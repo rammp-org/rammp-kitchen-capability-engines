@@ -51,8 +51,8 @@ def main(capability, image):
     domain = str(random.randint(1, 100))
     name = f"rammp-smoke-{capability}-{domain}"
 
-    # As sheppy does: params go in a file keyed by ros_node_name (or /**), and
-    # --ros-args --params-file is appended to the command.
+    # sheppy's params delivery: a file keyed by ros_node_name (or /**), and
+    # --ros-args --params-file appended to the command.
     mount = []
     if mock.get("params"):
         key = mock.get("ros_node_name") or "/**"
