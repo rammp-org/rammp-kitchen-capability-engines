@@ -1172,17 +1172,14 @@ class ArmInterface:
         monitor=None,
         feedback=None,
         trajectory=False,
-        replace_goal=None,
     ):
         """Send goal `g` on action `name` with SENDER_ID and the token, and wait up to `timeout_s`
         for its result: the action's Result. A cancel of the action cancels the goal and raises
         Cancelled; a goal HALTED under the token raises ControlTaken (unless the arm e-stopped).
         None, with last_error set, when the goal was refused (`rejected`), had no result in time
         (`timed_out`; the goal is cancelled) or its action ended. `monitor`: polled while the goal
-        runs; True cancels the goal and sets monitor_stopped, and anything else truthy goes to
-        `replace_goal` (a goal that replaces this one; this one is cancelled if it isn't taken).
-        `feedback`: called with each GoalFeedback, on the executor (it must not block).
-        `trajectory`: record last_path."""
+        runs; True cancels the goal and sets monitor_stopped. `feedback`: called with each
+        GoalFeedback, on the executor (it must not block). `trajectory`: record last_path."""
         g.sender_id = rammp_arm.SENDER_ID
         token = self._driver.token
         if token is not None:
@@ -1213,15 +1210,7 @@ class ArmInterface:
                 return None
             try:
                 return self._goal_result(
-                    send,
-                    timeout_s,
-                    ctx,
-                    token,
-                    rejected,
-                    timed_out,
-                    monitor,
-                    trajectory,
-                    replace_goal,
+                    send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
                 )
             finally:
                 with self._cond:  # once the action has ended, end_action() settles the goal
@@ -1230,18 +1219,7 @@ class ArmInterface:
         finally:
             self._driver.end_goal()
 
-    def _goal_result(
-        self,
-        send,
-        timeout_s,
-        ctx,
-        token,
-        rejected,
-        timed_out,
-        monitor,
-        trajectory,
-        replace_goal=None,
-    ):
+    def _goal_result(self, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory):
         gh, rf = self._wait(send, GOAL_ACCEPT_S), None
         with self._cond:
             ended = not self._in_action
@@ -1266,11 +1244,9 @@ class ArmInterface:
             while not rf.done() and time.monotonic() < t_end and self._in_action:
                 if ctx.cancelled():
                     ctx.checkpoint()  # raises the engine's Cancelled: cancelled below
-                stop = monitor() if monitor is not None and not self.monitor_stopped else None
-                if stop:
+                if monitor is not None and not self.monitor_stopped and monitor():
                     self.monitor_stopped = True
-                    if stop is True or replace_goal is None or not replace_goal(stop):
-                        self._cancel(gh)  # the driver stops the arm, then settles PREEMPTED
+                    self._cancel(gh)  # the driver stops the arm, then settles PREEMPTED
                 time.sleep(POLL_S)
             if rf.done():
                 res = rf.result()
@@ -1383,7 +1359,6 @@ class ArmInterface:
         gains=None,
         speed_scale=1.0,
         feedback=None,
-        monitor=None,
     ) -> TrajectoryResult:
         """The driver's /execute_joint_trajectory, every field: joints `names` through `points`,
         [(t from start s, positions, velocities), ...] sent as given (no timing or interpolation
@@ -1392,22 +1367,13 @@ class ArmInterface:
         GoalFeedback on the executor (it must not block). Blocking; a cancel of the action
         cancels the goal and raises Cancelled, its end raises NotInAction. Raises ArmError when
         the arm must not be commanded (EStopped when e-stopped), the goal is refused or no result
-        comes in time.
-
-        `monitor`: polled at ~100 Hz while the goal runs. True cancels the goal, like
-        move_joints'. A list of points instead REPLACES the goal: they go out as a new goal with
-        the same names, tolerances, mode and gains, preemption LATEST_WINS, and the driver settles
-        this one PREEMPTED. Either way `monitor_stopped` is set and the result is this goal's. The
-        replacement keeps running after the call returns (until it ends or a later LATEST_WINS
-        goal replaces it): place_container's hold on contact, where a cancel made the compliant
-        arm spring ~3 cm up (RAMMP-table, 2026-10-08)."""
+        comes in time."""
         if speed_scale <= 0:
             self._fail(
                 ArmError, f"execute_joint_trajectory: speed_scale must be > 0, not {speed_scale}"
             )
         gains = _impedance_gains(gains)
         self._checkpoint()
-        self.monitor_stopped = False
         if self._mock:  # the last point's joints become the state, when they are the arm's
             points, idx, q = list(points), _joint_index(names), None
             if points:
@@ -1447,24 +1413,6 @@ class ArmInterface:
         if not self._wait_for_server(client, ctx, STATE_WAIT_S):
             self._fail(StateTimeout, "no /execute_joint_trajectory action server")
         timeout_s = duration + goal_time_tolerance + RESULT_MARGIN_S
-
-        def replace_goal(new_points):
-            """Send `new_points` as g's replacement (LATEST_WINS); True once the driver took it."""
-            r = copy.deepcopy(g)
-            r.trajectory.points = [
-                JointTrajectoryPoint(
-                    positions=[float(x) for x in q],
-                    velocities=[float(x) for x in qd],
-                    time_from_start=_duration(t),
-                )
-                for t, q, qd in new_points
-            ]
-            r.preemption = LATEST_WINS
-            with self._cond:
-                send = client.send_goal_async(r) if self._in_action else None
-            gh = None if send is None else self._wait(send, GOAL_ACCEPT_S)
-            return gh is not None and gh.accepted
-
         res = self._run_goal(
             "execute_joint_trajectory",
             client,
@@ -1474,8 +1422,6 @@ class ArmInterface:
             "execute_joint_trajectory: goal REJECTED -- nothing moved",
             f"execute_joint_trajectory: no result in {timeout_s:.0f} s -- goal cancelled",
             feedback=feedback,
-            monitor=monitor,
-            replace_goal=replace_goal,
         )
         if res is None:
             raise (ArmError if self._in_action else NotInAction)(self.last_error)

@@ -85,7 +85,6 @@ PAUSE_POLL_S = 0.01  # how often a paused FakeCtx.checkpoint() looks for resume 
 FLATBOT_URDF = Path("/fixtures/urdf/flatbot.urdf")
 FRAME = "arm_mount"
 SUCCESSFUL, PREEMPTED, HALTED, STREAM_REJECTED = 0, -6, -9, -10
-LATEST_WINS = 1  # execute_joint_trajectory preemption: replace the running goal
 
 LATCHED = QoSProfile(
     depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
@@ -197,8 +196,6 @@ class FakeDriver(Node):
         self._results_after_cancel = {}
         self._finish = {}
         self._cancelled = set()
-        # bumped by each LATEST_WINS trajectory goal: the running ones settle PREEMPTED
-        self._latest_wins = 0
         self._hold_s = 0.0
         self._accept_delay_s = 0.0
         self._plan = None
@@ -409,8 +406,6 @@ class FakeDriver(Node):
         time.sleep(self._accept_delay_s)
         if not self._accept.get(name, True) or not self._authorized(goal):
             return GoalResponse.REJECT
-        if getattr(goal, "preemption", None) == LATEST_WINS:
-            self._latest_wins += 1
         return GoalResponse.ACCEPT
 
     def _on_cancel(self, name):
@@ -418,7 +413,7 @@ class FakeDriver(Node):
         return CancelResponse.ACCEPT
 
     def _execute(self, name, handle):
-        halts, latest = self._halts, self._latest_wins
+        halts = self._halts
         if name not in PLANNER_ACTIONS:
             fb = ACTIONS[name][0].Feedback(fraction_complete=FEEDBACK_FRACTION)
             with self._lock:
@@ -428,13 +423,9 @@ class FakeDriver(Node):
             handle.publish_feedback(fb)
         deadline = time.monotonic() + self._hold_s
         while (
-            time.monotonic() < deadline
-            and not handle.is_cancel_requested
-            and self._halts == halts
-            and self._latest_wins == latest
+            time.monotonic() < deadline and not handle.is_cancel_requested and self._halts == halts
         ):
             time.sleep(GOAL_POLL_S)
-        replaced = self._latest_wins != latest
         joints, flange = self._finish.get(name, (None, None))
         if joints is not None:
             self.set_joints(joints)
@@ -443,9 +434,6 @@ class FakeDriver(Node):
         if handle.is_cancel_requested:
             code = self._results_after_cancel.get(name, PREEMPTED)
             handle.canceled()
-        elif replaced:  # a LATEST_WINS goal took over
-            code = PREEMPTED
-            handle.abort()
         else:
             code = HALTED if self._halts != halts else self._results.get(name, SUCCESSFUL)
             if code == SUCCESSFUL:
