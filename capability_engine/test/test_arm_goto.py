@@ -245,6 +245,50 @@ def test_execute_joint_trajectory_refuses_a_non_positive_speed(arm_env):
     assert not fake.goals["execute_joint_trajectory"]
 
 
+def test_execute_joint_trajectory_monitor_points_replace_the_goal(arm_env):
+    """place_container's hold on contact: the monitor's points go out as a LATEST_WINS goal with the
+    same mode and gains, the running goal settles PREEMPTED, and nothing is cancelled."""
+    arm, _, fake = arm_env
+    fake.hold_goals(HOLD_S)
+    arm.begin_action(FakeCtx(), None)
+    names = [f"arm_joint_{i}" for i in range(1, 8)]
+    calls = []
+
+    def monitor():
+        calls.append(1)
+        return [(0.5, [0.25] * 7, [0.0] * 7)] if len(calls) >= 3 else None
+
+    t0 = time.monotonic()
+    res = arm.execute_joint_trajectory(
+        names,
+        [(2.0, [0.3] * 7, [0.0] * 7)],
+        control_mode=IMPEDANCE,
+        gains="medium",
+        path_tolerance=1.0,
+        monitor=monitor,
+    )
+    assert time.monotonic() - t0 < HOLD_S  # replaced, not run to its end
+    assert res.error_code == -6
+    assert arm.monitor_stopped
+    assert not fake.cancelled("execute_joint_trajectory")
+    first, hold = fake.goals["execute_joint_trajectory"]
+    assert first.preemption != LATEST_WINS and hold.preemption == LATEST_WINS
+    assert (hold.control_mode, hold.gains.profile) == (IMPEDANCE, ImpedanceGains.PROFILE_MEDIUM)
+    assert [t.position for t in hold.path_tolerance] == pytest.approx([1.0] * 7)
+    np.testing.assert_allclose([p.positions for p in hold.trajectory.points], [[0.25] * 7])
+    assert [pt_time(p) for p in hold.trajectory.points] == pytest.approx([0.5])
+
+
+def test_execute_joint_trajectory_monitor_true_cancels(arm_env):
+    arm, _, fake = arm_env
+    fake.hold_goals(HOLD_S)
+    arm.begin_action(FakeCtx(), None)
+    res = arm.execute_joint_trajectory(["arm_joint_1"], [(2.0, [0.1], [0.0])], monitor=lambda: True)
+    assert res.error_code == -6
+    assert arm.monitor_stopped and fake.cancelled("execute_joint_trajectory")
+    assert len(fake.goals["execute_joint_trajectory"]) == 1
+
+
 # -- races at the end of an action ------------------------------------------------------------
 
 
