@@ -18,7 +18,7 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
                   set_result_after_cancel(name, code), hold_goals(seconds),
                   finish_at(name, joints=None, flange=None), cancelled(name)
     streams:      set_controllers([(name, channels, available)]), publish_stream_status(open),
-                  late_close_on_next_open()
+                  late_close_on_next_open(), delay_open_stream(seconds, accept)
     planner:      plan_result(points, joint_names=JOINTS, velocities=True)
 
 Every accepted driver goal (not the planner's) publishes one feedback message as it starts:
@@ -201,6 +201,7 @@ class FakeDriver(Node):
         self._plan = None
         self._controllers = list(CONTROLLERS)
         self._late_close = False
+        self._open_delay_s, self._open_accept = 0.0, True  # delay_open_stream()
 
         self._js_pub = self.create_publisher(JointState, "/joint_states", qos_profile_sensor_data)
         self._ee_pub = self.create_publisher(EeState, "/ee_state", qos_profile_sensor_data)
@@ -371,6 +372,11 @@ class FakeDriver(Node):
         """What /list_controllers reports: [(name, channels, available), ...]."""
         self._controllers = [(n, list(c), bool(a)) for n, c, a in controllers]
 
+    def delay_open_stream(self, seconds, accept=True):
+        """open_stream answers this long after it is called, accepting (and opening) or refusing
+        as `accept` says."""
+        self._open_delay_s, self._open_accept = float(seconds), bool(accept)
+
     def late_close_on_next_open(self):
         """The next open_stream publishes /stream_status open=False just before it opens: the
         late "closed" of the session before, which lands after the new stream began."""
@@ -462,6 +468,11 @@ class FakeDriver(Node):
         return handler(request, response)
 
     def _srv_open_stream(self, request, response):
+        time.sleep(self._open_delay_s)
+        if not self._open_accept:
+            response.error_code = STREAM_REJECTED
+            response.message = "FakeDriver: refused (delay_open_stream)"
+            return response
         row = next((c for c in self._controllers if c[0] == request.controller), None)
         if row is None or not row[2] or not self._authorized(request):
             response.error_code = STREAM_REJECTED

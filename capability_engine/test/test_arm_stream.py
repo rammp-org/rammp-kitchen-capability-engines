@@ -25,6 +25,7 @@ TOKEN = b"\x03" * 16
 WAIT_S = 2.0  # how long a test waits for a message to reach the fake or the arm
 POLL_S = 0.01
 TWIST = np.ones(6) * 0.01
+OPEN_DELAY_S = 0.5  # how long the fake takes to answer open_stream, past CANCEL_AFTER_S
 CANCEL_AFTER_S = 0.3  # when a test cancels the action during a service call
 SLOW_ANSWER_S = 2.0  # how long the slow test service takes to answer (> CANCEL_AFTER_S)
 
@@ -365,3 +366,18 @@ def test_services(arm_env):
     assert bytes(req.token) == TOKEN
     assert arm.set_world("kitchen") == (True, "")
     assert fake.requests["set_world"][-1].world == "kitchen"
+
+
+@pytest.mark.parametrize("accept", [True, False], ids=["opened_late", "refused_late"])
+def test_cancel_while_opening_closes_only_a_stream_the_driver_opened(arm_env, accept):
+    """Cancelled while /open_stream is answering: a session the driver opens after all is closed;
+    one it refuses is left alone (CloseStream would close whatever session is open)."""
+    arm, _, fake = arm_env
+    fake.delay_open_stream(OPEN_DELAY_S, accept=accept)
+    ctx = FakeCtx()
+    arm.begin_action(ctx, None)
+    threading.Timer(CANCEL_AFTER_S, ctx.cancel).start()
+    with pytest.raises(Cancelled):
+        with arm.stream("ee_twist"):
+            pass
+    assert len(fake.requests["close_stream"]) == (1 if accept else 0)

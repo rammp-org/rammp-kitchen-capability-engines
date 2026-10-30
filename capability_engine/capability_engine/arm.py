@@ -515,6 +515,7 @@ class Stream:
         self._ctx, self._driver, self._token = ctx, driver, driver.token
         self._pub = None  # created before open_stream, destroyed when the session closes
         self._opened = False  # the driver accepted open_stream
+        self._open_sent = None  # open_stream's future once sent: settled by _close_stream
 
     def send(self, setpoint):
         """Send one setpoint: 7 joints for joint controllers, (pos, quat xyzw) of /ee_state's frame
@@ -1548,11 +1549,12 @@ class ArmInterface:
         res = self._call("set_gains", req)
         return res.accepted, res.message
 
-    def _call(self, name, request):
+    def _call(self, name, request, on_sent=None):
         """Call service `name` and return its response: ArmError when the server is not up within
         SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
         ends, Cancelled once it is cancelled (both waits poll every POLL_S). Waits for no arm
-        state."""
+        state. `on_sent`: called with the request's future once it is sent, so a caller can
+        settle a request the driver answers after this call has given up on it."""
         self._ensure_open(wait_state=False)
         ctx = self._ctx
         with self._open_lock:  # not while _destroy() empties the dict
@@ -1569,6 +1571,8 @@ class ArmInterface:
                     self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
                 if client.service_is_ready():
                     future = client.call_async(request)
+                    if on_sent is not None:
+                        on_sent(future)
             if future is None:
                 if ctx.cancelled():
                     ctx.checkpoint()  # raises the engine's Cancelled
@@ -1623,7 +1627,7 @@ class ArmInterface:
             req = OpenStream.Request(controller=controller, timeout_s=float(timeout_s), gains=gains)
             if stream._token is not None:
                 req.token = list(stream._token)
-            res = self._call("open_stream", req)
+            res = self._call("open_stream", req, on_sent=lambda f: setattr(stream, "_open_sent", f))
             if not res.accepted:
                 self._fail(
                     ArmError,
@@ -1706,6 +1710,12 @@ class ArmInterface:
                 return
             self._stream = None
             try:
+                if not stream._opened and stream._open_sent is not None:
+                    # Sent, unanswered (cancelled, timed out, the action ended): close it if the
+                    # driver opened it after all. Never otherwise: CloseStream closes whatever
+                    # session is open, perhaps another sender's.
+                    res = self._wait(stream._open_sent, CLOSE_STREAM_WAIT_S)
+                    stream._opened = res is not None and res.accepted
                 if stream._opened:
                     hold = self._hold_setpoint(stream.channel)
                     if hold is not None:
