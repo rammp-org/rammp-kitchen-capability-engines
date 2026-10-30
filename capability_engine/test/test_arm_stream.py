@@ -11,7 +11,7 @@ from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 from capability_engine import arm as arm_module
-from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan
+from capability_engine.arm import HOLD_LEVEL, Controller, Plan
 from capability_engine.driver_state import (
     ArmError,
     EStopped,
@@ -265,36 +265,6 @@ def test_end_action_closes_an_open_stream(arm_env):
     assert len(fake.requests["close_stream"]) == 1
 
 
-def test_control_services_refused_under_engine(arm_env):
-    arm, _, fake = arm_env
-    arm.begin_action(FakeCtx(), None)
-    for call in (
-        lambda: arm.acquire_control("bench"),
-        lambda: arm.release_control(),
-        lambda: arm.revoke_control("test"),
-    ):
-        with pytest.raises(ArmError, match="control comes from the orchestrator"):
-            call()
-    for name in ("acquire_control", "release_control", "revoke_control"):
-        assert not fake.requests[name]
-
-
-def test_control_services_standalone(arm_env):
-    _, node, fake = arm_env
-    arm = ArmInterface(node, ReentrantCallbackGroup(), standalone=True)
-    arm.begin_action(FakeCtx(), None)
-    try:
-        accepted, token, generation, _ = arm.acquire_control("bench")
-        assert accepted and len(token) == 16 and generation == 1
-        assert fake.requests["acquire_control"][-1].owner_id == "bench"
-        assert arm.release_control(token)[0] is True
-        assert bytes(fake.requests["release_control"][-1].token) == token
-        assert arm.revoke_control("done")[0] is True
-        assert fake.requests["revoke_control"][-1].reason == "done"
-    finally:
-        arm.end_action()
-
-
 def test_plan_to_pose_round_trip(arm_env):
     arm, _, fake = arm_env
     q = np.arange(21.0).reshape(3, 7) / 10
@@ -348,17 +318,15 @@ def test_unusable_plan_fails(arm_env, names, velocities):
         assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
 
 
-def test_planner_and_estop_need_no_arm_state(arm_env):
-    """With no /joint_states, /ee_state or /gripper_state, both go out at once."""
+def test_planner_needs_no_arm_state(arm_env):
+    """With no /joint_states, /ee_state or /gripper_state, a plan goes out at once."""
     arm, _, fake = arm_env
     fake.pause_publishing()
     fake.plan_result([[0.0] * 7, [0.1] * 7])
     arm.begin_action(FakeCtx(), None)
     t0 = time.monotonic()
-    arm.estop(True, "test")
     assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
     assert time.monotonic() - t0 < WAIT_S  # far below STATE_WAIT_S
-    wait_until(lambda: fake.setpoints["/estop"])
 
 
 def test_plan_to_joints_and_failure(arm_env):
@@ -397,14 +365,3 @@ def test_services(arm_env):
     assert bytes(req.token) == TOKEN
     assert arm.set_world("kitchen") == (True, "")
     assert fake.requests["set_world"][-1].world == "kitchen"
-
-
-def test_estop_publishes(arm_env):
-    arm, node, fake = arm_env
-    arm.begin_action(FakeCtx(), None)
-    arm.estop(True, "test")
-    wait_until(lambda: fake.setpoints["/estop"])
-    m = fake.setpoints["/estop"][-1]
-    assert m.engaged is True
-    assert m.reason == "test"
-    assert m.source == node.get_name()

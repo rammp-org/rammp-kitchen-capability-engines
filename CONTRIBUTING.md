@@ -107,8 +107,10 @@ the driver's own model. These rules keep your checks and the arm in agreement:
   `rammp_arm.CART_SPEED *= s` are fine.
 
 **Control comes from the orchestrator.** It grants the arm when it starts your
-action. Never call `/acquire_control` or `/release_control`; `self.arm` does not
-either.
+action. Never call `/acquire_control`, `/release_control` or `/revoke_control`, and
+never publish `/estop`: the orchestrator and other nodes own them, and `self.arm`
+has no way to. It only reads them: it refuses commands while the arm is e-stopped
+and raises `ControlTaken` when another sender takes the arm.
 
 **No `print`.** Ruff forbids it. When you migrate a student script, turn each
 `print(msg)` into `self.get_logger().info(msg)` (`warn`/`error` where it was a

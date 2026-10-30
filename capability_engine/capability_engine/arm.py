@@ -45,8 +45,6 @@ from rammp_arm_interfaces.msg import GripperState as GripperStateMsg
 from rammp_arm_interfaces.msg import StreamStatus as StreamStatusMsg
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
 from rammp_common_interfaces.msg import ControlStatus as ControlStatusMsg
-from rammp_common_interfaces.msg import EStop
-from rammp_common_interfaces.srv import AcquireControl, ReleaseControl, RevokeControl
 from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.action import ActionClient
@@ -103,14 +101,13 @@ PLAN_TIMEOUT_S = 30.0  # how long a plan_to_* call waits for cuRobo's plan
 SERVICE_WAIT_S = 5.0  # how long a service call waits for its server to come up
 SERVICE_CALL_S = 10.0  # how long a service call waits for its answer (set_world reloads cuRobo)
 STREAM_TIMEOUT_S = 0.1  # stream(): the driver closes the session after this long with no setpoint
-PUBLISHER_MATCH_S = 1.0  # how long a new setpoint or /estop publisher waits for the driver to
+PUBLISHER_MATCH_S = 1.0  # how long a new setpoint publisher waits for the driver to
 # subscribe before its first message (DDS discovery), so that message is not lost
 CLOSE_STREAM_WAIT_S = 1.0  # how long closing a stream waits for /close_stream's answer
 MOCK_JOINTS = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]  # mock mode: the joints it starts at
 MOCK_URDF = ""  # mock mode: the URDF file make_sim() loads ("": none, make_sim() refuses)
 MOCK_NOT_SENT = "mock: not sent"
 MOCK_NO_MODEL_MESSAGE = "mock mode has no driver model: set arm.mock_urdf to a URDF file"
-CONTROL_FROM_ORCHESTRATOR_MESSAGE = "control comes from the orchestrator"
 STREAM_ENDED_MESSAGE = "the stream is closed: send() works only inside its with block"
 
 # The driver's goal fields, for the keyword arguments of the goal methods (the driver's values).
@@ -137,7 +134,6 @@ LATCHED = QoSProfile(
 SETPOINT_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1
 )
-ESTOP_QOS = 10  # /estop is volatile; a reliable publisher reaches any subscriber
 # What stream() sends on each /setpoint/<channel> a controller reads, and what send() takes.
 SETPOINTS = {
     "joint_position": (JointSetpoint, "7 joint positions (rad)"),
@@ -160,9 +156,6 @@ SERVICES = {
     "close_stream": (CloseStream, "/close_stream"),
     "list_controllers": (ListControllers, "/list_controllers"),
     "set_gains": (SetGains, "/set_gains"),
-    "acquire_control": (AcquireControl, "/acquire_control"),
-    "release_control": (ReleaseControl, "/release_control"),
-    "revoke_control": (RevokeControl, "/revoke_control"),
     "set_world": (SetWorld, "/rammp_curobo/set_world"),
 }
 # The first arm call in an action waits for these (RammpArm's constructor did).
@@ -665,7 +658,6 @@ class ArmInterface:
         self._pubs["/setpoint/gripper"] = node.create_publisher(
             GripperSetpoint, "/setpoint/gripper", SETPOINT_QOS
         )
-        self._pubs["/estop"] = node.create_publisher(EStop, "/estop", ESTOP_QOS)
         self._opened = True
 
     def _destroy(self):
@@ -1556,37 +1548,6 @@ class ArmInterface:
         res = self._call("set_gains", req)
         return res.accepted, res.message
 
-    def acquire_control(self, owner_id, token=None) -> tuple[bool, bytes, int, str]:
-        """Standalone only (control comes from the orchestrator under the engine). Seize control
-        as `owner_id`, with the pre-generated key `token` or a fresh one: (accepted, token,
-        generation, message)."""
-        self._check_standalone()
-        req = AcquireControl.Request(owner_id=owner_id)
-        if token is not None:
-            req.token = list(token)
-        res = self._call("acquire_control", req)
-        return res.accepted, bytes(res.token), int(res.generation), res.message
-
-    def release_control(self, token=None) -> tuple[bool, str]:
-        """Standalone only. Release `token` (default: this action's): (released, message)."""
-        self._check_standalone()
-        token = self._driver.token if token is None else token
-        req = ReleaseControl.Request()
-        if token is not None:
-            req.token = list(token)
-        res = self._call("release_control", req)
-        return res.released, res.message
-
-    def revoke_control(self, reason) -> tuple[bool, str]:
-        """Standalone only. Take control from whoever holds it: (revoked, message)."""
-        self._check_standalone()
-        res = self._call("revoke_control", RevokeControl.Request(reason=reason))
-        return res.revoked, res.message
-
-    def _check_standalone(self):
-        if not self._standalone:
-            self._fail(ArmError, CONTROL_FROM_ORCHESTRATOR_MESSAGE)
-
     def _call(self, name, request):
         """Call service `name` and return its response: ArmError when the server is not up within
         SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
@@ -1792,25 +1753,3 @@ class ArmInterface:
             if time.monotonic() > deadline:
                 return
             time.sleep(POLL_S)
-
-    # -- e-stop ----------------------------------------------------------------------------------
-
-    def estop(self, engaged: bool, reason: str):
-        """Engage (True) or clear (False) the e-stop on /estop, as this capability's node. Sent at
-        once: it waits for no arm state, only (up to PUBLISHER_MATCH_S) for a subscriber."""
-        if self._mock:
-            self._mock_sent("estop")
-            return
-        self._ensure_open(wait_state=False)
-        m = EStop(engaged=bool(engaged), source=self._node.get_name(), reason=reason)
-        m.header.stamp = self._node.get_clock().now().to_msg()
-        with self._open_lock:  # after _ensure_open() has made it
-            pub = self._pubs.get("/estop")
-        if pub is None:
-            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-        self._wait_matched(pub)
-        # Under _cond: end_action() clears _in_action under it before it destroys `pub`.
-        with self._cond:
-            if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-            pub.publish(m)
