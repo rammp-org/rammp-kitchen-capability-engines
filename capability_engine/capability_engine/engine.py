@@ -59,6 +59,7 @@ REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
 STOP_WAIT_S = 5.0  # on SIGTERM/SIGINT, how long the cancelled action may take to end
+SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them
 
 
 @dataclass
@@ -394,15 +395,8 @@ class CapabilityEngine(Node):
                 goal_handle.abort()
             self._publish_status()
         finally:
-            self._busy.release()  # once the result is reported: _stop_after_action waits for it
+            self._busy.release()  # once the result is reported: run()'s stop waits for it
         return ExecuteAction.Result(result=result)
-
-    def _stop_after_action(self):
-        """Shut ROS down once the running action, already cancelled, has ended and reported its
-        result, or after STOP_WAIT_S. Until then the executor keeps spinning, so self.arm sees the
-        driver settle its goal or stream. The busy lock is kept: no new goal starts."""
-        self._busy.acquire(timeout=STOP_WAIT_S)
-        rclpy.try_shutdown()
 
     def _publish_status(self):
         if self._active_action:
@@ -433,15 +427,27 @@ def run(engine_class: type[CapabilityEngine], args=None):
     # full grace period and then SIGKILL. SIGINT is the image's STOPSIGNAL and
     # Ctrl-C. Either cancels the running action first: self.arm then cancels
     # its goal or closes its stream at the driver while ROS still runs.
+    #
+    # The executor spins on until the cancelled action has ended and reported its result (or
+    # STOP_WAIT_S), so self.arm sees the driver settle. The busy lock is kept: no new goal
+    # starts. ROS is shut down here, in the spinning thread: rclpy.try_shutdown() from another
+    # thread can land mid-spin and raise RCLError out of it.
+    stopped = threading.Event()
+
+    def stop_after_action():
+        node._busy.acquire(timeout=STOP_WAIT_S)
+        stopped.set()
+
     def stop(*_):
         node._cancel.set()
-        threading.Thread(target=node._stop_after_action, daemon=True).start()
+        threading.Thread(target=stop_after_action, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
     try:
-        executor.spin()
+        while rclpy.ok() and not stopped.is_set():
+            executor.spin_once(timeout_sec=SPIN_STEP_S)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
