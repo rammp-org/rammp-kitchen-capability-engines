@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>box_opening</name>
+  <version>0.1.0</version>
+  <description>Open the food container: press its button, take its lid off and set it down
+    beside it, on the kinova-gen3-ros2 driver and the RAMMP-CuRobo planner</description>
+  <maintainer email="chrisman4247@gmail.com">Chris</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>capability_engine</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>rammp_arm_interfaces</exec_depend>
+  <exec_depend>rammp_curobo_interfaces</exec_depend>
+  <exec_depend>rammp_orchestrator_interfaces</exec_depend>
+  <!-- the scene segmenter's /perception/object_detections (perception/segmenter_source) -->
+  <exec_depend>rammp_perception_interfaces</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <!-- the markers Foxglove shows (perception/viz, tasks/lid_room_view) -->
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
