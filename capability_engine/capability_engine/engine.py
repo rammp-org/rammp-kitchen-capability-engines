@@ -19,6 +19,7 @@ it with `ros2 action send_goal /<id>/execute_action ...` (see `make action`).
 import json
 import signal
 import threading
+import time
 from dataclasses import dataclass, field
 
 import rammp_arm
@@ -164,6 +165,7 @@ class CapabilityEngine(Node):
         self._cancel = threading.Event()
         self._registered = False
         self._registering = False
+        self._register_sent = 0.0  # time.monotonic() the pending RegisterEngine call was sent
         self._active_action = ""
         self.instance_id = ""
 
@@ -255,17 +257,25 @@ class CapabilityEngine(Node):
         )
 
     def _try_register(self):
-        if self._registered or self._registering:
-            return
         client = self._orchestrator_clients["register_engine"]
         if not client.service_is_ready():
+            # Gone: a restarted orchestrator has forgotten every registration, and a call it
+            # never answered never will be. Register afresh once it is back.
+            if self._registered or self._registering:
+                self._registered = self._registering = False
+                self._publish_status()
             self.get_logger().info(
                 "waiting for the orchestrator to register "
                 "(run with -p use_orchestrator:=false to run standalone)",
                 throttle_duration_sec=10.0,
             )
             return
+        if self._registering and time.monotonic() - self._register_sent > CALL_TIMEOUT_S:
+            self._registering = False  # never answered: ask again
+        if self._registered or self._registering:
+            return
         self._registering = True
+        self._register_sent = time.monotonic()
         future = client.call_async(RegisterEngine.Request(manifest=self._manifest()))
         future.add_done_callback(self._on_registered)
 
@@ -335,16 +345,18 @@ class CapabilityEngine(Node):
 
     def _on_goal(self, goal):
         known = {a.action_id for a in self.actions}
-        if goal.action_id not in known or self._busy.locked():
+        # Taken here, not in _on_execute: a second goal arriving before the first executes is
+        # rejected, and a Control.CANCEL from now on applies to this goal. _on_execute releases it.
+        if goal.action_id not in known or not self._busy.acquire(blocking=False):
             return GoalResponse.REJECT
+        self._cancel.clear()
+        self._paused.clear()
         return GoalResponse.ACCEPT
 
     def _on_execute(self, goal_handle):
         goal = goal_handle.request
         result = Result()
-        with self._busy:
-            self._cancel.clear()
-            self._paused.clear()
+        try:
             self._active_action = goal.action_id
             self._publish_status()
             ctx = Context(self, goal_handle)
@@ -369,6 +381,8 @@ class CapabilityEngine(Node):
             finally:
                 self.arm.end_action()  # settles any goal or stream, destroys the arm's entities
                 self._active_action = ""
+        finally:
+            self._busy.release()
 
         # canceled() is only a legal transition after an action-level cancel
         # request; a Control.CANCEL is reported through result.status instead.
@@ -414,5 +428,7 @@ def run(engine_class: type[CapabilityEngine], args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        # shutdown() waits for a running execute(): cancel it, or a paused one never returns.
+        node._cancel.set()
         executor.shutdown()
         rclpy.try_shutdown()

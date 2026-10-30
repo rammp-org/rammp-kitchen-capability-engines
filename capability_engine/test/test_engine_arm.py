@@ -2,6 +2,9 @@
 and mock mode. Each engine runs beside a FakeDriver and is driven through its execute_action."""
 
 import itertools
+import signal
+import subprocess
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -14,6 +17,7 @@ import rammp_arm
 from fake_driver import FLATBOT_URDF, FakeDriver, counts
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import Result
+from rammp_orchestrator_interfaces.srv import Control, RegisterEngine
 from rcl_interfaces.msg import Log
 from rclpy.action import ActionClient
 from rclpy.exceptions import InvalidHandle
@@ -22,10 +26,11 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 
 from capability_engine import arm as arm_module
+from capability_engine import engine as engine_module
 from capability_engine import sim
 from capability_engine.arm_params import PARAMS
 from capability_engine.driver_state import ArmError, NotInAction
-from capability_engine.engine import Action, CapabilityEngine
+from capability_engine.engine import ORCHESTRATOR, Action, CapabilityEngine
 
 WAIT_S = 5.0  # how long a test waits for a server, a goal's acceptance or a node to go
 ACTION_WAIT_S = 30.0  # how long a test waits for an action's result
@@ -39,6 +44,11 @@ CART_STEP = np.array([0.02, 0.0, 0.0])  # the mock Cartesian move: 2 cm along x
 PRE_STEP = np.array([0.0, 0.05, -0.05])  # the mock go_to_ee_pose: from the start to a line-up
 UNREACHABLE = [5.0, 0.0, 0.0]  # a tool position 5 m out: no IK solution
 SHORT_WAIT_S = 0.5  # STATE_WAIT_S in the test of a driver with no trajectory server
+REGISTER_RETRY_TEST_S = 0.1  # REGISTER_RETRY_S in the registration test
+REGISTER_TIMEOUT_TEST_S = 0.5  # CALL_TIMEOUT_S there: how long an unanswered call is waited on
+SHUTDOWN_LIMIT_S = 5.0  # how long a SIGTERMed engine may take to exit
+REPLY_WAIT_S = 1.0  # how long the SIGTERM test waits for one Control reply
+EXECUTE_DELAY_S = 0.5  # how long the two-goal test holds back each goal's execute
 
 
 def wait_until(condition, timeout_s=WAIT_S):
@@ -99,7 +109,9 @@ def env(ros):
         finally:
             client.destroy()
 
-    yield SimpleNamespace(fake=fake, make=make, run=run, logs=logs, engine_id=engine_id)
+    yield SimpleNamespace(
+        fake=fake, make=make, run=run, logs=logs, engine_id=engine_id, executor=executor
+    )
     executor.shutdown()
     spinner.join()
     for engine in engines:
@@ -401,3 +413,144 @@ def test_mock_raw_trajectory(env):
     assert type(seen["short"]) is ArmError
     assert "3 positions for 7 joints" in str(seen["short"])
     assert not any(env.fake.goals.values())
+
+
+# -- the engine's own lifecycle: goals, registration, shutdown ------------------------------------
+
+
+def test_two_goals_at_once_accept_only_one(env, monkeypatch):
+    execute = CapabilityEngine._on_execute
+
+    def late_execute(self, goal_handle):  # both goals are decided before either one executes
+        time.sleep(EXECUTE_DELAY_S)
+        return execute(self, goal_handle)
+
+    monkeypatch.setattr(CapabilityEngine, "_on_execute", late_execute)
+    release = threading.Event()
+    env.make(lambda engine, ctx: release.wait(WAIT_S))
+    client_node = Node(f"{env.engine_id}_goals")
+    executor = MultiThreadedExecutor()
+    executor.add_node(client_node)
+    threading.Thread(target=executor.spin, daemon=True).start()
+    client = ActionClient(client_node, ExecuteAction, f"/{env.engine_id}/execute_action")
+    try:
+        assert client.wait_for_server(timeout_sec=WAIT_S)
+        sends = [client.send_goal_async(ExecuteAction.Goal(action_id="run")) for _ in range(2)]
+        wait_until(lambda: all(s.done() for s in sends))
+        accepted = [s.result() for s in sends if s.result().accepted]
+        assert len(accepted) == 1
+        release.set()
+        result = accepted[0].get_result_async()
+        wait_until(result.done, ACTION_WAIT_S)
+    finally:
+        release.set()
+        client.destroy()
+        executor.shutdown()
+        client_node.destroy_node()
+
+
+def registrar(name, calls):
+    """A node serving /rammp_orchestrator/register_engine that records each call. Until it is
+    spun, the service is discoverable but never replies."""
+    node = Node(name)
+
+    def on_register(request, response):
+        calls.append(request.manifest.engine_id)
+        response.accepted = True
+        response.message = "registered"
+        return response
+
+    node.create_service(RegisterEngine, f"{ORCHESTRATOR}/register_engine", on_register)
+    return node
+
+
+def test_reregisters_after_the_orchestrator_restarts(env, monkeypatch):
+    monkeypatch.setattr(engine_module, "REGISTER_RETRY_S", REGISTER_RETRY_TEST_S)
+    monkeypatch.setattr(engine_module, "CALL_TIMEOUT_S", REGISTER_TIMEOUT_TEST_S)
+    calls = []
+    silent = registrar(f"{env.engine_id}_silent", [])  # never spun: never answers
+    engine = env.make(lambda engine, ctx: None, use_orchestrator=True)
+    client = engine._orchestrator_clients["register_engine"]
+    sent = []
+    call_async = client.call_async
+    monkeypatch.setattr(client, "call_async", lambda req: sent.append(req) or call_async(req))
+    # An orchestrator that never answers: the engine asks again after CALL_TIMEOUT_S.
+    wait_until(lambda: len(sent) >= 2)
+    assert not engine._registered
+    silent.destroy_node()
+    orchestrator = registrar(f"{env.engine_id}_orchestrator", calls)
+    env.executor.add_node(orchestrator)
+    wait_until(lambda: engine._registered)
+    assert calls == [env.engine_id]
+    # It restarts and forgets every registration: once it is gone the engine registers again.
+    env.executor.remove_node(orchestrator)
+    orchestrator.destroy_node()
+    wait_until(lambda: not engine._registered)
+    restarted = registrar(f"{env.engine_id}_restarted", calls)
+    env.executor.add_node(restarted)
+    wait_until(lambda: engine._registered)
+    assert calls == [env.engine_id, env.engine_id]
+    env.executor.remove_node(restarted)
+    restarted.destroy_node()
+
+
+SHUTDOWN_SCRIPT = """
+import time
+from capability_engine.engine import Action, CapabilityEngine, run
+
+
+class Paused(CapabilityEngine):
+    actions = [Action("run", "Run")]
+
+    def __init__(self):
+        super().__init__("{engine_id}")
+
+    def execute(self, action_id, params, ctx):
+        while True:
+            ctx.checkpoint()
+            time.sleep(0.05)
+
+
+run(Paused)
+"""
+
+
+def reply(client, request):
+    """`client`'s reply message to `request`, or None when none arrives within REPLY_WAIT_S."""
+    future = client.call_async(request)
+    deadline = time.monotonic() + REPLY_WAIT_S
+    while not future.done() and time.monotonic() < deadline:
+        time.sleep(POLL_S)
+    return future.result().message if future.done() else None
+
+
+def test_sigterm_exits_while_an_action_is_paused(ros, tmp_path):
+    engine_id = f"arm_test_engine_{next(ENGINE_IDS)}"
+    script = tmp_path / "paused.py"
+    script.write_text(SHUTDOWN_SCRIPT.format(engine_id=engine_id))
+    proc = subprocess.Popen(
+        [sys.executable, str(script), "--ros-args", "-p", "use_orchestrator:=false"]
+    )
+    node = Node(f"{engine_id}_client")
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    threading.Thread(target=executor.spin, daemon=True).start()
+    client = ActionClient(node, ExecuteAction, f"/{engine_id}/execute_action")
+    control = node.create_client(Control, f"/{engine_id}/control")
+    try:
+        assert client.wait_for_server(timeout_sec=ACTION_WAIT_S)
+        assert control.wait_for_service(timeout_sec=WAIT_S)
+        # Humble may drop a reply sent before the server has discovered the client, so neither
+        # the goal's acceptance nor one Control reply is waited on: PAUSE is repeated until the
+        # engine answers that it paused a running action.
+        client.send_goal_async(ExecuteAction.Goal(action_id="run"))
+        pause = Control.Request(command=Control.Request.PAUSE)
+        wait_until(lambda: reply(control, pause) == "ok", ACTION_WAIT_S)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=SHUTDOWN_LIMIT_S)  # TimeoutExpired: the paused action held the exit
+    finally:
+        proc.kill()
+        proc.wait()
+        client.destroy()
+        executor.shutdown()
+        node.destroy_node()
