@@ -1,0 +1,29 @@
+# The mock: the real alternative's exact interface, no hardware. Other teams
+# develop against it, the all-mock profile runs on it, and CI smoke-tests it.
+# check_capabilities.py rejects a mock whose topics differ from the real one.
+# Each action reports the real run's phases and moves nothing.
+id: box_opening_mock
+tier: experimental
+kind: docker
+container:
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/box_opening:dev
+  network_mode: host
+  ipc: host
+  command: ["ros2", "launch", "box_opening", "box_opening.launch.py", "mock:=true"]
+# No `params:` here: they would need the node's executable, and this fragment
+# uses `ros2 launch` for mock:=true.
+publishes: [/box_opening/status]
+subscribes:
+  - /tf
+  - /tf_static
+  - /joint_states
+  - /gripper_state
+  - /arm/robot_description
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/color/camera_info
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /scene_camera/depth/camera_info
+  - /perception/object_detections
