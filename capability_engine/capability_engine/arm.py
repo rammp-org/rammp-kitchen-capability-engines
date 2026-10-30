@@ -560,6 +560,9 @@ class ArmInterface:
         self.last_path = []  # the last trajectory's measured tool path: [(t, x, y, z)]
         self.monitor_stopped = False  # the last trajectory was stopped by its monitor
         self._goal = None  # the send future of the running goal: end_action() cancels it
+        # send futures of goals the driver had not answered in GOAL_ACCEPT_S: each is cancelled
+        # if it is accepted later, by _cancel_late_goal or, once the action has ended, _settle
+        self._late_goals = []
         self._path_t0 = None  # time.monotonic() its goal started; set: /ee_state adds to last_path
         self._stream = None  # the open Stream: end_action() zeroes and closes it
         self._mock_q = np.array(MOCK_JOINTS, float)  # mock mode: the last commanded joints
@@ -603,8 +606,10 @@ class ArmInterface:
         """Cancel any running goal and close any open stream, waiting for each to settle.
         Called after the action has ended: uses the stored handles only, never _ensure_open()."""
         with self._cond:
-            send, self._goal = self._goal, None
-        if send is not None:  # sent, perhaps not yet accepted: wait for the handle to cancel it
+            goal, self._goal = self._goal, None
+            late, self._late_goals = self._late_goals, []
+        for send in [s for s in [goal, *late] if s is not None]:
+            # sent, perhaps not yet accepted: wait for the handle to cancel it
             gh = self._wait(send, GOAL_ACCEPT_S)
             if gh is not None and gh.accepted:
                 self._cancel_goal(gh, gh.get_result_async())
@@ -1228,6 +1233,10 @@ class ArmInterface:
         if ended:
             self._refuse(ACTION_ENDED_MESSAGE)
             return None
+        if gh is None:  # not answered in time: the driver may still accept it, so cancel it then
+            with self._cond:
+                self._late_goals.append(send)
+            send.add_done_callback(self._cancel_late_goal)
         if gh is None or not gh.accepted:
             self._refuse(rejected)
             return None
@@ -1286,6 +1295,17 @@ class ArmInterface:
             if self._in_action:
                 gh.cancel_goal_async()
 
+    def _cancel_late_goal(self, send):
+        """On the executor, once the driver answers a goal its call had given up on: cancel it if
+        accepted. After the action has ended it is left to _settle, which still holds the client."""
+        with self._cond:
+            if not self._in_action or send not in self._late_goals:
+                return
+            self._late_goals.remove(send)
+            gh = send.result()
+            if gh.accepted:
+                gh.cancel_goal_async()
+
     def _cancel_goal(self, gh, rf):
         """Cancel a goal and wait up to CANCEL_SETTLE_S for the driver to settle it (_settle,
         before the client is destroyed)."""
@@ -1307,13 +1327,17 @@ class ArmInterface:
         """Stream /setpoint/gripper at 50 Hz until the fingers stop moving (or `timeout_s`). The
         2F-85 latches the last command, so it holds after the stream stops. `speed`: a fraction
         of the closing speed (default GRIPPER_SPEED). A cancel of the action stops the stream and
-        raises Cancelled."""
+        raises Cancelled. False, as for every motion, when not_ready() refuses (e.g. an e-stop),
+        before or while it streams."""
         self._checkpoint()
         if self._mock:
             self._mock_gripper = float(position)
             return self._mock_sent("gripper")
         ctx = self._ctx
         self._check_command()
+        why = self.not_ready()
+        if why is not None:
+            return self._refuse(f"  RammpArm: gripper: {why} -- nothing sent.")
         m = GripperSetpoint()
         m.position = float(position)
         m.speed = float(rammp_arm.GRIPPER_SPEED if speed is None else speed)
@@ -1328,6 +1352,9 @@ class ArmInterface:
         while time.monotonic() - t0 < timeout_s:
             if ctx.cancelled():
                 ctx.checkpoint()  # raises the engine's Cancelled
+            why = self._driver.not_ready(rammp_arm.SENDER_ID)  # e.g. e-stopped mid-stream
+            if why is not None:
+                return self._refuse(f"  RammpArm: gripper: {why}")
             # Under _cond: end_action() clears _in_action under it before it destroys `pub`.
             with self._cond:
                 if not self._in_action:

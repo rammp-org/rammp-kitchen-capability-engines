@@ -323,3 +323,37 @@ def test_monitor_cancel_after_end_action_leaves_the_destroyed_client_alone(arm_e
     assert arm.last_error == "action ended"
     assert fake.cancelled("execute_joint_trajectory")  # by end_action()'s settle
     assert client_open == [True]  # the monitor's cancel did not touch the destroyed client
+
+
+def test_gripper_estopped_returns_false(arm_env):
+    arm, _, fake = arm_env
+    fake.engage_estop()
+    arm.begin_action(FakeCtx(), TOKEN)
+    assert arm.gripper(1.0) is False
+    assert "E-STOPPED" in arm.last_error
+    assert not fake.setpoints["/setpoint/gripper"]  # nothing sent
+
+
+def test_gripper_estop_mid_stream_returns_false(arm_env):
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), TOKEN)
+    threading.Timer(0.3, fake.engage_estop).start()  # the fake's gripper never moves: ~0.8 s
+    assert arm.gripper(1.0) is False
+    assert "E-STOPPED" in arm.last_error
+
+
+@pytest.mark.parametrize("end_action", [False, True], ids=["in_action", "after_end_action"])
+def test_goal_accepted_after_the_wait_is_cancelled(arm_env, monkeypatch, end_action):
+    arm, _, fake = arm_env
+    monkeypatch.setattr(arm_module, "GOAL_ACCEPT_S", 0.4)
+    fake.hold_goals(HOLD_S)
+    # accepted after the call gives up on it, and within end_action()'s own GOAL_ACCEPT_S wait
+    fake.delay_accept(0.6)
+    arm.begin_action(FakeCtx(), None)
+    assert arm.move_joints([[0.3] * 7]) is False
+    if end_action:
+        arm.end_action()  # before the driver accepts the goal
+    deadline = time.monotonic() + HOLD_S
+    while not fake.cancelled("execute_joint_trajectory") and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.cancelled("execute_joint_trajectory")
