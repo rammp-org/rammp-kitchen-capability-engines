@@ -33,10 +33,12 @@ COPY capability_engine/ src/capability_engine/
 COPY capabilities/example/ src/example/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
-# base's entrypoint sources its install/ automatically.
+# base's entrypoint sources its install/ automatically. The nightly base ships
+# rosdep's sources but no cache, so rosdep update first.
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \
     && apt-get update \
+    && rosdep update --rosdistro humble \
     && rosdep install --from-paths src --ignore-src -y \
     && rm -rf /var/lib/apt/lists/* \
     && colcon build \
