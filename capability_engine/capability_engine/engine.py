@@ -46,6 +46,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 
 from capability_engine import sim
@@ -57,6 +58,7 @@ ARM_PARAMS_FIXED_MESSAGE = "arm.* parameters are read at startup; restart to cha
 REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
+STOP_WAIT_S = 5.0  # on SIGTERM/SIGINT, how long the cancelled action may take to end
 
 
 @dataclass
@@ -381,19 +383,26 @@ class CapabilityEngine(Node):
             finally:
                 self.arm.end_action()  # settles any goal or stream, destroys the arm's entities
                 self._active_action = ""
-        finally:
-            self._busy.release()
 
-        # canceled() is only a legal transition after an action-level cancel
-        # request; a Control.CANCEL is reported through result.status instead.
-        if result.status == Result.STATUS_SUCCESS:
-            goal_handle.succeed()
-        elif result.status == Result.STATUS_CANCELLED and goal_handle.is_cancel_requested:
-            goal_handle.canceled()
-        else:
-            goal_handle.abort()
-        self._publish_status()
+            # canceled() is only a legal transition after an action-level cancel
+            # request; a Control.CANCEL is reported through result.status instead.
+            if result.status == Result.STATUS_SUCCESS:
+                goal_handle.succeed()
+            elif result.status == Result.STATUS_CANCELLED and goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
+            self._publish_status()
+        finally:
+            self._busy.release()  # once the result is reported: _stop_after_action waits for it
         return ExecuteAction.Result(result=result)
+
+    def _stop_after_action(self):
+        """Shut ROS down once the running action, already cancelled, has ended and reported its
+        result, or after STOP_WAIT_S. Until then the executor keeps spinning, so self.arm sees the
+        driver settle its goal or stream. The busy lock is kept: no new goal starts."""
+        self._busy.acquire(timeout=STOP_WAIT_S)
+        rclpy.try_shutdown()
 
     def _publish_status(self):
         if self._active_action:
@@ -413,15 +422,23 @@ class CapabilityEngine(Node):
 
 def run(engine_class: type[CapabilityEngine], args=None):
     """Entry point for a capability: spin until SIGTERM or Ctrl-C."""
-    rclpy.init(args=args)
+    # rclpy's own handlers would shut ROS down at once, under a running action.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = engine_class()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
 
     # A container's PID 1 receives no default action for SIGTERM, so without
     # this handler `docker stop` — and every `sheppy woof` — would wait out the
-    # full grace period and then SIGKILL.
-    signal.signal(signal.SIGTERM, lambda *_: rclpy.try_shutdown())
+    # full grace period and then SIGKILL. SIGINT is the image's STOPSIGNAL and
+    # Ctrl-C. Either cancels the running action first: self.arm then cancels
+    # its goal or closes its stream at the driver while ROS still runs.
+    def stop(*_):
+        node._cancel.set()
+        threading.Thread(target=node._stop_after_action, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
 
     try:
         executor.spin()

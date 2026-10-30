@@ -515,6 +515,59 @@ run(Paused)
 """
 
 
+MOVING_SCRIPT = """
+from capability_engine.engine import Action, CapabilityEngine, run
+
+
+class Moving(CapabilityEngine):
+    actions = [Action("run", "Run")]
+
+    def __init__(self):
+        super().__init__("{engine_id}")
+
+    def execute(self, action_id, params, ctx):
+        return {{"moved": self.arm.move_joints([[0.3] * 7])}}
+
+
+run(Moving)
+"""
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT], ids=["sigterm", "sigint"])
+def test_a_signal_mid_motion_cancels_the_goal_at_the_driver(env, tmp_path, sig):
+    """docker stop (SIGINT, the image's STOPSIGNAL) or a SIGTERM while a trajectory runs: the
+    engine cancels the goal at the driver and reports the action's result before ROS shuts down,
+    rather than leaving the arm moving or failing on a dead context."""
+    env.fake.hold_goals(ACTION_WAIT_S)
+    engine_id = f"arm_test_engine_{next(ENGINE_IDS)}"
+    script = tmp_path / "moving.py"
+    script.write_text(MOVING_SCRIPT.format(engine_id=engine_id))
+    proc = subprocess.Popen(
+        [sys.executable, str(script), "--ros-args", "-p", "use_orchestrator:=false"],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    node = Node(f"{engine_id}_client")
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    threading.Thread(target=executor.spin, daemon=True).start()
+    client = ActionClient(node, ExecuteAction, f"/{engine_id}/execute_action")
+    try:
+        assert client.wait_for_server(timeout_sec=ACTION_WAIT_S)
+        client.send_goal_async(ExecuteAction.Goal(action_id="run"))  # its reply may be lost
+        wait_until(lambda: env.fake.goals["execute_joint_trajectory"], ACTION_WAIT_S)
+        proc.send_signal(sig)
+        _, logs = proc.communicate(timeout=SHUTDOWN_LIMIT_S)
+        assert env.fake.cancelled("execute_joint_trajectory")
+        assert "Error" not in logs, logs
+    finally:
+        proc.kill()
+        proc.wait()
+        client.destroy()
+        executor.shutdown()
+        node.destroy_node()
+
+
 def reply(client, request):
     """`client`'s reply message to `request`, or None when none arrives within REPLY_WAIT_S."""
     future = client.call_async(request)
