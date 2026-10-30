@@ -6,8 +6,8 @@
 FROM ros:humble-ros-base
 
 # Pins. Interfaces and curobo are full SHAs; kinova_gen3_description is dev.
-ARG INTERFACES_REF=672a329f9036c640ce7b872ae02c77116780fb21
-ARG CUROBO_REF=525b7527df7ac75b5446f0a9367e651a0ecdb303
+ARG INTERFACES_REF=73e7ed1716bf8a2df0c4f1614d8c360bde20d009
+ARG CUROBO_REF=fd8b89cb18fd854f3add36ab9b1b72933dbabf76
 ARG KINOVA_REF=2546edbab9cda031cdfe82b33289f05e01341f88
 ARG DEPLOYMENTS_REF=9e0cd960fd7e1876a8a592b8fdb33a27da82a734
 # feeding-deployment microwave-wip: the students' Cornell arm model.

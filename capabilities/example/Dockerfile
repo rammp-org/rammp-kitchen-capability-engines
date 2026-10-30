@@ -26,7 +26,13 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
 # build it from a pinned RAMMP-CuRobo commit alongside the packages below.
-ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/525b7527df7ac75b5446f0a9367e651a0ecdb303.tar.gz /tmp/curobo.tar.gz
+# rammp_arm_interfaces too, at rammp-interfaces-ros2 73e7ed1 (dev with #21): the
+# base's copy predates GoToEEPoses / GoToJointConfigs. #21 added types only, so
+# this overlay speaks the base's messages unchanged. Drop it once a base carries
+# #21.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/73e7ed1716bf8a2df0c4f1614d8c360bde20d009.tar.gz /tmp/interfaces.tar.gz
+RUN mkdir -p src && tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_arm_interfaces' && rm /tmp/interfaces.tar.gz
+ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 COPY capability_engine/ src/capability_engine/

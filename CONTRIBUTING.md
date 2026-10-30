@@ -72,23 +72,29 @@ as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
 they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
 first arm call to the end of that `execute()`.
 
-**Several waypoints in one motion.** Each `go_to_*` call plans from rest and
-stops dead at its goal. `go_through` plans a list of poses and joint
-configurations as one trajectory, which passes a waypoint without stopping
-wherever its `blend_radius` (m) lets the tool cut the corner:
+**Several targets in one motion.** Each `go_to_*` call plans from rest and
+stops dead at its goal. `go_to_ee_poses` and `go_to_joint_configs` send a list
+of targets as ONE goal to the driver. It plans every leg and blends them, so the
+arm passes a target without stopping wherever its `blend_radius` (m) lets the
+tool cut the corner:
 
 ```python
-from capability_engine.arm import Waypoint
+from capability_engine.arm import HOLD_FIXED, PoseTarget
 
-self.arm.go_through(
-    [Waypoint(joints=HOME, blend_radius=0.05), Waypoint(view_pos, view_quat)], "to view"
+self.arm.go_to_ee_poses(
+    [
+        PoseTarget(view_pos, view_quat, blend_radius=0.05),
+        PoseTarget(grasp_pos, grasp_quat, hold=HOLD_FIXED, speed_scale=0.2),
+    ],
+    "to the grasp",
 )
 ```
 
-A radius of 0, and the last waypoint, stop. `straight=True` joint waypoints turn a
-list of joint positions into one smooth motion. The cuRobo planner does the
-blending (`/rammp_curobo/plan_through`) and checks every cut corner for
-collisions in its world.
+Each target has its own `hold` and `speed_scale` (default `GO_TO_SPEED_SCALE`).
+A radius of 0, and the last target, stop. With a radius above 0 a
+`JointTarget`'s joints are only passed near, not reached. cuRobo checks every cut
+corner for collisions in its world. Near something that isn't in that world, keep
+the radius small.
 
 **What a motion can raise.** `RammpArm`'s methods return `False` for a refused
 or failed motion, an e-stop included, as they always did. On top of that, any

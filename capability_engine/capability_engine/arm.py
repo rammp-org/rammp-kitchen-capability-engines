@@ -29,26 +29,29 @@ from rammp_arm import CONTINUOUS, ERRORS, JOINTS, _wrap
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
     GoToEEPose,
+    GoToEEPoses,
     GoToJointConfig,
+    GoToJointConfigs,
     GoToPreset,
 )
-from rammp_arm_interfaces.msg import EeState as EeStateMsg
 from rammp_arm_interfaces.msg import (
+    EEPoseTarget,
     GripperSetpoint,
     ImpedanceGains,
+    JointConfigTarget,
     JointImpedanceGainValues,
     JointSetpoint,
     PoseSetpoint,
     TwistSetpoint,
 )
+from rammp_arm_interfaces.msg import EeState as EeStateMsg
 from rammp_arm_interfaces.msg import GripperState as GripperStateMsg
 from rammp_arm_interfaces.msg import StreamStatus as StreamStatusMsg
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
 from rammp_common_interfaces.msg import ControlStatus as ControlStatusMsg
 from rammp_common_interfaces.msg import EStop
 from rammp_common_interfaces.srv import AcquireControl, ReleaseControl, RevokeControl
-from rammp_curobo_interfaces.action import PlanThrough, PlanToJoints, PlanToPose
-from rammp_curobo_interfaces.msg import Waypoint as WaypointMsg
+from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.action import ActionClient
 from rclpy.callback_groups import CallbackGroup
@@ -96,7 +99,6 @@ HALT_STATUS_WAIT_S = 0.2  # after a HALTED goal, how long to wait for /control_s
 ACTION_ENDED_MESSAGE = "action ended"  # last_error of a motion the end of its action stopped
 PLANNER_WAIT_S = 5.0  # how long a go_to_* call waits for its action server (the cuRobo planner)
 GO_TO_SETTLE_S = 0.3  # after a go_to goal, let /ee_state and /joint_states catch up with its end
-GO_THROUGH_PATH_TOL_RAD = 0.35  # go_through's tracking tolerance per joint: the driver's go_to one
 GRIPPER_PERIOD_S = 0.02  # gripper() streams /setpoint/gripper at 50 Hz
 GRIPPER_MOVED = 0.002  # gripper(): a position change (0..1) above this means the fingers move
 GRIPPER_JUDGE_AFTER_S = 0.5  # gripper(): the fingers are judged still only after this long
@@ -153,10 +155,11 @@ ACTIONS = {
     "execute_joint_trajectory": (ExecuteJointTrajectory, "/execute_joint_trajectory"),
     "go_to_ee_pose": (GoToEEPose, "/go_to_ee_pose"),
     "go_to_joint_config": (GoToJointConfig, "/go_to_joint_config"),
+    "go_to_ee_poses": (GoToEEPoses, "/go_to_ee_poses"),
+    "go_to_joint_configs": (GoToJointConfigs, "/go_to_joint_configs"),
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),
-    "plan_through": (PlanThrough, "/rammp_curobo/plan_through"),
 }
 SERVICES = {
     "open_stream": (OpenStream, "/open_stream"),
@@ -276,25 +279,33 @@ class Plan:
     q: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
     qd: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
     planning_time: float = 0.0  # s
-    corner_m: list = field(default_factory=list)  # plan_through: see Waypoint.blend_radius
 
 
 @dataclass
-class Waypoint:
-    """One waypoint of go_through / plan_through: the tool at (pos, quat xyzw) in arm_mount, or
-    `joints` (rad, J1..J7), never both. `blend_radius` (m): how far the tool may pass from the
-    planned path here, still moving, instead of stopping on it; 0 stops here, and the last
-    waypoint always stops. The planner cuts the corner only as far as the joint limits and its
-    collision world allow, and reports how far it did (Plan.corner_m). `hold` (HOLD_*): a pose's
-    orientation hold on the way to it. `straight`: joints reached by a straight line in joint
-    space instead of a planned path (collision-checked, never detoured)."""
+class PoseTarget:
+    """One target of go_to_ee_poses: the tool (tool_frame) at (pos, quat xyzw) in FRAME, reached
+    with orientation hold `hold` (HOLD_*) at `speed_scale` (default GO_TO_SPEED_SCALE).
+    `blend_radius` (m): how close the tool must pass this pose, cutting the corner into the next
+    leg instead of stopping on it; 0 stops here, and the last target always stops. The planner
+    cuts only as far as the joint limits, collision and the holds allow, which may be not at
+    all."""
 
-    pos: tuple = None
-    quat: tuple = None
-    joints: tuple = None
-    blend_radius: float = 0.0
+    pos: tuple
+    quat: tuple
     hold: int = HOLD_NONE
-    straight: bool = False
+    blend_radius: float = 0.0
+    speed_scale: float | None = None
+
+
+@dataclass
+class JointTarget:
+    """One target of go_to_joint_configs: joints `joints` (rad, J1..J7) at `speed_scale` (default
+    GO_TO_SPEED_SCALE). `blend_radius` as PoseTarget's, around where the tool is at these joints:
+    with a radius above 0 the joints themselves are not reached, only passed near."""
+
+    joints: tuple
+    blend_radius: float = 0.0
+    speed_scale: float | None = None
 
 
 @dataclass
@@ -343,6 +354,11 @@ def _impedance_gains(gains) -> ImpedanceGains:
     )
 
 
+def _speed_scale(speed_scale):
+    """A go_to speed scale: GO_TO_SPEED_SCALE when None."""
+    return float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+
+
 def _refusal(why):
     """The driver API's exception for not_ready() reason `why`: EStopped for an e-stop (as
     Stream.send raises), ArmError otherwise."""
@@ -387,29 +403,7 @@ def _plan(res):
         np.array([[p.positions[i] for i in idx] for p in points]).reshape(-1, len(JOINTS)),
         np.array([[p.velocities[i] for i in idx] for p in points]).reshape(-1, len(JOINTS)),
         float(res.planning_time),
-        list(getattr(res, "corner_m", [])),
     )
-
-
-def _waypoint_msg(w):
-    """A Waypoint as the planner's message."""
-    if w.joints is not None:
-        return WaypointMsg(
-            kind=WaypointMsg.JOINTS,
-            joints=[float(x) for x in w.joints],
-            straight=bool(w.straight),
-            blend_radius=float(w.blend_radius),
-        )
-    m = WaypointMsg(
-        kind=WaypointMsg.POSE,
-        hold=int(w.hold),
-        straight=bool(w.straight),
-        blend_radius=float(w.blend_radius),
-    )
-    p, o = m.pose.position, m.pose.orientation
-    p.x, p.y, p.z = map(float, w.pos[:3])
-    o.x, o.y, o.z, o.w = map(float, w.quat)
-    return m
 
 
 def _setpoint(channel, value):
@@ -1094,69 +1088,67 @@ class ArmInterface:
         g.preset_name = name
         return self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
 
-    def go_through(
+    def go_to_ee_poses(
+        self, targets, label="go_to_ee_poses", *, control_mode=POSITION, gains=None, feedback=None
+    ):
+        """go_to_ee_pose through `targets` (PoseTarget) in ONE motion: the driver plans every leg
+        (cuRobo), blends them so the arm passes the poses between still moving where each
+        target's blend_radius allows, and executes once (/go_to_ee_poses). Blocking; True if the
+        driver succeeded and the tool ended within GO_TO_TRACK_M of the last target. Keyword
+        arguments as in go_to_ee_pose, one for the whole motion. In mock mode the joints become
+        the last target's IK solution, as go_to_ee_pose does."""
+        targets = list(targets)
+        if not targets:
+            self._fail(ArmError, f"{label}: no targets")
+        last = targets[-1]
+        if self._mock:
+            self._checkpoint()
+            return self._mock_sent(label, self._mock_ik(last.pos, last.quat))
+        g = GoToEEPoses.Goal()
+        stamp = self._node.get_clock().now().to_msg()
+        for t in targets:
+            m = EEPoseTarget(orientation_hold=t.hold, blend_radius=float(t.blend_radius))
+            m.speed_scale = _speed_scale(t.speed_scale)
+            m.pose.header.frame_id, m.pose.header.stamp = rammp_arm.FRAME, stamp
+            p, o = m.pose.pose.position, m.pose.pose.orientation
+            p.x, p.y, p.z = map(float, t.pos[:3])
+            o.x, o.y, o.z, o.w = map(float, t.quat)
+            g.targets.append(m)
+        if not self._go_to("go_to_ee_poses", g, label, None, control_mode, gains, feedback):
+            return False
+        return self._tool_reached(label, last.pos)
+
+    def go_to_joint_configs(
         self,
-        waypoints,
-        label="go_through",
-        speed_scale=None,
+        targets,
+        label="go_to_joint_configs",
         *,
         control_mode=POSITION,
         gains=None,
         feedback=None,
     ):
-        """Through `waypoints` (Waypoint) in ONE motion: cuRobo plans the whole path from the
-        measured joints (plan_through), stopping only on waypoints whose blend_radius is 0 and on
-        the last, and the driver executes it at `speed_scale` (default GO_TO_SPEED_SCALE) of its
-        planned speed. Blocking; True if the driver succeeded and the arm ended on the last
-        waypoint as go_to_ee_pose / go_to_joint_config judge it. Keyword arguments as in
-        go_to_ee_pose. In mock mode the joints become the last waypoint's (IK'd for a pose, as
-        go_to_ee_pose does)."""
-        waypoints = list(waypoints)
-        if not waypoints:
-            self._fail(ArmError, f"{label}: no waypoints")
-        last = waypoints[-1]
+        """go_to_joint_config through `targets` (JointTarget) in ONE motion (/go_to_joint_configs),
+        as go_to_ee_poses. Blocking; True if the driver succeeded and every joint ended within
+        GO_TO_TRACK_DEG of the last target. In mock mode the joints become the last target's."""
+        targets = list(targets)
+        if not targets:
+            self._fail(ArmError, f"{label}: no targets")
+        last = targets[-1]
         if self._mock:
             self._checkpoint()
-            q = last.joints if last.joints is not None else self._mock_ik(last.pos, last.quat)
-            return self._mock_sent(label, q)
-        _impedance_gains(gains)  # a bad `gains` raises before anything is planned
-        self._checkpoint()
-        self._check_command()
-        why = self.not_ready()
-        if why is not None:
-            return self._refuse(f"  RammpArm: {label}: {why} -- nothing sent.")
-        plan = self.plan_through(waypoints, self.raw_joints())
-        if not plan.success:
-            return self._refuse(f"  RammpArm: {label}: no plan ({plan.message}) -- nothing sent.")
-        s = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
-        corners = ", ".join(f"{c * 100:.1f}" for c in plan.corner_m[:-1]) or "none"
-        self._node.get_logger().info(
-            f"  {label}: cuRobo planned {len(waypoints)} waypoints as one path, "
-            f"{plan.t[-1]:.2f} s at full speed (corners cut {corners} cm), run at {s:g} x ..."
-        )
-        try:
-            res = self.execute_joint_trajectory(
-                JOINTS,
-                zip(plan.t, plan.q, plan.qd, strict=True),
-                path_tolerance=GO_THROUGH_PATH_TOL_RAD,
-                control_mode=control_mode,
-                gains=gains,
-                speed_scale=s,
-                feedback=feedback,
+            return self._mock_sent(label, last.joints)
+        g = GoToJointConfigs.Goal()
+        for t in targets:
+            g.targets.append(
+                JointConfigTarget(
+                    target_joints=[float(x) for x in t.joints],
+                    speed_scale=_speed_scale(t.speed_scale),
+                    blend_radius=float(t.blend_radius),
+                )
             )
-        except ArmError as e:
-            if type(e) is not ArmError:  # EStopped, ControlTaken, ...: as for any motion
-                raise
-            return False  # refused or timed out: execute_joint_trajectory logged it
-        if res.error_code != SUCCESSFUL:
-            return self._refuse(
-                f"  RammpArm: {label} ended {ERRORS.get(res.error_code, res.error_code)} "
-                f"{res.error_string}"
-            )
-        time.sleep(GO_TO_SETTLE_S)  # let /ee_state and /joint_states catch up with the end
-        if last.joints is not None:
-            return self._joints_reached(label, last.joints)
-        return self._tool_reached(label, last.pos)
+        if not self._go_to("go_to_joint_configs", g, label, None, control_mode, gains, feedback):
+            return False
+        return self._joints_reached(label, last.joints)
 
     def _tool_reached(self, label, pos):
         """Whether the tool ended within GO_TO_TRACK_M of `pos`; logged, a refusal if not."""
@@ -1194,13 +1186,15 @@ class ArmInterface:
                 f"  RammpArm: {label}: no action server (the go_to_* actions need the cuRobo "
                 "planner: sheppy profile real-arm-camera-planner) -- nothing sent."
             )
-        g.speed_scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+        legs = len(getattr(g, "targets", ())) or 1
+        if hasattr(g, "targets"):  # GoToEEPoses / GoToJointConfigs: a speed per target
+            how = f"{legs} targets in one motion, each leg at its own speed"
+        else:
+            g.speed_scale = _speed_scale(speed_scale)
+            how = f"run at {g.speed_scale:g} x its speed"
         g.control_mode = control_mode
-        self._node.get_logger().info(
-            f"  {label}: cuRobo plans the path (not previewed), run at {g.speed_scale:g} x its "
-            "speed ..."
-        )
-        timeout_s = rammp_arm.GO_TO_TIMEOUT_S
+        self._node.get_logger().info(f"  {label}: cuRobo plans the path (not previewed), {how} ...")
+        timeout_s = rammp_arm.GO_TO_TIMEOUT_S * legs  # planning + execution, per leg
         res = self._run_goal(
             name,
             client,
@@ -1572,17 +1566,6 @@ class ArmInterface:
         g.target_joints = [float(x) for x in q_goal]
         g.start_joints = [float(x) for x in start_joints]
         return self._plan_goal("plan_to_joints", g)
-
-    def plan_through(self, waypoints, start_joints) -> Plan:
-        """cuRobo's plan through `waypoints` (Waypoint) from `start_joints` (rad, arm_joint_1..7):
-        ONE trajectory that stops only on waypoints whose blend_radius is 0 and on the last
-        (/rammp_curobo/plan_through). Plan.corner_m: per waypoint, how far the tool passes from
-        the planned path there (m). A failed plan, a waypoint the planner refuses included, is
-        Plan(success=False, message) naming the waypoint."""
-        g = PlanThrough.Goal()
-        g.waypoints = [_waypoint_msg(w) for w in waypoints]
-        g.start_joints = [float(x) for x in start_joints]
-        return self._plan_goal("plan_through", g)
 
     def set_world(self, world: str) -> tuple[bool, str]:
         """Swap cuRobo's collision world for the packaged world `world`: (success, message)."""
