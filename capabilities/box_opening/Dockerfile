@@ -4,12 +4,13 @@
 # the same packages you build natively in ~/ros2_ws, capability_engine and this
 # capability, and runs the same node.
 #
-# nightly-20261027 is the base the nightly arm driver is built on (interfaces
-# 672a329f9036), so box opening speaks the driver's exact messages. It carries the
+# nightly-20261030 is the base the nightly arm driver is built on (interfaces
+# 73e7ed1716bf, which capability_engine's self.arm needs), so box opening speaks
+# the driver's exact messages. It carries the
 # arm, common, orchestrator and perception interfaces; rammp_curobo_interfaces it
 # does not. rammp-cuda, not rammp-base: the OWL detectors run OWLv2 on the Jetson's
 # GPU (the image ships CUDA 12.6 and the Jetson build of torch). arm64 only.
-FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261027
+FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261030
 
 WORKDIR /module_ws
 
