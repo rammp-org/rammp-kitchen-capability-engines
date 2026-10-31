@@ -7,10 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fake_driver import FakeCtx, counts
-from rclpy.callback_groups import ReentrantCallbackGroup
 
 from capability_engine import arm as arm_module
-from capability_engine.action_scope import ActionScope
 from capability_engine.driver_state import ArmError, NotInAction, StateTimeout
 
 STRESS_CYCLES = 200  # actions in test_end_action_while_state_streams_in
@@ -209,19 +207,23 @@ def test_begin_action_ends_an_unended_action(arm_env):
     assert counts(node) == base
 
 
-def test_no_state_is_stored_after_the_action_ends(arm_env):
-    """Under the engine, the action's scope closes only after end_action(): a message arriving in
-    between must not be kept, or the next action would start from the last one's state."""
-    arm, node, _ = arm_env
-    scope = ActionScope(node, ReentrantCallbackGroup())
-    arm.begin_action(FakeCtx(), None, scope)
+def test_no_state_is_stored_after_the_action_ends(arm_env, monkeypatch):
+    """end_action() closes the scope only after it settles: a message arriving in between must
+    not be kept, or the next action would start from the last one's state."""
+    arm, _, _ = arm_env
+    arm.begin_action(FakeCtx(), None)
     arm.get_state()
-    arm.end_action()
-    try:
+    settle, received = arm._settle, {}
+
+    def slow_settle():
+        received["at_end"] = {topic: t for topic, (_, t) in arm._latest.items()}
         time.sleep(LINGER_S)  # the fake keeps publishing to the still-open subscriptions
-        assert not arm._latest
-    finally:
-        scope.close()
+        received["after"] = {topic: t for topic, (_, t) in arm._latest.items()}
+        settle()
+
+    monkeypatch.setattr(arm, "_settle", slow_settle)
+    arm.end_action()
+    assert received["after"] == received["at_end"]
 
 
 def test_end_action_holds_nothing_of_the_action(arm_env):

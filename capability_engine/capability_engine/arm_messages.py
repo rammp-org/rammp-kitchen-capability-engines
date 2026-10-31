@@ -28,6 +28,10 @@ GAIN_PROFILES = {
 }
 GAIN_KEYS = ("kq", "zeta", "torque_limit")  # `gains` as a dict: custom joint impedance
 
+HOLD_NONE = 0  # go_to_ee_pose orientation_hold: the planner reorients as it likes
+HOLD_LEVEL = 1  # keep the tool's tilt; spin about arm_mount z is free
+HOLD_FIXED = 2  # keep the orientation entirely
+
 # What stream() sends on each /setpoint/<channel> a controller reads, and what send() takes.
 SETPOINTS = {
     "joint_position": (JointSetpoint, "7 joint positions (rad)"),
@@ -153,7 +157,7 @@ class PoseTarget:
 
     pos: tuple
     quat: tuple
-    hold: int = 0  # HOLD_NONE
+    hold: int = HOLD_NONE
     blend_radius: float = 0.0
     speed_scale: float | None = None
 

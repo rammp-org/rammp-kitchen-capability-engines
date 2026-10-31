@@ -65,6 +65,9 @@ from capability_engine.action_scope import ActionScope
 from capability_engine.arm_messages import (  # re-exports: the arm's dataclasses and constants
     GAIN_KEYS,
     GAIN_PROFILES,  # noqa: F401
+    HOLD_FIXED,  # noqa: F401
+    HOLD_LEVEL,  # noqa: F401
+    HOLD_NONE,
     SETPOINTS,
     Controller,
     ControlStatus,
@@ -105,7 +108,6 @@ from capability_engine.driver_state import (
     ArmError,
     DriverState,
     EStopped,
-    ModeConflict,
     NotInAction,
     Refused,
     StateTimeout,
@@ -144,9 +146,6 @@ MOCK_NO_MODEL_MESSAGE = "mock mode has no driver model: set arm.mock_urdf to a U
 STREAM_ENDED_MESSAGE = "the stream is closed: send() works only inside its with block"
 
 # The driver's goal fields, for the keyword arguments of the goal methods (the driver's values).
-HOLD_NONE = 0  # go_to_ee_pose orientation_hold: the planner reorients as it likes
-HOLD_LEVEL = 1  # keep the tool's tilt; spin about arm_mount z is free
-HOLD_FIXED = 2  # keep the orientation entirely
 POSITION = 0  # control_mode: stiff position control
 IMPEDANCE = 1  # control_mode: compliant joint impedance
 QUEUE = 0  # execute_joint_trajectory preemption: wait for the running goal to finish
@@ -278,10 +277,7 @@ class Stream:
             self._ctx.checkpoint()  # raises the engine's Cancelled; the block's exit closes
         if self._pub is None:  # mock mode: a dry run
             return
-        try:
-            self._driver.check_command()
-        except ArmError as e:
-            fail(type(e), str(e))
+        self._arm._recorded(self._driver.check_command)
         m = self._message(setpoint)
         if m is None:
             fail(
@@ -365,12 +361,12 @@ class ArmInterface:
 
     # -- lifecycle ----------------------------------------------------------------------------
 
-    def begin_action(self, ctx, token: bytes | None, scope: ActionScope | None = None):
+    def begin_action(self, ctx, token: bytes | None):
         """Start an action: arm calls are allowed until end_action(). Creates no ROS entity: the
-        first call that needs them makes them in `scope` (the engine's for this action, or a new
-        one), which end_action() closes."""
+        first call that needs them makes them in the arm's own scope for this action, which
+        end_action() closes."""
         self.end_action()  # the last action never ended: carry nothing
-        scope = ActionScope(self._node, self._group) if scope is None else scope
+        scope = ActionScope(self._node, self._group)
         driver = DriverState(standalone=self._standalone)  # a fresh baseline: this action's
         driver.set_token(token)  # /control_status generation is its own
         with self._cond:
@@ -404,10 +400,12 @@ class ArmInterface:
     @staticmethod
     def worst_settle_s() -> float:
         """How long a cancelled action's arm calls may still take to end, at most: the running
-        call's own settle (CANCEL_SETTLE_S after it cancels its goal, or GO_TO_SETTLE_S after a
-        go_to goal) and end_action()'s (GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals, twice
-        CLOSE_STREAM_WAIT_S for a stream). From the arm.* parameters; 8.1 s by default."""
-        call = CANCEL_SETTLE_S + GO_TO_SETTLE_S
+        call's own settle, then end_action()'s. The call either cancels its goal and waits
+        CANCEL_SETTLE_S, or is in a go_to goal's GO_TO_SETTLE_S, or closes its stream; end_action()
+        waits GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals left and closes a stream still open.
+        A stream closes once (twice CLOSE_STREAM_WAIT_S), in the call or in end_action(), so it
+        counts once. From the arm.* parameters; 7.8 s by default."""
+        call = max(CANCEL_SETTLE_S, GO_TO_SETTLE_S)
         return call + GOAL_ACCEPT_S + CANCEL_SETTLE_S + 2 * CLOSE_STREAM_WAIT_S
 
     def _settle(self):
@@ -506,9 +504,16 @@ class ArmInterface:
         self._node.get_logger().error(message)
 
     def _fail(self, error, message):
-        """Raise `error`(`message`), recorded: every error the arm raises goes through here."""
+        """Raise `error`(`message`), recorded: every ArmError the arm raises goes through here."""
         self._record(message)
         raise error(message)
+
+    def _recorded(self, check):
+        """Run check(), a DriverState check: an ArmError from it is recorded, as by _fail()."""
+        try:
+            check()
+        except ArmError as e:
+            self._fail(type(e), str(e))
 
     def _check_command(self):
         """Raise ControlTaken or StreamClosed. An e-stop is not raised here: _check_ready()
@@ -823,7 +828,8 @@ class ArmInterface:
         o = g.target.pose.orientation
         o.x, o.y, o.z, o.w = map(float, quat)
         g.orientation_hold = orientation_hold
-        self._go_to("go_to_ee_pose", g, label, speed_scale, control_mode, gains, feedback)
+        g.speed_scale = _speed_scale(speed_scale)
+        self._go_to("go_to_ee_pose", g, label, control_mode, gains, feedback)
         return self._tool_reached(label, pos)
 
     @_rammp
@@ -845,7 +851,8 @@ class ArmInterface:
             return self._mock_sent(label, q)
         g = GoToJointConfig.Goal()
         g.target_joints = [float(x) for x in q]
-        self._go_to("go_to_joint_config", g, label, speed_scale, control_mode, gains, feedback)
+        g.speed_scale = _speed_scale(speed_scale)
+        self._go_to("go_to_joint_config", g, label, control_mode, gains, feedback)
         return self._joints_reached(label, q)
 
     @_rammp
@@ -861,7 +868,8 @@ class ArmInterface:
             return self._mock_sent(label)
         g = GoToPreset.Goal()
         g.preset_name = name
-        self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
+        g.speed_scale = _speed_scale(speed_scale)
+        self._go_to("go_to_preset", g, label, control_mode, gains, feedback)
         return True
 
     @_rammp
@@ -900,7 +908,7 @@ class ArmInterface:
             p.x, p.y, p.z = map(float, t.pos[:3])
             o.x, o.y, o.z, o.w = map(float, q)
             g.targets.append(m)
-        self._go_to("go_to_ee_poses", g, label, None, control_mode, gains, feedback)
+        self._go_to("go_to_ee_poses", g, label, control_mode, gains, feedback, legs=len(targets))
         return self._tool_reached(label, last.pos)
 
     @_rammp
@@ -933,7 +941,9 @@ class ArmInterface:
                     blend_radius=float(t.blend_radius),
                 )
             )
-        self._go_to("go_to_joint_configs", g, label, None, control_mode, gains, feedback)
+        self._go_to(
+            "go_to_joint_configs", g, label, control_mode, gains, feedback, legs=len(targets)
+        )
         return self._joints_reached(label, last.joints)
 
     def _tool_reached(self, label, pos):
@@ -958,7 +968,10 @@ class ArmInterface:
         self._node.get_logger().info(message)
         return True
 
-    def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
+    def _go_to(self, name, g, label, control_mode, gains, feedback, legs=None):
+        """Run go_to goal `g` on action `name`. `legs`: the number of targets of a
+        GoToEEPoses / GoToJointConfigs goal, each with its own speed; None for a one-target goal,
+        whose speed_scale the caller has set."""
         g.gains = _impedance_gains(gains)  # a bad `gains` raises before anything is sent
         self._checkpoint()
         self._check_ready(f"  RammpArm: {label}: ")
@@ -968,12 +981,10 @@ class ArmInterface:
                 f"  RammpArm: {label}: no action server (the go_to_* actions need the cuRobo "
                 "planner: sheppy profile real-arm-camera-planner) -- nothing sent.",
             )
-        legs = len(getattr(g, "targets", ())) or 1
-        if hasattr(g, "targets"):  # GoToEEPoses / GoToJointConfigs: a speed per target
-            how = f"{legs} targets in one motion, each leg at its own speed"
+        if legs is None:
+            how, legs = f"run at {g.speed_scale:g} x its speed", 1
         else:
-            g.speed_scale = _speed_scale(speed_scale)
-            how = f"run at {g.speed_scale:g} x its speed"
+            how = f"{legs} targets in one motion, each leg at its own speed"
         g.control_mode = control_mode
         self._node.get_logger().info(f"  {label}: cuRobo plans the path (not previewed), {how} ...")
         timeout_s = rammp_arm.GO_TO_TIMEOUT_S * legs  # planning + execution, per leg
@@ -1021,15 +1032,15 @@ class ArmInterface:
         code = res.error_code
         if code == 0 or (self.monitor_stopped and code == PREEMPTED):
             return True
-        message = f"  RammpArm: trajectory ended {ERRORS.get(code, code)} {res.error_string}"
-        self._record(message)
         fe = list(res.final_error.positions)
         if fe:
             self._node.get_logger().error(
                 "  RammpArm: final joint error (ref - actual) deg J1-J7 "
                 f"{np.round(np.degrees(fe), 1)}"
             )
-        raise Refused(message)
+        self._fail(
+            Refused, f"  RammpArm: trajectory ended {ERRORS.get(code, code)} {res.error_string}"
+        )
 
     def _run_goal(self, name, g, timeout_s, label, *, monitor=None, feedback=None, path=False):
         """Send the driver's goal `g` on action `name` with SENDER_ID and the token, and wait for
@@ -1049,10 +1060,7 @@ class ArmInterface:
                 self._node.get_logger().error(f"{name}: the feedback callback raised {e!r}")
 
         client = self._action(name)
-        try:
-            self._driver.begin_goal(name)
-        except ModeConflict as e:
-            self._fail(ModeConflict, str(e))
+        self._recorded(lambda: self._driver.begin_goal(name))
         try:
             send = self._send_goal(client, g, None if feedback is None else on_feedback)
             res = self._goal_result(send, timeout_s, label, monitor, path)
@@ -1411,10 +1419,7 @@ class ArmInterface:
         self._subscription("/stream_status")
         close_client = self._client("close_stream")
         driver = self._driver
-        try:
-            driver.begin_stream(controller)
-        except ModeConflict as e:
-            self._fail(ModeConflict, str(e))
+        self._recorded(lambda: driver.begin_stream(controller))
         stream = None
         try:
             channel = self._channel(controller)

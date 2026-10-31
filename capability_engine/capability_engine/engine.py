@@ -80,7 +80,7 @@ class Action:
 
 def stop_wait_s() -> float:
     """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's worst settle
-    (ArmInterface.worst_settle_s(), 8.1 s by default) plus STOP_MARGIN_S. docker stop's grace
+    (ArmInterface.worst_settle_s(), 7.8 s by default) plus STOP_MARGIN_S. docker stop's grace
     (10 s) must cover it."""
     return ArmInterface.worst_settle_s() + STOP_MARGIN_S
 
@@ -456,7 +456,7 @@ class CapabilityEngine(Node):
             ctx = Context(self, goal_handle, run)
             try:
                 # Follow-up: ExecuteAction carries no control token yet, so self.arm sends none.
-                self.arm.begin_action(ctx, token=None, scope=run.scope)
+                self.arm.begin_action(ctx, token=None)
                 params = json.loads(goal.params_json or "{}")
                 payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS
@@ -475,9 +475,9 @@ class CapabilityEngine(Node):
             finally:
                 try:
                     try:
-                        self.arm.end_action()  # settles goals and stream, closes run.scope
+                        self.arm.end_action()  # settles its goals and stream, closes its scope
                     finally:
-                        run.scope.close()  # a no-op unless end_action() failed early
+                        run.scope.close()  # destroys the capability's entities of this action
                 except Exception as error:  # the run must still end and report its result
                     result.status = Result.STATUS_FAILED
                     result.error_code = "exception"
