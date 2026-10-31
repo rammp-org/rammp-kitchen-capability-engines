@@ -40,18 +40,23 @@ RUN pip freeze | grep -iE '^(torch|torchvision|numpy)==' > /tmp/keep.txt \
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
-COPY capability_engine/ src/capability_engine/
-COPY capabilities/microwave/ src/microwave/
-
-# /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
-# base's entrypoint sources its install/ automatically. The base ships rosdep's
+# Dependencies first, from the package.xml files only, so a code-only change reuses this layer and
+# rebuilds in seconds (no apt). /module_ws is an overlay on the base's /ros2_ws (the RAMMP
+# interfaces); the base's entrypoint sources its install/ automatically. The base ships rosdep's
 # sources but not its cache, hence the update (as button_press does).
+COPY capability_engine/package.xml src/capability_engine/package.xml
+COPY capabilities/microwave/package.xml src/microwave/package.xml
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \
     && rosdep update --rosdistro humble \
     && apt-get update \
     && rosdep install --from-paths src --ignore-src -y \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY capability_engine/ src/capability_engine/
+COPY capabilities/microwave/ src/microwave/
+RUN . /opt/ros/humble/setup.sh \
+    && . /ros2_ws/install/setup.sh \
     && colcon build \
     && rm -rf build log
 

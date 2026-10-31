@@ -25,8 +25,10 @@ container:
   # kept on the host, across container restarts.
   volumes:
     - /tmp/microwave_data:/microwave_data
-  # The handle detector's YOLO runs on the GPU (the mock has none and needs none).
-  gpus: all
+  # The handle detector's YOLO runs on the GPU (the mock has none and needs none). JetPack exposes it through the
+  # NVIDIA runtime, not --gpus (10-29 on snorlax: "invoking the NVIDIA Container Runtime Hook directly ... is not
+  # supported"), as every GPU node in the deployment manifest does.
+  runtime: nvidia
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
@@ -40,6 +42,20 @@ params:
   camera_info_topic: /wrist_camera/color/camera_info
   depth_topic: /wrist_camera/aligned_depth_to_color/image_raw
   camera_frame: ""
+  # boxer's 3D boxes (scene camera): the handle detector crops the wrist camera's points to the
+  # microwave's box. "" = YOLO on the wrist image instead (yolo_model).
+  box_topic: ""  # /perception/object_detections_3d to use boxer
+  box_class: microwave
+  # The view pose in front of the box: camera distances out from its front face and heights above
+  # its middle (m), tried in order. Per camera and setup.
+  view_dists: [0.35, 0.30, 0.40, 0.45]
+  view_heights: [0.15, 0.20, 0.10, 0.25, 0.05]
+  # Where the handle comes from: depth (the vertical bar sticking out of the door) or sam3 (SAM 3's
+  # mask of sam3_prompts on the wrist image; the door plane and hinge still come from depth).
+  handle_source: depth
+  sam3_service: /perception/sam3/detect
+  sam3_prompts: [handle]
+  sam3_threshold: 0.3
   # Dev stand-in for the microwave box (the demo uses a different detector).
   yolo_model: yolo26s.pt
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
@@ -101,3 +117,4 @@ subscribes:
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
   - /wrist_camera/aligned_depth_to_color/image_raw
+  - /perception/object_detections_3d
