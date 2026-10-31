@@ -958,13 +958,13 @@ class ArmInterface:
             except Exception as e:  # noqa: BLE001 -- the caller's callback, any error
                 self._node.get_logger().error(f"{name}: the feedback callback raised {e!r}")
 
+        client = self._action(name)
         try:
             self._driver.begin_goal(name)
         except ModeConflict as e:
             self._fail(ModeConflict, str(e))
         try:
-            callback = None if feedback is None else on_feedback
-            send = self._send_goal(self._action(name), g, callback)
+            send = self._send_goal(client, g, None if feedback is None else on_feedback)
             res = self._goal_result(send, timeout_s, label, monitor, path)
         finally:
             self._driver.end_goal()
@@ -980,9 +980,9 @@ class ArmInterface:
         return res
 
     def _send_goal(self, client, g, feedback_callback=None):
-        """Send goal `g`, kept in _goals until the driver reports its end. NotInAction once the
-        action has ended."""
-        with self._alive():
+        """Send goal `g`, kept in _goals until the driver reports its end. _ActionEnded once the
+        action has ended: the call that began in it was cut short."""
+        with self._alive(_ActionEnded, ACTION_ENDED_MESSAGE):
             send = client.send_goal_async(g, feedback_callback=feedback_callback)
             self._goals.append(send)
         return send
