@@ -14,6 +14,7 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
     state:        set_joints(q7), set_flange(pos, quat), set_gripper(pos), move_gripper_to(pos, s),
                   pause_publishing(), resume_publishing(), set_publish_rate(hz)
     arbitration:  enforce_arbitration(), seize(owner_id), engage_estop(status_delay_s=0.0)
+    observing:    running() goals executing, session_open()
     goals:        accept(name, bool), delay_accept(seconds), set_result(name, code, final_error),
                   set_result_after_cancel(name, code), hold_goals(seconds),
                   finish_at(name, joints=None, flange=None), cancelled(name)
@@ -202,6 +203,8 @@ class FakeDriver(Node):
         self._controllers = list(CONTROLLERS)
         self._late_close = False
         self._open_delay_s, self._open_accept = 0.0, True  # delay_open_stream()
+        self._running = 0  # goals executing now
+        self._session = False  # a streaming session is open
 
         self._js_pub = self.create_publisher(JointState, "/joint_states", qos_profile_sensor_data)
         self._ee_pub = self.create_publisher(EeState, "/ee_state", qos_profile_sensor_data)
@@ -366,6 +369,15 @@ class FakeDriver(Node):
         """Whether a cancel was requested for any goal of `name`."""
         return name in self._cancelled
 
+    def running(self):
+        """How many goals, of any action, are executing now."""
+        with self._lock:
+            return self._running
+
+    def session_open(self):
+        """Whether a streaming session is open now."""
+        return self._session
+
     # -- test controls: streams and planner -----------------------------------------------------
 
     def set_controllers(self, controllers):
@@ -419,6 +431,15 @@ class FakeDriver(Node):
         return CancelResponse.ACCEPT
 
     def _execute(self, name, handle):
+        with self._lock:
+            self._running += 1
+        try:
+            return self._run_goal(name, handle)
+        finally:
+            with self._lock:
+                self._running -= 1
+
+    def _run_goal(self, name, handle):
         halts = self._halts
         if name not in PLANNER_ACTIONS:
             fb = ACTIONS[name][0].Feedback(fraction_complete=FEEDBACK_FRACTION)
@@ -483,11 +504,12 @@ class FakeDriver(Node):
             self.publish_stream_status(False)
             time.sleep(LATE_CLOSE_S)  # taken by the arm, not overwritten in its depth-1 queue
         response.accepted, response.channels = True, row[1]
+        self._session = True
         self.publish_stream_status(True, row[0], row[1], request.timeout_s)
         return response
 
     def _srv_close_stream(self, request, response):
-        response.closed = True
+        response.closed, self._session = True, False
         self.publish_stream_status(False)
         return response
 

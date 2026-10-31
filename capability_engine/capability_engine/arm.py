@@ -47,8 +47,6 @@ from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, S
 from rammp_common_interfaces.msg import ControlStatus as ControlStatusMsg
 from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
-from rclpy.action import ActionClient
-from rclpy.callback_groups import CallbackGroup
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -62,6 +60,7 @@ from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 from capability_engine import sim
+from capability_engine.action_scope import ActionScope, _Gate
 from capability_engine.cornell_commands import (
     CartesianTrajectoryCommand,
     CloseGripperCommand,
@@ -463,45 +462,19 @@ def _diagnostics(m):
     )
 
 
-class _Gate(CallbackGroup):
-    """The engine's callback group, closable. rclpy (Humble) raises InvalidHandle out of the
-    executor's spin() when an entity is destroyed after the executor found it ready but before it
-    took the message, so close() lets no new callback start and waits for the running ones; the
-    entities in the gate can then be destroyed while the engine's executor spins. close() waits
-    for running callbacks with no timeout, so a callback on a gate must never block or call
-    end_action()."""
-
-    def __init__(self, group):
-        super().__init__()
-        self._group = group
-        self._cond = threading.Condition()
-        self._running = 0
-        self._closed = False
-
-    def add_entity(self, entity):
-        super().add_entity(entity)
-        self._group.add_entity(entity)
-
-    def can_execute(self, entity):
-        return not self._closed and self._group.can_execute(entity)
-
-    def beginning_execution(self, entity):
-        with self._cond:
-            if self._closed or not self._group.beginning_execution(entity):
-                return False
-            self._running += 1
+def wait_until(ready, timeout_s, ctx=None):
+    """Poll ready() every POLL_S: True once it is, False after `timeout_s`. Raises the engine's
+    Cancelled once `ctx` (an action's) is cancelled, and whatever ready() raises (NotInAction
+    once the action has ended). Every blocking wait goes through here, so none outlasts a cancel."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if ready():
             return True
-
-    def ending_execution(self, entity):
-        self._group.ending_execution(entity)
-        with self._cond:
-            self._running -= 1
-            self._cond.notify_all()
-
-    def close(self):
-        with self._cond:
-            self._closed = True
-            self._cond.wait_for(lambda: self._running == 0)
+        if ctx is not None and ctx.cancelled():
+            ctx.checkpoint()  # raises the engine's Cancelled
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(POLL_S)
 
 
 class Stream:
@@ -546,17 +519,18 @@ class ArmInterface:
         self._in_action = False
         self._open_lock = threading.Lock()
         self._opened = False
-        self._gate = None  # the callback group of the entities _open() made
+        self._scope = None  # the action's ActionScope: the entities _open() made live in it
+        self._owns_scope = False  # made by begin_action() (no engine scope): end_action() closes it
         self._subs, self._actions, self._clients, self._pubs = {}, {}, {}, {}
         self._cond = threading.Condition()
         self._latest = {}  # topic -> (dataclass, time.monotonic() when received)
         self.last_error = ""  # the most recent refusal or failure, also logged
         self.last_path = []  # the last trajectory's measured tool path: [(t, x, y, z)]
         self.monitor_stopped = False  # the last trajectory was stopped by its monitor
-        self._goal = None  # the send future of the running goal: end_action() cancels it
-        # send futures of goals the driver had not answered in GOAL_ACCEPT_S: each is cancelled
-        # if it is accepted later, by _cancel_late_goal or, once the action has ended, _settle
-        self._late_goals = []
+        # Send futures of this action's goals whose end the driver has not reported: each leaves
+        # once refused or finished; a goal its call gave up on is cancelled if accepted later
+        # (_cancel_late_goal), and end_action() cancels whatever is left.
+        self._goals = []
         self._path_t0 = None  # time.monotonic() its goal started; set: /ee_state adds to last_path
         self._stream = None  # the open Stream: end_action() zeroes and closes it
         self._mock_q = np.array(MOCK_JOINTS, float)  # mock mode: the last commanded joints
@@ -564,22 +538,26 @@ class ArmInterface:
 
     # -- lifecycle ----------------------------------------------------------------------------
 
-    def begin_action(self, ctx, token: bytes | None):
-        """Start an action: arm calls are allowed until end_action(). Creates no ROS entity."""
+    def begin_action(self, ctx, token: bytes | None, scope: ActionScope | None = None):
+        """Start an action: arm calls are allowed until end_action(). Creates no ROS entity: the
+        first call that needs them makes them in `scope`, the engine's for this action (closed by
+        the engine after end_action()), or a scope of the arm's own that end_action() closes."""
         if self._in_action or self._opened:  # the last action never ended: carry nothing over
             self.end_action()
         self._ctx = ctx
+        self._owns_scope = scope is None
+        self._scope = ActionScope(self._node, self._group) if scope is None else scope
         # A fresh baseline: this action's /control_status generation is its own, not the last's.
         self._driver = DriverState(standalone=self._standalone)
         self._driver.set_token(token)
         self._in_action = True
 
     def end_action(self):
-        """End the action: settle any goal or stream, destroy every ROS entity _open() made and
-        forget the state they received, so the next action starts from the driver afresh.
-        Worst case, it waits GOAL_ACCEPT_S + CANCEL_SETTLE_S for a goal the driver has not yet
-        answered, to accept it and then to settle its cancel, or CLOSE_STREAM_WAIT_S for a stream
-        to close."""
+        """End the action: settle any goal or stream, forget the entities _open() made (destroying
+        them if the scope is the arm's own; the engine closes its scope itself) and the state they
+        received, so the next action starts from the driver afresh. Worst case, it waits
+        GOAL_ACCEPT_S + CANCEL_SETTLE_S for each goal the driver has not yet answered, to accept
+        it and then to settle its cancel, or CLOSE_STREAM_WAIT_S for a stream to close."""
         with self._cond:
             self._in_action = False
             self._cond.notify_all()  # a call waiting for state wakes with NotInAction
@@ -600,9 +578,8 @@ class ArmInterface:
         """Cancel any running goal and close any open stream, waiting for each to settle.
         Called after the action has ended: uses the stored handles only, never _ensure_open()."""
         with self._cond:
-            goal, self._goal = self._goal, None
-            late, self._late_goals = self._late_goals, []
-        for send in [s for s in [goal, *late] if s is not None]:
+            goals, self._goals = self._goals, []
+        for send in goals:
             # sent, perhaps not yet accepted: wait for the handle to cancel it
             gh = self._wait(send, GOAL_ACCEPT_S)
             if gh is not None and gh.accepted:
@@ -631,11 +608,10 @@ class ArmInterface:
             self._fail(StateTimeout, NO_STATE_MESSAGE)
 
     def _open(self):
-        """Create the subscriptions, clients and publishers."""
+        """Create the subscriptions, clients and publishers, in the action's scope."""
         with self._cond:
             self._latest.clear()
-        node = self._node
-        group = self._gate = _Gate(self._group)
+        scope = self._scope
         topics = (
             (JointState, "/joint_states", qos_profile_sensor_data, _joint_states),
             (EeStateMsg, "/ee_state", qos_profile_sensor_data, _ee_state),
@@ -645,36 +621,25 @@ class ArmInterface:
             (DiagnosticArray, "/diagnostics", qos_profile_sensor_data, _diagnostics),
         )
         for msg_type, topic, qos, convert in topics:
-            self._subs[topic] = node.create_subscription(
-                msg_type,
-                topic,
-                lambda m, t=topic, c=convert: self._store(t, c(m)),
-                qos,
-                callback_group=group,
+            self._subs[topic] = scope.create_subscription(
+                msg_type, topic, lambda m, t=topic, c=convert: self._store(t, c(m)), qos
             )
         for name, (action_type, path) in ACTIONS.items():
-            self._actions[name] = ActionClient(node, action_type, path, callback_group=group)
+            self._actions[name] = scope.create_action_client(action_type, path)
         for name, (srv_type, path) in SERVICES.items():
-            self._clients[name] = node.create_client(srv_type, path, callback_group=group)
-        self._pubs["/setpoint/gripper"] = node.create_publisher(
+            self._clients[name] = scope.create_client(srv_type, path)
+        self._pubs["/setpoint/gripper"] = scope.create_publisher(
             GripperSetpoint, "/setpoint/gripper", SETPOINT_QOS
         )
         self._opened = True
 
     def _destroy(self):
-        if self._gate is not None:
-            self._gate.close()
-        node = self._node
-        for sub in self._subs.values():
-            node.destroy_subscription(sub)
-        for action_client in self._actions.values():
-            action_client.destroy()
-        for client in self._clients.values():
-            node.destroy_client(client)
-        for pub in self._pubs.values():
-            node.destroy_publisher(pub)
+        """Forget the entities; destroy them now if the scope is the arm's own (the engine closes
+        its scope itself, after end_action())."""
+        if self._owns_scope and self._scope is not None:
+            self._scope.close()
         self._subs, self._actions, self._clients, self._pubs = {}, {}, {}, {}
-        self._gate = None
+        self._scope = None
         self._opened = False
 
     def _fail(self, error, message):
@@ -709,21 +674,17 @@ class ArmInterface:
         return client
 
     def _wait_for_server(self, client, ctx, timeout_s):
-        """Whether the action server came up within `timeout_s`, polled in POLL_S slices so a
-        cancel of the action (Cancelled) or its end (NotInAction) is not held up."""
-        deadline = time.monotonic() + timeout_s
-        while True:
-            # Under _cond: end_action() clears _in_action under it before it destroys the client.
-            with self._cond:
-                if not self._in_action:
-                    self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-                if client.server_is_ready():
-                    return True
-            if ctx.cancelled():
-                ctx.checkpoint()  # raises the engine's Cancelled
-            if time.monotonic() > deadline:
-                return False
-            time.sleep(POLL_S)
+        """Whether the action server came up within `timeout_s`; Cancelled once the action is
+        cancelled, NotInAction once it ends."""
+        return wait_until(lambda: self._live(client.server_is_ready), timeout_s, ctx)
+
+    def _live(self, use):
+        """use(), on one of this action's entities: under _cond, after _in_action is checked, as
+        end_action() clears _in_action under _cond before it destroys them. NotInAction after."""
+        with self._cond:
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            return use()
 
     def _estopped_within(self, timeout_s):
         """Whether /control_status shows the arm e-stopped, waiting up to `timeout_s` for it."""
@@ -803,12 +764,10 @@ class ArmInterface:
 
     def _wait_for(self, topic):
         """Wait up to STATE_WAIT_S for the first message on `topic`: its (value, receipt time),
-        or None if none came. NotInAction if the action ends meanwhile."""
-        with self._cond:
-            self._cond.wait_for(lambda: topic in self._latest or not self._in_action, STATE_WAIT_S)
-            if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-            return self._latest.get(topic)
+        or None if none came. NotInAction if the action ends meanwhile, Cancelled once it is
+        cancelled."""
+        wait_until(lambda: self._live(lambda: topic in self._latest), STATE_WAIT_S, self._ctx)
+        return self._live(lambda: self._latest.get(topic))
 
     def _read(self, topic, stale_s=None):
         """The latest value on `topic` with its age; an error when there is none, or when it is
@@ -898,7 +857,7 @@ class ArmInterface:
             String, "/arm/robot_description", on_description, LATCHED, callback_group=gate
         )
         try:
-            if not done.wait(STATE_WAIT_S):
+            if not wait_until(done.is_set, STATE_WAIT_S, self._ctx):
                 self._fail(
                     StateTimeout,
                     f"no /arm/robot_description in {STATE_WAIT_S:g} s -- is the arm driver up?",
@@ -1196,41 +1155,46 @@ class ArmInterface:
             self._fail(ModeConflict, str(e))
         try:
             # The client is used under _cond, after _in_action is checked: end_action() clears
-            # _in_action under _cond before it settles self._goal and destroys the client.
+            # _in_action under _cond before it settles self._goals and destroys the client.
             with self._cond:
                 send = None
                 if self._in_action:
-                    send = self._goal = client.send_goal_async(
+                    send = client.send_goal_async(
                         g, feedback_callback=None if feedback is None else on_feedback
                     )
+                    self._goals.append(send)
             if send is None:
                 self._refuse(ACTION_ENDED_MESSAGE)
                 return None
-            try:
-                return self._goal_result(
-                    send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
-                )
-            finally:
-                with self._cond:  # once the action has ended, end_action() settles the goal
-                    if self._in_action and self._goal is send:
-                        self._goal = None
+            return self._goal_result(
+                name, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
+            )
         finally:
             self._driver.end_goal()
 
-    def _goal_result(self, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory):
-        gh, rf = self._wait(send, GOAL_ACCEPT_S), None
+    def _goal_result(
+        self, name, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
+    ):
+        wait_until(lambda: send.done() or not self._in_action, GOAL_ACCEPT_S, ctx)
+        gh, rf = (send.result() if send.done() else None), None
         with self._cond:
             ended = not self._in_action
             if not ended and gh is not None and gh.accepted:
                 rf = gh.get_result_async()
+        if rf is not None:
+            rf.add_done_callback(lambda _: self._forget(send))
         if ended:
             self._refuse(ACTION_ENDED_MESSAGE)
             return None
-        if gh is None:  # not answered in time: the driver may still accept it, so cancel it then
-            with self._cond:
-                self._late_goals.append(send)
+        if gh is None:  # not answered: the driver may still accept it, so cancel it then
             send.add_done_callback(self._cancel_late_goal)
-        if gh is None or not gh.accepted:
+            self._refuse(
+                f"{name}: no answer from the driver in {GOAL_ACCEPT_S:g} s -- "
+                "cancelled if it starts"
+            )
+            return None
+        if not gh.accepted:
+            self._forget(send)
             self._refuse(rejected)
             return None
         if trajectory:
@@ -1288,33 +1252,36 @@ class ArmInterface:
             if self._in_action:
                 gh.cancel_goal_async()
 
+    def _forget(self, send):
+        """The driver has reported goal `send`'s end (refused, or its result): nothing to settle."""
+        with self._cond:
+            if send in self._goals:
+                self._goals.remove(send)
+
     def _cancel_late_goal(self, send):
         """On the executor, once the driver answers a goal its call had given up on: cancel it if
         accepted. After the action has ended it is left to _settle, which still holds the client."""
+        gh = send.result()
+        if not gh.accepted:
+            self._forget(send)
+            return
         with self._cond:
-            if not self._in_action or send not in self._late_goals:
+            if not self._in_action or send not in self._goals:
                 return
-            self._late_goals.remove(send)
-            gh = send.result()
-            if gh.accepted:
-                gh.cancel_goal_async()
+            gh.cancel_goal_async()
+            rf = gh.get_result_async()
+        rf.add_done_callback(lambda _: self._forget(send))
 
     def _cancel_goal(self, gh, rf):
         """Cancel a goal and wait up to CANCEL_SETTLE_S for the driver to settle it (_settle,
         before the client is destroyed)."""
         gh.cancel_goal_async()
-        deadline = time.monotonic() + CANCEL_SETTLE_S
-        while not rf.done() and time.monotonic() < deadline:
-            time.sleep(POLL_S)
+        wait_until(rf.done, CANCEL_SETTLE_S)
 
     @staticmethod
     def _wait(fut, timeout_s):
-        t0 = time.monotonic()
-        while not fut.done():
-            if time.monotonic() - t0 > timeout_s:
-                return None
-            time.sleep(POLL_S)
-        return fut.result()
+        """`fut`'s result, or None if it is not done within `timeout_s` (no cancel: settling)."""
+        return fut.result() if wait_until(fut.done, timeout_s) else None
 
     def gripper(self, position, timeout_s=4.0, force=None, *, speed=None):
         """Stream /setpoint/gripper at 50 Hz until the fingers stop moving (or `timeout_s`). The
@@ -1489,27 +1456,24 @@ class ArmInterface:
         if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
             self._refuse(f"{name}: no {path} action server (the cuRobo planner)")
             return Plan(False, self.last_error)
-        with self._cond:  # as in _run_goal: end_action() settles self._goal before it destroys
+        with self._cond:  # as in _run_goal: end_action() settles self._goals before it destroys
             send = None
             if self._in_action:
-                send = self._goal = client.send_goal_async(g)
+                send = client.send_goal_async(g)
+                self._goals.append(send)
         if send is None:
             self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-        try:
-            res = self._goal_result(
-                send,
-                PLAN_TIMEOUT_S,
-                ctx,
-                None,
-                f"{name}: goal REJECTED",
-                f"{name}: no plan in {PLAN_TIMEOUT_S:g} s -- goal cancelled",
-                None,
-                False,
-            )
-        finally:
-            with self._cond:
-                if self._in_action and self._goal is send:
-                    self._goal = None
+        res = self._goal_result(
+            name,
+            send,
+            PLAN_TIMEOUT_S,
+            ctx,
+            None,
+            f"{name}: goal REJECTED",
+            f"{name}: no plan in {PLAN_TIMEOUT_S:g} s -- goal cancelled",
+            None,
+            False,
+        )
         if res is None:
             if not self._in_action:
                 self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
@@ -1562,34 +1526,13 @@ class ArmInterface:
         if client is None:
             self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
         path = SERVICES[name][1]
-        deadline = time.monotonic() + SERVICE_WAIT_S
-        future = None
-        while future is None:
-            # Under _cond: end_action() clears _in_action under it before it destroys the client.
-            with self._cond:
-                if not self._in_action:
-                    self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-                if client.service_is_ready():
-                    future = client.call_async(request)
-                    if on_sent is not None:
-                        on_sent(future)
-            if future is None:
-                if ctx.cancelled():
-                    ctx.checkpoint()  # raises the engine's Cancelled
-                if time.monotonic() > deadline:
-                    self._fail(
-                        ArmError, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?"
-                    )
-                time.sleep(POLL_S)
-        deadline = time.monotonic() + SERVICE_CALL_S
-        while not future.done():
-            if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-            if ctx.cancelled():
-                ctx.checkpoint()  # raises the engine's Cancelled
-            if time.monotonic() > deadline:
-                self._fail(ArmError, f"{path}: no answer in {SERVICE_CALL_S:g} s")
-            time.sleep(POLL_S)
+        if not wait_until(lambda: self._live(client.service_is_ready), SERVICE_WAIT_S, ctx):
+            self._fail(ArmError, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")
+        future = self._live(lambda: client.call_async(request))
+        if on_sent is not None:
+            on_sent(future)
+        if not wait_until(lambda: self._live(future.done), SERVICE_CALL_S, ctx):
+            self._fail(ArmError, f"{path}: no answer in {SERVICE_CALL_S:g} s")
         return future.result()
 
     # -- streaming -------------------------------------------------------------------------------
@@ -1751,15 +1694,10 @@ class ArmInterface:
 
     def _wait_matched(self, pub):
         """Wait up to PUBLISHER_MATCH_S for `pub`, one of this action's publishers, to have a
-        subscriber. NotInAction once the action ends (end_action() then destroys `pub`)."""
-        deadline = time.monotonic() + PUBLISHER_MATCH_S
-        while True:
-            # Under _cond: end_action() clears _in_action under it before it destroys `pub`.
-            with self._cond:
-                if not self._in_action:
-                    self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-                if pub.get_subscription_count() > 0:
-                    return
-            if time.monotonic() > deadline:
-                return
-            time.sleep(POLL_S)
+        subscriber. NotInAction once the action ends (end_action() then destroys `pub`),
+        Cancelled once it is cancelled."""
+        wait_until(
+            lambda: self._live(lambda: pub.get_subscription_count() > 0),
+            PUBLISHER_MATCH_S,
+            self._ctx,
+        )

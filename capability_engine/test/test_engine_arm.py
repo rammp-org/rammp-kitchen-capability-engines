@@ -15,19 +15,25 @@ import pybullet as p
 import pytest
 import rammp_arm
 from fake_driver import FLATBOT_URDF, FakeDriver, counts
+from geometry_msgs.msg import TransformStamped
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import Result
-from rammp_orchestrator_interfaces.srv import Control, RegisterEngine
+from rammp_orchestrator_interfaces.srv import Control, RegisterEngine, RequestIntent
 from rcl_interfaces.msg import Log
 from rclpy.action import ActionClient
+from rclpy.duration import Duration as RclpyDuration
 from rclpy.exceptions import InvalidHandle
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.time import Time as RclpyTime
+from std_msgs.msg import String
+from tf2_msgs.msg import TFMessage
 
 from capability_engine import arm as arm_module
 from capability_engine import engine as engine_module
 from capability_engine import sim
+from capability_engine.action_scope import TF_STATIC_QOS, ScopeClosed
 from capability_engine.arm_params import PARAMS
 from capability_engine.driver_state import ArmError, NotInAction
 from capability_engine.engine import ORCHESTRATOR, Action, CapabilityEngine
@@ -48,6 +54,7 @@ REGISTER_RETRY_TEST_S = 0.1  # REGISTER_RETRY_S in the registration test
 REGISTER_TIMEOUT_TEST_S = 0.5  # CALL_TIMEOUT_S there: how long an unanswered call is waited on
 SHUTDOWN_LIMIT_S = 5.0  # how long a SIGTERMed engine may take to exit
 REPLY_WAIT_S = 1.0  # how long the SIGTERM test waits for one Control reply
+INTERRUPT_AFTER_S = 0.3  # when the lifecycle tests interrupt a running action
 EXECUTE_DELAY_S = 0.5  # how long the two-goal test holds back each goal's execute
 
 
@@ -112,6 +119,8 @@ def env(ros):
     yield SimpleNamespace(
         fake=fake, make=make, run=run, logs=logs, engine_id=engine_id, executor=executor
     )
+    for engine in engines:
+        engine.stop()  # cancels an action a failed test left running, so shutdown() returns
     executor.shutdown()
     spinner.join()
     for engine in engines:
@@ -607,3 +616,166 @@ def test_sigterm_exits_while_an_action_is_paused(ros, tmp_path):
         client.destroy()
         executor.shutdown()
         node.destroy_node()
+
+
+# -- the lifecycle, interrupted: every way an action can be cut short ------------------------------
+
+
+class GoalClient:
+    """A client node for one engine: sends its "run" goal, calls its control service."""
+
+    def __init__(self, engine_id):
+        self.node = Node(f"{engine_id}_lifecycle_client")
+        self.executor = MultiThreadedExecutor()
+        self.executor.add_node(self.node)
+        threading.Thread(target=self.executor.spin, daemon=True).start()
+        self.action = ActionClient(self.node, ExecuteAction, f"/{engine_id}/execute_action")
+        self.control_client = self.node.create_client(Control, f"/{engine_id}/control")
+        assert self.action.wait_for_server(timeout_sec=WAIT_S)
+        assert self.control_client.wait_for_service(timeout_sec=WAIT_S)
+
+    def send(self):
+        """The goal's handle: accepted or not."""
+        send = self.action.send_goal_async(ExecuteAction.Goal(action_id="run"))
+        wait_until(send.done)
+        return send.result()
+
+    def result(self, handle):
+        future = handle.get_result_async()
+        wait_until(future.done, ACTION_WAIT_S)
+        return future.result().result.result
+
+    def control(self, command):
+        future = self.control_client.call_async(Control.Request(command=command))
+        wait_until(future.done)
+        return future.result()
+
+    def close(self):
+        self.action.destroy()
+        self.executor.shutdown()
+        self.node.destroy_node()
+
+
+def trajectory_body(engine, ctx):
+    return {"moved": engine.arm.move_joints([TARGET])}
+
+
+def subscription_body(engine, ctx):
+    engine.create_action_subscription(String, "/lifecycle_test", lambda m: None, 10)
+    while True:
+        ctx.checkpoint()
+        time.sleep(POLL_S)
+
+
+def control_cancel(client, handle, engine):
+    client.control(Control.Request.CANCEL)
+
+
+def goal_cancel(client, handle, engine):
+    handle.cancel_goal_async()
+
+
+def pause_then_cancel(client, handle, engine):
+    client.control(Control.Request.PAUSE)
+    time.sleep(INTERRUPT_AFTER_S)
+    client.control(Control.Request.CANCEL)
+
+
+def stop(client, handle, engine):
+    engine.stop()
+
+
+@pytest.mark.parametrize(
+    "interrupt", [control_cancel, goal_cancel, pause_then_cancel, stop], ids=lambda f: f.__name__
+)
+@pytest.mark.parametrize("body", [trajectory_body, subscription_body], ids=lambda f: f.__name__)
+def test_an_interrupted_action_ends_cleanly(env, body, interrupt):
+    """Cancelled however: the result says so, nothing of the action is left at the driver or on
+    the node, the engine is idle, and it takes the next goal (none once stopping)."""
+    env.fake.hold_goals(ACTION_WAIT_S)
+    engine = env.make(body)
+    base = counts(engine)
+    client = GoalClient(env.engine_id)
+    try:
+        handle = client.send()
+        assert handle.accepted
+        time.sleep(INTERRUPT_AFTER_S)  # running: the trajectory sent, the subscription made
+        assert counts(engine) != base
+        interrupt(client, handle, engine)
+        assert client.result(handle).status == Result.STATUS_CANCELLED
+        wait_until(lambda: engine._current is None)
+        assert counts(engine) == base
+        wait_until(lambda: env.fake.running() == 0)
+        following = client.send()
+        assert following.accepted == (interrupt is not stop)
+        if following.accepted:
+            client.control(Control.Request.CANCEL)
+            client.result(following)
+    finally:
+        client.close()
+
+
+def test_action_entities_only_inside_execute(env):
+    engine = env.make(lambda engine, ctx: None)
+    with pytest.raises(ScopeClosed):
+        engine.create_action_subscription(String, "/lifecycle_test", lambda m: None, 10)
+
+
+def test_action_tf_buffer_sees_static_transforms(env):
+    broadcaster = Node(f"{env.engine_id}_tf")
+    pub = broadcaster.create_publisher(TFMessage, "/tf_static", TF_STATIC_QOS)
+    t = TransformStamped()
+    t.header.frame_id, t.child_frame_id = "world", "lifecycle_cam"
+    t.transform.translation.x, t.transform.rotation.w = 0.5, 1.0
+    pub.publish(TFMessage(transforms=[t]))
+    seen = {}
+
+    def body(engine, ctx):
+        tf = engine.create_action_tf_buffer()
+        assert tf.can_transform(
+            "world", "lifecycle_cam", RclpyTime(), RclpyDuration(seconds=WAIT_S)
+        )
+        seen["x"] = tf.lookup_transform(
+            "world", "lifecycle_cam", RclpyTime()
+        ).transform.translation.x
+
+    engine = env.make(body)
+    try:
+        assert env.run(engine).status == Result.STATUS_SUCCESS
+        assert seen["x"] == pytest.approx(0.5)
+    finally:
+        broadcaster.destroy_node()
+
+
+def test_a_failing_end_still_reports_and_idles(env, monkeypatch):
+    engine = env.make(lambda engine, ctx: None)
+
+    def broken():
+        raise RuntimeError("end_action broke")
+
+    monkeypatch.setattr(engine.arm, "end_action", broken)
+    result = env.run(engine)
+    assert (result.status, result.error_code) == (Result.STATUS_FAILED, "exception")
+    assert engine._current is None
+    assert env.run(engine).status == Result.STATUS_FAILED  # a second goal is taken
+
+
+def test_request_intent_honours_cancel(env, monkeypatch):
+    """An orchestrator that never answers an intent: a cancel ends the action at once, not after
+    INTENT_TIMEOUT_S."""
+    silent = Node(f"{env.engine_id}_intents")  # never spun: discoverable, never answers
+    silent.create_service(RequestIntent, f"{ORCHESTRATOR}/request_intent", lambda q, r: r)
+    engine = env.make(lambda engine, ctx: ctx.request_intent("MOVE_BASE"), use_orchestrator=True)
+    client = GoalClient(env.engine_id)
+    try:
+        handle = client.send()
+        assert handle.accepted
+        time.sleep(INTERRUPT_AFTER_S)
+        t0 = time.monotonic()
+        client.control(Control.Request.CANCEL)
+        assert client.result(handle).status == Result.STATUS_CANCELLED
+        assert time.monotonic() - t0 < WAIT_S
+    finally:
+        client.close()
+        silent.destroy_node()
+        engine.destroy_node()

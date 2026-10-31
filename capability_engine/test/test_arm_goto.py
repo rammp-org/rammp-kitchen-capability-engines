@@ -276,7 +276,7 @@ def test_end_action_while_the_goal_is_accepted_cancels_it(arm_env):
     motion.join(HOLD_S)
     assert result == [False]
     assert arm.last_error == "action ended"
-    assert arm._goal is None
+    assert not arm._goals
 
 
 def test_execute_joint_trajectory_ended_action_is_not_in_action(arm_env):
@@ -351,6 +351,7 @@ def test_goal_accepted_after_the_wait_is_cancelled(arm_env, monkeypatch, end_act
     fake.delay_accept(0.6)
     arm.begin_action(FakeCtx(), None)
     assert arm.move_joints([[0.3] * 7]) is False
+    assert "no answer from the driver" in arm.last_error  # not "REJECTED -- nothing moved"
     if end_action:
         arm.end_action()  # before the driver accepts the goal
     deadline = time.monotonic() + HOLD_S

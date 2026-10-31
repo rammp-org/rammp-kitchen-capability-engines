@@ -9,6 +9,8 @@
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>rammp_orchestrator_interfaces</exec_depend>
   <exec_depend>rammp_arm_interfaces</exec_depend>
   <exec_depend>rammp_common_interfaces</exec_depend>

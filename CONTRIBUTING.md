@@ -112,6 +112,22 @@ never publish `/estop`: the orchestrator and other nodes own them, and `self.arm
 has no way to. It only reads them: it refuses commands while the arm is e-stopped
 and raises `ControlTaken` when another sender takes the arm.
 
+**Your own topics: subscribe only during the action.** An idle subscription still
+costs CPU for every message it receives (about 2 ms each on the Orin:
+Demo-Software #263), so a camera or detections subscription should exist only
+while an action needs it. Make it inside `execute()` with
+`self.create_action_subscription(...)` (and `self.create_action_publisher(...)`,
+`self.create_action_tf_buffer()` in place of a `TransformListener`): the same
+arguments as rclpy's, and the engine destroys them when the action ends. Do not
+destroy subscriptions yourself: on Humble, destroying one while the executor
+spins can crash the node, and the engine does it in the safe order. Plain
+`self.create_subscription()` still works for what the node needs all its life.
+
+**Cancel ends the action promptly.** Call `ctx.checkpoint()` between steps and keep
+each step short: on a cancel or a stop (`docker stop`), `self.arm` cancels its
+motion at once, but your own code ends only at its next checkpoint, and a stop
+waits at most a few seconds for it.
+
 **No `print`.** Ruff forbids it. When you migrate a student script, turn each
 `print(msg)` into `self.get_logger().info(msg)` (`warn`/`error` where it was a
 warning or failure) with the same message text.

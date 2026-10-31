@@ -9,7 +9,9 @@ contract (rammp_orchestrator_interfaces) once, for every capability:
   orchestrator appears, and never exiting because it is absent
 - publishes /<id>/status (JSON in std_msgs/String) at 1 Hz and on every change
 - accepts cancel from Control.CANCEL and from an action cancel alike
-- exits on SIGTERM
+- gives each action ROS entities that live only while it runs (self.arm's, and the
+  capability's own through create_action_subscription() and friends)
+- on SIGTERM or SIGINT, cancels the running action, lets it end, then exits
 
 The same node runs standalone with `-p use_orchestrator:=false`: it skips
 registration, and the orchestrator calls on `ctx` become logged no-ops. Drive
@@ -50,7 +52,8 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 
 from capability_engine import sim
-from capability_engine.arm import ArmInterface
+from capability_engine.action_scope import ENDED_MESSAGE, ActionScope, ScopeClosed
+from capability_engine.arm import ArmInterface, wait_until
 from capability_engine.arm_params import PARAMS
 
 ORCHESTRATOR = "/rammp_orchestrator"
@@ -86,13 +89,25 @@ class EngineError(Exception):
         self.recoverable = recoverable
 
 
+class _Run:
+    """One accepted goal, from its acceptance until its result is reported: its cancel and pause,
+    and (once it executes) the scope its per-action ROS entities live in."""
+
+    def __init__(self, action_id: str):
+        self.action_id = action_id
+        self.cancelled = threading.Event()
+        self.paused = threading.Event()
+        self.scope = None
+
+
 class Context:
     """What `execute()` uses to report progress, honour pause/cancel, and talk
     to the orchestrator."""
 
-    def __init__(self, engine: "CapabilityEngine", goal_handle):
+    def __init__(self, engine: "CapabilityEngine", goal_handle, run: _Run):
         self._engine = engine
         self._goal = goal_handle
+        self._run = run
 
     def progress(self, phase: str, pct: float, message: str = "", pausable: bool = True):
         feedback = ExecuteAction.Feedback()
@@ -103,25 +118,25 @@ class Context:
 
     def checkpoint(self):
         """Call between steps: blocks while paused, raises Cancelled if cancelled."""
-        engine = self._engine
-        while engine._paused.is_set() and not self.cancelled():
-            engine._cancel.wait(0.1)
+        while self._run.paused.is_set() and not self.cancelled():
+            self._run.cancelled.wait(0.1)
         if self.cancelled():
             raise Cancelled()
 
     def cancelled(self) -> bool:
         """Whether the action has been cancelled. Never blocks, even while paused: self.arm
         polls it while a motion runs."""
-        return self._engine._cancel.is_set() or self._goal.is_cancel_requested
+        return self._run.cancelled.is_set() or self._goal.is_cancel_requested
 
     def request_intent(self, intent_type: str, params: dict | None = None) -> Result:
-        """Ask the orchestrator to delegate an intent (e.g. MOVE_BASE) and wait."""
+        """Ask the orchestrator to delegate an intent (e.g. MOVE_BASE) and wait (Cancelled
+        once the action is cancelled)."""
         request = RequestIntent.Request(
             requesting_engine_id=self._engine.get_name(),
             intent_type=intent_type,
             params_json=json.dumps(params or {}),
         )
-        response = self._engine._call("request_intent", request, INTENT_TIMEOUT_S)
+        response = self._engine._call("request_intent", request, self, INTENT_TIMEOUT_S)
         if response is None:
             return Result(status=Result.STATUS_FAILED, error_code="orchestrator_unavailable")
         return response.result
@@ -130,11 +145,11 @@ class Context:
         """Merge into the orchestrator's world state. Its schema is fixed
         (gripper, doors, objects, arm, base_pose); unknown keys are rejected."""
         request = WriteWorldState.Request(updates_json=json.dumps(updates))
-        return self._engine._write("write_world_state", request)
+        return self._engine._write("write_world_state", request, self)
 
     def update_object(self, instance_id: str, **fields) -> bool:
         request = UpdateObjectState.Request(instance_id=instance_id, fields_json=json.dumps(fields))
-        return self._engine._write("update_object_state", request)
+        return self._engine._write("update_object_state", request, self)
 
 
 class CapabilityEngine(Node):
@@ -163,13 +178,14 @@ class CapabilityEngine(Node):
         self.arm = ArmInterface(self, self._group, mock=self.mock)
         # make_sim() loads the driver's model (in mock mode, arm.mock_urdf's)
         sim.set_model_provider(self.arm.robot_description)
-        self._busy = threading.Lock()
-        self._paused = threading.Event()
-        self._cancel = threading.Event()
+        # The lifecycle: idle (no _current), running one goal from its acceptance until its
+        # result is reported (_current), and stopping (_stopping set: no goal is accepted again).
+        self._lifecycle = threading.Condition()
+        self._current = None
+        self._stopping = None  # time.monotonic() stop() was first called
         self._registered = False
         self._registering = False
         self._register_sent = 0.0  # time.monotonic() the pending RegisterEngine call was sent
-        self._active_action = ""
         self.instance_id = ""
 
         self.create_service(Activate, "~/activate", self._on_activate, callback_group=self._group)
@@ -218,6 +234,29 @@ class CapabilityEngine(Node):
 
     def hibernate(self):
         """Drop any per-selection state. Default: nothing to drop."""
+
+    # -- ROS entities for the running action only ---------------------------
+
+    def create_action_subscription(self, msg_type, topic, callback, qos_profile):
+        """Node.create_subscription, for the running action only: destroyed, safely, when it
+        ends (an idle subscription still costs CPU for every message). Call it inside execute()."""
+        return self._action_scope().create_subscription(msg_type, topic, callback, qos_profile)
+
+    def create_action_publisher(self, msg_type, topic, qos_profile):
+        """Node.create_publisher, for the running action only, as create_action_subscription()."""
+        return self._action_scope().create_publisher(msg_type, topic, qos_profile)
+
+    def create_action_tf_buffer(self):
+        """A tf2_ros.Buffer kept current for the running action only. Use it instead of a
+        TransformListener, whose unregister() is not safe while the executor spins."""
+        return self._action_scope().create_tf_buffer()
+
+    def _action_scope(self) -> ActionScope:
+        with self._lifecycle:
+            run = self._current
+        if run is None or run.scope is None:
+            raise ScopeClosed(ENDED_MESSAGE)
+        return run.scope
 
     # -- orchestrator plumbing ----------------------------------------------
 
@@ -294,25 +333,24 @@ class CapabilityEngine(Node):
         else:
             self.get_logger().warning(f"registration rejected, will retry: {response.message}")
 
-    def _call(self, name: str, request, timeout: float = CALL_TIMEOUT_S):
-        """Blocking call to an orchestrator service, from inside execute()."""
+    def _call(self, name: str, request, ctx: Context, timeout: float = CALL_TIMEOUT_S):
+        """Blocking call to an orchestrator service, from inside execute(): None when it is
+        unavailable or does not answer, Cancelled once the action is cancelled."""
         if not self.orchestrated:
             self.get_logger().warning(f"standalone: skipping orchestrator call '{name}'")
             return None
         client = self._orchestrator_clients[name]
-        if not client.wait_for_service(timeout_sec=timeout):
+        if not wait_until(client.service_is_ready, timeout, ctx):
             self.get_logger().error(f"orchestrator service '{name}' unavailable")
             return None
-        done = threading.Event()
         future = client.call_async(request)
-        future.add_done_callback(lambda _: done.set())
-        if not done.wait(timeout):
+        if not wait_until(future.done, timeout, ctx):
             self.get_logger().error(f"orchestrator service '{name}' timed out")
             return None
         return future.result()
 
-    def _write(self, name: str, request) -> bool:
-        response = self._call(name, request)
+    def _write(self, name: str, request, ctx: Context) -> bool:
+        response = self._call(name, request, ctx)
         if response is not None and not response.success:
             self.get_logger().warning(f"orchestrator rejected {name}: {response.message}")
         return bool(response and response.success)
@@ -332,40 +370,50 @@ class CapabilityEngine(Node):
         return response
 
     def _on_control(self, request, response):
-        if request.command == Control.Request.PAUSE:
-            self._paused.set()
-        elif request.command == Control.Request.RESUME:
-            self._paused.clear()
-        elif request.command == Control.Request.CANCEL:
-            self._cancel.set()
-        else:
+        with self._lifecycle:
+            run = self._current  # pause and cancel belong to the goal running, if any
+        if request.command not in (
+            Control.Request.PAUSE,
+            Control.Request.RESUME,
+            Control.Request.CANCEL,
+        ):
             response.message = f"unknown command {request.command}"
             return response
+        if run is not None:
+            if request.command == Control.Request.PAUSE:
+                run.paused.set()
+            elif request.command == Control.Request.RESUME:
+                run.paused.clear()
+            else:
+                run.cancelled.set()
         response.accepted = True
-        response.message = "ok" if self._active_action else "ok (no action running)"
+        response.message = "ok" if run is not None else "ok (no action running)"
         self._publish_status()
         return response
 
     def _on_goal(self, goal):
-        known = {a.action_id for a in self.actions}
-        # Taken here, not in _on_execute: a second goal arriving before the first executes is
-        # rejected, and a Control.CANCEL from now on applies to this goal. _on_execute releases it.
-        if goal.action_id not in known or not self._busy.acquire(blocking=False):
+        if goal.action_id not in {a.action_id for a in self.actions}:
             return GoalResponse.REJECT
-        self._cancel.clear()
-        self._paused.clear()
+        # Accepted only when idle, and its run is made here: a Control.CANCEL from now on, even
+        # before it executes, applies to this goal.
+        with self._lifecycle:
+            if self._current is not None or self._stopping is not None:
+                return GoalResponse.REJECT
+            self._current = _Run(goal.action_id)
         return GoalResponse.ACCEPT
 
     def _on_execute(self, goal_handle):
         goal = goal_handle.request
+        with self._lifecycle:
+            run = self._current  # made by _on_goal for this goal
         result = Result()
         try:
-            self._active_action = goal.action_id
+            run.scope = ActionScope(self, self._group)
             self._publish_status()
-            ctx = Context(self, goal_handle)
+            ctx = Context(self, goal_handle, run)
             try:
                 # Follow-up: ExecuteAction carries no control token yet, so self.arm sends none.
-                self.arm.begin_action(ctx, token=None)
+                self.arm.begin_action(ctx, token=None, scope=run.scope)
                 params = json.loads(goal.params_json or "{}")
                 payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS
@@ -382,8 +430,15 @@ class CapabilityEngine(Node):
                 result.error_code = "exception"
                 self.get_logger().error(f"{goal.action_id} raised: {error!r}")
             finally:
-                self.arm.end_action()  # settles any goal or stream, destroys the arm's entities
-                self._active_action = ""
+                try:
+                    try:
+                        self.arm.end_action()  # settles self.arm's goals and stream
+                    finally:
+                        run.scope.close()  # destroys every entity of this action
+                except Exception as error:  # the run must still end and report its result
+                    result.status = Result.STATUS_FAILED
+                    result.error_code = "exception"
+                    self.get_logger().error(f"{goal.action_id}: ending it raised: {error!r}")
 
             # canceled() is only a legal transition after an action-level cancel
             # request; a Control.CANCEL is reported through result.status instead.
@@ -395,17 +450,38 @@ class CapabilityEngine(Node):
                 goal_handle.abort()
             self._publish_status()
         finally:
-            self._busy.release()  # once the result is reported: run()'s stop waits for it
+            with self._lifecycle:  # idle again only once the result is reported: stop() waits
+                self._current = None
+                self._lifecycle.notify_all()
+            self._publish_status()
         return ExecuteAction.Result(result=result)
 
+    def stop(self):
+        """Begin stopping: no goal is accepted from now on, and the running one is cancelled."""
+        with self._lifecycle:
+            if self._stopping is None:
+                self._stopping = time.monotonic()
+            if self._current is not None:
+                self._current.cancelled.set()
+
+    def _stopped(self) -> bool:
+        """Whether stop() was called and the running action has since ended (or STOP_WAIT_S
+        has passed)."""
+        with self._lifecycle:
+            if self._stopping is None:
+                return False
+            return self._current is None or time.monotonic() - self._stopping > STOP_WAIT_S
+
     def _publish_status(self):
-        if self._active_action:
-            state = "paused" if self._paused.is_set() else "executing"
-        else:
+        with self._lifecycle:
+            run = self._current
+        if run is None:
             state = "idle"
+        else:
+            state = "paused" if run.paused.is_set() else "executing"
         status = {
             "state": state,
-            "action": self._active_action,
+            "action": "" if run is None else run.action_id,
             "instance_id": self.instance_id,
             "mode": "orchestrated" if self.orchestrated else "standalone",
             "registered": self._registered,
@@ -425,33 +501,21 @@ def run(engine_class: type[CapabilityEngine], args=None):
     # A container's PID 1 receives no default action for SIGTERM, so without
     # this handler `docker stop` — and every `sheppy woof` — would wait out the
     # full grace period and then SIGKILL. SIGINT is the image's STOPSIGNAL and
-    # Ctrl-C. Either cancels the running action first: self.arm then cancels
-    # its goal or closes its stream at the driver while ROS still runs.
-    #
-    # The executor spins on until the cancelled action has ended and reported its result (or
-    # STOP_WAIT_S), so self.arm sees the driver settle. The busy lock is kept: no new goal
-    # starts. ROS is shut down here, in the spinning thread: rclpy.try_shutdown() from another
-    # thread can land mid-spin and raise RCLError out of it.
-    stopped = threading.Event()
-
-    def stop_after_action():
-        node._busy.acquire(timeout=STOP_WAIT_S)
-        stopped.set()
-
-    def stop(*_):
-        node._cancel.set()
-        threading.Thread(target=stop_after_action, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    # Ctrl-C. Either cancels the running action and stops accepting goals; the
+    # executor spins on until the action has ended and reported its result (at
+    # most STOP_WAIT_S), so self.arm sees the driver settle. ROS is shut down
+    # here, in the spinning thread: rclpy.try_shutdown() from another thread
+    # can land mid-spin and raise RCLError out of it.
+    signal.signal(signal.SIGTERM, lambda *_: node.stop())
+    signal.signal(signal.SIGINT, lambda *_: node.stop())
 
     try:
-        while rclpy.ok() and not stopped.is_set():
+        while rclpy.ok() and not node._stopped():
             executor.spin_once(timeout_sec=SPIN_STEP_S)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         # shutdown() waits for a running execute(): cancel it, or a paused one never returns.
-        node._cancel.set()
+        node.stop()
         executor.shutdown()
         rclpy.try_shutdown()
