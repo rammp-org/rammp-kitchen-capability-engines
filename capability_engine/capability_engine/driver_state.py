@@ -10,7 +10,6 @@ STREAM_CLOSED_MESSAGE = (
     "the driver closed the stream: your loop stopped sending for more than timeout_s, "
     "or the driver could not solve that pose"
 )
-ESTOPPED_REASON = "arm is E-STOPPED -- clear it first"  # not_ready()'s reason for an e-stop
 
 
 class ArmError(Exception):
@@ -29,7 +28,12 @@ class ControlTaken(ArmError):
     """Another sender took control of the arm."""
 
 
-class EStopped(ArmError):
+class Refused(ArmError):
+    """The driver or the arm refused a command, or it failed. RammpArm's methods return False
+    for it; every other ArmError propagates from them."""
+
+
+class EStopped(Refused):
     """The arm is e-stopped."""
 
 
@@ -76,6 +80,12 @@ class DriverState:
 
     def begin_goal(self, name):
         self._begin("goal", name)
+
+    @property
+    def estopped(self) -> bool:
+        """The latest /control_status showed the arm e-stopped."""
+        with self._lock:
+            return self._status is not None and self._status[0]
 
     @property
     def stream_closed(self) -> bool:
@@ -140,7 +150,7 @@ class DriverState:
             return "no /control_status (latched) -- arm driver not up?"
         estopped, enforced, owned, owner_id = st
         if estopped:
-            return ESTOPPED_REASON
+            return "arm is E-STOPPED -- clear it first"
         # With a token, the driver judges it: the orchestrator acquires control under its own
         # owner_id, not this sender_id.
         if enforced and token is None:

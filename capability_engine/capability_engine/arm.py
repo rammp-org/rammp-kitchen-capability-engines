@@ -20,6 +20,7 @@ arm joints of the process's one shared sim copy, as solve_ik does.
 """
 
 import copy
+import functools
 import threading
 import time
 from contextlib import contextmanager
@@ -75,12 +76,12 @@ from capability_engine.cornell_commands import (
     OpenGripperCommand,
 )
 from capability_engine.driver_state import (
-    ESTOPPED_REASON,
     ArmError,
     DriverState,
     EStopped,
     ModeConflict,
     NotInAction,
+    Refused,
     StateTimeout,
 )
 
@@ -321,10 +322,23 @@ def _impedance_gains(gains) -> ImpedanceGains:
     )
 
 
-def _refusal(why):
-    """The driver API's exception for not_ready() reason `why`: EStopped for an e-stop (as
-    Stream.send raises), ArmError otherwise."""
-    return EStopped if why == ESTOPPED_REASON else ArmError
+class _ActionEnded(NotInAction, Refused):
+    """The action ended while a call waited on a goal it sent: NotInAction to the driver API,
+    False from RammpArm's methods."""
+
+
+def _rammp(method):
+    """RammpArm's failure path over a method of the core, which raises: a Refused (already
+    logged and kept in last_error) returns False; every other error propagates."""
+
+    @functools.wraps(method)
+    def call(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except Refused:
+            return False
+
+    return call
 
 
 def _duration(t):
@@ -610,13 +624,13 @@ class ArmInterface:
             pass
 
     @contextmanager
-    def _alive(self):
+    def _alive(self, error=NotInAction, message=NOT_IN_ACTION_MESSAGE):
         """The one guard of the action's entities: hold it to make or use one. It holds _cond,
         under which end_action() marks the action ended before it settles or destroys anything.
-        NotInAction once the action has ended."""
+        `error`(`message`) once the action has ended."""
         with self._cond:
             if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+                self._fail(error, message)
             yield
 
     def _live(self, use):
@@ -675,26 +689,34 @@ class ArmInterface:
         if not all(self._wait_for(t) for t in MOTION_STATE):
             self._fail(StateTimeout, NO_STATE_MESSAGE)
 
-    def _fail(self, error, message):
+    def _record(self, message):
+        """Log `message` (RammpArm's print) and keep it in last_error."""
         self.last_error = message
         self._node.get_logger().error(message)
+
+    def _fail(self, error, message):
+        """Raise `error`(`message`), recorded: every error the arm raises goes through here."""
+        self._record(message)
         raise error(message)
 
-    def _refuse(self, message):
-        """RammpArm's failure path: log `message` (its print), keep it in last_error, False."""
-        self.last_error = message
-        self._node.get_logger().error(message)
-        return False
-
     def _check_command(self):
-        """Raise (and log) ControlTaken or StreamClosed. An e-stop is not raised here: RammpArm's
-        motions return False for it, through not_ready(), with RammpArm's message."""
+        """Raise ControlTaken or StreamClosed. An e-stop is not raised here: _check_ready()
+        reports it with not_ready()'s reason."""
         try:
             self._driver.check_command()
         except EStopped:
             pass
         except ArmError as e:
             self._fail(type(e), str(e))
+
+    def _check_ready(self, prefix):
+        """Before a command: ControlTaken or StreamClosed, else EStopped or Refused when
+        not_ready() gives a reason (f"{prefix}{why} -- nothing sent.")."""
+        self._check_command()
+        why = self.not_ready()
+        if why is not None:
+            error = EStopped if self._driver.estopped else Refused
+            self._fail(error, f"{prefix}{why} -- nothing sent.")
 
     def _wait_for_server(self, client, ctx, timeout_s):
         """Whether the action server came up within `timeout_s`; Cancelled once the action is
@@ -904,6 +926,7 @@ class ArmInterface:
             return self.gripper(1.0)
         raise TypeError(f"RammpArm: unsupported command {type(cmd).__name__}")
 
+    @_rammp
     def move_joints(self, knots, cart_lengths=None, speed_scale=1.0, impedance=None, monitor=None):
         """Through joint `knots` (wrapped or not) from the measured joints. `cart_lengths`: the
         Cartesian distance of each segment -- given, the path is timed in metres at CART_SPEED,
@@ -922,12 +945,14 @@ class ArmInterface:
             for qi in list(q[::2]) + [q[-1]]:
                 msg = sim.keep_out_message(rb, qi)
                 if msg is not None:
-                    return self._refuse(
+                    self._fail(
+                        Refused,
                         f"  RammpArm: the trajectory enters the keep-out zone ({msg}) -- "
-                        "nothing sent."
+                        "nothing sent.",
                     )
         return self._send(t, q, qd, impedance, monitor)
 
+    @_rammp
     def move_cartesian(self, traj, impedance=None, speed_scale=1.0):
         """`traj`: [(pos, quat xyzw), ...] in the base frame, like CartesianTrajectoryCommand. Each
         segment (from the current pose) is a straight line with slerped orientation -- what Kortex
@@ -942,13 +967,14 @@ class ArmInterface:
             sim.make_sim(), self.get_state()["ee_pos"], self.raw_joints(), traj, log=refusals.append
         )
         if knots is None:
-            return self._refuse(refusals[-1])
+            self._fail(Refused, refusals[-1])
         return self.move_joints(
             knots, cart_lengths=lengths, impedance=impedance, speed_scale=speed_scale
         )
 
     # -- planned moves (RammpArm's go_to_*, rammp_arm.py@7bc328ae:317-378) -------------------
 
+    @_rammp
     def go_to_ee_pose(
         self,
         pos,
@@ -984,16 +1010,16 @@ class ArmInterface:
         o = g.target.pose.orientation
         o.x, o.y, o.z, o.w = map(float, quat)
         g.orientation_hold = orientation_hold
-        if not self._go_to("go_to_ee_pose", g, label, speed_scale, control_mode, gains, feedback):
-            return False
+        self._go_to("go_to_ee_pose", g, label, speed_scale, control_mode, gains, feedback)
         tool = _tool_position(self._read("/ee_state"))
         e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
         message = f"  {label}: tool {e * 100:.1f} cm from the goal"
         if e > rammp_arm.GO_TO_TRACK_M:
-            return self._refuse(message)
+            self._fail(Refused, message)
         self._node.get_logger().info(message)
         return True
 
+    @_rammp
     def go_to_joint_config(
         self,
         q,
@@ -1012,19 +1038,17 @@ class ArmInterface:
             return self._mock_sent(label, q)
         g = GoToJointConfig.Goal()
         g.target_joints = [float(x) for x in q]
-        if not self._go_to(
-            "go_to_joint_config", g, label, speed_scale, control_mode, gains, feedback
-        ):
-            return False
+        self._go_to("go_to_joint_config", g, label, speed_scale, control_mode, gains, feedback)
         d = np.asarray(q, float) - self.raw_joints()
         d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
         e = float(np.degrees(np.max(np.abs(d))))
         message = f"  {label}: joints within {e:.1f} deg of the goal"
         if e > rammp_arm.GO_TO_TRACK_DEG:
-            return self._refuse(message)
+            self._fail(Refused, message)
         self._node.get_logger().info(message)
         return True
 
+    @_rammp
     def go_to_preset(
         self, name: str, speed_scale=None, *, control_mode=POSITION, gains=None, feedback=None
     ):
@@ -1037,21 +1061,20 @@ class ArmInterface:
             return self._mock_sent(label)
         g = GoToPreset.Goal()
         g.preset_name = name
-        return self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
+        self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
+        return True
 
     def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
         g.gains = _impedance_gains(gains)  # a bad `gains` raises before anything is sent
         self._checkpoint()
         ctx = self._ctx
-        self._check_command()
-        why = self.not_ready()
-        if why is not None:
-            return self._refuse(f"  RammpArm: {label}: {why} -- nothing sent.")
+        self._check_ready(f"  RammpArm: {label}: ")
         client = self._action(name)
         if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
-            return self._refuse(
+            self._fail(
+                Refused,
                 f"  RammpArm: {label}: no action server (the go_to_* actions need the cuRobo "
-                "planner: sheppy profile real-arm-camera-planner) -- nothing sent."
+                "planner: sheppy profile real-arm-camera-planner) -- nothing sent.",
             )
         g.speed_scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
         g.control_mode = control_mode
@@ -1070,15 +1093,12 @@ class ArmInterface:
             f"  RammpArm: {label}: no result in {timeout_s:.0f} s -- goal cancelled",
             feedback=feedback,
         )
-        if res is None:
-            return False
         code = res.error_code
         if code != 0:
-            return self._refuse(
-                f"  RammpArm: {label} ended {ERRORS.get(code, code)} {res.error_string}"
+            self._fail(
+                Refused, f"  RammpArm: {label} ended {ERRORS.get(code, code)} {res.error_string}"
             )
         time.sleep(GO_TO_SETTLE_S)  # let /ee_state and /joint_states catch up with the move's end
-        return True
 
     def _checkpoint(self):
         """Before every motion: NotInAction outside an action, wait while the action is paused,
@@ -1090,11 +1110,8 @@ class ArmInterface:
         if self._mock:
             self.last_path, self.monitor_stopped = [], False
             return self._mock_sent("trajectory", q[-1])
-        ctx = self._ctx  # end_action() clears self._ctx; an ended action fails in not_ready()
-        self._check_command()
-        why = self.not_ready()
-        if why is not None:
-            return self._refuse(f"  RammpArm: {why} -- nothing sent.")
+        ctx = self._ctx
+        self._check_ready("  RammpArm: ")
         g = ExecuteJointTrajectory.Goal()
         g.trajectory.joint_names = JOINTS
         for ti, qi, qdi in zip(t, q, qd, strict=False):
@@ -1123,22 +1140,18 @@ class ArmInterface:
             monitor=monitor,
             trajectory=True,
         )
-        if res is None:
-            return False
         code = res.error_code
-        if self.monitor_stopped and code == PREEMPTED:
+        if code == 0 or (self.monitor_stopped and code == PREEMPTED):
             return True
-        if code != 0:
-            self._refuse(
-                f"  RammpArm: trajectory ended {ERRORS.get(code, code)} {res.error_string}"
+        message = f"  RammpArm: trajectory ended {ERRORS.get(code, code)} {res.error_string}"
+        self._record(message)
+        fe = list(res.final_error.positions)
+        if fe:
+            self._node.get_logger().error(
+                "  RammpArm: final joint error (ref - actual) deg J1-J7 "
+                f"{np.round(np.degrees(fe), 1)}"
             )
-            fe = list(res.final_error.positions)
-            if fe:
-                self._node.get_logger().error(
-                    "  RammpArm: final joint error (ref - actual) deg J1-J7 "
-                    f"{np.round(np.degrees(fe), 1)}"
-                )
-        return code == 0
+        raise Refused(message)
 
     def _run_goal(
         self,
@@ -1157,8 +1170,8 @@ class ArmInterface:
         """Send goal `g` on action `name` with SENDER_ID and the token, and wait up to `timeout_s`
         for its result: the action's Result. A cancel of the action cancels the goal and raises
         Cancelled; a goal HALTED under the token raises ControlTaken (unless the arm e-stopped).
-        None, with last_error set, when the goal was refused (`rejected`), had no result in time
-        (`timed_out`; the goal is cancelled) or its action ended. `monitor`: polled while the goal
+        Refused when the goal was refused (`rejected`) or had no result in time (`timed_out`; the
+        goal is cancelled); _ActionEnded when its action ended. `monitor`: polled while the goal
         runs; True cancels the goal and sets monitor_stopped. `feedback`: called with each
         GoalFeedback, on the executor (it must not block). `trajectory`: record last_path."""
         g.sender_id = rammp_arm.SENDER_ID
@@ -1197,27 +1210,20 @@ class ArmInterface:
         self, name, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
     ):
         wait_until(lambda: send.done() or not self._in_action, GOAL_ACCEPT_S, ctx)
-        gh, rf = (send.result() if send.done() else None), None
-        with self._cond:
-            ended = not self._in_action
-            if not ended and gh is not None and gh.accepted:
-                rf = gh.get_result_async()
-        if rf is not None:
-            rf.add_done_callback(lambda _: self._forget(send))
-        if ended:
-            self._refuse(ACTION_ENDED_MESSAGE)
-            return None
+        gh = send.result() if send.done() else None
+        with self._alive(_ActionEnded, ACTION_ENDED_MESSAGE):  # end_action() settles it then
+            rf = gh.get_result_async() if gh is not None and gh.accepted else None
         if gh is None:  # not answered: the driver may still accept it, so cancel it then
             send.add_done_callback(self._cancel_late_goal)
-            self._refuse(
+            self._fail(
+                Refused,
                 f"{name}: no answer from the driver in {GOAL_ACCEPT_S:g} s -- "
-                "cancelled if it starts"
+                "cancelled if it starts",
             )
-            return None
         if not gh.accepted:
             self._forget(send)
-            self._refuse(rejected)
-            return None
+            self._fail(Refused, rejected)
+        rf.add_done_callback(lambda _: self._forget(send))
         if trajectory:
             # record the measured tool path while the goal runs (`last_path`: [(t, x, y, z)], from
             # the /ee_state callback) -- in impedance mode this is where the door actually let the
@@ -1247,13 +1253,11 @@ class ArmInterface:
             raise
         finally:
             self._path_t0 = None
-        if not self._in_action:
-            self._refuse(ACTION_ENDED_MESSAGE)
-            return None
+        with self._alive(_ActionEnded, ACTION_ENDED_MESSAGE):
+            pass
         if res is None:
             self._cancel(gh)
-            self._refuse(timed_out)
-            return None
+            self._fail(Refused, timed_out)
         # HALTED under our token: control taken, unless the driver e-stopped (an e-stop drops
         # grants without a new generation), which is the caller's plain failure. The planner's
         # goals carry no token (and no error_code).
@@ -1298,6 +1302,7 @@ class ArmInterface:
         """`fut`'s result, or None if it is not done within `timeout_s` (no cancel: settling)."""
         return fut.result() if wait_until(fut.done, timeout_s) else None
 
+    @_rammp
     def gripper(self, position, timeout_s=4.0, force=None, *, speed=None):
         """Stream /setpoint/gripper at 50 Hz until the fingers stop moving (or `timeout_s`). The
         2F-85 latches the last command, so it holds after the stream stops. `speed`: a fraction
@@ -1316,10 +1321,7 @@ class ArmInterface:
                 GripperSetpoint, "/setpoint/gripper", SETPOINT_QOS
             ),
         )
-        self._check_command()
-        why = self.not_ready()
-        if why is not None:
-            return self._refuse(f"  RammpArm: gripper: {why} -- nothing sent.")
+        self._check_ready("  RammpArm: gripper: ")
         m = GripperSetpoint()
         m.position = float(position)
         m.speed = float(rammp_arm.GRIPPER_SPEED if speed is None else speed)
@@ -1335,7 +1337,7 @@ class ArmInterface:
                 ctx.checkpoint()  # raises the engine's Cancelled
             why = self._driver.not_ready(rammp_arm.SENDER_ID)  # e.g. e-stopped mid-stream
             if why is not None:
-                return self._refuse(f"  RammpArm: gripper: {why}")
+                self._fail(Refused, f"  RammpArm: gripper: {why}")
             self._live(lambda: pub.publish(m))
             time.sleep(GRIPPER_PERIOD_S)
             g = self._read("/gripper_state").position
@@ -1369,7 +1371,7 @@ class ArmInterface:
         added). Tolerances: position (rad), one for all joints or one per joint; None leaves the
         driver's default. `gains`: see _impedance_gains(). `feedback`: called with each
         GoalFeedback on the executor (it must not block). Blocking; a cancel of the action
-        cancels the goal and raises Cancelled, its end raises NotInAction. Raises ArmError when
+        cancels the goal and raises Cancelled, its end raises NotInAction. Raises Refused when
         the arm must not be commanded (EStopped when e-stopped), the goal is refused or no result
         comes in time."""
         if speed_scale <= 0:
@@ -1392,10 +1394,7 @@ class ArmInterface:
             self._mock_sent("execute_joint_trajectory", q)
             return TrajectoryResult(SUCCESSFUL, "", np.zeros(len(names)))
         ctx = self._ctx
-        self._check_command()
-        why = self.not_ready()
-        if why is not None:
-            self._fail(_refusal(why), f"execute_joint_trajectory: {why} -- nothing sent.")
+        self._check_ready("execute_joint_trajectory: ")
         g = ExecuteJointTrajectory.Goal()
         g.trajectory.joint_names = list(names)
         duration = 0.0
@@ -1427,8 +1426,6 @@ class ArmInterface:
             f"execute_joint_trajectory: no result in {timeout_s:.0f} s -- goal cancelled",
             feedback=feedback,
         )
-        if res is None:
-            raise (ArmError if self._in_action else NotInAction)(self.last_error)
         return TrajectoryResult(
             res.error_code, res.error_string, np.array(res.final_error.positions)
         )
@@ -1469,32 +1466,32 @@ class ArmInterface:
         ctx = self._ctx
         client = self._action(name)  # the planner needs no arm state
         path = ACTIONS[name][1]
-        if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
-            self._refuse(f"{name}: no {path} action server (the cuRobo planner)")
-            return Plan(False, self.last_error)
-        send = self._send_goal(client, g)
-        res = self._goal_result(
-            name,
-            send,
-            PLAN_TIMEOUT_S,
-            ctx,
-            None,
-            f"{name}: goal REJECTED",
-            f"{name}: no plan in {PLAN_TIMEOUT_S:g} s -- goal cancelled",
-            None,
-            False,
-        )
-        if res is None:
-            if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-            return Plan(False, self.last_error)
+        try:
+            if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
+                self._fail(Refused, f"{name}: no {path} action server (the cuRobo planner)")
+            send = self._send_goal(client, g)
+            res = self._goal_result(
+                name,
+                send,
+                PLAN_TIMEOUT_S,
+                ctx,
+                None,
+                f"{name}: goal REJECTED",
+                f"{name}: no plan in {PLAN_TIMEOUT_S:g} s -- goal cancelled",
+                None,
+                False,
+            )
+        except NotInAction:
+            raise
+        except Refused as e:  # a failed plan
+            return Plan(False, str(e))
         if not res.success:
-            self._refuse(f"{name}: {res.message}")
+            self._record(f"{name}: {res.message}")
             return Plan(False, res.message, planning_time=float(res.planning_time))
         plan = _plan(res)
         if plan is None:
             names = list(res.trajectory.joint_names)
-            self._refuse(
+            self._record(
                 f"{name}: the plan is not positions and velocities of arm_joint_1..7 or "
                 f"joint_1..7 at every point (its joints: {names})"
             )
@@ -1525,7 +1522,7 @@ class ArmInterface:
         return res.accepted, res.message
 
     def _call(self, name, request, on_sent=None):
-        """Call service `name` and return its response: ArmError when the server is not up within
+        """Call service `name` and return its response: Refused when the server is not up within
         SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
         ends, Cancelled once it is cancelled (both waits poll every POLL_S). Waits for no arm
         state. `on_sent`: called with the request's future once it is sent, so a caller can
@@ -1534,12 +1531,12 @@ class ArmInterface:
         ctx = self._ctx
         path = SERVICES[name][1]
         if not wait_until(lambda: self._live(client.service_is_ready), SERVICE_WAIT_S, ctx):
-            self._fail(ArmError, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")
+            self._fail(Refused, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")
         future = self._live(lambda: client.call_async(request))
         if on_sent is not None:
             on_sent(future)
         if not wait_until(lambda: self._live(future.done), SERVICE_CALL_S, ctx):
-            self._fail(ArmError, f"{path}: no answer in {SERVICE_CALL_S:g} s")
+            self._fail(Refused, f"{path}: no answer in {SERVICE_CALL_S:g} s")
         return future.result()
 
     # -- streaming -------------------------------------------------------------------------------
@@ -1569,10 +1566,7 @@ class ArmInterface:
             finally:
                 self._close_stream(stream)
             return
-        self._check_command()
-        why = self.not_ready()
-        if why is not None:
-            self._fail(_refusal(why), f"stream {controller!r}: {why} -- nothing sent.")
+        self._check_ready(f"stream {controller!r}: ")
         # Before open_stream: /stream_status shows the driver closing the session (DriverState),
         # and _close_stream uses the close_stream client after the action has ended.
         self._subscription("/stream_status")
@@ -1590,8 +1584,7 @@ class ArmInterface:
             res = self._call("open_stream", req, on_sent=lambda f: setattr(stream, "_open_sent", f))
             if not res.accepted:
                 self._fail(
-                    ArmError,
-                    f"stream {controller!r}: refused ({res.error_code}) {res.message}",
+                    Refused, f"stream {controller!r}: refused ({res.error_code}) {res.message}"
                 )
             stream._opened = True
             if list(res.channels) != [stream.channel]:
