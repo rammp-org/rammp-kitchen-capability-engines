@@ -179,6 +179,8 @@ NO_STATE_MESSAGE = (
 )
 
 
+# Both, so one raise suits both layers: the driver API raises it as NotInAction, and _rammp
+# turns it (a Refused) into False, as RammpArm returned for a motion its action cut short.
 class _ActionEnded(NotInAction, Refused):
     """The action ended while a call waited on a goal it sent: NotInAction to the driver API,
     False from RammpArm's methods."""
@@ -420,22 +422,22 @@ class ArmInterface:
         if stream is not None:
             stream.close()  # waits for a close the stream's block has begun
 
-    def _check_in_action(self):
-        with self._alive():
-            pass
+    def _check_in_action(self, error=NotInAction, message=NOT_IN_ACTION_MESSAGE):
+        """`error`(`message`) unless an action is running."""
+        if not self._in_action:
+            self._fail(error, message)
 
     @contextmanager
     def _alive(self, error=NotInAction, message=NOT_IN_ACTION_MESSAGE):
         """The one guard of the action's entities: hold it to make or use one. It holds _cond,
-        under which end_action() marks the action ended before it settles or destroys anything.
-        `error`(`message`) once the action has ended."""
+        under which end_action() marks the action ended before it settles or destroys anything,
+        and raises as _check_in_action() does."""
         with self._cond:
-            if not self._in_action:
-                self._fail(error, message)
+            self._check_in_action(error, message)
             yield
 
     def _live(self, use):
-        """use(), inside _alive()."""
+        """use() inside _alive(), for a wait_until() condition."""
         with self._alive():
             return use()
 
@@ -608,7 +610,8 @@ class ArmInterface:
         or None if none came. NotInAction if the action ends meanwhile, Cancelled once it is
         cancelled."""
         wait_until(lambda: self._live(lambda: topic in self._latest), STATE_WAIT_S, self._ctx)
-        return self._live(lambda: self._latest.get(topic))
+        with self._alive():
+            return self._latest.get(topic)
 
     def _read(self, topic, stale_s=None):
         """The latest value on `topic` with its age; an error when there is none, or when it is
@@ -1035,8 +1038,7 @@ class ArmInterface:
             raise
         finally:
             self._path_t0 = None
-        with self._alive(_ActionEnded, ACTION_ENDED_MESSAGE):
-            pass
+        self._check_in_action(_ActionEnded, ACTION_ENDED_MESSAGE)
         if res is None:
             self._cancel(gh)
             self._fail(Refused, f"{label}: no result in {timeout_s:.0f} s -- goal cancelled")
@@ -1105,7 +1107,8 @@ class ArmInterface:
             why = self._driver.not_ready(rammp_arm.SENDER_ID)  # e.g. e-stopped mid-stream
             if why is not None:
                 self._fail(Refused, f"  RammpArm: gripper: {why}")
-            self._live(lambda: pub.publish(m))
+            with self._alive():
+                pub.publish(m)
             time.sleep(GRIPPER_PERIOD_S)
             g = self._read("/gripper_state").position
             now = time.monotonic()
