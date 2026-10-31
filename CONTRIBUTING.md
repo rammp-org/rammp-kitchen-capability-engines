@@ -93,10 +93,12 @@ self.arm.go_to_ee_poses(
 
 Each target has its own `hold` and `speed_scale` (default `GO_TO_SPEED_SCALE`);
 `control_mode` and `gains` are one for the whole motion. A hold is checked
-against where the previous leg ended, so a held target must keep the previous
-target's orientation (its tilt under `HOLD_LEVEL`). Give both the same quat, as
-above, or the leg can fail with `PLANNING_FAILED leg 2/2`. A radius of 0, and the
-last target, stop. With a radius above 0 a `JointTarget`'s joints are only passed
+against where the arm is when its leg starts. So a held first target must keep
+the tool's current orientation (its tilt under `HOLD_LEVEL`), as for
+`go_to_ee_pose`, and a later held target must keep the previous target's. Give
+both the same quat, as above, or the leg can fail with `PLANNING_FAILED leg 2/2`.
+A radius of 0, and the last target, stop. A radius above 0 lets the planner cut
+the corner, but it may still stop there. With a radius above 0 a `JointTarget`'s joints are only passed
 near, not reached. The call returns `True` or `False` and raises like
 `go_to_ee_pose`, and its end check is against the last target. cuRobo checks
 every cut corner for collisions in its world. Near something that isn't in that

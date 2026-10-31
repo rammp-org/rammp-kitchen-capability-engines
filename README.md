@@ -224,7 +224,7 @@ execute_command(cmd)
 | `go_to_ee_pose`                              | cuRobo plans a path for the tool to the pose, then the driver runs it                                                                     |
 | `go_to_joint_config`                         | The same, to the joints `q`                                                                                                               |
 | `go_to_preset`                               | The same, to one of the driver's named poses                                                                                              |
-| `go_to_ee_poses`                             | Like `go_to_ee_pose`, through a list of `PoseTarget`s in one motion. It stops only at the last one and where a blend radius is 0          |
+| `go_to_ee_poses`                             | Like `go_to_ee_pose`, through a list of `PoseTarget`s in one motion. It need not stop between targets (see *Blend radius*)                |
 | `go_to_joint_configs`                        | The same, through a list of `JointTarget`s                                                                                                |
 | `gripper`                                    | `position` goes from 0 (open) to 1 (closed). Returns when the fingers stop moving                                                         |
 | `execute_command`                            | Runs a `cornell_commands` command: `JointCommand`, `CartesianTrajectoryCommand`, `OpenGripperCommand` or `CloseGripperCommand`            |
@@ -271,8 +271,10 @@ The constants and dataclasses are in `capability_engine.arm`:
   replaces it.
 - `PoseTarget(pos, quat, hold=HOLD_NONE, blend_radius=0.0, speed_scale=None)`:
   one target of `go_to_ee_poses`. `speed_scale=None` uses the
-  `arm.go_to_speed_scale` parameter. A target with a `hold` must have the same
-  `quat` as the target before it, or that leg may fail to plan.
+  `arm.go_to_speed_scale` parameter. A target with a `hold` must keep the
+  orientation the tool has when its leg starts: the tool's current one for the
+  first target, the previous target's `quat` for later ones. Otherwise that leg
+  may fail to plan.
 - `JointTarget(joints, blend_radius=0.0, speed_scale=None)`: one target of
   `go_to_joint_configs`.
 
@@ -311,8 +313,8 @@ parameters.
   its collision world.
 - **Leg**: the part of a planned motion from one target to the next.
 - **Blend radius**: how close (in m) the tool must pass a target before it turns
-  toward the next one. The arm cuts the corner there instead of stopping. 0 means
-  stop at the target.
+  toward the next one. The arm cuts the corner there instead of stopping, if the
+  planner can (it may still stop). 0 means stop at the target.
 - **Impedance control**: the arm gives way when pushed, instead of holding its
   position stiffly.
 - **Stream**: sending setpoints one after another, instead of a whole trajectory

@@ -180,6 +180,8 @@ def test_after_its_action_ended_is_not_in_action(arm_env, motion):
     with pytest.raises(NotInAction):
         motion(arm)
     assert not fake.goals[MOTIONS[motion]]
+    with pytest.raises(NotInAction):  # before the targets are even looked at
+        getattr(arm, MOTIONS[motion])([])
 
 
 def test_the_time_limit_is_per_leg(arm_env, monkeypatch):

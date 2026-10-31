@@ -281,10 +281,10 @@ class PoseTarget:
     `blend_radius` (m): how close the tool must pass this pose, cutting the corner into the next
     leg instead of stopping on it; 0 stops here, and the last target always stops. The planner
     cuts only as far as the joint limits, collision and the holds allow, which may be not at
-    all. A hold is checked against where the previous leg ended, so a held target (other than
-    the first) must keep the previous target's orientation (its tilt under HOLD_LEVEL): give it
-    the same quat, or the leg may fail to plan (PLANNING_FAILED leg k/N). `quat` is sent
-    normalized."""
+    all. A hold is checked against where the arm is when its leg starts: a held first target
+    must keep the tool's current orientation (its tilt under HOLD_LEVEL), as for go_to_ee_pose,
+    and a later one the previous target's (give it the same quat), or the leg may fail to plan
+    (PLANNING_FAILED leg k/N). `quat` is sent normalized."""
 
     pos: tuple
     quat: tuple
@@ -1077,6 +1077,7 @@ class ArmInterface:
         driver succeeded and the tool ended within GO_TO_TRACK_M of the last target. Keyword
         arguments as in go_to_ee_pose, one for the whole motion. In mock mode it is go_to_ee_pose
         to the last target."""
+        self._checkpoint()  # NotInAction / Cancelled first, as for every other call
         targets = list(targets)
         if not targets:
             self._fail(ArmError, f"{label}: no targets")
@@ -1119,6 +1120,7 @@ class ArmInterface:
         as go_to_ee_poses. Blocking; True if the driver succeeded and every joint ended within
         GO_TO_TRACK_DEG of the last target. In mock mode it is go_to_joint_config to the last
         target."""
+        self._checkpoint()  # NotInAction / Cancelled first, as for every other call
         targets = list(targets)
         if not targets:
             self._fail(ArmError, f"{label}: no targets")
