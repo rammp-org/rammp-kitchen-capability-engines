@@ -749,6 +749,10 @@ class ArmInterface:
             return
         now = time.monotonic()
         with self._cond:
+            # Ended: the engine closes the action's scope only after end_action(), and a message
+            # kept now would be the next action's first state.
+            if not self._in_action:
+                return
             self._latest[topic] = (value, now)
             self._cond.notify_all()
         t0 = self._path_t0

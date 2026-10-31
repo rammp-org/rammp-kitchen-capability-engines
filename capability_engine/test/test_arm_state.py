@@ -7,8 +7,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fake_driver import FakeCtx, counts
+from rclpy.callback_groups import ReentrantCallbackGroup
 
 from capability_engine import arm as arm_module
+from capability_engine.action_scope import ActionScope
 from capability_engine.driver_state import ArmError, NotInAction, StateTimeout
 
 STRESS_CYCLES = 200  # actions in test_end_action_while_state_streams_in
@@ -19,6 +21,8 @@ SHEPPY_NO_STATE = (
     "no /joint_states, /ee_state or /gripper_state -- is the sheppy arm node up, "
     "and ROS_DOMAIN_ID / RMW_IMPLEMENTATION exported?"
 )
+
+LINGER_S = 0.3  # how long the no-state-after-the-end test waits for late messages
 
 
 def test_no_resources_until_first_call(arm_env):
@@ -195,3 +199,18 @@ def test_begin_action_ends_an_unended_action(arm_env):
     arm.get_state()
     arm.begin_action(FakeCtx(), None)  # the last action never got end_action()
     assert counts(node) == base
+
+
+def test_no_state_is_stored_after_the_action_ends(arm_env):
+    """Under the engine, the action's scope closes only after end_action(): a message arriving in
+    between must not be kept, or the next action would start from the last one's state."""
+    arm, node, _ = arm_env
+    scope = ActionScope(node, ReentrantCallbackGroup())
+    arm.begin_action(FakeCtx(), None, scope)
+    arm.get_state()
+    arm.end_action()
+    try:
+        time.sleep(LINGER_S)  # the fake keeps publishing to the still-open subscriptions
+        assert not arm._latest
+    finally:
+        scope.close()

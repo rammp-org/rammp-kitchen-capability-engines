@@ -97,8 +97,9 @@ class _Run:
     """One accepted goal, from its acceptance until its result is reported: its cancel and pause,
     and (once it executes) the scope its per-action ROS entities live in."""
 
-    def __init__(self, action_id: str):
+    def __init__(self, action_id: str, request):
         self.action_id = action_id
+        self.request = request  # the goal request, the same object rclpy gives its goal handle
         self.accepted_at = time.monotonic()
         self.goal = None  # its goal handle, once rclpy has sent the acceptance (_on_accepted)
         self.cancelled = threading.Event()
@@ -422,14 +423,16 @@ class CapabilityEngine(Node):
                 run = self._current = None
             if run is not None or self._stopping is not None:
                 return GoalResponse.REJECT
-            self._current = _Run(goal.action_id)
+            self._current = _Run(goal.action_id, goal)
         return GoalResponse.ACCEPT
 
     def _on_accepted(self, goal_handle):
-        """rclpy has sent the acceptance: bind the run _on_goal made to this goal, then execute."""
+        """rclpy has sent the acceptance: bind the run _on_goal made for this goal (by its
+        request, never a newer goal's run), then execute."""
         with self._lifecycle:
-            if self._current is not None and self._current.goal is None:
-                self._current.goal = goal_handle
+            run = self._current
+            if run is not None and run.goal is None and run.request is goal_handle.request:
+                run.goal = goal_handle
         goal_handle.execute()
 
     def _on_execute(self, goal_handle):

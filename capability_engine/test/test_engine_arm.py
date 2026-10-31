@@ -886,3 +886,20 @@ def test_a_stop_is_bounded_when_execute_ignores_the_cancel(ros, tmp_path):
         client.destroy()
         executor.shutdown()
         node.destroy_node()
+
+
+def test_a_late_acceptance_does_not_take_over_the_next_run(env, monkeypatch):
+    """A goal whose acceptance comes so late that its run was dropped (and the next goal's made)
+    must not be bound to that next run: runs are bound by their goal request, not by timing."""
+    monkeypatch.setattr(engine_module, "START_WAIT_S", START_WAIT_TEST_S)
+    engine = env.make(lambda engine, ctx: None)
+    goal_a, goal_b = ExecuteAction.Goal(action_id="run"), ExecuteAction.Goal(action_id="run")
+    assert engine._on_goal(goal_a) == GoalResponse.ACCEPT
+    time.sleep(2 * START_WAIT_TEST_S)  # A's run is dropped when B arrives
+    assert engine._on_goal(goal_b) == GoalResponse.ACCEPT
+    late_a = SimpleNamespace(request=goal_a, execute=lambda: None)
+    engine._on_accepted(late_a)
+    assert engine._current.goal is None  # B's run is still B's
+    handle_b = SimpleNamespace(request=goal_b, execute=lambda: None)
+    engine._on_accepted(handle_b)
+    assert engine._current.goal is handle_b

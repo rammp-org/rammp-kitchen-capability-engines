@@ -11,7 +11,7 @@ LIMIT_S = 1.0  # checkpoint() must raise well before the pause would end
 
 
 def test_goal_cancel_during_pause_raises_without_resume():
-    run = _Run("count")
+    run = _Run("count", SimpleNamespace())
     goal = SimpleNamespace(is_cancel_requested=False)
     ctx = Context(SimpleNamespace(), goal, run)
     run.paused.set()
