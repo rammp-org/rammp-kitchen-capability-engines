@@ -291,6 +291,28 @@ def test_end_action_closes_an_open_stream(arm_env):
     assert len(fake.requests["close_stream"]) == 1
 
 
+def test_a_send_racing_the_close_publishes_nothing_after_it(arm_env):
+    """The stream closes (end_action() in another thread) while send() is between its first
+    check and its publish: send() raises NotInAction and publishes nothing after the hold."""
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), None)
+    with arm.stream("ee_twist") as s:
+        s.send(TWIST)
+        message = s._message
+
+        def close_then_message(value):  # runs between send()'s first check and its publish
+            s._message = message
+            s.close()
+            return message(value)
+
+        s._message = close_then_message
+        with pytest.raises(NotInAction):
+            s.send(TWIST)
+    time.sleep(POLL_S * 10)  # a setpoint published after the hold would have arrived
+    assert last_twist(fake) == [0.0] * 6
+    assert len(fake.requests["close_stream"]) == 1
+
+
 def test_plan_to_pose_round_trip(arm_env):
     arm, _, fake = arm_env
     q = np.arange(21.0).reshape(3, 7) / 10
