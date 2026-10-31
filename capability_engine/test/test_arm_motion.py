@@ -341,7 +341,19 @@ def test_taken_before_the_first_command_raises(arm_env):
     arm, _, fake = arm_env
     arm.begin_action(FakeCtx(), b"\x01" * 16)
     arm.get_state()
-    time.sleep(STATUS_LATE_S)  # the action's /control_status has arrived
+
+    def owner():
+        latest = arm._latest.get("/control_status")
+        return None if latest is None else latest[0].owner_id
+
+    deadline = time.monotonic() + HOLD_S
+    while owner() is None:  # the baseline the takeover is judged against has arrived
+        assert time.monotonic() < deadline, "no /control_status"
+        time.sleep(0.01)
     fake.seize("teleop")
+    # Seen before the command: a takeover still in flight then is the driver's to refuse.
+    while owner() != "teleop":
+        assert time.monotonic() < deadline, "the takeover's /control_status never arrived"
+        time.sleep(0.01)
     with pytest.raises(ControlTaken, match="teleop"):
         arm.move_joints([[0.3] * 7])
