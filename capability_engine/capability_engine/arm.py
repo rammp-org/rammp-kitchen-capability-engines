@@ -602,12 +602,21 @@ class ArmInterface:
             # Again under the lock: end_action() may have destroyed everything since the check.
             if not self._in_action:
                 self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            if "/control_status" not in self._entities:
+                # With the action's first entity: the generation it first reports is the takeover
+                # baseline, so another sender taking the arm before the first command still
+                # raises ControlTaken. Latched, it only changes on arbitration events.
+                self._entities["/control_status"] = self._subscribe("/control_status")(self._scope)
             if key not in self._entities:
                 self._entities[key] = make(self._scope)
             return self._entities[key]
 
     def _subscription(self, topic):
         """Subscribe to the driver's state `topic`, its messages kept in _latest."""
+        return self._get(topic, self._subscribe(topic))
+
+    def _subscribe(self, topic):
+        """make(scope) for the subscription to `topic`, for _get."""
         msg_type, qos, convert = {
             "/joint_states": (JointState, qos_profile_sensor_data, _joint_states),
             "/ee_state": (EeStateMsg, qos_profile_sensor_data, _ee_state),
@@ -616,11 +625,8 @@ class ArmInterface:
             "/stream_status": (StreamStatusMsg, LATCHED, self._on_stream_status),
             "/diagnostics": (DiagnosticArray, qos_profile_sensor_data, _diagnostics),
         }[topic]
-        return self._get(
-            topic,
-            lambda scope: scope.create_subscription(
-                msg_type, topic, lambda m: self._store(topic, convert(m)), qos
-            ),
+        return lambda scope: scope.create_subscription(
+            msg_type, topic, lambda m: self._store(topic, convert(m)), qos
         )
 
     def _action(self, name):
