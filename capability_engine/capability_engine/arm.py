@@ -599,6 +599,15 @@ class ArmInterface:
     def close(self):
         """A no-op under the engine, which owns the node."""
 
+    @staticmethod
+    def worst_settle_s() -> float:
+        """How long a cancelled action's arm calls may still take to end, at most: the running
+        call's own settle (CANCEL_SETTLE_S after it cancels its goal, or GO_TO_SETTLE_S after a
+        go_to goal) and end_action()'s (GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals, twice
+        CLOSE_STREAM_WAIT_S for a stream). From the arm.* parameters; 8.1 s by default."""
+        call = CANCEL_SETTLE_S + GO_TO_SETTLE_S
+        return call + GOAL_ACCEPT_S + CANCEL_SETTLE_S + 2 * CLOSE_STREAM_WAIT_S
+
     def _settle(self):
         """Cancel any running goal and close any open stream, waiting for each to settle.
         Called after the action has ended: uses the stored handles only, never _get()."""

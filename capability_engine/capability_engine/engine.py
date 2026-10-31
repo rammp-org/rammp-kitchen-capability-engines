@@ -52,7 +52,6 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 
-from capability_engine import arm as arm_module
 from capability_engine import sim
 from capability_engine.action_scope import ENDED_MESSAGE, ActionScope, ScopeClosed
 from capability_engine.arm import ArmInterface, wait_until
@@ -81,10 +80,9 @@ class Action:
 
 def stop_wait_s() -> float:
     """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's worst settle
-    in end_action() (GOAL_ACCEPT_S + CANCEL_SETTLE_S + 2 * CLOSE_STREAM_WAIT_S, from the arm.*
-    parameters; 7.4 s by default) plus STOP_MARGIN_S. docker stop's grace (10 s) must cover it."""
-    a = arm_module
-    return a.GOAL_ACCEPT_S + a.CANCEL_SETTLE_S + 2 * a.CLOSE_STREAM_WAIT_S + STOP_MARGIN_S
+    (ArmInterface.worst_settle_s(), 8.1 s by default) plus STOP_MARGIN_S. docker stop's grace
+    (10 s) must cover it."""
+    return ArmInterface.worst_settle_s() + STOP_MARGIN_S
 
 
 class Cancelled(Exception):
