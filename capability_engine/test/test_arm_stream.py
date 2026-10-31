@@ -15,6 +15,7 @@ from capability_engine import arm as arm_module
 from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan
 from capability_engine.driver_state import (
     ArmError,
+    DriverState,
     EStopped,
     ModeConflict,
     NotInAction,
@@ -184,6 +185,25 @@ def test_driver_api_raises_estopped(arm_env):
             pass
     assert not fake.goals["execute_joint_trajectory"]
     assert not fake.requests["open_stream"]
+
+
+def test_a_refusal_takes_its_type_and_reason_from_one_status(arm_env, monkeypatch):
+    """/control_status can change between taking the reason and choosing the error (a callback
+    in between): both come from one snapshot, so an e-stop reason is always EStopped. Here the
+    e-stop clears just after the reason is taken, so any later look at the status disagrees."""
+    arm, _, fake = arm_env
+    fake.engage_estop()
+    arm.begin_action(FakeCtx(), TOKEN)
+    reason = DriverState._reason
+
+    def reason_then_clear(ds, st, token, sender_id):
+        why = reason(ds, st, token, sender_id)
+        ds._status = (False, *ds._status[1:])  # a /control_status callback lands here
+        return why
+
+    monkeypatch.setattr(DriverState, "_reason", reason_then_clear)
+    with pytest.raises(EStopped, match="arm is E-STOPPED -- clear it first"):
+        arm.execute_joint_trajectory(JOINTS, [(1.0, [0.1] * 7, [0.0] * 7)])
 
 
 @pytest.mark.parametrize("phase", ["server", "answer"])

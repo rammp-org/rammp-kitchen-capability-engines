@@ -82,12 +82,6 @@ class DriverState:
         self._begin("goal", name)
 
     @property
-    def estopped(self) -> bool:
-        """The latest /control_status showed the arm e-stopped."""
-        with self._lock:
-            return self._status is not None and self._status[0]
-
-    @property
     def stream_closed(self) -> bool:
         """The driver has closed the stream this code had open (its /stream_status said so)."""
         return self._stream_closed
@@ -144,8 +138,15 @@ class DriverState:
 
     def not_ready(self, sender_id):
         """Why the arm must not be commanded now, or None when it may be."""
+        return self.refusal(sender_id)[0]
+
+    def refusal(self, sender_id):
+        """(not_ready()'s reason, whether the arm is e-stopped), both from one /control_status."""
         with self._lock:
             st, token = self._status, self._token
+        return self._reason(st, token, sender_id), st is not None and st[0]
+
+    def _reason(self, st, token, sender_id):
         if st is None:
             return "no /control_status (latched) -- arm driver not up?"
         estopped, enforced, owned, owner_id = st

@@ -514,10 +514,9 @@ class ArmInterface:
         """Before a command: ControlTaken or StreamClosed, else EStopped or Refused when
         not_ready() gives a reason (f"{prefix}{why} -- nothing sent.")."""
         self._check_command()
-        why = self.not_ready()
+        why, estopped = self._refusal()
         if why is not None:
-            error = EStopped if self._driver.estopped else Refused
-            self._fail(error, f"{prefix}{why} -- nothing sent.")
+            self._fail(EStopped if estopped else Refused, f"{prefix}{why} -- nothing sent.")
 
     def _wait_for_server(self, client, ctx, timeout_s):
         """Whether the action server came up within `timeout_s`; Cancelled once the action is
@@ -673,14 +672,18 @@ class ArmInterface:
 
     def not_ready(self) -> str | None:
         """Why the arm must not be commanded now (from /control_status), or None when it may be."""
+        return self._refusal()[0]
+
+    def _refusal(self):
+        """(not_ready()'s reason, whether the arm is e-stopped), from one /control_status."""
         if self._mock:
             self._check_in_action()
-            return None
+            return None, False
         # /control_status before any command: the e-stop, and takeover by its generation.
         self._subscription("/control_status")
         self._motion_state()
         self._wait_for("/control_status")
-        return self._driver.not_ready(rammp_arm.SENDER_ID)
+        return self._driver.refusal(rammp_arm.SENDER_ID)
 
     def robot_description(self) -> str:
         """The driver's URDF, from /arm/robot_description (latched), through a one-shot

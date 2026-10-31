@@ -185,6 +185,7 @@ def test_refused_is_an_arm_error_and_covers_the_estop():
     assert issubclass(driver_state.Refused, driver_state.ArmError)
     assert issubclass(EStopped, driver_state.Refused)
     ds = DriverState()
-    assert not ds.estopped
+    status(ds, enforced=True, owned=True, owner="x")
+    assert ds.refusal("me") == ("the arm is owned by 'x'", False)
     status(ds, estopped=True)
-    assert ds.estopped
+    assert ds.refusal("me") == ("arm is E-STOPPED -- clear it first", True)
