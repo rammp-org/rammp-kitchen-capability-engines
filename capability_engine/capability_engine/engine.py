@@ -475,9 +475,9 @@ class CapabilityEngine(Node):
             finally:
                 try:
                     try:
-                        self.arm.end_action()  # settles self.arm's goals and stream
+                        self.arm.end_action()  # settles goals and stream, closes run.scope
                     finally:
-                        run.scope.close()  # destroys every entity of this action
+                        run.scope.close()  # a no-op unless end_action() failed early
                 except Exception as error:  # the run must still end and report its result
                     result.status = Result.STATUS_FAILED
                     result.error_code = "exception"
