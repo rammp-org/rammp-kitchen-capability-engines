@@ -152,22 +152,23 @@ def test_state_timeout_keeps_rammp_arms_message(arm_env, monkeypatch):
 
 
 def test_end_action_while_an_entity_is_made(arm_env, monkeypatch):
-    """Another thread's end_action() lands while a call makes the action's first entity: the
-    entity is still destroyed, and the call raises NotInAction instead of making more."""
+    """Another thread's end_action() lands just after a call's in-action check, as it makes the
+    action's first entity: the check and the making are one guarded step, so the entity is
+    made before the end (and destroyed by it), and the call raises NotInAction."""
     arm, node, fake = arm_env
     base = counts(node)
     fake.pause_publishing()  # no state: the call is still waiting when the end lands
     arm.begin_action(FakeCtx(), None)
     ender = threading.Thread(target=arm.end_action)
-    make = ActionScope.create_subscription
+    check = arm._check_in_action
 
-    def end_while_making(scope, *args):
+    def check_then_end(*args):
+        check(*args)
         if ender.ident is None:
             ender.start()
-            time.sleep(0.1)  # end_action() is under way, waiting for this call's guard
-        return make(scope, *args)
+            time.sleep(0.1)  # end_action() is under way before the entity is made
 
-    monkeypatch.setattr(ActionScope, "create_subscription", end_while_making)
+    monkeypatch.setattr(arm, "_check_in_action", check_then_end)
     with pytest.raises(NotInAction):
         arm.get_state()
     ender.join(WAKE_LIMIT_S)
