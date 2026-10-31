@@ -983,12 +983,13 @@ class ArmInterface:
             self._goals.append(send)
         return send
 
-    def _goal_result(self, send, timeout_s, label, monitor=None, path=False):
+    def _goal_result(self, send, timeout_s, label, monitor=None, path=False, moves=True):
         """Wait for goal `send`'s acceptance, then up to `timeout_s` for its result: the action's
         Result. A cancel of the action cancels the goal and raises Cancelled. Refused (`label`
         first) when the goal is refused or unanswered, or has no result in time (it is then
         cancelled); _ActionEnded when its action ends. `monitor`: polled while the goal runs; True
-        cancels the goal and sets monitor_stopped. `path`: record last_path."""
+        cancels the goal and sets monitor_stopped. `path`: record last_path. `moves`: a goal that
+        moves the arm (not a plan), so a refusal says nothing moved."""
         ctx = self._ctx
         wait_until(lambda: send.done() or not self._in_action, GOAL_ACCEPT_S, ctx)
         gh = send.result() if send.done() else None
@@ -1003,7 +1004,7 @@ class ArmInterface:
             )
         if not gh.accepted:
             self._forget(send)
-            self._fail(Refused, f"{label}: goal REJECTED -- nothing moved")
+            self._fail(Refused, f"{label}: goal REJECTED" + (" -- nothing moved" if moves else ""))
         rf.add_done_callback(lambda _: self._forget(send))
         if path:
             # record the measured tool path while the goal runs (`last_path`: [(t, x, y, z)], from
@@ -1224,7 +1225,8 @@ class ArmInterface:
         try:
             if not self._wait_for_server(client, self._ctx, PLANNER_WAIT_S):
                 self._fail(Refused, f"{name}: no {path} action server (the cuRobo planner)")
-            res = self._goal_result(self._send_goal(client, g), PLAN_TIMEOUT_S, name)
+            send = self._send_goal(client, g)
+            res = self._goal_result(send, PLAN_TIMEOUT_S, name, moves=False)
         except NotInAction:
             raise
         except Refused as e:  # a failed plan

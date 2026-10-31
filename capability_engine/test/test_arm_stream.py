@@ -402,6 +402,16 @@ def test_plan_to_joints_and_failure(arm_env):
     np.testing.assert_allclose(fake.goals["plan_to_joints"][-1].target_joints, [0.1] * 7)
 
 
+def test_a_rejected_plan_says_so_without_claiming_nothing_moved(arm_env):
+    """A plan never moves the arm: its REJECTED message has no "-- nothing moved"."""
+    arm, _, fake = arm_env
+    fake.accept("plan_to_joints", False)
+    arm.begin_action(FakeCtx(), None)
+    plan = arm.plan_to_joints([0.1] * 7, [0.0] * 7)
+    assert not plan.success
+    assert plan.message == arm.last_error == "plan_to_joints: goal REJECTED"
+
+
 def test_hold_constants_match_the_planner():
     goal = PlanToPose.Goal
     assert (arm_module.HOLD_NONE, arm_module.HOLD_LEVEL, arm_module.HOLD_FIXED) == (
