@@ -316,12 +316,29 @@ def ee_pose(rb):
     return Pose(tuple(ls[4]), tuple(ls[5]))
 
 
-def check_curobo_goal(scene, rb, label, q=None, pos=None, quat=None, seed=None, bodies=None):
+def _ik_within_guards(scene, rb, pos, quat, seed):
+    """IK for (pos, quat) from `seed`, re-solved up to 3 times: (joints, None), or (None, why it fails)."""
+    q, err = solve_ik(scene, rb, pos, quat, seed)
+    for _ in range(3):
+        if err <= sim.MAX_IK_ERR:
+            break
+        q, err = solve_ik(scene, rb, pos, quat, q)
+    if err > sim.MAX_IK_ERR:
+        return None, f"goal {np.round(pos, 3)} unreachable (IK err {err * 100:.1f} cm)"
+    j4, j6 = abs(np.degrees(q[3])), abs(np.degrees(q[5]))
+    if j4 > sim.J4_GUARD_DEG or j6 > sim.J6_GUARD_DEG:
+        return None, f"goal joints J4 {j4:.1f} / J6 {j6:.1f} deg past the guards"
+    return np.asarray(q, float), None
+
+
+def check_curobo_goal(scene, rb, label, q=None, pos=None, quat=None, seed=None, bodies=None, more_seeds=()):
     """Gate the GOAL of a cuRobo move (self.arm.go_to_*): cuRobo plans the path in the driver, which can't be
     previewed, so only where it ends is checked here -- joints `q`, or (pos, quat) IK'd from `seed`: IK, reach,
     J4/J6 guards, the keep-out zone (fridge) and, with `bodies`, >= MIN_CLEAR from the door model. For a pose goal
     cuRobo may end on another joint branch than this IK; the checked branch is the one nearest the seed.
-    Returns the checked goal joints, or None (refused)."""
+    `more_seeds`: tried in turn when IK from `seed` misses or lands past a guard -- PyBullet's IK ignores joint
+    limits and can settle on an impossible elbow (10-30: line-up J4 +160 deg, the grasp's -130) where a seed near
+    the goal finds the reachable one. Returns the checked goal joints, or None (refused)."""
     if q is None:
         if np.linalg.norm(pos) > MAX_REACH_M:
             say(
@@ -329,13 +346,13 @@ def check_curobo_goal(scene, rb, label, q=None, pos=None, quat=None, seed=None, 
                 " -- refusing."
             )
             return None
-        q, err = solve_ik(scene, rb, pos, quat, seed)
-        for _ in range(3):
-            if err <= sim.MAX_IK_ERR:
+        for s in [seed, *more_seeds]:
+            q, why = _ik_within_guards(scene, rb, pos, quat, s)
+            if q is not None:
                 break
-            q, err = solve_ik(scene, rb, pos, quat, q)
-        if err > sim.MAX_IK_ERR:
-            say(f"  {label}: goal {np.round(pos, 3)} unreachable (IK err {err * 100:.1f} cm) -- refusing.")
+            why = why if s is seed else f"{why} (and from {1 + len(more_seeds)} seeds)"
+        if q is None:
+            say(f"  {label}: {why} -- refusing.")
             return None
     q = np.asarray(q, float)
     j4, j6 = abs(np.degrees(q[3])), abs(np.degrees(q[5]))
@@ -747,6 +764,8 @@ class RunLog:
     Read-only towards the arm: it only wraps the arm's send/gripper calls to note them."""
 
     def __init__(self, what, args, ai):
+        # read the arm before starting the sampler or wrapping anything: if this raises, nothing is left running
+        start = arm_snapshot(ai.get_state())
         self.ai, self.t0 = ai, time.time()
         self.dir = RUNS_DIR / f"{time.strftime('%Y%m%d_%H%M%S')}_{what}"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -760,7 +779,7 @@ class RunLog:
         self._thread = threading.Thread(target=self._sample, daemon=True)
         self._thread.start()
         self._wrap(ai)
-        self.event("start", arm=arm_snapshot(ai.get_state()))
+        self.event("start", arm=start)
         say(f"run log: {self.dir}")
 
     def event(self, kind, **kw):

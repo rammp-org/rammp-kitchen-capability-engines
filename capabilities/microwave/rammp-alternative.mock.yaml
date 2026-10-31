@@ -18,3 +18,4 @@ subscribes:
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
   - /wrist_camera/aligned_depth_to_color/image_raw
+  - /perception/object_detections_3d
