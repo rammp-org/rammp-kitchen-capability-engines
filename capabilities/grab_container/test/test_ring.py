@@ -141,8 +141,8 @@ class FakeArm:
     def gripper(self, *a, **kw):
         return True
 
-    def go_through(self, waypoints, label, speed_scale=None, **kw):
-        self.moves.append((label, list(waypoints), speed_scale, kw))
+    def go_to_ee_poses(self, targets, label, **kw):
+        self.moves.append((label, list(targets), kw))
         return True
 
     def go_to_ee_pose(self, pos, quat, label, **kw):
@@ -155,8 +155,9 @@ def test_grab_approaches_in_one_motion_and_raises_level():
     motion = {"control_mode": 1, "gains": "medium"}
     out = grasp.grab(arm, cam, FakeModel(cam), True, lambda s: None, lambda *a: None, 1, **motion)
     assert out["raised"]
-    (label, (pre, at), speed, kw), (raise_label, quat, raise_kw) = arm.moves
-    assert (label, speed, kw) == ("approach", grasp.APPROACH_SPEED_SCALE, motion)
+    (label, (pre, at), kw), (raise_label, quat, raise_kw) = arm.moves
+    assert (label, kw) == ("approach", motion)
+    assert pre.speed_scale == at.speed_scale == grasp.APPROACH_SPEED_SCALE
     assert (pre.blend_radius, at.blend_radius) == (grasp.BLEND_M, 0.0)  # cut the pre-grasp corner
     assert (pre.hold, at.hold) == (0, 1)  # the hold on the pre-grasp -> rim leg only
     assert (raise_label, raise_kw) == ("raise", motion)

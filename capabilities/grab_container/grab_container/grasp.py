@@ -24,7 +24,7 @@ from collections import Counter
 
 import cv2
 import numpy as np
-from capability_engine.arm import Waypoint
+from capability_engine.arm import PoseTarget
 from scipy.spatial.transform import Rotation
 
 GRAB_CLASS = "grabber"
@@ -67,7 +67,7 @@ GRIP_CLOSE = 1.0  # CLOSE stalls on the ring at the force ceiling
 GRIP_SPEED = 1.0
 GRIP_FORCE = 0.5  # force = motor-current ceiling, not a force setpoint
 GRIP_SETTLE_S = 2.0
-BLEND_M = 0.02  # view -> pre-grasp -> grasp is one motion (go_through): the pre-grasp corner cut
+BLEND_M = 0.02  # view -> pre-grasp -> grasp is one motion (go_to_ee_poses): the pre-grasp corner cut
 APPROACH_SPEED_SCALE = 0.6  # that approach's speed_scale; the free-space moves run at arm.go_to_speed_scale
 
 # Custom scan pose, captured from /joint_states (already in RADIANS — no np.radians()).
@@ -238,16 +238,18 @@ def grab(arm, camera, model, execute, log, progress, grasp_hold=0, **motion):
     }
     quat_raise = Rotation.from_matrix(level(R)).as_quat()
     through = [
-        Waypoint(pos=tuple(pre), quat=tuple(quat), blend_radius=BLEND_M),
-        Waypoint(pos=tuple(p_grasp), quat=tuple(quat), hold=grasp_hold),
+        PoseTarget(tuple(pre), tuple(quat), blend_radius=BLEND_M, speed_scale=APPROACH_SPEED_SCALE),
+        PoseTarget(tuple(p_grasp), tuple(quat), hold=grasp_hold, speed_scale=APPROACH_SPEED_SCALE),
     ]
 
     if not execute:
         progress("approach", 30.0, "dry run: planning")
-        plan = arm.plan_through(through, arm.raw_joints())
-        if not plan.success:
-            raise Abort(f"approach: cuRobo found no path ({plan.message}) -- arm not commanded")
-        log(f"approach         cuRobo {len(plan.t):3d} pts  {plan.t[-1]:.1f} s")
+        plan = None  # each leg on its own, from where the last ends (the driver blends them on execute)
+        for t in through:
+            plan = arm.plan_to_pose(t.pos, t.quat, arm.raw_joints() if plan is None else plan.q[-1], t.hold)
+            if not plan.success:
+                raise Abort(f"approach: cuRobo found no path ({plan.message}) -- arm not commanded")
+            log(f"approach leg     cuRobo {len(plan.t):3d} pts  {plan.t[-1]:.1f} s")
         progress("raise", 70.0, "dry run: planning")
         plan = arm.plan_to_pose(p_raise, quat_raise, plan.q[-1])  # from where the approach ends
         if not plan.success:
@@ -259,7 +261,7 @@ def grab(arm, camera, model, execute, log, progress, grasp_hold=0, **motion):
     progress("grasp", 10.0, "opening")
     arm.gripper(GRIP_OPEN, timeout_s=GRIP_SETTLE_S, force=GRIP_FORCE, speed=GRIP_SPEED)
     progress("approach", 30.0, "view -> pre-grasp -> grasp, one motion")
-    if not arm.go_through(through, "approach", APPROACH_SPEED_SCALE, **motion):
+    if not arm.go_to_ee_poses(through, "approach", **motion):
         raise Abort(f"approach: {arm.last_error} -- HOLDING HERE")
     progress("grasp", 70.0, "closing")
     arm.gripper(GRIP_CLOSE, timeout_s=GRIP_SETTLE_S, force=GRIP_FORCE, speed=GRIP_SPEED)

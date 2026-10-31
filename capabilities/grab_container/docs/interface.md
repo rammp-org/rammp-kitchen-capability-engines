@@ -20,7 +20,7 @@ and holds it a little above where it stood. `grab`:
    the brim's plane gives its outer edge. 5 new frames must each fit the brim's
    radius (8.43 cm, within 3 mm) and agree on the edge to 5 mm. The grasp point
    is 8 mm short of the edge, facing the approach. Then it opens the gripper and
-   approaches in one motion (`self.arm.go_through`): from the view, past a
+   approaches in one motion (`self.arm.go_to_ee_poses`): from the view, past a
    pre-grasp 10 cm back (its corner cut by up to 2 cm, no stop), and in to the
    rim keeping the gripper's tilt (`HOLD_LEVEL`). It closes, and raises 6 cm,
    turning the gripper level with the world.
@@ -33,8 +33,8 @@ The detector loads in the background from the node's start, so detection takes
 about 0.6 s, the first time too. Every move is a cuRobo move through `self.arm`,
 in stiff position control or, with `impedance`, on the driver's joint impedance
 controller: the free-space moves at `arm.go_to_speed_scale` (0.8 in the real
-fragment), the approach at 0.6. The approach needs a planner with
-`/rammp_curobo/plan_through` (RAMMP-CuRobo#47).
+fragment), the approach at 0.6. The approach needs an arm driver with
+`/go_to_ee_poses`, which blends its legs.
 `park` sends the arm to the scan pose by a direct joint move, which works when
 cuRobo refuses the start state; it is not collision-checked. A failed check
 stops the action with the arm holding where it is. It is activated when the

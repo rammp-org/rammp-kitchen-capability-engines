@@ -6,10 +6,10 @@ Action `grab`:
      camera's depth give a coarse position.
   2. view (scene.view_pose): the wrist camera moves above the container, on the approach side.
   3. grasp (grasp.grab): the students' YOLO brim detector and a circle fit find the grasp point,
-     then open, approach (view -> pre-grasp -> grasp in one motion, self.arm.go_through), close and
+     then open, approach (view -> pre-grasp -> grasp in one motion, self.arm.go_to_ee_poses), close and
      raise a little with the gripper turned level, holding it.
 The detector loads in the background from the node's start. Every move is a cuRobo move
-(self.arm.go_to_* / go_through); the goal's `impedance` runs them all on the driver's joint
+(self.arm.go_to_*); the goal's `impedance` runs them all on the driver's joint
 impedance controller (`impedance_gains`) instead of stiff position control. Action `park`: the scan
 pose by a direct joint move, for when cuRobo refuses the start state. A failed check stops the run
 with the arm holding where it is (EngineError "refused").
