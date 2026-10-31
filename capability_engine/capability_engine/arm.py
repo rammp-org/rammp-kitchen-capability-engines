@@ -1152,10 +1152,8 @@ class ArmInterface:
     def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
         g.gains = _impedance_gains(gains)  # a bad `gains` raises before anything is sent
         self._checkpoint()
-        ctx = self._ctx
         self._check_ready(f"  RammpArm: {label}: ")
-        client = self._action(name)
-        if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
+        if not self._wait_for_server(self._action(name), self._ctx, PLANNER_WAIT_S):
             self._fail(
                 Refused,
                 f"  RammpArm: {label}: no action server (the go_to_* actions need the cuRobo "
@@ -1167,16 +1165,8 @@ class ArmInterface:
             f"  {label}: cuRobo plans the path (not previewed), run at {g.speed_scale:g} x its "
             "speed ..."
         )
-        timeout_s = rammp_arm.GO_TO_TIMEOUT_S
         res = self._run_goal(
-            name,
-            client,
-            g,
-            timeout_s,
-            ctx,
-            f"  RammpArm: {label}: goal REJECTED -- nothing moved",
-            f"  RammpArm: {label}: no result in {timeout_s:.0f} s -- goal cancelled",
-            feedback=feedback,
+            name, g, rammp_arm.GO_TO_TIMEOUT_S, f"  RammpArm: {label}", feedback=feedback
         )
         code = res.error_code
         if code != 0:
@@ -1195,7 +1185,6 @@ class ArmInterface:
         if self._mock:
             self.last_path, self.monitor_stopped = [], False
             return self._mock_sent("trajectory", q[-1])
-        ctx = self._ctx
         self._check_ready("  RammpArm: ")
         g = ExecuteJointTrajectory.Goal()
         g.trajectory.joint_names = JOINTS
@@ -1211,19 +1200,12 @@ class ArmInterface:
             g.control_mode = IMPEDANCE
             g.gains = _impedance_gains({k: impedance[k] for k in GAIN_KEYS})
         g.preemption = QUEUE
-        client = self._action("execute_joint_trajectory")
-        if not self._wait_for_server(client, ctx, STATE_WAIT_S):
+        name = "execute_joint_trajectory"
+        if not self._wait_for_server(self._action(name), self._ctx, STATE_WAIT_S):
             self._fail(StateTimeout, "no /execute_joint_trajectory action server")
+        timeout_s = t[-1] + RESULT_MARGIN_S
         res = self._run_goal(
-            "execute_joint_trajectory",
-            client,
-            g,
-            t[-1] + RESULT_MARGIN_S,
-            ctx,
-            "  RammpArm: trajectory goal REJECTED",
-            "  RammpArm: no result in time -- goal cancelled",
-            monitor=monitor,
-            trajectory=True,
+            name, g, timeout_s, "  RammpArm: trajectory", monitor=monitor, path=True
         )
         code = res.error_code
         if code == 0 or (self.monitor_stopped and code == PREEMPTED):
@@ -1238,27 +1220,11 @@ class ArmInterface:
             )
         raise Refused(message)
 
-    def _run_goal(
-        self,
-        name,
-        client,
-        g,
-        timeout_s,
-        ctx,
-        rejected,
-        timed_out,
-        *,
-        monitor=None,
-        feedback=None,
-        trajectory=False,
-    ):
-        """Send goal `g` on action `name` with SENDER_ID and the token, and wait up to `timeout_s`
-        for its result: the action's Result. A cancel of the action cancels the goal and raises
-        Cancelled; a goal HALTED under the token raises ControlTaken (unless the arm e-stopped).
-        Refused when the goal was refused (`rejected`) or had no result in time (`timed_out`; the
-        goal is cancelled); _ActionEnded when its action ended. `monitor`: polled while the goal
-        runs; True cancels the goal and sets monitor_stopped. `feedback`: called with each
-        GoalFeedback, on the executor (it must not block). `trajectory`: record last_path."""
+    def _run_goal(self, name, g, timeout_s, label, *, monitor=None, feedback=None, path=False):
+        """Send the driver's goal `g` on action `name` with SENDER_ID and the token, and wait for
+        its result as _goal_result() does; a goal HALTED under the token then raises ControlTaken
+        (unless the arm e-stopped). `feedback`: called with each GoalFeedback, on the executor (it
+        must not block)."""
         g.sender_id = rammp_arm.SENDER_ID
         token = self._driver.token
         if token is not None:
@@ -1276,12 +1242,21 @@ class ArmInterface:
         except ModeConflict as e:
             self._fail(ModeConflict, str(e))
         try:
-            send = self._send_goal(client, g, None if feedback is None else on_feedback)
-            return self._goal_result(
-                name, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
-            )
+            callback = None if feedback is None else on_feedback
+            send = self._send_goal(self._action(name), g, callback)
+            res = self._goal_result(send, timeout_s, label, monitor, path)
         finally:
             self._driver.end_goal()
+        # HALTED under our token: control taken, unless the driver e-stopped (an e-stop drops
+        # grants without a new generation), which is the caller's plain failure.
+        if (
+            token is not None
+            and res.error_code == HALTED
+            and not self._estopped_within(HALT_STATUS_WAIT_S)
+        ):
+            self._driver.on_goal_halted()
+            self._check_command()  # raises ControlTaken: another sender took the arm from us
+        return res
 
     def _send_goal(self, client, g, feedback_callback=None):
         """Send goal `g`, kept in _goals until the driver reports its end. NotInAction once the
@@ -1291,9 +1266,13 @@ class ArmInterface:
             self._goals.append(send)
         return send
 
-    def _goal_result(
-        self, name, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
-    ):
+    def _goal_result(self, send, timeout_s, label, monitor=None, path=False):
+        """Wait for goal `send`'s acceptance, then up to `timeout_s` for its result: the action's
+        Result. A cancel of the action cancels the goal and raises Cancelled. Refused (`label`
+        first) when the goal is refused or unanswered, or has no result in time (it is then
+        cancelled); _ActionEnded when its action ends. `monitor`: polled while the goal runs; True
+        cancels the goal and sets monitor_stopped. `path`: record last_path."""
+        ctx = self._ctx
         wait_until(lambda: send.done() or not self._in_action, GOAL_ACCEPT_S, ctx)
         gh = send.result() if send.done() else None
         with self._alive(_ActionEnded, ACTION_ENDED_MESSAGE):  # end_action() settles it then
@@ -1302,14 +1281,14 @@ class ArmInterface:
             send.add_done_callback(self._cancel_late_goal)
             self._fail(
                 Refused,
-                f"{name}: no answer from the driver in {GOAL_ACCEPT_S:g} s -- "
+                f"{label}: no answer from the driver in {GOAL_ACCEPT_S:g} s -- "
                 "cancelled if it starts",
             )
         if not gh.accepted:
             self._forget(send)
-            self._fail(Refused, rejected)
+            self._fail(Refused, f"{label}: goal REJECTED -- nothing moved")
         rf.add_done_callback(lambda _: self._forget(send))
-        if trajectory:
+        if path:
             # record the measured tool path while the goal runs (`last_path`: [(t, x, y, z)], from
             # the /ee_state callback) -- in impedance mode this is where the door actually let the
             # hand go
@@ -1342,17 +1321,7 @@ class ArmInterface:
             pass
         if res is None:
             self._cancel(gh)
-            self._fail(Refused, timed_out)
-        # HALTED under our token: control taken, unless the driver e-stopped (an e-stop drops
-        # grants without a new generation), which is the caller's plain failure. The planner's
-        # goals carry no token (and no error_code).
-        if (
-            token is not None
-            and res.result.error_code == HALTED
-            and not self._estopped_within(HALT_STATUS_WAIT_S)
-        ):
-            self._driver.on_goal_halted()
-            self._check_command()  # raises ControlTaken: another sender took the arm from us
+            self._fail(Refused, f"{label}: no result in {timeout_s:.0f} s -- goal cancelled")
         return res.result
 
     def _cancel(self, gh):
@@ -1473,7 +1442,6 @@ class ArmInterface:
                 q = None if idx is None else last[idx]
             self._mock_sent("execute_joint_trajectory", q)
             return TrajectoryResult(SUCCESSFUL, "", np.zeros(len(names)))
-        ctx = self._ctx
         self._check_ready("execute_joint_trajectory: ")
         g = ExecuteJointTrajectory.Goal()
         g.trajectory.joint_names = list(names)
@@ -1492,20 +1460,11 @@ class ArmInterface:
         g.goal_time_tolerance = _duration(goal_time_tolerance)
         g.control_mode, g.preemption, g.gains = control_mode, preemption, gains
         g.speed_scale = float(speed_scale)
-        client = self._action("execute_joint_trajectory")
-        if not self._wait_for_server(client, ctx, STATE_WAIT_S):
+        name = "execute_joint_trajectory"
+        if not self._wait_for_server(self._action(name), self._ctx, STATE_WAIT_S):
             self._fail(StateTimeout, "no /execute_joint_trajectory action server")
         timeout_s = duration + goal_time_tolerance + RESULT_MARGIN_S
-        res = self._run_goal(
-            "execute_joint_trajectory",
-            client,
-            g,
-            timeout_s,
-            ctx,
-            "execute_joint_trajectory: goal REJECTED -- nothing moved",
-            f"execute_joint_trajectory: no result in {timeout_s:.0f} s -- goal cancelled",
-            feedback=feedback,
-        )
+        res = self._run_goal(name, g, timeout_s, name, feedback=feedback)
         return TrajectoryResult(
             res.error_code, res.error_string, np.array(res.final_error.positions)
         )
@@ -1543,24 +1502,12 @@ class ArmInterface:
         if self._mock:  # a successful plan with no samples
             self._mock_sent(name)
             return Plan(True, MOCK_NOT_SENT)
-        ctx = self._ctx
         client = self._action(name)  # the planner needs no arm state
         path = ACTIONS[name][1]
         try:
-            if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
+            if not self._wait_for_server(client, self._ctx, PLANNER_WAIT_S):
                 self._fail(Refused, f"{name}: no {path} action server (the cuRobo planner)")
-            send = self._send_goal(client, g)
-            res = self._goal_result(
-                name,
-                send,
-                PLAN_TIMEOUT_S,
-                ctx,
-                None,
-                f"{name}: goal REJECTED",
-                f"{name}: no plan in {PLAN_TIMEOUT_S:g} s -- goal cancelled",
-                None,
-                False,
-            )
+            res = self._goal_result(self._send_goal(client, g), PLAN_TIMEOUT_S, name)
         except NotInAction:
             raise
         except Refused as e:  # a failed plan
