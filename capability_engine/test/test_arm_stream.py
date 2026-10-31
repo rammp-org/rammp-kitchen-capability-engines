@@ -12,7 +12,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
 from capability_engine import arm as arm_module
-from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan
+from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan, Stream
 from capability_engine.driver_state import (
     ArmError,
     DriverState,
@@ -30,6 +30,7 @@ TWIST = np.ones(6) * 0.01
 OPEN_DELAY_S = 0.5  # how long the fake takes to answer open_stream, past CANCEL_AFTER_S
 CANCEL_AFTER_S = 0.3  # when a test cancels the action during a service call
 SLOW_ANSWER_S = 2.0  # how long the slow test service takes to answer (> CANCEL_AFTER_S)
+END_LANDS_S = 0.1  # how long a test holds a call back while end_action() starts
 
 
 def wait_until(condition, timeout_s=WAIT_S):
@@ -417,6 +418,33 @@ def test_cancel_while_opening_closes_only_a_stream_the_driver_opened(arm_env, ac
         with arm.stream("ee_twist"):
             pass
     assert len(fake.requests["close_stream"]) == (1 if accept else 0)
+
+
+def test_end_action_just_as_open_stream_is_sent_closes_the_late_session(arm_env, monkeypatch):
+    """end_action() in another thread lands just as /open_stream is sent, before the stream
+    has noted the request, and the driver opens the session late: end_action()'s settle still
+    sees the request and closes the session."""
+    arm, _, fake = arm_env
+    fake.delay_open_stream(OPEN_DELAY_S)  # answered within the close's CLOSE_STREAM_WAIT_S
+    arm.begin_action(FakeCtx(), None)
+    ender = threading.Thread(target=arm.end_action)
+
+    def end_then_note(stream, future):  # the stream notes the sent request (on_sent)
+        if future is not None:
+            ender.start()
+            time.sleep(END_LANDS_S)  # end_action() is under way before the note
+        stream.__dict__["_open_sent"] = future
+
+    noted = property(lambda stream: stream.__dict__["_open_sent"], end_then_note)
+    monkeypatch.setattr(Stream, "_open_sent", noted, raising=False)
+    with pytest.raises(NotInAction):
+        with arm.stream("ee_twist"):
+            pass
+    ender.join(WAIT_S + OPEN_DELAY_S)
+    assert not ender.is_alive()
+    time.sleep(OPEN_DELAY_S)  # the driver has answered, and opened the session, by now
+    assert len(fake.requests["open_stream"]) == 1
+    assert not fake.session_open(), "the session the driver opened late is still open"
 
 
 def test_mock_stream_honours_cancel_and_its_end(ros):
