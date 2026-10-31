@@ -207,6 +207,10 @@ go_to_ee_pose(pos, quat, label="go_to_ee_pose", speed_scale=None, *,
 go_to_joint_config(q, label="go_to_joint_config", speed_scale=None, *,
                    control_mode=POSITION, gains=None, feedback=None)
 go_to_preset(name, speed_scale=None, *, control_mode=POSITION, gains=None, feedback=None)
+go_to_ee_poses(targets, label="go_to_ee_poses", *,
+               control_mode=POSITION, gains=None, feedback=None)
+go_to_joint_configs(targets, label="go_to_joint_configs", *,
+                    control_mode=POSITION, gains=None, feedback=None)
 gripper(position, timeout_s=4.0, force=None, *, speed=None)
 execute_command(cmd)
 ```
@@ -220,6 +224,8 @@ execute_command(cmd)
 | `go_to_ee_pose`                              | cuRobo plans a path for the tool to the pose, then the driver runs it                                                                     |
 | `go_to_joint_config`                         | The same, to the joints `q`                                                                                                               |
 | `go_to_preset`                               | The same, to one of the driver's named poses                                                                                              |
+| `go_to_ee_poses`                             | Like `go_to_ee_pose`, through a list of `PoseTarget`s in one motion. It stops only at the last one and where a blend radius is 0          |
+| `go_to_joint_configs`                        | The same, through a list of `JointTarget`s                                                                                                |
 | `gripper`                                    | `position` goes from 0 (open) to 1 (closed). Returns when the fingers stop moving                                                         |
 | `execute_command`                            | Runs a `cornell_commands` command: `JointCommand`, `CartesianTrajectoryCommand`, `OpenGripperCommand` or `CloseGripperCommand`            |
 | `last_error`, `last_path`, `monitor_stopped` | The last refusal or failure; the tool path the last move measured, as `[(t, x, y, z)]`; whether its monitor stopped it                    |
@@ -263,6 +269,11 @@ The constants and dataclasses are in `capability_engine.arm`:
 - `POSITION`, `IMPEDANCE`: stiff or compliant control.
 - `QUEUE`, `LATEST_WINS`: whether a new trajectory waits for the running one or
   replaces it.
+- `PoseTarget(pos, quat, hold=HOLD_NONE, blend_radius=0.0, speed_scale=None)`:
+  one target of `go_to_ee_poses`. `speed_scale=None` uses the
+  `arm.go_to_speed_scale` parameter.
+- `JointTarget(joints, blend_radius=0.0, speed_scale=None)`: one target of
+  `go_to_joint_configs`.
 
 Other modules:
 
@@ -297,6 +308,10 @@ parameters.
   axis.
 - **cuRobo**: the motion planner. It finds a path that avoids the obstacles in
   its collision world.
+- **Leg**: the part of a planned motion from one target to the next.
+- **Blend radius**: how close (in m) the tool must pass a target before it turns
+  toward the next one. The arm cuts the corner there instead of stopping. 0 means
+  stop at the target.
 - **Impedance control**: the arm gives way when pushed, instead of holding its
   position stiffly.
 - **Stream**: sending setpoints one after another, instead of a whole trajectory
