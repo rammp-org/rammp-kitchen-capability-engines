@@ -11,7 +11,7 @@ LAUNCH_ARGS = use_orchestrator:=$(if $(filter 1,$(STANDALONE)),false,true) \
 ACTION ?=
 PARAMS ?= {}
 
-.PHONY: new build run action check smoke lint test-arm
+.PHONY: new build run action check smoke lint test-arm test-hw
 
 # Start a capability from the example: make new CAP=button_press
 new:
@@ -40,7 +40,7 @@ action:
 		'{engine_id: $(CAP), action_id: $(ACTION), params_json: "$(subst ",\",$(PARAMS))"}'
 
 check:
-	uv run --no-project --with pyyaml --with pytest python3 -m pytest -q tests --ignore=tests/arm
+	uv run --no-project --with pyyaml --with pytest python3 -m pytest -q tests --ignore=tests/arm --ignore=tests/hardware
 	uv run --no-project --with pyyaml --with "$(SHEPPY)" python3 scripts/check_capabilities.py
 
 smoke:
@@ -61,3 +61,20 @@ test-arm:
 	docker build -f docker/test.Dockerfile -t $(ARM_TEST_IMAGE) docker
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
 		-v $(CURDIR):/repo $(ARM_TEST_IMAGE) $(ARM_CMD)
+
+# self.arm against the real arm driver and planner, ON THE CELL (arm64), with a person at the
+# e-stop for anything that moves. See tests/hardware/README.md. HW_ARGS go to pytest:
+#   make test-hw                                  # stage 0 only: nothing moves
+#   make test-hw HW_ARGS='--motion tests/hardware/test_10_joints.py'
+# HW_DDS is the cell's CycloneDDS config, the one the sheppy stack runs with.
+HW_TEST_IMAGE = rammp-arm-hw-test:dev
+HW_DDS ?= $(HOME)/.config/rammp-bench/cyclonedds-local.xml
+HW_ARGS ?=
+test-hw:
+	docker build -f docker/hw-test.Dockerfile -t $(HW_TEST_IMAGE) .
+	docker run --rm --network host --ipc host --user $$(id -u):$$(id -g) -e HOME=/tmp \
+		-e PYTHONDONTWRITEBYTECODE=1 -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+		-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp -e CYCLONEDDS_URI=file://$(HW_DDS) \
+		-v $(HW_DDS):$(HW_DDS):ro -v $(CURDIR):/repo $(HW_TEST_IMAGE) \
+		python3 -m pytest -p no:cacheprovider -rA --junitxml=tests/hardware/results.xml \
+		$(or $(filter tests/%,$(HW_ARGS)),tests/hardware) $(filter-out tests/%,$(HW_ARGS))
