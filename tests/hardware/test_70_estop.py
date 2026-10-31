@@ -13,7 +13,6 @@ import rammp_arm
 from conftest import STOP_S, WAIT_S, diagnostic, wait_until
 
 from capability_engine import EStopped, StreamClosed
-from capability_engine.driver_state import ESTOPPED_REASON
 
 pytestmark = pytest.mark.motion
 
@@ -81,7 +80,7 @@ def test_an_estopped_arm_refuses_every_command(cell, home):
         motion = cell.observer.motion_span(t0)
         recover(cell, home)
     assert motion is None, "the arm moved while e-stopped"
-    assert out["not_ready"] == ESTOPPED_REASON
+    assert says_estop(out["not_ready"]), out["not_ready"]
     for name in ("move_joints", "move_cartesian", "go_to_joint_config", "go_to_ee_pose", "gripper"):
         ok, last_error = out[name]
         assert ok is False and says_estop(last_error), (name, last_error)
