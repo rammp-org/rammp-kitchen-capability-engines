@@ -44,6 +44,21 @@ def go_to(arm):
     return arm.go_to_preset("home")
 
 
+def go_to_many(arm):
+    return arm.go_to_ee_poses(
+        [
+            arm_module.PoseTarget([0.4, 0.1, 0.3], [0.0, 0.0, 0.0, 1.0], blend_radius=0.05),
+            arm_module.PoseTarget([0.5, 0.1, 0.2], [0.0, 0.0, 0.0, 1.0]),
+        ]
+    )
+
+
+def go_to_many_joints(arm):
+    return arm.go_to_joint_configs(
+        [arm_module.JointTarget([0.1] * 7, blend_radius=0.05), arm_module.JointTarget([0.2] * 7)]
+    )
+
+
 def plan(arm):
     return arm.plan_to_joints([0.1] * 7, [0.0] * 7)
 
@@ -59,8 +74,14 @@ def gripper(arm):
     return arm.gripper(1.0, timeout_s=HOLD_S)
 
 
-GOALS = {trajectory: "execute_joint_trajectory", go_to: "go_to_preset", plan: "plan_to_joints"}
-OPERATIONS = [trajectory, go_to, plan, stream, gripper]
+GOALS = {
+    trajectory: "execute_joint_trajectory",
+    go_to: "go_to_preset",
+    go_to_many: "go_to_ee_poses",
+    go_to_many_joints: "go_to_joint_configs",
+    plan: "plan_to_joints",
+}
+OPERATIONS = [trajectory, go_to, go_to_many, go_to_many_joints, plan, stream, gripper]
 
 
 def cancel(arm, ctx, fake):
@@ -143,6 +164,8 @@ GOAL_MOTIONS = {
     "go_to_ee_pose": lambda arm: arm.go_to_ee_pose([0.4, 0.0, 0.4], [0.0, 0.0, 0.0, 1.0]),
     "go_to_joint_config": lambda arm: arm.go_to_joint_config([0.1] * 7),
     "go_to_preset": lambda arm: arm.go_to_preset("home"),
+    "go_to_ee_poses": go_to_many,
+    "go_to_joint_configs": go_to_many_joints,
 }
 # Where the end lands: (class, method, after it returns). end_goal comes after the result.
 LANDINGS = {

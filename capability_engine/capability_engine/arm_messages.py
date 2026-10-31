@@ -140,6 +140,36 @@ class Plan:
 
 
 @dataclass
+class PoseTarget:
+    """One target of go_to_ee_poses: the tool (tool_frame) at (pos, quat xyzw) in FRAME, reached
+    with orientation hold `hold` (HOLD_*) at `speed_scale` (default GO_TO_SPEED_SCALE).
+    `blend_radius` (m): how close the tool must pass this pose, cutting the corner into the next
+    leg instead of stopping on it; 0 stops here, and the last target always stops. The planner
+    cuts only as far as the joint limits, collision and the holds allow, which may be not at
+    all. A hold is checked against where the arm is when its leg starts: a held first target
+    must keep the tool's current orientation (its tilt under HOLD_LEVEL), as for go_to_ee_pose,
+    and a later one the previous target's (give it the same quat), or the leg may fail to plan
+    (PLANNING_FAILED leg k/N). `quat` is sent normalized."""
+
+    pos: tuple
+    quat: tuple
+    hold: int = 0  # HOLD_NONE
+    blend_radius: float = 0.0
+    speed_scale: float | None = None
+
+
+@dataclass
+class JointTarget:
+    """One target of go_to_joint_configs: joints `joints` (rad, J1..J7) at `speed_scale` (default
+    GO_TO_SPEED_SCALE). `blend_radius` as PoseTarget's, around where the tool is at these joints:
+    with a radius above 0 the joints themselves are not reached, only passed near."""
+
+    joints: tuple
+    blend_radius: float = 0.0
+    speed_scale: float | None = None
+
+
+@dataclass
 class Controller:
     """A streaming controller of the driver (/list_controllers)."""
 
@@ -155,6 +185,11 @@ def _goal_feedback(m):
         getattr(m, "phase", ""),
         getattr(m, "planner_state", ""),
     )
+
+
+def _speed_scale(speed_scale):
+    """A go_to speed scale: GO_TO_SPEED_SCALE when None."""
+    return float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
 
 
 def _impedance_gains(gains) -> ImpedanceGains:

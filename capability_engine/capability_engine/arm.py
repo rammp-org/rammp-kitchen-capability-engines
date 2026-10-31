@@ -35,11 +35,13 @@ from rammp_arm import CONTINUOUS, ERRORS, JOINTS, _wrap
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
     GoToEEPose,
+    GoToEEPoses,
     GoToJointConfig,
+    GoToJointConfigs,
     GoToPreset,
 )
+from rammp_arm_interfaces.msg import EEPoseTarget, GripperSetpoint, JointConfigTarget
 from rammp_arm_interfaces.msg import EeState as EeStateMsg
-from rammp_arm_interfaces.msg import GripperSetpoint
 from rammp_arm_interfaces.msg import GripperState as GripperStateMsg
 from rammp_arm_interfaces.msg import StreamStatus as StreamStatusMsg
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
@@ -72,7 +74,9 @@ from capability_engine.arm_messages import (  # re-exports: the arm's dataclasse
     GoalFeedback,  # noqa: F401
     GripperState,
     JointStates,
+    JointTarget,  # noqa: F401
     Plan,
+    PoseTarget,  # noqa: F401
     StreamStatus,
     TrajectoryResult,
     _control_status,
@@ -86,6 +90,7 @@ from capability_engine.arm_messages import (  # re-exports: the arm's dataclasse
     _joint_states,
     _plan,
     _setpoint,
+    _speed_scale,
     _stream_status,
     _tolerances,
     _tool_position,
@@ -158,6 +163,8 @@ ACTIONS = {
     "execute_joint_trajectory": (ExecuteJointTrajectory, "/execute_joint_trajectory"),
     "go_to_ee_pose": (GoToEEPose, "/go_to_ee_pose"),
     "go_to_joint_config": (GoToJointConfig, "/go_to_joint_config"),
+    "go_to_ee_poses": (GoToEEPoses, "/go_to_ee_poses"),
+    "go_to_joint_configs": (GoToJointConfigs, "/go_to_joint_configs"),
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),
@@ -817,13 +824,7 @@ class ArmInterface:
         o.x, o.y, o.z, o.w = map(float, quat)
         g.orientation_hold = orientation_hold
         self._go_to("go_to_ee_pose", g, label, speed_scale, control_mode, gains, feedback)
-        tool = _tool_position(self._read("/ee_state"))
-        e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
-        message = f"  {label}: tool {e * 100:.1f} cm from the goal"
-        if e > rammp_arm.GO_TO_TRACK_M:
-            self._fail(Refused, message)
-        self._node.get_logger().info(message)
-        return True
+        return self._tool_reached(label, pos)
 
     @_rammp
     def go_to_joint_config(
@@ -845,14 +846,7 @@ class ArmInterface:
         g = GoToJointConfig.Goal()
         g.target_joints = [float(x) for x in q]
         self._go_to("go_to_joint_config", g, label, speed_scale, control_mode, gains, feedback)
-        d = np.asarray(q, float) - self.raw_joints()
-        d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
-        e = float(np.degrees(np.max(np.abs(d))))
-        message = f"  {label}: joints within {e:.1f} deg of the goal"
-        if e > rammp_arm.GO_TO_TRACK_DEG:
-            self._fail(Refused, message)
-        self._node.get_logger().info(message)
-        return True
+        return self._joints_reached(label, q)
 
     @_rammp
     def go_to_preset(
@@ -870,6 +864,100 @@ class ArmInterface:
         self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
         return True
 
+    @_rammp
+    def go_to_ee_poses(
+        self, targets, label="go_to_ee_poses", *, control_mode=POSITION, gains=None, feedback=None
+    ):
+        """go_to_ee_pose through `targets` (PoseTarget) in ONE motion: the driver plans every leg
+        (cuRobo), blends them so the arm passes the poses between still moving where each
+        target's blend_radius allows, and executes once (/go_to_ee_poses). Blocking; True if the
+        driver succeeded and the tool ended within GO_TO_TRACK_M of the last target. Keyword
+        arguments as in go_to_ee_pose, one for the whole motion. In mock mode it is go_to_ee_pose
+        to the last target."""
+        self._checkpoint()  # NotInAction / Cancelled first, as for every other call
+        targets = list(targets)
+        if not targets:
+            self._fail(ArmError, f"{label}: no targets")
+        # The driver refuses a target whose quaternion is not unit (go_to_ee_pose's does not):
+        # send each normalized, and refuse one that is no rotation at all.
+        quats = []
+        for k, t in enumerate(targets):
+            q = np.asarray(t.quat, float)
+            n = float(np.linalg.norm(q))
+            if not (np.isfinite(n) and n > 0.0):
+                self._fail(ArmError, f"{label}: targets[{k}]: quaternion {t.quat} is no rotation")
+            quats.append(q / n)
+        last = targets[-1]
+        if self._mock:
+            return self.go_to_ee_pose(last.pos, quats[-1], label)
+        g = GoToEEPoses.Goal()
+        stamp = self._node.get_clock().now().to_msg()
+        for t, q in zip(targets, quats, strict=True):
+            m = EEPoseTarget(orientation_hold=t.hold, blend_radius=float(t.blend_radius))
+            m.speed_scale = _speed_scale(t.speed_scale)
+            m.pose.header.frame_id, m.pose.header.stamp = rammp_arm.FRAME, stamp
+            p, o = m.pose.pose.position, m.pose.pose.orientation
+            p.x, p.y, p.z = map(float, t.pos[:3])
+            o.x, o.y, o.z, o.w = map(float, q)
+            g.targets.append(m)
+        self._go_to("go_to_ee_poses", g, label, None, control_mode, gains, feedback)
+        return self._tool_reached(label, last.pos)
+
+    @_rammp
+    def go_to_joint_configs(
+        self,
+        targets,
+        label="go_to_joint_configs",
+        *,
+        control_mode=POSITION,
+        gains=None,
+        feedback=None,
+    ):
+        """go_to_joint_config through `targets` (JointTarget) in ONE motion (/go_to_joint_configs),
+        as go_to_ee_poses. Blocking; True if the driver succeeded and every joint ended within
+        GO_TO_TRACK_DEG of the last target. In mock mode it is go_to_joint_config to the last
+        target."""
+        self._checkpoint()  # NotInAction / Cancelled first, as for every other call
+        targets = list(targets)
+        if not targets:
+            self._fail(ArmError, f"{label}: no targets")
+        last = targets[-1]
+        if self._mock:
+            return self.go_to_joint_config(last.joints, label)
+        g = GoToJointConfigs.Goal()
+        for t in targets:
+            g.targets.append(
+                JointConfigTarget(
+                    target_joints=[float(x) for x in t.joints],
+                    speed_scale=_speed_scale(t.speed_scale),
+                    blend_radius=float(t.blend_radius),
+                )
+            )
+        self._go_to("go_to_joint_configs", g, label, None, control_mode, gains, feedback)
+        return self._joints_reached(label, last.joints)
+
+    def _tool_reached(self, label, pos):
+        """True when the tool ended within GO_TO_TRACK_M of `pos` (logged); Refused if not."""
+        tool = _tool_position(self._read("/ee_state"))
+        e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
+        message = f"  {label}: tool {e * 100:.1f} cm from the goal"
+        if e > rammp_arm.GO_TO_TRACK_M:
+            self._fail(Refused, message)
+        self._node.get_logger().info(message)
+        return True
+
+    def _joints_reached(self, label, q):
+        """True when every joint ended within GO_TO_TRACK_DEG of `q` (free joints compared the
+        short way; logged); Refused if not."""
+        d = np.asarray(q, float) - self.raw_joints()
+        d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
+        e = float(np.degrees(np.max(np.abs(d))))
+        message = f"  {label}: joints within {e:.1f} deg of the goal"
+        if e > rammp_arm.GO_TO_TRACK_DEG:
+            self._fail(Refused, message)
+        self._node.get_logger().info(message)
+        return True
+
     def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
         g.gains = _impedance_gains(gains)  # a bad `gains` raises before anything is sent
         self._checkpoint()
@@ -880,15 +968,16 @@ class ArmInterface:
                 f"  RammpArm: {label}: no action server (the go_to_* actions need the cuRobo "
                 "planner: sheppy profile real-arm-camera-planner) -- nothing sent.",
             )
-        g.speed_scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+        legs = len(getattr(g, "targets", ())) or 1
+        if hasattr(g, "targets"):  # GoToEEPoses / GoToJointConfigs: a speed per target
+            how = f"{legs} targets in one motion, each leg at its own speed"
+        else:
+            g.speed_scale = _speed_scale(speed_scale)
+            how = f"run at {g.speed_scale:g} x its speed"
         g.control_mode = control_mode
-        self._node.get_logger().info(
-            f"  {label}: cuRobo plans the path (not previewed), run at {g.speed_scale:g} x its "
-            "speed ..."
-        )
-        res = self._run_goal(
-            name, g, rammp_arm.GO_TO_TIMEOUT_S, f"  RammpArm: {label}", feedback=feedback
-        )
+        self._node.get_logger().info(f"  {label}: cuRobo plans the path (not previewed), {how} ...")
+        timeout_s = rammp_arm.GO_TO_TIMEOUT_S * legs  # planning + execution, per leg
+        res = self._run_goal(name, g, timeout_s, f"  RammpArm: {label}", feedback=feedback)
         code = res.error_code
         if code != 0:
             self._fail(
