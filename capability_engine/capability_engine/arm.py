@@ -11,7 +11,9 @@ while a call is in progress; executor callbacks (state, goal answers, feedback) 
 Every use of the action's entities is inside `_alive()`, which holds _cond: end_action() marks the
 action ended under _cond before it settles or destroys anything, so inside `_alive()` every entity
 exists and every request sent is one end_action() will settle. After the end, a cancel is left to
-end_action()'s settle (_cancel, _cancel_late_goal) and a state message is dropped (_store).
+end_action()'s settle (_cancel, _cancel_late_goal) and a state message is dropped (_store). The
+one use outside `_alive()` is Stream.close(), which end_action() itself calls: it holds the
+stream's lock, and end_action() closes the scope only after its own close() has taken that lock.
 
 In mock mode (`mock=True`) it is a dry run that makes no ROS entity at all: motions and goals log
 "mock: not sent" and succeed, and the state is the last commanded joints (from MOCK_JOINTS), with
@@ -210,7 +212,9 @@ def _rammp(method):
 def wait_until(ready, timeout_s, ctx=None):
     """Poll ready() every POLL_S: True once it is, False after `timeout_s`. Raises the engine's
     Cancelled once `ctx` (an action's) is cancelled, and whatever ready() raises (NotInAction
-    once the action has ended). Every blocking wait goes through here, so none outlasts a cancel."""
+    once the action has ended). Every wait that observes a cancel goes through here; the few that
+    do not (settling a cancelled goal or a stream, GO_TO_SETTLE_S, HALT_STATUS_WAIT_S) are bounded
+    and counted in ArmInterface.worst_settle_s()."""
     deadline = time.monotonic() + timeout_s
     while True:
         if ready():
@@ -339,8 +343,9 @@ class ArmInterface:
         self._driver = DriverState(standalone=standalone)
         self._ctx = None
         self._in_action = False
-        # One end_action() at a time: one in another thread returns only once the first is done,
-        # and begin_action() never installs an action while the last one is being torn down.
+        # One end_action() at a time: one in another thread returns only once the first is done.
+        # begin_action() holds it from ending the last action to installing the next, so an
+        # end_action() in another thread ends a whole action, never a half-installed one.
         self._end_lock = threading.Lock()
         self._scope = None  # the action's ActionScope: the entities _get() made live in it
         # This action's entities, by action or service name, or topic (they never collide).
@@ -365,13 +370,14 @@ class ArmInterface:
         """Start an action: arm calls are allowed until end_action(). Creates no ROS entity: the
         first call that needs them makes them in the arm's own scope for this action, which
         end_action() closes."""
-        self.end_action()  # the last action never ended: carry nothing
-        scope = ActionScope(self._node, self._group)
-        driver = DriverState(standalone=self._standalone)  # a fresh baseline: this action's
-        driver.set_token(token)  # /control_status generation is its own
-        with self._cond:
-            self._ctx, self._scope, self._driver = ctx, scope, driver
-            self._in_action = True
+        with self._end_lock:
+            self._end_locked()  # the last action never ended: carry nothing
+            scope = ActionScope(self._node, self._group)
+            driver = DriverState(standalone=self._standalone)  # a fresh baseline: this action's
+            driver.set_token(token)  # /control_status generation is its own
+            with self._cond:
+                self._ctx, self._scope, self._driver = ctx, scope, driver
+                self._in_action = True
 
     def end_action(self):
         """End the action: settle any goal or stream, close its scope (destroying the entities
@@ -380,19 +386,23 @@ class ArmInterface:
         driver has not yet answered (all at once), to accept them and then to settle their
         cancels, and twice CLOSE_STREAM_WAIT_S for a stream to open late and then close."""
         with self._end_lock:
+            self._end_locked()
+
+    def _end_locked(self):
+        """end_action()'s work, under _end_lock."""
+        with self._cond:
+            self._in_action = False
+            self._cond.notify_all()  # a call waiting for state wakes with NotInAction
+        try:
+            self._settle()
+        finally:
+            with self._cond:  # nothing of the ended action is kept
+                scope, self._scope, self._entities, self._ctx = self._scope, None, {}, None
+            if scope is not None:
+                scope.close()
             with self._cond:
-                self._in_action = False
-                self._cond.notify_all()  # a call waiting for state wakes with NotInAction
-            try:
-                self._settle()
-            finally:
-                with self._cond:  # nothing of the ended action is kept
-                    scope, self._scope, self._entities, self._ctx = self._scope, None, {}, None
-                if scope is not None:
-                    scope.close()
-                with self._cond:
-                    self._latest.clear()
-                    self._cond.notify_all()
+                self._latest.clear()
+                self._cond.notify_all()
 
     def close(self):
         """A no-op under the engine, which owns the node."""
@@ -401,11 +411,12 @@ class ArmInterface:
     def worst_settle_s() -> float:
         """How long a cancelled action's arm calls may still take to end, at most: the running
         call's own settle, then end_action()'s. The call either cancels its goal and waits
-        CANCEL_SETTLE_S, or is in a go_to goal's GO_TO_SETTLE_S, or closes its stream; end_action()
-        waits GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals left and closes a stream still open.
-        A stream closes once (twice CLOSE_STREAM_WAIT_S), in the call or in end_action(), so it
-        counts once. From the arm.* parameters; 7.8 s by default."""
-        call = max(CANCEL_SETTLE_S, GO_TO_SETTLE_S)
+        CANCEL_SETTLE_S, or is in a go_to goal's GO_TO_SETTLE_S, or after a HALTED goal waits
+        HALT_STATUS_WAIT_S for an e-stop status, or closes its stream; end_action() waits
+        GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals left and closes a stream still open. A stream
+        closes once (twice CLOSE_STREAM_WAIT_S), in the call or in end_action(), so it counts
+        once. From the arm.* parameters; 7.8 s by default."""
+        call = max(CANCEL_SETTLE_S, GO_TO_SETTLE_S, HALT_STATUS_WAIT_S)
         return call + GOAL_ACCEPT_S + CANCEL_SETTLE_S + 2 * CLOSE_STREAM_WAIT_S
 
     def _settle(self):
@@ -721,7 +732,8 @@ class ArmInterface:
 
         scope = ActionScope(self._node, self._group)  # its own: destroyed when the call returns
         try:
-            scope.create_subscription(String, "/arm/robot_description", on_description, LATCHED)
+            with self._alive():  # never made once the action has ended
+                scope.create_subscription(String, "/arm/robot_description", on_description, LATCHED)
             if not wait_until(lambda: self._live(done.is_set), STATE_WAIT_S, self._ctx):
                 self._fail(
                     StateTimeout,

@@ -910,9 +910,10 @@ def test_a_late_acceptance_does_not_take_over_the_next_run(env, monkeypatch):
 
 def test_the_stop_budget_follows_the_arm_parameters(env):
     """A profile that lets self.arm wait longer gets a longer stop, not an exit mid-settle."""
-    env.make(lambda engine, ctx: None, **{"arm.goal_accept_s": 10.0})
+    params = {"arm.goal_accept_s": 10.0, "arm.halt_status_wait_s": 2.0}
+    env.make(lambda engine, ctx: None, **params)
     assert engine_module.stop_wait_s() == pytest.approx(
-        max(arm_module.CANCEL_SETTLE_S, arm_module.GO_TO_SETTLE_S)  # the running call's settle
+        2.0  # the running call's settle: the longest of its waits, here the HALTED one
         + 10.0
         + arm_module.CANCEL_SETTLE_S  # end_action()'s
         + 2 * arm_module.CLOSE_STREAM_WAIT_S

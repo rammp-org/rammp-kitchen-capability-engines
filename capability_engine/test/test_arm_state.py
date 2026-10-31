@@ -21,6 +21,7 @@ SHEPPY_NO_STATE = (
 )
 
 LINGER_S = 0.3  # how long the no-state-after-the-end test waits for late messages
+RACE_HOLD_S = 0.3  # the begin/end race test: how long the ending thread is held mid-end
 
 
 def test_no_resources_until_first_call(arm_env):
@@ -205,6 +206,33 @@ def test_begin_action_ends_an_unended_action(arm_env):
     arm.get_state()
     arm.begin_action(FakeCtx(), None)  # the last action never got end_action()
     assert counts(node) == base
+
+
+def test_end_action_racing_begin_action_leaves_a_whole_action_or_none(arm_env, monkeypatch):
+    """end_action() in another thread while begin_action() sets the next action up: the arm is
+    left with that action whole, or with none, never in an action with no scope or ctx."""
+    arm, _, _ = arm_env
+    arm.begin_action(FakeCtx(), None)
+    ender, settling = threading.Thread(target=arm.end_action), threading.Event()
+    settle, make_driver = arm._settle, arm_module.DriverState
+
+    def slow_settle():
+        if threading.current_thread() is ender:
+            settling.set()
+            time.sleep(RACE_HOLD_S)  # begin_action() sets up meanwhile, unless it holds the lock
+        settle()
+
+    def driver(**kwargs):  # in begin_action(), after it has ended the last action
+        if ender.ident is None:
+            ender.start()
+            settling.wait(RACE_HOLD_S)
+        return make_driver(**kwargs)
+
+    monkeypatch.setattr(arm, "_settle", slow_settle)
+    monkeypatch.setattr(arm_module, "DriverState", driver)
+    arm.begin_action(FakeCtx(), None)
+    ender.join()
+    assert arm._in_action == (arm._scope is not None) == (arm._ctx is not None)
 
 
 def test_no_state_is_stored_after_the_action_ends(arm_env, monkeypatch):
