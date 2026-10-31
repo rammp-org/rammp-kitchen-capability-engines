@@ -365,7 +365,7 @@ def test_goal_accepted_after_the_wait_is_cancelled(arm_env, monkeypatch, end_act
 
 def test_end_action_settles_many_unanswered_goals_at_once(arm_env, monkeypatch):
     """Several goals left unanswered: end_action() waits for their answers together, so it stays
-    within one GOAL_ACCEPT_S (+ CANCEL_SETTLE_S), inside the engine's STOP_WAIT_S on a stop."""
+    within one GOAL_ACCEPT_S (+ CANCEL_SETTLE_S), inside the engine's stop_wait_s() on a stop."""
     arm, _, fake = arm_env
     monkeypatch.setattr(arm_module, "GOAL_ACCEPT_S", UNANSWERED_WAIT_S)
     fake.delay_accept(NEVER_ANSWERED_S)

@@ -588,7 +588,7 @@ class ArmInterface:
             goals, self._goals = self._goals, []
         # Sent, perhaps not yet accepted: wait for all their answers at once, cancel each one
         # accepted, then wait for all to settle, so however many are left the settle takes at
-        # most GOAL_ACCEPT_S + CANCEL_SETTLE_S (inside the engine's STOP_WAIT_S).
+        # most GOAL_ACCEPT_S + CANCEL_SETTLE_S (inside the engine's stop_wait_s()).
         wait_until(lambda: all(send.done() for send in goals), GOAL_ACCEPT_S)
         results = []
         for send in goals:
@@ -1690,7 +1690,9 @@ class ArmInterface:
                     # session is open, perhaps another sender's.
                     res = self._wait(stream._open_sent, CLOSE_STREAM_WAIT_S)
                     stream._opened = res is not None and res.accepted
-                if stream._opened:
+                # Closed by the driver already: no hold, no CloseStream, which closes whatever
+                # session is open now, perhaps another sender's.
+                if stream._opened and not stream._driver.stream_closed:
                     hold = self._hold_setpoint(stream.channel)
                     if hold is not None:
                         stream._pub.publish(stream._message(hold))

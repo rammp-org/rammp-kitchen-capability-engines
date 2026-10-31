@@ -217,7 +217,10 @@ def test_stream_closed_by_driver_raises(arm_env):
             fake.publish_stream_status(False)
             wait_until(lambda: not arm.stream_status().open)
             s.send(TWIST)
-    assert len(fake.requests["close_stream"]) == 1
+    # Closed by the driver: its exit neither holds nor closes (a CloseStream now could close
+    # another sender's session).
+    assert not fake.requests["close_stream"]
+    assert twist_values(fake.setpoints["/setpoint/twist"][-1]) != [0.0] * 6
     assert arm._driver.mode == "idle"
 
 

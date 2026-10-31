@@ -62,7 +62,9 @@ SHUTDOWN_LIMIT_S = 5.0  # how long a SIGTERMed engine may take to exit
 REPLY_WAIT_S = 1.0  # how long the SIGTERM test waits for one Control reply
 INTERRUPT_AFTER_S = 0.3  # when the lifecycle tests interrupt a running action
 START_WAIT_TEST_S = 0.2  # START_WAIT_S in the never-started test
-STOP_WAIT_TEST_S = 0.5  # STOP_WAIT_S in the stuck-action test
+# The stuck-action test's stop budget, set through the arm.* parameters it is computed from.
+FAST_SETTLE_ARGS = ["-p", "arm.goal_accept_s:=0.1", "-p", "arm.cancel_settle_s:=0.1"]
+FAST_SETTLE_ARGS += ["-p", "arm.close_stream_wait_s:=0.1"]
 EXECUTE_DELAY_S = 0.5  # how long the two-goal test holds back each goal's execute
 
 
@@ -835,7 +837,7 @@ import time
 from capability_engine import engine
 from capability_engine.engine import Action, CapabilityEngine, run
 
-engine.STOP_WAIT_S = {stop_wait_s}
+engine.STOP_MARGIN_S = 0.2
 
 
 class Stuck(CapabilityEngine):
@@ -854,13 +856,14 @@ run(Stuck)
 
 
 def test_a_stop_is_bounded_when_execute_ignores_the_cancel(ros, tmp_path):
-    """The action does not end: the engine still exits, STOP_WAIT_S after the signal, saying so,
+    """The action does not end: the engine still exits, stop_wait_s() after the signal, saying so,
     instead of waiting for it until docker's SIGKILL."""
     engine_id = f"arm_test_engine_{next(ENGINE_IDS)}"
     script = tmp_path / "stuck.py"
-    script.write_text(STUCK_SCRIPT.format(engine_id=engine_id, stop_wait_s=STOP_WAIT_TEST_S))
+    script.write_text(STUCK_SCRIPT.format(engine_id=engine_id))
     proc = subprocess.Popen(
-        [sys.executable, str(script), "--ros-args", "-p", "use_orchestrator:=false"],
+        [sys.executable, str(script), "--ros-args", "-p", "use_orchestrator:=false"]
+        + FAST_SETTLE_ARGS,
         stderr=subprocess.PIPE,
         text=True,
     )
@@ -903,3 +906,14 @@ def test_a_late_acceptance_does_not_take_over_the_next_run(env, monkeypatch):
     handle_b = SimpleNamespace(request=goal_b, execute=lambda: None)
     engine._on_accepted(handle_b)
     assert engine._current.goal is handle_b
+
+
+def test_the_stop_budget_follows_the_arm_parameters(env):
+    """A profile that lets self.arm wait longer gets a longer stop, not an exit mid-settle."""
+    env.make(lambda engine, ctx: None, **{"arm.goal_accept_s": 10.0})
+    assert engine_module.stop_wait_s() == pytest.approx(
+        10.0
+        + arm_module.CANCEL_SETTLE_S
+        + 2 * arm_module.CLOSE_STREAM_WAIT_S
+        + engine_module.STOP_MARGIN_S
+    )

@@ -52,6 +52,7 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 
+from capability_engine import arm as arm_module
 from capability_engine import sim
 from capability_engine.action_scope import ENDED_MESSAGE, ActionScope, ScopeClosed
 from capability_engine.arm import ArmInterface, wait_until
@@ -62,10 +63,7 @@ ARM_PARAMS_FIXED_MESSAGE = "arm.* parameters are read at startup; restart to cha
 REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
-# On SIGTERM/SIGINT, how long the cancelled action may take to end: inside docker stop's 10 s
-# grace, and longer than self.arm's worst settle (end_action(): GOAL_ACCEPT_S + CANCEL_SETTLE_S
-# + 2 * CLOSE_STREAM_WAIT_S, 7.4 s by default). Raising those arm.* parameters means raising this.
-STOP_WAIT_S = 8.0
+STOP_MARGIN_S = 1.0  # on a stop, past self.arm's worst settle: for the action's own code
 START_WAIT_S = 1.0  # an accepted goal not handed to execute within this was lost by rclpy
 SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them
 
@@ -79,6 +77,14 @@ class Action:
     params_schema: dict = field(default_factory=dict)
     sticky_followup: bool = False
     perception_classes: list[str] = field(default_factory=list)
+
+
+def stop_wait_s() -> float:
+    """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's worst settle
+    in end_action() (GOAL_ACCEPT_S + CANCEL_SETTLE_S + 2 * CLOSE_STREAM_WAIT_S, from the arm.*
+    parameters; 7.4 s by default) plus STOP_MARGIN_S. docker stop's grace (10 s) must cover it."""
+    a = arm_module
+    return a.GOAL_ACCEPT_S + a.CANCEL_SETTLE_S + 2 * a.CLOSE_STREAM_WAIT_S + STOP_MARGIN_S
 
 
 class Cancelled(Exception):
@@ -504,12 +510,12 @@ class CapabilityEngine(Node):
                 self._current.cancelled.set()
 
     def _stopped(self) -> bool:
-        """Whether stop() was called and the running action has since ended (or STOP_WAIT_S
+        """Whether stop() was called and the running action has since ended (or stop_wait_s()
         has passed)."""
         with self._lifecycle:
             if self._stopping is None:
                 return False
-            return self._current is None or time.monotonic() - self._stopping > STOP_WAIT_S
+            return self._current is None or time.monotonic() - self._stopping > stop_wait_s()
 
     def _publish_status(self):
         with self._lifecycle:
@@ -542,7 +548,7 @@ def run(engine_class: type[CapabilityEngine], args=None):
     # full grace period and then SIGKILL. SIGINT is the image's STOPSIGNAL and
     # Ctrl-C. Either cancels the running action and stops accepting goals; the
     # executor spins on until the action has ended and reported its result (at
-    # most STOP_WAIT_S), so self.arm sees the driver settle. ROS is shut down
+    # most stop_wait_s()), so self.arm sees the driver settle. ROS is shut down
     # here, in the spinning thread: rclpy.try_shutdown() from another thread
     # can land mid-spin and raise RCLError out of it.
     signal.signal(signal.SIGTERM, lambda *_: node.stop())
@@ -556,9 +562,9 @@ def run(engine_class: type[CapabilityEngine], args=None):
     finally:
         node.stop()  # cancels a running execute(), which shutdown() waits for
         if node._current is not None:
-            # It ignored the cancel for STOP_WAIT_S: shutdown() would wait for it forever.
+            # It ignored the cancel for stop_wait_s(): shutdown() would wait for it forever.
             node.get_logger().error(
-                f"{node._current.action_id} did not end within {STOP_WAIT_S:g} s of the stop; "
+                f"{node._current.action_id} did not end within {stop_wait_s():g} s of the stop; "
                 "exiting without it"
             )
             os._exit(1)

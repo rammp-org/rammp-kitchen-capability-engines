@@ -77,6 +77,11 @@ class DriverState:
     def begin_goal(self, name):
         self._begin("goal", name)
 
+    @property
+    def stream_closed(self) -> bool:
+        """The driver has closed the stream this code had open (its /stream_status said so)."""
+        return self._stream_closed
+
     def begin_stream(self, controller):
         self._begin("stream", controller)
 
