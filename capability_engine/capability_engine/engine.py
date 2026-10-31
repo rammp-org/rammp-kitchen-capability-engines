@@ -19,6 +19,7 @@ it with `ros2 action send_goal /<id>/execute_action ...` (see `make action`).
 """
 
 import json
+import os
 import signal
 import threading
 import time
@@ -61,7 +62,10 @@ ARM_PARAMS_FIXED_MESSAGE = "arm.* parameters are read at startup; restart to cha
 REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
-STOP_WAIT_S = 5.0  # on SIGTERM/SIGINT, how long the cancelled action may take to end
+# On SIGTERM/SIGINT, how long the cancelled action may take to end: inside docker stop's 10 s
+# grace, and longer than self.arm's worst settle (GOAL_ACCEPT_S + CANCEL_SETTLE_S).
+STOP_WAIT_S = 8.0
+START_WAIT_S = 1.0  # an accepted goal not handed to execute within this was lost by rclpy
 SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them
 
 
@@ -95,6 +99,8 @@ class _Run:
 
     def __init__(self, action_id: str):
         self.action_id = action_id
+        self.accepted_at = time.monotonic()
+        self.goal = None  # its goal handle, once rclpy has sent the acceptance (_on_accepted)
         self.cancelled = threading.Event()
         self.paused = threading.Event()
         self.scope = None
@@ -199,6 +205,7 @@ class CapabilityEngine(Node):
             "~/execute_action",
             execute_callback=self._on_execute,
             goal_callback=self._on_goal,
+            handle_accepted_callback=self._on_accepted,
             cancel_callback=lambda _: CancelResponse.ACCEPT,
             callback_group=self._group,
         )
@@ -359,14 +366,20 @@ class CapabilityEngine(Node):
 
     def _on_activate(self, request, response):
         self.instance_id = request.instance_id
-        world = json.loads(request.world_state_snapshot_json or "{}")
-        response.availability = self.availability(request.instance_id, world)
+        try:
+            world = json.loads(request.world_state_snapshot_json or "{}")
+            response.availability = self.availability(request.instance_id, world)
+        except Exception as error:  # bad input or a bug in availability() must not kill the node
+            self.get_logger().error(f"activate {request.instance_id!r} raised: {error!r}")
         return response
 
     def _on_hibernate(self, request, response):
         self.instance_id = ""
-        self.hibernate()
-        response.success = True
+        try:
+            self.hibernate()
+            response.success = True
+        except Exception as error:  # a bug in hibernate() must not kill the node
+            self.get_logger().error(f"hibernate raised: {error!r}")
         return response
 
     def _on_control(self, request, response):
@@ -397,15 +410,37 @@ class CapabilityEngine(Node):
         # Accepted only when idle, and its run is made here: a Control.CANCEL from now on, even
         # before it executes, applies to this goal.
         with self._lifecycle:
-            if self._current is not None or self._stopping is not None:
+            run = self._current
+            if (
+                run is not None
+                and run.goal is None
+                and time.monotonic() - run.accepted_at > START_WAIT_S
+            ):
+                # rclpy accepted it but failed before handing it on (e.g. its client went away
+                # before the acceptance was sent): it will never execute or end.
+                self.get_logger().warning(f"{run.action_id}: accepted but never started; dropped")
+                run = self._current = None
+            if run is not None or self._stopping is not None:
                 return GoalResponse.REJECT
             self._current = _Run(goal.action_id)
         return GoalResponse.ACCEPT
 
+    def _on_accepted(self, goal_handle):
+        """rclpy has sent the acceptance: bind the run _on_goal made to this goal, then execute."""
+        with self._lifecycle:
+            if self._current is not None and self._current.goal is None:
+                self._current.goal = goal_handle
+        goal_handle.execute()
+
     def _on_execute(self, goal_handle):
         goal = goal_handle.request
         with self._lifecycle:
-            run = self._current  # made by _on_goal for this goal
+            run = self._current
+        if run is None or run.goal is not goal_handle:  # its run was dropped as never started
+            goal_handle.abort()
+            return ExecuteAction.Result(
+                result=Result(status=Result.STATUS_FAILED, error_code="not_started")
+            )
         result = Result()
         try:
             run.scope = ActionScope(self, self._group)
@@ -515,7 +550,13 @@ def run(engine_class: type[CapabilityEngine], args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        # shutdown() waits for a running execute(): cancel it, or a paused one never returns.
-        node.stop()
+        node.stop()  # cancels a running execute(), which shutdown() waits for
+        if node._current is not None:
+            # It ignored the cancel for STOP_WAIT_S: shutdown() would wait for it forever.
+            node.get_logger().error(
+                f"{node._current.action_id} did not end within {STOP_WAIT_S:g} s of the stop; "
+                "exiting without it"
+            )
+            os._exit(1)
         executor.shutdown()
         rclpy.try_shutdown()

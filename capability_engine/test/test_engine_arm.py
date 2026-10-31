@@ -18,9 +18,15 @@ from fake_driver import FLATBOT_URDF, FakeDriver, counts
 from geometry_msgs.msg import TransformStamped
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import Result
-from rammp_orchestrator_interfaces.srv import Control, RegisterEngine, RequestIntent
+from rammp_orchestrator_interfaces.srv import (
+    Activate,
+    Control,
+    Hibernate,
+    RegisterEngine,
+    RequestIntent,
+)
 from rcl_interfaces.msg import Log
-from rclpy.action import ActionClient
+from rclpy.action import ActionClient, GoalResponse
 from rclpy.duration import Duration as RclpyDuration
 from rclpy.exceptions import InvalidHandle
 from rclpy.executors import MultiThreadedExecutor
@@ -55,6 +61,8 @@ REGISTER_TIMEOUT_TEST_S = 0.5  # CALL_TIMEOUT_S there: how long an unanswered ca
 SHUTDOWN_LIMIT_S = 5.0  # how long a SIGTERMed engine may take to exit
 REPLY_WAIT_S = 1.0  # how long the SIGTERM test waits for one Control reply
 INTERRUPT_AFTER_S = 0.3  # when the lifecycle tests interrupt a running action
+START_WAIT_TEST_S = 0.2  # START_WAIT_S in the never-started test
+STOP_WAIT_TEST_S = 0.5  # STOP_WAIT_S in the stuck-action test
 EXECUTE_DELAY_S = 0.5  # how long the two-goal test holds back each goal's execute
 
 
@@ -779,3 +787,102 @@ def test_request_intent_honours_cancel(env, monkeypatch):
         client.close()
         silent.destroy_node()
         engine.destroy_node()
+
+
+def test_a_failing_activate_or_hibernate_keeps_the_engine_alive(env, monkeypatch):
+    """Bad input or a bug in availability()/hibernate() is the call's failure, not the node's."""
+    engine = env.make(lambda engine, ctx: None)
+
+    def broken(*_):
+        raise KeyError("world_state")
+
+    monkeypatch.setattr(engine, "availability", broken)
+    monkeypatch.setattr(engine, "hibernate", broken)
+    node = Node(f"{env.engine_id}_activate_client")
+    env.executor.add_node(node)
+    activate = node.create_client(Activate, f"/{env.engine_id}/activate")
+    hibernate = node.create_client(Hibernate, f"/{env.engine_id}/hibernate")
+    try:
+        assert activate.wait_for_service(timeout_sec=WAIT_S)
+        for _ in range(2):  # the second call is answered too: the executor still spins
+            future = activate.call_async(
+                Activate.Request(instance_id="counter_1", world_state_snapshot_json="{not json")
+            )
+            wait_until(future.done)
+            assert list(future.result().availability) == []
+            future = hibernate.call_async(Hibernate.Request())
+            wait_until(future.done)
+            assert future.result().success is False
+        assert env.run(engine).status == Result.STATUS_SUCCESS
+    finally:
+        env.executor.remove_node(node)
+        node.destroy_node()
+
+
+def test_a_goal_rclpy_never_starts_does_not_block_the_next(env, monkeypatch):
+    """rclpy can accept a goal and then fail before executing it (its client gone before the
+    acceptance went out): that run is dropped, and the next goal is taken."""
+    monkeypatch.setattr(engine_module, "START_WAIT_S", START_WAIT_TEST_S)
+    engine = env.make(lambda engine, ctx: None)
+    assert engine._on_goal(ExecuteAction.Goal(action_id="run")) == GoalResponse.ACCEPT
+    time.sleep(2 * START_WAIT_TEST_S)  # never handed on
+    assert env.run(engine).status == Result.STATUS_SUCCESS
+
+
+STUCK_SCRIPT = """
+import time
+
+from capability_engine import engine
+from capability_engine.engine import Action, CapabilityEngine, run
+
+engine.STOP_WAIT_S = {stop_wait_s}
+
+
+class Stuck(CapabilityEngine):
+    actions = [Action("run", "Run")]
+
+    def __init__(self):
+        super().__init__("{engine_id}")
+
+    def execute(self, action_id, params, ctx):
+        while True:  # never checks for a cancel
+            time.sleep(0.05)
+
+
+run(Stuck)
+"""
+
+
+def test_a_stop_is_bounded_when_execute_ignores_the_cancel(ros, tmp_path):
+    """The action does not end: the engine still exits, STOP_WAIT_S after the signal, saying so,
+    instead of waiting for it until docker's SIGKILL."""
+    engine_id = f"arm_test_engine_{next(ENGINE_IDS)}"
+    script = tmp_path / "stuck.py"
+    script.write_text(STUCK_SCRIPT.format(engine_id=engine_id, stop_wait_s=STOP_WAIT_TEST_S))
+    proc = subprocess.Popen(
+        [sys.executable, str(script), "--ros-args", "-p", "use_orchestrator:=false"],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    node = Node(f"{engine_id}_client")
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    threading.Thread(target=executor.spin, daemon=True).start()
+    client = ActionClient(node, ExecuteAction, f"/{engine_id}/execute_action")
+    control = node.create_client(Control, f"/{engine_id}/control")
+    try:
+        assert client.wait_for_server(timeout_sec=ACTION_WAIT_S)
+        assert control.wait_for_service(timeout_sec=WAIT_S)
+        client.send_goal_async(ExecuteAction.Goal(action_id="run"))  # its reply may be lost
+        resume = Control.Request(command=Control.Request.RESUME)
+        wait_until(lambda: reply(control, resume) == "ok", ACTION_WAIT_S)  # it runs
+        proc.send_signal(signal.SIGTERM)
+        _, logs = proc.communicate(timeout=SHUTDOWN_LIMIT_S)
+        assert proc.returncode == 1
+        assert "did not end within" in logs, logs
+    finally:
+        proc.kill()
+        proc.wait()
+        client.destroy()
+        executor.shutdown()
+        node.destroy_node()
