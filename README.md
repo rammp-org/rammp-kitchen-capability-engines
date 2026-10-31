@@ -89,116 +89,219 @@ To run it on the robot, transcribe the capability's two fragments into
 
 ## API
 
-A capability subclasses `CapabilityEngine`, implements `execute()`, and controls
-the arm through `self.arm`. `capabilities/example` is a working one. The rules
-for using it (cancel, subscriptions, the sim, parameters) are in
-[Using `self.arm`](CONTRIBUTING.md#using-selfarm). Everything below is importable
-as `from capability_engine import ...` unless a module is named.
+A capability is a Python class. It subclasses `CapabilityEngine`, lists its
+actions, and implements `execute()`, which the engine calls each time the
+orchestrator starts one of those actions. Inside `execute()`, `self.arm`
+controls the arm and `ctx` talks to the orchestrator:
+
+```python
+from capability_engine import Action, CapabilityEngine, EngineError, run
+
+
+class Capability(CapabilityEngine):
+    display_name = "Open microwave"
+    perception_classes = ["microwave"]
+    required_resources = ["arm", "gripper"]
+    actions = [Action("open", "Open the door")]
+
+    def __init__(self):
+        super().__init__("open_microwave")
+
+    def execute(self, action_id, params, ctx):
+        if not self.arm.gripper(0.0):  # open the fingers
+            raise EngineError("gripper_failed", self.arm.last_error)
+        ctx.checkpoint()  # stop here if the action was paused or cancelled
+        if not self.arm.move_joints([[0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]]):
+            raise EngineError("move_failed", self.arm.last_error)
+        return {"opened": True}
+
+
+def main():
+    run(Capability)
+```
+
+`capabilities/example` is a complete one you can copy. Everything below imports
+from `capability_engine` unless another module is named. Before you write a
+capability, read the rules in [Using `self.arm`](CONTRIBUTING.md#using-selfarm):
+how to handle a cancel, when to subscribe to topics, how to use the sim, and
+the `arm.*` parameters. Terms such as *knot*, *tool frame* and *cuRobo* are
+explained in [Terms](#terms) at the end.
 
 ### `CapabilityEngine`
 
-Class attributes, read at registration:
+Set these class attributes. The engine sends them to the orchestrator when it
+registers:
 
-| Attribute            | Meaning                                                                          |
-| -------------------- | -------------------------------------------------------------------------------- |
-| `display_name`       | Shown to the user                                                                |
-| `perception_classes` | The engine is activated when the user selects an object of one of these          |
-| `required_resources` | What the orchestrator locks while an action runs: `"arm"`, `"base"`, `"gripper"` |
-| `state_reads`        | World-state keys the engine reads                                                |
-| `state_writes`       | World-state keys the engine writes                                               |
-| `intents_handled`    | Intents (e.g. `MOVE_BASE`) other engines may delegate to this one                |
-| `actions`            | `list[Action]`                                                                   |
+| Attribute            | What it is                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `display_name`       | The name shown to the user                                                                  |
+| `perception_classes` | Object classes this engine handles. Selecting an object of one of them activates the engine |
+| `required_resources` | What the orchestrator locks while an action runs: `"arm"`, `"base"`, `"gripper"`            |
+| `state_reads`        | World-state keys the engine reads                                                           |
+| `state_writes`       | World-state keys the engine writes                                                          |
+| `intents_handled`    | Intents (such as `MOVE_BASE`) that other engines may hand to this one                       |
+| `actions`            | The actions it offers, as a list of `Action`                                                |
 
-`Action(action_id, label, params_schema={}, sticky_followup=False, perception_classes=[])`:
-one action the engine offers; `params_schema` is JSON Schema.
+`Action(action_id, label, params_schema={}, sticky_followup=False, perception_classes=[])`
+describes one action. `params_schema` is a JSON Schema for the `params` dict
+that `execute()` receives.
 
-| Method / attribute                                           | Meaning                                                                                                 |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `__init__(engine_id, **node_kwargs)`                         | Call `super().__init__("<engine_id>")`; the node name is the engine id                                  |
-| `execute(action_id, params, ctx) -> dict`                    | **Override.** Run one action and return its result payload. Raise `EngineError` to fail it              |
-| `availability(instance_id, world_state)`                     | Override to say which actions can run on this object now. Default: all                                  |
-| `hibernate()`                                                | Override to drop per-selection state. Default: nothing                                                  |
-| `create_action_subscription(msg_type, topic, callback, qos)` | `Node.create_subscription` for the running action only; destroyed when it ends. Call inside `execute()` |
-| `create_action_publisher(msg_type, topic, qos)`              | The same, for a publisher                                                                               |
-| `create_action_tf_buffer()`                                  | A `tf2_ros.Buffer` kept current for the running action only. Use it in place of a `TransformListener`   |
-| `self.arm`                                                   | The arm: see below                                                                                      |
-| `self.mock`                                                  | The `mock` parameter: no hardware                                                                       |
-| `self.instance_id`                                           | The object the engine was activated on                                                                  |
-| `stop()`                                                     | Stop accepting goals and cancel the running one. `run()` calls it on SIGTERM / SIGINT                   |
+Methods you override:
 
-`run(EngineClass)` is a capability's entry point: it spins until SIGTERM or
-Ctrl-C. `EngineError(error_code, message="", recoverable=False)` fails the action
-with that code.
+| Method                                    | What it does                                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `execute(action_id, params, ctx) -> dict` | Required. Runs one action and returns its result. To fail, raise `EngineError`             |
+| `availability(instance_id, world_state)`  | Optional. Says which actions can run on this object right now. By default, all of them can |
+| `hibernate()`                             | Optional. Clears anything you stored for the selected object. By default, it does nothing  |
+
+What the engine gives you:
+
+| Name                                                         | What it is                                                                                                          |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `__init__(engine_id, **node_kwargs)`                         | Call it as `super().__init__("<engine_id>")`. The ROS node's name is the engine id                                  |
+| `self.arm`                                                   | The arm (see [below](#selfarm-arminterface))                                                                        |
+| `self.mock`                                                  | True when the `mock` parameter is set, meaning there is no hardware                                                 |
+| `self.instance_id`                                           | The object the engine was activated on                                                                              |
+| `create_action_subscription(msg_type, topic, callback, qos)` | Like `Node.create_subscription`, but the subscription exists only until the action ends. Call it inside `execute()` |
+| `create_action_publisher(msg_type, topic, qos)`              | The same, for a publisher                                                                                           |
+| `create_action_tf_buffer()`                                  | A `tf2_ros.Buffer` that stays up to date until the action ends. Use it instead of a `TransformListener`             |
+| `stop()`                                                     | Stops accepting new actions and cancels the running one. `run()` calls it on SIGTERM or SIGINT                      |
+
+`run(EngineClass)` starts a capability. It runs until SIGTERM or Ctrl-C.
+`EngineError(error_code, message="", recoverable=False)` fails the action with
+`error_code`.
 
 ### `ctx` (`Context`)
 
-| Method                                               | Meaning                                                                                  |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `checkpoint()`                                       | Call between steps: blocks while paused, raises `Cancelled` once the action is cancelled |
-| `cancelled() -> bool`                                | Whether the action has been cancelled. Never blocks                                      |
-| `progress(phase, pct, message="", pausable=True)`    | Report progress to the orchestrator                                                      |
-| `request_intent(intent_type, params=None) -> Result` | Ask the orchestrator to delegate an intent (e.g. `MOVE_BASE`) and wait for its result    |
-| `write_world_state(**updates) -> bool`               | Merge into the world state (keys `gripper`, `doors`, `objects`, `arm`, `base_pose`)      |
-| `update_object(instance_id, **fields) -> bool`       | Update one object's fields in the world state                                            |
+`execute()` receives a `ctx`. Use it to follow pause and cancel and to talk to
+the orchestrator:
+
+| Method                                               | What it does                                                                                              |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `checkpoint()`                                       | Call it between steps. It waits while the action is paused and raises `Cancelled` once it is cancelled    |
+| `cancelled() -> bool`                                | Whether the action has been cancelled. Returns at once, even while paused                                 |
+| `progress(phase, pct, message="", pausable=True)`    | Reports progress to the orchestrator. `pct` runs from 0 to 100                                            |
+| `request_intent(intent_type, params=None) -> Result` | Asks the orchestrator to hand an intent (such as `MOVE_BASE`) to another engine, and waits for its result |
+| `write_world_state(**updates) -> bool`               | Updates the world state. The keys are `gripper`, `doors`, `objects`, `arm` and `base_pose`                |
+| `update_object(instance_id, **fields) -> bool`       | Updates one object's fields in the world state                                                            |
 
 ### `self.arm` (`ArmInterface`)
 
-Usable only inside `execute()`; a call outside raises `NotInAction`. It has two
-layers. They share the same connection to the arm driver, but report failure
-differently.
+Use `self.arm` only inside `execute()`. Anywhere else, a call raises
+`NotInAction`.
 
-**The students' `RammpArm` API.** Motions return `True`, or `False` when refused
-or failed (an e-stop included), with the reason in `self.arm.last_error`.
+It has two sets of methods. Both talk to the same arm driver, but they report
+failure differently.
 
-| Method                                                                                                                                   | Meaning                                                                                                                    |
-| ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `get_state() -> dict`                                                                                                                    | `position` (joints wrapped to ±π), `velocity`, `effort`, `ee_pos` (tool frame, `[x, y, z, qx, qy, qz, qw]`), `gripper_pos` |
-| `raw_joints()`                                                                                                                           | Measured joints, not wrapped: where a cuRobo plan must start                                                               |
-| `move_joints(knots, cart_lengths=None, speed_scale=1.0, impedance=None, monitor=None)`                                                   | Through joint `knots`. `monitor()` returning True stops the move and sets `monitor_stopped`                                |
-| `move_cartesian(traj, impedance=None, speed_scale=1.0)`                                                                                  | Straight-line segments through `[(pos, quat_xyzw), ...]` in the base frame                                                 |
-| `go_to_ee_pose(pos, quat, label=..., speed_scale=None, *, orientation_hold=HOLD_NONE, control_mode=POSITION, gains=None, feedback=None)` | cuRobo plans the tool to a pose, the driver executes it                                                                    |
-| `go_to_joint_config(q, label=..., speed_scale=None, *, control_mode=POSITION, gains=None, feedback=None)`                                | The same, to joints `q`                                                                                                    |
-| `go_to_preset(name, speed_scale=None, *, control_mode=POSITION, gains=None, feedback=None)`                                              | The same, to one of the driver's named presets                                                                             |
-| `gripper(position, timeout_s=4.0, force=None, *, speed=None)`                                                                            | `position` 0 (open) to 1 (closed); returns when the fingers stop                                                           |
-| `execute_command(cmd)`                                                                                                                   | A `cornell_commands` command (`JointCommand`, `CartesianTrajectoryCommand`, `Open/CloseGripperCommand`)                    |
-| `last_error`, `last_path`, `monitor_stopped`                                                                                             | The last refusal, the last move's measured tool path `[(t, x, y, z)]`, whether its monitor stopped it                      |
+**The `RammpArm` methods** are the ones the microwave students wrote against.
+A motion returns `True` when it succeeds. It returns `False` when the arm refuses
+it or it fails, an e-stop included, and puts the reason in `self.arm.last_error`.
 
-**The driver API.** Reads and motions raise `ArmError` subclasses instead of
-returning `False`.
+```python
+get_state() -> dict
+raw_joints()
+move_joints(knots, cart_lengths=None, speed_scale=1.0, impedance=None, monitor=None)
+move_cartesian(traj, impedance=None, speed_scale=1.0)
+go_to_ee_pose(pos, quat, label="go_to_ee_pose", speed_scale=None, *,
+              orientation_hold=HOLD_NONE, control_mode=POSITION, gains=None, feedback=None)
+go_to_joint_config(q, label="go_to_joint_config", speed_scale=None, *,
+                   control_mode=POSITION, gains=None, feedback=None)
+go_to_preset(name, speed_scale=None, *, control_mode=POSITION, gains=None, feedback=None)
+gripper(position, timeout_s=4.0, force=None, *, speed=None)
+execute_command(cmd)
+```
 
-| Method                                                                                                                                                                                                                   | Meaning                                                                                                     |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `joint_states()`, `ee_state()`, `gripper_state()`                                                                                                                                                                        | The latest message as a dataclass with `age_s`; `StateTimeout` when none arrives or it is stale             |
-| `control_status()`, `stream_status()`, `diagnostics()`                                                                                                                                                                   | The same for `/control_status`, `/stream_status`, `/diagnostics`                                            |
-| `not_ready() -> str \| None`                                                                                                                                                                                             | Why the arm must not be commanded now (e.g. e-stopped), or None                                             |
-| `robot_description() -> str`                                                                                                                                                                                             | The driver's URDF                                                                                           |
-| `execute_joint_trajectory(names, points, *, path_tolerance=None, goal_tolerance=None, goal_time_tolerance=0.0, control_mode=POSITION, preemption=QUEUE, gains=None, speed_scale=1.0, feedback=None) -> TrajectoryResult` | The driver's trajectory action, every field; `points` are `[(t, positions, velocities), ...]` sent as given |
-| `with stream(controller, gains=None, timeout_s=None) as s: s.send(setpoint)`                                                                                                                                             | A streaming session; `send()` at least every `timeout_s`. Leaving the block holds and closes it             |
-| `list_controllers() -> list[Controller]`                                                                                                                                                                                 | The driver's streaming controllers and whether each can be opened now                                       |
-| `set_gains(gains) -> (accepted, message)`                                                                                                                                                                                | The session's default impedance gains                                                                       |
-| `plan_to_pose(pos, quat, start_joints, hold=HOLD_NONE) -> Plan`                                                                                                                                                          | A cuRobo plan, nothing moved                                                                                |
-| `plan_to_joints(q_goal, start_joints) -> Plan`                                                                                                                                                                           | The same, to joints                                                                                         |
-| `set_world(world) -> (success, message)`                                                                                                                                                                                 | Swap cuRobo's collision world for a packaged one                                                            |
+| Name                                         | What it does                                                                                                                              |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_state()`                                | A dict: `position` (joints, wrapped to ±π), `velocity`, `effort`, `ee_pos` (the tool frame as `[x, y, z, qx, qy, qz, qw]`), `gripper_pos` |
+| `raw_joints()`                               | The measured joints, not wrapped. A cuRobo plan must start from these                                                                     |
+| `move_joints`                                | Moves through the joint `knots`. If you pass `monitor`, the arm stops as soon as `monitor()` returns True, and `monitor_stopped` is set   |
+| `move_cartesian`                             | Moves the tool in straight lines through `traj`, a list of `(pos, quat_xyzw)` in the arm's base frame                                     |
+| `go_to_ee_pose`                              | cuRobo plans a path for the tool to the pose, then the driver runs it                                                                     |
+| `go_to_joint_config`                         | The same, to the joints `q`                                                                                                               |
+| `go_to_preset`                               | The same, to one of the driver's named poses                                                                                              |
+| `gripper`                                    | `position` goes from 0 (open) to 1 (closed). Returns when the fingers stop moving                                                         |
+| `execute_command`                            | Runs a `cornell_commands` command: `JointCommand`, `CartesianTrajectoryCommand`, `OpenGripperCommand` or `CloseGripperCommand`            |
+| `last_error`, `last_path`, `monitor_stopped` | The last refusal or failure; the tool path the last move measured, as `[(t, x, y, z)]`; whether its monitor stopped it                    |
 
-The constants (`HOLD_NONE` / `HOLD_LEVEL` / `HOLD_FIXED`, `POSITION` /
-`IMPEDANCE`, `QUEUE` / `LATEST_WINS`) and the dataclasses are in
-`capability_engine.arm`. `RammpArm`'s tunables and path helpers
-(`cartesian_knots`, `joint_trajectory`, `FRAME`, ...) are in `rammp_arm`; the
-shared sim (`make_sim`, `solve_ik`, `tool_pose`, `set_keep_out`) is in
-`capability_engine.sim`. Every tunable is an `arm.*` ROS parameter.
+**The driver methods** expose the arm driver directly. Instead of returning
+`False`, they raise one of the `ArmError` exceptions.
+
+```python
+joint_states(), ee_state(), gripper_state()
+control_status(), stream_status(), diagnostics()
+not_ready() -> str | None
+robot_description() -> str
+execute_joint_trajectory(names, points, *, path_tolerance=None, goal_tolerance=None,
+                         goal_time_tolerance=0.0, control_mode=POSITION, preemption=QUEUE,
+                         gains=None, speed_scale=1.0, feedback=None) -> TrajectoryResult
+stream(controller, gains=None, timeout_s=None)  # use as: with self.arm.stream(...) as s:
+list_controllers() -> list[Controller]
+set_gains(gains) -> (accepted, message)
+plan_to_pose(pos, quat, start_joints, hold=HOLD_NONE) -> Plan
+plan_to_joints(q_goal, start_joints) -> Plan
+set_world(world) -> (success, message)
+```
+
+| Name                                                   | What it does                                                                                                                                          |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `joint_states()`, `ee_state()`, `gripper_state()`      | The latest message from that topic, as a dataclass. `age_s` says how old it is. Raises `StateTimeout` if none arrives or it is too old                |
+| `control_status()`, `stream_status()`, `diagnostics()` | The same, for `/control_status`, `/stream_status` and `/diagnostics`                                                                                  |
+| `not_ready()`                                          | Why the arm must not be commanded right now (for example, it is e-stopped), or None if it can be                                                      |
+| `robot_description()`                                  | The driver's URDF                                                                                                                                     |
+| `execute_joint_trajectory`                             | The driver's trajectory action, with all its options. `points` is a list of `(t, positions, velocities)`, sent exactly as you give it                 |
+| `stream`                                               | Opens a streaming session. Call `s.send(setpoint)` at least every `timeout_s`. When the `with` block ends, the arm holds still and the session closes |
+| `list_controllers()`                                   | The driver's streaming controllers, and whether each can be opened now                                                                                |
+| `set_gains`                                            | Sets the session's default impedance gains                                                                                                            |
+| `plan_to_pose`, `plan_to_joints`                       | Asks cuRobo for a plan without moving the arm                                                                                                         |
+| `set_world`                                            | Replaces cuRobo's collision world with one of the packaged worlds                                                                                     |
+
+The constants and dataclasses are in `capability_engine.arm`:
+
+- `HOLD_NONE`, `HOLD_LEVEL`, `HOLD_FIXED`: how much of the tool's orientation a
+  planned path keeps.
+- `POSITION`, `IMPEDANCE`: stiff or compliant control.
+- `QUEUE`, `LATEST_WINS`: whether a new trajectory waits for the running one or
+  replaces it.
+
+Other modules:
+
+- `rammp_arm` has `RammpArm`'s speeds and other settings, and its path helpers
+  (`cartesian_knots`, `joint_trajectory`, `FRAME`, ...).
+- `capability_engine.sim` has the shared PyBullet sim (`make_sim`, `solve_ik`,
+  `tool_pose`, `set_keep_out`).
+
+The arm's tunable values (speeds, tolerances, timeouts) are `arm.*` ROS
+parameters.
 
 ### Exceptions
 
-| Exception      | Raised when                                                                         |
-| -------------- | ----------------------------------------------------------------------------------- |
-| `Cancelled`    | The orchestrator cancelled the action (by `ctx.checkpoint()` and by any arm motion) |
-| `ArmError`     | Base of the arm's errors below; also a refused or failed driver-API call            |
-| `NotInAction`  | An arm call outside `execute()`, or `send()` outside its `with` block               |
-| `ControlTaken` | Another sender took control of the arm mid-action                                   |
-| `EStopped`     | A driver-API command while the arm is e-stopped                                     |
-| `StreamClosed` | The driver closed your stream                                                       |
-| `ModeConflict` | A stream or goal while another one runs                                             |
-| `StateTimeout` | A state read got no fresh message                                                   |
+| Exception      | Raised when                                                                                                    |
+| -------------- | -------------------------------------------------------------------------------------------------------------- |
+| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()` and every arm motion raise it                        |
+| `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails |
+| `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                            |
+| `ControlTaken` | Another program took control of the arm in the middle of your action                                           |
+| `EStopped`     | You called a driver method while the arm is e-stopped                                                          |
+| `StreamClosed` | The driver closed your stream                                                                                  |
+| `ModeConflict` | You started a stream or a trajectory while another one was running                                             |
+| `StateTimeout` | A state read got no recent message                                                                             |
+
+### Terms
+
+- **Orchestrator**: the RAMMP program that engines register with. It starts and
+  cancels their actions and holds the world state.
+- **Knot**: one set of 7 joint angles that a path passes through.
+- **Wrapped to ±π**: each joint angle given between -π and π.
+- **Tool frame**: a point 0.12 m past the arm's flange, along the flange's z
+  axis.
+- **cuRobo**: the motion planner. It finds a path that avoids the obstacles in
+  its collision world.
+- **Impedance control**: the arm gives way when pushed, instead of holding its
+  position stiffly.
+- **Stream**: sending setpoints one after another, instead of a whole trajectory
+  at once.
+- **URDF**: the file that describes the robot's links and joints.
 
 ## A capability
 
