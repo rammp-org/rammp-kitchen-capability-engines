@@ -12,8 +12,9 @@ Every use of the action's entities is inside `_alive()`, which holds _cond: end_
 action ended under _cond before it settles or destroys anything, so inside `_alive()` every entity
 exists and every request sent is one end_action() will settle. After the end, a cancel is left to
 end_action()'s settle (_cancel, _cancel_late_goal) and a state message is dropped (_store). The
-one use outside `_alive()` is Stream.close(), which end_action() itself calls: it holds the
-stream's lock, and end_action() closes the scope only after its own close() has taken that lock.
+uses outside `_alive()` are a Stream's send() and close(), under the stream's lock instead:
+end_action() closes the stream (setting it closed) before it closes the scope, and send() does
+not publish on a closed stream.
 
 In mock mode (`mock=True`) it is a dry run that makes no ROS entity at all: motions and goals log
 "mock: not sent" and succeed, and the state is the last commanded joints (from MOCK_JOINTS), with
@@ -439,18 +440,18 @@ class ArmInterface:
         if stream is not None:
             stream.close()  # waits for a close the stream's block has begun
 
-    def _check_in_action(self, error=NotInAction, message=NOT_IN_ACTION_MESSAGE):
-        """`error`(`message`) unless an action is running."""
+    def _check_in_action(self, message=NOT_IN_ACTION_MESSAGE):
+        """NotInAction(`message`) unless an action is running."""
         if not self._in_action:
-            self._fail(error, message)
+            self._fail(NotInAction, message)
 
     @contextmanager
-    def _alive(self, error=NotInAction, message=NOT_IN_ACTION_MESSAGE):
+    def _alive(self, message=NOT_IN_ACTION_MESSAGE):
         """The one guard of the action's entities: hold it to make or use one. It holds _cond,
         under which end_action() marks the action ended before it settles or destroys anything,
         and raises as _check_in_action() does."""
         with self._cond:
-            self._check_in_action(error, message)
+            self._check_in_action(message)
             yield
 
     def _live(self, use):
@@ -1092,7 +1093,7 @@ class ArmInterface:
     def _send_goal(self, client, g, feedback_callback=None):
         """Send goal `g`, kept in _goals until the driver reports its end. NotInAction ("action
         ended") once the action has ended: the call that began in it was cut short."""
-        with self._alive(NotInAction, ACTION_ENDED_MESSAGE):
+        with self._alive(ACTION_ENDED_MESSAGE):
             send = client.send_goal_async(g, feedback_callback=feedback_callback)
             self._goals.append(send)
         return send
@@ -1107,7 +1108,7 @@ class ArmInterface:
         ctx = self._ctx
         wait_until(lambda: send.done() or not self._in_action, GOAL_ACCEPT_S, ctx)
         gh = send.result() if send.done() else None
-        with self._alive(NotInAction, ACTION_ENDED_MESSAGE):  # end_action() settles it then
+        with self._alive(ACTION_ENDED_MESSAGE):  # end_action() settles it then
             rf = gh.get_result_async() if gh is not None and gh.accepted else None
         if gh is None:  # not answered: the driver may still accept it, so cancel it then
             send.add_done_callback(self._cancel_late_goal)
@@ -1149,7 +1150,7 @@ class ArmInterface:
             raise
         finally:
             self._path_t0 = None
-        self._check_in_action(NotInAction, ACTION_ENDED_MESSAGE)
+        self._check_in_action(ACTION_ENDED_MESSAGE)
         if res is None:
             self._cancel(gh)
             self._fail(Refused, f"{label}: no result in {timeout_s:.0f} s -- goal cancelled")
