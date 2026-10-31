@@ -302,7 +302,12 @@ def test_a_send_racing_the_close_publishes_nothing_after_it(arm_env):
 
         def close_then_message(value):  # runs between send()'s first check and its publish
             s._message = message
-            s.close()
+            # In another thread, as end_action() would, so the test fails, not hangs, if
+            # _message ever runs under send()'s (non-reentrant) lock.
+            closer = threading.Thread(target=s.close, daemon=True)
+            closer.start()
+            closer.join(WAIT_S)
+            assert not closer.is_alive(), "close() is waiting for send()'s lock"
             return message(value)
 
         s._message = close_then_message
