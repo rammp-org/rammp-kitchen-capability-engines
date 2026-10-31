@@ -84,7 +84,7 @@ from capability_engine.arm import HOLD_FIXED, PoseTarget
 
 self.arm.go_to_ee_poses(
     [
-        PoseTarget(view_pos, view_quat, blend_radius=0.05),
+        PoseTarget(view_pos, grasp_quat, blend_radius=0.05),
         PoseTarget(grasp_pos, grasp_quat, hold=HOLD_FIXED, speed_scale=0.2),
     ],
     "to the grasp",
@@ -92,7 +92,10 @@ self.arm.go_to_ee_poses(
 ```
 
 Each target has its own `hold` and `speed_scale` (default `GO_TO_SPEED_SCALE`);
-`control_mode` and `gains` are one for the whole motion. A radius of 0, and the
+`control_mode` and `gains` are one for the whole motion. A hold is checked
+against where the previous leg ended, so a held target must keep the previous
+target's orientation (its tilt under `HOLD_LEVEL`). Give both the same quat, as
+above, or the leg can fail with `PLANNING_FAILED leg 2/2`. A radius of 0, and the
 last target, stop. With a radius above 0 a `JointTarget`'s joints are only passed
 near, not reached. The call returns `True` or `False` and raises like
 `go_to_ee_pose`, and its end check is against the last target. cuRobo checks

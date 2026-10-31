@@ -271,7 +271,8 @@ The constants and dataclasses are in `capability_engine.arm`:
   replaces it.
 - `PoseTarget(pos, quat, hold=HOLD_NONE, blend_radius=0.0, speed_scale=None)`:
   one target of `go_to_ee_poses`. `speed_scale=None` uses the
-  `arm.go_to_speed_scale` parameter.
+  `arm.go_to_speed_scale` parameter. A target with a `hold` must have the same
+  `quat` as the target before it, or that leg may fail to plan.
 - `JointTarget(joints, blend_radius=0.0, speed_scale=None)`: one target of
   `go_to_joint_configs`.
 

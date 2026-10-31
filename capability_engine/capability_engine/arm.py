@@ -281,7 +281,10 @@ class PoseTarget:
     `blend_radius` (m): how close the tool must pass this pose, cutting the corner into the next
     leg instead of stopping on it; 0 stops here, and the last target always stops. The planner
     cuts only as far as the joint limits, collision and the holds allow, which may be not at
-    all."""
+    all. A hold is checked against where the previous leg ended, so a held target (other than
+    the first) must keep the previous target's orientation (its tilt under HOLD_LEVEL): give it
+    the same quat, or the leg may fail to plan (PLANNING_FAILED leg k/N). `quat` is sent
+    normalized."""
 
     pos: tuple
     quat: tuple
@@ -1077,18 +1080,27 @@ class ArmInterface:
         targets = list(targets)
         if not targets:
             self._fail(ArmError, f"{label}: no targets")
+        # The driver refuses a target whose quaternion is not unit (go_to_ee_pose's does not):
+        # send each normalized, and refuse one that is no rotation at all.
+        quats = []
+        for k, t in enumerate(targets):
+            q = np.asarray(t.quat, float)
+            n = float(np.linalg.norm(q))
+            if not (np.isfinite(n) and n > 0.0):
+                self._fail(ArmError, f"{label}: targets[{k}]: quaternion {t.quat} is no rotation")
+            quats.append(q / n)
         last = targets[-1]
         if self._mock:
-            return self.go_to_ee_pose(last.pos, last.quat, label)
+            return self.go_to_ee_pose(last.pos, quats[-1], label)
         g = GoToEEPoses.Goal()
         stamp = self._node.get_clock().now().to_msg()
-        for t in targets:
+        for t, q in zip(targets, quats, strict=True):
             m = EEPoseTarget(orientation_hold=t.hold, blend_radius=float(t.blend_radius))
             m.speed_scale = _speed_scale(t.speed_scale)
             m.pose.header.frame_id, m.pose.header.stamp = rammp_arm.FRAME, stamp
             p, o = m.pose.pose.position, m.pose.pose.orientation
             p.x, p.y, p.z = map(float, t.pos[:3])
-            o.x, o.y, o.z, o.w = map(float, t.quat)
+            o.x, o.y, o.z, o.w = map(float, q)
             g.targets.append(m)
         if not self._go_to("go_to_ee_poses", g, label, None, control_mode, gains, feedback):
             return False

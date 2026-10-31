@@ -10,11 +10,13 @@ import time
 import numpy as np
 import pytest
 import rammp_arm
-from fake_driver import FakeCtx
+from fake_driver import FLATBOT_URDF, FakeCtx
 from rammp_arm import SENDER_ID, TOOL_Z
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
+from capability_engine import arm as arm_module
+from capability_engine import sim
 from capability_engine.arm import (
     HOLD_FIXED,
     HOLD_LEVEL,
@@ -115,6 +117,27 @@ def test_no_targets_and_bad_gains_raise_before_anything_is_sent(arm_env):
     assert not fake.goals["go_to_ee_poses"] and not fake.goals["go_to_joint_configs"]
 
 
+def test_each_quaternion_is_sent_normalized(arm_env):
+    """The driver refuses a GoToEEPoses target whose quaternion is not unit (to 1e-3), where
+    GoToEEPose takes it: a rounded one is normalized before it is sent."""
+    arm, _, fake = arm_env
+    fake.finish_at("go_to_ee_poses", flange=([0.4, 0.1, 0.3 - TOOL_Z], UP))
+    arm.begin_action(FakeCtx(), None)
+    rounded = [0.71, 0.0, 0.0, 0.71]
+    assert arm.go_to_ee_poses([PoseTarget([0.4, 0.1, 0.3], rounded)]) is True
+    o = fake.goals["go_to_ee_poses"][-1].targets[0].pose.pose.orientation
+    np.testing.assert_allclose([o.x, o.y, o.z, o.w], np.array(rounded) / np.linalg.norm(rounded))
+
+
+@pytest.mark.parametrize("quat", [[0.0] * 4, [np.nan, 0.0, 0.0, 1.0]], ids=["zero", "nan"])
+def test_a_quaternion_that_is_no_rotation_raises_before_anything_is_sent(arm_env, quat):
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), None)
+    with pytest.raises(ArmError, match=r"targets\[1\]"):
+        arm.go_to_ee_poses([VIEW, PoseTarget([0.5, 0.1, 0.2], quat)])
+    assert not fake.goals["go_to_ee_poses"]
+
+
 @pytest.mark.parametrize("motion", MOTIONS, ids=lambda f: f.__name__)
 def test_cancel_cancels_the_goal_at_the_driver(arm_env, motion):
     arm, _, fake = arm_env
@@ -172,13 +195,22 @@ def test_the_time_limit_is_per_leg(arm_env, monkeypatch):
 
 
 def test_mock_mode_ends_on_the_last_target(ros):
+    sim.reset_for_tests()
+    sim.make_sim(FLATBOT_URDF)  # the mock state's tool pose comes from this copy's FK
     node = Node("arm_mock_goto_many")
     arm = ArmInterface(node, ReentrantCallbackGroup(), mock=True)
     try:
         arm.begin_action(FakeCtx(), None)
         assert arm.go_to_joint_configs([JointTarget([0.0] * 7), JointTarget(END)]) is True
         np.testing.assert_allclose(arm.raw_joints(), END)
-        assert arm.go_to_ee_poses([VIEW, GRASP]) is True
+
+        arm.go_to_joint_config(arm_module.MOCK_JOINTS)  # back where the mock starts: reachable
+        ee = np.asarray(arm.get_state()["ee_pos"])
+        first, last = ee[:3] + [0.0, 0.05, -0.05], ee[:3] + [0.03, 0.0, -0.03]
+        targets = [PoseTarget(first, ee[3:], blend_radius=0.02), PoseTarget(last, ee[3:])]
+        assert arm.go_to_ee_poses(targets) is True
+        np.testing.assert_allclose(arm.get_state()["ee_pos"][:3], last, atol=sim.MAX_IK_ERR)
     finally:
         arm.end_action()
         node.destroy_node()
+        sim.reset_for_tests()
