@@ -10,12 +10,13 @@
 # torch/torchvision from your requirements (the base ships the Jetson wheels).
 # arm64 only.
 #
-# nightly-20261027 is the base the nightly arm driver is built on (interfaces
-# 672a329f9036), so self.arm speaks the driver's exact messages. It carries the
-# arm, common and orchestrator interfaces; rammp_curobo_interfaces it does not.
+# nightly-20261030 is the base the nightly arm driver is built on (interfaces
+# 73e7ed1716bf, which has GoToEEPoses / GoToJointConfigs), so self.arm speaks
+# the driver's exact messages. It carries the arm, common and orchestrator
+# interfaces; rammp_curobo_interfaces it does not.
 # rammp-cuda, not rammp-base: the handle detector's YOLO runs on the Jetson's GPU (the
 # image ships CUDA 12.6 and the Jetson builds of torch 2.10.0 / torchvision 0.25.0).
-FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261027
+FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261030
 
 WORKDIR /module_ws
 
