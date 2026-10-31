@@ -310,7 +310,7 @@ def test_monitor_cancel_after_end_action_leaves_the_destroyed_client_alone(arm_e
     cancel = ClientGoalHandle.cancel_goal_async
 
     def recording_cancel(gh):
-        client_open.append(arm._opened)
+        client_open.append(bool(arm._entities))
         return cancel(gh)
 
     monkeypatch.setattr(ClientGoalHandle, "cancel_goal_async", recording_cancel)

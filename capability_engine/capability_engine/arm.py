@@ -1,10 +1,10 @@
 """`self.arm`: the arm driver (kinova-gen3-ros2) and its cuRobo planner, for a capability.
 
 `ArmInterface` lives on the engine's node and callback group and owns no node, executor or thread.
-Its ROS entities exist only inside an action: the first arm call after `begin_action()` creates
-them all (`_open`), and `end_action()` settles any goal or stream, destroys them and forgets the
-state they received. An action that never touches the arm costs nothing, and no state read in one
-action is returned in the next.
+Its ROS entities exist only inside an action: each is made the first time a call in the action
+needs it (`_get`), and `end_action()` settles any goal or stream, destroys them and forgets the
+state they received. An action pays only for what it uses (one that only plans subscribes to none
+of the 50 Hz state topics), and no state read in one action is returned in the next.
 
 In mock mode (`mock=True`) it is a dry run that makes no ROS entity at all: motions and goals log
 "mock: not sent" and succeed, and the state is the last commanded joints (from MOCK_JOINTS), with
@@ -77,7 +77,7 @@ from capability_engine.driver_state import (
     StateTimeout,
 )
 
-STATE_WAIT_S = 10.0  # how long the first arm call in an action waits for the driver's state
+STATE_WAIT_S = 10.0  # how long a call waits for the driver's state to arrive
 STATE_STALE_S = 0.5  # /joint_states, /ee_state or /gripper_state older than this is an error
 DIAGNOSTICS_STALE_S = 3.0  # /diagnostics (1 Hz) older than this is an error
 GOAL_ACCEPT_S = 5.0  # how long a motion waits for the driver to accept or reject its goal
@@ -157,7 +157,8 @@ SERVICES = {
     "set_gains": (SetGains, "/set_gains"),
     "set_world": (SetWorld, "/rammp_curobo/set_world"),
 }
-# The first arm call in an action waits for these (RammpArm's constructor did).
+# Every call that reads them or commands the arm waits for these first (RammpArm's constructor
+# did).
 MOTION_STATE = ("/joint_states", "/ee_state", "/gripper_state")
 NOT_IN_ACTION_MESSAGE = "the arm is only available inside an action"
 NO_STATE_MESSAGE = (
@@ -518,10 +519,10 @@ class ArmInterface:
         self._ctx = None
         self._in_action = False
         self._open_lock = threading.Lock()
-        self._opened = False
-        self._scope = None  # the action's ActionScope: the entities _open() made live in it
+        self._scope = None  # the action's ActionScope: the entities _get() made live in it
         self._owns_scope = False  # made by begin_action() (no engine scope): end_action() closes it
-        self._subs, self._actions, self._clients, self._pubs = {}, {}, {}, {}
+        # This action's entities, by action or service name, or topic (they never collide).
+        self._entities = {}
         self._cond = threading.Condition()
         self._latest = {}  # topic -> (dataclass, time.monotonic() when received)
         self.last_error = ""  # the most recent refusal or failure, also logged
@@ -542,7 +543,7 @@ class ArmInterface:
         """Start an action: arm calls are allowed until end_action(). Creates no ROS entity: the
         first call that needs them makes them in `scope`, the engine's for this action (closed by
         the engine after end_action()), or a scope of the arm's own that end_action() closes."""
-        if self._in_action or self._opened:  # the last action never ended: carry nothing over
+        if self._in_action or self._entities:  # the last action never ended: carry nothing over
             self.end_action()
         self._ctx = ctx
         self._owns_scope = scope is None
@@ -553,7 +554,7 @@ class ArmInterface:
         self._in_action = True
 
     def end_action(self):
-        """End the action: settle any goal or stream, forget the entities _open() made (destroying
+        """End the action: settle any goal or stream, forget the entities _get() made (destroying
         them if the scope is the arm's own; the engine closes its scope itself) and the state they
         received, so the next action starts from the driver afresh. Worst case, it waits
         GOAL_ACCEPT_S + CANCEL_SETTLE_S for each goal the driver has not yet answered, to accept
@@ -576,7 +577,7 @@ class ArmInterface:
 
     def _settle(self):
         """Cancel any running goal and close any open stream, waiting for each to settle.
-        Called after the action has ended: uses the stored handles only, never _ensure_open()."""
+        Called after the action has ended: uses the stored handles only, never _get()."""
         with self._cond:
             goals, self._goals = self._goals, []
         for send in goals:
@@ -592,55 +593,62 @@ class ArmInterface:
         if not self._in_action:
             self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
 
-    def _ensure_open(self, wait_state=True):
-        """Create the arm's entities on the first call in an action, and (`wait_state`) wait for
-        the arm's state; the e-stop, the planner and the services need none. The wait is outside
-        _open_lock, so a call that needs no state is never held up by one that waits."""
+    def _get(self, key, make):
+        """This action's entity `key`, made by make(scope) the first time a call needs it: an
+        action pays only for what it uses (rclpy's executor spends ~2 ms per message on the Orin,
+        Demo-Software #263). NotInAction, never a new entity, once end_action() has run."""
         self._check_in_action()
         with self._open_lock:
             # Again under the lock: end_action() may have destroyed everything since the check.
             if not self._in_action:
                 self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-            opened_now = not self._opened
-            if opened_now:
-                self._open()
-        if opened_now and wait_state and not all(self._wait_for(t) for t in MOTION_STATE):
-            self._fail(StateTimeout, NO_STATE_MESSAGE)
+            if key not in self._entities:
+                self._entities[key] = make(self._scope)
+            return self._entities[key]
 
-    def _open(self):
-        """Create the subscriptions, clients and publishers, in the action's scope."""
-        with self._cond:
-            self._latest.clear()
-        scope = self._scope
-        topics = (
-            (JointState, "/joint_states", qos_profile_sensor_data, _joint_states),
-            (EeStateMsg, "/ee_state", qos_profile_sensor_data, _ee_state),
-            (GripperStateMsg, "/gripper_state", qos_profile_sensor_data, _gripper_state),
-            (ControlStatusMsg, "/control_status", LATCHED, self._on_control_status),
-            (StreamStatusMsg, "/stream_status", LATCHED, self._on_stream_status),
-            (DiagnosticArray, "/diagnostics", qos_profile_sensor_data, _diagnostics),
+    def _subscription(self, topic):
+        """Subscribe to the driver's state `topic`, its messages kept in _latest."""
+        msg_type, qos, convert = {
+            "/joint_states": (JointState, qos_profile_sensor_data, _joint_states),
+            "/ee_state": (EeStateMsg, qos_profile_sensor_data, _ee_state),
+            "/gripper_state": (GripperStateMsg, qos_profile_sensor_data, _gripper_state),
+            "/control_status": (ControlStatusMsg, LATCHED, self._on_control_status),
+            "/stream_status": (StreamStatusMsg, LATCHED, self._on_stream_status),
+            "/diagnostics": (DiagnosticArray, qos_profile_sensor_data, _diagnostics),
+        }[topic]
+        return self._get(
+            topic,
+            lambda scope: scope.create_subscription(
+                msg_type, topic, lambda m: self._store(topic, convert(m)), qos
+            ),
         )
-        for msg_type, topic, qos, convert in topics:
-            self._subs[topic] = scope.create_subscription(
-                msg_type, topic, lambda m, t=topic, c=convert: self._store(t, c(m)), qos
-            )
-        for name, (action_type, path) in ACTIONS.items():
-            self._actions[name] = scope.create_action_client(action_type, path)
-        for name, (srv_type, path) in SERVICES.items():
-            self._clients[name] = scope.create_client(srv_type, path)
-        self._pubs["/setpoint/gripper"] = scope.create_publisher(
-            GripperSetpoint, "/setpoint/gripper", SETPOINT_QOS
-        )
-        self._opened = True
+
+    def _action(self, name):
+        """Action client `name` (ACTIONS)."""
+        action_type, path = ACTIONS[name]
+        return self._get(name, lambda scope: scope.create_action_client(action_type, path))
+
+    def _client(self, name):
+        """Service client `name` (SERVICES)."""
+        srv_type, path = SERVICES[name]
+        return self._get(name, lambda scope: scope.create_client(srv_type, path))
+
+    def _motion_state(self):
+        """Subscribe to MOTION_STATE and wait for each, as RammpArm's constructor did: before a
+        read of them or a command. The wait is outside _open_lock, so a call that needs no state
+        is never held up by one that waits. StateTimeout when one does not come."""
+        for topic in MOTION_STATE:
+            self._subscription(topic)
+        if not all(self._wait_for(t) for t in MOTION_STATE):
+            self._fail(StateTimeout, NO_STATE_MESSAGE)
 
     def _destroy(self):
         """Forget the entities; destroy them now if the scope is the arm's own (the engine closes
         its scope itself, after end_action())."""
         if self._owns_scope and self._scope is not None:
             self._scope.close()
-        self._subs, self._actions, self._clients, self._pubs = {}, {}, {}, {}
+        self._entities = {}
         self._scope = None
-        self._opened = False
 
     def _fail(self, error, message):
         self.last_error = message
@@ -662,16 +670,6 @@ class ArmInterface:
             pass
         except ArmError as e:
             self._fail(type(e), str(e))
-
-    def _action(self, name):
-        """Action client `name`, opening the arm's entities if needed; NotInAction, never a
-        KeyError, once end_action() has destroyed them."""
-        self._ensure_open()
-        with self._open_lock:  # not while _destroy() empties the dict
-            client = self._actions.get(name)
-        if client is None:
-            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-        return client
 
     def _wait_for_server(self, client, ctx, timeout_s):
         """Whether the action server came up within `timeout_s`; Cancelled once the action is
@@ -775,7 +773,10 @@ class ArmInterface:
         if self._mock:
             self._check_in_action()
             return self._mock_read(topic)
-        self._ensure_open()
+        if topic in MOTION_STATE:
+            self._motion_state()
+        else:
+            self._subscription(topic)
         latest = self._wait_for(topic)
         if latest is None:
             if topic in MOTION_STATE:
@@ -831,7 +832,9 @@ class ArmInterface:
         if self._mock:
             self._check_in_action()
             return None
-        self._ensure_open()
+        # /control_status before any command: the e-stop, and takeover by its generation.
+        self._subscription("/control_status")
+        self._motion_state()
         self._wait_for("/control_status")
         return self._driver.not_ready(rammp_arm.SENDER_ID)
 
@@ -1294,6 +1297,13 @@ class ArmInterface:
             self._mock_gripper = float(position)
             return self._mock_sent("gripper")
         ctx = self._ctx
+        # Made before the state wait, so discovery has that long (_wait_matched below).
+        pub = self._get(
+            "/setpoint/gripper",
+            lambda scope: scope.create_publisher(
+                GripperSetpoint, "/setpoint/gripper", SETPOINT_QOS
+            ),
+        )
         self._check_command()
         why = self.not_ready()
         if why is not None:
@@ -1306,9 +1316,8 @@ class ArmInterface:
         token = self._driver.token
         if token is not None:
             m.token = list(token)
+        self._wait_matched(pub)  # its first setpoints are not lost while the driver discovers it
         t0, last, still_since = time.monotonic(), self._read("/gripper_state").position, None
-        with self._open_lock:  # after _read() has opened the arm's entities
-            pub = self._pubs.get("/setpoint/gripper")
         while time.monotonic() - t0 < timeout_s:
             if ctx.cancelled():
                 ctx.checkpoint()  # raises the engine's Cancelled
@@ -1449,9 +1458,8 @@ class ArmInterface:
         if self._mock:  # a successful plan with no samples
             self._mock_sent(name)
             return Plan(True, MOCK_NOT_SENT)
-        self._ensure_open(wait_state=False)  # the planner needs no arm state
         ctx = self._ctx
-        client = self._action(name)
+        client = self._action(name)  # the planner needs no arm state
         path = ACTIONS[name][1]
         if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
             self._refuse(f"{name}: no {path} action server (the cuRobo planner)")
@@ -1507,6 +1515,7 @@ class ArmInterface:
         if self._mock:
             return self._mock_sent("set_gains"), MOCK_NOT_SENT
         req = SetGains.Request(spec=_impedance_gains(gains))
+        self._subscription("/control_status")  # before any command, as in not_ready()
         token = self._driver.token
         if token is not None:
             req.token = list(token)
@@ -1519,12 +1528,8 @@ class ArmInterface:
         ends, Cancelled once it is cancelled (both waits poll every POLL_S). Waits for no arm
         state. `on_sent`: called with the request's future once it is sent, so a caller can
         settle a request the driver answers after this call has given up on it."""
-        self._ensure_open(wait_state=False)
+        client = self._client(name)
         ctx = self._ctx
-        with self._open_lock:  # not while _destroy() empties the dict
-            client = self._clients.get(name)
-        if client is None:
-            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
         path = SERVICES[name][1]
         if not wait_until(lambda: self._live(client.service_is_ready), SERVICE_WAIT_S, ctx):
             self._fail(ArmError, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")
@@ -1554,12 +1559,22 @@ class ArmInterface:
         ctx, driver = self._ctx, self._driver
         if self._mock:
             self._mock_sent(f"stream {controller!r}")
-            yield Stream(self, controller, None, ctx, driver)
+            stream = Stream(self, controller, None, ctx, driver)
+            with self._open_lock:  # registered, as a real one: send() honours a cancel and the end
+                self._stream = stream
+            try:
+                yield stream
+            finally:
+                self._close_stream(stream)
             return
         self._check_command()
         why = self.not_ready()
         if why is not None:
             self._fail(_refusal(why), f"stream {controller!r}: {why} -- nothing sent.")
+        # Before open_stream: /stream_status shows the driver closing the session (DriverState),
+        # and _close_stream uses the close_stream client after the action has ended.
+        self._subscription("/stream_status")
+        self._client("close_stream")
         try:
             driver.begin_stream(controller)
         except ModeConflict as e:
@@ -1622,12 +1637,12 @@ class ArmInterface:
         return stream
 
     def _send_setpoint(self, stream, setpoint):
-        if self._mock:
-            return
         if self._stream is not stream:  # closed already: the block outlived it, or its action
             self._fail(NotInAction, STREAM_ENDED_MESSAGE)
         if stream._ctx.cancelled():
             stream._ctx.checkpoint()  # raises the engine's Cancelled; the block's exit closes
+        if self._mock:  # a dry run: nothing goes to the driver
+            return
         try:
             stream._driver.check_command()
         except ArmError as e:
@@ -1667,7 +1682,7 @@ class ArmInterface:
                     if stream._token is not None:
                         req.token = list(stream._token)
                     res = self._wait(
-                        self._clients["close_stream"].call_async(req), CLOSE_STREAM_WAIT_S
+                        self._entities["close_stream"].call_async(req), CLOSE_STREAM_WAIT_S
                     )
                     log = self._node.get_logger()
                     if res is None:
@@ -1675,7 +1690,8 @@ class ArmInterface:
                     elif not res.closed:  # the driver had closed it already
                         log.debug(f"stream {stream.controller!r}: /close_stream: {res.message}")
             finally:
-                self._node.destroy_publisher(stream._pub)
+                if stream._pub is not None:  # none in mock mode
+                    self._node.destroy_publisher(stream._pub)
 
     def _hold_setpoint(self, channel):
         """What holds the arm as a session closes: zeros for twist and velocity, the latest

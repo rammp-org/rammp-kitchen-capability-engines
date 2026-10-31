@@ -9,9 +9,10 @@ from rammp_arm_interfaces.msg import ImpedanceGains
 from rammp_curobo_interfaces.action import PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.node import Node
 
 from capability_engine import arm as arm_module
-from capability_engine.arm import HOLD_LEVEL, Controller, Plan
+from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan
 from capability_engine.driver_state import (
     ArmError,
     EStopped,
@@ -330,6 +331,18 @@ def test_planner_needs_no_arm_state(arm_env):
     assert time.monotonic() - t0 < WAIT_S  # far below STATE_WAIT_S
 
 
+def test_plan_subscribes_to_no_arm_state(arm_env):
+    """An action that only plans pays for none of the 50 Hz state subscriptions (~2 ms a message
+    on the Orin): each entity is made when a call first needs it."""
+    arm, node, fake = arm_env
+    fake.plan_result([[0.0] * 7, [0.1] * 7])
+    arm.begin_action(FakeCtx(), None)
+    assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
+    topics = {s.topic_name for s in node.subscriptions}
+    assert not topics & {"/joint_states", "/ee_state", "/gripper_state"}
+    assert fake.count_subscribers("/joint_states") == 0
+
+
 def test_plan_to_joints_and_failure(arm_env):
     arm, _, fake = arm_env
     arm.begin_action(FakeCtx(), None)
@@ -381,3 +394,26 @@ def test_cancel_while_opening_closes_only_a_stream_the_driver_opened(arm_env, ac
         with arm.stream("ee_twist"):
             pass
     assert len(fake.requests["close_stream"]) == (1 if accept else 0)
+
+
+def test_mock_stream_honours_cancel_and_its_end(ros):
+    """mock:=true: send() after the block raises NotInAction, and a send loop ends on a cancel."""
+    node = Node("arm_test_mock")
+    arm = ArmInterface(node, ReentrantCallbackGroup(), mock=True)
+    ctx = FakeCtx()
+    arm.begin_action(ctx, None)
+    try:
+        with arm.stream("ee_twist") as s:
+            s.send(TWIST)
+        with pytest.raises(NotInAction):
+            s.send(TWIST)
+        threading.Timer(CANCEL_AFTER_S, ctx.cancel).start()
+        deadline = time.monotonic() + WAIT_S  # a bound, so the test fails rather than hangs
+        with pytest.raises(Cancelled):
+            with arm.stream("ee_twist") as s:
+                while time.monotonic() < deadline:
+                    s.send(TWIST)
+                    time.sleep(POLL_S)
+    finally:
+        arm.end_action()
+        node.destroy_node()
