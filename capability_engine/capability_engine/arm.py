@@ -188,13 +188,20 @@ class _ActionEnded(NotInAction, Refused):
 
 def _rammp(method):
     """RammpArm's failure path over a method of the core, which raises: a Refused (already
-    logged and kept in last_error) returns False; every other error propagates."""
+    logged and kept in last_error) returns False, and so does a call its action's end cut short
+    (NotInAction once it had begun inside the action); every other error propagates."""
 
     @functools.wraps(method)
     def call(self, *args, **kwargs):
+        began = self._in_action
         try:
             return method(self, *args, **kwargs)
         except Refused:
+            return False
+        except NotInAction:
+            if not began:  # called outside an action
+                raise
+            self.last_error = ACTION_ENDED_MESSAGE
             return False
 
     return call

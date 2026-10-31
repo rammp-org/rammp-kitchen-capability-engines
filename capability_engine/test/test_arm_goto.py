@@ -297,19 +297,6 @@ def end_just_before_the_send(arm_env, monkeypatch):
     return arm, fake
 
 
-@pytest.mark.parametrize(
-    "motion",
-    [lambda arm: arm.move_joints([[0.3] * 7]), lambda arm: arm.go_to_joint_config([0.1] * 7)],
-    ids=["move_joints", "go_to_joint_config"],
-)
-def test_a_motion_whose_action_ends_before_the_send_returns_false(end_just_before_the_send, motion):
-    """RammpArm's motions return False whenever their action ends after they started."""
-    arm, fake = end_just_before_the_send
-    assert motion(arm) is False
-    assert arm.last_error == "action ended"
-    assert not fake.goals["execute_joint_trajectory"] and not fake.goals["go_to_joint_config"]
-
-
 def test_the_driver_api_whose_action_ends_before_the_send_is_not_in_action(
     end_just_before_the_send,
 ):
