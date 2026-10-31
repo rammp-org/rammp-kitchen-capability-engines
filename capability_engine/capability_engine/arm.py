@@ -68,7 +68,7 @@ from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 from capability_engine import sim
-from capability_engine.action_scope import ActionScope, _Gate
+from capability_engine.action_scope import ActionScope
 from capability_engine.cornell_commands import (
     CartesianTrajectoryCommand,
     CloseGripperCommand,
@@ -499,18 +499,47 @@ def wait_until(ready, timeout_s, ctx=None):
         time.sleep(POLL_S)
 
 
-class Stream:
-    """A streaming session open on the driver, from ArmInterface.stream(): send() a setpoint
-    at least every timeout_s, or the driver closes the session."""
+def _result_within(fut, timeout_s):
+    """`fut`'s result, or None if it is not done within `timeout_s` (no cancel: settling)."""
+    return fut.result() if wait_until(fut.done, timeout_s) else None
 
-    def __init__(self, arm, controller, channel, ctx, driver):
+
+class Stream:
+    """A streaming session on the driver, from ArmInterface.stream(): send() a setpoint at
+    least every timeout_s, or the driver closes the session. close() ends it, once: on leaving
+    the stream's block, or in end_action(), whichever comes first. Its publisher and the
+    close_stream client are the action's (None in mock mode, where nothing is sent): they outlive
+    the session, and end_action() destroys them only after closing it."""
+
+    def __init__(self, arm, controller, channel, pub, close_client):
         self.controller = controller
         self.channel = channel  # the /setpoint/<channel> it publishes on
         self._arm = arm
-        self._ctx, self._driver, self._token = ctx, driver, driver.token
-        self._pub = None  # created before open_stream, destroyed when the session closes
+        self._ctx, self._driver, self._token = arm._ctx, arm._driver, arm._driver.token
+        self._pub, self._close_client = pub, close_client
+        self._lock = threading.Lock()  # send()'s publish and close(), one at a time
+        self._closed = False
         self._opened = False  # the driver accepted open_stream
-        self._open_sent = None  # open_stream's future once sent: settled by _close_stream
+        self._open_sent = None  # open_stream's future once sent: settled by close()
+
+    def open(self, timeout_s, gains):
+        """Open the session at the driver: Refused when it says no."""
+        req = OpenStream.Request(controller=self.controller, timeout_s=float(timeout_s))
+        req.gains = gains
+        if self._token is not None:
+            req.token = list(self._token)
+        res = self._arm._call("open_stream", req, on_sent=lambda f: setattr(self, "_open_sent", f))
+        if not res.accepted:
+            self._arm._fail(
+                Refused, f"stream {self.controller!r}: refused ({res.error_code}) {res.message}"
+            )
+        self._opened = True
+        if list(res.channels) != [self.channel]:
+            self._arm._fail(
+                ArmError,
+                f"stream {self.controller!r}: opened on {list(res.channels)}, not "
+                f"[{self.channel!r}] as /list_controllers said",
+            )
 
     def send(self, setpoint):
         """Send one setpoint: 7 joints for joint controllers, (pos, quat xyzw) of /ee_state's frame
@@ -518,7 +547,58 @@ class Stream:
         arm_mount axes) for twist controllers. Never blocks. Raises Cancelled once the action is
         cancelled, StreamClosed, ControlTaken or EStopped when the driver will not take it, and
         NotInAction outside the with block; leaving the block then zeroes and closes the session."""
-        self._arm._send_setpoint(self, setpoint)
+        fail = self._arm._fail
+        if self._closed:  # the block outlived it, or its action
+            fail(NotInAction, STREAM_ENDED_MESSAGE)
+        if self._ctx.cancelled():
+            self._ctx.checkpoint()  # raises the engine's Cancelled; the block's exit closes
+        if self._pub is None:  # mock mode: a dry run
+            return
+        try:
+            self._driver.check_command()
+        except ArmError as e:
+            fail(type(e), str(e))
+        m = self._message(setpoint)
+        if m is None:
+            fail(
+                ArmError,
+                f"stream {self.controller!r}: a {self.channel} setpoint is "
+                f"{SETPOINTS[self.channel][1]}, not {setpoint!r}",
+            )
+        with self._lock:
+            if self._closed:
+                fail(NotInAction, STREAM_ENDED_MESSAGE)
+            self._pub.publish(m)
+
+    def close(self):
+        """Send the hold setpoint and close the session at the driver, once. Waits at most
+        twice CLOSE_STREAM_WAIT_S."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if not self._opened and self._open_sent is not None:
+                # Sent, unanswered (cancelled, timed out, the action ended): close it if the
+                # driver opened it after all. Never otherwise: CloseStream closes whatever
+                # session is open, perhaps another sender's.
+                res = _result_within(self._open_sent, CLOSE_STREAM_WAIT_S)
+                self._opened = res is not None and res.accepted
+            # Closed by the driver already: no hold, no CloseStream, which closes whatever
+            # session is open now, perhaps another sender's.
+            if not self._opened or self._driver.stream_closed:
+                return
+            hold = self._arm._hold_setpoint(self.channel)
+            if hold is not None:
+                self._pub.publish(self._message(hold))
+            req = CloseStream.Request()
+            if self._token is not None:
+                req.token = list(self._token)
+            res = _result_within(self._close_client.call_async(req), CLOSE_STREAM_WAIT_S)
+        log = self._arm._node.get_logger()
+        if res is None:
+            log.warning(f"stream {self.controller!r}: /close_stream: no answer")
+        elif not res.closed:  # the driver had closed it already
+            log.debug(f"stream {self.controller!r}: /close_stream: {res.message}")
 
     def _message(self, value):
         """`value` as this session's setpoint message, with the token; None for a wrong shape."""
@@ -542,7 +622,6 @@ class ArmInterface:
         # One end_action() at a time: one in another thread returns only once the first is done,
         # and begin_action() never installs an action while the last one is being torn down.
         self._end_lock = threading.Lock()
-        self._stream_lock = threading.Lock()  # a stream's send and close, and its client's end
         self._scope = None  # the action's ActionScope: the entities _get() made live in it
         # This action's entities, by action or service name, or topic (they never collide).
         self._entities = {}
@@ -587,11 +666,10 @@ class ArmInterface:
             try:
                 self._settle()
             finally:
-                with self._stream_lock:  # not while a stream's close uses its client
-                    with self._cond:
-                        scope, self._scope, self._entities = self._scope, None, {}
-                    if scope is not None:
-                        scope.close()
+                with self._cond:
+                    scope, self._scope, self._entities = self._scope, None, {}
+                if scope is not None:
+                    scope.close()
                 with self._cond:
                     self._latest.clear()
                     self._cond.notify_all()
@@ -613,6 +691,7 @@ class ArmInterface:
         Called after the action has ended: uses the stored handles only, never _get()."""
         with self._cond:
             goals, self._goals = self._goals, []
+            stream, self._stream = self._stream, None
         # Sent, perhaps not yet accepted: wait for all their answers at once, cancel each one
         # accepted, then wait for all to settle, so however many are left the settle takes at
         # most GOAL_ACCEPT_S + CANCEL_SETTLE_S (inside the engine's stop_wait_s()).
@@ -624,9 +703,8 @@ class ArmInterface:
                 gh.cancel_goal_async()
                 results.append(gh.get_result_async())
         wait_until(lambda: all(rf.done() for rf in results), CANCEL_SETTLE_S)
-        stream = self._stream
         if stream is not None:
-            self._close_stream(stream)
+            stream.close()  # waits for a close the stream's block has begun
 
     def _check_in_action(self):
         with self._alive():
@@ -892,7 +970,8 @@ class ArmInterface:
 
     def robot_description(self) -> str:
         """The driver's URDF, from /arm/robot_description (latched), through a one-shot
-        subscription destroyed after the first message. Opens none of the arm's other entities.
+        subscription of its own, destroyed as the call returns (NotInAction once the action
+        ends). Opens none of the arm's other entities.
         In mock mode, MOCK_URDF's text; SimModelError when it is unset (this is make_sim()'s
         model provider, and a missing model is a sim error)."""
         self._check_in_action()
@@ -907,19 +986,16 @@ class ArmInterface:
             received["urdf"] = m.data
             done.set()
 
-        gate = _Gate(self._group)
-        sub = self._node.create_subscription(
-            String, "/arm/robot_description", on_description, LATCHED, callback_group=gate
-        )
+        scope = ActionScope(self._node, self._group)  # its own: destroyed when the call returns
         try:
-            if not wait_until(done.is_set, STATE_WAIT_S, self._ctx):
+            scope.create_subscription(String, "/arm/robot_description", on_description, LATCHED)
+            if not wait_until(lambda: self._live(done.is_set), STATE_WAIT_S, self._ctx):
                 self._fail(
                     StateTimeout,
                     f"no /arm/robot_description in {STATE_WAIT_S:g} s -- is the arm driver up?",
                 )
         finally:
-            gate.close()
-            self._node.destroy_subscription(sub)
+            scope.close()
         return received["urdf"]
 
     # -- motions (RammpArm's, rammp_arm.py@7bc328ae:260-458) -------------------------------
@@ -1256,7 +1332,7 @@ class ArmInterface:
             # Anything raised while the goal runs (a cancel, Ctrl-C, the monitor, a state read)
             # must not leave it running: cancel it and let the driver settle it, then re-raise.
             self._cancel(gh)
-            self._wait(rf, CANCEL_SETTLE_S)
+            _result_within(rf, CANCEL_SETTLE_S)
             if isinstance(e, KeyboardInterrupt):
                 self._node.get_logger().warning("  RammpArm: Ctrl-C -- goal cancelled")
             raise
@@ -1305,11 +1381,6 @@ class ArmInterface:
             gh.cancel_goal_async()
             rf = gh.get_result_async()
         rf.add_done_callback(lambda _: self._forget(send))
-
-    @staticmethod
-    def _wait(fut, timeout_s):
-        """`fut`'s result, or None if it is not done within `timeout_s` (no cancel: settling)."""
-        return fut.result() if wait_until(fut.done, timeout_s) else None
 
     @_rammp
     def gripper(self, position, timeout_s=4.0, force=None, *, speed=None):
@@ -1541,9 +1612,10 @@ class ArmInterface:
         path = SERVICES[name][1]
         if not wait_until(lambda: self._live(client.service_is_ready), SERVICE_WAIT_S, ctx):
             self._fail(Refused, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")
-        future = self._live(lambda: client.call_async(request))
-        if on_sent is not None:
-            on_sent(future)
+        with self._alive():  # end_action() settles a request sent here (`on_sent`)
+            future = client.call_async(request)
+            if on_sent is not None:
+                on_sent(future)
         if not wait_until(lambda: self._live(future.done), SERVICE_CALL_S, ctx):
             self._fail(Refused, f"{path}: no answer in {SERVICE_CALL_S:g} s")
         return future.result()
@@ -1557,64 +1629,60 @@ class ArmInterface:
         _impedance_gains()) apply to impedance controllers, at open. One session is one motion: a
         pause is honoured at open only. Leaving the block, however (an exception, a cancel, the
         driver closing it), sends the hold setpoint (zeros for twist and velocity controllers, the
-        measured pose or joints for pose and position ones; nothing for torque), closes the
-        session and destroys its publisher. ModeConflict while a goal or another stream runs;
-        ArmError when the arm must not be commanded (EStopped when e-stopped) or the driver has no
-        such controller available. In mock mode the session opens and send() does nothing."""
+        measured pose or joints for pose and position ones; nothing for torque) and closes the
+        session; its publisher is the action's. ModeConflict while a goal or another stream runs;
+        Refused when the arm must not be commanded (EStopped when e-stopped), ArmError when the
+        driver has no such controller available. In mock mode the session opens and send() does
+        nothing."""
         gains = _impedance_gains(gains)
         timeout_s = STREAM_TIMEOUT_S if timeout_s is None else timeout_s
         self._checkpoint()
-        ctx, driver = self._ctx, self._driver
         if self._mock:
             self._mock_sent(f"stream {controller!r}")
-            stream = Stream(self, controller, None, ctx, driver)
+            stream = Stream(self, controller, None, None, None)
             with self._alive():  # registered, as a real one: send() honours a cancel and the end
                 self._stream = stream
             try:
                 yield stream
             finally:
-                self._close_stream(stream)
+                stream.close()
             return
         self._check_ready(f"stream {controller!r}: ")
         # Before open_stream: /stream_status shows the driver closing the session (DriverState),
-        # and _close_stream uses the close_stream client after the action has ended.
+        # and the stream closes with the close_stream client after the action has ended.
         self._subscription("/stream_status")
-        self._client("close_stream")
+        close_client = self._client("close_stream")
+        driver = self._driver
         try:
             driver.begin_stream(controller)
         except ModeConflict as e:
             self._fail(ModeConflict, str(e))
         stream = None
         try:
-            stream = self._new_stream(controller, ctx, driver)
-            req = OpenStream.Request(controller=controller, timeout_s=float(timeout_s), gains=gains)
-            if stream._token is not None:
-                req.token = list(stream._token)
-            res = self._call("open_stream", req, on_sent=lambda f: setattr(stream, "_open_sent", f))
-            if not res.accepted:
-                self._fail(
-                    Refused, f"stream {controller!r}: refused ({res.error_code}) {res.message}"
-                )
-            stream._opened = True
-            if list(res.channels) != [stream.channel]:
-                self._fail(
-                    ArmError,
-                    f"stream {controller!r}: opened on {list(res.channels)}, not "
-                    f"[{stream.channel!r}] as /list_controllers said",
-                )
+            channel = self._channel(controller)
+            topic = f"/setpoint/{channel}"
+            pub = self._get(
+                topic,
+                lambda scope: scope.create_publisher(SETPOINTS[channel][0], topic, SETPOINT_QOS),
+            )
+            stream = Stream(self, controller, channel, pub, close_client)
+            with self._alive():  # registered: end_action() closes it from here on
+                self._stream = stream
+            # The driver's OpenStream: create the publisher and let discovery settle BEFORE
+            # opening, or the first setpoints go nowhere and the session expires.
+            self._wait_matched(pub)
+            stream.open(timeout_s, gains)
             yield stream
         finally:
             try:
                 if stream is not None:
-                    self._close_stream(stream)
+                    stream.close()
             finally:
                 driver.end_stream()
 
-    def _new_stream(self, controller, ctx, driver):
-        """A Stream on `controller`'s channel, its publisher made and matched (the driver's
-        OpenStream: create the publisher and let discovery settle BEFORE opening, or the first
-        setpoints go nowhere and the session expires). ArmError for a controller the driver
-        does not list as available."""
+    def _channel(self, controller):
+        """The /setpoint/<channel> `controller` reads; ArmError for a controller the driver does
+        not list as available."""
         listed = {c.name: c for c in self.list_controllers()}
         row = listed.get(controller)
         if row is None:
@@ -1629,73 +1697,7 @@ class ArmInterface:
                 f"stream: controller {controller!r} reads {row.channels}, not one of "
                 f"{sorted(SETPOINTS)}",
             )
-        stream = Stream(self, controller, row.channels[0], ctx, driver)
-        with self._alive():  # registered: end_action() closes it from here on
-            msg_type = SETPOINTS[stream.channel][0]
-            topic = f"/setpoint/{stream.channel}"
-            stream._pub = self._node.create_publisher(msg_type, topic, SETPOINT_QOS)
-            self._stream = stream
-        self._wait_matched(stream._pub)
-        return stream
-
-    def _send_setpoint(self, stream, setpoint):
-        if self._stream is not stream:  # closed already: the block outlived it, or its action
-            self._fail(NotInAction, STREAM_ENDED_MESSAGE)
-        if stream._ctx.cancelled():
-            stream._ctx.checkpoint()  # raises the engine's Cancelled; the block's exit closes
-        if self._mock:  # a dry run: nothing goes to the driver
-            return
-        try:
-            stream._driver.check_command()
-        except ArmError as e:
-            self._fail(type(e), str(e))
-        m = stream._message(setpoint)
-        if m is None:
-            self._fail(
-                ArmError,
-                f"stream {stream.controller!r}: a {stream.channel} setpoint is "
-                f"{SETPOINTS[stream.channel][1]}, not {setpoint!r}",
-            )
-        with self._stream_lock:  # not while the session closes and destroys its publisher
-            if self._stream is not stream:
-                self._fail(NotInAction, STREAM_ENDED_MESSAGE)
-            stream._pub.publish(m)
-
-    def _close_stream(self, stream):
-        """Send the hold setpoint, close the session at the driver and destroy its publisher,
-        once: on leaving the stream's block, or in end_action() (_settle), whichever comes first.
-        Stored handles only; waits at most CLOSE_STREAM_WAIT_S."""
-        with self._stream_lock:  # not while end_action() destroys the close_stream client
-            if self._stream is not stream:
-                return
-            self._stream = None
-            try:
-                if not stream._opened and stream._open_sent is not None:
-                    # Sent, unanswered (cancelled, timed out, the action ended): close it if the
-                    # driver opened it after all. Never otherwise: CloseStream closes whatever
-                    # session is open, perhaps another sender's.
-                    res = self._wait(stream._open_sent, CLOSE_STREAM_WAIT_S)
-                    stream._opened = res is not None and res.accepted
-                # Closed by the driver already: no hold, no CloseStream, which closes whatever
-                # session is open now, perhaps another sender's.
-                if stream._opened and not stream._driver.stream_closed:
-                    hold = self._hold_setpoint(stream.channel)
-                    if hold is not None:
-                        stream._pub.publish(stream._message(hold))
-                    req = CloseStream.Request()
-                    if stream._token is not None:
-                        req.token = list(stream._token)
-                    res = self._wait(
-                        self._entities["close_stream"].call_async(req), CLOSE_STREAM_WAIT_S
-                    )
-                    log = self._node.get_logger()
-                    if res is None:
-                        log.warning(f"stream {stream.controller!r}: /close_stream: no answer")
-                    elif not res.closed:  # the driver had closed it already
-                        log.debug(f"stream {stream.controller!r}: /close_stream: {res.message}")
-            finally:
-                if stream._pub is not None:  # none in mock mode
-                    self._node.destroy_publisher(stream._pub)
+        return row.channels[0]
 
     def _hold_setpoint(self, channel):
         """What holds the arm as a session closes: zeros for twist and velocity, the latest
