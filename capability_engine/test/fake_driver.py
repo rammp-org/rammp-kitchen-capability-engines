@@ -14,11 +14,12 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
     state:        set_joints(q7), set_flange(pos, quat), set_gripper(pos), move_gripper_to(pos, s),
                   pause_publishing(), resume_publishing(), set_publish_rate(hz)
     arbitration:  enforce_arbitration(), seize(owner_id), engage_estop(status_delay_s=0.0)
+    observing:    running() goals executing, session_open()
     goals:        accept(name, bool), delay_accept(seconds), set_result(name, code, final_error),
                   set_result_after_cancel(name, code), hold_goals(seconds),
                   finish_at(name, joints=None, flange=None), cancelled(name)
     streams:      set_controllers([(name, channels, available)]), publish_stream_status(open),
-                  late_close_on_next_open()
+                  late_close_on_next_open(), delay_open_stream(seconds, accept)
     planner:      plan_result(points, joint_names=JOINTS, velocities=True)
 
 Every accepted driver goal (not the planner's) publishes one feedback message as it starts:
@@ -40,9 +41,7 @@ from rammp_arm import ERRORS, JOINTS
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
     GoToEEPose,
-    GoToEEPoses,
     GoToJointConfig,
-    GoToJointConfigs,
     GoToPreset,
 )
 from rammp_arm_interfaces.msg import (
@@ -99,8 +98,6 @@ ACTIONS = {
     "execute_joint_trajectory": (ExecuteJointTrajectory, "/execute_joint_trajectory"),
     "go_to_ee_pose": (GoToEEPose, "/go_to_ee_pose"),
     "go_to_joint_config": (GoToJointConfig, "/go_to_joint_config"),
-    "go_to_ee_poses": (GoToEEPoses, "/go_to_ee_poses"),
-    "go_to_joint_configs": (GoToJointConfigs, "/go_to_joint_configs"),
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),
@@ -205,6 +202,9 @@ class FakeDriver(Node):
         self._plan = None
         self._controllers = list(CONTROLLERS)
         self._late_close = False
+        self._open_delay_s, self._open_accept = 0.0, True  # delay_open_stream()
+        self._running = 0  # goals executing now
+        self._session = False  # a streaming session is open
 
         self._js_pub = self.create_publisher(JointState, "/joint_states", qos_profile_sensor_data)
         self._ee_pub = self.create_publisher(EeState, "/ee_state", qos_profile_sensor_data)
@@ -369,11 +369,25 @@ class FakeDriver(Node):
         """Whether a cancel was requested for any goal of `name`."""
         return name in self._cancelled
 
+    def running(self):
+        """How many goals, of any action, are executing now."""
+        with self._lock:
+            return self._running
+
+    def session_open(self):
+        """Whether a streaming session is open now."""
+        return self._session
+
     # -- test controls: streams and planner -----------------------------------------------------
 
     def set_controllers(self, controllers):
         """What /list_controllers reports: [(name, channels, available), ...]."""
         self._controllers = [(n, list(c), bool(a)) for n, c, a in controllers]
+
+    def delay_open_stream(self, seconds, accept=True):
+        """open_stream answers this long after it is called, accepting (and opening) or refusing
+        as `accept` says."""
+        self._open_delay_s, self._open_accept = float(seconds), bool(accept)
 
     def late_close_on_next_open(self):
         """The next open_stream publishes /stream_status open=False just before it opens: the
@@ -417,6 +431,15 @@ class FakeDriver(Node):
         return CancelResponse.ACCEPT
 
     def _execute(self, name, handle):
+        with self._lock:
+            self._running += 1
+        try:
+            return self._run_goal(name, handle)
+        finally:
+            with self._lock:
+                self._running -= 1
+
+    def _run_goal(self, name, handle):
         halts = self._halts
         if name not in PLANNER_ACTIONS:
             fb = ACTIONS[name][0].Feedback(fraction_complete=FEEDBACK_FRACTION)
@@ -466,6 +489,11 @@ class FakeDriver(Node):
         return handler(request, response)
 
     def _srv_open_stream(self, request, response):
+        time.sleep(self._open_delay_s)
+        if not self._open_accept:
+            response.error_code = STREAM_REJECTED
+            response.message = "FakeDriver: refused (delay_open_stream)"
+            return response
         row = next((c for c in self._controllers if c[0] == request.controller), None)
         if row is None or not row[2] or not self._authorized(request):
             response.error_code = STREAM_REJECTED
@@ -476,11 +504,12 @@ class FakeDriver(Node):
             self.publish_stream_status(False)
             time.sleep(LATE_CLOSE_S)  # taken by the arm, not overwritten in its depth-1 queue
         response.accepted, response.channels = True, row[1]
+        self._session = True
         self.publish_stream_status(True, row[0], row[1], request.timeout_s)
         return response
 
     def _srv_close_stream(self, request, response):
-        response.closed = True
+        response.closed, self._session = True, False
         self.publish_stream_status(False)
         return response
 

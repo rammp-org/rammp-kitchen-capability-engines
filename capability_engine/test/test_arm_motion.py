@@ -333,3 +333,27 @@ def test_execute_command_dispatch(arm_env):
     assert grips == [("gripper", 0.0), ("gripper", 1.0)]
     with pytest.raises(TypeError, match="unsupported command"):
         arm.execute_command(object())
+
+
+def test_taken_before_the_first_command_raises(arm_env):
+    """Another sender takes the arm after the action's first arm call (a state read) but before
+    its first command: the command raises ControlTaken, not just a refusal from the driver."""
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), b"\x01" * 16)
+    arm.get_state()
+
+    def owner():
+        latest = arm._latest.get("/control_status")
+        return None if latest is None else latest[0].owner_id
+
+    deadline = time.monotonic() + HOLD_S
+    while owner() is None:  # the baseline the takeover is judged against has arrived
+        assert time.monotonic() < deadline, "no /control_status"
+        time.sleep(0.01)
+    fake.seize("teleop")
+    # Seen before the command: a takeover still in flight then is the driver's to refuse.
+    while owner() != "teleop":
+        assert time.monotonic() < deadline, "the takeover's /control_status never arrived"
+        time.sleep(0.01)
+    with pytest.raises(ControlTaken, match="teleop"):
+        arm.move_joints([[0.3] * 7])

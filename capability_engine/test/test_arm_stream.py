@@ -9,6 +9,7 @@ from rammp_arm_interfaces.msg import ImpedanceGains
 from rammp_curobo_interfaces.action import PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.node import Node
 
 from capability_engine import arm as arm_module
 from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan
@@ -25,6 +26,7 @@ TOKEN = b"\x03" * 16
 WAIT_S = 2.0  # how long a test waits for a message to reach the fake or the arm
 POLL_S = 0.01
 TWIST = np.ones(6) * 0.01
+OPEN_DELAY_S = 0.5  # how long the fake takes to answer open_stream, past CANCEL_AFTER_S
 CANCEL_AFTER_S = 0.3  # when a test cancels the action during a service call
 SLOW_ANSWER_S = 2.0  # how long the slow test service takes to answer (> CANCEL_AFTER_S)
 
@@ -215,7 +217,10 @@ def test_stream_closed_by_driver_raises(arm_env):
             fake.publish_stream_status(False)
             wait_until(lambda: not arm.stream_status().open)
             s.send(TWIST)
-    assert len(fake.requests["close_stream"]) == 1
+    # Closed by the driver: its exit neither holds nor closes (a CloseStream now could close
+    # another sender's session).
+    assert not fake.requests["close_stream"]
+    assert twist_values(fake.setpoints["/setpoint/twist"][-1]) != [0.0] * 6
     assert arm._driver.mode == "idle"
 
 
@@ -263,36 +268,6 @@ def test_end_action_closes_an_open_stream(arm_env):
             s.send(TWIST)
     assert last_twist(fake) == [0.0] * 6
     assert len(fake.requests["close_stream"]) == 1
-
-
-def test_control_services_refused_under_engine(arm_env):
-    arm, _, fake = arm_env
-    arm.begin_action(FakeCtx(), None)
-    for call in (
-        lambda: arm.acquire_control("bench"),
-        lambda: arm.release_control(),
-        lambda: arm.revoke_control("test"),
-    ):
-        with pytest.raises(ArmError, match="control comes from the orchestrator"):
-            call()
-    for name in ("acquire_control", "release_control", "revoke_control"):
-        assert not fake.requests[name]
-
-
-def test_control_services_standalone(arm_env):
-    _, node, fake = arm_env
-    arm = ArmInterface(node, ReentrantCallbackGroup(), standalone=True)
-    arm.begin_action(FakeCtx(), None)
-    try:
-        accepted, token, generation, _ = arm.acquire_control("bench")
-        assert accepted and len(token) == 16 and generation == 1
-        assert fake.requests["acquire_control"][-1].owner_id == "bench"
-        assert arm.release_control(token)[0] is True
-        assert bytes(fake.requests["release_control"][-1].token) == token
-        assert arm.revoke_control("done")[0] is True
-        assert fake.requests["revoke_control"][-1].reason == "done"
-    finally:
-        arm.end_action()
 
 
 def test_plan_to_pose_round_trip(arm_env):
@@ -348,17 +323,27 @@ def test_unusable_plan_fails(arm_env, names, velocities):
         assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
 
 
-def test_planner_and_estop_need_no_arm_state(arm_env):
-    """With no /joint_states, /ee_state or /gripper_state, both go out at once."""
+def test_planner_needs_no_arm_state(arm_env):
+    """With no /joint_states, /ee_state or /gripper_state, a plan goes out at once."""
     arm, _, fake = arm_env
     fake.pause_publishing()
     fake.plan_result([[0.0] * 7, [0.1] * 7])
     arm.begin_action(FakeCtx(), None)
     t0 = time.monotonic()
-    arm.estop(True, "test")
     assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
     assert time.monotonic() - t0 < WAIT_S  # far below STATE_WAIT_S
-    wait_until(lambda: fake.setpoints["/estop"])
+
+
+def test_plan_subscribes_to_no_arm_state(arm_env):
+    """An action that only plans pays for none of the 50 Hz state subscriptions (~2 ms a message
+    on the Orin): each entity is made when a call first needs it."""
+    arm, node, fake = arm_env
+    fake.plan_result([[0.0] * 7, [0.1] * 7])
+    arm.begin_action(FakeCtx(), None)
+    assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
+    topics = {s.topic_name for s in node.subscriptions}
+    assert not topics & {"/joint_states", "/ee_state", "/gripper_state"}
+    assert fake.count_subscribers("/joint_states") == 0
 
 
 def test_plan_to_joints_and_failure(arm_env):
@@ -399,12 +384,39 @@ def test_services(arm_env):
     assert fake.requests["set_world"][-1].world == "kitchen"
 
 
-def test_estop_publishes(arm_env):
-    arm, node, fake = arm_env
-    arm.begin_action(FakeCtx(), None)
-    arm.estop(True, "test")
-    wait_until(lambda: fake.setpoints["/estop"])
-    m = fake.setpoints["/estop"][-1]
-    assert m.engaged is True
-    assert m.reason == "test"
-    assert m.source == node.get_name()
+@pytest.mark.parametrize("accept", [True, False], ids=["opened_late", "refused_late"])
+def test_cancel_while_opening_closes_only_a_stream_the_driver_opened(arm_env, accept):
+    """Cancelled while /open_stream is answering: a session the driver opens after all is closed;
+    one it refuses is left alone (CloseStream would close whatever session is open)."""
+    arm, _, fake = arm_env
+    fake.delay_open_stream(OPEN_DELAY_S, accept=accept)
+    ctx = FakeCtx()
+    arm.begin_action(ctx, None)
+    threading.Timer(CANCEL_AFTER_S, ctx.cancel).start()
+    with pytest.raises(Cancelled):
+        with arm.stream("ee_twist"):
+            pass
+    assert len(fake.requests["close_stream"]) == (1 if accept else 0)
+
+
+def test_mock_stream_honours_cancel_and_its_end(ros):
+    """mock:=true: send() after the block raises NotInAction, and a send loop ends on a cancel."""
+    node = Node("arm_test_mock")
+    arm = ArmInterface(node, ReentrantCallbackGroup(), mock=True)
+    ctx = FakeCtx()
+    arm.begin_action(ctx, None)
+    try:
+        with arm.stream("ee_twist") as s:
+            s.send(TWIST)
+        with pytest.raises(NotInAction):
+            s.send(TWIST)
+        threading.Timer(CANCEL_AFTER_S, ctx.cancel).start()
+        deadline = time.monotonic() + WAIT_S  # a bound, so the test fails rather than hangs
+        with pytest.raises(Cancelled):
+            with arm.stream("ee_twist") as s:
+                while time.monotonic() < deadline:
+                    s.send(TWIST)
+                    time.sleep(POLL_S)
+    finally:
+        arm.end_action()
+        node.destroy_node()

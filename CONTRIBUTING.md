@@ -72,30 +72,6 @@ as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
 they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
 first arm call to the end of that `execute()`.
 
-**Several targets in one motion.** Each `go_to_*` call plans from rest and
-stops dead at its goal. `go_to_ee_poses` and `go_to_joint_configs` send a list
-of targets as ONE goal to the driver. It plans every leg and blends them, so the
-arm passes a target without stopping wherever its `blend_radius` (m) lets the
-tool cut the corner:
-
-```python
-from capability_engine.arm import HOLD_FIXED, PoseTarget
-
-self.arm.go_to_ee_poses(
-    [
-        PoseTarget(view_pos, view_quat, blend_radius=0.05),
-        PoseTarget(grasp_pos, grasp_quat, hold=HOLD_FIXED, speed_scale=0.2),
-    ],
-    "to the grasp",
-)
-```
-
-Each target has its own `hold` and `speed_scale` (default `GO_TO_SPEED_SCALE`).
-A radius of 0, and the last target, stop. With a radius above 0 a
-`JointTarget`'s joints are only passed near, not reached. cuRobo checks every cut
-corner for collisions in its world. Near something that isn't in that world, keep
-the radius small.
-
 **What a motion can raise.** `RammpArm`'s methods return `False` for a refused
 or failed motion, an e-stop included, as they always did. On top of that, any
 motion can raise:
@@ -131,8 +107,26 @@ the driver's own model. These rules keep your checks and the arm in agreement:
   `rammp_arm.CART_SPEED *= s` are fine.
 
 **Control comes from the orchestrator.** It grants the arm when it starts your
-action. Never call `/acquire_control` or `/release_control`; `self.arm` does not
-either.
+action. Never call `/acquire_control`, `/release_control` or `/revoke_control`, and
+never publish `/estop`: the orchestrator and other nodes own them, and `self.arm`
+has no way to. It only reads them: it refuses commands while the arm is e-stopped
+and raises `ControlTaken` when another sender takes the arm.
+
+**Your own topics: subscribe only during the action.** An idle subscription still
+costs CPU for every message it receives (about 2 ms each on the Orin:
+Demo-Software #263), so a camera or detections subscription should exist only
+while an action needs it. Make it inside `execute()` with
+`self.create_action_subscription(...)` (and `self.create_action_publisher(...)`,
+`self.create_action_tf_buffer()` in place of a `TransformListener`): the same
+arguments as rclpy's, and the engine destroys them when the action ends. Do not
+destroy subscriptions yourself: on Humble, destroying one while the executor
+spins can crash the node, and the engine does it in the safe order. Plain
+`self.create_subscription()` still works for what the node needs all its life.
+
+**Cancel ends the action promptly.** Call `ctx.checkpoint()` between steps and keep
+each step short: on a cancel or a stop (`docker stop`), `self.arm` cancels its
+motion at once, but your own code ends only at its next checkpoint, and a stop
+waits at most a few seconds for it.
 
 **No `print`.** Ruff forbids it. When you migrate a student script, turn each
 `print(msg)` into `self.get_logger().info(msg)` (`warn`/`error` where it was a

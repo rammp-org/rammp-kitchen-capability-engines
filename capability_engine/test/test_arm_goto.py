@@ -16,6 +16,9 @@ from capability_engine.engine import Cancelled
 
 HOLD_S = 5.0  # how long the fake runs a goal in the tests that need one running
 TOKEN = b"\x02" * 16
+UNANSWERED_GOALS = 5  # goals left unanswered when the action ends
+UNANSWERED_WAIT_S = 0.3  # GOAL_ACCEPT_S in that test
+NEVER_ANSWERED_S = 3.0  # the fake answers them only after all are sent and end_action() gave up
 UP = [0.0, 0.0, 0.0, 1.0]  # identity quaternion, x y z w
 CUSTOM = {"kq": [10.0] * 7, "zeta": 0.7, "torque_limit": [20.0] * 7}
 
@@ -276,7 +279,7 @@ def test_end_action_while_the_goal_is_accepted_cancels_it(arm_env):
     motion.join(HOLD_S)
     assert result == [False]
     assert arm.last_error == "action ended"
-    assert arm._goal is None
+    assert not arm._goals
 
 
 def test_execute_joint_trajectory_ended_action_is_not_in_action(arm_env):
@@ -310,7 +313,7 @@ def test_monitor_cancel_after_end_action_leaves_the_destroyed_client_alone(arm_e
     cancel = ClientGoalHandle.cancel_goal_async
 
     def recording_cancel(gh):
-        client_open.append(arm._opened)
+        client_open.append(bool(arm._entities))
         return cancel(gh)
 
     monkeypatch.setattr(ClientGoalHandle, "cancel_goal_async", recording_cancel)
@@ -323,3 +326,54 @@ def test_monitor_cancel_after_end_action_leaves_the_destroyed_client_alone(arm_e
     assert arm.last_error == "action ended"
     assert fake.cancelled("execute_joint_trajectory")  # by end_action()'s settle
     assert client_open == [True]  # the monitor's cancel did not touch the destroyed client
+
+
+def test_gripper_estopped_returns_false(arm_env):
+    arm, _, fake = arm_env
+    fake.engage_estop()
+    arm.begin_action(FakeCtx(), TOKEN)
+    assert arm.gripper(1.0) is False
+    assert "E-STOPPED" in arm.last_error
+    assert not fake.setpoints["/setpoint/gripper"]  # nothing sent
+
+
+def test_gripper_estop_mid_stream_returns_false(arm_env):
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), TOKEN)
+    threading.Timer(0.3, fake.engage_estop).start()  # the fake's gripper never moves: ~0.8 s
+    assert arm.gripper(1.0) is False
+    assert "E-STOPPED" in arm.last_error
+
+
+@pytest.mark.parametrize("end_action", [False, True], ids=["in_action", "after_end_action"])
+def test_goal_accepted_after_the_wait_is_cancelled(arm_env, monkeypatch, end_action):
+    arm, _, fake = arm_env
+    monkeypatch.setattr(arm_module, "GOAL_ACCEPT_S", 0.4)
+    fake.hold_goals(HOLD_S)
+    # accepted after the call gives up on it, and within end_action()'s own GOAL_ACCEPT_S wait
+    fake.delay_accept(0.6)
+    arm.begin_action(FakeCtx(), None)
+    assert arm.move_joints([[0.3] * 7]) is False
+    assert "no answer from the driver" in arm.last_error  # not "REJECTED -- nothing moved"
+    if end_action:
+        arm.end_action()  # before the driver accepts the goal
+    deadline = time.monotonic() + HOLD_S
+    while not fake.cancelled("execute_joint_trajectory") and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.cancelled("execute_joint_trajectory")
+
+
+def test_end_action_settles_many_unanswered_goals_at_once(arm_env, monkeypatch):
+    """Several goals left unanswered: end_action() waits for their answers together, so it stays
+    within one GOAL_ACCEPT_S (+ CANCEL_SETTLE_S), inside the engine's stop_wait_s() on a stop."""
+    arm, _, fake = arm_env
+    monkeypatch.setattr(arm_module, "GOAL_ACCEPT_S", UNANSWERED_WAIT_S)
+    fake.delay_accept(NEVER_ANSWERED_S)
+    arm.begin_action(FakeCtx(), None)
+    for _ in range(UNANSWERED_GOALS):
+        assert arm.move_joints([[0.3] * 7]) is False
+    assert len(arm._goals) == UNANSWERED_GOALS
+    t0 = time.monotonic()
+    arm.end_action()
+    assert time.monotonic() - t0 < 2 * UNANSWERED_WAIT_S
+    time.sleep(NEVER_ANSWERED_S)  # the fake answers and runs them before the fixture tears down
