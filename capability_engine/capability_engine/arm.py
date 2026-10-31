@@ -6,6 +6,13 @@ needs it (`_get`), and `end_action()` settles any goal or stream, destroys them 
 state they received. An action pays only for what it uses (one that only plans subscribes to none
 of the 50 Hz state topics), and no state read in one action is returned in the next.
 
+Threading: any thread may call it during an action, and end_action() may run in another thread
+while a call is in progress; executor callbacks (state, goal answers, feedback) must never block.
+Every use of the action's entities is inside `_alive()`, which holds _cond: end_action() marks the
+action ended under _cond before it settles or destroys anything, so inside `_alive()` every entity
+exists and every request sent is one end_action() will settle. After the end, a cancel is left to
+end_action()'s settle (_cancel, _cancel_late_goal) and a state message is dropped (_store).
+
 In mock mode (`mock=True`) it is a dry run that makes no ROS entity at all: motions and goals log
 "mock: not sent" and succeed, and the state is the last commanded joints (from MOCK_JOINTS), with
 the tool pose from the sim's FK when a sim exists or can be built from MOCK_URDF. That FK sets the
@@ -518,15 +525,14 @@ class ArmInterface:
         self._driver = DriverState(standalone=standalone)
         self._ctx = None
         self._in_action = False
-        self._open_lock = threading.Lock()
-        # begin_action() and end_action() one at a time: a slow end_action() in one thread must
-        # not tear down the next action another thread has begun meanwhile.
-        self._lifecycle_lock = threading.RLock()
+        # One end_action() at a time: one in another thread returns only once the first is done,
+        # and begin_action() never installs an action while the last one is being torn down.
+        self._end_lock = threading.Lock()
+        self._stream_lock = threading.Lock()  # a stream's send and close, and its client's end
         self._scope = None  # the action's ActionScope: the entities _get() made live in it
-        self._owns_scope = False  # made by begin_action() (no engine scope): end_action() closes it
         # This action's entities, by action or service name, or topic (they never collide).
         self._entities = {}
-        self._cond = threading.Condition()
+        self._cond = threading.Condition()  # _in_action, _latest, _goals and _entities: _alive()
         self._latest = {}  # topic -> (dataclass, time.monotonic() when received)
         self.last_error = ""  # the most recent refusal or failure, also logged
         self.last_path = []  # the last trajectory's measured tool path: [(t, x, y, z)]
@@ -544,39 +550,37 @@ class ArmInterface:
 
     def begin_action(self, ctx, token: bytes | None, scope: ActionScope | None = None):
         """Start an action: arm calls are allowed until end_action(). Creates no ROS entity: the
-        first call that needs them makes them in `scope`, the engine's for this action (closed by
-        the engine after end_action()), or a scope of the arm's own that end_action() closes."""
-        with self._lifecycle_lock:
-            if self._in_action or self._entities:  # the last action never ended: carry nothing
-                self.end_action()
-            self._ctx = ctx
-            self._owns_scope = scope is None
-            self._scope = ActionScope(self._node, self._group) if scope is None else scope
-            # A fresh baseline: this action's /control_status generation is its own.
-            self._driver = DriverState(standalone=self._standalone)
-            self._driver.set_token(token)
+        first call that needs them makes them in `scope` (the engine's for this action, or a new
+        one), which end_action() closes."""
+        self.end_action()  # the last action never ended: carry nothing
+        scope = ActionScope(self._node, self._group) if scope is None else scope
+        driver = DriverState(standalone=self._standalone)  # a fresh baseline: this action's
+        driver.set_token(token)  # /control_status generation is its own
+        with self._cond:
+            self._ctx, self._scope, self._driver = ctx, scope, driver
             self._in_action = True
 
     def end_action(self):
-        """End the action: settle any goal or stream, forget the entities _get() made (destroying
-        them if the scope is the arm's own; the engine closes its scope itself) and the state they
-        received, so the next action starts from the driver afresh. Worst case, it waits
-        GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals the driver has not yet answered (all at
-        once), to accept them and then to settle their cancels, and twice CLOSE_STREAM_WAIT_S for
-        a stream to open late and then close."""
-        with self._cond:
-            self._in_action = False
-            self._cond.notify_all()  # a call waiting for state wakes with NotInAction
-        with self._lifecycle_lock:
+        """End the action: settle any goal or stream, close its scope (destroying the entities
+        _get() made) and forget the state they received, so the next action starts from the
+        driver afresh. Worst case, it waits GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals the
+        driver has not yet answered (all at once), to accept them and then to settle their
+        cancels, and twice CLOSE_STREAM_WAIT_S for a stream to open late and then close."""
+        with self._end_lock:
+            with self._cond:
+                self._in_action = False
+                self._cond.notify_all()  # a call waiting for state wakes with NotInAction
             try:
                 self._settle()
             finally:
-                with self._open_lock:
-                    self._destroy()
+                with self._stream_lock:  # not while a stream's close uses its client
+                    with self._cond:
+                        scope, self._scope, self._entities = self._scope, None, {}
+                    if scope is not None:
+                        scope.close()
                 with self._cond:
                     self._latest.clear()
                     self._cond.notify_all()
-                self._ctx = None
 
     def close(self):
         """A no-op under the engine, which owns the node."""
@@ -602,18 +606,29 @@ class ArmInterface:
             self._close_stream(stream)
 
     def _check_in_action(self):
-        if not self._in_action:
-            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        with self._alive():
+            pass
+
+    @contextmanager
+    def _alive(self):
+        """The one guard of the action's entities: hold it to make or use one. It holds _cond,
+        under which end_action() marks the action ended before it settles or destroys anything.
+        NotInAction once the action has ended."""
+        with self._cond:
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            yield
+
+    def _live(self, use):
+        """use(), inside _alive()."""
+        with self._alive():
+            return use()
 
     def _get(self, key, make):
         """This action's entity `key`, made by make(scope) the first time a call needs it: an
         action pays only for what it uses (rclpy's executor spends ~2 ms per message on the Orin,
         Demo-Software #263). NotInAction, never a new entity, once end_action() has run."""
-        self._check_in_action()
-        with self._open_lock:
-            # Again under the lock: end_action() may have destroyed everything since the check.
-            if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        with self._alive():
             if "/control_status" not in self._entities:
                 # With the action's first entity: the generation it first reports is the takeover
                 # baseline, so another sender taking the arm before the first command still
@@ -653,20 +668,12 @@ class ArmInterface:
 
     def _motion_state(self):
         """Subscribe to MOTION_STATE and wait for each, as RammpArm's constructor did: before a
-        read of them or a command. The wait is outside _open_lock, so a call that needs no state
+        read of them or a command. The wait is outside _alive(), so a call that needs no state
         is never held up by one that waits. StateTimeout when one does not come."""
         for topic in MOTION_STATE:
             self._subscription(topic)
         if not all(self._wait_for(t) for t in MOTION_STATE):
             self._fail(StateTimeout, NO_STATE_MESSAGE)
-
-    def _destroy(self):
-        """Forget the entities; destroy them now if the scope is the arm's own (the engine closes
-        its scope itself, after end_action())."""
-        if self._owns_scope and self._scope is not None:
-            self._scope.close()
-        self._entities = {}
-        self._scope = None
 
     def _fail(self, error, message):
         self.last_error = message
@@ -693,14 +700,6 @@ class ArmInterface:
         """Whether the action server came up within `timeout_s`; Cancelled once the action is
         cancelled, NotInAction once it ends."""
         return wait_until(lambda: self._live(client.server_is_ready), timeout_s, ctx)
-
-    def _live(self, use):
-        """use(), on one of this action's entities: under _cond, after _in_action is checked, as
-        end_action() clears _in_action under _cond before it destroys them. NotInAction after."""
-        with self._cond:
-            if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-            return use()
 
     def _estopped_within(self, timeout_s):
         """Whether /control_status shows the arm e-stopped, waiting up to `timeout_s` for it."""
@@ -1179,23 +1178,20 @@ class ArmInterface:
         except ModeConflict as e:
             self._fail(ModeConflict, str(e))
         try:
-            # The client is used under _cond, after _in_action is checked: end_action() clears
-            # _in_action under _cond before it settles self._goals and destroys the client.
-            with self._cond:
-                send = None
-                if self._in_action:
-                    send = client.send_goal_async(
-                        g, feedback_callback=None if feedback is None else on_feedback
-                    )
-                    self._goals.append(send)
-            if send is None:
-                self._refuse(ACTION_ENDED_MESSAGE)
-                return None
+            send = self._send_goal(client, g, None if feedback is None else on_feedback)
             return self._goal_result(
                 name, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
             )
         finally:
             self._driver.end_goal()
+
+    def _send_goal(self, client, g, feedback_callback=None):
+        """Send goal `g`, kept in _goals until the driver reports its end. NotInAction once the
+        action has ended."""
+        with self._alive():
+            send = client.send_goal_async(g, feedback_callback=feedback_callback)
+            self._goals.append(send)
+        return send
 
     def _goal_result(
         self, name, send, timeout_s, ctx, token, rejected, timed_out, monitor, trajectory
@@ -1340,11 +1336,7 @@ class ArmInterface:
             why = self._driver.not_ready(rammp_arm.SENDER_ID)  # e.g. e-stopped mid-stream
             if why is not None:
                 return self._refuse(f"  RammpArm: gripper: {why}")
-            # Under _cond: end_action() clears _in_action under it before it destroys `pub`.
-            with self._cond:
-                if not self._in_action:
-                    self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-                pub.publish(m)
+            self._live(lambda: pub.publish(m))
             time.sleep(GRIPPER_PERIOD_S)
             g = self._read("/gripper_state").position
             now = time.monotonic()
@@ -1480,13 +1472,7 @@ class ArmInterface:
         if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
             self._refuse(f"{name}: no {path} action server (the cuRobo planner)")
             return Plan(False, self.last_error)
-        with self._cond:  # as in _run_goal: end_action() settles self._goals before it destroys
-            send = None
-            if self._in_action:
-                send = client.send_goal_async(g)
-                self._goals.append(send)
-        if send is None:
-            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        send = self._send_goal(client, g)
         res = self._goal_result(
             name,
             send,
@@ -1576,7 +1562,7 @@ class ArmInterface:
         if self._mock:
             self._mock_sent(f"stream {controller!r}")
             stream = Stream(self, controller, None, ctx, driver)
-            with self._open_lock:  # registered, as a real one: send() honours a cancel and the end
+            with self._alive():  # registered, as a real one: send() honours a cancel and the end
                 self._stream = stream
             try:
                 yield stream
@@ -1642,9 +1628,7 @@ class ArmInterface:
                 f"{sorted(SETPOINTS)}",
             )
         stream = Stream(self, controller, row.channels[0], ctx, driver)
-        with self._open_lock:  # registered: end_action() closes it from here on
-            if not self._in_action:
-                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        with self._alive():  # registered: end_action() closes it from here on
             msg_type = SETPOINTS[stream.channel][0]
             topic = f"/setpoint/{stream.channel}"
             stream._pub = self._node.create_publisher(msg_type, topic, SETPOINT_QOS)
@@ -1670,7 +1654,7 @@ class ArmInterface:
                 f"stream {stream.controller!r}: a {stream.channel} setpoint is "
                 f"{SETPOINTS[stream.channel][1]}, not {setpoint!r}",
             )
-        with self._open_lock:  # not while the session closes and destroys its publisher
+        with self._stream_lock:  # not while the session closes and destroys its publisher
             if self._stream is not stream:
                 self._fail(NotInAction, STREAM_ENDED_MESSAGE)
             stream._pub.publish(m)
@@ -1679,7 +1663,7 @@ class ArmInterface:
         """Send the hold setpoint, close the session at the driver and destroy its publisher,
         once: on leaving the stream's block, or in end_action() (_settle), whichever comes first.
         Stored handles only; waits at most CLOSE_STREAM_WAIT_S."""
-        with self._open_lock:  # not while _destroy() destroys the close_stream client
+        with self._stream_lock:  # not while end_action() destroys the close_stream client
             if self._stream is not stream:
                 return
             self._stream = None

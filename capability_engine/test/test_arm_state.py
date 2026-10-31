@@ -151,20 +151,27 @@ def test_state_timeout_keeps_rammp_arms_message(arm_env, monkeypatch):
     assert isinstance(raised.value, RuntimeError)  # what RammpArm's callers catch
 
 
-def test_end_action_between_check_and_open(arm_env, monkeypatch):
-    arm, node, _ = arm_env
+def test_end_action_while_an_entity_is_made(arm_env, monkeypatch):
+    """Another thread's end_action() lands while a call makes the action's first entity: the
+    entity is still destroyed, and the call raises NotInAction instead of making more."""
+    arm, node, fake = arm_env
     base = counts(node)
+    fake.pause_publishing()  # no state: the call is still waiting when the end lands
     arm.begin_action(FakeCtx(), None)
-    arm.get_state()
-    check = arm._check_in_action
+    ender = threading.Thread(target=arm.end_action)
+    make = ActionScope.create_subscription
 
-    def check_then_end():  # another thread's end_action() lands between the check and the lock
-        check()
-        arm.end_action()
+    def end_while_making(scope, *args):
+        if ender.ident is None:
+            ender.start()
+            time.sleep(0.1)  # end_action() is under way, waiting for this call's guard
+        return make(scope, *args)
 
-    monkeypatch.setattr(arm, "_check_in_action", check_then_end)
+    monkeypatch.setattr(ActionScope, "create_subscription", end_while_making)
     with pytest.raises(NotInAction):
         arm.get_state()
+    ender.join(WAKE_LIMIT_S)
+    assert not ender.is_alive()
     assert counts(node) == base
 
 
