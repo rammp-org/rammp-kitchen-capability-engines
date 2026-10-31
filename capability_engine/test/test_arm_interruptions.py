@@ -214,6 +214,18 @@ def test_a_motion_outside_an_action_still_raises(arm_env):
         arm.move_joints([[0.3] * 7])
 
 
+def test_a_motion_misusing_a_closed_stream_still_raises(arm_env):
+    """Only the end of the action turns NotInAction into False: a monitor that sends on a
+    stream closed earlier in the same action raises it, as RammpArm's callers expect."""
+    arm, _, fake = arm_env
+    fake.hold_goals(GOAL_S)
+    arm.begin_action(FakeCtx(), None)
+    with arm.stream("ee_twist") as s:
+        pass
+    with pytest.raises(NotInAction, match="the stream is closed"):
+        arm.move_joints([[0.3] * 7], monitor=lambda: s.send(TWIST))
+
+
 def test_a_gripper_cut_short_by_the_end_of_its_action_returns_false(arm_env, monkeypatch):
     landing = (Publisher, "publish", False)
     result, _ = run_cut_short(arm_env, monkeypatch, lambda arm: arm.gripper(1.0), landing)
