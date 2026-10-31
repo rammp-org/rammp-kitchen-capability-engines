@@ -179,13 +179,6 @@ NO_STATE_MESSAGE = (
 )
 
 
-# Both, so one raise suits both layers: the driver API raises it as NotInAction, and _rammp
-# turns it (a Refused) into False, as RammpArm returned for a motion its action cut short.
-class _ActionEnded(NotInAction, Refused):
-    """The action ended while a call waited on a goal it sent: NotInAction to the driver API,
-    False from RammpArm's methods."""
-
-
 def _rammp(method):
     """RammpArm's failure path over a method of the core, which raises: a Refused (already
     logged and kept in last_error) returns False, and so does a call its action's end cut short
@@ -988,9 +981,9 @@ class ArmInterface:
         return res
 
     def _send_goal(self, client, g, feedback_callback=None):
-        """Send goal `g`, kept in _goals until the driver reports its end. _ActionEnded once the
-        action has ended: the call that began in it was cut short."""
-        with self._alive(_ActionEnded, ACTION_ENDED_MESSAGE):
+        """Send goal `g`, kept in _goals until the driver reports its end. NotInAction ("action
+        ended") once the action has ended: the call that began in it was cut short."""
+        with self._alive(NotInAction, ACTION_ENDED_MESSAGE):
             send = client.send_goal_async(g, feedback_callback=feedback_callback)
             self._goals.append(send)
         return send
@@ -999,13 +992,13 @@ class ArmInterface:
         """Wait for goal `send`'s acceptance, then up to `timeout_s` for its result: the action's
         Result. A cancel of the action cancels the goal and raises Cancelled. Refused (`label`
         first) when the goal is refused or unanswered, or has no result in time (it is then
-        cancelled); _ActionEnded when its action ends. `monitor`: polled while the goal runs; True
-        cancels the goal and sets monitor_stopped. `path`: record last_path. `moves`: a goal that
-        moves the arm (not a plan), so a refusal says nothing moved."""
+        cancelled); NotInAction ("action ended") when its action ends. `monitor`: polled while
+        the goal runs; True cancels the goal and sets monitor_stopped. `path`: record last_path.
+        `moves`: a goal that moves the arm (not a plan), so a refusal says nothing moved."""
         ctx = self._ctx
         wait_until(lambda: send.done() or not self._in_action, GOAL_ACCEPT_S, ctx)
         gh = send.result() if send.done() else None
-        with self._alive(_ActionEnded, ACTION_ENDED_MESSAGE):  # end_action() settles it then
+        with self._alive(NotInAction, ACTION_ENDED_MESSAGE):  # end_action() settles it then
             rf = gh.get_result_async() if gh is not None and gh.accepted else None
         if gh is None:  # not answered: the driver may still accept it, so cancel it then
             send.add_done_callback(self._cancel_late_goal)
@@ -1047,7 +1040,7 @@ class ArmInterface:
             raise
         finally:
             self._path_t0 = None
-        self._check_in_action(_ActionEnded, ACTION_ENDED_MESSAGE)
+        self._check_in_action(NotInAction, ACTION_ENDED_MESSAGE)
         if res is None:
             self._cancel(gh)
             self._fail(Refused, f"{label}: no result in {timeout_s:.0f} s -- goal cancelled")
@@ -1239,8 +1232,6 @@ class ArmInterface:
                 self._fail(Refused, f"{name}: no {path} action server (the cuRobo planner)")
             send = self._send_goal(client, g)
             res = self._goal_result(send, PLAN_TIMEOUT_S, name, moves=False)
-        except NotInAction:
-            raise
         except Refused as e:  # a failed plan
             return Plan(False, str(e))
         if not res.success:
