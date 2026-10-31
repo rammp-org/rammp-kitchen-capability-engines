@@ -16,6 +16,9 @@ from capability_engine.engine import Cancelled
 
 HOLD_S = 5.0  # how long the fake runs a goal in the tests that need one running
 TOKEN = b"\x02" * 16
+UNANSWERED_GOALS = 5  # goals left unanswered when the action ends
+UNANSWERED_WAIT_S = 0.3  # GOAL_ACCEPT_S in that test
+NEVER_ANSWERED_S = 3.0  # the fake answers them only after all are sent and end_action() gave up
 UP = [0.0, 0.0, 0.0, 1.0]  # identity quaternion, x y z w
 CUSTOM = {"kq": [10.0] * 7, "zeta": 0.7, "torque_limit": [20.0] * 7}
 
@@ -358,3 +361,19 @@ def test_goal_accepted_after_the_wait_is_cancelled(arm_env, monkeypatch, end_act
     while not fake.cancelled("execute_joint_trajectory") and time.monotonic() < deadline:
         time.sleep(0.01)
     assert fake.cancelled("execute_joint_trajectory")
+
+
+def test_end_action_settles_many_unanswered_goals_at_once(arm_env, monkeypatch):
+    """Several goals left unanswered: end_action() waits for their answers together, so it stays
+    within one GOAL_ACCEPT_S (+ CANCEL_SETTLE_S), inside the engine's STOP_WAIT_S on a stop."""
+    arm, _, fake = arm_env
+    monkeypatch.setattr(arm_module, "GOAL_ACCEPT_S", UNANSWERED_WAIT_S)
+    fake.delay_accept(NEVER_ANSWERED_S)
+    arm.begin_action(FakeCtx(), None)
+    for _ in range(UNANSWERED_GOALS):
+        assert arm.move_joints([[0.3] * 7]) is False
+    assert len(arm._goals) == UNANSWERED_GOALS
+    t0 = time.monotonic()
+    arm.end_action()
+    assert time.monotonic() - t0 < 2 * UNANSWERED_WAIT_S
+    time.sleep(NEVER_ANSWERED_S)  # the fake answers and runs them before the fixture tears down

@@ -63,7 +63,8 @@ REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
 # On SIGTERM/SIGINT, how long the cancelled action may take to end: inside docker stop's 10 s
-# grace, and longer than self.arm's worst settle (GOAL_ACCEPT_S + CANCEL_SETTLE_S).
+# grace, and longer than self.arm's worst settle (end_action(): GOAL_ACCEPT_S + CANCEL_SETTLE_S
+# + 2 * CLOSE_STREAM_WAIT_S, 7.4 s by default). Raising those arm.* parameters means raising this.
 STOP_WAIT_S = 8.0
 START_WAIT_S = 1.0  # an accepted goal not handed to execute within this was lost by rclpy
 SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them

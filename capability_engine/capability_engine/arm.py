@@ -519,6 +519,9 @@ class ArmInterface:
         self._ctx = None
         self._in_action = False
         self._open_lock = threading.Lock()
+        # begin_action() and end_action() one at a time: a slow end_action() in one thread must
+        # not tear down the next action another thread has begun meanwhile.
+        self._lifecycle_lock = threading.RLock()
         self._scope = None  # the action's ActionScope: the entities _get() made live in it
         self._owns_scope = False  # made by begin_action() (no engine scope): end_action() closes it
         # This action's entities, by action or service name, or topic (they never collide).
@@ -543,34 +546,37 @@ class ArmInterface:
         """Start an action: arm calls are allowed until end_action(). Creates no ROS entity: the
         first call that needs them makes them in `scope`, the engine's for this action (closed by
         the engine after end_action()), or a scope of the arm's own that end_action() closes."""
-        if self._in_action or self._entities:  # the last action never ended: carry nothing over
-            self.end_action()
-        self._ctx = ctx
-        self._owns_scope = scope is None
-        self._scope = ActionScope(self._node, self._group) if scope is None else scope
-        # A fresh baseline: this action's /control_status generation is its own, not the last's.
-        self._driver = DriverState(standalone=self._standalone)
-        self._driver.set_token(token)
-        self._in_action = True
+        with self._lifecycle_lock:
+            if self._in_action or self._entities:  # the last action never ended: carry nothing
+                self.end_action()
+            self._ctx = ctx
+            self._owns_scope = scope is None
+            self._scope = ActionScope(self._node, self._group) if scope is None else scope
+            # A fresh baseline: this action's /control_status generation is its own.
+            self._driver = DriverState(standalone=self._standalone)
+            self._driver.set_token(token)
+            self._in_action = True
 
     def end_action(self):
         """End the action: settle any goal or stream, forget the entities _get() made (destroying
         them if the scope is the arm's own; the engine closes its scope itself) and the state they
         received, so the next action starts from the driver afresh. Worst case, it waits
-        GOAL_ACCEPT_S + CANCEL_SETTLE_S for each goal the driver has not yet answered, to accept
-        it and then to settle its cancel, or CLOSE_STREAM_WAIT_S for a stream to close."""
+        GOAL_ACCEPT_S + CANCEL_SETTLE_S for the goals the driver has not yet answered (all at
+        once), to accept them and then to settle their cancels, and twice CLOSE_STREAM_WAIT_S for
+        a stream to open late and then close."""
         with self._cond:
             self._in_action = False
             self._cond.notify_all()  # a call waiting for state wakes with NotInAction
-        try:
-            self._settle()
-        finally:
-            with self._open_lock:
-                self._destroy()
-            with self._cond:
-                self._latest.clear()
-                self._cond.notify_all()
-            self._ctx = None
+        with self._lifecycle_lock:
+            try:
+                self._settle()
+            finally:
+                with self._open_lock:
+                    self._destroy()
+                with self._cond:
+                    self._latest.clear()
+                    self._cond.notify_all()
+                self._ctx = None
 
     def close(self):
         """A no-op under the engine, which owns the node."""
@@ -580,11 +586,17 @@ class ArmInterface:
         Called after the action has ended: uses the stored handles only, never _get()."""
         with self._cond:
             goals, self._goals = self._goals, []
+        # Sent, perhaps not yet accepted: wait for all their answers at once, cancel each one
+        # accepted, then wait for all to settle, so however many are left the settle takes at
+        # most GOAL_ACCEPT_S + CANCEL_SETTLE_S (inside the engine's STOP_WAIT_S).
+        wait_until(lambda: all(send.done() for send in goals), GOAL_ACCEPT_S)
+        results = []
         for send in goals:
-            # sent, perhaps not yet accepted: wait for the handle to cancel it
-            gh = self._wait(send, GOAL_ACCEPT_S)
+            gh = send.result() if send.done() else None
             if gh is not None and gh.accepted:
-                self._cancel_goal(gh, gh.get_result_async())
+                gh.cancel_goal_async()
+                results.append(gh.get_result_async())
+        wait_until(lambda: all(rf.done() for rf in results), CANCEL_SETTLE_S)
         stream = self._stream
         if stream is not None:
             self._close_stream(stream)
@@ -1284,12 +1296,6 @@ class ArmInterface:
             gh.cancel_goal_async()
             rf = gh.get_result_async()
         rf.add_done_callback(lambda _: self._forget(send))
-
-    def _cancel_goal(self, gh, rf):
-        """Cancel a goal and wait up to CANCEL_SETTLE_S for the driver to settle it (_settle,
-        before the client is destroyed)."""
-        gh.cancel_goal_async()
-        wait_until(rf.done, CANCEL_SETTLE_S)
 
     @staticmethod
     def _wait(fut, timeout_s):
