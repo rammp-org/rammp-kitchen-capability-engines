@@ -382,8 +382,8 @@ class ArmInterface:
             try:
                 self._settle()
             finally:
-                with self._cond:
-                    scope, self._scope, self._entities = self._scope, None, {}
+                with self._cond:  # nothing of the ended action is kept
+                    scope, self._scope, self._entities, self._ctx = self._scope, None, {}, None
                 if scope is not None:
                     scope.close()
                 with self._cond:
@@ -898,8 +898,9 @@ class ArmInterface:
     def _checkpoint(self):
         """Before every motion: NotInAction outside an action, wait while the action is paused,
         Cancelled once it is cancelled."""
+        ctx = self._ctx  # first: end_action() clears it only after the action has ended
         self._check_in_action()
-        self._ctx.checkpoint()
+        ctx.checkpoint()
 
     def _send(self, t, q, qd, impedance=None, monitor=None):
         if self._mock:

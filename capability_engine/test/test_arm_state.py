@@ -221,3 +221,12 @@ def test_no_state_is_stored_after_the_action_ends(arm_env):
         assert not arm._latest
     finally:
         scope.close()
+
+
+def test_end_action_holds_nothing_of_the_action(arm_env):
+    arm, _, _ = arm_env
+    arm.begin_action(FakeCtx(), None)
+    arm.get_state()
+    arm.end_action()
+    assert arm._ctx is None and arm._scope is None and arm._stream is None
+    assert not arm._entities and not arm._latest and not arm._goals
