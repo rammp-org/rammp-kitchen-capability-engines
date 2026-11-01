@@ -18,8 +18,8 @@ go and push it further open -- one run.
    handle at the end.
 
 4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper,
-   cuRobo up (PUSH_UP_M over the door top) and back (PUSH_BACK_M) from the handle; then straight legs, sim-gated
-   against the door model: over to above the inside of the door, turning to point the hand down; down until the tool
+   cuRobo up (PUSH_UP_M over the door top) and back (PUSH_BACK_M) from the handle, turning the hand to point down;
+   then straight legs, sim-gated against the door model: over to above the inside of the door; down until the tool
    is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the handle; push PUSH_DIST_M square to the door,
    opening it further. Checked from the planned swing's end before any motion, re-planned from the real one before
    letting go, and once more from where cuRobo leaves the arm.
@@ -156,19 +156,18 @@ def _push_poses(door, ee):
         pushed=inside + out * PUSH_DIST_M,
         down=down,
         out=out,
-        quat0=np.asarray(ee[3:7], dtype=float),
     )
 
 
 def _plan_push(scene, rb, P, q_up, loud=False):
-    """The straight legs after cuRobo's up-and-back, from joints `q_up` there: over the door to above its inside
-    (turning to point down), down, the push. The first two are gated against the door model at its opening; the push
-    only against the body (it pushes the door). Returns ([(label, joints, length m)], None) or (None, why)."""
+    """The straight legs after cuRobo's up-and-back, from joints `q_up` there, the hand pointing down throughout:
+    over the door to above its inside, down, the push. The first two are gated against the door model at its opening;
+    the push only against the body (it pushes the door). Returns ([(label, joints, length m)], None) or (None, why)."""
     bodies = P.df.bodies(scene, rb, P.deg)
     try:
         legs, q = [], q_up
         for label, p0, q0, p1, avoid in (
-            ("over the door", P.up_back, P.quat0, P.above, bodies),
+            ("over the door", P.up_back, P.down, P.above, bodies),
             ("down inside the door", P.above, P.down, P.inside, bodies),
             ("push open", P.inside, P.down, P.pushed, bodies[1:]),
         ):
@@ -188,7 +187,7 @@ def _plan_push_open(scene, rb, door, ee, q, loud=False):
     why). cuRobo's up-and-back is gated as a goal (its path can't be previewed); the legs are planned from it."""
     P = _push_poses(door, ee)
     with contextlib.nullcontext() if loud else quiet():
-        q_up = check_curobo_goal(scene, rb, "push-open: up and back", pos=P.up_back, quat=P.quat0, seed=q)
+        q_up = check_curobo_goal(scene, rb, "push-open: up and back", pos=P.up_back, quat=P.down, seed=q)
     if q_up is None:
         return None, None, "push-open: up and back is not a reachable cuRobo goal"
     legs, why = _plan_push(scene, rb, P, q_up, loud)
@@ -432,7 +431,9 @@ def push_open(ai, execute, on_release=None):
     time.sleep(0.5)
     if on_release is not None:
         on_release()
-    if not ai.go_to_ee_pose(P.up_back, P.quat0, "push-open: up and back", **go_to):
+    # cuRobo turns the hand to point down on the way up: a 90 deg wrist turn in free space, not along a checked line
+    # (11-01: turning on the straight leg over the door failed its gates)
+    if not ai.go_to_ee_pose(P.up_back, P.down, "push-open: up and back", **go_to):
         raise Refused("push-open: did not get up and back -- the arm holds where it is.")
     # cuRobo may end on another joint branch than the checked IK: plan the legs from where it left the arm
     legs, why = _plan_push(scene, rb, P, ai.get_state()["position"])
