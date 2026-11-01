@@ -1,7 +1,8 @@
 """The microwave's handle detector: door_common's, with YOLO or boxer finding where the microwave is.
 
-1. YOLO box around the microwave (COCO 'microwave', else the classes it confuses it with) -- or, with boxer, every
-   pixel, keeping the wrist-camera points inside boxer's 3D box.
+1. Where the microwave is: a 3D box -- boxer's, or (open, without boxer) the door the scene camera found inside the
+   scene segmenter's 2D microwave box -- keeping the wrist-camera points inside it; else (view false) a YOLO box around
+   the microwave (COCO 'microwave', else the classes it confuses it with).
 2. The rest is door_common.perception.HandleDetector: door plane, handle, hinge.
 
 NOTE: YOLO (step 1) is a development stand-in only -- the actual demo will NOT use YOLO; a different
@@ -34,6 +35,7 @@ BOX_MIN_POINTS = 500
 class HandleDetector(door_common.perception.HandleDetector):
     def __init__(self, model=YOLO_MODEL):
         self._model, self._yolo = model, None
+        self.region_2d = None  # (x1, y1, x2, y2) from another detector (the scene segmenter): used instead of YOLO
 
     def _box(self, rgb):
         """Highest-confidence microwave box (x1, y1, x2, y2), or None.
@@ -63,12 +65,12 @@ class HandleDetector(door_common.perception.HandleDetector):
         return res.boxes.xyxy[best].cpu().numpy().astype(int)
 
     def door_region(self, rgb, box, debug):
-        """The whole image when cropping to boxer's 3D box, else YOLO's 2D box."""
+        """The whole image when cropping to a 3D box, else `region_2d` when set, else YOLO's 2D box."""
         mask = np.zeros(rgb.shape[:2], dtype=bool)
         if box is not None:
             mask[:] = True
         else:
-            b2d = self._box(rgb)
+            b2d = self.region_2d if self.region_2d is not None else self._box(rgb)
             if b2d is None:
                 say("  no microwave box")
                 return None
@@ -87,8 +89,8 @@ class HandleDetector(door_common.perception.HandleDetector):
         lo[2] = -box["size"][2] / 2 + BOX_FLOOR_CLEAR_M  # box z is up (boxer's boxes are gravity-aligned)
         pts = pts[np.all((local >= lo) & (local <= hi), axis=1)]
         say(
-            f"  boxer {float(box['score']):.2f}: box {np.round(box['center'], 3)} size {np.round(box['size'], 3)}"
-            f" -> {len(pts)} wrist-camera points inside"
+            f"  {box.get('source', 'boxer')} {float(box['score']):.2f}: box {np.round(box['center'], 3)} "
+            f"size {np.round(box['size'], 3)} -> {len(pts)} wrist-camera points inside"
         )
         if len(pts) < BOX_MIN_POINTS:
             say(f"  fewer than {BOX_MIN_POINTS} points in the box -- is the microwave in the wrist camera's view?")

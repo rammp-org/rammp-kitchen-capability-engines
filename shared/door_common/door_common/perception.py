@@ -71,6 +71,7 @@ class WristCamera:
         sam3=None,
         sam3_prompts=("handle",),
         sam3_threshold=0.3,
+        box2d_topic="",
     ):
         """`camera_frame` "" = the colour image's own frame_id. Depth must be aligned to colour.
         `box_topic`: boxer's 3D boxes (rammp_perception_interfaces/ObjectDetections, from the scene camera); each
@@ -78,6 +79,10 @@ class WristCamera:
         `sam3`: a client of SAM 3's Detect service (made once, for the node's
         lifetime: a client gets no messages) -- `sam3_handle_mask` asks it for `sam3_prompts` on this camera's colour
         image. None = none.
+        `box2d_topic`: a 2D detector's ObjectDetections on THIS camera's image (the scene segmenter, e.g. RF-DETR on
+        /perception/object_detections); each frame then carries the latest visible `box_class` box, `box2d`. "" = none.
+        `fixed_box`: a box set by the caller (e.g. placed from another camera), carried as each frame's `box` when
+        there is no box_topic.
 
         On a CapabilityEngine node the subscriptions and the tf buffer are the running action's
         (create_action_subscription, create_action_tf_buffer): make the camera inside execute(); the engine destroys
@@ -94,6 +99,8 @@ class WristCamera:
         self._lock = threading.Lock()
         self._latest = None
         self._box = None  # (header, DetectedObject): the latest box_class object with a pose
+        self._box2d = None  # (header, DetectedObject): the latest visible box_class object on box2d_topic
+        self.box2d_topic, self.fixed_box = box2d_topic, None
         if hasattr(node, "create_action_subscription"):
             subscribe, self.tf_buffer = node.create_action_subscription, node.create_action_tf_buffer()
         else:
@@ -111,6 +118,10 @@ class WristCamera:
             from rammp_perception_interfaces.msg import ObjectDetections
 
             subscribe(ObjectDetections, box_topic, self._on_boxes, qos)
+        if box2d_topic:
+            from rammp_perception_interfaces.msg import ObjectDetections
+
+            subscribe(ObjectDetections, box2d_topic, self._on_boxes_2d, qos)
         self._sam3 = sam3
         self.topics = (color_topic, info_topic, depth_topic)
 
@@ -123,6 +134,31 @@ class WristCamera:
         if objs:
             with self._lock:
                 self._box = (msg.header, max(objs, key=lambda o: o.score))
+
+    def _on_boxes_2d(self, msg):
+        objs = [
+            o
+            for o in msg.objects
+            if o.perception_class == self.box_class and o.state == o.STATE_VISIBLE and o.box[2] > o.box[0]
+        ]
+        if objs:
+            with self._lock:
+                self._box2d = (msg.header, max(objs, key=lambda o: o.score))
+
+    def appliance_box_2d(self):
+        """The latest visible `box_class` box on box2d_topic: {xyxy (ints, this camera's pixels), score}, or None (says
+        why)."""
+        with self._lock:
+            latest = self._box2d
+        if latest is None:
+            say(f"  no visible '{self.box_class}' on {self.box2d_topic} yet (scene segmenter up?)")
+            return None
+        header, obj = latest
+        age = (self.node.get_clock().now() - Time.from_msg(header.stamp)).nanoseconds / 1e9
+        if age > BOX_MAX_AGE_S:
+            say(f"  the last '{self.box_class}' 2D box is {age:.1f} s old (max {BOX_MAX_AGE_S:g})")
+            return None
+        return {"xyxy": [int(round(v)) for v in obj.box], "score": float(obj.score)}
 
     def sam3_handle_mask(self):
         """SAM 3's mask of the handle on this camera's next colour frame (bool, image-sized): the best-scoring instance
@@ -225,7 +261,8 @@ class WristCamera:
             "base_T_cam": self.base_T_cam(color.header.frame_id, color.header.stamp),
             "time": time.time(),
             "frame_id": self.camera_frame or color.header.frame_id,
-            "box": self.appliance_box() if self.box_topic else None,
+            "box": self.appliance_box() if self.box_topic else self.fixed_box,
+            "box2d": self.appliance_box_2d() if self.box2d_topic else None,
         }
 
 
@@ -346,18 +383,9 @@ class HandleDetector:
         )
         return handle
 
-    def detect(self, rgb, K, depth, base_T_cam, box=None, handle_mask=None, debug=None):
-        """`K` 3x3, `base_T_cam` 4x4 (arm base <- camera, or None). `box`: boxer's box in the base frame
-        (WristCamera.appliance_box), or None -- `door_region` and `crop_points` decide what it means.
-        `handle_mask`: SAM 3's mask of the handle (bool, image-sized) -- the handle from it instead of
-        from what sticks out (handle_source). `debug`: a dict filled with the intermediate camera-frame points (door,
-        protruding, bar) and the 2D box, for detection_debug. Returns dict(handle, quat, normal, hinge, door_z,
-        door_mid) in the arm's base frame, or None.
-        normal: horizontal door-face normal, out of the door toward the camera.
-        hinge: door-face point on the edge farthest from the handle, nearest the handle's height
-          (the swing pivots about the vertical line through it).
-        door_z: (low, high) of the door face (1st/99th percentile height).
-        door_mid: door-face point at the middle of its horizontal span."""
+    def _door_plane(self, rgb, K, depth, base_T_cam, box, debug):
+        """The door plane in the camera frame: (plane points, the other points, normal out of the door toward the
+        camera, offset, base +z in the camera frame, base <- camera rotation, translation), or None (says why)."""
         if base_T_cam is None:
             say("no arm base <- camera transform")
             return None
@@ -397,6 +425,46 @@ class HandleDetector:
         if abs(float(np.dot(normal, up_cam))) > MAX_DOOR_NORMAL_VERTICAL:
             say("  plane is not a door (normal not horizontal -- table/floor?)")
             return None
+        return plane_pts, off_plane, normal, offset, up_cam, Rb, tb
+
+    def door_face(self, rgb, K, depth, base_T_cam, box=None, debug=None):
+        """The door face alone -- no handle -- from any RGB-D camera (e.g. a scene camera too far out to see the
+        handle): dict(normal, door_z, door_mid) in the arm's base frame as `detect` returns them, and the face's width
+        (m), or None."""
+        plane = self._door_plane(rgb, K, depth, base_T_cam, box, debug)
+        if plane is None:
+            return None
+        plane_pts, _, normal, _, up_cam, Rb, tb = plane
+        axis = np.cross(normal, up_cam)
+        axis /= np.linalg.norm(axis)
+        proj = plane_pts @ axis
+        lo, hi = float(np.percentile(proj, 1)), float(np.percentile(proj, 99))
+        n_base = Rb @ normal
+        n_base[2] = 0.0
+        plane_base = plane_pts @ Rb.T + tb
+        return {
+            "normal": n_base / np.linalg.norm(n_base),
+            "door_z": (float(np.percentile(plane_base[:, 2], 1)), float(np.percentile(plane_base[:, 2], 99))),
+            "door_mid": plane_base[int(np.argmin(np.abs(proj - 0.5 * (lo + hi))))].copy(),
+            "width": hi - lo,
+        }
+
+    def detect(self, rgb, K, depth, base_T_cam, box=None, handle_mask=None, debug=None):
+        """`K` 3x3, `base_T_cam` 4x4 (arm base <- camera, or None). `box`: boxer's box in the base frame
+        (WristCamera.appliance_box), or None -- `door_region` and `crop_points` decide what it means.
+        `handle_mask`: SAM 3's mask of the handle (bool, image-sized) -- the handle from it instead of
+        from what sticks out (handle_source). `debug`: a dict filled with the intermediate camera-frame points (door,
+        protruding, bar) and the 2D box, for detection_debug. Returns dict(handle, quat, normal, hinge, door_z,
+        door_mid) in the arm's base frame, or None.
+        normal: horizontal door-face normal, out of the door toward the camera.
+        hinge: door-face point on the edge farthest from the handle, nearest the handle's height
+          (the swing pivots about the vertical line through it).
+        door_z: (low, high) of the door face (1st/99th percentile height).
+        door_mid: door-face point at the middle of its horizontal span."""
+        plane = self._door_plane(rgb, K, depth, base_T_cam, box, debug)
+        if plane is None:
+            return None
+        plane_pts, off_plane, normal, offset, up_cam, Rb, tb = plane
 
         z0 = float(base_T_cam[2, 3])  # base z = camera-frame point @ up_cam + the camera's height
         if handle_mask is not None:

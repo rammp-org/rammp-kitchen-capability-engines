@@ -45,6 +45,12 @@ params:
   camera_info_topic: /wrist_camera/color/camera_info
   depth_topic: /wrist_camera/depth/image_rect_raw
   camera_frame: ""
+  # Scene camera, depth aligned to colour: without boxer, its view of the door places the view pose.
+  scene_color_topic: /scene_camera/color/image_raw
+  scene_camera_info_topic: /scene_camera/color/camera_info
+  scene_depth_topic: /scene_camera/depth/image_rect_raw
+  # The scene segmenter's 2D boxes on the scene camera (RF-DETR): its box_class box is where the door is looked for.
+  scene_detections_topic: /perception/object_detections
   # boxer's 3D boxes (scene camera): the handle detector crops the wrist camera's points to the
   # microwave's box. "" = YOLO on the wrist image instead (yolo_model).
   box_topic: ""  # /perception/object_detections_3d to use boxer
@@ -120,4 +126,8 @@ subscribes:
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
   - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /perception/object_detections
   - /perception/object_detections_3d
