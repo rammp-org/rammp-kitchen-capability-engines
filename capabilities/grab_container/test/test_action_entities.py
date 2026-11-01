@@ -57,6 +57,7 @@ class Engine(CapabilityEngine):
         detections = scene.SceneDetections(self, "/t/detections")
         wait_until(lambda: all(cam.get(n) is not None for n in ("color", "info", "depth")))
         self.seen = detections.wait(WAIT_S)
+        self.tf_subs = [self.count_subscribers(t) for t in ("/tf", "/tf_static")]
         return {}
 
 
@@ -87,6 +88,7 @@ def test_subscriptions_live_only_while_the_action_runs():
         stop.set()
 
         assert engine.seen is not None  # every topic reached the action
+        assert all(engine.tf_subs), engine.tf_subs  # the action's tf buffer was listening
         for topic in [*TOPICS, "/tf", "/tf_static"]:  # graph updates lag a little
             wait_until(lambda topic=topic: client.count_subscribers(topic) == 0)
         executor.shutdown()
