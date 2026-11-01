@@ -138,15 +138,23 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
     # swing start: `side_past_hinge` past the hinge, or further until it clears the door at its
     # actual angle (a door open ~90 deg needs more than one open ~110 deg)
     a_side = args.side_past_hinge
+    tried = []  # (a, why) of each swing start that failed, to say why
     while True:
         if args.push_radius <= abs(a_side) or a_side > 0.25:
-            say("no swing start clears the open door within 25 cm past the hinge -- refusing.")
+            say("no swing start clears the open door within 25 cm past the hinge -- refusing. Tried:")
+            for a_t, why in tried[:: max(1, len(tried) // 6)] + tried[-1:]:
+                say(f"  a {a_t * 100:+.0f} cm past the hinge: {why}")
             drop(rb, bodies)
             return None
         b_start = -np.sqrt(args.push_radius**2 - a_side**2)
         qs, err = solve_ik(scene, rb, pos(a_side, b_start), quat, q0)
-        if err < sim.MAX_IK_ERR and clearance(rb, qs, bodies)[0] >= GAP:
-            break
+        if err >= sim.MAX_IK_ERR:
+            tried.append((a_side, f"out of reach (IK {err * 100:.1f} cm off)"))
+        else:
+            gap, link = clearance(rb, qs, bodies)
+            if gap >= GAP:
+                break
+            tried.append((a_side, f"{link} {gap * 100:.1f} cm from the door/body (needs {GAP * 100:.0f})"))
         a_side += 0.01
     say(
         f"hinge {np.round(df.hinge[:2], 3)}; open door free edge ~{np.round(free_edge[:2], 3)} "

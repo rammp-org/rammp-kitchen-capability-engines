@@ -6,7 +6,7 @@ setup(
     name=package_name,
     version="0.1.0",
     packages=[package_name],
-    # the recorded push-open demo the open task replays (open_door.PUSH_OPEN)
+    # the recorded push-open demo (demo_replay's bench CLI; the open's push-open no longer replays it)
     package_data={package_name: ["demos/*.json"]},
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
