@@ -17,11 +17,12 @@ go and push it further open -- one run.
 3. Execute: cuRobo to the line-up point, straight in, close, one blended swing. The hand stays on the
    handle at the end.
 
-4. Push-open (default; `--no-push-open` to stop after the swing): let go of the handle and replay the
-   user's push-open demo relative to the door (`demo_replay.py`, demos/push_open_2026-10-07.door.json):
-   up, over to the right of the microwave, down, into the opening, push it further open. The swing
-   is then PUSH_OPEN_SWING_DEG (the demo starts from a ~50 deg swing). Planned and sim-gated from
-   where the swing actually ends, before anything moves -- so a dry run only lists its keypoints.
+4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper,
+   cuRobo up (PUSH_UP_M over the door top) and back (PUSH_BACK_M) from the handle; then straight legs, sim-gated
+   against the door model: over to above the inside of the door, turning to point the hand down; down until the tool
+   is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the handle; push PUSH_DIST_M square to the door,
+   opening it further. Checked from the planned swing's end before any motion, re-planned from the real one before
+   letting go, and once more from where cuRobo leaves the arm.
 
 `--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
 handle, go toward the base to clear the door's free edge, joint move to `PARK_JOINTS` (constants).
@@ -39,9 +40,11 @@ import json
 import sys
 import time
 from functools import partial
-from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import rammp_arm
+from capability_engine.arm import IMPEDANCE as IMPEDANCE_MODE
 from door_common import common as dc
 from door_common import open_door as shared
 from door_common.common import (
@@ -49,8 +52,12 @@ from door_common.common import (
     Refused,
     RunLog,
     check_curobo_goal,
+    drop,
+    make_sim,
+    plan_cartesian,
     quiet,
     release_and_back_off,
+    save_door_geometry,
     say,
 )
 from door_common.open_door import BACK_OFF_M, SWING_MAX_TRY_DEG, SWING_MIN_DEG
@@ -82,9 +89,15 @@ VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
 BOX_WAIT_S = 10.0  # wait this long for boxer's first microwave box
 
-PUSH_OPEN = Path(__file__).resolve().parent / "demos" / "push_open_2026-10-07.door.json"
-PUSH_OPEN_SWING_DEG = 50  # the push-open demo starts from a ~50 deg swing
-PUSH_OPEN_TRUST_FROM = 3  # the 50-deg door model contradicts the user's real push-open poses from leg 3 on
+# --- push-open (after the swing): let go, up and back, over to the inside of the door, down, push it further open ---
+PUSH_OPEN_SWING_DEG = 50  # the swing before the push-open
+PUSH_UP_M = 0.15  # after letting go, cuRobo takes the hand this far above the door top (to cross over it; 0.10 left
+#   the fingertips ~4 cm over it on 11-01's door.json, with the door top a depth-fit estimate) ...
+PUSH_BACK_M = 0.05  # ... and this far back from the handle, along the open door's outward normal
+PUSH_BEHIND_DOOR_M = 0.05  # (~2 in) then the tool goes down this far behind the door's inner face, at the handle
+PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing down: the fingertips reach
+#   FINGERTIP_PAST_TOOL (6 cm) below the top edge
+PUSH_DIST_M = 0.12  # then push this far, square to the door (its outward normal: further open)
 PRE_PARK_X = 0.216
 
 HANDLE_DETECTOR_MODEL = YOLO_MODEL  # the node sets its yolo_model parameter here
@@ -118,49 +131,92 @@ def configure(data_dir):
     )
 
 
-def _push_open_check(scene, rb, n, g_p, h, door_z, hinge_seen, deg, end_wp, q_end, loud=False):
-    """Plan the push-open (demo_replay) from a planned swing's end -- pose `end_wp`, joints `q_end` -- against the
-    door as the open will have saved it then, so a push-open that can't run refuses BEFORE the grasp, not after the
-    swing (10-30). `loud`: print the plan (every leg's steps and the failing check). Returns (ok, message). The real
-    run re-plans it from where the swing really ends."""
-    from . import demo_replay
+def _push_poses(door, ee):
+    """The push-open's targets from the door file `door` as the swing left it (door_open_deg, open_sign) and the hand
+    pose `ee` [x, y, z, qx, qy, qz, qw] at the swing's end: SimpleNamespace(df, deg, up_back, above, inside, pushed,
+    down (the pointing-down quat), out (the open door's outward normal: pushing along it opens it further))."""
+    sign, deg = float(door.get("open_sign", 1.0)), float(door["door_open_deg"])
+    df = DoorFrame(door, sign)
+    top = float(door["door_z"][1])
+    out = df.pos(df.u_handle, 1.0, deg, 0.0) - df.pos(df.u_handle, 0.0, deg, 0.0)
+    inside = df.pos(df.u_handle, -(df.t / 2 + PUSH_BEHIND_DOOR_M), deg, top + PUSH_TOOL_ABOVE_TOP_M)
+    up_back = np.asarray(ee[:3], dtype=float) + out * PUSH_BACK_M
+    up_back[2] = top + PUSH_UP_M
+    above = np.r_[inside[:2], top + PUSH_UP_M]
+    down_z = np.array([0.0, 0.0, -1.0])  # tool z down, tool y along the push: a finger pad meets the door
+    down = R.from_matrix(np.column_stack([np.cross(out, down_z), out, down_z])).as_quat()
+    return SimpleNamespace(
+        df=df,
+        deg=deg,
+        sign=sign,
+        up_back=up_back,
+        above=above,
+        inside=inside,
+        pushed=inside + out * PUSH_DIST_M,
+        down=down,
+        out=out,
+        quat0=np.asarray(ee[3:7], dtype=float),
+    )
 
-    if door_z is None:
-        return False, "push-open: no door height detected (door_z) to place it"
-    door = dict(closed_normal=list(n), closed_grasp_pos=list(g_p), closed_handle=list(h), door_z=list(door_z))
-    door.update(hinge=list(hinge_seen))  # as saved: the demo uses the detected edge
-    # ... and the opening angle as the run will record it after the swing (record_door_angle: the hand's angle about
-    # that edge), not the swing's own `deg` about the pivot -- 10-30: 50 deg about the pivot recorded 54.2, and the
-    # door model 4 deg further open failed the real check after this one had passed
-    a = DoorFrame(door, 1.0).angle_of(end_wp[:3])
-    door.update(door_open_deg=abs(a), open_sign=float(np.sign(a) or 1.0))
-    enc = json.loads(PUSH_OPEN.read_text())
-    pts, grippers = demo_replay.decode(enc, door), [k["gripper"] for k in enc["keypoints"]]
-    off = float(np.linalg.norm(np.asarray(end_wp[:3]) - pts[0][0]))
-    if off > demo_replay.START_TOL:
-        return False, f"push-open: the swing ends {off * 100:.1f} cm from the demo's start"
-    st = {"position": list(q_end), "ee_pos": list(end_wp)}
-    lift_off = grippers[0] > 0.2 and grippers[1] < 0.2
-    if loud:
-        for k, (p_, _) in zip(enc["keypoints"], pts, strict=False):
-            say(f"    {k['label'][:30]:30s} -> {np.round(p_, 3)}")
+
+def _plan_push(scene, rb, P, q_up, loud=False):
+    """The straight legs after cuRobo's up-and-back, from joints `q_up` there: over the door to above its inside
+    (turning to point down), down, the push. The first two are gated against the door model at its opening; the push
+    only against the body (it pushes the door). Returns ([(label, joints, length m)], None) or (None, why)."""
+    bodies = P.df.bodies(scene, rb, P.deg)
+    try:
+        legs, q = [], q_up
+        for label, p0, q0, p1, avoid in (
+            ("over the door", P.up_back, P.quat0, P.above, bodies),
+            ("down inside the door", P.above, P.down, P.inside, bodies),
+            ("push open", P.inside, P.down, P.pushed, bodies[1:]),
+        ):
+            with contextlib.nullcontext() if loud else quiet():
+                leg = plan_cartesian(scene, rb, p0, q0, p1, P.down, q, f"push-open: {label}", avoid)
+            if leg is None:
+                return None, f"push-open: '{label}' fails a gate"
+            legs.append((label, leg, float(np.linalg.norm(np.asarray(p1) - np.asarray(p0)))))
+            q = leg[-1]
+        return legs, None
+    finally:
+        drop(rb, bodies)
+
+
+def _plan_push_open(scene, rb, door, ee, q, loud=False):
+    """The whole push-open from the hand pose `ee` / joints `q` at the swing's end: (P, legs, None) or (None, None,
+    why). cuRobo's up-and-back is gated as a goal (its path can't be previewed); the legs are planned from it."""
+    P = _push_poses(door, ee)
     with contextlib.nullcontext() if loud else quiet():
-        legs = demo_replay.plan(scene, rb, door, st, pts[1:], PUSH_OPEN_TRUST_FROM, lift_off, short_last=True)
-    return legs is not None, ("push-open OK" if legs is not None else "push-open: a leg fails a gate")
+        q_up = check_curobo_goal(scene, rb, "push-open: up and back", pos=P.up_back, quat=P.quat0, seed=q)
+    if q_up is None:
+        return None, None, "push-open: up and back is not a reachable cuRobo goal"
+    legs, why = _plan_push(scene, rb, P, q_up, loud)
+    return (P, legs, None) if legs is not None else (None, None, why)
 
 
 class PushOpen(shared.AfterSwing):
-    """Plans the push-open with the swing; `push_open` runs it. The real run re-plans it from where the swing ends."""
+    """Plans the push-open with the swing, against the door as the open will have saved it then, so a push-open that
+    can't run refuses BEFORE the grasp; `push_open` re-plans it from where the swing really ends."""
 
     def check(self, scene, rb, geom, cand, explain):
-        g, d, end_wp, q_end = cand["grasp"], cand["swing"], cand["wps"][-1], cand["arc"][-1]
-        n, h = geom["n"], cand["h"]
-        args = (scene, rb, n, g.position, h, geom["door_z"], geom["hinge_seen"], d, end_wp, q_end)
-        ok, m = _push_open_check(*args)
-        if not ok and explain:  # the best candidate's failing push-open, out loud
-            say(f"  tilt {cand['pitch']} deg, swing {d} deg: the push-open fails -- why, its plan in full:")
-            _push_open_check(*args, loud=True)
-        return ok, m
+        end_wp, q_end = cand["wps"][-1], cand["arc"][-1]
+        door = dict(
+            closed_normal=list(geom["n"]),
+            closed_grasp_pos=list(cand["grasp"].position),
+            closed_handle=list(cand["h"]),
+            door_z=list(geom["door_z"]) if geom["door_z"] is not None else None,
+            hinge=list(geom["hinge_seen"]),  # as saved: the detected edge
+        )
+        if door["door_z"] is None:
+            return False, "push-open: no door height detected (door_z) to place it"
+        # the opening as record_door_angle will save it after the swing (the hand's angle about that edge)
+        a = DoorFrame(door, 1.0).angle_of(end_wp[:3])
+        door.update(door_open_deg=abs(a), open_sign=float(np.sign(a) or 1.0))
+        _, _, why = _plan_push_open(scene, rb, door, list(end_wp), q_end)
+        if why and explain:  # the best candidate's failing push-open, out loud
+            say(f"  tilt {cand['pitch']} deg, swing {cand['swing']} deg: {why} -- its plan in full:")
+            _plan_push_open(scene, rb, door, list(end_wp), q_end, loud=True)
+        return why is None, why or "push-open OK"
 
 
 def _pose_T(pos, quat):
@@ -348,27 +404,56 @@ def open_task(
     )
 
 
-def push_open(ai, execute):
-    """After the swing: release the handle and push the door further open (the user's 10-07 demo, door-relative)."""
-    from . import demo_replay
-
+def push_open(ai, execute, on_release=None):
+    """After the swing: let go of the handle and push the door further open (see the module's step 4). `on_release()`:
+    called once the gripper has let go. Saves the door's new opening to the door file. Returns True when the push
+    finished (or the dry run passed); raises Refused."""
     say("\n===== release + push further open =====")
     if not execute:
-        say("  (planned above from the planned swing end -- see the chosen tilt's line; re-planned from the real one)")
+        say(
+            "  (planned above from the planned swing's end -- see the chosen tilt's line; re-planned from the real one)"
+        )
         return True
-    return demo_replay.run(
-        PUSH_OPEN,
-        True,
-        PUSH_OPEN_TRUST_FROM,
-        ai=ai,
-        impedance=shared.grasped_impedance(),
-        speed_scale=PUSH_OPEN_SPEED_SCALE,
-    )
+    door = json.loads(dc.DOOR_FILE.read_text())
+    st = ai.get_state()
+    scene, rb = make_sim()
+    P, _, why = _plan_push_open(scene, rb, door, list(st["ee_pos"]), st["position"])
+    if why:
+        raise Refused(f"{why} from where the swing ended -- still holding the handle.")
+    gains = shared.grasped_impedance()
+    go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=shared.GRASPED_GAINS)
+    say("opening the gripper ...")
+    ai.gripper(0.0)
+    time.sleep(0.5)
+    if on_release is not None:
+        on_release()
+    if not ai.go_to_ee_pose(P.up_back, P.quat0, "push-open: up and back", **go_to):
+        raise Refused("push-open: did not get up and back -- the arm holds where it is.")
+    # cuRobo may end on another joint branch than the checked IK: plan the legs from where it left the arm
+    legs, why = _plan_push(scene, rb, P, ai.get_state()["position"])
+    if legs is None:
+        raise Refused(f"{why} from where cuRobo left the arm -- the arm holds where it is.")
+    for label, leg, length in legs:
+        speed = PUSH_OPEN_SPEED_SCALE * rammp_arm.contact_speed_scale() if label == "push open" else 1.0
+        say(f"push-open: {label} ({length * 100:.0f} cm) ...")
+        if not ai.move_joints(
+            list(leg), cart_lengths=[length / len(leg)] * len(leg), speed_scale=speed, impedance=gains
+        ):
+            raise Refused(
+                f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
+            )
+    # the door turned with the point the hand pushed: its new opening for the close
+    h, a0 = P.df.hinge[:2], P.inside[:2] - P.df.hinge[:2]
+    a1 = np.asarray(ai.get_state()["ee_pos"][:2]) - h
+    turned = float(np.degrees(np.arctan2(a0[0] * a1[1] - a0[1] * a1[0], a0 @ a1))) * P.sign
+    save_door_geometry(door_open_deg=P.deg + turned)
+    say(f"door file: open ~{P.deg + turned:.1f} deg after the push ({turned:+.1f})")
+    return True
 
 
 def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=True, view_only=False, on_hold=None):
     """The open task as the node runs it (was door_task.py `open`): (`view`) to the view pose, grasp + swing, then
-    (`push`) let go and replay the push-open demo, all logged to RUNS_DIR/<time>_open (RunLog). `speed` (0..1]
+    (`push`) let go and push the door further open, all logged to RUNS_DIR/<time>_open (RunLog). `speed` (0..1]
     scales every arm motion for this run only. `view_only`: stop at the view pose. `on_hold(True)` once the gripper
     closes on the handle, `on_hold(False)` once the push-open has let go of it. Returns True when it finished
     (or the dry run passed); raises Refused."""
@@ -391,9 +476,7 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=T
         if not ok:
             say("swing did not finish -- stopping (still holding the handle).")
         elif push and not view_only:
-            ok = push_open(ai, execute)
-            if ok and execute and on_hold:
-                on_hold(False)
+            ok = push_open(ai, execute, on_release=partial(on_hold, False) if on_hold else None)
         log.event("open", ok=ok)
         say(f"\nOPEN {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")
         return ok
