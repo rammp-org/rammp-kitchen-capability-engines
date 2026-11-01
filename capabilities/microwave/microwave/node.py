@@ -49,6 +49,12 @@ PARAMS = {
     # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
     "depth_topic": "/wrist_camera/depth/image_rect_raw",
     "camera_frame": "",
+    # the scene camera (depth aligned to colour): without boxer, its view of the door places the view pose
+    "scene_color_topic": "/scene_camera/color/image_raw",
+    "scene_camera_info_topic": "/scene_camera/color/camera_info",
+    "scene_depth_topic": "/scene_camera/depth/image_rect_raw",
+    # the scene segmenter's 2D boxes on the scene camera (RF-DETR): its box_class box is where the door is looked for
+    "scene_detections_topic": "/perception/object_detections",
     # boxer's 3D boxes (scene camera), e.g. /perception/object_detections_3d: the open goes to a view pose in front
     # of the microwave's box and the handle detector crops the wrist camera's points to it. "" (default, 10-30: boxer's
     # box wasn't accurate enough on snorlax) = no view pose, YOLO on the wrist image (yolo_model).
@@ -82,7 +88,8 @@ class Capability(CapabilityEngine):
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 45, "maximum": 75},
                     "push_open": {"type": "boolean", "default": True},
-                    # with boxer (box_topic): go to the view pose in front of the microwave before detecting
+                    # go to the view pose in front of the microwave before detecting (placed by boxer's box,
+                    # or without boxer by a first detection from where the arm is)
                     "view": {"type": "boolean", "default": True},
                     "view_only": {"type": "boolean", "default": False},
                 },
@@ -150,6 +157,18 @@ class Capability(CapabilityEngine):
             self.cfg["sam3_threshold"],
         )
         dc.set_camera(camera)
+        if action_id == "open" and not self.cfg["box_topic"]:
+            open_door.set_scene_camera(
+                WristCamera(
+                    self,
+                    self.cfg["scene_color_topic"],
+                    self.cfg["scene_camera_info_topic"],
+                    self.cfg["scene_depth_topic"],
+                    rammp_arm.FRAME,
+                    box_class=self.cfg["box_class"],
+                    box2d_topic=self.cfg["scene_detections_topic"],
+                )
+            )
         dc.set_output(self.get_logger().info)
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
         log_args = {**params, "execute": execute}
@@ -190,6 +209,7 @@ class Capability(CapabilityEngine):
         finally:
             dc.set_output(None)
             dc.set_camera(None)
+            open_door.set_scene_camera(None)
         if not execute:
             ctx.checkpoint()  # a dry run makes no arm call after detecting and planning: a cancel there ends it here
         if not ok:

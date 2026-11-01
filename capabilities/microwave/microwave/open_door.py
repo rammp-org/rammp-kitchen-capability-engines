@@ -58,17 +58,20 @@ from scipy.spatial.transform import Rotation as R
 
 from . import constants
 from .constants import (
+    BODY_DEPTH,
     GAINS_RIGID,
     GRASP_X_ADJUST,
     GRIP_EXT,
     HINGE_BEHIND_FACE,
     HINGE_PAST_EDGE,
+    PUSH_OPEN_SPEED_SCALE,
     SWING_SPEED_SCALE,
     VERTICAL_CORR,
     YOLO_MODEL,
 )
 
-# --- view pose (with boxer): before detecting, the wrist camera goes square in front of the microwave ---
+# --- view pose: before detecting, the wrist camera goes square in front of the microwave (placed from boxer's box, or
+# without boxer from a first detection) ---
 VIEW_DISTS = (0.35, 0.30, 0.40, 0.45)  # camera this far out from the box's front face (horizontally) ...
 # 10-30: was 0.50 first -- at 50 cm a 1-2 cm handle bar is ~1 pixel of the OAK's 320x200 near-range depth and comes and
 # goes between frames ("nothing protruding" / "no vertical bar" retries, and its height wandered)
@@ -85,6 +88,14 @@ PUSH_OPEN_TRUST_FROM = 3  # the 50-deg door model contradicts the user's real pu
 PRE_PARK_X = 0.216
 
 HANDLE_DETECTOR_MODEL = YOLO_MODEL  # the node sets its yolo_model parameter here
+SCENE_CAMERA = None  # without boxer, the camera whose view of the door places the view pose (set_scene_camera)
+SCENE_WAIT_S = 10.0  # wait this long for the scene camera's first frame
+
+
+def set_scene_camera(cam):
+    """The scene camera (a perception.WristCamera on the scene camera's topics) for this action, or None."""
+    global SCENE_CAMERA
+    SCENE_CAMERA = cam
 
 
 def _make_detector():
@@ -158,12 +169,9 @@ def _pose_T(pos, quat):
     return T
 
 
-def plan_view(ai, scene, rb):
-    """The view pose in front of boxer's microwave box: the wrist camera VIEW_DISTS out from the box face that
-    looks toward the arm base, at the box's mid height, level and square to that face. The hand pose comes from
-    where the camera sits on it now (TF), its joints from IK seeded at VIEW_SEED_DEG and checked like any cuRobo
-    goal. Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch); raises Refused."""
-    cam = dc.camera()
+def _box_face(cam):
+    """The front of boxer's microwave box: of its four side faces, the one whose outward normal points most toward
+    the arm base. Returns (face centre at the box's mid height, outward normal); raises Refused without a box."""
     box, t0 = None, time.time()
     while box is None and time.time() - t0 < BOX_WAIT_S:
         with quiet():
@@ -174,7 +182,6 @@ def plan_view(ai, scene, rb):
         cam.appliance_box()  # says why
         raise Refused(f"No microwave box from boxer ({cam.box_topic}) in {BOX_WAIT_S:g} s -- is it running?")
     c, Rb, size = box["center"], box["R"], box["size"]
-    # the front: of the box's four side faces, the one whose outward normal points most toward the arm base
     to_base = -c[:2] / np.linalg.norm(c[:2])
     n, half = max(
         ((s * Rb[:, i], size[i] / 2) for i in (0, 1) for s in (1.0, -1.0)), key=lambda t: float(t[0][:2] @ to_base)
@@ -185,6 +192,68 @@ def plan_view(ai, scene, rb):
         f"boxer microwave {box['score']:.2f}: center {np.round(c, 3)} size {np.round(size, 3)}; front face "
         f"{np.round(face, 3)} facing {np.round(n, 3)}"
     )
+    return face, n
+
+
+def _door_box(door, score):
+    """The microwave as a box behind the door the scene camera found -- `door` (door_face's) its front face, BODY_DEPTH
+    deep -- in boxer's box form, so the wrist detection crops its points to it the same way (no YOLO)."""
+    n = np.asarray(door["normal"], dtype=float)
+    up = np.array([0.0, 0.0, 1.0])
+    lo, hi = door["door_z"]
+    face = np.r_[door["door_mid"][:2], (lo + hi) / 2]
+    return {
+        "center": face - n * BODY_DEPTH / 2,
+        "R": np.column_stack([n, np.cross(up, n), up]),
+        "size": np.array([BODY_DEPTH, door["width"], hi - lo]),
+        "score": score,
+        "source": "scene camera",
+    }
+
+
+def _detected_face():
+    """Without boxer: the scene camera's view of the door places the view pose -- the scene segmenter's microwave box
+    (RF-DETR, not YOLO), the door plane in it (no handle: it is too small from there), the face's centre (the middle of
+    its width and of its height) and its normal. That door, as a box, is also what the wrist detection crops to.
+    Returns (face centre, outward normal); raises Refused if it finds no door."""
+    cam = SCENE_CAMERA
+    if cam is None:
+        raise Refused("No scene camera to place the view pose -- set box_topic, or send view false.")
+    if not cam.wait_for_frames(SCENE_WAIT_S):
+        raise Refused(f"No scene camera frames on {', '.join(cam.topics)} in {SCENE_WAIT_S:g} s -- is it up?")
+    detector = _make_detector()
+    for attempt in range(1, shared.MAX_EMPTY_RETRIES + 1):
+        f = cam.grab()
+        door = None
+        if f["box2d"] is not None:
+            detector.region_2d = f["box2d"]["xyxy"]
+            door = detector.door_face(f["rgb"], f["K"], f["depth_mm"], f["base_T_cam"])
+        shared._save_frame(f, "scene", attempt, door)
+        if door is not None:
+            break
+        say(f"  no door in the scene camera (retry {attempt}/{shared.MAX_EMPTY_RETRIES})")
+        time.sleep(0.5)
+    else:
+        raise Refused(
+            f"No door in the scene camera after {shared.MAX_EMPTY_RETRIES} tries -- stopping before any motion."
+        )
+    face = np.r_[door["door_mid"][:2], float(np.mean(door["door_z"]))]
+    say(
+        f"door face {np.round(face, 3)} facing {np.round(door['normal'], 3)}, {door['width'] * 100:.0f} cm wide "
+        f"(scene camera, {cam.box_class} {f['box2d']['score']:.2f})"
+    )
+    dc.camera().fixed_box = _door_box(door, f["box2d"]["score"])  # the wrist detection crops to it, not YOLO
+    return face, np.asarray(door["normal"], dtype=float)
+
+
+def plan_view(ai, scene, rb):
+    """The view pose square in front of the microwave: the wrist camera VIEW_DISTS out from its front face, VIEW_HEIGHTS
+    above the face's middle, looking at the face's centre. The face comes from boxer's box (box_topic) or, without
+    boxer, from a first detection made from where the arm is. The hand pose comes from where the camera sits on it now
+    (TF), its joints from IK seeded at VIEW_SEED_DEG and checked like any cuRobo goal. Returns the goal joints (to
+    go_to_joint_config, so the arm arrives on that branch); raises Refused."""
+    cam = dc.camera()
+    face, n = _box_face(cam) if getattr(cam, "box_topic", "") else _detected_face()
     f = cam.grab()
     if f["base_T_cam"] is None:
         raise Refused("No arm base <- camera transform -- can't place the camera for the view pose.")
@@ -234,8 +303,9 @@ def plan_view(ai, scene, rb):
 
 
 def _view_step(view, view_only, ai, scene, rb, execute):
-    """(`view`, with boxer) go to the view pose. Returns True when the open ends here."""
-    if not (view and getattr(dc.camera(), "box_topic", "")):
+    """(`view`) go to the view pose, so the handle is detected from the same place every run. Returns True when the
+    open ends here."""
+    if not view:
         return False
     q_view = plan_view(ai, scene, rb)
     if not execute:
@@ -263,7 +333,7 @@ def open_task(
     push=False,
     on_grasp=None,
 ):
-    """(`view`, with boxer) go to the view pose, then detect, plan, grasp, swing. `view_only`: stop at the view pose.
+    """(`view`) go to the view pose, then detect, plan, grasp, swing. `view_only`: stop at the view pose.
     `push`: the push-open follows, so each candidate's push-open is planned too before any motion. `on_grasp()`: called
     once the gripper has closed on the handle.
     Returns True when the swing finished (or the dry run passed); raises Refused on any refusal."""
@@ -286,7 +356,14 @@ def push_open(ai, execute):
     if not execute:
         say("  (planned above from the planned swing end -- see the chosen tilt's line; re-planned from the real one)")
         return True
-    return demo_replay.run(PUSH_OPEN, True, PUSH_OPEN_TRUST_FROM, ai=ai, impedance=shared.grasped_impedance())
+    return demo_replay.run(
+        PUSH_OPEN,
+        True,
+        PUSH_OPEN_TRUST_FROM,
+        ai=ai,
+        impedance=shared.grasped_impedance(),
+        speed_scale=PUSH_OPEN_SPEED_SCALE,
+    )
 
 
 def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=True, view_only=False, on_hold=None):
@@ -360,6 +437,17 @@ def main():
             "/wrist_camera/color/camera_info",
             "/wrist_camera/depth/image_rect_raw",
             rammp_arm.FRAME,
+        )
+    )
+    set_scene_camera(
+        WristCamera(
+            ai.node,
+            "/scene_camera/color/image_raw",
+            "/scene_camera/color/camera_info",
+            "/scene_camera/depth/image_rect_raw",
+            rammp_arm.FRAME,
+            box_class="microwave",
+            box2d_topic="/perception/object_detections",
         )
     )
     try:

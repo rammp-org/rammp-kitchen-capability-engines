@@ -29,12 +29,16 @@ frames) and every detection frame to `<data_dir>/detections/`.
 
 ## Subscribes
 
-| Topic                                | Type                     | Required | Meaning                                     |
-| ------------------------------------ | ------------------------ | -------- | ------------------------------------------- |
-| `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`      | yes      | Handle detection (`color_topic`)            |
-| `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo` | yes      | Intrinsics (`camera_info_topic`)            |
-| `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`      | yes      | Depth **aligned to colour** (`depth_topic`) |
-| `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`     | yes      | Camera pose in `arm.frame` (hand-eye calib) |
+| Topic                                | Type                                           | Required      | Meaning                                                                                             |
+| ------------------------------------ | ---------------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------- |
+| `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | yes           | Handle detection (`color_topic`)                                                                    |
+| `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes           | Intrinsics (`camera_info_topic`)                                                                    |
+| `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes           | Depth **aligned to colour** (`depth_topic`)                                                         |
+| `/scene_camera/color/image_raw`      | `sensor_msgs/Image`                            | without boxer | `open`: places the view pose (`scene_color_topic`)                                                  |
+| `/scene_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | without boxer | Scene camera intrinsics (`scene_camera_info_topic`)                                                 |
+| `/scene_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | without boxer | Scene depth, **aligned to colour** (`scene_depth_topic`)                                            |
+| `/perception/object_detections`      | `rammp_perception_interfaces/ObjectDetections` | without boxer | The scene segmenter's (RF-DETR's) 2D `box_class` box on the scene camera (`scene_detections_topic`) |
+| `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`                           | yes           | Camera pose in `arm.frame` (hand-eye calib)                                                         |
 
 The camera subscriptions (and boxer's `box_topic`, when set) exist only while an action runs;
 the engine destroys them when it ends. `self.arm` subscribes to the arm driver's state topics
@@ -51,10 +55,10 @@ Served under `/microwave/`, types from `rammp_orchestrator_interfaces`:
 | `/microwave/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/microwave/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action  | Params                                                                                                                                                                                                                                                                                                                                                                 | Result payload                                                             |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `open`  | `execute` (bool, default false), `swing_deg` (45–75; default 50 with the push-open, else 75), `push_open` (bool, default true), `speed` ((0, 1\], default 1.0: scales every arm motion), `view` (bool, default true: with boxer, go to the view pose in front of the microwave first; a dry run stops there), `view_only` (bool, default false: stop at the view pose) | `{"executed": bool, "note": str, "runs_dir": str, "holding_handle": bool}` |
-| `close` | `execute`, `speed` as above, plus the push-close settings in `close_door.CLOSE_DEFAULTS` (below)                                                                                                                                                                                                                                                                       | `{"executed": bool, "note": str, "runs_dir": str, "holding_handle": bool}` |
+| Action  | Params                                                                                                                                                                                                                                                                                                                                                                                                                                       | Result payload                                                             |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `open`  | `execute` (bool, default false), `swing_deg` (45–75; default 50 with the push-open, else 75), `push_open` (bool, default true), `speed` ((0, 1\], default 1.0: scales every arm motion), `view` (bool, default true: go to the view pose in front of the microwave first -- placed by boxer's box, or without boxer by the scene camera's view of the door; a dry run stops there), `view_only` (bool, default false: stop at the view pose) | `{"executed": bool, "note": str, "runs_dir": str, "holding_handle": bool}` |
+| `close` | `execute`, `speed` as above, plus the push-close settings in `close_door.CLOSE_DEFAULTS` (below)                                                                                                                                                                                                                                                                                                                                             | `{"executed": bool, "note": str, "runs_dir": str, "holding_handle": bool}` |
 
 From the moment `open` closes the gripper on the handle until the push-open lets go of it, its progress is
 reported `pausable: false`: a pause or cancel there would leave the hand holding the door. If the open stops in
@@ -97,25 +101,29 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name                | Default                              | Meaning                                                                                                                   |
-| ------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator`  | `true`                               | `false` runs standalone: no registration, drive it by CLI                                                                 |
-| `mock`              | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                      |
-| `allow_execute`     | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                |
-| `data_dir`          | `/microwave_data`                    | Door file, grasp record, run logs, detection frames (a host volume)                                                       |
-| `color_topic`       | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                        |
-| `camera_info_topic` | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                   |
-| `depth_topic`       | `/wrist_camera/depth/image_rect_raw` | Wrist depth, aligned to colour (D405, OAK); the D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`              |
-| `camera_frame`      | `""`                                 | Camera optical frame; `""` = the colour image's frame_id                                                                  |
-| `box_topic`         | `""`                                 | boxer's 3D boxes (`/perception/object_detections_3d`): view pose + crop to the microwave's box. `""` = YOLO, no view pose |
-| `box_class`         | `microwave`                          | The `perception_class` of the box to use                                                                                  |
-| `view_dists`        | `[0.35, 0.30, 0.40, 0.45]`           | View pose: camera distances out from the box's front face (m), in order                                                   |
-| `view_heights`      | `[0.15, 0.20, 0.10, 0.25, 0.05]`     | View pose: camera heights above the box's middle (m), in order                                                            |
-| `handle_source`     | `depth`                              | `depth` (bar sticking out of the door) or `sam3` (SAM 3's handle mask)                                                    |
-| `sam3_service`      | `/perception/sam3/detect`            | SAM 3's Detect service (`handle_source: sam3`)                                                                            |
-| `sam3_prompts`      | `[handle]`                           | SAM 3 text prompts for the handle; the best-scoring instance is used                                                      |
-| `sam3_threshold`    | `0.3`                                | SAM 3 score threshold                                                                                                     |
-| `yolo_model`        | `yolo26s.pt`                         | YOLO weights for the microwave box (dev stand-in)                                                                         |
+| Name                      | Default                              | Meaning                                                                                                                                                                                |
+| ------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`        | `true`                               | `false` runs standalone: no registration, drive it by CLI                                                                                                                              |
+| `mock`                    | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                                                                                   |
+| `allow_execute`           | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                                                                             |
+| `data_dir`                | `/microwave_data`                    | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                                    |
+| `color_topic`             | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                                                                                     |
+| `camera_info_topic`       | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                                                                                |
+| `depth_topic`             | `/wrist_camera/depth/image_rect_raw` | Wrist depth, aligned to colour (D405, OAK); the D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`                                                                           |
+| `camera_frame`            | `""`                                 | Camera optical frame; `""` = the colour image's frame_id                                                                                                                               |
+| `scene_color_topic`       | `/scene_camera/color/image_raw`      | Scene camera colour: without boxer, the door plane inside the scene segmenter's microwave box places the view pose and the wrist detection's crop                                      |
+| `scene_camera_info_topic` | `/scene_camera/color/camera_info`    | Scene camera intrinsics                                                                                                                                                                |
+| `scene_depth_topic`       | `/scene_camera/depth/image_rect_raw` | Scene camera depth, aligned to colour                                                                                                                                                  |
+| `scene_detections_topic`  | `/perception/object_detections`      | The scene segmenter's 2D boxes on the scene camera: the door is looked for inside its `box_class` box (no YOLO)                                                                        |
+| `box_topic`               | `""`                                 | boxer's 3D boxes (`/perception/object_detections_3d`): view pose + crop to the microwave's box. `""` = the scene camera places the view pose and the crop; YOLO only with `view` false |
+| `box_class`               | `microwave`                          | The `perception_class` of the box to use                                                                                                                                               |
+| `view_dists`              | `[0.35, 0.30, 0.40, 0.45]`           | View pose: camera distances out from the box's front face (m), in order                                                                                                                |
+| `view_heights`            | `[0.15, 0.20, 0.10, 0.25, 0.05]`     | View pose: camera heights above the box's middle (m), in order                                                                                                                         |
+| `handle_source`           | `depth`                              | `depth` (bar sticking out of the door) or `sam3` (SAM 3's handle mask)                                                                                                                 |
+| `sam3_service`            | `/perception/sam3/detect`            | SAM 3's Detect service (`handle_source: sam3`)                                                                                                                                         |
+| `sam3_prompts`            | `[handle]`                           | SAM 3 text prompts for the handle; the best-scoring instance is used                                                                                                                   |
+| `sam3_threshold`          | `0.3`                                | SAM 3 score threshold                                                                                                                                                                  |
+| `yolo_model`              | `yolo26s.pt`                         | YOLO weights for the microwave box (dev stand-in)                                                                                                                                      |
 
 Per-rig constants that are not parameters yet, in `microwave/constants.py`: the park pose
 (`PARK_JOINTS`, hand-placed on the Jetson rig 2026-10-07), the grasp corrections (`GRIP_EXT`,
