@@ -81,10 +81,11 @@ def plan(scene, rb, door, st, kps, trust_from, lift_off=False, short_last=False)
     return legs
 
 
-def replay(pts, grippers, door, execute, trust_from, ai=None):
+def replay(pts, grippers, door, execute, trust_from, ai=None, impedance=None):
     """Replay keypoints: `pts` [(pos, quat)] (the first = where the hand must be now), `grippers` the
     gripper reading at each, `door` the door dict the legs are checked against. `ai`: the arm to use (the capability
-    chains steps); else one is made here. Returns True when it reached the last keypoint (or the dry run passed)."""
+    chains steps); else one is made here. `impedance`: run the legs compliant (self.arm's `impedance`); None: stiff
+    position control. Returns True when it reached the last keypoint (or the dry run passed)."""
     own = ai is None
     ai = ai or rammp_arm.RammpArm()
     try:
@@ -118,7 +119,7 @@ def replay(pts, grippers, door, execute, trust_from, ai=None):
         # back, while turning 68 deg) aborted PATH_TOLERANCE_VIOLATED ~12.5 cm short both times; it ran clean
         # three times at 0.5 / 0.09.
         ok, err, _ = run_cartesian_trajectory(
-            ai, [(list(p), list(q)) for p, q in kps], speed_scale=rammp_arm.contact_speed_scale()
+            ai, [(list(p), list(q)) for p, q in kps], speed_scale=rammp_arm.contact_speed_scale(), impedance=impedance
         )
         say(
             f"{'DONE' if ok else 'STOPPED SHORT'}: hand {np.round(ai.get_state()['ee_pos'][:3], 3)} "

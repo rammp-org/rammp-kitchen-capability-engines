@@ -17,7 +17,7 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
 """
 
 import rammp_arm
-from capability_engine import Action, CapabilityEngine, EngineError, run
+from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
 from door_common import close_door
 from door_common import common as dc
 from door_common import open_door as shared_open
@@ -46,7 +46,8 @@ PARAMS = {
     "data_dir": "/microwave_data",
     "color_topic": "/wrist_camera/color/image_raw",
     "camera_info_topic": "/wrist_camera/color/camera_info",
-    "depth_topic": "/wrist_camera/aligned_depth_to_color/image_raw",
+    # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
+    "depth_topic": "/wrist_camera/depth/image_rect_raw",
     "camera_frame": "",
     # boxer's 3D boxes (scene camera), e.g. /perception/object_detections_3d: the open goes to a view pose in front
     # of the microwave's box and the handle detector crops the wrist camera's points to it. "" (default, 10-30: boxer's
@@ -152,6 +153,16 @@ class Capability(CapabilityEngine):
         dc.set_output(self.get_logger().info)
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
         log_args = {**params, "execute": execute}
+        holding = False
+
+        def on_hold(now):
+            """From the grasp until the push-open lets go the hand is on the handle: a pause or cancel there would
+            leave it holding the door, so the step is not pausable and the result says so."""
+            nonlocal holding
+            holding = now
+            ctx.progress(action_id, 50.0, "holding the handle" if now else "let go of the handle", pausable=not now)
+
+        held = " -- still holding the handle" if action_id == "open" else ""
         try:
             if action_id == "open":
                 ok = open_door.run(
@@ -163,22 +174,33 @@ class Capability(CapabilityEngine):
                     log_args=log_args,
                     view=bool(params.get("view", True)),
                     view_only=bool(params.get("view_only", False)),
+                    on_hold=on_hold,
                 )
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
                 ok = close_door.run(self.arm, execute, speed=speed, log_args=log_args, **settings)
         except dc.Refused as e:
-            raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
+            raise EngineError(
+                "refused", f"{e} -- the arm holds where it is{held if holding else ''}", recoverable=True
+            ) from e
+        except Cancelled:
+            if holding:  # a cancelled action can't move the arm: someone has to let go of the handle
+                self.get_logger().error(f"{action_id} cancelled{held}; release it with open_door --release")
+            raise
         finally:
             dc.set_output(None)
             dc.set_camera(None)
+        if not execute:
+            ctx.checkpoint()  # a dry run makes no arm call after detecting and planning: a cancel there ends it here
         if not ok:
             raise EngineError(
-                "stopped", f"the {action_id} stopped short -- the arm holds where it is", recoverable=True
+                "stopped",
+                f"the {action_id} stopped short -- the arm holds where it is{held if holding else ''}",
+                recoverable=True,
             )
         if execute:
             ctx.update_object(self.instance_id, opened=action_id == "open")
-        return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
+        return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR), "holding_handle": holding}
 
 
 def main():

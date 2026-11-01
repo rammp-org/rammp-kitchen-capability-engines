@@ -11,6 +11,9 @@ GRIP_EXT = 0.07  # along the approach axis (negative = past the detected handle)
 VERTICAL_CORR = 0.0  # world z. 0.025 (rchi-cpu-5) -> 0.046 (10-07 touch) -> 0: the detector now returns the
 # MIDDLE of the bar, not a point near its bottom end
 GRASP_X_ADJUST = 0.040  # along the approach axis
+# Joint impedance from the grasp on (the swing and the push-open; door_common.open_door.GRASPED_GAINS): the stiffest
+# the driver takes (kq up to 400), critically damped, torque capped at the Gen3's own limits (self.arm's IMPEDANCE)
+GAINS_RIGID = {"kq": (400.0,) * 7, "zeta": 1.0, "torque_limit": (39.0,) * 4 + (9.0,) * 3}
 
 HINGE_BEHIND_FACE = 0.016  # real pivot vs the detected hinge (the door's visible edge): this far behind the door
 HINGE_PAST_EDGE = 0.021  # face and this far beyond the edge, away from the handle. Measured 10-07 from the
