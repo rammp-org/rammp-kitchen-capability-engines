@@ -1,4 +1,4 @@
-"""Close the microwave door: push it shut with the side of the hand -- no grasp.
+"""Close a door: push it shut with the side of the hand -- no grasp.
 
 The route-over push-close that latched the door on 2026-10-21 (feeding-deployment
 `real_gen3_ros2_close_microwave.py --phase push-close`, code `door_push.push_close`). The gripper is never
@@ -16,9 +16,6 @@ touched: the hand may be holding something (a container -- `hold_offset_x`, `kee
 Everything is planned and gated (IK, per-step jump, J4/J6, +-180 wrap, clearance to the door model and
 microwave body) before anything moves; a failed gate means nothing is commanded. The door model is the
 one the open saved (DOOR_FILE); it doesn't include the handle or whatever the gripper holds.
-
-Also what the fridge's push-close runs (fridge_push.close: `door_file`, `door_shift`, `behind`,
-`stop_deg`, `max_tilt_deg`).
 """
 
 import json
@@ -32,8 +29,8 @@ from capability_engine import sim
 from capability_engine.cornell_commands import CartesianTrajectoryCommand
 from scipy.spatial.transform import Rotation as R
 
-from . import microwave_common as mc
-from .microwave_common import (
+from . import common as dc
+from .common import (
     ARM,
     FINGERTIP_PAST_TOOL,
     MIN_CLEAR,
@@ -96,8 +93,8 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
     `push_radius_end` -- until it is `preload` into the closed door, then straight back out.
     This is the user's hand-demonstrated close (09-25): straight there kept J3 moving AWAY from
     +-180, where sideways-first drove it across.
-    `behind` (fridge: a tall door, no going over it): only the route back out in front of the open door's free edge,
-    left past it, then forward to the swing start. `stop_deg` > 0 (fridge: it swings shut by itself from there): the
+    `behind` (a tall door, no going over it): only the route back out in front of the open door's free edge,
+    left past it, then forward to the swing start. `stop_deg` > 0 (it swings shut by itself from there): the
     swing ends where the door, pushed by the hand, is at `stop_deg` instead of `push_stop_short` from closed."""
     fwd = np.r_[-df.n, 0.0]  # into the microwave, closed-door normal
     side = np.r_[-df.e, 0.0]  # along the closed door, toward the hinge
@@ -358,12 +355,12 @@ def _max_tilt_deg(scene, rb, qs, quat):
 def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg=0.0, max_tilt_deg=None):
     """Push the open door shut with the hand facing forward throughout. The gripper is never
     touched (it may be holding a container).
-    Fridge (`fridge_push.close`): `door_file` = its own door file; `door_shift` (x, y) = how far the recorded door has
+    `door_file` = a door file other than DOOR_FILE; `door_shift` (x, y) = how far the recorded door has
     moved in the arm's frame since it was detected (the wheelchair backed up); `behind` / `stop_deg`: see _plan_close
     (route in front of the free edge instead of over the door; swing only until the door is at `stop_deg`, no push);
     `max_tilt_deg`: refuse unless every planned configuration keeps the hand's tilt (roll / pitch; turning about
     vertical is free) within this of where it starts (holding a container: it must not tip)."""
-    door_file = door_file or mc.DOOR_FILE
+    door_file = door_file or dc.DOOR_FILE
     if not door_file.exists():
         say(f"need {door_file} -- refusing.")
         return False
@@ -421,7 +418,7 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
             return False
     if not _run_sweep(ai, *plan["sweep"], args.smooth):
         return False
-    if plan["push"]:  # none for the fridge (--push-max 0): it swings shut from stop_deg
+    if plan["push"]:  # none with --push-max 0: it swings shut from stop_deg
         done = _push_until_shut(ai, plan["push"], args.push_contact_nm)
         # back along the push steps actually taken, to the swing's end, then the planned back-out
         back_steps = plan["push"][: max(done - 1, 0)][::-1] + [plan["sweep"][0][-1]]

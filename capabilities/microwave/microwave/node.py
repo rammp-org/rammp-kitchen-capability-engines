@@ -18,9 +18,11 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
 
 import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
+from door_common import close_door
+from door_common import common as dc
+from door_common import open_door as shared_open
 
-from . import close_door, open_door
-from . import microwave_common as mc
+from . import open_door
 from .perception import YOLO_MODEL, WristCamera
 
 COMMON = {
@@ -102,13 +104,13 @@ class Capability(CapabilityEngine):
         self.cfg = {
             k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
         }
-        mc.configure_paths(self.cfg["data_dir"])
+        open_door.configure(self.cfg["data_dir"])
         open_door.HANDLE_DETECTOR_MODEL = self.cfg["yolo_model"]
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
         if self.cfg["handle_source"] not in ("depth", "sam3"):
             raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
-        open_door.HANDLE_SOURCE = self.cfg["handle_source"]
+        shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
         # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
         self.sam3 = None
         if self.cfg["handle_source"] == "sam3":
@@ -146,8 +148,8 @@ class Capability(CapabilityEngine):
             self.cfg["sam3_prompts"],
             self.cfg["sam3_threshold"],
         )
-        mc.set_camera(camera)
-        mc.set_output(self.get_logger().info)
+        dc.set_camera(camera)
+        dc.set_output(self.get_logger().info)
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
         log_args = {**params, "execute": execute}
         try:
@@ -165,18 +167,18 @@ class Capability(CapabilityEngine):
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
                 ok = close_door.run(self.arm, execute, speed=speed, log_args=log_args, **settings)
-        except mc.Refused as e:
+        except dc.Refused as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         finally:
-            mc.set_output(None)
-            mc.set_camera(None)
+            dc.set_output(None)
+            dc.set_camera(None)
         if not ok:
             raise EngineError(
                 "stopped", f"the {action_id} stopped short -- the arm holds where it is", recoverable=True
             )
         if execute:
             ctx.update_object(self.instance_id, opened=action_id == "open")
-        return {"executed": execute, "note": note, "runs_dir": str(mc.RUNS_DIR)}
+        return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
 
 
 def main():

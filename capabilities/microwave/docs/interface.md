@@ -111,10 +111,11 @@ passes them as a params file.
 | `sam3_threshold`    | `0.3`                                            | SAM 3 score threshold                                                                                                     |
 | `yolo_model`        | `yolo26s.pt`                                     | YOLO weights for the microwave box (dev stand-in)                                                                         |
 
-Per-rig constants that are not parameters yet: the park pose (`microwave_common.PARK_JOINTS`,
-hand-placed on the Jetson rig 2026-10-07), the grasp corrections (`open_door.GRIP_EXT`,
-`GRASP_X_ADJUST`, `VERTICAL_CORR`, `GRASP_PITCHES_DEG` -- 14° first for that rig's tilted base)
-and the hinge corrections (`HINGE_BEHIND_FACE`, `HINGE_PAST_EDGE`).
+Per-rig constants that are not parameters yet, in `microwave/constants.py`: the park pose
+(`PARK_JOINTS`, hand-placed on the Jetson rig 2026-10-07), the grasp corrections (`GRIP_EXT`,
+`GRASP_X_ADJUST`, `VERTICAL_CORR`) and the hinge corrections (`HINGE_BEHIND_FACE`,
+`HINGE_PAST_EDGE`). `GRASP_PITCHES_DEG` is `door_common.open_door`'s -- 14° first for that rig's
+tilted base.
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the
