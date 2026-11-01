@@ -36,6 +36,18 @@ make test-hw HW_ARGS='--motion -x'                                # all automati
 make test-hw HW_ARGS='--motion --manual tests/hardware/test_80_manual.py'
 ```
 
+On flatbot (snorlax), give the cell's DDS config and its own planner world (the chair and
+floor), never the default bench world:
+
+```bash
+make test-hw HW_DDS=$HOME/rammp-deployments-curobo/december_2026/config/dds/cyclonedds.xml \
+    HW_ARGS='--motion --world /config/robot/curobo/world.yaml tests/hardware/test_10_joints.py'
+```
+
+The arm must start where cuRobo will plan from: it refuses the stowed pose and any joint within
+0.1 rad of its limit, so jog the arm out first. Flatbot's red e-stop cuts the arm's power: after
+the release, wait for the driver to reconnect, then call `/clear_faults`.
+
 Run the stages in order and read each one's failures before you start the next.
 `-x` stops at the first failure, with the arm at rest. The results go to
 `tests/hardware/results.xml`. To test another branch, such as #28, check it out

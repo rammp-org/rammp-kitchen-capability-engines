@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 import pytest
-from conftest import ACTION_WAIT_S, WAIT_S, diagnostic, say, wait_until
+from conftest import ACTION_WAIT_S, WAIT_S, say, wait_until
 
 pytestmark = [pytest.mark.motion, pytest.mark.manual]
 
@@ -54,7 +54,7 @@ def test_an_unexpected_contact_mid_motion(cell, home):
     """With the driver's contact detection on (kinova-gen3-ros2 #112), a push stops the goal
     (CONTACT_STOP) and the driver refuses every goal until /clear_faults. self.arm has no way to
     clear it, so a capability's next motion must fail with a reason that says so."""
-    if cell.act(lambda arm, ctx: diagnostic(arm.diagnostics(), "Contact detection")) is None:
+    if cell.observer.status("Contact detection") is None:
         pytest.skip("this driver has no contact detection")
     handle = cell.start(slow_turn(home))
     cell.observer.wait_moving(timeout_s=10.0)
@@ -87,11 +87,13 @@ def test_a_grasp_on_an_object_returns_and_holds(cell, home):
     say(f"Hold the foam block between the open fingers; the gripper closes in {ACT_S / 2:g} s.")
     time.sleep(ACT_S / 2)
     t0 = time.monotonic()
-    assert cell.act(lambda arm, ctx: arm.gripper(1.0))
-    took = time.monotonic() - t0
-    held = cell.observer.gripper()
-    say("Let go of the block; the test checks the grip for 3 s.")
-    time.sleep(3.0)
-    assert took < 4.0 and held < CLOSED_ON_NOTHING, (took, held)
-    assert abs(cell.observer.gripper() - held) < 0.02, "the grip slipped"
-    assert cell.act(lambda arm, ctx: arm.gripper(0.0))
+    try:
+        assert cell.act(lambda arm, ctx: arm.gripper(1.0))
+        took = time.monotonic() - t0
+        held = cell.observer.gripper()
+        say("Let go of the block; the test checks the grip for 3 s.")
+        time.sleep(3.0)
+        assert took < 4.0 and held < CLOSED_ON_NOTHING, (took, held)
+        assert abs(cell.observer.gripper() - held) < 0.02, "the grip slipped"
+    finally:
+        assert cell.act(lambda arm, ctx: arm.gripper(0.0))

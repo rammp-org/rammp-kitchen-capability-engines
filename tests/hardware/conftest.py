@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 import rammp_arm
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray
 from rammp_arm_interfaces.msg import EeState, GripperState, StreamStatus
 from rammp_common_interfaces.msg import ControlStatus, EStop
 from rammp_orchestrator_interfaces.action import ExecuteAction
@@ -106,8 +107,8 @@ def wait_until(condition, timeout_s=WAIT_S, what="condition"):
 def joint_err(a, b):
     """|a - b| per joint (rad), the short way round for the continuous joints."""
     d = np.asarray(a, float) - np.asarray(b, float)
-    for i in rammp_arm.CONTINUOUS:
-        d[i] = (d[i] + np.pi) % (2 * np.pi) - np.pi
+    c = rammp_arm.CONTINUOUS
+    d[..., c] = (d[..., c] + np.pi) % (2 * np.pi) - np.pi
     return np.abs(d)
 
 
@@ -159,6 +160,10 @@ class Observer(Node):
         self.create_subscription(
             StreamStatus, "/stream_status", lambda m: setattr(self, "stream", m), LATCHED
         )
+        # The latest status of each driver task ("Arm link", ...): the driver publishes one per
+        # /diagnostics message, so arm.diagnostics() (the latest message) shows only one of them.
+        self.statuses = {}
+        self.create_subscription(DiagnosticArray, "/diagnostics", self._on_diagnostics, 10)
         self._estop = self.create_publisher(EStop, "/estop", 10)
         self._clear = self.create_client(Trigger, "/clear_faults")
         self.estop_engaged = False  # this session engaged it: the session's end clears it
@@ -200,6 +205,17 @@ class Observer(Node):
     def _on_grip(self, m):
         with self._lock:
             self._grip.append((time.monotonic(), float(m.position)))
+
+    def _on_diagnostics(self, m):
+        for s in m.status:
+            self.statuses[s.name.rsplit(": ", 1)[-1]] = s
+
+    def status(self, task, timeout_s=3.0):
+        """The driver's latest /diagnostics status of `task`, or None if none came in timeout_s."""
+        deadline = time.monotonic() + timeout_s
+        while task not in self.statuses and time.monotonic() < deadline:
+            time.sleep(0.1)
+        return self.statuses.get(task)
 
     # -- now ------------------------------------------------------------------------------------
 
@@ -271,8 +287,11 @@ class Observer(Node):
         return time.monotonic() - STILL_FOR_S
 
     def wait_moving(self, timeout_s=WAIT_S):
-        def moving():
-            return np.abs(self._latest(self._joints, "/joint_states")[2]).max() > MOVING_RAD_S
+        def moving():  # a stale sample is not moving (move_cartesian's IK can starve callbacks)
+            with self._lock:
+                last = self._joints[-1] if self._joints else None
+            fresh = last is not None and time.monotonic() - last[0] < STATE_FRESH_S
+            return fresh and np.abs(last[2]).max() > MOVING_RAD_S
 
         wait_until(moving, timeout_s, "the arm to move")
         return time.monotonic()

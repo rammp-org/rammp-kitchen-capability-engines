@@ -10,7 +10,8 @@ import time
 import numpy as np
 import pytest
 import rammp_arm
-from conftest import STOP_S, WAIT_S, diagnostic, wait_until
+from conftest import STOP_S, WAIT_S, wait_until
+from diagnostic_msgs.msg import DiagnosticStatus
 
 from capability_engine import EStopped, StreamClosed
 
@@ -35,11 +36,7 @@ def recover(cell, home):
     cell.observer.set_estop(False)
     time.sleep(DIAGNOSTICS_S)  # /diagnostics is 1 Hz: let it show a latched fault
 
-    def link(arm, ctx):
-        d = arm.diagnostics()
-        return (diagnostic(d, "Arm link") or diagnostic(d, "Arm")).level
-
-    if cell.act(link) != 0:
+    if cell.observer.status("Arm link").level != DiagnosticStatus.OK:
         cell.observer.clear_faults()
     assert cell.act(lambda arm, ctx: arm.go_to_joint_config(home)), "the arm did not recover"
 
