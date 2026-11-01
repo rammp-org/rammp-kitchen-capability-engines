@@ -44,8 +44,8 @@ from .common import (
 # --- detection ---
 MAX_LOOKS = 5  # keep looking until two detections agree within DETECT_AGREE
 MAX_EMPTY_RETRIES = 8  # per look: retries on an empty read (viewpoint-dependent YOLO misses)
-DETECT_AGREE = 0.03
-HINGE_AGREE = 0.03  # the two agreeing looks' hinges must agree this well too (horizontal)
+DETECT_AGREE = 0.06
+HINGE_AGREE = 0.06  # the two agreeing looks' hinges must agree this well too (horizontal)
 PLAUSIBLE_X = (0.30, 0.90)  # snorlax 10-30: was 0.85; the planner checks reach itself
 PLAUSIBLE_Y = (-0.50, 0.20)
 PLAUSIBLE_Z = (

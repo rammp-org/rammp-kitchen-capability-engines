@@ -12,7 +12,7 @@ INCH = 0.0254
 MEASURED = {
     # middle of the handle bar (where the fingers close) -> door's front surface, perpendicular to the door, gap behind
     # the bar included (measured 10-22; was 0.020, estimated by eye)
-    "handle_centre_to_face_m": 0.053,
+    "handle_centre_to_face_m": 1.5 * INCH,
     # door's front surface -> hinge pin axis: door thickness 1.25 in (measured 09-20, pin assumed at the back face) +
     # 1.5 cm (hinge side crept forward). If the pin depth is measured directly, use it alone.
     "pin_behind_face_m": 1.25 * INCH + 0.015,
@@ -25,8 +25,8 @@ MEASURED = {
     # Modelled as a slab this deep across the whole door: it sets the room behind the open door for the push-open
     "door_depth_m": 4.2 * INCH,
     # door top / bottom above / below the middle of the handle bar (measured 10-24). The close pushes only within these
-    "door_above_handle_m": 12.5 * INCH,
-    "door_below_handle_m": 18 * INCH,
+    "door_above_handle_m": 15 * INCH,
+    "door_below_handle_m": 15.5 * INCH,
     "body_depth_m": 0.50,  # cabinet behind the door
     # The arm is mounted on the chair's left and the person sits just behind it, to its right (10-24: a close ran the
     # arm into the back of the chair). No part of the arm or gripper may be more than this far behind the arm base

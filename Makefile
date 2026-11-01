@@ -2,6 +2,10 @@ CAP ?= example
 IMAGE = ghcr.io/rammp-org/rammp-kitchen-capability-engines/$(CAP)
 TAG ?= dev
 ROS_DOMAIN_ID ?= 0
+# The pinned images' Cyclone config caps a host at 10 DDS participants, and
+# a full robot stack already uses more. Layer ParticipantIndex none on top of
+# it (no cap). Drop once images are built on a rammp-base that sets none.
+DDS_ENV = -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>'
 SHEPPY = sheppy @ git+https://github.com/rammp-org/sheppy@main
 # STANDALONE=1 runs without the orchestrator; MOCK=1 skips hardware.
 STANDALONE ?= 0
@@ -28,13 +32,13 @@ build:
 	docker build -f capabilities/$(CAP)/Dockerfile -t $(IMAGE):$(TAG) .
 
 run:
-	docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+	docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) $(DDS_ENV) \
 		$(IMAGE):$(TAG) ros2 launch $(CAP) $(CAP).launch.py $(LAUNCH_ARGS)
 
 # Send one action to a running capability, as the orchestrator would:
 #   make action CAP=example ACTION=count PARAMS='{"to": 5}'
 action:
-	docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+	docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) $(DDS_ENV) \
 		$(IMAGE):$(TAG) ros2 action send_goal --feedback /$(CAP)/execute_action \
 		rammp_orchestrator_interfaces/action/ExecuteAction \
 		'{engine_id: $(CAP), action_id: $(ACTION), params_json: "$(subst ",\",$(PARAMS))"}'
