@@ -16,6 +16,7 @@ import time
 
 import numpy as np
 import pybullet as p
+import rammp_arm
 from capability_engine import sim
 from capability_engine.cornell_commands import CloseGripperCommand, OpenGripperCommand
 from scipy.spatial.transform import Rotation as R
@@ -105,12 +106,20 @@ PLACEMENT_NOTE = None  # (handle, door normal, start joints) -> how to place the
 DOOR_MODEL = {}  # door-model geometry written into the door file (common.door_dims). Empty: common's defaults
 DOOR_Z_FROM_HANDLE = None  # door bottom / top relative to the handle, when it is taller than any detection sees
 KEEP_ARM_IN_FRAMES = False  # each saved detection frame also keeps the arm's joints + tool pose
+GRASPED_GAINS = None  # joint impedance {kq, zeta, torque_limit} from the grasp on (the swing, what follows it); None:
+#   stiff position control. The approach (line-up, straight in) stays in position control either way
 REQUIRED = ("MAKE_DETECTOR", "FIND_HINGE", "GRIP_EXT", "VERTICAL_CORR", "GRASP_X_ADJUST")
 
 
 def configure(**values):
     """Set this module's constants at startup (the capability's process, the capability's values)."""
     dc.set_constants(globals(), values, REQUIRED)
+
+
+def grasped_impedance():
+    """self.arm's `impedance` for a move holding or pushing the door: GRASPED_GAINS with the usual tracking tolerance,
+    or None (stiff position control)."""
+    return None if GRASPED_GAINS is None else {**GRASPED_GAINS, "path_tol": rammp_arm.PATH_TOL_RAD}
 
 
 def _swing_waypoints(start_pose, hinge, deg):
@@ -524,9 +533,18 @@ def _placement_advice(scene, rb, geom, q0, max_swing, min_swing, after_swing):
     return f"\nWould work with the {dc.APPLIANCE} moved: " + "; or ".join(works) + "."
 
 
-def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG, after_swing=None, before_detect=None):
+def open_task(
+    ai,
+    execute,
+    max_swing=SWING_MAX_TRY_DEG,
+    min_swing=SWING_MIN_DEG,
+    after_swing=None,
+    before_detect=None,
+    on_grasp=None,
+):
     """Detect, plan, grasp, swing. `before_detect` `(ai, scene, rb, execute)`: runs first; returning True ends the task
-    there. `after_swing`: what follows the swing (AfterSwing), planned with it before any motion.
+    there. `after_swing`: what follows the swing (AfterSwing), planned with it before any motion. `on_grasp()`: called
+    once the gripper has closed on the handle -- from then on a stop leaves the hand holding it.
     Returns True when the swing finished (or the dry run passed); raises Refused on any refusal."""
     scene, rb = make_sim()
     after_swing = after_swing or AfterSwing()
@@ -618,6 +636,8 @@ def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG,
     say(f"gripper after close: {g:.4f} (can't confirm a grasp on this rig -- watch it)")
     if g < 0.2:
         raise Refused("Gripper is OPEN -- nothing grasped. Refusing to swing.")
+    if on_grasp is not None:
+        on_grasp()
 
     # --- swing: the planned joints, unless the arm isn't where the plan put it -- then re-planned from where it is ---
     st = ai.get_state()
@@ -635,7 +655,7 @@ def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG,
     save_door_geometry(**hinge_fields)
     if hasattr(ai, "move_joints"):  # the checked joints at every waypoint, as one smooth trajectory
         say(f"swing {deg} deg: sending the {len(arc)} checked waypoints' joints ...")
-        ai.move_joints(list(arc), cart_lengths=[SWING_WAYPOINT_SPACING_M] * len(arc))
+        ai.move_joints(list(arc), cart_lengths=[SWING_WAYPOINT_SPACING_M] * len(arc), impedance=grasped_impedance())
         time.sleep(0.3)
         err = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - np.asarray(wps[-1][:3])))
         ok = err <= SWING_DONE_TOL_M
@@ -644,7 +664,7 @@ def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG,
         if sent[-1] is not wps[-1]:
             sent.append(wps[-1])
         say(f"swing {deg} deg: {len(wps)} waypoints checked, sending {len(sent)} ...")
-        ok, err, _ = run_cartesian_trajectory(ai, [(w[:3], w[3:]) for w in sent])
+        ok, err, _ = run_cartesian_trajectory(ai, [(w[:3], w[3:]) for w in sent], impedance=grasped_impedance())
     path = np.array([p_[1:] for p_ in getattr(ai, "last_path", [])])
     final = ai.get_state()
     arc_deg = 0.0

@@ -99,8 +99,9 @@ def decode(enc, door):
     return pts
 
 
-def run(enc_path, execute, trust_from, ai=None):
-    """Replay one encoded demo. `ai`: the arm to use (open_door chains steps); else one is made here.
+def run(enc_path, execute, trust_from, ai=None, impedance=None):
+    """Replay one encoded demo. `ai`: the arm to use (open_door chains steps); else one is made here. `impedance`: as
+    door_common.demo_replay.replay.
     Returns True when it reached the last keypoint (or the dry run passed)."""
     enc = json.loads(Path(enc_path).read_text())
     door = json.loads(dc.DOOR_FILE.read_text())
@@ -112,7 +113,7 @@ def run(enc_path, execute, trust_from, ai=None):
     )
     for k, (p, _) in zip(enc["keypoints"], pts, strict=False):
         say(f"  {k['label'][:30]:30s} -> {np.round(p, 3)}")
-    return replay(pts, [k["gripper"] for k in enc["keypoints"]], door, execute, trust_from, ai)
+    return replay(pts, [k["gripper"] for k in enc["keypoints"]], door, execute, trust_from, ai, impedance)
 
 
 def main():

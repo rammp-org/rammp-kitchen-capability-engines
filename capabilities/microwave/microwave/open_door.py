@@ -57,7 +57,15 @@ from door_common.open_door import BACK_OFF_M, SWING_MAX_TRY_DEG, SWING_MIN_DEG
 from scipy.spatial.transform import Rotation as R
 
 from . import constants
-from .constants import GRASP_X_ADJUST, GRIP_EXT, HINGE_BEHIND_FACE, HINGE_PAST_EDGE, VERTICAL_CORR, YOLO_MODEL
+from .constants import (
+    GAINS_RIGID,
+    GRASP_X_ADJUST,
+    GRIP_EXT,
+    HINGE_BEHIND_FACE,
+    HINGE_PAST_EDGE,
+    VERTICAL_CORR,
+    YOLO_MODEL,
+)
 
 # --- view pose (with boxer): before detecting, the wrist camera goes square in front of the microwave ---
 VIEW_DISTS = (0.35, 0.30, 0.40, 0.45)  # camera this far out from the box's front face (horizontally) ...
@@ -93,6 +101,7 @@ def configure(data_dir):
         GRIP_EXT=GRIP_EXT,
         VERTICAL_CORR=VERTICAL_CORR,
         GRASP_X_ADJUST=GRASP_X_ADJUST,
+        GRASPED_GAINS=GAINS_RIGID,
     )
 
 
@@ -243,10 +252,18 @@ def _view_step(view, view_only, ai, scene, rb, execute):
 
 
 def open_task(
-    ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG, view=True, view_only=False, push=False
+    ai,
+    execute,
+    max_swing=SWING_MAX_TRY_DEG,
+    min_swing=SWING_MIN_DEG,
+    view=True,
+    view_only=False,
+    push=False,
+    on_grasp=None,
 ):
     """(`view`, with boxer) go to the view pose, then detect, plan, grasp, swing. `view_only`: stop at the view pose.
-    `push`: the push-open follows, so each candidate's push-open is planned too before any motion.
+    `push`: the push-open follows, so each candidate's push-open is planned too before any motion. `on_grasp()`: called
+    once the gripper has closed on the handle.
     Returns True when the swing finished (or the dry run passed); raises Refused on any refusal."""
     return shared.open_task(
         ai,
@@ -255,6 +272,7 @@ def open_task(
         min_swing,
         after_swing=PushOpen() if push else None,
         before_detect=partial(_view_step, view, view_only),
+        on_grasp=on_grasp,
     )
 
 
@@ -266,13 +284,14 @@ def push_open(ai, execute):
     if not execute:
         say("  (planned above from the planned swing end -- see the chosen tilt's line; re-planned from the real one)")
         return True
-    return demo_replay.run(PUSH_OPEN, True, PUSH_OPEN_TRUST_FROM, ai=ai)
+    return demo_replay.run(PUSH_OPEN, True, PUSH_OPEN_TRUST_FROM, ai=ai, impedance=shared.grasped_impedance())
 
 
-def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=True, view_only=False):
+def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=True, view_only=False, on_hold=None):
     """The open task as the node runs it (was door_task.py `open`): (`view`) to the view pose, grasp + swing, then
     (`push`) let go and replay the push-open demo, all logged to RUNS_DIR/<time>_open (RunLog). `speed` (0..1]
-    scales every arm motion for this run only. `view_only`: stop at the view pose. Returns True when it finished
+    scales every arm motion for this run only. `view_only`: stop at the view pose. `on_hold(True)` once the gripper
+    closes on the handle, `on_hold(False)` once the push-open has let go of it. Returns True when it finished
     (or the dry run passed); raises Refused."""
     import rammp_arm
 
@@ -286,11 +305,16 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=T
         log.frame("run_start")
         swing = swing_deg or (PUSH_OPEN_SWING_DEG if push else SWING_MAX_TRY_DEG)
         say("\n===== OPEN: grasp + swing =====")
-        ok = open_task(ai, execute, swing, view=view, view_only=view_only, push=push and not view_only)
+        on_grasp = partial(on_hold, True) if on_hold else None
+        ok = open_task(
+            ai, execute, swing, view=view, view_only=view_only, push=push and not view_only, on_grasp=on_grasp
+        )
         if not ok:
             say("swing did not finish -- stopping (still holding the handle).")
         elif push and not view_only:
             ok = push_open(ai, execute)
+            if ok and execute and on_hold:
+                on_hold(False)
         log.event("open", ok=ok)
         say(f"\nOPEN {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")
         return ok
@@ -332,7 +356,7 @@ def main():
             ai.node,
             "/wrist_camera/color/image_raw",
             "/wrist_camera/color/camera_info",
-            "/wrist_camera/aligned_depth_to_color/image_raw",
+            "/wrist_camera/depth/image_rect_raw",
             rammp_arm.FRAME,
         )
     )
