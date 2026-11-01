@@ -1,8 +1,8 @@
-"""The microwave's handle detector: door_common's, with YOLO or boxer finding where the microwave is.
+"""The microwave's handle detector: door_common's, with a box saying where the microwave is.
 
 1. Where the microwave is: a 3D box -- boxer's, or (open, without boxer) the door the scene camera found inside the
-   scene segmenter's 2D microwave box -- keeping the wrist-camera points inside it; else (view false) a YOLO box around
-   the microwave (COCO 'microwave', else the classes it confuses it with).
+   scene segmenter's 2D microwave box -- keeping the wrist-camera points inside it; else (the bench scripts) a YOLO
+   box around the microwave (COCO 'microwave', else the classes it confuses it with).
 2. The rest is door_common.perception.HandleDetector: door plane, handle, hinge.
 
 NOTE: YOLO (step 1) is a development stand-in only -- the actual demo will NOT use YOLO; a different

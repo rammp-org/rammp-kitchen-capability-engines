@@ -88,6 +88,7 @@ VIEW_HEIGHTS = (0.15, 0.20, 0.10, 0.25, 0.05)  # ... and this far above the box'
 VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
 BOX_WAIT_S = 10.0  # wait this long for boxer's first microwave box
+VIEW_AT_TOL_M = 0.05  # the hand this close to the view pose counts as there: a dry run goes on to detect and plan
 
 # --- push-open (after the swing): let go, up and back, over to the inside of the door, down, push it further open ---
 PUSH_OPEN_SWING_DEG = 50  # the swing before the push-open
@@ -274,7 +275,7 @@ def _detected_face():
     Returns (face centre, outward normal); raises Refused if it finds no door."""
     cam = SCENE_CAMERA
     if cam is None:
-        raise Refused("No scene camera to place the view pose -- set box_topic, or send view false.")
+        raise Refused("No scene camera to place the view pose -- is it configured (scene_*_topic), or set box_topic.")
     if not cam.wait_for_frames(SCENE_WAIT_S):
         raise Refused(f"No scene camera frames on {', '.join(cam.topics)} in {SCENE_WAIT_S:g} s -- is it up?")
     detector = _make_detector()
@@ -307,7 +308,7 @@ def plan_view(ai, scene, rb):
     above the face's middle, looking at the face's centre. The face comes from boxer's box (box_topic) or, without
     boxer, from a first detection made from where the arm is. The hand pose comes from where the camera sits on it now
     (TF), its joints from IK seeded at VIEW_SEED_DEG and checked like any cuRobo goal. Returns the goal joints (to
-    go_to_joint_config, so the arm arrives on that branch); raises Refused."""
+    go_to_joint_config, so the arm arrives on that branch) and the hand's goal position; raises Refused."""
     cam = dc.camera()
     face, n = _box_face(cam) if getattr(cam, "box_topic", "") else _detected_face()
     f = cam.grab()
@@ -341,7 +342,7 @@ def plan_view(ai, scene, rb):
                     f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
                     f"{np.round(pos, 3)}, joints {np.round(np.degrees(q), 1)}"
                 )
-                return q
+                return q, T_tool[:3, 3]
             tried.append((label, T_tool))
     label, T_tool = tried[0]  # say why the preferred one failed
     check_curobo_goal(
@@ -358,16 +359,21 @@ def plan_view(ai, scene, rb):
     )
 
 
-def _view_step(view, view_only, ai, scene, rb, execute):
-    """(`view`) go to the view pose, so the handle is detected from the same place every run. Returns True when the
-    open ends here."""
-    if not view:
-        return False
-    q_view = plan_view(ai, scene, rb)
+def _view_step(view_only, ai, scene, rb, execute):
+    """Go to the view pose, so the handle is always detected from the same place. Already there (VIEW_AT_TOL_M), a dry
+    run goes on to detect and plan from it; elsewhere it stops, since it can't detect from where the arm isn't.
+    Returns True when the open ends here."""
+    q_view, p_view = plan_view(ai, scene, rb)
+    off = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - p_view))
+    if off <= VIEW_AT_TOL_M:
+        say(f"already at the view pose ({off * 100:.1f} cm) -- detecting from here")
+        if view_only:
+            say("\nAT THE VIEW POSE (view_only) -- stopping here.")
+        return view_only
     if not execute:
         say(
-            "\nDRY RUN -- would move to the view pose and detect from there; nothing commanded. To dry-run the "
-            "rest: a view_only goal (moves), then a dry run with view false."
+            f"\nDRY RUN -- would move to the view pose ({off * 100:.0f} cm away) and detect from there; nothing "
+            "commanded. To dry-run the rest: a view_only goal (moves there), then this dry run again."
         )
         return True
     if not ai.go_to_joint_config(q_view, "to view pose"):
@@ -384,12 +390,11 @@ def open_task(
     execute,
     max_swing=SWING_MAX_TRY_DEG,
     min_swing=SWING_MIN_DEG,
-    view=True,
     view_only=False,
     push=False,
     on_grasp=None,
 ):
-    """(`view`) go to the view pose, then detect, plan, grasp, swing. `view_only`: stop at the view pose.
+    """Go to the view pose, then detect, plan, grasp, swing. `view_only`: stop at the view pose.
     `push`: the push-open follows, so each candidate's push-open is planned too before any motion. `on_grasp()`: called
     once the gripper has closed on the handle.
     Returns True when the swing finished (or the dry run passed); raises Refused on any refusal."""
@@ -399,7 +404,7 @@ def open_task(
         max_swing,
         min_swing,
         after_swing=PushOpen() if push else None,
-        before_detect=partial(_view_step, view, view_only),
+        before_detect=partial(_view_step, view_only),
         on_grasp=on_grasp,
     )
 
@@ -451,8 +456,8 @@ def push_open(ai, execute, on_release=None):
     return True
 
 
-def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=True, view_only=False, on_hold=None):
-    """The open task as the node runs it (was door_task.py `open`): (`view`) to the view pose, grasp + swing, then
+def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_only=False, on_hold=None):
+    """The open task as the node runs it (was door_task.py `open`): to the view pose, grasp + swing, then
     (`push`) let go and push the door further open, all logged to RUNS_DIR/<time>_open (RunLog). `speed` (0..1]
     scales every arm motion for this run only. `view_only`: stop at the view pose. `on_hold(True)` once the gripper
     closes on the handle, `on_hold(False)` once the push-open has let go of it. Returns True when it finished
@@ -470,9 +475,7 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=T
         swing = swing_deg or (PUSH_OPEN_SWING_DEG if push else SWING_MAX_TRY_DEG)
         say("\n===== OPEN: grasp + swing =====")
         on_grasp = partial(on_hold, True) if on_hold else None
-        ok = open_task(
-            ai, execute, swing, view=view, view_only=view_only, push=push and not view_only, on_grasp=on_grasp
-        )
+        ok = open_task(ai, execute, swing, view_only=view_only, push=push and not view_only, on_grasp=on_grasp)
         if not ok:
             say("swing did not finish -- stopping (still holding the handle).")
         elif push and not view_only:

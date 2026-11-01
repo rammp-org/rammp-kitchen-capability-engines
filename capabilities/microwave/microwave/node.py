@@ -57,7 +57,7 @@ PARAMS = {
     "scene_detections_topic": "/perception/object_detections",
     # boxer's 3D boxes (scene camera), e.g. /perception/object_detections_3d: the open goes to a view pose in front
     # of the microwave's box and the handle detector crops the wrist camera's points to it. "" (default, 10-30: boxer's
-    # box wasn't accurate enough on snorlax) = no view pose, YOLO on the wrist image (yolo_model).
+    # box wasn't accurate enough on snorlax) = the scene camera places the view pose.
     "box_topic": "",
     "box_class": "microwave",
     # the view pose in front of the box (open_door.VIEW_*): camera distances out from its front face and heights
@@ -88,9 +88,7 @@ class Capability(CapabilityEngine):
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 45, "maximum": 75},
                     "push_open": {"type": "boolean", "default": True},
-                    # go to the view pose in front of the microwave before detecting (placed by boxer's box,
-                    # or without boxer by a first detection from where the arm is)
-                    "view": {"type": "boolean", "default": True},
+                    # stop at the view pose (the open always goes there first, to detect the handle from it)
                     "view_only": {"type": "boolean", "default": False},
                 },
             },
@@ -191,7 +189,6 @@ class Capability(CapabilityEngine):
                     push=bool(params.get("push_open", True)),
                     speed=speed,
                     log_args=log_args,
-                    view=bool(params.get("view", True)),
                     view_only=bool(params.get("view_only", False)),
                     on_hold=on_hold,
                 )
