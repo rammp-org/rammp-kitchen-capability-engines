@@ -63,6 +63,7 @@ from .constants import (
     GRIP_EXT,
     HINGE_BEHIND_FACE,
     HINGE_PAST_EDGE,
+    SWING_SPEED_SCALE,
     VERTICAL_CORR,
     YOLO_MODEL,
 )
@@ -102,6 +103,7 @@ def configure(data_dir):
         VERTICAL_CORR=VERTICAL_CORR,
         GRASP_X_ADJUST=GRASP_X_ADJUST,
         GRASPED_GAINS=GAINS_RIGID,
+        SWING_SPEED_SCALE=SWING_SPEED_SCALE,
     )
 
 

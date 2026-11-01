@@ -108,6 +108,7 @@ DOOR_Z_FROM_HANDLE = None  # door bottom / top relative to the handle, when it i
 KEEP_ARM_IN_FRAMES = False  # each saved detection frame also keeps the arm's joints + tool pose
 GRASPED_GAINS = None  # joint impedance {kq, zeta, torque_limit} from the grasp on (the swing, what follows it); None:
 #   stiff position control. The approach (line-up, straight in) stays in position control either way
+SWING_SPEED_SCALE = 1.0  # the swing's speed as a fraction of the free-air one (CART_SPEED x the goal's speed)
 REQUIRED = ("MAKE_DETECTOR", "FIND_HINGE", "GRIP_EXT", "VERTICAL_CORR", "GRASP_X_ADJUST")
 
 
@@ -655,7 +656,12 @@ def open_task(
     save_door_geometry(**hinge_fields)
     if hasattr(ai, "move_joints"):  # the checked joints at every waypoint, as one smooth trajectory
         say(f"swing {deg} deg: sending the {len(arc)} checked waypoints' joints ...")
-        ai.move_joints(list(arc), cart_lengths=[SWING_WAYPOINT_SPACING_M] * len(arc), impedance=grasped_impedance())
+        ai.move_joints(
+            list(arc),
+            cart_lengths=[SWING_WAYPOINT_SPACING_M] * len(arc),
+            speed_scale=SWING_SPEED_SCALE,
+            impedance=grasped_impedance(),
+        )
         time.sleep(0.3)
         err = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - np.asarray(wps[-1][:3])))
         ok = err <= SWING_DONE_TOL_M
@@ -664,7 +670,9 @@ def open_task(
         if sent[-1] is not wps[-1]:
             sent.append(wps[-1])
         say(f"swing {deg} deg: {len(wps)} waypoints checked, sending {len(sent)} ...")
-        ok, err, _ = run_cartesian_trajectory(ai, [(w[:3], w[3:]) for w in sent], impedance=grasped_impedance())
+        ok, err, _ = run_cartesian_trajectory(
+            ai, [(w[:3], w[3:]) for w in sent], impedance=grasped_impedance(), speed_scale=SWING_SPEED_SCALE
+        )
     path = np.array([p_[1:] for p_ in getattr(ai, "last_path", [])])
     final = ai.get_state()
     arc_deg = 0.0
