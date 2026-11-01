@@ -92,18 +92,18 @@ class Capability(CapabilityEngine):
         try:
             if action_id == "park":
                 return {**grasp.park(self.arm, execute, log), "note": note}
-            # the cameras' and detections' subscriptions live only while the action runs
+            # the cameras', detections' and tf subscriptions are per action: the engine drops them at its end
             cfg = self.cfg
             motion = {"control_mode": IMPEDANCE, "gains": cfg["impedance_gains"]} if params.get("impedance") else {}
-            wrist = self._camera(cfg["color_topic"], cfg["camera_info_topic"], cfg["depth_topic"], cfg["camera_frame"])
-            scene_cam = self._camera(cfg["scene_color_topic"], cfg["scene_camera_info_topic"], cfg["scene_depth_topic"])
+            tfbuf = self.create_action_tf_buffer()
+            wrist = self._camera(
+                tfbuf, cfg["color_topic"], cfg["camera_info_topic"], cfg["depth_topic"], cfg["camera_frame"]
+            )
+            scene_cam = self._camera(
+                tfbuf, cfg["scene_color_topic"], cfg["scene_camera_info_topic"], cfg["scene_depth_topic"]
+            )
             detections = scene.SceneDetections(self, cfg["detections_topic"])
-            try:
-                return {**self._grab(wrist, scene_cam, detections, execute, log, ctx, motion), "note": note}
-            finally:
-                detections.close()
-                scene_cam.close()
-                wrist.close()
+            return {**self._grab(wrist, scene_cam, detections, execute, log, ctx, motion), "note": note}
         except grasp.Abort as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
 
@@ -139,10 +139,10 @@ class Capability(CapabilityEngine):
         log(f"wrist image turned {90 * wrist.set_upright()} deg for the detector (world up = image up)")
         return {**located, **grasp.grab(self.arm, wrist, self._model(), True, log, ctx.progress, HOLD_LEVEL, **motion)}
 
-    def _camera(self, color_topic, info_topic, depth_topic, frame=""):
+    def _camera(self, tfbuf, color_topic, info_topic, depth_topic, frame=""):
         from .camera import Camera
 
-        return Camera(self, rammp_arm.FRAME, color_topic, info_topic, depth_topic, frame)
+        return Camera(self, tfbuf, rammp_arm.FRAME, color_topic, info_topic, depth_topic, frame)
 
     def _model(self):
         try:

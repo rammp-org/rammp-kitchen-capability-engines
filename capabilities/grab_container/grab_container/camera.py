@@ -1,8 +1,9 @@
 """The wrist camera: the latest colour, aligned depth and camera_info, and tf2.
 
 The button press's Perception (rammp_button_press/perception.py), on the capability's own node
-instead of a node and spin thread of its own, and made per action: the subscriptions and the tf
-listener exist only between Camera() and close(). Read-only: nothing here commands anything.
+instead of a node and spin thread of its own, and made per action: its subscriptions are the
+engine's per-action ones (create_action_subscription), which the engine destroys when the action
+ends. Read-only: nothing here commands anything.
 
 set_upright() turns the frames by quarter turns so the world's up is the image's up: the ring
 detector was trained on upright images, and the wrist camera rolls with the gripper. frame(),
@@ -27,18 +28,17 @@ QUARTER = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
 
 class Camera:
-    def __init__(self, node, arm_frame, color_topic, info_topic, depth_topic, cam_frame=""):
-        """`cam_frame` "" = the colour image's own frame_id. Depth must be aligned to colour."""
-        import tf2_ros
+    def __init__(self, node, tfbuf, arm_frame, color_topic, info_topic, depth_topic, cam_frame=""):
+        """Call it inside execute(). `tfbuf`: the action's tf2 Buffer (create_action_tf_buffer).
+        `cam_frame` "" = the colour image's own frame_id. Depth must be aligned to colour."""
         from cv_bridge import CvBridge
         from sensor_msgs.msg import CameraInfo, Image
 
-        self.node, self.arm_frame, self.cam_frame = node, arm_frame, cam_frame
+        self.arm_frame, self.cam_frame = arm_frame, cam_frame
         self.bridge = CvBridge()
         self.lock = threading.Lock()
         self.latest = {}
-        self.tfbuf = tf2_ros.Buffer()
-        self.tfl = tf2_ros.TransformListener(self.tfbuf, node)
+        self.tfbuf = tfbuf
         self.turns = 0  # quarter turns counterclockwise applied to every frame (set_upright)
         self.stamp = None  # the last frame()'s colour stamp (ns)
 
@@ -50,16 +50,9 @@ class Camera:
             return cb
 
         qos = qos_profile_sensor_data  # best effort: receives from reliable and best-effort publishers
-        self.subs = [
-            node.create_subscription(CameraInfo, info_topic, keep("info"), qos),
-            node.create_subscription(Image, color_topic, keep("color"), qos),
-            node.create_subscription(Image, depth_topic, keep("depth"), qos),
-        ]
-
-    def close(self):
-        for s in self.subs:
-            self.node.destroy_subscription(s)
-        self.tfl.unregister()
+        node.create_action_subscription(CameraInfo, info_topic, keep("info"), qos)
+        node.create_action_subscription(Image, color_topic, keep("color"), qos)
+        node.create_action_subscription(Image, depth_topic, keep("depth"), qos)
 
     def get(self, name, max_age=None):
         with self.lock:

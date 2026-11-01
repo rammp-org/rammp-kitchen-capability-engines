@@ -30,15 +30,12 @@ class SceneDetections:
     def __init__(self, node, topic):
         from rammp_perception_interfaces.msg import ObjectDetections
 
-        self.node, self.lock, self.latest = node, threading.Lock(), None
-        self.sub = node.create_subscription(ObjectDetections, topic, self._on_msg, qos_profile_sensor_data)
+        self.lock, self.latest = threading.Lock(), None
+        node.create_action_subscription(ObjectDetections, topic, self._on_msg, qos_profile_sensor_data)
 
     def _on_msg(self, m):
         with self.lock:
             self.latest = (time.monotonic(), m)
-
-    def close(self):
-        self.node.destroy_subscription(self.sub)
 
     def wait(self, timeout):
         deadline = time.monotonic() + timeout
