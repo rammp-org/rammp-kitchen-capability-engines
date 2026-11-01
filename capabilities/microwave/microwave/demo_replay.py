@@ -43,6 +43,10 @@ from .microwave_common import (
 OVER_TOP_MIN = 0.08  # points above the door top stay at least this far above today's top
 START_TOL = 0.06  # the hand must be within this of the demo's first keypoint
 DEMO_MIN_CLEAR = 0.02  # to the door model, on legs before --trust-demo
+# The last leg (the push) may stop short when all of it doesn't pass (10-30: snorlax's 30-deg mount folds the elbow
+# past J4's guard as the push sweeps the hand back toward the arm): the longest of these fractions of it that passes.
+# Below the smallest, the push is too short to be worth doing -- refuse.
+SHORT_PUSH_FRACTIONS = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4)
 LIFT_OFF_MIN_CLEAR = 0.005  # first leg of a demo that starts holding the handle: the fingers straddle the bar, i.e.
 # start next to the door face (as the old door_push.RETREAT_OUT_MIN_CLEAR)
 
@@ -109,8 +113,10 @@ def decode(enc, door):
     return pts
 
 
-def plan(scene, rb, door, st, kps, trust_from, lift_off=False):
-    """Sim-gated joint path through `kps` from the arm's state `st`: one list of joints per leg, or None."""
+def plan(scene, rb, door, st, kps, trust_from, lift_off=False, short_last=False):
+    """Sim-gated joint path through `kps` from the arm's state `st`: one list of joints per leg, or None.
+    `short_last`: if the last leg fails, end it at the longest SHORT_PUSH_FRACTIONS of the way that passes -- `kps`'
+    last keypoint is then replaced by where it ends (so the caller replays exactly what was planned)."""
     df = DoorFrame(door, door.get("open_sign", -1.0))
     q, legs = np.asarray(st["position"], float), []
     bodies = df.bodies(scene, rb, float(door.get("door_open_deg", 50.0)))
@@ -132,6 +138,21 @@ def plan(scene, rb, door, st, kps, trust_from, lift_off=False):
                 check,
                 min_clear=clear,
             )
+            if leg is None and short_last and i == len(pts) - 2:
+                from scipy.spatial.transform import Slerp
+
+                (p0, q0), (p1, q1) = pts[i], pts[i + 1]
+                slerp = Slerp([0, 1], R.from_quat([q0, q1]))
+                for f in SHORT_PUSH_FRACTIONS:
+                    end = (np.asarray(p0) + (np.asarray(p1) - p0) * f, slerp([f]).as_quat()[0])
+                    with mc.quiet():
+                        leg = plan_cartesian(
+                            scene, rb, p0, q0, *end, q, f"last leg to {f * 100:.0f}%", check, min_clear=clear
+                        )
+                    if leg is not None:
+                        say(f"  last leg: all of it fails a gate -- pushing {f * 100:.0f}% of the way instead")
+                        kps[-1] = end
+                        break
             if leg is None:
                 return None
             legs.append(leg)
@@ -175,7 +196,8 @@ def replay(pts, grippers, door, execute, trust_from, ai=None):
             return False
         scene, rb = make_sim()
         lift_off = grippers[0] > 0.2 and grippers[1] < 0.2
-        legs = plan(scene, rb, door, st, pts[1:], trust_from, lift_off)
+        kps = pts[1:]
+        legs = plan(scene, rb, door, st, kps, trust_from, lift_off, short_last=True)
         if legs is None:
             say("a leg fails a gate -- refusing, arm untouched.")
             return False
@@ -193,7 +215,7 @@ def replay(pts, grippers, door, execute, trust_from, ai=None):
         # back, while turning 68 deg) aborted PATH_TOLERANCE_VIOLATED ~12.5 cm short both times; it ran clean
         # three times at 0.5 / 0.09.
         ok, err, _ = run_cartesian_trajectory(
-            ai, [(list(p), list(q)) for p, q in pts[1:]], speed_scale=rammp_arm.contact_speed_scale()
+            ai, [(list(p), list(q)) for p, q in kps], speed_scale=rammp_arm.contact_speed_scale()
         )
         say(
             f"{'DONE' if ok else 'STOPPED SHORT'}: hand {np.round(ai.get_state()['ee_pos'][:3], 3)} "

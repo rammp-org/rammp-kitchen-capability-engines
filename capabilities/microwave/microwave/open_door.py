@@ -35,6 +35,7 @@ the commands above (rammp_arm.RammpArm). Refusals raise microwave_common.Refused
 """
 
 import argparse
+import contextlib
 import json
 import sys
 import time
@@ -68,6 +69,7 @@ from .microwave_common import (
     save_door_geometry,
     save_frame,
     say,
+    short_delta,
 )
 from .perception import YOLO_MODEL, HandleDetector, WristCamera
 
@@ -76,7 +78,7 @@ MAX_LOOKS = 5  # keep looking until two detections agree within DETECT_AGREE
 MAX_EMPTY_RETRIES = 8  # per look: retries on an empty read (viewpoint-dependent YOLO misses)
 DETECT_AGREE = 0.03
 HINGE_AGREE = 0.03  # the two agreeing looks' hinges must agree this well too (horizontal)
-PLAUSIBLE_X = (0.30, 0.85)
+PLAUSIBLE_X = (0.30, 0.90)
 PLAUSIBLE_Y = (-0.50, 0.20)
 PLAUSIBLE_Z = (
     0.05,
@@ -85,18 +87,21 @@ PLAUSIBLE_Z = (
 MAX_FACE_YAW_DEG = 70.0  # beyond this the plane fit is more likely wrong than the door
 
 # --- grasp (tuned on the arm, see NOTES.md) ---
-GRIP_EXT = 0.088  # along the approach axis (negative = past the detected handle). Was -0.010 (rchi-cpu-5);
-# Jetson+sheppy+Capybara calib 10-07 touch check: planned grasp 9.8 cm too deep
+GRIP_EXT = 0.085  # along the approach axis (negative = past the detected handle). Was -0.010 (rchi-cpu-5);
+# Jetson+sheppy+Capybara calib 10-07 touch check: planned grasp 9.8 cm too deep (0.088); snorlax 10-28: 0.100
 VERTICAL_CORR = 0.0  # world z. 0.025 (rchi-cpu-5) -> 0.046 (10-07 touch) -> 0: the detector now returns the
 # MIDDLE of the bar, not a point near its bottom end
 GRASP_X_ADJUST = 0.040  # along the approach axis
+# middle of the finger pads, past the tool point along the approach: ~2 cm in from the fingertips (FINGERTIP_PAST_TOOL,
+# measured). An estimate -- what a tilted grasp keeps on the handle (grasp_pose)
+GRASP_PADS_PAST_TOOL = 0.042
 PREGRASP_STANDOFFS = (0.25, 0.20, 0.15, 0.10)  # line up this far straight out from the grasp (door normal, level),
 # already squared, then go straight in along the normal; the largest that passes the gates
 # (10 cm still looked diagonal on 10-21: most of the approach was the view -> line-up leg)
-GRASP_PITCHES_DEG = (14, 10, 17, 25, 30, 35, 0)  # TEMPORARY 14 first (10-21): the arm's base is tilted a little on
-# this rig, so the user's hand-placed grasp "perpendicular to the door" was 14 deg nose-down
-# (demos/user_grasp_pose_2026-10-21.json). REAL DEPLOYMENT: the base will be level -> go back
-# to (0, 10, 17, 25, 30, 35) (level first).
+GRASP_PITCHES_DEG = (0, 10, 14, 17, 25)  # snorlax 10-30: level first, up to 25. Was (14, 10, 17, 25, 30, 35, 0)
+# TEMPORARY 14 first (10-21): the arm's base is tilted a little on this rig, so the user's hand-placed grasp
+# "perpendicular to the door" was 14 deg nose-down (demos/user_grasp_pose_2026-10-21.json). REAL DEPLOYMENT: the
+# base will be level -> go back to (0, 10, 17, 25, 30, 35) (level first).
 # Nose-down tilts tried about the finger axis, IN ORDER (fingers stay
 # horizontal across the vertical bar); the smallest reaching the largest swing wins. A low
 # handle needs one: 10-07, handle z ~0.14, level -> swing max 25-35 deg (J6 hits its guard),
@@ -104,8 +109,20 @@ GRASP_PITCHES_DEG = (14, 10, 17, 25, 30, 35, 0)  # TEMPORARY 14 first (10-21): t
 MAX_REACH, MIN_Z, MAX_Z = 0.915, 0.15, 0.75
 GRASP_TRACK_ABORT = 0.03
 
+# --- view pose (with boxer): before detecting, the wrist camera goes square in front of the microwave ---
+VIEW_DISTS = (0.35, 0.30, 0.40, 0.45)  # camera this far out from the box's front face (horizontally) ...
+# 10-30: was 0.50 first -- at 50 cm a 1-2 cm handle bar is ~1 pixel of the OAK's 320x200 near-range depth and comes and
+# goes between frames ("nothing protruding" / "no vertical bar" retries, and its height wandered)
+VIEW_HEIGHTS = (0.15, 0.20, 0.10, 0.25, 0.05)  # ... and this far above the box's middle, looking down at the face's
+# centre; the first (height, distance) that passes. Level at mid-height folded the elbow past its limit (10-30: J4
+# ~210 deg, door 72 cm out); the hand-placed view that worked (10-28) had the camera ~20 cm above the door, looking down
+VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
+# (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
+BOX_WAIT_S = 10.0  # wait this long for boxer's first microwave box
+
 # --- swing ---
 SWING_WAYPOINT_SPACING_M = 0.02  # sim-checked spacing
+SWING_DONE_TOL_M = 0.02  # the swing counts as done with the hand this close to its last waypoint
 SWING_SEND_EVERY = 4  # Kortex slows at every waypoint: send every 4th (8 cm chords) + the last
 SWING_DIRECTION = -1
 SWING_MAX_TRY_DEG = 75  # tries this down to 45 in 5-deg steps; 80 dragged the microwave (09-29)
@@ -183,6 +200,37 @@ def _fridge_after_swing(scene, rb, end_wp, q_end, door):
     return pts is not None, msg
 
 
+def _push_open_check(scene, rb, n, g_p, h, door_z, hinge_seen, deg, end_wp, q_end, loud=False):
+    """Plan the push-open (demo_replay) from a planned swing's end -- pose `end_wp`, joints `q_end` -- against the
+    door as the open will have saved it then, so a push-open that can't run refuses BEFORE the grasp, not after the
+    swing (10-30). `loud`: print the plan (every leg's steps and the failing check). Returns (ok, message). The real
+    run re-plans it from where the swing really ends."""
+    from . import demo_replay
+
+    if door_z is None:
+        return False, "push-open: no door height detected (door_z) to place it"
+    door = dict(closed_normal=list(n), closed_grasp_pos=list(g_p), closed_handle=list(h), door_z=list(door_z))
+    door.update(hinge=list(hinge_seen))  # as saved: the demo uses the detected edge
+    # ... and the opening angle as the run will record it after the swing (record_door_angle: the hand's angle about
+    # that edge), not the swing's own `deg` about the pivot -- 10-30: 50 deg about the pivot recorded 54.2, and the
+    # door model 4 deg further open failed the real check after this one had passed
+    a = DoorFrame(door, 1.0).angle_of(end_wp[:3])
+    door.update(door_open_deg=abs(a), open_sign=float(np.sign(a) or 1.0))
+    enc = json.loads(PUSH_OPEN.read_text())
+    pts, grippers = demo_replay.decode(enc, door), [k["gripper"] for k in enc["keypoints"]]
+    off = float(np.linalg.norm(np.asarray(end_wp[:3]) - pts[0][0]))
+    if off > demo_replay.START_TOL:
+        return False, f"push-open: the swing ends {off * 100:.1f} cm from the demo's start"
+    st = {"position": list(q_end), "ee_pos": list(end_wp)}
+    lift_off = grippers[0] > 0.2 and grippers[1] < 0.2
+    if loud:
+        for k, (p_, _) in zip(enc["keypoints"], pts, strict=False):
+            say(f"    {k['label'][:30]:30s} -> {np.round(p_, 3)}")
+    with contextlib.nullcontext() if loud else quiet():
+        legs = demo_replay.plan(scene, rb, door, st, pts[1:], PUSH_OPEN_TRUST_FROM, lift_off, short_last=True)
+    return legs is not None, ("push-open OK" if legs is not None else "push-open: a leg fails a gate")
+
+
 def _fridge_door_after(n, g_p, h, hinge, deg, end_pos):
     """The fridge door dict as the open will have saved it once the swing ends (for planning the after-swing step)."""
     door = dict(
@@ -199,8 +247,9 @@ def _fridge_door_after(n, g_p, h, hinge, deg, end_pos):
 
 
 def _check_arc(scene, rb, wps, q0):
-    """Chained sim IK over every swing waypoint from joints `q0`. Returns (ok, q_end, message)."""
-    q = np.asarray(q0, dtype=float)
+    """Chained sim IK over every swing waypoint from joints `q0`. Returns (ok, q_end, message, joints at each waypoint
+    -- what the swing sends, so the arm runs exactly what was checked)."""
+    q, qs = np.asarray(q0, dtype=float), []
     for i, w in enumerate(wps):
         pos, quat = w[:3], w[3:]
         for j, jj in enumerate(ARM):
@@ -232,17 +281,20 @@ def _check_arc(scene, rb, wps, q0):
                 q,
                 (
                     f"waypoint {i + 1}: ik_err {ikerr * 100:.2f}cm, reach {np.linalg.norm(pos):.3f}, "
-                    f"jump {jump:.1f}deg, J6 {j6:.1f}deg"
+                    f"jump {jump:.1f}deg, J4 {np.degrees(nq[3]):.1f}deg, J6 {j6:.1f}deg"
                 ),
+                qs,
             )
         ko = keep_out_message(rb, nq)  # fridge runs only (None for the microwave)
         if ko is not None:
-            return False, q, f"waypoint {i + 1}: {ko}"
+            return False, q, f"waypoint {i + 1}: {ko}", qs
         q = nq
-    return True, q, f"all {len(wps)} waypoints OK, final J6 {np.degrees(q[5]):.1f}deg"
+        qs.append(nq)
+    return True, q, f"all {len(wps)} waypoints OK, final J6 {np.degrees(q[5]):.1f}deg", qs
 
 
 HANDLE_DETECTOR_MODEL = YOLO_MODEL  # the node sets its yolo_model parameter here
+HANDLE_SOURCE = "depth"  # the node's handle_source: "depth" (what sticks out of the door) or "sam3" (SAM 3's mask)
 FRAME_ARM = None  # fridge runs: the arm, so each saved detection frame also keeps its joints + tool pose
 
 
@@ -281,7 +333,18 @@ def detect_handle():
     def look(tag):
         for attempt in range(1, MAX_EMPTY_RETRIES + 1):
             f = cam.grab()
-            det = detector.detect(f["rgb"], f["K"], f["depth_mm"], f["base_T_cam"])
+            if getattr(cam, "box_topic", "") and f["box"] is None:
+                det = None  # boxer has no usable microwave box yet (grab said why): retry, never YOLO instead
+            else:
+                # handle_source "sam3": SAM 3 masks the handle on the wrist image (the door still comes from depth)
+                mask = cam.sam3_handle_mask() if HANDLE_SOURCE == "sam3" else None
+                det = (
+                    None
+                    if HANDLE_SOURCE == "sam3" and mask is None
+                    else detector.detect(
+                        f["rgb"], f["K"], f["depth_mm"], f["base_T_cam"], box=f.get("box"), handle_mask=mask
+                    )
+                )
             _save_frame(f, tag, attempt, det)
             if det is not None:
                 break
@@ -344,11 +407,12 @@ def grasp_pose(h, orient, n, pitch_deg=0.0):
             f"Face yaw {np.degrees(yaw):.1f} deg > {MAX_FACE_YAW_DEG} deg -- implausible plane fit? Refusing."
         )
     quat = (R.from_euler("z", yaw) * quat * R.from_euler("x", pitch_deg, degrees=True)).as_quat()
-    approach = R.from_quat(quat).as_matrix()[:, 2]
-    # the tool point is placed along the LEVEL approach -- where the touch check put it -- whatever the tilt
-    approach[2] = 0.0
-    approach /= np.linalg.norm(approach)
-    pos = h + approach * (GRASP_X_ADJUST - GRIP_EXT)
+    tilted = R.from_quat(quat).as_matrix()[:, 2]
+    # the LEVEL grasp is where the touch check put it; tilted, the finger pads must stay there (10-30: placing the
+    # tool point there instead left the pads ~2 cm low and ~0.4 cm short at 25 deg), so the tool point backs out
+    # along the tilted approach
+    approach = np.r_[tilted[:2], 0.0] / np.linalg.norm(tilted[:2])
+    pos = h + approach * (GRASP_X_ADJUST - GRIP_EXT) + (approach - tilted) * GRASP_PADS_PAST_TOOL
     say(f"grasp {np.round(pos, 4)}  range {np.linalg.norm(pos):.3f}")
     if np.linalg.norm(pos) > MAX_REACH or not MIN_Z <= pos[2] <= MAX_Z:
         raise Refused(
@@ -366,29 +430,288 @@ def pregrasp_point(grasp, standoff):
     return np.asarray(grasp.position) - approach * standoff
 
 
-def plan_approach(scene, rb, grasp, q0):
-    """View pose -> line-up point (cuRobo, already squared to the door; only the goal is checked here) -> straight in
-    to the grasp, for the largest PREGRASP_STANDOFFS that passes. Returns (joint plan of the straight-in leg, line-up
-    point), or (None, None). The straight-in leg is planned from this IK's joints at the line-up point; cuRobo may end
-    on another branch, so the real run re-plans it from the measured joints (and re-checks the swing from the grasp)."""
+# --- the planner's search (plan_open): which arm configurations to try for each grasp, and how far to shift the
+# microwave when looking for a placement that works ---
+SEARCH_J3_OFFSETS_DEG = (0.0, -30.0, 30.0, -60.0, 60.0)  # the 7-DOF arm's redundant elbow angle, about the start's
+# J3; each also with the wrist flipped (J5 + 180, -J6, J7 + 180: the same hand, the other wrist branch)
+SEARCH_AFTER_SWING_MAX = 6  # how many swing-feasible candidates (best first) to try the push-open on
+SAME_CONFIG_DEG = 10.0  # grasp IK solutions closer than this (every joint) are one configuration
+REPLAN_SWING_DEG = 3.0  # after the grasp, re-plan the swing from the real joints if they are further than this off
+PLACEMENT_SHIFTS_M = ((0.05, 0.0), (0.10, 0.0), (-0.05, 0.0), (0.0, 0.05), (0.0, -0.05), (0.05, 0.05), (0.05, -0.05))
+# (x away from the arm, y to the arm's left), tried on a refusal to say where the microwave would work
+
+
+CUROBO_LIMIT_MARGIN_DEG = 6.0  # cuRobo refuses to plan to or from joints this close to a limit (its
+# joint_limit_margin_rad 0.1 = 5.7 deg, 10-28 START_IN_LIMIT_MARGIN) -- the line-up joints are a cuRobo goal
+
+
+def _near_limit(rb, q, margin_deg):
+    """Which joint of `q` is within `margin_deg` of its limit in the model (continuous joints have none), or ""."""
+    for j, jj in enumerate(ARM):
+        info = p.getJointInfo(rb.robot_id, jj, physicsClientId=rb.physics_client_id)
+        lo, hi = info[8], info[9]
+        if lo < hi and not (lo + np.radians(margin_deg) <= q[j] <= hi - np.radians(margin_deg)):
+            return f"J{j + 1} {np.degrees(q[j]):.1f} deg is within {margin_deg:g} deg of its limit"
+    return ""
+
+
+def _config_seeds(q0, quick=False):
+    """IK seeds spanning the arm's configurations: the start joints with J3 offset (SEARCH_J3_OFFSETS_DEG), each with
+    and without the wrist flipped. `quick`: the first three."""
+    seeds = []
+    for flip in (False, True):
+        for d3 in SEARCH_J3_OFFSETS_DEG:
+            q = np.array(q0, dtype=float)
+            q[2] += np.radians(d3)
+            if flip:
+                q[4], q[5], q[6] = q[4] + np.pi, -q[5], q[6] + np.pi
+            seeds.append(q)
+    return seeds[:3] if quick else seeds
+
+
+def _guard_margin(qs):
+    """Smallest distance (deg) of J4 and J6 to their guards over joint configurations `qs`."""
+    d = np.degrees(np.asarray(qs, dtype=float))
+    return float(min(sim.J4_GUARD_DEG - np.abs(d[:, 3]).max(), J6_GUARD_DEG - np.abs(d[:, 5]).max()))
+
+
+def _approach_from(scene, rb, grasp, q_g):
+    """Line-up point -> straight in to `grasp`, on the configuration of grasp joints `q_g` (the line-up IK is seeded
+    there), for the largest PREGRASP_STANDOFFS that passes. The line-up joints are a cuRobo goal, so they must also
+    clear cuRobo's own limit margin. Returns (standoff, line-up point, line-up joints, straight-in joint plan), or
+    None."""
     g_p, g_q = np.asarray(grasp.position), np.asarray(grasp.orientation)
     for standoff in PREGRASP_STANDOFFS:
         pre_p = pregrasp_point(grasp, standoff)
         if not MIN_Z <= pre_p[2] <= MAX_Z:
             continue
-        q_pre = check_curobo_goal(scene, rb, f"to line-up {standoff * 100:.0f} cm out", pos=pre_p, quat=g_q, seed=q0)
+        q_pre, why = mc._ik_within_guards(scene, rb, pre_p, g_q, q_g)
         if q_pre is None:
+            say(f"  to line-up {standoff * 100:.0f} cm out: {why}")
+            continue
+        if keep_out_message(rb, q_pre) is not None:
+            continue
+        near = _near_limit(rb, q_pre, CUROBO_LIMIT_MARGIN_DEG)
+        if near:
+            say(f"  to line-up {standoff * 100:.0f} cm out: {near} -- cuRobo refuses goals that close")
             continue
         leg = plan_cartesian(scene, rb, pre_p, g_q, g_p, g_q, q_pre, "straight in")
         if leg is not None:
-            return leg, pre_p
-    return None, None
+            return standoff, pre_p, q_pre, leg
+    return None
 
 
-def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG):
-    """Detect, plan, grasp, swing. Returns True when the swing finished (or the dry run passed); raises Refused
-    on any refusal."""
+def plan_open(scene, rb, geom, q0, max_swing, min_swing, push, quick=False):
+    """Plan the whole open before any motion, searching the arm's configurations: for each nose-down tilt
+    (GRASP_PITCHES_DEG), each distinct grasp configuration from _config_seeds, its approach and the largest swing that
+    fits; then, best first (largest swing, then most margin to the J4/J6 guards over the whole path), what follows the
+    swing (push-open, or the fridge's). `geom`: the detection (h_raw, orient, n, hinge, hinge_seen, door_z). Prints a
+    line per tilt. Returns (plan dict, or None; the reason when None)."""
+    h_raw, orient, n, hinge = geom["h_raw"], geom["orient"], geom["n"], geom["hinge"]
+    swings = list(range(max_swing, min(min_swing, max_swing) - 1, -10 if quick else -5))
+    if swings[-1] != min(min_swing, max_swing):
+        swings.append(min(min_swing, max_swing))
+    cands, explained = [], quick  # explained: the first failing approach has been printed in full
+    for pitch in GRASP_PITCHES_DEG:
+        try:
+            with quiet():
+                h, g = grasp_pose(h_raw, orient, n, pitch)
+        except Refused as e:
+            say(f"  tilt {pitch:2d} deg: {e}")
+            continue
+        g_p, g_q = np.asarray(g.position), np.asarray(g.orientation)
+        configs = []
+        for seed in _config_seeds(q0, quick):
+            q_g, _ = mc._ik_within_guards(scene, rb, g_p, g_q, seed)
+            if q_g is not None and all(
+                np.degrees(np.max(np.abs(short_delta(c, q_g)))) > SAME_CONFIG_DEG for c in configs
+            ):
+                configs.append(q_g)
+        best, why = None, "no grasp configuration within the J4/J6 guards"
+        for q_g in configs:
+            with quiet():
+                appr = _approach_from(scene, rb, g, q_g)
+            if appr is None:
+                why = "no line-up + straight-in passes"
+                if not explained:  # once, out loud: which standoff, step and check fail
+                    say(f"  tilt {pitch:2d} deg: no line-up + straight-in passes -- why, the first configuration's:")
+                    _approach_from(scene, rb, g, q_g)
+                    explained = True
+                continue
+            standoff, pre_p, q_pre, leg = appr
+            for d in swings:
+                wps = _swing_waypoints(g, hinge, d)
+                ok, q_end, msg, arc = _check_arc(scene, rb, wps, leg[-1])
+                if ok:
+                    c = dict(
+                        pitch=pitch,
+                        swing=d,
+                        grasp=g,
+                        h=h,
+                        standoff=standoff,
+                        pre_p=pre_p,
+                        q_pre=q_pre,
+                        leg=leg,
+                        wps=wps,
+                        arc=arc,
+                        margin=_guard_margin([q_pre, *leg, *arc]),
+                        msg=msg,
+                    )
+                    cands.append(c)
+                    if best is None or (c["swing"], c["margin"]) > (best["swing"], best["margin"]):
+                        best = c
+                    break
+                why = f"swing: {msg}"
+        say(
+            f"  tilt {pitch:2d} deg: {len(configs)} arm configuration(s) -> "
+            + (f"swing {best['swing']} deg fits, {best['margin']:.0f} deg from the J4/J6 guards" if best else why)
+        )
+    if not cands:
+        return None, "no tilt and arm configuration gives a grasp + swing that passes the sim checks"
+    cands.sort(key=lambda c: (c["swing"], c["margin"]), reverse=True)
+    reason = None
+    for c in cands[: 3 if quick else SEARCH_AFTER_SWING_MAX]:
+        g, d, end_wp, q_end = c["grasp"], c["swing"], c["wps"][-1], c["arc"][-1]
+        if FRIDGE:
+            door = _fridge_door_after(n, g.position, c["h"], hinge, d, end_wp[:3])
+            ok, m = _fridge_after_swing(scene, rb, end_wp, q_end, door)
+        elif push:
+            args = (scene, rb, n, g.position, c["h"], geom["door_z"], geom["hinge_seen"], d, end_wp, q_end)
+            ok, m = _push_open_check(*args)
+            if not ok and reason is None and not quick:  # the best candidate's failing push-open, out loud
+                say(f"  tilt {c['pitch']} deg, swing {d} deg: the push-open fails -- why, its plan in full:")
+                _push_open_check(*args, loud=True)
+        else:
+            ok, m = True, ""
+        c["after"] = m
+        if ok:
+            return c, None
+        reason = reason or f"tilt {c['pitch']} deg, swing {d} deg fits but {m}"
+    return None, reason
+
+
+def _placement_advice(scene, rb, geom, q0, max_swing, min_swing, push):
+    """Where the microwave would work: the open re-planned (quick) with the detection shifted by PLACEMENT_SHIFTS_M."""
+    works = []
+    for dx, dy in PLACEMENT_SHIFTS_M:
+        shift = np.array([dx, dy, 0.0])
+        g2 = dict(geom, h_raw=geom["h_raw"] + shift, hinge=geom["hinge"] + shift, hinge_seen=geom["hinge_seen"] + shift)
+        with quiet():
+            plan, _ = plan_open(scene, rb, g2, q0, max_swing, min_swing, push, quick=True)
+        if plan is not None:
+            where = []
+            if dx:
+                where.append(f"{abs(dx) * 100:.0f} cm {'further from' if dx > 0 else 'closer to'} the arm")
+            if dy:
+                where.append(f"{abs(dy) * 100:.0f} cm to the arm's {'left' if dy > 0 else 'right'}")
+            works.append(f"{' and '.join(where)} (tilt {plan['pitch']} deg, swing {plan['swing']} deg)")
+    if not works:
+        return "\nNo shift of the microwave tried (up to 10 cm) makes it work from here."
+    return "\nWould work with the microwave moved: " + "; or ".join(works) + "."
+
+
+def _pose_T(pos, quat):
+    T = np.eye(4)
+    T[:3, :3], T[:3, 3] = R.from_quat(quat).as_matrix(), pos
+    return T
+
+
+def plan_view(ai, scene, rb):
+    """The view pose in front of boxer's microwave box: the wrist camera VIEW_DISTS out from the box face that
+    looks toward the arm base, at the box's mid height, level and square to that face. The hand pose comes from
+    where the camera sits on it now (TF), its joints from IK seeded at VIEW_SEED_DEG and checked like any cuRobo
+    goal. Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch); raises Refused."""
+    cam = mc.camera()
+    box, t0 = None, time.time()
+    while box is None and time.time() - t0 < BOX_WAIT_S:
+        with quiet():
+            box = cam.microwave_box()
+        if box is None:
+            time.sleep(0.5)
+    if box is None:
+        cam.microwave_box()  # says why
+        raise Refused(f"No microwave box from boxer ({cam.box_topic}) in {BOX_WAIT_S:g} s -- is it running?")
+    c, Rb, size = box["center"], box["R"], box["size"]
+    # the front: of the box's four side faces, the one whose outward normal points most toward the arm base
+    to_base = -c[:2] / np.linalg.norm(c[:2])
+    n, half = max(
+        ((s * Rb[:, i], size[i] / 2) for i in (0, 1) for s in (1.0, -1.0)), key=lambda t: float(t[0][:2] @ to_base)
+    )
+    n = np.r_[n[:2], 0.0] / np.linalg.norm(n[:2])
+    face = c + n * half
+    say(
+        f"boxer microwave {box['score']:.2f}: center {np.round(c, 3)} size {np.round(size, 3)}; front face "
+        f"{np.round(face, 3)} facing {np.round(n, 3)}"
+    )
+    f = cam.grab()
+    if f["base_T_cam"] is None:
+        raise Refused("No arm base <- camera transform -- can't place the camera for the view pose.")
+    st = ai.get_state()
+    tool_T_cam = np.linalg.inv(_pose_T(st["ee_pos"][:3], st["ee_pos"][3:7])) @ f["base_T_cam"]
+    tried = []
+    for height in VIEW_HEIGHTS:
+        for dist in VIEW_DISTS:
+            # optical frame: z at the face's centre (tilted down), y down in the image, x right
+            pos = face + n * dist + np.array([0.0, 0.0, height])
+            z = (face - pos) / np.linalg.norm(face - pos)
+            y = np.array([0.0, 0.0, -1.0]) - z * -z[2]
+            y /= np.linalg.norm(y)
+            T_cam = np.eye(4)
+            T_cam[:3, :3], T_cam[:3, 3] = np.column_stack([np.cross(y, z), y, z]), pos
+            T_tool = T_cam @ np.linalg.inv(tool_T_cam)
+            label = f"to view pose {dist * 100:.0f} cm out, {height * 100:.0f} cm up"
+            with quiet():
+                q = check_curobo_goal(
+                    scene,
+                    rb,
+                    label,
+                    pos=T_tool[:3, 3],
+                    quat=R.from_matrix(T_tool[:3, :3]).as_quat(),
+                    seed=np.radians(VIEW_SEED_DEG),
+                )
+            if q is not None:
+                say(
+                    f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
+                    f"{np.round(pos, 3)}, joints {np.round(np.degrees(q), 1)}"
+                )
+                return q
+            tried.append((label, T_tool))
+    label, T_tool = tried[0]  # say why the preferred one failed
+    check_curobo_goal(
+        scene,
+        rb,
+        label,
+        pos=T_tool[:3, 3],
+        quat=R.from_matrix(T_tool[:3, :3]).as_quat(),
+        seed=np.radians(VIEW_SEED_DEG),
+    )
+    raise Refused(
+        f"No view pose ({len(tried)} tried: {VIEW_DISTS} m out x {VIEW_HEIGHTS} m up) passes the checks -- "
+        "move the microwave or the robot."
+    )
+
+
+def open_task(
+    ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG, view=True, view_only=False, push=False
+):
+    """(`view`, with boxer) go to the view pose, then detect, plan, grasp, swing. `view_only`: stop at the view pose.
+    `push`: the push-open follows, so each candidate's push-open is planned too before any motion.
+    Returns True when the swing finished (or the dry run passed); raises Refused on any refusal."""
     scene, rb = make_sim()
+    if view and getattr(mc.camera(), "box_topic", ""):
+        q_view = plan_view(ai, scene, rb)
+        if not execute:
+            say(
+                "\nDRY RUN -- would move to the view pose and detect from there; nothing commanded. To dry-run the "
+                "rest: a view_only goal (moves), then a dry run with view false."
+            )
+            return True
+        if not ai.go_to_joint_config(q_view, "to view pose"):
+            raise Refused("Did not reach the view pose -- stopping before detection.")
+        time.sleep(1.0)  # let the camera frames catch up with the arm
+        if view_only:
+            say("\nAT THE VIEW POSE (view_only) -- stopping here.")
+            return True
 
     st = ai.get_state()
     q0 = np.asarray(st["position"], dtype=float)
@@ -437,55 +760,35 @@ def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG)
     if not HINGE_RADIUS_RANGE[0] <= radius <= HINGE_RADIUS_RANGE[1]:
         raise Refused(f"hinge radius {radius * 100:.1f} cm is implausible (door ~35 cm) -- refusing.{advice}")
 
-    # --- plan everything before any motion: grasp path + largest swing, for each nose-down tilt ---
-    best = None  # (swing deg, pitch, grasp, leg)
-    for pitch in GRASP_PITCHES_DEG:
-        with quiet():
-            _, g = grasp_pose(h_raw, orient, n, pitch)
-            leg_p, _ = plan_approach(scene, rb, g, q0)
-        if leg_p is None:
-            say(f"  tilt {pitch:2d} deg: grasp path fails a gate")
-            continue
-        for d in range(max_swing, min(min_swing, max_swing) - 1, -5):
-            wps_d = _swing_waypoints(g, hinge, d)
-            ok, q_end, msg = _check_arc(scene, rb, wps_d, leg_p[-1])
-            if ok and FRIDGE:
-                # the fridge plans what follows the swing too, before any motion (the microwave's push-open is
-                # planned after the swing, from where it really ends)
-                ok, m2 = _fridge_after_swing(
-                    scene, rb, wps_d[-1], q_end, _fridge_door_after(n, g.position, h, hinge, d, wps_d[-1][:3])
-                )
-                msg = f"{msg}; {m2}"
-            if ok:
-                break
-        else:
-            d, ok = None, False
-        say(
-            f"  tilt {pitch:2d} deg: grasp J4 {np.degrees(leg_p[-1][3]):6.1f} J6 {np.degrees(leg_p[-1][5]):5.1f} -> "
-            + (f"swing {d} deg OK ({msg})" if ok else f"no swing >= {min_swing} deg ({msg})")
-        )
-        if ok and (best is None or d > best[0]):
-            best = (d, pitch, g, leg_p)
-        if ok and d == max_swing:
-            break  # smallest tilt that reaches the largest swing
-    if best is None:
-        raise Refused(
-            f"no tilt in {GRASP_PITCHES_DEG} gives a grasp + swing of >= {min_swing} deg that passes the "
-            f"sim gates -- refusing before any motion. Start joints {np.round(np.degrees(q0), 1)}.{advice}"
-        )
-    deg, pitch, grasp, leg = best
+    # --- plan everything before any motion: tilts x arm configurations x swings, then what follows the swing ---
+    geom = dict(h_raw=h_raw, orient=orient, n=n, hinge=hinge, hinge_seen=hinge_seen, door_z=door_z)
+    plan, why = plan_open(scene, rb, geom, q0, max_swing, min_swing, push)
+    if plan is None:
+        say("  (refused -- looking for a microwave placement that works ...)")
+        advice += _placement_advice(scene, rb, geom, q0, max_swing, min_swing, push)
+        raise Refused(f"{why} -- refusing before any motion. Start joints {np.round(np.degrees(q0), 1)}.{advice}")
+    deg, pitch, grasp, h = plan["swing"], plan["pitch"], plan["grasp"], plan["h"]
     g_p, g_q = np.asarray(grasp.position), np.asarray(grasp.orientation)
-    say(f"chosen: tilt {pitch} deg nose-down, swing {deg} deg; grasp {np.round(g_p, 4)}")
-    _, pre_p = plan_approach(scene, rb, grasp, q0)  # re-print the chosen path
+    say(
+        f"chosen: tilt {pitch} deg nose-down, swing {deg} deg, line-up {plan['standoff'] * 100:.0f} cm out, "
+        f"{plan['margin']:.0f} deg from the J4/J6 guards; grasp {np.round(g_p, 4)}; line-up joints "
+        f"{np.round(np.degrees(plan['q_pre']), 1)}{'; ' + plan['after'] if plan.get('after') else ''}"
+    )
 
     if not execute:
         say(f"\nDRY RUN -- would grasp, then swing {deg} deg. Nothing commanded.")
         return True
 
-    # --- grasp: cuRobo to the line-up point, then straight in (re-planned from the measured joints) ---
-    if not ai.go_to_ee_pose(pre_p, g_q, "to line-up"):
+    # --- grasp: cuRobo to the planned line-up JOINTS, then the planned straight-in joints ---
+    if not ai.go_to_joint_config(plan["q_pre"], "to line-up"):
         raise Refused("Did not reach the line-up point -- ABORT before touching the handle, gripper untouched.")
-    _, e, _ = run_cartesian_trajectory(ai, [(list(g_p), list(g_q))])
+    if hasattr(ai, "move_joints"):  # the checked joint path itself, timed as the straight line it is
+        step = float(np.linalg.norm(g_p - plan["pre_p"])) / len(plan["leg"])
+        ai.move_joints(list(plan["leg"]), cart_lengths=[step] * len(plan["leg"]))
+        time.sleep(0.3)
+        e = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - g_p))
+    else:
+        _, e, _ = run_cartesian_trajectory(ai, [(list(g_p), list(g_q))])
     say(f"grasp: tracking {e * 100:.1f} cm")
     if e > GRASP_TRACK_ABORT:
         raise Refused(f"Tracking {e * 100:.1f} cm at the grasp -- ABORT, gripper untouched.")
@@ -519,13 +822,18 @@ def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG)
     if g < 0.2:
         raise Refused("Gripper is OPEN -- nothing grasped. Refusing to swing.")
 
-    # --- swing, re-checked from where the arm actually is ---
+    # --- swing: the planned joints, unless the arm isn't where the plan put it -- then re-planned from where it is ---
     st = ai.get_state()
     ee = list(st["ee_pos"])
-    wps = _swing_waypoints(Pose(tuple(ee[:3]), tuple(ee[3:7])), hinge, deg)
-    ok, q_end, msg = _check_arc(scene, rb, wps, st["position"])
-    if not ok:
-        raise Refused(f"swing re-check from the real grasp failed ({msg}) -- stopping, still holding the handle.")
+    off = float(np.degrees(np.max(np.abs(short_delta(plan["leg"][-1], st["position"])))))
+    if off <= REPLAN_SWING_DEG:
+        wps, arc, q_end = plan["wps"], plan["arc"], plan["arc"][-1]
+    else:
+        say(f"  the grasp joints are {off:.1f} deg off the plan's -- re-planning the swing from them")
+        wps = _swing_waypoints(Pose(tuple(ee[:3]), tuple(ee[3:7])), hinge, deg)
+        ok, q_end, msg, arc = _check_arc(scene, rb, wps, st["position"])
+        if not ok:
+            raise Refused(f"swing re-check from the real grasp failed ({msg}) -- stopping, still holding the handle.")
     if FRIDGE:
         ok, m2 = _fridge_after_swing(scene, rb, wps[-1], q_end, _fridge_door_after(n, g_p, h, hinge, deg, wps[-1][:3]))
         say(f"after-swing re-check from the real grasp: {m2}")
@@ -540,11 +848,18 @@ def open_task(ai, execute, max_swing=SWING_MAX_TRY_DEG, min_swing=SWING_MIN_DEG)
         save_door_geometry(
             hinge=hinge_seen, hinge_pivot=hinge, door_file=DOOR_SAVE_FILE
         )  # demos + door model use the detected edge; swing uses the pivot
-    sent = wps[SWING_SEND_EVERY - 1 :: SWING_SEND_EVERY]
-    if sent[-1] is not wps[-1]:
-        sent.append(wps[-1])
-    say(f"swing {deg} deg: {len(wps)} waypoints checked, sending {len(sent)} ...")
-    ok, err, _ = run_cartesian_trajectory(ai, [(w[:3], w[3:]) for w in sent])
+    if hasattr(ai, "move_joints"):  # the checked joints at every waypoint, as one smooth trajectory
+        say(f"swing {deg} deg: sending the {len(arc)} checked waypoints' joints ...")
+        ai.move_joints(list(arc), cart_lengths=[SWING_WAYPOINT_SPACING_M] * len(arc))
+        time.sleep(0.3)
+        err = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - np.asarray(wps[-1][:3])))
+        ok = err <= SWING_DONE_TOL_M
+    else:
+        sent = wps[SWING_SEND_EVERY - 1 :: SWING_SEND_EVERY]
+        if sent[-1] is not wps[-1]:
+            sent.append(wps[-1])
+        say(f"swing {deg} deg: {len(wps)} waypoints checked, sending {len(sent)} ...")
+        ok, err, _ = run_cartesian_trajectory(ai, [(w[:3], w[3:]) for w in sent])
     path = np.array([p_[1:] for p_ in getattr(ai, "last_path", [])])
     final = ai.get_state()
     arc_deg = 0.0
@@ -578,7 +893,7 @@ def push_open(ai, execute):
 
     say("\n===== release + push further open =====")
     if not execute:
-        say("  (starts where the swing ends: planned and sim-gated then, before it moves)")
+        say("  (planned above from the planned swing end -- see the chosen tilt's line; re-planned from the real one)")
         return True
     return demo_replay.run(PUSH_OPEN, True, PUSH_OPEN_TRUST_FROM, ai=ai)
 
@@ -614,10 +929,11 @@ def fridge_release(ai, execute):
     return bool(ok)
 
 
-def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None):
-    """The open task as the node runs it (was door_task.py `open`): grasp + swing, then (`push`) let go and
-    replay the push-open demo, all logged to RUNS_DIR/<time>_open (RunLog). `speed` (0..1] scales every arm
-    motion for this run only. Returns True when it finished (or the dry run passed); raises Refused."""
+def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view=True, view_only=False):
+    """The open task as the node runs it (was door_task.py `open`): (`view`) to the view pose, grasp + swing, then
+    (`push`) let go and replay the push-open demo, all logged to RUNS_DIR/<time>_open (RunLog). `speed` (0..1]
+    scales every arm motion for this run only. `view_only`: stop at the view pose. Returns True when it finished
+    (or the dry run passed); raises Refused."""
     import rammp_arm
 
     saved = (rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE)
@@ -630,10 +946,10 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None):
         log.frame("run_start")
         swing = swing_deg or (PUSH_OPEN_SWING_DEG if push else SWING_MAX_TRY_DEG)
         say("\n===== OPEN: grasp + swing =====")
-        ok = open_task(ai, execute, swing)
+        ok = open_task(ai, execute, swing, view=view, view_only=view_only, push=push and not view_only)
         if not ok:
             say("swing did not finish -- stopping (still holding the handle).")
-        elif push:
+        elif push and not view_only:
             ok = push_open(ai, execute)
         log.event("open", ok=ok)
         say(f"\nOPEN {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")

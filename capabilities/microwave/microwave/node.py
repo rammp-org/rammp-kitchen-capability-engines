@@ -46,6 +46,21 @@ PARAMS = {
     "camera_info_topic": "/wrist_camera/color/camera_info",
     "depth_topic": "/wrist_camera/aligned_depth_to_color/image_raw",
     "camera_frame": "",
+    # boxer's 3D boxes (scene camera), e.g. /perception/object_detections_3d: the open goes to a view pose in front
+    # of the microwave's box and the handle detector crops the wrist camera's points to it. "" (default, 10-30: boxer's
+    # box wasn't accurate enough on snorlax) = no view pose, YOLO on the wrist image (yolo_model).
+    "box_topic": "",
+    "box_class": "microwave",
+    # the view pose in front of the box (open_door.VIEW_*): camera distances out from its front face and heights
+    # above its middle (m), tried in order. Per camera and setup.
+    "view_dists": list(open_door.VIEW_DISTS),
+    "view_heights": list(open_door.VIEW_HEIGHTS),
+    # where the handle comes from: "depth" (the vertical bar sticking out of the door) or "sam3" (SAM 3's mask of
+    # sam3_prompts on the wrist image, from sam3_service; the door plane and hinge still come from depth)
+    "handle_source": "depth",
+    "sam3_service": "/perception/sam3/detect",
+    "sam3_prompts": ["handle"],
+    "sam3_threshold": 0.3,
     "yolo_model": YOLO_MODEL,
 }
 
@@ -64,6 +79,9 @@ class Capability(CapabilityEngine):
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 45, "maximum": 75},
                     "push_open": {"type": "boolean", "default": True},
+                    # with boxer (box_topic): go to the view pose in front of the microwave before detecting
+                    "view": {"type": "boolean", "default": True},
+                    "view_only": {"type": "boolean", "default": False},
                 },
             },
         ),
@@ -80,8 +98,17 @@ class Capability(CapabilityEngine):
     def __init__(self):
         super().__init__("microwave")
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
+        # an empty string can arrive as "null" (sheppy's params file, 10-29: camera_frame) -- it means empty
+        self.cfg = {
+            k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
+        }
         mc.configure_paths(self.cfg["data_dir"])
         open_door.HANDLE_DETECTOR_MODEL = self.cfg["yolo_model"]
+        open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
+        open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
+        if self.cfg["handle_source"] not in ("depth", "sam3"):
+            raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
+        open_door.HANDLE_SOURCE = self.cfg["handle_source"]
         self.get_logger().info(
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
@@ -106,6 +133,11 @@ class Capability(CapabilityEngine):
             self.cfg["depth_topic"],
             rammp_arm.FRAME,
             self.cfg["camera_frame"],
+            self.cfg["box_topic"],
+            self.cfg["box_class"],
+            self.cfg["sam3_service"] if self.cfg["handle_source"] == "sam3" else "",
+            self.cfg["sam3_prompts"],
+            self.cfg["sam3_threshold"],
         )
         mc.set_camera(camera)
         mc.set_output(self.get_logger().info)
@@ -120,6 +152,8 @@ class Capability(CapabilityEngine):
                     push=bool(params.get("push_open", True)),
                     speed=speed,
                     log_args=log_args,
+                    view=bool(params.get("view", True)),
+                    view_only=bool(params.get("view_only", False)),
                 )
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
