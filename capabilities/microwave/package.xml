@@ -8,6 +8,7 @@
   <license>Proprietary</license>
 
   <exec_depend>capability_engine</exec_depend>
+  <exec_depend>door_common</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>

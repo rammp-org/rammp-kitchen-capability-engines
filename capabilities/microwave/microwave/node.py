@@ -15,8 +15,9 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
 
 import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
+from door_common import common as dc
+from door_common import open_door as shared_open
 
-from . import microwave_common as mc
 from . import open_door
 from .perception import YOLO_MODEL, WristCamera
 
@@ -77,13 +78,13 @@ class Capability(CapabilityEngine):
         self.cfg = {
             k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
         }
-        mc.configure_paths(self.cfg["data_dir"])
+        open_door.configure(self.cfg["data_dir"])
         open_door.HANDLE_DETECTOR_MODEL = self.cfg["yolo_model"]
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
         if self.cfg["handle_source"] not in ("depth", "sam3"):
             raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
-        open_door.HANDLE_SOURCE = self.cfg["handle_source"]
+        shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
         # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
         self.sam3 = None
         if self.cfg["handle_source"] == "sam3":
@@ -121,8 +122,8 @@ class Capability(CapabilityEngine):
             self.cfg["sam3_prompts"],
             self.cfg["sam3_threshold"],
         )
-        mc.set_camera(camera)
-        mc.set_output(self.get_logger().info)
+        dc.set_camera(camera)
+        dc.set_output(self.get_logger().info)
         ctx.progress("open", 0.0, note or ("executing" if execute else "dry run"))
         try:
             ok = open_door.run(
@@ -135,16 +136,16 @@ class Capability(CapabilityEngine):
                 view=bool(params.get("view", True)),
                 view_only=bool(params.get("view_only", False)),
             )
-        except mc.Refused as e:
+        except dc.Refused as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         finally:
-            mc.set_output(None)
-            mc.set_camera(None)
+            dc.set_output(None)
+            dc.set_camera(None)
         if not ok:
             raise EngineError("stopped", "the open stopped short -- the arm holds where it is", recoverable=True)
         if execute:
             ctx.update_object(self.instance_id, opened=True)
-        return {"executed": execute, "note": note, "runs_dir": str(mc.RUNS_DIR)}
+        return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
 
 
 def main():

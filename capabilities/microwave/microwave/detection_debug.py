@@ -13,8 +13,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from door_common.common import save_frame, say
 
-from .microwave_common import save_frame, say
 from .perception import YOLO_MODEL, HandleDetector
 
 DEPTH_RANGE_VIEW_M = (0.15, 1.2)  # the depth colour scale

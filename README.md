@@ -325,6 +325,7 @@ parameters.
 
 ```
 capability_engine/               shared ament_python package: the orchestrator engine contract
+shared/door_common/              shared ament_python package: door code shared by capabilities, not a capability
 capabilities/<name>/             one ament_python package per capability (`make new CAP=<name>`)
   package.xml, setup.py, setup.cfg
   <name>/node.py                the capability: a CapabilityEngine subclass
