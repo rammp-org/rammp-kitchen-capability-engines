@@ -36,6 +36,7 @@ red/blue swap in `_box`).
 import threading
 import time
 
+import message_filters
 import numpy as np
 import open3d as o3d
 from rclpy.duration import Duration
@@ -51,6 +52,15 @@ BOX_MAX_AGE_S = 5.0  # a boxer box older than this is not used
 SAM3_TIMEOUT_S = 10.0  # one SAM 3 detect call (~0.5 s on the Orin, plus waiting for the next frame)
 
 
+class _Input(message_filters.SimpleFilter):
+    """A message_filters input fed by `subscribe` (create_action_subscription, or create_subscription on a plain
+    node): message_filters.Subscriber always makes a plain subscription."""
+
+    def __init__(self, subscribe, msg_type, topic, qos):
+        super().__init__()
+        subscribe(msg_type, topic, self.signalMessage, qos)
+
+
 class WristCamera:
     def __init__(
         self,
@@ -62,16 +72,21 @@ class WristCamera:
         camera_frame="",
         box_topic="",
         box_class="microwave",
-        sam3_service="",
+        sam3=None,
         sam3_prompts=("handle",),
         sam3_threshold=0.3,
     ):
         """`camera_frame` "" = the colour image's own frame_id. Depth must be aligned to colour.
         `box_topic`: boxer's 3D boxes (rammp_perception_interfaces/ObjectDetections, from the scene camera); each
         frame then carries the latest `box_class` box in the base frame, and the detector crops to it instead of
-        running YOLO. "" = no boxer (YOLO). `sam3_service`: SAM 3's Detect service -- `sam3_handle_mask` asks it for
-        `sam3_prompts` on this camera's colour image. "" = none."""
-        import message_filters
+        running YOLO. "" = no boxer (YOLO). `sam3`: a client of SAM 3's Detect service (made once, for the node's
+        lifetime: a client gets no messages) -- `sam3_handle_mask` asks it for `sam3_prompts` on this camera's colour
+        image. None = none.
+
+        On a CapabilityEngine node the subscriptions and the tf buffer are the running action's
+        (create_action_subscription, create_action_tf_buffer): make the camera inside execute(); the engine destroys
+        them when the action ends. On a plain node (the bench scripts) they are plain ones that live as long as the
+        node."""
         import tf2_ros
         from cv_bridge import CvBridge
         from sensor_msgs.msg import CameraInfo, Image
@@ -83,39 +98,25 @@ class WristCamera:
         self._lock = threading.Lock()
         self._latest = None
         self._box = None  # (header, DetectedObject): the latest box_class object with a pose
-        self.tf_buffer = tf2_ros.Buffer()
-        self._tf_listener = tf2_ros.TransformListener(self.tf_buffer, node)
+        if hasattr(node, "create_action_subscription"):
+            subscribe, self.tf_buffer = node.create_action_subscription, node.create_action_tf_buffer()
+        else:
+            subscribe, self.tf_buffer = node.create_subscription, tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self.tf_buffer, node)
         qos = qos_profile_sensor_data
-        self._subs = [
-            message_filters.Subscriber(node, Image, color_topic, qos_profile=qos),
-            message_filters.Subscriber(node, CameraInfo, info_topic, qos_profile=qos),
-            message_filters.Subscriber(node, Image, depth_topic, qos_profile=qos),
+        self._inputs = [
+            _Input(subscribe, Image, color_topic, qos),
+            _Input(subscribe, CameraInfo, info_topic, qos),
+            _Input(subscribe, Image, depth_topic, qos),
         ]
-        self._sync = message_filters.ApproximateTimeSynchronizer(self._subs, 10, SYNC_SLOP_S)
+        self._sync = message_filters.ApproximateTimeSynchronizer(self._inputs, 10, SYNC_SLOP_S)
         self._sync.registerCallback(self._on_frame)
-        self._box_sub = None
         if box_topic:
             from rammp_perception_interfaces.msg import ObjectDetections
 
-            self._box_sub = node.create_subscription(ObjectDetections, box_topic, self._on_boxes, qos)
-        self._sam3 = None
-        if sam3_service:
-            from rammp_perception_interfaces.srv import Detect
-            from rclpy.callback_groups import ReentrantCallbackGroup
-
-            self._sam3 = node.create_client(Detect, sam3_service, callback_group=ReentrantCallbackGroup())
-            self._sam3_request = Detect.Request
+            subscribe(ObjectDetections, box_topic, self._on_boxes, qos)
+        self._sam3 = sam3
         self.topics = (color_topic, info_topic, depth_topic)
-
-    def close(self):
-        """Drop the subscriptions and the tf listener (the node makes a camera per action)."""
-        for s in self._subs:
-            self.node.destroy_subscription(s.sub)
-        if self._box_sub is not None:
-            self.node.destroy_subscription(self._box_sub)
-        if self._sam3 is not None:
-            self.node.destroy_client(self._sam3)
-        self._tf_listener.unregister()
 
     def _on_frame(self, color, info, depth):
         with self._lock:
@@ -135,7 +136,7 @@ class WristCamera:
         if not self._sam3.wait_for_service(timeout_sec=2.0):
             say(f"  no SAM 3 service {self._sam3.srv_name} (is the sam3 node up?)")
             return None
-        req = self._sam3_request(
+        req = self._sam3.srv_type.Request(
             prompts=self.sam3_prompts, image_topic=self.color_topic, score_threshold=float(self.sam3_threshold)
         )
         done, fut = threading.Event(), self._sam3.call_async(req)

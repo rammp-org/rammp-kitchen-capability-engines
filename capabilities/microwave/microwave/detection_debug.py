@@ -111,7 +111,6 @@ def live(args, detector):
         stem = save_frame(f, "live", args.dir)
         say(f"  -> {render(str(stem), detector)}")
     finally:
-        cam.close()
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

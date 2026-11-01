@@ -32,6 +32,7 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 # The versions the detector runs with on the Jetson (2026-10-28). The base's torch, torchvision
 # and numpy are held where they are (a constraints file of their installed versions), so
 # ultralytics can't swap the Jetson CUDA torch for a PyPI one.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN pip freeze | grep -iE '^(torch|torchvision|numpy)==' > /tmp/keep.txt \
     && pip install --no-cache-dir -c /tmp/keep.txt ultralytics==8.4.174 open3d==0.20.0 \
     && rm /tmp/keep.txt

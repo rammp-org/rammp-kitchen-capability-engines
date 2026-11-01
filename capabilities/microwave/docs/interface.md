@@ -36,8 +36,9 @@ frames) and every detection frame to `<data_dir>/detections/`.
 | `/wrist_camera/aligned_depth_to_color/image_raw` | `sensor_msgs/Image`      | yes      | Depth **aligned to colour** (`depth_topic`) |
 | `/tf`, `/tf_static`                              | `tf2_msgs/TFMessage`     | yes      | Camera pose in `arm.frame` (hand-eye calib) |
 
-The camera subscriptions exist only while an action runs. `self.arm` subscribes to the arm
-driver's state topics the same way.
+The camera subscriptions (and boxer's `box_topic`, when set) exist only while an action runs;
+the engine destroys them when it ends. `self.arm` subscribes to the arm driver's state topics
+the same way. The SAM 3 client (`handle_source: sam3`) is made once and lives as long as the node.
 
 ## Orchestrator interface
 

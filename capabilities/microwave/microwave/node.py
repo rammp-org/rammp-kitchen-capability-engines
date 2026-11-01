@@ -84,6 +84,13 @@ class Capability(CapabilityEngine):
         if self.cfg["handle_source"] not in ("depth", "sam3"):
             raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
         open_door.HANDLE_SOURCE = self.cfg["handle_source"]
+        # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
+        self.sam3 = None
+        if self.cfg["handle_source"] == "sam3":
+            from rammp_perception_interfaces.srv import Detect
+            from rclpy.callback_groups import ReentrantCallbackGroup
+
+            self.sam3 = self.create_client(Detect, self.cfg["sam3_service"], callback_group=ReentrantCallbackGroup())
         self.get_logger().info(
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
@@ -100,7 +107,7 @@ class Capability(CapabilityEngine):
             return {"executed": False, "mock": True}
 
         ctx.checkpoint()
-        # the camera's subscriptions live only while the action runs
+        # the camera's subscriptions and tf buffer are this action's: the engine destroys them when it ends
         camera = WristCamera(
             self,
             self.cfg["color_topic"],
@@ -110,7 +117,7 @@ class Capability(CapabilityEngine):
             self.cfg["camera_frame"],
             self.cfg["box_topic"],
             self.cfg["box_class"],
-            self.cfg["sam3_service"] if self.cfg["handle_source"] == "sam3" else "",
+            self.sam3,
             self.cfg["sam3_prompts"],
             self.cfg["sam3_threshold"],
         )
@@ -133,7 +140,6 @@ class Capability(CapabilityEngine):
         finally:
             mc.set_output(None)
             mc.set_camera(None)
-            camera.close()
         if not ok:
             raise EngineError("stopped", "the open stopped short -- the arm holds where it is", recoverable=True)
         if execute:
