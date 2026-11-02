@@ -176,6 +176,37 @@ def test_a_cancel_is_the_runs_own_ctrl_c_and_ends_the_action_cancelled(engine, m
     assert time.monotonic() - t0 < 5.0
 
 
+def test_a_run_is_stopped_when_following_it_raises(engine, monkeypatch):
+    """REVIEW_RULES R3: an exception while following the run (here, reading its progress) must
+    not leave the child running, and moving the arm, after the goal has ended."""
+    given(monkeypatch, FULL_RUN[:3], wait=True)
+    sent = []
+    real = node.Run.interrupt
+
+    runs = []
+
+    def interrupt(run):
+        sent.append(signal.SIGINT)
+        runs.append(run)
+        real(run)
+
+    monkeypatch.setattr(node.Run, "interrupt", interrupt)
+    calls = []
+
+    def progress(log, track, ctx):
+        calls.append(1)
+        if len(calls) == 20:  # ~1 s in: the run is waiting for its Ctrl+C
+            raise RuntimeError("a row the tracker cannot read")
+
+    monkeypatch.setattr(node.Capability, "_progress", staticmethod(progress))
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError):
+        engine.execute("open_box", {"execute": True}, FakeCtx())
+    assert sent == [signal.SIGINT]  # its own stop, not a kill
+    assert runs[0].proc.poll() == 130 and engine._run is None  # ended by its Ctrl+C
+    assert time.monotonic() - t0 < 5.0  # the stand-in exits on its Ctrl+C at once
+
+
 def test_execute_moves_nothing_unless_the_node_allows_it(engine, monkeypatch):
     given(monkeypatch)
     lines = []

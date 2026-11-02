@@ -331,10 +331,18 @@ class Capability(CapabilityEngine):
         try:
             code = self._follow(self._run, log, track, ctx)
         finally:
-            self._progress(log, track, ctx)  # the last rows, written as it ended
             run_, self._run = self._run, None
         if ctx.cancelled():
             raise Cancelled()
+            if run_.proc.poll() is None:
+                # _follow raised with the run still going: nothing else would stop it, and it
+                # would go on moving the arm after its goal ended. Its own stop first (Ctrl+C:
+                # the motion in flight cancelled), a kill if it has not ended in time.
+                self.get_logger().error(
+                    f"the run outlived its goal: its own stop (Ctrl+C), a kill after {CANCEL_ESCALATE_S:.0f} s"
+                )
+                run_.stop(CANCEL_ESCALATE_S)
+            self._progress(log, track, ctx)  # the last rows, written as it ended
         result = {
             "executed": execute,
             "lid_off": track.lid_off(code),
