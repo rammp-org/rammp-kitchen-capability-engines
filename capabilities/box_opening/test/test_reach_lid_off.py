@@ -404,6 +404,10 @@ def test_a_knob_up_after_the_press_is_gripped_lifted_carried_set_down_and_the_ar
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
     assert (spot["tier"], spot["mapped"], spot["chosen"]) == ("beside the box", False, "ahead, with the scene camera")
     assert spot["room_s"] is not None  # the room judged while the press flew
+    # of ahead_s, the wait for that room; the spots whose reach was judged, their IK's time; the
+    # lookahead's overrun (None: this client says nothing of what it sent)
+    assert 0.0 <= spot["room_wait_s"] <= spot["ahead_s"] and spot["spot_checks"] >= 1 and spot["spot_ik_s"] >= 0.0
+    assert spot["host_stood_s"] is None
     assert spot["xyz"] == pytest.approx(list(ctx.lid_drop.xyz), abs=1e-4)
     hover = rec.legs["lid:carry"].target[1]
     assert hover[:2] == pytest.approx(list(ctx.lid_drop.xyz[:2]))
@@ -1847,6 +1851,26 @@ def test_after_a_grip_once_more_the_carry_is_the_one_planned_while_its_own_lift_
     assert [at for name, at in rec.plans if name == "lid:carry"] == [second_lift]
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
     assert spot["ahead"]["flown"] is True and rec.most_at_once == 1
+
+
+def test_a_lookahead_result_is_told_how_long_its_host_stood_for_it():
+    """The grip's lookahead (lift, why, CarryAhead) or the lift's
+    (CarryAhead): the CarryAhead learns its host's stand at its end
+    (Runner.lookahead_stood_s), for the lid_spot row."""
+    from types import SimpleNamespace
+
+    placed = rlo.CarryAhead([0.0] * 7)
+    got = rlo._lookahead(SimpleNamespace(lookahead_result=("lift", None, placed), lookahead_stood_s=0.31))
+    assert got == ("lift", None, placed) and placed.host_stood_s == 0.31
+    alone = rlo.CarryAhead([0.0] * 7)
+    assert rlo._lookahead(SimpleNamespace(lookahead_result=alone, lookahead_stood_s=0.02)) is alone
+    assert alone.host_stood_s == 0.02
+    assert rlo._lookahead(SimpleNamespace(lookahead_result=(None, "no lift", None), lookahead_stood_s=0.5)) == (
+        None,
+        "no lift",
+        None,
+    )
+    assert rlo._lookahead(SimpleNamespace(lookahead_result=None)) is None  # a runner that keeps no stand
 
 
 def test_a_spot_is_the_carry_planned_ahead_s_own_within_a_centimetre_and_the_same_turn():

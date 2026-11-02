@@ -1393,7 +1393,7 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     res = runner.run(
         [opened, up], execute=True, lookahead=lambda _end: grip_ahead(ctx, cfg, eyes, lower.goal_joints, quat, room)
     )
-    ahead = runner.lookahead_result
+    ahead = _lookahead(runner)
     spread = runner.join_pending()  # the fingers open before the hand comes down round the knob
     if not all(r.ok for r in res) or (spread is not None and not spread.ok):
         bad = res[-1] if not all(r.ok for r in res) else spread
@@ -1938,7 +1938,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     res = runner.run(
         [opened, *legs], execute=True, lookahead=lambda end: grip_ahead(ctx, cfg, eyes, end, way.stroke.quat, room)
     )
-    ahead = runner.lookahead_result
+    ahead = _lookahead(runner)
     last = res[-1]
     if not all(r.ok for r in res):
         if not _started(last):
@@ -2055,8 +2055,14 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             refused="; ".join(placed.refused) or None,
             chosen="ahead, with the scene camera",
             room_s=None if placed.room_s is None else round(placed.room_s, 3),
+            # ahead_s is the lookahead's spot work and its wait for the room (room_wait_s);
+            # host_stood_s, how long the hosting leg stood at its end for the lookahead
             ahead_s=round(placed.spent_s, 3),
+            room_wait_s=None if placed.room_wait_s is None else round(placed.room_wait_s, 3),
+            spot_checks=placed.checks,
+            spot_ik_s=round(placed.ik_s, 3),
             plan_s=round(placed.plan_s, 3),
+            host_stood_s=placed.host_stood_s,
         )
         _say_spot(ctx, eyes, (drop, placed.tier, placed.says), placed.refused, placed.tmap, placed.table_z)
         log.info(
@@ -2093,7 +2099,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         # lift where the spot chosen there is the same
         _video(ctx, "CLOSE on the knob, then LIFT %.0f mm and CLEAR the box" % (1000 * lift_off_m(ctx.model)))
         res = runner.run(flying, execute=True, lookahead=lambda end: carry_ahead(ctx, cfg, eyes, end, room=room))
-        carried = runner.lookahead_result
+        carried = _lookahead(runner)
     grip = [r for r in res if r.leg_name in ("grip:open", "grip:close")]
     for shot in shots:
         shot.note(
@@ -2143,7 +2149,11 @@ class CarryAhead:
     (`spent_s`) and the carry's own plan (`plan_s`); with home asked for,
     the legs after the release (`home`, plan_home_after's). The map it chose
     on (`tmap`, on the table at `table_z`), and how long the room on it took
-    while the press flew (`room_s`, None: judged here)."""
+    while the press flew (`room_s`, None: judged here), how long this waited
+    for that (`room_wait_s`: spent_s mixed the wait with the work), the
+    spots whose reach it judged (`checks`) and their IK's time (`ik_s`); and
+    how long the leg that hosted it stood at its end for it (`host_stood_s`,
+    Runner.lookahead_stood_s, set by the caller)."""
 
     q: list
     drop: object = None
@@ -2158,6 +2168,22 @@ class CarryAhead:
     tmap: object = None
     table_z: float = None
     room_s: float = None
+    room_wait_s: float = None
+    checks: int = 0
+    ik_s: float = 0.0
+    host_stood_s: float = None
+
+
+def _lookahead(runner):
+    """runner.lookahead_result, the CarryAhead in it (grip_ahead's third,
+    or carry_ahead's own) told how long the leg that hosted it stood at its
+    end for it (host_stood_s, Runner.lookahead_stood_s): the lookahead's
+    overrun, which a lid_spot row keeps."""
+    got = runner.lookahead_result
+    placed = got[2] if isinstance(got, tuple) and len(got) == 3 else got
+    if isinstance(placed, CarryAhead):
+        placed.host_stood_s = getattr(runner, "lookahead_stood_s", None)
+    return got
 
 
 def carry_ahead(ctx, cfg, eyes, q_end, room=None, home=False):
@@ -2178,12 +2204,16 @@ def carry_ahead(ctx, cfg, eyes, q_end, room=None, home=False):
     t0 = time.monotonic()
     _node, watcher, scene_fix, scene_q = eyes
     q = [float(v) for v in q_end]
+    t_room = time.monotonic()
     judged = room_for(ctx, room)
+    room_wait_s = None if room is None else time.monotonic() - t_room
     table_z = _table_z(watcher, scene_fix, ctx.cpose)
     tmap = judged.tmap if judged is not None else spot_map(ctx, None, q, scene_fix, scene_q, table_z)
     rest = list(pd.rest_joints(cfg))
     reach = _Reach()
-    ahead = CarryAhead(q, tmap=tmap, table_z=table_z, room_s=None if judged is None else judged.spent_s)
+    ahead = CarryAhead(
+        q, tmap=tmap, table_z=table_z, room_s=None if judged is None else judged.spent_s, room_wait_s=room_wait_s
+    )
     for drop, tier, says in spot_candidates(
         ctx,
         tmap,
@@ -2210,6 +2240,7 @@ def carry_ahead(ctx, cfg, eyes, q_end, room=None, home=False):
             break
         ahead.refused.append("[%.2f, %.2f]: %s" % (drop.xyz[0], drop.xyz[1], why))
     ahead.known = reach.found
+    ahead.checks, ahead.ik_s = len(reach.found), reach.ik_s
     ahead.spent_s = time.monotonic() - t0
     return ahead
 
@@ -2318,6 +2349,11 @@ def _ahead_note(ahead, off, flew, chosen, reach):
         off_rad=round(off, 4),
         xyz=None if ahead.drop is None else [round(v, 4) for v in ahead.drop.xyz],
         spent_s=round(ahead.spent_s, 3),
+        # of spent_s, the wait for the room judged while the press flew; the spots
+        # it judged the reach of, and how long the lift stood at its end for it
+        room_wait_s=None if ahead.room_wait_s is None else round(ahead.room_wait_s, 3),
+        spot_checks=ahead.checks,
+        host_stood_s=ahead.host_stood_s,
         reused=reach.reused,
         saved_s=round(reach.saved_s + (ahead.plan_s if flew else 0.0), 3),
     )
@@ -2394,6 +2430,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         map_s=round(t_map - t_look, 3),
         candidates_s=round(t_end - t_map - carry_s, 3),
         ik_s=round(reach.ik_s, 3),
+        spot_checks=len(reach.found),  # the spots whose reach was judged here (the rest: ahead's)
         carry_s=round(carry_s, 3),
         ahead=note,
     )

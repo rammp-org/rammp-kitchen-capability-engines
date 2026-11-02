@@ -2053,6 +2053,24 @@ def test_a_flight_keeps_the_knuckle_beside_the_joints_and_how_long_the_arm_stood
     assert doc["stood_s"] == pytest.approx(0.4, abs=0.05) and doc["lookahead_s"] == 0.7
 
 
+def test_the_leg_that_hosted_a_lookahead_says_how_long_it_stood_for_it(tmp_path):
+    """Sweep lid_spot-log-room-wait: the grip host leg's lookahead overrun
+    was read off t_wall minus the trajectory's duration by hand. Every
+    executed leg's row now keeps stood_s, and the run that hosted a
+    lookahead keeps its host's beside the result (lookahead_stood_s)."""
+    import json
+
+    c = _FliesHolding(tmp_path)
+    r = runner(c, tmp_path)
+    res = r.run([leg("grip:rise", Q0, Q1, chain=0)], execute=True, lookahead=lambda end: "planned")
+    assert r.lookahead_result == "planned" and r.lookahead_stood_s == pytest.approx(0.4, abs=0.05)
+    assert res[-1].stood_s == pytest.approx(0.4, abs=0.05)
+    (row,) = (json.loads(line) for line in next(tmp_path.glob("run-*.jsonl")).read_text().splitlines())
+    assert row["stood_s"] == pytest.approx(0.4, abs=0.05)
+    r.run([leg("b", Q1, Q2, chain=0)], execute=True)
+    assert r.lookahead_result is None and r.lookahead_stood_s is None  # every run resets them
+
+
 def test_a_flight_from_feedback_without_the_knuckle_keeps_none_for_it(tmp_path):
     """An older client's 3-element samples: the knuckle is None, and with no
     lookahead hosted lookahead_s is None too."""

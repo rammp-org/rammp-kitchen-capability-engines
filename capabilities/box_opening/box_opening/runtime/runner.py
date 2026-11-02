@@ -101,6 +101,10 @@ class LegResult:
     flight: str = None
     # a gripper leg's knuckle when it finished (rad, 0.0 open .. 0.8 closed)
     gripper_pos: float = None
+    # how long past the trajectory's own end the client returned (s): the
+    # arm standing at its end while a lookahead it hosted still planned
+    # (_stood_s; 0.01-1.50 s per grip rise). None: nothing was sent
+    stood_s: float = None
     # what tripped the guard (guards.TorqueGuard.trip_report): the joint, its
     # deviation from the baseline in force, and the run-up — so a false trip
     # can be read off the log instead of re-flown
@@ -287,6 +291,18 @@ def _rounded(rows, places):
     return [[round(float(v), places) for v in r] for r in rows]
 
 
+def _stood_s(info, ended):
+    """How long past the sent trajectory's own end (s) the client returned
+    from executing it, at `ended` (time.monotonic()): the arm standing at
+    its end, e.g. while a lookahead it hosted still planned (client.execute
+    returns only once that does). None when nothing was sent."""
+    if info.get("sent_at") is None or info.get("sent_traj") is None:
+        return None
+    pts = list(info["sent_traj"].points)
+    duration = secs(pts[-1].time_from_start) if pts else 0.0
+    return max(0.0, float(ended) - float(info["sent_at"]) - duration)
+
+
 def _flight_doc(seq, names, outcome, flew, info, traj, arrived, every):
     """An execution's side file (Runner._keep_flight): the trajectory sent,
     point by point — t, q, qd, qdd, as the driver samples it — and every
@@ -300,7 +316,7 @@ def _flight_doc(seq, names, outcome, flew, info, traj, arrived, every):
     fb = list(info.get("feedback_q") or ())
     t0 = float(info["sent_at"])
     ended_s = arrived[0] - t0
-    duration = secs(pts[-1].time_from_start) if pts else 0.0
+    stood = _stood_s({**info, "sent_traj": sent}, arrived[0])
     ahead = info.get("while_running_s")
     return {
         "seq": seq,
@@ -314,7 +330,7 @@ def _flight_doc(seq, names, outcome, flew, info, traj, arrived, every):
         "ended_s": round(ended_s, 4),  # when the client returned its result, s after that
         # past the trajectory's own end: the arm standing at its end, e.g. while a lookahead it
         # hosted still planned (execute returns only once that does: 0.01-1.50 s per grip rise)
-        "stood_s": round(max(0.0, ended_s - duration), 4),
+        "stood_s": round(stood, 4),
         "lookahead_s": None if ahead is None else round(float(ahead), 4),  # the hosted lookahead's own time
         "trajectory": {
             "t": [round(secs(p.time_from_start), 4) for p in pts],
@@ -665,6 +681,7 @@ class Runner:
         self.lookahead_result; a failure leaves None and the caller builds
         after the run as before. Never hosted on a guarded stroke."""
         self.lookahead_result = None
+        self.lookahead_stood_s = None  # how long the host's arm stood at its end for the lookahead (LegResult.stood_s)
         log.info(self.preview(legs))
         if not execute:
             log.info("dry-run complete — nothing moved (add --execute)")
@@ -846,6 +863,7 @@ class Runner:
                 res = self._run_motion(group, while_running=hook)
                 if group is host and res.lookahead is not None:
                     self.lookahead_result = res.lookahead
+                    self.lookahead_stood_s = res.stood_s
                 after_touch = res.outcome == "touch"
             for g in group:
                 self._log(res, g)
@@ -1304,6 +1322,7 @@ class Runner:
                 )
             )
         t_wall = time.monotonic() - t0
+        stood = _stood_s(info, arrived[0])
         return LegResult(
             group[-1].name if len(group) > 1 else lead.name,
             outcome,
@@ -1317,6 +1336,7 @@ class Runner:
             lookahead=info.get("while_running"),
             flown_traj=traj,
             flight=self._keep_flight([g.name for g in group], outcome, flew, info, traj, arrived),
+            stood_s=None if stood is None else round(stood, 4),
             **flew,
         )
 
