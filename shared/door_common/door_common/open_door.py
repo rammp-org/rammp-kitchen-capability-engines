@@ -106,6 +106,8 @@ PLACEMENT_NOTE = None  # (handle, door normal, start joints) -> how to place the
 DOOR_MODEL = {}  # door-model geometry written into the door file (common.door_dims). Empty: common's defaults
 DOOR_Z_FROM_HANDLE = None  # door bottom / top relative to the handle, when it is taller than any detection sees
 KEEP_ARM_IN_FRAMES = False  # each saved detection frame also keeps the arm's joints + tool pose
+LAST_PLAN = None  # the last open_task's chosen plan: {q0 (start joints), plan (plan_open's), geom} -- e.g. to save a
+#   dry run's plan for rendering
 GRASPED_GAINS = None  # joint impedance {kq, zeta, torque_limit} from the grasp on (the swing, what follows it); None:
 #   stiff position control. The approach (line-up, straight in) stays in position control either way
 SWING_SPEED_SCALE = 1.0  # the swing's speed as a fraction of the free-air one (CART_SPEED x the goal's speed)
@@ -586,6 +588,8 @@ def open_task(
         say(f"  (refused -- looking for a {dc.APPLIANCE} placement that works ...)")
         advice += _placement_advice(scene, rb, geom, q0, max_swing, min_swing, after_swing)
         raise Refused(f"{why} -- refusing before any motion. Start joints {np.round(np.degrees(q0), 1)}.{advice}")
+    global LAST_PLAN
+    LAST_PLAN = dict(q0=q0, plan=plan, geom=geom)
     deg, pitch, grasp, h = plan["swing"], plan["pitch"], plan["grasp"], plan["h"]
     g_p, g_q = np.asarray(grasp.position), np.asarray(grasp.orientation)
     say(

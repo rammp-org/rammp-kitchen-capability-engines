@@ -183,15 +183,83 @@ def _plan_push(scene, rb, P, q_up, loud=False):
 
 
 def _plan_push_open(scene, rb, door, ee, q, loud=False):
-    """The whole push-open from the hand pose `ee` / joints `q` at the swing's end: (P, legs, None) or (None, None,
-    why). cuRobo's up-and-back is gated as a goal (its path can't be previewed); the legs are planned from it."""
+    """The whole push-open from the hand pose `ee` / joints `q` at the swing's end: (P, q_up, legs, None) or (None,
+    None, None, why). cuRobo's up-and-back is gated as a goal, joints `q_up` (its path can't be previewed); the legs are
+    planned from it."""
     P = _push_poses(door, ee)
     with contextlib.nullcontext() if loud else quiet():
         q_up = check_curobo_goal(scene, rb, "push-open: up and back", pos=P.up_back, quat=P.down, seed=q)
     if q_up is None:
-        return None, None, "push-open: up and back is not a reachable cuRobo goal"
+        return None, None, None, "push-open: up and back is not a reachable cuRobo goal"
     legs, why = _plan_push(scene, rb, P, q_up, loud)
-    return (P, legs, None) if legs is not None else (None, None, why)
+    return (P, q_up, legs, None) if legs is not None else (None, None, None, why)
+
+
+def _door_after_swing(geom, cand):
+    """The door file as the open will have saved it after candidate `cand`'s swing (detection `geom`), or None without
+    a detected door height."""
+    if geom["door_z"] is None:
+        return None
+    door = dict(
+        closed_normal=list(geom["n"]),
+        closed_grasp_pos=list(cand["grasp"].position),
+        closed_handle=list(cand["h"]),
+        door_z=list(geom["door_z"]),
+        hinge=list(geom["hinge_seen"]),  # as saved: the detected edge
+    )
+    # the opening as record_door_angle will save it after the swing (the hand's angle about that edge)
+    a = DoorFrame(door, 1.0).angle_of(cand["wps"][-1][:3])
+    door.update(door_open_deg=abs(a), open_sign=float(np.sign(a) or 1.0))
+    return door
+
+
+def _curobo_path(plan_fn, label):
+    """cuRobo's own plan for one of the open's cuRobo moves (self.arm's plan_to_*: nothing moves), as joint lists, or
+    None (says why)."""
+    pl = plan_fn()
+    if not pl.success:
+        say(f"  cuRobo can't plan {label}: {pl.message}")
+        return None
+    say(f"  cuRobo planned {label}: {len(pl.q)} samples, {pl.t[-1]:.1f} s")
+    return np.asarray(pl.q, dtype=float).tolist()
+
+
+def _save_plan(ai, run_dir, push):
+    """A dry run's plan, for render_plan: <run_dir>/plan.json -- the joints (rad) of the start, the line-up, the
+    straight in, the swing and (`push`) the push-open's cuRobo goal and legs, and the door as the open would save it.
+    With self.arm, also cuRobo's own paths for its two moves (the line-up, the push-open's up-and-back): asked of the
+    planner, nothing moves."""
+    if shared.LAST_PLAN is None:
+        return
+    q0, plan, geom = shared.LAST_PLAN["q0"], shared.LAST_PLAN["plan"], shared.LAST_PLAN["geom"]
+    door = _door_after_swing(geom, plan)
+    j = lambda qs: np.asarray(qs, dtype=float).tolist()  # noqa: E731
+    out = dict(
+        start=j(q0),
+        line_up=j(plan["q_pre"]),
+        straight_in=j(plan["leg"]),
+        swing=j(plan["arc"]),
+        swing_deg=plan["swing"],
+        tilt_deg=plan["pitch"],
+        door=door,
+        push_open=None,
+        line_up_curobo=None,
+    )
+    curobo = hasattr(ai, "plan_to_joints")
+    if curobo:
+        out["line_up_curobo"] = _curobo_path(lambda: ai.plan_to_joints(plan["q_pre"], ai.raw_joints()), "the line-up")
+    if push and door is not None:
+        scene, rb = make_sim()
+        with quiet():
+            P, q_up, legs, _ = _plan_push_open(scene, rb, door, list(plan["wps"][-1]), plan["arc"][-1])
+        if legs is not None:
+            out["push_open"] = dict(up_back=j(q_up), legs=[dict(label=lb, joints=j(leg)) for lb, leg, _ in legs])
+            if curobo:
+                out["push_open"]["up_back_curobo"] = _curobo_path(
+                    lambda: ai.plan_to_pose(P.up_back, P.down, plan["arc"][-1]), "the push-open's up-and-back"
+                )
+    (run_dir / "plan.json").write_text(json.dumps(out))
+    say(f"plan saved: {run_dir / 'plan.json'} -- render it: python3 -m microwave.render_plan {run_dir}")
 
 
 class PushOpen(shared.AfterSwing):
@@ -200,19 +268,10 @@ class PushOpen(shared.AfterSwing):
 
     def check(self, scene, rb, geom, cand, explain):
         end_wp, q_end = cand["wps"][-1], cand["arc"][-1]
-        door = dict(
-            closed_normal=list(geom["n"]),
-            closed_grasp_pos=list(cand["grasp"].position),
-            closed_handle=list(cand["h"]),
-            door_z=list(geom["door_z"]) if geom["door_z"] is not None else None,
-            hinge=list(geom["hinge_seen"]),  # as saved: the detected edge
-        )
-        if door["door_z"] is None:
+        door = _door_after_swing(geom, cand)
+        if door is None:
             return False, "push-open: no door height detected (door_z) to place it"
-        # the opening as record_door_angle will save it after the swing (the hand's angle about that edge)
-        a = DoorFrame(door, 1.0).angle_of(end_wp[:3])
-        door.update(door_open_deg=abs(a), open_sign=float(np.sign(a) or 1.0))
-        _, _, why = _plan_push_open(scene, rb, door, list(end_wp), q_end)
+        _, _, _, why = _plan_push_open(scene, rb, door, list(end_wp), q_end)
         if why and explain:  # the best candidate's failing push-open, out loud
             say(f"  tilt {cand['pitch']} deg, swing {cand['swing']} deg: {why} -- its plan in full:")
             _plan_push_open(scene, rb, door, list(end_wp), q_end, loud=True)
@@ -421,7 +480,7 @@ def push_open(ai, execute, on_release=None):
     door = json.loads(dc.DOOR_FILE.read_text())
     st = ai.get_state()
     scene, rb = make_sim()
-    P, _, why = _plan_push_open(scene, rb, door, list(st["ee_pos"]), st["position"])
+    P, _, _, why = _plan_push_open(scene, rb, door, list(st["ee_pos"]), st["position"])
     if why:
         raise Refused(f"{why} from where the swing ended -- still holding the handle.")
     gains = shared.grasped_impedance()
@@ -476,12 +535,15 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_o
         swing = swing_deg or (PUSH_OPEN_SWING_DEG if push else SWING_MAX_TRY_DEG)
         say("\n===== OPEN: grasp + swing =====")
         on_grasp = partial(on_hold, True) if on_hold else None
+        shared.LAST_PLAN = None  # open_task sets it once it has a plan
         ok = open_task(ai, execute, swing, view_only=view_only, push=push and not view_only, on_grasp=on_grasp)
         if not ok:
             say("swing did not finish -- stopping (still holding the handle).")
         elif push and not view_only:
             ok = push_open(ai, execute, on_release=partial(on_hold, False) if on_hold else None)
         log.event("open", ok=ok)
+        if ok and not execute and not view_only:
+            _save_plan(ai, log.dir, push)
         say(f"\nOPEN {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")
         return ok
     except BaseException as e:
