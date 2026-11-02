@@ -671,3 +671,43 @@ def test_the_pose_is_looked_up_at_the_stamp_given_not_the_grabbers_newest():
     camera_pose_at(g, stamp=Time(sec=9, nanosec=500))
     camera_pose_at(g, offset_s=-0.2, stamp=Time(sec=9, nanosec=500))
     assert asked == [5_000_000_000, 9_000_000_500, 8_800_000_500]
+
+
+def test_the_box_top_watchers_timer_runs_only_while_it_detects(monkeypatch):
+    """Sweep startup_cpu-watcher-period: the watcher detects only inside a
+    detect window (the wrist-mount observation's), but its 20 Hz timer woke
+    the perception thread in every run, ~2 % of a core. The timer is
+    cancelled while the watcher is idle and reset when a window opens."""
+    from types import SimpleNamespace
+
+    from box_opening.perception import d405
+    from box_opening.perception import depth_source as ds
+
+    class Timer:
+        def __init__(self):
+            self.running, self.calls = True, []
+
+        def cancel(self):
+            self.running = False
+            self.calls.append("cancel")
+
+        def reset(self):
+            self.running = True
+            self.calls.append("reset")
+
+    timers = []
+
+    class Node:
+        def create_timer(self, period, cb):
+            timers.append(Timer())
+            return timers[-1]
+
+    monkeypatch.setattr(d405, "D405Grabber", lambda node, **kw: SimpleNamespace())
+    cfg = SimpleNamespace(min_hits=3, tol_m=0.004, window_s=1.0, fresh_s=1.0, detect_period_s=0.05)
+    w = ds.BoxTopWatcher(Node(), cfg, None, 0.2)
+    (timer,) = timers
+    assert w.active is False and timer.running is False  # idle from the start: no tick at all
+    w.active = True
+    assert timer.running and timer.calls[-1] == "reset"
+    w.active = False
+    assert not timer.running and timer.calls[-1] == "cancel"

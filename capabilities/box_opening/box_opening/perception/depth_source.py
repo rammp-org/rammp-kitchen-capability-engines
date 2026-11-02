@@ -542,7 +542,11 @@ class BoxTopWatcher:
         self._last_cam = None  # previous frame's camera pose (still filter)
         # detection runs only inside a detect window (the wrist-mount
         # observation's report sets it); the idle 20 Hz tick otherwise costs a
-        # TF lookup per frame for nothing
+        # TF lookup per frame for nothing — and its timer itself runs only
+        # while active (the `active` property): idle, it still woke the
+        # perception thread 20 times a second, ~2 % of a core (sweep
+        # startup_cpu-watcher-period), in every run but the wrist-mount one
+        self._timer = None
         self.active = False
         # an offered roi is applied only once the camera has been still
         # since BEFORE the bbox's frame: a box seen while decelerating must
@@ -554,7 +558,21 @@ class BoxTopWatcher:
         # cadence never starves it — while fix() is read from the mission's
         # thread. One lock covers the windows and the counters.
         self._lock = threading.Lock()
-        node.create_timer(period_s, self._tick)
+        self._timer = node.create_timer(period_s, self._tick)
+        self.active = self._active  # idle: the timer cancelled until a detect window opens
+
+    @property
+    def active(self):
+        """Whether the watcher detects: its timer runs only then."""
+        return self._active
+
+    @active.setter
+    def active(self, on):
+        self._active = bool(on)
+        timer = getattr(self, "_timer", None)
+        switch = None if timer is None else getattr(timer, "reset" if self._active else "cancel", None)
+        if switch is not None:
+            switch()
 
     def offer_roi(self, roi, frame_t):
         self._pending_roi = (roi, float(frame_t))
