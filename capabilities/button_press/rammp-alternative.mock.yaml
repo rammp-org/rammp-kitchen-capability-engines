@@ -1,38 +1,20 @@
-# The mock: the real alternative's exact interface, no hardware. Every goal succeeds at
-# once (nothing detected or moved). Other teams develop against it, the all-mock profile
-# runs on it, and CI smoke-tests it.
+# The mock: the real alternative's exact interface, no hardware. Every action succeeds at once
+# as a dry run (nothing detected or moved). Other teams develop against it, the all-mock profile
+# runs on it, and CI smoke-tests it. check_capabilities.py rejects a mock whose topics differ
+# from the real one.
 id: button_press_mock
 tier: experimental
 kind: docker
-ros_node_name: button_press
 container:
   image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/button_press:dev
   network_mode: host
   ipc: host
-  command: ["/module_ws/install/rammp_button_press/lib/rammp_button_press/press_server", "--mock"]
-params:
-  allow_execute: false
-  acquire_control: false
-  arm_frame: arm_mount
-  joint_prefix: arm_
-  mount_rpy_deg: [0.0, 30.0, 0.0]
-  camera_frame: ""
-  camera_ns: /wrist_camera
-  depth_topic: depth/image_rect_raw
-  far: scene
-  scene_ns: /scene_camera
-  scene_depth_topic: depth/image_rect_raw
-  log_dir: /tmp/press_logs
+  command: ["ros2", "launch", "button_press", "button_press.launch.py", "mock:=true"]
+# No `params:` here: they would need the node's executable as the command, and this fragment uses `ros2 launch` for mock:=true.
 publishes:
+  - /button_press/status
   - /button_press/target_pose
-  - /setpoint/twist
-  - /setpoint/gripper
 subscribes:
-  - /joint_states
-  - /ee_state
-  - /gripper_state
-  - /control_status
-  - /diagnostics
   - /tf
   - /tf_static
   - /wrist_camera/color/image_raw
@@ -42,4 +24,4 @@ subscribes:
   - /scene_camera/color/camera_info
   - /scene_camera/depth/image_rect_raw
   - /scene_camera/depth/camera_info
-  - /yolo/detections
+  - /perception/object_detections

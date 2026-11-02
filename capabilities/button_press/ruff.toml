@@ -5,4 +5,4 @@ line-length = 120
 
 [lint.per-file-ignores]
 # Offline analysis scripts, run on a laptop against run logs (like the repo's scripts/).
-"rammp_button_press/tools/*" = ["T20"]
+"tools/*" = ["T20"]
