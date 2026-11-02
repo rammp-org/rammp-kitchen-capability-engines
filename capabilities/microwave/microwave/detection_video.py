@@ -16,9 +16,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from door_common.common import say
 from scipy.spatial.transform import Rotation as R
-
-from .microwave_common import say
 
 SCENE_TOPICS = ("/scene_camera/color/image_raw", "/scene_camera/color/camera_info")
 WRIST_TOPICS = ("/wrist_camera/color/image_raw", "/wrist_camera/color/camera_info")

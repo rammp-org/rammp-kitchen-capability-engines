@@ -18,9 +18,10 @@ container:
   ipc: host
   # Runs the same node as the image's CMD, without the launch file. sheppy
   # appends `--ros-args --params-file` to the command; with no command, those
-  # args replace the CMD and the node never starts. Run the node's executable
-  # (`ros2 run`), never `ros2 launch`, which rejects them.
-  command: ["ros2", "run", "microwave", "microwave_node"]
+  # args replace the CMD and the node never starts. Run the node's installed
+  # executable itself: never `ros2 launch`, which rejects them, nor `ros2 run`,
+  # which as PID 1 swallows the stop signal and leaves the node to be SIGKILLed.
+  command: ["/module_ws/install/microwave/lib/microwave/microwave_node"]
   # The door geometry and grasp the open saves (the close reads them back) and every run's log:
   # kept on the host, across container restarts.
   volumes:
@@ -38,10 +39,18 @@ params:
   allow_execute: false
   data_dir: /microwave_data
   # Wrist camera; depth must be aligned to colour. camera_frame "" = the colour image's frame_id.
+  # depth/image_rect_raw is every wrist camera's, and aligned to colour on the D405 and the OAK; the
+  # D435i's is not -- with it, override this to /wrist_camera/aligned_depth_to_color/image_raw.
   color_topic: /wrist_camera/color/image_raw
   camera_info_topic: /wrist_camera/color/camera_info
-  depth_topic: /wrist_camera/aligned_depth_to_color/image_raw
+  depth_topic: /wrist_camera/depth/image_rect_raw
   camera_frame: ""
+  # Scene camera, depth aligned to colour: without boxer, its view of the door places the view pose.
+  scene_color_topic: /scene_camera/color/image_raw
+  scene_camera_info_topic: /scene_camera/color/camera_info
+  scene_depth_topic: /scene_camera/depth/image_rect_raw
+  # The scene segmenter's 2D boxes on the scene camera (RF-DETR): its box_class box is where the door is looked for.
+  scene_detections_topic: /perception/object_detections
   # boxer's 3D boxes (scene camera): the handle detector crops the wrist camera's points to the
   # microwave's box. "" = YOLO on the wrist image instead (yolo_model).
   box_topic: ""  # /perception/object_detections_3d to use boxer
@@ -116,5 +125,9 @@ subscribes:
   - /tf_static
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
-  - /wrist_camera/aligned_depth_to_color/image_raw
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /perception/object_detections
   - /perception/object_detections_3d

@@ -1,6 +1,6 @@
-"""Shared motion pieces for the microwave tasks: planning, the door model, files, output.
+"""Shared motion pieces for the door tasks: planning, the door model, files, output.
 
-Used by `open_door.py` and `demo_replay.py`.
+Used by `open_door.py`, `close_door.py` and `demo_replay.py`, here and in each capability.
 
 * `release_and_back_off` -- records the current grasp (pose + joints) to
   `LAST_GRASP_FILE`, opens the gripper, then backs straight off the handle along the
@@ -20,6 +20,9 @@ All gripper motion goes through `execute_command(Open/CloseGripperCommand())` --
 The arm sim (make_sim, solve_ik, clearance, the IK guards) is capability_engine.sim, shared with
 self.arm: one PyBullet copy per process, built from the driver's own model. The guards are ROS
 parameters (arm.max_ik_err, arm.j4_guard_deg, ...), so they are read as sim.X at call time.
+
+Each capability is its own process, so module constants are safe: the values that differ per appliance are
+constants here with no default (None), set once at startup with `configure` (and `configure_paths`).
 """
 
 import json
@@ -54,6 +57,23 @@ from scipy.spatial.transform import Rotation as R
 
 class Refused(Exception):
     """A check failed before (or instead of) a motion: the arm holds where it is. The message says why."""
+
+
+def set_constants(module, values, required=()):
+    """Set constants in `module` (a module's globals()): an unknown name raises, and so does any of `required` left
+    unset (None) -- a capability that forgets one fails at startup, not on the arm."""
+    unknown = sorted(k for k in values if k not in module or not k.isupper())
+    if unknown:
+        raise ValueError(f"unknown settings: {unknown}")
+    module.update(values)
+    missing = [k for k in required if module[k] is None]
+    if missing:
+        raise ValueError(f"missing settings: {missing}")
+
+
+def configure(**values):
+    """Set this module's per-appliance constants at startup: APPLIANCE, PARK_JOINTS and the door-size defaults."""
+    set_constants(globals(), values)
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +118,9 @@ def quiet():
 # ---------------------------------------------------------------------------
 # Where a run's files go. The open saves the door geometry and the grasp; the close (a later
 # run, maybe another process) reads them back -- so this must be persistent (the node's
-# data_dir parameter, a host volume in the fragment).
+# data_dir parameter, a host volume in the fragment). Each capability sets its own (configure_paths).
 # ---------------------------------------------------------------------------
-DATA_DIR = Path("/tmp/microwave")
+DATA_DIR = Path("/tmp/door_common")
 LAST_GRASP_FILE = DATA_DIR / "last_grasp.json"
 DOOR_FILE = DATA_DIR / "door.json"
 RUNS_DIR = DATA_DIR / "runs"
@@ -108,7 +128,7 @@ DETECT_FRAMES_DIR = DATA_DIR / "detections"
 
 
 def configure_paths(data_dir):
-    """Point every file above into `data_dir` (created). Modules read them as mc.X at call time."""
+    """Point every file above into `data_dir` (created). Modules read them as dc.X at call time."""
     global DATA_DIR, LAST_GRASP_FILE, DOOR_FILE, RUNS_DIR, DETECT_FRAMES_DIR
     DATA_DIR = Path(data_dir)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -119,18 +139,8 @@ def configure_paths(data_dir):
 
 
 STEP_M = 0.02
-# Park ("end") pose for the open and close tasks, joints in rad. Hand-placed by teleop on the Jetson
-# rig, 2026-10-07 (was park_pose.json v4). HARDCODED FOR NOW: per-robot, so this can change -- likely
-# to a fragment param or one of the driver's presets (go_to_preset).
-PARK_JOINTS = [
-    0.6047337092622715,
-    0.6574053764067224,
-    -2.7310591810191354,
-    -2.245420837282717,
-    1.0414940588270571,
-    1.366535599611345,
-    1.2981626670490867,
-]
+APPLIANCE = "appliance"  # what the door belongs to: names its body in the door model and the refusal messages
+PARK_JOINTS = None  # park ("end") joints in rad, if the capability parks (release_and_back_off's `park`)
 
 
 def door_arc_waypoints(
@@ -334,7 +344,7 @@ def _ik_within_guards(scene, rb, pos, quat, seed):
 def check_curobo_goal(scene, rb, label, q=None, pos=None, quat=None, seed=None, bodies=None, more_seeds=()):
     """Gate the GOAL of a cuRobo move (self.arm.go_to_*): cuRobo plans the path in the driver, which can't be
     previewed, so only where it ends is checked here -- joints `q`, or (pos, quat) IK'd from `seed`: IK, reach,
-    J4/J6 guards, the keep-out zone (fridge) and, with `bodies`, >= MIN_CLEAR from the door model. For a pose goal
+    J4/J6 guards, the keep-out zone and, with `bodies`, >= MIN_CLEAR from the door model. For a pose goal
     cuRobo may end on another joint branch than this IK; the checked branch is the one nearest the seed.
     `more_seeds`: tried in turn when IK from `seed` misses or lands past a guard -- PyBullet's IK ignores joint
     limits and can settle on an impossible elbow (10-30: line-up J4 +160 deg, the grasp's -130) where a seed near
@@ -404,6 +414,8 @@ def execute_joint_plan(ai, plan, label):
 
 
 def load_park():
+    if PARK_JOINTS is None:
+        raise Refused("no PARK_JOINTS set (configure)")
     return wrap_joints(PARK_JOINTS)
 
 
@@ -503,21 +515,19 @@ def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre
 # tool_frame -> fingertip distance along the approach axis, measured twice on 09-23
 # (6.3 / 6.1 cm); the closed door face sits just past the fingertips at grasp time.
 FINGERTIP_PAST_TOOL = 0.062
-DOOR_T = 0.04  # door thickness
-DOOR_PAST_HANDLE = 0.06  # free edge beyond the handle. Was 0.122 (detector span 47.2 - 35.0 cm), but that
-# span includes the control panel: on 09-25 the hand passed the 90-deg door's edge
-# at x ~0.27, which only fits a door ending <= ~6 cm past the handle.
-DOOR_Z = (0.25, 0.80)  # unmeasured -> deliberately generous (fallback: no closed_handle in the door file)
-DOOR_Z_HANDLE_Z = 0.537  # closed-handle z when DOOR_Z was set (09-23); the model keeps DOOR_Z's extent
-# relative to the handle, so a lower/higher microwave (09-28: handle ~0.26) is covered
+# door-size defaults, for a door file without its own (door_dims, add_door_model): set by the capability (configure)
+DOOR_T = None  # door thickness
+DOOR_PAST_HANDLE = None  # free edge beyond the handle
+DOOR_Z = None  # door (bottom, top), the fallback when the door file has no door_z
+DOOR_Z_HANDLE_Z = None  # closed-handle z when DOOR_Z was set; the model keeps DOOR_Z's extent relative to the handle
+BODY_DEPTH = None
 DOOR_Z_MARGIN = 0.02  # padding on the detected door_z range (door file), when the grasp saved one
-BODY_DEPTH = 0.40
 MIN_CLEAR = 0.03  # every arm/gripper link must stay >= 3 cm from door/body
 
 
 def door_dims(door):
     """(face behind the closed grasp, door thickness, free edge past the grasp, body depth) for the door model. A door
-    file may carry its own (the fridge's, written by its open); the microwave's doesn't -> the constants above."""
+    file may carry its own (DOOR_MODEL in open_door, which the open writes into it); else the constants above."""
     return (
         float(door.get("face_behind_grasp", FINGERTIP_PAST_TOOL + 0.005)),
         float(door.get("door_t", DOOR_T)),
@@ -543,7 +553,7 @@ def _yaw_about(center, xy, ang):
 
 
 def add_door_model(scene, rb, door, open_grasp_pos):
-    """Add the door slab (rotated to its current opening) and the fixed microwave body to
+    """Add the door slab (rotated to its current opening) and the appliance's fixed body to
     the sim as collision-only boxes. Returns (bodies, info) -- bodies is [(id, name)]."""
     c = rb.physics_client_id
     n = np.asarray(door["closed_normal"], float)
@@ -585,7 +595,7 @@ def add_door_model(scene, rb, door, open_grasp_pos):
     body_c = face + t[:2] * mid - n[:2] * (door_t + body_depth / 2)
     body_id = box(body_c, [body_depth / 2, (hi - lo) / 2, zh], yaw_closed)
     free_edge = _yaw_about(hinge, face + t[:2] * lo, ang)
-    return [(door_id, "door"), (body_id, "microwave body")], {
+    return [(door_id, "door"), (body_id, f"{APPLIANCE} body")], {
         "open_deg": float(np.degrees(ang)),
         "free_edge": free_edge,
     }
@@ -642,7 +652,7 @@ class DoorFrame:
         return np.array([*(self.hinge[:2] + self._rot(deg) @ (self.g0[:2] - self.hinge[:2])), self.g0[2]])
 
     def bodies(self, scene, rb, deg):
-        """Door slab at `deg` + microwave body, as [(id, name)] -- remove with `drop`."""
+        """Door slab at `deg` + the appliance's body, as [(id, name)] -- remove with `drop`."""
         return add_door_model(scene, rb, self.door, self.bodies_point(deg))[0]
 
 
@@ -658,6 +668,40 @@ def record_door_angle(ee, door_file=None):
 def drop(rb, bodies):
     for bid, _ in bodies:
         p.removeBody(bid, physicsClientId=rb.physics_client_id)
+
+
+# ---------------------------------------------------------------------------
+# Wheelchair keep-out: off unless a capability enables it. Assumes a level arm base.
+# ---------------------------------------------------------------------------
+def enable_keep_out(behind_m):
+    """Check every plan (sim.solve_ik, the open's swing check) and every move_joints against a keep-out zone: more than
+    `behind_m` behind the arm base (arm-base x), on its right (y < 0). The zone is a collision box in the sim, added on
+    first use. go_to_* (cuRobo) goals are checked by check_curobo_goal; cuRobo's path is not."""
+    boxes = {}  # physics client id -> the box's body id
+
+    def keep_out(rb, q):
+        """Why joints `q` put the arm in the zone, or None. The arm is left at `q`."""
+        c = rb.physics_client_id
+        if c not in boxes:
+            base = np.asarray(p.getBasePositionAndOrientation(rb.robot_id, physicsClientId=c)[0])
+            half = np.array([2.0, 2.0, 3.0])
+            cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=half.tolist(), physicsClientId=c)
+            boxes[c] = p.createMultiBody(
+                0, cs, basePosition=(base + [-behind_m - half[0], -half[1], 0.0]).tolist(), physicsClientId=c
+            )
+        for j, jj in enumerate(ARM):
+            p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
+        pts = p.getClosestPoints(rb.robot_id, boxes[c], 0.0, physicsClientId=c)
+        if not pts:
+            return None
+        worst = min(pts, key=lambda pt: pt[8])
+        link = p.getJointInfo(rb.robot_id, worst[3], physicsClientId=c)[12].decode() if worst[3] >= 0 else "base"
+        return (
+            f"{link} {-worst[8] * 100:.1f} cm into the wheelchair keep-out (> {behind_m * 100:.0f} cm "
+            "behind the arm base, on its right)"
+        )
+
+    sim.set_keep_out(keep_out)
 
 
 # ---------------------------------------------------------------------------
