@@ -2120,3 +2120,28 @@ def test_a_ctrl_c_before_anything_went_out_keeps_no_flight(tmp_path):
         r.run([leg("b", Q1, Q2)], execute=True)
     folder = next(tmp_path.glob("run-*.flights"))
     assert sorted(p.name for p in folder.iterdir()) == ["01-a.json"] and r._flights == 1
+
+
+def test_the_preview_times_a_merged_group_once_and_prints_the_same(tmp_path, monkeypatch):
+    """Runner.preview re-timed each plan-free line on its own (line_profile) and then threw
+    that away for every line its merged group had already timed: 0.01-0.03 s of CPU per merged
+    execution, while the arm stands before it. Only legs no group timed get their own profile
+    now, and the table it prints is the same."""
+    from conftest import leg as make_leg
+
+    from box_opening.runtime import runner as runner_mod
+
+    a = make_leg("a", start=[0.0] * 7, end=[0.1] * 7)
+    b = make_leg("b", start=[0.1] * 7, end=[0.2] * 7)
+    alone = make_leg("alone", start=[0.2] * 7, end=[0.25] * 7)
+    for lg in (a, b, alone):
+        lg.plan_free = True
+    assert [len(g) for g in runner_mod.merge_groups([a, b])] == [2]
+    r = runner(_Flown(compliant=True), tmp_path)
+    real = runner_mod.line_profile
+    profiled = []
+    monkeypatch.setattr(runner_mod, "line_profile", lambda lg, *a_, **k: profiled.append(lg.name) or real(lg, *a_, **k))
+    table = r.preview([a, b])
+    assert profiled == [] and table.splitlines()[1].split()[0] == "a"  # timed with its group, not again on its own
+    r.preview([alone])  # a group of one: timed as a group too
+    assert profiled == []

@@ -557,17 +557,20 @@ class Runner:
                     pass
         for leg in legs:
             flies = "-"
-            line = (
-                line_profile(leg, self.retime_params(), self.time_scale)
-                if leg.kind is Kind.MOTION and leg.traj is not None and _free_air_line(leg)
-                else None
-            )
             if id(leg) in flown:
+                # timed with its merged group above: its own line profile would be thrown away
+                # (0.01-0.03 s of CPU per merged execution, while the arm stands)
                 flies = "%.2f" % flown[id(leg)]
-            elif line is not None:
-                flies = "%.2f" % secs(line.points[-1].time_from_start)
-            elif leg.kind is Kind.MOTION and leg.traj is not None:
-                flies = "%.2f" % (secs(leg.traj.points[-1].time_from_start) / (leg.speed * self.time_scale))
+            else:
+                line = (
+                    line_profile(leg, self.retime_params(), self.time_scale)
+                    if leg.kind is Kind.MOTION and leg.traj is not None and _free_air_line(leg)
+                    else None
+                )
+                if line is not None:
+                    flies = "%.2f" % secs(line.points[-1].time_from_start)
+                elif leg.kind is Kind.MOTION and leg.traj is not None:
+                    flies = "%.2f" % (secs(leg.traj.points[-1].time_from_start) / (leg.speed * self.time_scale))
             speed_txt = "%5.2f" % leg.speed
             if leg.warp:
                 # the profile is baked into the timing; showing 1.00 would
