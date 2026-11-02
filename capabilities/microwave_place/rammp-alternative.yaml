@@ -22,9 +22,12 @@ container:
   # executable itself: never `ros2 launch`, which rejects them, nor `ros2 run`,
   # which as PID 1 swallows the stop signal and leaves the node to be SIGKILLed.
   command: ["/module_ws/install/microwave_place/lib/microwave_place/microwave_place_node"]
-  # state_dir: the descent recordings, kept across restarts.
+  # state_dir: the plans, the start position and the descent recordings, kept across restarts.
+  # worlds_dir: cuRobo's world files, written here and loaded by the planner by their path, so it is
+  # mounted at the SAME path here and in the planner's container.
   volumes:
     - /config/microwave_place:/config/microwave_place
+    - /home/snorlax/.ros/rammp_box_opening/worlds:/home/snorlax/.ros/rammp_box_opening/worlds
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
@@ -32,71 +35,60 @@ params:
   # The arm moves only with this true AND `execute` in the goal; otherwise every goal is a dry run.
   # true only for attended runs, someone on the e-stop.
   allow_execute: false
-  # Flange face to the closed fingertips (m): where the container centre lands. Not ruler-measured yet.
+  # flange face to the closed fingertips (m): sets where the container centre is (model.reach)
   flange_to_tip: 0.17955
-  # The hand points this many deg down while placing, so the container touches before the fingers.
+  # the hold the model checks a carried container against (reset's tilt check)
   pitch_deg: 5.0
-  # Contact: the hand's z velocity (m/s, + up) back up to this after moving down.
+  # contact: vz (m/s, + up) back up to this after moving down; 0.0 came 4.5 s late on the flatbot
   vz_stop: -0.01
-  # The hold after contact, this far (m) below the contact point, while the gripper opens.
+  # the hold after contact, this far (m) below the contact point, while the gripper opens
   hold_press: 0.003
-  # Held in impedance at the start of the lowering this long (s); must end still.
+  # held in impedance at the start of the lowering this long (s); must end still
   settle_s: 3.0
-  # Contact more than this (m) above where the bottom meets the oven floor = not the floor.
+  # contact more than this (m) above where the box's bottom meets the glass = not the glass
   early_stop: 0.03
-  # Joint impedance for the settle, lowering, hold and back-out (one set: the stiffness never changes
-  # mid-place). The driver's documented starting point.
+  # joint impedance for the settle, lowering, hold, back-out and reset (one set: the stiffness never
+  # changes mid-place). Default: the driver's documented starting point (rammp_arm.IMPEDANCE)
   impedance_kq: [80.0, 80.0, 80.0, 80.0, 30.0, 30.0, 30.0]
   impedance_zeta: 0.5
   impedance_torque_limit: [39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]
-  # The hand's speed where the floor should be (m/s): what the contact test was tuned at.
+  # the hand's speed where the glass should be (m/s): what the contact test was tuned at
   lower_speed: 0.02
-  # speed_scale of the carrying moves (go_to_ee_pose).
-  go_to_speed_scale: 0.4
-  # speed_scale of the squaring turn (move_joints).
-  adjust_speed_scale: 1.0
-  # The back-out's peak speed (m/s).
-  retreat_speed: 0.06
-  # The squaring turn may correct at most this much (deg).
-  max_adjust_deg: 15.0
-  # The arm's tool frame vs the model's (m).
+  # speed_scale of reset's joint moves (move_joints)
+  reset_speed_scale: 1.0
+  # the arm's tool frame vs the model's (m): further apart = wrong model or tool configuration
   tool_frame_tol: 0.015
-  # Where the descent recordings are kept.
+  # the plans (plans/, last_plan.json), the start position and the descent recordings (descents/)
   state_dir: /config/microwave_place
-  # The scene camera (depth aligned to color) and rammp-perception's 3D detections.
+  # locate: the scene camera's depth and intrinsics (the 3D detections are not used)
   depth_topic: /scene_camera/depth/image_rect_raw
   camera_info_topic: /scene_camera/color/camera_info
   detections_topic: /perception/object_detections_3d
-  # Locate: this many detected frames within timeout_s (s), all within agree_m (m) and agree_deg (deg).
-  frames: 5
-  timeout_s: 10.0
+  # up to max_frames detected frames within timeout_s; at least `frames` of them within agree_m / agree_deg
+  # of their median
+  frames: 3
+  max_frames: 5
+  timeout_s: 20.0
   agree_m: 0.01
   agree_deg: 2.0
-  # The container's bottom this far (m) above the oven floor on the way in.
-  insert_clearance: 0.03
-  # In front of the oven, the container's far edge this far (m) from its outer front.
-  standoff: 0.05
-  # The straight line in, peak speed (m/s).
-  insert_speed: 0.03
-  # Clearances (m) checked at every configuration of every leg, in the sim, before anything moves: every
-  # arm/gripper link from the oven model and the scene voxels ...
-  clear_link: 0.03
-  # ... the held container from them ...
-  clear_container: 0.02
-  # ... and, on the legs into, in and out of the oven, links and container from the oven model.
-  clear_inside: 0.015
-  # Checked configurations are at most this far apart (m, any link frame or container rim point).
-  check_step_m: 0.005
-  # Obstacles from the scene camera: this many new depth frames, taken after locate with the arm still ...
-  obstacle_frames: 3
-  # ... their points as cubes this size (m) ...
-  voxel_m: 0.03
-  # ... within this distance (m) of arm_mount's origin ...
-  region_m: 1.4
-  # ... except points this close (m) to the oven model (its own surfaces) ...
-  surface_band: 0.03
-  # ... or to the arm and the held container where they were.
-  self_band: 0.04
+  # SAM3's prompt for the whole oven (its outside, for the obstacles)
+  microwave_prompt: microwave
+  # the tool this far (m) over the turntable glass at the end of the line in, then lowered from there
+  above: 0.08
+  # the hand's heading off the oven's axis (deg, + = left), tried in this order; the first that passes wins
+  heading_offsets_deg: [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0, 30.0, -30.0, 35.0, -35.0, 40.0, -40.0]
+  # every arm and gripper link at least this far (m) from every true obstacle box
+  clear_min: 0.01
+  # the hand's tilt vs the start, anywhere on the transit and the lines (deg)
+  tilt_max_deg: 2.0
+  # also keep the held box clear_min from the obstacles
+  check_container: false
+  # cuRobo's world files go here; the planner's container must see this directory at the SAME path
+  worlds_dir: /home/snorlax/.ros/rammp_box_opening/worlds
+  # the transit at this fraction of cuRobo's timing
+  transit_speed: 1.0
+  # the hand's speed (m/s; position control) on the line in, the release lift and the back-out
+  insert_speed: 0.16
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -149,7 +141,7 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
-publishes: [/microwave_place/status, /microwave_place/plan]
+publishes: [/microwave_place/status]
 subscribes:
   - /tf
   - /tf_static

@@ -6,7 +6,10 @@ Entry points:
         one frame; pure numpy/opencv
     locate(engine, ...) -> dict
         the live scene camera inside a running action: SAM3's cavity mask on each frame, `frames`
-        detected frames that agree, their median; raises NotLocated otherwise
+        detected frames that agree (of up to `max_frames`), their median, and the frame nearest it;
+        raises NotLocated otherwise
+    SceneCamera(engine, ...).grab(prompt, deadline), scene_frame(camera, prompt, timeout_s)
+        one live frame: SAM3's mask for a prompt, the depth frame of its stamp, the camera pose at it
     cavity_mask_from_detect(response) -> HxW bool or None
         the cavity mask from a rammp_perception_interfaces/srv/Detect response
 
@@ -58,7 +61,9 @@ HEIGHT = 0.1746  # floor -> ceiling (with FLOOR: the ceiling is flush with the o
 # 1. the outline's sides
 SIDE_MIN_PX = 20  # a side of the outline shorter than this is not measured
 SIDE_RMS_PX = 1.5  # ... nor one that is not straight to this (rms px off its line; no lens distortion)
-BORDER_PX = 3  # a side running this close to the image border is the border, not an edge
+BORDER_PX = (
+    12  # a side running this close to the image border is the border, not an edge (SAM3 stops a few px short of it)
+)
 OCCLUDER_BAND_PX = (2, 8)  # just outside a side: what is seen there ...
 OCCLUDER_FRONT = 0.015  # ... is an occluder where it is this far in front of the frame plane ...
 OCCLUDER_SHARE = 0.3  # ... in this share of the band's depth points (the frame face itself is on the plane)
@@ -78,7 +83,9 @@ SIDE_UPRIGHT_DEG = 30.0  # an outline side within this of world-up in the image 
 # square to it horizontal; in between it is neither and is not used
 RECT_RMS_PX = 2.0  # the upright rectangle must fit the sides it uses to this (px rms)
 RING_MIN = 50  # with at least this many depth points on the frame strips ...
-RING_TOL = 0.015  # ... their median must be within this of the fitted plane
+RING_TOL = 0.015  # ... their median must be within this of the final (depth-refined) plane ...
+RING_TOL_COARSE = 0.03  # ... and within this of the plane fitted to the outline alone (the mask's edge can sit a
+# little outside the opening, which places the known-size rectangle a little too near)
 RING_SAMPLE = 300  # frame depth points used in the refinement ...
 RING_WEIGHT = 200.0  # ... each weighted so 1 cm off the plane counts as 2 px off an edge
 SAME_POSE_M, SAME_POSE_DEG = 0.02, 3.0  # passing poses further apart than this: two answers, not detected
@@ -392,7 +399,7 @@ def fit_interior(depth_m, K, world_T_cam, cavity_mask, door_mask=None):
                 sol.append((rms, r.x, lab))
 
     # 3. the depth checks, on every pose that fits the outline
-    def check(p):
+    def check(p, ring_tol=RING_TOL_COARSE):
         C, n, w = _upright_rect(*p)
         b = np.asarray(p[1:])
         if n @ (b - cam) <= 0:
@@ -408,7 +415,7 @@ def fit_interior(depth_m, K, world_T_cam, cavity_mask, door_mask=None):
         on = (np.abs(a) < OPENING[0] / 2 + 0.04) & (z > -0.04) & (z < OPENING[1] + 0.04)
         if on.sum() >= RING_MIN:
             off = float(np.median((Pr[on] - b) @ n))
-            if abs(off) > RING_TOL:
+            if abs(off) > ring_tol:
                 return f"the frame's depth is {off * 100:+.1f} cm off the fitted plane"
         return None
 
@@ -443,7 +450,7 @@ def fit_interior(depth_m, K, world_T_cam, cavity_mask, door_mask=None):
     Pr = Pw[ring].astype(float)
     a_r, z_r = (Pr - b) @ w, Pr[:, 2] - b[2]
     on = (np.abs(a_r) < OPENING[0] / 2 + 0.04) & (z_r > -0.04) & (z_r < OPENING[1] + 0.04)
-    on &= np.abs((Pr - b) @ n) < RING_TOL
+    on &= np.abs((Pr - b) @ n) < RING_TOL_COARSE  # the frame points the outline-only fit is near to
     depth_used = int(on.sum())
     if depth_used >= RING_MIN:
         Pf = Pr[on][np.random.default_rng(0).permutation(depth_used)[:RING_SAMPLE]]
@@ -456,7 +463,7 @@ def fit_interior(depth_m, K, world_T_cam, cavity_mask, door_mask=None):
         rms_q = float(np.sqrt(np.mean(resid(q, lab) ** 2)))
         if rms_q > RECT_RMS_PX:
             raise NotDetected(f"the outline and the frame's depth disagree (edges {rms_q:.1f} px rms after both)")
-        why = check(q)
+        why = check(q, RING_TOL)
         if why is not None:
             raise NotDetected(f"after adding the frame's depth: {why}")
         p, rms = q, rms_q
@@ -533,6 +540,96 @@ def cavity_mask_from_detect(response):
     return labels == top.mask_id
 
 
+class SceneCamera:
+    """The live scene camera inside a running action of `engine`: SAM3 (sam3_service) masks on its color
+    frames, each paired with the depth frame of the same stamp and with the camera pose in `frame` from TF
+    at that stamp. topics: (depth, camera_info, ...). Its subscriptions and client end with the action.
+    Raises NotLocated when the SAM3 service is not up."""
+
+    def __init__(
+        self,
+        engine,
+        frame,
+        topics,
+        sam3_service=SAM3_SERVICE,
+        sam3_threshold=SAM3_THRESHOLD,
+        sam3_image_topic=SAM3_IMAGE_TOPIC,
+    ):
+        import threading
+        from collections import deque
+
+        from cv_bridge import CvBridge
+        from rammp_perception_interfaces.srv import Detect
+        from rclpy.qos import qos_profile_sensor_data
+        from sensor_msgs.msg import CameraInfo, Image
+
+        self.frame, self._Detect = frame, Detect
+        self._service, self._threshold, self._image_topic = sam3_service, sam3_threshold, sam3_image_topic
+        self._depths, self._latest, self._lock = deque(maxlen=DEPTH_KEEP), {}, threading.Lock()
+        self._bridge = CvBridge()
+
+        def keep_depth(m):
+            with self._lock:
+                self._depths.append(m)
+
+        self._tf = engine.create_action_tf_buffer()
+        engine.create_action_subscription(Image, topics[0], keep_depth, qos_profile_sensor_data)
+        engine.create_action_subscription(
+            CameraInfo, topics[1], lambda m: self._latest.update(info=m), qos_profile_sensor_data
+        )
+        # The engine has no public action-scoped service client; its action scope makes one (as for the
+        # subscriptions above) and destroys it safely when the action ends.
+        self._sam3 = engine._action_scope().create_client(Detect, sam3_service)
+        if not self._sam3.wait_for_service(timeout_sec=SAM3_WAIT_S):
+            raise NotLocated(f"SAM3 service {sam3_service} not available within {SAM3_WAIT_S:.0f} s")
+
+    def grab(self, prompt, deadline):
+        """One SAM3 call for `prompt` on the next color frame. (shot, None) with shot = dict(depth_m (HxW m),
+        K (3x3), world_T_cam (4x4, optical -> `frame`), mask (HxW bool, SAM3's best object), stamp); (None, why)
+        when SAM3 found nothing or there is no depth frame, camera_info or TF at its frame; (None, None) when
+        time.monotonic() passed `deadline` first. Raises NotLocated on a depth encoding or image size it
+        cannot use."""
+        import time
+
+        from rclpy.duration import Duration
+        from rclpy.time import Time
+
+        future = self._sam3.call_async(
+            self._Detect.Request(prompts=[prompt], image_topic=self._image_topic, score_threshold=self._threshold)
+        )
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            self._sam3.remove_pending_request(future)
+            return None, None
+        response = future.result()
+        mask = cavity_mask_from_detect(response)
+        if mask is None:
+            return None, f"SAM3 found no {prompt!r}" + (f" ({response.message})" if response.message else "")
+        stamp = _stamp(response.detections)
+        with self._lock:
+            depth = min(self._depths, key=lambda m: abs(_stamp(m) - stamp), default=None)
+        info = self._latest.get("info")
+        if depth is None or info is None or abs(_stamp(depth) - stamp) > PAIR_MAX_S:
+            return None, "no depth frame or camera_info at SAM3's frame"
+        if depth.encoding not in DEPTH_SCALE:
+            raise NotLocated(f"scene depth encoding {depth.encoding!r} (expected one of {sorted(DEPTH_SCALE)})")
+        try:
+            t = self._tf.lookup_transform(
+                self.frame, depth.header.frame_id, Time.from_msg(depth.header.stamp), timeout=Duration(seconds=0.5)
+            ).transform
+        except Exception as e:  # noqa: BLE001 -- tf2's lookup errors: this frame is not used
+            return None, f"no TF {self.frame} <- {depth.header.frame_id} at the frame's stamp ({type(e).__name__})"
+        T = np.eye(4)
+        T[:3, :3] = _Rot.from_quat([t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w]).as_matrix()
+        T[:3, 3] = [t.translation.x, t.translation.y, t.translation.z]
+        depth_m = self._bridge.imgmsg_to_cv2(depth).astype(np.float32) * DEPTH_SCALE[depth.encoding]
+        if depth_m.shape != mask.shape:
+            raise NotLocated(f"SAM3's mask is {mask.shape[::-1]} px, the depth image {depth_m.shape[::-1]}")
+        K = np.array(info.k, float).reshape(3, 3)
+        return dict(depth_m=depth_m, K=K, world_T_cam=T, mask=mask, stamp=_stamp(depth)), None
+
+
 def locate(
     engine,
     frame,
@@ -546,79 +643,40 @@ def locate(
     sam3_prompt=SAM3_PROMPT,
     sam3_threshold=SAM3_THRESHOLD,
     sam3_image_topic=SAM3_IMAGE_TOPIC,
+    max_frames=None,
+    camera=None,
 ):
     """The interior in `frame` (gravity-aligned, z up: arm_mount) from the scene camera, inside a
     running action of `engine`. topics: (depth, camera_info, object_detections_3d); the 3D detections
     are not used. Each round asks SAM3 (sam3_service) for sam3_prompt on the next color frame, pairs
     its mask with the depth frame of the same stamp, and fits that with the camera pose from TF at the
-    stamp; frames that are not detected are skipped. Once `frames` are detected, every point must be
-    within agree_m of their median and every insertion axis within agree_deg of the median heading.
-    Returns {point, insertion_axis, floor_z, frames, spread_m, spread_deg}; raises NotLocated."""
-    import threading
+    stamp; frames that are not detected are skipped.
+
+    max_frames None: once `frames` are detected, every point must be within agree_m of their median and
+    every insertion axis within agree_deg of the median heading. max_frames > frames: up to max_frames
+    are detected (until timeout_s), and at least `frames` of them must lie within agree_m and agree_deg of
+    the median of all detected; only those are used. camera: a SceneCamera to use (None: one is made).
+
+    Returns {point, insertion_axis, floor_z (medians of the frames used), frames (used), detected,
+    spread_m, spread_deg, fit (the used frame's fit_interior result nearest the median point), scene (that
+    frame: depth_m, K, world_T_cam, mask, stamp)}; raises NotLocated."""
     import time
-    from collections import deque
 
-    from cv_bridge import CvBridge
-    from rammp_perception_interfaces.srv import Detect
-    from rclpy.duration import Duration
-    from rclpy.qos import qos_profile_sensor_data
-    from rclpy.time import Time
-    from sensor_msgs.msg import CameraInfo, Image
-
-    depths, latest, lock = deque(maxlen=DEPTH_KEEP), {}, threading.Lock()
-
-    def keep_depth(m):
-        with lock:
-            depths.append(m)
-
-    tf = engine.create_action_tf_buffer()
-    engine.create_action_subscription(Image, topics[0], keep_depth, qos_profile_sensor_data)
-    engine.create_action_subscription(CameraInfo, topics[1], lambda m: latest.update(info=m), qos_profile_sensor_data)
-    # The engine has no public action-scoped service client; its action scope makes one (as for the
-    # subscriptions above) and destroys it safely when the action ends.
-    sam3 = engine._action_scope().create_client(Detect, sam3_service)
-    if not sam3.wait_for_service(timeout_sec=SAM3_WAIT_S):
-        raise NotLocated(f"SAM3 service {sam3_service} not available within {SAM3_WAIT_S:.0f} s")
-    request = Detect.Request(prompts=[sam3_prompt], image_topic=sam3_image_topic, score_threshold=sam3_threshold)
-    bridge, found, misses, asked = CvBridge(), [], [], 0
+    if camera is None:
+        camera = SceneCamera(engine, frame, topics, sam3_service, sam3_threshold, sam3_image_topic)
+    want = frames if max_frames is None else max(int(frames), int(max_frames))
+    found, misses, asked = [], [], 0
     deadline = time.monotonic() + timeout_s
-    while len(found) < frames and time.monotonic() < deadline:
-        future = sam3.call_async(request)
-        asked += 1
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not future.done():
-            sam3.remove_pending_request(future)
+    while len(found) < want and time.monotonic() < deadline:
+        shot, why = camera.grab(sam3_prompt, deadline)
+        if shot is None and why is None:
             break
-        response = future.result()
-        mask = cavity_mask_from_detect(response)
-        if mask is None:
-            misses.append(f"SAM3 found no {sam3_prompt!r}" + (f" ({response.message})" if response.message else ""))
+        asked += 1
+        if shot is None:
+            misses.append(why)
             continue
-        stamp = _stamp(response.detections)
-        with lock:
-            depth = min(depths, key=lambda m: abs(_stamp(m) - stamp), default=None)
-        info = latest.get("info")
-        if depth is None or info is None or abs(_stamp(depth) - stamp) > PAIR_MAX_S:
-            misses.append("no depth frame or camera_info at SAM3's frame")
-            continue
-        if depth.encoding not in DEPTH_SCALE:
-            raise NotLocated(f"scene depth encoding {depth.encoding!r} (expected one of {sorted(DEPTH_SCALE)})")
         try:
-            t = tf.lookup_transform(
-                frame, depth.header.frame_id, Time.from_msg(depth.header.stamp), timeout=Duration(seconds=0.5)
-            ).transform
-        except Exception as e:  # noqa: BLE001 -- tf2's lookup errors: this frame is not used
-            misses.append(f"no TF {frame} <- {depth.header.frame_id} at the frame's stamp ({type(e).__name__})")
-            continue
-        T = np.eye(4)
-        T[:3, :3] = _Rot.from_quat([t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w]).as_matrix()
-        T[:3, 3] = [t.translation.x, t.translation.y, t.translation.z]
-        depth_m = bridge.imgmsg_to_cv2(depth).astype(np.float32) * DEPTH_SCALE[depth.encoding]
-        if depth_m.shape != mask.shape:
-            raise NotLocated(f"SAM3's mask is {mask.shape[::-1]} px, the depth image {depth_m.shape[::-1]}")
-        try:
-            found.append(fit_interior(depth_m, np.array(info.k, float).reshape(3, 3), T, mask))
+            found.append((fit_interior(shot["depth_m"], shot["K"], shot["world_T_cam"], shot["mask"]), shot))
         except NotDetected as e:
             misses.append(str(e))
             log(f"frame not detected: {e}")
@@ -628,22 +686,65 @@ def locate(
             f"the interior was detected in {len(found)} of {asked} SAM3 frames in {timeout_s:.0f} s (need {frames}); "
             f"last reasons: {why}"
         )
-    pts = np.array([r["point"] for r in found])
-    yaws = np.array([np.arctan2(r["insertion_axis"][1], r["insertion_axis"][0]) for r in found])
-    mid = np.median(pts, axis=0)
-    yaw = yaws[0] + float(np.median((yaws - yaws[0] + np.pi) % (2 * np.pi) - np.pi))
-    spread_m = float(np.max(np.linalg.norm(pts - mid, axis=1)))
-    spread_deg = float(np.degrees(np.max(np.abs((yaws - yaw + np.pi) % (2 * np.pi) - np.pi))))
-    if spread_m > agree_m or spread_deg > agree_deg:
+
+    def medians(items):
+        pts = np.array([r["point"] for r, _ in items])
+        yaws = np.array([np.arctan2(r["insertion_axis"][1], r["insertion_axis"][0]) for r, _ in items])
+        yaw = yaws[0] + float(np.median((yaws - yaws[0] + np.pi) % (2 * np.pi) - np.pi))
+        off_m = np.linalg.norm(pts - np.median(pts, axis=0), axis=1)
+        off_deg = np.degrees(np.abs((yaws - yaw + np.pi) % (2 * np.pi) - np.pi))
+        return np.median(pts, axis=0), yaw, off_m, off_deg
+
+    detected = len(found)
+    mid, yaw, off_m, off_deg = medians(found)
+    if max_frames is not None:
+        agree = (off_m <= agree_m) & (off_deg <= agree_deg)
+        log(
+            f"located in {len(found)} frames, cm from their median: {np.round(off_m * 100, 1).tolist()}, "
+            f"deg: {np.round(off_deg, 1).tolist()}"
+        )
+        if agree.sum() < frames:
+            raise NotLocated(
+                f"only {int(agree.sum())} of {len(found)} detected frames lie within {agree_m * 100:.1f} cm and "
+                f"{agree_deg:.1f} deg of their median (need {frames}): cm off {np.round(off_m * 100, 1).tolist()}, "
+                f"deg off {np.round(off_deg, 1).tolist()}"
+            )
+        found = [f for f, ok in zip(found, agree, strict=True) if ok]
+        mid, yaw, off_m, off_deg = medians(found)
+    spread_m, spread_deg = float(np.max(off_m)), float(np.max(off_deg))
+    if max_frames is None and (spread_m > agree_m or spread_deg > agree_deg):
         raise NotLocated(
             f"{frames} detected frames disagree: points within {spread_m * 100:.1f} cm of their median (max "
             f"{agree_m * 100:.1f}), insertion axes within {spread_deg:.1f} deg (max {agree_deg:.1f})"
         )
+    fit, shot = found[int(np.argmin(off_m))]
     return dict(
         point=mid.tolist(),
         insertion_axis=[float(np.cos(yaw)), float(np.sin(yaw)), 0.0],
-        floor_z=float(np.median([r["floor_z"] for r in found])),
-        frames=frames,
+        floor_z=float(np.median([r["floor_z"] for r, _ in found])),
+        frames=len(found),
+        detected=detected,
         spread_m=spread_m,
         spread_deg=spread_deg,
+        fit=fit,
+        scene=shot,
+    )
+
+
+def scene_frame(camera, prompt, timeout_s):
+    """One scene-camera frame with SAM3's mask for `prompt` (e.g. "microwave"), its depth and the camera
+    pose at its stamp (SceneCamera.grab's shot), within timeout_s; raises NotLocated with the reasons."""
+    import time
+
+    deadline, misses = time.monotonic() + timeout_s, []
+    while time.monotonic() < deadline:
+        shot, why = camera.grab(prompt, deadline)
+        if shot is not None:
+            return shot
+        if why is None:
+            break
+        misses.append(why)
+    raise NotLocated(
+        f"no scene frame with SAM3's {prompt!r} in {timeout_s:.0f} s; last reasons: "
+        + ("; ".join(dict.fromkeys(misses[-3:])) or "-")
     )

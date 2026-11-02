@@ -10,7 +10,7 @@ container:
   ipc: host
   command: ["ros2", "launch", "microwave_place", "microwave_place.launch.py", "mock:=true"]
 # No `params:` here: they would need the node's executable as the command, and this fragment uses `ros2 launch` for mock:=true.
-publishes: [/microwave_place/status, /microwave_place/plan]
+publishes: [/microwave_place/status]
 subscribes:
   - /tf
   - /tf_static
