@@ -1483,3 +1483,19 @@ def test_the_table_offset_warning_starts_past_30_mm():
     for raw, warned in ((-0.0216, False), (0.030, False), (-0.0301, True), (0.045, True), (float("nan"), False)):
         assert (press_demo.table_offset_warning(raw) is not None) is warned, raw
     assert "-57 mm" in press_demo.table_offset_warning(-0.057)
+
+
+def test_capture_folders_are_named_to_the_millisecond_and_still_sort_in_time_order():
+    """Sweep startup_cpu-g-capture-unique-names: two reach-after aims 0.18-0.43 s apart shared one
+    folder (10-28 16:16:08, 16:24:09; 10-29 12:03:00), the second's frame over the first's."""
+    import re
+    import time
+
+    from box_opening.tasks import press_demo
+
+    t = 1793370000.0
+    names = [press_demo.capture_stamp(t + dt) for dt in (0.0, 0.007, 0.18, 0.999, 1.0, 61.5)]
+    assert all(re.fullmatch(r"\d{8}-\d{6}-\d{3}", n) for n in names)
+    assert len(set(names)) == len(names) and names == sorted(names)
+    old = time.strftime("%Y%m%d-%H%M%S", time.localtime(t))  # a folder named before, in the same second
+    assert sorted([names[1], old, names[0]]) == [old, names[0], names[1]]

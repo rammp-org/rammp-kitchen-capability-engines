@@ -23,11 +23,12 @@ import numpy as np
 
 VIDEO_FPS = 10
 PANEL_W, PANEL_H = 640, 360
-CAPTION_H = 30
+CAPTION_H = 30  # even, as the picture's height must be: yuv420p's MP4 refuses an odd one
+CAPTION_SCALE = 0.6  # the caption's font scale, shrunk where a caption would run past the picture's edge
 # at most this long: a run that stops holding the lid keeps its first minutes
 VIDEO_MAX_S = 180.0
 JPEG_QUALITY = 80  # 80 kB a picture against 93 at 85, composed as fast; the MP4 re-encodes at crf 26
-VIDEOS_KEPT = 20  # newest videos kept of each tag; older ones are pruned
+VIDEOS_KEPT = 20  # newest videos kept of each tag; older ones are pruned (read when it prunes)
 STALE_S = 1.0  # a camera with no new frame for this long says so on its panel
 # ffmpeg took 1.6 s for a 25 s run, ~12 s at most for VIDEO_MAX_S: the run's process waits for
 # it before it exits, inside the engine's 100 s budget (node.RUN_BUDGET_S)
@@ -63,6 +64,18 @@ def _fit(img):
     x, y = (PANEL_W - sw) // 2, (PANEL_H - sh) // 2
     panel[y : y + sh, x : x + sw] = cv2.resize(img[:, :, :3], (sw, sh), interpolation=cv2.INTER_AREA)
     return panel, s, (x, y)
+
+
+def caption_scale(text, width, scale=CAPTION_SCALE, margin=8):
+    """The font scale `text` is drawn at so it fits `width` px from `margin`
+    to `margin`: `scale`, or smaller where it would run past the edge (the
+    one-motion captions needed 1 293 and 1 296 px of 1 280, '... 1.6 mm
+    past the tabl')."""
+    import cv2
+
+    (w, _h), _base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 3)
+    room = width - 2 * margin
+    return scale if w <= room else scale * room / float(w)
 
 
 def _text(img, text, org, scale=0.55, color=(255, 255, 255)):
@@ -160,7 +173,8 @@ class CameraVideo:
                     label += " - no new frame for %.1f s" % (now - last[1])
             _text(panel, label, (8, PANEL_H - 10))
             canvas[CAPTION_H:, i * PANEL_W : (i + 1) * PANEL_W] = panel
-        _text(canvas, "%5.1f s  %s" % (now - self._t0, self.caption), (8, CAPTION_H - 9), 0.6)
+        caption = "%5.1f s  %s" % (now - self._t0, self.caption)
+        _text(canvas, caption, (8, CAPTION_H - 9), caption_scale(caption, canvas.shape[1]))
         ok, buf = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         return buf.tobytes() if ok else None
 
@@ -264,18 +278,27 @@ def _opencv(frames, fps, path):
     size = (first.shape[1], first.shape[0])
     for p, code in ((path, "mp4v"), (path.with_suffix(".avi"), "MJPG")):
         w = cv2.VideoWriter(str(p), cv2.VideoWriter_fourcc(*code), fps, size)
-        if not w.isOpened():
-            continue
-        for f in frames:
-            w.write(cv2.imdecode(np.frombuffer(f, np.uint8), cv2.IMREAD_COLOR))
-        w.release()
-        if p.exists() and p.stat().st_size > 0:
-            return p
+        if w.isOpened():
+            for f in frames:
+                w.write(cv2.imdecode(np.frombuffer(f, np.uint8), cv2.IMREAD_COLOR))
+            w.release()
+            if p.exists() and p.stat().st_size > 0:
+                return p
+        _drop_empty(p)  # a writer that failed leaves an empty file: no video beside the one that plays
     return None
 
 
-def _prune(out_dir, tag, kept=VIDEOS_KEPT):
-    """Keep the newest `kept` of <tag>-* in `out_dir`."""
+def _drop_empty(path):
+    try:
+        if path.exists() and path.stat().st_size == 0:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _prune(out_dir, tag, kept=None):
+    """Keep the newest `kept` (None: VIDEOS_KEPT, read now) of <tag>-* in `out_dir`."""
+    kept = VIDEOS_KEPT if kept is None else int(kept)
     try:
         for f in sorted(Path(out_dir).glob("%s-*" % tag))[:-kept]:
             f.unlink()

@@ -103,3 +103,60 @@ def test_the_lid_s_spot_is_drawn_where_the_scene_camera_sees_that_place():
     loc.base_to_color = lambda: None
     rlo._video_spot(ctx, (None, None, fix, None), ContainerPose(xyz=(0.5, 0.0, 0.0), yaw=0.0))
     assert not marks
+
+
+def test_a_long_caption_shrinks_to_fit_the_picture_and_a_short_one_does_not(tmp_path):
+    """Sweep startup_cpu-g-caption-fit: the one-motion captions needed 1 293
+    and 1 296 px of the 1 280 and ran off the edge ('... 1.6 mm past the
+    tabl'). Ink stays inside the caption band's last columns now."""
+    long = (
+        "CLOSE on the knob, then ONE MOTION: LIFT, CLEAR, CARRY to [0.56, -0.37] (beside the box) and SET DOWN, "
+        "1.6 mm past the table"
+    )
+    v = cvid.CameraVideo([("wrist", _cam(0, 480, 640)), ("scene", _cam(0, 720, 1280))], tmp_path)
+    v._t0 = time.monotonic()
+    v.mark(long)
+    img = cv2.imdecode(np.frombuffer(v.compose(time.monotonic()), np.uint8), cv2.IMREAD_COLOR)
+    band = img[: cvid.CAPTION_H]
+    assert int(band[:, -6:].max()) < 60  # no caption ink at the right edge
+    assert int(band[:, : img.shape[1] // 2].max()) > 200  # ... and the caption is there
+    assert cvid.caption_scale(long, 2 * cvid.PANEL_W) < cvid.CAPTION_SCALE
+    assert cvid.caption_scale("  2.0 s  GRIP", 2 * cvid.PANEL_W) == cvid.CAPTION_SCALE
+    assert cvid.CAPTION_H % 2 == 0 and (cvid.CAPTION_H + cvid.PANEL_H) % 2 == 0  # yuv420p needs even sizes
+
+
+def test_the_prune_reads_how_many_videos_to_keep_when_it_prunes(tmp_path, monkeypatch):
+    for i in range(5):
+        (tmp_path / ("lid-video-20261102-0000%02d.mp4" % i)).write_bytes(b"v")
+    monkeypatch.setattr(cvid, "VIDEOS_KEPT", 2)
+    cvid._prune(tmp_path, "lid-video")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "lid-video-20261102-000003.mp4",
+        "lid-video-20261102-000004.mp4",
+    ]
+
+
+def test_a_writer_that_fails_leaves_no_empty_video_beside_the_one_that_plays(tmp_path, monkeypatch):
+    """OpenCV's mp4v writer can open, write nothing and leave a 0-byte .mp4
+    beside the motion-JPEG .avi that does play: that empty file goes."""
+
+    class Writer:
+        def __init__(self, path, fourcc, fps, size):
+            self.path = path
+            open(path, "wb").close()  # created empty, as a failed writer leaves it
+
+        def isOpened(self):  # noqa: N802 - cv2's name
+            return True
+
+        def write(self, img):
+            if self.path.endswith(".avi"):
+                with open(self.path, "ab") as f:
+                    f.write(b"x")
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoWriter", Writer)
+    ok, jpg = cv2.imencode(".jpg", np.zeros((8, 8, 3), np.uint8))
+    got = cvid._opencv([jpg.tobytes()] * 3, 10, tmp_path / "lid-video-x.mp4")
+    assert got == tmp_path / "lid-video-x.avi" and sorted(p.name for p in tmp_path.iterdir()) == ["lid-video-x.avi"]

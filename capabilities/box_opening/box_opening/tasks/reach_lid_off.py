@@ -494,14 +494,14 @@ def _keep_spot_frame(g, n):
     (press_demo._save_wrist_frame, written on a thread off the carry's
     planning; the newest AIM_CAPTURES_KEPT kept). Its folder, or None
     where there is no frame or no pose to keep it with."""
-    from box_opening.tasks.press_demo import CAPTURES_DIR, _prune_captures, _save_wrist_frame
+    from box_opening.tasks.press_demo import CAPTURES_DIR, _prune_captures, _save_wrist_frame, capture_stamp
 
     if getattr(g, "color", None) is None or getattr(g, "k", None) is None:
         return None
     try:
         out = _save_wrist_frame(
             g,
-            CAPTURES_DIR / ("wrist-spot-look-%s" % time.strftime("%Y%m%d-%H%M%S")),
+            CAPTURES_DIR / ("wrist-spot-look-%s" % capture_stamp()),
             "the spot look, the lid lifted: %d table points" % n,
             background=True,
             after=lambda: _prune_captures("spot-look"),
@@ -1868,7 +1868,7 @@ class _GripShot:
     close; note() records both with whether the grip held."""
 
     def __init__(self, watcher, model, attempt):
-        from box_opening.tasks.press_demo import CAPTURES_DIR, _prune_captures, _save_wrist_frame
+        from box_opening.tasks.press_demo import CAPTURES_DIR, _prune_captures, _save_wrist_frame, capture_stamp
 
         g = getattr(watcher, "grab", None)
         self.result, self.thread, self.frame = None, None, None
@@ -1880,7 +1880,7 @@ class _GripShot:
         try:
             out = _save_wrist_frame(
                 g,
-                CAPTURES_DIR / ("wrist-grip-close-%s-a%d" % (time.strftime("%Y%m%d-%H%M%S"), attempt)),
+                CAPTURES_DIR / ("wrist-grip-close-%s-a%d" % (capture_stamp(), attempt)),
                 "the grip's close-up, attempt %d" % attempt,
                 background=True,
                 after=lambda: _prune_captures("grip-close"),

@@ -636,13 +636,23 @@ def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=
     return folder
 
 
+def capture_stamp(t=None):
+    """A capture folder's time, to the millisecond and fixed-width, so the
+    names still sort in time order (_prune_captures, the replay scripts):
+    YYYYmmdd-HHMMSS-mmm. Second-wide names put two captures of one second
+    in one folder, the second's frame over the first's (10-28 16:16:08 and
+    16:24:09, 10-29 12:03:00: two reach-after aims 0.18-0.43 s apart)."""
+    t = time.time() if t is None else float(t)
+    return "%s-%03d" % (time.strftime("%Y%m%d-%H%M%S", time.localtime(t)), min(999, int((t % 1.0) * 1000)))
+
+
 def dump_wrist_frame(watcher, tag):
     """Save the wrist camera's CURRENT frame and the detector's last reject
     reason, so "the wrist did not see the box" can be looked at afterwards
     instead of argued about (owner, 2026-09-16). Lands in
-    ~/.ros/box_opening/captures/wrist-<tag>-<stamp>/. Returns the
-    folder or None."""
-    folder = CAPTURES_DIR / ("wrist-%s-%s" % (tag, time.strftime("%Y%m%d-%H%M%S")))
+    ~/.ros/box_opening/captures/wrist-<tag>-<stamp>/ (capture_stamp). Returns
+    the folder or None."""
+    folder = CAPTURES_DIR / ("wrist-%s-%s" % (tag, capture_stamp()))
     out = _save_wrist_frame(getattr(watcher, "grab", None), folder, watcher.last_reject or "no reject recorded")
     if out is None:
         return None
@@ -658,7 +668,7 @@ def save_aim_frame(grab, sighting, tag="aim", frame=None):
     miss had no frame). Keeps the newest AIM_CAPTURES_KEPT folders.
     `frame`: the frame the aim judged (ButtonAimer.judged_frame), with the
     fused depth it was judged on; None: the grabber's newest."""
-    folder = CAPTURES_DIR / ("wrist-%s-%s" % (tag, time.strftime("%Y%m%d-%H%M%S")))
+    folder = CAPTURES_DIR / ("wrist-%s-%s" % (tag, capture_stamp()))
 
     def draw(img):
         import cv2
