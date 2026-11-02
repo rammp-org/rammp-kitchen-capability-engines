@@ -12,6 +12,7 @@ import time
 
 import numpy as np
 import pytest
+from conftest import fixture_path
 
 from box_opening.models.container import ContainerModel
 from box_opening.perception.depth_source import (
@@ -138,10 +139,9 @@ def test_a_lid_the_fingers_half_hide_is_a_partial_top():
     wrist frame. They hid part of the lid; the rest measured 0.06 x 0.10 m
     against the 0.105 model and was refused — "NO BOX" with the box in
     plain view. Now a partial top: roughly where the lid is."""
-    from pathlib import Path
 
     pink = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
-    z = np.load(Path(__file__).parent / "data" / "wrist_search_pink_fingers_20260923.npz")
+    z = np.load(fixture_path("wrist_search_pink_fingers_20260923.npz"))
     fix, why = top_face_from_depth(z["depth"], z["k"], z["rot_cam"], z["trans_cam"], TABLE_Z, pink)
     assert fix is not None and fix.partial, why
     # the lid's pink pixels put its centre at [0.315, 0.179]: the partial

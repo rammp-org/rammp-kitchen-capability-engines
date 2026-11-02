@@ -7,12 +7,12 @@ reachability on flatbot's URDF for the boxes of 2026-10-27/28."""
 import json
 import math
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import test_reach_press as trp
+from conftest import fixture_path
 
 from box_opening.models.container import ContainerModel, ContainerPose, load_press_demo
 from box_opening.tasks import depth_press as dp
@@ -2142,7 +2142,7 @@ def test_the_knobs_circle_is_found_in_the_grips_close_up(name, want):
     a record, not yet a correction."""
     import cv2
 
-    img = cv2.imread(str(Path(__file__).parent / "data" / name))
+    img = cv2.imread(str(fixture_path(name)))
     got = rlo.grip_knob_circle(img)
     assert got is not None
     assert got[0] == pytest.approx(want[0], abs=3) and got[1] == pytest.approx(want[1], abs=3)
@@ -2159,7 +2159,7 @@ def test_the_grips_close_up_is_kept_with_where_the_knob_sits_and_whether_it_held
 
     from box_opening.tasks import press_demo
 
-    img = cv2.imread(str(Path(__file__).parent / "data" / "wrist_grip_close_flatbot_20261030_1059_air.jpg"))
+    img = cv2.imread(str(fixture_path("wrist_grip_close_flatbot_20261030_1059_air.jpg")))
     kept = []
     monkeypatch.setattr(press_demo, "_save_wrist_frame", lambda g, folder, caption, **kw: kept.append(folder) or folder)
     K = np.array([[398.4, 0.0, 338.0], [0.0, 398.3, 203.2], [0.0, 0.0, 1.0]])

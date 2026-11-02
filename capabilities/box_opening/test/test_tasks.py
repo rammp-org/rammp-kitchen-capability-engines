@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import FakeClient
+from conftest import FakeClient, fixture_path
 
 from box_opening.models.container import ContainerPose
 from box_opening.runtime.legs import Kind
@@ -274,7 +274,7 @@ def test_the_lid_goes_where_the_cameras_saw_room_not_onto_the_microwave(monkeypa
     from box_opening.models.container import ContainerModel
     from box_opening.tasks import press_demo
 
-    f = np.load("capabilities/box_opening/test/data/table_room_flatbot_20261023_1757.npz")
+    f = np.load(fixture_path("table_room_flatbot_20261023_1757.npz"))
     pink = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
     table_z = float(f["table_z"])
     scene_fix = SimpleNamespace(

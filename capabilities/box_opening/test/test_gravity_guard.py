@@ -4,23 +4,22 @@ pinned to flatbot's own URDF and /joint_states (2026-10-21, vsp_boxer_test)."""
 
 import numpy as np
 import pytest
+from conftest import fixture_path, flatbot_urdf
 
 from box_opening.runtime.guards import CompensatedGuard, GuardSpec, TorqueGuard
 from box_opening.runtime.kinematics import ArmChain, GravityModel
 
-DATA = "capabilities/box_opening/test/data/"
-URDF = DATA + "arm_flatbot_20261021.urdf"
 CONTACT_TOOL = (0.0, -0.009, 0.011)  # tasks/reach_press
 
 
 @pytest.fixture(scope="module")
 def model():
-    return GravityModel(path=URDF, root="arm_mount")
+    return GravityModel(path=flatbot_urdf(), root="arm_mount")
 
 
 @pytest.fixture(scope="module")
 def recorded():
-    d = np.load(DATA + "joint_states_flatbot_20261021.npz")
+    d = np.load(fixture_path("joint_states_flatbot_20261021.npz"))
     return d["t"].astype(float), d["position"], d["effort"].astype(float)
 
 
@@ -47,7 +46,7 @@ def test_the_model_explains_what_flatbots_wrist_joints_read(model, recorded):
 
 
 def test_the_model_uses_the_same_chain_as_the_kinematics(model):
-    chain = ArmChain(path=URDF, root="arm_mount")
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
     assert model.joint_names == chain.joint_names
     q = [0.067, -1.897, -3.137, -2.269, -0.211, -0.683, 1.725]
     # a mass AT the tool frame is felt exactly as the chain places tool_frame
@@ -91,7 +90,7 @@ def test_the_lumped_model_matches_the_link_tree_walk(model):
 
 
 def test_the_lumps_follow_the_gripper_angle_they_were_built_at():
-    open_ = GravityModel(path=URDF, root="arm_mount", gripper_rad=0.0)
+    open_ = GravityModel(path=flatbot_urdf(), root="arm_mount", gripper_rad=0.0)
     _assert_lumps_match_the_tree(open_, seed=2)
     _assert_lumps_match_the_tree(_installed_model(gripper_rad=0.0), seed=3)
 

@@ -1,10 +1,9 @@
 """The circle-only aim from staging, on the real frame that the plateau
 gate refused (2026-09-17, the 4.1-inch OXO, wrist 25 cm above the lid)."""
 
-from pathlib import Path
-
 import numpy as np
 import pytest
+from conftest import fixture_path
 
 from box_opening.models.container import ContainerModel
 from box_opening.perception.button_aim import (
@@ -15,13 +14,13 @@ from box_opening.perception.button_aim import (
 )
 
 CFG = "capabilities/box_opening/config/containers/oxo_pop.yaml"
-FRAME = Path(__file__).parent / "data" / "wrist_staging_big_box.npz"
+FRAME = "wrist_staging_big_box.npz"
 TABLE_Z = -0.027
 
 
 @pytest.fixture(scope="module")
 def frame():
-    z = np.load(FRAME)
+    z = np.load(fixture_path(FRAME))
     return {k: z[k] for k in ("color", "depth", "k", "rot_cam", "trans_cam")}
 
 
@@ -129,7 +128,7 @@ def test_two_of_four_fixes_wherever_three_in_a_row_would_and_never_later():
     assert sooner > 100
 
 
-MISSED = Path(__file__).parent / "data" / "wrist_aim_pressed_right_20260921.npz"
+MISSED = "wrist_aim_pressed_right_20260921.npz"
 
 
 def test_the_press_point_is_the_centre_of_the_circle(model):
@@ -143,7 +142,7 @@ def test_the_press_point_is_the_centre_of_the_circle(model):
     four, and that one missed; every press at the centre landed on the
     button. The owner had already said it: the gripper goes to the centre
     of the circle OpenCV segments. Nothing overrides that now."""
-    z = np.load(MISSED)
+    z = np.load(fixture_path(MISSED))
     k, rot, trans = z["k"], z["rot_cam"], z["trans_cam"]
 
     def centre_of(s):
@@ -191,12 +190,12 @@ def test_the_aim_says_whether_the_button_already_stands_proud(model):
     notice (the raised knob is soft: strokes have ridden it all the way down
     under a 3 Nm guard), so the aim reports it and the mission does not
     press."""
-    closed = np.load(Path(__file__).parent / "data" / "wrist_aim_closed_20260921.npz")
+    closed = np.load(fixture_path("wrist_aim_closed_20260921.npz"))
     s, why = find_button(
         closed["color"], closed["depth"], closed["k"], closed["rot_cam"], closed["trans_cam"], TABLE_Z, model
     )
     assert why is None and abs(s.above_lid_m) < 0.003
-    opened = np.load(MISSED)
+    opened = np.load(fixture_path(MISSED))
     s, why = find_button(
         opened["color"], opened["depth"], opened["k"], opened["rot_cam"], opened["trans_cam"], TABLE_Z, model
     )
@@ -212,7 +211,7 @@ def test_a_knob_standing_high_is_still_the_button(model):
     stand up to a knob's height above the lid, and still nothing below it."""
     from box_opening.perception.button_aim import KNOB_MAX_UP_M
 
-    z = np.load(Path(__file__).parent / "data" / "wrist_aim_closed_20260921.npz")
+    z = np.load(fixture_path("wrist_aim_closed_20260921.npz"))
     s0, _ = find_button(z["color"], z["depth"], z["k"], z["rot_cam"], z["trans_cam"], TABLE_Z, model)
     yy, xx = np.mgrid[0 : z["depth"].shape[0], 0 : z["depth"].shape[1]]
     disc = (xx - s0.uv[0]) ** 2 + (yy - s0.uv[1]) ** 2 < (0.97 * s0.r_px) ** 2
@@ -240,7 +239,7 @@ def test_the_pink_canister_is_aimed_at_staging():
     from box_opening.models.container import ContainerModel
 
     m = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
-    z = np.load(Path(__file__).parent / "data" / "wrist_staging_pink_20260923.npz")
+    z = np.load(fixture_path("wrist_staging_pink_20260923.npz"))
     s, why = find_button(z["color"], z["depth"], z["k"], z["rot_cam"], z["trans_cam"], TABLE_Z, m)
     assert why is None, why
     assert s.uv == pytest.approx((238.0, 390.0), abs=4.0)
@@ -264,7 +263,7 @@ def test_the_press_point_is_corrected_for_lens_distortion():
     from box_opening.models.container import ContainerModel
 
     m = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
-    z = np.load(Path(__file__).parent / "data" / "wrist_staging_pink_20260923.npz")
+    z = np.load(fixture_path("wrist_staging_pink_20260923.npz"))
     raw, _ = find_button(z["color"], z["depth"], z["k"], z["rot_cam"], z["trans_cam"], TABLE_Z, m)
     s, why = find_button(z["color"], z["depth"], z["k"], z["rot_cam"], z["trans_cam"], TABLE_Z, m, dist=D405_DIST)
     assert why is None and s.uv == raw.uv  # the same circle, the same pixel reported
@@ -914,7 +913,7 @@ def test_a_button_with_depth_on_a_quarter_of_it_is_still_the_button(pink):
     assert abs(s.above_lid_m) < 0.003 and 0.15 < s.disc_fill < 0.4
 
 
-REACH_1404 = Path(__file__).parent / "data" / "wrist_reach_look_flatbot_20261027_1404.npz"
+REACH_1404 = "wrist_reach_look_flatbot_20261027_1404.npz"
 
 
 def test_the_button_refused_at_1404_for_too_little_depth_is_aimed(pink):
@@ -925,7 +924,7 @@ def test_the_button_refused_at_1404_for_too_little_depth_is_aimed(pink):
     in the picture, flush with its lid: the box is shut."""
     import cv2
 
-    f = np.load(REACH_1404)
+    f = np.load(fixture_path(REACH_1404))
     color = cv2.imdecode(f["color_png"], cv2.IMREAD_COLOR)
     depth = f["depth_mm"].astype(np.float32) / 1000.0
     lid_z, prior = float(f["lid_z"]), tuple(float(v) for v in f["prior_xy"])
@@ -954,7 +953,7 @@ def _reach_frame(name):
     (the run's scene_fix and reach_plan notes)."""
     import cv2
 
-    f = np.load(Path(__file__).parent / "data" / name)
+    f = np.load(fixture_path(name))
     return (
         cv2.imdecode(f["color_png"], cv2.IMREAD_COLOR),
         f["depth_mm"].astype(np.float32) / 1000.0,
@@ -1205,7 +1204,7 @@ def test_a_top_down_frame_takes_the_old_path_unchanged(name, cfg, distorted, bef
     from dataclasses import astuple
 
     m = ContainerModel.load(cfg)
-    z = np.load(Path(__file__).parent / "data" / ("%s.npz" % name))
+    z = np.load(fixture_path("%s.npz" % name))
     d = D405_DIST if distorted else None
     s, why = find_button(z["color"], z["depth"], z["k"], z["rot_cam"], z["trans_cam"], TABLE_Z, m, dist=d)
     assert why is None and not s.oblique
@@ -1837,7 +1836,7 @@ def test_the_cut_lid_at_staging_is_found_where_the_box_was():
     own ring said the box was."""
     from box_opening.perception.button_aim import lid_in_view
 
-    z = np.load(Path(__file__).parent / "data" / "wrist_staging_cut_20261023.npz")
+    z = np.load(fixture_path("wrist_staging_cut_20261023.npz"))
     lid, info = lid_in_view(
         z["depth_mm"].astype(float) / 1000.0, z["k"], z["rot_cam"], z["trans_cam"], ContainerModel.load(PINK)
     )

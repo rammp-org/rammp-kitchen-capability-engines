@@ -10,12 +10,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import fixture_path
 
 from box_opening.models.container import ContainerModel
 from box_opening.perception import viz
 
 PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
-DATA = Path(__file__).parent / "data"
 F_162417 = "scene_upright_flatbot_20261027_162417.npz"  # the 10-27 16:24 frame the OWL missed and RF-DETR boxed
 F_1623 = "wrist_reach_aim_flatbot_20261027_1623.npz"  # the 10-27 16:23 reach-out aim from the look pose
 
@@ -37,7 +37,7 @@ def look_1624(pink):
     from box_opening.perception.scene_source import SceneFix, scene_fix_from_boxes, table_from_scene_points
     from box_opening.perception.segmenter_source import segmenter_candidates
 
-    z = np.load(DATA / F_162417)
+    z = np.load(fixture_path(F_162417))
     T = z["T_base_color"]
     pc, uv = color_cloud(z["depth_mm"].astype(float) / 1000.0, z["kd"], z["k"], z["dist"], z["T_color_depth"], stride=2)
     pts = pc @ T[:3, :3].T + T[:3, 3]
@@ -81,7 +81,7 @@ def reach_1623(pink):
 
     from box_opening.perception.button_aim import find_button
 
-    f = np.load(DATA / F_1623)
+    f = np.load(fixture_path(F_1623))
     color = cv2.imdecode(f["color_png"], cv2.IMREAD_COLOR)
     lid_z, prior = float(f["lid_z"]), tuple(float(v) for v in f["prior_xy"])
     s, why = find_button(
@@ -1263,7 +1263,7 @@ def test_the_tilted_aim_hands_its_frames_and_its_fix_over_as_press_demo_runs_it(
     from box_opening.tasks import press_demo
 
     color, k, dist, cam, lid_z, prior, _s = reach_1623
-    f = np.load(DATA / F_1623)
+    f = np.load(fixture_path(F_1623))
 
     class Grab:  # a new still frame at every read, as the wrist OAK gives one every 67 ms
         def __init__(self):

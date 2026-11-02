@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import flatbot_urdf
 
 from box_opening.constants import TCP_OFFSET_M, TIP_TO_TOOL_M
 from box_opening.models.container import ContainerModel, load_press_demo
@@ -1860,7 +1861,7 @@ def _on_flatbot(ctx, monkeypatch):
     from box_opening.runtime.branches import planner_branch
     from box_opening.runtime.kinematics import ArmChain
 
-    chain = ArmChain(path="capabilities/box_opening/test/data/arm_flatbot_20261021.urdf", root="arm_mount")
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
     monkeypatch.setattr(approach, "_chain", lambda: chain)
     ctx.model = ContainerModel.load(PINK)
 

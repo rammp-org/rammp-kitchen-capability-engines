@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import flatbot_urdf
 
 from box_opening.constants import HOME
 from box_opening.primitives.core import LiftFree, PlanState
@@ -26,7 +27,6 @@ from box_opening.runtime.kinematics import ArmChain
 from box_opening.tasks import cli_common, home_arm, press_demo
 
 PKG = Path(__file__).resolve().parents[1]
-FLATBOT_URDF = str(PKG / "test" / "data" / "arm_flatbot_20261021.urdf")
 FLATBOT_WORLD = str(PKG / "config" / "world_flatbot.yaml")
 BENCH_WORLD = str(PKG / "config" / "world_bench.yaml")
 CONTAINER = str(PKG / "config" / "containers" / "ankou_pink.yaml")
@@ -67,13 +67,13 @@ def _stub_runtime(monkeypatch, node=None):
 
 def test_build_ctx_on_flatbot_roots_the_chain_at_arm_mount_and_the_lift_is_vertical(monkeypatch):
     _stub_runtime(monkeypatch)
-    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: FLATBOT_URDF)
+    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
     ctx, _runner = cli_common.build_ctx(_args(FLATBOT_WORLD))
     assert approach._ROOT == "arm_mount"
-    assert approach._URDF_PATH == FLATBOT_URDF
+    assert approach._URDF_PATH == flatbot_urdf()
     legs, _ = LiftFree(0.08).plan(ctx, PlanState(joints=list(HOME), chain=0))
     pts = [p.positions for p in legs[0].traj.points]
-    fb = ArmChain(root="arm_mount", path=FLATBOT_URDF)
+    fb = ArmChain(root="arm_mount", path=flatbot_urdf())
     d = (fb.fk(pts[-1])[1] - fb.fk(pts[0])[1]) * 1000
     # it was [+40, 0, +69.3] mm: the tilted base's z
     assert np.allclose(d, [0.0, 0.0, 80.0], atol=1.0), d
@@ -102,7 +102,7 @@ def test_the_bench_urdf_has_no_arm_mount_and_says_so():
 
 def test_lift_free_refuses_a_chain_rooted_off_the_planning_frame(monkeypatch):
     _stub_runtime(monkeypatch)
-    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: FLATBOT_URDF)
+    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
     ctx, _runner = cli_common.build_ctx(_args(FLATBOT_WORLD))
     approach.set_chain_root("base_link", None)  # what home_arm had before
     with pytest.raises(RuntimeError, match="chain root base_link != planning frame arm_mount"):
@@ -159,7 +159,7 @@ class _DescNode:
 
 
 def test_the_description_goes_to_one_fixed_file_not_a_temp_file_per_run(tmp_path):
-    xml = Path(FLATBOT_URDF).read_text()
+    xml = Path(flatbot_urdf()).read_text()
     before = set(glob.glob(str(Path(tempfile.gettempdir()) / "tmp*.urdf")))
     a = cli_common._arm_urdf_path(_DescNode(xml), "arm_mount")
     b = cli_common._arm_urdf_path(_DescNode(xml), "arm_mount")

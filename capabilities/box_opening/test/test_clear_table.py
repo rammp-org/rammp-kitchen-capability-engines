@@ -7,13 +7,13 @@ import math
 
 import numpy as np
 import pytest
+from conftest import fixture_path
 
 from box_opening.geometry import ang_diff, yaw_about_world_z
 from box_opening.models.container import ContainerModel
 from box_opening.perception import clear_table as ct
 
 PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
-DATA = "capabilities/box_opening/test/data/"
 TABLE_Z = 0.187
 
 
@@ -110,7 +110,7 @@ def test_the_1757_spot_had_no_room_and_the_spot_it_finds_does(pink):
     the wrist camera came down on the microwave. The map says that spot has
     no room, and finds one on the open table beyond the box, the hand turned
     so the wrist camera faces the open table."""
-    f = np.load(DATA + "table_room_flatbot_20261023_1757.npz")
+    f = np.load(fixture_path("table_room_flatbot_20261023_1757.npz"))
     shift = np.r_[f["wrist_box"] - f["scene_box"], 0.0]
     scene = f["scene_mm"] / 1000.0 + shift
     wrist = f["wrist_mm"] / 1000.0
@@ -312,7 +312,7 @@ def _covered(boxes, x, y, z=None):
 
 
 def _1757_map():
-    f = np.load(DATA + "table_room_flatbot_20261023_1757.npz")
+    f = np.load(fixture_path("table_room_flatbot_20261023_1757.npz"))
     scene = f["scene_mm"] / 1000.0 + np.r_[f["wrist_box"] - f["scene_box"], 0.0]
     box, tz = tuple(f["wrist_box"]), float(f["table_z"])
     return ct.table_map([(scene, tz), (f["wrist_mm"] / 1000.0, tz)], box), box, tz

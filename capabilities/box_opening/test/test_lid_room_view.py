@@ -6,12 +6,12 @@ import math
 
 import numpy as np
 import pytest
+from conftest import fixture_path
 
 from box_opening.models.container import ContainerModel
 from box_opening.tasks import lid_room_view as lrv
 
 PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
-DATA = "capabilities/box_opening/test/data/"
 TABLE_Z = 0.187
 BOX = (0.39, -0.20)
 
@@ -82,7 +82,7 @@ def test_the_1757_table_from_the_scene_camera_alone_has_no_room_and_it_says_why(
     was short."""
     from builtin_interfaces.msg import Time
 
-    f = np.load(DATA + "table_room_flatbot_20261023_1757.npz")
+    f = np.load(fixture_path("table_room_flatbot_20261023_1757.npz"))
     scene = f["scene_mm"] / 1000.0 + np.r_[f["wrist_box"] - f["scene_box"], 0.0]
     fix, why = lrv.fix_around(scene, tuple(f["wrist_box"]), pink)
     assert why is None and fix.table_z_scene == pytest.approx(float(f["table_z"]), abs=0.01)

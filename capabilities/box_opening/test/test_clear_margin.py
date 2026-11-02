@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import FakeClient
+from conftest import FakeClient, flatbot_urdf
 
 from box_opening.constants import HOME
 from box_opening.primitives import core
@@ -24,7 +24,6 @@ from box_opening.runtime.kinematics import ArmChain
 from box_opening.tasks import cli_common, home_arm
 
 PKG = Path(__file__).resolve().parents[1]
-FLATBOT_URDF = str(PKG / "test" / "data" / "arm_flatbot_20261021.urdf")
 FLATBOT_WORLD = str(PKG / "config" / "world_flatbot.yaml")
 CONTAINER = str(PKG / "config" / "containers" / "ankou_pink.yaml")
 
@@ -67,7 +66,8 @@ def chain_state(monkeypatch, tmp_path):
     approach._ROOT, approach._URDF_PATH, approach._CHAIN, approach._GRAVITY = saved
 
 
-def _flatbot_ctx(monkeypatch, live, urdf=FLATBOT_URDF, client=None):
+def _flatbot_ctx(monkeypatch, live, urdf="flatbot", client=None):
+    urdf = flatbot_urdf() if urdf == "flatbot" else urdf
     client = client or FakeClient()
     client.live = list(live)
     monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), client))
@@ -94,7 +94,7 @@ def test_home_arm_steps_toward_home_until_the_planner_can_plan_it(monkeypatch, c
     assert _along(pts[-1]) == pytest.approx(0.475, abs=1e-3)
     assert np.max(np.abs(pts[-1] - STUCK)) == pytest.approx(0.254, abs=1e-3)
     # the tool only rises: +119 mm
-    fb = ArmChain(root="arm_mount", path=FLATBOT_URDF)
+    fb = ArmChain(root="arm_mount", path=flatbot_urdf())
     z = [fb.fk(q)[1][2] for q in pts]
     assert min(z) == pytest.approx(z[0]) and z[-1] - z[0] == pytest.approx(0.119, abs=0.002)
     # HOME is planned from the step's END, once per step in the bare world:
@@ -130,7 +130,7 @@ def test_a_continuous_joint_the_other_side_of_the_wrap_steps_the_short_way_round
     assert np.max(np.abs(pts[-1] - WRAPPED)) == pytest.approx(0.120, abs=2e-3)
     assert 0.0 < pts[-1][2] - WRAPPED[2] < 0.03  # joint_3 toward +pi, the short way
     assert min(pts[-1][3] - (-2.57), 2.57 - pts[-1][3]) == pytest.approx(core.CLEAR_MARGIN_FIRST_RAD, abs=1e-3)
-    fb = ArmChain(root="arm_mount", path=FLATBOT_URDF)
+    fb = ArmChain(root="arm_mount", path=flatbot_urdf())
     z = [fb.fk(q)[1][2] for q in pts]
     assert min(z) == pytest.approx(z[0]) and z[-1] > z[0]
     assert ctx.client.joint_starts == [pytest.approx(list(legs[0].goal_joints))]
@@ -171,7 +171,7 @@ def test_a_line_that_would_lower_the_tool_is_refused(monkeypatch):
     start = list(HOME)
     start[3] = -2.50  # 0.07 rad from its limit
     goal = [0.0617, -1.9, -3.1385, -2.30, -0.2102, -1.4, 1.7257]
-    fb = ArmChain(root="arm_mount", path=FLATBOT_URDF)
+    fb = ArmChain(root="arm_mount", path=flatbot_urdf())
     q0, q1 = np.array(start), np.array(start) + 0.25 * (np.array(goal) - start)
     z = [fb.fk(q0 + u * (q1 - q0))[1][2] for u in np.linspace(0, 1, 26)]
     assert z[0] - min(z) > 0.02  # the line toward this goal goes down

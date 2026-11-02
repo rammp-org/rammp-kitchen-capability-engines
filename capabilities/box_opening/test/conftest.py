@@ -36,6 +36,25 @@ from box_opening.runtime.runner import Runner  # noqa: E402
 # no test run records the lid-off's video of the cameras (perception/camera_video) unless it asks
 os.environ.setdefault("BOX_OPENING_VIDEO", "0")
 
+# The recorded fixtures (camera frames, flatbot's arm URDF and joint states, grip close-ups) are
+# kept out of this repo: no data files in git. Point BOX_OPENING_TEST_DATA at a copy, or put one
+# in test/data (git ignores it). A test that reads a fixture that is not there skips.
+DATA = Path(os.environ.get("BOX_OPENING_TEST_DATA") or Path(__file__).resolve().parent / "data")
+
+
+def fixture_path(name):
+    """A recorded fixture's path. The calling test skips when the fixture is absent."""
+    path = DATA / name
+    if not path.is_file():
+        pytest.skip("recorded fixture %s is not in %s (set BOX_OPENING_TEST_DATA)" % (name, DATA))
+    return path
+
+
+def flatbot_urdf():
+    """flatbot's arm URDF (2026-10-21, with arm_mount), as a str path. Skips the test without it."""
+    return str(fixture_path("arm_flatbot_20261021.urdf"))
+
+
 CFG = "capabilities/box_opening/config/containers/oxo_pop.yaml"
 
 Q0 = [0.0] * 7

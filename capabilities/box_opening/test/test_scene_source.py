@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import fixture_path
 
 from box_opening.models.container import ContainerModel
 from box_opening.perception.scene_source import (
@@ -343,12 +344,11 @@ def test_flatbot_scene_frame_finds_the_pink_canister_from_the_side():
     the canister in a blue holder, a black speaker beside it): the top-face
     lift refuses the canister — the wall behind it falls in its box — and
     the side lift finds it, refusing the speaker on height."""
-    from pathlib import Path
 
     from box_opening.perception.scene import color_cloud
     from box_opening.perception.scene_source import scene_fix_from_boxes
 
-    z = np.load(Path(__file__).parent / "data" / "scene_side_flatbot_20261022.npz")
+    z = np.load(fixture_path("scene_side_flatbot_20261022.npz"))
     T = z["T_base_color"]
     pc, uv = color_cloud(z["depth_mm"].astype(float) / 1000.0, z["kd"], z["k"], z["dist"], z["T_color_depth"], stride=2)
     pts = pc @ T[:3, :3].T + T[:3, 3]
@@ -435,12 +435,11 @@ def test_a_camera_level_with_the_lid_takes_the_side_lift():
     it passed decided the fix on a few pixels of the OWL box — 13 mm in xy,
     7.5 mm in lid height between runs of the same placement."""
     import itertools
-    from pathlib import Path
 
     from box_opening.perception.scene import color_cloud
     from box_opening.perception.scene_source import scene_fix_from_boxes
 
-    z = np.load(Path(__file__).parent / "data" / "scene_level_flatbot_20261022_2004.npz")
+    z = np.load(fixture_path("scene_level_flatbot_20261022_2004.npz"))
     T = z["T_base_color"]
     pc, uv = color_cloud(z["depth_mm"].astype(float) / 1000.0, z["kd"], z["k"], z["dist"], z["T_color_depth"], stride=2)
     pts = pc @ T[:3, :3].T + T[:3, 3]
@@ -523,12 +522,10 @@ def test_the_way_off_the_frame_is_said_in_the_planning_frame():
 
 
 def test_the_recorded_flatbot_frame_still_finds_its_canister_inside_the_frame():
-    from pathlib import Path
-
     from box_opening.perception.scene import color_cloud
     from box_opening.perception.scene_source import scene_fix_from_boxes
 
-    z = np.load(Path(__file__).parent / "data" / "scene_side_flatbot_20261022.npz")
+    z = np.load(fixture_path("scene_side_flatbot_20261022.npz"))
     T = z["T_base_color"]
     pc, uv = color_cloud(z["depth_mm"].astype(float) / 1000.0, z["kd"], z["k"], z["dist"], z["T_color_depth"], stride=2)
     pts = pc @ T[:3, :3].T + T[:3, 3]
@@ -594,12 +591,11 @@ def test_the_cut_flatbot_frame_puts_the_canister_where_the_wrist_found_it():
     camera found its lid near [0.45, -0.21], through its own hand-measured
     mount. Finished from its lid's arc, the scene puts it within 3 cm of
     that: a regression pin, not a tape truth."""
-    from pathlib import Path
 
     from box_opening.perception.scene import color_cloud
     from box_opening.perception.scene_source import scene_fix_from_boxes
 
-    z = np.load(Path(__file__).parent / "data" / "scene_side_flatbot_cut_20261023.npz")
+    z = np.load(fixture_path("scene_side_flatbot_cut_20261023.npz"))
     T = z["T_base_color"]
     pc, uv = color_cloud(z["depth_mm"].astype(float) / 1000.0, z["kd"], z["k"], z["dist"], z["T_color_depth"], stride=2)
     pts = pc @ T[:3, :3].T + T[:3, 3]
@@ -620,12 +616,11 @@ def test_however_tight_the_owl_box_on_a_cut_lid_the_fix_does_not_slide():
     radius slides along a short arc; both press runs staged 7 cm off. Over
     boxes from a sliver to the whole canister, a fix is where the canister
     stood or none."""
-    from pathlib import Path
 
     from box_opening.perception.scene import color_cloud
     from box_opening.perception.scene_source import scene_fix_from_boxes
 
-    z = np.load(Path(__file__).parent / "data" / "scene_side_flatbot_cut_20261023.npz")
+    z = np.load(fixture_path("scene_side_flatbot_cut_20261023.npz"))
     T = z["T_base_color"]
     pc, uv = color_cloud(z["depth_mm"].astype(float) / 1000.0, z["kd"], z["k"], z["dist"], z["T_color_depth"], stride=2)
     pts = pc @ T[:3, :3].T + T[:3, 3]
@@ -760,11 +755,9 @@ def _upright(name):
     """(pts_base, uv, table rows z or None, gate kwargs, segmenter objects, the GT holder box, the reference top),
     as locate() lifts the frame: the stride-2 cloud in the base frame."""
     if name not in _FIXTURES:
-        from pathlib import Path
-
         from box_opening.perception.scene import color_cloud
 
-        z = np.load(Path(__file__).parent / "data" / name)
+        z = np.load(fixture_path(name))
         T = z["T_base_color"]
         pc, uv = color_cloud(
             z["depth_mm"].astype(float) / 1000.0, z["kd"], z["k"], z["dist"], z["T_color_depth"], stride=2
@@ -825,11 +818,10 @@ def _upright_at(name, ox=0, oy=0, lo=0, cylinders=()):
     with `lo`, with the frame's left edge moved `lo` px in (the depth runs up to the new edge, as it does at a
     right-edge cut); `cylinders` (centre_xy, radius, z0, z1) are rendered into its depth first
     (_ray_cast_cylinder). (pts_base, uv, table rows z or None, gate kwargs, segmenter objects, the npz)."""
-    from pathlib import Path
 
     from box_opening.perception.scene import color_cloud
 
-    z = np.load(Path(__file__).parent / "data" / name)
+    z = np.load(fixture_path(name))
     T = z["T_base_color"]
     k, kd = np.asarray(z["k"], float).copy(), np.asarray(z["kd"], float).copy()
     full = z["depth_mm"].astype(float) / 1000.0
@@ -1495,12 +1487,11 @@ def test_the_look_end_to_end_through_the_real_gate_on_the_frame_the_owl_missed()
     segmenter's message and the SceneFix: its holder box in each 5 Hz
     message, the real band, gate, vote, pose and table extent. Two fresh
     frames commit; the OWL is never asked."""
-    from pathlib import Path
 
     from box_opening.perception import scene_source as ss
     from box_opening.perception.scene import color_cloud
 
-    z = np.load(Path(__file__).parent / "data" / F_162417)
+    z = np.load(fixture_path(F_162417))
     depth = z["depth_mm"].astype(float) / 1000.0
     _pts, _uv, _tz, _kw, objs, _gt, ref = _upright(F_162417)
     world = _World(seg_msgs=_every(0.1, 3.0, objs))

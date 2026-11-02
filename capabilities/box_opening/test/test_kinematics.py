@@ -1,17 +1,15 @@
 """The arm's own FK/IK: the straight final descent the planner cannot shape."""
 
 import math
-import os
 
 import numpy as np
 import pytest
+from conftest import flatbot_urdf
 
 from box_opening.constants import HOME
 from box_opening.perception.d405 import quat_to_mat
 from box_opening.runtime import kinematics as kin
 from box_opening.runtime.kinematics import ArmChain, _axis_rot, mat_to_quat_xyzw, rotvec
-
-FLATBOT_URDF = os.path.join(os.path.dirname(__file__), "data", "arm_flatbot_20261021.urdf")
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +42,7 @@ def test_the_tools_of_many_readings_at_once_are_fk_row_by_row():
     the same numbers fk() gives one by one, on both chains."""
     rng = np.random.default_rng(7)
     qs = rng.uniform(-3.2, 3.2, size=(40, 7))
-    for arm in (ArmChain(), ArmChain(FLATBOT_URDF, root="arm_mount")):
+    for arm in (ArmChain(), ArmChain(flatbot_urdf(), root="arm_mount")):
         many = arm.tool_positions(qs)
         assert many.shape == (40, 3)
         assert np.allclose(many, [arm.fk(q)[1] for q in qs], atol=1e-12)
@@ -88,7 +86,7 @@ def test_the_reach_bound_never_refuses_a_pose_the_arm_holds():
     reads at or inside the reach — the arm stretched straight within 6 mm
     of it, its links' offsets — and the same tool 0.5 m further out, joint_6
     moved straight away from the shoulder, reads 0.5 m further past."""
-    arm = ArmChain(path=FLATBOT_URDF, root="arm_mount")
+    arm = ArmChain(path=flatbot_urdf(), root="arm_mount")
     rng = np.random.default_rng(0)
     worst = -1.0
     for q in rng.uniform(-math.pi, math.pi, (2000, 7)):
@@ -228,7 +226,7 @@ def test_one_fold_solve_gives_the_four_solves_candidates(chain):
 
 
 def _chains():
-    return [ArmChain(), ArmChain(FLATBOT_URDF, root="arm_mount")]
+    return [ArmChain(), ArmChain(flatbot_urdf(), root="arm_mount")]
 
 
 def _fk_multiplied_out(chain, q):
@@ -378,7 +376,7 @@ def test_the_lines_are_the_ones_the_finite_difference_built(chain, monkeypatch):
     _assert_same_line(now, ref)
 
     # a 290 mm stroke along the tool's z from HOME on flatbot's chain (a depth:touch)
-    fb = ArmChain(FLATBOT_URDF, root="arm_mount")
+    fb = ArmChain(flatbot_urdf(), root="arm_mount")
     R, t = fb.fk(HOME)
     now, ref = _line_both_ways(fb, monkeypatch, HOME, t + 0.29 * R[:, 2], mat_to_quat_xyzw(R))
     assert now[1] is None and len(now[0]) == 147
@@ -408,7 +406,7 @@ def test_the_self_motion_swings_the_elbow_with_the_tool_standing_still():
     from box_opening.tasks import reach_press
 
     pink = "capabilities/box_opening/config/containers/ankou_pink.yaml"
-    arm = ArmChain(FLATBOT_URDF, root="arm_mount")
+    arm = ArmChain(flatbot_urdf(), root="arm_mount")
     quat, _start, _bottom, look = reach_press.reach_geometry(
         ContainerModel.load(pink), (0.5921, -0.2869, 0.3123), 30, load_press_demo(pink).travel_m
     )

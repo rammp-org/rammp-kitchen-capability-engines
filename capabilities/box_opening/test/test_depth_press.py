@@ -1,11 +1,11 @@
 """The depth press (tasks/depth_press): once the hand is over the box, the
 height from the wrist camera's own depth, the press from the arm's torques."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import fixture_path, flatbot_urdf
 
 from box_opening.constants import GAINS_STIFF, IMPEDANCE_KQ
 from box_opening.models.container import ContainerModel, load_press_demo
@@ -540,7 +540,7 @@ def test_without_the_button_in_view_it_does_not_press_blind(ctx, monkeypatch, tm
 # ---- the caller's aim: where the first look expects the button, and where no look confirms it -----
 
 AIMED = (BUTTON[0], BUTTON[1], 0.46 - TOUCH_AT + 0.0004)  # under the turned-down pads, 0.4 mm up off its lid
-DEPTH_1433 = Path(__file__).parent / "data" / "wrist_depth_look_flatbot_20261027_1433.npz"
+DEPTH_1433 = "wrist_depth_look_flatbot_20261027_1433.npz"
 
 
 def test_the_first_look_expects_the_button_where_the_callers_aim_put_it(ctx, monkeypatch, tmp_path):
@@ -639,7 +639,7 @@ def test_the_1433_close_up_takes_the_lids_edge_and_backs_the_aim(ctx, monkeypatc
     from box_opening.runtime import approach
     from box_opening.runtime.kinematics import mat_to_quat_xyzw
 
-    f = np.load(DEPTH_1433)
+    f = np.load(fixture_path(DEPTH_1433))
     color = cv2.imdecode(f["color_png"], cv2.IMREAD_COLOR)
     depth = f["depth_mm"].astype(np.float32) / 1000.0
     rot, cam = np.asarray(f["rot_cam"], float), np.asarray(f["trans_cam"], float)
@@ -1443,7 +1443,7 @@ def test_the_walk_in_on_flatbot_turns_down_over_the_button_no_lower_than_the_sli
     from box_opening.runtime import approach
     from box_opening.runtime.kinematics import ArmChain
 
-    chain = ArmChain(path="capabilities/box_opening/test/data/arm_flatbot_20261021.urdf", root="arm_mount")
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
     model = ContainerModel.load(PINK)
     ctx.model = model
     button, tilt = (0.4833, -0.1575, 0.4044), 35
@@ -2750,7 +2750,7 @@ def test_on_flatbot_1623s_aimed_button_is_pressed_turning_12_deg_short_after_the
     from box_opening.runtime.branches import planner_branch
     from box_opening.runtime.kinematics import ArmChain
 
-    chain = ArmChain(path="capabilities/box_opening/test/data/arm_flatbot_20261021.urdf", root="arm_mount")
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
     monkeypatch.setattr(approach, "_chain", lambda: chain)
     model = ContainerModel.load(PINK)
     cfg = load_press_demo(PINK)
@@ -2990,7 +2990,7 @@ def test_on_flatbot_the_compliant_clear_leaves_home_nothing_to_refuse_or_step_of
     from box_opening.runtime.runner import Runner
     from box_opening.worlds import planned_top_z
 
-    chain = ArmChain(path="capabilities/box_opening/test/data/arm_flatbot_20261021.urdf", root="arm_mount")
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
     monkeypatch.setattr(approach, "_chain", lambda: chain)
     model = ContainerModel.load(PINK)
     ctx.model = model
@@ -3157,7 +3157,7 @@ def _flatbot_turned_down(scene, aimed):
     from box_opening.runtime.branches import planner_branch
     from box_opening.runtime.kinematics import ArmChain
 
-    chain = ArmChain(path="capabilities/box_opening/test/data/arm_flatbot_20261021.urdf", root="arm_mount")
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
     model, cfg = ContainerModel.load(PINK), load_press_demo(PINK)
     quat_s, _start_s, _bottom_s, look_s = rp.reach_geometry(model, scene, 30, cfg.travel_m)
     q_look = chain.nearest_solution(planner_branch(HOME), look_s, quat_s, seeds=(look_joints(HOME),))
