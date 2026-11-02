@@ -134,6 +134,9 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
         def base_to_link(self):
             return None
 
+        def look_record(self):
+            return {"timing": {"streams_s": 0.1}, "segmenter": {"state": "live", "frames": 3}}
+
     class _Rclpy:
         @staticmethod
         def create_node(name):
@@ -185,6 +188,13 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
     return e.value.code, client, rows
 
 
+def rows_of(tmp_path):
+    rows = []
+    for f in sorted((tmp_path / "runs").glob("run-*.jsonl")):
+        rows += [json.loads(line) for line in open(f)]
+    return rows
+
+
 def _at_staging(button_up_mm=0.0):
     """The scene approach as it ends at staging over the scene's box, with
     the first aim landing on the button (no pre-planned descent)."""
@@ -224,6 +234,30 @@ def test_a_run_whose_scene_camera_finds_no_box_says_so_in_its_record(monkeypatch
     refused = [r for r in rows if r["leg"] == "reach_refused"]
     assert [r["why"] for r in refused] == ["NO BOX — scene camera: the OWL's 3 candidates refused"]
     assert rows.index(refused[0]) < len(rows) - 1 and rows[-1]["kind"] == "motion"  # then the home
+
+
+def test_a_no_box_row_keeps_the_looks_seconds_and_the_segmenters_verdict(monkeypatch, tmp_path):
+    """reach_refused on NO BOX keeps SceneLocator.look_record() too (sweep
+    scene-g-05): which of the failures that wear the NO BOX face it was."""
+    from box_opening.tasks import press_demo
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute"], _at_staging(), found=False)
+    (refused,) = (r for r in rows if r["leg"] == "reach_refused")
+    assert code == 2 and homes == [refused["why"]]
+    assert refused["timing"] == {"streams_s": 0.1} and refused["segmenter"] == {"state": "live", "frames": 3}
+
+
+def test_the_scene_fix_row_keeps_the_looks_seconds_and_the_segmenters_verdict(monkeypatch, tmp_path):
+    """Sweep scene-g-05: 84 scene_fix rows carried none of the look's timing
+    or the segmenter's verdict (printed only), so the freshness bounds could
+    not be judged offline. The row now keeps SceneLocator.look_record()."""
+    client = FakeClient()
+    client.exec_script = [TOUCH]
+    run_main(monkeypatch, tmp_path, ["--execute", "--press-only"], _at_staging(), client=client)
+    (row,) = (r for r in rows_of(tmp_path) if r["leg"] == "scene_fix")
+    assert row["timing"] == {"streams_s": 0.1} and row["segmenter"] == {"state": "live", "frames": 3}
 
 
 class _Hears(FakeClient):

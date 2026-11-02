@@ -970,6 +970,13 @@ def _newer(stamp, since, last):
     return last is None or last.stamp_ns is None or stamp > last.stamp_ns
 
 
+def _spread(xs):
+    """[min, median, max] of `xs`, rounded to ms; None for none."""
+    if not xs:
+        return None
+    return [round(float(v), 3) for v in (min(xs), float(np.median(xs)), max(xs))]
+
+
 def _top_xy(top):
     return "[%.3f, %.3f]" % (float(top[0]), float(top[1]))
 
@@ -1023,6 +1030,7 @@ class SceneLocator:
         self.last_boxes = {}
         self.last_judged = {}  # source -> (its candidates, SceneBoxFix, colour frame, T_base_color): what viz draws
         self.last_seg_state = None  # the segmenter's state when locate() or prime() last looked
+        self._look = None  # what the last locate() saw of the segmenter (look_record)
         self._clock, self._sleep = time.monotonic, time.sleep  # tests drive them
         # where the calibration saw the cabinet's tag (scene_calib.scene_tag_px):
         # checked once per locate, before any fix is trusted
@@ -1071,6 +1079,38 @@ class SceneLocator:
         if self.seg is not None and self.seg.available:
             self.last_seg_state = self.seg.state(*self._seg_args(self._clock()))
 
+    def look_record(self):
+        """What the last locate() saw, for the run record (the scene_fix row,
+        and reach_refused on NO BOX), where it was only printed before: its
+        seconds (last_timing) and the segmenter's verdict — its state at the
+        end, the frames gated and the boxes of its classes in them, the
+        candidates refused with the last three reasons that differ, the
+        sightings, the messages that passed in two places, the messages
+        heard. Per gated frame, how far its stamp lagged the scene camera's
+        newest frame (what SEG_FRESH_S bounds) and how long ago it had
+        arrived (SEG_SILENT_S's), as [min, median, max] s."""
+        rec = {"timing": dict(self.last_timing)}
+        look = getattr(self, "_look", None)
+        if look is None:
+            return rec
+        tried = look["tried"]
+        seg = {
+            "state": look["state"],
+            "frames": look["frames"],
+            "boxes": look["boxes"],
+            "refused": len(tried),
+            "reasons": list(dict.fromkeys(reversed(tried)))[:3][::-1],
+            "sightings": look["sightings"],
+            "ambiguous": look["ambiguous"],
+            "heard": None if look["seg"] is None else look["seg"].count - look["heard0"],
+            "lag_s": _spread(look["lag_s"]),
+            "age_s": _spread(look["age_s"]),
+        }
+        if self.instance_id is not None:
+            seg["selected"] = look["selected"]  # frames the selected container was in
+        rec["segmenter"] = seg
+        return rec
+
     def locate(self, timeout_s):
         """The box, from the scene frames that arrive from now on. Each new
         segmenter message's boxes (the band above the holder) go through the
@@ -1087,6 +1127,21 @@ class SceneLocator:
         self.last_timing = {}  # where a locate's seconds went (the SCENE line prints it)
         self.last_boxes = {}
         self.last_judged = {}
+        tried = []  # why each refused candidate was refused
+        # kept up to date as the look goes, whichever way it ends (look_record)
+        look = self._look = {
+            "state": None if seg is None or seg.available else "unavailable",
+            "frames": 0,
+            "boxes": 0,
+            "selected": 0,
+            "tried": tried,
+            "sightings": 0,
+            "ambiguous": 0,
+            "lag_s": [],
+            "age_s": [],
+            "seg": seg,
+            "heard0": 0 if seg is None else seg.count,
+        }
         if seg is None or not seg.available:
             self.last_why = (
                 "no scene segmenter for this container (its config names no scene_detect.segmenter_classes)"
@@ -1101,7 +1156,6 @@ class SceneLocator:
         last_seg = None  # the message gated last
         n_seg = n_seg_boxes = 0  # segmenter frames gated in this call, and the boxes of its classes in them
         n_selected = 0  # of those frames, the ones the selected container was in (with an instance_id)
-        tried = []  # why each refused candidate was refused
         # (top, rivals) of each message that passed in two places. Such a message
         # is no sighting. Following the selected container, both places are its
         # own boxes (its holder's band and its lid), and later sightings that
@@ -1149,7 +1203,7 @@ class SceneLocator:
             m_seg = seg.latest  # one read: the perception thread replaces it whole
             seg_args = self._seg_args(now)
             state = seg.state(*seg_args, frame=m_seg)
-            self.last_seg_state = state
+            self.last_seg_state = look["state"] = state
             if state in ("absent", "unavailable"):
                 break  # nothing publishes the boxes: no word is coming
             if state != "live" or m_seg is last_seg or not _newer(m_seg.stamp_ns, since, last_seg):
@@ -1160,6 +1214,10 @@ class SceneLocator:
             self.last_timing.setdefault("seg_s", round(now - t_ready, 2))
             self.last_boxes["segmenter"] = [[c, float(s)] + [float(v) for v in b] for c, s, b in m_seg.objects]
             n_seg_boxes += len(m_seg.objects)
+            look.update(frames=n_seg, boxes=n_seg_boxes, selected=n_selected)
+            if seg_args[3] is not None and m_seg.stamp_ns is not None:
+                look["lag_s"].append((seg_args[3] - m_seg.stamp_ns) / 1e9)
+            look["age_s"].append(now - m_seg.recv_s)
             cands = segmenter_candidates(m_seg.objects, seg.classes, seg_args[2], box_kind=self.seg_box)
             if not cands:
                 continue
@@ -1206,6 +1264,7 @@ class SceneLocator:
                 continue
             if got.rivals:
                 ambiguous.append((got.top, got.rivals))
+                look["ambiguous"] = len(ambiguous)
                 continue
             if ambiguous and self.instance_id is None:
                 continue  # which container passed is not settled: see `ambiguous`
@@ -1226,6 +1285,7 @@ class SceneLocator:
                     key if det is None else box_key(det),
                 )
             )
+            look["sightings"] = len(sightings)
             top, _why = commit_fix(sightings)
             if top is not None:
                 found = (top, sightings[-VOTE_N:], pts_base, uv, got, T_base_color)

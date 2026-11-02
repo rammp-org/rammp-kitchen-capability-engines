@@ -1,6 +1,7 @@
 """Finding the box from the scene camera: depth inside the detector's box,
 at lid height, in base_link."""
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -1313,6 +1314,7 @@ class _World:
             shot = rest[2] if len(rest) > 2 else t - 0.075  # its frame was taken this long before it arrives
             selected = rest[3] if len(rest) > 3 else None
             self.rung.latest = SegFrame(t, stamp_ns(_stamp(shot)), frame_id, wh, tuple(objects), len(objects), selected)
+            self.rung.count += 1  # as the rung's callback counts what it heard
 
 
 def _every(t0, t1, objects, *rest, period=0.2):
@@ -1439,6 +1441,73 @@ def test_the_look_end_to_end_through_the_real_gate_on_the_frame_the_owl_missed()
     assert abs(fix.top_xyz[2] - fix.pose.xyz[2] - loc.model.dims[2]) < ss.LID_BAND_M
     assert fix.table_extent is not None and len(fix.table_points) > 0  # no survey: the table it stands on, measured
     assert loc.last_timing["fix_s"] == pytest.approx(0.5, abs=0.05)  # the 0.1 s frame predates the look
+
+
+def test_a_fixs_look_record_keeps_its_seconds_and_the_segmenters_verdict(monkeypatch):
+    """Sweep scene-g-05 / waits_retries-g-08: the look's seconds and the
+    segmenter's verdict were printed, never kept (84 scene_fix rows carry
+    none). look_record() is what the scene_fix row now keeps: here two fresh
+    frames gated, both sightings, their stamps a frame or two behind the
+    camera's newest (the 75 ms the segmenter takes) and each judged on the
+    first poll after it arrived."""
+    before = [(0.1, [("food container", 0.88, _holder())])]
+    after = [(t, [("food container", 0.88, _holder())]) for t in np.arange(0.3, 3.0, 0.2)]
+    world = _World(seg_msgs=before + after)
+    loc, _gated = _locator(monkeypatch, world, {_band(_holder()): SEG_TOP})
+    assert loc.locate(15.0) is not None, loc.last_why
+    rec = loc.look_record()
+    assert set(rec["timing"]) == {"streams_s", "seg_s", "fix_s", "lift_s"}
+    seg = rec["segmenter"]
+    lag, age = seg.pop("lag_s"), seg.pop("age_s")
+    assert seg == {
+        "state": "live",
+        "frames": 2,
+        "boxes": 2,
+        "refused": 0,
+        "reasons": [],
+        "sightings": 2,
+        "ambiguous": 0,
+        "heard": 3,  # 0.1, 0.3 and 0.5 s: the 0.1 s message is of a frame from before the look, never gated
+    }
+    assert 0.0 < lag[0] <= lag[1] <= lag[2] < 0.2  # [min, median, max] s behind the newest frame
+    assert 0.0 <= age[0] <= age[2] <= 0.025  # judged within a poll (20 ms) of arriving
+    json.dumps(rec)  # a run record row
+
+
+def test_a_no_box_look_record_keeps_why_its_candidates_were_refused(monkeypatch):
+    world = _World(seg_msgs=_every(0.1, 10.0, [("food container", 0.88, _holder())]))
+    loc, _gated = _locator(monkeypatch, world, {_band(_holder()): "from the side, its top is -55 mm from lid height"})
+    assert loc.locate(3.0) is None
+    seg = loc.look_record()["segmenter"]
+    # 0.1-2.9 s at 5 Hz, but the 0.1 s message's frame predates the look
+    assert seg["state"] == "live" and seg["frames"] == seg["boxes"] == seg["refused"] == 14 and seg["sightings"] == 0
+    assert seg["reasons"] == ["from the side, its top is -55 mm from lid height (segmenter 0.88)"]
+    assert "fix_s" not in loc.look_record()["timing"]
+
+
+def test_a_silent_or_missing_segmenters_look_record_says_so(monkeypatch):
+    world = _World(seg_since=5.0)
+    loc, _gated = _locator(monkeypatch, world, {})
+    assert loc.locate(2.0) is None
+    seg = loc.look_record()["segmenter"]
+    assert seg["state"] == "silent" and seg["frames"] == 0 and seg["lag_s"] is None and seg["age_s"] is None
+    loc, _gated = _locator(monkeypatch, _World(), {}, seg=False)
+    assert loc.locate(2.0) is None
+    assert loc.look_record()["segmenter"]["state"] is None and loc.look_record()["segmenter"]["heard"] is None
+    from box_opening.perception.scene_source import SceneLocator
+
+    fresh = SceneLocator.__new__(SceneLocator)
+    fresh.last_timing = {}
+    assert fresh.look_record() == {"timing": {}}  # no look yet
+
+
+def test_a_selected_containers_look_record_counts_the_frames_it_was_in(monkeypatch):
+    world = _World(seg_msgs=_every(0.1, 3.0, [], SCENE_FRAME, (640, 400), None, False))
+    world.seg_msgs = [(t, objs, fr, wh, t - 0.075, sel) for t, objs, fr, wh, _shot, sel in world.seg_msgs]
+    loc, _gated = _locator(monkeypatch, world, {}, instance_id="food_container_2")
+    assert loc.locate(2.0) is None
+    seg = loc.look_record()["segmenter"]
+    assert seg["selected"] == 0 and seg["frames"] == 9  # 0.3-1.9 s (the 0.1 s frame predates the look)
 
 
 def test_a_silent_segmenter_finds_no_box_and_says_so(monkeypatch):

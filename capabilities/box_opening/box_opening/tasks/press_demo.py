@@ -1487,7 +1487,8 @@ def main():
         if locator.moved_note and scene_fix is not None:
             log.info("[press_demo] scene camera: %s" % locator.moved_note)  # e.g. the tag was not in view
         if scene_fix is None:
-            runner.note("reach_refused", why="NO BOX — scene camera: %s" % locator.last_why)
+            # the look's seconds and the segmenter's verdict: what a NO BOX was
+            runner.note("reach_refused", why="NO BOX — scene camera: %s" % locator.last_why, **locator.look_record())
             try_home(ctx, runner, args.execute, "NO BOX — scene camera: %s" % locator.last_why)
             sys.exit(2)
         if not scene_by_tf:
@@ -1535,6 +1536,7 @@ def main():
             table_z_scene=None
             if scene_fix.table_z_scene != scene_fix.table_z_scene
             else round(scene_fix.table_z_scene, 4),
+            **locator.look_record(),  # timing, segmenter: the look's seconds and what the segmenter gave it
         )
         # EVERY box the scene camera fixes is pressed by the reach-out: the
         # tilted look, the wrist's aim, the hand turned down onto the button,
