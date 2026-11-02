@@ -18,7 +18,7 @@ gate on the name's prefix, "full"/"bench"/"interaction") and gives the
 planner's: PLANNER_WORLD.
 """
 
-import yaml
+from box_opening.constants import load_yaml
 
 # The world the planner holds, by name: rammp_curobo's own, the deployment's
 # (configs/world_empty.yaml on flatbot)
@@ -52,7 +52,7 @@ def _table_top_z(bench):
 class WorldStore:
     def __init__(self, bench_yaml_path, out_dir=None):
         with open(bench_yaml_path) as f:
-            self._bench = yaml.safe_load(f)
+            self._bench = load_yaml(f)
         self._surface_z = None  # runtime-measured surface; overrides YAML when set
         self._surface_xy = None  # (x0, x1, y0, y1): where the scene camera saw that surface
 

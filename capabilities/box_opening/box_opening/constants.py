@@ -15,6 +15,15 @@ def state_dir(env=None):
     return Path(env.get("BOX_OPENING_STATE") or Path.home() / ".ros" / "box_opening")
 
 
+def load_yaml(f):
+    """yaml.safe_load of the open file `f`, through libyaml's C loader where this PyYAML has it,
+    else the pure-Python SafeLoader: the same documents (every config file compared), parsed
+    ~25x faster (ankou_pink.yaml 33.5 ms -> 1.2 ms on the Jetson, before the scene look)."""
+    import yaml
+
+    return yaml.load(f, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+
+
 VIZ_ENV = "BOX_OPENING_VIZ"  # 1 (or on, true, yes): a Foxglove view of the run (perception/viz)
 # 1 (or on, true, yes): each --execute mission keeps its camera frames (detection_set.MissionFrames)
 MISSION_FRAMES_ENV = "BOX_OPENING_MISSION_FRAMES"

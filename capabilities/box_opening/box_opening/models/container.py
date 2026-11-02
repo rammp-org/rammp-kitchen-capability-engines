@@ -5,14 +5,27 @@ Every pose-directed leg uses the press attitude from the container config
 fixed in the world or steered to the target's bearing (press_yaw_steer).
 """
 
+import copy
+import functools
 import math
 from dataclasses import dataclass
 
-import yaml
-
-from box_opening.constants import TRANSIT_SPEED
+from box_opening.constants import TRANSIT_SPEED, load_yaml
 from box_opening.geometry import euler_deg_to_quat_xyzw, yaw_about_world_z
 from box_opening.primitives.look import SWEEP_RAD
+
+
+@functools.lru_cache(maxsize=8)
+def _parsed(text):
+    return load_yaml(text)
+
+
+def container_doc(path):
+    """The container config at `path`, parsed once per text of the file (ContainerModel.load
+    and load_press_demo each read the same file, before the scene look; keyed by what it holds,
+    so an edited file is parsed again however soon): a copy, so no reader changes another's."""
+    with open(path) as f:
+        return copy.deepcopy(_parsed(f.read()))
 
 
 @dataclass(frozen=True)
@@ -51,8 +64,7 @@ class ContainerModel:
 
     @classmethod
     def load(cls, path):
-        with open(path) as f:
-            raw = yaml.safe_load(f)
+        raw = container_doc(path)
         return cls(
             dims=tuple(raw["dims"]),
             lid_dims=tuple(raw["lid_dims"]),
@@ -156,8 +168,7 @@ def scene_detect_cfg(raw):
 
 
 def load_press_demo(path):
-    with open(path) as f:
-        raw = yaml.safe_load(f)
+    raw = container_doc(path)
     pd = raw["press_demo"]
     segmenter_classes, segmenter_box = scene_detect_cfg(raw)
     cfg = PressDemoCfg(

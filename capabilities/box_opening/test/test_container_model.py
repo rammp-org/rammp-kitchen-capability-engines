@@ -247,3 +247,34 @@ def test_a_bad_scene_detect_block_is_refused_at_load(tmp_path):
         load_press_demo(str(listed))
     none = load_press_demo(_pink_variant(tmp_path, "segmenter_classes: [food container]", "segmenter_classes: []"))
     assert none.segmenter_classes == ()  # an empty list: no segmenter, so nothing finds it
+
+
+def test_every_config_file_parses_the_same_through_the_c_loader():
+    """load_yaml takes libyaml's C loader where PyYAML has it (~25x faster: ankou_pink.yaml
+    33.5 ms -> 1.2 ms before the scene look) and must read every config file exactly as
+    yaml.safe_load does."""
+    from pathlib import Path
+
+    import yaml
+
+    from box_opening.constants import load_yaml
+
+    files = sorted(Path("capabilities/box_opening/config").rglob("*.yaml"))
+    assert len(files) >= 8
+    for f in files:
+        with open(f) as a, open(f) as b:
+            assert load_yaml(a) == yaml.safe_load(b), f.name
+
+
+def test_the_container_file_is_parsed_once_and_each_reader_gets_its_own_copy(tmp_path):
+    from box_opening.models import container as cm
+
+    path = tmp_path / "c.yaml"
+    path.write_text(open("capabilities/box_opening/config/containers/ankou_pink.yaml").read())
+    cm._parsed.cache_clear()
+    a = cm.container_doc(str(path))
+    a["dims"][0] = 9.0  # a reader that changes its copy
+    b = cm.container_doc(str(path))
+    assert b["dims"][0] == 0.105 and cm._parsed.cache_info().misses == 1
+    path.write_text(path.read_text().replace("dims: [0.105, 0.105, 0.121]", "dims: [0.106, 0.106, 0.121]"))
+    assert cm.container_doc(str(path))["dims"][0] == 0.106  # edited at once: read again

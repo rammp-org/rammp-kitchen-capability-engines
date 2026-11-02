@@ -12,7 +12,8 @@ import os
 from types import SimpleNamespace
 
 import numpy as np
-import yaml
+
+from box_opening.constants import load_yaml
 
 CAMERA_CONFIG = "camera_d405_wrist.yaml"
 
@@ -32,7 +33,7 @@ def camera_config(name=CAMERA_CONFIG):
     for path in candidates:
         if os.path.isfile(path):
             with open(path) as f:
-                return yaml.safe_load(f)
+                return load_yaml(f)
     raise FileNotFoundError("camera config %r not found (tried %s)" % (name, candidates))
 
 
