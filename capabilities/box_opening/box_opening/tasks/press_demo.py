@@ -1526,15 +1526,15 @@ def main():
         sys.exit(130)  # the abort path already reported what was confirmed
     finally:
         ending = sys.exc_info()[1]  # how the run ended, for its record
+        # a run unwinding from a Ctrl+C (the engine's cancel: the 130 above)
+        ctrl_c = isinstance(ending, KeyboardInterrupt) or isinstance(
+            getattr(ending, "__context__", None), KeyboardInterrupt
+        )
         try:
             # the console as it was, before the node the viz's publishers
             # live on goes, and the viz's thread stopped (never left inside
             # OpenCV for the interpreter's teardown, a second Ctrl+C or
-            # not); a run unwinding from a Ctrl+C (the 130 above) publishes
-            # nothing more
-            ctrl_c = isinstance(ending, KeyboardInterrupt) or isinstance(
-                getattr(ending, "__context__", None), KeyboardInterrupt
-            )
+            # not); a cancelled run publishes nothing more
             stop_viz(not ctrl_c)
         finally:
             # Stop the perception thread BEFORE the interpreter tears rclpy
@@ -1550,9 +1550,11 @@ def main():
             except Exception:
                 pass
             # the run is over and the arm stopped: now the last arrival's settle
-            # is noted, from what was heard (runner.flush), and its frames written
+            # is noted, from what was heard (runner.flush), and its frames written,
+            # except after a cancel, which must end at once (no frames kept)
             runner.flush()
-            keep_mission_frames(getattr(ctx, "mission_frames", None), ending)
+            if not ctrl_c:
+                keep_mission_frames(getattr(ctx, "mission_frames", None), ending)
 
 
 if __name__ == "__main__":

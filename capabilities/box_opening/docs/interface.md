@@ -97,7 +97,8 @@ Progress phases, in order: `locate` (5%), `look` (10%), `press` (35%), `grip`
 its motion ends. A run is one motion from the press to the set-down, so it
 cannot pause once it has started (every phase reports `pausable: false`); a
 cancel stops it at once. The cancel is the run's own Ctrl+C: the motion in
-flight is cancelled, and the action ends once the driver has confirmed it.
+flight is cancelled, and the action ends once the driver has confirmed it, with
+no video encoded and no frames written on the way out.
 
 A run that stops fails the action with one of these codes:
 

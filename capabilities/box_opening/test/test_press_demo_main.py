@@ -446,6 +446,22 @@ def test_the_finally_reads_mission_frames_through_getattr():
     assert len(arg.args) == 3 and arg.args[2].value is None
 
 
+def test_a_cancelled_run_keeps_no_mission_frames(monkeypatch, tmp_path):
+    """Review on #23 (REVIEW_RULES C1): a cancel (the engine's Ctrl+C, exit
+    130) ends at once; the mission's frames are not written on the way out.
+    A run that ends any other way still keeps them (when they are on)."""
+    kept = []
+    monkeypatch.setattr(press_demo, "keep_mission_frames", lambda frames, ending: kept.append(ending))
+
+    def ctrl_c(ctx):
+        raise KeyboardInterrupt
+
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute"], ctrl_c)
+    assert code == 130 and kept == []
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute"], _at_staging())
+    assert code == 0 and len(kept) == 1
+
+
 def test_no_frames_to_keep_is_a_no_op():
     assert press_demo.keep_mission_frames(None, SystemExit(2)) is None
     assert press_demo.keep_mission_frames(getattr(None, "mission_frames", None), None) is None

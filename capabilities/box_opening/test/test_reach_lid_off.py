@@ -250,7 +250,7 @@ class _Video:
 
     def __init__(self, sources, out_dir, rec=None, ctx=None):
         self.sources, self.out_dir, self.rec, self.ctx = [n for n, _g in sources], out_dir, rec, ctx
-        self.said, self.started, self.finished = [], None, None
+        self.said, self.started, self.finished, self.stopped = [], None, None, None
 
     def start(self):
         self.started = list(self.rec.events)
@@ -265,6 +265,9 @@ class _Video:
     def finish(self, caption=None):
         self.finished = (caption, len(self.ctx.client.lets_go))
         return "/captures/lid-video-x.mp4"
+
+    def stop(self):
+        self.stopped = len(self.ctx.client.lets_go)
 
 
 def _videoed(ctx, monkeypatch):
@@ -314,7 +317,11 @@ def test_a_full_run_records_both_cameras_from_the_grip_on_says_each_step_and_wri
     )
 
 
-def test_a_ctrl_c_with_the_lid_in_the_fingers_lets_go_first_then_writes_the_video(ctx, monkeypatch, tmp_path):
+def test_a_ctrl_c_with_the_lid_in_the_fingers_lets_go_first_and_writes_no_video(ctx, monkeypatch, tmp_path):
+    """Review on #23 (REVIEW_RULES C1): a cancel (the engine's Ctrl+C) must
+    end at once. The arm lets go first, as before; the video's sampling
+    stops and nothing is encoded (seconds of ffmpeg before the cancelled
+    result). Any other way out still writes it, with how the run stopped."""
     made, made_rec = _videoed(ctx, monkeypatch)
     real = _Rec
 
@@ -330,8 +337,17 @@ def test_a_ctrl_c_with_the_lid_in_the_fingers_lets_go_first_then_writes_the_vide
     with pytest.raises(KeyboardInterrupt):
         _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], at_spot_look=ctrl_c, one_motion=False)
     (v,) = made
+    assert v.finished is None and v.stopped is not None and v.stopped >= 1  # let go, then sampling stopped
+    made.clear()
+
+    def stop_line():
+        raise SystemExit(1)
+
+    with pytest.raises(SystemExit):
+        _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], at_spot_look=stop_line, one_motion=False)
+    (v,) = made
     caption, lets_go = v.finished
-    assert caption == "stopped: KeyboardInterrupt" and lets_go >= 1  # the arm let go before the video was written
+    assert caption == "stopped: SystemExit" and lets_go >= 1  # the arm let go before the video was written
 
 
 def test_a_knob_up_after_the_press_is_gripped_lifted_carried_set_down_and_the_arm_goes_home(

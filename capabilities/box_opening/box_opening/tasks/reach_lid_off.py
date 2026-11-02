@@ -1524,7 +1524,13 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
         )
     except BaseException as e:
         rp.let_go(ctx)
-        _finish_video(video, "stopped: %s" % (type(e).__name__))  # after the let-go: the arm first
+        if isinstance(e, KeyboardInterrupt):
+            # a cancel (the engine's Ctrl+C): end at once, with no video encoded on the way out
+            # (seconds of ffmpeg before the cancelled result); the pictures taken are dropped
+            if video is not None:
+                video.stop()
+        else:
+            _finish_video(video, "stopped: %s" % (type(e).__name__))  # after the let-go: the arm first
         raise
 
 
