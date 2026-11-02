@@ -314,3 +314,39 @@ class PressContact:
         elif self.stopped_frac is None:
             out["why"] = "the stroke ended before its reference got there"
         return out
+
+
+class PadsAbove:
+    """A gripper leg's gate (Leg.send_when): True once the pads, as the arm
+    measures them, stand at `z` or higher — the newest sample the client
+    keeps of the driver's feedback (client.last_execution's feedback_q), one
+    FK for each new one (~90 Hz; polled at every spin). The grip straight
+    from the press opens the fingers so: off the knob, not on it
+    (reach_lid_off._grip_from_hold). `at` is where it said so: (when, after
+    the goal went out, s; the pads' height)."""
+
+    def __init__(self, chain, client, z):
+        self.chain, self.client, self.z = chain, client, float(z)
+        self._sent = None
+        self._last_t = None
+        self.at = None
+        self.highest = None  # the highest the pads stood while it watched
+
+    def __call__(self, progress):
+        info = getattr(self.client, "last_execution", None)
+        if not isinstance(info, dict) or info.get("sent_traj") is None:
+            return False
+        if info is not self._sent:  # a new execution: watched afresh
+            self._sent, self._last_t, self.at, self.highest = info, None, None, None
+        kept = info.get("feedback_q")
+        if not kept or (self._last_t is not None and kept[-1][0] <= self._last_t):
+            return False
+        t, _frac, q = kept[-1][0], kept[-1][1], kept[-1][2]
+        self._last_t = t
+        z = pads_z(self.chain, q)
+        self.highest = z if self.highest is None else max(self.highest, z)
+        if z < self.z:
+            return False
+        sent = info.get("sent_at")
+        self.at = (None if sent is None else round(float(t) - float(sent), 3), round(z, 4))
+        return True

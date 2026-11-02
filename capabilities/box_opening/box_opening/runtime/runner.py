@@ -864,17 +864,17 @@ class Runner:
                         and all(g.guard is None for g in group)
                     ):
                         early = cand
+                gated = None
+                if early is not None and early.send_when is not None:
+                    gated, early = early, None  # sent where its gate says so (Leg.send_when), not at once
                 if early is not None:
                     inner = hook
 
                     def hook(_leg=early, _inner=inner):
-                        handle = self.client.gripper_send(_leg.gripper_cmd)
-                        if handle is not None:
-                            self._pending = (_leg, handle, time.monotonic())
-                            self._sent_early.add(id(_leg))
+                        self._send_early(_leg)
                         return _inner() if _inner is not None else None
 
-                with self._mode(group[0]):
+                with self._mode(group[0]), self._gated(group[0], gated):
                     res = self._run_motion(group, while_running=hook)
                 if group is host and res.lookahead is not None:
                     self.lookahead_result = res.lookahead
@@ -1002,6 +1002,44 @@ class Runner:
         return res
 
     # -- helpers -------------------------------------------------------------
+    def _send_early(self, leg):
+        """A deferred gripper leg sent under the motion before it: pending,
+        joined as any deferred one (_join_pending)."""
+        handle = self.client.gripper_send(leg.gripper_cmd)
+        if handle is not None:
+            self._pending = (leg, handle, time.monotonic())
+            self._sent_early.add(id(leg))
+
+    @contextmanager
+    def _gated(self, lead, leg):
+        """`lead`'s stop_when, for its execution, also asks `leg`'s gate
+        (Leg.send_when) at every poll, and sends `leg` the first time it says
+        so; the gate never stops the motion, and one that fails sends
+        nothing (the leg goes out after the motion, as any deferred one).
+        Nothing to gate: as it is."""
+        if leg is None:
+            yield
+            return
+        inner, failed = lead.stop_when, []
+
+        def stop_when(progress):
+            if not failed and id(leg) not in self._sent_early and self._pending is None:
+                try:
+                    go = bool(leg.send_when(progress))
+                except Exception as e:  # noqa: BLE001 -- a gate that fails sends at the motion's end
+                    log.info("[runner] %s: its gate failed (%s) — sent after the motion" % (leg.name, e))
+                    failed.append(e)
+                    go = False
+                if go:
+                    self._send_early(leg)
+            return bool(inner(progress)) if inner is not None else False
+
+        lead.stop_when = stop_when
+        try:
+            yield
+        finally:
+            lead.stop_when = inner
+
     @contextmanager
     def _mode(self, lead):
         """The client in `lead`'s own control mode (Leg.compliant) for one

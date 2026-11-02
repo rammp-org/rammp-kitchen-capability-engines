@@ -2643,20 +2643,23 @@ def test_each_grip_close_is_recorded_once_the_arm_stands_still(ctx, monkeypatch,
 
 # ---- the grip straight from the press ---------------------------------------------------
 
-FROM_PRESS = ["grip:open", "grip:rise"]
+FROM_PRESS = ["grip:rise", "grip:open"]  # the open sent under the rise once the pads leave the knob
 
 
 def test_the_grip_straight_from_the_press_takes_the_lid_off_with_no_way_back_and_no_look(
     ctx, monkeypatch, tmp_path, capsys
 ):
     """Owner 2026-10-30: after the first press's hold the hand rises
-    GRIP_RISE_M, the fingers opening to the knob's width as it does, comes
+    GRIP_RISE_M, the fingers opening to the knob's width as it does once the
+    pads have left the knob (owner 2026-11-02: not on it), comes
     down the stroke's line to the grip's height — GRIP_LID_ABOVE_HELD_M
     over where the hold held the pads, less GRIP_BELOW_LID_M — and closes:
     no way back to the look pose, no look, no way down from it (10:08's
     were 2.6 + 0.7 + 3.2 s). The lift, the spot, its carry and home are
     planned while the hand rises; the fingers are open before it comes
     down; the rest as from the look pose."""
+    from box_opening.tasks.press_contact import PadsAbove
+
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], from_press=True)
     assert code == 0
     assert rec.events == [
@@ -2681,8 +2684,14 @@ def test_the_grip_straight_from_the_press_takes_the_lid_off_with_no_way_back_and
     assert rec.legs["grip:open"].defer_join and rec.legs["grip:open"].gripper_cmd == pytest.approx(
         rlo.grip_open_cmd(ctx.model)
     )
-    (grip,) = (r for r in rows if r["leg"] == "reach_grip")
     held = BUTTON[2] - 0.006  # the fake hold's pads
+    opened = rec.legs["grip:open"]
+    assert opened.send_with_previous_motion and isinstance(opened.send_when, PadsAbove)
+    assert opened.send_when.z == pytest.approx(held + rlo.GRIP_OPEN_ABOVE_HELD_M)
+    # the fake client keeps no feedback: the gate never said so, and the open went out at the rise's top
+    (open_row,) = (r for r in rows if r["leg"] == "grip_open")
+    assert open_row["under_rise"] is False and open_row["above_held_mm"] == pytest.approx(12.5)
+    (grip,) = (r for r in rows if r["leg"] == "reach_grip")
     assert (grip["attempt"], grip["from_press"]) == (0, True)
     assert grip["lid_z"] == pytest.approx(held + rlo.GRIP_LID_ABOVE_HELD_M)
     assert grip["pads_z"] == pytest.approx(held + rlo.GRIP_LID_ABOVE_HELD_M - rlo.GRIP_BELOW_LID_M)

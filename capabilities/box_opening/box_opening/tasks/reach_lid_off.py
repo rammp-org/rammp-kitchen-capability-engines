@@ -26,8 +26,9 @@ after the press as before (reach_press._fly_way_in).
           box left open — a flush knob gives the fingers nothing to hold,
           and a released lid is not pressed again.
   DIRECT  first, straight from the first press's hold (GRIP_FROM_PRESS):
-          up GRIP_RISE_M, the fingers opening to the knob's width as the hand
-          rises, down the stroke's line to the grip's height (grip_lid_z),
+          up GRIP_RISE_M, the fingers opening to the knob's width once the
+          pads have left the knob (GRIP_OPEN_ABOVE_HELD_M), down the stroke's
+          line to the grip's height (grip_lid_z),
           the close and the LIFT below — no way back, no look. On air, back
           to the look pose, and the LOOK as below, the GRIP from there.
   GRIP    up: the fingers open as the hand comes down from the look pose —
@@ -209,6 +210,15 @@ GRIP_TRIES = 2
 # the knob's base.
 GRIP_FROM_PRESS = True
 GRIP_RISE_M = 0.025  # over the popped knob (~7.5 mm proud) before the fingers spread
+# ... and the fingers open on the way up once the pads, as the arm measures
+# them, stand this far over where the hold held them: off the popped knob,
+# its stroke and a margin over it (press_contact.PadsAbove, Leg.send_when).
+# They opened as the rise began (owner 2026-11-02: "it opens the grippers too
+# fast and makes the fingers slide along the lid. i need it to open after the
+# fingers stop touching the lid"): 16:20's spread from shut to the knob's
+# width in the rise's first 0.35 s, the pads 6 mm over the hold sinking to
+# 1.5 as they spread, the hand rising only after
+GRIP_OPEN_ABOVE_HELD_M = KNOB_STROKE_M + 0.005
 _MISSED = "the grip straight from the press missed"  # _grip_from_hold's: back at the look pose
 # The grip's close-up record (owner 2026-10-30, "a recorder first"): at each
 # close, once the arm stands still, the wrist's frame — the fingers open
@@ -1487,7 +1497,8 @@ def grip_from_hold_lines(ctx, way, q_held):
 def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     """The grip straight from the first press's hold (GRIP_FROM_PRESS): the
     fingers opening to the knob's width as the hand rises off the button,
-    the lift and the first spot the hand reaches planned while it does
+    once the pads are GRIP_OPEN_ABOVE_HELD_M over where the hold held them
+    (else at the rise's top), the lift and the first spot the hand reaches planned while it does
     (grip_ahead_rise, from the way down's end), the way down to the knob
     once they are open, the carry and home planned while it comes down
     (grip_ahead_down), then the close and the lift to the set-down as from
@@ -1515,24 +1526,51 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         from_press=True,
     )
     log.info(
-        "[press_demo] GRIP STRAIGHT FROM THE PRESS: up %.0f mm, the fingers opening to the knob's width as it "
-        "rises, then down to the knob, the closed pads %.0f mm under the lid at %.3f (%.0f mm over where the press "
-        "held them)" % (1000 * GRIP_RISE_M, 1000 * GRIP_BELOW_LID_M, lid_z, 1000 * GRIP_LID_ABOVE_HELD_M)
+        "[press_demo] GRIP STRAIGHT FROM THE PRESS: up %.0f mm, the fingers opening to the knob's width once the "
+        "pads are %.1f mm over the hold, then down to the knob, the closed pads %.0f mm under the lid at %.3f (%.0f mm "
+        "over where the press held them)"
+        % (
+            1000 * GRIP_RISE_M,
+            1000 * GRIP_OPEN_ABOVE_HELD_M,
+            1000 * GRIP_BELOW_LID_M,
+            lid_z,
+            1000 * GRIP_LID_ABOVE_HELD_M,
+        )
     )
     _video(ctx, "GRIP straight from the press: up, the fingers open, down to the knob")
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_contact import PadsAbove
+
     opened = _gripper_leg(
-        ctx, PlanState(joints=None, chain=0), "grip:open", grip_open_cmd(ctx.model), world, defer_join=True
+        ctx,
+        PlanState(joints=None, chain=0),
+        "grip:open",
+        grip_open_cmd(ctx.model),
+        world,
+        defer_join=True,
+        send_with_previous_motion=True,
     )
+    # sent under the rise once the pads have left the knob, as the arm measures them; never so, at its top
+    off = PadsAbove(approach._chain(), ctx.client, held_z + GRIP_OPEN_ABOVE_HELD_M)
+    opened.send_when = off
     up = dp.compliant_line(ctx, "grip:rise", rise, quat, rp.free_line_speed(ctx), world)
     lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
     # the lookahead split over both (grip_ahead_rise, grip_ahead_down): the lift and the
     # first spot while the hand rises, the carry and home while it comes down
     res = runner.run(
-        [opened, up],
+        [up, opened],
         execute=True,
         lookahead=lambda _end: grip_ahead_rise(ctx, cfg, eyes, lower.goal_joints, quat, room),
     )
     first, rise_stood = runner.lookahead_result, runner.lookahead_stood_s
+    runner.note(
+        "grip_open",
+        above_held_mm=round(1000 * GRIP_OPEN_ABOVE_HELD_M, 1),
+        under_rise=off.at is not None,  # sent as the hand rose, the pads off the knob; else at the rise's top
+        at_s=None if off.at is None else off.at[0],
+        pads_z=None if off.at is None else off.at[1],
+        highest_mm=None if off.highest is None else round(1000 * (off.highest - held_z), 1),
+    )
     spread = runner.join_pending()  # the fingers open before the hand comes down round the knob
     if not all(r.ok for r in res) or (spread is not None and not spread.ok):
         bad = res[-1] if not all(r.ok for r in res) else spread

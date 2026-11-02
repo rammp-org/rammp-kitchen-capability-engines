@@ -72,6 +72,12 @@ class Leg:
     # every point of that motion (an open during a retreat that starts
     # clear of the box); the usual join still gates the next guarded leg.
     send_with_previous_motion: bool = False
+    # ... and, so flagged, sent only once this says so while that motion
+    # flies — polled with its stop_when (client.execute), with the driver's
+    # fraction — not when its goal is accepted: the fingers opening off the
+    # knob once the pads have left it (reach_lid_off._grip_from_hold). Never
+    # said by the motion's end, it is sent then, as any deferred leg is
+    send_when: object = field(default=None, compare=False, repr=False)
     # GRIPPER legs only: the command goes out once the arm stands still
     # (Runner.wait_still, the run's 'still' note) — a close on what the hand
     # has just come down to: in the joint impedance "arrived" is the
