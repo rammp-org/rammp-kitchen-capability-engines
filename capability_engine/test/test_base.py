@@ -343,3 +343,93 @@ def test_a_mode_it_did_not_switch_into_is_left_alone(base_env):
     time.sleep(0.2)
     assert fake.requests() == []
     assert fake.state() == AUTONOMOUS
+
+
+ENABLED = MibStatus.SYSTEM_STATE_ENABLED
+HIGH, NORMAL = MibStatus.PROFILE_HIGH, MibStatus.PROFILE_NORMAL
+
+
+def _requests(fake):
+    """fake's DriveCommand requests, each repeat (a resend before the answer) dropped."""
+    rs = fake.requests()
+    return [r for i, r in enumerate(rs) if i == 0 or r != rs[i - 1]]
+
+
+def test_request_mode_sets_the_profile(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous", profile="high")
+    assert (fake.state(), fake.profile()) == (AUTONOMOUS, HIGH)
+    assert _requests(fake) == [(DriveCommand.REQUEST_AUTONOMOUS, HIGH)]
+
+
+def test_a_new_profile_in_autonomous_goes_through_disable(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous")
+    base.request_mode("autonomous", profile="normal")
+    assert (fake.state(), fake.profile()) == (AUTONOMOUS, NORMAL)
+    assert _requests(fake) == [
+        (DriveCommand.REQUEST_AUTONOMOUS, LOW),
+        (DriveCommand.REQUEST_DISABLE, LOW),
+        (DriveCommand.REQUEST_AUTONOMOUS, NORMAL),
+    ]
+
+
+def test_manual_from_autonomous_hands_the_chair_back(base_env):
+    """Manual from AUTONOMOUS goes through DISABLE; then twists are refused, and the end of the
+    action leaves manual alone."""
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous")
+    base.request_mode("manual")
+    assert fake.state() == ENABLED
+    assert [r for r, _ in _requests(fake)] == [
+        DriveCommand.REQUEST_AUTONOMOUS,
+        DriveCommand.REQUEST_DISABLE,
+        DriveCommand.REQUEST_ENABLE,
+    ]
+    with pytest.raises(BaseError, match="manual mode"):
+        base.send_twist(0.1, 0.0)
+    sent = len(fake.requests())
+    base.end_action()
+    time.sleep(0.2)
+    assert len(fake.requests()) == sent
+    assert fake.state() == ENABLED
+
+
+def test_a_new_profile_in_manual_is_one_enable(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(ENABLED)
+    base.begin_action(FakeCtx())
+    base.request_mode("manual", profile="high")
+    assert (fake.state(), fake.profile()) == (ENABLED, HIGH)
+    assert _requests(fake) == [(DriveCommand.REQUEST_ENABLE, HIGH)]
+
+
+def test_manual_from_push_assist_goes_through_disable(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(MibStatus.SYSTEM_STATE_PUSH_ASSIST)
+    base.begin_action(FakeCtx())
+    base.request_mode("manual")
+    assert fake.state() == ENABLED
+    assert [r for r, _ in _requests(fake)] == [
+        DriveCommand.REQUEST_DISABLE,
+        DriveCommand.REQUEST_ENABLE,
+    ]
+
+
+def test_unknown_profile_raises(base_env):
+    make, _ = base_env
+    base, _ = make()
+    base.begin_action(FakeCtx())
+    with pytest.raises(BaseError, match="profile 'turbo'"):
+        base.request_mode("autonomous", profile="turbo")

@@ -371,19 +371,19 @@ first. Use `self.base` only inside `execute()`, and add `"base"` to
 `required_resources`. Anywhere else, a call raises `BaseError`.
 
 ```python
-self.base.request_mode("autonomous")  # or "shared"
+self.base.request_mode("autonomous", profile="low")  # or "shared"; "manual" to hand back
 while not arrived(self.base.odometry()):
     self.base.send_twist(0.2, 0.0)  # 0.2 m/s forward
     time.sleep(0.05)
 self.base.stop()
 ```
 
-| Method                                        | What it does                                                                                                                                                                                                                  |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `request_mode(mode)`                          | Asks the MIB for `"autonomous"` or `"shared"` and returns once its status shows it, keeping the drive profile. Switching between the two goes through IDLE. `BaseError` if it is e-stopped, faulted or does not answer in 3 s |
-| `send_twist(linear_x, angular_z, linear_y=0)` | Sends one velocity in `base_link`: forward m/s, counter-clockwise rad/s seen from above, left m/s (a differential drive ignores it). Resend it at a steady rate while you drive. Never blocks                                 |
-| `stop()`                                      | Sends a zero velocity. It works after a cancel too                                                                                                                                                                            |
-| `odometry()`                                  | The latest `nav_msgs/Odometry`: pose in `odom`, twist in `base_link`. `BaseError` if none comes or it is older than 0.5 s                                                                                                     |
+| Method                                        | What it does                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `request_mode(mode, profile=None)`            | Asks the MIB for `"autonomous"`, `"shared"` or `"manual"` (the joystick drives: hands the chair back) and returns once its status shows it. `profile` is `"low"`, `"normal"` or `"high"`; `None` keeps the one in force. Some switches go through IDLE. `BaseError` if it is e-stopped, faulted or does not answer in 3 s |
+| `send_twist(linear_x, angular_z, linear_y=0)` | Sends one velocity in `base_link`: forward m/s, counter-clockwise rad/s seen from above, left m/s (a differential drive ignores it). Resend it at a steady rate while you drive. Never blocks                                                                                                                             |
+| `stop()`                                      | Sends a zero velocity. It works after a cancel too                                                                                                                                                                                                                                                                        |
+| `odometry()`                                  | The latest `nav_msgs/Odometry`: pose in `odom`, twist in `base_link`. `BaseError` if none comes or it is older than 0.5 s                                                                                                                                                                                                 |
 
 It publishes `rammp_base_interfaces/TwistSetpoint` on `/base/setpoint/twist`
 and `DriveCommand` on `/rammp/drive_command`, and reads `/base/odom` and
@@ -392,11 +392,12 @@ that, `send_twist()` raises `BaseError`, and nothing asks for the mode again.
 That is the user's decision; ask again only for a new reason of your own.
 `send_twist()` raises `Cancelled` once the action is cancelled. When the action
 ends, however it ends, the engine sends the base a zero velocity if the action
-sent it anything. If the action switched the MIB into a mode it is still in,
-the engine then asks for IDLE. A paused action sends nothing, so call `stop()`
-before `ctx.checkpoint()`, or the base may drive on at the last velocity. In
-mock mode nothing is sent, `request_mode()` returns at once, and `odometry()`
-integrates the velocities you sent, starting at the origin.
+sent it anything. If the action switched the MIB into autonomous or shared and
+it is still there, the engine then asks for IDLE; manual is left alone. A
+paused action sends nothing, so call `stop()` before `ctx.checkpoint()`, or the
+base may drive on at the last velocity. In mock mode nothing is sent,
+`request_mode()` returns at once, and `odometry()` integrates the velocities
+you sent, starting at the origin.
 
 ### Exceptions
 

@@ -665,6 +665,9 @@ class FakeBase(Node):
     def state(self):
         return self._state
 
+    def profile(self):
+        return self._profile
+
     def ignore_commands(self):
         self._ignore = True
 
@@ -689,9 +692,11 @@ class FakeBase(Node):
                     if c.request == DriveCommand.REQUEST_AUTONOMOUS
                     else S.SYSTEM_STATE_SHARED
                 )
+                self._profile = c.profile
         elif c.request == DriveCommand.REQUEST_ENABLE:
             if s in (S.SYSTEM_STATE_IDLE, S.SYSTEM_STATE_ENABLED):
                 self._state = S.SYSTEM_STATE_ENABLED
+                self._profile = c.profile
 
     def _publish_status(self):
         if self._mib:

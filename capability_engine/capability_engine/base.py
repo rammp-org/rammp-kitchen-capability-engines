@@ -3,11 +3,13 @@
 One velocity command: a body-frame twist, sent as rammp_base_interfaces/TwistSetpoint on
 TWIST_TOPIC (best-effort, latest wins: rammp-rtps messages/control_message.hpp). One reading: the
 base's nav_msgs/Odometry on ODOM_TOPIC. The MIB drives on TwistSetpoint only in its AUTONOMOUS or
-SHARED state: request_mode() asks for one with a DriveCommand on DRIVE_COMMAND_TOPIC, resending it
-until MibStatus on MIB_STATUS_TOPIC shows it (DriveCommand.msg's protocol). After that, a twist
-raises BaseError once the MIB has left that state (a joystick touch ends AUTONOMOUS): the user's
-decision, which nothing here re-requests. If the action switched the MIB into a mode and the MIB
-is still in it, end_action() asks for DISABLE (IDLE), as that joystick touch would.
+SHARED state: request_mode() asks for one (or for ENABLED, "manual", where the joystick drives),
+and for a drive profile, with a DriveCommand on DRIVE_COMMAND_TOPIC, resending it until MibStatus
+on MIB_STATUS_TOPIC shows it (DriveCommand.msg's protocol). After that, a twist raises BaseError
+once the MIB has left that state (a joystick touch ends AUTONOMOUS): the user's decision, which
+nothing here re-requests. If the action switched the MIB into AUTONOMOUS or SHARED and the MIB is
+still in it, end_action() asks for DISABLE (IDLE), as that joystick touch would; manual is left
+alone, as the user's.
 
 Like self.arm, it lives on the engine's node and callback group and makes its ROS entities inside
 an action only: the setpoint publisher on the first send_twist() or stop(), the odometry
@@ -45,16 +47,36 @@ MIB_STATUS_TOPIC = "/rammp/mib/status"  # the MIB's rt/rammp/mib/status, every 5
 MIB_STATUS_STALE_S = 1.5  # three MibStatus periods: older than this is an error
 MODE_WAIT_S = 3.0  # request_mode(): how long the MIB has to show each requested state
 MODE_RESEND_S = 0.5  # request_mode(): resend an unanswered DriveCommand this often
-# request_mode()'s modes: (DriveCommand request, the MibStatus system_state that answers it)
+_S = MibStatus
+# request_mode()'s modes, from DriveCommand.msg: (the DriveCommand request, the MibStatus
+# system_state that answers it, the states the MIB accepts the request from, the states to DISABLE
+# out of first). AUTONOMOUS and SHARED are refused from either, and a profile change there too, so
+# those leave first; ENABLE is refused from all three of the states with their own way out.
 MODES = {
-    "autonomous": (DriveCommand.REQUEST_AUTONOMOUS, MibStatus.SYSTEM_STATE_AUTONOMOUS),
-    "shared": (DriveCommand.REQUEST_SHARED, MibStatus.SYSTEM_STATE_SHARED),
+    "autonomous": (
+        DriveCommand.REQUEST_AUTONOMOUS,
+        _S.SYSTEM_STATE_AUTONOMOUS,
+        {_S.SYSTEM_STATE_IDLE, _S.SYSTEM_STATE_ENABLED, _S.SYSTEM_STATE_PUSH_ASSIST},
+        {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED},
+    ),
+    "shared": (
+        DriveCommand.REQUEST_SHARED,
+        _S.SYSTEM_STATE_SHARED,
+        {_S.SYSTEM_STATE_IDLE, _S.SYSTEM_STATE_ENABLED, _S.SYSTEM_STATE_PUSH_ASSIST},
+        {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED},
+    ),
+    "manual": (  # the joystick drives; ENABLE from ENABLED is a profile change while driving
+        DriveCommand.REQUEST_ENABLE,
+        _S.SYSTEM_STATE_ENABLED,
+        {_S.SYSTEM_STATE_IDLE, _S.SYSTEM_STATE_ENABLED},
+        {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED, _S.SYSTEM_STATE_PUSH_ASSIST},
+    ),
 }
-# The states the MIB accepts AUTONOMOUS and SHARED from (DriveCommand.msg).
-ENTERABLE_FROM = {
-    MibStatus.SYSTEM_STATE_IDLE,
-    MibStatus.SYSTEM_STATE_ENABLED,
-    MibStatus.SYSTEM_STATE_PUSH_ASSIST,
+TWIST_STATES = {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED}  # the MIB drives on twists
+PROFILES = {
+    "low": DriveCommand.PROFILE_LOW,
+    "normal": DriveCommand.PROFILE_NORMAL,
+    "high": DriveCommand.PROFILE_HIGH,
 }
 STATE_NAMES = {
     getattr(MibStatus, n): n.removeprefix("SYSTEM_STATE_")
@@ -110,9 +132,10 @@ class BaseInterface:
             if self._pub is not None:
                 sends += [(self._pub, _setpoint(0.0, 0.0, 0.0))] * STOP_REPEATS
             status = self._latest.get(MIB_STATUS_TOPIC, (None,))[0]
-            # Only a mode this action switched the MIB into, and only while the MIB is in it.
+            # Only AUTONOMOUS or SHARED this action switched the MIB into, while it is still in it.
+            # Manual is the user's: an action that asked for it handed the chair back.
             entered = self._cmd_pub is not None and status is not None
-            if entered and self._mode == status.system_state:
+            if entered and self._mode in TWIST_STATES and self._mode == status.system_state:
                 disable = DriveCommand(
                     request=DriveCommand.REQUEST_DISABLE, profile=status.active_profile
                 )
@@ -157,6 +180,8 @@ class BaseInterface:
                         f"the MIB left {STATE_NAMES[self._mode]} for {_state_name(state)} "
                         "(a joystick touch, an e-stop or a fault): not driving"
                     )
+                if state not in TWIST_STATES:
+                    self._fail("manual mode: the joystick drives, not send_twist()")
             self._publish((float(linear_x), float(linear_y), float(angular_z)))
 
     def stop(self):
@@ -177,17 +202,22 @@ class BaseInterface:
             self._pub = self._scope.create_publisher(TwistSetpoint, TWIST_TOPIC, SETPOINT_QOS)
         self._pub.publish(_setpoint(*twist))
 
-    def request_mode(self, mode: str):
-        """Ask the MIB to drive on this action's twists: "autonomous" (the Jetson alone; a
-        joystick touch ends it) or "shared" (the Jetson and the joystick together). Returns once
-        MibStatus shows it, keeping the drive profile in force. From the other of the two it
-        first asks for DISABLE (IDLE), as the MIB accepts neither from the other. Honours a pause
-        before it starts. Raises Cancelled once the action is cancelled, BaseError outside an
-        action, for another mode, when the MIB cannot enter it now (INITIALIZING, ESTOP, ERROR),
-        or when MibStatus does not show it within MODE_WAIT_S."""
+    def request_mode(self, mode: str, profile: str | None = None):
+        """Ask the MIB for a drive mode: "autonomous" (it drives on this action's twists alone; a
+        joystick touch ends it), "shared" (on the twists and the joystick together) or "manual"
+        (the joystick alone: handing the chair back to the user). `profile` ("low", "normal",
+        "high") sets the drive profile; None keeps the one in force. Returns once MibStatus shows
+        both. When the MIB cannot take the request where it is (between autonomous and shared, a
+        new profile in either, or manual from them or from push assist), it first asks for
+        DISABLE (IDLE). Honours a pause before it starts. Raises Cancelled once the action is
+        cancelled, BaseError outside an action, for another mode or profile, when the MIB cannot
+        enter it now (INITIALIZING, ESTOP, ERROR), or when MibStatus does not show it within
+        MODE_WAIT_S."""
         if mode not in MODES:
             raise BaseError(f"request_mode: {mode!r} is not one of {sorted(MODES)}")
-        request, target = MODES[mode]
+        if profile is not None and profile not in PROFILES:
+            raise BaseError(f"request_mode: profile {profile!r} is not one of {sorted(PROFILES)}")
+        request, target, enterable, exit_first = MODES[mode]
         with self._lock:
             ctx = self._check_in_action()
         ctx.checkpoint()
@@ -200,25 +230,37 @@ class BaseInterface:
             MIB_STATUS_TOPIC, MibStatus, MODE_WAIT_S, MIB_STATUS_STALE_S, NO_STATUS_MESSAGE, ctx
         )
         state = status.system_state
-        if state != target:
-            if state in (MibStatus.SYSTEM_STATE_AUTONOMOUS, MibStatus.SYSTEM_STATE_SHARED):
+        want = status.active_profile if profile is None else PROFILES[profile]
+        if (state, status.active_profile) != (target, want):
+            if state in exit_first:
                 idle = MibStatus.SYSTEM_STATE_IDLE
-                state = self._drive(DriveCommand.REQUEST_DISABLE, status, idle, ctx)
-            if state not in ENTERABLE_FROM:
+                state = self._drive(
+                    DriveCommand.REQUEST_DISABLE, status.active_profile, idle, None, ctx
+                )
+            if state not in enterable:
                 self._fail(
                     f"request_mode {mode!r}: the MIB is in {_state_name(state)} "
                     f"({status.error_message})"
                 )
-            self._drive(request, status, target, ctx)
+            self._drive(request, want, target, want, ctx)
         with self._lock:
             self._check_in_action()
             self._mode = target
 
-    def _drive(self, request, status, target, ctx):
-        """Send DriveCommand `request` (with `status`'s profile) every MODE_RESEND_S until
-        MibStatus shows `target`, for up to MODE_WAIT_S; returns `target`."""
-        msg = DriveCommand(request=request, profile=status.active_profile)
+    def _drive(self, request, profile, target, target_profile, ctx):
+        """Send DriveCommand `request` with `profile` every MODE_RESEND_S until MibStatus shows
+        `target` (and `target_profile`, unless None), for up to MODE_WAIT_S; returns `target`."""
+        msg = DriveCommand(request=request, profile=profile)
         deadline = time.monotonic() + MODE_WAIT_S
+
+        def answered():
+            entry = self._received(MIB_STATUS_TOPIC)
+            return (
+                entry is not None
+                and entry[0].system_state == target
+                and (target_profile is None or entry[0].active_profile == target_profile)
+            )
+
         while True:
             with self._lock:
                 self._check_in_action()
@@ -228,12 +270,21 @@ class BaseInterface:
                     )
                 self._cmd_pub.publish(msg)
             wait_s = min(MODE_RESEND_S, max(0.0, deadline - time.monotonic()))
-            if wait_until(lambda: self._latest_state() == target, wait_s, ctx):
+            if wait_until(answered, wait_s, ctx):
                 return target
             if time.monotonic() >= deadline:
+                entry = self._received(MIB_STATUS_TOPIC)
+                now = (
+                    "no MibStatus"
+                    if entry is None
+                    else (
+                        f"{_state_name(entry[0].system_state)}, profile {entry[0].active_profile}"
+                    )
+                )
                 self._fail(
-                    f"the MIB did not enter {STATE_NAMES[target]} within {MODE_WAIT_S} s: "
-                    f"it is in {_state_name(self._latest_state())}"
+                    f"the MIB did not enter {STATE_NAMES[target]} (profile "
+                    f"{target_profile if target_profile is not None else 'any'}) within "
+                    f"{MODE_WAIT_S} s: it is in {now}"
                 )
 
     # -- state --------------------------------------------------------------------------------
@@ -279,11 +330,6 @@ class BaseInterface:
         with self._lock:
             self._check_in_action()
             return self._latest.get(topic)
-
-    def _latest_state(self):
-        """The latest MibStatus system_state of this action, or None."""
-        entry = self._received(MIB_STATUS_TOPIC)
-        return None if entry is None else entry[0].system_state
 
     def _check_in_action(self):
         """The running action's ctx; BaseError when none runs."""
