@@ -167,14 +167,23 @@ class BaseInterface:
         `angular_z` counter-clockwise seen from above (rad/s), `linear_y` left (m/s; a
         differential drive ignores it). One message: resend it at a steady rate while you drive,
         and stop() (or leave the action) to halt. Never blocks. Raises Cancelled once the action
-        is cancelled, BaseError outside an action or once the MIB has left the mode
-        request_mode() entered."""
+        is cancelled, BaseError outside an action, once the MIB has left the mode request_mode()
+        entered, or when its MibStatus is older than MIB_STATUS_STALE_S."""
         with self._lock:
             ctx = self._check_in_action()
             if ctx.cancelled():
                 ctx.checkpoint()  # raises the engine's Cancelled; end_action() stops the base
             if self._mode is not None:
-                state = self._latest[MIB_STATUS_TOPIC][0].system_state
+                state = self._mode  # mock mode: the MIB is where it was asked to be
+                if not self._mock:
+                    status, received = self._latest[MIB_STATUS_TOPIC]
+                    age = time.monotonic() - received
+                    if age > MIB_STATUS_STALE_S:
+                        self._fail(
+                            f"{MIB_STATUS_TOPIC} is {age:.2f} s old "
+                            f"(limit {MIB_STATUS_STALE_S} s): not driving"
+                        )
+                    state = status.system_state
                 if state != self._mode:
                     self._fail(
                         f"the MIB left {STATE_NAMES[self._mode]} for {_state_name(state)} "
@@ -225,6 +234,7 @@ class BaseInterface:
             with self._lock:
                 self._check_in_action()
                 self._node.get_logger().info(f"mock: drive mode {mode!r} not requested")
+                self._mode = target
             return
         status = self._read(
             MIB_STATUS_TOPIC, MibStatus, MODE_WAIT_S, MIB_STATUS_STALE_S, NO_STATUS_MESSAGE, ctx

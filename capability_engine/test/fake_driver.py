@@ -631,7 +631,7 @@ class FakeBase(Node):
     It also publishes MibStatus on /rammp/mib/status at MIB_STATUS_HZ (once start_mib() is called)
     and records every DriveCommand on /rammp/drive_command in .commands, answering each as
     DriveCommand.msg says the MIB does (unless ignore_commands()). set_state(s) moves it, as a
-    joystick touch or an e-stop would."""
+    joystick touch or an e-stop would; stop_mib() stops the MibStatus."""
 
     def __init__(self):
         super().__init__("fake_base")
@@ -658,6 +658,9 @@ class FakeBase(Node):
     def start_mib(self, state=MibStatus.SYSTEM_STATE_IDLE):
         self._state = state
         self._mib = True
+
+    def stop_mib(self):
+        self._mib = False
 
     def set_state(self, state):
         self._state = state

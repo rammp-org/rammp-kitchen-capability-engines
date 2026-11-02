@@ -325,6 +325,29 @@ def test_mock_request_mode_sends_nothing(base_env):
     assert counts(node) == idle
 
 
+def test_mock_manual_refuses_twists(base_env):
+    """In mock, as on the MIB, the joystick drives in manual: send_twist() raises."""
+    make, _ = base_env
+    base, _ = make(mock=True)
+    base.begin_action(FakeCtx())
+    base.request_mode("manual")
+    with pytest.raises(BaseError, match="manual mode"):
+        base.send_twist(0.1, 0.0)
+
+
+def test_stale_mib_status_stops_the_twists(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous")
+    base.send_twist(0.1, 0.0)
+    fake.stop_mib()
+    time.sleep(base_module.MIB_STATUS_STALE_S + 0.2)
+    with pytest.raises(BaseError, match="s old"):
+        base.send_twist(0.1, 0.0)
+
+
 def _raises(call):
     try:
         call()
