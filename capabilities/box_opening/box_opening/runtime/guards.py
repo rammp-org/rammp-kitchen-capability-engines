@@ -14,7 +14,9 @@ from dataclasses import dataclass, field
 from box_opening.geometry import ang_diff
 from box_opening.runtime.stamps import secs
 
-RECENT_SAMPLES = 60  # effort readings kept for a trip's report (~1.5 s of a live stream)
+# effort readings kept for a trip's report: ~1.2 s of /joint_states, which flatbot
+# publishes at 49.1-49.3 Hz (a guarded leg's full run-up spans 1.20 s)
+RECENT_SAMPLES = 60
 # The pull at the fingertip (CompensatedGuard `hang`) is judged on the mean of
 # this many distinct readings (~0.1 s of /joint_states at ~46 Hz), never on
 # one: 0.1 s into a depth press's unload, 23 ms after the recoil stopped,
