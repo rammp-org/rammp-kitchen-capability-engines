@@ -401,17 +401,17 @@ you sent, starting at the origin.
 
 ### Exceptions
 
-| Exception      | Raised when                                                                                                    |
-| -------------- | -------------------------------------------------------------------------------------------------------------- |
-| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()`, arm motions and `send_twist()` raise it             |
-| `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails |
-| `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                            |
-| `ControlTaken` | Another program took control of the arm in the middle of your action                                           |
-| `EStopped`     | You called a driver method while the arm is e-stopped                                                          |
-| `StreamClosed` | The driver closed your stream                                                                                  |
-| `ModeConflict` | You started a stream or a trajectory while another one was running                                             |
-| `StateTimeout` | A state read got no recent message                                                                             |
-| `BaseError`    | You called `self.base` outside `execute()`, or its odometry is missing or stale                                |
+| Exception      | Raised when                                                                                                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()`, arm motions and `send_twist()` raise it                                                                                         |
+| `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails                                                                             |
+| `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                                                                                                        |
+| `ControlTaken` | Another program took control of the arm in the middle of your action                                                                                                                       |
+| `EStopped`     | You called a driver method while the arm is e-stopped                                                                                                                                      |
+| `StreamClosed` | The driver closed your stream                                                                                                                                                              |
+| `ModeConflict` | You started a stream or a trajectory while another one was running                                                                                                                         |
+| `StateTimeout` | A state read got no recent message                                                                                                                                                         |
+| `BaseError`    | You called `self.base` outside `execute()`, its odometry or MIB status is missing or stale, the MIB refused or did not enter the mode you asked for, or it left that mode (`send_twist()`) |
 
 ### Terms
 
