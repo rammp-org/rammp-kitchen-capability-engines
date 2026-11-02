@@ -109,7 +109,7 @@ from box_opening.primitives.core import (
     _plan_motion,
     _push_guard_and_verify,
 )
-from box_opening.runtime import fingers
+from box_opening.runtime import abort, fingers
 from box_opening.runtime.guards import GuardSpec
 from box_opening.runtime.legs import Kind, Leg, can_merge, merge_groups
 from box_opening.runtime.retime import RetimeParams, positions_to_traj, retime_group
@@ -1730,6 +1730,7 @@ def plan_way_out(ctx, cfg, q_from, quat):
         return WayOut(pts, list(quat), home, back, "; ".join(whys) or None)
 
     for target in clear_targets(ctx, R, t):
+        abort.check(ctx.client)  # hosted by the way in: a Ctrl+C goes out between two targets
         back = math.hypot(target[0] - float(t[0]), target[1] - float(t[1]))
         pts, why = chain.straight_line(q_from, target, quat)
         if pts is None:

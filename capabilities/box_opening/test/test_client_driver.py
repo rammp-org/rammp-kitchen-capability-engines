@@ -565,6 +565,31 @@ def _abort_client(handle):
     return c, flag, sigint_handler(flag)
 
 
+def test_a_ctrl_c_while_the_lookahead_plans_stops_it_and_cancels_the_motion(monkeypatch):
+    """Mid-goal, the first Ctrl+C only sets the abort flag, and the loop that sends the cancel
+    runs only once the lookahead hosted by the motion (while_running) returns: 1.4-2.4 s of the
+    grip's rise on 10-30. The lookahead's CPU loops check the flag each pass (abort.check), so
+    it stops on the next one, nothing half-planned is handed on, and the cancel goes out."""
+    from box_opening.runtime import abort
+
+    h = _ScriptedHandle(_cresp(CancelGoal.Response.ERROR_NONE), _ended(5, -6))
+    c, _flag, handler = _abort_client(h)
+    monkeypatch.setattr(client_mod.rclpy, "spin_once", lambda node, timeout_sec=0.0: None)
+    passes = []
+
+    def lookahead():
+        for i in range(100):  # e.g. a spot's reach check a pass
+            abort.check(c)
+            passes.append(i)
+            if i == 2:
+                handler(2, None)  # the Ctrl+C, mid-loop
+        return "planned"
+
+    with pytest.raises(KeyboardInterrupt):
+        c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0, while_running=lookahead)
+    assert passes == [0, 1, 2] and h.cancels == 1
+
+
 def test_a_ctrl_c_in_the_spin_that_delivers_the_result_is_not_swallowed(monkeypatch):
     h = _ScriptedHandle(None, None)
     c, flag, handler = _abort_client(h)

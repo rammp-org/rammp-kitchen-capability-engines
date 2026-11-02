@@ -110,7 +110,7 @@ from box_opening.primitives.core import (
     band_verify,
     tcp_z,
 )
-from box_opening.runtime import fingers
+from box_opening.runtime import abort, fingers
 from box_opening.runtime.driver import GripperWait
 from box_opening.runtime.guards import in_band
 from box_opening.runtime.legs import merge_groups
@@ -324,6 +324,11 @@ def setdown_poses(ctx, drop):
         tcp_z(float(drop.xyz[2]) + float(ctx.model.lid_dims[2]) - GRIP_BELOW_LID_M),
     ]
     return quat, contact, [float(v) for v in Place.hover_for(ctx, contact)]
+
+
+def _abort_check(ctx):
+    """runtime.abort.check on this run's client: LookaheadAborted where a Ctrl+C has come."""
+    abort.check(getattr(ctx, "client", None))
 
 
 def drop_reachable(ctx, drop, q_start, seeds=()):
@@ -674,6 +679,7 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
                 continue
             n += 1
             tried.append(d)
+            _abort_check(ctx)  # each reach check is an IK walk: a Ctrl+C goes out between two
             why = (reach or drop_reachable)(ctx, d, q, seeds)
             if why is None:
                 yield d, tier, says
@@ -2189,12 +2195,15 @@ def carry_ahead(ctx, cfg, eyes, q_end, room=None, home=False):
     ):
         if len(ahead.refused) >= CARRY_TRIES:
             break
+        _abort_check(ctx)
         t = time.monotonic()
         carry, why = plan_carry(ctx, cfg, q, drop)
         after = None
         if carry is not None and home:
+            _abort_check(ctx)  # a plan cut short by the Ctrl+C is no refusal: never the next spot
             after, why = plan_home_after(ctx, cfg, carry)
             carry = carry if after is not None else None
+        _abort_check(ctx)
         if carry is not None:
             ahead.drop, ahead.tier, ahead.says, ahead.carry, ahead.home = drop, tier, says, carry, after
             ahead.plan_s = time.monotonic() - t
@@ -2259,7 +2268,9 @@ def room_for(ctx, room):
     if room is None:
         return None
     if room.thread is not None:
-        room.thread.join()
+        while room.thread.is_alive():  # judging can outlast the press (4.9-8.2 s on the robot)
+            room.thread.join(0.05)
+            _abort_check(ctx)
     return room if room.at == tuple(float(v) for v in ctx.cpose.xyz) else None
 
 
@@ -2274,6 +2285,7 @@ def grip_ahead(ctx, cfg, eyes, q_grip, quat, room=None):
     lift, why = plan_lift(ctx, cfg, q_grip, quat)
     if lift is None:
         return None, why, None
+    _abort_check(ctx)
     return lift, None, carry_ahead(ctx, cfg, eyes, lift.legs[-1].goal_joints, room=room, home=True)
 
 

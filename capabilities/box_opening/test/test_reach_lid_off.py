@@ -1481,6 +1481,36 @@ def test_the_wrist_points_of_the_held_lid_are_not_an_obstacle(ctx, monkeypatch):
     assert len(rlo.wrist_table(ctx, held, [0.0] * 7, (0.0, 0.0, 0.5))) < len(table)  # the lid's column and the box out
 
 
+def test_a_ctrl_c_stops_the_lookahead_between_two_spots_and_while_it_waits_for_the_room(ctx, monkeypatch):
+    """The grip's lookahead (carry_ahead) checks the abort flag before each spot's carry and
+    each reach check, and while it waits for the room judged during the press: a Ctrl+C there
+    goes out at once, never after the rest of the planning."""
+    import threading
+    import time
+
+    from box_opening.runtime.abort import AbortFlag, LookaheadAborted
+
+    ctx.client._abort = AbortFlag()
+    ctx.client._abort.requested = True
+    planned = []
+    monkeypatch.setattr(rlo, "plan_carry", lambda *a, **k: planned.append(1) or (None, "x"))
+    monkeypatch.setattr(rlo, "spot_candidates", lambda *a, **k: iter([(SimpleNamespace(xyz=(0.5, 0.0, 0.2)), "t", "")]))
+    monkeypatch.setattr(rlo, "spot_map", lambda *a, **k: None)
+    monkeypatch.setattr(rlo, "_table_z", lambda *a, **k: 0.2)
+    with pytest.raises(LookaheadAborted):
+        rlo.carry_ahead(ctx, load_press_demo(PINK), (None, None, None, None), [0.0] * 7)
+    assert planned == []
+    room = rlo.Room(at=tuple(float(v) for v in ctx.cpose.xyz))
+    done = threading.Event()
+    room.thread = threading.Thread(target=done.wait, args=(5.0,), daemon=True)
+    room.thread.start()
+    t0 = time.monotonic()
+    with pytest.raises(LookaheadAborted):
+        rlo.room_for(ctx, room)
+    assert time.monotonic() - t0 < 1.0  # not the room's 5 s
+    done.set()
+
+
 def test_no_carry_that_plans_puts_the_lid_back_on_the_box_and_goes_home(ctx, monkeypatch, tmp_path, capsys):
     """Every spot the hand reaches refused by the planner (CARRY_TRIES): the
     arm stands holding the lid over the box. It does not stay there: the lid

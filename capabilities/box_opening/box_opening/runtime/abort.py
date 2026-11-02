@@ -29,6 +29,22 @@ Semantics:
 import signal
 
 
+class LookaheadAborted(Exception):
+    """A Ctrl+C came while a lookahead (planning hosted inside a motion: PlannerClient.execute's
+    while_running) was computing. It stops there, with nothing half-planned handed on; execute
+    then cancels the motion in flight, as for a Ctrl+C that comes once the lookahead is done."""
+
+
+def check(client):
+    """Raise LookaheadAborted where a Ctrl+C has been asked for (`client`'s AbortFlag). A
+    lookahead's CPU loops call this on every pass, as spin_until_done does for its planner
+    calls: mid-goal the first Ctrl+C only sets the flag, and the execute loop that sends the
+    cancel does not run until the lookahead returns (1.4-2.4 s of the grip's rise, 10-30)."""
+    flag = getattr(client, "_abort", None)
+    if flag is not None and getattr(flag, "requested", False):
+        raise LookaheadAborted("a Ctrl+C while the lookahead planned")
+
+
 class AbortFlag:
     """Shared between the SIGINT handler and PlannerClient.execute."""
 
