@@ -16,8 +16,8 @@ are translated in one place.
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # REQUIRED_RMW re-exported: both containers of the arm module build on rammp-base, which selects Cyclone
+from box_opening.constants import GRIPPER_CMD_CLOSED, START_GATE_RAD
 from box_opening.constants import REQUIRED_RMW as REQUIRED_RMW
-from box_opening.constants import START_GATE_RAD
 from box_opening.geometry import ang_diff
 from box_opening.runtime.retime import check_like_executor
 from box_opening.runtime.stamps import secs, set_stamp
@@ -40,8 +40,8 @@ NOT_AUTHORIZED = -8
 # /joint_states reports the Robotiq knuckle as GripperSetpoint.position x 0.8,
 # the knuckle's URDF upper limit (the driver's gripper tier). Every gripper
 # number in this repo stays in knuckle radians; only the command on the wire
-# is normalized.
-KNUCKLE_CLOSED_RAD = 0.8
+# is normalized. One definition: constants.GRIPPER_CMD_CLOSED
+KNUCKLE_CLOSED_RAD = GRIPPER_CMD_CLOSED
 
 
 def dilate(traj, speed):

@@ -22,6 +22,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+from box_opening.constants import GRIPPER_CMD_CLOSED
 from box_opening.perception.d405 import mat_to_quat_xyzw as _mat_to_quat_xyzw
 from box_opening.perception.d405 import quat_to_mat
 
@@ -453,7 +454,7 @@ class ArmChain:
 
 
 G_MPS2 = 9.81
-GRIPPER_CLOSED_RAD = 0.8  # the 2F-85's knuckle shut: the reach-out presses with the fingers closed
+GRIPPER_CLOSED_RAD = GRIPPER_CMD_CLOSED  # the 2F-85's knuckle shut: the reach-out presses with the fingers closed
 
 
 class GravityModel:

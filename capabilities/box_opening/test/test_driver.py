@@ -166,3 +166,21 @@ def test_a_shell_not_speaking_cyclone_is_refused():
     assert rmw_refusal({}) is not None
     assert rmw_refusal({"RMW_IMPLEMENTATION": "rmw_fastrtps_cpp"}) is not None
     assert rmw_refusal({"RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"}) is None
+
+
+def test_the_closed_knuckle_has_one_value_the_urdfs_limit():
+    """Sweep grip-g-02: the closed knuckle was written 0.8 in four places
+    (constants, the driver's tier, the kinematics, the grip band's check).
+    One definition now, constants.GRIPPER_CMD_CLOSED, and it is the
+    2F-85's knuckle upper limit in flatbot's URDF."""
+    import xml.etree.ElementTree as ET
+
+    from conftest import fixture_path
+
+    from box_opening import constants
+    from box_opening.runtime import driver, kinematics
+
+    assert driver.KNUCKLE_CLOSED_RAD == kinematics.GRIPPER_CLOSED_RAD == constants.GRIPPER_CMD_CLOSED
+    root = ET.parse(fixture_path("arm_flatbot_20261021.urdf")).getroot()
+    (knuckle,) = (j for j in root.iter("joint") if j.get("name", "").endswith("robotiq_85_left_knuckle_joint"))
+    assert float(knuckle.find("limit").get("upper")) == constants.GRIPPER_CMD_CLOSED

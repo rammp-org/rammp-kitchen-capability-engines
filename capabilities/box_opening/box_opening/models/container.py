@@ -10,7 +10,7 @@ import functools
 import math
 from dataclasses import dataclass
 
-from box_opening.constants import TRANSIT_SPEED, load_yaml
+from box_opening.constants import GRIPPER_CMD_CLOSED, TRANSIT_SPEED, load_yaml
 from box_opening.geometry import euler_deg_to_quat_xyzw, yaw_about_world_z
 from box_opening.primitives.look import SWEEP_RAD
 
@@ -206,10 +206,10 @@ def load_press_demo(path):
         segmenter_classes=segmenter_classes,
         segmenter_box=segmenter_box,
     )
-    if not raw["open_box"]["grip_band"][0] < raw["open_box"]["grip_band"][1] < 0.8:
+    if not raw["open_box"]["grip_band"][0] < raw["open_box"]["grip_band"][1] < GRIPPER_CMD_CLOSED:
         raise ValueError(
-            "open_box.grip_band must be (lo, hi) with hi < 0.8 — 0.8 is the "
-            "closed-on-air feedback and can never mean 'holding the button'"
+            "open_box.grip_band must be (lo, hi) with hi < %.1f — %.1f is the closed-on-air feedback and can "
+            "never mean 'holding the button'" % (GRIPPER_CMD_CLOSED, GRIPPER_CMD_CLOSED)
         )
     if len(cfg.press_offset_xy) != 2 or any(abs(v) > 0.02 for v in cfg.press_offset_xy):
         raise ValueError(
