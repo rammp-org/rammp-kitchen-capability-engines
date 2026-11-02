@@ -24,15 +24,17 @@ def test_entry_points_registered():
 
 def test_home_arm_plans_home_in_the_bench_world(ctx):
     """The isolated recovery home knows no container pose: it plans above
-    the unseen-container band, like the mission's own recovery home."""
-    from box_opening.constants import HOME, TRANSIT_SPEED
+    the unseen-container band, like the mission's own recovery home: slow,
+    in the driver's MEDIUM joint impedance (core.as_home)."""
+    from box_opening.constants import GAINS_MEDIUM, HOME, HOME_SPEED
     from box_opening.tasks import home_arm
 
     c = ctx
     c.cpose = None
     legs = home_arm.build_legs(c)
     assert names(legs) == ["home"]
-    assert legs[0].world == "bench" and legs[0].speed == TRANSIT_SPEED
+    assert legs[0].world == "bench" and legs[0].speed == HOME_SPEED
+    assert legs[0].compliant is True and legs[0].gains == GAINS_MEDIUM
     assert legs[0].target == ("joints", list(HOME))
 
 
@@ -577,6 +579,7 @@ def test_a_stop_above_the_box_still_gets_home(ctx, tmp_path, capsys):
     import pytest
     from conftest import runner as make_runner
 
+    from box_opening.constants import GAINS_MEDIUM
     from box_opening.tasks import press_demo
 
     c = ctx
@@ -592,8 +595,8 @@ def test_a_stop_above_the_box_still_gets_home(ctx, tmp_path, capsys):
     assert press_demo.try_home(c, make_runner(c.client, tmp_path), True, "STOP: test") is True
     said = capsys.readouterr().out
     assert "arm holds" not in said and "rising over the box first" in said
-    # the rise flows into the home: ONE execution, like the mission's own retreat + home
-    assert len(c.client.executed) == 1
+    # the rise, then home: two goals, home its own in the driver's MEDIUM joint impedance (core.as_home)
+    assert len(c.client.executed) == 2 and c.client.gains_sent[-1] == GAINS_MEDIUM
     assert re.search(r"retreat:rise .*interaction_button[^\n]*\nhome ", said)
     assert c.client.joint_targets[-1] == pytest.approx(press_demo.rest_joints(cfg))
     assert c.client.live == pytest.approx(press_demo.rest_joints(cfg))  # and it got there

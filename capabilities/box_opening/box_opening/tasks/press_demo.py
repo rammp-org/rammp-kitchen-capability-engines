@@ -69,6 +69,7 @@ from box_opening.constants import (
     COMPLIANT_DEFAULT,
     GRIPPER_CMD_CLOSED,
     HOME,
+    HOME_SPEED,
     REST_TOL_RAD,
     SEARCH_SPEED,
     TRANSIT_SPEED,
@@ -95,6 +96,7 @@ from box_opening.primitives.core import (
     _full_world,
     _interaction_world,
     _plan_motion,
+    as_home,
 )
 from box_opening.primitives.look import look_joints, sweep_targets
 from box_opening.runtime import fingers
@@ -713,9 +715,9 @@ def build_home_leg(ctx, start_joints, joints=None, chain=0):
         "home",
         ("joints", list(HOME if joints is None else joints)),
         world,
-        TRANSIT_SPEED,
+        HOME_SPEED,
     )
-    return leg
+    return as_home(leg)
 
 
 def build_approach_leg(ctx, cfg, start_joints=None):
@@ -1047,8 +1049,9 @@ def _home_legs(ctx, cfg, rest, st, say=log.info):
         say("[press_demo] home refused from here (%s) — rising over the box first" % e)
     _world, rise, after = _rise_over_button(ctx, cfg, st, "retreat:rise")
     home, _ = _plan_motion(
-        ctx, after, "home", ("joints", list(HOME if rest is None else rest)), _full_world(ctx), TRANSIT_SPEED
+        ctx, after, "home", ("joints", list(HOME if rest is None else rest)), _full_world(ctx), HOME_SPEED
     )
+    as_home(home)
     return [rise, home]
 
 
@@ -1273,7 +1276,7 @@ def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
     log.info("[press_demo] HOME FIRST: the arm is %.2f rad from its rest pose — going there before anything else" % off)
     world = ctx.worlds.push_name("bench", model=ctx.model)
     try:
-        leg, _ = _plan_motion(ctx, _state(live), "home", ("joints", list(rest)), world, TRANSIT_SPEED)
+        leg = as_home(_plan_motion(ctx, _state(live), "home", ("joints", list(rest)), world, HOME_SPEED)[0])
     except RuntimeError as e:
         log.info(
             "[press_demo] not starting: the move home was refused in the bench world (%s) — the arm is "

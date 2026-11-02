@@ -67,14 +67,13 @@ after the press as before (reach_press._fly_way_in).
           the carry planned ahead flies where the spot chosen there is its
           own, else the carry to it is planned there.
   PLACE   the fingers open as the retreat back up to the carry's height
-          starts; then home, planned ahead, in the driver's POSITION control
-          (_in_position): nothing in the fingers, the wrist free of the
-          impedance's ceiling.
+          starts; then home, planned ahead, slow and in the driver's MEDIUM
+          joint impedance, as every home flies (core.plan_home).
 
 Every move up to the release flies in the driver's joint impedance under the
 run's one gains spec (depth_press.COMPLIANT_GAINS, RIGID), unguarded, merged
 where its legs meet: nothing the run reads stops the arm. The way home after
-the release flies in POSITION, as home_arm's does. Its free-air lines — the rise and
+the release flies slow under MEDIUM, as home_arm's does. Its free-air lines — the rise and
 the way back, the grip's way up, the clear, the retreat — fly at
 reach_press.free_line_speed; the legs that meet the box, the knob or the
 table at their own. It decides only what it must:
@@ -92,7 +91,6 @@ between motions, never a stop.
 import math
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -1281,8 +1279,8 @@ def plan_carry(ctx, cfg, q_from, drop):
 def plan_home_after(ctx, cfg, carry):
     """The retreat back up from the set-down and home planned from its
     end, with the lid lying at the spot (ctx.lid_at, for this plan only):
-    the legs after the release, one gains spec, or (None, why). The carry's
-    lookahead."""
+    the legs after the release, home under its own gains (MEDIUM), or
+    (None, why). The carry's lookahead."""
     from box_opening.runtime import approach
 
     world = _full_world(ctx)
@@ -1300,8 +1298,10 @@ def plan_home_after(ctx, cfg, carry):
             leg.traj = approach.on_branch_of(leg.traj, q)
             leg.goal_joints = [float(v) for v in leg.traj.points[-1].positions]
             q = leg.goal_joints
-        if leg.guard is None:
-            leg.gains = dp.COMPLIANT_GAINS  # one gains spec: the retreat and home merge
+        if leg.guard is None and getattr(leg, "compliant", None) is None:
+            # one gains spec: a step off a joint limit merges with the retreat; home itself flies its own,
+            # MEDIUM (core.as_home), a goal of its own after the retreat
+            leg.gains = dp.COMPLIANT_GAINS
     retreat = dp.compliant_line(ctx, "place:retreat", carry.retreat, carry.quat, rp.free_line_speed(ctx), world)
     return [retreat, *home], None
 
@@ -2833,28 +2833,6 @@ def _touch_says(carry):
     )
 
 
-@contextmanager
-def _in_position(ctx, runner):
-    """The legs flown inside it in the driver's POSITION control, the run's
-    own (client.compliant) put back after: the way home once the lid is on
-    the table, nothing in the fingers. Under the joint impedance the wrist
-    follows no faster than ~0.5 rad/s, its torque at the driver's clamp
-    (constants.COMPLIANT_QD_CEILING): 10:08 2026-10-30's retreat and home
-    took 4.2 s, arm_joint_6 at its 0.45 rad/s ceiling, and home_arm, in
-    POSITION, flies the same homes with the wrist at 0.9 x its limit. The
-    driver refuses a mode change while the arm moves: it is waited still
-    first (runner.wait_still)."""
-    client = ctx.client
-    was = bool(getattr(client, "compliant", False))
-    if was:
-        runner.wait_still("home in position")
-    client.compliant = False
-    try:
-        yield
-    finally:
-        client.compliant = was
-
-
 def put_lid_back(ctx, cfg, runner, why):
     """A STOP with the lid in the fingers and the arm standing (no carry to any spot plans, or
     the carry was refused before it went out): the lid goes back where it came from, the one
@@ -2940,8 +2918,7 @@ def put_lid_back(ctx, cfg, runner, why):
         if _started(res[-1]):
             rp.let_go(ctx)
         return 1
-    with _in_position(ctx, runner):
-        homed = rp._go_home(ctx, cfg, runner, "home after putting the lid back (%s)" % why)
+    homed = rp._go_home(ctx, cfg, runner, "home after putting the lid back (%s)" % why)
     if not homed:
         return 1
     runner.finish()
@@ -2994,9 +2971,9 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
     (defer_join: the pads leave the knob in the first millimetres, the
     retreat's first ones come slower than that); then `home` — the legs
     after the release planned ahead, None: home planned after the retreat
-    (`why` there was none) — in the driver's POSITION control (_in_position;
-    a mode change it refuses: in the run's own). Returns the exit code: 0
-    with the lid set down and the arm home."""
+    (`why` there was none), slow and under MEDIUM as every home flies
+    (core.plan_home). Returns the exit code: 0 with the lid set down and the
+    arm home."""
     world = _full_world(ctx)
     ok_q, pos, _stalled = ctx.client.gripper_cmd(None)  # query only: still on the knob?
     kept = not ok_q or pos is None or in_band(pos, cfg.grip_band)
@@ -3043,7 +3020,7 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
             home_flies=bool(home_legs),  # ... and flies from where this retreat ends
         )
     log.info(
-        "[press_demo] RELEASE as the retreat starts (%s), then HOME in position control%s"
+        "[press_demo] RELEASE as the retreat starts (%s), then HOME, slow, in MEDIUM impedance%s"
         % (", ".join(lg.name for lg in up), ": %s" % ", ".join(lg.name for lg in home_legs) if home_legs else "")
     )
     _video(ctx, "RELEASE as the retreat starts, then HOME")
@@ -3074,15 +3051,7 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
                 return 1
         home_legs = []  # planned from where the arm stands now
     if home_legs:
-        with _in_position(ctx, runner):
-            res = runner.run(home_legs, execute=True)
-        if not all(r.ok for r in res) and not _started(res[-1]):
-            # the driver did not take it in POSITION (a mode change it refused): as the run flies
-            log.info(
-                "[press_demo] home in position control did not start (%s) — flying it as the run does"
-                % (res[-1].detail or res[-1].outcome)
-            )
-            res = runner.run(home_legs, execute=True)
+        res = runner.run(home_legs, execute=True)
         if not all(r.ok for r in res):
             log.info(
                 "[press_demo] STOP: the way home stopped during %s (%s) — the arm holds"
@@ -3092,8 +3061,7 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
                 rp.let_go(ctx)
             return 1
     else:
-        with _in_position(ctx, runner):
-            ok = rp._go_home(ctx, cfg, runner, "home from the lid (%s)" % why if why else "")
+        ok = rp._go_home(ctx, cfg, runner, "home from the lid (%s)" % why if why else "")
         if not ok:
             return 1
     runner.finish()

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from conftest import fixture_path, flatbot_urdf
 
-from box_opening.constants import GAINS_STIFF, IMPEDANCE_KQ
+from box_opening.constants import GAINS_MEDIUM, GAINS_STIFF, IMPEDANCE_KQ
 from box_opening.models.container import ContainerModel, load_press_demo
 from box_opening.perception.d405 import quat_to_mat
 from box_opening.tasks import depth_press as dp
@@ -2173,7 +2173,8 @@ def test_a_reach_out_re_times_every_motion_on_its_own_runs_profile(ctx, monkeypa
     wrist's COMPLIANT_QD_CEILING (Runner.retime_params reads the flag at
     each re-timing: a flag kept from when the runner was built would fly
     the whole run on the position profile); a guarded one, in position,
-    keeps RetimeParams' and no ceiling."""
+    keeps RetimeParams' and no ceiling. Home flies in impedance in either
+    (core.as_home): a position run's is re-timed on the compliant profile."""
     from box_opening.constants import COMPLIANT_ACCEL, COMPLIANT_DECEL, COMPLIANT_QD_CEILING
     from box_opening.runtime import runner as runner_mod
     from box_opening.runtime.retime import RetimeParams
@@ -2201,8 +2202,9 @@ def test_a_reach_out_re_times_every_motion_on_its_own_runs_profile(ctx, monkeypa
     code, rec, _chain, _h, got = _depth_flow(ctx, monkeypatch, tmp_path, _popped, compliant=compliant)
     assert code == 0 and got["client_compliant"] is compliant and seen
     plain = RetimeParams()
-    want = (COMPLIANT_ACCEL, COMPLIANT_DECEL, COMPLIANT_QD_CEILING) if compliant else (plain.accel, plain.decel, None)
-    assert {(p.accel, p.decel, p.qd_ceiling) for p in seen} == {want}
+    soft = (COMPLIANT_ACCEL, COMPLIANT_DECEL, COMPLIANT_QD_CEILING)
+    want = {soft} if compliant else {(plain.accel, plain.decel, None), soft}
+    assert {(p.accel, p.decel, p.qd_ceiling) for p in seen} == want
     assert not ctx.client.compliant  # put back once the run is over
 
 
@@ -2394,8 +2396,9 @@ def test_a_compliant_reach_out_flies_its_way_in_as_one_execution(ctx, monkeypatc
         }
     )
     assert {lg.name: lg.speed for lg in legs} == speeds
-    # then the rise back up to where the stroke began, the clear and home: one run, one execution
-    assert rec.runs[-1] == (["depth:rise", "depth:clear", "home"], [dp.COMPLIANT_GAINS])
+    # then the rise back up to where the stroke began and the clear: one execution; home, slow under MEDIUM
+    # (core.as_home), a goal of its own after it
+    assert rec.runs[-1] == (["depth:rise", "depth:clear", "home"], [dp.COMPLIANT_GAINS, GAINS_MEDIUM])
     rise = rec.legs["depth:rise"]
     assert rise.gains == dp.COMPLIANT_GAINS and rise.speed == COMPLIANT_FREE_LINE_SPEED and rise.guard is None
     assert list(rise.traj.points[0].positions) == list(legs[-1].traj.points[-1].positions)
@@ -3464,14 +3467,15 @@ def test_on_flatbot_a_compliant_press_rises_back_up_its_bent_stroke(ctx, monkeyp
     assert min(float(_pads_at(chain, q)[2]) for q in path) >= floor - 1e-9
 
 
-def test_on_flatbot_1623s_way_home_from_the_hold_is_one_goal_the_drivers_gate_takes(ctx, monkeypatch, tmp_path):
+def test_on_flatbot_1623s_way_home_from_the_hold_is_two_goals_the_drivers_gate_takes(ctx, monkeypatch, tmp_path):
     """16:23's press on flatbot's URDF, the arm held by the button
     (_flatbot_1623_hold), its way out planned from the stroke's start
     (rp.plan_way_out) with home stood in by what the client hands the
     planner — planner_branch(start), the rest pose the short way round from
-    there — as a joint line. _way_home sends ONE goal, from the held arm to
-    the rest pose, that the runner's gates and the driver's own
-    (driver.refusal: the start, the velocity limits, the continuity) take:
+    there — as a joint line. _way_home sends two goals, the rise and the
+    clear from the held arm, then home under MEDIUM (core.as_home) to the
+    rest pose, that the runner's gates and the driver's own (driver.refusal:
+    the start, the velocity limits, the continuity) take:
     no continuous joint turning round in it, the pads never lower than the
     spring held them on the way up, and the rise flowing on into the clear
     (a 143 deg turn in joint space, inside retime's 150 deg reversal). The
@@ -3528,10 +3532,11 @@ def test_on_flatbot_1623s_way_home_from_the_hold_is_one_goal_the_drivers_gate_ta
     result, homed = rp._way_home(
         ctx, cfg, Runner(ctx.client, log_dir=tmp_path), stroke, pressed, list(held), (way, None), None, None
     )
-    assert homed and result.free and len(sent) == 1
-    (goal,) = sent
-    assert driver.refusal(goal, list(held), JOINT_VMAX) is None
-    path = np.asarray([p.positions for p in goal.points], float)
+    assert homed and result.free and len(sent) == 2
+    out, home = sent
+    assert driver.refusal(out, list(held), JOINT_VMAX) is None
+    assert driver.refusal(home, list(out.points[-1].positions), JOINT_VMAX) is None
+    path = np.asarray([p.positions for goal in sent for p in goal.points], float)
     assert np.abs(path[0] - held).max() < 1e-9
     assert all(
         abs(math.remainder(float(a) - float(b), 2 * math.pi)) < 1e-9
@@ -3544,21 +3549,22 @@ def test_on_flatbot_1623s_way_home_from_the_hold_is_one_goal_the_drivers_gate_ta
     assert min(float(pads(q)[2]) for q in path[: k0 + 1]) >= floor - 1e-9
     rows = [json.loads(line) for line in open(next(tmp_path.glob("run-*.jsonl")))]
     (flight,) = (r for r in rows if r["leg"] == "reach_way_out_flight")
-    assert flight["legs"] == ["depth:rise", "depth:clear", "home"] and flight["outcome"] == "arrived"
+    assert flight["legs"] == ["depth:rise", "depth:clear"] and flight["outcome"] == "arrived"
     assert flight["junction_speeds"][0] >= 0.04  # the rise flows into the clear: no stop between them
 
 
 def _compliant_goal_ends(ctx, monkeypatch, n, outcome=None, info=None, trajs=None):
-    """The fake client with the `n`th goal sent under COMPLIANT_GAINS (the
-    way in's is the first) scripted to end `outcome` with `info`; every
-    trajectory sent appended to `trajs`."""
+    """The fake client with the `n`th goal sent under named gains —
+    COMPLIANT_GAINS, or home's HOME_GAINS (the way in's is the first) —
+    scripted to end `outcome` with `info`; every trajectory sent appended
+    to `trajs`."""
     real = ctx.client.execute
     count = {"n": 0}
 
     def execute(traj, speed, guard=None, while_running=None, stop_when=None, gains=None):
         if trajs is not None:
             trajs.append(traj)
-        if gains == dp.COMPLIANT_GAINS:
+        if gains in (dp.COMPLIANT_GAINS, GAINS_MEDIUM):
             count["n"] += 1
             if count["n"] == n and outcome is not None:
                 ctx.client.exec_script.insert(0, (outcome, dict(info)))
@@ -3576,16 +3582,16 @@ def _after_the_hold(rec):
     return rec.runs[rec.runs.index((WAY_IN, [dp.COMPLIANT_GAINS])) + 1 :]
 
 
-def test_a_compliant_reach_out_flies_from_the_button_to_home_as_one_execution(ctx, monkeypatch, tmp_path, capsys):
+def test_a_compliant_reach_out_flies_from_the_button_to_home_in_one_run(ctx, monkeypatch, tmp_path, capsys):
     """After the hold every 10-27 run that reached the box took extra moves
     to get home: a rise, a clear, home planned over the box (refused at
     14:33 and 16:23), then a clear-margin step or a 15 cm back-off. Now the
     way home is planned while the way in flies — the clear from the
     stroke's start up and back toward the arm, home from the clear's end,
     the box already padded for a shove — and after the hold it is ONE
-    runner.run and one execution: the rise back up the stroke from where
-    the spring held the arm, the clear and home, under COMPLIANT_GAINS, no
-    planner asked after the hold."""
+    runner.run: one execution, the rise back up the stroke from where the
+    spring held the arm and the clear, under COMPLIANT_GAINS, then home,
+    slow under MEDIUM (core.as_home), no planner asked after the hold."""
     import json
 
     from box_opening.constants import COMPLIANT_FREE_LINE_SPEED
@@ -3596,12 +3602,13 @@ def test_a_compliant_reach_out_flies_from_the_button_to_home_as_one_execution(ct
     )
     assert code == 0
     assert rec.events == ["reach:look", "aim:reach-aim", *WAY_IN, *WAY_OUT]
-    assert _after_the_hold(rec) == [(WAY_OUT, [dp.COMPLIANT_GAINS])]  # one run, one execution
+    assert _after_the_hold(rec) == [(WAY_OUT, [dp.COMPLIANT_GAINS, GAINS_MEDIUM])]  # one run, home its own goal
     legs = [rec.legs[n] for n in WAY_OUT]
     for a, b in zip(legs, legs[1:], strict=False):
         assert list(b.traj.points[0].positions) == list(a.traj.points[-1].positions), (a.name, b.name)
     for lg in legs:
-        assert lg.guard is None and lg.gains == dp.COMPLIANT_GAINS and lg.world.startswith("full"), lg.name
+        assert lg.guard is None and lg.world.startswith("full"), lg.name
+    assert [lg.gains for lg in legs] == [dp.COMPLIANT_GAINS, dp.COMPLIANT_GAINS, GAINS_MEDIUM]
     assert rec.legs["depth:rise"].speed == rec.legs["depth:clear"].speed == COMPLIANT_FREE_LINE_SPEED
     # home was planned from the clear's end while the way in flew — the way in handed over, the arm still at
     # its start, nothing of the way home yet — around the box padded for the stroke's shove
@@ -3620,38 +3627,37 @@ def test_a_compliant_reach_out_flies_from_the_button_to_home_as_one_execution(ct
     assert out["planned"] and out["legs"] == WAY_OUT and out["rise_on_stroke"] and out["why"] is None
     assert out["clear_back_mm"] == pytest.approx(1000 * rp.CLEAR_BACK_M)
     assert not [r for r in rows if r["leg"] in ("depth_clear", "home_refused")]
-    # its members log the one execution's t_wall alike: the flight row says where each began, as the way in's does
+    # the first execution's members log its t_wall alike: the flight row says where each began, as the way in's does
     (flight,) = (r for r in rows if r["leg"] == "reach_way_out_flight")
-    assert flight["legs"] == WAY_OUT and flight["outcome"] == "arrived" and flight["duration_s"] > 0.0
+    assert flight["legs"] == WAY_OUT[:2] and flight["outcome"] == "arrived" and flight["duration_s"] > 0.0
     fracs = flight["seg_start_fracs"]
-    assert len(fracs) == len(WAY_OUT) and fracs[0] == 0.0 and fracs == sorted(fracs) and fracs[-1] <= 1.0
+    assert len(fracs) == 2 and fracs[0] == 0.0 and fracs == sorted(fracs) and fracs[-1] <= 1.0
     assert flight["stops"] == len([v for v in flight["junction_speeds"] if v < 0.04])
     member = [r for r in rows if r["leg"] in WAY_OUT and r["kind"] == "motion"]
-    assert [r["leg"] for r in member] == WAY_OUT and len({r["t_wall"] for r in member}) == 1
+    assert [r["leg"] for r in member] == WAY_OUT and member[0]["t_wall"] == member[1]["t_wall"]
     assert round(member[0]["t_wall"], 3) == flight["t_wall"]
     said = capsys.readouterr().out
-    assert "ONE MOTION from the button to home: depth:rise, depth:clear, home — up to the stroke's start" in said
+    assert "in 2 goals from the button to home: depth:rise, depth:clear, home — up to the stroke's start" in said
 
 
-def test_a_home_planned_a_turn_off_the_clear_is_written_on_its_branch_and_still_one_execution(
-    ctx, monkeypatch, tmp_path
-):
+def test_a_home_planned_a_turn_off_the_clear_is_written_on_its_branch(ctx, monkeypatch, tmp_path):
     """The planner is handed planner_branch(start), and its plan can start
-    a whole turn from the clear's raw end — joint_3 2 pi off here. Merged as
-    written, one goal would turn joint_3 a full revolution at the junction
-    (legs.MERGE_GAP_RAD); the plan is moved onto the clear's end
-    (approach.on_branch_of): the same motion to the arm, one execution."""
+    a whole turn from the clear's raw end — joint_3 2 pi off here. Flown as
+    written, its goal would turn joint_3 a full revolution from where the
+    clear ends (legs.MERGE_GAP_RAD); the plan is moved onto the clear's end
+    (approach.on_branch_of): the same motion to the arm, home's own goal
+    after the clear's (core.as_home)."""
     trajs = []
     _compliant_goal_ends(ctx, monkeypatch, 0, trajs=trajs)
     code, rec, _chain, home, _got = _depth_flow(
         ctx, monkeypatch, tmp_path, _popped, compliant=True, chain=_sinking_chain(), home_turns=1
     )
-    assert code == 0 and _after_the_hold(rec) == [(WAY_OUT, [dp.COMPLIANT_GAINS])]
+    assert code == 0 and _after_the_hold(rec) == [(WAY_OUT, [dp.COMPLIANT_GAINS, GAINS_MEDIUM])]
     leg = rec.legs["home"]
     clear_end = list(rec.legs["depth:clear"].traj.points[-1].positions)
     assert list(leg.traj.points[0].positions) == pytest.approx(clear_end) and home["start"] == clear_end
     assert leg.goal_joints == pytest.approx([0.0] * 7)  # the rest pose as planned, a turn back
-    q3 = [p.positions[2] for p in trajs[-1].points]  # the one goal sent: no turn of joint_3 in it
+    q3 = [p.positions[2] for p in trajs[-1].points]  # home's goal: no turn of joint_3 in it
     assert max(q3) - min(q3) < 0.5
 
 
@@ -3823,7 +3829,7 @@ def test_a_way_home_whose_home_steps_off_a_limit_first_flies_that_step_as_a_goal
 
 
 def test_a_way_home_that_stops_part_way_holds_the_arm_and_says_in_which_leg(ctx, monkeypatch, tmp_path, capsys):
-    """The one execution stopped just after it began: the arm holds where
+    """The rise's execution stopped just after it began: the arm holds where
     it stopped, near the button — no home — and the STOP names the leg in
     flight, as the run record's row for that execution does."""
     import json
@@ -3838,17 +3844,17 @@ def test_a_way_home_that_stops_part_way_holds_the_arm_and_says_in_which_leg(ctx,
     assert "did not get home" not in out  # one STOP, the arm held where it stopped
     rows = [json.loads(line) for line in open(next(tmp_path.glob("run-*.jsonl")))]
     (flight,) = (r for r in rows if r["leg"] == "reach_way_out_flight")
-    assert flight["legs"] == WAY_OUT and flight["outcome"] == "failed" and flight["seg_start_fracs"][1] > 0.01
+    assert flight["legs"] == WAY_OUT[:2] and flight["outcome"] == "failed" and flight["seg_start_fracs"][1] > 0.01
 
 
 def test_a_way_home_whose_later_goal_did_not_start_goes_home_from_where_the_arm_stands(
     ctx, monkeypatch, tmp_path, capsys
 ):
     """Home planned 10 mrad off the clear's end flies as a goal of its own
-    after the rise and the clear (legs.MERGE_GAP_RAD). The driver turned
-    that goal down: the arm stands where the clear left it, in free air off
-    the button, and home is planned from there as before the one
-    execution."""
+    after the rise and the clear (legs.MERGE_GAP_RAD; and under its own
+    gains, core.as_home). The driver turned that goal down: the arm stands
+    where the clear left it, in free air off the button, and home is
+    planned from there."""
     real = rp._home_legs
 
     def off_the_clear(ctx_, cfg_, start=None):
@@ -3865,8 +3871,8 @@ def test_a_way_home_whose_later_goal_did_not_start_goes_home_from_where_the_arm_
     )
     assert code == 0
     after = _after_the_hold(rec)
-    assert after[0] == (WAY_OUT, [dp.COMPLIANT_GAINS, dp.COMPLIANT_GAINS])  # [rise, clear], then home turned down
-    assert after[1:] == [(["home"], [None])]  # planned from where the arm stands
+    assert after[0] == (WAY_OUT, [dp.COMPLIANT_GAINS, GAINS_MEDIUM])  # [rise, clear], then home turned down
+    assert after[1:] == [(["home"], [GAINS_MEDIUM])]  # planned from where the arm stands
     out = capsys.readouterr().out
     assert "in 2 goals from the button to home: depth:rise, depth:clear, home" in out
     assert (

@@ -357,3 +357,13 @@ IMPEDANCE_NAMES[GAINS_RIGID] = GAINS_RIGID.name
 # 2026-10-28: RIGID (above), flown at zeta 0.7 from 14:21 to 16:23 (ten
 # runs); zeta 1.0 has not flown: the first attended run is its test.
 COMPLIANT_RUN_GAINS = GAINS_RIGID
+# Every way home flies slow, in the driver's MEDIUM joint impedance, whatever
+# the run's own mode: home_arm's, and a run's (its end, a stop's, the home
+# first at its start). Owner 2026-11-02, after 16:20's home (POSITION
+# control, full speed, 2.38 s) "almost hit the flat bot": the planner holds
+# no flatbot body (it starts on world_empty.yaml), so nothing keeps a home's
+# sweep off it. Slower gives the operator the time to stop it; MEDIUM (Kq
+# 80/30, a fifth of RIGID's) gives way where the arm meets something.
+# HOME_SPEED is a cruise fraction, as TRANSIT_SPEED (runtime/legs.Leg.speed).
+HOME_SPEED = 0.4
+HOME_GAINS = GAINS_MEDIUM

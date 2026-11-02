@@ -37,7 +37,7 @@ the box may be (review 2026-10-28). It stops, saying what is left.
 """
 
 from box_opening import LOGGER as log
-from box_opening.constants import HOME, TRANSIT_SPEED
+from box_opening.constants import HOME, HOME_SPEED
 from box_opening.primitives.core import (
     CLEAR_MARGIN_MAX_STEP_RAD,
     ClearMarginFree,
@@ -45,6 +45,7 @@ from box_opening.primitives.core import (
     PlanRefused,
     PlanState,
     _plan_motion,
+    as_home,
 )
 from box_opening.tasks import cli_common
 
@@ -62,13 +63,13 @@ def _plan_home(ctx, state, say=log.info):
     if ctx.worlds.table_top_z is None:
         bare = ctx.worlds.push_name("bench", model=None, tag="bare")
         try:
-            leg, _ = _plan_motion(ctx, state, "home", ("joints", list(HOME)), bare, TRANSIT_SPEED)
+            leg = as_home(_plan_motion(ctx, state, "home", ("joints", list(HOME)), bare, HOME_SPEED)[0])
         except PlanRefused as e:
             raise PlanRefused("%s — %s" % (e, REFUSED_HOME_NEXT)) from e
         return leg
     guarded = ctx.worlds.push_name("bench", model=ctx.model)
     try:
-        leg, _ = _plan_motion(ctx, state, "home", ("joints", list(HOME)), guarded, TRANSIT_SPEED)
+        leg = as_home(_plan_motion(ctx, state, "home", ("joints", list(HOME)), guarded, HOME_SPEED)[0])
         return leg
     except PlanRefused as e:
         # the planner did plan in this world: the bare one would plan the
@@ -89,7 +90,7 @@ def _plan_home(ctx, state, say=log.info):
         "without it first if the bench is not clear."
     )
     bare = ctx.worlds.push_name("bench", model=None, tag="bare")
-    leg, _ = _plan_motion(ctx, state, "home", ("joints", list(HOME)), bare, TRANSIT_SPEED)
+    leg = as_home(_plan_motion(ctx, state, "home", ("joints", list(HOME)), bare, HOME_SPEED)[0])
     return leg
 
 

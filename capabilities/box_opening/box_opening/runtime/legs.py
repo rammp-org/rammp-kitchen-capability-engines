@@ -145,6 +145,13 @@ class Leg:
     # (constants.GAINS_*), a constants.CustomGains its own kq/zeta/torque
     # limits. A position run never sends one.
     gains: object = None
+    # MOTION legs flown in a control mode of their own, whatever the client's
+    # (PlannerClient.compliant): True the driver's joint impedance under
+    # `gains`, False its POSITION control, None the client's own. A home
+    # flies in impedance from a position run too (constants.HOME_GAINS,
+    # primitives.core.plan_home); the runner changes the client's mode for
+    # the leg's execution and puts it back after (runner._mode)
+    compliant: object = None
 
 
 def _joined(a, b):
@@ -186,6 +193,8 @@ def can_merge(a, b):
         # the group's): legs under different gains fly as goals of their
         # own. None, the client's run default, is not any profile a leg names
         and a.gains == b.gains
+        # ...and one control mode: the driver flies a goal in one
+        and a.compliant == b.compliant
         # a contact ENDS its execution: never merge past one
         and a.guard is None
         and a.verify is None  # a verify CLOSES its merge group

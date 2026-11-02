@@ -16,6 +16,8 @@ from box_opening import LOGGER as log
 from box_opening.constants import (
     CONTACT_SPEED,
     GRIPPER_CMD_OPEN,
+    HOME_GAINS,
+    HOME_SPEED,
     PLANNER_LIMIT_MARGIN_RAD,
     TCP_OFFSET_M,
     TIP_TO_TOOL_M,
@@ -250,6 +252,15 @@ def _plan_motion(
         ctx.contact_pad = CONTACT_SHIFT_PAD_M
     next_chain = state.chain + 1 if invalidates else state.chain
     return leg, PlanState(joints=end, chain=next_chain)
+
+
+def as_home(leg):
+    """`leg`, planned to a home, flown as every home flies (constants
+    .HOME_SPEED, HOME_GAINS): cruising at HOME_SPEED, in the driver's joint
+    impedance under MEDIUM whatever the run's own mode (Leg.compliant;
+    runner._mode puts the client in it). Returns it."""
+    leg.speed, leg.compliant, leg.gains = HOME_SPEED, True, HOME_GAINS
+    return leg
 
 
 def _gripper_leg(

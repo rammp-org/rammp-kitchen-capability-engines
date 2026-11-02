@@ -89,6 +89,7 @@ from box_opening.constants import (
     CONTACT_SPEED,
     DRIFT_REPLAN_RAD,
     FREE_LINE_SPEED,
+    HOME_SPEED,
     IMPEDANCE_KQ,
     IMPEDANCE_NAMES,
     JOINT_VMAX,
@@ -108,6 +109,7 @@ from box_opening.primitives.core import (
     _interaction_world,
     _plan_motion,
     _push_guard_and_verify,
+    as_home,
 )
 from box_opening.runtime import abort, fingers
 from box_opening.runtime.guards import GuardSpec
@@ -1462,7 +1464,7 @@ def _home_legs(ctx, cfg, start=None):
     clear = ClearMarginFree(rest)
     near = clear.near(ctx, state.joints)
     if not near:
-        leg, _ = _plan_motion(ctx, state, "home", ("joints", rest), _full_world(ctx), TRANSIT_SPEED)
+        leg = as_home(_plan_motion(ctx, state, "home", ("joints", rest), _full_world(ctx), HOME_SPEED)[0])
         return [leg]
     log.info(
         "[press_demo] %s: too near for the planner to start from — trying plan-free steps along the joint line "
@@ -1471,7 +1473,7 @@ def _home_legs(ctx, cfg, start=None):
     last = None
     for step, at, info in clear.steps(ctx, state):
         try:
-            leg, _ = _plan_motion(ctx, at, "home", ("joints", rest), _full_world(ctx), TRANSIT_SPEED)
+            leg = as_home(_plan_motion(ctx, at, "home", ("joints", rest), _full_world(ctx), HOME_SPEED)[0])
         except RuntimeError as e:
             last = e
             continue
@@ -2075,8 +2077,8 @@ def _note_flight(runner, kind, names, last):
     logs every leg with the group's t_wall, and where each began, as a
     fraction of the execution's time, keeps them apart — with how fast it
     took each junction and how many it stopped at. Returns the runner's
-    report of it (last_retime)."""
-    retimed = runner.last_retime or {}
+    report of it (LegResult.retime; else the runner's last_retime)."""
+    retimed = getattr(last, "retime", None) or runner.last_retime or {}
     runner.note(
         kind,
         legs=list(names),
@@ -2305,8 +2307,10 @@ def _way_home(ctx, cfg, runner, stroke, held, q_held, ahead, scene_fix, locator)
         if leg.traj is not None:
             leg.traj = approach.on_branch_of(leg.traj, legs[-1].goal_joints)
             leg.goal_joints = [float(v) for v in leg.traj.points[-1].positions]
-        if leg.guard is None:
-            leg.gains = dp.COMPLIANT_GAINS  # one gains spec: the home transit merges, and flies RIGID
+        if leg.guard is None and getattr(leg, "compliant", None) is None:
+            # one gains spec: a step off a joint limit merges, and flies RIGID; home itself flies its own,
+            # MEDIUM (core.as_home), a goal of its own after the clear
+            leg.gains = dp.COMPLIANT_GAINS
         legs.append(leg)
     names = [lg.name for lg in legs]
     groups = merge_groups(legs)
@@ -2325,10 +2329,10 @@ def _way_home(ctx, cfg, runner, stroke, held, q_held, ahead, scene_fix, locator)
     )
     res = runner.run(legs, execute=True)
     last = res[-1]
-    if len(res) == 1 and last.flown_traj is not None:
-        # the first execution, the rise in it, re-timed and sent: the
-        # runner's report is its own (a later goal's would replace it)
-        _note_flight(runner, "reach_way_out_flight", [lg.name for lg in groups[0]], last)
+    if res[0].flown_traj is not None:
+        # the first execution, the rise in it, re-timed and sent: its own
+        # report (LegResult.retime), home's goal after it its own
+        _note_flight(runner, "reach_way_out_flight", [lg.name for lg in groups[0]], res[0])
     if all(r.ok for r in res):
         return held, True
     started = last.flown_traj is not None and bool(last.progress)

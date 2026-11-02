@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from collections import namedtuple
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -116,6 +117,9 @@ class LegResult:
     # profile, a re-timed line): what `progress` is a fraction of, so the
     # recoil reverses the path flown, in its own time base
     flown_traj: object = field(default=None, compare=False, repr=False)
+    # the runner's re-timing report (last_retime) as this execution went
+    # out: its own where it was re-timed, kept past a later goal's
+    retime: dict = field(default=None, compare=False, repr=False)
 
 
 def _hold(seconds):
@@ -524,11 +528,14 @@ class Runner:
         # goes out (_keep_flight, _note_settle)
         self._flights = 0
         self._settling = None
+        # the control mode (client.compliant) of the last execution sent: a
+        # leg flown in a mode of its own waits the arm still first (_mode)
+        self._flown_mode = None
         # the newest flight file's write, on a thread of its own (_keep_flight):
         # joined before the next goal goes out, so no write ever runs under a motion
         self._flight_write = None
 
-    def retime_params(self):
+    def retime_params(self, leg=None):
         """What this runner re-times a motion with: every group it profiles
         (a guarded tail rides its approach's), a free-air line's profile and
         the recoil, in flight and in the preview alike, so what the preview
@@ -543,8 +550,10 @@ class Runner:
         flown on its own under a contact guard keeps its dilated or warped
         timing, tuned to the contact (no compliant leg carries a guard). A
         guarded run, which flies in position, keeps self.retime as it is,
-        as every other position run does."""
-        if not getattr(self.client, "compliant", False):
+        as every other position run does. A `leg` flown in a mode of its own
+        (Leg.compliant: a home, core.as_home) is re-timed in that mode."""
+        own = None if leg is None else getattr(leg, "compliant", None)
+        if not (getattr(self.client, "compliant", False) if own is None else own):
             return self.retime
         return replace(
             self.retime,
@@ -580,7 +589,7 @@ class Runner:
                         [g.traj for g in group],
                         [g.speed for g in group],
                         JOINT_VMAX,
-                        replace(self.retime_params(), time_scale=self.time_scale),
+                        replace(self.retime_params(group[0]), time_scale=self.time_scale),
                     )
                     per = info["duration_s"] / len(group)
                     for g in group:
@@ -595,7 +604,7 @@ class Runner:
                 flies = "%.2f" % flown[id(leg)]
             else:
                 line = (
-                    line_profile(leg, self.retime_params(), self.time_scale)
+                    line_profile(leg, self.retime_params(leg), self.time_scale)
                     if leg.kind is Kind.MOTION and leg.traj is not None and _free_air_line(leg)
                     else None
                 )
@@ -865,7 +874,8 @@ class Runner:
                             self._sent_early.add(id(_leg))
                         return _inner() if _inner is not None else None
 
-                res = self._run_motion(group, while_running=hook)
+                with self._mode(group[0]):
+                    res = self._run_motion(group, while_running=hook)
                 if group is host and res.lookahead is not None:
                     self.lookahead_result = res.lookahead
                     self.lookahead_stood_s = res.stood_s
@@ -992,6 +1002,28 @@ class Runner:
         return res
 
     # -- helpers -------------------------------------------------------------
+    @contextmanager
+    def _mode(self, lead):
+        """The client in `lead`'s own control mode (Leg.compliant) for one
+        execution, the client's own put back after; a leg with none flies the
+        client's. The driver refuses a mode change while the arm moves, so an
+        execution in a mode other than the last one sent waits the arm still
+        first (wait_still): a home in impedance after a position run's last
+        leg, a position leg after one."""
+        was = bool(getattr(self.client, "compliant", False))
+        want = getattr(lead, "compliant", None)
+        mode = was if want is None else bool(want)
+        if self._flown_mode is not None and mode != self._flown_mode:
+            self.wait_still("%s in %s" % (lead.name, "impedance" if mode else "position"))
+        if mode != was:
+            self.client.compliant = mode
+        try:
+            yield
+        finally:
+            self._flown_mode = mode
+            if mode != was:
+                self.client.compliant = was
+
     def _drifted(self, group):
         if any(g.traj is None for g in group):
             return True  # lazy: planned here, from live, for the first time
@@ -1371,6 +1403,7 @@ class Runner:
             trip=guard.trip_report() if guard is not None else None,
             lookahead=info.get("while_running"),
             flown_traj=traj,
+            retime=self.last_retime,
             flight=self._keep_flight([g.name for g in group], outcome, flew, info, traj, arrived),
             stood_s=None if stood is None else round(stood, 4),
             **flew,
@@ -1626,7 +1659,7 @@ class Runner:
             "world": leg.world,
             "speed": leg.speed,
             # the trajectories are not log material (and asdict deep-copies them)
-            **asdict(replace(res, lookahead=None, flown_traj=None)),
+            **asdict(replace(res, lookahead=None, flown_traj=None, retime=None)),
         }
         row.pop("leg_name", None)
         row.pop("lookahead", None)

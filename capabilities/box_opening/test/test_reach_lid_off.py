@@ -14,6 +14,7 @@ import pytest
 import test_reach_press as trp
 from conftest import fixture_path
 
+from box_opening.constants import GAINS_MEDIUM, HOME_SPEED
 from box_opening.models.container import ContainerModel, ContainerPose, load_press_demo
 from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_lid_off as rlo
@@ -239,7 +240,7 @@ GRIP = ["grip:open", "reach:re-aim", "reach:slide-in", "depth:turn", "grip:appro
 CLOSE = ["grip:close", "lid:lift", "lid:clear"]
 CARRY = ["lid:carry", "place:down", "place:touch"]
 HOME = ["place:open", "place:retreat", "home"]
-# ... flown as two: the release riding the retreat, then home in POSITION (_in_position)
+# ... flown as two: the release riding the retreat, then home, slow, under MEDIUM (core.as_home)
 RELEASED, HOMED = ["place:open", "place:retreat"], ["home"]
 
 
@@ -388,10 +389,11 @@ def test_a_knob_up_after_the_press_is_gripped_lifted_carried_set_down_and_the_ar
     runs = _executions(rec)
     assert [names for names, _g in runs] == [["reach:look"], WAY_IN, BACK, GRIP, CLOSE + CARRY, RELEASED, HOMED]
     # one goal each, every one under the run's one gains spec: the lift to the set-down one execution; the
-    # release rides the retreat (sent, not waited on), and home after it flies in POSITION
-    for names, gains in runs[1:]:
+    # release rides the retreat (sent, not waited on); home after it flies under MEDIUM, as every home does
+    for names, gains in runs[1:-1]:
         assert gains == [dp.COMPLIANT_GAINS], names
-    assert modes == [True] * 6 + [False] and rec.legs["place:open"].defer_join
+    assert runs[-1] == (HOMED, [GAINS_MEDIUM]) and rec.legs["home"].speed == HOME_SPEED
+    assert modes == [True] * 7 and rec.legs["place:open"].defer_join
     assert all(lg.guard is None for lg in rec.legs.values() if lg.kind.value == "motion")
     # the carry and home after the set-down planned once each, while the grip's way down flew (the record then
     # ended with its legs); home before that from the look pose while the way back flew, for a stop there
@@ -440,7 +442,8 @@ def test_where_nothing_was_planned_ahead_the_lift_flies_alone_and_the_spot_is_lo
     down to the knob (here: none looked for): as before, the close, the
     lift and the clear, then the lid's one stop, the spot look; the carry
     and the set-down; the release, the retreat and home — six executions
-    after the look's, every one RIGID and unguarded."""
+    after the look's, every one unguarded and RIGID but home's, slow under
+    MEDIUM (core.as_home)."""
     code, rec, chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], one_motion=False)
     assert code == 0
     assert rec.events == [
@@ -458,9 +461,10 @@ def test_where_nothing_was_planned_ahead_the_lift_flies_alone_and_the_spot_is_lo
     ]
     runs = _executions(rec)
     assert [names for names, _g in runs] == [["reach:look"], WAY_IN, BACK, GRIP, CLOSE, CARRY, RELEASED, HOMED]
-    # one goal each, every one under the run's one gains spec
-    for names, gains in runs[1:]:
+    # one goal each, every one under the run's one gains spec, home under its own
+    for names, gains in runs[1:-1]:
         assert gains == [dp.COMPLIANT_GAINS], names
+    assert runs[-1] == (HOMED, [GAINS_MEDIUM])
     assert all(lg.guard is None for lg in rec.legs.values() if lg.kind.value == "motion")
     # the carry planned while the lift and the clear flew (carry_ahead), before the spot look, and flown: the spot
     # chosen with the lid lifted is its own; home while the carry flew
@@ -1001,7 +1005,8 @@ def test_the_full_runs_free_air_lines_fly_at_the_compliant_speed_and_only_under_
     and every execution carrying one is re-timed under the wrist's
     COMPLIANT_QD_CEILING and meets its legs at COMPLIANT_JUNCTION_SPEED
     (Runner.retime_params). The legs that meet the button, the knob or the
-    table keep their own speeds, the planned ones TRANSIT_SPEED. Outside
+    table keep their own speeds, the planned ones TRANSIT_SPEED, home
+    HOME_SPEED (constants: every home flies slow, under MEDIUM). Outside
     the run, the client as press_demo built it, free_line_speed is a
     guarded run's FREE_LINE_SPEED."""
     from box_opening.constants import (
@@ -1009,6 +1014,7 @@ def test_the_full_runs_free_air_lines_fly_at_the_compliant_speed_and_only_under_
         COMPLIANT_JUNCTION_SPEED,
         COMPLIANT_QD_CEILING,
         FREE_LINE_SPEED,
+        HOME_SPEED,
         TRANSIT_SPEED,
     )
     from box_opening.runtime import runner as runner_mod
@@ -1068,7 +1074,7 @@ def test_the_full_runs_free_air_lines_fly_at_the_compliant_speed_and_only_under_
             "place:touch": rlo.PLACE_TOUCH_SPEED,
             "reach:look": TRANSIT_SPEED,
             "lid:carry": TRANSIT_SPEED,
-            "home": TRANSIT_SPEED,
+            "home": HOME_SPEED,
         }
     )
     assert [(n, s) for n, s in flown if s != want[n]] == []
@@ -2200,17 +2206,17 @@ def test_the_fingers_close_on_the_knob_once_the_arm_stands_still(ctx, monkeypatc
     off its end. The close now goes out once the arm stands still
     (Leg.send_when_still): after the way down and the open that rode it,
     before the fingers move, noted 'still' before grip:close. Nothing else
-    waits so."""
+    waits so: home flies in the run's own mode, impedance (core.as_home),
+    so no mode change waits for it."""
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
     assert code == 0
     assert [name for name, lg in rec.legs.items() if lg.send_when_still] == ["grip:close"]
-    # after the look, the way in, the way back and the way down to the knob; and before home in POSITION
-    assert ctx.client.stills == [4, 6]
+    # after the look, the way in, the way back and the way down to the knob
+    assert ctx.client.stills == [4]
     legs = [r["leg"] for r in rows]
     stills = [i for i, name in enumerate(legs) if name == "still"]
-    assert [rows[i]["before"] for i in stills] == ["grip:close", "home in position"]
+    assert [rows[i]["before"] for i in stills] == ["grip:close"]
     assert legs.index("grip:down") < legs.index("grip:open") < stills[0] < legs.index("grip:close")
-    assert legs.index("place:retreat") < stills[1] < legs.index("home")
 
 
 # ---- flatbot's URDF: the five boxes of the owner's brief ------------------------
