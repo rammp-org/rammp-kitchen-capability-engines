@@ -164,16 +164,21 @@ def main():
     if po is not None:
         frames += [(q, False, swing_end_deg, f"let go -- push-open: {po['how']}")] * HOLD_FRAMES
         for leg in po["legs"]:
-            pushing = leg["label"] == "push open"
-            start_xy = w.tool(q)[:2] - w.df.hinge[:2] if pushing else None
             for nq in _through(q, leg["joints"]):
-                deg = swing_end_deg
-                if pushing:  # the door turns with the point the hand pushes
-                    now = w.tool(nq)[:2] - w.df.hinge[:2]
-                    turn = np.degrees(np.arctan2(start_xy[0] * now[1] - start_xy[1] * now[0], start_xy @ now))
-                    deg = swing_end_deg + turn * w.sign
-                frames.append((nq, False, deg, f"push-open: {leg['label']} (cuRobo's plan)"))
+                frames.append((nq, False, swing_end_deg, f"push-open: {leg['label']} (cuRobo's plan)"))
             q = frames[-1][0]
+        # the push: a straight line, the hand held -- IK'd in the sim 1 cm at a time, as move_cartesian does
+        start = w.tool(q)
+        start_xy = start[:2] - w.df.hinge[:2]
+        to = np.asarray(po["push"]["to"], float)
+        n = max(1, int(np.ceil(np.linalg.norm(to - start) / 0.01)))
+        for k in range(1, n + 1):
+            nq, _ = sim.solve_ik(w.scene, w.rb, start + (to - start) * k / n, po["push"]["quat"], q)
+            now = w.tool(nq)[:2] - w.df.hinge[:2]  # the door turns with the point the hand pushes
+            turn = np.degrees(np.arctan2(start_xy[0] * now[1] - start_xy[1] * now[0], start_xy @ now))
+            for fq in _blend(q, nq):
+                frames.append((fq, False, swing_end_deg + turn * w.sign, "push-open: push (straight, the hand held)"))
+            q = nq
     frames += [frames[-1]] * HOLD_FRAMES
 
     out = args.out or args.run_dir / "plan.mp4"

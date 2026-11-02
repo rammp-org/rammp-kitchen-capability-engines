@@ -18,12 +18,13 @@ go and push it further open -- one run.
    handle at the end.
 
 4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper,
-   then four cuRobo moves, the hand pointing down (PUSH_TILT_TRY_DEG off vertical, the least that plans): up
-   (the fingertips PUSH_CLEAR_TRY_M over the door top, the most that plans) and back (PUSH_BACK_M) from the handle;
-   over to above the inside of the door; down until the tool is at the door top, PUSH_BEHIND_DOOR_M behind its inner
-   face at the handle; push PUSH_DIST_M square to the door, opening it further. cuRobo is trusted with all of it
-   (11-02) -- not sim-gated, and its world has no door: it is asked for the whole chain (plan_to_pose, nothing moves)
-   from the planned swing's end before the grasp, and again from the real one before letting go.
+   then three cuRobo moves, the hand pointing down (PUSH_TILT_TRY_DEG off vertical, the least that plans; of the two
+   such hands the one nearest the grip, no wrist flip): up (the fingertips PUSH_CLEAR_TRY_M over the door top, the
+   most that plans) and back (PUSH_BACK_M) from the handle; over to above the inside of the door; down until the tool
+   is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the handle. Then push PUSH_DIST_M square to the
+   door, opening it further. cuRobo is trusted with its moves (11-02) -- not sim-gated, and its world has no door:
+   it is asked for them (plan_to_pose, nothing moves) from the planned swing's end before the grasp, and again from
+   the real one before letting go. The push is a straight line, the hand held as it is (move_cartesian), not cuRobo.
 
 `--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
 handle, go toward the base to clear the door's free edge, joint move to `PARK_JOINTS` (constants).
@@ -98,7 +99,8 @@ PUSH_BACK_M = 0.05  # ... and this far back from the handle, along the open door
 PUSH_BEHIND_DOOR_M = 0.05  # (~2 in) then the tool goes down this far behind the door's inner face, at the handle
 PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing down: the fingertips reach
 #   FINGERTIP_PAST_TOOL (6 cm) below the top edge
-PUSH_DIST_M = 0.12  # then push this far, square to the door (its outward normal: further open)
+PUSH_DIST_M = 0.06  # then push this far, square to the door (its outward normal: further open); 0.12 pushed it
+#   further than needed (11-02)
 PUSH_TILT_TRY_DEG = (0, 30, 45, 60)  # the hand points down tilted this far from vertical, leaning away from the arm
 #   base, the least that plans: straight down over the inside of the door the wrist runs out (11-02: J6 -104..-114,
 #   at its guard, and IK 1-2 cm off on the way there)
@@ -157,7 +159,11 @@ def _push_poses(door, ee, clear_m, tilt_deg):
     z = np.cos(t) * np.array([0.0, 0.0, -1.0]) + np.sin(t) * away
     y = out - z * float(out @ z)
     y /= np.linalg.norm(y)
-    down = R.from_matrix(np.column_stack([np.cross(y, z), y, z])).as_quat()
+    # either finger pad can push: of the two hands pointing down (tool y along +-out), the one nearest the hand now,
+    # so cuRobo doesn't spin the wrist half a turn on the way up (11-02: it flipped the hand)
+    downs = [R.from_matrix(np.column_stack([np.cross(s_ * y, z), s_ * y, z])) for s_ in (1.0, -1.0)]
+    now = R.from_quat(np.asarray(ee[3:7], dtype=float))
+    down = min(downs, key=lambda r: (r * now.inv()).magnitude()).as_quat()
     return SimpleNamespace(
         df=df,
         deg=deg,
@@ -174,12 +180,11 @@ def _push_poses(door, ee, clear_m, tilt_deg):
 
 def _push_legs(P):
     """The push-open's cuRobo moves: (label, tool position, orientation hold) -- turning down on the first, then the
-    hand held as it is."""
+    hand held as it is. The push itself is not one: it is a straight line, the hand held (push_open)."""
     return (
         ("up and back", P.up_back, HOLD_NONE),
         ("over the door", P.above, HOLD_FIXED),
         ("down inside the door", P.inside, HOLD_FIXED),
-        ("push open", P.pushed, HOLD_FIXED),
     )
 
 
@@ -263,7 +268,11 @@ def _save_plan(ai, run_dir, push):
         P, plans, why = _plan_push_open(ai, door, list(plan["wps"][-1]), plan["arc"][-1])
         if plans is not None:
             say(f"  cuRobo planned the push-open: {P.how}")
-            out["push_open"] = dict(how=P.how, legs=[dict(label=lb, joints=j(pl.q)) for lb, pl in plans])
+            out["push_open"] = dict(
+                how=P.how,
+                legs=[dict(label=lb, joints=j(pl.q)) for lb, pl in plans],
+                push=dict(to=j(P.pushed), quat=j(P.down)),  # the straight push, from where the last leg ends
+            )
         else:
             say(f"  {why}")
     (run_dir / "plan.json").write_text(json.dumps(out))
@@ -501,12 +510,22 @@ def push_open(ai, execute, on_release=None):
     if on_release is not None:
         on_release()
     for label, pos, hold in _push_legs(P):
-        speed = rammp_arm.GO_TO_SPEED_SCALE * (PUSH_OPEN_SPEED_SCALE if label == "push open" else 1.0)
         say(f"push-open: {label} (cuRobo) ...")
-        if not ai.go_to_ee_pose(pos, P.down, f"push-open: {label}", speed, orientation_hold=hold, **go_to):
+        if not ai.go_to_ee_pose(pos, P.down, f"push-open: {label}", orientation_hold=hold, **go_to):
             raise Refused(
                 f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
             )
+    # the push: a straight line square to the door, the hand held exactly as it is -- not cuRobo, whose path needn't be
+    # straight (11-02: it pushed the wrong way)
+    say(f"push-open: push {PUSH_DIST_M * 100:.0f} cm along {np.round(P.out[:2], 3)} (straight, the hand held) ...")
+    here = ai.get_state()["ee_pos"]
+    ok = ai.move_cartesian(
+        [(list(P.pushed), list(here[3:7]))],
+        impedance=gains,
+        speed_scale=rammp_arm.contact_speed_scale() * PUSH_OPEN_SPEED_SCALE,
+    )
+    if not ok:
+        raise Refused(f"push-open: the push stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is.")
     # the door turned with the point the hand pushed: its new opening for the close
     h, a0 = P.df.hinge[:2], P.inside[:2] - P.df.hinge[:2]
     a1 = np.asarray(ai.get_state()["ee_pos"][:2]) - h
