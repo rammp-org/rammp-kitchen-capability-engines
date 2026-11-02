@@ -1989,6 +1989,7 @@ def test_each_execution_keeps_what_it_sent_and_what_flew_beside_the_record_once_
     r = runner(c, tmp_path)
     r.run([leg("reach:look", Q0, Q1, chain=0)], execute=True)
     r.run([leg("b", Q1, Q2, chain=0), leg("c", Q2, [0.3] * 7, chain=0)], execute=True)
+    r.wait_flights()  # the last flight's file, written in the background
     assert c.during == [[], ["01-reach_look.json"]]  # nothing of a motion is written while it flies
     record = next(tmp_path.glob("run-*.jsonl"))
     folder = record.with_suffix(".flights")
@@ -2048,6 +2049,7 @@ def test_a_flight_keeps_the_knuckle_beside_the_joints_and_how_long_the_arm_stood
     c = _FliesHolding(tmp_path)
     r = runner(c, tmp_path)
     r.run([leg("lift:rise", Q0, Q1, chain=0)], execute=True)
+    r.wait_flights()  # written in the background
     doc = json.loads(next(tmp_path.glob("run-*.flights/*.json")).read_text())
     assert doc["feedback"]["gripper"] == [None] + [pytest.approx(0.79 - 0.001 * k, abs=1e-4) for k in range(1, 11)]
     assert doc["stood_s"] == pytest.approx(0.4, abs=0.05) and doc["lookahead_s"] == 0.7
@@ -2105,9 +2107,43 @@ def test_a_flight_from_feedback_without_the_knuckle_keeps_none_for_it(tmp_path):
     c = _Flies(tmp_path)
     r = runner(c, tmp_path)
     r.run([leg("reach:look", Q0, Q1, chain=0)], execute=True)
+    r.wait_flights()  # written in the background
     doc = json.loads(next(tmp_path.glob("run-*.flights/*.json")).read_text())
     assert doc["feedback"]["gripper"] == [None] * 11 and doc["lookahead_s"] is None
     assert doc["stood_s"] >= 0.0
+
+
+def test_a_flight_file_is_written_off_the_way_between_motions_and_before_the_next_goal(tmp_path, monkeypatch):
+    """Sweep motion_timing-g-04: the side file's write (2.7 ms an execution)
+    goes to a thread from a copy of the execution's info; the next goal goes
+    out only once it is done, so no write runs under a motion, and the
+    files keep their order."""
+    import json
+    import threading
+
+    from box_opening.runtime import runner as runner_mod
+
+    gate, real = threading.Event(), runner_mod._flight_doc
+    written = []
+
+    def slow(*a, **k):
+        assert gate.wait(5.0)
+        written.append(a[0])
+        return real(*a, **k)
+
+    monkeypatch.setattr(runner_mod, "_flight_doc", slow)
+    c = _Flies(tmp_path)
+    r = runner(c, tmp_path)
+    res = r.run([leg("a", Q0, Q1, chain=0)], execute=True)
+    folder = next(tmp_path.glob("run-*.flights"))
+    assert res[-1].flight.endswith("01-a.json") and not list(folder.iterdir())  # not written yet: the run went on
+    timer = threading.Timer(0.2, gate.set)
+    timer.start()
+    r.run([leg("b", Q1, Q2, chain=0)], execute=True)  # its goal waits for the first file
+    assert c.during[-1] == ["01-a.json"]
+    r.finish()
+    assert written == [1, 2] and sorted(p.name for p in folder.iterdir()) == ["01-a.json", "02-b.json"]
+    assert json.loads((folder / "02-b.json").read_text())["legs"] == ["b"]
 
 
 def test_an_execution_the_client_never_sent_keeps_no_flight_and_no_settle(tmp_path, monkeypatch):
@@ -2197,6 +2233,7 @@ def test_an_execution_a_ctrl_c_stopped_keeps_its_flight_and_the_ctrl_c_goes_on(t
         else:
             c.exec_script = [("touch", {"message": "contact", "progress": 0.8, "torque_peak": 7.1})]
             r.run([_press_leg(chain=0), leg("retreat", Q1, Q2, chain=1, world="interaction_button")], execute=True)
+    r.wait_flights()
     folder = next(tmp_path.glob("run-*.flights"))
     first = "01-a.json" if stopped == "b" else "01-press_down.json"
     assert sorted(p.name for p in folder.iterdir()) == [first, "02-%s.json" % stopped] and r._flights == 2
@@ -2213,6 +2250,7 @@ def test_a_ctrl_c_before_anything_went_out_keeps_no_flight(tmp_path):
     r.run([leg("a", Q0, Q1)], execute=True)
     with pytest.raises(KeyboardInterrupt):
         r.run([leg("b", Q1, Q2)], execute=True)
+    r.wait_flights()
     folder = next(tmp_path.glob("run-*.flights"))
     assert sorted(p.name for p in folder.iterdir()) == ["01-a.json"] and r._flights == 1
 

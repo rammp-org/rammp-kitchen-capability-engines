@@ -9,6 +9,7 @@ never auto-continues past a cancel.
 import json
 import math
 import re
+import threading
 import time
 from collections import namedtuple
 from dataclasses import asdict, dataclass, field, replace
@@ -523,6 +524,9 @@ class Runner:
         # goes out (_keep_flight, _note_settle)
         self._flights = 0
         self._settling = None
+        # the newest flight file's write, on a thread of its own (_keep_flight):
+        # joined before the next goal goes out, so no write ever runs under a motion
+        self._flight_write = None
 
     def retime_params(self):
         """What this runner re-times a motion with: every group it profiles
@@ -950,8 +954,19 @@ class Runner:
         return self._join_pending()
 
     def finish(self):
-        """Collect any pending gripper command (mission end / exit)."""
+        """Collect any pending gripper command (mission end / exit), and the
+        last flight file's write."""
+        self.wait_flights()
         return self.join_pending()
+
+    def wait_flights(self, timeout_s=5.0):
+        """Let the flight file still being written (_keep_flight) finish, for
+        at most `timeout_s`."""
+        t = self._flight_write
+        if t is not None:
+            t.join(timeout_s)
+            if not t.is_alive():
+                self._flight_write = None
 
     def wait_still(self, before):
         """Wait, the arm at rest, until it stands still (client.wait_still),
@@ -1039,6 +1054,7 @@ class Runner:
             def hook(_end=list(reflex.goal_joints)):  # noqa: B006 - binds the goal now
                 return self._replan_group(next_group, next_chain + 1, start=_end)
 
+        self.wait_flights()  # the last flight's file written before this goal goes out
         self._note_settle()  # the last arrival's, its window cut by this goal
         t0 = time.monotonic()
         try:
@@ -1302,6 +1318,7 @@ class Runner:
         # (legs.can_merge merges only legs under the same one), sent when it
         # names a profile; with None the client flies its run default
         gains = group[0].gains
+        self.wait_flights()  # the last flight's file written before this goal goes out
         self._note_settle()  # the last arrival's, its window cut by this goal
         t0 = time.monotonic()
         try:
@@ -1385,7 +1402,7 @@ class Runner:
             "end_err_joint": worst,
         }
 
-    def _keep_flight(self, names, outcome, flew, info, traj, arrived):
+    def _keep_flight(self, names, outcome, flew, info, traj, arrived, background=True):
         """After an execution of the legs `names` (`traj`, what flew, as
         _how_it_flew's `flew`) the client returned at `arrived`
         (time.monotonic(), time.time()) — a Ctrl+C's, raised by then
@@ -1397,7 +1414,11 @@ class Runner:
         flies. Returns the side file's path from the record's folder
         (LegResult.flight); None where nothing went to the driver (the
         client's own gates refused it: no info["sent_at"]) or nothing could
-        be written. A measurement only: nothing here may cost the run."""
+        be written. A measurement only: nothing here may cost the run. Its
+        doc is built and written on a thread (`background`: 2.7 ms an
+        execution, 23 ms a full run, off the way between motions), from a
+        copy of what the execution's info holds; wait_flights joins it, and
+        the next goal goes out only once it is done."""
         if "sent_at" not in info:
             return None
         self._flights += 1
@@ -1417,14 +1438,28 @@ class Runner:
         try:
             path = self._record().with_suffix(".flights") / ("%02d-%s.json" % (seq, re.sub(r"[^\w.-]+", "_", names[0])))
             path.parent.mkdir(exist_ok=True)
-            doc = _flight_doc(
-                seq, names, outcome, flew, info, traj, arrived, getattr(self.client, "FEEDBACK_EVERY", None)
-            )
-            path.write_text(json.dumps(doc))
-            return str(path.relative_to(self._log_dir))
         except Exception as e:  # noqa: BLE001 - a side file must never cost the run
             log.info("[runner] the flight of %s is not kept (%s)" % (names[0], e))
             return None
+        # what the doc reads, copied now: the execution's info is not to be read once this returns
+        snap = {k: info.get(k) for k in ("sent_traj", "sent_at", "while_running_s")}
+        snap["feedback_q"] = list(info.get("feedback_q") or ())
+        names, flew = list(names), dict(flew)
+        every = getattr(self.client, "FEEDBACK_EVERY", None)
+
+        def write():
+            try:
+                path.write_text(json.dumps(_flight_doc(seq, names, outcome, flew, snap, traj, arrived, every)))
+            except Exception as e:  # noqa: BLE001 - a side file must never cost the run
+                log.info("[runner] the flight of %s is not kept (%s)" % (names[0], e))
+
+        self.wait_flights()  # one at a time, in order
+        if background:
+            self._flight_write = threading.Thread(target=write, name="flight-write", daemon=False)
+            self._flight_write.start()
+        else:
+            write()
+        return str(path.relative_to(self._log_dir))
 
     def _keep_aborted(self, names, traj, t0):
         """A Ctrl+C ended the execution of the legs `names` (`traj`) begun at
@@ -1441,7 +1476,9 @@ class Runner:
             if not isinstance(info, dict) or float(info.get("sent_at", t0 - 1.0)) < t0:
                 return
             arrived = (time.monotonic(), time.time())
-            self._keep_flight(names, "aborted", self._how_it_flew("aborted", info, traj), info, traj, arrived)
+            # on disk before the Ctrl+C unwinds any further
+            flew = self._how_it_flew("aborted", info, traj)
+            self._keep_flight(names, "aborted", flew, info, traj, arrived, background=False)
         except Exception as e:  # noqa: BLE001 - a measurement only: the Ctrl+C goes on
             log.info("[runner] the flight of %s is not kept (%s)" % (names[0], e))
 
