@@ -26,9 +26,11 @@ Every accepted driver goal (not the planner's) publishes one feedback message as
 fraction_complete FEEDBACK_FRACTION, actual = the joints, and on go_to goals phase "executing" and
 planner_state "fake".
 
-Also here: FakeCtx, which stands in for the engine's Context, and counts(node).
+Also here: FakeBase (the drive base), FakeCtx, which stands in for the engine's Context, and
+counts(node).
 """
 
+import math
 import secrets
 import threading
 import time
@@ -37,6 +39,7 @@ from pathlib import Path
 
 from builtin_interfaces.msg import Duration
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
+from nav_msgs.msg import Odometry
 from rammp_arm import ERRORS, JOINTS
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
@@ -57,6 +60,7 @@ from rammp_arm_interfaces.msg import (
     TwistSetpoint,
 )
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
+from rammp_base_interfaces.msg import TwistSetpoint as BaseTwistSetpoint
 from rammp_common_interfaces.msg import ControlStatus, EStop
 from rammp_common_interfaces.srv import AcquireControl, ReleaseControl, RevokeControl
 from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
@@ -84,6 +88,7 @@ GOAL_POLL_S = 0.01  # how often a held goal checks for a cancel or a seize
 PLAN_DT_S = 0.1  # time between the points of a plan_result trajectory
 FEEDBACK_FRACTION = 0.5  # fraction_complete of the one feedback message a goal publishes
 LATE_CLOSE_S = 0.1  # late_close_on_next_open(): the "closed" lands this long before the open
+ODOM_HZ = 50.0  # FakeBase's /base/odom
 PAUSE_POLL_S = 0.01  # how often a paused FakeCtx.checkpoint() looks for resume or cancel
 FLATBOT_URDF = Path("/fixtures/urdf/flatbot.urdf")
 FRAME = "arm_mount"
@@ -614,3 +619,53 @@ class FakeDriver(Node):
         )
         msg.header.stamp = self.get_clock().now().to_msg()
         self._diag_pub.publish(msg)
+
+
+class FakeBase(Node):
+    """The drive base (the MIB), faked: records every rammp_base_interfaces/TwistSetpoint on
+    /base/setpoint/twist in .twists, and publishes nav_msgs/Odometry on /base/odom at ODOM_HZ while
+    publishing (set_odom(x, y, yaw) sets what it publishes; start() and stop_publishing())."""
+
+    def __init__(self):
+        super().__init__("fake_base")
+        self.twists = []
+        self._lock = threading.Lock()
+        self._publishing = False
+        self._pose = (0.0, 0.0, 0.0)
+        self.create_subscription(
+            BaseTwistSetpoint, "/base/setpoint/twist", self._on_twist, SETPOINT_QOS
+        )
+        self._odom_pub = self.create_publisher(Odometry, "/base/odom", qos_profile_sensor_data)
+        self.create_timer(1.0 / ODOM_HZ, self._publish_odom)
+
+    def _on_twist(self, m):
+        with self._lock:
+            self.twists.append(m)
+
+    def received(self):
+        """[(vx, vy, wz, token)] of every setpoint so far."""
+        with self._lock:
+            return [
+                (m.twist.linear.x, m.twist.linear.y, m.twist.angular.z, list(m.token))
+                for m in self.twists
+            ]
+
+    def set_odom(self, x, y, yaw):
+        self._pose = (x, y, yaw)
+
+    def start(self):
+        self._publishing = True
+
+    def stop_publishing(self):
+        self._publishing = False
+
+    def _publish_odom(self):
+        if not self._publishing:
+            return
+        x, y, yaw = self._pose
+        m = Odometry()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id, m.child_frame_id = "odom", "base_link"
+        m.pose.pose.position.x, m.pose.pose.position.y = x, y
+        m.pose.pose.orientation.z, m.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
+        self._odom_pub.publish(m)
