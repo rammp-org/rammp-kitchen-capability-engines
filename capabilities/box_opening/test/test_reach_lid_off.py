@@ -1323,6 +1323,62 @@ def test_a_small_table_no_longer_stops_the_run_before_anything_moves(ctx, monkey
     assert math.hypot(ctx.lid_drop.xyz[0] - BOX_XY[0], ctx.lid_drop.xyz[1] - BOX_XY[1]) > 0.105  # off the box
 
 
+def test_the_nearest_spot_keeps_the_lid_off_the_box_s_holder(ctx, monkeypatch, tmp_path, capsys):
+    """Sweep lid_spot-g-3: 2026-10-30 13:35 set the lid down 0.120 m from
+    the box, on the blue holder's flange, and the holder tipped. The
+    'nearest' rings now start with the lid's rim NEAREST_CLEAR_M off the
+    box, centred on the box where the press held its button."""
+    from box_opening.tasks.press_demo import container_half
+
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=SMALL)
+    assert code == 0
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    lid_r = 0.5 * max(ctx.model.lid_dims[:2])
+    first = container_half(ctx.model) + lid_r + rlo.NEAREST_CLEAR_M
+    assert spot["tier"] == "nearest" and first == pytest.approx(0.155, abs=0.005)
+    cx, cy = rlo.nearest_centre(ctx)
+    assert math.hypot(ctx.lid_drop.xyz[0] - cx, ctx.lid_drop.xyz[1] - cy) >= first - 1e-6
+    assert ctx.held_xy == pytest.approx(BUTTON[:2])  # the fake hold held the pads on the button
+
+
+def _standing_ring(centre, inner, outer, cell=0.02, tall=0.03):
+    """A TableMap with something `tall` standing from `inner` to `outer`
+    round `centre` (a holder's flange), the rest seen bare."""
+    from box_opening.perception.clear_table import TableMap
+
+    n = 60
+    x0, y0 = centre[0] - n * cell / 2, centre[1] - n * cell / 2
+    xs = x0 + (np.arange(n) + 0.5) * cell
+    ys = y0 + (np.arange(n) + 0.5) * cell
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    d = np.hypot(X - centre[0], Y - centre[1])
+    tall_ = np.where((d >= inner) & (d <= outer), tall, np.nan)
+    return TableMap(x0, y0, cell, tall_, np.ones((n, n), bool), np.zeros((n, n), bool), tuple(centre))
+
+
+def test_the_nearest_rings_centre_on_the_held_button_and_pass_over_what_stands(ctx):
+    from box_opening.models.container import from_container
+
+    button = from_container(ctx.cpose, ctx.model.button_offset)
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    assert rlo.nearest_centre(ctx) == (bx, by)  # no press held: the box as aimed
+    ctx.held_xy = (float(button[0]) + 0.007, float(button[1]) - 0.017)  # 13:35's press, 18 mm off the aim
+    assert rlo.nearest_centre(ctx) == pytest.approx((bx + 0.007, by - 0.017))
+    ctx.held_xy = (float(button[0]) + 0.05, float(button[1]))  # not this box where it is now
+    assert rlo.nearest_centre(ctx) == (bx, by)
+    ctx.held_xy = (float(button[0]) + 0.007, float(button[1]) - 0.017)
+    cx, cy = rlo.nearest_centre(ctx)
+    pts = rlo._nearest_points(ctx, -0.07)
+    r0 = min(math.hypot(p.xyz[0] - cx, p.xyz[1] - cy) for p in pts)
+    lid_r = 0.5 * max(ctx.model.lid_dims[:2])
+    # a flange standing out to 0.12 m: no spot whose disc (and LID_CLEAR_M) covers it
+    flange = _standing_ring((cx, cy), 0.06, 0.12)
+    kept = rlo._nearest_points(ctx, -0.07, flange)
+    near = min(math.hypot(p.xyz[0] - cx, p.xyz[1] - cy) for p in kept)
+    assert near > r0 and near - lid_r - rlo.clear_table.LID_CLEAR_M > 0.12 - 0.02  # past the flange's cells
+    assert len(kept) < len(pts)
+
+
 def test_a_press_only_run_chooses_no_lid_spot(ctx, monkeypatch, tmp_path, capsys):
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4)], extent=SMALL, press_only=True)
     assert code == 0 and ctx.lid_drop is None and not [r for r in rows if r["leg"] == "lid_spot"]

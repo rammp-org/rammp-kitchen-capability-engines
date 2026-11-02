@@ -78,6 +78,10 @@ class Ctx:
     # full runs (reach_press._reach_press)
     scene_locator: object = None
     lid_video: object = None
+    # where the press held the pads on the knob (x, y; depth_press.compliant_hold's
+    # held_pad_xyz, felt), the box's button as the arm measured it: 'nearest'
+    # set-down rings centre on the box there (reach_lid_off._nearest_points)
+    held_xy: tuple = None
 
 
 @dataclass

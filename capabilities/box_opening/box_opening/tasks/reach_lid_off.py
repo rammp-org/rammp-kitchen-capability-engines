@@ -384,9 +384,21 @@ CARRY_TRIES = 4
 # same spot chosen after it, 0.89 s at rest instead of 1.67.
 AHEAD_SAME_SPOT_M = 0.01
 # The last resort: table points on rings round the box, from the lid's
-# disc off the box's (and LID_CLEAR_M) outward NEAREST_STEP_M apart to
+# disc NEAREST_CLEAR_M off the box's outward NEAREST_STEP_M apart to
 # NEAREST_MAX_M, every NEAREST_DEG, nearest the box first, then nearest
-# the arm (the hand reaches nearer in)
+# the arm (the hand reaches nearer in). The rings centre on the box where
+# the press held its button (Ctx.held_xy), and pass over every spot whose
+# disc covers something a camera saw standing. 2026-10-30 13:35 set the
+# lid down 0.120 m from the box (its rim LID_CLEAR_M off the canister,
+# the press 18 mm off the aim) on the blue holder's flange, and the holder
+# tipped; 10:08 left it touching the holder. The first ring is the lid's
+# rim 50 mm off the box (0.155 m for the pink canister): lid_place_min_clear's
+# 0.1985 m has no spot the hand reaches on 10:08's run
+NEAREST_CLEAR_M = 0.05
+# ... a held button farther than this from ctx.cpose's is not this box's
+# where it is now (the box moved since, and was aimed at again): the rings
+# centre on ctx.cpose. The presses since #109 held the pads 2-18 mm off it
+NEAREST_HELD_MAX_M = 0.03
 NEAREST_STEP_M = 0.025
 NEAREST_MAX_M = 0.45
 NEAREST_DEG = 20
@@ -554,17 +566,38 @@ def spot_map(ctx, wrist, q, scene_fix, scene_q, table_z, lens_in_hand=None):
     return clear_table.table_map(clouds, ctx.cpose.xyz[:2]) if clouds else None
 
 
-def _nearest_points(ctx, table_z):
-    """spot_candidates' last resort: table points round the box, the lid's
-    disc off the box's, nearest the box first, then nearest the arm —
-    inside the table the scene camera saw, where it saw one."""
+def nearest_centre(ctx):
+    """Where the 'nearest' rings centre (x, y): the box whose button is
+    where the press held the pads (Ctx.held_xy), within NEAREST_HELD_MAX_M
+    of ctx.cpose's button; else ctx.cpose's."""
+    from box_opening.models.container import from_container
+
+    held = getattr(ctx, "held_xy", None)
+    here = (float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1]))
+    if held is None:
+        return here
+    button = from_container(ctx.cpose, ctx.model.button_offset)
+    if math.hypot(float(held[0]) - float(button[0]), float(held[1]) - float(button[1])) > NEAREST_HELD_MAX_M:
+        return here
+    c = rp.cpose_for_button((float(held[0]), float(held[1]), float(button[2])), ctx.cpose.yaw, ctx.model.button_offset)
+    return float(c.xyz[0]), float(c.xyz[1])
+
+
+def _nearest_points(ctx, table_z, tmap=None):
+    """spot_candidates' last resort: table points round the box (centred
+    where the press held its button: nearest_centre), the lid's disc
+    NEAREST_CLEAR_M off the box's, nearest the box first, then nearest the
+    arm — inside the table the scene camera saw, where it saw one, and none
+    whose disc (LID_CLEAR_M round it) covers a cell of `tmap` something
+    stands in: the box's holder, where a camera saw it."""
     from box_opening.tasks.press_demo import container_half
 
     m = ctx.model
     lid_r = 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1]))
-    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    bx, by = nearest_centre(ctx)
     ext = getattr(ctx.worlds, "table_extent", None)
-    first = container_half(m) + lid_r + clear_table.LID_CLEAR_M
+    stands = np.zeros((0, 3)) if tmap is None else tmap.standing()
+    first = container_half(m) + lid_r + NEAREST_CLEAR_M
     out = []
     for r in np.arange(first, NEAREST_MAX_M + 1e-9, NEAREST_STEP_M):
         ring = []
@@ -574,6 +607,8 @@ def _nearest_points(ctx, table_z):
                 ext[0] + lid_r <= x <= ext[1] - lid_r and ext[2] + lid_r <= y <= ext[3] - lid_r
             ):
                 continue
+            if len(stands) and np.hypot(stands[:, 0] - x, stands[:, 1] - y).min() <= lid_r + clear_table.LID_CLEAR_M:
+                continue  # the lid would come down on what stands there
             ring.append((math.hypot(x, y), x, y))
         out += [ContainerPose(xyz=(x, y, float(table_z)), yaw=0.0) for _d, x, y in sorted(ring)]
     return out
@@ -666,7 +701,7 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
                     "%s, nor beside the box in the set-down zone: the nearest table point the hand "
                     "reaches, off the box" % said,
                 )
-                for d in _nearest_points(ctx, table_z)
+                for d in _nearest_points(ctx, table_z, tmap)
             ],
         )
     )
@@ -1246,6 +1281,8 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     if held.felt:
         _note_frames(ctx, stage="pressed", touch_xyz=list(seen["touch_xyz"]) if seen.get("touch_xyz") else None)
     held_z = float(seen["touch_xyz"][2]) if held.felt and seen.get("touch_xyz") else None
+    if held_z is not None:
+        ctx.held_xy = (float(seen["touch_xyz"][0]), float(seen["touch_xyz"][1]))  # where the button was held
     if direct is not None and held_z is not None and seen.get("held_joints"):
         got = direct(seen)
         return (None, held_z) if got == _MISSED else (got, None)
