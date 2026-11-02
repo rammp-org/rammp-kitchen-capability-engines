@@ -86,3 +86,5 @@ def test_the_flatbot_world_file_carries_only_keys_worldstore_reads():
         "obstacles",
     }
     assert "table" not in {o["name"] for o in w["obstacles"]}
+    # nor a 'floor' that reads as a keep-out: nothing here reaches the planner (worlds.py)
+    assert w["obstacles"] == []

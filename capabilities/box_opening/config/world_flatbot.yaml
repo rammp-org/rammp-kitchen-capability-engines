@@ -3,25 +3,21 @@
 # arm_mount is gravity-aligned (+Z up). arm_base_link shares this origin but
 # is rotated 30° around Y (forward lean, new_adapter_plate_v3).
 #
-# There is NO static table obstacle. The working surface in front of the
-# wheelchair varies with the environment; SceneLocator measures it from the
-# scene OAK-D depth on every run, around the box it found (scene_source.table_around
-# → SceneFix.table_z_scene).
-# The planner gets that table only from the scene fix: press_demo copies
-# SceneFix.table_z_scene/table_extent into WorldStore.table_top_z/table_extent,
-# and WorldStore._planning_bench adds a TABLE_THICKNESS_M slab under it, over
-# where it was seen. What stands on that table comes from the cameras too,
-# every run: the scene camera's points (and the wrist's look from staging) as
-# cuboids in every world (press_demo.adopt_seen -> WorldStore.seen). Nothing
-# on the table is surveyed or named here (owner, 2026-10-27). Until a scene
-# fix, and in any CLI that never makes one (home_arm, preflight,
-# record_detection_set ...), the planner sees only the floor keep-out below.
+# Box opening sends the planner no world (worlds.py; owner 2026-10-29, #86):
+# the planner plans in the world its deployment starts it with,
+# rammp_curobo's world_empty.yaml on flatbot, the arm and nothing else.
+# Nothing in this file reaches the planner. WorldStore reads its robot
+# settings below, and a 'table' obstacle where a bench surveys one
+# (world_bench.yaml); flatbot has none: the working surface in front of the
+# wheelchair varies with the environment, and SceneLocator measures it from
+# the scene camera's depth on every run, around the box it found
+# (SceneFix.table_z_scene / table_extent -> WorldStore.table_top_z /
+# table_extent). What stands on that table is the mission's own, measured
+# each run, and keeps no place in any planner world.
 #
-# TODO: Confirm the floor keepout clears the wheelchair seat (tape measure).
-#
-# Names are load-bearing:
-#   pedestal : arm adapter-plate block; cuRobo marks it no_pad and never
-#              drops it (NEVER_DROP in worlds.py).
+# The planner has NO floor or wheelchair-seat keep-out: world_empty.yaml
+# holds none, and this file's old 'floor' entry never reached it. A keep-out
+# belongs in the planner deployment's own world (rammp-deployments).
 base_frame: arm_mount
 # In a gravity-aligned frame the table normal is purely +Z.
 table_normal_base: [0.0, 0.0, 1.0]
@@ -33,9 +29,6 @@ scene_camera_config: camera_oak_scene.yaml
 # static_transform_publisher for the scene camera.
 external_static_tf: true
 
-obstacles:
-  # Keep-out below the arm — prevents planning into the wheelchair seat and
-  # frame. 30 cm below arm_mount origin. ESTIMATED — verify with tape.
-  - name: floor
-    position: [0.0, 0.0, -0.33]
-    dims: [1.50, 1.50, 0.06]
+# No obstacles: none would reach the planner (above), and flatbot surveys no
+# table. A bench's file names its table here (world_bench.yaml).
+obstacles: []
