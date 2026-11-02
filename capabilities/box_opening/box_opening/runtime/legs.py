@@ -98,6 +98,11 @@ class Leg:
     # a latch may need a moment held down (2026-09-23: a push that met its
     # stop and let go at once left the box shut)
     hold_s: float = 0.0
+    # MOTION legs, unguarded, first of their execution: the arm stands still
+    # this long at the leg's first point before it moves on (Runner._run_motion,
+    # after the retime: retime.hold_at_start). The release's retreat
+    # (reach_lid_off.retreat_from_live): the fingers open first
+    start_hold_s: float = 0.0
     # MOTION legs with a "press" guard: the TOUCH's trajectory this push
     # continues. The push alone is button_travel_m long; the reflex recoil
     # reverses it and then carries on back up this stroke until it has

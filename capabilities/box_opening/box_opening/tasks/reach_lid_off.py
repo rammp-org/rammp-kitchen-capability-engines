@@ -2824,6 +2824,45 @@ def put_lid_back(ctx, cfg, runner, why):
     return 1
 
 
+# The retreat back up from the lid on the table flies from where the arm
+# stands at the release (retreat_from_live), its first RETREAT_HOLD_S
+# standing there: the fingers open on the knob before the hand rises
+RETREAT_HOLD_S = 0.25
+
+
+def retreat_from_live(ctx, carry, world):
+    """The retreat back up to the hover over the lid, solved from where the
+    arm stands at the release — the joints read, on the planned line's
+    branch — not from where the touch was sent: the carry arrives 8-43 mrad
+    off that (the table holds the hand up, the spring lags), and against the
+    runner's 40 mrad drift gate the planned retreat was refused on 2 of 7
+    runs (39.5, 42.8 mrad; 13:35 and 14:26 on 10-30), 4 more within 3-8
+    mrad of it. Its first RETREAT_HOLD_S stand still where the arm is
+    (Leg.start_hold_s): the reference set where the hand is, the open hand
+    sinks nowhere (a refused retreat's rebuild let it drop 15.6 and 26.6 mm
+    toward the lid), and the fingers open before it rises. Returns (the
+    leg, how far its end is from the planned retreat's, rad) — the home
+    planned ahead flies from it within DRIFT_REPLAN_RAD — or (None, why)
+    where no line from here solves: the planned one goes, as before."""
+    from box_opening.geometry import ang_diff
+    from box_opening.runtime import approach
+    from box_opening.runtime.branches import on_branch
+
+    chain = approach._chain()
+    planned = [list(map(float, p)) for p in carry.retreat]
+    live = [float(v) for v in on_branch(ctx.client.joints(), planned[0])]
+    _R, t_end = chain.fk(planned[-1])
+    pts, why = chain.straight_line(live, [float(v) for v in t_end], carry.quat)
+    if pts is not None:
+        why = dp.line_refusal(chain, pts)
+    if pts is None or why is not None:
+        return None, why
+    pts = [[float(v) for v in p] for p in pts]
+    leg = dp.compliant_line(ctx, "place:retreat", pts, carry.quat, rp.free_line_speed(ctx), world)
+    leg.start_hold_s = RETREAT_HOLD_S
+    return leg, max(abs(ang_diff(a, b)) for a, b in zip(pts[-1], planned[-1], strict=False))
+
+
 def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
     """The lid on the table at `drop` (`carry` flown): the knuckle read (the
     lid slipped?); the release, the retreat starting as the fingers open
@@ -2850,6 +2889,23 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
         else [dp.compliant_line(ctx, "place:retreat", carry.retreat, carry.quat, rp.free_line_speed(ctx), world)]
     )
     up, home_legs = retreat[:1], retreat[1:]
+    live_up, off = retreat_from_live(ctx, carry, world)
+    if live_up is None:
+        log.info("[press_demo] no retreat solves from where the arm stands (%s): the one planned flies" % off)
+    else:
+        up = [live_up]
+        ahead = bool(home_legs)
+        if home_legs and off > DRIFT_REPLAN_RAD:
+            # it ends too far from where home was planned from for the runner to fly that home
+            home_legs = []
+            why = "the retreat from where the arm stood ends %.3f rad from the one home was planned from" % off
+        runner.note(
+            "retreat_from_live",
+            end_off_rad=round(off, 4),
+            hold_s=RETREAT_HOLD_S,
+            home_ahead=ahead,  # a home was planned ahead ...
+            home_flies=bool(home_legs),  # ... and flies from where this retreat ends
+        )
     log.info(
         "[press_demo] RELEASE as the retreat starts (%s), then HOME in position control%s"
         % (", ".join(lg.name for lg in up), ": %s" % ", ".join(lg.name for lg in home_legs) if home_legs else "")

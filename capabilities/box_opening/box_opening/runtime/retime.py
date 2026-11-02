@@ -425,6 +425,35 @@ def retime_group(trajs, speeds, vmax, params=RetimeParams()):  # noqa: B008 - fr
     return to_message(trajs[0].joint_names, positions, t, v * _time_scale(params)), info
 
 
+def hold_at_start(traj, hold_s):
+    """`traj` standing still `hold_s` at its first point before it moves:
+    a copy of point 0 at point 0's own time, and every point after it
+    `hold_s` later. Point 0 is at rest (retime_group's profiles start
+    there): the arm holds it, then flies the profile as it was timed.
+    Positions are never touched."""
+    hold_s = float(hold_s)
+    pts = list(traj.points)
+    if hold_s <= 0.0 or not pts:
+        return traj
+    out = JointTrajectory()
+    out.joint_names = list(traj.joint_names)
+    t0 = secs(pts[0].time_from_start)
+    first = JointTrajectoryPoint()
+    first.positions = list(pts[0].positions)
+    first.velocities = [0.0] * len(first.positions)
+    first.accelerations = [0.0] * len(first.positions)
+    set_stamp(first.time_from_start, t0)
+    out.points.append(first)
+    for p in pts:
+        q = JointTrajectoryPoint()
+        q.positions = list(p.positions)
+        q.velocities = list(p.velocities)
+        q.accelerations = list(p.accelerations)
+        set_stamp(q.time_from_start, secs(p.time_from_start) + hold_s)
+        out.points.append(q)
+    return out
+
+
 def positions_to_traj(joint_names, positions):
     """A bare position path as a JointTrajectory (times are placeholders —
     retime_group reads positions only)."""

@@ -410,6 +410,10 @@ def test_a_knob_up_after_the_press_is_gripped_lifted_carried_set_down_and_the_ar
     assert spot["host_stood_s"] is None
     # the wrist's look-pose frame was to be pooled into the room (shadow): this aim kept none
     assert spot["pooled"]["chose"] is False and spot["pooled"]["why"] == "no aim kept its frame"
+    # the retreat flown from where the arm stood at the release, held at its start; home as planned ahead
+    (back,) = (r for r in rows if r["leg"] == "retreat_from_live")
+    assert (back["home_ahead"], back["home_flies"], back["hold_s"]) == (True, True, rlo.RETREAT_HOLD_S)
+    assert rec.legs["place:retreat"].start_hold_s == rlo.RETREAT_HOLD_S
     assert spot["xyz"] == pytest.approx(list(ctx.lid_drop.xyz), abs=1e-4)
     hover = rec.legs["lid:carry"].target[1]
     assert hover[:2] == pytest.approx(list(ctx.lid_drop.xyz[:2]))
@@ -1468,6 +1472,55 @@ def test_the_pooled_room_map_is_built_beside_the_scene_cameras_and_does_not_choo
     assert {"scene_tall", "scene_seen", "pooled_tall", "pooled_seen", "pooled_origin", "box_xy"} <= set(maps.files)
     assert int(maps["pooled_seen"].sum()) == note["pooled_seen"]
     assert rlo.pooled_note(ctx, runner, None, drop) is None  # no room judged ahead: nothing to compare
+
+
+def test_the_retreat_from_the_lid_flies_from_where_the_arm_stands_held_at_its_start(ctx, monkeypatch):
+    """Sweep planning-retreat-from-live, as verified: the planned retreat
+    starts where the touch was sent, and the arm stands 8-43 mrad off that
+    at the release — the 40 mrad drift gate refused two of seven. It is
+    solved from the joints read, on the planned line's branch, and holds
+    RETREAT_HOLD_S at its start; the home planned ahead flies from its end
+    only within the drift gate."""
+    from types import SimpleNamespace
+
+    from box_opening.constants import DRIFT_REPLAN_RAD
+    from box_opening.runtime import approach
+
+    chain = _Chain()
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    planned = [[0.1] * 7, [0.11] * 7]
+    carry = SimpleNamespace(retreat=planned, quat=[0.0, 1.0, 0.0, 0.0])
+    world = ("full", "full.yaml")
+    live = [0.1] * 7
+    live[3] += 0.0428  # 14:26's 42.8 mrad
+    ctx.client.joints = lambda: list(live)
+    lg, off = rlo.retreat_from_live(ctx, carry, world)
+    assert lg.name == "place:retreat" and lg.start_hold_s == rlo.RETREAT_HOLD_S == 0.25
+    assert list(lg.traj.points[0].positions) == pytest.approx(live)  # from where the arm stands
+    assert off == pytest.approx(0.0428) and off > DRIFT_REPLAN_RAD  # the fake line ends as far off as it starts
+    live[2] = 0.1 + 2 * math.pi  # joint_3, continuous, read a turn round: put on the planned line's branch
+    lg, off = rlo.retreat_from_live(ctx, carry, world)
+    assert lg.traj.points[0].positions[2] == pytest.approx(0.1) and off == pytest.approx(0.0428)
+    stuck = SimpleNamespace(fk=chain.fk, straight_line=lambda q0, xyz, quat: (None, "IK did not converge"))
+    monkeypatch.setattr(approach, "_chain", lambda: stuck)
+    assert rlo.retreat_from_live(ctx, carry, world) == (None, "IK did not converge")
+
+
+def test_a_retreat_from_where_the_arm_stands_that_ends_past_the_drift_gate_plans_home_after_it(
+    ctx, monkeypatch, tmp_path
+):
+    """The home planned ahead starts where the planned retreat ends: one
+    from the live joints ending past DRIFT_REPLAN_RAD of that is not flown
+    (the runner would refuse it with the lid let go), home is planned where
+    the retreat ends."""
+    real = rlo.retreat_from_live
+    monkeypatch.setattr(rlo, "retreat_from_live", lambda c, carry, world: (real(c, carry, world)[0], 0.05))
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0
+    (back,) = (r for r in rows if r["leg"] == "retreat_from_live")
+    assert (back["home_ahead"], back["home_flies"]) == (True, False)
+    homes = [at for name, at in rec.plans if name == "home"]
+    assert homes[-1] > rec.events.index("place:retreat")  # planned once the retreat had flown
 
 
 def test_a_press_only_run_chooses_no_lid_spot(ctx, monkeypatch, tmp_path, capsys):

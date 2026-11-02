@@ -2071,6 +2071,32 @@ def test_the_leg_that_hosted_a_lookahead_says_how_long_it_stood_for_it(tmp_path)
     assert r.lookahead_result is None and r.lookahead_stood_s is None  # every run resets them
 
 
+def test_a_leg_held_at_its_start_stands_still_there_then_flies_its_profile_as_timed(tmp_path):
+    """Leg.start_hold_s (the release's retreat, reach_lid_off.RETREAT_HOLD_S):
+    the execution's first point is held that long, then every point flies
+    as the retime timed it — positions untouched, the driver's gates met."""
+    from box_opening.constants import JOINT_VMAX
+    from box_opening.runtime.retime import check_like_executor
+
+    plain = runner(_Flies(tmp_path), tmp_path)
+    plain.run([leg("place:retreat", Q0, Q1, chain=0)], execute=True)
+    c = _Flies(tmp_path / "held")
+    held = runner(c, tmp_path / "held")
+    lg = leg("place:retreat", Q0, Q1, chain=0)
+    lg.start_hold_s = 0.25
+    held.run([lg], execute=True)
+    a, b = plain.client.flown[-1].points, c.flown[-1].points
+    t = [p.time_from_start.sec + 1e-9 * p.time_from_start.nanosec for p in b]
+    t_plain = [p.time_from_start.sec + 1e-9 * p.time_from_start.nanosec for p in a]
+    assert list(b[0].positions) == list(b[1].positions) == list(a[0].positions)
+    assert t[0] == pytest.approx(t_plain[0]) and t[1] - t[0] == pytest.approx(0.25)
+    assert t[1:] == pytest.approx([v + 0.25 for v in t_plain])
+    assert [list(p.positions) for p in b[1:]] == [list(p.positions) for p in a]
+    assert check_like_executor(c.flown[-1], JOINT_VMAX) == []
+    assert held.last_retime["start_hold_s"] == 0.25
+    assert held.last_retime["duration_s"] == pytest.approx(plain.last_retime["duration_s"] + 0.25)
+
+
 def test_a_flight_from_feedback_without_the_knuckle_keeps_none_for_it(tmp_path):
     """An older client's 3-element samples: the knuckle is None, and with no
     lookahead hosted lookahead_s is None too."""

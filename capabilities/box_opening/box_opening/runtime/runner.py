@@ -49,6 +49,7 @@ from box_opening.runtime.legs import (
 from box_opening.runtime.planner import plan_record
 from box_opening.runtime.retime import (
     RetimeParams,
+    hold_at_start,
     positions_to_traj,
     retime_group,
     reverse_tail,
@@ -1228,6 +1229,17 @@ class Runner:
             params = replace(self.retime_params(), time_scale=self.time_scale)
             traj, self.last_retime = retime_group([g.traj for g in group], [g.speed for g in group], JOINT_VMAX, params)
             exec_speed = 1.0
+            hold = float(getattr(group[0], "start_hold_s", 0.0) or 0.0)
+            if hold > 0.0 and guard_spec is None:
+                # stands still at its start first (Leg.start_hold_s): the profile after it as timed,
+                # each leg's share of the execution moved on by the hold
+                traj = hold_at_start(traj, hold)
+                total = float(self.last_retime.get("duration_s") or 0.0)
+                fracs = self.last_retime.get("seg_start_fracs")
+                if fracs and total > 0.0:
+                    self.last_retime["seg_start_fracs"] = [(hold + f * total) / (hold + total) for f in fracs]
+                self.last_retime["duration_s"] = total + hold
+                self.last_retime["start_hold_s"] = hold
             if guard_spec is not None:
                 # Arm where the guarded leg BEGINS, plus a settle: before
                 # that the arm is still flying its approach, and the corner
