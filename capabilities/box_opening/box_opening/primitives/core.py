@@ -195,6 +195,7 @@ def _plan_motion(
     if not ok:
         raise RuntimeError("set_world before planning %s failed: %s" % (name, msg))
     n_refused = len(getattr(ctx.client, "refusals", ()))
+    n_busy = getattr(ctx.client, "busy_retries", 0)
     t_plan = time.monotonic()
 
     if kind == "pose":
@@ -229,7 +230,13 @@ def _plan_motion(
         plan_server_s=getattr(plan, "planning_time", None),
         # the client's refusals while it planned this leg: none, or the
         # joint plan the pose plan stood in for (PlannerClient.refusals)
-        plan=plan_record(plan, target, plan_s, getattr(ctx.client, "refusals", ())[n_refused:]),
+        plan=plan_record(
+            plan,
+            target,
+            plan_s,
+            getattr(ctx.client, "refusals", ())[n_refused:],
+            busy=getattr(ctx.client, "busy_retries", 0) - n_busy,  # the planner busy with another goal
+        ),
         waypoint=getattr(plan, "waypoint", None),
         guard_from=descent_index(plan),
     )

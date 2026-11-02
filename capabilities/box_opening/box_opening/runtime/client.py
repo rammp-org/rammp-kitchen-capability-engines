@@ -593,6 +593,11 @@ class PlannerClient:
     # BUSY_WAIT_S apart, before it fails as it always did.
     BUSY_RETRIES = 2
     BUSY_WAIT_S = 0.2
+    # how many times a goal was asked again for a busy planner, in all: the
+    # run record keeps the ones made while a leg was planned (plan_record's
+    # busy_retries), so collisions with the other planners' goals are
+    # counted, not read off console lines (0 of 96 plans on 10-28)
+    busy_retries = 0
 
     # A plan's END is checked against what was asked before anything uses
     # it: the arm flies what comes back, and the leg after it starts there
@@ -652,6 +657,7 @@ class PlannerClient:
             )
             if not self._spin_for(self.BUSY_WAIT_S):
                 break  # aborted: the busy answer stands, a failed plan
+            self.busy_retries += 1
             res = self._ask(client, goal, timeout_s)
         return res
 

@@ -456,6 +456,7 @@ def test_a_goal_the_planner_was_too_busy_for_is_asked_again(live, capsys):
     assert len(planner.goals) == 2 and planner.sent_at[1] - planner.sent_at[0] >= live.BUSY_WAIT_S
     out = capsys.readouterr().out
     assert out.count("[client] planner busy") == 1 and "(1/2)" in out
+    assert live.busy_retries == 1  # counted, for the plan record
 
 
 def test_a_planner_busy_three_times_over_is_a_failed_plan_as_before(live, capsys):
@@ -465,6 +466,7 @@ def test_a_planner_busy_three_times_over_is_a_failed_plan_as_before(live, capsys
     assert len(planner.goals) == 1 + live.BUSY_RETRIES == 3
     assert planner.sent_at[-1] - planner.sent_at[0] >= 2 * live.BUSY_WAIT_S
     assert capsys.readouterr().out.count("[client] planner busy") == 2
+    assert live.busy_retries == 2
 
 
 def test_only_busy_is_asked_again(live):
@@ -482,7 +484,32 @@ def test_a_ctrl_c_while_waiting_on_a_busy_planner_asks_nothing_more(live, monkey
     monkeypatch.setattr(client_mod.rclpy, "spin_once", spin)
     planner = _Planner(_joints_result(success=False, message=BUSY), _joints_result([START, START]))
     got = live._call(planner, PlanToJoints.Goal())
-    assert not got.success and len(planner.goals) == 1
+    assert not got.success and len(planner.goals) == 1 and live.busy_retries == 0  # nothing asked again
+
+
+def test_the_plan_record_counts_the_times_a_busy_planner_had_the_goal_asked_again(ctx):
+    """Sweep waits_retries-g-07: a goal that lands in another engine's plan
+    is asked again (BUSY_RETRIES) and only a console line said so. The leg's
+    plan record keeps the retries made while it was planned, none where
+    there were none."""
+    from box_opening.primitives.core import PlanState, _plan_motion
+    from box_opening.runtime.planner import plan_record
+
+    class Busy(FakeClient):
+        busy_retries = 0
+
+        def plan_to_joints(self, q7, start_joints):
+            self.busy_retries += 2  # this goal landed in another's plan twice
+            return super().plan_to_joints(q7, start_joints)
+
+    ctx.client = Busy()
+    at = PlanState(joints=list(Q0), chain=0)
+    leg, _st = _plan_motion(ctx, at, "home", ("joints", list(Q1)), ("full", "full.yaml"), 1.0)
+    assert leg.plan["busy_retries"] == 2
+    ctx.client = FakeClient()  # a client that counts nothing
+    leg, _st = _plan_motion(ctx, at, "home", ("joints", list(Q1)), ("full", "full.yaml"), 1.0)
+    assert "busy_retries" not in leg.plan
+    assert "busy_retries" not in plan_record(None, None) and plan_record(None, None, busy=1)["busy_retries"] == 1
 
 
 # -- the run record keeps what the planner said ---------------------------------------
@@ -547,6 +574,32 @@ def test_a_leg_planned_at_flight_keeps_its_own_plan_in_the_run_record(tmp_path):
     assert res[-1].ok
     plan = _rows(tmp_path)["retreat"]["plan"]
     assert plan["message"] == "ok" and plan["end_rad"] == 0.0 and plan["replanned"] is True
+    assert "busy_retries" not in plan
+
+
+def test_a_leg_planned_at_flight_counts_a_busy_planners_retries(tmp_path):
+    from box_opening.runtime.legs import Kind, Leg
+
+    class Busy(FakeClient):
+        busy_retries = 0
+
+        def plan_to_joints(self, q7, start_joints):
+            self.busy_retries += 1
+            return super().plan_to_joints(q7, start_joints)
+
+    lazy = Leg(
+        name="retreat",
+        kind=Kind.MOTION,
+        traj=None,
+        speed=1.0,
+        guard=None,
+        world="full",
+        chain=0,
+        target=("joints", list(Q1)),
+        goal_joints=None,
+    )
+    assert runner(Busy(), tmp_path).run([lazy], execute=True)[-1].ok
+    assert _rows(tmp_path)["retreat"]["plan"]["busy_retries"] == 1
 
 
 def test_a_refused_joint_plan_the_pose_plan_stood_in_for_is_in_the_legs_plan_record(ctx, chain):

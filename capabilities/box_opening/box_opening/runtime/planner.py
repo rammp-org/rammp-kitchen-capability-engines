@@ -150,7 +150,7 @@ def pose_end_error(traj, xyz, quat_xyzw):
     return (off if math.isfinite(off) else math.inf), turn
 
 
-def plan_record(plan, target, plan_s=None, refused=()):
+def plan_record(plan, target, plan_s=None, refused=(), busy=0):
     """What the run record keeps of a leg's plan (Leg.plan, runner._log):
     the planner's message and solve time; its goal_mismatch_rad where it
     reports one, which a PlanToJoints plan does — a pose leg planned to the
@@ -160,8 +160,10 @@ def plan_record(plan, target, plan_s=None, refused=()):
     and end_deg for ("pose", xyz, quat_xyzw, ...); how long the asking took
     (`plan_s`); and the plans the client refused while it asked
     (`refused`, PlannerClient.refusals), where there were any: a refused
-    joint plan the pose plan then stood in for leaves no other trace. A
-    measurement only."""
+    joint plan the pose plan then stood in for leaves no other trace; and
+    how many times the planner, busy with another goal, had it asked again
+    (`busy`, PlannerClient.busy_retries), where it did. A measurement
+    only."""
     out = {"message": "no response" if plan is None else str(getattr(plan, "message", "") or "")}
     solve_s = finite(getattr(plan, "planning_time", None))
     out["solve_s"] = None if solve_s is None else round(solve_s, 3)
@@ -183,4 +185,6 @@ def plan_record(plan, target, plan_s=None, refused=()):
         out["plan_s"] = round(float(plan_s), 3)
     if refused:
         out["refused"] = list(refused)
+    if busy:
+        out["busy_retries"] = int(busy)
     return out

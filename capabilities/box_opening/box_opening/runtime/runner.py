@@ -1138,6 +1138,7 @@ class Runner:
                 return None, next_chain
             kind, *rest = leg.target
             n_refused = len(getattr(self.client, "refusals", ()))
+            n_busy = getattr(self.client, "busy_retries", 0)
             t_plan = time.monotonic()
             if kind == "pose":
                 off = float(rest[2]) if len(rest) > 2 else 0.0
@@ -1148,7 +1149,13 @@ class Runner:
             # the run record keeps what was planned at flight: the plan this
             # leg now flies, or the one that failed, in a note of its own —
             # the failure's row shows the leg's old plan, or none (lazy)
-            record = plan_record(plan, leg.target, plan_s, getattr(self.client, "refusals", ())[n_refused:])
+            record = plan_record(
+                plan,
+                leg.target,
+                plan_s,
+                getattr(self.client, "refusals", ())[n_refused:],
+                busy=getattr(self.client, "busy_retries", 0) - n_busy,
+            )
             if plan is None or not plan.success:
                 self.note("replan_failed", name=leg.name, plan=record)
                 return None, next_chain
