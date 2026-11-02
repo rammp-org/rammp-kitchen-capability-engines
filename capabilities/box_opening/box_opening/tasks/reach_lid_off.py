@@ -80,9 +80,10 @@ table at their own. It decides only what it must:
 the knob up or not, the box where it was, the fingers on the knob or on
 air, where the lid goes, the lid still in them at the table. Contact is bounded by the spring,
 not stopped by a guard: the grip's pads ride on the lid where it stands
-higher than estimated, and the set-down presses the lid at most
-SETDOWN_OVER_M past where the scene camera's table says it lands, no deeper
-than SETDOWN_PUSH_N on the hand's spring (setdown_over). Where it looks at rest — the
+higher than estimated. The set-down is the one move the arm's own feel
+ends: it stops where the lid meets the table (watch_setdown, cut there) and
+lets go, and goes no lower than SETDOWN_RELEASE_M over where the scene
+camera's table and the model's lid put that. Where it looks at rest — the
 knob, and the spot where nothing was planned ahead — and before the fingers
 close on the knob, it waits for the arm to stand still (runner.wait_still):
 between motions, never a stop.
@@ -246,28 +247,22 @@ REGRIP_AIM_HITS = 3
 # rest of the way out is up and back toward the arm (reach_press
 # .clear_targets), as the way home's clear goes.
 LIFT_OFF_CLEAR_M = 0.015
-# The set-down: at setdown_speed or faster (PLACE_TOUCH_SPEED below) to this
-# far above where the lid meets the table, then at PLACE_TOUCH_SPEED to
-# setdown_over below it — the spring pressing the lid onto the table there,
-# never a guard. The table is the scene camera's, which stood 7-18 mm above
-# the touched one on 2026-10-28: a lid let go up to that much above the
-# table drops onto it. Small, too, so the arm's reference after the release
-# stays within the runner's drift gate (0.04 rad ~ 10 mm) of where the
-# retreat starts, if the hand has not yet sunk back to it.
-SETDOWN_SLOW_M = 0.04
-# How far past where the lid meets the table the touch ends: no deeper than
-# SETDOWN_PUSH_N on the hand's spring there (depth_press.fingertip_stiffness_z
-# under the run's gains), and never more than SETDOWN_OVER_M. It was a fixed
-# 6 mm, "~6 N at the ~1000 N/m RIGID gives". On 2026-10-29 the hand stood
-# 7-14 mm short of its set-down end when the motion's clock ran out, at
-# 1150-2290 N/m straight down (the wrist's springs doubled from 13:00, #88):
-# 11-30 N on the lid, 18-30 N after 13:00, and it sank 5-10 mm more before
-# the fingers let go (the knob the fingers hold gives into the lid). The
-# owner: the lid is set down "too hard ... pressing against it abnormally
-# hard". With 2 mm the lid let go up to that far above the table drops onto
-# it, which a lid does no harm.
-SETDOWN_PUSH_N = 5.0
-SETDOWN_OVER_M = 0.002
+# The set-down: at setdown_speed or faster (PLACE_TOUCH_SPEED below) to
+# SETDOWN_SLOW_M above where the plan has the lid meet the table — the scene
+# camera's table, the model's lid hanging from the grip (setdown_poses) —
+# then at PLACE_TOUCH_SPEED, watched (watch_setdown), down to
+# SETDOWN_RELEASE_M above it: stopped where the arm feels the lid meet the
+# table, and let go there. The plan is no measure of it: the 17 recorded
+# set-downs met the table 8-74 mm above where it put that (the lid hangs
+# lower from the knob than lid_dims.z says), and flown to the plan's end
+# the spring pressed on down 2-34 mm past the touch — 2026-11-02 16:20 met
+# it 72-77 mm up, during the fast way down, and ended 37 mm under the hand,
+# ~60 N (owner: "presses the lid down onto the table waaaaaaay too hard ...
+# the lid should just be let go of when it's ~1 cm above the table"). The
+# slow stretch begins above all of them, and the touch's own end — a lid the
+# plan puts right — lets it go 1 cm over the table, to drop onto it.
+SETDOWN_SLOW_M = 0.08
+SETDOWN_RELEASE_M = 0.010
 # Owner 2026-10-29: "we also need to speed up the lid placement". The way down
 # to SETDOWN_SLOW_M over the table is free air, so it flies at the free-air
 # lines' speed (reach_press.free_line_speed: 0.55 in a compliant run; it was
@@ -277,15 +272,6 @@ SETDOWN_OVER_M = 0.002
 # down "too hard" (2026-10-29 14:45): the faster touch met the table at twice
 # the speed, the damper (zeta 1.0) pushing on while the reference ran on.
 PLACE_TOUCH_SPEED = dp.TOUCH_SPEED
-
-
-def setdown_over(chain, q):
-    """How far past where the lid meets the table the set-down's touch ends,
-    the hand at joints `q` (near there): SETDOWN_PUSH_N on the spring straight
-    down at the fingertips (depth_press.fingertip_stiffness_z, the run's
-    gains), at most SETDOWN_OVER_M. Returns (metres, the spring in N/m)."""
-    k = float(dp.fingertip_stiffness_z(chain, q))
-    return min(SETDOWN_OVER_M, SETDOWN_PUSH_N / k) if k > 0 else SETDOWN_OVER_M, k
 
 
 def lift_off_m(model):
@@ -348,7 +334,7 @@ def drop_reachable(ctx, drop, q_start, seeds=()):
     q = chain.nearest_solution(list(q_start), hover, quat, seeds=tuple(seeds))
     if q is None:
         return "no straight-down hand reaches its carry height %.3f" % hover[2]
-    pts, why = chain.straight_line(q, [contact[0], contact[1], contact[2] - SETDOWN_OVER_M], quat)
+    pts, why = chain.straight_line(q, [contact[0], contact[1], contact[2] + SETDOWN_RELEASE_M], quat)
     if pts is None:
         return "the set-down is not a straight line the arm can fly (%s)" % why
     return None
@@ -1181,35 +1167,36 @@ class Carry:
     retreat: list
     quat: list
     drop: object
-    over_m: float = None  # how far past where the lid meets the table the touch ends (setdown_over)
+    over_m: float = None  # how far past where the plan has the lid meet the table the touch ends: -SETDOWN_RELEASE_M
     k_z: float = None  # the hand's spring straight down there, N/m
     contact: object = None  # the set-down watched as it flies (watch_setdown): where the lid met the table
 
 
 # The set-down watched for where the lid meets the table (watch_setdown,
-# tasks/press_contact's PressContact) from this far above where the plan puts
-# that: below the descent's start, where the reference speeds up and the gap
-# with it (watched from 0.07 m, the 16 recorded set-downs gave one false
-# contact, 88 mm early; from 0.05 m none that early). The 16 met the table
-# 2-39 mm above the touch's planned end — the lid hangs lower in the fingers
-# than the model's lid (lid_dims.z) puts it — and pressed on 6-32 mm, 20-60 N
-# on the spring against SETDOWN_PUSH_N. Watched only (SETDOWN_FROM_CONTACT
-# False): its first touch is no lid set down — in 10 of the 16 the hand went
-# on down 8-20 mm after it, the lid settling flat or the knob slipping in the
-# fingers — and a set-down cut short of the table leaves the lid on its rim or
-# in the air for the release to drop. The run record says where it met and
-# what a cut would have done, for the attended runs' video to judge
-SETDOWN_WATCH_M = 0.05
-SETDOWN_FROM_CONTACT = False
+# tasks/press_contact's PressContact) from where its slow stretch begins,
+# SETDOWN_SLOW_M above where the plan puts that, on the execution's last
+# stretch below there (PressContact final=True: never the lift off a box that
+# stands lower). Replayed on the 16 recorded set-downs of 10-29 and 10-30, a
+# watch over the fast way down (from 0.07 m) met one 88 mm early, from 0.05 m
+# none; at PLACE_TOUCH_SPEED the slow stretch is what the press's slow leg
+# is, which met none of the 25 presses early. Cut where it meets
+# (SETDOWN_FROM_CONTACT; past 0: the reference held where the pads met the
+# table, the lag of a detection under it), and the release opens there: the
+# first touch is the lid let go — on its rim if it leans, to settle flat (in
+# 10 of the 16 the hand went on down 8-20 mm after it, the lid settling or
+# the knob slipping in the fingers, the spring pressing on).
+SETDOWN_WATCH_M = SETDOWN_SLOW_M
+SETDOWN_FROM_CONTACT = True
 
 
 def watch_setdown(ctx, legs, carry):
     """The set-down of `carry` (plan_carry's) watched as it flies in the
     execution `legs` begins (the first motion leg's stop_when): a
     PressContact on where the lid meets the table — SETDOWN_WATCH_M above
-    where the plan puts that on — cutting nothing unless SETDOWN_FROM_CONTACT.
-    Kept on the carry (carry.contact) for the reach_setdown row. Returns it,
-    or None: nothing to watch."""
+    where the plan puts that on, the execution's last stretch below there —
+    cut where it meets (past 0) with SETDOWN_FROM_CONTACT. Kept on the carry
+    (carry.contact) for the reach_setdown row. Returns it, or None: nothing
+    to watch."""
     from box_opening.runtime import approach
     from box_opening.runtime.legs import Kind
     from box_opening.tasks.press_contact import PressContact, pads_z
@@ -1223,7 +1210,7 @@ def watch_setdown(ctx, legs, carry):
     over = float(carry.over_m or 0.0)
     expect = end + over  # where the plan has the lid meet the table
     carry.contact = PressContact(
-        chain, ctx.client, expect, expect + SETDOWN_WATCH_M, over, end, cut=SETDOWN_FROM_CONTACT
+        chain, ctx.client, expect, expect + SETDOWN_WATCH_M, 0.0, end, cut=SETDOWN_FROM_CONTACT, final=True
     )
     lead.stop_when = carry.contact
     return carry.contact
@@ -1253,13 +1240,12 @@ def plan_carry(ctx, cfg, q_from, drop):
     carry.gains = dp.COMPLIANT_GAINS
     lines = []
     q = carry.goal_joints
-    over, k_z = SETDOWN_OVER_M, None
+    k_z = None
+    z_at = {"place:down": contact[2] + SETDOWN_SLOW_M, "place:touch": contact[2] + SETDOWN_RELEASE_M}
     for name in ("place:down", "place:touch", "place:retreat"):
-        if name == "place:touch":  # sized on the spring where the way down ends, 4 cm over the table
-            over, k_z = setdown_over(chain, q)
-        z = {"place:down": contact[2] + SETDOWN_SLOW_M, "place:touch": contact[2] - over, "place:retreat": hover[2]}[
-            name
-        ]
+        if name == "place:touch":  # the hand's spring where the slow stretch begins, for the record
+            k_z = float(dp.fingertip_stiffness_z(chain, q))
+        z = z_at.get(name, hover[2])
         pts, why = chain.straight_line(q, [hover[0], hover[1], z], quat)
         if pts is not None:
             why = dp.line_refusal(chain, pts)
@@ -1273,7 +1259,7 @@ def plan_carry(ctx, cfg, q_from, drop):
         dp.compliant_line(ctx, "place:down", lines[0], quat, down_speed, world),
         dp.compliant_line(ctx, "place:touch", lines[1], quat, PLACE_TOUCH_SPEED, world),
     ]
-    return Carry(legs, lines[2], quat, drop, over_m=over, k_z=k_z), None
+    return Carry(legs, lines[2], quat, drop, over_m=-SETDOWN_RELEASE_M, k_z=k_z), None
 
 
 def plan_home_after(ctx, cfg, carry):
@@ -2241,7 +2227,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         _video(
             ctx,
             "CLOSE on the knob, then ONE MOTION: LIFT, CLEAR, CARRY to [%.2f, %.2f] (%s) and SET DOWN, "
-            "%.1f mm past the table" % (drop.xyz[0], drop.xyz[1], placed.tier, 1000 * (carry.over_m or 0.0)),
+            "let go where it meets the table" % (drop.xyz[0], drop.xyz[1], placed.tier),
         )
         watch_setdown(ctx, flying, carry)  # where the lid meets the table, watched
         res = runner.run(flying, execute=True)
@@ -2760,8 +2746,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
     _say_spot(ctx, eyes, chosen, refused, tmap, table_z)
     _video(
         ctx,
-        "CARRY to [%.2f, %.2f] (%s) and SET DOWN, %.1f mm past the table"
-        % (drop.xyz[0], drop.xyz[1], tier, 1000 * (carry.over_m or 0.0)),
+        "CARRY to [%.2f, %.2f] (%s) and SET DOWN, let go where it meets the table" % (drop.xyz[0], drop.xyz[1], tier),
     )
     log.info(
         "[press_demo] ONE MOTION: %s — to [%.2f, %.2f] and down onto the table, %s"
@@ -2825,11 +2810,11 @@ def _say_spot(ctx, eyes, chosen, refused, tmap, table_z):
 
 
 def _touch_says(carry):
-    """How far past where the lid meets the table `carry`'s set-down ends, and its push."""
-    return "%.1f mm past where the lid meets it (%.1f N on the hand's %.0f N/m)" % (
-        1000 * (carry.over_m or 0.0),
-        (carry.k_z or 0.0) * (carry.over_m or 0.0),
-        carry.k_z or 0.0,
+    """Where `carry`'s set-down lets the lid go."""
+    return "slowly from %.0f mm over where the plan has the lid meet it, let go where it %s %.0f mm over that" % (
+        1000 * SETDOWN_SLOW_M,
+        "meets it, or" if SETDOWN_FROM_CONTACT else "ends,",
+        -1000 * (carry.over_m or 0.0),
     )
 
 
@@ -2981,10 +2966,15 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
     runner.note("reach_setdown", knuckle=None if pos is None else round(float(pos), 3), kept=kept, contact=watched)
     if watched and watched.get("met"):
         log.info(
-            "[press_demo] SET-DOWN CONTACT (watched): the lid met the table %+.0f mm from where the plan put it; %s"
+            "[press_demo] SET-DOWN CONTACT: the lid met the table %+.0f mm from where the plan put it; %s"
             % (
                 watched["above_top_mm"],
-                "a cut would have ended the touch %.0f mm short of its planned end" % watched["cut_mm"]
+                (
+                    "the touch stopped there, %.0f mm short of its planned end, and lets go"
+                    if watched.get("cut")
+                    else "a cut would have ended the touch %.0f mm short of its planned end"
+                )
+                % watched["cut_mm"]
                 if watched.get("cut_mm") is not None
                 else "the touch's planned end stands",
             )

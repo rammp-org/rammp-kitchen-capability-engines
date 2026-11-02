@@ -1222,26 +1222,30 @@ def test_a_stop_at_the_look_pose_flies_the_home_planned_while_the_way_back_flew(
     assert ahead["flown"] is True and ahead["off_rad"] == pytest.approx(0.0)
 
 
-def test_the_set_down_is_watched_for_where_the_lid_meets_the_table_and_nothing_is_cut(ctx, monkeypatch, tmp_path):
-    """The set-down flies as planned, watched (SETDOWN_FROM_CONTACT off): the
-    lift-to-set-down execution's lead carries a PressContact that cuts
-    nothing, and the reach_setdown row says what it saw (here: no flight
-    reported by the fake client, so nothing watched)."""
+def test_the_set_down_is_cut_where_the_lid_meets_the_table(ctx, monkeypatch, tmp_path):
+    """Owner 2026-11-02: the arm "presses the lid down onto the table
+    waaaaaaay too hard ... the lid should just be let go of when it's ~1 cm
+    above the table". The lift-to-set-down execution's lead carries a
+    PressContact that cuts the touch where the lid meets the table
+    (SETDOWN_FROM_CONTACT), and the reach_setdown row says what it saw (here:
+    no flight reported by the fake client, so nothing watched)."""
     from box_opening.tasks.press_contact import PressContact
 
-    assert rlo.SETDOWN_FROM_CONTACT is False
+    assert rlo.SETDOWN_FROM_CONTACT is True
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
     assert code == 0
     lead = rec.legs["lid:lift"]  # the one motion's lead: lift, clear, carry, down, touch
-    assert isinstance(lead.stop_when, PressContact) and lead.stop_when.cut is False
+    assert isinstance(lead.stop_when, PressContact) and lead.stop_when.cut is True and lead.stop_when.final
     (sd,) = (r for r in rows if r["leg"] == "reach_setdown")
-    assert sd["contact"]["cut_on"] is False and sd["contact"]["watched"] is False and sd["contact"]["met"] is False
+    assert sd["contact"]["cut_on"] is True and sd["contact"]["watched"] is False and sd["contact"]["met"] is False
 
 
 def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_table(monkeypatch):
-    """watch_setdown: the lid meets the table, as planned, carry.over_m above
-    the touch's end; the watch begins SETDOWN_WATCH_M above that, on the
-    execution's first motion leg (not a gripper leg before it)."""
+    """watch_setdown: the plan has the lid meet the table SETDOWN_RELEASE_M
+    under the touch's end (carry.over_m); the watch begins SETDOWN_WATCH_M
+    above that — where the slow stretch begins — on the execution's last
+    stretch below there (final), from its first motion leg (not a gripper
+    leg before it), and cuts where the lid meets (past 0)."""
     from box_opening.runtime import approach
     from box_opening.runtime.legs import Kind
     from box_opening.tasks.press_contact import pads_z
@@ -1254,14 +1258,14 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
     close = SimpleNamespace(kind=Kind.GRIPPER, stop_when=None)
     lift = SimpleNamespace(kind=Kind.MOTION, stop_when=None)
     touch = SimpleNamespace(kind=Kind.MOTION, stop_when=None, goal_joints=[0.25] + [0.0] * 6)
-    carry = SimpleNamespace(legs=[SimpleNamespace(), touch], over_m=0.002, contact=None)
+    carry = SimpleNamespace(legs=[SimpleNamespace(), touch], over_m=-rlo.SETDOWN_RELEASE_M, contact=None)
     ctx = SimpleNamespace(client=SimpleNamespace())
     got = rlo.watch_setdown(ctx, [close, lift, touch], carry)
     end = pads_z(Chain(), touch.goal_joints)
     assert lift.stop_when is got is carry.contact and close.stop_when is None
-    assert got.end_z == pytest.approx(end) and got.top_z == pytest.approx(end + 0.002)
-    assert got.arm_z == pytest.approx(end + 0.002 + rlo.SETDOWN_WATCH_M) and got.past_m == pytest.approx(0.002)
-    assert got.cut is False
+    assert got.end_z == pytest.approx(end) and got.top_z == pytest.approx(end - rlo.SETDOWN_RELEASE_M)
+    assert got.arm_z == pytest.approx(end - rlo.SETDOWN_RELEASE_M + rlo.SETDOWN_WATCH_M) and got.past_m == 0.0
+    assert got.cut is True and got.final is True and rlo.SETDOWN_WATCH_M == rlo.SETDOWN_SLOW_M
 
 
 def test_the_first_press_is_cut_at_its_contact_and_a_press_once_more_flies_its_full_stroke(ctx, monkeypatch, tmp_path):
@@ -2256,19 +2260,16 @@ def _plan_by_ik(chain, home):
     return plan_ik
 
 
-def test_the_lid_is_pressed_onto_the_table_no_harder_than_its_push_and_never_past_two_millimetres(monkeypatch):
-    """Owner 2026-10-29: the lid is set down "too hard aka the arm is moving
-    too far down towards the table and pressing against it abnormally
-    hard". 6 mm past the table at the hand's 1150-2290 N/m was 11-30 N on
-    it. The touch ends SETDOWN_PUSH_N (5 N) on the spring straight down at
-    the fingertips past where the lid meets the table, at most
-    SETDOWN_OVER_M (2 mm): a stiff hand goes less deep, a soft one no
-    deeper than 2 mm."""
-    assert rlo.SETDOWN_PUSH_N == pytest.approx(5.0) and rlo.SETDOWN_OVER_M == pytest.approx(0.002)
-    for k, over in ((5000.0, 0.001), (2500.0, 0.002), (1150.0, 0.002), (float("inf"), 0.0)):
-        monkeypatch.setattr(dp, "fingertip_stiffness_z", lambda chain, q, k=k: k)
-        got, k_z = rlo.setdown_over(None, None)
-        assert got == pytest.approx(over) and k_z == k
+@pytest.mark.parametrize("name", ["ankou_pink", "oxo_pop", "oxo_pop_small"])
+def test_the_set_downs_slow_stretch_begins_below_every_containers_hover(name):
+    """The carry's hover (Place.hover_for: hover_standoff and a lid over
+    where the plan has the lid meet the table, at least) stands above where
+    the set-down's slow stretch begins, SETDOWN_SLOW_M over that: the way
+    down from it goes down. And the touch's end, SETDOWN_RELEASE_M over it,
+    below that: the lid let go 1 cm over the table where the plan is right."""
+    model = ContainerModel.load("capabilities/box_opening/config/containers/%s.yaml" % name)
+    assert model.hover_standoff + model.lid_dims[2] > rlo.SETDOWN_SLOW_M + 0.01
+    assert 0.0 < rlo.SETDOWN_RELEASE_M < rlo.SETDOWN_SLOW_M
 
 
 @pytest.mark.parametrize("shortest_walk", [False, True], ids=["today's posture", "the quickest walks' posture"])
@@ -2361,11 +2362,14 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     assert tier == "beside the box"
     carry, why = rlo.plan_carry(ctx, cfg, q_look, drop)
     assert carry is not None, why
-    # the touch ends past where the lid meets the table no deeper than SETDOWN_PUSH_N on the hand's spring there
+    # the way down to SETDOWN_SLOW_M over where the plan has the lid meet the table, the touch on down to
+    # SETDOWN_RELEASE_M over it (cut where the lid meets the table: watch_setdown)
     _quat, contact, _hover = rlo.setdown_poses(ctx, drop)
+    _R, t_down = chain.fk(carry.legs[1].goal_joints)
     _R, t_touch = chain.fk(carry.legs[2].goal_joints)
-    assert t_touch[2] == pytest.approx(contact[2] - carry.over_m, abs=5e-4)
-    assert 0.0 < carry.over_m <= rlo.SETDOWN_OVER_M and carry.k_z * carry.over_m <= rlo.SETDOWN_PUSH_N + 1e-9
+    assert t_down[2] == pytest.approx(contact[2] + rlo.SETDOWN_SLOW_M, abs=5e-4)
+    assert t_touch[2] == pytest.approx(contact[2] + rlo.SETDOWN_RELEASE_M, abs=5e-4)
+    assert carry.over_m == -rlo.SETDOWN_RELEASE_M and carry.k_z > 0.0
     home_legs, why = rlo.plan_home_after(ctx, cfg, carry)
     assert home_legs is not None, why
     names = [lg.name for lg in carry.legs + home_legs]

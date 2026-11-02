@@ -235,3 +235,58 @@ def test_a_watcher_that_fails_stops_nothing():
     det = pc.PressContact(Broken(), client, TOP, TOP + 0.035, 0.032, END)
     assert det(0.5) is False
     assert pc.PressContact(_Chain(), SimpleNamespace(), TOP, TOP + 0.035, 0.032, END)(0.5) is False  # no execution
+
+
+def _set_down(final):
+    """reach_lid_off.watch_setdown's watch on one execution: the lift off a
+    box standing lower than where the watch begins (the pads held back 6 mm
+    by the lid's latch, then springing after the reference as it comes
+    free), up and over, and down to the touch's end 10 mm over where the
+    plan has the lid meet the table — which it meets 40 mm higher."""
+    table = 0.20  # where the plan has the lid meet the table (pads)
+    arm, end, met = table + 0.08, table + 0.010, table + 0.040
+    client = SimpleNamespace(last_execution=None)
+    det = pc.PressContact(_Chain(), client, table, arm, 0.0, end, cut=True, final=final)
+    z = np.concatenate([np.linspace(0.25, 0.40, 31), np.linspace(0.40, end, 80)[1:]])
+
+    def measured(t, zr):
+        if t < 0.3:
+            return zr - 0.006  # the latch holds the lid, and the pads with it
+        if t < 1.6:
+            return zr - 0.001  # free: the pads a millimetre behind the rising reference
+        return max(zr + 0.002, met)  # down: a little above it, until the table holds the lid
+
+    stopped, _info = _fly(det, client, z, 0.05, measured)
+    return det, stopped, met, end
+
+
+def test_a_final_watch_judges_only_the_last_stretch_below_where_it_arms_and_cuts_where_the_lid_meets():
+    """final=True: the lid springing free in the lift below where the watch
+    begins is not judged; the last stretch down is, and it is cut where the
+    lid meets the table (past 0), above the touch's end — the lid let go
+    there."""
+    det, stopped, met, end = _set_down(final=True)
+    assert stopped is not None and det.how == "fast"
+    assert det.contact[1] == pytest.approx(met, abs=0.002)
+    assert det.stop_z == pytest.approx(det.contact[1]) and det.stop_z > end
+    assert pc.pads_z(_Chain(), det.held_ref) < met  # the detection's lag under where it met ...
+    assert pc.pads_z(_Chain(), det.held_ref) > met - 0.015  # ... no more
+    rec = det.record()
+    assert rec["cut"] and rec["above_top_mm"] == pytest.approx(40.0, abs=2.0) and rec["past_mm"] == 0.0
+
+
+def test_a_watch_from_the_first_time_under_where_it_arms_would_take_the_lift_for_the_table():
+    """Without final, the same execution is watched from its start, below
+    where the watch begins: the pads springing after the reference as the
+    lid comes free off the box rise like a contact, and the set-down is cut
+    there — the lid let go over the box."""
+    det, stopped, met, _end = _set_down(final=False)
+    assert stopped is not None and det.contact[1] < 0.30  # met in the lift, not at the table
+    assert abs(det.contact[1] - met) > 0.02
+
+
+def test_a_final_watch_of_a_trajectory_that_ends_above_where_it_arms_watches_nothing():
+    client = SimpleNamespace(last_execution=None)
+    det = pc.PressContact(_Chain(), client, TOP, TOP + 0.08, 0.0, TOP + 0.09, cut=True, final=True)
+    stopped, _info = _fly(det, client, np.linspace(0.30, 0.45, 20), 0.05, _free())
+    assert stopped is None and det.armed_t is None and det.arm_frac is None

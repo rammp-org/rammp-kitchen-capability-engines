@@ -114,6 +114,20 @@ class _Traj:
             return t / self.T if self.T > 0 else 1.0
         return None
 
+    def frac_final_below(self, z):
+        """The fraction from which the reference's pads stand at `z` or
+        lower to the trajectory's end (linear between points): 0.0 where
+        they never stand above it, None where they end above it."""
+        if not len(self.z) or self.z[-1] > z:
+            return None
+        above = np.nonzero(self.z > z)[0]
+        if not len(above):
+            return 0.0
+        i = int(above[-1])  # the last point above z; the next one is not
+        a = (self.z[i] - z) / max(self.z[i] - self.z[i + 1], 1e-12)
+        t = self.t[i] + a * (self.t[i + 1] - self.t[i])
+        return t / self.T if self.T > 0 else 1.0
+
 
 class PressContact:
     """A compliant press watched as it flies: client.execute's stop_when.
@@ -128,13 +142,17 @@ class PressContact:
     fraction, the joints) and the trajectory it sent (sent_traj), each kept
     sample once (feed). held_ref is the reference the driver holds where it
     cut: what the hold's spring pulls toward (depth_press.compliant_hold).
-    record() is what the run record keeps of it."""
+    record() is what the run record keeps of it. With `final` it watches
+    only the execution's last stretch below `arm_z` (_Traj.frac_final_below):
+    the set-down's, which flies in one execution from a lift off a box that
+    may stand lower (reach_lid_off.watch_setdown)."""
 
-    def __init__(self, chain, client, top_z, arm_z, past_m, end_z, cut=True):
+    def __init__(self, chain, client, top_z, arm_z, past_m, end_z, cut=True, final=False):
         self.chain, self.client = chain, client
         self.top_z, self.arm_z = float(top_z), float(arm_z)
         self.past_m, self.end_z = float(past_m), float(end_z)
         self.cut = bool(cut) and PRESS_FROM_CONTACT
+        self.final = bool(final)
         self.traj = None
         self._sent = None  # the info whose trajectory self.traj is
         self._reset()
@@ -143,6 +161,7 @@ class PressContact:
         """Nothing seen yet: a new execution starts its watch afresh."""
         self._last_t = None  # the newest kept sample fed
         self.armed_t = None
+        self.arm_frac = 0.0  # where watching may begin (final: the last stretch below arm_z; None never)
         self._win = deque()  # (t, gap, pads z measured) since arming, the last CONTACT_WINDOW_S
         self._hist = deque()  # ... the last HISTORY_S of them: where a rise began
         self._cand = None  # (the least gap, its sample) a rise is counted from
@@ -166,6 +185,8 @@ class PressContact:
         if self.traj is None:
             return
         self.samples += 1
+        if self.armed_t is None and (self.arm_frac is None or frac < self.arm_frac):
+            return  # before the stretch it watches (final): nothing to judge
         if self.armed_t is None and self.traj.z_at(frac) > self.arm_z + 0.005:
             return  # well above the slow leg: nothing to judge, no kinematics spent
         z_ref = pads_z(self.chain, self.traj.at(frac))
@@ -229,6 +250,8 @@ class PressContact:
         if info is not self._sent:  # a new execution: the trajectory it sent, watched afresh
             self._reset()
             self._sent, self.traj = info, _Traj(self.chain, info["sent_traj"])
+            if self.final:
+                self.arm_frac = self.traj.frac_final_below(self.arm_z)
         kept = info.get("feedback_q")
         if not kept or (self._last_t is not None and kept[-1][0] <= self._last_t):
             return  # polled at every spin (~1 kHz); a sample is kept every 10th feedback
