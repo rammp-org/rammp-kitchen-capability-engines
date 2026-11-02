@@ -193,8 +193,11 @@ class PlannerClient:
     # command, and re-sending the same absolute setpoint changes nothing
     GRIPPER_RESEND_S = 0.1
     GRIPPER_TIMEOUT_S = 10.0
-    # a knuckle reading older than this is a stream gap, never "settled"
-    GRIPPER_STREAM_GAP_S = 0.2
+    # two knuckle readings this far apart are a stream gap, never "settled": under
+    # GripperWait.SETTLE_S (0.15), so a pause in the stream can never itself be
+    # the stillness a stall is judged by (simulated with 2 % gaps: 45 of 400
+    # closes judged done on a mid-motion reading at 0.2 s, 0 at 0.1 s)
+    GRIPPER_STREAM_GAP_S = 0.1
 
     def __init__(self, node, abort=None, motion_enabled=False):
         self.node = node
@@ -1346,13 +1349,20 @@ class PlannerClient:
         from the dispatch, where that question belongs."""
         wait = driver.GripperWait(handle.target, handle.start, handle.t0)
         deadline = time.monotonic() + self.GRIPPER_TIMEOUT_S
+        last_at = None  # when the reading judged last arrived
         try:
             while time.monotonic() < deadline:
                 rclpy.spin_once(self.node, timeout_sec=0.02)
-                now = time.monotonic()
-                pos = self._gripper_pos
-                fresh = pos is not None and now - self._eff_at <= self.GRIPPER_STREAM_GAP_S
-                done = wait.update(handle.start if pos is None else pos, now, fresh)
+                pos, at = self._gripper_pos, self._eff_at
+                if pos is None or at == last_at:
+                    # nothing new: an old reading is judged once only, as wait_still does.
+                    # Judged again it would read as stillness through a stream pause, and
+                    # a close still moving would be taken for one that stopped
+                    continue
+                # fresh: close enough to the reading before it (the first one, to now)
+                gap = (at - last_at) if last_at is not None else (time.monotonic() - at)
+                last_at = at
+                done = wait.update(pos, at, gap <= self.GRIPPER_STREAM_GAP_S)
                 if done is not None:
                     return done
             return False, float(self._gripper_pos or 0.0), False

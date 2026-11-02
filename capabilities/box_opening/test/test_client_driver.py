@@ -253,6 +253,28 @@ def test_a_gripper_that_never_moved_still_fails_after_a_long_motion():
     assert ok is False and pos == pytest.approx(0.0)
 
 
+def test_a_pause_in_the_knuckle_stream_is_never_taken_for_a_stall(monkeypatch):
+    """A close still moving when /joint_states pauses (0.25 s here) used to be judged on its last
+    reading again and again: that reading held still for SETTLE_S, and the close was taken for a
+    stall short of the knob (a false miss). Only new readings are judged now, and a gap between
+    two of them over GRIPPER_STREAM_GAP_S restarts the stillness window."""
+    c = _client()
+    handle = c.gripper_send(0.8)
+    t0 = time.monotonic()
+    # (elapsed s, reading): moving, a pause with none, moving on, at the target
+    stream = [(0.02 * i, 0.05 + 0.04 * i) for i in range(6)] + [(0.37 + 0.02 * i, 0.5 + 0.1 * i) for i in range(4)]
+
+    def spin(node, timeout_sec=0.0):
+        time.sleep(0.005)
+        while stream and time.monotonic() - t0 >= stream[0][0]:
+            _t, pos = stream.pop(0)
+            c._gripper_pos, c._eff_at = pos, time.monotonic()
+
+    monkeypatch.setattr(client_mod.rclpy, "spin_once", spin)
+    ok, pos, stalled = c.gripper_join(handle)
+    assert ok and not stalled and pos == pytest.approx(0.8)  # at the target, after the pause
+
+
 def test_a_motion_stops_the_moment_the_search_finds_something():
     """The sweep flies until the detector commits a coarse fix. The goal is
     cancelled then and there, and the arm holds where it stopped — which is
