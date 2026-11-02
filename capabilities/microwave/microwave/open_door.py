@@ -202,9 +202,35 @@ def _push_legs(P):
     )
 
 
+def _back_legs(P):
+    """After the push, back the way it came (as _push_legs, reversed): off the door to where the push started, up,
+    back over the door to up-and-back -- the hand held pointing down -- so the arm can go home from there."""
+    return (
+        ("back off the door", P.inside, HOLD_FIXED),
+        ("back up", P.above, HOLD_FIXED),
+        ("back over the door", P.up_back, HOLD_FIXED),
+    )
+
+
+def _stitched(ai, P, legs, label, go_to, speeds=None):
+    """`legs` (as _push_legs) as ONE stitched cuRobo motion, passing every corner but the last within PUSH_BLEND_M;
+    `speeds` {leg label: speed_scale}. Returns True, or (False, why) -- and whether nothing moved (it failed planning,
+    e.g. no blend server), so the legs can be run one at a time instead."""
+    targets = [
+        PoseTarget(tuple(pos), tuple(P.down), hold, PUSH_BLEND_M if k < len(legs) - 1 else 0.0, (speeds or {}).get(lb))
+        for k, (lb, pos, hold) in enumerate(legs)
+    ]
+    say(f"push-open: {', '.join(lb for lb, _, _ in legs)} (cuRobo, one stitched motion) ...")
+    if ai.go_to_ee_poses(targets, f"push-open: {label}", **go_to):
+        return True, "", False
+    why = getattr(ai, "last_error", "")
+    return False, why, "PLANNING_FAILED" in why
+
+
 def _plan_push_open(ai, door, ee, q, loud=False):
     """Ask cuRobo -- nothing moves -- for the push-open from the hand pose `ee` / joints `q` at the swing's end: each
-    of its moves (_push_legs) from where the one before ends, for the first variant that plans all of them -- the hand
+    of its moves (_push_legs, then back the way it came: _back_legs) from where the one before ends, for the first
+    variant that plans all of them -- the hand
     PUSH_TILT_TRY_DEG off straight down, the fingertips PUSH_CLEAR_TRY_M over the door top. Not sim-gated: cuRobo is
     trusted with it (11-02), and its world has no door. Returns (P, [(label, Plan)], None) or (None, None, why)."""
     whys = []
@@ -213,7 +239,7 @@ def _plan_push_open(ai, door, ee, q, loud=False):
         if float((P.pushed - P.inside)[:2] @ P.out[:2]) <= 0:  # toward the hinge must open the door further
             return None, None, "push-open: the hinge's y is on the door's closing side of the hand -- refusing"
         start, plans = np.asarray(q, dtype=float), []
-        for label, pos, hold in _push_legs(P):
+        for label, pos, hold in (*_push_legs(P), *_back_legs(P)):
             pl = ai.plan_to_pose(pos, P.down, start, hold=hold)
             if not pl.success:
                 whys.append(f"{P.how}: cuRobo can't plan '{label}' ({pl.message})")
@@ -570,6 +596,19 @@ def push_open(ai, execute, on_release=None):
             raise Refused(
                 f"push-open: the push stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
             )
+    # back the way it came, off the door and over it, so the arm can go home from there
+    back = _back_legs(P)
+    ok, why, unmoved = _stitched(ai, P, back, "back the way it came", go_to)
+    if not ok and not unmoved:
+        raise Refused(f"push-open: back the way it came stopped ({why}) -- the arm holds where it is.")
+    if not ok:
+        say("push-open: cuRobo can't stitch them here -- back one move at a time")
+        for label, pos, hold in back:
+            say(f"push-open: {label} (cuRobo) ...")
+            if not ai.go_to_ee_pose(pos, P.down, f"push-open: {label}", orientation_hold=hold, **go_to):
+                raise Refused(
+                    f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
+                )
     # the door's new opening, for the close: taken as square to the arm -- the push stops at the hinge's y
     save_door_geometry(door_open_deg=PUSH_OPEN_DOOR_DEG)
     say(f"door file: open {PUSH_OPEN_DOOR_DEG:.0f} deg after the push (taken, not measured)")
