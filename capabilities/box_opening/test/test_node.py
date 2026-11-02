@@ -60,10 +60,11 @@ sys.exit(int(os.environ["EXIT"]))
 
 
 class FakeCtx:
-    def __init__(self):
+    def __init__(self, accepts=True):
         self.said = []
         self.cancel = False
         self.objects = {}
+        self.accepts = accepts  # what the orchestrator answers a world-state write
 
     def progress(self, phase, pct, message="", pausable=True):
         self.said.append((phase, pct, message, pausable))
@@ -76,8 +77,9 @@ class FakeCtx:
         return self.cancel
 
     def update_object(self, instance_id, **fields):
-        self.objects[instance_id] = fields
-        return True
+        if self.accepts:
+            self.objects[instance_id] = fields
+        return self.accepts
 
 
 @pytest.fixture(scope="module")
@@ -127,7 +129,38 @@ def test_a_full_run_reports_its_phases_in_order_and_the_lid_off(engine, monkeypa
     assert out["executed"] and out["lid_off"] and out["lid_xyz"] == [0.597, -0.071, 0.209]
     assert (out["presses"], out["grips"], out["video"]) == (1, 1, video)
     assert out["run_log"].endswith("run-20261030-140000.jsonl")
-    assert ctx.objects == {"food_container_1": {"lid": "off", "lid_xyz": [0.597, -0.071, 0.209]}}
+    # the object record's own field: the orchestrator refuses any other (REVIEW_RULES O6)
+    assert ctx.objects == {"food_container_1": {"opened": True}} and out["world_state"] == "opened"
+
+
+def test_a_world_state_write_the_orchestrator_refuses_is_said_in_the_result(engine, monkeypatch):
+    """REVIEW_RULES O6: a refused write would leave open_box offered on an open container."""
+    given(monkeypatch, FULL_RUN)
+    ctx = FakeCtx(accepts=False)
+    engine.instance_id = "food_container_1"
+    out = engine.execute("open_box", {"execute": True}, ctx)
+    assert out["lid_off"] and out["world_state"] == "not updated" and ctx.objects == {}
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"execute": "false"},
+        {"execute": 1},
+        {"execute": None},
+        {"exectue": True},
+        {"execute": True, "lift_first_m": 0.5},
+    ],
+)
+def test_bad_params_fail_before_anything_runs(engine, monkeypatch, params):
+    """REVIEW_RULES O4: the base class does not enforce params_schema. A string "false" must not
+    read as true, and an unknown key (a typo, or the old home action's lift) is refused."""
+    given(monkeypatch)
+    started = []
+    monkeypatch.setattr(node, "Run", lambda *a, **k: started.append(a))
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", params, FakeCtx())
+    assert e.value.error_code == "bad_params" and not started
 
 
 def test_a_run_that_stops_with_the_arm_holding_is_not_recoverable(engine, monkeypatch):
@@ -243,11 +276,13 @@ def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):
     assert (logging.INFO, "plain line") in said
 
 
-def test_open_box_is_offered_until_the_lid_is_off(engine):
-    on = {a.action_id: a.available for a in engine.availability("c1", {"objects": {"c1": {"lid": "on"}}})}
-    off = {a.action_id: a.available for a in engine.availability("c1", {"objects": {"c1": {"lid": "off"}}})}
-    unknown = {a.action_id: a.available for a in engine.availability("c1", {})}
-    assert on == unknown == {"open_box": True} and off == {"open_box": False}
+def test_open_box_is_offered_until_the_world_state_holds_the_container_opened(engine):
+    def offered(record):
+        world = {"objects": {"c1": record}} if record is not None else {}
+        return {a.action_id: a.available for a in engine.availability("c1", world)}
+
+    assert offered({"opened": False}) == offered({"opened": None}) == offered(None) == {"open_box": True}
+    assert offered({"opened": True}) == {"open_box": False}
 
 
 def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):

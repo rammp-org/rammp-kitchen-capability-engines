@@ -82,15 +82,18 @@ Served under `/box_opening/`, types from `rammp_orchestrator_interfaces`:
 | `/box_opening/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
 It is activated when the user selects a `food container`. `open_box` is offered
-until the container's lid is off.
+until the world state holds the container `opened`.
 
 | Action     | Params                            | Result payload                                                                                     |
 | ---------- | --------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `open_box` | `execute` (bool, default `false`) | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log", "note"}` |
+| `open_box` | `execute` (bool, default `false`) | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log", "note"}`, and `world_state` when the lid came off |
 
 `lid_xyz` is where the lid was set down, in `arm_mount` (m). `video` is the MP4
 of both cameras from the grip to the set-down, where one was recorded. When the
-lid comes off, the container's object state gets `lid: "off"` and `lid_xyz`.
+lid comes off, the container's object record gets `opened: true`; `world_state`
+says `opened`, or `not updated` where the orchestrator refused the write (also
+logged as an error). Params are checked before anything runs: anything but a
+JSON boolean `execute` fails with `bad_params`.
 
 Progress phases, in order: `locate` (5%), `look` (10%), `press` (35%), `grip`
 (50%), `carry` (85%), `release` (90%), `home` (100%). A phase is reported as
@@ -104,6 +107,7 @@ A run that stops fails the action with one of these codes:
 
 | Code        | Recoverable | Meaning                                                                |
 | ----------- | ----------- | ---------------------------------------------------------------------- |
+| `bad_params` | no         | The goal's params are not `{"execute": true/false}`; nothing ran       |
 | `not_ready` | yes         | Refused before anything moved: a driver, planner, camera or TF missing |
 | `not_found` | yes         | The scene camera found no container                                    |
 | `not_home`  | yes         | The arm could not get to its start pose                                |

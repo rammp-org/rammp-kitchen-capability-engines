@@ -60,6 +60,22 @@ PARAMS = {
 }
 EXECUTE = {"execute": {"type": "boolean", "default": False}}
 
+
+def checked_params(params):
+    """`params` against open_box's schema (REVIEW_RULES O4: the base class does not enforce it):
+    a JSON object whose only key is `execute`, a JSON boolean. Returns `execute`; anything else
+    is EngineError("bad_params"). A string "false" must never read as true."""
+    if not isinstance(params, dict):
+        raise EngineError("bad_params", f"params must be a JSON object, not {type(params).__name__}")
+    unknown = sorted(set(params) - set(EXECUTE))
+    if unknown:
+        raise EngineError("bad_params", f"unknown param(s) {', '.join(unknown)}: open_box takes only 'execute'")
+    execute = params.get("execute", False)
+    if not isinstance(execute, bool):
+        raise EngineError("bad_params", f"'execute' must be true or false, not {execute!r}")
+    return execute
+
+
 # the command line each action runs: the package's executable, as `ros2 run box_opening <it>`
 EXECUTABLES = {"open_box": "press_demo"}
 POLL_S = 0.05
@@ -310,13 +326,15 @@ class Capability(CapabilityEngine):
         )
 
     def availability(self, instance_id, world_state):
-        """open_box for a container whose lid is not already off."""
-        lid_off = ((world_state.get("objects") or {}).get(instance_id) or {}).get("lid") == "off"
-        return [ActionAvailability(action_id=a.action_id, available=not lid_off) for a in self.actions]
+        """open_box for a container the world state does not already hold opened (its object
+        record's `opened`, which a run that took the lid off writes)."""
+        opened = ((world_state.get("objects") or {}).get(instance_id) or {}).get("opened") is True
+        return [ActionAvailability(action_id=a.action_id, available=not opened) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
-        execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
-        note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
+        asked = checked_params(params)
+        execute = asked and self.cfg["allow_execute"]
+        note = "allow_execute is false: ran as a DRY RUN" if asked and not execute else ""
         if self.mock:
             return self._mock(action_id, ctx, note)
         ctx.checkpoint()  # cancelled before it started: nothing runs
@@ -356,7 +374,14 @@ class Capability(CapabilityEngine):
         if code != 0:
             raise error_for(action_id, code, run_.lines)
         if result["lid_off"] and self.instance_id:
-            ctx.update_object(self.instance_id, lid="off", lid_xyz=result["lid_xyz"])
+            # `opened` is the object record's own field (the orchestrator refuses any other); where
+            # the lid went is the result's lid_xyz. A refused write leaves open_box offered on an
+            # open container: said, in the log and in the result (REVIEW_RULES O6)
+            result["world_state"] = "opened" if ctx.update_object(self.instance_id, opened=True) else "not updated"
+            if result["world_state"] != "opened":
+                self.get_logger().error(
+                    f"the lid is off, but the world state was not updated: {self.instance_id} is not marked opened"
+                )
         return result
 
     def _follow(self, run_, log, track, ctx):
