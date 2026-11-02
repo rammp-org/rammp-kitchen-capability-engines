@@ -64,6 +64,7 @@ class FakeCtx:
         self.said = []
         self.cancel = False
         self.objects = {}
+        self.world = []  # every world-state write, in order
         self.accepts = accepts  # what the orchestrator answers a world-state write
 
     def progress(self, phase, pct, message="", pausable=True):
@@ -79,6 +80,11 @@ class FakeCtx:
     def update_object(self, instance_id, **fields):
         if self.accepts:
             self.objects[instance_id] = fields
+        return self.accepts
+
+    def write_world_state(self, **updates):
+        if self.accepts:
+            self.world.append(updates)
         return self.accepts
 
 
@@ -119,7 +125,7 @@ def test_a_full_run_reports_its_phases_in_order_and_the_lid_off(engine, monkeypa
     )
     ctx = FakeCtx()
     engine.instance_id = "food_container_1"
-    out = engine.execute("open_box", {"execute": True}, ctx)
+    out = engine.execute("open_box", {}, ctx)
     phases = [p for p, *_ in ctx.said]
     assert phases[0] == "locate" and phases[-1] == "home"
     order = ["locate", "look", "press", "grip", "carry", "release", "home"]
@@ -131,6 +137,68 @@ def test_a_full_run_reports_its_phases_in_order_and_the_lid_off(engine, monkeypa
     assert out["run_log"].endswith("run-20261030-140000.jsonl")
     # the object record's own field: the orchestrator refuses any other (REVIEW_RULES O6)
     assert ctx.objects == {"food_container_1": {"opened": True}} and out["world_state"] == "opened"
+    # REVIEW_RULES C7: never left holding (the grip and the release came in one read here)
+    assert not ctx.world or ctx.world[-1] == {"gripper": {"holding": None}}
+
+
+def test_the_world_state_holds_the_lid_from_the_grip_that_held_it_to_its_release(engine):
+    """REVIEW_RULES C7, row by row as a run writes them: holding from the grip's held result,
+    empty again at the release (or a put-back's), each change written once."""
+    ctx = FakeCtx()
+    engine.instance_id = "food_container_1"
+    track = node.Tracker("open_box")
+    said = []
+    for row in FULL_RUN:
+        track.add(row)
+        engine._sync_held(track, ctx)
+        said.append(track.held)
+    assert ctx.world == [{"gripper": {"holding": "food_container_1:lid"}}, {"gripper": {"holding": None}}]
+    assert said.index(True) == 10 and said.index(False, 10) == 13  # reach_grip_result, then place:open
+    engine.instance_id = ""  # standalone: nothing to tell
+    track = node.Tracker("open_box")
+    track.add(FULL_RUN[10])
+    engine._sync_held(track, FakeCtx())
+    assert track.held and not track.held_said
+
+
+def test_a_run_that_stops_with_the_lid_in_the_fingers_leaves_it_said(engine, monkeypatch):
+    """REVIEW_RULES C7: the run stopped part way with the lid held (the driver stopped the
+    carry): the world state already says the gripper holds it (written as the grip held, so a
+    cancel needs no write either), and the error says so."""
+    stop = "[press_demo] STOP: the lid's way to the table stopped during lid:carry (aborted) — the arm holds the lid"
+    given(monkeypatch, FULL_RUN[:8] + [FULL_RUN[10]], [stop], code=1)  # the grip held, then the carry stopped
+    ctx = FakeCtx()
+    engine.instance_id = "food_container_1"
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_holds" and not e.value.recoverable
+    assert str(e.value).endswith("the lid is still in the fingers")
+    assert ctx.world == [{"gripper": {"holding": "food_container_1:lid"}}]
+
+
+def test_a_lid_put_back_on_the_box_leaves_the_gripper_empty_and_the_run_retryable(engine, monkeypatch):
+    """No carry planned: the run put the lid back on the box and went home (reach_lid_off
+    .put_lid_back). The lid is no longer held, and a retry can succeed."""
+    rows = (
+        FULL_RUN[:8]
+        + [FULL_RUN[10]]
+        + [
+            {"leg": "lid:release", "kind": "gripper", "ok": True, "outcome": "arrived"},
+            {"leg": "lid_put_back", "kind": "note", "ok": True, "why": "no carry to a spot the lid could go to plans"},
+            {"leg": "home", "kind": "motion", "ok": True, "outcome": "arrived"},
+        ]
+    )
+    stop = (
+        "[press_demo] STOP: no carry to a spot the lid could go to plans — the lid is back on the box, "
+        "and the arm is home"
+    )
+    given(monkeypatch, rows, [stop], code=1)
+    ctx = FakeCtx()
+    engine.instance_id = "food_container_1"
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "failed" and e.value.recoverable and "still in the fingers" not in str(e.value)
+    assert not ctx.world or ctx.world[-1] == {"gripper": {"holding": None}}  # not left holding
 
 
 def test_a_world_state_write_the_orchestrator_refuses_is_said_in_the_result(engine, monkeypatch):
@@ -138,23 +206,18 @@ def test_a_world_state_write_the_orchestrator_refuses_is_said_in_the_result(engi
     given(monkeypatch, FULL_RUN)
     ctx = FakeCtx(accepts=False)
     engine.instance_id = "food_container_1"
-    out = engine.execute("open_box", {"execute": True}, ctx)
+    out = engine.execute("open_box", {}, ctx)
     assert out["lid_off"] and out["world_state"] == "not updated" and ctx.objects == {}
 
 
 @pytest.mark.parametrize(
     "params",
-    [
-        {"execute": "false"},
-        {"execute": 1},
-        {"execute": None},
-        {"exectue": True},
-        {"execute": True, "lift_first_m": 0.5},
-    ],
+    [{"execute": True}, {"execute": "false"}, {"exectue": True}, {"lift_first_m": 0.5}, ["execute"]],
 )
 def test_bad_params_fail_before_anything_runs(engine, monkeypatch, params):
-    """REVIEW_RULES O4: the base class does not enforce params_schema. A string "false" must not
-    read as true, and an unknown key (a typo, or the old home action's lift) is refused."""
+    """REVIEW_RULES O4: the base class does not enforce params_schema. open_box takes no params:
+    the dry run's `execute` is gone, and anything else (a typo, the old home action's lift) is
+    refused before anything runs."""
     given(monkeypatch)
     started = []
     monkeypatch.setattr(node, "Run", lambda *a, **k: started.append(a))
@@ -166,7 +229,7 @@ def test_bad_params_fail_before_anything_runs(engine, monkeypatch, params):
 def test_a_run_that_stops_with_the_arm_holding_is_not_recoverable(engine, monkeypatch):
     given(monkeypatch, FULL_RUN[:5], ["[press_demo] STOP: the fingers did not open (timeout) — the arm holds"], code=1)
     with pytest.raises(EngineError) as e:
-        engine.execute("open_box", {"execute": True}, FakeCtx())
+        engine.execute("open_box", {}, FakeCtx())
     assert e.value.error_code == "arm_holds" and not e.value.recoverable
     assert "the fingers did not open" in str(e.value) and "clear it" in str(e.value)
 
@@ -184,7 +247,7 @@ def test_a_run_that_stops_with_the_arm_holding_is_not_recoverable(engine, monkey
 def test_how_a_run_ended_is_its_error_code(engine, monkeypatch, say, code, error):
     given(monkeypatch, say=say, code=code)
     with pytest.raises(EngineError) as e:
-        engine.execute("open_box", {"execute": True}, FakeCtx())
+        engine.execute("open_box", {}, FakeCtx())
     assert e.value.error_code == error and e.value.recoverable
 
 
@@ -204,7 +267,7 @@ def test_a_cancel_is_the_runs_own_ctrl_c_and_ends_the_action_cancelled(engine, m
     threading.Timer(1.0, setattr, args=(ctx, "cancel", True)).start()
     t0 = time.monotonic()
     with pytest.raises(Cancelled):
-        engine.execute("open_box", {"execute": True}, ctx)
+        engine.execute("open_box", {}, ctx)
     assert sent == [signal.SIGINT]  # once: a second is the escalation, after CANCEL_ESCALATE_S
     assert time.monotonic() - t0 < 5.0
 
@@ -234,25 +297,31 @@ def test_a_run_is_stopped_when_following_it_raises(engine, monkeypatch):
     monkeypatch.setattr(node.Capability, "_progress", staticmethod(progress))
     t0 = time.monotonic()
     with pytest.raises(RuntimeError):
-        engine.execute("open_box", {"execute": True}, FakeCtx())
+        engine.execute("open_box", {}, FakeCtx())
     assert sent == [signal.SIGINT]  # its own stop, not a kill
     assert runs[0].proc.poll() == 130 and engine._run is None  # ended by its Ctrl+C
     assert time.monotonic() - t0 < 5.0  # the stand-in exits on its Ctrl+C at once
 
 
-def test_execute_moves_nothing_unless_the_node_allows_it(engine, monkeypatch):
+def test_nothing_runs_unless_the_node_allows_it_and_it_is_not_offered(engine, monkeypatch):
+    """REVIEW_RULES O1: no dry run. With allow_execute off (the default, and between attended
+    runs) open_box is reported unavailable, with why, and a goal that comes anyway is refused
+    before anything runs. On, it runs, and always with --execute."""
     given(monkeypatch)
     lines = []
     monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: lines.append(msg))
-    engine.cfg["allow_execute"] = False
-    out = engine.execute("open_box", {"execute": True}, FakeCtx())
-    argv = next(ln for ln in lines if ln.startswith("ARGV "))
-    assert "--execute" not in argv.split() and not out["executed"] and "DRY RUN" in out["note"]
-    engine.cfg["allow_execute"] = True
-    lines.clear()
-    engine.execute("open_box", {"execute": True}, FakeCtx())
+    engine.set_parameters([Parameter("allow_execute", value=False)])
+    (a,) = engine.availability("c1", {})
+    assert not a.available and a.reason.startswith("allow_execute is off")
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "not_allowed" and not any(ln.startswith("ARGV ") for ln in lines)
+    engine.set_parameters([Parameter("allow_execute", value=True)])
+    (a,) = engine.availability("c1", {})
+    assert a.available and a.reason == ""
+    engine.execute("open_box", {}, FakeCtx())
     argv = next(ln for ln in lines if ln.startswith("ARGV ")).split()
-    assert "--execute" in argv
+    assert argv[-1] == "--execute"
 
 
 def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
@@ -260,11 +329,14 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     open_box's own run (press_demo checks readiness and homes first), not actions of their own."""
     assert [a.action_id for a in engine.actions] == ["open_box"] == list(node.EXECUTABLES) == list(node.MOCK_PHASES)
     real = node.Capability._argv.__get__(engine)
-    argv = real("open_box", {"execute": True}, True)
+    argv = real("open_box")
     assert argv[0].endswith("lib/box_opening/press_demo") and "--press-only" not in argv
     assert argv[argv.index("--container") + 1].endswith("config/containers/ankou_pink.yaml")
     assert argv[argv.index("--bench-world") + 1].endswith("config/world_flatbot.yaml")
-    assert argv[-1] == "--execute" and "--execute" not in real("open_box", {"execute": True}, False)
+    assert argv[-1] == "--execute" and "--instance-id" not in argv  # standalone: no selection
+    engine.instance_id = "food_container_2"
+    argv = real("open_box")
+    assert argv[argv.index("--instance-id") + 1] == "food_container_2"
 
 
 def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):
@@ -292,7 +364,9 @@ def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
     )
     try:
         ctx = FakeCtx()
-        out = cap.execute("open_box", {"execute": True}, ctx)
+        (a,) = cap.availability("c1", {})  # allow_execute off, as by default: the mock is offered all the same
+        assert a.available
+        out = cap.execute("open_box", {}, ctx)
         assert [p for p, *_ in ctx.said] == [p for p, _ in node.MOCK_PHASES["open_box"]]
         assert out["mock"] and not out["executed"] and not out["lid_off"]
     finally:

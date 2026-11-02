@@ -18,13 +18,12 @@ the perception already running on the robot: only the object the orchestrator se
 instance_id, passed to the run as --instance-id), and a lid box stacked on it. No detector
 runs in this node.
 
-SAFETY: the arm moves only if the node runs with allow_execute:=true AND the goal sets
-`execute`. Otherwise the run is a dry run: it finds the box, plans and checks every motion,
-and sends none (its client's motion latch stays off). Someone stands at the e-stop whenever
-allow_execute is on.
+SAFETY: the arm moves only on a node with allow_execute:=true, set for an attended run (someone
+at the e-stop). With it false, open_box is reported unavailable and a goal that comes anyway is
+refused before anything runs. The mock moves nothing and is always available.
 
     ros2 launch box_opening box_opening.launch.py use_orchestrator:=false
-    make action CAP=box_opening ACTION=open_box PARAMS='{"execute": false}'
+    make action CAP=box_opening ACTION=open_box
 """
 
 import json
@@ -58,22 +57,17 @@ PARAMS = {
     "mission_frames": False,
     "speed_scale": 1.0,
 }
-EXECUTE = {"execute": {"type": "boolean", "default": False}}
+NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
 
 
-def checked_params(params):
-    """`params` against open_box's schema (REVIEW_RULES O4: the base class does not enforce it):
-    a JSON object whose only key is `execute`, a JSON boolean. Returns `execute`; anything else
-    is EngineError("bad_params"). A string "false" must never read as true."""
+def check_params(params):
+    """`params` against open_box's schema (REVIEW_RULES O4: the base class does not enforce
+    it): open_box takes none, so anything but an empty JSON object is EngineError("bad_params")
+    (the dry run's `execute` included: it is gone)."""
     if not isinstance(params, dict):
         raise EngineError("bad_params", f"params must be a JSON object, not {type(params).__name__}")
-    unknown = sorted(set(params) - set(EXECUTE))
-    if unknown:
-        raise EngineError("bad_params", f"unknown param(s) {', '.join(unknown)}: open_box takes only 'execute'")
-    execute = params.get("execute", False)
-    if not isinstance(execute, bool):
-        raise EngineError("bad_params", f"'execute' must be true or false, not {execute!r}")
-    return execute
+    if params:
+        raise EngineError("bad_params", f"open_box takes no params, not {', '.join(sorted(map(str, params)))}")
 
 
 # the command line each action runs: the package's executable, as `ros2 run box_opening <it>`
@@ -245,6 +239,8 @@ class Tracker:
         self.lid_spot = None
         self.set_down = False
         self.released = False
+        self.held = False  # the lid in the fingers: from the grip that held it to its release or put-back
+        self.held_said = False  # ... as the world state was last told (Capability._sync_held)
 
     def add(self, row):
         """The (phase, %, message) this row says, or None."""
@@ -258,6 +254,8 @@ class Tracker:
             self.grips += 1
         if leg == "place:open" and ok:
             self.released = True
+        if leg in ("place:open", "lid:release") and ok:
+            self.held = False
         for start, phase, pct in LEG_PHASES:
             if leg.startswith(start):
                 self.pct = max(self.pct, pct)
@@ -275,7 +273,11 @@ class Tracker:
             return "grip", self.pct, f"the lid goes to [{x:.2f}, {y:.2f}] ({row.get('tier', '')})"
         if leg == "reach_setdown":
             self.set_down = True
+        if leg == "lid_put_back" and row.get("ok"):
+            self.held = False
+            return "release", self.pct, f"the lid put back on the box ({row.get('why', '')})"
         if leg == "reach_grip_result":
+            self.held = self.held or bool(row.get("ok"))
             held = "held" if row.get("ok") else "missed"
             return "grip", self.pct, f"the grip {held} ({row.get('detail', '')})"
         if leg == "reach_refused":
@@ -311,7 +313,11 @@ class Capability(CapabilityEngine):
     perception_classes = ["food container"]
     required_resources = ["arm", "gripper"]
     actions = [
-        Action("open_box", "Open the container", params_schema={"type": "object", "properties": EXECUTE}),
+        Action(
+            "open_box",
+            "Open the container",
+            params_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
     ]
 
     def __init__(self, **node_kwargs):
@@ -321,30 +327,37 @@ class Capability(CapabilityEngine):
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
         self.get_logger().info(
-            f"allow_execute={self.cfg['allow_execute']}: "
-            + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
+            "allow_execute is on: open_box moves the arm"
+            if self._allowed()
+            else NOT_ALLOWED + " (open_box unavailable)"
         )
+
+    def _allowed(self):
+        """allow_execute as it is now (a deployment may set it while the node runs)."""
+        return bool(self.get_parameter("allow_execute").value)
 
     def availability(self, instance_id, world_state):
         """open_box for a container the world state does not already hold opened (its object
         record's `opened`, which a run that took the lid off writes)."""
         opened = ((world_state.get("objects") or {}).get(instance_id) or {}).get("opened") is True
-        return [ActionAvailability(action_id=a.action_id, available=not opened) for a in self.actions]
+        # REVIEW_RULES O1: offered only where it will run. The mock moves nothing: always offered
+        why = "the container is already opened" if opened else "" if self.mock or self._allowed() else NOT_ALLOWED
+        return [ActionAvailability(action_id=a.action_id, available=not why, reason=why) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
-        asked = checked_params(params)
-        execute = asked and self.cfg["allow_execute"]
-        note = "allow_execute is false: ran as a DRY RUN" if asked and not execute else ""
+        check_params(params)
         if self.mock:
-            return self._mock(action_id, ctx, note)
+            return self._mock(action_id, ctx)
+        if not self._allowed():
+            raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
         ctx.checkpoint()  # cancelled before it started: nothing runs
         runs = state_dir(self._env()) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
         track = Tracker(action_id)
         t0 = time.monotonic()
         first = MOCK_PHASES[action_id][0][0]
-        ctx.progress(first, 0.0, "starting" + ("" if execute else " (dry run)"), pausable=False)
-        self._run = Run(self._argv(action_id, params, execute), self._env(), LOGGER.log)
+        ctx.progress(first, 0.0, "starting", pausable=False)
+        self._run = Run(self._argv(action_id), self._env(), LOGGER.log)
         try:
             code = self._follow(self._run, log, track, ctx)
         finally:
@@ -361,7 +374,7 @@ class Capability(CapabilityEngine):
         if ctx.cancelled():
             raise Cancelled()
         result = {
-            "executed": execute,
+            "executed": True,
             "lid_off": track.lid_off(code),
             "lid_xyz": track.lid_spot if track.lid_off(code) else None,
             "presses": track.presses,
@@ -369,10 +382,15 @@ class Capability(CapabilityEngine):
             "duration_s": round(time.monotonic() - t0, 1),
             "video": run_.video,
             "run_log": str(log.path) if log.path else None,
-            "note": note,
         }
+        self._sync_held(track, ctx)  # the last rows' word: a release, a put-back
         if code != 0:
-            raise error_for(action_id, code, run_.lines)
+            error = error_for(action_id, code, run_.lines)
+            if track.held:
+                error = EngineError(
+                    error.error_code, f"{error} -- the lid is still in the fingers", recoverable=error.recoverable
+                )
+            raise error
         if result["lid_off"] and self.instance_id:
             # `opened` is the object record's own field (the orchestrator refuses any other); where
             # the lid went is the result's lid_xyz. A refused write leaves open_box offered on an
@@ -389,6 +407,8 @@ class Capability(CapabilityEngine):
         sent = escalated = None
         while run_.proc.poll() is None:
             self._progress(log, track, ctx)
+            if not ctx.cancelled():
+                self._sync_held(track, ctx)
             now = time.monotonic()
             if ctx.cancelled() and sent is None:
                 self.get_logger().warning("cancelled: the run's own stop (Ctrl+C) sent")
@@ -404,6 +424,18 @@ class Capability(CapabilityEngine):
             time.sleep(POLL_S)
         return run_.finish()
 
+    def _sync_held(self, track, ctx):
+        """The world state's gripper as the run's rows say it (REVIEW_RULES C7): holding the
+        selected container's lid from the grip that held it to its release or put-back. A cancel,
+        or a run stopped between the two, then leaves it said: the base class takes no world-state
+        write once an action is cancelled, so it is written as it happens, never after."""
+        if not self.instance_id or track.held == track.held_said:
+            return
+        track.held_said = track.held
+        holding = f"{self.instance_id}:lid" if track.held else None
+        if not ctx.write_world_state(gripper={"holding": holding}):
+            self.get_logger().error(f"the world state was not told the gripper holds {holding}")
+
     @staticmethod
     def _progress(log, track, ctx):
         """The progress each new row of the run log says (a run cannot pause once started)."""
@@ -412,14 +444,14 @@ class Capability(CapabilityEngine):
             if said is not None:
                 ctx.progress(*said, pausable=False)
 
-    def _argv(self, action_id, params, execute):
+    def _argv(self, action_id):
         argv = [executable(EXECUTABLES[action_id])]
         argv += ["--container", config_path(self.cfg["container"], "containers")]
         argv += ["--bench-world", config_path(self.cfg["world"])]
         argv += ["--speed-scale", str(float(self.cfg["speed_scale"]))]
         if self.instance_id:  # the container the orchestrator selected; standalone: any of its class
             argv += ["--instance-id", self.instance_id]
-        return argv + (["--execute"] if execute else [])
+        return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
 
     def _env(self):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
@@ -430,7 +462,7 @@ class Capability(CapabilityEngine):
             env["BOX_OPENING_STATE"] = self.cfg["state_dir"]
         return env
 
-    def _mock(self, action_id, ctx, note):
+    def _mock(self, action_id, ctx):
         for phase, pct in MOCK_PHASES[action_id]:
             ctx.checkpoint()
             ctx.progress(phase, pct, "mock: nothing detected or moved", pausable=False)
@@ -444,7 +476,6 @@ class Capability(CapabilityEngine):
             "duration_s": 0.0,
             "video": None,
             "run_log": None,
-            "note": note,
         }
 
     def _on_shutdown(self):

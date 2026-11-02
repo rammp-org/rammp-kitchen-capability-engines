@@ -45,9 +45,11 @@ action's progress. Planning and motion go straight to the arm driver
 (`/execute_joint_trajectory`, `/setpoint/gripper`) and the cuRobo planner
 (`/rammp_curobo/plan_to_pose`, `plan_to_joints`), not yet through `self.arm`.
 
-The arm moves only when the node runs with `allow_execute: true` and the goal
-sets `execute`. Otherwise the run is a dry run: it finds the container, plans
-and checks every motion, and sends none.
+The arm moves only on a node with `allow_execute: true`, set for an attended
+run with someone at the e-stop. With it `false` (the default), `open_box` is
+reported unavailable (with why), and a goal that comes anyway fails with
+`not_allowed` before anything runs. There is no dry run. The mock moves nothing
+and is always offered.
 
 ## Publishes
 
@@ -90,18 +92,24 @@ Served under `/box_opening/`, types from `rammp_orchestrator_interfaces`:
 | `/box_opening/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
 It is activated when the user selects a `food container`. `open_box` is offered
-until the world state holds the container `opened`.
+where `allow_execute` is on, until the world state holds the container `opened`.
 
-| Action     | Params                            | Result payload                                                                                     |
-| ---------- | --------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `open_box` | `execute` (bool, default `false`) | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log", "note"}`, and `world_state` when the lid came off |
+| Action     | Params | Result payload                                                                                                                     |
+| ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `open_box` | none   | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log"}`, and `world_state` when the lid came off |
 
 `lid_xyz` is where the lid was set down, in `arm_mount` (m). `video` is the MP4
 of both cameras from the grip to the set-down, where one was recorded. When the
 lid comes off, the container's object record gets `opened: true`; `world_state`
 says `opened`, or `not updated` where the orchestrator refused the write (also
-logged as an error). Params are checked before anything runs: anything but a
-JSON boolean `execute` fails with `bad_params`.
+logged as an error). `open_box` takes no params: any fails with `bad_params`
+before anything runs.
+
+While the lid is in the fingers the world state's gripper says so: `holding`
+is `<instance_id>:lid` from the grip that held it to its release (or its
+put-back), when it is `null` again. A cancel or a stop in between leaves it
+said; it is written as the run goes, since the engine takes no world-state
+write once an action is cancelled.
 
 Progress phases, in order: `locate` (5%), `look` (10%), `press` (35%), `grip`
 (50%), `carry` (85%), `release` (90%), `home` (100%). A phase is reported as
@@ -115,7 +123,8 @@ A run that stops fails the action with one of these codes:
 
 | Code        | Recoverable | Meaning                                                                |
 | ----------- | ----------- | ---------------------------------------------------------------------- |
-| `bad_params` | no         | The goal's params are not `{"execute": true/false}`; nothing ran       |
+| `bad_params` | no         | The goal had params; `open_box` takes none. Nothing ran                |
+| `not_allowed` | no        | `allow_execute` is off on this node. Nothing ran                       |
 | `not_ready` | yes         | Refused before anything moved: a driver, planner, camera or TF missing |
 | `not_found` | yes         | The scene camera found no container                                    |
 | `not_home`  | yes         | The arm could not get to its start pose                                |
@@ -137,7 +146,7 @@ passes them as a params file.
 | ------------------ | ---------------------- | ---------------------------------------------------------------------------- |
 | `use_orchestrator` | `true`                 | `false` runs standalone: no registration, drive it by CLI                    |
 | `mock`             | `false`                | `true` skips hardware (the mock alternative sets it)                         |
-| `allow_execute`    | `false`                | `false`: every goal is a dry run, whatever it asks                           |
+| `allow_execute`    | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs |
 | `container`        | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path        |
 | `world`            | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`  |
 | `state_dir`        | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening` |

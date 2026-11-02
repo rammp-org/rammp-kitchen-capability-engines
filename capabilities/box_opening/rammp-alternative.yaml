@@ -26,9 +26,8 @@ container:
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here.
 params:
-  # false: every goal is a dry run (it finds the box, plans and checks every
-  # motion, and sends none), whatever it asks. true only for attended runs,
-  # someone on the e-stop.
+  # false: open_box is reported unavailable and nothing runs (there is no dry
+  # run). true only for attended runs, someone on the e-stop.
   allow_execute: false
   # the container's config, in the image's config/containers (or a path)
   container: ankou_pink.yaml
