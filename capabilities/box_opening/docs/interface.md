@@ -30,6 +30,14 @@ beside the container, and goes home. It has one action, `open_box`:
 1. **Release and home:** the fingers open as the arm rises off the lid, and the
    arm goes home.
 
+If the run has to stop with the lid in the fingers and the arm standing (no
+carry to any spot plans, or the run's own checks refuse the carry before it
+starts), it puts the lid back on the box first: back over the box and straight
+down to where the knob was gripped, the fingers open, the hand rises off the
+knob, and the arm goes home. The action still fails (`failed`, recoverable).
+After a cancel, an e-stop or a motion the driver stopped part way, nothing more
+moves: the arm holds where it stopped (`arm_holds`, or the cancel).
+
 The action runs box opening's command line (`press_demo`) as a child process,
 the way it ran on flatbot until now. Its
 console lines are this node's log lines, and its run log's rows are the

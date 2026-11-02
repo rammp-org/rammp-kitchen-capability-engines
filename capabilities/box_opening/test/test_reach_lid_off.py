@@ -1486,16 +1486,47 @@ def test_the_wrist_points_of_the_held_lid_are_not_an_obstacle(ctx, monkeypatch):
     assert len(rlo.wrist_table(ctx, held, [0.0] * 7, (0.0, 0.0, 0.5))) < len(table)  # the lid's column and the box out
 
 
-def test_no_carry_that_plans_holds_the_lid_and_says_so(ctx, monkeypatch, tmp_path, capsys):
-    """Every spot the hand reaches refused by the planner: the run stops
-    holding the lid (exit 1) after CARRY_TRIES, not before the run."""
+def test_no_carry_that_plans_puts_the_lid_back_on_the_box_and_goes_home(ctx, monkeypatch, tmp_path, capsys):
+    """Every spot the hand reaches refused by the planner (CARRY_TRIES): the
+    arm stands holding the lid over the box. It does not stay there: the lid
+    goes back where it came from, back over the box and straight down to
+    where the knob was held, the fingers open, the hand rises off the knob
+    and goes home. Exit 1 (the lid did not come off), the arm home."""
     code, rec, _chain, rows = _full_flow(
         ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, refuse_carry=True
     )
-    assert code == 1 and "lid:carry" not in rec.events
+    assert code == 1 and "lid:carry" not in rec.events and "place:open" not in rec.events
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
     assert spot["xyz"] is None and spot["refused"].count("IK_FAIL") == rlo.CARRY_TRIES
-    assert "STOP: no carry to a spot the lid could go to plans" in capsys.readouterr().out
+    after = rec.events[rec.events.index("spot-look") + 1 :]
+    assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
+    (back,) = (r for r in rows if r["leg"] == "lid_put_back")
+    assert back["ok"] is True and back["why"].startswith("no carry to a spot the lid could go to plans")
+    assert ctx.lid_lifted is None and not ctx.client.lets_go  # out of the fingers; nothing stopped part way
+    out = capsys.readouterr().out
+    assert "PUT BACK: no carry to a spot the lid could go to plans" in out
+    assert "the lid is back on the box, and the arm is home" in out and "the arm holds" not in out.split("PUT BACK")[-1]
+
+
+def test_a_carry_the_run_refuses_before_it_starts_puts_the_lid_back(ctx, monkeypatch, tmp_path, capsys):
+    """The carry refused by the run's own checks before anything went out
+    (here its start gate): the arm stands at the clear holding the lid, and
+    the lid goes back on the box, as when no carry plans."""
+    from box_opening.runtime.runner import Runner
+
+    real = Runner._refusal
+    monkeypatch.setattr(
+        Runner,
+        "_refusal",
+        lambda self, leg: "the arm is 0.06 rad from the start" if leg.name == "lid:carry" else real(self, leg),
+    )
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, one_motion=False
+    )
+    assert code == 1 and "place:open" not in rec.events
+    after = rec.events[rec.events.index("place:touch") + 1 :]  # after the carry's legs, refused as one
+    assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
+    assert "PUT BACK: the lid's way to the table was refused before it started" in capsys.readouterr().out
 
 
 def test_the_spot_look_takes_the_first_frame_shot_once_the_arm_stands_still(monkeypatch):

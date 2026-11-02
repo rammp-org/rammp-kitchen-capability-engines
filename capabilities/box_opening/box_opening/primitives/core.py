@@ -70,6 +70,9 @@ class Ctx:
     # home's legs planned from the look pose while the way back to it flew
     # (reach_lid_off), for a stop there; dropped once the arm moves on
     home_ahead: list = None
+    # the lift that took the lid off the box (reach_lid_off.LiftOff), while the lid is in the
+    # fingers: where it goes back to on a STOP before the carry (reach_lid_off.put_lid_back)
+    lid_lifted: object = None
     # the scene camera's SceneLocator (its grabber streams the whole run) and
     # the lid-off's video of both cameras (perception/camera_video), --execute
     # full runs (reach_press._reach_press)

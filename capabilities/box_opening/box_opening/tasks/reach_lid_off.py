@@ -992,6 +992,9 @@ class LiftOff:
 
     legs: list
     back_m: float = 0.0
+    q_grip: list = None  # the joints the knob was held at, the lid on the box
+    q_top: list = None  # ... and at the top of the lift, straight above
+    quat: list = None  # the hand's attitude all the way
 
 
 def _clear_after_lift(ctx, chain, q, quat):
@@ -1047,6 +1050,9 @@ def plan_lift(ctx, cfg, q_grip, quat):
             dp.compliant_line(ctx, "lid:clear", clear, quat, rp.free_line_speed(ctx), world),
         ],
         back,
+        q_grip=q_grip,
+        q_top=lift[-1],
+        quat=[float(v) for v in quat],
     ), None
 
 
@@ -1961,6 +1967,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
     # stop. A close that fails stops before anything lifts
     one = placed is not None and placed.carry is not None
     carried = None
+    ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
     if one:
         carry, drop = placed.carry, placed.drop
         flying = [close, *lift.legs, *carry.legs]
@@ -2319,11 +2326,12 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
             )
         )
     if carry is None:
-        log.info(
-            "[press_demo] STOP: no carry to a spot the lid could go to plans (%s) — the arm holds the lid"
-            % ("; ".join(refused) or "no spot the hand reaches")
+        return put_lid_back(
+            ctx,
+            cfg,
+            runner,
+            "no carry to a spot the lid could go to plans (%s)" % ("; ".join(refused) or "no spot the hand reaches"),
         )
-        return 1
     drop, tier, says = chosen
     _say_spot(ctx, eyes, chosen, refused, tmap, table_z)
     _video(
@@ -2341,6 +2349,16 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
     if len(res) == 1 and last.flown_traj is not None:
         rp._note_flight(runner, "reach_carry_flight", [lg.name for lg in merge_groups(carry.legs)[0]], last)
     if not all(r.ok for r in res):
+        if len(res) == 1 and not _started(last) and last.outcome == "refused":
+            # the run's own checks refused it before anything went out (the driver never saw
+            # it): the arm stands where the clear left it, holding the lid, which goes back on
+            # the box the way it came off
+            return put_lid_back(
+                ctx,
+                cfg,
+                runner,
+                "the lid's way to the table was refused before it started (%s)" % (last.detail or last.outcome),
+            )
         log.info(
             "[press_demo] STOP: the lid's way to the table %s during %s (%s) — the arm holds the lid"
             % (
@@ -2410,6 +2428,100 @@ def _in_position(ctx, runner):
         yield
     finally:
         client.compliant = was
+
+
+def put_lid_back(ctx, cfg, runner, why):
+    """A STOP with the lid in the fingers and the arm standing (no carry to any spot plans, or
+    the carry was refused before it went out): the lid goes back where it came from, the one
+    place known to take it, rather than staying in the fingers over the table. Built from where
+    the arm stands (so no drift gate can refuse it): a straight line back over the box to the top
+    of the lift, and straight down to where the knob was held (ctx.lid_lifted) in one execution;
+    the fingers open there; the hand rises straight up off the knob as the lid came up; home.
+
+    Never after a cancel, an e-stop or a motion stopped part way: those leave the arm where it
+    stopped (the caller's STOP says it holds the lid). Returns 1: the lid did not come off. Its
+    last line says the lid is back on the box and the arm home, or where it stopped holding."""
+    from box_opening.runtime import approach
+
+    lifted = ctx.lid_lifted
+    if lifted is None or lifted.q_grip is None:
+        log.info("[press_demo] STOP: %s — the arm holds the lid (no lift to retrace)" % why)
+        return 1
+    log.info("[press_demo] PUT BACK: %s — the lid back on the box where it was gripped, then home" % why)
+    _video(ctx, "PUT BACK: %s" % why)
+    chain = approach._chain()
+    world = _full_world(ctx)
+    quat = lifted.quat
+    top_xyz = [float(v) for v in chain.fk(lifted.q_top)[1]]
+    grip_xyz = [float(v) for v in chain.fk(lifted.q_grip)[1]]
+    lines, q = [], [float(v) for v in ctx.client.joints()]
+    for name, target, speed in (
+        ("lid:back-over", top_xyz, rp.free_line_speed(ctx)),
+        ("lid:put-back", grip_xyz, cfg.lift_speed),
+    ):
+        pts, refusal = chain.straight_line(q, target, quat)
+        if pts is not None:
+            refusal = dp.line_refusal(chain, pts)
+        if pts is None or refusal is not None:
+            runner.note("lid_put_back", ok=False, why=why, refused="%s: %s" % (name, refusal))
+            log.info(
+                "[press_demo] STOP: %s, and the lid's way back onto the box is not a straight line the arm can "
+                "fly (%s: %s) — the arm holds the lid" % (why, name, refusal)
+            )
+            return 1
+        pts = [[float(v) for v in p] for p in pts]
+        lines.append(dp.compliant_line(ctx, name, pts, quat, speed, world))
+        q = pts[-1]
+    res = runner.run(lines, execute=True)
+    if not all(r.ok for r in res):
+        runner.note("lid_put_back", ok=False, why=why, stopped=res[-1].leg_name)
+        log.info(
+            "[press_demo] STOP: %s, and the lid's way back onto the box %s (%s) — the arm holds the lid"
+            % (why, "stopped" if _started(res[-1]) else "did not start", res[-1].detail or res[-1].outcome)
+        )
+        if _started(res[-1]):
+            rp.let_go(ctx)
+        return 1
+    release = _gripper_leg(ctx, PlanState(joints=None, chain=0), "lid:release", GRIPPER_CMD_OPEN, world)
+    res = runner.run([release], execute=True)
+    if not all(r.ok for r in res):
+        runner.note("lid_put_back", ok=False, why=why, stopped="lid:release")
+        log.info(
+            "[press_demo] STOP: %s, the lid is back on the box, and the fingers do not open (%s) — the arm holds"
+            % (why, res[-1].detail or res[-1].outcome)
+        )
+        rp.let_go(ctx)  # the spring pressing the lid onto the box
+        return 1
+    ctx.lid_lifted = None  # the lid is on the box again, out of the fingers
+    runner.note("lid_put_back", ok=True, why=why)
+    rise, refusal = chain.straight_line(
+        [float(v) for v in ctx.client.joints()], [grip_xyz[0], grip_xyz[1], grip_xyz[2] + lift_off_m(ctx.model)], quat
+    )
+    if rise is not None:
+        refusal = dp.line_refusal(chain, rise)
+    if rise is None or refusal is not None:
+        log.info(
+            "[press_demo] STOP: %s, the lid is back on the box, and the way up off the knob is not a straight "
+            "line the arm can fly (%s) — the arm holds, its fingers open" % (why, refusal)
+        )
+        return 1
+    rise = [[float(v) for v in p] for p in rise]
+    res = runner.run([dp.compliant_line(ctx, "lid:rise-off", rise, quat, cfg.lift_speed, world)], execute=True)
+    if not all(r.ok for r in res):
+        log.info(
+            "[press_demo] STOP: %s, the lid is back on the box, and the way up off the knob %s (%s) — the arm holds"
+            % (why, "stopped" if _started(res[-1]) else "did not start", res[-1].detail or res[-1].outcome)
+        )
+        if _started(res[-1]):
+            rp.let_go(ctx)
+        return 1
+    with _in_position(ctx, runner):
+        homed = rp._go_home(ctx, cfg, runner, "home after putting the lid back (%s)" % why)
+    if not homed:
+        return 1
+    runner.finish()
+    log.info("[press_demo] STOP: %s — the lid is back on the box, and the arm is home" % why)
+    return 1
 
 
 def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
