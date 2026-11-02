@@ -141,7 +141,9 @@ COMPLIANT_FREE_LINE_SPEED = 0.55
 # one junction of two legs faster than 0.3 that is not a free-air line's, the
 # carry into the set-down (TRANSIT_SPEED into setdown_speed 0.35, never
 # flown), meets at it too: up to 0.55 -> 0.51 rad/s, 0-0.08 s longer.
-COMPLIANT_JUNCTION_SPEED = FREE_LINE_SPEED
+# FREE_LINE_SPEED's value, written as its own: the junction ceiling must not follow
+# a change to the free-air lines' speed it was measured against (sweep motion_timing-g-02)
+COMPLIANT_JUNCTION_SPEED = 0.3
 DRIFT_REPLAN_RAD = 0.04  # < START_GATE_RAD: replan before the gate would refuse
 # The driver commands a trajectory's first waypoint at once, wherever the arm
 # is; runtime/driver.py refuses a goal whose start is farther than this from

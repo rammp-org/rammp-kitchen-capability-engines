@@ -498,12 +498,11 @@ def test_lines_that_cruise_faster_under_the_junction_ceiling_meet_as_the_slower_
         COMPLIANT_DECEL,
         COMPLIANT_FREE_LINE_SPEED,
         COMPLIANT_JUNCTION_SPEED,
-        FREE_LINE_SPEED,
     )
 
     legs = _near_reversal(turn_deg)
     p = RetimeParams(accel=COMPLIANT_ACCEL, decel=COMPLIANT_DECEL, qd_ceiling=WRIST_CEILING)
-    slow, was = retime_group(legs, [FREE_LINE_SPEED] * 2, JOINT_VMAX, p)
+    slow, was = retime_group(legs, [COMPLIANT_JUNCTION_SPEED] * 2, JOINT_VMAX, p)
     loose, free = retime_group(legs, [COMPLIANT_FREE_LINE_SPEED] * 2, JOINT_VMAX, p)
     held, info = retime_group(
         legs, [COMPLIANT_FREE_LINE_SPEED] * 2, JOINT_VMAX, replace(p, junction_cruise=COMPLIANT_JUNCTION_SPEED)
