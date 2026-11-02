@@ -163,16 +163,16 @@ def main():
     po = plan["push_open"]
     if po is not None:
         frames += [(q, False, swing_end_deg, f"let go -- push-open: {po['how']}")] * HOLD_FRAMES
+        door_deg = swing_end_deg  # the door stays where the push leaves it, on the way back too
         for leg in po["legs"]:
             pushing = leg["label"] == "push open"
-            start_xy = w.tool(q)[:2] - w.df.hinge[:2]
+            start_xy, at_start = w.tool(q)[:2] - w.df.hinge[:2], door_deg
             for nq in _through(q, leg["joints"]):
-                deg = swing_end_deg
                 if pushing:  # the door turns with the point the hand pushes
                     now = w.tool(nq)[:2] - w.df.hinge[:2]
                     turn = np.degrees(np.arctan2(start_xy[0] * now[1] - start_xy[1] * now[0], start_xy @ now))
-                    deg = swing_end_deg + turn * w.sign
-                frames.append((nq, False, deg, f"push-open: {leg['label']} (cuRobo's plan)"))
+                    door_deg = max(at_start, at_start + turn * w.sign)
+                frames.append((nq, False, door_deg, f"push-open: {leg['label']} (cuRobo's plan)"))
             q = frames[-1][0]
     if po is not None and not any(leg["label"] == "push open" for leg in po["legs"]):
         # the push: a straight line, the hand held -- IK'd in the sim 1 cm at a time, as move_cartesian does
