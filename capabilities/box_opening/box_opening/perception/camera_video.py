@@ -26,10 +26,12 @@ PANEL_W, PANEL_H = 640, 360
 CAPTION_H = 30
 # at most this long: a run that stops holding the lid keeps its first minutes
 VIDEO_MAX_S = 180.0
-JPEG_QUALITY = 85
+JPEG_QUALITY = 80  # 80 kB a picture against 93 at 85, composed as fast; the MP4 re-encodes at crf 26
 VIDEOS_KEPT = 20  # newest videos kept of each tag; older ones are pruned
 STALE_S = 1.0  # a camera with no new frame for this long says so on its panel
-ENCODE_TIMEOUT_S = 300.0
+# ffmpeg took 1.6 s for a 25 s run, ~12 s at most for VIDEO_MAX_S: the run's process waits for
+# it before it exits, inside the engine's 100 s budget (node.RUN_BUDGET_S)
+ENCODE_TIMEOUT_S = 60.0
 
 
 def enabled(env=None):
