@@ -1645,3 +1645,41 @@ def test_prime_reads_the_segmenters_state(monkeypatch):
     loc, _gated = _locator(monkeypatch, world, {}, seg=False)
     loc.prime()  # no segmenter for this container: nothing to read
     assert loc.last_seg_state is None
+
+
+def test_a_round_boxs_yaw_is_never_fitted_and_a_square_ones_is(monkeypatch):
+    """Sweep scene-skip-unused-compute: nothing reads a round box's yaw (its
+    button is centred, the posture guard reads a disc), and its fit was
+    every top's dearest step."""
+    from types import SimpleNamespace
+
+    from box_opening.perception import scene_source as ss
+
+    rng = np.random.default_rng(1)
+    xy = rng.uniform(-0.05, 0.05, (400, 2)) @ np.array([[0.96, -0.28], [0.28, 0.96]])
+    real, called = ss.robust_yaw, []
+    monkeypatch.setattr(ss, "robust_yaw", lambda pts: called.append(len(pts)) or real(pts))
+    assert ss.fitted_yaw(xy, 400, SimpleNamespace(round=True)) == 0.0 and called == []
+    assert ss.fitted_yaw(xy, 400, SimpleNamespace(round=False)) == pytest.approx(real(xy)) and called == [400]
+    assert ss.fitted_yaw(xy, ss.YAW_MIN_POINTS - 1, SimpleNamespace(round=False)) == 0.0
+
+
+def test_a_look_reads_the_table_off_its_frames_once(monkeypatch):
+    """Sweep scene-skip-unused-compute: with no surveyed table the look read
+    it off every message's cloud; the table does not move between one
+    look's frames, so it is read until one message shows a clean plane,
+    and kept."""
+    from box_opening.perception import scene_source as ss
+
+    world = _World(seg_msgs=_every(0.1, 3.0, [("food container", 0.88, _holder())]))
+    loc, _gated = _locator(monkeypatch, world, {_band(_holder()): "refused"})
+    reads = []
+    answers = iter([float("nan"), 0.187])
+
+    def table(pts, uv, h):
+        reads.append(1)
+        return next(answers, 0.5)
+
+    monkeypatch.setattr(ss, "table_from_scene_points", table)
+    assert loc.locate(2.0) is None
+    assert len(reads) == 2  # the first message's no plane, the second's kept for the rest

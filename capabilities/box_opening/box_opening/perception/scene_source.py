@@ -43,6 +43,18 @@ TOP_SLAB_M = 0.015  # the lid top: points within this of the highest surface
 TOP_PCTL = 97  # "highest" as a percentile, so flying pixels do not define it
 MIN_LID_POINTS = 40
 YAW_MIN_POINTS = 150  # fewer than this and the min-area rect's yaw is noise
+
+
+def fitted_yaw(xy, n, model):
+    """The box's yaw from its top's points `xy` (robust_yaw), 0 for fewer
+    than YAW_MIN_POINTS — or for a round box, whose yaw nothing reads: its
+    fit was every top's dearest step for nothing (sweep
+    scene-skip-unused-compute)."""
+    if getattr(model, "round", False) or n < YAW_MIN_POINTS:
+        return 0.0
+    return robust_yaw(xy)
+
+
 # the top slab must be a FACE, not a rim: a taller container's near face
 # crosses the lid band as a thin strip, and a strip must not read as a box
 MIN_FOOTPRINT_FRAC = 0.4  # of the model's shorter side, as a 10-90 % spread
@@ -165,7 +177,7 @@ def box_from_scene_points(pts_base, uv, bbox, table_z, model):
             ),
             n,
         )
-    yaw = robust_yaw(xy) if n >= YAW_MIN_POINTS else 0.0
+    yaw = fitted_yaw(xy, n, model)
     pose = container_pose_from_top((centre[0], centre[1], centre[2]), yaw, model, table_z)
     return pose, (float(centre[0]), float(centre[1]), float(centre[2])), n
 
@@ -373,7 +385,7 @@ def box_from_side_points(
             table_z,
         )
     cx, cy = centre_of(obj)
-    yaw = robust_yaw(obj[:, :2] - (cx, cy)) if n >= YAW_MIN_POINTS else 0.0
+    yaw = fitted_yaw(obj[:, :2] - (cx, cy), n, model)
     pose = container_pose_from_top((cx, cy, top_z), yaw, model, table_z)
     return pose, (float(cx), float(cy), top_z), n, float(table_z)
 
@@ -431,7 +443,11 @@ PARTIAL_MIN_ARC_DEG = 60.0  # the points on it spread over at least this much of
 PARTIAL_REACH_M = 0.02  # beyond one lid diameter from the box's own near points
 PARTIAL_RIVAL_M = 0.035
 PARTIAL_RIVAL_FRAC = 0.85
-PARTIAL_RANSAC_ITERS = 400
+# 400 -> 200 (sweep scene-ransac-200): the cut gate's median 34.8 -> 22.5 ms on 18
+# real cut frames, and outcomes equal or better (388 synthetic + 60 real, no bad
+# fix; left <=50 % cuts from 4 off fixes to 1). The seed is fixed per frame, so a
+# single frame can flip either way
+PARTIAL_RANSAC_ITERS = 200
 # Not every two places is a slide. Half out of the frame, a lid can show its
 # depth only as a strip along its own silhouette ray (the rest of its side is
 # past the frame's edge, or in the strip beside it where the OAK gives no
@@ -1164,6 +1180,7 @@ class SceneLocator:
         ambiguous = []
         sightings = []
         off_frame = None  # (score, edges, R_base_color, src) of the best candidate cut by the frame's edge
+        looked_table_z = None  # the table this look read off its frames, once (no survey)
         state = seg_args = m_seg = None
         found = None
         if self.spins:
@@ -1240,8 +1257,12 @@ class SceneLocator:
             # refusal: the side lift reads the table around each box)
             top_table_z = self.table_z
             if top_table_z is None:
-                measured = table_from_scene_points(pts_base, uv, h)
-                top_table_z = None if np.isnan(measured) else measured
+                # read once per look, off its first message that shows a clean plane: the
+                # table does not move between this look's frames (sweep scene-skip-unused-compute)
+                if looked_table_z is None:
+                    measured = table_from_scene_points(pts_base, uv, h)
+                    looked_table_z = None if np.isnan(measured) else float(measured)
+                top_table_z = looked_table_z
             got = scene_fix_from_boxes(
                 cands,
                 pts_base,
