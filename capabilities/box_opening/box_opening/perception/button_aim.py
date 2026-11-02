@@ -75,6 +75,13 @@ OBLIQUE_PRIOR_MAX_DEG = 65.0
 OBLIQUE_BUTTON_PX = 24.0  # the button's radius in the rectified image (fixes the scale)
 OBLIQUE_HALF_M = 0.16  # rectified half-extent: a 12 cm prior error plus the annulus
 OBLIQUE_RADIUS_WINDOW = (0.85, 1.2)  # of OBLIQUE_BUTTON_PX; a lid off its prior scales the circle
+# The oblique Hough's accumulator votes for a circle (cv2.HoughCircles param2). A whole button
+# seam collects far more than an arc of the lid's rim does: at 14, 37 of 50 button-less views
+# (the button painted out) fixed a 41-54 mm circle on the lid 17-26 mm off the button; at 18,
+# 7 of 50, with no real frame's aim lost (50 labelled frames, and 100 noisy variants: no
+# miss). Higher cuts more rim arcs but thins the margin on popped-knob re-aims (one recorded
+# frame holds only up to 22): 18 keeps room under it (sweep 2026-11-01, aim-lidarc).
+OBLIQUE_HOUGH_VOTES = 18
 OBLIQUE_MAX_CIRCLES = 8
 LID_PRIOR_TOL_M = 0.035  # the measured lid within this of its prior height
 PRIOR_MAX_M = 0.15  # a circle farther than this from prior_xy is not the button
@@ -728,7 +735,7 @@ def find_button_oblique(color_bgr, depth, k, rot_cam, trans_cam, table_z, model,
         dp=1,
         minDist=2 * r0,
         param1=90,
-        param2=14,
+        param2=OBLIQUE_HOUGH_VOTES,
         minRadius=r_lo,
         maxRadius=r_hi,
     )
