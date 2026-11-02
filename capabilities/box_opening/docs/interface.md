@@ -111,8 +111,9 @@ put-back), when it is `null` again. A cancel or a stop in between leaves it
 said; it is written as the run goes, since the engine takes no world-state
 write once an action is cancelled.
 
-Progress phases, in order: `locate` (5%), `look` (10%), `press` (35%), `grip`
-(50%), `carry` (85%), `release` (90%), `home` (100%). A phase is reported as
+Progress `pct` is the fraction of the run done, from 0 to 1. The phases, in
+order: `locate` (0.05), `look` (0.1), `press` (0.35), `grip` (0.5), `carry`
+(0.85), `release` (0.9), `home` (1.0). A phase is reported as
 its motion ends. A run is one motion from the press to the set-down, so it
 cannot pause once it has started (every phase reports `pausable: false`); a
 cancel stops it at once. The cancel is the run's own Ctrl+C: the motion in

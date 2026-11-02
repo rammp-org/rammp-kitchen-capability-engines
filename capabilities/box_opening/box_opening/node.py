@@ -80,29 +80,30 @@ CANCEL_KILL_S = 10.0
 SHUTDOWN_WAIT_S = 3.0  # on SIGTERM: the run's own stop first, inside docker stop's grace period
 TAIL_LINES = 40
 
-# a leg's row -> (phase, %) it ends; rows are written as their legs end. First match wins.
+# a leg's row -> (phase, the fraction of the run done) it ends (REVIEW_RULES U2: progress runs
+# from 0 to 1); rows are written as their legs end. First match wins.
 LEG_PHASES = (
-    ("reach:look", "look", 10.0),
-    ("press:close", "look", 12.0),
-    ("reach:", "press", 20.0),
-    ("depth:approach", "press", 25.0),
-    ("depth:", "press", 35.0),
-    ("grip:", "grip", 50.0),
-    ("lid:", "carry", 70.0),
-    ("place:down", "carry", 80.0),
-    ("place:touch", "carry", 85.0),
-    ("place:", "release", 90.0),
-    ("home", "home", 100.0),
+    ("reach:look", "look", 0.1),
+    ("press:close", "look", 0.12),
+    ("reach:", "press", 0.2),
+    ("depth:approach", "press", 0.25),
+    ("depth:", "press", 0.35),
+    ("grip:", "grip", 0.5),
+    ("lid:", "carry", 0.7),
+    ("place:down", "carry", 0.8),
+    ("place:touch", "carry", 0.85),
+    ("place:", "release", 0.9),
+    ("home", "home", 1.0),
 )
 MOCK_PHASES = {
     "open_box": (
-        ("locate", 5.0),
-        ("look", 10.0),
-        ("press", 35.0),
-        ("grip", 50.0),
-        ("carry", 85.0),
-        ("release", 90.0),
-        ("home", 100.0),
+        ("locate", 0.05),
+        ("look", 0.1),
+        ("press", 0.35),
+        ("grip", 0.5),
+        ("carry", 0.85),
+        ("release", 0.9),
+        ("home", 1.0),
     ),
 }
 VIDEO_LINE = re.compile(r"\] VIDEO: .*: (\S+)$")
@@ -265,7 +266,7 @@ class Tracker:
     def _note(self, leg, row):
         if leg == "scene_fix" and row.get("origin_xyz"):
             x, y = row["origin_xyz"][:2]
-            self.pct = max(self.pct, 5.0)
+            self.pct = max(self.pct, 0.05)
             return "locate", self.pct, f"the box at [{x:.2f}, {y:.2f}] ({row.get('source', '?')})"
         if leg == "lid_spot" and row.get("xyz"):
             self.lid_spot = [round(float(v), 3) for v in row["xyz"]]

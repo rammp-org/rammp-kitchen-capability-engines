@@ -130,7 +130,8 @@ def test_a_full_run_reports_its_phases_in_order_and_the_lid_off(engine, monkeypa
     assert phases[0] == "locate" and phases[-1] == "home"
     order = ["locate", "look", "press", "grip", "carry", "release", "home"]
     assert [p for p in order if p in phases] == order
-    assert [pct for _, pct, *_ in ctx.said] == sorted(pct for _, pct, *_ in ctx.said)  # never backwards
+    pcts = [pct for _, pct, *_ in ctx.said]
+    assert pcts == sorted(pcts) and 0.0 <= pcts[0] and pcts[-1] == 1.0  # REVIEW_RULES U2: 0 to 1, never backwards
     assert not any(pausable for *_, pausable in ctx.said)  # one motion: no pause once started
     assert out["executed"] and out["lid_off"] and out["lid_xyz"] == [0.597, -0.071, 0.209]
     assert (out["presses"], out["grips"], out["video"]) == (1, 1, video)
