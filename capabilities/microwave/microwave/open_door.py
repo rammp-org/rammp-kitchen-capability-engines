@@ -18,14 +18,14 @@ go and push it further open -- one run.
    handle at the end.
 
 4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper,
-   then three cuRobo moves, the hand pointing down (PUSH_TILT_TRY_DEG off vertical, the least that plans; of the two
-   such hands the one nearest the grip, no wrist flip): up (the fingertips PUSH_CLEAR_TRY_M over the door top, the
-   most that plans) and back (PUSH_BACK_M) from the handle; over to above the inside of the door; down until the
-   tool is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the handle. Then push straight toward the
-   hinge until level with it (its y), opening the door to ~90 deg. cuRobo is trusted with its moves (11-02) -- not
-   sim-gated, and its world has no door: it is asked for them (plan_to_pose, nothing moves) from the planned swing's
-   end before the grasp, and again from the real one before letting go. The push is a straight line, the hand held
-   as it is (move_cartesian), not cuRobo.
+   then three cuRobo moves stitched into one motion (go_to_ee_poses), the hand pointing down (PUSH_TILT_TRY_DEG off
+   vertical, the least that plans; of the two such hands the one nearest the grip, no wrist flip): up (the
+   fingertips PUSH_CLEAR_TRY_M over the door top, the most that plans) and back (PUSH_BACK_M) from the handle; over
+   to above the inside of the door; down until the tool is at the door top, PUSH_BEHIND_DOOR_M behind its inner face
+   at the handle. Then push straight toward the hinge until level with it (its y), opening the door to ~90 deg.
+   cuRobo is trusted with its moves (11-02) -- not sim-gated, and its world has no door: it is asked for them
+   (plan_to_pose, nothing moves) from the planned swing's end before the grasp, and again from the real one before
+   letting go. The push is a straight line, the hand held as it is (move_cartesian), not cuRobo.
 
 `--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
 handle, go toward the base to clear the door's free edge, joint move to `PARK_JOINTS` (constants).
@@ -47,7 +47,7 @@ from types import SimpleNamespace
 import numpy as np
 import rammp_arm
 from capability_engine.arm import IMPEDANCE as IMPEDANCE_MODE
-from capability_engine.arm_messages import HOLD_FIXED, HOLD_NONE
+from capability_engine.arm_messages import HOLD_FIXED, HOLD_NONE, PoseTarget
 from door_common import common as dc
 from door_common import open_door as shared
 from door_common.common import (
@@ -107,6 +107,8 @@ PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing d
 # then push straight left (toward the hinge: further open), the hand's x and height kept, until it is level with the
 # detected hinge (the door file's hinge): the door then stands square to the arm, ~90 deg (11-02: 6 and 12 cm along
 # the door's normal didn't open it enough)
+PUSH_BLEND_M = 0.02  # the stitched cuRobo motion passes its corners (up and back, above the door) this close, not
+#   stopping; small, so it doesn't cut the corner over the door top
 PUSH_TILT_TRY_DEG = (0, 30, 45, 60)  # the hand points down tilted this far from vertical, leaning away from the arm
 #   base, the least that plans: straight down over the inside of the door the wrist runs out (11-02: J6 -104..-114,
 #   at its guard, and IK 1-2 cm off on the way there)
@@ -517,12 +519,18 @@ def push_open(ai, execute, on_release=None):
     time.sleep(0.5)
     if on_release is not None:
         on_release()
-    for label, pos, hold in _push_legs(P):
-        say(f"push-open: {label} (cuRobo) ...")
-        if not ai.go_to_ee_pose(pos, P.down, f"push-open: {label}", orientation_hold=hold, **go_to):
-            raise Refused(
-                f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
-            )
+    # up and back, over the door, down behind it: ONE cuRobo motion, its legs stitched (go_to_ee_poses), passing the
+    # first two within PUSH_BLEND_M
+    legs = _push_legs(P)
+    targets = [
+        PoseTarget(tuple(pos), tuple(P.down), hold, PUSH_BLEND_M if k < len(legs) - 1 else 0.0)
+        for k, (_, pos, hold) in enumerate(legs)
+    ]
+    say(f"push-open: {', '.join(label for label, _, _ in legs)} (cuRobo, one stitched motion) ...")
+    if not ai.go_to_ee_poses(targets, "push-open: up, over, down", **go_to):
+        raise Refused(
+            f"push-open: up, over, down stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
+        )
     # the push: a straight line square to the door, the hand held exactly as it is -- not cuRobo, whose path needn't be
     # straight (11-02: it pushed the wrong way)
     push = np.asarray(P.pushed) - np.asarray(P.inside)
