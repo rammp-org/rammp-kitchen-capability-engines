@@ -20,11 +20,12 @@ go and push it further open -- one run.
 4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper,
    then three cuRobo moves, the hand pointing down (PUSH_TILT_TRY_DEG off vertical, the least that plans; of the two
    such hands the one nearest the grip, no wrist flip): up (the fingertips PUSH_CLEAR_TRY_M over the door top, the
-   most that plans) and back (PUSH_BACK_M) from the handle; over to above the inside of the door; down until the tool
-   is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the handle. Then push PUSH_DIST_M square to the
-   door, opening it further. cuRobo is trusted with its moves (11-02) -- not sim-gated, and its world has no door:
-   it is asked for them (plan_to_pose, nothing moves) from the planned swing's end before the grasp, and again from
-   the real one before letting go. The push is a straight line, the hand held as it is (move_cartesian), not cuRobo.
+   most that plans) and back (PUSH_BACK_M) from the handle; over to above the inside of the door; down until the
+   tool is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the handle. Then push straight toward the
+   hinge until level with it (its y), opening the door to ~90 deg. cuRobo is trusted with its moves (11-02) -- not
+   sim-gated, and its world has no door: it is asked for them (plan_to_pose, nothing moves) from the planned swing's
+   end before the grasp, and again from the real one before letting go. The push is a straight line, the hand held
+   as it is (move_cartesian), not cuRobo.
 
 `--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
 handle, go toward the base to clear the door's free edge, joint move to `PARK_JOINTS` (constants).
@@ -92,15 +93,20 @@ VIEW_AT_TOL_M = 0.05  # the hand this close to the view pose counts as there: a 
 
 # --- push-open (after the swing): let go, up and back, over to the inside of the door, down, push it further open ---
 PUSH_OPEN_SWING_DEG = 50  # the swing before the push-open
-PUSH_CLEAR_TRY_M = (0.10, 0.075, 0.05)  # after letting go, cuRobo lifts the hand to cross the door with its fingertips
-#   (pointing down) this far over the door top, the first that plans: at least 5 cm over the detected top (a depth-fit
-#   estimate); higher folds the elbow more (11-02: the tool 15 cm over it, pointing down, put J6 past its guard) ...
+PUSH_CLEAR_TRY_M = (
+    0.05,
+    0.0375,
+    0.025,
+)  # after letting go, cuRobo lifts the hand to cross the door with its fingertips
+#   (pointing down) this far over the door top, the first that plans: half of 11-02's 10 cm (it went higher than
+#   needed); the door top is a depth-fit estimate ...
 PUSH_BACK_M = 0.05  # ... and this far back from the handle, along the open door's outward normal
 PUSH_BEHIND_DOOR_M = 0.05  # (~2 in) then the tool goes down this far behind the door's inner face, at the handle
 PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing down: the fingertips reach
 #   FINGERTIP_PAST_TOOL (6 cm) below the top edge
-PUSH_DIST_M = 0.06  # then push this far, square to the door (its outward normal: further open); 0.12 pushed it
-#   further than needed (11-02)
+# then push straight left (toward the hinge: further open), the hand's x and height kept, until it is level with the
+# detected hinge (the door file's hinge): the door then stands square to the arm, ~90 deg (11-02: 6 and 12 cm along
+# the door's normal didn't open it enough)
 PUSH_TILT_TRY_DEG = (0, 30, 45, 60)  # the hand points down tilted this far from vertical, leaning away from the arm
 #   base, the least that plans: straight down over the inside of the door the wrist runs out (11-02: J6 -104..-114,
 #   at its guard, and IK 1-2 cm off on the way there)
@@ -171,7 +177,7 @@ def _push_poses(door, ee, clear_m, tilt_deg):
         up_back=up_back,
         above=above,
         inside=inside,
-        pushed=inside + out * PUSH_DIST_M,
+        pushed=np.r_[inside[0], df.hinge[1], inside[2]],
         down=down,
         out=out,
         how=f"the hand {tilt_deg} deg off straight down, fingertips {clear_m * 100:.1f} cm over the door top",
@@ -196,6 +202,8 @@ def _plan_push_open(ai, door, ee, q, loud=False):
     whys = []
     for tilt_deg, clear_m in ((t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M):
         P = _push_poses(door, ee, clear_m, tilt_deg)
+        if float((P.pushed - P.inside)[:2] @ P.out[:2]) <= 0:  # toward the hinge must open the door further
+            return None, None, "push-open: the hinge's y is on the door's closing side of the hand -- refusing"
         start, plans = np.asarray(q, dtype=float), []
         for label, pos, hold in _push_legs(P):
             pl = ai.plan_to_pose(pos, P.down, start, hold=hold)
@@ -517,7 +525,11 @@ def push_open(ai, execute, on_release=None):
             )
     # the push: a straight line square to the door, the hand held exactly as it is -- not cuRobo, whose path needn't be
     # straight (11-02: it pushed the wrong way)
-    say(f"push-open: push {PUSH_DIST_M * 100:.0f} cm along {np.round(P.out[:2], 3)} (straight, the hand held) ...")
+    push = np.asarray(P.pushed) - np.asarray(P.inside)
+    say(
+        f"push-open: push {np.linalg.norm(push) * 100:.0f} cm to the hinge's y {P.df.hinge[1]:.3f} (straight, the "
+        "hand held) ..."
+    )
     here = ai.get_state()["ee_pos"]
     ok = ai.move_cartesian(
         [(list(P.pushed), list(here[3:7]))],
