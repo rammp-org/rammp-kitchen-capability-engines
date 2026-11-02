@@ -192,7 +192,9 @@ class PlannerClient:
     # best-effort and latest-wins, so one lost message must not strand a
     # command, and re-sending the same absolute setpoint changes nothing
     GRIPPER_RESEND_S = 0.1
-    GRIPPER_TIMEOUT_S = 10.0
+    # a gripper wait that never decides ends here, the arm standing all the while: the
+    # slowest of 102 logged gripper legs took 0.716 s, a full 2F-85 stroke at speed 0.3 ~2.4 s
+    GRIPPER_TIMEOUT_S = 4.0
     # two knuckle readings this far apart are a stream gap, never "settled": under
     # GripperWait.SETTLE_S (0.15), so a pause in the stream can never itself be
     # the stillness a stall is judged by (simulated with 2 % gaps: 45 of 400
