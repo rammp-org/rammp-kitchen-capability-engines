@@ -339,6 +339,28 @@ def test_a_level_camera_finds_the_canister_from_its_side():
     assert pose is None and "another container" in why
 
 
+def test_a_round_container_is_never_one_much_wider_than_itself(monkeypatch):
+    """The two recorded wrong fixes (2026-10-28 14:29) were an object behind
+    the canister that the side lift read 124-131 mm across, under the old 1.4x
+    cap of the 105 mm canister (147 mm). A round container's spread is its
+    diameter from every side: 1.1x (115.5 mm) refuses such a one and still
+    takes the canister (test_a_level_camera_finds_the_canister_from_its_side);
+    a square one keeps 1.4x."""
+    from box_opening.perception import scene_source as ss
+
+    model = ContainerModel.load(PINK)
+    assert model.round and ss.side_too_wide_m(model) == pytest.approx(ss.MAX_SIDE_FRAC_ROUND * 0.105)
+    pts, uv, wide, _t = _side_scene(np.random.default_rng(6), r=0.075)  # 150 mm across
+    bbox = _pixel_box(_project(wide[wide[:, 2] > SIDE_TABLE + model.dims[2] - 0.025]))
+    pose, why, _n, _tz = ss.box_from_side_points(pts, uv, bbox, None, model, SIDE_CAM)
+    assert pose is None and "another container" in why
+    monkeypatch.setattr(ss, "MAX_SIDE_FRAC_ROUND", ss.MAX_FOOTPRINT_FRAC)  # the old cap took it for the canister
+    pose, _top, _n, _tz = ss.box_from_side_points(pts, uv, bbox, None, model, SIDE_CAM)
+    assert pose is not None
+    oxo = ContainerModel.load(CFG)
+    assert not oxo.round and ss.side_too_wide_m(oxo) == pytest.approx(ss.MAX_FOOTPRINT_FRAC * max(oxo.dims[:2]))
+
+
 def test_flatbot_scene_frame_finds_the_pink_canister_from_the_side():
     """The recorded flatbot frame (2026-10-22, camera level with the lid,
     the canister in a blue holder, a black speaker beside it): the top-face

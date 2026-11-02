@@ -50,6 +50,19 @@ MIN_FOOTPRINT_FRAC = 0.4  # of the model's shorter side, as a 10-90 % spread
 # the 10 cm OXO passed every other gate and the OWL's best box flipped
 # between the two (2026-09-17). The longer spread must fit the longer side.
 MAX_FOOTPRINT_FRAC = 1.4
+# ... tighter for a round container seen from its side (box_from_side_points): its spread is
+# its diameter from every side. The canister's side lift reads 64-91 mm across (n=300), the
+# object behind both recorded wrong fixes 124-131 mm (2026-10-28 14:29:14 and 14:29:51); at
+# 1.1 both are refused and no true fix of 840 is lost. A square one keeps MAX_FOOTPRINT_FRAC:
+# a 104 mm OXO turned 45 deg spreads ~118 mm.
+MAX_SIDE_FRAC_ROUND = 1.1
+
+
+def side_too_wide_m(model):
+    """The widest a side lift may read and still be `model`: MAX_SIDE_FRAC_ROUND (a round
+    container) or MAX_FOOTPRINT_FRAC times its longer side."""
+    frac = MAX_SIDE_FRAC_ROUND if getattr(model, "round", False) else MAX_FOOTPRINT_FRAC
+    return frac * max(float(model.dims[0]), float(model.dims[1]))
 
 
 @dataclass(frozen=True)
@@ -350,7 +363,7 @@ def box_from_side_points(
     need = MIN_FOOTPRINT_FRAC * min(float(model.dims[0]), float(model.dims[1]))
     if width < need:
         return None, "it is %.0f mm across, not a container (need %.0f mm)" % (1000 * width, 1000 * need), n, table_z
-    too_big = MAX_FOOTPRINT_FRAC * max(float(model.dims[0]), float(model.dims[1]))
+    too_big = side_too_wide_m(model)
     if width > too_big:
         return (
             None,
