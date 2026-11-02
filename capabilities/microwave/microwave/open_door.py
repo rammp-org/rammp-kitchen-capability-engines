@@ -108,6 +108,8 @@ PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing d
 # then push straight left (toward the hinge: further open), the hand's x and height kept, until it is level with the
 # detected hinge (the door file's hinge): the door then stands square to the arm, ~90 deg (11-02: 6 and 12 cm along
 # the door's normal didn't open it enough) -- stopping PUSH_HINGE_SHORT_M short of it
+PUSH_OPEN_DOOR_DEG = 90.0  # the door's opening the push leaves, saved for the close: taken, not measured (11-02:
+#   estimating it from the hand, which slides along the door as it pushes, said 106.7 deg for ~90 by eye)
 PUSH_HINGE_SHORT_M = 0.03  # the tool stops this short of the hinge's y, so the hand's far side, not its middle, lines
 #   up with the hinge (11-02: level with it opened the door further than needed)
 PUSH_BLEND_M = 0.02  # the stitched cuRobo motion passes its corners (up and back, above the door) this close, not
@@ -568,12 +570,9 @@ def push_open(ai, execute, on_release=None):
             raise Refused(
                 f"push-open: the push stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
             )
-    # the door turned with the point the hand pushed: its new opening for the close
-    h, a0 = P.df.hinge[:2], P.inside[:2] - P.df.hinge[:2]
-    a1 = np.asarray(ai.get_state()["ee_pos"][:2]) - h
-    turned = float(np.degrees(np.arctan2(a0[0] * a1[1] - a0[1] * a1[0], a0 @ a1))) * P.sign
-    save_door_geometry(door_open_deg=P.deg + turned)
-    say(f"door file: open ~{P.deg + turned:.1f} deg after the push ({turned:+.1f})")
+    # the door's new opening, for the close: taken as square to the arm -- the push stops at the hinge's y
+    save_door_geometry(door_open_deg=PUSH_OPEN_DOOR_DEG)
+    say(f"door file: open {PUSH_OPEN_DOOR_DEG:.0f} deg after the push (taken, not measured)")
     return True
 
 
