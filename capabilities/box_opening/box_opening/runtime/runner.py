@@ -1541,6 +1541,23 @@ class Runner:
             self._log_path = self._log_dir / time.strftime("run-%Y%m%d-%H%M%S.jsonl")
         return self._log_path
 
+    def side_file(self, name):
+        """A path for a side file `name` next to the run record,
+        <record>.side/<name>, its folder made; None where it cannot be made
+        (a side file must never cost the run). The record's folder relative
+        path is str(path.relative_to(self.log_dir))."""
+        try:
+            path = self._record().with_suffix(".side") / name
+            path.parent.mkdir(exist_ok=True)
+            return path
+        except Exception as e:  # noqa: BLE001 - a side file must never cost the run
+            log.info("[runner] no side file %s (%s)" % (name, e))
+            return None
+
+    @property
+    def log_dir(self):
+        return self._log_dir
+
     def _append(self, row):
         """One row onto this run's jsonl (created on the first row)."""
         with open(self._record(), "a") as f:

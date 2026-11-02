@@ -362,6 +362,16 @@ SPOT_FRAME_S = 1.0
 # BOX_CLEAR_M past it: the box, which every spot keeps clear of anyway)
 WRIST_HAND_M = 0.20
 HELD_LID_CLEAR_M = 0.03
+# The wrist's frame at the look pose (the reach-aim's, before the press)
+# sees the table round the box from above, where the scene camera, 14 cm
+# over it, sees it edge-on: pooled into the room map (aim_cloud), offline
+# on 20 aimed missions the spots verified clear went from 10 to 18 and the
+# map-blind tiers ('beside the box', 'nearest') from 8 to 0. False: shadow
+# mode — the pooled map is built while the press flies and kept beside the
+# run record (the lid_spot row's 'pooled'), the scene camera's alone
+# chooses. True once attended runs show every object placed in the scene
+# camera's blind band standing in it
+POOL_AIM_FRAME = False
 # A spot tier's candidates checked for the hand's reach at most this many,
 # and the carry planned to at most CARRY_TRIES of those that pass
 TIER_TRIES = {"clear": 8, "most room": 10, "beside the box": 8, "nearest": 24}
@@ -545,25 +555,72 @@ def spot_map(ctx, wrist, q, scene_fix, scene_q, table_z, lens_in_hand=None):
     aim measured where the box is), what was the arm when it looked (its
     centre line at `scene_q`, clear_table.ARM_CLEAR_M round it: flatbot
     stood at HOME) left out. None where neither shows a table."""
-    from box_opening.runtime import approach
-
     clouds = []
-    tz = getattr(scene_fix, "table_z_scene", None)
-    tz = float(tz) if tz is not None and math.isfinite(float(tz)) else float(table_z)
-    pts = getattr(scene_fix, "table_points", None)
-    if pts is not None and len(pts):
-        pts = np.asarray(pts, float) + [
-            float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]),
-            float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]),
-            0.0,
-        ]
-        chain = approach._chain()
-        if scene_q is not None and hasattr(chain, "points"):
-            pts = _off_line(pts, chain.points(list(scene_q)), clear_table.ARM_CLEAR_M)
-        clouds.append((pts, tz))
+    scene = _scene_cloud(ctx, scene_fix, scene_q, table_z)
+    if scene is not None:
+        clouds.append(scene)
+    tz = scene[1] if scene is not None else float(table_z)
     if wrist is not None and len(wrist):
         clouds.append((wrist_table(ctx, wrist, q, lens_in_hand), tz))
     return clear_table.table_map(clouds, ctx.cpose.xyz[:2]) if clouds else None
+
+
+def _scene_cloud(ctx, scene_fix, scene_q, table_z):
+    """spot_map's scene camera cloud: (its table points moved by its error
+    at the box, the arm when it looked left out; the table they were
+    measured on), or None where it kept none."""
+    from box_opening.runtime import approach
+
+    tz = getattr(scene_fix, "table_z_scene", None)
+    tz = float(tz) if tz is not None and math.isfinite(float(tz)) else float(table_z)
+    pts = getattr(scene_fix, "table_points", None)
+    if pts is None or not len(pts):
+        return None
+    pts = np.asarray(pts, float) + [
+        float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]),
+        float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]),
+        0.0,
+    ]
+    chain = approach._chain()
+    if scene_q is not None and hasattr(chain, "points"):
+        pts = _off_line(pts, chain.points(list(scene_q)), clear_table.ARM_CLEAR_M)
+    return pts, tz
+
+
+def aim_cloud(ctx, watcher, table_z):
+    """The wrist's frame at the look pose — the aim's, kept by press_demo
+    (watcher.last_aim_frame: its tag, the judged frame and the table offset
+    the wrist read in it) — as a room map cloud: ((points, its own table),
+    None) or (None, why). What is not the table is taken out: nearer the
+    lens than WRIST_HAND_M (the fingers, shut for the press) and over the
+    box's footprint and BOX_CLEAR_M. The points move AIM_FORWARD_M out along
+    the box's bearing, as the box was put from the aim (reach_press.
+    aim_forward); the scene camera's moved by its error at the box are as
+    far moved. Its table is its own: the scene's (`table_z`) and the table
+    offset the wrist read (its table sits 7-68 mm below the scene's)."""
+    from box_opening.tasks.press_demo import container_half
+
+    got = getattr(watcher, "last_aim_frame", None)
+    if got is None:
+        return None, "no aim kept its frame"
+    _tag, frame, off_raw = got
+    if frame is None:
+        return None, "the aim's frame had no pose"
+    if off_raw is None or not math.isfinite(float(off_raw)):
+        return None, "the wrist read no table of its own at the aim"
+    f, (rot, trans), _extra = frame
+    if getattr(f, "depth", None) is None or getattr(f, "k", None) is None:
+        return None, "the aim's frame has no depth"
+    pts = clear_table.depth_points(f.depth, f.k, rot, trans)
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    keep = np.linalg.norm(pts - np.asarray(trans, float), axis=1) > WRIST_HAND_M
+    keep &= np.hypot(pts[:, 0] - bx, pts[:, 1] - by) > container_half(ctx.model) + clear_table.BOX_CLEAR_M
+    pts = pts[keep]
+    d = math.hypot(bx, by)
+    if d > 0:
+        pts[:, 0] += rp.AIM_FORWARD_M * bx / d
+        pts[:, 1] += rp.AIM_FORWARD_M * by / d
+    return (pts, float(table_z) + float(off_raw)), None
 
 
 def nearest_centre(ctx):
@@ -2100,6 +2157,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             spot_ik_s=round(placed.ik_s, 3),
             plan_s=round(placed.plan_s, 3),
             host_stood_s=placed.host_stood_s,
+            pooled=pooled_note(ctx, runner, placed.room, drop),  # the wrist's look-pose frame pooled in: shadow
         )
         _say_spot(ctx, eyes, (drop, placed.tier, placed.says), placed.refused, placed.tmap, placed.table_z)
         log.info(
@@ -2209,6 +2267,7 @@ class CarryAhead:
     checks: int = 0
     ik_s: float = 0.0
     host_stood_s: float = None
+    room: object = None  # the Room it chose on (room_for's), None: judged here
 
 
 def _lookahead(runner):
@@ -2249,7 +2308,12 @@ def carry_ahead(ctx, cfg, eyes, q_end, room=None, home=False):
     rest = list(pd.rest_joints(cfg))
     reach = _Reach()
     ahead = CarryAhead(
-        q, tmap=tmap, table_z=table_z, room_s=None if judged is None else judged.spent_s, room_wait_s=room_wait_s
+        q,
+        tmap=tmap,
+        table_z=table_z,
+        room_s=None if judged is None else judged.spent_s,
+        room_wait_s=room_wait_s,
+        room=judged,
     )
     for drop, tier, says in spot_candidates(
         ctx,
@@ -2294,6 +2358,13 @@ class Room:
     cache: dict = field(default_factory=dict)
     spent_s: float = 0.0
     thread: object = None
+    # the map with the wrist's look-pose frame pooled in (aim_cloud): what the
+    # room is judged on with POOL_AIM_FRAME, else built beside it (shadow mode);
+    # why there is none; the scene camera's alone, kept for the row's comparison
+    pooled: object = None
+    pooled_why: str = None
+    scene_map: object = None
+    aim_points: int = 0
 
 
 def room_ahead(ctx, eyes):
@@ -2316,7 +2387,10 @@ def room_ahead(ctx, eyes):
     def judge():
         t0 = time.monotonic()
         try:
-            room.tmap = spot_map(ctx, None, None, scene_fix, scene_q, table_z)
+            room.tmap = room.scene_map = spot_map(ctx, None, None, scene_fix, scene_q, table_z)
+            pool_aim_frame(ctx, room, watcher, scene_fix, scene_q, table_z)
+            if POOL_AIM_FRAME and room.pooled is not None:
+                room.tmap = room.pooled
             if room.tmap is not None:
                 pd.clear_lid_drops(model, cpose, room.tmap, table_z, cache=room.cache)
         except Exception as e:  # not judged here, it is judged in the grip's lookahead
@@ -2327,6 +2401,76 @@ def room_ahead(ctx, eyes):
     room.thread = threading.Thread(target=judge, name="lid-room", daemon=True)
     room.thread.start()
     return room
+
+
+def pool_aim_frame(ctx, room, watcher, scene_fix, scene_q, table_z):
+    """room.pooled: the scene camera's cloud and the wrist's at the look
+    pose (aim_cloud) in one map, or None with room.pooled_why. Never what
+    stops the room being judged."""
+    try:
+        aim, why = aim_cloud(ctx, watcher, table_z)
+        if aim is None:
+            room.pooled_why = why
+            return
+        room.aim_points = len(aim[0])
+        scene = _scene_cloud(ctx, scene_fix, scene_q, table_z)
+        clouds = ([scene] if scene is not None else []) + [aim]
+        room.pooled = clear_table.table_map(clouds, ctx.cpose.xyz[:2])
+        if room.pooled is None:
+            room.pooled_why = "no table plane in the pooled clouds"
+    except Exception as e:  # noqa: BLE001 - the shadow map must never cost the run
+        room.pooled, room.pooled_why = None, "pooling failed (%s)" % e
+
+
+def pooled_note(ctx, runner, room, drop):
+    """The lid_spot row's 'pooled': the map with the wrist's look-pose
+    frame in it against the scene camera's alone — the cells seen and
+    standing in each, the spot chosen (`drop`) — and the two maps kept
+    beside the run record (<record>.side/room-maps.npz), where an attended
+    run checks that every object it placed stands in the pooled one and
+    the spot's room on each; whether the pooled map chose (POOL_AIM_FRAME).
+    Nothing is judged here: the room is the lid-room thread's work. None
+    without a room judged ahead."""
+    from box_opening.tasks import press_demo as pd
+
+    if room is None:
+        return None
+    out = {"chose": bool(POOL_AIM_FRAME and room.pooled is not None), "why": room.pooled_why}
+    maps = {"scene": room.scene_map, "pooled": room.pooled}
+    for key, tmap in maps.items():
+        if tmap is not None:
+            out["%s_seen" % key] = int(tmap.seen.sum())
+            out["%s_standing" % key] = int(np.isfinite(tmap.tall).sum())
+    out["aim_points"] = room.aim_points
+    out["spot"] = None if drop is None else [round(float(v), 4) for v in drop.xyz[:2]] + [round(float(drop.yaw), 4)]
+    arrays = {}
+    for key, tmap in maps.items():
+        if tmap is not None:
+            arrays.update(
+                {
+                    "%s_tall" % key: tmap.tall.astype(np.float32),
+                    "%s_seen" % key: tmap.seen,
+                    "%s_off" % key: tmap.off,
+                    "%s_origin" % key: np.array([tmap.x0, tmap.y0, tmap.cell]),
+                }
+            )
+    path = runner.side_file("room-maps.npz") if arrays and hasattr(runner, "side_file") else None
+    if path is not None:
+        box_xy = np.asarray(ctx.cpose.xyz[:2], float)
+
+        def write():
+            try:
+                np.savez_compressed(path, box_xy=box_xy, **arrays)
+            except Exception as e:  # noqa: BLE001 - a side file must never cost the run
+                log.info("[press_demo] (the room maps are not kept: %s)" % e)
+
+        # compressed off the motion's way (the close is the next thing sent), with
+        # the captures' writes (press_demo.wait_capture_writes waits for it)
+        writer = threading.Thread(target=write, name="room-maps", daemon=False)
+        pd._PENDING_WRITES[:] = [t for t in pd._PENDING_WRITES if t.is_alive()] + [writer]
+        writer.start()
+        out["maps"] = str(path.relative_to(runner.log_dir))
+    return out
 
 
 def room_for(ctx, room):
@@ -2470,6 +2614,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         spot_checks=len(reach.found),  # the spots whose reach was judged here (the rest: ahead's)
         carry_s=round(carry_s, 3),
         ahead=note,
+        pooled=pooled_note(ctx, runner, None if ahead is None else ahead.room, None if chosen is None else chosen[0]),
     )
     if note is not None:
         log.info(

@@ -408,6 +408,8 @@ def test_a_knob_up_after_the_press_is_gripped_lifted_carried_set_down_and_the_ar
     # lookahead's overrun (None: this client says nothing of what it sent)
     assert 0.0 <= spot["room_wait_s"] <= spot["ahead_s"] and spot["spot_checks"] >= 1 and spot["spot_ik_s"] >= 0.0
     assert spot["host_stood_s"] is None
+    # the wrist's look-pose frame was to be pooled into the room (shadow): this aim kept none
+    assert spot["pooled"]["chose"] is False and spot["pooled"]["why"] == "no aim kept its frame"
     assert spot["xyz"] == pytest.approx(list(ctx.lid_drop.xyz), abs=1e-4)
     hover = rec.legs["lid:carry"].target[1]
     assert hover[:2] == pytest.approx(list(ctx.lid_drop.xyz[:2]))
@@ -1377,6 +1379,95 @@ def test_the_nearest_rings_centre_on_the_held_button_and_pass_over_what_stands(c
     near = min(math.hypot(p.xyz[0] - cx, p.xyz[1] - cy) for p in kept)
     assert near > r0 and near - lid_r - rlo.clear_table.LID_CLEAR_M > 0.12 - 0.02  # past the flange's cells
     assert len(kept) < len(pts)
+
+
+def _aim_frame(ctx, table_off=-0.02, h=0.5):
+    """watcher.last_aim_frame as press_demo keeps it: a wrist frame looking
+    straight down from `h` over the box onto a bare table `table_off` below
+    the scene camera's (the box's base), and that offset as the aim read it."""
+    from types import SimpleNamespace
+
+    bx, by, bz = (float(v) for v in ctx.cpose.xyz)
+    k = np.array([[300.0, 0.0, 160.0], [0.0, 300.0, 120.0], [0.0, 0.0, 1.0]])
+    depth = np.full((240, 320), h + bz - (bz + table_off), np.float32)
+    rot, trans = np.diag([1.0, -1.0, -1.0]), np.array([bx, by, bz + h])
+    snap = SimpleNamespace(depth=depth, k=k, color=None, color_stamp=None)
+    return "reach-aim", (snap, (rot, trans), {}), table_off
+
+
+def test_the_look_poses_wrist_frame_is_a_cloud_on_its_own_table_moved_as_the_box_was(ctx):
+    """Sweep lid_spot-pool-aim-frame, as the safety verifier corrected it:
+    the wrist's cloud on its own table plane (it sits 7-68 mm below the
+    scene camera's) and moved AIM_FORWARD_M as the box was from the aim; the
+    fingers and the box taken out."""
+    from types import SimpleNamespace
+
+    from box_opening.perception import clear_table
+    from box_opening.tasks.press_demo import container_half
+
+    watcher = SimpleNamespace(last_aim_frame=_aim_frame(ctx))
+    table_z = float(ctx.cpose.xyz[2])
+    (pts, tz), why = rlo.aim_cloud(ctx, watcher, table_z)
+    assert why is None and tz == pytest.approx(table_z - 0.02)
+    assert pts[:, 2] == pytest.approx(table_z - 0.02, abs=1e-6)  # the table the wrist sees, where it reads it
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    _tag, (snap, (rot, trans), _x), _off = watcher.last_aim_frame
+    raw = clear_table.depth_points(snap.depth, snap.k, rot, trans)
+    raw = raw[np.hypot(raw[:, 0] - bx, raw[:, 1] - by) > container_half(ctx.model) + clear_table.BOX_CLEAR_M]
+    d = math.hypot(bx, by)
+    shift = np.array([rp.AIM_FORWARD_M * bx / d, rp.AIM_FORWARD_M * by / d])
+    assert len(pts) == len(raw) and pts[:, :2] == pytest.approx(raw[:, :2] + shift)
+    for kept, why_none in (
+        (None, "no aim kept its frame"),
+        (("reach-aim", None, -0.02), "the aim's frame had no pose"),
+        ((*_aim_frame(ctx)[:2], float("nan")), "the wrist read no table of its own at the aim"),
+    ):
+        assert rlo.aim_cloud(ctx, SimpleNamespace(last_aim_frame=kept), table_z) == (None, why_none)
+
+
+def test_the_pooled_room_map_is_built_beside_the_scene_cameras_and_does_not_choose(ctx, monkeypatch, tmp_path):
+    """Shadow mode (POOL_AIM_FRAME False): the room is judged on the scene
+    camera's map as before, the pooled one built beside it; switched on,
+    the pooled one is what the room is judged on."""
+    from types import SimpleNamespace
+
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(approach, "_chain", lambda: SimpleNamespace())  # no arm to leave out of the scene's cloud
+    bx, by, bz = (float(v) for v in ctx.cpose.xyz)
+    g = np.arange(-0.5, 0.5, 0.01)
+    X, Y = np.meshgrid(g + bx, g + by, indexing="ij")
+    scene_pts = np.stack([X.ravel(), Y.ravel(), np.full(X.size, bz)], -1)
+    scene_pts = scene_pts[(scene_pts[:, 1] - by) < -0.2]  # it sees the table only on one side
+    scene_fix = SimpleNamespace(table_points=scene_pts, table_z_scene=bz, pose=ctx.cpose)
+    watcher = SimpleNamespace(table_z=bz, last_aim_frame=_aim_frame(ctx, h=0.45))
+    judged = []
+    from box_opening.tasks import press_demo
+
+    monkeypatch.setattr(
+        press_demo,
+        "clear_lid_drops",
+        lambda m, cpose, tmap, table_z, cache=None: judged.append(tmap) or ([], [], "none"),
+    )
+    for pool in (False, True):
+        monkeypatch.setattr(rlo, "POOL_AIM_FRAME", pool)
+        room = rlo.room_ahead(ctx, (None, watcher, scene_fix, None))
+        room.thread.join(10.0)
+        assert room.pooled is not None and room.scene_map is not None and room.aim_points > 0
+        assert room.tmap is (room.pooled if pool else room.scene_map) and judged[-1] is room.tmap
+        assert room.pooled.seen.sum() > room.scene_map.seen.sum()  # the wrist sees what the scene camera did not
+    from box_opening.runtime.runner import Runner
+
+    runner = Runner(ctx.client, log_dir=tmp_path)
+    drop = rlo.ContainerPose(xyz=(bx + 0.2, by, bz), yaw=0.0)
+    note = rlo.pooled_note(ctx, runner, room, drop)
+    assert note["chose"] is True and note["pooled_seen"] > note["scene_seen"] and note["aim_points"] == room.aim_points
+    assert note["spot"] == pytest.approx([bx + 0.2, by, 0.0])
+    press_demo.wait_capture_writes()  # the maps are written off the motion's way
+    maps = np.load(tmp_path / note["maps"])
+    assert {"scene_tall", "scene_seen", "pooled_tall", "pooled_seen", "pooled_origin", "box_xy"} <= set(maps.files)
+    assert int(maps["pooled_seen"].sum()) == note["pooled_seen"]
+    assert rlo.pooled_note(ctx, runner, None, drop) is None  # no room judged ahead: nothing to compare
 
 
 def test_a_press_only_run_chooses_no_lid_spot(ctx, monkeypatch, tmp_path, capsys):

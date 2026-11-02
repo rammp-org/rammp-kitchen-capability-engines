@@ -441,7 +441,11 @@ def aim_button_at_staging(
                 )
             )
             # the frame the fix's newest hit was judged on, not the grabber's newest
-            folder = save_aim_frame(watcher.grab, s, tag, frame=aimer.judged_frame())
+            judged = aimer.judged_frame()
+            folder = save_aim_frame(watcher.grab, s, tag, frame=judged)
+            # ... and kept, with the table the wrist read in it: the look pose's view of the
+            # table round the box, for the lid's room map (reach_lid_off.aim_cloud)
+            watcher.last_aim_frame = (tag, judged, off_raw)
             # the press point, when the press goes on it (aim_source), and its frame
             watcher.last_aim, watcher.last_aim_capture = tuple(float(v) for v in xyz), folder
             if runner is not None:
