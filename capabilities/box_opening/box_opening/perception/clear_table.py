@@ -293,6 +293,109 @@ def carry_clearance(tmap, start_xy, end_xy, lid_r, tips_h, lid_h):
     return worst
 
 
+# Whether clear_spots judges its spots in batches (clearance_batch): the
+# same answers as one by one, several times faster
+BATCHED_SPOTS = True
+BATCH_SPOTS = 256  # spot-turns judged in one batch (~1.5 MB per window array)
+
+
+def clearance_batch(tmap, xys, quats, lid_r, tips_h, near_m=0.25, batch=None):
+    """[clearance(tmap, xy, quat, lid_r, tips_h, near_m) for each xy, quat]:
+    the same arithmetic on the same cells, every spot's window at once —
+    each window clipped to the map where clearance clips it, the cells
+    past it masked — so the same floats come out."""
+    n = len(xys)
+    if not n:
+        return []
+    batch = int(batch or BATCH_SPOTS)
+    c = tmap.cell
+    nx, ny = tmap.tall.shape
+    half = 0.5 * c
+    tall_all = np.nan_to_num(tmap.tall, nan=-1.0)
+    seen_all, off_all = tmap.seen, tmap.off
+    w = int(2 * near_m / c) + 3  # cells a window spans at most
+    out = []
+    for b0 in range(0, n, batch):
+        part = range(b0, min(n, b0 + batch))
+        sx = np.array([float(xys[k][0]) for k in part])
+        sy = np.array([float(xys[k][1]) for k in part])
+        i0 = np.array([max(0, int((x - near_m - tmap.x0) / c)) for x in sx])
+        i1 = np.array([min(nx, int((x + near_m - tmap.x0) / c) + 1) for x in sx])
+        j0 = np.array([max(0, int((y - near_m - tmap.y0) / c)) for y in sy])
+        j1 = np.array([min(ny, int((y + near_m - tmap.y0) / c) + 1) for y in sy])
+        ii = i0[:, None] + np.arange(w)[None, :]
+        jj = j0[:, None] + np.arange(w)[None, :]
+        ok = (ii < i1[:, None])[:, :, None] & (jj < j1[:, None])[:, None, :]
+        ic, jc = np.minimum(ii, nx - 1), np.minimum(jj, ny - 1)
+        tall = tall_all[ic[:, :, None], jc[:, None, :]]
+        seen = seen_all[ic[:, :, None], jc[:, None, :]]
+        off = off_all[ic[:, :, None], jc[:, None, :]]
+        # as clearance's meshgrid: tmap.x0 + (i + 0.5) * c - sx, cell by cell
+        dx = ((tmap.x0 + (ii + 0.5) * c) - sx[:, None])[:, :, None]
+        dy = ((tmap.y0 + (jj + 0.5) * c) - sy[:, None])[:, None, :]
+        lid_d = np.where(
+            ok & ((tall > 0.0) | ~seen | off), np.hypot(_to_square(dx, half), _to_square(dy, half)), np.inf
+        )
+        lid_min = lid_d.reshape(len(sx), -1).min(axis=1)
+        axes = [_hand_axes(quats[k]) for k in part]
+        ax0 = np.array([a[0][0] for a in axes])[:, None, None]
+        ax1 = np.array([a[0][1] for a in axes])[:, None, None]
+        ay0 = np.array([a[1][0] for a in axes])[:, None, None]
+        ay1 = np.array([a[1][1] for a in axes])[:, None, None]
+        hx, hy = dx * ax0 + dy * ax1, dx * ay0 + dy * ay1
+        parts = []
+        for name, (xa, xb), (ya, yb), bottom, need in HAND_PARTS:
+            hits = ok & ((tall > float(tips_h) + bottom - UP_SLACK_M) | ~seen)
+            gx = np.maximum(np.maximum(xa - hx, hx - xb) - half, 0.0)
+            gy = np.maximum(np.maximum(ya - hy, hy - yb) - half, 0.0)
+            d = np.where(hits, np.hypot(gx, gy), np.inf).reshape(len(sx), -1).min(axis=1)
+            parts.append((name, d, need))
+        for k in range(len(sx)):
+            best, what = near_m, None
+            if np.isfinite(lid_min[k]):
+                d = float(lid_min[k]) - float(lid_r) - LID_CLEAR_M
+                if d < best:
+                    best, what = d, "the lid"
+            for name, d_all, need in parts:
+                if not np.isfinite(d_all[k]):
+                    continue
+                d = float(d_all[k]) - need
+                if d < best:
+                    best, what = d, name
+            out.append((best, what))
+    return out
+
+
+def carry_clearance_fast(tmap, start_xy, end_xy, lid_r, tips_h, lid_h):
+    """carry_clearance, every step of the carry at once: the same floats,
+    the first of the least kept as its loop keeps it."""
+    st = tmap.standing()
+    a, b = np.asarray(start_xy, float)[:2], np.asarray(end_xy, float)[:2]
+    worst = (float("inf"), None, None)
+    if not len(st):
+        return worst
+    half = 0.5 * tmap.cell
+    parts = [("the lid", float(lid_r) + LID_CLEAR_M, float(tips_h) - float(lid_h))]
+    for name, (xa, xb), (ya, yb), bottom, need in HAND_PARTS:
+        parts.append((name, math.hypot(max(-xa, xb), max(-ya, yb)) + need, float(tips_h) + bottom))
+    steps = max(1, int(math.ceil(np.linalg.norm(b - a) / tmap.cell)))
+    ts = np.linspace(0.0, 1.0, steps + 1)
+    p = np.stack([a + t * (b - a) for t in ts])  # as the loop's a + t * (b - a), step by step
+    d = np.hypot(_to_square(st[None, :, 0] - p[:, 0:1], half), _to_square(st[None, :, 1] - p[:, 1:2], half))
+    table = np.full((len(ts), len(parts)), np.inf)
+    for k, (_name, r, bottom) in enumerate(parts):
+        hits = st[:, 2] > bottom - UP_SLACK_M
+        if hits.any():
+            table[:, k] = d[:, hits].min(axis=1) - r
+    if not np.isfinite(table).any():
+        return worst
+    flat = int(np.argmin(table))  # the first least, steps then parts, as the loop finds it
+    t_i, k = divmod(flat, len(parts))
+    if not float(table[t_i, k]) < worst[0]:
+        return worst
+    return float(table[t_i, k]), parts[k][0], (float(p[t_i][0]), float(p[t_i][1]))
+
+
 @dataclass(frozen=True)
 class Spot:
     xy: tuple
@@ -324,6 +427,49 @@ def clear_spots(
     hand_at=None,
     cache=None,
 ):
+    """_clear_spots_loop's spots and why, judged in batches (clearance_batch,
+    carry_clearance_fast): the same spots, rooms, turns, rotations, why,
+    judged list and cache — 2 932 clearance() calls on a map became 13
+    batched ones (median 0.63 -> 0.18 s offline; the lid-room thread took
+    4.9-8.2 s on the robot, late for the grip's lookahead in 4 of 7 runs).
+    The loop itself, should the batches fail."""
+    args = (tmap, box_xy, zone, min_from_box, quat_at, lid_r, tips_h, carry_tips_h, lid_h)
+    kw = dict(step=step, judged_out=judged_out, hand_at=hand_at, cache=cache)
+    if BATCHED_SPOTS:
+        mark = None if judged_out is None else len(judged_out)
+        try:
+            return _clear_spots(*args, batched=True, **kw)
+        except Exception as e:  # noqa: BLE001 - the loop judges alike, only slower
+            from box_opening import LOGGER as log
+
+            log.info("[clear_table] the batched spot judging failed (%s): judging spot by spot" % e)
+            if judged_out is not None:
+                del judged_out[mark:]
+    return _clear_spots(*args, batched=False, **kw)
+
+
+def _clear_spots_loop(*args, **kw):
+    """clear_spots as it judged every spot before batching (its tests'
+    reference)."""
+    return _clear_spots(*args, batched=False, **kw)
+
+
+def _clear_spots(
+    tmap,
+    box_xy,
+    zone,
+    min_from_box,
+    quat_at,
+    lid_r,
+    tips_h,
+    carry_tips_h,
+    lid_h,
+    step=SPOT_STEP_M,
+    judged_out=None,
+    hand_at=None,
+    cache=None,
+    batched=False,
+):
     """(spots, why): every spot in `zone` (x0, x1, y0, y1) at least
     `min_from_box` from the box, and at most SPOT_REACH_M more, where the
     hand comes down, at one of TURNS,
@@ -349,14 +495,42 @@ def clear_spots(
     held = hand_yaw(quat_at((bx, by))) if hand_at is None else float(hand_at)
     judged = {}
 
-    def judge(sx, sy):
+    def inside(sx, sy):
+        return (x0 - 1e-9 <= sx <= x1 + 1e-9 and y0 - 1e-9 <= sy <= y1 + 1e-9) and (
+            min_from_box <= math.hypot(sx - bx, sy - by) <= min_from_box + SPOT_REACH_M
+        )
+
+    def judge_many(points):
+        """judge() of each of `points` in turn, its spot-turns' clearances
+        not in `cache` judged in one batch first (batched) — the dict and
+        the cache filled in the order judge() one by one fills them."""
+        todo, seen_keys = [], set()
+        for sx, sy in points:
+            key = (round(sx, 4), round(sy, 4))
+            if key in judged or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            todo.append((sx, sy, key))
+        rooms = {}
+        if batched:
+            ask = []
+            for sx, sy, key in todo:
+                turns = [t for t in TURNS if cache is None or (key, t) not in cache]
+                if not turns or not inside(sx, sy):
+                    continue  # judged from the cache (a re-rank), or not a spot at all
+                q0 = quat_at((sx, sy))
+                ask += [((sx, sy), yaw_about_world_z(q0, t), (key, t)) for t in turns]
+            if ask:
+                got = clearance_batch(tmap, [a[0] for a in ask], [a[1] for a in ask], lid_r, tips_h)
+                rooms = {a[2]: g for a, g in zip(ask, got, strict=True)}
+        for sx, sy, _key in todo:
+            judge(sx, sy, rooms)
+
+    def judge(sx, sy, rooms=None):
         key = (round(sx, 4), round(sy, 4))
         if key in judged:
             return judged[key]
-        if (
-            not (x0 - 1e-9 <= sx <= x1 + 1e-9 and y0 - 1e-9 <= sy <= y1 + 1e-9)
-            or not min_from_box <= math.hypot(sx - bx, sy - by) <= min_from_box + SPOT_REACH_M
-        ):
+        if not inside(sx, sy):
             judged[key] = None
             return None
         q0 = quat_at((sx, sy))
@@ -366,7 +540,8 @@ def clear_spots(
             if cache is not None and (key, t) in cache:
                 room, what = cache[key, t]
             else:
-                room, what = clearance(tmap, (sx, sy), q, lid_r, tips_h)
+                got = None if rooms is None else rooms.get((key, t))
+                room, what = got if got is not None else clearance(tmap, (sx, sy), q, lid_r, tips_h)
                 if cache is not None:
                     cache[key, t] = room, what
             turned.append(
@@ -385,19 +560,24 @@ def clear_spots(
         if cache is not None and (key, "carry") in cache:
             carry, c_what = cache[key, "carry"]
         else:
-            carry, c_what, _at = carry_clearance(tmap, (bx, by), (sx, sy), lid_r, carry_tips_h, lid_h)
+            way = carry_clearance_fast if batched else carry_clearance
+            carry, c_what, _at = way(tmap, (bx, by), (sx, sy), lid_r, carry_tips_h, lid_h)
             if cache is not None:
                 cache[key, "carry"] = carry, c_what
         clear = [replace(s, room_m=carry, what="%s on the carry" % c_what) if carry < s.room_m else s for s in clear]
         judged[key] = min(clear, key=lambda s: (*_rank(s), -s.room_m))
         return judged[key]
 
-    coarse = [judge(sx, sy) for sx in np.arange(x0, x1 + 1e-9, step) for sy in np.arange(y0, y1 + 1e-9, step)]
+    grid = [(sx, sy) for sx in np.arange(x0, x1 + 1e-9, step) for sy in np.arange(y0, y1 + 1e-9, step)]
+    judge_many(grid)
+    coarse = [judged[(round(sx, 4), round(sy, 4))] for sx, sy in grid]
     half = 0.5 * step
+    near = []
     for s in [s for s in coarse if s is not None and s.room_m >= -step]:
         for ox in (-half, 0.0, half):
             for oy in (-half, 0.0, half):
-                judge(s.xy[0] + ox, s.xy[1] + oy)
+                near.append((s.xy[0] + ox, s.xy[1] + oy))
+    judge_many(near)
     every = [s for s in judged.values() if s is not None]
     if judged_out is not None:
         judged_out.extend(every)

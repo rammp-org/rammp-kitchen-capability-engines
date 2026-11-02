@@ -1573,13 +1573,17 @@ def test_a_clear_spot_the_scene_camera_sees_is_where_the_lid_goes_its_room_judge
     from box_opening.perception import clear_table
 
     judged_on = []
-    real = clear_table.clearance
 
-    def counted(*a, **k):
-        judged_on.append(threading.current_thread().name)
-        return real(*a, **k)
+    def counted(real):
+        def judge(*a, **k):
+            judged_on.append(threading.current_thread().name)
+            return real(*a, **k)
 
-    monkeypatch.setattr(clear_table, "clearance", counted)
+        return judge
+
+    # spot by spot or in batches (clear_table.BATCHED_SPOTS): wherever the room is judged
+    monkeypatch.setattr(clear_table, "clearance", counted(clear_table.clearance))
+    monkeypatch.setattr(clear_table, "clearance_batch", counted(clear_table.clearance_batch))
     code, rec, _chain, rows = _full_flow(
         ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table()
     )

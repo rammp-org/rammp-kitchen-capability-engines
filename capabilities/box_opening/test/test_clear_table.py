@@ -391,3 +391,86 @@ def test_more_things_than_the_planner_holds_merge_into_fewer_cuboids_around_the_
     )
     assert near.any() and not any(_covered(boxes, X[i, j], Y[i, j]) for i, j in zip(*np.nonzero(near), strict=False))
     assert not _covered(boxes, *box)
+
+
+# --- the batched spot judging: the same answers as one spot at a time -------------
+
+
+def _random_map(rng, box):
+    """A table round `box` with things standing on it, holes the camera did
+    not see into and a stretch past the table's edge, drawn by `rng`."""
+    pts = [_table(holes=[BOX_AT]), _block(*BOX_AT, TABLE_Z + 0.121)]
+    for _ in range(int(rng.integers(0, 5))):
+        cx, cy = rng.uniform(0.28, 0.72), rng.uniform(-0.65, 0.15)
+        w, d, h = rng.uniform(0.02, 0.12), rng.uniform(0.02, 0.12), rng.uniform(0.01, 0.3)
+        pts.append(_block(cx - w, cx + w, cy - d, cy + d, TABLE_Z + h))
+    t = np.concatenate(pts)
+    for _ in range(int(rng.integers(0, 3))):  # what it did not see
+        cx, cy, r = rng.uniform(0.3, 0.7), rng.uniform(-0.6, 0.1), rng.uniform(0.03, 0.1)
+        t = t[np.hypot(t[:, 0] - cx, t[:, 1] - cy) > r]
+    if rng.random() < 0.5:  # past the table's edge: the floor
+        edge = rng.uniform(0.55, 0.7)
+        t[t[:, 0] > edge, 2] = TABLE_Z - 0.4
+    return ct.table_map([(t, TABLE_Z)], box)
+
+
+def _both(pink, tmap, box, monkeypatch, **kw):
+    """clear_spots batched and one spot at a time: (spots, why, judged, cache) each."""
+    out = []
+    for batched in (True, False):
+        monkeypatch.setattr(ct, "BATCHED_SPOTS", batched)
+        judged, cache = [], {}
+        spots, why = _spots(pink, tmap, box, judged_out=judged, cache=cache, **kw)
+        out.append((spots, why, judged, list(cache.items())))
+    return out
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_the_batched_spot_judging_says_exactly_what_the_loop_says(pink, monkeypatch, seed):
+    """Sweep lid_spot-fastspots, rebuilt: the same spots, rooms, turns,
+    rotations, why, every judged spot in the same order and the same
+    cache in the same order — equal, not near — and the cached re-rank for
+    another hand as well."""
+    rng = np.random.default_rng(seed)
+    tmap = _random_map(rng, BOX)
+    fast, loop = _both(pink, tmap, BOX, monkeypatch)
+    assert fast == loop
+    hand = float(rng.uniform(-math.pi, math.pi))
+    for batched in (True, False):  # the re-rank from the cache: nothing judged again either way
+        monkeypatch.setattr(ct, "BATCHED_SPOTS", batched)
+        cache = dict(fast[3])
+        monkeypatch.setattr(ct, "clearance", lambda *a, **k: pytest.fail("judged again"))
+        again = _spots(pink, tmap, BOX, cache=cache, hand_at=hand)
+        monkeypatch.undo()
+        assert again == _spots(pink, tmap, BOX, cache=dict(loop[3]), hand_at=hand)
+
+
+def test_the_batched_spot_judging_on_1757s_map_says_what_the_loop_says(pink, monkeypatch):
+    tmap, box, _tz = _1757_map()
+    fast, loop = _both(pink, tmap, box, monkeypatch)
+    assert fast == loop and fast[0]  # a spot, and the same one
+
+
+def test_the_batched_clearance_is_clearance_spot_by_spot(pink):
+    """clearance_batch and carry_clearance_fast: the same floats as clearance
+    and carry_clearance, at spots near the map's edge too, in batches
+    smaller than the spots asked."""
+    rng = np.random.default_rng(7)
+    tmap = _random_map(rng, BOX)
+    xys = [(float(rng.uniform(-0.5, 1.3)), float(rng.uniform(-1.1, 0.7))) for _ in range(300)]
+    quats = [yaw_about_world_z(pink.press_quat((x, y, TABLE_Z)), float(rng.uniform(-3, 3))) for x, y in xys]
+    lid_r, lid_h = 0.5 * pink.lid_dims[0], pink.lid_dims[2]
+    want = [ct.clearance(tmap, xy, q, lid_r, lid_h) for xy, q in zip(xys, quats, strict=True)]
+    assert ct.clearance_batch(tmap, xys, quats, lid_r, lid_h, batch=37) == want
+    for xy in xys[:40]:
+        args = (tmap, BOX, xy, lid_r, pink.dims[2] + lid_h + 0.04, lid_h)
+        assert ct.carry_clearance_fast(*args) == ct.carry_clearance(*args)
+
+
+def test_a_batch_that_fails_is_judged_spot_by_spot(pink, monkeypatch, capsys):
+    tmap = _random_map(np.random.default_rng(3), BOX)
+    want = _spots(pink, tmap, BOX)
+    monkeypatch.setattr(ct, "clearance_batch", lambda *a, **k: 1 / 0)
+    judged = []
+    assert _spots(pink, tmap, BOX, judged_out=judged) == want and judged  # each judged spot once
+    assert len(judged) == len({(s.xy, s.turn) for s in judged})
