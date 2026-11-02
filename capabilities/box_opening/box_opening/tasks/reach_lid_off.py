@@ -235,6 +235,13 @@ GRIP_RETRY_LOWER_M = 0.010
 # took the lid's 60 mm ring for it, button_aim.TABLE_RECTIFY_M); farther is
 # the box moved, and the hand goes home
 REGRIP_MAX_M = 0.040
+# ... and found there on this many agreeing hits, not the reach-out's 2
+# (reach_press.REACH_AIM_HITS): a popped knob aims worse than a flush one —
+# on 14 real popped-knob frames and 42 variants the re-aim landed 4.1 mm
+# median, 11.6 mm p90 and 21 mm at most from the same run's flush first aim,
+# and the 3 recorded regrips at re-aimed points (10-30, before #103/#109)
+# closed on air (sweep aim-popped). The agreeing hits' mean or median then
+REGRIP_AIM_HITS = 3
 # Straight up with the knob held, this much past the cap's own height: off
 # the canister's rim. Flatbot's URDF lifts the hand turned down only 60-140
 # mm straight up over boxes 0.60-0.78 m out (150 mm only at 0.58 m), so the
@@ -1923,8 +1930,8 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True):
     """After a first close on air (`detail`, what it read): the fingers
     open and the hand backs out the grip's way down to the look pose
     (_back_to_look, home planned while it flies), and from there the wrist
-    aims at the knob again (reach_press._aim, 'reach-regrip'), as
-    knob_look does after a press. Returns (the button the grip goes to
+    aims at the knob again (reach_press._aim, 'reach-regrip', on
+    REGRIP_AIM_HITS agreeing hits), as knob_look does after a press. Returns (the button the grip goes to
     once more, None): the re-aim's x and y where it finds the knob no
     farther than REGRIP_MAX_M from the aimed `button`, else — no knob
     found — the aimed `button`'s, where the first grip went; its height the
@@ -1938,7 +1945,9 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True):
         runner.note("reach_regrip", found=None, outcome="the back-out did not fly")
         return None, code
     node, watcher = eyes[0], eyes[1]
-    got, status, up, _measured = rp._aim(node, watcher, yaw, button[2], button[:2], runner, "reach-regrip")
+    got, status, up, _measured = rp._aim(
+        node, watcher, yaw, button[2], button[:2], runner, "reach-regrip", min_hits=REGRIP_AIM_HITS
+    )
     if got is None:
         runner.note("reach_regrip", found=False, why=status, outcome="grip again where the first went")
         log.info(

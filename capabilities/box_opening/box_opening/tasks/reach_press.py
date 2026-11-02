@@ -1345,10 +1345,10 @@ REACH_AIM_S = 4.0
 REACH_AIM_HITS = 2
 
 
-def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag):
+def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag, min_hits=None):
     """(got, status, the knob's height above its lid in mm, the press point
     as the wrist measured it) from aim_button_at_staging, within REACH_AIM_S
-    and on REACH_AIM_HITS agreeing hits, got's point moved AIM_FORWARD_M
+    and on REACH_AIM_HITS agreeing hits (`min_hits` where given), got's point moved AIM_FORWARD_M
     out from the arm (aim_forward). got's z is raised by the wrist's
     table offset (button_aim.ButtonAimer.fix): the height the arm and the
     scene camera are compared with. The measured point is the one the
@@ -1380,7 +1380,7 @@ def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag):
         out=seen,
         lid_z=lid_z,
         prior_xy=prior_xy,
-        min_hits=REACH_AIM_HITS,
+        min_hits=REACH_AIM_HITS if min_hits is None else int(min_hits),
     )
     measured = seen.get("measured_xyz", None if got is None else got[0])
     if got is not None:

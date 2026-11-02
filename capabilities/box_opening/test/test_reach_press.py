@@ -2543,3 +2543,20 @@ def test_the_wrist_aim_is_moved_1_cm_out_from_the_arm_for_the_press_and_the_grip
         assert moved[2] == xyz[2]
         assert math.hypot(*moved[:2]) - math.hypot(*xyz[:2]) == pytest.approx(0.01)
         assert math.atan2(moved[1], moved[0]) == pytest.approx(math.atan2(xyz[1], xyz[0]))
+
+
+def test_an_aim_asks_for_the_hits_it_is_given_else_the_reach_outs(monkeypatch):
+    """reach_press._aim: REACH_AIM_HITS agreeing hits, or `min_hits` (the
+    regrip's re-aim at a popped knob: reach_lid_off.REGRIP_AIM_HITS)."""
+    from box_opening.tasks import press_demo
+
+    asked = []
+
+    def staging(node, watcher, yaw, **kw):
+        asked.append(kw["min_hits"])
+        return None, "no circle"
+
+    monkeypatch.setattr(press_demo, "aim_button_at_staging", staging)
+    reach_press._aim(None, None, 0.0, 0.3, (0.6, -0.2), None, "reach-aim")
+    reach_press._aim(None, None, 0.0, 0.3, (0.6, -0.2), None, "reach-regrip", min_hits=3)
+    assert asked == [reach_press.REACH_AIM_HITS, 3]

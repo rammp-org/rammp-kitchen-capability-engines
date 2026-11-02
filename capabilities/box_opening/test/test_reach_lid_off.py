@@ -61,6 +61,7 @@ class _Rec(trp._Rec):
         self.plans = []  # (leg name, how many events came before it was planned)
         self.planning = 0  # plans in progress now
         self.most_at_once = 0  # ... and the most there ever were
+        self.aim_hits = []  # (each aim's tag, the agreeing hits it asked for: None, the reach-out's)
 
 
 def _walk_or_turn(ctx_, q_look, slide, start, quat, top_z=None):
@@ -187,8 +188,9 @@ def _full_flow(
     runner = R(ctx.client, log_dir=tmp_path)
     queue = list(aims)
 
-    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag):
+    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag, min_hits=None):
         rec.events.append("aim:" + tag)
+        rec.aim_hits.append((tag, min_hits))
         got = queue.pop(0) if queue else None
         if got is None:
             return None, "no circle", None, None
@@ -778,6 +780,9 @@ def test_a_grip_on_air_is_aimed_again_from_the_look_pose_and_gripped_once_more_w
         *HOME,
     ]
     assert rec.events.count("aim:reach-regrip") == 1 and rec.events.count("grip:close") == 2
+    # the re-aim at the popped knob asks for REGRIP_AIM_HITS agreeing hits; every other aim the reach-out's own
+    assert [h for tag, h in rec.aim_hits if tag == "reach-regrip"] == [rlo.REGRIP_AIM_HITS] == [3]
+    assert all(h is None for tag, h in rec.aim_hits if tag != "reach-regrip")
     # the second way down solved for the re-aimed button, at the first's height, lid and tilt
     (first, lid1, tilt1), (second, lid2, tilt2) = asked
     assert first == pytest.approx(BUTTON) and second == pytest.approx((REGRIP[0], REGRIP[1], BUTTON[2]))
