@@ -163,16 +163,28 @@ def main():
     po = plan["push_open"]
     if po is not None:
         frames += [(q, False, swing_end_deg, f"let go -- push-open: {po['how']}")] * HOLD_FRAMES
+        if "back" in po:  # straight back off the handle, the hand held, before cuRobo's first leg
+            start, to = w.tool(q), np.asarray(po["back"]["to"], float)
+            n = max(1, int(np.ceil(np.linalg.norm(to - start) / 0.01)))
+            for k in range(1, n + 1):
+                nq, _ = sim.solve_ik(w.scene, w.rb, start + (to - start) * k / n, po["back"]["quat"], q)
+                frames += [
+                    (fq, False, swing_end_deg, "push-open: back off the handle (straight)") for fq in _blend(q, nq)
+                ]
+                q = nq
         door_deg = swing_end_deg  # the door stays where the push leaves it, on the way back too
         for leg in po["legs"]:
             pushing = leg["label"] == "push open"
             start_xy, at_start = w.tool(q)[:2] - w.df.hinge[:2], door_deg
+            closed = leg["label"] != "up and back"  # the gripper closes after the first move up
+            if leg["label"] == "over the door":
+                frames += [(q, True, door_deg, "close the gripper")] * HOLD_FRAMES
             for nq in _through(q, leg["joints"]):
                 if pushing:  # the door turns with the point the hand pushes
                     now = w.tool(nq)[:2] - w.df.hinge[:2]
                     turn = np.degrees(np.arctan2(start_xy[0] * now[1] - start_xy[1] * now[0], start_xy @ now))
                     door_deg = max(at_start, at_start + turn * w.sign)
-                frames.append((nq, False, door_deg, f"push-open: {leg['label']} (cuRobo's plan)"))
+                frames.append((nq, closed, door_deg, f"push-open: {leg['label']} (cuRobo's plan)"))
             q = frames[-1][0]
     if po is not None and not any(leg["label"] == "push open" for leg in po["legs"]):
         # the push: a straight line, the hand held -- IK'd in the sim 1 cm at a time, as move_cartesian does
