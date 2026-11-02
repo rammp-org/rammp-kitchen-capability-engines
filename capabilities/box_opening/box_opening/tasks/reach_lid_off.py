@@ -1185,6 +1185,50 @@ class Carry:
     drop: object
     over_m: float = None  # how far past where the lid meets the table the touch ends (setdown_over)
     k_z: float = None  # the hand's spring straight down there, N/m
+    contact: object = None  # the set-down watched as it flies (watch_setdown): where the lid met the table
+
+
+# The set-down watched for where the lid meets the table (watch_setdown,
+# tasks/press_contact's PressContact) from this far above where the plan puts
+# that: below the descent's start, where the reference speeds up and the gap
+# with it (watched from 0.07 m, the 16 recorded set-downs gave one false
+# contact, 88 mm early; from 0.05 m none that early). The 16 met the table
+# 2-39 mm above the touch's planned end — the lid hangs lower in the fingers
+# than the model's lid (lid_dims.z) puts it — and pressed on 6-32 mm, 20-60 N
+# on the spring against SETDOWN_PUSH_N. Watched only (SETDOWN_FROM_CONTACT
+# False): its first touch is no lid set down — in 10 of the 16 the hand went
+# on down 8-20 mm after it, the lid settling flat or the knob slipping in the
+# fingers — and a set-down cut short of the table leaves the lid on its rim or
+# in the air for the release to drop. The run record says where it met and
+# what a cut would have done, for the attended runs' video to judge
+SETDOWN_WATCH_M = 0.05
+SETDOWN_FROM_CONTACT = False
+
+
+def watch_setdown(ctx, legs, carry):
+    """The set-down of `carry` (plan_carry's) watched as it flies in the
+    execution `legs` begins (the first motion leg's stop_when): a
+    PressContact on where the lid meets the table — SETDOWN_WATCH_M above
+    where the plan puts that on — cutting nothing unless SETDOWN_FROM_CONTACT.
+    Kept on the carry (carry.contact) for the reach_setdown row. Returns it,
+    or None: nothing to watch."""
+    from box_opening.runtime import approach
+    from box_opening.runtime.legs import Kind
+    from box_opening.tasks.press_contact import PressContact, pads_z
+
+    lead = next((lg for lg in legs if lg.kind is Kind.MOTION), None)
+    touch = carry.legs[-1] if carry.legs else None
+    if lead is None or touch is None or touch.goal_joints is None:
+        return None
+    chain = approach._chain()
+    end = pads_z(chain, touch.goal_joints)
+    over = float(carry.over_m or 0.0)
+    expect = end + over  # where the plan has the lid meet the table
+    carry.contact = PressContact(
+        chain, ctx.client, expect, expect + SETDOWN_WATCH_M, over, end, cut=SETDOWN_FROM_CONTACT
+    )
+    lead.stop_when = carry.contact
+    return carry.contact
 
 
 def plan_carry(ctx, cfg, q_from, drop):
@@ -2199,6 +2243,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             "CLOSE on the knob, then ONE MOTION: LIFT, CLEAR, CARRY to [%.2f, %.2f] (%s) and SET DOWN, "
             "%.1f mm past the table" % (drop.xyz[0], drop.xyz[1], placed.tier, 1000 * (carry.over_m or 0.0)),
         )
+        watch_setdown(ctx, flying, carry)  # where the lid meets the table, watched
         res = runner.run(flying, execute=True)
     else:
         if placed is not None:
@@ -2722,6 +2767,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         "[press_demo] ONE MOTION: %s — to [%.2f, %.2f] and down onto the table, %s"
         % (", ".join(lg.name for lg in carry.legs), drop.xyz[0], drop.xyz[1], _touch_says(carry))
     )
+    watch_setdown(ctx, carry.legs, carry)  # where the lid meets the table, watched
     res = runner.run(carry.legs, execute=True, lookahead=lambda _end: plan_home_after(ctx, cfg, carry))
     ahead = runner.lookahead_result
     last = res[-1]
@@ -2954,7 +3000,18 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
     world = _full_world(ctx)
     ok_q, pos, _stalled = ctx.client.gripper_cmd(None)  # query only: still on the knob?
     kept = not ok_q or pos is None or in_band(pos, cfg.grip_band)
-    runner.note("reach_setdown", knuckle=None if pos is None else round(float(pos), 3), kept=kept)
+    watched = None if getattr(carry, "contact", None) is None else carry.contact.record()
+    runner.note("reach_setdown", knuckle=None if pos is None else round(float(pos), 3), kept=kept, contact=watched)
+    if watched and watched.get("met"):
+        log.info(
+            "[press_demo] SET-DOWN CONTACT (watched): the lid met the table %+.0f mm from where the plan put it; %s"
+            % (
+                watched["above_top_mm"],
+                "a cut would have ended the touch %.0f mm short of its planned end" % watched["cut_mm"]
+                if watched.get("cut_mm") is not None
+                else "the touch's planned end stands",
+            )
+        )
     if not kept:
         log.info(
             "[press_demo] the fingers read %.3f at the table, outside the grip band %s: the lid slipped on the way"

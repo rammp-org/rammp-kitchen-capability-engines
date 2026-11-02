@@ -1216,6 +1216,48 @@ def test_a_stop_at_the_look_pose_flies_the_home_planned_while_the_way_back_flew(
     assert ahead["flown"] is True and ahead["off_rad"] == pytest.approx(0.0)
 
 
+def test_the_set_down_is_watched_for_where_the_lid_meets_the_table_and_nothing_is_cut(ctx, monkeypatch, tmp_path):
+    """The set-down flies as planned, watched (SETDOWN_FROM_CONTACT off): the
+    lift-to-set-down execution's lead carries a PressContact that cuts
+    nothing, and the reach_setdown row says what it saw (here: no flight
+    reported by the fake client, so nothing watched)."""
+    from box_opening.tasks.press_contact import PressContact
+
+    assert rlo.SETDOWN_FROM_CONTACT is False
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0
+    lead = rec.legs["lid:lift"]  # the one motion's lead: lift, clear, carry, down, touch
+    assert isinstance(lead.stop_when, PressContact) and lead.stop_when.cut is False
+    (sd,) = (r for r in rows if r["leg"] == "reach_setdown")
+    assert sd["contact"]["cut_on"] is False and sd["contact"]["watched"] is False and sd["contact"]["met"] is False
+
+
+def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_table(monkeypatch):
+    """watch_setdown: the lid meets the table, as planned, carry.over_m above
+    the touch's end; the watch begins SETDOWN_WATCH_M above that, on the
+    execution's first motion leg (not a gripper leg before it)."""
+    from box_opening.runtime import approach
+    from box_opening.runtime.legs import Kind
+    from box_opening.tasks.press_contact import pads_z
+
+    class Chain:
+        def fk(self, q):
+            return np.eye(3), np.array([0.0, 0.0, float(q[0])])
+
+    monkeypatch.setattr(approach, "_chain", lambda: Chain())
+    close = SimpleNamespace(kind=Kind.GRIPPER, stop_when=None)
+    lift = SimpleNamespace(kind=Kind.MOTION, stop_when=None)
+    touch = SimpleNamespace(kind=Kind.MOTION, stop_when=None, goal_joints=[0.25] + [0.0] * 6)
+    carry = SimpleNamespace(legs=[SimpleNamespace(), touch], over_m=0.002, contact=None)
+    ctx = SimpleNamespace(client=SimpleNamespace())
+    got = rlo.watch_setdown(ctx, [close, lift, touch], carry)
+    end = pads_z(Chain(), touch.goal_joints)
+    assert lift.stop_when is got is carry.contact and close.stop_when is None
+    assert got.end_z == pytest.approx(end) and got.top_z == pytest.approx(end + 0.002)
+    assert got.arm_z == pytest.approx(end + 0.002 + rlo.SETDOWN_WATCH_M) and got.past_m == pytest.approx(0.002)
+    assert got.cut is False
+
+
 def test_the_first_press_is_cut_at_its_contact_and_a_press_once_more_flies_its_full_stroke(ctx, monkeypatch, tmp_path):
     """Contact detection rides each press's way in (its lead's stop_when):
     the first press's stroke ends as far past where the pads met the box as
