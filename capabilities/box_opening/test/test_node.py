@@ -304,6 +304,22 @@ def test_a_run_is_stopped_when_following_it_raises(engine, monkeypatch):
     assert time.monotonic() - t0 < 5.0  # the stand-in exits on its Ctrl+C at once
 
 
+def test_a_run_past_its_budget_is_stopped_its_own_way_before_the_orchestrators_cancel(engine, monkeypatch):
+    """REVIEW_RULES O3: the orchestrator cancels an action after 120 s (fixed there). A run still
+    going at RUN_BUDGET_S is stopped first, by its own Ctrl+C, and fails with `timeout`."""
+    assert node.RUN_BUDGET_S < 120.0
+    given(monkeypatch, FULL_RUN[:3], wait=True)
+    monkeypatch.setattr(node, "RUN_BUDGET_S", 0.5)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "timeout" and e.value.recoverable and sent == [signal.SIGINT]
+    assert time.monotonic() - t0 < 5.0
+
+
 def test_nothing_runs_unless_the_node_allows_it_and_it_is_not_offered(engine, monkeypatch):
     """REVIEW_RULES O1: no dry run. With allow_execute off (the default, and between attended
     runs) open_box is reported unavailable, with why, and a goal that comes anyway is refused

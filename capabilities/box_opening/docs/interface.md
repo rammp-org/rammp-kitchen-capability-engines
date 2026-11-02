@@ -126,6 +126,7 @@ A run that stops fails the action with one of these codes:
 | ----------- | ----------- | ---------------------------------------------------------------------- |
 | `bad_params` | no         | The goal had params; `open_box` takes none. Nothing ran                |
 | `not_allowed` | no        | `allow_execute` is off on this node. Nothing ran                       |
+| `timeout`   | yes         | The run was still going after 100 s and was stopped its own way (one Ctrl+C), before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers |
 | `not_ready` | yes         | Refused before anything moved: a driver, planner, camera or TF missing |
 | `not_found` | yes         | The scene camera found no container                                    |
 | `not_home`  | yes         | The arm could not get to its start pose                                |

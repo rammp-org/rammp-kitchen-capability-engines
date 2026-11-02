@@ -78,6 +78,11 @@ POLL_S = 0.05
 CANCEL_ESCALATE_S = 15.0
 CANCEL_KILL_S = 10.0
 SHUTDOWN_WAIT_S = 3.0  # on SIGTERM: the run's own stop first, inside docker stop's grace period
+# REVIEW_RULES O3: the orchestrator cancels any action still running after 120 s (fixed in
+# rammp-orchestrator; an engine cannot ask for more). A run still going at this budget is stopped
+# its own way (one Ctrl+C) and fails with `timeout`, so the end is the run's, with room left for
+# its stop before that cancel. The longest of 48 logged missions took 45 s, plus ~5 s to start.
+RUN_BUDGET_S = 100.0
 TAIL_LINES = 40
 
 # a leg's row -> (phase, the fraction of the run done) it ends (REVIEW_RULES U2: progress runs
@@ -143,6 +148,8 @@ class Run:
     def __init__(self, argv, env, log):
         self.lines = deque(maxlen=TAIL_LINES)
         self.video = None
+        self.started = time.monotonic()
+        self.timed_out = False  # stopped by the node at RUN_BUDGET_S
         self._log = log
         # its own session: a Ctrl+C at this node's terminal reaches it once, from here. Its
         # lines are decoded whatever they hold: a reader that died would leave the run
@@ -385,6 +392,13 @@ class Capability(CapabilityEngine):
             "run_log": str(log.path) if log.path else None,
         }
         self._sync_held(track, ctx)  # the last rows' word: a release, a put-back
+        if run_.timed_out:
+            held = " -- the lid is still in the fingers" if track.held else ""
+            raise EngineError(
+                "timeout",
+                f"the run took longer than {RUN_BUDGET_S:.0f} s and was stopped its own way (Ctrl+C){held}",
+                recoverable=not track.held,
+            )
         if code != 0:
             error = error_for(action_id, code, run_.lines)
             if track.held:
@@ -413,6 +427,14 @@ class Capability(CapabilityEngine):
             now = time.monotonic()
             if ctx.cancelled() and sent is None:
                 self.get_logger().warning("cancelled: the run's own stop (Ctrl+C) sent")
+                run_.interrupt()
+                sent = now
+            elif sent is None and now - run_.started > RUN_BUDGET_S:
+                self.get_logger().error(
+                    f"the run is still going after {RUN_BUDGET_S:.0f} s: its own stop (Ctrl+C), before the "
+                    "orchestrator's 120 s cancel"
+                )
+                run_.timed_out = True
                 run_.interrupt()
                 sent = now
             elif sent is not None and escalated is None and now - sent > CANCEL_ESCALATE_S:
