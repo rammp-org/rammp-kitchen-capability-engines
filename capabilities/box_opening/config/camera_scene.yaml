@@ -1,0 +1,22 @@
+parent_frame: base_link
+child_frame: scene_camera_link
+xyz:
+- -0.06506
+- 0.64157
+- 0.35206
+quat_xyzw:
+- 0.044383
+- 0.020535
+- -0.265541
+- 0.962859
+note: 'tag position via the wrist camera + door and table planes; 20260923-112915;
+  mismatch 1.17 deg; 20 frames per camera Refined 2026-09-24 16:01: rigid fit to the
+  table plane (surveyed z, level) and 3 button truths (close-up aims, one pressed
+  open), 3 iterations: table 0.0 mm, buttons <= 5 mm in xy; was 28 mm high, 2.8 deg
+  tilted, 12 cm off at the box. The gripper at HOME now projects onto the gripper.
+  Refined 2026-09-25 15:38 from 3 wrist pairs (translation fit, automatic, by the
+  mission; rms 83.0 -> 6.7 mm).'
+tag_px:
+- 716.5
+- 219.2
+refined_at: 1790365120.5

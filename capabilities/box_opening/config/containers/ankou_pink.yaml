@@ -1,0 +1,397 @@
+# The round clear canister with the pink push-button lid ("ankou" on the
+# button; on the bench from 2026-09-22). Copied from oxo_pop.yaml so every
+# tuned press/grip setting carries over; only the geometry, the detector
+# prompts and this header differ.
+#
+# GEOMETRY MEASURED 2026-09-23 from the wrist D405 at staging (frame
+# test/data/wrist_staging_pink_20260923.npz, 22 cm above the lid): top 121
+# mm above the surveyed table (the phone-photo estimate said 95 — 26 mm low,
+# which put the aim's lid-height gate and the search's height band below
+# the real lid: "it isn't finding the box even though the box is right
+# underneath it"); lid ~105 mm across (the 4.1-inch OXO's footprint);
+# button 44.3 mm, flush with the lid when closed. The height is the lid
+# as the D405 reads it (lid heights read true — the OXO's was touch-
+# verified to 0.7 mm; the FAR table reads ~29 mm high and is not used).
+# The first press's touch re-measures the button top (run log press_depth
+# surface_z); a tape on the lid diameter still beats the depth edge.
+#
+# The mechanism is the OXO's (owner, 2026-09-22: "exactly like the oxo
+# box"): press to release, the button pops up as a handle, the fingers
+# grip it and lift the lid. Grip band and pop check carry over unchanged;
+# expect open_box.grip_band to want a re-tune for this knob's diameter.
+# THE DEFAULT CONTAINER since 2026-09-22 (tasks/cli_common
+# default_container_yaml): every CLI and both OWL detector nodes fall back
+# to this file; the OXOs stay selectable with --container.
+measure_me: false                 # height and button measured 2026-09-23 (above)
+round: true                       # the lid is a disc lid_dims[0] across (ContainerModel.round)
+
+dims: [0.105, 0.105, 0.121]       # ROUND: x = y = the lid's outer diameter
+                                  # (depth edge ~54 mm from the button
+                                  # centre, 2026-09-23). z = the closed
+                                  # container's top above the table:
+                                  # MEASURED 0.121 (button disc and lid
+                                  # annulus both at base z 0.094 against the
+                                  # surveyed table -0.027). A round top passes
+                                  # every gate that was written for a square
+                                  # one: the depth plateau's min-area rect is
+                                  # d x d with fill pi/4, the scene locator's
+                                  # 10-90 % spread is ~0.7 d; the yaw either
+                                  # reports is arbitrary and unused (press
+                                  # attitude fixed, world cuboids base-aligned).
+lid_dims: [0.105, 0.105, 0.025]  # the pink cap; its thickness an ESTIMATE
+button_offset: [0.0, 0.0, 0.121]  # the flush button top IS the container
+                                  # top: the detected lid plateau is the
+                                  # press plane. Moves with dims.z — they are
+                                  # the same surface, re-derived 2026-09-03.
+button_diameter_m: 0.044          # the pink push button across — MEASURED
+                                  # 44.3 mm (Hough r 43.8 px at 220 mm,
+                                  # 2026-09-23). Drives the staging aim's
+                                  # Hough radius window (0.7-1.4 x): the
+                                  # lid's own outer edge is ~2.4 x the
+                                  # button, outside the window, so Hough
+                                  # cannot mistake it for the button.
+press:
+  contact_nm: 3.0                 # the TOUCH stage: a light guarded descent
+                                  # that stops at first contact with the
+                                  # button. The arm then knows the surface
+                                  # from its own fingertip TF, and the push
+                                  # below is measured from THAT — not from
+                                  # the camera's lid height, which swings
+                                  # +/-6 mm run to run (2026-09-03).
+  button_travel_m: 0.012          # the PUSH stage's BOUND: how far past first
+  push_hold_s: 0.3                # held on the button after the push, before
+                                  # the recoil lets go. With touch_nm 10 (the
+                                  # push's backstop 10 - 3 = 7 Nm) and 12 mm of
+                                  # room: owner 2026-09-23, "press down harder
+                                  # so it can open the box" — the push had
+                                  # stopped at 4.5 Nm after 4.9 mm, off-centre,
+                                  # and the box stayed shut.
+                                  # contact the pads may drive. The push
+                                  # normally ends EARLIER, when the button's
+                                  # own stop is felt (touch_nm below): that
+                                  # is the press. 0.004 -> 0.010 (owner,
+                                  # 2026-09-17: "press until it feels the
+                                  # force, it's barely touching the button"):
+                                  # the touch stops at a light 3 Nm contact
+                                  # with the 4.1-inch button barely loaded,
+                                  # and 4 mm from there popped it only when
+                                  # the contact read +2 mm (10:52), not at
+                                  # +6 mm. Still a bound: the 2026-09-03
+                                  # video showed an unbounded 7 Nm stroke
+                                  # compressing the whole container.
+  touch_nm: 10.0                  # now the push's BACKSTOP: the push trips at
+                                  # (touch_nm - contact_nm) above its own
+                                  # in-contact baseline, i.e. the same ~7 Nm
+                                  # total as before, but reaching it is the
+                                  # exception, not how the press ends.
+                                  # The reach-out and depth presses bound
+                                  # the TOTAL instead: touch_nm off the
+                                  # free-air reading taken before the touch.
+                                  # 7.0 -> 7.5 (2026-09-16): a press 6 mm off
+                                  # centre met the 7.0 backstop at 5.6 Nm over
+                                  # its baseline without popping the button;
+                                  # 8.1 scooted the box, so this is the room
+                                  # there is.
+                                  # Old note: torque-guard trip threshold (spec §6).
+                                  # Bisected at the bench: 6.1 Nm stopped
+                                  # short of releasing the seal at the crisp
+                                  # 0.02 s executor poll; 8.1 released it but
+                                  # pressed hard enough to SCOOT the box
+                                  # ~2 cm (fix moved 0.458->0.438 between
+                                  # runs, and the stale cuboid then clipped
+                                  # the home sweep). 7.0 splits the bracket.
+press_attitude_rpy_deg: [180.0, 0.0, 90.0]  # top-down, wrist facing straight
+                                  # ahead: the LOOK pose's own orientation
+                                  # (0.02 deg apart), so nothing turns
+                                  # between look, approach and press
+press_yaw_steer: false            # FIXED in the world (above). true = yaw
+                                  # steered to the box's bearing (2026-08-25
+                                  # family), which turned the wrist up to
+                                  # 105 deg on the way to staging — "the arm
+                                  # keeps flipping" (owner, 2026-09-16)
+hover_standoff: 0.08              # m above the lid set-down spot for the carry
+                                  # hover (plus a lid height; Place.hover_for)
+# No lid pose is configured (it was open_container.lid_place, a bench
+# point): the lid goes where the cameras see room for it and the hand,
+# every run (perception/clear_table; owner 2026-10-27: nothing in the
+# environment is hard coded).
+
+# --- open_box (step 2, owner 2026-08-26): pull the lid off ---------------
+open_box:
+  grip_band: [0.30, 0.55]         # close feedback = HOLDING the popped
+                                  # button. Bench-measured 2026-08-26:
+                                  # 0.387 gripping the knob. Below lo =
+                                  # closed on something too wide (the box
+                                  # itself reads ~0.09); 0.8 = air
+  lift_m: 0.15                    # slow pull height before the carry
+  lift_speed: 0.35                # visibly gentle pull, 2.3x faster than the
+                                  # 0.15 it shipped at (speed pass 2026-08-28).
+                                  # Unguarded, so runner._refusal exempts
+                                  # "lift" alongside "retreat".
+  grip_hop_m: 0.05                # how far ABOVE the lid plane the press
+                                  # retreat stops before the fingers open and
+                                  # re-descend. Was staging_m (0.12), making a
+                                  # 253 mm rise-and-fall for a 2 mm reposition.
+                                  # 0.05 clears the err-tall container cuboid
+                                  # (top sits ~20 mm above the plane) and still
+                                  # leaves the fingers room to swing open over
+                                  # the popped knob. Only interaction-world
+                                  # legs plan from this height — press-only
+                                  # keeps the full retreat, because its home
+                                  # is planned in the FULL world where the
+                                  # finger spheres need ~0.10 m of clearance.
+  grip_speed: 0.35                # descent onto the popped button. Raised
+                                  # 0.15 -> 0.35 (owner, 2026-09-16) to match
+                                  # the guarded set-down, which has run at
+                                  # 0.35 since 2026-09-02. A trip here still
+                                  # means FAILURE (struck the knob or the lid);
+                                  # watch torque_peak in the run jsonl.
+  warp_fast_speed: 0.75           # free-air portion of a GUARDED descent.
+                                  # A guarded leg used one scale for its whole
+                                  # length, so grip:down crawled 118 mm at 0.15
+                                  # (4.16 s) when only the last stretch is near
+                                  # anything. Positions are unchanged by the
+                                  # warp and every scale stays <= 1.0, so no
+                                  # executed velocity exceeds what cuRobo
+                                  # already limit-checked. The guard stays
+                                  # armed throughout and re-baselines at the
+                                  # transition. 0 disables warping entirely.
+                                  # Raised 0.5 -> 0.75 (owner, 2026-09-15) to
+                                  # match the free-air cruise the chained
+                                  # press approach already runs at. It governs
+                                  # grip:down, and the press descent FROM
+                                  # STAGING above its straight line (the last
+                                  # 60 mm, where that descent's guard arms;
+                                  # press_demo.fly_free_air_fast, 2026-09-24).
+                                  # The set-down gave up its warp to join the
+                                  # carry's merge group.
+                                  # KNOW WHAT THIS BUYS AND COSTS: the
+                                  # fast segment is planned in the reduced
+                                  # world, where the container top is absent,
+                                  # and the guard cannot TRIP before its
+                                  # slow-zone rebaseline settles — so a
+                                  # strike in free air is a collision, not a
+                                  # caught contact. warp_slow_frac decides
+                                  # how much of the path is protected.
+  warp_slow_frac: 0.30            # final fraction of the PATH at contact speed
+  setdown_speed: 0.35             # guarded set-down; a trip IS the success
+                                  # here. The guard observes the whole stroke
+                                  # but can only trip after half of it
+                                  # (arm_after 0.5, and never before the
+                                  # warp's slow zone): a fast-segment trip
+                                  # released the lid 110 mm up (2026-09-02).
+  park_tool_down: false           # true: the arm RESTS at the LOOK pose
+                                  # between runs instead of the factory
+                                  # HOME, skipping the 2.4-2.9 rad wrist flip
+                                  # twice a run (~5-7 s) — but it then holds
+                                  # the tool out over where the box goes.
+                                  # Tried ON 2026-09-03; the owner wants the
+                                  # run to END AT HOME (2026-09-04), so off.
+  setdown_touch_nm: 4.0           # set-down trip threshold — a lid on a
+                                  # table loads the wrist far less than a
+                                  # press pops a seal; 7.0 stayed blind
+                                  # through the crunch (field 2026-09-02)
+  grip_clear_m: 0.005             # fingertip stop height ABOVE the lid
+                                  # plane. 0.002 grazed the lid at the bench
+                                  # (2026-09-01 — z fixes are good to ~2-3 mm,
+                                  # so 2 mm of clearance had none to spare);
+                                  # 5 mm still grips the 15 mm knob low.
+                                  # The lid plane is the detected lid top
+                                  # (the button sits flush in it at scan):
+                                  # the popped-up button is grabbed at its
+                                  # BASE — press depth is 15 mm INTO the
+                                  # lid, and open fingertips sent there
+                                  # trip the guard (field 2026-08-26, first
+                                  # grip attempt)
+  press_offset_xy: [0.0, 0.0]     # base-frame trim of where the CLOSED pads
+                                  # land on the button (m), for a pad-vs-tool
+                                  # offset ONLY. Zero: the constant 6 mm miss
+                                  # of 2026-09-14..16 was the planner's
+                                  # descent bowing sideways (runtime/approach
+                                  # .py), not the pads — a trim here would
+                                  # have double-corrected once the line
+                                  # replaced it. Dial only from a run whose
+                                  # PRESS line reports a straight descent.
+  grip_offset_xy: [0.0, 0.0]      # base-frame grasp trim, on top of the
+                                  # button circle. ZEROED 2026-09-03: the
+                                  # -3 mm was measured when the pose came
+                                  # from the TAG; the aim is the circle
+                                  # OpenCV segments now, and the fingers
+                                  # go to its centre. Old note: first grip
+                                  # landed ~3 mm too far +x (measured
+                                  # 2026-08-26); at 85 mm aperture around
+                                  # a 75 mm box there is only 5 mm of
+                                  # side clearance — this trim matters
+
+# --- press_demo (camera-driven press flow, owner design 2026-08-24) ------
+press_demo:
+  travel_m: 0.015                 # how far below the ESTIMATED button the
+                                  # touch stage may search before reporting
+                                  # "no surface" — it must cover the camera's
+                                  # run-to-run lid-height spread (+/-6 mm)
+                                  # — nothing more: the push is not cut from
+                                  # this stroke but flown as the arm's own
+                                  # straight line, button_travel_m below the
+                                  # MEASURED contact, so no planner runs while
+                                  # the fingers press. The touch stops at contact;
+                                  # a deeper plan costs nothing.
+                                  # Old note: press depth below the lid plane. This is
+                                  # the HARD bound on how deep the stroke can
+                                  # go — the guard normally stops it first,
+                                  # but nothing else limits it, so 15 mm of
+                                  # commanded overtravel was 15 mm the arm
+                                  # could drive into the lid if the guard was
+                                  # slow ("pressed too low", 2026-09-03). It
+                                  # must still cover the button's own travel
+                                  # (~4 mm) PLUS the run-to-run spread of the
+                                  # measured lid height (+/-6 mm), so 10 mm is
+                                  # the floor until the contact heights now
+                                  # logged say otherwise. Old note: (owner
+                                  # 2026-08-26, third bump); the guard at
+                                  # press.touch_nm remains the force ceiling
+  speed: 0.35                     # press stroke speed (owner 2026-08-25)
+  staging_m: 0.12                 # approach height above the button for the
+                                  # STAGED fallback (full world) and the
+                                  # press-only retreat. EMPIRICAL 2026-08-25:
+                                  # 0.08 was IK_FAIL live (finger spheres +
+                                  # err-tall + padding eat ~0.10); 0.10 is
+                                  # the measured boundary
+scan:
+  # The mission no longer FLIES to a scan pose: it turns the wrist down
+  # from wherever the arm rests and sweeps the base to search (the look,
+  # primitives/look.py). What is left here is the sweep's arc and an xyz
+  # that only scripts/reach_probe.py still surveys.
+  search_arc_rad: 0.6             # base yaw each way when the look sees
+                                  # nothing: at the look the camera stands
+                                  # 0.49 m out, so this carries the view
+                                  # centre to [0.41, +/-0.28] and reaches
+                                  # the corners of the placement band. The
+                                  # look alone covers x 0.28-0.71, y +/-0.38
+                                  # at LID height (its narrow axis is x)
+  xyz: [0.42, 0.0, 0.45]          # reach-probe survey point only
+vlm:                              # detect.source: vlm — the semantic gate
+  backends: [owl, claude]         # tried in order, first bbox wins. LOCAL
+                                  # first: the wheelchair will not always
+                                  # have internet (deployment 2026-09-01); the
+                                  # cloud is the fallback and plain depth is
+                                  # the floor when both decline.
+  owl_model: google/owlv2-base-patch16-ensemble
+  owl_queries:                    # phrasing matters more than the model.
+                                  # Swept 16 phrasings over the five phone
+                                  # photos (2026-09-22): the lid is the
+                                  # anchor — "clear", "glass", "jar",
+                                  # "canister", "container" alone all scored
+                                  # 0.00; every phrase with "pink lid"
+                                  # scored 0.36-0.67 (the OXO's own prompts
+                                  # score the OXO 0.08-0.13 on real wrist
+                                  # frames). The union covers every angle:
+    - a round pink lid            # 0.36-0.54 on four of five
+    - a cup with a pink lid       # 0.44-0.67 on four of five
+    - a pink lid                  # 0.56 on the cut-off edge view
+    - a round clear canister with a pink lid  # 0.37 on the straight-on view
+                                  # NOT "a pink push button" (0.22-0.39 on all
+                                  # five): it boxes the BUTTON alone, whose
+                                  # 10-90 % spread is under the locator's
+                                  # 0.4 x dims floor. Phone photos at arm's
+                                  # length: the scene camera sees it smaller
+                                  # from 0.6 m, so expect lower absolute
+                                  # scores; the RANKING is what carries.
+  owl_min_score: 0.18             # false positives sat at 0.12-0.18 on the
+                                  # captures; the true box at 0.235-0.249
+  owl_min_score_scene: 0.05       # the scene camera's floor (was the launch
+                                  # file's): from a metre the box scores lower,
+                                  # and the lid-slab geometry behind it rejects
+                                  # anything that is not this box's top.
+                                  # 0.12 -> 0.05 (2026-10-27): 16:22 and 16:24
+                                  # ("saw no box in 15 s") were floor misses,
+                                  # the pale lid at 0.07-0.10; with no floor at
+                                  # all the gate refused every distractor, and
+                                  # on upright frames the OWL goes from 32/37
+                                  # to 34/37 detbench frames with no wrong fix.
+                                  # The OWL is the FALLBACK here (scene_detect)
+  model: claude-opus-5            # measured 2026-09-01: 3.3 s, box dead-on;
+                                  # claude-haiku-4-5 was 0.4 s faster and
+                                  # boxed the ROBOT'S OWN BASE. Fast loses.
+  target: a small round clear canister with a pink push-button lid
+  timeout_s: 20.0                 # API budget; past it the mission falls
+                                  # back to plain depth, never stalls
+  pad_px: 20                      # bbox padding before it gates the depth
+scene_detect:                     # the scene camera's box, from sheppy's always-on scene_segmenter
+  segmenter_classes: [food container]  # RF-DETR boxes the blue holder as COCO "bowl" = food container: 37/37
+                                  # detbench frames, nothing else boxed as one at the node's 0.25. Never other
+                                  # classes: class-agnostic boxes gave the only wrong fixes (keyboard, TV)
+  segmenter_box: holder           # its box is the HOLDER: the band above it is gated (object geometry: the lid
+                                  # stands on its holder). as_is: the box is the container itself
+detect:
+  confirm_in_flight: false        # true: with the scene camera's coarse fix,
+                                  # the approach and the guarded descent fly
+                                  # as ONE goal and the wrist confirms the
+                                  # box DURING the approach; the arm never
+                                  # stops above the box. The goal is cut at
+                                  # the junction only when the wrist has not
+                                  # confirmed by then, or disagrees with the
+                                  # scene by more than 5 mm. Needs the
+                                  # camera's timestamp lag MEASURED first
+                                  # (camera_d405_wrist.yaml stamp_offset_s):
+                                  # moving frames are otherwise placed where
+                                  # the arm was, not where the shutter fired.
+  recentre_max_moves: 2           # at staging, when the aim finds the button
+                                  # more than 25 mm from under the tool: move
+                                  # over it and aim again, up to this many
+                                  # times, then press from the last aim. Every
+                                  # press that landed dead centre was aimed
+                                  # with the button under the tool; aimed 11
+                                  # cm off, one hit the button's edge and did
+                                  # not open the box (2026-09-23). 0: aim once
+                                  # and press (the stub harness: its planner
+                                  # has no real IK and its camera is fixed).
+  require_button_circle: true     # only a sighting whose BUTTON CIRCLE was
+                                  # segmented (OpenCV Hough on the button's
+                                  # seam) may commit a fix — that circle's
+                                  # centre IS the aim point for the press and
+                                  # the grip. The plateau centroid finds the
+                                  # LID: on the bench capture it sat a median
+                                  # 5.9 mm (max 15.4) off the circle and its
+                                  # 3-sample medians scattered 8.4 x 13.3 mm
+                                  # against the circle's 2.9 x 1.8, so one
+                                  # centroid sample in the window could win
+                                  # the median and walk the press off the
+                                  # button (field 2026-09-03). 97 % of
+                                  # plateau frames yield a circle; false
+                                  # falls back to centroid-or-circle.
+  source: vlm                     # vlm | depth. Both find the box by depth:
+                                  # the lid plateau above the measured table
+                                  # supplies the mm geometry, and every depth
+                                  # honesty gate always stands. vlm adds the
+                                  # semantic ladder above (vlm.backends: the
+                                  # persistent OWL node first, the cloud as
+                                  # fallback) to say WHICH surface is the
+                                  # container (bbox) — its live bbox gates
+                                  # the depth watcher while the arm parks,
+                                  # and the ladder is walked only when depth
+                                  # alone has not answered in its first beat;
+                                  # every rung declining = plain depth. depth
+                                  # = the geometry alone (refuses when two
+                                  # box-sized tops are in view). No print to
+                                  # wear out: the press knuckles destroyed
+                                  # two ArUco prints in a week (field
+                                  # 2026-09-01) and that path is gone.
+  timeout_s: 10.0                 # scan-pose wait for a stable fix
+  min_hits: 3                     # agreeing frames before the fix commits
+  tol_m: 0.015                    # pairwise agreement (stable_fix). 0.03
+                                  # let in-flight samples agree with each
+                                  # other 20 mm off the truth (field
+                                  # 2026-09-01: two runs' fixes disagreed
+                                  # 21 mm in x and the grip closed on air);
+                                  # 15 mm forces the commit onto the
+                                  # consistent deceleration/parked tail
+                                  # for ~0.2 s more wait
+  window_s: 2.0                   # sightings older than this leave the window
+  fresh_s: 1.0                    # a fix older than this cannot commit
+  period_s: 0.05                  # detector tick. min_hits * period is the
+                                  # hard floor on time-to-commit: 0.15 s here
+                                  # vs 0.45 s at the 0.15 s default. Not the
+                                  # camera's 0.033 s: this tick shares the
+                                  # single-threaded spin that polls the torque
+                                  # guard, so 20 Hz buys most of the win
+                                  # without tripling the load during contact.
