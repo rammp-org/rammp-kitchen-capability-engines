@@ -82,7 +82,7 @@ class Action:
 def stop_wait_s() -> float:
     """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's and
     self.base's worst settle (ArmInterface.worst_settle_s(), 7.8 s by default, and
-    BaseInterface.worst_settle_s(), 0.04 s) plus STOP_MARGIN_S. docker stop's grace (10 s) must
+    BaseInterface.worst_settle_s(), 0.1 s) plus STOP_MARGIN_S. docker stop's grace (10 s) must
     cover it."""
     return ArmInterface.worst_settle_s() + BaseInterface.worst_settle_s() + STOP_MARGIN_S
 

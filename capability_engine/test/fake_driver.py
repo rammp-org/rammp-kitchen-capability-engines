@@ -60,6 +60,7 @@ from rammp_arm_interfaces.msg import (
     TwistSetpoint,
 )
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
+from rammp_base_interfaces.msg import DriveCommand, MibStatus
 from rammp_base_interfaces.msg import TwistSetpoint as BaseTwistSetpoint
 from rammp_common_interfaces.msg import ControlStatus, EStop
 from rammp_common_interfaces.srv import AcquireControl, ReleaseControl, RevokeControl
@@ -89,6 +90,7 @@ PLAN_DT_S = 0.1  # time between the points of a plan_result trajectory
 FEEDBACK_FRACTION = 0.5  # fraction_complete of the one feedback message a goal publishes
 LATE_CLOSE_S = 0.1  # late_close_on_next_open(): the "closed" lands this long before the open
 ODOM_HZ = 50.0  # FakeBase's /base/odom
+MIB_STATUS_HZ = 20.0  # FakeBase's /rammp/mib/status (the MIB's is 2 Hz)
 PAUSE_POLL_S = 0.01  # how often a paused FakeCtx.checkpoint() looks for resume or cancel
 FLATBOT_URDF = Path("/fixtures/urdf/flatbot.urdf")
 FRAME = "arm_mount"
@@ -624,19 +626,80 @@ class FakeDriver(Node):
 class FakeBase(Node):
     """The drive base (the MIB), faked: records every rammp_base_interfaces/TwistSetpoint on
     /base/setpoint/twist in .twists, and publishes nav_msgs/Odometry on /base/odom at ODOM_HZ while
-    publishing (set_odom(x, y, yaw) sets what it publishes; start() and stop_publishing())."""
+    publishing (set_odom(x, y, yaw) sets what it publishes; start() and stop_publishing()).
+
+    It also publishes MibStatus on /rammp/mib/status at MIB_STATUS_HZ (once start_mib() is called)
+    and records every DriveCommand on /rammp/drive_command in .commands, answering each as
+    DriveCommand.msg says the MIB does (unless ignore_commands()). set_state(s) moves it, as a
+    joystick touch or an e-stop would."""
 
     def __init__(self):
         super().__init__("fake_base")
         self.twists = []
+        self.commands = []
         self._lock = threading.Lock()
         self._publishing = False
+        self._mib = False
+        self._ignore = False
+        self._state = MibStatus.SYSTEM_STATE_IDLE
+        self._profile = MibStatus.PROFILE_LOW
         self._pose = (0.0, 0.0, 0.0)
         self.create_subscription(
             BaseTwistSetpoint, "/base/setpoint/twist", self._on_twist, SETPOINT_QOS
         )
+        self.create_subscription(
+            DriveCommand, "/rammp/drive_command", self._on_command, SETPOINT_QOS
+        )
         self._odom_pub = self.create_publisher(Odometry, "/base/odom", qos_profile_sensor_data)
+        self._status_pub = self.create_publisher(MibStatus, "/rammp/mib/status", SETPOINT_QOS)
         self.create_timer(1.0 / ODOM_HZ, self._publish_odom)
+        self.create_timer(1.0 / MIB_STATUS_HZ, self._publish_status)
+
+    def start_mib(self, state=MibStatus.SYSTEM_STATE_IDLE):
+        self._state = state
+        self._mib = True
+
+    def set_state(self, state):
+        self._state = state
+
+    def state(self):
+        return self._state
+
+    def ignore_commands(self):
+        self._ignore = True
+
+    def requests(self):
+        """[(request, profile)] of every DriveCommand so far."""
+        with self._lock:
+            return [(c.request, c.profile) for c in self.commands]
+
+    def _on_command(self, c):
+        with self._lock:
+            self.commands.append(c)
+        if self._ignore:
+            return
+        s, S = self._state, MibStatus
+        if c.request == DriveCommand.REQUEST_DISABLE:
+            if s not in (S.SYSTEM_STATE_INITIALIZING, S.SYSTEM_STATE_ESTOP, S.SYSTEM_STATE_ERROR):
+                self._state = S.SYSTEM_STATE_PUSH_ASSIST if c.push_assist else S.SYSTEM_STATE_IDLE
+        elif c.request in (DriveCommand.REQUEST_AUTONOMOUS, DriveCommand.REQUEST_SHARED):
+            if s in (S.SYSTEM_STATE_IDLE, S.SYSTEM_STATE_ENABLED, S.SYSTEM_STATE_PUSH_ASSIST):
+                self._state = (
+                    S.SYSTEM_STATE_AUTONOMOUS
+                    if c.request == DriveCommand.REQUEST_AUTONOMOUS
+                    else S.SYSTEM_STATE_SHARED
+                )
+        elif c.request == DriveCommand.REQUEST_ENABLE:
+            if s in (S.SYSTEM_STATE_IDLE, S.SYSTEM_STATE_ENABLED):
+                self._state = S.SYSTEM_STATE_ENABLED
+
+    def _publish_status(self):
+        if self._mib:
+            self._status_pub.publish(
+                MibStatus(
+                    system_state=self._state, active_profile=self._profile, error_message="No error"
+                )
+            )
 
     def _on_twist(self, m):
         with self._lock:

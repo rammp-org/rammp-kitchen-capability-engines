@@ -1,5 +1,6 @@
-"""self.base: twists to the drive base, its odometry, per-action entities, the stop at the end of
-an action, cancel, and mock mode. A BaseInterface on a fresh node beside a FakeBase."""
+"""self.base: twists to the drive base, its odometry, drive mode requests, per-action entities, the
+stop at the end of an action, cancel, and mock mode. A BaseInterface on a fresh node beside a
+FakeBase."""
 
 import math
 import threading
@@ -7,6 +8,7 @@ import time
 
 import pytest
 from fake_driver import FakeBase, FakeCtx, counts
+from rammp_base_interfaces.msg import DriveCommand, MibStatus
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -182,3 +184,162 @@ def test_mock_sends_nothing_and_dead_reckons(base_env):
     x = base.odometry().pose.pose.position.x
     time.sleep(0.1)
     assert base.odometry().pose.pose.position.x == x
+
+
+AUTONOMOUS, SHARED = MibStatus.SYSTEM_STATE_AUTONOMOUS, MibStatus.SYSTEM_STATE_SHARED
+IDLE, ESTOP = MibStatus.SYSTEM_STATE_IDLE, MibStatus.SYSTEM_STATE_ESTOP
+LOW = MibStatus.PROFILE_LOW  # FakeBase's profile in force
+
+
+def test_request_mode_enters_it_keeping_the_profile(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous")
+    assert fake.state() == AUTONOMOUS
+    assert fake.requests()[-1] == (DriveCommand.REQUEST_AUTONOMOUS, LOW)
+
+
+def test_request_mode_already_in_it_sends_nothing(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(SHARED)
+    base.begin_action(FakeCtx())
+    base.request_mode("shared")
+    assert fake.requests() == []
+
+
+def test_switching_modes_goes_through_disable(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("shared")
+    base.request_mode("autonomous")
+    assert fake.state() == AUTONOMOUS
+    requests = [r for r, _ in fake.requests()]
+    deduped = [r for i, r in enumerate(requests) if i == 0 or r != requests[i - 1]]
+    # A request repeats until MibStatus answers it.
+    assert deduped == [
+        DriveCommand.REQUEST_SHARED,
+        DriveCommand.REQUEST_DISABLE,
+        DriveCommand.REQUEST_AUTONOMOUS,
+    ]
+
+
+def test_request_mode_refused_in_estop_sends_nothing(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(ESTOP)
+    base.begin_action(FakeCtx())
+    with pytest.raises(BaseError, match="ESTOP"):
+        base.request_mode("autonomous")
+    assert fake.requests() == []
+
+
+def test_an_unanswered_request_is_resent_then_fails(base_env, monkeypatch):
+    monkeypatch.setattr(base_module, "MODE_WAIT_S", 0.6)
+    monkeypatch.setattr(base_module, "MODE_RESEND_S", 0.1)
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    fake.ignore_commands()
+    base.begin_action(FakeCtx())
+    with pytest.raises(BaseError, match="did not enter AUTONOMOUS"):
+        base.request_mode("autonomous")
+    assert len(fake.requests()) >= 3
+
+
+def test_no_mib_status_fails(base_env, monkeypatch):
+    monkeypatch.setattr(base_module, "MODE_WAIT_S", 0.3)
+    make, _ = base_env
+    base, _ = make()
+    base.begin_action(FakeCtx())
+    with pytest.raises(BaseError, match="no /rammp/mib/status"):
+        base.request_mode("autonomous")
+
+
+def test_unknown_mode_raises(base_env):
+    make, _ = base_env
+    base, _ = make()
+    base.begin_action(FakeCtx())
+    with pytest.raises(BaseError, match="not one of"):
+        base.request_mode("enable")
+
+
+def test_request_mode_follows_a_cancel(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    fake.ignore_commands()
+    ctx = FakeCtx()
+    base.begin_action(ctx)
+    threading.Timer(0.3, ctx.cancel).start()
+    with pytest.raises(Cancelled):
+        base.request_mode("autonomous")
+
+
+def test_the_user_taking_over_stops_the_twists_and_is_not_undone(base_env):
+    """A joystick touch ends AUTONOMOUS (IDLE): send_twist() raises, and the end of the action
+    neither re-requests the mode nor sends DISABLE."""
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous")
+    base.send_twist(0.1, 0.0)
+    fake.set_state(IDLE)
+    wait_until(lambda: _raises(lambda: base.send_twist(0.1, 0.0)))
+    with pytest.raises(BaseError, match="left AUTONOMOUS for IDLE"):
+        base.send_twist(0.1, 0.0)
+    sent = len(fake.requests())
+    base.end_action()
+    time.sleep(0.2)
+    assert len(fake.requests()) == sent
+
+
+def test_the_end_of_the_action_leaves_the_mode_it_entered(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("shared")
+    base.send_twist(0.1, 0.0)
+    base.end_action()
+    wait_until(lambda: fake.state() == IDLE)
+    assert fake.requests()[-1] == (DriveCommand.REQUEST_DISABLE, LOW)
+
+
+def test_mock_request_mode_sends_nothing(base_env):
+    make, fake = base_env
+    base, node = make(mock=True)
+    idle = counts(node)
+    fake.start_mib(IDLE)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous")
+    base.send_twist(0.1, 0.0)
+    base.end_action()
+    time.sleep(0.1)
+    assert fake.requests() == []
+    assert counts(node) == idle
+
+
+def _raises(call):
+    try:
+        call()
+    except BaseError:
+        return True
+    return False
+
+
+def test_a_mode_it_did_not_switch_into_is_left_alone(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.start_mib(AUTONOMOUS)
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous")
+    base.end_action()
+    time.sleep(0.2)
+    assert fake.requests() == []
+    assert fake.state() == AUTONOMOUS
