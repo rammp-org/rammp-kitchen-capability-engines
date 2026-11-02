@@ -1233,13 +1233,16 @@ class _ReportingDriver(_Driver):
     """Replays `n` feedbacks, each with its fraction and the joints it
     measured, as the driver's sampler does every tick."""
 
-    def __init__(self, n):
+    def __init__(self, n, knuckle=None):
         super().__init__()
         self.n = n
+        self.knuckle = knuckle  # knuckle(k): the gripper reading heard just before feedback k
 
     def send_goal_async(self, goal, feedback_callback=None):
         self.goals.append(goal)
         for k in range(self.n):
+            if self.knuckle is not None:
+                self.knuckle(k)
             fb = ExecuteJointTrajectory.Feedback(
                 fraction_complete=k / self.n, actual=JointTrajectoryPoint(positions=[k * 1e-3] * 7)
             )
@@ -1258,18 +1261,42 @@ def test_every_tenth_feedback_is_kept_with_its_fraction_and_when_it_was_heard():
     outcome, info = c.execute(_traj(LIVE, end), 1.0)
     assert outcome == "arrived"
     kept = list(info["feedback_q"])
-    assert [round(f * 95) for _t, f, _q in kept] == list(range(0, 95, 10))  # the 1st, the 11th, ... the 91st
-    for (_t, _f, q), k in zip(kept, range(0, 95, 10), strict=False):
-        assert q == pytest.approx([k * 1e-3] * 7)
+    assert [round(s[1] * 95) for s in kept] == list(range(0, 95, 10))  # the 1st, the 11th, ... the 91st
+    for s, k in zip(kept, range(0, 95, 10), strict=False):
+        assert s[2] == pytest.approx([k * 1e-3] * 7)
     assert t0 <= info["sent_at"] <= kept[0][0] <= kept[-1][0] <= time.monotonic()
     assert list(info["sent_traj"].points[-1].positions) == pytest.approx(end)
     assert info["progress"] == pytest.approx(94 / 95)
 
 
+def test_each_feedback_kept_carries_the_knuckle_heard_by_then():
+    """grip-08: the knuckle rides with the joints — a lid slipping out of
+    the fingers mid-carry shows where it went, not only at the table."""
+    c = _client()
+    c._gripper_pos = None  # nothing heard yet
+
+    def knuckle(k):
+        if k >= 10:
+            c._gripper_pos = 0.7 + k * 1e-4
+
+    c._execute = _ReportingDriver(35, knuckle)
+    _outcome, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
+    kept = list(info["feedback_q"])
+    assert [s[3] for s in kept] == [None, pytest.approx(0.701), pytest.approx(0.702), pytest.approx(0.703)]
+
+
+def test_the_lookahead_a_motion_hosted_is_timed():
+    c = _client(_ReportingDriver(5))
+    _outcome, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0, while_running=lambda: time.sleep(0.05))
+    assert 0.05 <= info["while_running_s"] < 1.0
+    _outcome, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
+    assert "while_running_s" not in info
+
+
 def test_the_feedback_kept_is_bounded_to_the_newest(monkeypatch):
     monkeypatch.setattr(client_mod.PlannerClient, "FEEDBACK_KEEP", 5)
     _outcome, info = _client(_ReportingDriver(200)).execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
-    assert [round(f * 200) for _t, f, _q in info["feedback_q"]] == [150, 160, 170, 180, 190]
+    assert [round(s[1] * 200) for s in info["feedback_q"]] == [150, 160, 170, 180, 190]
 
 
 def test_a_refused_trajectory_reports_nothing_sent():

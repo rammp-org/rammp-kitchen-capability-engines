@@ -2015,6 +2015,57 @@ def test_each_execution_keeps_what_it_sent_and_what_flew_beside_the_record_once_
     }
 
 
+class _FliesHolding(_Flies):
+    """_Flies whose feedback carries the knuckle (the 4th element; None
+    before the first reading) and whose motion hosted a 0.7 s lookahead
+    that kept the client 0.4 s past the trajectory's end."""
+
+    def execute(self, traj_, speed, guard=None, while_running=None, stop_when=None, gains=None):
+        outcome, info = super().execute(traj_, speed, guard, while_running, stop_when, gains)
+        pts = list(info["sent_traj"].points)
+        last = pts[-1].time_from_start
+        duration = last.sec + 1e-9 * last.nanosec
+        now = time.monotonic()
+        info.update(
+            sent_at=now - duration - 0.4,
+            feedback_q=[
+                (now - duration - 0.4 + 0.1 * k, 0.1 * k, [0.01 * k] * 7, None if k == 0 else 0.79 - 0.001 * k)
+                for k in range(11)
+            ],
+            while_running_s=0.7,
+        )
+        return outcome, info
+
+
+def test_a_flight_keeps_the_knuckle_beside_the_joints_and_how_long_the_arm_stood_at_its_end(tmp_path):
+    """grip-08: the lid that slipped out of the fingers (10-30 13:28) was
+    read only at the close and at the table — the knuckle at each feedback
+    sample now flies with the joints. And a lookahead the motion hosted
+    holds the arm at the trajectory's end until it returns (0.01-1.50 s per
+    grip rise): stood_s is that stand, lookahead_s the lookahead's own time."""
+    import json
+
+    c = _FliesHolding(tmp_path)
+    r = runner(c, tmp_path)
+    r.run([leg("lift:rise", Q0, Q1, chain=0)], execute=True)
+    doc = json.loads(next(tmp_path.glob("run-*.flights/*.json")).read_text())
+    assert doc["feedback"]["gripper"] == [None] + [pytest.approx(0.79 - 0.001 * k, abs=1e-4) for k in range(1, 11)]
+    assert doc["stood_s"] == pytest.approx(0.4, abs=0.05) and doc["lookahead_s"] == 0.7
+
+
+def test_a_flight_from_feedback_without_the_knuckle_keeps_none_for_it(tmp_path):
+    """An older client's 3-element samples: the knuckle is None, and with no
+    lookahead hosted lookahead_s is None too."""
+    import json
+
+    c = _Flies(tmp_path)
+    r = runner(c, tmp_path)
+    r.run([leg("reach:look", Q0, Q1, chain=0)], execute=True)
+    doc = json.loads(next(tmp_path.glob("run-*.flights/*.json")).read_text())
+    assert doc["feedback"]["gripper"] == [None] * 11 and doc["lookahead_s"] is None
+    assert doc["stood_s"] >= 0.0
+
+
 def test_an_execution_the_client_never_sent_keeps_no_flight_and_no_settle(tmp_path, monkeypatch):
     c = _Flies(tmp_path)
     r = runner(c, tmp_path)

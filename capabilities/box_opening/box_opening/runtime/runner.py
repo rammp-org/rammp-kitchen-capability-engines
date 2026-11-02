@@ -291,12 +291,17 @@ def _flight_doc(seq, names, outcome, flew, info, traj, arrived, every):
     """An execution's side file (Runner._keep_flight): the trajectory sent,
     point by point — t, q, qd, qdd, as the driver samples it — and every
     `every`-th of the driver's feedback (client.FEEDBACK_EVERY): s after
-    the goal went out, the driver's fraction of the trajectory's time, and
-    the joints it measured."""
+    the goal went out, the driver's fraction of the trajectory's time, the
+    joints it measured and the gripper's knuckle then. stood_s is how long
+    the client returned after the trajectory's own end, lookahead_s the
+    time of the lookahead the motion hosted (client.execute while_running)."""
     sent = info.get("sent_traj") or traj
     pts = list(sent.points)
     fb = list(info.get("feedback_q") or ())
     t0 = float(info["sent_at"])
+    ended_s = arrived[0] - t0
+    duration = secs(pts[-1].time_from_start) if pts else 0.0
+    ahead = info.get("while_running_s")
     return {
         "seq": seq,
         "legs": list(names),
@@ -306,7 +311,11 @@ def _flight_doc(seq, names, outcome, flew, info, traj, arrived, every):
         "gains_zeta": flew.get("gains_zeta"),
         "joint_names": list(sent.joint_names),
         "sent_t": round(arrived[1] - (arrived[0] - t0), 3),  # time.time() when the goal went out
-        "ended_s": round(arrived[0] - t0, 4),  # when the client returned its result, s after that
+        "ended_s": round(ended_s, 4),  # when the client returned its result, s after that
+        # past the trajectory's own end: the arm standing at its end, e.g. while a lookahead it
+        # hosted still planned (execute returns only once that does: 0.01-1.50 s per grip rise)
+        "stood_s": round(max(0.0, ended_s - duration), 4),
+        "lookahead_s": None if ahead is None else round(float(ahead), 4),  # the hosted lookahead's own time
         "trajectory": {
             "t": [round(secs(p.time_from_start), 4) for p in pts],
             "q": _rounded([list(p.positions) for p in pts], 6),
@@ -318,6 +327,8 @@ def _flight_doc(seq, names, outcome, flew, info, traj, arrived, every):
             "t": [round(float(s[0]) - t0, 4) for s in fb],
             "fraction": [round(float(s[1]), 5) for s in fb],
             "q": _rounded([list(s[2]) for s in fb], 6),
+            # the gripper's knuckle at each sample (None: none heard yet)
+            "gripper": [None if len(s) < 4 or s[3] is None else round(float(s[3]), 4) for s in fb],
         },
     }
 

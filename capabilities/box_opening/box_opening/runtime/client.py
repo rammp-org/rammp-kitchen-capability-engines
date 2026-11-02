@@ -1075,12 +1075,14 @@ class PlannerClient:
         this motion instead of after it (the planner is its own container).
         Its blocking plans spin this same node, so feedback keeps flowing;
         its result lands in info["while_running"], an exception in
-        info["while_running_error"] — never past the cancel path.
+        info["while_running_error"], its own time in info["while_running_s"]
+        — never past the cancel path.
 
         Once the goal goes out, info["sent_at"] is when (time.monotonic()),
         info["sent_traj"] the trajectory sent (dilated where `speed` asked)
         and info["feedback_q"] what flew: every FEEDBACK_EVERY-th feedback
-        as (when it was heard, its fraction, the measured joints). The same
+        as (when it was heard, its fraction, the measured joints, the
+        gripper's knuckle then — None before one was heard). The same
         info is self.last_execution from the call's start: a Ctrl+C raises
         through here, once the cancel and the release are out, with
         nothing returned."""
@@ -1129,7 +1131,11 @@ class PlannerClient:
             nonlocal heard
             info["progress"] = float(msg.feedback.fraction_complete)
             if heard % every == 0:
-                kept.append((time.monotonic(), info["progress"], list(msg.feedback.actual.positions)))
+                # the knuckle beside the arm's joints: when a lid slips out of the fingers
+                # (10-30 13:28) is otherwise read only at the close and at the table
+                kept.append(
+                    (time.monotonic(), info["progress"], list(msg.feedback.actual.positions), self._gripper_pos)
+                )
             heard += 1
             if guard is not None:
                 guard.on_progress(info["progress"])
@@ -1167,12 +1173,15 @@ class PlannerClient:
                     # a first Ctrl+C that only set the flag while the motion
                     # finished under the plan must not be swallowed (review
                     # 2026-09-02)
+                    t_ahead = time.monotonic()
                     try:
                         info["while_running"] = while_running()
                     except KeyboardInterrupt:
                         raise
                     except Exception as exc:  # a failed lookahead is not a failed leg
                         info["while_running_error"] = str(exc)
+                    finally:
+                        info["while_running_s"] = time.monotonic() - t_ahead
                     if self._abort is not None and self._abort.requested:
                         self._cancel_confirm(send, result_future)
                         aborted = True
