@@ -7,7 +7,7 @@ Put the tupperware the gripper is already holding (after `grab_container`) into 
 - `microwave_place/place_motion.py`: planning, checking and running the arm: Walter Hsieh's
   `place_container` motion (arm model, impedance lowering), with the transit, the straight lines and the
   release the microwave needs.
-- `microwave_place/node.py`: the `CapabilityEngine` action server: parameters, the actions, the plan and
+- `microwave_place/microwave_place_node.py`: the `CapabilityEngine` action server: parameters, the actions, the plan and
   state files.
 
 ## Finding the spot: `microwave_detection.py`

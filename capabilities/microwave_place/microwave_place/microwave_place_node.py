@@ -1,9 +1,9 @@
 """The microwave_place capability: put the held container into the open microwave.
 
-  microwave_detection.py  where the microwave is, from the scene camera (SAM3 masks + depth)
-  place_motion.py         planning, checking and running the arm (Walter Hsieh's place_container motion,
-                          with the transit, the straight lines and the release the microwave needs)
-  node.py                 this action server: parameters, the actions, the plan and state files
+  microwave_detection.py   where the microwave is, from the scene camera (SAM3 masks + depth)
+  place_motion.py          planning, checking and running the arm (Walter Hsieh's place_container motion,
+                           with the transit, the straight lines and the release the microwave needs)
+  microwave_place_node.py  this action server: parameters, the actions, the plan and state files
 
 Everything is in arm_mount (x forward, y left, z up).
 

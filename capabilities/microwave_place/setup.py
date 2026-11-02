@@ -14,5 +14,5 @@ setup(
     install_requires=["setuptools"],
     zip_safe=True,
     description="Put the held container into the open microwave (CapabilityEngine + self.arm).",
-    entry_points={"console_scripts": [f"{package_name}_node = {package_name}.node:main"]},
+    entry_points={"console_scripts": [f"{package_name}_node = {package_name}.{package_name}_node:main"]},
 )
