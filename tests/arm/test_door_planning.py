@@ -66,12 +66,13 @@ def door_sim(tmp_path):
 
 def test_microwave_open_plans(door_sim):
     scene, rb = door_sim
+    # the push-open is all cuRobo's (asked of the planner; the test image has none): unchecked here
     plan, why = open_door.plan_open(
-        scene, rb, _detection(MICROWAVE_DOOR), KINOVA_HOME, 50, 45, microwave_open.PushOpen()
+        scene, rb, _detection(MICROWAVE_DOOR), KINOVA_HOME, 50, 45, microwave_open.PushOpen(None)
     )
     assert why is None
     assert plan["swing"] == 50
-    assert plan["after"] == "push-open OK"
+    assert plan["after"] == "push-open: not checked (no cuRobo)"
 
 
 def test_microwave_close_plans(door_sim, tmp_path):
