@@ -190,7 +190,9 @@ class CapabilityEngine(Node):
         self._declare_arm_params(engine_id)
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self.arm = ArmInterface(self, self._group, mock=self.mock)
-        self.base = BaseInterface(self, self._group, mock=self.mock)
+        self.base = BaseInterface(
+            self, self._group, declared="base" in self.required_resources, mock=self.mock
+        )
         # make_sim() loads the driver's model (in mock mode, arm.mock_urdf's)
         sim.set_model_provider(self.arm.robot_description)
         # The lifecycle: idle (no _current), running one goal from its acceptance until its

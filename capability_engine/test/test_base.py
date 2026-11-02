@@ -32,16 +32,18 @@ def wait_until(condition, timeout_s=WAIT_S):
 
 @pytest.fixture
 def base_env(ros):
-    """(make, fake): make(mock=False) -> a BaseInterface on a fresh spun node; a FakeBase."""
+    """(make, fake): make(mock=False, declared=True) -> (a BaseInterface on a fresh spun node,
+    the node); a FakeBase."""
     fake = FakeBase()
     executor = MultiThreadedExecutor()
     executor.add_node(fake)
     made = []
 
-    def make(mock=False):
+    def make(mock=False, declared=True):
         node = Node(f"base_test_engine_{len(made)}")
         executor.add_node(node)
-        made.append((BaseInterface(node, ReentrantCallbackGroup(), mock=mock), node))
+        group = ReentrantCallbackGroup()
+        made.append((BaseInterface(node, group, declared=declared, mock=mock), node))
         return made[-1]
 
     spinner = threading.Thread(target=executor.spin, daemon=True)
@@ -62,6 +64,29 @@ def test_calls_outside_an_action_raise(base_env):
     for call in (lambda: base.send_twist(0.1, 0.0), base.stop, base.odometry):
         with pytest.raises(BaseError, match="only available inside an action"):
             call()
+
+
+@pytest.mark.parametrize("mock", [False, True])
+def test_an_engine_without_base_in_required_resources_never_talks_to_it(base_env, mock):
+    make, fake = base_env
+    fake.start_mib(MibStatus.SYSTEM_STATE_IDLE)
+    fake.start()
+    base, node = make(mock=mock, declared=False)
+    idle = counts(node)
+    base.begin_action(FakeCtx())
+    calls = (
+        lambda: base.send_twist(0.1, 0.0),
+        base.stop,
+        base.odometry,
+        lambda: base.request_mode("autonomous"),
+    )
+    for call in calls:
+        with pytest.raises(BaseError, match="required_resources"):
+            call()
+    base.end_action()
+    time.sleep(0.2)  # anything sent has landed
+    assert counts(node) == idle
+    assert fake.received() == [] and fake.requests() == []
 
 
 def test_twists_reach_the_base_and_the_end_stops_it(base_env):

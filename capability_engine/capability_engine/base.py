@@ -84,22 +84,29 @@ STATE_NAMES = {
     if n.startswith("SYSTEM_STATE_")
 }
 NOT_IN_ACTION_MESSAGE = "the base is only available inside an action"
+NOT_DECLARED_MESSAGE = (
+    'the base is not this engine\'s: add "base" to required_resources, so the orchestrator '
+    "grants it control of the base"
+)
 NO_ODOM_MESSAGE = f"no {ODOM_TOPIC} -- is the base up, and ROS_DOMAIN_ID exported?"
 NO_STATUS_MESSAGE = f"no {MIB_STATUS_TOPIC} -- is the MIB up, and ROS_DOMAIN_ID exported?"
 MOCK_NOT_SENT = "mock: base twists not sent"
 
 
 class BaseError(Exception):
-    """A base call failed: outside an action, no fresh odometry or MibStatus, the MIB refused or
-    left the requested mode."""
+    """A base call failed: "base" not in required_resources, outside an action, no fresh odometry
+    or MibStatus, the MIB refused or left the requested mode."""
 
 
 class BaseInterface:
     """`self.base`: the drive base's mode, velocity commands and odometry, on the engine's
-    node."""
+    node. `declared`: "base" is in the engine's required_resources. Without it every call raises
+    BaseError and nothing talks to the base: the orchestrator only grants control of what an
+    engine declares, and the base rejects commands from anyone else."""
 
-    def __init__(self, node, callback_group, *, mock: bool = False):
+    def __init__(self, node, callback_group, *, declared: bool, mock: bool = False):
         self._node = node
+        self._declared = declared
         self._group = callback_group
         self._mock = mock
         self._lock = threading.Lock()  # everything below
@@ -342,7 +349,9 @@ class BaseInterface:
             return self._latest.get(topic)
 
     def _check_in_action(self):
-        """The running action's ctx; BaseError when none runs."""
+        """The running action's ctx; BaseError when "base" is not declared or no action runs."""
+        if not self._declared:
+            self._fail(NOT_DECLARED_MESSAGE)
         if self._ctx is None:
             self._fail(NOT_IN_ACTION_MESSAGE)
         return self._ctx

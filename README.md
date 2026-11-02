@@ -367,8 +367,11 @@ parameters.
 You drive the base with velocity commands and read its odometry. It drives
 on your velocities only in the AUTONOMOUS mode (the engine drives) or
 the SHARED mode (the engine and the joystick drive together), so ask for one
-first. Use `self.base` only inside `execute()`, and add `"base"` to
-`required_resources`. Anywhere else, a call raises `BaseError`.
+first. Add `"base"` to `required_resources`: the orchestrator grants an
+engine control only of what it declares, and the base rejects commands from
+anyone else. Without it, every `self.base` call raises `BaseError` and nothing
+is sent to the base or read from it. Use `self.base` only inside `execute()`;
+anywhere else, a call raises `BaseError`.
 
 ```python
 self.base.request_mode("autonomous", profile="low")  # or "shared"; "manual" to hand back
@@ -411,7 +414,7 @@ you sent, starting at the origin.
 | `StreamClosed` | The driver closed your stream                                                                                                                                                              |
 | `ModeConflict` | You started a stream or a trajectory while another one was running                                                                                                                         |
 | `StateTimeout` | A state read got no recent message                                                                                                                                                         |
-| `BaseError`    | You called `self.base` outside `execute()`, its odometry or MIB status is missing or stale, the MIB refused or did not enter the mode you asked for, or it left that mode (`send_twist()`) |
+| `BaseError`    | `"base"` is not in `required_resources`, `self.base` is called outside `execute()`, its odometry or MIB status is missing or stale, the MIB refused or did not enter the mode, or left it. |
 
 ### Terms
 
