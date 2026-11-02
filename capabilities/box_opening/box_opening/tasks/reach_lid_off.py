@@ -110,6 +110,8 @@ from box_opening.primitives.core import (
     band_verify,
     tcp_z,
 )
+from box_opening.runtime import fingers
+from box_opening.runtime.driver import GripperWait
 from box_opening.runtime.guards import in_band
 from box_opening.runtime.legs import merge_groups
 from box_opening.tasks import depth_press as dp
@@ -1412,15 +1414,50 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         code = _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True))
         return _MISSED if code is None else code
 
-    def miss(detail, air):
+    def miss(detail, air, empty=False):
         runner.note("reach_grip_result", ok=False, detail=detail, attempt=0, on_air=air, retry=True, from_press=True)
         log.info("[press_demo] the grip straight from the press did not hold the knob (%s)" % detail)
         _video(ctx, "the grip straight from the press missed (%s): back to the look pose" % detail)
+        # shut on nothing, they back out shut; stopped on something, they open first, or the
+        # hand would carry it back up the stroke
         return back_out(
-            "the fingers closed on air" if air else "the fingers closed on something else (%s)" % detail, opened=not air
+            "the fingers closed on air" if air else "the fingers closed on something else (%s)" % detail,
+            opened=not empty,
         )
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, 0, room, back_out, miss)
+
+
+def _fingers_shut(ctx, cfg, runner):
+    """Before a press after the first, at the look pose: the fingers shut on
+    nothing, as the first press's are (reach_press reads them before it). A
+    grip straight from the press that missed can leave them open, or at the
+    pre-shape ("the lid has no way off the box", "the lift did not start"),
+    and an open aperture strikes the lid and can still read "pressed";
+    fingers closed on something press with it. Shut already, nothing to do;
+    else a blocking press:close here, which must read shut. Returns None to
+    press, or the exit code: home, nothing pressed."""
+    ok, pos, _stalled = ctx.client.gripper_cmd(None)  # query only
+    if ok and fingers.reads_empty_close(pos):
+        return None
+    log.info(
+        "[press_demo] the fingers read %s before the press once more: shutting them first"
+        % ("nothing" if pos is None else "%.3f" % pos)
+    )
+    world = _full_world(ctx)
+    res = runner.run(
+        [_gripper_leg(ctx, PlanState(joints=None, chain=0), "press:close", GRIPPER_CMD_CLOSED, world)], execute=True
+    )
+    closed = res[-1]
+    if fingers.reads_empty_close(closed.gripper_pos):
+        return None
+    return _stop_home(
+        ctx,
+        cfg,
+        runner,
+        "%s %s (%s) before the press once more — the fingers are not shut; nothing was pressed"
+        % (closed.leg_name, closed.outcome, closed.detail),
+    )
 
 
 def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
@@ -1456,6 +1493,10 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
         if GRIP_FROM_PRESS:
             video = ctx.lid_video.start() if getattr(ctx, "lid_video", None) is not None else None
         for press in range(1, PRESSES + 1):
+            if press > 1:
+                code = _fingers_shut(ctx, cfg, runner)
+                if code is not None:
+                    return end(code)
             direct = None
             if GRIP_FROM_PRESS and press == 1:
 
@@ -1608,7 +1649,8 @@ def _back_out(ctx, cfg, runner, way, why, opened=True):
 
 def _back_to_look(ctx, cfg, runner, way, why, opened=True):
     """From the knob, the fingers on nothing they keep: open (`opened`
-    False: they are open already), the grip's way down backwards to the look
+    False: left as they are: open already, or shut on nothing, a close that
+    reached its target: _close_reached), the grip's way down backwards to the look
     pose (_grip_backwards: one execution), home planned from there while it
     flies (ctx.home_ahead, for a stop there: _stop_home). Returns None at
     the look pose, or 1 where the run stops, the arm let go: the fingers did
@@ -1650,6 +1692,22 @@ def _on_air(r, band):
         and r.outcome == "arrived"
         and r.gripper_pos is not None
         and float(r.gripper_pos) > float(band[1])
+    )
+
+
+def _close_reached(r):
+    """Whether the close `r` (grip:close's LegResult) reached its target: the
+    fingers shut with nothing between the pads, within GripperWait's
+    AT_TARGET_TOL of GRIPPER_CMD_CLOSED (every logged close on air read
+    0.768-0.790). _on_air also counts a close that stalled between the grip
+    band's top and that, on something 4-26 mm thick (an off-centre chord of
+    the knob, the lid's lip): those fingers open before the hand backs out,
+    or they would carry it up."""
+    return (
+        r.leg_name == "grip:close"
+        and r.outcome == "arrived"
+        and r.gripper_pos is not None
+        and float(r.gripper_pos) >= GRIPPER_CMD_CLOSED - GripperWait.AT_TARGET_TOL
     )
 
 
@@ -1739,7 +1797,7 @@ class _GripShot:
         )
 
 
-def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail):
+def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=True):
     """After a first close on air (`detail`, what it read): the fingers
     open and the hand backs out the grip's way down to the look pose
     (_back_to_look, home planned while it flies), and from there the wrist
@@ -1753,7 +1811,7 @@ def _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail):
     (the arm let go), or the knob is farther than that — the box moved —:
     home from the look pose, flying the home planned on the way back.
     Noted 'reach_regrip': the re-aim's point, its shift and what follows."""
-    code = _back_to_look(ctx, cfg, runner, way, "the grip closed on air (%s)" % detail)
+    code = _back_to_look(ctx, cfg, runner, way, "the grip closed on air (%s)" % detail, opened)
     if code is not None:
         runner.note("reach_regrip", found=None, outcome="the back-out did not fly")
         return None, code
@@ -1886,20 +1944,21 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
     def back_out(why, opened=True):
         return _back_out(ctx, cfg, runner, way, why, opened=opened)
 
-    def miss(detail, air):
+    def miss(detail, air, empty=False):
         retry = air and attempt < GRIP_TRIES and yaw is not None
         runner.note("reach_grip_result", ok=False, detail=detail, attempt=attempt, on_air=air, retry=retry)
         if retry:
             log.info(
-                "[press_demo] GRIP MISSED — %s: the fingers closed on air; opening them, backing out to the look "
-                "pose, aiming at the knob once more and coming down %.0f mm lower" % (detail, 1000 * GRIP_RETRY_LOWER_M)
+                "[press_demo] GRIP MISSED — %s: the fingers closed on air; %sbacking out to the look pose, aiming "
+                "at the knob once more and coming down %.0f mm lower"
+                % (detail, "" if empty else "opening them, ", 1000 * GRIP_RETRY_LOWER_M)
             )
             _video(
                 ctx,
                 "GRIP MISSED (%s): back out to the look pose, aim again, %.0f mm lower"
                 % (detail, 1000 * GRIP_RETRY_LOWER_M),
             )
-            regrip, code = _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail)
+            regrip, code = _regrip(ctx, cfg, runner, eyes, way, button, yaw, detail, opened=not empty)
             if regrip is None:
                 return code
             lower = lid_z - GRIP_RETRY_LOWER_M
@@ -1928,6 +1987,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
             way,
             "the grip failed%s (%s) — the lid is not taken off"
             % (" twice, the second time %.0f mm lower" % (1000 * GRIP_RETRY_LOWER_M) if attempt > 1 else "", detail),
+            opened=not empty,
         )
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, way.stroke.quat, attempt, room, back_out, miss)
@@ -2029,7 +2089,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         )
     if not grip or not grip[-1].ok or grip[-1].leg_name != "grip:close":
         detail = grip[-1].detail if grip else res[-1].detail
-        return miss(detail, bool(grip) and _on_air(grip[-1], cfg.grip_band))
+        return miss(detail, bool(grip) and _on_air(grip[-1], cfg.grip_band), bool(grip) and _close_reached(grip[-1]))
     runner.note("reach_grip_result", ok=True, detail=grip[-1].detail, attempt=attempt)
     log.info("[press_demo] LID GRIPPED — %s" % grip[-1].detail)
     moves = [r for r in res if r.leg_name not in ("grip:open", "grip:close")]

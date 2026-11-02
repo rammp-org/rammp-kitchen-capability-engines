@@ -196,7 +196,8 @@ def _full_flow(
 
     monkeypatch.setattr(rp, "_aim", aim)
     closes = list(knuckle) if isinstance(knuckle, list | tuple) else [knuckle]
-    held = {"on": True, "reads": closes[0]}
+    # the fingers as press_demo's press:close left them before the run: shut on nothing
+    held = {"on": True, "reads": AIR}
 
     def gripper_cmd(pos):
         if pos is None:  # query only
@@ -671,9 +672,10 @@ def test_a_knob_still_not_up_after_the_second_press_sends_the_arm_home_with_noth
 BACK_OUT = ["grip:up", "depth:turn-back", "reach:slide-out"]  # the grip's way down backwards, to the look pose
 
 
-def test_fingers_that_close_on_air_open_again_and_back_out_the_way_they_came(ctx, monkeypatch, tmp_path, capsys):
-    """The close reads air (outside the grip band): nothing is lifted. The
-    fingers open, the hand backs out the grip's way down to the look pose,
+def test_fingers_that_close_on_air_back_out_shut_the_way_they_came(ctx, monkeypatch, tmp_path, capsys):
+    """The close reads air (outside the grip band, at its target: nothing
+    between the pads): nothing is lifted. The fingers stay shut (no 0.7 s
+    open first), the hand backs out the grip's way down to the look pose,
     the wrist aims at the knob again there (_regrip) — here it finds none,
     so the second grip comes down where the first went, GRIP_RETRY_LOWER_M
     lower; on air again, it backs out once more and goes home: exit 1."""
@@ -689,13 +691,11 @@ def test_fingers_that_close_on_air_open_again_and_back_out_the_way_they_came(ctx
         *GRIP,
         *CLOSE,
         *CARRY,
-        "grip:open",
         *BACK_OUT,
         "aim:reach-regrip",
         *GRIP,
         *CLOSE,
         *CARRY,
-        "grip:open",
         *BACK_OUT,
         "home",
     ]
@@ -740,7 +740,7 @@ def test_a_grip_on_air_is_aimed_again_from_the_look_pose_and_gripped_once_more_w
 ):
     """12:03:52 2026-10-29: the fingers closed on air (0.789 against the
     band [0.30, 0.55]) 11 mm short of the knob, and the run went home, exit
-    1. Now the fingers open, the hand backs out to the look pose, the wrist
+    1. Now the hand backs out to the look pose (the fingers, shut on nothing, stay shut), the wrist
     aims at the knob again from there — once — and the hand comes down to
     the knob it sees, the first grip's tilt kept, GRIP_RETRY_LOWER_M (1 cm)
     lower (owner 2026-10-30): the second close holds it, and the lid comes
@@ -760,7 +760,6 @@ def test_a_grip_on_air_is_aimed_again_from_the_look_pose_and_gripped_once_more_w
         *GRIP,
         *CLOSE,
         *CARRY,
-        "grip:open",
         *BACK_OUT,
         "aim:reach-regrip",
         *GRIP,
@@ -795,9 +794,9 @@ def test_a_grip_on_air_is_aimed_again_from_the_look_pose_and_gripped_once_more_w
 
 
 def test_a_grip_on_air_twice_backs_out_and_goes_home_after_one_retry_only(ctx, monkeypatch, tmp_path, capsys):
-    """The second close reads air as well: the fingers open, the hand backs
-    out to the look pose once more and goes home from there, exit 1 — never
-    a third grip, nor a second re-aim, whatever the wrist would see."""
+    """The second close reads air as well: the hand backs out to the look
+    pose once more, the fingers shut, and goes home from there, exit 1 —
+    never a third grip, nor a second re-aim, whatever the wrist would see."""
     plans = _home_plans(monkeypatch)
     aims = [(BUTTON, 0.4), (UP, 9.0), (REGRIP, 9.0), (REGRIP, 9.0)]
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims, knuckle=AIR)
@@ -812,13 +811,11 @@ def test_a_grip_on_air_twice_backs_out_and_goes_home_after_one_retry_only(ctx, m
         *GRIP,
         *CLOSE,
         *CARRY,
-        "grip:open",
         *BACK_OUT,
         "aim:reach-regrip",
         *GRIP,
         *CLOSE,
         *CARRY,
-        "grip:open",
         *BACK_OUT,
         "home",
     ]
@@ -899,7 +896,6 @@ def test_a_re_aim_with_no_way_down_to_the_knob_sends_the_arm_home_from_the_look_
         *GRIP,
         *CLOSE,
         *CARRY,
-        "grip:open",
         *BACK_OUT,
         "aim:reach-regrip",
         "home",
@@ -1130,7 +1126,6 @@ def test_an_open_box_s_grip_on_air_is_tried_once_more_at_the_knob_aimed_at_again
         *GRIP,
         *CLOSE,
         *CARRY,
-        "grip:open",
         *BACK_OUT,
         "aim:reach-regrip",
         *GRIP,
@@ -2391,6 +2386,53 @@ def test_a_knob_not_up_after_the_grip_from_the_press_is_pressed_once_more_from_t
     ]
     assert rec.events.count("grip:rise") == 1
     assert "pressing once more — the same press, from the look pose" in capsys.readouterr().out
+
+
+RIM = 0.147  # the knuckle closed on the box's rim: below the grip band, on something else
+CHORD = 0.65  # ... stalled between the band's top and an empty close: on something 4-26 mm thick
+
+
+def test_the_fingers_are_shut_before_the_press_once_more(ctx, monkeypatch, tmp_path):
+    """A grip straight from the press that closed on something else (the rim)
+    backs out with the fingers opened; the look then reads the knob down. The
+    press once more must not fly with open fingers (an open aperture strikes
+    the lid and can still read "pressed"): a press:close at the look pose
+    first, which reads shut, then the press, the look and the grip."""
+    aims = [(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (UP, 8.0)]
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims, knuckle=[RIM, AIR, KNOB_ON], from_press=True)
+    assert code == 0
+    first, second = [i for i, e in enumerate(rec.events) if e == "reach:re-aim"][:2]
+    between = rec.events[first:second]
+    assert between.count("press:close") == 1 and between.index("press:close") > between.index("grip:close")
+    assert rec.events.count("press:close") == 1
+
+
+def test_fingers_that_stay_open_stop_the_press_once_more(ctx, monkeypatch, tmp_path, capsys):
+    """The close before the press once more does not read shut (here it
+    stops on something): nothing is pressed, home."""
+    aims = [(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (UP, 8.0)]
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, aims, knuckle=[RIM, RIM], from_press=True)
+    assert code == 1 and rec.events[-1] == "home"
+    assert rec.events.count("depth:press") == 1  # the first press only
+    assert "the fingers are not shut; nothing was pressed" in capsys.readouterr().out
+
+
+def test_a_grip_that_stalls_on_something_opens_before_it_backs_out(ctx, monkeypatch, tmp_path):
+    """A close that stops above the grip band but short of shut (CHORD) counts
+    as on air for the retry, yet something stands between the pads: they open
+    before the hand backs up the stroke, or it would carry that back up. A
+    close that reached its target (AIR) backs out shut: nothing to carry."""
+    code, rec, _chain, _rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], knuckle=[CHORD, KNOB_ON], from_press=True
+    )
+    assert code == 0
+    after = rec.events[rec.events.index("grip:close") :]
+    assert after[after.index("grip:close") + 1 : after.index("depth:rise")].count("grip:open") == 1
+    code, rec, _chain, _rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], knuckle=[AIR, KNOB_ON], from_press=True
+    )
+    after = rec.events[rec.events.index("grip:close") :]
+    assert code == 0 and "grip:open" not in after[: after.index("depth:rise")]
 
 
 def test_where_the_grip_from_the_press_does_not_fly_the_way_back_and_the_look_follow(
