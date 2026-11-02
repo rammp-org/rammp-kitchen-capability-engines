@@ -1715,6 +1715,44 @@ def test_a_ctrl_c_stops_the_lookahead_between_two_spots_and_while_it_waits_for_t
     done.set()
 
 
+def test_the_carry_search_in_two_parts_finds_what_carry_ahead_does_and_plans_only_in_its_second(ctx, monkeypatch):
+    """Sweep motion_timing-g-06: the grip's lookahead split at a plan
+    boundary. CarrySearch.start finds the first spot the hand reaches and
+    plans nothing; finish plans the carry and home there, trying the next
+    spots where they are refused — the same answer carry_ahead gives in one
+    go (it is the two, one after the other)."""
+    cfg = load_press_demo(PINK)
+    spots = [(SimpleNamespace(xyz=(0.5 + 0.01 * i, 0.0, 0.2), yaw=0.0), "clear", "says %d" % i) for i in range(4)]
+    asked, plans = [], []
+
+    def candidates(*a, **k):
+        for s in spots:
+            asked.append(s[2])
+            yield s
+
+    def carry(ctx_, cfg_, q, drop):
+        plans.append(drop.xyz[0])
+        return (None, "refused") if drop.xyz[0] < 0.515 else (SimpleNamespace(legs=[], retreat=[]), None)
+
+    monkeypatch.setattr(rlo, "spot_candidates", candidates)
+    monkeypatch.setattr(rlo, "spot_map", lambda *a, **k: None)
+    monkeypatch.setattr(rlo, "_table_z", lambda *a, **k: 0.2)
+    monkeypatch.setattr(rlo, "plan_carry", carry)
+    monkeypatch.setattr(rlo, "plan_home_after", lambda ctx_, cfg_, c: (["home"], None))
+    eyes = (None, None, None, None)
+    search = rlo.CarrySearch(ctx, cfg, eyes, [0.0] * 7, home=True).start()
+    assert asked == ["says 0"] and plans == []  # the first spot found, nothing planned
+    got = search.finish()
+    assert plans == pytest.approx([0.5, 0.51, 0.52]) and asked == ["says 0", "says 1", "says 2"]
+    assert got.drop.xyz[0] == pytest.approx(0.52) and got.home == ["home"] and len(got.refused) == 2
+    asked.clear()
+    plans.clear()
+    once = rlo.carry_ahead(ctx, cfg, eyes, [0.0] * 7, home=True)
+    assert (once.drop.xyz, once.tier, once.refused, once.home) == (got.drop.xyz, got.tier, got.refused, got.home)
+    # the rise's half with no lift hands that on; the way down's makes nothing of it
+    assert rlo.grip_ahead_down((None, "no lift", None)) == (None, "no lift", None)
+
+
 def test_no_carry_that_plans_puts_the_lid_back_on_the_box_and_goes_home(ctx, monkeypatch, tmp_path, capsys):
     """Every spot the hand reaches refused by the planner (CARRY_TRIES): the
     arm stands holding the lid over the box. It does not stay there: the lid
@@ -2548,7 +2586,11 @@ def test_the_grip_straight_from_the_press_takes_the_lid_off_with_no_way_back_and
     runs = [names for names, _g in _executions(rec)]
     assert runs == [["reach:look"], WAY_IN, FROM_PRESS, ["grip:down"], CLOSE + CARRY, RELEASED, HOMED]
     planned = {name: at for name, at in rec.plans}
-    assert planned["lid:carry"] == planned["home"] == rec.events.index("grip:down")  # while the hand rose
+    # the lookahead split over the rise and the way down (grip_ahead_rise, grip_ahead_down): the lift and
+    # the first spot while the hand rose, the carry and home after it while it came down
+    assert planned["lid:carry"] == planned["home"] == rec.events.index("grip:down") + 1
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["chosen"] == "ahead, with the scene camera" and spot["spot_checks"] >= 1
     assert rec.legs["grip:open"].defer_join and rec.legs["grip:open"].gripper_cmd == pytest.approx(
         rlo.grip_open_cmd(ctx.model)
     )

@@ -1447,10 +1447,11 @@ def grip_from_hold_lines(ctx, way, q_held):
 def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     """The grip straight from the first press's hold (GRIP_FROM_PRESS): the
     fingers opening to the knob's width as the hand rises off the button,
-    the lift, the spot, its carry and home planned while it does
-    (grip_ahead, from the way down's end), the way down to the knob once
-    they are open, then the close and the lift to the set-down as from the
-    look pose (_close_and_carry). Returns its exit code where it ended the
+    the lift and the first spot the hand reaches planned while it does
+    (grip_ahead_rise, from the way down's end), the way down to the knob
+    once they are open, the carry and home planned while it comes down
+    (grip_ahead_down), then the close and the lift to the set-down as from
+    the look pose (_close_and_carry). Returns its exit code where it ended the
     run (0: the lid off, the arm home); _MISSED where the hand went back to
     the look pose instead — the lines did not fly, the close did not hold
     — for the look to judge the knob; the arm holding where it stopped part
@@ -1484,10 +1485,14 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     )
     up = dp.compliant_line(ctx, "grip:rise", rise, quat, rp.free_line_speed(ctx), world)
     lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
+    # the lookahead split over both (grip_ahead_rise, grip_ahead_down): the lift and the
+    # first spot while the hand rises, the carry and home while it comes down
     res = runner.run(
-        [opened, up], execute=True, lookahead=lambda _end: grip_ahead(ctx, cfg, eyes, lower.goal_joints, quat, room)
+        [opened, up],
+        execute=True,
+        lookahead=lambda _end: grip_ahead_rise(ctx, cfg, eyes, lower.goal_joints, quat, room),
     )
-    ahead = _lookahead(runner)
+    first, rise_stood = runner.lookahead_result, runner.lookahead_stood_s
     spread = runner.join_pending()  # the fingers open before the hand comes down round the knob
     if not all(r.ok for r in res) or (spread is not None and not spread.ok):
         bad = res[-1] if not all(r.ok for r in res) else spread
@@ -1502,7 +1507,12 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             % (bad.detail or bad.outcome)
         )
         return _MISSED if _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True)) is None else 1
-    res = runner.run([lower], execute=True)
+    res = runner.run([lower], execute=True, lookahead=None if first is None else (lambda _end: grip_ahead_down(first)))
+    ahead = _lookahead(runner)
+    if ahead is not None and isinstance(ahead[2], CarryAhead):
+        # how long the arm stood for the lookahead, at the rise's top and at the way down's bottom
+        stood = [v for v in (rise_stood, ahead[2].host_stood_s) if v is not None]
+        ahead[2].host_stood_s = round(sum(stood), 4) if stood else None
     if not all(r.ok for r in res):
         if _started(res[-1]):
             log.info("[press_demo] STOP: the way down to the knob stopped (%s) — the arm holds" % res[-1].detail)
@@ -2293,57 +2303,87 @@ def carry_ahead(ctx, cfg, eyes, q_end, room=None, home=False):
     close to the set-down then fly as one. Else the lift's: the spot is
     chosen after the lift, the wrist's frame in its map (choose_and_carry),
     and this carry flies only where that spot is its own. Returns a
-    CarryAhead."""
-    from box_opening.primitives.look import look_joints
-    from box_opening.tasks import press_demo as pd
+    CarryAhead. CarrySearch's two parts, one after the other."""
+    return CarrySearch(ctx, cfg, eyes, q_end, room=room, home=home).start().finish()
 
-    t0 = time.monotonic()
-    _node, watcher, scene_fix, scene_q = eyes
-    q = [float(v) for v in q_end]
-    t_room = time.monotonic()
-    judged = room_for(ctx, room)
-    room_wait_s = None if room is None else time.monotonic() - t_room
-    table_z = _table_z(watcher, scene_fix, ctx.cpose)
-    tmap = judged.tmap if judged is not None else spot_map(ctx, None, q, scene_fix, scene_q, table_z)
-    rest = list(pd.rest_joints(cfg))
-    reach = _Reach()
-    ahead = CarryAhead(
-        q,
-        tmap=tmap,
-        table_z=table_z,
-        room_s=None if judged is None else judged.spent_s,
-        room_wait_s=room_wait_s,
-        room=judged,
-    )
-    for drop, tier, says in spot_candidates(
-        ctx,
-        tmap,
-        table_z,
-        q,
-        seeds=(look_joints(rest), rest),
-        reach=reach,
-        cache=None if judged is None else judged.cache,
-    ):
-        if len(ahead.refused) >= CARRY_TRIES:
-            break
-        _abort_check(ctx)
-        t = time.monotonic()
-        carry, why = plan_carry(ctx, cfg, q, drop)
-        after = None
-        if carry is not None and home:
-            _abort_check(ctx)  # a plan cut short by the Ctrl+C is no refusal: never the next spot
-            after, why = plan_home_after(ctx, cfg, carry)
-            carry = carry if after is not None else None
-        _abort_check(ctx)
-        if carry is not None:
-            ahead.drop, ahead.tier, ahead.says, ahead.carry, ahead.home = drop, tier, says, carry, after
-            ahead.plan_s = time.monotonic() - t
-            break
-        ahead.refused.append("[%.2f, %.2f]: %s" % (drop.xyz[0], drop.xyz[1], why))
-    ahead.known = reach.found
-    ahead.checks, ahead.ik_s = len(reach.found), reach.ik_s
-    ahead.spent_s = time.monotonic() - t0
-    return ahead
+
+class CarrySearch:
+    """carry_ahead in two parts, each of which a motion can host (the grip
+    straight from the press: grip_ahead_rise, grip_ahead_down), both on the
+    main thread — the planner is called from nowhere else. start(): the
+    room (room_for), the map and the first spot the hand reaches, no plan;
+    finish(): the carry (and home after it) planned to that spot, the next
+    ones tried where it is refused, and the CarryAhead — what carry_ahead
+    returns, its spent_s both parts' time."""
+
+    def __init__(self, ctx, cfg, eyes, q_end, room=None, home=False):
+        self.ctx, self.cfg, self.eyes, self.room, self.home = ctx, cfg, eyes, room, home
+        self.q = [float(v) for v in q_end]
+        self.ahead = None
+        self._spots = self._next = None
+        self._reach = None
+
+    def start(self):
+        from box_opening.primitives.look import look_joints
+        from box_opening.tasks import press_demo as pd
+
+        t0 = time.monotonic()
+        ctx = self.ctx
+        _node, watcher, scene_fix, scene_q = self.eyes
+        t_room = time.monotonic()
+        judged = room_for(ctx, self.room)
+        room_wait_s = None if self.room is None else time.monotonic() - t_room
+        table_z = _table_z(watcher, scene_fix, ctx.cpose)
+        tmap = judged.tmap if judged is not None else spot_map(ctx, None, self.q, scene_fix, scene_q, table_z)
+        rest = list(pd.rest_joints(self.cfg))
+        self._reach = _Reach()
+        self.ahead = CarryAhead(
+            self.q,
+            tmap=tmap,
+            table_z=table_z,
+            room_s=None if judged is None else judged.spent_s,
+            room_wait_s=room_wait_s,
+            room=judged,
+        )
+        self._spots = spot_candidates(
+            ctx,
+            tmap,
+            table_z,
+            self.q,
+            seeds=(look_joints(rest), rest),
+            reach=self._reach,
+            cache=None if judged is None else judged.cache,
+        )
+        self._next = next(self._spots, None)
+        self.ahead.spent_s += time.monotonic() - t0
+        return self
+
+    def finish(self):
+        t0 = time.monotonic()
+        ctx, ahead = self.ctx, self.ahead
+        while self._next is not None:
+            if len(ahead.refused) >= CARRY_TRIES:
+                break
+            drop, tier, says = self._next
+            _abort_check(ctx)
+            t = time.monotonic()
+            carry, why = plan_carry(ctx, self.cfg, self.q, drop)
+            after = None
+            if carry is not None and self.home:
+                _abort_check(ctx)  # a plan cut short by the Ctrl+C is no refusal: never the next spot
+                after, why = plan_home_after(ctx, self.cfg, carry)
+                carry = carry if after is not None else None
+            _abort_check(ctx)
+            if carry is not None:
+                ahead.drop, ahead.tier, ahead.says, ahead.carry, ahead.home = drop, tier, says, carry, after
+                ahead.plan_s = time.monotonic() - t
+                break
+            ahead.refused.append("[%.2f, %.2f]: %s" % (drop.xyz[0], drop.xyz[1], why))
+            self._next = next(self._spots, None)
+        ahead.known = self._reach.found
+        ahead.checks, ahead.ik_s = len(self._reach.found), self._reach.ik_s
+        ahead.spent_s += time.monotonic() - t0
+        return ahead
 
 
 @dataclass
@@ -2499,6 +2539,33 @@ def grip_ahead(ctx, cfg, eyes, q_grip, quat, room=None):
         return None, why, None
     _abort_check(ctx)
     return lift, None, carry_ahead(ctx, cfg, eyes, lift.legs[-1].goal_joints, room=room, home=True)
+
+
+def grip_ahead_rise(ctx, cfg, eyes, q_grip, quat, room=None):
+    """grip_ahead's first part, while the hand rises off the press (the grip
+    straight from it): the lift from the knob held at `q_grip` and, from
+    where its clear ends, the room and the first spot the hand reaches
+    (CarrySearch.start). The arm stood at the rise's top 0.01-1.50 s for
+    the whole of grip_ahead (mean 0.48 s on 7 runs, the rise 0.77-1.17 s
+    against 0.71-2.29 s of it); the carry and home plans go to the way
+    down (grip_ahead_down), which hosted nothing. Returns (LiftOff, None,
+    CarrySearch) or (None, why, None)."""
+    lift, why = plan_lift(ctx, cfg, q_grip, quat)
+    if lift is None:
+        return None, why, None
+    _abort_check(ctx)
+    return lift, None, CarrySearch(ctx, cfg, eyes, lift.legs[-1].goal_joints, room=room, home=True).start()
+
+
+def grip_ahead_down(first):
+    """grip_ahead's second part, while the hand comes down to the knob: the
+    carry to the spot grip_ahead_rise found and home after its set-down
+    (CarrySearch.finish) — `first` its result. Returns grip_ahead's:
+    (LiftOff, None, CarryAhead) or (None, why, None)."""
+    lift, why, search = first
+    if lift is None or search is None:
+        return lift, why, None
+    return lift, None, search.finish()
 
 
 def _ahead_note(ahead, off, flew, chosen, reach):
