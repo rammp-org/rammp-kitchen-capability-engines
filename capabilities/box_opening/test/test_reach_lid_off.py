@@ -218,7 +218,6 @@ def _full_flow(
         table_z_scene=BUTTON[2] - 0.121,
     )
     locator = SimpleNamespace(
-        owl=SimpleNamespace(enable=lambda: None, disable=lambda: None),
         prime=lambda: None,
         locate=lambda s: (rec.events.append("scene"), fix)[1],
     )

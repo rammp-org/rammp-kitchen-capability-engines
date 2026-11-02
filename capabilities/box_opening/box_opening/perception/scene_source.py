@@ -13,9 +13,9 @@ is not enough: a detector says WHICH thing is the box (a pixel box), and
 the depth points inside that box that sit at lid height above the table
 give its position. The detector is sheppy's always-on scene segmenter
 (perception/segmenter_source: RF-DETR at 5 Hz, its holder box turned into
-the band where the lid stands) where the container config names its
-classes, with the OWL node's scene instance as the fallback; a fix
-commits when two sightings agree (commit_fix). No smoothness or footprint
+the band where the lid stands), reading only the container the user selected
+(its instance_id) where it is given; a fix commits when two sightings agree
+(commit_fix). No smoothness or footprint
 gates — the scene depth at a metre is noisier than those gates were tuned
 for, and the wrist fix that follows carries the precision.
 
@@ -64,7 +64,7 @@ class SceneFix:
     # the scene's points around the box (float32, base frame): what stands on
     # the table there, for where the lid may go (perception/clear_table)
     table_points: object = None
-    source: str = "owl"  # the newest sighting's detector: "segmenter" | "owl"
+    source: str = "segmenter"  # the newest sighting's detector
     n_sightings: int = 1  # the agreeing sightings behind it (commit_fix)
     sources: tuple = ()  # ... and each one's detector, oldest first
 
@@ -686,7 +686,7 @@ def off_frame_ways(edges, R_base_color):
     return ways
 
 
-def off_frame_why(score, edges, R_base_color, frame="arm_mount", src="OWL"):
+def off_frame_why(score, edges, R_base_color, frame="arm_mount", src="segmenter"):
     """What to tell the operator about a box the detector `src` found
     running off the frame at `edges`: which way that is in `frame`
     (off_frame_ways), and the way back."""
@@ -721,7 +721,7 @@ def sees_top_face(pts_base, uv, bbox, lid_z, cam_xyz):
 
 
 # Two candidates of one message that both pass this far apart (xy) are two
-# places, not one box: the message is ambiguous, and the OWL settles it
+# places, not one box: the message is ambiguous and no sighting
 # (SceneLocator.locate). A band above some other bowl lifts whatever stands
 # behind it; 33 of the 35 detbench phantoms the gate still passed are caught
 # this way when the canister is in view too, with no false ambiguity in 248
@@ -745,7 +745,7 @@ def scene_fix_from_boxes(
     side_table_z=None,
     image_wh=None,
     cam_R=None,
-    src="OWL",
+    src="segmenter",
     rivals=False,
 ):
     """A detector's candidates (score, [x0, y0, x1, y1][, holder]) best
@@ -771,7 +771,7 @@ def scene_fix_from_boxes(
     lid band (segmenter_source.SceneCand): an uncut one arms the side
     lift's looks-past refusal (holder_front_rng). A SceneCand of a kind in
     HOLDER_SIDE_KINDS has its holder's sides, not its lid's (lid_circle's
-    `side_is_lid`); an OWL box is the lid's. `src` names the detector
+    `side_is_lid`); any other box is the lid's. `src` names the detector
     in every reason. With `rivals`, every OTHER candidate is gated on its
     own too, and the tops that pass more than RIVAL_M from the winner's are
     the fix's `rivals`."""
@@ -916,19 +916,14 @@ def image_upside_down(T_base_color):
 # the two newest sightings of one locate() agree within VOTE_TOL_M. With the
 # segmenter at 5 Hz that costs one frame, 0.2 s.
 VOTE_N, VOTE_TOL_M = 2, 0.020
-# The scene OWL is enabled when the segmenter has made no fix this long after
-# the streams were ready — and at once when the segmenter is down or a message
-# is ambiguous. The OWL needs ~1.3 s an inference and two boxes to commit.
-OWL_AFTER_S = 1.0
 SEG_DOWN = ("unavailable", "absent", "silent", "wrong_camera", "wrong_size", "stale")  # SegmenterRung.state
-SRC_LABEL = {"segmenter": "segmenter", "owl": "OWL"}  # how each source is named in the gate's reasons
 
 
 @dataclass(frozen=True)
 class Sighting:
     """One message's fix, as the vote counts it."""
 
-    source: str  # "segmenter" | "owl"
+    source: str  # "segmenter": the scene segmenter's box
     score: float  # the detector's score of the candidate that passed
     top: tuple  # the lid top's centre (base)
     pose: object  # ContainerPose
@@ -940,53 +935,15 @@ class Sighting:
     det_box: tuple  # the detector's own box (the holder under a band)
 
 
-def commit_fix(sightings, segmenter_saw, n=VOTE_N, tol=VOTE_TOL_M, owl_settles=False, segmenter_places=()):
+def commit_fix(sightings, n=VOTE_N, tol=VOTE_TOL_M):
     """(top, None) when the newest `n` sightings agree pairwise within `tol`
-    — their median (d405.stable_fix) — else (None, why), why one of "too
-    few", "disagree", "cut OWL box unconfirmed" and "two places unsettled".
-
-    `segmenter_saw`: the segmenter is live and has seen the container in
-    this look (a sighting, or a message that passed in two places). The
-    OWL's box of a cut lid (a partial lift) then counts only with the
-    segmenter beside it: a segmenter sighting in the pair, or one of
-    `segmenter_places` within `tol` of each of the pair's sightings, as a
-    third sighting would be. The segmenter can confirm it, so it must.
-    Down, or live but blind (no food container, or every band refused), it
-    confirms nothing, and the OWL's cut boxes commit on their own. Before
-    the cut lid's arc was bounded by its box's uncut side, the OWL's circle
-    at detbench 163450 slid 46 mm in 39 % of its commits, so it waited on
-    any live segmenter; a blind one then left all 15 cut frames unfixed.
-    Bounded, those commits land 12-14 mm off and all 15 commit
-    (detbench/spec blind_stream).
-
-    `segmenter_places`: the tops of the places this look's segmenter
-    messages passed in two (SceneBoxFix.top and .rivals). Such a message is
-    no sighting, so with only a sighting to confirm it, a look whose every
-    frame passed two places — the canister half off the frame, beside a
-    second bowl whose band passes too — held the OWL's cut pair until it
-    timed out: NO BOX, nothing moved (the 2026-10-28 merge review of #43 +
-    #57). On detbench's 15 cut frames every segmenter fix of the canister
-    lies within 17.8 mm of each sighting of every OWL cut pair that agrees.
-
-    `owl_settles`: a segmenter message of this look passed in two places
-    (SceneBoxFix.rivals). Two later segmenter sightings that agree on one of
-    them do not say which is the container — a frame where the canister's
-    band failed and a phantom bowl's passed, twice, would agree on the
-    phantom — so the pair must hold an OWL sighting: the OWL boxes the lid
-    itself."""
+    — their median (d405.stable_fix) — else (None, why), why "too few" or
+    "disagree"."""
     if len(sightings) < n:
         return None, "too few"
     top = stable_fix([(s.top, i) for i, s in enumerate(sightings)], tol, n)
     if top is None:
         return None, "disagree"
-    pair = sightings[-n:]
-    beside = any(s.source == "segmenter" for s in pair) or any(
-        all(np.linalg.norm(np.subtract(p, s.top)) <= tol for s in pair) for p in segmenter_places
-    )
-    if segmenter_saw and any(s.partial and s.source == "owl" for s in pair) and not beside:
-        return None, "cut OWL box unconfirmed"
-    if owl_settles and not any(s.source == "owl" for s in pair):
-        return None, "two places unsettled"
     return top, None
 
 
@@ -1005,13 +962,26 @@ def _top_xy(top):
 
 
 class SceneLocator:
-    """The ROS side: the scene grabber, the scene segmenter and OWL rungs
-    and the calibration, answering `locate()` with a SceneFix or None."""
+    """The ROS side: the scene grabber, the scene segmenter's rung and the
+    calibration, answering `locate()` with a SceneFix or None.
+
+    `instance_id`: the container the user selected (perception's tracked id,
+    passed down by the engine); only its boxes are read (segmenter_source).
+    None or "" (a standalone run): every box of the container's classes."""
 
     def __init__(
-        self, node, cfg, model, table_z, T_base_link, spins=True, tag_px=None, scene_cfg=None, base_frame=None
+        self,
+        node,
+        cfg,
+        model,
+        table_z,
+        T_base_link,
+        spins=True,
+        tag_px=None,
+        scene_cfg=None,
+        base_frame=None,
+        instance_id=None,
     ):
-        from box_opening.perception.owl_source import OwlRung
         from box_opening.perception.scene import SceneGrabber
         from box_opening.perception.segmenter_source import SegmenterRung
 
@@ -1026,13 +996,13 @@ class SceneLocator:
         # external_static_tf), read as base_frame <- the camera's link
         self.T_base_link = None if T_base_link is None else np.asarray(T_base_link, dtype=float)
         self.base_frame = base_frame
+        self.instance_id = instance_id or None
         self.grab = SceneGrabber(node, keep=3, need_depth=True, scene_cfg=scene_cfg)
-        self.owl = OwlRung(node, cfg, camera="scene")
         # sheppy's scene segmenter, for a container whose config names the
-        # classes it is boxed as (scene_detect.segmenter_classes); None: the
-        # scene OWL alone finds it, as before
+        # classes it is boxed as (scene_detect.segmenter_classes); None: nothing
+        # finds this container, and locate() says so
         classes = tuple(getattr(cfg, "segmenter_classes", ()) or ())
-        self.seg = SegmenterRung(node, classes) if classes else None
+        self.seg = SegmenterRung(node, classes, instance_id=self.instance_id) if classes else None
         self.seg_box = getattr(cfg, "segmenter_box", "holder")
         self.last_why = None
         self.last_timing = {}
@@ -1046,9 +1016,7 @@ class SceneLocator:
         self.tag_px = tag_px
         self.moved_note = None  # "tag not in view" and the like, for the log
         if self.seg is not None and not self.seg.available:
-            log.info(
-                "[scene] the scene segmenter cannot be read (%s): the scene OWL alone finds the box" % self.seg.why
-            )
+            log.info("[scene] the scene segmenter cannot be read (%s): no look can find the box" % self.seg.why)
 
     def base_to_link(self):
         """T(base <- the camera's link): the calibration's, or TF's."""
@@ -1085,28 +1053,18 @@ class SceneLocator:
 
     def prime(self):
         """Ahead of a locate() (at construction; before the look after a
-        press): the scene OWL enabled now where the segmenter cannot answer —
-        none for this container, or down — so the OWL's first box (~0.7 s,
-        inferred on the enable edge) comes while the caller does something
-        else. A live segmenter, or one still in its first second, leaves the
-        OWL off and off the GPU: locate() enables it itself when it must."""
-        if self.seg is None or not self.seg.available:
-            self.owl.enable()
-            return
-        self.last_seg_state = self.seg.state(*self._seg_args(self._clock()))
-        if self.last_seg_state in SEG_DOWN:
-            self.owl.enable()
+        press): the segmenter's state now (last_seg_state), for the log.
+        Nothing to start: the scene segmenter runs on its own."""
+        if self.seg is not None and self.seg.available:
+            self.last_seg_state = self.seg.state(*self._seg_args(self._clock()))
 
     def locate(self, timeout_s):
         """The box, from the scene frames that arrive from now on. Each new
         segmenter message's boxes (the band above the holder) go through the
-        gate (scene_fix_from_boxes) as they come; the scene OWL's boxes too
-        once the segmenter is down, a message is ambiguous, or OWL_AFTER_S
-        has passed with no fix. A fix commits when the two newest sightings
-        agree (commit_fix). Sightings belong to this call only: the looks
-        after a press never mix with those before it. None, with
-        `last_why`, when nothing commits in `timeout_s`."""
-        from box_opening.perception.owl_source import bboxes_in_msg
+        gate (scene_fix_from_boxes) as they come. A fix commits when the two
+        newest sightings agree (commit_fix). Sightings belong to this call
+        only: the looks after a press never mix with those before it. None,
+        with `last_why`, when nothing commits in `timeout_s`."""
         from box_opening.perception.segmenter_source import segmenter_candidates, stamp_ns
 
         clock = self._clock
@@ -1116,297 +1074,225 @@ class SceneLocator:
         self.last_timing = {}  # where a locate's seconds went (the SCENE line prints it)
         self.last_boxes = {}
         self.last_judged = {}
+        if seg is None or not seg.available:
+            self.last_why = (
+                "no scene segmenter for this container (its config names no scene_detect.segmenter_classes)"
+                if seg is None
+                else "the scene segmenter cannot be read: %s" % seg.why
+            )
+            return None
         # only frames newer than the newest one held now: those kept from
         # before the call (before a press, say) must not vote
         since = stamp_ns(getattr(g, "color_stamp", None))
         t_ready = None
-        owl_on = False
-
-        def owl_now():
-            nonlocal owl_on
-            if not owl_on:
-                self.owl.enable()
-                owl_on = True
-                self.last_timing["owl_s"] = 0.0 if t_ready is None else round(clock() - t_ready, 2)
-
-        try:
-            # no segmenter for this container (or none this install can read),
-            # or prime() found it down: the OWL from the start (an enable
-            # repeated refreshes the node's window)
-            if seg is None or not seg.available or getattr(self.owl, "enabled", False):
-                owl_now()
-            heard_owl = False  # any message at all from the scene OWL
-            last_owl = last_seg = None  # the messages gated last, per source
-            n_seg = n_seg_boxes = 0  # segmenter frames gated in this call, and the boxes of its classes in them
-            tried = {"segmenter": [], "owl": []}  # why each refused candidate was refused, per source
-            ambiguous = {"segmenter": [], "owl": []}  # (top, rivals) of each message that passed in two places
-            # a segmenter message passed in two places: from then on in this
-            # look, only a pair with an OWL sighting in it commits (commit_fix)
-            owl_settles = False
-            sightings = []
-            unconfirmed = False  # an OWL pair on a cut lid was held back: nothing the segmenter saw stood beside it
-            off_frame = None  # (score, edges, R_base_color, src) of the best candidate cut by the frame's edge
-            state = seg_args = m_seg = None
-            found = None
+        last_seg = None  # the message gated last
+        n_seg = n_seg_boxes = 0  # segmenter frames gated in this call, and the boxes of its classes in them
+        n_selected = 0  # of those frames, the ones the selected container was in (with an instance_id)
+        tried = []  # why each refused candidate was refused
+        # (top, rivals) of each message that passed in two places. Such a message
+        # is no sighting. Following the selected container, both places are its
+        # own boxes (its holder's band and its lid), and later sightings that
+        # agree commit. Without one, a second container's band may be what
+        # passed, so nothing commits after it: the run must be told which.
+        ambiguous = []
+        sightings = []
+        off_frame = None  # (score, edges, R_base_color, src) of the best candidate cut by the frame's edge
+        state = seg_args = m_seg = None
+        found = None
+        if self.spins:
+            import rclpy
+        while clock() - t0 < timeout_s:
             if self.spins:
-                import rclpy
-            while clock() - t0 < timeout_s:
-                if self.spins:
-                    rclpy.spin_once(self.node, timeout_sec=0.05)
-                else:
-                    self._sleep(0.02)
-                if not self.ready():
-                    continue
-                if t_ready is None:
-                    t_ready = clock()
-                    self.last_timing["streams_s"] = round(t_ready - t0, 2)
-                    # the detectors need upright frames (upside down, RF-DETR
-                    # found the box in 7 of 37 detbench frames, the OWL in 15),
-                    # and nothing here turns them: a camera hung upside down
-                    # rotates them on the device
-                    if image_upside_down(self.base_to_color()):
-                        self.last_why = (
-                            "TF has the scene camera's frames upside down — its detectors need them upright: "
-                            "rotate them on the device (the OAK driver's color/depth i_rotation 180, "
-                            "rammp-deployments #133) with the upright mount in TF"
-                        )
-                        return None
-                    # is the calibration's tag where it was? Said, never
-                    # refused: it rides the cabinet door (scene_calib
-                    # TAG_MOVED_PX); a re-aimed camera is caught by what its
-                    # fixes measure instead (press_demo.scene_trust)
-                    from box_opening.perception.scene_calib import scene_camera_moved
-
-                    _moved, why = scene_camera_moved(g.color, self.tag_px)
-                    self.moved_note = why
-                    if since is None:  # no frame at the call: the first one counts
-                        first = stamp_ns(getattr(g, "color_stamp", None))
-                        since = None if first is None else first - 1
-                now = clock()
-                if seg is not None:
-                    m_seg = seg.latest  # one read: the perception thread replaces it whole
-                    seg_args = self._seg_args(now)
-                    state = seg.state(*seg_args, frame=m_seg)
-                    self.last_seg_state = state
-                if not owl_on and (seg is None or state in SEG_DOWN or now - t_ready >= OWL_AFTER_S):
-                    owl_now()
-                msgs = []
-                if state == "live" and m_seg is not last_seg and _newer(m_seg.stamp_ns, since, last_seg):
-                    last_seg = m_seg
-                    n_seg += 1
-                    self.last_timing.setdefault("seg_s", round(now - t_ready, 2))
-                    self.last_boxes["segmenter"] = [[c, float(s)] + [float(v) for v in b] for c, s, b in m_seg.objects]
-                    n_seg_boxes += len(m_seg.objects)
-                    cands = segmenter_candidates(m_seg.objects, seg.classes, seg_args[2], box_kind=self.seg_box)
-                    if cands:
-                        msgs.append(("segmenter", cands))
-                if owl_on and self.owl.latest is not None:
-                    heard_owl = True
-                    # the newest BOX, not the newest message: a heartbeat that
-                    # lands milliseconds after it must not hide it (2026-09-23)
-                    m = self.owl.fresh_box()
-                    if m is not None and m is not last_owl:
-                        last_owl = m
-                        boxes = bboxes_in_msg(m)
-                        self.last_timing.setdefault("bbox_s", round(now - t_ready, 2))
-                        self.last_boxes["owl"] = [[float(b[4])] + [float(v) for v in b[:4]] for b in boxes]
-                        if boxes:
-                            msgs.append(("owl", [(b[4], b[:4]) for b in boxes]))
-                if not msgs:
-                    continue
-                # every candidate of every new message, best first, against the
-                # container's geometry, on one cloud: the first whose top is at
-                # lid height AND the container's size passes
-                t_cloud = clock()
-                cloud = g.cloud_in_color_frame(depth=g.depth_median(), stride=2)
-                if cloud is None:
-                    self.last_why = "no scene depth cloud"
+                rclpy.spin_once(self.node, timeout_sec=0.05)
+            else:
+                self._sleep(0.02)
+            if not self.ready():
+                continue
+            if t_ready is None:
+                t_ready = clock()
+                self.last_timing["streams_s"] = round(t_ready - t0, 2)
+                # the detector needs upright frames (upside down, RF-DETR
+                # found the box in 7 of 37 detbench frames), and nothing here
+                # turns them: a camera hung upside down rotates them on the device
+                if image_upside_down(self.base_to_color()):
+                    self.last_why = (
+                        "TF has the scene camera's frames upside down — its detectors need them upright: "
+                        "rotate them on the device (the OAK driver's color/depth i_rotation 180, "
+                        "rammp-deployments #133) with the upright mount in TF"
+                    )
                     return None
-                pc, uv = cloud
-                T_base_color = self.base_to_color()
-                if T_base_color is None:
-                    continue
-                pts_base = pc @ T_base_color[:3, :3].T + T_base_color[:3, 3]
-                h, w = g.color.shape[:2]
-                # the top-face lift needs a table height up front: surveyed,
-                # else read off the image rows (no clean plane there is no
-                # refusal: the side lift reads the table around each box)
-                top_table_z = self.table_z
-                if top_table_z is None:
-                    measured = table_from_scene_points(pts_base, uv, h)
-                    top_table_z = None if np.isnan(measured) else measured
-                for source, cands in msgs:
-                    label = SRC_LABEL[source]
-                    got = scene_fix_from_boxes(
-                        cands,
-                        pts_base,
-                        uv,
-                        top_table_z,
-                        self.model,
-                        cam_xyz=T_base_color[:3, 3],
-                        side_table_z=self.table_z,
-                        image_wh=(w, h),
-                        cam_R=T_base_color[:3, :3],
-                        src=label,
-                        rivals=True,
-                    )
-                    tried[source].extend(got.tried)
-                    self.last_judged[source] = (cands, got, g.color, T_base_color)  # what perception/viz draws
-                    for score, _box, edges in got.clipped:
-                        if off_frame is None or score > off_frame[0]:
-                            off_frame = (score, edges, T_base_color[:3, :3], label)
-                    if got.pose is None:
-                        continue
-                    if got.rivals:
-                        # two places pass as this container: no sighting, and
-                        # the OWL, which boxes the lid itself, settles which
-                        ambiguous[source].append((got.top, got.rivals))
-                        owl_settles = owl_settles or source == "segmenter"
-                        owl_now()
-                        continue
-                    key = box_key(got.box)
-                    c = next(c for c in cands if box_key(c[1]) == key)
-                    det = getattr(c, "det_box", None)
-                    sightings.append(
-                        Sighting(
-                            source,
-                            float(c[0]),
-                            tuple(float(v) for v in got.top),
-                            got.pose,
-                            int(got.n),
-                            tuple(got.partial),
-                            float(got.table_z),
-                            got.lift,
-                            key,
-                            key if det is None else box_key(det),
-                        )
-                    )
-                    # a live segmenter confirms a cut OWL box only once it has seen the container in this look:
-                    # a sighting beside it, or a place one of its messages passed in two (commit_fix)
-                    seg_saw = state == "live" and (
-                        bool(ambiguous["segmenter"]) or any(s.source == "segmenter" for s in sightings)
-                    )
-                    places = [p for at, riv in ambiguous["segmenter"] for p in (at, *riv)]
-                    top, why = commit_fix(sightings, seg_saw, owl_settles=owl_settles, segmenter_places=places)
-                    unconfirmed = unconfirmed or why == "cut OWL box unconfirmed"
-                    if top is not None:
-                        found = (top, sightings[-VOTE_N:], pts_base, uv, got, T_base_color)
-                        t_fix = clock()
-                        self.last_timing["fix_s"] = round(t_fix - t_ready, 2)
-                        self.last_timing["lift_s"] = round(t_fix - t_cloud, 2)
-                        break
-                if found is not None:
-                    break
-            if found is None:
-                n_owl = sum(s.source == "owl" for s in sightings)
-                if g.missing():
-                    why = "scene camera streams missing: %s" % ", ".join(g.missing())
-                elif t_ready is None:
-                    why = self._unplaced_why()
-                else:
-                    # three different failures wear the same "no box" face: the
-                    # camera is down, a detector is silent (not started, still
-                    # loading, or getting no frames — a launch-started OWL
-                    # instance was seen like that, 2026-09-16), or it is alive
-                    # and honestly sees no box
-                    owl_part = _owl_why(
-                        timeout_s, owl_on or seg is None, heard_owl, tried["owl"], ambiguous["owl"], n_owl, unconfirmed
-                    )
-                    if seg is None:
-                        why = owl_part
-                    else:
-                        if state in SEG_DOWN:
-                            seg_part = seg.describe(state, *seg_args[1:], frame=m_seg)
-                        elif n_seg == 0:
-                            seg_part = "no frame newer than the look in %.1f s" % timeout_s
-                        elif n_seg_boxes == 0:
-                            seg_part = "saw no %s in %d frames" % (" or ".join(seg.classes), n_seg)
-                        elif ambiguous["segmenter"]:
-                            top, riv = ambiguous["segmenter"][-1]
-                            seg_part = (
-                                "two places pass as this container, %s and %s, and the OWL did not settle which"
-                                % (_top_xy(top), _top_xy(riv[0]))
-                            )
-                        elif unconfirmed:
-                            seg_part = "the OWL's box of the cut lid is not confirmed by the segmenter's"
-                        elif len(sightings) == n_owl:
-                            # the same box is refused for the same reason 5 times a second: the last 3 reasons
-                            # that differ
-                            last = list(dict.fromkeys(reversed(tried["segmenter"])))[:3][::-1]
-                            seg_part = "none of its %d boxes is this container: %s" % (
-                                len(tried["segmenter"]),
-                                "; ".join(last),
-                            )
-                        elif len(sightings) - n_owl == 1:
-                            seg_part = "one of its boxes passed in %d frames, and a fix needs two that agree" % n_seg
-                        else:
-                            seg_part = "its fixes did not agree within %.0f mm" % (1000 * VOTE_TOL_M)
-                        why = "scene segmenter: %s; scene OWL: %s" % (seg_part, owl_part)
-                    if off_frame is not None:
-                        score, edges, R, label = off_frame
-                        why = "%s; %s" % (
-                            off_frame_why(score, edges, R, frame=self.base_frame or "base_link", src=label),
-                            why,
-                        )
-                self.last_why = why
+                # is the calibration's tag where it was? Said, never
+                # refused: it rides the cabinet door (scene_calib
+                # TAG_MOVED_PX); a re-aimed camera is caught by what its
+                # fixes measure instead (press_demo.scene_trust)
+                from box_opening.perception.scene_calib import scene_camera_moved
+
+                _moved, why = scene_camera_moved(g.color, self.tag_px)
+                self.moved_note = why
+                if since is None:  # no frame at the call: the first one counts
+                    first = stamp_ns(getattr(g, "color_stamp", None))
+                    since = None if first is None else first - 1
+            now = clock()
+            m_seg = seg.latest  # one read: the perception thread replaces it whole
+            seg_args = self._seg_args(now)
+            state = seg.state(*seg_args, frame=m_seg)
+            self.last_seg_state = state
+            if state in ("absent", "unavailable"):
+                break  # nothing publishes the boxes: no word is coming
+            if state != "live" or m_seg is last_seg or not _newer(m_seg.stamp_ns, since, last_seg):
+                continue
+            last_seg = m_seg
+            n_seg += 1
+            n_selected += bool(getattr(m_seg, "selected", None))
+            self.last_timing.setdefault("seg_s", round(now - t_ready, 2))
+            self.last_boxes["segmenter"] = [[c, float(s)] + [float(v) for v in b] for c, s, b in m_seg.objects]
+            n_seg_boxes += len(m_seg.objects)
+            cands = segmenter_candidates(m_seg.objects, seg.classes, seg_args[2], box_kind=self.seg_box)
+            if not cands:
+                continue
+            # every candidate of the new message, best first, against the
+            # container's geometry, on one cloud: the first whose top is at
+            # lid height AND the container's size passes
+            t_cloud = clock()
+            cloud = g.cloud_in_color_frame(depth=g.depth_median(), stride=2)
+            if cloud is None:
+                self.last_why = "no scene depth cloud"
                 return None
-            top, pair, pts_base, uv, got, T_base_color = found
-            top = tuple(float(v) for v in top)
-            newest = pair[-1]
-            pose = container_pose_from_top(top, newest.pose.yaw, self.model, newest.table_z)
-            table_seen = got.table_z if got.lift == "side" else table_from_scene_points(pts_base, uv, g.color.shape[0])
-            # no survey: the table the box was found on is the one the
-            # planner must know about (WorldStore.table_extent)
-            extent = None
-            if self.table_z is None:
-                extent, assumed = seen_table_extent(pts_base, got.table_z, top[:2])
-                if assumed:
-                    log.info(
-                        "[scene] too few table points to measure its extent; planning the %.2f m ring "
-                        "square around the box at the measured height" % (2 * TABLE_RING_M[1])
-                    )
-            partial = ""
-            if got.partial:
-                partial = "cut off by the frame toward %s %s" % (
-                    self.base_frame or "base_link",
-                    " and ".join(off_frame_ways(got.partial, T_base_color[:3, :3])),
-                )
-            near = np.hypot(pts_base[:, 0] - top[0], pts_base[:, 1] - top[1]) < MAP_R_M
-            return SceneFix(
-                pose=pose,
-                top_xyz=top,
-                n_points=newest.n,
-                score=newest.score,
-                table_z_scene=table_seen,
-                table_extent=extent,
-                partial=partial,
-                table_points=pts_base[near].astype(np.float32),
-                source=newest.source,
-                n_sightings=len(pair),
-                sources=tuple(s.source for s in pair),
+            pc, uv = cloud
+            T_base_color = self.base_to_color()
+            if T_base_color is None:
+                continue
+            pts_base = pc @ T_base_color[:3, :3].T + T_base_color[:3, 3]
+            h, w = g.color.shape[:2]
+            # the top-face lift needs a table height up front: surveyed,
+            # else read off the image rows (no clean plane there is no
+            # refusal: the side lift reads the table around each box)
+            top_table_z = self.table_z
+            if top_table_z is None:
+                measured = table_from_scene_points(pts_base, uv, h)
+                top_table_z = None if np.isnan(measured) else measured
+            got = scene_fix_from_boxes(
+                cands,
+                pts_base,
+                uv,
+                top_table_z,
+                self.model,
+                cam_xyz=T_base_color[:3, 3],
+                side_table_z=self.table_z,
+                image_wh=(w, h),
+                cam_R=T_base_color[:3, :3],
+                src="segmenter",
+                rivals=True,
             )
-        finally:
-            self.owl.disable()
-
-
-def _owl_why(timeout_s, asked, heard, tried, ambiguous, n_sightings, unconfirmed):
-    """Why the scene OWL gave no fix: today's three texts, and the vote's."""
-    if not asked:
-        return "not asked: the segmenter was live"
-    if not heard:
-        return (
-            "the scene OWL is SILENT (no heartbeat in %.1f s) — not started, still "
-            "loading, or not receiving frames: check the launch terminal" % timeout_s
+            tried.extend(got.tried)
+            self.last_judged["segmenter"] = (cands, got, g.color, T_base_color)  # what perception/viz draws
+            for score, _box, edges in got.clipped:
+                if off_frame is None or score > off_frame[0]:
+                    off_frame = (score, edges, T_base_color[:3, :3], "segmenter")
+            if got.pose is None:
+                continue
+            if got.rivals:
+                ambiguous.append((got.top, got.rivals))
+                continue
+            if ambiguous and self.instance_id is None:
+                continue  # which container passed is not settled: see `ambiguous`
+            key = box_key(got.box)
+            c = next(c for c in cands if box_key(c[1]) == key)
+            det = getattr(c, "det_box", None)
+            sightings.append(
+                Sighting(
+                    "segmenter",
+                    float(c[0]),
+                    tuple(float(v) for v in got.top),
+                    got.pose,
+                    int(got.n),
+                    tuple(got.partial),
+                    float(got.table_z),
+                    got.lift,
+                    key,
+                    key if det is None else box_key(det),
+                )
+            )
+            top, _why = commit_fix(sightings)
+            if top is not None:
+                found = (top, sightings[-VOTE_N:], pts_base, uv, got, T_base_color)
+                t_fix = clock()
+                self.last_timing["fix_s"] = round(t_fix - t_ready, 2)
+                self.last_timing["lift_s"] = round(t_fix - t_cloud, 2)
+                break
+        if found is None:
+            if g.missing():
+                why = "scene camera streams missing: %s" % ", ".join(g.missing())
+            elif t_ready is None:
+                why = self._unplaced_why()
+            else:
+                # different failures wear the same "no box" face: the segmenter
+                # is down or watching something else, it has not seen the
+                # selected container, or it is alive and honestly sees no box
+                if state in SEG_DOWN:
+                    seg_part = seg.describe(state, *seg_args[1:], frame=m_seg)
+                elif n_seg == 0:
+                    seg_part = "no frame newer than the look in %.1f s" % timeout_s
+                elif self.instance_id is not None and n_selected == 0:
+                    seg_part = "the selected container (%s) was in none of its %d frames" % (self.instance_id, n_seg)
+                elif n_seg_boxes == 0:
+                    seg_part = "saw no %s in %d frames" % (" or ".join(seg.classes), n_seg)
+                elif ambiguous and (self.instance_id is None or not sightings):
+                    top, riv = ambiguous[-1]
+                    seg_part = "two places pass as this container, %s and %s%s" % (
+                        _top_xy(top),
+                        _top_xy(riv[0]),
+                        "" if self.instance_id else ": select which container (its instance_id) to open",
+                    )
+                elif not sightings:
+                    # the same box is refused for the same reason 5 times a second: the last 3 reasons that differ
+                    last = list(dict.fromkeys(reversed(tried)))[:3][::-1]
+                    seg_part = "none of its %d boxes is this container: %s" % (len(tried), "; ".join(last))
+                elif len(sightings) == 1:
+                    seg_part = "one of its boxes passed in %d frames, and a fix needs two that agree" % n_seg
+                else:
+                    seg_part = "its fixes did not agree within %.0f mm" % (1000 * VOTE_TOL_M)
+                why = "scene segmenter: %s" % seg_part
+                if off_frame is not None:
+                    score, edges, R, label = off_frame
+                    why = "%s; %s" % (
+                        off_frame_why(score, edges, R, frame=self.base_frame or "base_link", src=label),
+                        why,
+                    )
+            self.last_why = why
+            return None
+        top, pair, pts_base, uv, got, T_base_color = found
+        top = tuple(float(v) for v in top)
+        newest = pair[-1]
+        pose = container_pose_from_top(top, newest.pose.yaw, self.model, newest.table_z)
+        table_seen = got.table_z if got.lift == "side" else table_from_scene_points(pts_base, uv, g.color.shape[0])
+        # no survey: the table the box was found on is the one the
+        # planner must know about (WorldStore.table_extent)
+        extent = None
+        if self.table_z is None:
+            extent, assumed = seen_table_extent(pts_base, got.table_z, top[:2])
+            if assumed:
+                log.info(
+                    "[scene] too few table points to measure its extent; planning the %.2f m ring "
+                    "square around the box at the measured height" % (2 * TABLE_RING_M[1])
+                )
+        partial = ""
+        if got.partial:
+            partial = "cut off by the frame toward %s %s" % (
+                self.base_frame or "base_link",
+                " and ".join(off_frame_ways(got.partial, T_base_color[:3, :3])),
+            )
+        near = np.hypot(pts_base[:, 0] - top[0], pts_base[:, 1] - top[1]) < MAP_R_M
+        return SceneFix(
+            pose=pose,
+            top_xyz=top,
+            n_points=newest.n,
+            score=newest.score,
+            table_z_scene=table_seen,
+            table_extent=extent,
+            partial=partial,
+            table_points=pts_base[near].astype(np.float32),
+            source=newest.source,
+            n_sightings=len(pair),
+            sources=tuple(s.source for s in pair),
         )
-    if unconfirmed and n_sightings >= VOTE_N:
-        return "its boxes of the cut lid wait on the segmenter's"
-    if n_sightings == 1:
-        return "one of its boxes passed in %.1f s, and a fix needs two that agree" % timeout_s
-    if n_sightings > 1:
-        return "its fixes did not agree within %.0f mm" % (1000 * VOTE_TOL_M)
-    if ambiguous:
-        top, riv = ambiguous[-1]
-        return "two places pass as this container, %s and %s" % (_top_xy(top), _top_xy(riv[0]))
-    if not tried:
-        return "the scene OWL saw no box in %.1f s" % timeout_s
-    return "none of the OWL's %d candidate(s) is this container: %s" % (len(tried), "; ".join(tried[-3:]))

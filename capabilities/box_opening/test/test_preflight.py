@@ -30,21 +30,18 @@ def test_stream_verdicts_fail_a_required_stream_and_warn_an_optional_one():
     assert levels["/c"][0] == "PASS" and "4.0 Hz" in levels["/c"][1]
 
 
-def test_a_deaf_detector_is_told_apart_from_a_missing_one():
-    """The wrist owl_detector ran 400 s without one frame (2026-09-22) and
-    the mission called it "not running". Preflight reads the heartbeats:
-    none -> not running; only BLIND -> up but deaf (restart box_opening);
-    anything else -> fine."""
-    from box_opening.perception.owl_source import BLIND, HEARTBEAT
-    from box_opening.tasks.preflight import owl_verdict
+def test_a_silent_scene_segmenter_is_a_warning_that_says_how_to_start_it():
+    """The scene segmenter is what finds the box: silent, nothing will. A
+    WARN (as for a silent scene camera: the run then stops before the arm
+    moves toward a box), with what to select in the profile."""
+    from box_opening.tasks.preflight import segmenter_verdict
 
-    lvl, text = owl_verdict([], "wrist")
-    assert lvl == "WARN" and "not running" in text
-    lvl, text = owl_verdict([BLIND] * 6, "wrist")
-    assert lvl == "WARN" and "no wrist frame" in text and "sheppy restart box_opening" in text
-    assert owl_verdict([BLIND, BLIND, HEARTBEAT], "scene")[0] == "PASS"  # frames came back
-    assert owl_verdict([HEARTBEAT] * 6, "scene")[0] == "PASS"
-    assert owl_verdict([0.57], "scene")[0] == "PASS"  # a box: very much alive
+    lvl, text = segmenter_verdict(0, window_s=3.0)
+    assert lvl == "WARN" and "silent for 3 s" in text and "scene_segmenter: rfdetr" in text
+    lvl, text = segmenter_verdict(15, window_s=3.0)
+    assert lvl == "PASS" and "5.0 Hz" in text
+    lvl, text = segmenter_verdict(None)
+    assert lvl == "WARN" and "cannot be read" in text
 
 
 FLATBOT = "capabilities/box_opening/config/world_flatbot.yaml"

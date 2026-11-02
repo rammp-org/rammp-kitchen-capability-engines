@@ -86,11 +86,11 @@ def test_the_1757_table_from_the_scene_camera_alone_has_no_room_and_it_says_why(
     scene = f["scene_mm"] / 1000.0 + np.r_[f["wrist_box"] - f["scene_box"], 0.0]
     fix, why = lrv.fix_around(scene, tuple(f["wrist_box"]), pink)
     assert why is None and fix.table_z_scene == pytest.approx(float(f["table_z"]), abs=0.01)
-    view = lrv.room_view(pink, fix, "scene OWL")
+    view = lrv.room_view(pink, fix, "scene segmenter")
     assert not view.drops and "short of the room it needs" in view.why
     line = lrv.status_line(view)
     assert line.startswith(
-        "box at [0.39, -0.21] (scene OWL), %d planner cuboid(s): nowhere to set the lid down" % len(view.boxes)
+        "box at [0.39, -0.21] (scene segmenter), %d planner cuboid(s): nowhere to set the lid down" % len(view.boxes)
     )
     ma = lrv.view_markers(view, pink, "arm_mount", Time())
     assert not _by_ns(ma, "lid")

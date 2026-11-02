@@ -118,18 +118,9 @@ class PressDemoCfg:
     grip_offset_xy: tuple  # base-frame grasp trim (bench-measured bias)
     detect_period_s: float  # detector tick; min_hits * this = commit floor
     detect_source: str  # 'vlm' | 'depth'
-    vlm_backends: tuple  # ladder order, e.g. ('owl', 'claude')
-    vlm_model: str
-    owl_model: str
-    owl_queries: tuple
-    owl_min_score: float
-    owl_min_score_scene: float  # the scene camera's floor: the box is small from a metre
-    vlm_target: str  # what to ask Claude to box — plain English
-    vlm_timeout_s: float
-    vlm_pad_px: int
     # the scene camera's box from sheppy's always-on scene segmenter
     # (perception/segmenter_source): the classes it boxes this container as,
-    # () for none — the scene OWL alone then finds it
+    # () for none — then nothing finds it, and every run says so
     segmenter_classes: tuple = ()
     segmenter_box: str = "holder"  # "holder": its box is the holder the lid stands on; "as_is": the container
 
@@ -156,7 +147,7 @@ def scene_detect_cfg(raw):
     if not isinstance(classes, list) or not all(isinstance(c, str) and c.strip() for c in classes):
         raise ValueError(
             "scene_detect.segmenter_classes must be a list of the scene segmenter's class names "
-            "(e.g. [food container]); an empty list or none means the scene OWL alone"
+            "(e.g. [food container]); an empty list or none means nothing finds the container"
         )
     box = sd.get("segmenter_box", "holder")
     if box not in ("holder", "as_is"):
@@ -201,15 +192,6 @@ def load_press_demo(path):
         grip_offset_xy=tuple(raw["open_box"]["grip_offset_xy"]),
         detect_period_s=float(raw["detect"].get("period_s", 0.15)),
         detect_source=str(raw["detect"].get("source", "depth")),
-        vlm_backends=tuple(raw.get("vlm", {}).get("backends", ("claude",))),
-        vlm_model=str(raw.get("vlm", {}).get("model", "claude-opus-5")),
-        owl_model=str(raw.get("vlm", {}).get("owl_model", "google/owlv2-base-patch16-ensemble")),
-        owl_queries=tuple(raw.get("vlm", {}).get("owl_queries", ("a small white square box",))),
-        owl_min_score=float(raw.get("vlm", {}).get("owl_min_score", 0.18)),
-        owl_min_score_scene=float(raw.get("vlm", {}).get("owl_min_score_scene", 0.12)),
-        vlm_target=str(raw.get("vlm", {}).get("target", "the food-storage container")),
-        vlm_timeout_s=float(raw.get("vlm", {}).get("timeout_s", 20.0)),
-        vlm_pad_px=int(raw.get("vlm", {}).get("pad_px", 20)),
         segmenter_classes=segmenter_classes,
         segmenter_box=segmenter_box,
     )
@@ -273,15 +255,6 @@ def load_press_demo(path):
         raise ValueError("detect.source must be 'depth' or 'vlm'")
     if not 0 <= int(raw["detect"].get("recentre_max_moves", 2)) <= 5:
         raise ValueError("detect.recentre_max_moves must be 0-5")
-    bad = set(cfg.vlm_backends) - {"owl", "claude"}
-    if bad or (cfg.detect_source == "vlm" and not cfg.vlm_backends):
-        raise ValueError("vlm.backends must be a non-empty subset of ['owl', 'claude']")
-    if not 0.0 < cfg.owl_min_score < 1.0:
-        raise ValueError("vlm.owl_min_score must be in (0, 1)")
-    if not 0.0 < cfg.owl_min_score_scene < 1.0:
-        raise ValueError("vlm.owl_min_score_scene must be in (0, 1)")
-    if not 0.0 < cfg.vlm_timeout_s <= 60.0:
-        raise ValueError("vlm.timeout_s must be in (0, 60] s")
     if not 0.0 < cfg.detect_period_s <= 0.5:
         raise ValueError("detect.period_s must be in (0, 0.5] s")
     # staging is anchored at the BUTTON TOP; the full-world obstacle tops

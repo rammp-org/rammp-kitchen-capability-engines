@@ -8,8 +8,9 @@
 # 73e7ed1716bf, which capability_engine's self.arm needs), so box opening speaks
 # the driver's exact messages. It carries the
 # arm, common, orchestrator and perception interfaces; rammp_curobo_interfaces it
-# does not. rammp-cuda, not rammp-base: the OWL detectors run OWLv2 on the Jetson's
-# GPU (the image ships CUDA 12.6 and the Jetson build of torch). arm64 only.
+# does not. Nothing in it uses the GPU since the OWL detectors went (the box comes
+# from the scene segmenter); the base is still rammp-cuda's, as built and tested so
+# far, and may move to rammp-base. arm64 only.
 FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261030
 
 WORKDIR /module_ws
@@ -18,19 +19,6 @@ WORKDIR /module_ws
 # this compiles from source; the version and the layer are grab_container's, so a
 # machine that built either image builds this one without compiling it again.
 RUN pip install --no-cache-dir pybullet==3.2.7
-
-# OWLv2 (perception/owl_node): transformers at the version the OWL detectors run with
-# on flatbot (2026-10-30). The base's torch, torchvision and numpy are held where they
-# are (a constraints file of their installed versions), so nothing swaps the Jetson's
-# CUDA torch for a PyPI one.
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN pip freeze | grep -iE '^(torch|torchvision|numpy)==' > /tmp/keep.txt \
-    && pip install --no-cache-dir -c /tmp/keep.txt \
-        transformers==4.57.6 huggingface-hub==0.36.2 safetensors==0.7.0 tokenizers==0.22.2 \
-    && rm /tmp/keep.txt
-# The weights are the host's Hugging Face cache, mounted here (the real fragment's
-# volume); nothing is fetched at run time.
-ENV HF_HOME=/models/hf HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
 # build it from a pinned RAMMP-CuRobo commit alongside the packages below.

@@ -18,7 +18,7 @@ from box_opening import LOGGER, node
 
 # rows of a full run on flatbot (run-20261030-132845), shortened
 FULL_RUN = [
-    {"leg": "scene_fix", "kind": "note", "origin_xyz": [0.6018, -0.2302, 0.2091], "source": "owl"},
+    {"leg": "scene_fix", "kind": "note", "origin_xyz": [0.6018, -0.2302, 0.2091], "source": "segmenter"},
     {"leg": "reach:look", "kind": "motion", "ok": True, "outcome": "arrived"},
     {"leg": "press:close", "kind": "gripper", "ok": True, "outcome": "arrived"},
     {"leg": "reach:slide-in", "kind": "motion", "ok": True, "outcome": "arrived"},
@@ -93,7 +93,7 @@ def engine(ros, tmp_path, monkeypatch):
     handlers = list(LOGGER.handlers)
     script = tmp_path / "fake_run.py"
     script.write_text(FAKE_RUN)
-    overrides = {"use_orchestrator": False, "owl": False, "allow_execute": True, "state_dir": str(tmp_path)}
+    overrides = {"use_orchestrator": False, "allow_execute": True, "state_dir": str(tmp_path)}
     cap = node.Capability(parameter_overrides=[Parameter(k, value=v) for k, v in overrides.items()])
     real_argv = cap._argv
     monkeypatch.setattr(cap, "_argv", lambda *a: [sys.executable, str(script)] + real_argv(*a)[1:])

@@ -11,8 +11,9 @@ camera stream the mission reads silent (colour, camera_info, and the
 ALIGNED depth, which only exists with align_depth.enable:=true).
 WARN (exit unaffected): no TF for the scene camera where TF places it
 (flatbot), a silent scene camera stream (the mission then finds no box and
-stops before the arm moves toward one: the wrist no longer searches), an
-owl_detector not running, or running but deaf (no frame reaching it).
+stops before the arm moves toward one: the wrist no longer searches), or
+sheppy's scene segmenter silent (/perception/object_detections: it is what
+finds the box).
 Report-only: the gripper's position.
 
 Preflight never moves anything: its client is not armed.
@@ -144,37 +145,32 @@ def stream_verdicts(topics, counts, window_s=STREAM_WINDOW_S):
     return out
 
 
-def owl_verdict(scores, camera):
-    """("PASS" | "WARN", text) for one owl_detector from the score slots of
-    the messages it sent in the window: none means it is not running; only
-    BLIND heartbeats mean it is up but no camera frame reaches it — the
-    "deaf" state a restart has always cured (2026-09-16, -17, -22). Pure."""
-    from box_opening.perception.owl_source import BLIND
+def segmenter_verdict(n, window_s=STREAM_WINDOW_S):
+    """("PASS" | "WARN", text) for sheppy's scene segmenter, from how many
+    /perception/object_detections messages came in the window (None: this
+    install cannot read them). It is what finds the box. Pure."""
+    from box_opening.perception.segmenter_source import SEGMENTER_TOPIC
 
-    if not scores:
+    if n is None:
+        return "WARN", "%s cannot be read here (rammp_perception_interfaces does not import)" % SEGMENTER_TOPIC
+    if n == 0:
         return "WARN", (
-            "owl_detector (%s camera) not running — just restarted? it takes ~9 s to load; run "
-            "preflight again. Otherwise: is sheppy's box_opening node up? (the mission falls back "
-            "to the cloud rung, then plain depth)" % camera
+            "%s silent for %.0f s — sheppy's scene segmenter is not running, and nothing else finds the box: "
+            "select scene_segmenter: rfdetr in the sheppy profile" % (SEGMENTER_TOPIC, window_s)
         )
-    if all(s <= BLIND for s in scores):
-        return "WARN", (
-            "owl_detector (%s camera) is up but has had no %s frame — `sheppy restart box_opening` "
-            "(the camera itself is checked above)" % (camera, camera)
-        )
-    return "PASS", "owl_detector (%s camera) up and receiving frames" % camera
+    return "PASS", "%s at %.1f Hz (sheppy's scene segmenter)" % (SEGMENTER_TOPIC, n / float(window_s))
 
 
 def _listen(node, topics, window_s=STREAM_WINDOW_S):
-    """{topic: message count} and {camera: [owl scores]} over one window."""
+    """{topic: message count} and the scene segmenter's message count (None:
+    its messages cannot be read here) over one window."""
     from rclpy.qos import qos_profile_sensor_data
     from sensor_msgs.msg import CameraInfo, Image
-    from std_msgs.msg import Float32MultiArray
 
-    from box_opening.perception.owl_source import topics_for
+    from box_opening.perception.segmenter_source import SEGMENTER_TOPIC
 
     counts = {t: 0 for t, _r, _f in topics}
-    owl = {"wrist": [], "scene": []}
+    seg = [0]
     subs = []
 
     def counter(topic):
@@ -186,21 +182,22 @@ def _listen(node, topics, window_s=STREAM_WINDOW_S):
     for topic, _r, _f in topics:
         kind = CameraInfo if topic.endswith("camera_info") else Image
         subs.append(node.create_subscription(kind, topic, counter(topic), qos_profile_sensor_data))
-    for cam in owl:
-        subs.append(
-            node.create_subscription(
-                Float32MultiArray,
-                topics_for(cam)[0],
-                lambda m, cam=cam: owl[cam].append(float(m.data[4])) if len(m.data) >= 5 else None,
-                1,
-            )
-        )
+    try:
+        from rammp_perception_interfaces.msg import ObjectDetections
+    except ImportError:
+        seg = None
+    else:
+
+        def seg_cb(_msg):
+            seg[0] += 1
+
+        subs.append(node.create_subscription(ObjectDetections, SEGMENTER_TOPIC, seg_cb, qos_profile_sensor_data))
     t0 = time.monotonic()
     while time.monotonic() - t0 < window_s:
         rclpy.spin_once(node, timeout_sec=0.05)
     for sub in subs:
         node.destroy_subscription(sub)
-    return counts, owl
+    return counts, None if seg is None else seg[0]
 
 
 def _gripper_state(node, timeout_s=3.0):
@@ -325,15 +322,14 @@ def main():
     else:
         log.info("PASS  gripper present, at %.3f (0 open .. 1 closed)" % state.position)
 
-    # 7. the camera streams the mission reads, and the two OWL detectors
-    #    (a mission used to discover a missing stream mid-run: 2026-09-22)
+    # 7. the camera streams the mission reads, and the scene segmenter that
+    #    finds the box (a mission used to discover a missing stream mid-run: 2026-09-22)
     topics = camera_topics(store)
-    counts, owl = _listen(node, topics)
+    counts, n_seg = _listen(node, topics)
     for _topic, level, text in stream_verdicts(topics, counts):
         log.info("%-4s  %s" % (level, text))
         failures += level == "FAIL"
-    for cam in ("wrist", "scene"):
-        level, text = owl_verdict(owl[cam], cam)
-        log.info("%-4s  %s" % (level, text))
+    level, text = segmenter_verdict(n_seg)
+    log.info("%-4s  %s" % (level, text))
 
     raise SystemExit(1 if failures else 0)

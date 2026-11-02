@@ -65,8 +65,8 @@ def test_the_three_best_are_offered_clamped_to_the_frame():
         sg.segmenter_candidates(objs, FOOD, WH, box_kind="lid")
 
 
-def _obj(cls="food container", score=0.88, box=HOLDER_162417, state=0):
-    return SimpleNamespace(perception_class=cls, score=score, box=list(box), state=state)
+def _obj(cls="food container", score=0.88, box=HOLDER_162417, state=0, instance_id="food_container_1"):
+    return SimpleNamespace(perception_class=cls, score=score, box=list(box), state=state, instance_id=instance_id)
 
 
 def _msg(objects, stamp=(100, 5), frame_id="scene_camera_color_optical_frame", wh=WH):
@@ -165,11 +165,42 @@ class _GraphNode(_Node):
         return self.n[0]
 
 
+def test_with_a_selected_container_only_its_boxes_and_its_lid_are_read():
+    """The run opens the container the user selected (the orchestrator's
+    instance_id, perception's tracked id): another container on the table is
+    never offered, and a box stacked on the selected one (its lid, boxed as a
+    second bowl) is. `selected` says whether the container was in the frame;
+    without an instance_id every box of the classes is read, as before."""
+    holder = HOLDER_162417
+    lid = (holder[0] + 15.0, holder[1] - 30.0, holder[2] - 15.0, holder[1] + 5.0)  # stacked on the holder
+    other = (420.0, 216.0, 500.0, 260.0)  # a second container, beside it
+    m = _msg(
+        [
+            _obj(box=holder, instance_id="food_container_2"),
+            _obj(box=lid, score=0.5, instance_id="food_container_7"),
+            _obj(box=other, score=0.95, instance_id="food_container_3"),
+        ]
+    )
+    assert sg.stacked_on(lid, [holder])
+    f = sg.frame_of(m, FOOD, now_s=0.0, instance_id="food_container_2")
+    assert [o[2] for o in f.objects] == [pytest.approx(holder), pytest.approx(lid)] and f.selected is True
+    assert f.n_objects == 3
+    f = sg.frame_of(m, FOOD, now_s=0.0, instance_id="food_container_9")  # not in this frame
+    assert f.objects == () and f.selected is False
+    f = sg.frame_of(m, FOOD, now_s=0.0)
+    assert len(f.objects) == 3 and f.selected is None
+    rung, node = _rung()
+    rung.instance_id = "food_container_3"
+    _type, _topic, cb = node.subs[0]
+    cb(m)
+    assert [o[2] for o in rung.latest.objects] == [pytest.approx(other)] and rung.latest.selected is True
+
+
 def test_a_segmenter_nothing_publishes_is_absent_at_once_not_after_a_silent_second():
     """A profile that does not select the segmenter: no message will ever
-    come, and waiting out SEG_SILENT_S before the scene OWL is asked cost the
-    first look its first second. One that has a publisher still gets its
-    first second; a node that cannot say keeps the timer."""
+    come, and it is said at once rather than after SEG_SILENT_S. One that has
+    a publisher still gets its first second; a node that cannot say keeps the
+    timer."""
     n = [0]
     node = _GraphNode(n)
     rung = sg.SegmenterRung(node, FOOD, import_types=lambda: (object, type("D", (), {"size": None})))
@@ -191,7 +222,7 @@ def test_a_segmenter_nothing_publishes_is_absent_at_once_not_after_a_silent_seco
 
 def test_a_message_the_rung_cannot_read_never_reaches_the_perception_executor():
     """An exception in the callback would end the executor's spin, and with
-    it every camera and OWL rung the mission's perception thread serves."""
+    it every camera the mission's perception thread serves."""
     rung, node = _rung()
     _type, _topic, cb = node.subs[0]
     cb(_msg([_obj()]))

@@ -36,7 +36,7 @@ def _share_path(*parts):
 
 
 def default_container_yaml():
-    """The container every CLI and both OWL detector nodes fall back to:
+    """The container every CLI falls back to:
     the round clear canister with the pink push-button lid (owner,
     2026-09-22: "this box is the new default"). The OXOs stay selectable
     with --container."""

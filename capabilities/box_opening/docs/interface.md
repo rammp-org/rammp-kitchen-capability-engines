@@ -13,11 +13,11 @@ beside the container, and goes home. It has one action, `open_box`:
 1. **Ready:** the run checks the robot is ready (driver, planner, TF, gripper,
    both cameras) and refuses before anything moves if not; an arm away from its
    rest pose is brought there first.
-1. **Locate:** the scene camera finds the container before the arm moves (the
-   OWL detector, or the scene segmenter's `food container` mask where it has
-   one), with its lid's height from the scene camera's depth. Nothing about the
-   table or the container's place is configured: both come from the cameras on
-   every run.
+1. **Locate:** the scene camera finds the container before the arm moves: the
+   scene segmenter's box of the selected container (its `instance_id` on
+   `/perception/object_detections`, and a lid box stacked on it), with its lid's
+   height from the scene camera's depth. Nothing about the table or the
+   container's place is configured: both come from the cameras on every run.
 1. **Look:** the arm moves to a pose looking down at the lid at 45 degrees, and
    the wrist camera aims at the button.
 1. **Press:** the fingers, closed, press the button in joint impedance and feel
@@ -47,13 +47,13 @@ and checks every motion, and sends none.
 | --------------------- | ----------------- | ---- | --------------------------------------------------------------------------------------------------------- |
 | `/box_opening/status` | `std_msgs/String` | 1 Hz | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
 
-Inside the container, the run and the two OWL detectors also talk over
-`/box_opening/owl_*` (the detectors' boxes, and when to look), and with
-`viz: true` the run draws what it sees on `/box_opening/viz/*` for Foxglove.
+With `viz: true` the run also draws what it sees on `/box_opening/viz/*`
+(`scene/annotated/compressed`, `wrist/annotated/compressed`, `markers`,
+`status`) for Foxglove.
 
 ## Subscribes
 
-While an action runs; the OWL detectors read the cameras from the node's start.
+While an action runs (its run subscribes; the node itself reads nothing).
 
 | Topic                                | Type                                           | Required | Meaning                                                    |
 | ------------------------------------ | ---------------------------------------------- | -------- | ---------------------------------------------------------- |
@@ -67,7 +67,7 @@ While an action runs; the OWL detectors read the cameras from the node's start.
 | `/scene_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Its intrinsics                                             |
 | `/scene_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes      | Scene depth aligned to colour                              |
 | `/scene_camera/depth/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Its intrinsics                                             |
-| `/perception/object_detections`      | `rammp_perception_interfaces/ObjectDetections` | no       | The scene segmenter's masks, used where they name the box  |
+| `/perception/object_detections`      | `rammp_perception_interfaces/ObjectDetections` | yes      | The scene segmenter's boxes: the selected container's      |
 | `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`                           | yes      | The finger tips and both cameras in `arm_mount`            |
 
 ## Orchestrator interface
@@ -128,10 +128,9 @@ passes them as a params file.
 | `container`        | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path        |
 | `world`            | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`  |
 | `state_dir`        | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening` |
-| `owl`              | `true`                 | Run the wrist's and the scene camera's OWL detectors in this node's process  |
 | `video`            | `true`                 | Record both cameras from the grip to the set-down                            |
-| `mission_frames`   | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20)     |
 | `viz`              | `false`                | Draw what the perception sees and decides for Foxglove                       |
+| `mission_frames`   | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20)     |
 | `speed_scale`      | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)             |
 
 The engine base declares the `arm.*` parameters too; box opening does not use
@@ -139,10 +138,10 @@ The engine base declares the `arm.*` parameters too; box opening does not use
 
 ## Hardware
 
-The Kinova Gen3 and its Robotiq 2F-85 through the arm driver, the wrist and the
-scene OAK-D cameras through their own nodes, and the GPU for OWLv2 (`gpus: all`
-in the real fragment). OWLv2's weights come from the host's Hugging Face cache,
-mounted read-only at `/models/hf`.
+The Kinova Gen3 and its Robotiq 2F-85 through the arm driver, and the wrist and
+the scene OAK-D cameras through their own nodes. No GPU: box opening runs no
+model; the container's box comes from sheppy's scene segmenter (RF-DETR), which
+the deployment must run.
 
 ## Alternatives
 

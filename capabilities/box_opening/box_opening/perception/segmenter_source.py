@@ -18,6 +18,12 @@ not a place in the room. A box RF-DETR draws on the lid itself, a second
 holder box the frame cuts at its side is grown upward instead, so the
 gate's partial lift still finishes it from the lid's arc in view.
 
+The container is the one the user selected: given its instance_id (the
+orchestrator's selection, perception's tracked id such as food_container_2),
+only that object's boxes are read, with a box stacked on it (its lid), never
+another container's on the table. Without one (a standalone run), every box
+of the container's classes is a candidate.
+
 Every candidate still goes through box opening's own depth gate
 (scene_source.scene_fix_from_boxes): a box only ever says WHERE to look.
 
@@ -34,12 +40,11 @@ from box_opening.perception.scene_source import frame_edges
 SEGMENTER_TOPIC = "/perception/object_detections"
 SEG_SILENT_S = 1.0  # no message for this long (since subscribing, or since the last) = silent
 # ... but no publisher on the graph at all is "absent" at once: a profile that
-# does not select the segmenter must not cost the first look its first second
-# before the scene OWL is even asked (the OWL needs ~0.7 s for its first box).
+# does not select the segmenter is told so at once, not after a second's wait.
 # The graph is asked at most this often, and only while no message has come.
 SEG_GRAPH_S = 0.5
 SEG_FRESH_S = 1.0  # newest segmenter frame this much older than the grabber's newest colour frame = stale
-SEG_TOP_K = 3  # = owl_source.TOP_K
+SEG_TOP_K = 3  # the best boxes of one message the gate tries
 # the lid band, in holder-box widths/heights: this fraction of its width each
 # side of its centre, from this fraction of its height above its top to this
 # fraction below it. Any band above the holder works (8 settings, width
@@ -68,6 +73,7 @@ class SegFrame(NamedTuple):
     wh: tuple  # its label image's (width, height); (0, 0) when it sent no masks
     objects: tuple  # ((perception_class, score, (x0, y0, x1, y1)), ...) of the rung's classes
     n_objects: int  # every object it published, of any class
+    selected: object = None  # with an instance_id to follow: whether that object was in it (else None)
 
 
 class SceneCand(NamedTuple):
@@ -153,11 +159,13 @@ def segmenter_candidates(objects, classes, image_wh, box_kind="holder", k=SEG_TO
     return lids + rest
 
 
-def frame_of(msg, classes, now_s):
+def frame_of(msg, classes, now_s, instance_id=None):
     """A rammp_perception_interfaces/ObjectDetections message as a SegFrame:
     only the VISIBLE objects of `classes` with a finite, non-empty box, a
     score in [0, 1] and (when it sent masks) a box inside its label image
-    to within a pixel."""
+    to within a pixel. With `instance_id`, of those only the object of that
+    id and a box stacked on one of its boxes (stacked_on: the lid, boxed as
+    a second bowl on its holder)."""
     li = getattr(msg, "label_image", None)
     wh = (int(li.width), int(li.height)) if li is not None else (0, 0)
     kept = []
@@ -174,8 +182,15 @@ def frame_of(msg, classes, now_s):
             continue
         if wh != (0, 0) and (box[0] < -1.0 or box[1] < -1.0 or box[2] > wh[0] + 1.0 or box[3] > wh[1] + 1.0):
             continue
-        kept.append((str(o.perception_class), score, box))
-    return SegFrame(float(now_s), stamp_ns(msg.header.stamp), str(msg.header.frame_id), wh, tuple(kept), n)
+        kept.append((str(o.perception_class), score, box, str(getattr(o, "instance_id", ""))))
+    selected = None
+    if instance_id:
+        mine = [k for k in kept if k[3] == instance_id]
+        selected = bool(mine)
+        lids = [k for k in kept if k[3] != instance_id and stacked_on(k[2], [m[2] for m in mine])]
+        kept = mine + lids
+    objects = tuple(k[:3] for k in kept)
+    return SegFrame(float(now_s), stamp_ns(msg.header.stamp), str(msg.header.frame_id), wh, objects, n, selected)
 
 
 def _import_types():
@@ -195,12 +210,14 @@ class SegmenterRung:
     """The scene segmenter's newest frame, as box opening's scene locator
     reads it. Subscribes once and keeps only the newest message (state()
     says whether it may be used: from the scene camera, at its size, fresh).
-    `available` False, with `why`, when this install cannot read the
-    messages at all."""
+    `instance_id`: the selected container's id, whose boxes alone are read
+    (frame_of); None or "" reads every box of `classes`. `available` False,
+    with `why`, when this install cannot read the messages at all."""
 
-    def __init__(self, node, classes, import_types=None):
+    def __init__(self, node, classes, import_types=None, instance_id=None):
         self.node = node
         self.classes = tuple(classes)
+        self.instance_id = instance_id or None
         self.latest = None  # SegFrame, replaced whole by the callback (one attribute store)
         self.count = 0
         self.available = False
@@ -232,11 +249,11 @@ class SegmenterRung:
     def _cb(self, msg):
         # on the perception thread: one atomic attribute store, the label image
         # dropped. Never raises: an exception here would end the executor's
-        # spin, and with it every camera and OWL rung the mission's perception
-        # thread serves. A message it cannot read keeps the frame before, which
-        # goes silent in SEG_SILENT_S and hands the look to the OWL.
+        # spin, and with it every camera the mission's perception thread
+        # serves. A message it cannot read keeps the frame before, which goes
+        # silent in SEG_SILENT_S: the look then says the segmenter is silent.
         try:
-            frame = frame_of(msg, self.classes, time.monotonic())
+            frame = frame_of(msg, self.classes, time.monotonic(), self.instance_id)
         except Exception as e:  # noqa: BLE001 -- someone else's node publishes this
             self.cb_error = repr(e)
             return

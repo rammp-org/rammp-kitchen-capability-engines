@@ -169,7 +169,7 @@ FONT_SCALE = 0.42
 LINE_PX = 16
 PAD_PX = 6
 WHY_MAX = 120  # a refusal is cut to this many characters in the image
-SRC_TAG = {"segmenter": "SEG", "owl": "OWL"}
+SRC_TAG = {"segmenter": "SEG"}  # any other detector's boxes by its own name, upper-cased
 KIND_WORDS = {
     "band": "the band above its box",
     "grown": "its box grown up (the frame cuts it)",
@@ -251,9 +251,9 @@ class _Record:
 
 class Cand(_Record):
     """One box the look's gate judged (judged_cands): its detector
-    ("segmenter" | "owl"), score, the box the gate lifted (x0, y0, x1, y1),
+    ("segmenter"), score, the box the gate lifted (x0, y0, x1, y1),
     the detector's own box (the holder under a band, else the box itself),
-    its kind (segmenter_source.SceneCand.kind; "" for the OWL's), the
+    its kind (segmenter_source.SceneCand.kind), the
     detector's class where it says one, the verdict ("fix" | "passed" |
     "two places" | "refused" | "not judged") and why."""
 
@@ -269,14 +269,21 @@ class Cand(_Record):
         word = {"fix": "FIX", "passed": "PASSED", "two places": "2 PLACES", "refused": "X", "not judged": "-"}[
             self.verdict
         ]
-        return "%s %.2f %s" % (SRC_TAG.get(self.source, self.source), self.score, word)
+        return "%s %.2f %s" % (SRC_TAG.get(self.source, self.source.upper()), self.score, word)
 
     def line(self):
         """What the strip under the image says of it."""
-        what = " ".join(w for w in (SRC_TAG.get(self.source, self.source), self.cls, "%.2f" % self.score) if w)
+        tag = SRC_TAG.get(self.source, self.source.upper())
+        what = " ".join(w for w in (tag, self.cls, "%.2f" % self.score) if w)
         if self.kind in KIND_WORDS and self.kind != "as_is":
             what += ", %s" % KIND_WORDS[self.kind]
         return "%s: %s - %s" % (what, self.verdict.upper(), self.why)
+
+
+def _src_label(source):
+    """A detector's name as the gate's reasons carry it: the scene
+    segmenter's as it is, any other upper-cased."""
+    return source if source == "segmenter" else str(source).upper()
 
 
 def judged_cands(judged, boxes=None, fix=None):
@@ -293,13 +300,13 @@ def judged_cands(judged, boxes=None, fix=None):
     reason; none where the two do not pair one to one), and the ones after
     the winner it never had to judge. `boxes`, the locator's last_boxes,
     names the segmenter's classes."""
-    from box_opening.perception.scene_source import SRC_LABEL, box_key
+    from box_opening.perception.scene_source import box_key
 
     voted = set() if fix is None else {getattr(fix, "source", None), *(getattr(fix, "sources", ()) or ())}
     out = []
     for source in sorted(judged, key=lambda s: s != "segmenter"):
         cands, got = judged[source][0], judged[source][1]
-        label = SRC_LABEL.get(source, source)
+        label = _src_label(source)
         won = None if got.pose is None else got.box  # the candidate's own box: matched by identity, as the reasons
         lifted = (
             None
@@ -323,7 +330,7 @@ def judged_cands(judged, boxes=None, fix=None):
             if passed and got.rivals:
                 d = min(math.hypot(r[0] - got.top[0], r[1] - got.top[1]) for r in got.rivals)
                 verdict = "two places"
-                why = "it passed, and so did another %.0f mm from it: the OWL settles which" % (1000 * d)
+                why = "it passed, and so did another %.0f mm from it: no sighting" % (1000 * d)
             elif passed and source in voted:
                 verdict, why = "fix", lifted
             elif passed:
@@ -332,7 +339,7 @@ def judged_cands(judged, boxes=None, fix=None):
                     lifted,
                     "no fix came of it: see the caption"
                     if fix is None
-                    else "the fix is the %s's" % SRC_LABEL.get(fix.source, fix.source),
+                    else "the fix is the %s's" % _src_label(fix.source),
                 )
             elif whys:
                 verdict, why = "refused", whys[-1]
@@ -523,7 +530,11 @@ def scene_image(look, model):
 
     from box_opening.perception.scene_source import TABLE_RING_M
 
-    order = [s for s in (getattr(look.fix, "source", None), "segmenter", "owl") if s in look.judged]
+    order = [
+        s
+        for s in dict.fromkeys((getattr(look.fix, "source", None), "segmenter", *sorted(look.judged)))
+        if s in look.judged
+    ]
     color, T = (look.judged[order[0]][2], look.judged[order[0]][3]) if order else (look.color, None)
     if color is None:
         return None

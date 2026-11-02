@@ -2,7 +2,7 @@
 2026-08-24; one run, the reach-out, since 2026-10-28).
 
     sheppy: the `arm` and `planner` nodes (rammp-deployments, december_2026)
-    ros2 launch box_opening press_demo.launch.py   # TF, OWL nodes
+    ros2 launch box_opening press_demo.launch.py   # TF
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     ros2 run box_opening press_demo --execute
 
@@ -12,8 +12,9 @@ it's close enough to go straight up and down"; the straight-down staging
 mode is gone). States logged one line each:
 
   SCENE   before the arm moves toward the box, the fixed scene camera finds
-          it — sheppy's scene segmenter, or the scene OWL where that cannot
-          answer, boxes it; the depth inside the box at lid height places it
+          it — sheppy's scene segmenter boxes it (only the container the
+          user selected, --instance-id, where one is given); the depth
+          inside the box at lid height places it
           through config/camera_scene.yaml, or through TF where the robot's
           TF carries the camera's mount (world external_static_tf:
           flatbot). What it sees standing on the table goes into the
@@ -175,15 +176,14 @@ class _NeverStops:
         return None
 
 
-# How long the scene camera gets to find the box before the arm has moved
-# at all: sheppy's scene segmenter fixes it in about 0.35 s (two agreeing
-# frames at 5 Hz; scene_source.commit_fix), and the scene OWL fallback needs
-# about 2.6 s for two boxes (~1.3 s an inference once enabled).
-SCENE_LOCATE_S = 5.0  # was 3.0: the OWL's first box came at 2.2-2.7 s — too tight
+# How long the scene camera gets to find the box (the looks after a press):
+# sheppy's scene segmenter fixes it in about 0.35 s (two agreeing frames at
+# 5 Hz; scene_source.commit_fix), so this leaves room for a slow segmenter.
+SCENE_LOCATE_S = 5.0
 # ... and the run's FIRST look, before anything moves, keeps at it longer:
-# flatbot 2026-10-27 15:34:01 refused all three candidates the OWL offered
-# in 5 s (0.12, 26-28 depth points in each) and the run went home; 25 s
-# later the next run had the box 0.83 s in. Looking longer costs only time.
+# flatbot 2026-10-27 15:34:01 refused every candidate it was offered in 5 s
+# (26-28 depth points in each) and the run went home; 25 s later the next
+# run had the box 0.83 s in. Looking longer costs only time.
 SCENE_FIRST_LOCATE_S = 15.0
 # How long the straight-down aim gets (aim_button_at_staging's default:
 # record_detection_set's, from its staging over a placed box; the reach-out
@@ -208,11 +208,11 @@ def scene_source_label(fix):
     """'SEG 0.88, 2 sightings (segmenter+segmenter)': the detector behind a
     scene fix (the newest sighting's), its score, and the sightings that
     agreed on it (scene_source.commit_fix)."""
-    source = getattr(fix, "source", "owl")
+    source = getattr(fix, "source", "segmenter")
     n = int(getattr(fix, "n_sightings", 1))
     sources = tuple(getattr(fix, "sources", ()) or (source,))
     return "%s %.2f, %d sighting%s (%s)" % (
-        "SEG" if source == "segmenter" else "OWL",
+        "SEG" if source == "segmenter" else source.upper(),
         float(fix.score),
         n,
         "" if n == 1 else "s",
@@ -937,9 +937,8 @@ def readiness_refusal(client, execute, planner_wait_s=PLANNER_WAIT_S, camera_cfg
             # flew to staging and then could not place one wrist frame
             # ("no camera pose for the frame", 0/60)
             return (
-                "no TF from %s to %s — sheppy's `box_opening` node (the arm's TF, the scene camera's and "
-                "the OWL detectors) is not running: `sheppy up box-opening`. Nothing moved."
-                % (client._base_frame, parent)
+                "no TF from %s to %s — sheppy's TF nodes (the arm's and the scene camera's) are not "
+                "running: `sheppy up box-opening`. Nothing moved." % (client._base_frame, parent)
             )
     return None
 
@@ -1054,10 +1053,10 @@ def scene_detect_report(locator, duration_s=DETECT_REPORT_S):
         fix = locator.locate(min(SCENE_LOCATE_S, max(0.5, duration_s - (time.monotonic() - t0))))
         viz_hook("scene", locator, fix)  # what it judged, drawn off this thread (perception/viz)
         if fix is None:
-            if locator.last_why != said:  # a refusal repeats every OWL tick: say it once
+            if locator.last_why != said:  # a refusal repeats every segmenter frame: say it once
                 log.info("[press_demo]   no fix: %s" % locator.last_why)
                 said = locator.last_why
-            time.sleep(0.5)  # an instant refusal must not spin the OWL's enable gate
+            time.sleep(0.5)  # an instant refusal (the segmenter absent) must not spin
             continue
         tops.append(fix.top_xyz)
         log.info(
@@ -1272,6 +1271,12 @@ def main():
         default=None,
         help="scene camera calibration yaml (default: the installed config/camera_scene.yaml)",
     )
+    ap.add_argument(
+        "--instance-id",
+        default=None,
+        help="the container to open: its instance_id on /perception/object_detections (the box_opening "
+        "engine passes the orchestrator's selection). Without it, any box of the container's classes",
+    )
     args = ap.parse_args()
     # the reach-out reads it (reach_press.run_reach_press): its depth press
     # is the run (owner 2026-10-28), whatever the command line said
@@ -1306,9 +1311,8 @@ def main():
     # the control loop's spin cadence (a 1 kHz joint-state stream, action
     # feedback, planning calls) never starves them: on the stub bench the
     # single executor gave the wrist's detector 1.6 frames a second
-    # (2026-09-16). The persistent owl_detector nodes own the OWL models;
-    # there is no in-process copy (a second OWLv2 beside cuRobo on one GPU,
-    # field 2026-09-01).
+    # (2026-09-16). No detector runs here: the box comes from sheppy's scene
+    # segmenter (/perception/object_detections).
     pnode = rclpy.create_node("box_opening_perception")
     from rclpy.executors import SingleThreadedExecutor
 
@@ -1320,12 +1324,6 @@ def main():
     ctx = None  # the finally below runs even if startup fails before Ctx
     pthread.start()
     try:
-        # the owl_detector nodes were started by the launch with no container
-        # of their own: tell them which one this run is for, so their prompts
-        # and floor are this container's
-        from box_opening.perception.owl_source import announce_container
-
-        announce_container(pnode, cfg_path)
         # what the perception sees and decides, drawn for Foxglove on a thread
         # of its own (perception/viz), which loads it once this thread waits:
         # nothing here waits on it, and starting it is that thread's start.
@@ -1368,14 +1366,9 @@ def main():
                     tag_px=None if scene_by_tf else scene_tag_px(args.scene_calib or scene_calib_path()),
                     scene_cfg=worlds.scene_camera_cfg,
                     base_frame=worlds.base_frame,
+                    instance_id=args.instance_id,
                 )
-                # the scene OWL NOW, where sheppy's scene segmenter cannot
-                # answer (no classes for this container, or down): its first
-                # bbox takes ~0.7 s (the node infers on the enable edge) and the
-                # readiness checks below are about that long — by the time
-                # locate() asks, the box is already on the topic. A live
-                # segmenter keeps the OWL off, and off the GPU (prime)
-                locator.prime()
+                locator.prime()  # the segmenter's state, for the log
         # camera on from here to exit
         ctx = Ctx(
             model=model,
@@ -1462,7 +1455,7 @@ def main():
                 fix_xyz=None if scene_fix is None else scene_fix.top_xyz,
                 score=None if scene_fix is None else scene_fix.score,
                 why=locator.last_why if scene_fix is None else None,
-                source=None if scene_fix is None else getattr(scene_fix, "source", "owl"),
+                source=None if scene_fix is None else getattr(scene_fix, "source", "segmenter"),
                 boxes=getattr(locator, "last_boxes", None),
             )
         if locator.moved_note and scene_fix is not None:
@@ -1510,8 +1503,8 @@ def main():
             yaw_deg=round(math.degrees(sp.yaw), 2),
             top_xyz=[round(float(v), 4) for v in scene_fix.top_xyz],
             n_points=scene_fix.n_points,
-            owl_score=round(scene_fix.score, 3),  # the detector's score, whichever detector
-            source=getattr(scene_fix, "source", "owl"),
+            owl_score=round(scene_fix.score, 3),  # the detector's score (the run log's field name since 2026-09)
+            source=getattr(scene_fix, "source", "segmenter"),
             n_sightings=int(getattr(scene_fix, "n_sightings", 1)),
             table_z_scene=None
             if scene_fix.table_z_scene != scene_fix.table_z_scene

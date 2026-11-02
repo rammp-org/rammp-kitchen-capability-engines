@@ -19,12 +19,10 @@ container:
   # kill a run without its own stop (a motion in flight left uncancelled).
   command: ["/module_ws/install/box_opening/lib/box_opening/box_opening_node"]
   volumes:
-    # OWLv2's weights, from the host's Hugging Face cache (not in the image)
-    - /home/snorlax/.cache/huggingface:/models/hf:ro
     # where runs keep their logs, captures and videos (state_dir)
     - /home/snorlax/.ros/box_opening:/state
-  # OWLv2 runs on the GPU (the mock has none and needs none).
-  gpus: all
+  # No GPU: nothing in it runs a model. The box comes from the scene segmenter
+  # (/perception/object_detections).
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here.
 params:
@@ -38,8 +36,6 @@ params:
   world: world_flatbot.yaml
   # where runs keep their logs, captures and videos (the volume above)
   state_dir: /state
-  # the wrist's and the scene camera's OWL detectors, in this node's process
-  owl: true
   # a video of both cameras from the grip to the set-down, written after each run
   video: true
   # what the perception sees and decides, drawn for Foxglove
@@ -54,11 +50,11 @@ subscribes:
   - /tf
   - /tf_static
   - /joint_states
-  - /gripper_state
   - /arm/robot_description
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
   - /wrist_camera/depth/image_rect_raw
+  - /gripper_state
   - /scene_camera/color/image_raw
   - /scene_camera/color/camera_info
   - /scene_camera/depth/image_rect_raw

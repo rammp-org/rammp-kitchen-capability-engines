@@ -17,8 +17,9 @@ def names(legs):
 
 def test_entry_points_registered():
     setup = Path("capabilities/box_opening/setup.py").read_text()
-    for ep in ["box_opening_node", "press_demo", "home_arm", "preflight", "owl_detector"]:
+    for ep in ["box_opening_node", "press_demo", "home_arm", "preflight"]:
         assert ep + " = " in setup
+    assert "owl_detector" not in setup  # no detector in this package: the scene segmenter finds the box
 
 
 def test_home_arm_plans_home_in_the_bench_world(ctx):
@@ -1118,9 +1119,8 @@ def test_the_scene_line_names_the_detector_and_the_sightings_behind_the_fix():
 
     seg = SimpleNamespace(score=0.881, source="segmenter", n_sightings=2, sources=("segmenter", "segmenter"))
     assert press_demo.scene_source_label(seg) == "SEG 0.88, 2 sightings (segmenter+segmenter)"
-    mixed = SimpleNamespace(score=0.31, source="owl", n_sightings=2, sources=("segmenter", "owl"))
-    assert press_demo.scene_source_label(mixed) == "OWL 0.31, 2 sightings (segmenter+owl)"
-    assert press_demo.scene_source_label(SimpleNamespace(score=0.44)) == "OWL 0.44, 1 sighting (owl)"  # an older fix
+    one = SimpleNamespace(score=0.44)  # a fix that names no detector: the segmenter's, the only one
+    assert press_demo.scene_source_label(one) == "SEG 0.44, 1 sighting (segmenter)"
 
 
 def test_the_lid_is_set_down_on_the_table_the_camera_measured():

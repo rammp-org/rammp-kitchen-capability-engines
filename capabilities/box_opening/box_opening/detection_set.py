@@ -171,7 +171,7 @@ class MissionFrames:
     def scene(self, arrays, fix_xyz=None, score=None, why=None, source=None, boxes=None):
         """The scene camera's capture at the locate, and its answer (the
         box's top) or why it had none; which detector the fix came from
-        ("segmenter" | "owl") and, per detector, the raw boxes of the last
+        ("segmenter") and, per detector, the raw boxes of the last
         message the locate gated (SceneLocator.last_boxes) — so a live run
         replays exactly. `scene_owl` stays the score behind the fix, for the
         evaluator."""

@@ -98,7 +98,7 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
 
     from box_opening import worlds as worlds_mod
     from box_opening.models.container import ContainerModel
-    from box_opening.perception import owl_source, scene, scene_calib, scene_source
+    from box_opening.perception import scene, scene_calib, scene_source
     from box_opening.perception.depth_source import container_pose_from_top
     from box_opening.tasks import cli_common, press_demo
 
@@ -122,7 +122,7 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
         grab = None
 
         def __init__(self, *a, **k):
-            self.owl = type("O", (), {"enable": lambda s: None})()
+            self.kwargs = k
 
         def prime(self):
             pass
@@ -148,10 +148,6 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
     monkeypatch.setattr(press_demo, "rclpy", _Rclpy)
     monkeypatch.setattr(faulthandler, "enable", lambda *a, **k: None)
     monkeypatch.setattr(rclpy.executors, "SingleThreadedExecutor", _Exec)
-    monkeypatch.setattr(owl_source, "announce_container", lambda node, path: None)
-    monkeypatch.setattr(
-        owl_source, "OwlRung", lambda *a, **k: type("Owl", (), {"enable": lambda s: None, "disable": lambda s: None})()
-    )
     monkeypatch.setattr(press_demo, "BoxTopWatcher", _Watcher)
     identity = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
     monkeypatch.setattr(scene, "load_scene_calibration", lambda p=None: identity)

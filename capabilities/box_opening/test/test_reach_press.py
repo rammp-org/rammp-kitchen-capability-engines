@@ -624,7 +624,7 @@ class _Rec:
     def __init__(self):
         self.events = []
         self.legs = {}  # name -> the last leg of that name
-        self.owl = []  # the scene OWL's ("on"/"off", events before it)
+        self.primes = []  # each locator.prime(): how many events came before it
         self.reads = 0  # at-rest reads (client.settled_efforts)
         self.runs = []  # per runner.run: (its legs' names, the gains each execution it took was sent)
 
@@ -754,12 +754,9 @@ def _flow(
         "none": None,
         "moved": SimpleNamespace(pose=moved_pose, top_xyz=(BUTTON[0] + 0.05, BUTTON[1], BUTTON[2])),
     }
-    # the scene OWL's enables/disables, each with how many events came before it
-    owl = SimpleNamespace(
-        enable=lambda: rec.owl.append(("on", len(rec.events))), disable=lambda: rec.owl.append(("off", len(rec.events)))
-    )
     locator = SimpleNamespace(
-        owl=owl, prime=owl.enable, locate=lambda s: (rec.events.append("scene"), seen[scene_after])[1]
+        prime=lambda: rec.primes.append(len(rec.events)),
+        locate=lambda s: (rec.events.append("scene"), seen[scene_after])[1],
     )
     args = SimpleNamespace(execute=True, press_only=True)
     code = reach_press.run_reach_press(None, ctx, cfg, runner, SimpleNamespace(), run_args or args, fix, locator)
@@ -846,8 +843,7 @@ def test_a_solved_line_is_flown_as_solved_only_from_where_it_starts(ctx, monkeyp
     assert got[0] == ctx.client.live and chain.lines == [([0.9, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])]
 
 
-def test_the_scene_owl_is_enabled_before_the_post_press_wrist_aim(ctx, monkeypatch, tmp_path):
-    # its first bbox (~1.2 s) comes while the wrist re-aims, not after it
+def test_the_scene_camera_looks_again_after_the_post_press_wrist_aim(ctx, monkeypatch, tmp_path):
     code, rec, _c, _h = _flow(ctx, monkeypatch, tmp_path)
     assert code == 0
     assert rec.events == [
@@ -864,26 +860,7 @@ def test_the_scene_owl_is_enabled_before_the_post_press_wrist_aim(ctx, monkeypat
         "scene",
         "home",
     ]
-    ons = [i for word, i in rec.owl if word == "on"]
-    assert ons and min(ons) <= rec.events.index("aim:reach-after")
-
-
-def test_an_aim_that_raises_after_the_early_enable_disables_the_scene_owl(ctx, monkeypatch):
-    # the enable is latched: a Ctrl-C in the re-aim must not leave the scene OWL inferring
-    ctx.model = ContainerModel.load(PINK)
-    calls = []
-    owl = SimpleNamespace(enable=lambda: calls.append("on"), disable=lambda: calls.append("off"))
-    locator = SimpleNamespace(owl=owl, prime=owl.enable, locate=lambda s: calls.append("scene"))
-
-    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag):
-        assert tag == "reach-after"
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(reach_press, "_aim", aim)
-    fix = SimpleNamespace(top_xyz=BUTTON)
-    with pytest.raises(KeyboardInterrupt):
-        reach_press._after_check(None, ctx, SimpleNamespace(), SimpleNamespace(), fix, locator, BUTTON, None, 0.0)
-    assert calls == ["on", "off"]
+    assert rec.primes and min(rec.primes) <= rec.events.index("aim:reach-after")  # its state read before the aim
 
 
 def test_both_reach_out_aims_take_their_own_budget_and_two_agreeing_hits(monkeypatch):

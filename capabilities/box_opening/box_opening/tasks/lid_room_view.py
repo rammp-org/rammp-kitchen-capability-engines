@@ -13,8 +13,7 @@ then add to Foxglove's 3D panel:
     /box_opening/lid_room/status    one line: where the lid goes, or why nowhere
 
 The box is where the mission's own SceneLocator finds it: from sheppy's
-scene_segmenter, or the scene OWL while press_demo.launch.py's
-owl_detector runs. Without either, click the box,
+scene_segmenter. Without it, click the box,
 or any spot to ask "what if the box stood here", with the 3D panel's
 publish-point tool (/clicked_point; in the 2D top-down view, so the click
 lands where it looks), or pass --box X Y. A click stays the box until the
@@ -41,8 +40,8 @@ from box_opening import LOGGER as log
 from box_opening.perception import clear_table as ct
 
 PERIOD_S = 3.0  # a map and a spot search a period: ~1 s of one core, niced
-OWL_RETRY_S = 30.0  # absent detectors (no segmenter, no owl_detector) are asked again this often
-DETECTOR_NAMES = {"segmenter": "scene segmenter", "owl": "scene OWL"}  # SceneFix.source, as the status names it
+DETECTOR_RETRY_S = 30.0  # an absent scene segmenter is asked again this often
+DETECTOR_NAMES = {"segmenter": "scene segmenter"}  # SceneFix.source, as the status names it
 STATUS_TOPIC = "/box_opening/lid_room/status"
 MARKER_TOPIC = "/box_opening/lid_room/markers"
 POINTS_TOPIC = "/box_opening/lid_room/points"
@@ -63,7 +62,7 @@ PLANNER_RGBA = (0.30, 0.55, 1.00, 0.25)
 @dataclass
 class RoomView:
     fix: object  # the SceneFix the map was made from
-    source: str  # where the box came from: "scene segmenter", "scene OWL", "clicked", "--box"
+    source: str  # where the box came from: "scene segmenter", "clicked", "--box"
     tmap: object = None
     drops: list = None
     spots: list = None
@@ -337,7 +336,6 @@ def main():
     from visualization_msgs.msg import MarkerArray
 
     from box_opening.models.container import ContainerModel, load_press_demo
-    from box_opening.perception.owl_source import announce_container
     from box_opening.perception.scene import load_scene_calibration
     from box_opening.perception.scene_source import SceneLocator
     from box_opening.tasks import cli_common
@@ -356,10 +354,12 @@ def main():
         type=float,
         metavar=("X", "Y"),
         default=None,
-        help="the box stands here (base frame, m) instead of where the OWL or a click says",
+        help="the box stands here (base frame, m) instead of where the segmenter or a click says",
     )
     ap.add_argument("--period", type=float, default=PERIOD_S, help="seconds between maps (default %(default)s)")
-    ap.add_argument("--no-owl", action="store_true", help="never ask the scene OWL; the box is clicked or --box")
+    ap.add_argument(
+        "--no-detector", action="store_true", help="never ask the scene segmenter; the box is clicked or --box"
+    )
     args = ap.parse_args()
     why = cli_common.rmw_refusal(os.environ)
     if why:
@@ -373,7 +373,7 @@ def main():
         sys.exit("[lid_room_view] not starting: the scene camera is not calibrated (scripts/calibrate_scene_camera.py)")
     frame = worlds.base_frame
 
-    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C is ours: the OWL's gate is shut on the way out
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C is ours: the spinner stops first on the way out
     node = rclpy.create_node("box_opening_lid_room_view")
     locator = SceneLocator(
         node,
@@ -403,8 +403,6 @@ def main():
         log.info("[lid_room_view] the box is now the click at [%.2f, %.2f]" % manual["xy"])
 
     node.create_subscription(PointStamped, CLICK_TOPIC, clicked, 10)
-    if not args.no_owl:
-        owl_announcer = announce_container(node, cfg_path)  # noqa: F841 (it keeps the latched message alive)
     pexec = SingleThreadedExecutor()
     pexec.add_node(node)
     spinner = threading.Thread(target=pexec.spin, name="perception", daemon=True)
@@ -413,7 +411,7 @@ def main():
         "[lid_room_view] nothing moves. Every %.0f s: the scene camera's room map and the lid's spot on %s, %s"
         % (args.period, MARKER_TOPIC, POINTS_TOPIC)
     )
-    said, owl_next = None, 0.0
+    said, detector_next = None, 0.0
     try:
         while True:
             t0 = time.monotonic()
@@ -423,23 +421,19 @@ def main():
                 pts, why = scene_points(locator)
                 if pts is not None:
                     fix, why = fix_around(pts, manual["xy"], model)
-            elif not args.no_owl and t0 >= owl_next:
+            elif not args.no_detector and t0 >= detector_next:
                 fix = locator.locate(SCENE_LOCATE_S)
                 if fix is None:
                     why = locator.last_why or "the scene camera found no box"
-                    if locator.owl.latest is None and locator.last_seg_state != "live":
-                        why = (
-                            "neither sheppy's scene_segmenter nor an owl_detector is answering "
-                            "(press_demo.launch.py starts the OWL)"
-                        )
-                        owl_next = time.monotonic() + OWL_RETRY_S
+                    if locator.last_seg_state in ("absent", "unavailable", "silent"):
+                        detector_next = time.monotonic() + DETECTOR_RETRY_S
                 else:
-                    source = DETECTOR_NAMES.get(getattr(fix, "source", "owl"), "scene camera")
+                    source = DETECTOR_NAMES.get(getattr(fix, "source", "segmenter"), "scene camera")
             else:
                 why = (
-                    "--no-owl, and no box clicked"
-                    if args.no_owl
-                    else "neither sheppy's scene_segmenter nor an owl_detector is answering"
+                    "--no-detector, and no box clicked"
+                    if args.no_detector
+                    else "sheppy's scene_segmenter is not answering (asked again every %.0f s)" % DETECTOR_RETRY_S
                 )
             stamp = node.get_clock().now().to_msg()
             if fix is None:
@@ -462,9 +456,6 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if not args.no_owl:
-            locator.owl.disable()
-            time.sleep(0.2)  # the latched False must leave before the node goes
         # the spinning thread stops BEFORE rclpy is torn down: one still in
         # spin() at exit ends in "terminate called without an active
         # exception" (press_demo's finally; this view's first live run)

@@ -240,29 +240,6 @@ scan:
                                   # look alone covers x 0.28-0.71, y +/-0.38
                                   # at LID height (its narrow axis is x)
   xyz: [0.42, 0.0, 0.45]          # reach-probe survey point only
-vlm:                              # detect.source: vlm — the semantic gate
-  backends: [owl, claude]         # tried in order, first bbox wins. LOCAL
-                                  # first: the wheelchair will not always
-                                  # have internet (deployment 2026-09-01); the
-                                  # cloud is the fallback and plain depth is
-                                  # the floor when both decline.
-  owl_model: google/owlv2-base-patch16-ensemble
-  owl_queries:                    # phrasing matters more than the model:
-    - a small white square box    # 0.24 on the bench captures, 8/8 frames,
-    - a white plastic container with a lid  # bbox stable to +/-1 px
-  owl_min_score: 0.18             # false positives sat at 0.12-0.18 on the
-                                  # captures; the true box at 0.235-0.249
-  owl_min_score_scene: 0.12       # the scene camera's floor (was the launch
-                                  # file's): from a metre the box scores lower,
-                                  # and the lid-slab geometry behind it rejects
-                                  # anything that is not this box's top
-  model: claude-opus-5            # measured 2026-09-01: 3.3 s, box dead-on;
-                                  # claude-haiku-4-5 was 0.4 s faster and
-                                  # boxed the ROBOT'S OWN BASE. Fast loses.
-  target: the OXO POP food-storage container — a square white plastic container with a rounded-square white lid
-  timeout_s: 20.0                 # API budget; past it the mission falls
-                                  # back to plain depth, never stalls
-  pad_px: 20                      # bbox padding before it gates the depth
 detect:
   confirm_in_flight: false        # true: with the scene camera's coarse fix,
                                   # the approach and the guarded descent fly
@@ -300,23 +277,8 @@ detect:
                                   # button (field 2026-09-03). 97 % of
                                   # plateau frames yield a circle; false
                                   # falls back to centroid-or-circle.
-  source: vlm                     # vlm | depth. Both find the box by depth:
-                                  # the lid plateau above the measured table
-                                  # supplies the mm geometry, and every depth
-                                  # honesty gate always stands. vlm adds the
-                                  # semantic ladder above (vlm.backends: the
-                                  # persistent OWL node first, the cloud as
-                                  # fallback) to say WHICH surface is the
-                                  # container (bbox) — its live bbox gates
-                                  # the depth watcher while the arm parks,
-                                  # and the ladder is walked only when depth
-                                  # alone has not answered in its first beat;
-                                  # every rung declining = plain depth. depth
-                                  # = the geometry alone (refuses when two
-                                  # box-sized tops are in view). No print to
-                                  # wear out: the press knuckles destroyed
-                                  # two ArUco prints in a week (field
-                                  # 2026-09-01) and that path is gone.
+  source: depth                  # read by nothing since the scene segmenter finds the box (the
+                                  # loader still checks it is depth or vlm)
   timeout_s: 10.0                 # scan-pose wait for a stable fix
   min_hits: 3                     # agreeing frames before the fix commits
   tol_m: 0.015                    # pairwise agreement (stable_fix). 0.03

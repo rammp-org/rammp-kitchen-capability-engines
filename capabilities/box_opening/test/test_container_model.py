@@ -76,7 +76,7 @@ def test_loader_refuses_the_retired_tag_source(tmp_path):
     from box_opening.models.container import load_press_demo
 
     with pytest.raises(ValueError, match="detect.source"):
-        load_press_demo(_cfg_variant(tmp_path, "source: vlm", "source: tag"))
+        load_press_demo(_cfg_variant(tmp_path, "source: depth", "source: tag"))
 
 
 def test_a_guarded_descent_never_flies_faster_than_a_transit(tmp_path):
@@ -151,23 +151,19 @@ def test_every_shipped_container_config_loads_and_validates():
         # lid's spot is the cameras' every run, never a pose in the yaml
         assert "open_container" not in yaml.safe_load(f.read_text()), f.name
         assert len(model.dims) == 3 and all(v > 0 for v in model.dims), f.name
-        assert cfg.owl_queries and cfg.owl_min_score > 0, f.name
+        assert "vlm" not in yaml.safe_load(f.read_text()), f.name  # no detector of its own: the scene segmenter
+        assert cfg.detect_period_s > 0, f.name
     pink = ContainerModel.load(str(folder / "ankou_pink.yaml"))
     # estimated from photos; the owner accepted flying on the estimates
     # (2026-09-22) — every one of them fails safe, and the first press
     # measures the button's height and diameter itself
     assert not pink.measure_me
     assert pink.dims[0] == pink.dims[1]  # round: the lid's diameter both ways
-    cfg = load_press_demo(str(folder / "ankou_pink.yaml"))
-    assert all("pink lid" in q for q in cfg.owl_queries)
-    assert not any("button" in q for q in cfg.owl_queries)  # a button-only box fails the footprint floor
-    oxo = load_press_demo(str(folder / "oxo_pop.yaml"))
-    assert oxo.owl_queries != cfg.owl_queries
 
 
 def test_the_default_container_is_the_pink_canister(monkeypatch):
     """Owner, 2026-09-22: "this box is the new default". Every CLI that
-    takes --container, and both OWL detector nodes, fall back to this one.
+    takes --container falls back to this one.
     The same function serves them all, so they cannot disagree. (The
     installed share dir comes from the ament index, which the unit-test
     shell does not carry: pointed at the source tree here.)"""
@@ -207,13 +203,12 @@ PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
 
 def test_the_canister_is_found_by_the_segmenter_as_the_food_container_it_stands_in():
     """ankou_pink names the scene segmenter's class (RF-DETR boxes the blue
-    holder as a COCO bowl, "food container"); the OXOs name none and keep
-    the scene OWL alone. Its OWL is the fallback, at the lower floor."""
+    holder as a COCO bowl, "food container"). The OXOs name none: nothing
+    finds them until a bench look says what the segmenter boxes them as."""
     from box_opening.models.container import load_press_demo
 
     pink = load_press_demo(PINK)
     assert pink.segmenter_classes == ("food container",) and pink.segmenter_box == "holder"
-    assert pink.owl_min_score_scene == pytest.approx(0.05)
     for name in ("oxo_pop.yaml", "oxo_pop_small.yaml"):
         oxo = load_press_demo("capabilities/box_opening/config/containers/" + name)
         assert oxo.segmenter_classes == () and oxo.segmenter_box == "holder"
@@ -251,4 +246,4 @@ def test_a_bad_scene_detect_block_is_refused_at_load(tmp_path):
     with pytest.raises(ValueError, match="must be a mapping"):
         load_press_demo(str(listed))
     none = load_press_demo(_pink_variant(tmp_path, "segmenter_classes: [food container]", "segmenter_classes: []"))
-    assert none.segmenter_classes == ()  # an empty list: no segmenter, the OWL alone
+    assert none.segmenter_classes == ()  # an empty list: no segmenter, so nothing finds it

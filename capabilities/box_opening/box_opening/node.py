@@ -13,9 +13,10 @@ console lines become this node's log lines, and the rows its run log gains becom
 action's progress. A run is one motion from the press to the set-down, so
 it cannot pause once it starts; a cancel stops it at once.
 
-The wrist's and the scene camera's OWL detectors, which the run asks where the box is
-(perception/owl_node), are nodes of this process: each loads OWLv2 onto the GPU once, in
-the background from startup, so no run waits for it.
+The run finds the container with sheppy's scene segmenter (/perception/object_detections),
+the perception already running on the robot: only the object the orchestrator selected (its
+instance_id, passed to the run as --instance-id), and a lid box stacked on it. No detector
+runs in this node.
 
 SAFETY: the arm moves only if the node runs with allow_execute:=true AND the goal sets
 `execute`. Otherwise the run is a dry run: it finds the box, plans and checks every motion,
@@ -51,7 +52,6 @@ PARAMS = {
     "world": "world_flatbot.yaml",
     # where runs keep their logs, captures and videos; "" = ~/.ros/box_opening
     "state_dir": "",
-    "owl": True,
     "video": True,
     "viz": False,
     # debug: each --execute run keeps its camera frames (~10 MB; the newest 20 kept)
@@ -302,11 +302,8 @@ class Capability(CapabilityEngine):
         super().__init__("box_opening", **node_kwargs)
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
         self._run = None  # the Run under way
-        self._owl = []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
-        if not self.mock and self.cfg["owl"]:
-            threading.Thread(target=self._start_owl, name="owl-load", daemon=True).start()
         self.get_logger().info(
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
@@ -395,6 +392,8 @@ class Capability(CapabilityEngine):
         argv += ["--container", config_path(self.cfg["container"], "containers")]
         argv += ["--bench-world", config_path(self.cfg["world"])]
         argv += ["--speed-scale", str(float(self.cfg["speed_scale"]))]
+        if self.instance_id:  # the container the orchestrator selected; standalone: any of its class
+            argv += ["--instance-id", self.instance_id]
         return argv + (["--execute"] if execute else [])
 
     def _env(self):
@@ -422,31 +421,6 @@ class Capability(CapabilityEngine):
             "run_log": None,
             "note": note,
         }
-
-    def _start_owl(self):
-        """The two OWL detectors, as nodes of this process once each has loaded."""
-        from rclpy.parameter import Parameter
-
-        from .perception.owl_node import OwlDetector
-        from .worlds import WorldStore
-
-        store = WorldStore(config_path(self.cfg["world"]))
-        container = config_path(self.cfg["container"], "containers")
-        cameras = [("box_opening_owl_wrist", "wrist", store.wrist_camera_config or "")]
-        scene_cfg = store._bench.get("scene_camera_config") or ""
-        if scene_cfg:
-            cameras.append(("box_opening_owl_scene", "scene", scene_cfg))
-        for name, camera, camera_cfg in cameras:
-            given = {"container": container, "camera": camera, "camera_config": camera_cfg}
-            try:
-                owl = OwlDetector(name, parameter_overrides=[Parameter(k, value=v) for k, v in given.items() if v])
-            except Exception as e:  # no GPU, no weights: the run says no box, this says why
-                self.get_logger().error(f"{name}: the OWL detector did not load: {e!r}")
-                continue
-            while self.executor is None:  # run() adds this node to its executor after __init__
-                time.sleep(0.1)
-            self.executor.add_node(owl)
-            self._owl.append(owl)
 
     def _on_shutdown(self):
         """SIGTERM (docker stop) or Ctrl+C: a run under way stops its own way first."""

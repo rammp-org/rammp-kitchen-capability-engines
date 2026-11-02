@@ -28,8 +28,6 @@ setup(
             # attended bring-up by hand, not actions: the arm home from where it holds, and the checks
             "home_arm = box_opening.tasks.home_arm:main",
             "preflight = box_opening.tasks.preflight:main",
-            # the OWL detector on its own (the node hosts two in its process)
-            "owl_detector = box_opening.perception.owl_node:main",
             # a wrist detection set from live frames, and a Foxglove view of where the lid would go
             "record_detection_set = box_opening.tasks.record_detection_set:main",
             "lid_room_view = box_opening.tasks.lid_room_view:main",
