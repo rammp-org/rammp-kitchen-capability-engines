@@ -18,12 +18,12 @@ go and push it further open -- one run.
    handle at the end.
 
 4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper,
-   cuRobo up (the fingertips PUSH_CLEAR_TRY_M over the door top) and back (PUSH_BACK_M) from the handle, turning the
-   hand to point down (or on the way over: the first variant that plans);
-   then straight legs, sim-gated against the door model: over to above the inside of the door; down until the tool
-   is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the handle; push PUSH_DIST_M square to the door,
-   opening it further. Checked from the planned swing's end before any motion, re-planned from the real one before
-   letting go, and once more from where cuRobo leaves the arm.
+   then four cuRobo moves, the hand pointing down (PUSH_TILT_TRY_DEG off vertical, the least that plans): up
+   (the fingertips PUSH_CLEAR_TRY_M over the door top, the most that plans) and back (PUSH_BACK_M) from the handle;
+   over to above the inside of the door; down until the tool is at the door top, PUSH_BEHIND_DOOR_M behind its inner
+   face at the handle; push PUSH_DIST_M square to the door, opening it further. cuRobo is trusted with all of it
+   (11-02) -- not sim-gated, and its world has no door: it is asked for the whole chain (plan_to_pose, nothing moves)
+   from the planned swing's end before the grasp, and again from the real one before letting go.
 
 `--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
 handle, go toward the base to clear the door's free edge, joint move to `PARK_JOINTS` (constants).
@@ -36,7 +36,6 @@ YOLO or boxer finding the microwave, the push-open that follows the swing.
 """
 
 import argparse
-import contextlib
 import json
 import sys
 import time
@@ -45,8 +44,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import rammp_arm
-from capability_engine import sim
 from capability_engine.arm import IMPEDANCE as IMPEDANCE_MODE
+from capability_engine.arm_messages import HOLD_FIXED, HOLD_NONE
 from door_common import common as dc
 from door_common import open_door as shared
 from door_common.common import (
@@ -55,14 +54,10 @@ from door_common.common import (
     Refused,
     RunLog,
     check_curobo_goal,
-    drop,
-    make_sim,
-    plan_cartesian,
     quiet,
     release_and_back_off,
     save_door_geometry,
     say,
-    short_delta,
 )
 from door_common.open_door import BACK_OFF_M, SWING_MAX_TRY_DEG, SWING_MIN_DEG
 from scipy.spatial.transform import Rotation as R
@@ -104,6 +99,9 @@ PUSH_BEHIND_DOOR_M = 0.05  # (~2 in) then the tool goes down this far behind the
 PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing down: the fingertips reach
 #   FINGERTIP_PAST_TOOL (6 cm) below the top edge
 PUSH_DIST_M = 0.12  # then push this far, square to the door (its outward normal: further open)
+PUSH_TILT_TRY_DEG = (0, 30, 45, 60)  # the hand points down tilted this far from vertical, leaning away from the arm
+#   base, the least that plans: straight down over the inside of the door the wrist runs out (11-02: J6 -104..-114,
+#   at its guard, and IK 1-2 cm off on the way there)
 PRE_PARK_X = 0.216
 
 HANDLE_DETECTOR_MODEL = YOLO_MODEL  # the node sets its yolo_model parameter here
@@ -137,12 +135,12 @@ def configure(data_dir):
     )
 
 
-def _push_poses(door, ee, clear_m, pads, turn_first):
+def _push_poses(door, ee, clear_m, tilt_deg):
     """The push-open's targets from the door file `door` as the swing left it (door_open_deg, open_sign) and the
     hand pose `ee` [x, y, z, qx, qy, qz, qw] at the swing's end: the fingertips crossing `clear_m` over the door top,
-    the pads facing `pads` (+-1) along the push, the hand turned down already at up-and-back (`turn_first`) or on the
-    way over the door. SimpleNamespace(df, deg, up_back, quat_up (the hand there), above, inside, pushed, down (the
-    pointing-down quat), out (the open door's outward normal: pushing along it opens it further), how (the variant))."""
+    the hand pointing down tilted `tilt_deg` from vertical away from the arm base. SimpleNamespace(df, deg, sign,
+    up_back, above, inside, pushed, down (the hand's quat throughout), out (the open door's outward normal: pushing
+    along it opens it further), how (the variant))."""
     sign, deg = float(door.get("open_sign", 1.0)), float(door["door_open_deg"])
     df = DoorFrame(door, sign)
     top = float(door["door_z"][1])
@@ -152,11 +150,14 @@ def _push_poses(door, ee, clear_m, pads, turn_first):
     up_z = top + clear_m + FINGERTIP_PAST_TOOL  # the tool, with the fingertips (pointing down) clear_m over the top
     up_back[2] = up_z
     above = np.r_[inside[:2], up_z]
-    down_z, y = (
-        np.array([0.0, 0.0, -1.0]),
-        out * pads,
-    )  # tool z down, tool y along the push: a finger pad meets the door
-    down = R.from_matrix(np.column_stack([np.cross(y, down_z), y, down_z])).as_quat()
+    # tool z down, tilted away from the arm base (the fingertips then lean further behind the door, not into it); tool
+    # y along the push: a finger pad meets the door
+    away = np.r_[inside[:2], 0.0] / np.linalg.norm(inside[:2])
+    t = np.radians(tilt_deg)
+    z = np.cos(t) * np.array([0.0, 0.0, -1.0]) + np.sin(t) * away
+    y = out - z * float(out @ z)
+    y /= np.linalg.norm(y)
+    down = R.from_matrix(np.column_stack([np.cross(y, z), y, z])).as_quat()
     return SimpleNamespace(
         df=df,
         deg=deg,
@@ -167,63 +168,43 @@ def _push_poses(door, ee, clear_m, pads, turn_first):
         pushed=inside + out * PUSH_DIST_M,
         down=down,
         out=out,
-        quat_up=down if turn_first else np.asarray(ee[3:7], dtype=float),
-        how=f"fingertips {clear_m * 100:.1f} cm over the door top, the hand turned down "
-        f"{'at up-and-back' if turn_first else 'on the way over'}, pads {'+' if pads > 0 else '-'}",
+        how=f"the hand {tilt_deg} deg off straight down, fingertips {clear_m * 100:.1f} cm over the door top",
     )
 
 
-def _plan_push(scene, rb, P, q_up, loud=False):
-    """The straight legs after cuRobo's up-and-back, from joints `q_up` there: over the door to above its inside
-    (turning the hand down unless it already is), down, the push. The first two are gated against the door model at
-    its opening; the push only against the body (it pushes the door). Returns ([(label, joints, length m)], None) or
-    (None, why)."""
-    bodies = P.df.bodies(scene, rb, P.deg)
-    try:
-        legs, q = [], q_up
-        for label, p0, q0, p1, avoid in (
-            ("over the door", P.up_back, P.quat_up, P.above, bodies),
-            ("down inside the door", P.above, P.down, P.inside, bodies),
-            ("push open", P.inside, P.down, P.pushed, bodies[1:]),
-        ):
-            with contextlib.nullcontext() if loud else quiet():
-                leg = plan_cartesian(scene, rb, p0, q0, p1, P.down, q, f"push-open: {label}", avoid)
-            if leg is None:
-                return None, f"push-open: '{label}' fails a gate"
-            legs.append((label, leg, float(np.linalg.norm(np.asarray(p1) - np.asarray(p0)))))
-            q = leg[-1]
-        return legs, None
-    finally:
-        drop(rb, bodies)
+def _push_legs(P):
+    """The push-open's cuRobo moves: (label, tool position, orientation hold) -- turning down on the first, then the
+    hand held as it is."""
+    return (
+        ("up and back", P.up_back, HOLD_NONE),
+        ("over the door", P.above, HOLD_FIXED),
+        ("down inside the door", P.inside, HOLD_FIXED),
+        ("push open", P.pushed, HOLD_FIXED),
+    )
 
 
-def _plan_push_open(scene, rb, door, ee, q, loud=False):
-    """The whole push-open from the hand pose `ee` / joints `q` at the swing's end, the first variant that plans --
-    the fingertips crossing PUSH_CLEAR_TRY_M over the door top, the hand turned down at up-and-back or on the way
-    over, the pads either way along the push: (P, q_up, legs, None) or (None, None, None, why). cuRobo's up-and-back
-    is NOT sim-gated (cuRobo is trusted with its own move, 11-02): its goal `q_up` is plain IK, from `q` and the arm's
-    other configurations, kept only as the configuration the checked straight legs after it are planned from -- the
-    open sends cuRobo those joints, so it arrives on that configuration."""
-    whys, seeds = [], [np.asarray(q, dtype=float), *shared._config_seeds(q, quick=True)]
-    for clear_m in PUSH_CLEAR_TRY_M:
-        for turn_first in (True, False):
-            for pads in (1.0, -1.0):
-                P = _push_poses(door, ee, clear_m, pads, turn_first)
+def _plan_push_open(ai, door, ee, q, loud=False):
+    """Ask cuRobo -- nothing moves -- for the push-open from the hand pose `ee` / joints `q` at the swing's end: each
+    of its moves (_push_legs) from where the one before ends, for the first variant that plans all of them -- the hand
+    PUSH_TILT_TRY_DEG off straight down, the fingertips PUSH_CLEAR_TRY_M over the door top. Not sim-gated: cuRobo is
+    trusted with it (11-02), and its world has no door. Returns (P, [(label, Plan)], None) or (None, None, why)."""
+    whys = []
+    for tilt_deg, clear_m in ((t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M):
+        P = _push_poses(door, ee, clear_m, tilt_deg)
+        start, plans = np.asarray(q, dtype=float), []
+        for label, pos, hold in _push_legs(P):
+            pl = ai.plan_to_pose(pos, P.down, start, hold=hold)
+            if not pl.success:
+                whys.append(f"{P.how}: cuRobo can't plan '{label}' ({pl.message})")
                 if loud:
-                    say(f"  push-open, {P.how}:")
-                why, tried = "no IK for up and back", []
-                for seed in seeds:
-                    q_up, err = sim.solve_ik(scene, rb, P.up_back, P.quat_up, seed)
-                    if err > sim.MAX_IK_ERR or any(
-                        np.degrees(np.max(np.abs(short_delta(t, q_up)))) < shared.SAME_CONFIG_DEG for t in tried
-                    ):
-                        continue  # no solution from this seed, or a configuration already tried
-                    tried.append(q_up)
-                    legs, why = _plan_push(scene, rb, P, q_up, loud)
-                    if legs is not None:
-                        return P, q_up, legs, None
-                whys.append(f"{P.how}: {why}")
-    return None, None, None, f"push-open: none of {len(whys)} variants plans (first: {whys[0]})"
+                    say(f"  push-open, {whys[-1]}")
+                break
+            plans.append((label, pl))
+            if len(pl.q):
+                start = pl.q[-1]
+        else:
+            return P, plans, None
+    return None, None, f"push-open: cuRobo plans none of {len(whys)} variants (first: {whys[0]})"
 
 
 def _door_after_swing(geom, cand):
@@ -257,9 +238,8 @@ def _curobo_path(plan_fn, label):
 
 def _save_plan(ai, run_dir, push):
     """A dry run's plan, for render_plan: <run_dir>/plan.json -- the joints (rad) of the start, the line-up, the
-    straight in, the swing and (`push`) the push-open's cuRobo goal and legs, and the door as the open would save it.
-    With self.arm, also cuRobo's own paths for its two moves (the line-up, the push-open's up-and-back): asked of the
-    planner, nothing moves."""
+    straight in, the swing, and the door as the open would save it; with self.arm, cuRobo's own paths for the line-up
+    and (`push`) the push-open's moves -- asked of the planner, nothing moves."""
     if shared.LAST_PLAN is None:
         return
     q0, plan, geom = shared.LAST_PLAN["q0"], shared.LAST_PLAN["plan"], shared.LAST_PLAN["geom"]
@@ -279,34 +259,33 @@ def _save_plan(ai, run_dir, push):
     curobo = hasattr(ai, "plan_to_joints")
     if curobo:
         out["line_up_curobo"] = _curobo_path(lambda: ai.plan_to_joints(plan["q_pre"], ai.raw_joints()), "the line-up")
-    if push and door is not None:
-        scene, rb = make_sim()
-        with quiet():
-            P, q_up, legs, _ = _plan_push_open(scene, rb, door, list(plan["wps"][-1]), plan["arc"][-1])
-        if legs is not None:
-            out["push_open"] = dict(up_back=j(q_up), legs=[dict(label=lb, joints=j(leg)) for lb, leg, _ in legs])
-            if curobo:
-                out["push_open"]["up_back_curobo"] = _curobo_path(
-                    lambda: ai.plan_to_joints(q_up, plan["arc"][-1]), "the push-open's up-and-back"
-                )
+    if push and door is not None and curobo:
+        P, plans, why = _plan_push_open(ai, door, list(plan["wps"][-1]), plan["arc"][-1])
+        if plans is not None:
+            say(f"  cuRobo planned the push-open: {P.how}")
+            out["push_open"] = dict(how=P.how, legs=[dict(label=lb, joints=j(pl.q)) for lb, pl in plans])
+        else:
+            say(f"  {why}")
     (run_dir / "plan.json").write_text(json.dumps(out))
     say(f"plan saved: {run_dir / 'plan.json'} -- render it: python3 -m microwave.render_plan {run_dir}")
 
 
 class PushOpen(shared.AfterSwing):
-    """Plans the push-open with the swing, against the door as the open will have saved it then, so a push-open that
-    can't run refuses BEFORE the grasp; `push_open` re-plans it from where the swing really ends."""
+    """Asks cuRobo for the push-open with the swing, against the door as the open will have saved it then, so a
+    push-open cuRobo can't plan refuses BEFORE the grasp; `push_open` asks again from where the swing really ends.
+    Without cuRobo (no plan_to_pose: the bench's mock) it can't check, and says so."""
+
+    def __init__(self, ai):
+        self.ai = ai
 
     def check(self, scene, rb, geom, cand, explain):
-        end_wp, q_end = cand["wps"][-1], cand["arc"][-1]
+        if not hasattr(self.ai, "plan_to_pose"):
+            return True, "push-open: not checked (no cuRobo)"
         door = _door_after_swing(geom, cand)
         if door is None:
             return False, "push-open: no door height detected (door_z) to place it"
-        _, _, _, why = _plan_push_open(scene, rb, door, list(end_wp), q_end)
-        if why and explain:  # the best candidate's failing push-open, out loud
-            say(f"  tilt {cand['pitch']} deg, swing {cand['swing']} deg: {why} -- its plan in full:")
-            _plan_push_open(scene, rb, door, list(end_wp), q_end, loud=True)
-        return why is None, why or "push-open OK"
+        P, _, why = _plan_push_open(self.ai, door, list(cand["wps"][-1]), cand["arc"][-1], loud=explain)
+        return why is None, why or f"push-open OK ({P.how})"
 
 
 def _pose_T(pos, quat):
@@ -492,28 +471,28 @@ def open_task(
         execute,
         max_swing,
         min_swing,
-        after_swing=PushOpen() if push else None,
+        after_swing=PushOpen(ai) if push else None,
         before_detect=partial(_view_step, view_only),
         on_grasp=on_grasp,
     )
 
 
 def push_open(ai, execute, on_release=None):
-    """After the swing: let go of the handle and push the door further open (see the module's step 4). `on_release()`:
-    called once the gripper has let go. Saves the door's new opening to the door file. Returns True when the push
-    finished (or the dry run passed); raises Refused."""
+    """After the swing: let go of the handle and push the door further open (see the module's step 4), all cuRobo.
+    `on_release()`: called once the gripper has let go. Saves the door's new opening to the door file. Returns True
+    when the push finished (or the dry run passed); raises Refused."""
     say("\n===== release + push further open =====")
     if not execute:
-        say(
-            "  (planned above from the planned swing's end -- see the chosen tilt's line; re-planned from the real one)"
-        )
+        say("  (asked of cuRobo above from the planned swing's end -- see the chosen tilt's line; asked again from the")
+        say("   real one)")
         return True
     door = json.loads(dc.DOOR_FILE.read_text())
     st = ai.get_state()
-    scene, rb = make_sim()
-    P, q_up, _, why = _plan_push_open(scene, rb, door, list(st["ee_pos"]), st["position"])
+    start = ai.raw_joints() if hasattr(ai, "raw_joints") else st["position"]
+    P, _, why = _plan_push_open(ai, door, list(st["ee_pos"]), start)
     if why:
         raise Refused(f"{why} from where the swing ended -- still holding the handle.")
+    say(f"push-open: {P.how}")
     gains = shared.grasped_impedance()
     go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=shared.GRASPED_GAINS)
     say("opening the gripper ...")
@@ -521,22 +500,10 @@ def push_open(ai, execute, on_release=None):
     time.sleep(0.5)
     if on_release is not None:
         on_release()
-    # cuRobo turns the hand to point down on the way up: a 90 deg wrist turn in free space, not along a checked line
-    # (11-01: turning on the straight leg over the door failed its gates)
-    say(f"push-open: {P.how}")
-    # cuRobo to the joints the straight legs were planned from (not the pose: it could arrive on another configuration)
-    if not ai.go_to_joint_config(q_up, "push-open: up and back", **go_to):
-        raise Refused("push-open: did not get up and back -- the arm holds where it is.")
-    # cuRobo may end on another joint branch than the checked IK: plan the legs from where it left the arm
-    legs, why = _plan_push(scene, rb, P, ai.get_state()["position"])
-    if legs is None:
-        raise Refused(f"{why} from where cuRobo left the arm -- the arm holds where it is.")
-    for label, leg, length in legs:
-        speed = PUSH_OPEN_SPEED_SCALE * rammp_arm.contact_speed_scale() if label == "push open" else 1.0
-        say(f"push-open: {label} ({length * 100:.0f} cm) ...")
-        if not ai.move_joints(
-            list(leg), cart_lengths=[length / len(leg)] * len(leg), speed_scale=speed, impedance=gains
-        ):
+    for label, pos, hold in _push_legs(P):
+        speed = rammp_arm.GO_TO_SPEED_SCALE * (PUSH_OPEN_SPEED_SCALE if label == "push open" else 1.0)
+        say(f"push-open: {label} (cuRobo) ...")
+        if not ai.go_to_ee_pose(pos, P.down, f"push-open: {label}", speed, orientation_hold=hold, **go_to):
             raise Refused(
                 f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
             )

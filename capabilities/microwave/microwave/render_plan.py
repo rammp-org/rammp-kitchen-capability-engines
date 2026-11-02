@@ -4,9 +4,9 @@ the microwave's body, from the side and from above.
     python3 -m microwave.render_plan /microwave_data/runs/<time>_open        # -> <run>/plan.mp4
 
 A dry run saves <run>/plan.json (open_door._save_plan). Run this where the arm driver publishes /arm/robot_description
-(the microwave container on the robot). cuRobo's two moves -- the line-up and the push-open's up-and-back -- are
-cuRobo's own plans when the dry run could ask the planner for them (plan_to_*; nothing moved); otherwise a straight
-joint-space blend from their start to their checked goal, labelled so.
+(the microwave container on the robot). The line-up and every push-open move are cuRobo's own plans, asked of the
+planner by the dry run (plan_to_*; nothing moved) -- the line-up falls back to a straight joint-space blend to its goal
+when cuRobo couldn't plan it, labelled so. cuRobo's world has no door: watch whether its paths clip the blue one.
 """
 
 import argparse
@@ -162,12 +162,7 @@ def main():
     swing_end_deg = w.door_deg_at(w.tool(q))
     po = plan["push_open"]
     if po is not None:
-        frames += [(q, False, swing_end_deg, "let go")] * HOLD_FRAMES
-        up = po.get("up_back_curobo")
-        label = "up and back (cuRobo's plan)" if up else "up and back (cuRobo: goal checked, path blended)"
-        for nq in _through(q, up or [po["up_back"]]):
-            frames.append((nq, False, swing_end_deg, label))
-        q = frames[-1][0]
+        frames += [(q, False, swing_end_deg, f"let go -- push-open: {po['how']}")] * HOLD_FRAMES
         for leg in po["legs"]:
             pushing = leg["label"] == "push open"
             start_xy = w.tool(q)[:2] - w.df.hinge[:2] if pushing else None
@@ -177,7 +172,7 @@ def main():
                     now = w.tool(nq)[:2] - w.df.hinge[:2]
                     turn = np.degrees(np.arctan2(start_xy[0] * now[1] - start_xy[1] * now[0], start_xy @ now))
                     deg = swing_end_deg + turn * w.sign
-                frames.append((nq, False, deg, f"push-open: {leg['label']}"))
+                frames.append((nq, False, deg, f"push-open: {leg['label']} (cuRobo's plan)"))
             q = frames[-1][0]
     frames += [frames[-1]] * HOLD_FRAMES
 
