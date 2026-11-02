@@ -1,18 +1,16 @@
 """The box_opening capability: press the food container's button, take its lid off, set the lid
 down beside the container, and go home.
 
-Actions:
-  open   the whole run: look, press, grip, lift, carry, set down, home (tasks/press_demo)
-  press  the press alone: the knob pops, the lid stays on, home (press_demo --press-only)
-  home   the arm home from wherever it holds (tasks/home_arm)
-  check  the robot ready for a run: driver, planner, TF, gripper, cameras (tasks/preflight);
-         nothing moves
+One action, open_box: the whole run (tasks/press_demo). It checks the robot is ready (driver,
+planner, TF, gripper, cameras: nothing moves if not), brings the arm to its rest pose if it is
+not there, then locates the container, looks, presses, grips, lifts, carries, sets the lid
+down and goes home.
 
-Each action runs box opening's command line for it as a child process, exactly as it ran on
-flatbot until now: its own process and executor, and Ctrl+C's stop path for a cancel (the
-motion in flight is cancelled and the driver's answer awaited before it exits,
-runtime/abort.py). Its console lines become this node's log lines, and the rows its run log
-gains become the action's progress. A run is one motion from the press to the set-down, so
+The action runs box opening's command line as a child process, exactly as it ran on flatbot
+until now: its own process and executor, and Ctrl+C's stop path for a cancel (the motion in
+flight is cancelled and the driver's answer awaited before it exits, runtime/abort.py). Its
+console lines become this node's log lines, and the rows its run log gains become the
+action's progress. A run is one motion from the press to the set-down, so
 it cannot pause once it starts; a cancel stops it at once.
 
 The wrist's and the scene camera's OWL detectors, which the run asks where the box is
@@ -25,7 +23,7 @@ and sends none (its client's motion latch stays off). Someone stands at the e-st
 allow_execute is on.
 
     ros2 launch box_opening box_opening.launch.py use_orchestrator:=false
-    make action CAP=box_opening ACTION=open PARAMS='{"execute": false}'
+    make action CAP=box_opening ACTION=open_box PARAMS='{"execute": false}'
 """
 
 import json
@@ -59,10 +57,9 @@ PARAMS = {
     "speed_scale": 1.0,
 }
 EXECUTE = {"execute": {"type": "boolean", "default": False}}
-HOME = {**EXECUTE, "lift_first_m": {"type": "number", "minimum": 0.0, "maximum": 0.15, "default": 0.0}}
 
 # the command line each action runs: the package's executable, as `ros2 run box_opening <it>`
-EXECUTABLES = {"open": "press_demo", "press": "press_demo", "home": "home_arm", "check": "preflight"}
+EXECUTABLES = {"open_box": "press_demo"}
 POLL_S = 0.05
 # a cancel is Ctrl+C's: one SIGINT, which cancels the motion in flight and waits for the
 # driver to confirm. A second, after this long, is its escalation; a kill after that.
@@ -86,7 +83,7 @@ LEG_PHASES = (
     ("home", "home", 100.0),
 )
 MOCK_PHASES = {
-    "open": (
+    "open_box": (
         ("locate", 5.0),
         ("look", 10.0),
         ("press", 35.0),
@@ -95,9 +92,6 @@ MOCK_PHASES = {
         ("release", 90.0),
         ("home", 100.0),
     ),
-    "press": (("locate", 5.0), ("look", 10.0), ("press", 35.0), ("home", 100.0)),
-    "home": (("home", 100.0),),
-    "check": (("check", 100.0),),
 }
 VIDEO_LINE = re.compile(r"\] VIDEO: .*: (\S+)$")
 # a line the run's own rclpy logger wrote: "[ERROR] [1793385477.635189323] [box_opening_run]: ..."
@@ -271,16 +265,13 @@ class Tracker:
         return None
 
     def lid_off(self, code):
-        return self.action_id == "open" and code == 0 and self.set_down and self.released
+        return self.action_id == "open_box" and code == 0 and self.set_down and self.released
 
 
 def error_for(action_id, code, lines):
     """The EngineError a run that ended with `code` reports, from what it said last."""
     said = [ln for ln in lines if "STOP" in ln or "not starting" in ln or "FAIL" in ln or "NO BOX" in ln]
     why = (said or list(lines) or [f"exit {code}"])[-1]
-    if action_id == "check":
-        fails = [ln for ln in lines if ln.startswith("FAIL")]
-        return EngineError("not_ready", "; ".join(fails) or why, recoverable=True)
     if "not starting" in why:
         return EngineError("not_ready", why, recoverable=True)
     if code == 2 or "NO BOX" in why:
@@ -288,7 +279,8 @@ def error_for(action_id, code, lines):
     if code == 3:
         return EngineError("not_home", why, recoverable=True)
     if "the arm holds" in why or "did not get home" in why:
-        return EngineError("arm_holds", f"{why} -- home it with the `home` action", recoverable=False)
+        clear = "the arm holds where it stopped: clear it, attended, before the next run"
+        return EngineError("arm_holds", f"{why} -- {clear}", recoverable=False)
     if "MOVED the box" in why or "left the table" in why:
         return EngineError("box_moved", why, recoverable=True)
     if code is not None and code < 0:
@@ -301,10 +293,7 @@ class Capability(CapabilityEngine):
     perception_classes = ["food container"]
     required_resources = ["arm", "gripper"]
     actions = [
-        Action("open", "Open the container", params_schema={"type": "object", "properties": EXECUTE}),
-        Action("press", "Press the container's button", params_schema={"type": "object", "properties": EXECUTE}),
-        Action("home", "Move the arm home", params_schema={"type": "object", "properties": HOME}),
-        Action("check", "Check the robot is ready", params_schema={"type": "object", "properties": {}}),
+        Action("open_box", "Open the container", params_schema={"type": "object", "properties": EXECUTE}),
     ]
 
     def __init__(self, **node_kwargs):
@@ -322,12 +311,9 @@ class Capability(CapabilityEngine):
         )
 
     def availability(self, instance_id, world_state):
-        """open and press for a container whose lid is on; home and check always."""
+        """open_box for a container whose lid is not already off."""
         lid_off = ((world_state.get("objects") or {}).get(instance_id) or {}).get("lid") == "off"
-        return [
-            ActionAvailability(action_id=a.action_id, available=a.action_id in ("home", "check") or not lid_off)
-            for a in self.actions
-        ]
+        return [ActionAvailability(action_id=a.action_id, available=not lid_off) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
@@ -362,8 +348,6 @@ class Capability(CapabilityEngine):
         }
         if code != 0:
             raise error_for(action_id, code, run_.lines)
-        if action_id == "check":
-            result["checks"] = [ln for ln in run_.lines if ln[:4] in ("PASS", "WARN", "FAIL")]
         if result["lid_off"] and self.instance_id:
             ctx.update_object(self.instance_id, lid="off", lid_xyz=result["lid_xyz"])
         return result
@@ -400,14 +384,7 @@ class Capability(CapabilityEngine):
         argv = [executable(EXECUTABLES[action_id])]
         argv += ["--container", config_path(self.cfg["container"], "containers")]
         argv += ["--bench-world", config_path(self.cfg["world"])]
-        if action_id == "check":
-            return argv
         argv += ["--speed-scale", str(float(self.cfg["speed_scale"]))]
-        if action_id == "press":
-            argv.append("--press-only")
-        lift = float(params.get("lift_first_m", 0.0) or 0.0)
-        if action_id == "home" and lift > 0.0:
-            argv += ["--lift-first", str(lift)]
         return argv + (["--execute"] if execute else [])
 
     def _env(self):

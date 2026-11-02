@@ -23,8 +23,9 @@ setup(
     entry_points={
         "console_scripts": [
             "box_opening_node = box_opening.node:main",
-            # the command lines the node runs for its actions, for attended runs by hand
+            # the command line open_box runs (also for attended runs by hand)
             "press_demo = box_opening.tasks.press_demo:main",
+            # attended bring-up by hand, not actions: the arm home from where it holds, and the checks
             "home_arm = box_opening.tasks.home_arm:main",
             "preflight = box_opening.tasks.preflight:main",
             # the OWL detector on its own (the node hosts two in its process)

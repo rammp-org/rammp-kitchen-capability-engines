@@ -117,7 +117,7 @@ def test_a_full_run_reports_its_phases_in_order_and_the_lid_off(engine, monkeypa
     )
     ctx = FakeCtx()
     engine.instance_id = "food_container_1"
-    out = engine.execute("open", {"execute": True}, ctx)
+    out = engine.execute("open_box", {"execute": True}, ctx)
     phases = [p for p, *_ in ctx.said]
     assert phases[0] == "locate" and phases[-1] == "home"
     order = ["locate", "look", "press", "grip", "carry", "release", "home"]
@@ -133,9 +133,9 @@ def test_a_full_run_reports_its_phases_in_order_and_the_lid_off(engine, monkeypa
 def test_a_run_that_stops_with_the_arm_holding_is_not_recoverable(engine, monkeypatch):
     given(monkeypatch, FULL_RUN[:5], ["[press_demo] STOP: the fingers did not open (timeout) — the arm holds"], code=1)
     with pytest.raises(EngineError) as e:
-        engine.execute("open", {"execute": True}, FakeCtx())
+        engine.execute("open_box", {"execute": True}, FakeCtx())
     assert e.value.error_code == "arm_holds" and not e.value.recoverable
-    assert "the fingers did not open" in str(e.value) and "`home`" in str(e.value)
+    assert "the fingers did not open" in str(e.value) and "clear it" in str(e.value)
 
 
 @pytest.mark.parametrize(
@@ -151,7 +151,7 @@ def test_a_run_that_stops_with_the_arm_holding_is_not_recoverable(engine, monkey
 def test_how_a_run_ended_is_its_error_code(engine, monkeypatch, say, code, error):
     given(monkeypatch, say=say, code=code)
     with pytest.raises(EngineError) as e:
-        engine.execute("open", {"execute": True}, FakeCtx())
+        engine.execute("open_box", {"execute": True}, FakeCtx())
     assert e.value.error_code == error and e.value.recoverable
 
 
@@ -171,7 +171,7 @@ def test_a_cancel_is_the_runs_own_ctrl_c_and_ends_the_action_cancelled(engine, m
     threading.Timer(1.0, setattr, args=(ctx, "cancel", True)).start()
     t0 = time.monotonic()
     with pytest.raises(Cancelled):
-        engine.execute("open", {"execute": True}, ctx)
+        engine.execute("open_box", {"execute": True}, ctx)
     assert sent == [signal.SIGINT]  # once: a second is the escalation, after CANCEL_ESCALATE_S
     assert time.monotonic() - t0 < 5.0
 
@@ -181,43 +181,42 @@ def test_execute_moves_nothing_unless_the_node_allows_it(engine, monkeypatch):
     lines = []
     monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: lines.append(msg))
     engine.cfg["allow_execute"] = False
-    out = engine.execute("open", {"execute": True}, FakeCtx())
+    out = engine.execute("open_box", {"execute": True}, FakeCtx())
     argv = next(ln for ln in lines if ln.startswith("ARGV "))
     assert "--execute" not in argv.split() and not out["executed"] and "DRY RUN" in out["note"]
     engine.cfg["allow_execute"] = True
     lines.clear()
-    engine.execute("press", {"execute": True}, FakeCtx())
+    engine.execute("open_box", {"execute": True}, FakeCtx())
     argv = next(ln for ln in lines if ln.startswith("ARGV ")).split()
-    assert "--execute" in argv and "--press-only" in argv
+    assert "--execute" in argv
 
 
-def test_each_action_runs_its_own_command_line(engine):
+def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
+    """Review on #23: exactly one action. Pressing, homing and the readiness check are steps of
+    open_box's own run (press_demo checks readiness and homes first), not actions of their own."""
+    assert [a.action_id for a in engine.actions] == ["open_box"] == list(node.EXECUTABLES) == list(node.MOCK_PHASES)
     real = node.Capability._argv.__get__(engine)
-    open_ = real("open", {"execute": True}, True)
-    assert open_[0].endswith("lib/box_opening/press_demo") and "--press-only" not in open_
-    assert open_[open_.index("--container") + 1].endswith("config/containers/ankou_pink.yaml")
-    assert open_[open_.index("--bench-world") + 1].endswith("config/world_flatbot.yaml")
-    home = real("home", {"execute": False, "lift_first_m": 0.08}, False)
-    assert home[0].endswith("lib/box_opening/home_arm") and "--execute" not in home
-    assert home[home.index("--lift-first") + 1] == "0.08"
-    check = real("check", {}, False)
-    assert check[0].endswith("lib/box_opening/preflight") and "--speed-scale" not in check
+    argv = real("open_box", {"execute": True}, True)
+    assert argv[0].endswith("lib/box_opening/press_demo") and "--press-only" not in argv
+    assert argv[argv.index("--container") + 1].endswith("config/containers/ankou_pink.yaml")
+    assert argv[argv.index("--bench-world") + 1].endswith("config/world_flatbot.yaml")
+    assert argv[-1] == "--execute" and "--execute" not in real("open_box", {"execute": True}, False)
 
 
 def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):
     given(monkeypatch, say=["[ERROR] [1793385477.635189323] [box_opening_run]: no arm kinematics", "plain line"])
     said = []
     monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: said.append((level, msg)))
-    engine.execute("check", {}, FakeCtx())
+    engine.execute("open_box", {}, FakeCtx())
     assert (logging.ERROR, "[box_opening_run] no arm kinematics") in said
     assert (logging.INFO, "plain line") in said
 
 
-def test_the_lid_off_leaves_only_home_and_check_offered(engine):
+def test_open_box_is_offered_until_the_lid_is_off(engine):
     on = {a.action_id: a.available for a in engine.availability("c1", {"objects": {"c1": {"lid": "on"}}})}
     off = {a.action_id: a.available for a in engine.availability("c1", {"objects": {"c1": {"lid": "off"}}})}
-    assert on == {"open": True, "press": True, "home": True, "check": True}
-    assert off == {"open": False, "press": False, "home": True, "check": True}
+    unknown = {a.action_id: a.available for a in engine.availability("c1", {})}
+    assert on == unknown == {"open_box": True} and off == {"open_box": False}
 
 
 def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
@@ -227,8 +226,8 @@ def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
     )
     try:
         ctx = FakeCtx()
-        out = cap.execute("open", {"execute": True}, ctx)
-        assert [p for p, *_ in ctx.said] == [p for p, _ in node.MOCK_PHASES["open"]]
+        out = cap.execute("open_box", {"execute": True}, ctx)
+        assert [p for p, *_ in ctx.said] == [p for p, _ in node.MOCK_PHASES["open_box"]]
         assert out["mock"] and not out["executed"] and not out["lid_off"]
     finally:
         cap.destroy_node()

@@ -8,8 +8,11 @@
 
 Opens the food container: presses the button on its lid so the lid comes
 loose, grips the lid by that button, lifts it off, sets it down on the table
-beside the container, and goes home. `open`:
+beside the container, and goes home. It has one action, `open_box`:
 
+1. **Ready:** the run checks the robot is ready (driver, planner, TF, gripper,
+   both cameras) and refuses before anything moves if not; an arm away from its
+   rest pose is brought there first.
 1. **Locate:** the scene camera finds the container before the arm moves (the
    OWL detector, or the scene segmenter's `food container` mask where it has
    one), with its lid's height from the scene camera's depth. Nothing about the
@@ -27,14 +30,8 @@ beside the container, and goes home. `open`:
 1. **Release and home:** the fingers open as the arm rises off the lid, and the
    arm goes home.
 
-`press` is the first three steps and home: the button pops, the lid stays on.
-`home` moves the arm home from wherever it holds, stepping a joint off its
-limit first where the planner cannot start from it. `check` reports whether the
-robot is ready for a run (driver, planner, TF, gripper, both cameras and the
-OWL detectors) and moves nothing.
-
-Each action runs box opening's command line for it (`press_demo`, `home_arm`,
-`preflight`) as a child process, the way it ran on flatbot until now. Its
+The action runs box opening's command line (`press_demo`) as a child process,
+the way it ran on flatbot until now. Its
 console lines are this node's log lines, and its run log's rows are the
 action's progress. Planning and motion go straight to the arm driver
 (`/execute_joint_trajectory`, `/setpoint/gripper`) and the cuRobo planner
@@ -84,21 +81,16 @@ Served under `/box_opening/`, types from `rammp_orchestrator_interfaces`:
 | `/box_opening/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/box_opening/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-It is activated when the user selects a `food container`. `open` and `press`
-are offered while the container's lid is on; `home` and `check` always.
+It is activated when the user selects a `food container`. `open_box` is offered
+until the container's lid is off.
 
-| Action  | Params                                                                   | Result payload                                                                                     |
-| ------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `open`  | `execute` (bool, default `false`)                                        | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log", "note"}` |
-| `press` | `execute` (bool, default `false`)                                        | the same; `lid_off` is always false                                                                |
-| `home`  | `execute` (bool, default `false`), `lift_first_m` (0 to 0.15, default 0) | the same, without the lid                                                                          |
-| `check` | none                                                                     | the same, and `checks`: each PASS, WARN and FAIL line                                              |
+| Action     | Params                            | Result payload                                                                                     |
+| ---------- | --------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `open_box` | `execute` (bool, default `false`) | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log", "note"}` |
 
 `lid_xyz` is where the lid was set down, in `arm_mount` (m). `video` is the MP4
-of both cameras from the grip to the set-down, where one was recorded.
-`lift_first_m` lifts the tool straight up that far before planning home, for a
-start the planner refuses (fingers at the table). When the lid comes off, the
-container's object state gets `lid: "off"` and `lid_xyz`.
+of both cameras from the grip to the set-down, where one was recorded. When the
+lid comes off, the container's object state gets `lid: "off"` and `lid_xyz`.
 
 Progress phases, in order: `locate` (5%), `look` (10%), `press` (35%), `grip`
 (50%), `carry` (85%), `release` (90%), `home` (100%). A phase is reported as
@@ -115,7 +107,7 @@ A run that stops fails the action with one of these codes:
 | `not_found` | yes         | The scene camera found no container                                    |
 | `not_home`  | yes         | The arm could not get to its start pose                                |
 | `box_moved` | yes         | The press moved the container                                          |
-| `arm_holds` | no          | A motion stopped part of the way: the arm holds there; send `home`     |
+| `arm_holds` | no          | A motion stopped part of the way: the arm holds there until cleared    |
 | `stopped`   | no          | The run was ended from outside                                         |
 | `failed`    | yes         | Anything else; the message is the run's last STOP line                 |
 
