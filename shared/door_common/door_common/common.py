@@ -1,6 +1,6 @@
 """Shared motion pieces for the door tasks: planning, the door model, files, output.
 
-Used by `open_door.py` and `demo_replay.py`, here and in each capability.
+Used by `open_door.py`, `close_door.py` and `demo_replay.py`, here and in each capability.
 
 * `release_and_back_off` -- records the current grasp (pose + joints) to
   `LAST_GRASP_FILE`, opens the gripper, then backs straight off the handle along the
