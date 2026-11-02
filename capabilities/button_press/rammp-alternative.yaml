@@ -1,0 +1,113 @@
+# The microwave button press: the button_press engine's press_button action. Transcribed into
+# rammp-deployments/december_2026/sheppy-manifest.yaml.
+#
+# NEEDS, from the rest of the manifest: the arm and planner on the NIGHTLY channel, static_tf (the
+# camera mounts), both cameras and the scene segmenter. The params below are flatbot's (OAK
+# cameras, the arm base pitched 30 deg in arm_mount); on dojo (level mount) override
+# mount_rpy_deg: [0.0, 0.0, 0.0].
+#
+# Keys under `container:` are the compose subset sheppy supports. Do not set RMW_IMPLEMENTATION or
+# CYCLONEDDS_URI; rammp-base owns them.
+id: button_press_real
+tier: experimental
+kind: docker
+container:
+  # :dev is mutable and overwritten on every merge to dev. A demo profile needs
+  # a release tag or digest; `tier: demo-ready` is rejected without one.
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/button_press:dev
+  network_mode: host
+  ipc: host
+  # Runs the same node as the image's CMD, without the launch file. sheppy
+  # appends `--ros-args --params-file` to the command; with no command, those
+  # args replace the CMD and the node never starts. Run the node's installed
+  # executable itself: never `ros2 launch`, which rejects them, nor `ros2 run`,
+  # which as PID 1 swallows the stop signal and leaves the node to be SIGKILLed.
+  command: ["/module_ws/install/button_press/lib/button_press/button_press_node"]
+# Defaults for every value a deployment may change per robot or from the sheppy
+# TUI; see Parameters in docs/interface.md.
+params:
+  # false: every action is a dry run (detect, plan, gate; nothing moves) and its result says so.
+  # true only for attended runs, someone on the e-stop.
+  allow_execute: false
+  # The arm base's orientation in arm_mount (the robot's mount.yaml rpy_deg): flatbot 0 30 0.
+  mount_rpy_deg: [0.0, 30.0, 0.0]
+  # Wrist camera; depth must be aligned to colour. camera_frame "" = the colour image's frame_id.
+  camera_frame: ""
+  camera_ns: /wrist_camera
+  depth_topic: depth/image_rect_raw
+  # First look from the scene camera ("scene"), falling back to the wrist camera; "wrist" = wrist only.
+  far: scene
+  scene_ns: /scene_camera
+  scene_depth_topic: depth/image_rect_raw
+  # Narrow the scene camera's search to the segmenter's microwave box (/perception/object_detections).
+  detections: true
+  # A JSONL run log per action in this directory (mount a volume for it); "" = none.
+  log_dir: ""
+  # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
+  "arm.tool_z": 0.12
+  "arm.dt": 0.02
+  "arm.joint_speed": 0.85
+  "arm.cart_speed": 0.16
+  "arm.contact_joint_speed": 0.5
+  "arm.contact_cart_speed": 0.09
+  "arm.min_duration_s": 1.0
+  "arm.cart_step_m": 0.02
+  "arm.cart_step_deg": 5.0
+  "arm.rot_equiv_m": 0.15
+  "arm.max_knot_jump_deg": 20.0
+  "arm.path_tol_rad": 0.15
+  "arm.gripper_force": 0.5
+  "arm.gripper_speed": 0.5
+  "arm.frame": "arm_mount"
+  "arm.go_to_speed_scale": 0.3
+  "arm.go_to_timeout_s": 120.0
+  # The long (cuRobo) moves only need to end near their goal: 50 cm moves ended 0.5-1.05 cm off
+  # with the driver reporting success (2026-10-12). The straight legs keep 1 cm (press_arm).
+  "arm.go_to_track_m": 0.05
+  "arm.go_to_track_deg": 2.0
+  "arm.max_ik_err": 0.02
+  "arm.max_step_jump_deg": 20.0
+  "arm.j6_guard_deg": 115.0
+  "arm.j4_guard_deg": 144.0
+  "arm.max_continuous_delta_deg": 170.0
+  "arm.keep_out_err": 9.0
+  "arm.ik_max_iterations": 200
+  "arm.clearance_query_m": 0.5
+  "arm.fingertip_open_rad": 0.0
+  "arm.finger_closed_rad": 0.7
+  "arm.state_wait_s": 10.0
+  "arm.state_stale_s": 0.5
+  "arm.diagnostics_stale_s": 3.0
+  "arm.goal_accept_s": 5.0
+  "arm.result_margin_s": 30.0
+  "arm.poll_s": 0.01
+  "arm.cancel_settle_s": 0.4
+  "arm.halt_status_wait_s": 0.2
+  "arm.planner_wait_s": 5.0
+  "arm.go_to_settle_s": 0.3
+  "arm.gripper_period_s": 0.02
+  "arm.gripper_moved": 0.002
+  "arm.gripper_judge_after_s": 0.5
+  "arm.gripper_still_s": 0.3
+  "arm.plan_timeout_s": 30.0
+  "arm.service_wait_s": 5.0
+  "arm.service_call_s": 10.0
+  "arm.stream_timeout_s": 0.1
+  "arm.publisher_match_s": 1.0
+  "arm.close_stream_wait_s": 1.0
+  "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+  "arm.mock_urdf": ""
+publishes:
+  - /button_press/status
+  - /button_press/target_pose
+subscribes:
+  - /tf
+  - /tf_static
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/color/camera_info
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /scene_camera/depth/camera_info
+  - /perception/object_detections
