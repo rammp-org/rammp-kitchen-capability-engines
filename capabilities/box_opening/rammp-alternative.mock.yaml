@@ -12,12 +12,19 @@ container:
   command: ["ros2", "launch", "box_opening", "box_opening.launch.py", "mock:=true"]
 # No `params:` here: they would need the node's executable, and this fragment
 # uses `ros2 launch` for mock:=true.
-publishes: [/box_opening/status]
+publishes:
+  - /box_opening/status
+  # the run's gripper commands (runtime/client.py), to the arm driver
+  - /setpoint/gripper
+  # with viz: true only, what the run's perception sees and decides, for Foxglove
+  - /box_opening/viz/scene/annotated/compressed
+  - /box_opening/viz/wrist/annotated/compressed
+  - /box_opening/viz/markers
+  - /box_opening/viz/status
 subscribes:
   - /tf
   - /tf_static
   - /joint_states
-  - /gripper_state
   - /arm/robot_description
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info

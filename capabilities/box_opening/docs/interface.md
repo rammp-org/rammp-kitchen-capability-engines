@@ -46,6 +46,7 @@ and checks every motion, and sends none.
 | Topic                 | Type              | Rate | Meaning                                                                                                   |
 | --------------------- | ----------------- | ---- | --------------------------------------------------------------------------------------------------------- |
 | `/box_opening/status` | `std_msgs/String` | 1 Hz | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
+| `/setpoint/gripper` | `rammp_arm_interfaces/GripperSetpoint` | per grip | The run's gripper commands, to the arm driver |
 
 With `viz: true` the run also draws what it sees on `/box_opening/viz/*`
 (`scene/annotated/compressed`, `wrist/annotated/compressed`, `markers`,
@@ -58,7 +59,6 @@ While an action runs (its run subscribes; the node itself reads nothing).
 | Topic                                | Type                                           | Required | Meaning                                                    |
 | ------------------------------------ | ---------------------------------------------- | -------- | ---------------------------------------------------------- |
 | `/joint_states`                      | `sensor_msgs/JointState`                       | yes      | The arm's joints, efforts and gripper knuckle              |
-| `/gripper_state`                     | `rammp_arm_interfaces/GripperState`            | `check`  | The gripper is present                                     |
 | `/arm/robot_description`             | `std_msgs/String`                              | yes      | The arm's URDF, rooted at `arm_mount` (the run's FK chain) |
 | `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | yes      | The aim at the button, the grip's close-up                 |
 | `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Its intrinsics                                             |
