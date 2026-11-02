@@ -8,6 +8,7 @@ import signal
 import sys
 import textwrap
 import time
+from pathlib import Path
 
 import pytest
 import rclpy
@@ -15,6 +16,8 @@ from capability_engine.engine import Cancelled, EngineError
 from rclpy.parameter import Parameter
 
 from box_opening import LOGGER, node
+
+FRAGMENT_MOCK = Path(__file__).resolve().parents[1] / "rammp-alternative.mock.yaml"
 
 # rows of a full run on flatbot (run-20261030-132845), shortened
 FULL_RUN = [
@@ -372,6 +375,36 @@ def test_open_box_is_offered_until_the_world_state_holds_the_container_opened(en
 
     assert offered({"opened": False}) == offered({"opened": None}) == offered(None) == {"open_box": True}
     assert offered({"opened": True}) == {"open_box": False}
+
+
+def test_the_mock_holds_every_topic_the_real_run_publishes_and_the_real_node_none(ros):
+    """scripts/smoke.py checks the mock container publishes every topic its fragment declares;
+    the fragments declare what the real RUN publishes (REVIEW_RULES M3). The mock holds an idle
+    publisher on each; the real node holds none — its run does, and press_demo refuses an arm
+    another program publishes gripper commands to."""
+    import yaml
+
+    from box_opening.constants import GRIPPER_SETPOINT_TOPIC
+
+    declared = set(yaml.safe_load(open(FRAGMENT_MOCK))["publishes"])
+    handlers = list(LOGGER.handlers)
+    mock = node.Capability(
+        parameter_overrides=[Parameter("mock", value=True), Parameter("use_orchestrator", value=False)]
+    )
+    real = None
+    try:
+        held = {p.topic_name for p in mock._mock_pubs}
+        assert held | {"/box_opening/status"} == declared
+        mock.destroy_node()
+        mock = None
+        real = node.Capability(parameter_overrides=[Parameter("use_orchestrator", value=False)])
+        assert real._mock_pubs == []
+        assert GRIPPER_SETPOINT_TOPIC not in {p.topic_name for p in real.publishers}
+    finally:
+        for cap in (mock, real):
+            if cap is not None:
+                cap.destroy_node()
+        LOGGER.handlers[:] = handlers
 
 
 def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):

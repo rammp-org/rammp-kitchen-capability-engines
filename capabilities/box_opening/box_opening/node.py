@@ -332,6 +332,7 @@ class Capability(CapabilityEngine):
         super().__init__("box_opening", **node_kwargs)
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
         self._run = None  # the Run under way
+        self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
         self.get_logger().info(
@@ -339,6 +340,31 @@ class Capability(CapabilityEngine):
             if self._allowed()
             else NOT_ALLOWED + " (open_box unavailable)"
         )
+
+    def _mock_interface(self):
+        """The mock's share of the real alternative's interface: a publisher, idle, on every topic
+        the real run publishes (rammp-alternative.yaml `publishes`), with the run's own types and
+        QoS — the gripper commands its run sends the driver, and with viz what its perception
+        sees and decides. The real node holds none of them: its run does, and press_demo
+        refuses to move an arm another program on the graph publishes gripper commands to. Nothing
+        is ever sent on them (scripts/smoke.py checks that every declared topic appears)."""
+        from rammp_arm_interfaces.msg import GripperSetpoint
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        from sensor_msgs.msg import CompressedImage
+        from std_msgs.msg import String
+        from visualization_msgs.msg import MarkerArray
+
+        from box_opening.constants import GRIPPER_SETPOINT_TOPIC
+        from box_opening.perception import viz
+
+        best_effort = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        return [
+            self.create_publisher(GripperSetpoint, GRIPPER_SETPOINT_TOPIC, best_effort),
+            self.create_publisher(CompressedImage, viz.SCENE_TOPIC, 1),
+            self.create_publisher(CompressedImage, viz.WRIST_TOPIC, 1),
+            self.create_publisher(MarkerArray, viz.MARKER_TOPIC, 1),
+            self.create_publisher(String, viz.STATUS_TOPIC, 1),
+        ]
 
     def _allowed(self):
         """allow_execute as it is now (a deployment may set it while the node runs)."""
