@@ -17,16 +17,19 @@ go and push it further open -- one run.
 3. Execute: cuRobo to the line-up point, straight in, close, one blended swing. The hand stays on the
    handle at the end.
 
-4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper,
-   then ONE cuRobo motion through four poses, stitched (go_to_ee_poses), the hand pointing down (PUSH_TILT_TRY_DEG
-   off vertical, the least that plans; of the two such hands the one nearest the grip, no wrist flip) and held after
-   the first (HOLD_FIXED): up (the fingertips PUSH_CLEAR_TRY_M over the door top, the most that plans) and back
-   (PUSH_BACK_M) from the handle; over to above the inside of the door; down until the tool is at the door top,
-   PUSH_BEHIND_DOOR_M behind its inner face at the handle; then push toward the hinge until level with it (its y),
-   opening the door to ~90 deg. Where cuRobo can't stitch (no blend server: snorlax 11-02) the first three run one
-   at a time and the push is a straight line, the hand held (move_cartesian). cuRobo is trusted with its moves
-   (11-02) -- not sim-gated, and its world has no door: it is asked for each (plan_to_pose, nothing moves) from the
-   planned swing's end before the grasp, and again from the real one before letting go.
+4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper;
+   straight back PUSH_BACK_M off the handle, level, along the door's outward normal, the hand held (the fingers
+   slide off the bar); cuRobo straight up from there (the fingertips PUSH_CLEAR_TRY_M over the door top, the most
+   that plans), turning the hand to point down (PUSH_TILT_TRY_DEG off vertical, the least that plans; of the two
+   such hands the one nearest the grip, no wrist flip); close the gripper (a narrower hand round the door); then ONE
+   cuRobo motion through three poses, stitched (go_to_ee_poses), the hand held (HOLD_FIXED): over to above the
+   inside of the door; down until the tool is at the door top, PUSH_BEHIND_DOOR_M behind its inner face at the
+   handle; push toward the hinge until PUSH_HINGE_SHORT_M short of level with it, opening the door to ~90 deg (saved
+   as PUSH_OPEN_DOOR_DEG); then back the way it came (_back_legs), stitched too. Where cuRobo can't stitch (no blend
+   server: snorlax 11-02) the moves run one at a time and the push is a straight line, the hand held
+   (move_cartesian). cuRobo is trusted with its moves (11-02) -- not sim-gated, and its world has no door: it is
+   asked for each (plan_to_pose, nothing moves) from the planned swing's end before the grasp, and again from the
+   real one before letting go.
 
 `--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
 handle, go toward the base to clear the door's free edge, joint move to `PARK_JOINTS` (constants).
@@ -101,7 +104,8 @@ PUSH_CLEAR_TRY_M = (
 )  # after letting go, cuRobo lifts the hand to cross the door with its fingertips
 #   (pointing down) this far over the door top, the first that plans: half of 11-02's 10 cm (it went higher than
 #   needed); the door top is a depth-fit estimate ...
-PUSH_BACK_M = 0.05  # ... and this far back from the handle, along the open door's outward normal
+PUSH_BACK_M = 0.08  # first, before going up, straight back this far from the handle, level, along the open door's
+#   outward normal (toward where the swing came from), the hand held: the open fingers come off the handle bar
 PUSH_BEHIND_DOOR_M = 0.05  # (~2 in) then the tool goes down this far behind the door's inner face, at the handle
 PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing down: the fingertips reach
 #   FINGERTIP_PAST_TOOL (6 cm) below the top edge
@@ -161,7 +165,8 @@ def _push_poses(door, ee, clear_m, tilt_deg):
     top = float(door["door_z"][1])
     out = df.pos(df.u_handle, 1.0, deg, 0.0) - df.pos(df.u_handle, 0.0, deg, 0.0)
     inside = df.pos(df.u_handle, -(df.t / 2 + PUSH_BEHIND_DOOR_M), deg, top + PUSH_TOOL_ABOVE_TOP_M)
-    up_back = np.asarray(ee[:3], dtype=float) + out * PUSH_BACK_M
+    back = np.asarray(ee[:3], dtype=float) + out * PUSH_BACK_M  # straight back off the handle, level
+    up_back = back.copy()  # then straight up from there
     up_z = top + clear_m + FINGERTIP_PAST_TOOL  # the tool, with the fingertips (pointing down) clear_m over the top
     up_back[2] = up_z
     above = np.r_[inside[:2], up_z]
@@ -181,6 +186,8 @@ def _push_poses(door, ee, clear_m, tilt_deg):
         df=df,
         deg=deg,
         sign=sign,
+        back=back,
+        grip=np.asarray(ee[3:7], dtype=float),
         up_back=up_back,
         above=above,
         inside=inside,
@@ -314,6 +321,7 @@ def _save_plan(ai, run_dir, push):
                 how=P.how,
                 legs=[dict(label=lb, joints=j(pl.q)) for lb, pl in plans],
                 push=dict(to=j(P.pushed), quat=j(P.down)),  # the straight push, from where the last leg ends
+                back=dict(to=j(P.back), quat=j(P.grip)),  # the straight back off the handle, before the first leg
             )
         else:
             say(f"  {why}")
@@ -551,28 +559,41 @@ def push_open(ai, execute, on_release=None):
     time.sleep(0.5)
     if on_release is not None:
         on_release()
-    # up and back, over the door, down behind it, the push: ONE cuRobo motion, its legs stitched (go_to_ee_poses),
-    # passing the corners before the door within PUSH_BLEND_M (none after: the push starts where it should), the hand
-    # held after the first, the push at its own speed
-    legs = _push_legs(P)
+    # straight back off the handle, level, the hand held as it gripped: the open fingers slide off the bar
+    say(f"push-open: back {PUSH_BACK_M * 100:.0f} cm off the handle (straight, the hand held) ...")
+    if not ai.move_cartesian([(list(P.back), list(P.grip))], impedance=gains):
+        raise Refused(f"push-open: backing off the handle stopped ({getattr(ai, 'last_error', '')}) -- the arm holds.")
+    # up and back (the hand turning down) on its own, then close the gripper -- a narrower hand to take round the
+    # door (11-02) -- then over the door, down behind it, the push: ONE cuRobo motion, stitched (go_to_ee_poses),
+    # passing the corner above the door within PUSH_BLEND_M (none after: the push starts where it should), the hand
+    # held, the push at its own speed
+    (up_label, up_pos, up_hold), *legs = _push_legs(P)
+    say(f"push-open: {up_label} (cuRobo) ...")
+    if not ai.go_to_ee_pose(up_pos, P.down, f"push-open: {up_label}", orientation_hold=up_hold, **go_to):
+        raise Refused(
+            f"push-open: '{up_label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
+        )
+    say("closing the gripper (a narrower hand round the door) ...")
+    ai.gripper(1.0)
+    time.sleep(0.8)
     push_speed = rammp_arm.GO_TO_SPEED_SCALE * PUSH_OPEN_SPEED_SCALE
     targets = [
         PoseTarget(
             tuple(pos),
             tuple(P.down),
             hold,
-            PUSH_BLEND_M if k < 2 else 0.0,
+            PUSH_BLEND_M if k == 0 else 0.0,
             push_speed if label == "push open" else None,
         )
         for k, (label, pos, hold) in enumerate(legs)
     ]
     say(f"push-open: {', '.join(label for label, _, _ in legs)} (cuRobo, one stitched motion) ...")
-    if not ai.go_to_ee_poses(targets, "push-open: up, over, down, push", **go_to):
+    if not ai.go_to_ee_poses(targets, "push-open: over, down, push", **go_to):
         why = getattr(ai, "last_error", "")
         if "PLANNING_FAILED" not in why:  # it may have moved: the arm holds where it stopped
-            raise Refused(f"push-open: up, over, down, push stopped ({why}) -- the arm holds where it is.")
+            raise Refused(f"push-open: over, down, push stopped ({why}) -- the arm holds where it is.")
         # nothing moved (11-02 on snorlax: "PLANNING_FAILED blend: cuRobo action server unavailable" -- the planner
-        # there can't stitch): the three moves to the door as separate cuRobo moves, then the push as a straight line,
+        # there can't stitch): the moves to the door as separate cuRobo moves, then the push as a straight line,
         # the hand held -- not cuRobo alone, whose path needn't be straight (11-02: alone it looped 78 cm for 12)
         say("push-open: cuRobo can't stitch them here -- the moves one at a time, the push a straight line")
         for label, pos, hold in legs[:-1]:
