@@ -1466,7 +1466,20 @@ def test_the_aim_says_and_keeps_the_wrists_table_offset(monkeypatch, capsys, off
     # ... and the caller is told it as the wrist measured it (reach_press._aim)
     assert out["measured_xyz"] == pytest.approx((0.661, -0.1969, 0.2885), abs=1e-6)
     assert out["button_up_mm"] == pytest.approx(1.0)
-    assert words in capsys.readouterr().out
+    said = capsys.readouterr().out
+    assert words in said
     ((leg, kw),) = notes
     assert leg == "reach-aim" and kw["press_xyz"] == [0.661, -0.1969, z] and kw["measured_z"] == 0.2885
     assert (kw["table_offset_mm"], kw["table_offset_raw_mm"]) == (off_mm, raw_mm)
+    # past 30 mm the raw offset is a warning: a camera may have moved (sweep aim-tablehealth)
+    warned = abs(off_raw) > press_demo.TABLE_OFFSET_WARN_M
+    assert kw["table_offset_warn"] is warned and ("WARNING: the wrist reads its table" in said) is warned
+
+
+def test_the_table_offset_warning_starts_past_30_mm():
+    from box_opening.tasks import press_demo
+
+    assert press_demo.TABLE_OFFSET_WARN_M == 0.030
+    for raw, warned in ((-0.0216, False), (0.030, False), (-0.0301, True), (0.045, True), (float("nan"), False)):
+        assert (press_demo.table_offset_warning(raw) is not None) is warned, raw
+    assert "-57 mm" in press_demo.table_offset_warning(-0.057)

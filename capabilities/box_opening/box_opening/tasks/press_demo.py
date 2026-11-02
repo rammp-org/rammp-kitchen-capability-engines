@@ -253,6 +253,26 @@ def scene_trust(path, calib):
     return True, None
 
 
+# The wrist reading its table this far from the scene camera's (the raw
+# offset, taken out or not) is said as a warning: a camera has likely moved.
+# 10-30 10:40-11:42, raw offsets of -57 mm and worse: 5 of 5 grips closed on
+# air; at -43 mm 1 of 1 held, at -2 to -23 mm 16 of 18 (sweep aim-tablehealth).
+# A warning only: whether to stop past ~40 mm is the owner's to decide
+TABLE_OFFSET_WARN_M = 0.030
+
+
+def table_offset_warning(off_raw):
+    """The warning line for a raw table offset (m) past TABLE_OFFSET_WARN_M,
+    else None."""
+    if off_raw is None or not math.isfinite(off_raw) or abs(off_raw) <= TABLE_OFFSET_WARN_M:
+        return None
+    return (
+        "[press_demo] WARNING: the wrist reads its table %+.0f mm from the scene camera's (more than %.0f mm): "
+        "a camera may have moved — on 10-30 every grip at -57 mm or worse closed on air"
+        % (1000 * off_raw, 1000 * TABLE_OFFSET_WARN_M)
+    )
+
+
 def _table_offset_words(off, off_raw):
     """The AIM line's word on the wrist's table against the scene camera's
     (button_aim.ButtonAimer.table_offset_m; nan: none)."""
@@ -440,6 +460,9 @@ def aim_button_at_staging(
                     time.monotonic() - t0,
                 )
             )
+            warn = table_offset_warning(off_raw)
+            if warn is not None:
+                log.info(warn)
             # the frame the fix's newest hit was judged on, not the grabber's newest
             judged = aimer.judged_frame()
             folder = save_aim_frame(watcher.grab, s, tag, frame=judged)
@@ -463,6 +486,7 @@ def aim_button_at_staging(
                     # drift shows here before it fails a run
                     table_offset_mm=round(1000 * off, 1) if math.isfinite(off) else None,
                     table_offset_raw_mm=round(1000 * off_raw, 1) if math.isfinite(off_raw) else None,
+                    table_offset_warn=warn is not None,  # past TABLE_OFFSET_WARN_M: a camera may have moved
                     hits=aimer.hits,
                     frames=aimer.frames,
                     aim_s=round(time.monotonic() - t0, 2),
