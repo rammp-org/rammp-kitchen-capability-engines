@@ -838,7 +838,7 @@ def _aim_frame_env(ctx, tmp_path, monkeypatch):
 
     monkeypatch.setattr(press_demo, "CAPTURES_DIR", tmp_path)
     grab, pose = _hop_frame(ctx, 0.0)
-    monkeypatch.setattr(depth_source, "camera_pose_at", lambda g, offset_s=None: pose)
+    monkeypatch.setattr(depth_source, "camera_pose_at", lambda g, offset_s=None, stamp=None: pose)
     gate, real = threading.Event(), press_demo.write_frame
 
     def held(folder, arrays, **kw):
@@ -848,6 +848,34 @@ def _aim_frame_env(ctx, tmp_path, monkeypatch):
     monkeypatch.setattr(press_demo, "write_frame", held)
     sighting = SimpleNamespace(uv=(424.0, 238.0), r_px=40.0, diameter_m=0.045)
     return press_demo, grab, pose, sighting, gate
+
+
+def test_a_capture_whose_pose_lands_late_is_still_kept(ctx, tmp_path, monkeypatch):
+    """A capture taken at a random moment found no pose in TF 7.6 % of the time (the 13:35:48
+    grip close-up kept no frame though the knob was found): its pose is asked for again for up
+    to POSE_WAIT_S, on the write thread for a background capture, for the same frame."""
+    import numpy as np
+
+    from box_opening.perception import depth_source
+    from box_opening.tasks import press_demo
+
+    grab, pose = _hop_frame(ctx, 0.0)
+    asked = []
+
+    def late(g, offset_s=None, stamp=None):
+        asked.append(stamp)
+        return None if len(asked) < 3 else pose
+
+    monkeypatch.setattr(depth_source, "camera_pose_at", late)
+    folder = press_demo._save_wrist_frame(grab, tmp_path / "now", "now")
+    assert folder is not None and np.allclose(np.load(folder / "frame_000.npz")["trans_cam"], pose[1])
+    assert len(set(map(id, asked))) == 1  # the frame's own stamp, every time
+    asked.clear()
+    folder = press_demo._save_wrist_frame(grab, tmp_path / "later", "later", background=True)
+    press_demo.wait_capture_writes()
+    assert (folder / "frame_000.npz").exists() and len(asked) >= 3
+    monkeypatch.setattr(depth_source, "camera_pose_at", lambda g, offset_s=None, stamp=None: None)
+    assert press_demo._save_wrist_frame(grab, tmp_path / "never", "never") is None
 
 
 def test_the_aim_frame_is_written_off_the_critical_path(ctx, tmp_path, monkeypatch):

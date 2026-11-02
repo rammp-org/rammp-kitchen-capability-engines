@@ -993,14 +993,17 @@ class ButtonAimer:
             # tick tries this colour frame again; a stalled depth never aims
             self.last_why = why
             return False
-        self._last_stamp = stamp
-        self._last_depth_stamp = depth_key(f)
-        self.frames += 1
         cam = camera_pose_at(g, stamp=f.color_stamp)
         self.last_frame = (f, cam)  # references: nothing is copied
         if cam is None:
+            # not consumed either: TF lands after the frames (a wrist frame arrives ~36 ms after
+            # its stamp; /tf comes at 16 Hz, so 40 % have no pose yet then), and the next tick
+            # judges this same frame once its pose is in (a dead TF: until REACH_AIM_S)
             self.last_why = "no camera pose for the frame"
             return False
+        self._last_stamp = stamp
+        self._last_depth_stamp = depth_key(f)
+        self.frames += 1
         prev = self._last_cam
         if prev is None:
             # the first frame has no frame before it: the camera's pose

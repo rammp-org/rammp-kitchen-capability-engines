@@ -1598,8 +1598,22 @@ def test_a_spot_look_with_no_points_says_why(monkeypatch):
         },
     )
     monkeypatch.setattr(depth_source, "camera_pose_at", lambda g: None)
-    rlo.spot_look(node, SimpleNamespace(grab=grab), runner)
-    assert notes[-1][1]["why"] == "no camera pose at the frame's stamp (TF)"
+    monkeypatch.setattr(pd, "wrist_points", lambda watcher: None)
+    assert rlo.spot_look(node, SimpleNamespace(grab=grab), runner) is None  # asked until SPOT_FRAME_S
+    assert notes[-1][1]["points"] == 0
+    assert notes[-1][1]["why"].startswith("no camera pose at the new frames' stamps (TF) within")
+    # TF lands after the frame (2 of 6 logged spot looks gave up here with ~0.9 s left): asked again
+    asked = []
+
+    def late(g):
+        asked.append(1)
+        return None if len(asked) < 3 else (np.eye(3), np.zeros(3))
+
+    monkeypatch.setattr(depth_source, "camera_pose_at", late)
+    # wrist_points places the frame by the same pose: none until TF has it (two asks in)
+    monkeypatch.setattr(pd, "wrist_points", lambda watcher: None if len(asked) < 2 else np.zeros((5, 3)))
+    monkeypatch.setattr(rlo, "SPOT_FRAME_S", 1.0)
+    assert len(rlo.spot_look(node, SimpleNamespace(grab=grab), runner)) == 5 and notes[-1][1]["points"] == 5
     assert rlo.spot_look(None, SimpleNamespace(grab=grab), runner) is None and notes[-1][1]["why"] == "no node to spin"
     assert rlo.spot_look(node, SimpleNamespace(), runner) is None and notes[-1][1]["why"] == "no wrist camera"
 

@@ -405,6 +405,7 @@ def spot_look(node, watcher, runner):
     (captures/wrist-spot-look-*): 2026-10-29 10:28's look gave the room map
     no points, and nothing said whether it had no frame, no pose for it or
     no depth in range with the lid in the fingers."""
+    from box_opening.perception.depth_source import camera_pose_at
     from box_opening.tasks.press_demo import _spin_detect, wrist_points
 
     g = getattr(watcher, "grab", None)
@@ -414,14 +415,22 @@ def spot_look(node, watcher, runner):
     runner.wait_still("spot-look")
     after = node.get_clock().now().nanoseconds
     t_end = time.monotonic() + SPOT_FRAME_S
+    posed = True  # every new frame so far had its pose
     while time.monotonic() < t_end:
         _spin_detect(node)
         if g.color_stamp is not None and g.depth is not None and dp._stamp_ns(g.color_stamp) > after:
             pts = wrist_points(watcher)
+            if pts is None and camera_pose_at(g) is None:
+                # TF does not hold the frame's stamp yet: it lands after the frame (/tf at
+                # 16 Hz, a frame ~36 ms late), so ask again, for this frame or the next, until
+                # SPOT_FRAME_S. 2 of 6 logged spot looks ended here with ~0.9 s left
+                posed = False
+                continue
             n = 0 if pts is None else len(pts)
             runner.note("spot_look", points=n, why=None if n else spot_look_why(g), frame=_keep_spot_frame(g, n))
             return pts
-    runner.note("spot_look", points=0, why="no new wrist frame within %.1f s of the arm standing still" % SPOT_FRAME_S)
+    why = "no new wrist frame" if posed else "no camera pose at the new frames' stamps (TF)"
+    runner.note("spot_look", points=0, why="%s within %.1f s of the arm standing still" % (why, SPOT_FRAME_S))
     return None
 
 

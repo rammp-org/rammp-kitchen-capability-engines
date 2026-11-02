@@ -500,6 +500,23 @@ def wait_capture_writes(timeout_s=5.0):
     _PENDING_WRITES[:] = [t for t in _PENDING_WRITES if t.is_alive()]
 
 
+POSE_WAIT_S = 0.05  # a frame's TF pose lands up to ~one /tf period (16 Hz) after the frame
+
+
+def _pose_at(grab, stamp, wait_s=POSE_WAIT_S):
+    """camera_pose_at(grab, stamp=stamp), asked again for up to `wait_s` while TF catches up
+    with the frame: a wrist frame arrives ~36 ms after its stamp and /tf comes at 16 Hz, so a
+    capture taken at a random moment found no pose 7.6 % of the time (none with 30 ms more)."""
+    from box_opening.perception.depth_source import camera_pose_at
+
+    end = time.monotonic() + wait_s
+    while True:
+        pose = camera_pose_at(grab, stamp=stamp)
+        if pose is not None or time.monotonic() >= end:
+            return pose
+        time.sleep(0.005)
+
+
 def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=None):
     """One wrist frame (colour, depth, K, camera pose, stamp) into `folder`
     in the recorder's format (replay: scripts/record_scan_frames.py
@@ -507,24 +524,28 @@ def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=
     then `after()`. Returns the folder, or None when there is no frame or
     no pose for it. With `background` the frame is taken now and written on
     a thread (compressing it is ~45 ms the next leg need not wait for): the
-    folder exists at once, its files a moment later (wait_capture_writes)."""
+    folder exists at once, its files a moment later (wait_capture_writes).
+    A pose TF does not hold yet is asked for again for up to POSE_WAIT_S (on
+    the write thread with `background`, so the mission never waits)."""
     import numpy as np
 
-    from box_opening.perception.depth_source import camera_pose_at
+    from box_opening.perception.d405 import frame_snapshot
 
-    if grab is None or grab.color is None or grab.depth is None or grab.k is None or grab.color_stamp is None:
-        return None
-    pose = camera_pose_at(grab)
-    if pose is None:
+    if grab is None:
         return None
     # one snapshot: the grabber assigns new arrays per message, so these
     # stay this frame while a thread writes them, and the JPEG is the npz's
-    arrays = wrist_frame(grab, pose)
+    f = frame_snapshot(grab)
+    if f.color is None or f.depth is None or f.k is None or f.color_stamp is None:
+        return None
+    pose = _pose_at(grab, f.color_stamp, wait_s=0.0 if background else POSE_WAIT_S)
+    if pose is None and not background:
+        return None
     img = None
     try:
         import cv2
 
-        img = np.ascontiguousarray(arrays["color"]).copy()
+        img = np.ascontiguousarray(f.color).copy()
         if draw is not None:
             draw(img)
         cv2.putText(img, str(caption)[:90], (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
@@ -532,6 +553,11 @@ def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=
         img = None
 
     def job():
+        got = pose if pose is not None else _pose_at(grab, f.color_stamp)
+        if got is None:
+            log.info("[press_demo] (wrist frame not written to %s: no camera pose for it in TF)" % folder)
+            return
+        arrays = wrist_frame(f, got)
         with _WRITE_LOCK:
             try:
                 write_frame(folder, arrays)

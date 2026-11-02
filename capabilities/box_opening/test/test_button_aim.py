@@ -1538,6 +1538,25 @@ def test_a_depth_that_lands_after_its_colour_is_not_lost(aimer_env):
     assert aimer.frames == aimer.hits == button_aim.MIN_HITS
 
 
+def test_a_frame_whose_pose_is_not_in_tf_yet_is_judged_once_it_is(aimer_env):
+    """TF lands after the frames (a wrist frame ~36 ms after its stamp, /tf at 16 Hz): 40 % of
+    frames had no pose when they arrived and were thrown away. A frame with no pose yet is not
+    consumed: the next tick judges the same frame once its pose is in, counted once."""
+    from box_opening.perception import button_aim
+
+    g, model, poses, calls, found = aimer_env
+    aimer = button_aim.ButtonAimer(g, model, FLAT_TABLE_Z)
+    g.color_stamp = g.depth_stamp = _st(0.08)
+    now = poses.pop("now")
+    assert not aimer.tick() and aimer.last_why == "no camera pose for the frame"
+    assert aimer.frames == 0 and not found
+    poses["now"] = now  # the TF for its stamp lands
+    aimer.tick()
+    assert aimer.frames == 1 and len(found) == 1  # the same frame, judged now
+    aimer.tick()
+    assert aimer.frames == 1 and len(found) == 1  # and not twice
+
+
 def test_a_depth_from_another_moment_than_its_colour_is_refused(aimer_env):
     from box_opening.perception import button_aim
     from box_opening.perception.depth_source import PAIR_TOL_S
