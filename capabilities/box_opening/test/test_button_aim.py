@@ -1557,6 +1557,56 @@ def test_a_frame_whose_pose_is_not_in_tf_yet_is_judged_once_it_is(aimer_env):
     assert aimer.frames == 1 and len(found) == 1  # and not twice
 
 
+def test_the_aimer_tallies_why_frames_were_turned_down_once_a_frame(aimer_env):
+    """Sweep aim-rejectlog: 3 of 9 tilted aims spent 0.5-1.2 s before their
+    first hit and the note kept only the hits. `rejects` tallies each
+    reason, its numbers taken out, once per frame: a frame asked again
+    every tick for its pose counts once."""
+    from box_opening.perception import button_aim
+
+    g, model, poses, calls, found = aimer_env
+    aimer = button_aim.ButtonAimer(g, model, FLAT_TABLE_Z)
+    assert not aimer.tick()  # no frame at all yet
+    g.color_stamp = g.depth_stamp = _st(0.08)
+    now = poses.pop("now")
+    for _ in range(5):
+        assert not aimer.tick()  # one frame, no pose for it, asked five times
+    poses["now"] = now
+    aimer.tick()  # judged once its pose lands: a hit
+    assert aimer.rejects == {"no wrist frame yet": 1, "no camera pose for the frame": 1}
+    assert button_aim.reject_kind("camera 41 mm above the lid — too close to aim") == (
+        "camera # mm above the lid — too close to aim"
+    )
+    assert button_aim.reject_kind("disc -12.5 mm from the lid around it") == "disc # mm from the lid around it"
+
+
+def test_the_frame_judged_is_the_one_the_capture_gets_with_the_depth_it_was_judged_on(aimer_env):
+    """Sweep aim-saveframe: the aim's capture read the grabber again, a
+    later frame than the one aimed. judged_frame() is the snapshot the
+    last hit was judged on and its pose; a tilted view's adds the fused
+    depth (StillDepth) it was judged on."""
+    from box_opening.perception import button_aim
+
+    g, model, poses, calls, found = aimer_env
+    aimer = button_aim.ButtonAimer(g, model, FLAT_TABLE_Z)
+    assert aimer.judged_frame() is None
+    _paired_frames(aimer, g, 1)
+    f, cam, extra = aimer.judged_frame()
+    assert f.color_stamp == g.color_stamp and cam is not None and extra == {}  # straight down: its own depth
+    g.depth = np.full((4, 4), 2.0, np.float32)  # the grabber's next message: new arrays
+    assert aimer.judged_frame()[0].depth is not g.depth
+    # a tilted view fuses the still frames before it
+    tilt = np.array([[1.0, 0.0, 0.0], [0.0, -0.5, -0.866], [0.0, 0.866, -0.5]])
+    poses["now"] = poses["past"] = (tilt, poses["now"][1])
+    for i in range(3, 7):  # the turn to the tilt (moving), then three still frames
+        g.color_stamp = g.depth_stamp = _st(i * 0.08)
+        aimer.tick()
+    assert aimer.rejects["camera moving"] == 1
+    f, cam, extra = aimer.judged_frame()
+    assert set(extra) == {"depth_fused", "fused_frames"} and int(extra["fused_frames"][0]) >= 2
+    assert extra["depth_fused"].dtype == np.float32 and extra["depth_fused"].shape == f.depth.shape
+
+
 def test_a_depth_from_another_moment_than_its_colour_is_refused(aimer_env):
     from box_opening.perception import button_aim
     from box_opening.perception.depth_source import PAIR_TOL_S

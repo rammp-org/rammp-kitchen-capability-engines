@@ -1277,7 +1277,7 @@ def test_the_tilted_aim_hands_its_frames_and_its_fix_over_as_press_demo_runs_it(
 
     monkeypatch.setattr(depth_source, "camera_pose_at", lambda g, offset_s=None, stamp=None: cam)
     monkeypatch.setattr(press_demo, "_spin_detect", lambda node: None)
-    monkeypatch.setattr(press_demo, "save_aim_frame", lambda grab, s, tag: None)
+    monkeypatch.setattr(press_demo, "save_aim_frame", lambda grab, s, tag, frame=None: None)
     v, pubs = _viz(pink, wrist=1)
     monkeypatch.setattr(viz, "_VIZ", v)
     w = SimpleNamespace(grab=Grab(), model=pink, table_z=float(f["table_z"]))

@@ -29,7 +29,9 @@ has put a lid top 21 mm below table_z + dims.z.
 
 import itertools
 import math
+import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
@@ -932,6 +934,15 @@ class StillDepth:
         self.cam, self.depths = None, []
 
 
+_NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def reject_kind(why):
+    """A reject reason with its numbers taken out ("camera # mm above the
+    lid — too close to aim"): what ButtonAimer.rejects tallies."""
+    return _NUMBER.sub("#", str(why))
+
+
 class ButtonAimer:
     """Frames from a D405Grabber, still ones only, until enough hits agree
     (agreeing_fix). A tilted view's aim takes `min_hits` (2: two agreeing
@@ -951,6 +962,12 @@ class ButtonAimer:
         self.window = int(window)
         self.t0 = time.monotonic()
         self.last_why = None
+        # why frames were turned down, by reject_kind: once per frame and
+        # reason (one not consumed — no pose yet — is asked again each tick)
+        self.rejects = Counter()
+        self._last_reject = None
+        self.last_depth = None  # the depth the last frame was judged on: its own, or StillDepth's fusion
+        self.last_fused = 0  # how many still frames that depth fused
         self.frames = 0
         self.hits = 0
         self.points = []
@@ -982,8 +999,7 @@ class ButtonAimer:
         # pixels judged all belong to it even if a newer one lands meanwhile
         f = frame_snapshot(g)
         if f.color is None or f.depth is None or f.k is None or f.color_stamp is None:
-            self.last_why = "no wrist frame yet"
-            return False
+            return self._reject("no wrist frame yet", None)
         stamp = (f.color_stamp.sec, f.color_stamp.nanosec)
         if stamp == self._last_stamp:
             return False
@@ -991,16 +1007,15 @@ class ButtonAimer:
         if not paired:
             # not consumed: its depth may not have landed yet, and the next
             # tick tries this colour frame again; a stalled depth never aims
-            self.last_why = why
-            return False
+            return self._reject(why, stamp)
         cam = camera_pose_at(g, stamp=f.color_stamp)
         self.last_frame = (f, cam)  # references: nothing is copied
+        self.last_depth, self.last_fused = None, 0  # until this frame is judged
         if cam is None:
             # not consumed either: TF lands after the frames (a wrist frame arrives ~36 ms after
             # its stamp; /tf comes at 16 Hz, so 40 % have no pose yet then), and the next tick
             # judges this same frame once its pose is in (a dead TF: until REACH_AIM_S)
-            self.last_why = "no camera pose for the frame"
-            return False
+            return self._reject("no camera pose for the frame", stamp)
         self._last_stamp = stamp
         self._last_depth_stamp = depth_key(f)
         self.frames += 1
@@ -1016,10 +1031,11 @@ class ButtonAimer:
         self._last_cam = cam
         if not still:
             self.still_depth.reset()
-            self.last_why = "camera moving"
-            return False
+            return self._reject("camera moving", stamp)
         rot, trans = cam
         depth = self.still_depth.add(cam, f.depth) if view_tilt_deg(rot) > OBLIQUE_MIN_DEG else f.depth
+        self.last_depth = depth
+        self.last_fused = 1 if depth is f.depth else len(self.still_depth.depths)
         s, why = find_button(
             f.color,
             depth,
@@ -1033,8 +1049,7 @@ class ButtonAimer:
             prior_xy=self.prior_xy,
         )
         if s is None:
-            self.last_why = why
-            return False
+            return self._reject(why, stamp)
         self.hits += 1
         self.last_sighting = s
         self.points.append(s.xyz)
@@ -1046,6 +1061,34 @@ class ButtonAimer:
         if dt is not None:
             self.pair_dt_ms.append(dt)
         return self.fix() is not None
+
+    def _reject(self, why, stamp):
+        """last_why = `why`, tallied in `rejects` once per frame (`stamp`)
+        and reason. False: the tick has no fix."""
+        self.last_why = why
+        kind = reject_kind(why)
+        if (stamp, kind) != self._last_reject:
+            self._last_reject = (stamp, kind)
+            self.rejects[kind] += 1
+        return False
+
+    def judged_frame(self):
+        """(snapshot, camera pose, extra arrays) of the frame judged last —
+        the one a fix's newest hit came from — or None without one: what
+        the aim's capture saves, not the grabber's newest frame, which may
+        be a later one. `extra` holds the depth it was judged on where
+        StillDepth fused more than its own (depth_fused, fused_frames), so a
+        tilted aim replays offline."""
+        if self.last_frame is None or self.last_frame[1] is None:
+            return None
+        f, cam = self.last_frame
+        extra = {}
+        if self.last_depth is not None and self.last_depth is not f.depth:
+            extra = {
+                "depth_fused": np.asarray(self.last_depth, np.float32),
+                "fused_frames": np.array([self.last_fused]),
+            }
+        return f, cam, extra
 
     def _need(self):
         """How many agreeing hits make the fix (agreeing_fix's n): min_hits

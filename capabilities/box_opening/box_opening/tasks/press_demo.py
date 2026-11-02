@@ -440,7 +440,8 @@ def aim_button_at_staging(
                     time.monotonic() - t0,
                 )
             )
-            folder = save_aim_frame(watcher.grab, s, tag)
+            # the frame the fix's newest hit was judged on, not the grabber's newest
+            folder = save_aim_frame(watcher.grab, s, tag, frame=aimer.judged_frame())
             # the press point, when the press goes on it (aim_source), and its frame
             watcher.last_aim, watcher.last_aim_capture = tuple(float(v) for v in xyz), folder
             if runner is not None:
@@ -469,6 +470,10 @@ def aim_button_at_staging(
                     above_lid_mm=[round(1000 * float(v), 1) if math.isfinite(v) else None for v in aimer.above_lid],
                     # the wrist's depth-vs-colour stamp offsets: what PAIR_TOL_S rests on
                     pair_dt_ms=[round(v, 1) for v in aimer.pair_dt_ms] or None,
+                    # why frames were turned down before the fix (button_aim.reject_kind):
+                    # 3 of 9 tilted aims spent 0.5-1.2 s before their first hit, the
+                    # cause (moving, no pose, a gate) recorded nowhere
+                    rejects=dict(aimer.rejects.most_common(AIM_REJECTS_KEPT)),
                     capture=None if folder is None else str(folder),
                 )
             return (xyz, yaw), aimer.status()
@@ -480,8 +485,22 @@ def aim_button_at_staging(
         if getattr(aimer, "frames", None) == n0:
             time.sleep(0.02)
     watcher.last_reject = aimer.last_why  # for the frame dump's caption
+    if runner is not None:
+        # no fix: what each frame was turned down for, in the record, not only printed
+        runner.note(
+            "aim_missed",
+            aim=tag,
+            hits=aimer.hits,
+            frames=aimer.frames,
+            aim_s=round(time.monotonic() - t0, 2),
+            hit_s=[round(float(v), 2) for v in aimer.hit_s],
+            rejects=dict(aimer.rejects.most_common(AIM_REJECTS_KEPT)),
+            last_reject=aimer.last_why,
+        )
     return None, aimer.status()
 
+
+AIM_REJECTS_KEPT = 8  # the most frequent of an aim's reject reasons its row keeps
 
 CAPTURES_DIR = state_dir() / "captures"
 AIM_CAPTURES_KEPT = 20  # newest folders kept of each every-run capture (aim, pop); older ones are pruned
@@ -517,12 +536,14 @@ def _pose_at(grab, stamp, wait_s=POSE_WAIT_S):
         time.sleep(0.005)
 
 
-def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=None):
+def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=None, frame=None):
     """One wrist frame (colour, depth, K, camera pose, stamp) into `folder`
     in the recorder's format (replay: scripts/record_scan_frames.py
     --analyze), plus a JPEG with `caption` and whatever `draw(img)` adds,
     then `after()`. Returns the folder, or None when there is no frame or
-    no pose for it. With `background` the frame is taken now and written on
+    no pose for it. `frame`: (snapshot, pose, extra arrays) to save instead
+    of the grabber's newest (ButtonAimer.judged_frame: the frame an aim
+    judged, a later one possibly in the grabber by now). With `background` the frame is taken now and written on
     a thread (compressing it is ~45 ms the next leg need not wait for): the
     folder exists at once, its files a moment later (wait_capture_writes).
     A pose TF does not hold yet is asked for again for up to POSE_WAIT_S (on
@@ -531,16 +552,20 @@ def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=
 
     from box_opening.perception.d405 import frame_snapshot
 
-    if grab is None:
+    if grab is None and frame is None:
         return None
-    # one snapshot: the grabber assigns new arrays per message, so these
-    # stay this frame while a thread writes them, and the JPEG is the npz's
-    f = frame_snapshot(grab)
-    if f.color is None or f.depth is None or f.k is None or f.color_stamp is None:
-        return None
-    pose = _pose_at(grab, f.color_stamp, wait_s=0.0 if background else POSE_WAIT_S)
-    if pose is None and not background:
-        return None
+    extra = {}
+    if frame is not None:
+        f, pose, extra = frame  # its pose already found: nothing to wait for
+    else:
+        # one snapshot: the grabber assigns new arrays per message, so these
+        # stay this frame while a thread writes them, and the JPEG is the npz's
+        f = frame_snapshot(grab)
+        if f.color is None or f.depth is None or f.k is None or f.color_stamp is None:
+            return None
+        pose = _pose_at(grab, f.color_stamp, wait_s=0.0 if background else POSE_WAIT_S)
+        if pose is None and not background:
+            return None
     img = None
     try:
         import cv2
@@ -557,7 +582,7 @@ def _save_wrist_frame(grab, folder, caption, draw=None, background=False, after=
         if got is None:
             log.info("[press_demo] (wrist frame not written to %s: no camera pose for it in TF)" % folder)
             return
-        arrays = wrist_frame(f, got)
+        arrays = {**wrist_frame(f, got), **extra}
         with _WRITE_LOCK:
             try:
                 write_frame(folder, arrays)
@@ -598,11 +623,13 @@ def dump_wrist_frame(watcher, tag):
     return out
 
 
-def save_aim_frame(grab, sighting, tag="aim"):
+def save_aim_frame(grab, sighting, tag="aim", frame=None):
     """The frame the press was aimed on, with the seam circle (green) and
     the PRESS POINT — its centre (red +) — drawn, every run, so a miss is a
     ten-second look instead of a blind read of the run log (the 2026-09-17
-    miss had no frame). Keeps the newest AIM_CAPTURES_KEPT folders."""
+    miss had no frame). Keeps the newest AIM_CAPTURES_KEPT folders.
+    `frame`: the frame the aim judged (ButtonAimer.judged_frame), with the
+    fused depth it was judged on; None: the grabber's newest."""
     folder = CAPTURES_DIR / ("wrist-%s-%s" % (tag, time.strftime("%Y%m%d-%H%M%S")))
 
     def draw(img):
@@ -617,7 +644,9 @@ def save_aim_frame(grab, sighting, tag="aim"):
         sighting.r_px,
     )
     # written off the critical path: the next leg need not wait for zlib
-    out = _save_wrist_frame(grab, folder, caption, draw, background=True, after=lambda: _prune_captures(tag))
+    out = _save_wrist_frame(
+        grab, folder, caption, draw, background=True, after=lambda: _prune_captures(tag), frame=frame
+    )
     if out is None:
         return None
     log.info("[press_demo] aim frame saved: %s" % out)

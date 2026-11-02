@@ -901,6 +901,32 @@ def test_the_aim_frame_is_written_off_the_critical_path(ctx, tmp_path, monkeypat
     assert (folder / "frame_000.jpg").exists()
 
 
+def test_the_aim_frame_is_the_one_the_aim_judged_with_the_depth_it_judged(ctx, tmp_path, monkeypatch):
+    """Sweep aim-saveframe: the capture read the grabber at save time, a
+    later frame than the one aimed. Given the aim's judged frame
+    (ButtonAimer.judged_frame) it saves that one — with its pose, nothing
+    asked of TF — and the fused depth a tilted aim was judged on."""
+    import numpy as np
+
+    from box_opening.perception import depth_source
+    from box_opening.perception.d405 import frame_snapshot
+
+    press_demo, grab, pose, sighting, gate = _aim_frame_env(ctx, tmp_path, monkeypatch)
+    judged = frame_snapshot(grab)
+    fused = np.full(np.shape(judged.depth), 0.31, np.float32)
+    grab.color, grab.depth = np.full_like(grab.color, 255), np.zeros_like(grab.depth)  # a newer frame since
+    asked = []
+    monkeypatch.setattr(depth_source, "camera_pose_at", lambda *a, **k: asked.append(1))
+    extra = {"depth_fused": fused, "fused_frames": np.array([3])}
+    folder = press_demo.save_aim_frame(grab, sighting, "aim", frame=(judged, pose, extra))
+    gate.set()
+    press_demo.wait_capture_writes()
+    saved = np.load(folder / "frame_000.npz")
+    assert np.array_equal(saved["color"], judged.color) and np.array_equal(saved["depth"], judged.depth)
+    assert np.allclose(saved["trans_cam"], pose[1]) and not asked
+    assert np.array_equal(saved["depth_fused"], fused) and int(saved["fused_frames"][0]) == 3
+
+
 def test_the_aim_frame_prunes_old_captures_after_its_write(ctx, tmp_path, monkeypatch):
     import numpy as np
 
@@ -1222,6 +1248,7 @@ def test_the_aim_judges_frames_back_to_back_and_waits_only_when_none_is_new(monk
     nothing new, or a colour frame whose depth has not landed, which the
     next tick tries again. The fix comes back as it did, and the AIM line
     and the note say which hits agreed and when each came."""
+    from collections import Counter
     from types import SimpleNamespace
 
     from box_opening.perception import button_aim
@@ -1277,6 +1304,11 @@ def test_the_aim_judges_frames_back_to_back_and_waits_only_when_none_is_new(monk
         def status(self):
             return "2 of 3 hits agree in 4 frames"
 
+        rejects = Counter({"camera moving": 1})
+
+        def judged_frame(self):
+            return None  # no frame: the capture reads the grabber, which has none
+
     monkeypatch.setattr(button_aim, "ButtonAimer", Aimer)
     monkeypatch.setattr(press_demo, "_spin_detect", lambda node: None)
     monkeypatch.setattr(press_demo.time, "sleep", lambda s: events.append("sleep"))
@@ -1315,6 +1347,42 @@ def test_the_aim_judges_frames_back_to_back_and_waits_only_when_none_is_new(monk
     ((leg, kw),) = notes
     assert leg == "reach-aim" and (kw["hits"], kw["frames"]) == (3, 4)
     assert kw["agreeing"] == [0, 2] and kw["hit_s"] == [0.07, 0.14, 0.28] and kw["above_lid_mm"] == [1.2, None, 1.4]
+    assert kw["rejects"] == {"camera moving": 1}
+
+
+def test_an_aim_with_no_fix_says_why_its_frames_were_turned_down_in_the_record(monkeypatch):
+    """A missed aim ("STOP: no button from the look pose") was only printed:
+    its row now keeps what each frame was turned down for."""
+    from collections import Counter
+    from types import SimpleNamespace
+
+    from box_opening.perception import button_aim
+    from box_opening.tasks import press_demo
+
+    class Aimer:
+        last_why = "no circle of 20-40 px radius in the frame"
+        frames, hits, hit_s = 6, 0, []
+        rejects = Counter({"no circle of #-# px radius in the frame": 5, "camera moving": 1})
+
+        def __init__(self, grab, model, table_z, **kw):
+            pass
+
+        def tick(self):
+            return False
+
+        def status(self):
+            return "0 of 0 hits agree in 6 frames"
+
+    monkeypatch.setattr(button_aim, "ButtonAimer", Aimer)
+    monkeypatch.setattr(press_demo, "_spin_detect", lambda node: None)
+    notes = []
+    runner = SimpleNamespace(note=lambda leg, **kw: notes.append((leg, kw)))
+    w = SimpleNamespace(grab=None, model=None, table_z=0.2)
+    got, _status = press_demo.aim_button_at_staging(None, w, 0.0, timeout_s=0.05, runner=runner, tag="reach-aim")
+    ((leg, kw),) = notes
+    assert got is None and leg == "aim_missed" and kw["aim"] == "reach-aim" and (kw["hits"], kw["frames"]) == (0, 6)
+    assert kw["rejects"] == {"no circle of #-# px radius in the frame": 5, "camera moving": 1}
+    assert kw["last_reject"] == "no circle of 20-40 px radius in the frame"
 
 
 @pytest.mark.parametrize(
