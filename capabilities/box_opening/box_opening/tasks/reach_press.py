@@ -503,11 +503,13 @@ def _proven(ctx, cfg, chain, tilt, button, geometry, q_look, depth):
 # the same walk is shorter. Offline (flatbot's URDF, the compliant run's own
 # timing: flown_s, transit_s), the posture quickest_look chooses:
 #   10-28 16:23 (r 0.66 m, az -26 deg) walk 2.79 -> 1.79 s, look +0.34 s:
-#               2.7 s quicker over the three walks
-#   10-28 15:45 (r 0.75)  walk 3.15 -> 2.16 s, +0.15 s: 2.8 s
-#   10-29 12:04 (r 0.65)  walk 2.79 -> 1.70 s, +0.38 s: 2.9 s
+#               2.7 s quicker over the three walks (0.66 s over the one
+#               walk a run flies since #109)
+#   10-28 15:45 (r 0.75)  walk 3.15 -> 2.16 s, +0.15 s: 2.8 s (0.78 s)
+#   10-29 12:04 (r 0.65)  walk 2.79 -> 1.70 s, +0.38 s: 2.9 s (0.79 s)
 #   10-29 13:37 (r 0.76), 10-28 14:21 (r 0.73): today's kept — the best
-#               other elbow there saves 0.6-0.7 s, under LOOK_POSTURE_GAIN_S
+#               other elbow there saves 0.6-0.7 s over three walks, under
+#               LOOK_POSTURE_GAIN_S's 1.0 then; over the one walk, under its 0.3
 # The candidates: the self-motion walked LOOK_POSTURE_SWING_RAD each way
 # from today's posture, one every LOOK_POSTURE_EVERY_RAD, inside the
 # planner's joint limits (a goal within PLANNER_LIMIT_MARGIN_RAD of one is
@@ -523,7 +525,10 @@ def _proven(ctx, cfg, chain, tilt, button, geometry, q_look, depth):
 LOOK_POSTURE_SWING_RAD = 2.4  # past ~2 rad the look's transit costs more than the walks save
 LOOK_POSTURE_EVERY_RAD = 0.3
 LOOK_POSTURE_DEDUP_RAD = 0.2  # any joint: closer than this is the same posture
-LOOK_POSTURE_PROOFS = 3
+# Only the best-ranked is proven (sweep planning-look-posture-proofs-1): replayed
+# on 36 logged looks, the search of 3 stood the arm 0.467 s at HOME to save 0.277 s
+# (-0.19 s a run); of 1, 0.208 s (+0.05 s a run), the posture saved 0.258 s
+LOOK_POSTURE_PROOFS = 1
 # IK time the search may spend (s): no proof is started that the time left
 # would not hold at the slowest one so far. Flatbot's Jetson (offline,
 # 2026-10-29): the sweep ~0.04 s, the ranking ~0.05, each proof 0.09-0.20
@@ -534,8 +539,12 @@ LOOK_POSTURE_BUDGET_S = 0.6
 # tenths are inside what the estimate cannot tell: at 14:21 and 13:37 the
 # best other elbow saved 0.6-0.7 s by it, and the research pass of 10-28
 # found no gain at 14:21
-LOOK_POSTURE_GAIN_S = 1.0
-LOOK_POSTURE_WALKS = 3  # the way in, the way back, the grip's way in (a back out only where the grip misses)
+# (1.0 against three walks; 0.3 against the one a run flies since #109)
+LOOK_POSTURE_GAIN_S = 0.3
+# The walks the look's posture is timed over: the way in alone. Since #109 the
+# grip goes straight from the press's hold (reach_lid_off.GRIP_FROM_PRESS): the
+# way back and the grip's way in from the look pose fly only where that grip misses
+LOOK_POSTURE_WALKS = 1
 # posture_refusal: the arm's centre line kept this far off the table and
 # the box — the links' radius (the Gen3's are ~0.06 m from their joints'
 # axes) and 0.03 m more
@@ -2521,7 +2530,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         log.info(
             "[press_demo] REACH-OUT: the look holds the same pose with the elbow swung %.1f rad along its swing "
             "(joints up to %.2f rad from the nearest posture): each walk to the hand turned down %.2f s against "
-            "%.2f, the look %.2f s against %.2f — %.1f s quicker over %d walks (%.2f s of IK)"
+            "%.2f, the look %.2f s against %.2f — %.1f s quicker over %d walk%s (%.2f s of IK)"
             % (
                 p["swing_rad"],
                 p["joint_gap_rad"],
@@ -2531,6 +2540,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
                 p["transit_s_today"],
                 p["saved_s"],
                 LOOK_POSTURE_WALKS,
+                "" if LOOK_POSTURE_WALKS == 1 else "s",
                 p["ik_s"],
             )
         )

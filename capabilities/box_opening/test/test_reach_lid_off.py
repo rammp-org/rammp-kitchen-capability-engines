@@ -2234,7 +2234,7 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     lines the runner flies; and a spot beside the box is one the hand
     reaches straight down. All of it as well from the posture the look
     takes for the quickest walks where one is quicker (rp.quickest_look,
-    run_reach_press's proof; at two of the five): every leg after the look
+    run_reach_press's proof; at one of the five): every leg after the look
     starts from it."""
     from box_opening.runtime.runner import Runner
     from box_opening.tasks import press_demo
@@ -2248,8 +2248,10 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     plan, why = rp.plan_reach(ctx, cfg, button, home, depth=True, shortest_walk=shortest_walk)
     assert why is None and plan.tilt_deg == 30
     assert plan.look_leg.goal_joints == pytest.approx(plan.look_joints, abs=1e-9)
-    if shortest_walk:  # two of the five take another elbow: 3.1 and 1.8 s quicker over the transit and three walks
-        assert (plan.posture["chosen"] > 0) is (box in ((0.668, -0.33), (0.60, -0.49))), plan.posture
+    if shortest_walk:
+        # over the transit and the one walk a run flies since #109 (rp.LOOK_POSTURE_WALKS), one of the five takes
+        # another elbow (over three walks two did, 3.1 and 1.8 s quicker: (0.60, -0.49) was the other)
+        assert (plan.posture["chosen"] > 0) is (box == (0.668, -0.33)), plan.posture
     way, why, _kind = rp.solve_way_in(ctx, cfg, button, plan.tilt_deg, plan.look_leg.goal_joints)
     assert way is not None, why
     runner = Runner(ctx.client, log_dir=tmp_path)

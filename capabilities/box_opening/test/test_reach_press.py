@@ -2227,9 +2227,10 @@ def test_on_flatbot_the_look_goes_to_the_elbow_whose_walks_are_quickest(ctx, mon
     rad of joint travel for ~16 cm of the hand's, from the posture HOME's
     nearest IK picks for the look. Asked for the shortest walks (the proof
     before the look), the look holds the same pose — the same view — with
-    the elbow swung elsewhere: at these boxes each walk is ~1 s quicker as
-    a compliant run flies it, 2.7-2.9 s over the three walks with the
-    look's longer transit taken off, its joint arc down by over 0.5 rad.
+    the elbow swung elsewhere: at these boxes each walk is 0.85-1.0 s quicker
+    as a compliant run flies it, 0.66-0.79 s over the one walk a run flies
+    since #109 (LOOK_POSTURE_WALKS) with the look's longer transit taken
+    off, its joint arc down by over 0.5 rad.
     The look is planned once, a joint goal to that posture; the way down
     is proven from it as it was from today's, it passed the guard, and the
     way in from where the look ends is one the runner flies."""
@@ -2246,10 +2247,11 @@ def test_on_flatbot_the_look_goes_to_the_elbow_whose_walks_are_quickest(ctx, mon
     plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True, shortest_walk=True)
     assert why is None and plan.tilt_deg == today.tilt_deg == 30
     p = plan.posture
-    assert p["chosen"] > 0 and p["saved_s"] >= 2.5 and p["proven"] >= 1, p
+    assert p["chosen"] > 0 and p["saved_s"] >= 0.6 and p["proven"] >= 1, p
     assert p["walk_s_today"] == round(reach_press.flown_s(reach_press.walk_legs(today), COMPLIANT_FREE_LINE_SPEED), 2)
     assert p["walk_s"] == round(reach_press.flown_s(reach_press.walk_legs(plan), COMPLIANT_FREE_LINE_SPEED), 2)
-    assert p["walk_s"] <= p["walk_s_today"] - 0.9 and p["transit_s"] > p["transit_s_today"]
+    # weighed over one walk, the posture chosen trades a little of the walk's saving for a shorter transit
+    assert p["walk_s"] <= p["walk_s_today"] - 0.8 and p["transit_s"] > p["transit_s_today"]
     assert dp.joint_arc(_walk(plan)) <= dp.joint_arc(_walk(today)) - 0.5
     # the same look pose, another posture
     R0, t0 = chain.fk(today.look_joints)
@@ -2257,7 +2259,7 @@ def test_on_flatbot_the_look_goes_to_the_elbow_whose_walks_are_quickest(ctx, mon
     assert np.asarray(t1) == pytest.approx(np.asarray(t0), abs=1e-4)
     assert np.asarray(R1) == pytest.approx(np.asarray(R0), abs=1e-4)
     gap = float(np.abs(np.asarray(plan.look_joints) - np.asarray(today.look_joints)).max())
-    assert gap > 0.5 and p["joint_gap_rad"] == pytest.approx(gap, abs=1e-3)
+    assert gap > 0.3 and p["joint_gap_rad"] == pytest.approx(gap, abs=1e-3)  # 0.34-0.71 rad: a nearer elbow
     # planned once, a joint goal to it; proven from it and guarded
     assert asked == [("joints", plan.look_joints)] and plan.look_leg.goal_joints == plan.look_joints
     assert plan.slide_pts[0] == pytest.approx(plan.look_joints) and plan.down.pts and plan.stroke.legs
@@ -2273,8 +2275,9 @@ def test_on_flatbot_the_look_goes_to_the_elbow_whose_walks_are_quickest(ctx, mon
 def test_on_flatbot_where_no_other_elbow_is_quicker_by_enough_the_look_is_todays_exactly(ctx, monkeypatch, scene):
     """10-28 14:21 (where the research pass of 10-28 found no gain) and
     10-29 13:37: the best other elbow proven saves 0.6-0.7 s over the look's
-    transit and the three walks, under LOOK_POSTURE_GAIN_S — inside what an
-    estimate timing each walk alone cannot tell. The look goes where it
+    transit and three walks, and less than LOOK_POSTURE_GAIN_S over the one
+    a run flies since #109 — inside what an estimate timing each walk alone
+    cannot tell. The look goes where it
     always did: today's posture exactly, planned as the pose goal it always
     was, the slide, the way down and the stroke the same proof. Only with the
     margin under that saving does the look move."""
@@ -2294,7 +2297,10 @@ def test_on_flatbot_where_no_other_elbow_is_quicker_by_enough_the_look_is_todays
     assert [(n, np.asarray(p).tolist()) for n, p, _s in plan.stroke.legs] == [
         (n, np.asarray(p).tolist()) for n, p, _s in today.stroke.legs
     ]
-    monkeypatch.setattr(reach_press, "LOOK_POSTURE_GAIN_S", 0.3)
+    # timed over the three walks of a run before #109, with its 1.0 s margin lowered to 0.3:
+    # only with the margin under that saving does the look move
+    monkeypatch.setattr(reach_press, "LOOK_POSTURE_WALKS", 3)
+    monkeypatch.setattr(reach_press, "LOOK_POSTURE_PROOFS", 3)
     plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True, shortest_walk=True)
     assert why is None and plan.posture["chosen"] > 0 and 0.3 <= plan.posture["saved_s"] < 1.0, plan.posture
 
@@ -2416,6 +2422,7 @@ def test_the_posture_search_never_starts_a_proof_the_ik_time_left_would_not_hold
 
     monkeypatch.setattr(reach_press, "_proven", proven)
     monkeypatch.setattr(reach_press, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(reach_press, "LOOK_POSTURE_PROOFS", 3)  # the budget, not the count, ends it here
     plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True, shortest_walk=True)
     p = plan.posture
     assert why is None and p["ik_s"] == 0.5 and p["proven"] == 2 and p["chosen"] > 0, p
@@ -2477,9 +2484,9 @@ def test_the_look_flies_to_the_posture_chosen_for_its_walks_and_the_record_says_
         "walk_s_today": 2.79,
         "transit_s": 2.16,
         "transit_s_today": 1.82,
-        "saved_s": 2.67,
+        "saved_s": 0.66,
         "candidates": 9,
-        "proven": 3,
+        "proven": 1,
         "refused": {},
         "ik_s": 0.43,
     }
@@ -2507,7 +2514,7 @@ def test_the_look_flies_to_the_posture_chosen_for_its_walks_and_the_record_says_
         assert (
             "REACH-OUT: the look holds the same pose with the elbow swung 1.2 rad along its swing (joints up to "
             "0.71 rad from the nearest posture): each walk to the hand turned down 1.79 s against 2.79, the look "
-            "2.16 s against 1.82 — 2.7 s quicker over 3 walks (0.43 s of IK)"
+            "2.16 s against 1.82 — 0.7 s quicker over 1 walk (0.43 s of IK)"
         ) in out
         return
     assert target[0] == "pose" and plan["look_posture"]["chosen"] == 0 and "the look holds the same pose" not in out
