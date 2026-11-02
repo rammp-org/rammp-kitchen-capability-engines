@@ -162,7 +162,7 @@ def _full_flow(
     )
     held_pad = (BUTTON[0], BUTTON[1], BUTTON[2] - 0.006)
 
-    def hold(ctx_, cfg_, runner_, stroke, top_z, seen):
+    def hold(ctx_, cfg_, runner_, stroke, top_z, seen, contact=None):
         rec.events.append("hold")
         seen.update(held_joints=[float(v) + 0.002 for v in stroke.legs[-1][1][-1]], touch_xyz=held_pad)
         return dp.DepthPress(free=True, contact=True, felt=True, judged=False, press_n=15.0)
@@ -1209,6 +1209,30 @@ def test_a_stop_at_the_look_pose_flies_the_home_planned_while_the_way_back_flew(
     assert rec.legs["home"] is plans[-1][1][-1]
     (ahead,) = (r for r in rows if r["leg"] == "home_ahead")
     assert ahead["flown"] is True and ahead["off_rad"] == pytest.approx(0.0)
+
+
+def test_the_first_press_is_cut_at_its_contact_and_a_press_once_more_flies_its_full_stroke(ctx, monkeypatch, tmp_path):
+    """Contact detection rides each press's way in (its lead's stop_when):
+    the first press's stroke ends as far past where the pads met the box as
+    it was planned past the top; a press once more, the knob not up after
+    the first, flies its full stroke, the contact only watched."""
+    from box_opening.tasks.press_contact import PressContact
+
+    real, watched = dp.watch_press, []
+
+    def watch(ctx_, legs, stroke, top_z, cut=True):
+        got = real(ctx_, legs, stroke, top_z, cut=cut)
+        watched.append((legs[0].name, legs[0].stop_when is got, got.cut))
+        return got
+
+    monkeypatch.setattr(dp, "watch_press", watch)
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, NOT_UP_TWICE)
+    assert code == 1
+    assert [(lead, on, cut) for lead, on, cut in watched] == [
+        ("reach:re-aim", True, True),
+        ("reach:re-aim", True, False),
+    ]
+    assert isinstance(rec.legs["reach:re-aim"].stop_when, PressContact)
 
 
 @pytest.mark.parametrize("push, flown", [(0.03, True), (0.05, False)])

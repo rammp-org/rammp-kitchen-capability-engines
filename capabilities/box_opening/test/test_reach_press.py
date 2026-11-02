@@ -1309,7 +1309,7 @@ def _depth_press_flow(ctx, monkeypatch, tmp_path, way_down, compliant=True, **kw
         got.update(aimed=aimed, top_z=top_z, compliant=compliant)
         return dp.DepthPress(free=True, contact=True, felt=True, judged=False, press_n=14.0)
 
-    def hold(ctx_, cfg_, runner_, stroke, top_z, seen):
+    def hold(ctx_, cfg_, runner_, stroke, top_z, seen, contact=None):
         got.update(aimed=from_container(ctx_.cpose, ctx_.model.button_offset), top_z=top_z, compliant=True)
         return dp.DepthPress(free=True, contact=True, felt=True, judged=False, press_n=14.0)
 

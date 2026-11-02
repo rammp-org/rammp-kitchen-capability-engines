@@ -1,0 +1,237 @@
+"""Contact in the compliant press (tasks/press_contact): where the pads met
+the box, from the gap between their height measured and the reference's,
+and the stroke ended as far past it as it was planned past the cameras'
+top — never deeper than planned."""
+
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from box_opening.tasks import depth_press as dp
+from box_opening.tasks import press_contact as pc
+
+PAD = dp.DOWN_CONTACT_TOOL[2]  # the pads below the tool frame (TCP_OFFSET_M)
+TOP = 0.30  # where the cameras put the button's top (pads height)
+END = TOP - 0.012 - 0.020  # the stroke's planned end: its travel and a 20 mm overshoot below that
+HZ = 90.0  # the client's kept samples
+
+
+class _Chain:
+    """Joint 1 is the tool frame's height; nothing else moves."""
+
+    def fk(self, q):
+        return np.eye(3), np.array([0.0, 0.0, float(q[0])])
+
+
+def _stamp(t):
+    return SimpleNamespace(sec=int(t), nanosec=int(round((t - int(t)) * 1e9)))
+
+
+def _traj(z_pads, dt):
+    """A trajectory through the pads heights `z_pads`, `dt` apart."""
+    return SimpleNamespace(
+        points=[
+            SimpleNamespace(positions=[z - PAD] + [0.0] * 6, time_from_start=_stamp(0.02 + i * dt))
+            for i, z in enumerate(z_pads)
+        ]
+    )
+
+
+def _ref(z0=0.40, z1=END, speed=0.025):
+    """The reference's pads straight down from z0 to z1 at `speed` (m/s)."""
+    n = int(round((z0 - z1) / speed / 0.05))
+    return np.linspace(z0, z1, n + 1), 0.05
+
+
+def _fly(det, client, z_pads, dt, measured, cut_seen=None):
+    """The client flying `z_pads`: every kept sample, the measured pads at
+    measured(t, z_ref); stop_when polled after each. Returns (the fraction
+    it stopped at or None, the samples)."""
+    traj = _traj(z_pads, dt)
+    T = 0.02 + (len(z_pads) - 1) * dt
+    info = {"sent_at": 100.0, "sent_traj": traj, "feedback_q": []}
+    client.last_execution = info
+    t, frac = 100.0, 0.0
+    while frac < 1.0:
+        frac = min(1.0, (t - 100.0) / T)
+        z_ref = float(np.interp(frac * T, [0.02 + i * dt for i in range(len(z_pads))], z_pads))
+        z_m = measured(t - 100.0, z_ref)
+        info["feedback_q"].append((t, frac, [z_m - PAD] + [0.0] * 6, None))
+        if det(frac):
+            return frac, info
+        t += 1.0 / HZ
+    return None, info
+
+
+def _watch(cut=True):
+    client = SimpleNamespace(last_execution=None)
+    det = pc.PressContact(_Chain(), client, TOP, TOP + dp.TOUCH_SLOW_M, TOP - END, END, cut=cut)
+    return det, client
+
+
+def _free(noise=0.0003, lag=-0.002, seed=0):
+    rng = np.random.default_rng(seed)
+    return lambda t, z: z + lag + float(rng.normal(0.0, noise))
+
+
+def test_a_hard_stop_is_met_where_the_pads_stopped_and_the_stroke_ends_as_far_past_it_as_planned():
+    """The box 10 mm higher than the cameras put it: the pads stop at 0.31.
+    The stroke was planned 32 mm past the top; it ends 32 mm past where
+    they stopped — 10 mm short of its planned end — and the driver holds
+    the reference there."""
+    det, client = _watch()
+    z, dt = _ref()
+    free = _free()
+    stopped, _info = _fly(det, client, z, dt, lambda t, zr: max(free(t, zr), 0.31))
+    assert stopped is not None
+    t_c, z_c, _g = det.contact
+    assert z_c == pytest.approx(0.31, abs=0.0015)
+    assert det.stop_z == pytest.approx(z_c - (TOP - END))
+    assert pc.pads_z(_Chain(), det.held_ref) == pytest.approx(det.stop_z, abs=0.0005)  # the reference held there
+    rec = det.record()
+    assert rec["met"] and rec["cut"] and rec["cut_on"] and rec["above_top_mm"] == pytest.approx(10.0, abs=1.5)
+    assert rec["cut_mm"] == pytest.approx(10.0, abs=1.5) and rec["past_mm"] == pytest.approx(32.0)
+    assert 0 < rec["detected_after_ms"] <= 1000 * pc.CONTACT_WINDOW_S + 1000 * pc.CONTACT_SAMPLES / HZ
+
+
+def test_the_speed_change_where_the_slow_leg_begins_is_no_contact():
+    """The reference slows where the slow leg begins; the measured pads dip
+    4 mm below it and come back at 5 mm/s (the recorded presses: 3-5 mm,
+    5-6 mm/s). No contact, and the stroke flies to its end."""
+    det, client = _watch()
+    fast = np.linspace(0.40, TOP + dp.TOUCH_SLOW_M, 9)  # 0.05 s apart: ~70 mm/s
+    slow = np.linspace(TOP + dp.TOUCH_SLOW_M, END, 54)[1:]  # ~25 mm/s
+    z = np.concatenate([fast, slow])
+    t_arm = 0.02 + 8 * 0.05
+
+    def measured(t, zr):
+        dip = 0.0
+        if t > t_arm:
+            s = t - t_arm
+            dip = -0.004 * min(1.0, s / 0.1) if s < 0.1 else -0.004 + 0.005 * min(s - 0.1, 0.8)
+        return zr - 0.002 + dip
+
+    stopped, _info = _fly(det, client, z, 0.05, measured)
+    assert stopped is None and det.contact is None
+    assert det.record() == {"watched": True, "cut_on": True, "samples": det.samples, "past_mm": 32.0, "met": False}
+
+
+def _yield(onset):
+    """The pads press on down into something that yields from `onset` on, at
+    half the reference's speed (10-29 14:31, 14:45; 10-30 13:35:48): the gap
+    grows 12.5 mm/s, slower than a fast rise."""
+
+    def measured(t, zr):
+        return zr - 0.002 if zr - 0.002 > onset else onset - 0.5 * (onset - (zr - 0.002))
+
+    return measured
+
+
+def test_a_slow_yield_is_met_where_it_begins():
+    """Begun once the slow leg's start has settled: the slow rise meets it
+    where the pads began to lag, and the stroke ends as far past that as
+    planned."""
+    det, client = _watch()
+    z, dt = _ref()
+    onset = TOP + 0.015
+    stopped, _info = _fly(det, client, z, dt, _yield(onset))
+    assert stopped is not None and det.how == "slow"
+    assert det.contact[1] == pytest.approx(onset, abs=0.002)
+    assert det.record()["cut_mm"] == pytest.approx(15.0, abs=2.0)
+
+
+def test_a_slow_yield_begun_as_the_slow_leg_starts_is_met_late_and_cuts_less():
+    """Begun inside CONTACT_SETTLE_S, where the slow leg's start still dips
+    the gap: no slow rise is judged there, so it is met once that has
+    settled, lower than it began — the stroke cut less, never deeper than
+    planned. (The recorded presses that met the box this early rose fast:
+    10-30 13:28, 21 mm/s.)"""
+    det, client = _watch()
+    z, dt = _ref()
+    onset = TOP + 0.032
+    stopped, _info = _fly(det, client, z, dt, _yield(onset))
+    assert stopped is not None and det.how == "slow"
+    assert onset - 0.012 < det.contact[1] < onset
+    assert 0.0 < det.record()["cut_mm"] < 32.0
+
+
+def test_a_contact_below_the_cameras_top_leaves_the_stroke_as_planned():
+    """The pads stop 10 mm below the top: as far past that as planned is
+    deeper than the stroke goes. Never deeper than planned: nothing cut."""
+    det, client = _watch()
+    z, dt = _ref()
+    free = _free()
+    stopped, _info = _fly(det, client, z, dt, lambda t, zr: max(free(t, zr), TOP - 0.010))
+    assert stopped is None and det.contact is not None and det.stop_z is None
+    rec = det.record()
+    assert rec["met"] and not rec["cut"] and rec["why"] == "the planned end is no deeper than that past the contact"
+
+
+@pytest.mark.parametrize("off", ["cut", "flag"])
+def test_watched_only_it_says_where_it_met_and_cuts_nothing(monkeypatch, off):
+    """A second press (cut=False), or PRESS_FROM_CONTACT off: the contact is
+    met and recorded with where the stroke would have ended, nothing cut."""
+    if off == "flag":
+        monkeypatch.setattr(pc, "PRESS_FROM_CONTACT", False)
+    det, client = _watch(cut=off != "cut")
+    z, dt = _ref()
+    free = _free()
+    stopped, _info = _fly(det, client, z, dt, lambda t, zr: max(free(t, zr), 0.31))
+    assert stopped is None and det.held_ref is None
+    rec = det.record()
+    assert rec["met"] and not rec["cut"] and not rec["cut_on"] and rec["why"] == "watched only"
+    assert rec["cut_mm"] == pytest.approx(10.0, abs=1.5)  # what it would have cut
+
+
+def test_nothing_is_judged_before_the_slow_leg():
+    """Above where the slow leg begins the reference moves fast and the gap
+    with it: a jump there is no contact."""
+    det, client = _watch()
+    z, dt = _ref()
+
+    def measured(t, zr):
+        return zr + (0.02 if zr > TOP + dp.TOUCH_SLOW_M + 0.01 else -0.002)
+
+    stopped, _info = _fly(det, client, z, dt, measured)
+    assert stopped is None and det.contact is None and det.armed_t is not None
+
+
+def test_a_reference_already_past_where_the_stroke_should_end_stops_at_once():
+    """Contact seen late (the samples read in a batch after the lookahead):
+    the reference is already past where the stroke should end — it stops at
+    the next poll, not never."""
+    det, client = _watch()
+    z, dt = _ref()
+    T = 0.02 + (len(z) - 1) * dt
+    traj = _traj(z, dt)
+    info = {"sent_at": 0.0, "sent_traj": traj, "feedback_q": []}
+    client.last_execution = info
+    free = _free()
+    ts = np.arange(0.0, T, 1.0 / HZ)
+    for t in ts:
+        frac = t / T
+        z_ref = float(np.interp(t, [0.02 + i * dt for i in range(len(z))], z))
+        info["feedback_q"].append((t, frac, [max(free(t, z_ref), 0.31) - PAD] + [0.0] * 6, None))
+    assert det(0.99)  # every sample at once: met, and the reference long past its stop
+    assert det.stopped_frac == 0.99
+
+
+def test_a_new_execution_is_watched_afresh():
+    det, client = _watch()
+    z, dt = _ref()
+    free = _free()
+    assert _fly(det, client, z, dt, lambda t, zr: max(free(t, zr), 0.31))[0] is not None
+    stopped, _info = _fly(det, client, z, dt, _free(seed=1))  # the next execution: free air all the way
+    assert stopped is None and det.contact is None and det.stopped_frac is None
+
+
+def test_a_watcher_that_fails_stops_nothing():
+    class Broken(_Chain):
+        def fk(self, q):
+            raise ValueError("no chain")
+
+    client = SimpleNamespace(last_execution={"sent_at": 0.0, "sent_traj": _traj([0.4, 0.3], 0.05), "feedback_q": []})
+    det = pc.PressContact(Broken(), client, TOP, TOP + 0.035, 0.032, END)
+    assert det(0.5) is False
+    assert pc.PressContact(_Chain(), SimpleNamespace(), TOP, TOP + 0.035, 0.032, END)(0.5) is False  # no execution

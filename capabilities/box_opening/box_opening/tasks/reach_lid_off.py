@@ -1313,6 +1313,9 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     log.info("[press_demo] %s" % dp.press_text(way.stroke, cfg))
     ctx.home_ahead = None  # the arm leaves the look pose: no home planned before is flown from where it comes back
     viz_hook("press", way.stroke, top_z, cfg)  # the stroke, drawn off this thread (perception/viz)
+    # where the pads meet the box ends the first press's stroke past it; a press after it (the
+    # knob not up) flies its full stroke, watched
+    contact = dp.watch_press(ctx, legs, way.stroke, top_z, cut=press == 1)
     res = runner.run(legs, execute=True)
     last = res[-1]
     flown = all(r.ok for r in res)
@@ -1334,7 +1337,7 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
         return 1, None
     runner.note("reach_slid_in", turned_down=way.down.walked, residual_nm=None)
     seen = {}
-    held = dp.compliant_hold(ctx, cfg, runner, way.stroke, top_z, seen)
+    held = dp.compliant_hold(ctx, cfg, runner, way.stroke, top_z, seen, contact=contact)
     if held.felt:
         _note_frames(ctx, stage="pressed", touch_xyz=list(seen["touch_xyz"]) if seen.get("touch_xyz") else None)
     held_z = float(seen["touch_xyz"][2]) if held.felt and seen.get("touch_xyz") else None

@@ -922,7 +922,7 @@ def _depth_flow(ctx, monkeypatch, tmp_path, press, compliant=False, walk_in=Fals
         )
         return press(ctx_)
 
-    def hold(ctx_, cfg, runner, stroke, top_z, seen):
+    def hold(ctx_, cfg, runner, stroke, top_z, seen, contact=None):
         got.update(top_z=top_z, stroke=stroke, client_compliant=getattr(ctx_.client, "compliant", False))
         return press(ctx_)
 
@@ -1627,6 +1627,92 @@ def test_a_compliant_press_held_short_of_its_end_pressed_with_the_spring(ctx, mo
     assert result.felt and result.press_n == pytest.approx(note["stiffness_n_per_m"] * 0.05, rel=0.02)
     assert result.free and dp.exit_code(result) == 0
     assert result.touch_xyz is not None
+
+
+def _flies_onto(ctx, contact_z, hz=90.0):
+    """ctx.client's execute flies each trajectory as the driver would report
+    it: the kept samples (client.FEEDBACK_EVERY's) of the joints measured —
+    the reference's, the pads held at `contact_z` once it goes below —
+    stop_when polled after each, honoured: the goal stopped, the arm held
+    where the pads met the box."""
+    from collections import deque
+
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_contact import pads_z
+
+    real = ctx.client.execute
+
+    def execute(traj_, speed, guard=None, while_running=None, stop_when=None, gains=None):
+        if stop_when is None:
+            return real(traj_, speed, guard, while_running, stop_when, gains)
+        ctx.client.executed.append((len(traj_.points), speed))
+        ctx.client.gains_sent = getattr(ctx.client, "gains_sent", []) + [gains]
+        chain = approach._chain()
+        pts = list(traj_.points)
+        ts = np.array([p.time_from_start.sec + 1e-9 * p.time_from_start.nanosec for p in pts])
+        qs = np.array([list(p.positions) for p in pts])
+        T = float(ts[-1])
+        info = {"message": "", "progress": 0.0, "sent_at": 50.0, "sent_traj": traj_, "feedback_q": deque()}
+        ctx.client.last_execution = info
+        t = 50.0
+        while True:
+            frac = min(1.0, (t - 50.0) / T)
+            q = np.array([np.interp(frac * T, ts, qs[:, j]) for j in range(qs.shape[1])])
+            below = contact_z - pads_z(chain, q)
+            if below > 0:
+                q[2] += below  # the box holds the pads (the harness's joints ARE the tool pose)
+            info["feedback_q"].append((t, frac, list(q), None))
+            info["progress"] = frac
+            ctx.client.live = [float(v) for v in q]
+            if stop_when(frac):
+                return "stopped", info
+            if frac >= 1.0:
+                return "arrived", info
+            t += 1.0 / hz
+
+    ctx.client.execute = execute
+
+
+def test_a_compliant_press_that_meets_the_box_above_its_top_is_cut_as_far_past_it_as_planned(
+    ctx, monkeypatch, tmp_path
+):
+    """Contact detection (tasks/press_contact): the box 20 mm higher than
+    the cameras put it. The stroke ends as far below where the pads met it
+    as it was planned below the top — 20 mm short of its planned end — the
+    driver holding the reference there; the hold reads the spring's pull
+    toward THAT reference, and the run record keeps where it met and the
+    cut."""
+    cfg = load_press_demo(PINK)
+    meet = COMPLIANT_TOP + 0.020
+    _flies_onto(ctx, meet)
+    result, events, _arm, legs, note = _compliant(ctx, monkeypatch, tmp_path, held_up_m=0.0)
+    assert events == ["depth:turn", "depth:approach", "depth:press", "depth:rise"]
+    met = note["contact"]
+    assert met["met"] and met["cut"] and met["cut_on"]
+    assert met["z"] == pytest.approx(meet, abs=0.002) and met["above_top_mm"] == pytest.approx(20.0, abs=2.0)
+    past = COMPLIANT_TOP - note["end_z"]  # the stroke's own depth below the top it was planned for
+    assert met["past_mm"] == pytest.approx(1000 * past, abs=0.1)
+    assert met["end_z"] == pytest.approx(met["z"] - past, abs=1e-4)
+    assert met["cut_mm"] == pytest.approx(met["above_top_mm"], abs=0.2)
+    # the spring pulls the held pads toward where the reference stopped, not the planned end: the
+    # harness's springs are its joints' (Kq x the pads' 1:1 joints), the pads held where they met
+    assert result.felt and result.press_n == pytest.approx(
+        dp.COMPLIANT_KQ[2] * (note["held_pad_xyz"][2] - met["end_z"]), rel=0.05
+    )
+    assert note["held_pad_xyz"][2] == pytest.approx(meet, abs=0.001)
+    assert cfg.button_travel_m < past
+
+
+def test_a_compliant_press_that_meets_the_box_below_its_top_flies_its_stroke_as_planned(ctx, monkeypatch, tmp_path):
+    """The box 8 mm lower than the cameras put it: as far past the contact
+    as planned would be deeper than the stroke goes — never deeper than
+    planned: it flies to its end."""
+    meet = COMPLIANT_TOP - 0.008
+    _flies_onto(ctx, meet)
+    result, _events, _arm, _legs, note = _compliant(ctx, monkeypatch, tmp_path, held_up_m=0.0)
+    met = note["contact"]
+    assert met["met"] and not met["cut"] and met["why"] == "the planned end is no deeper than that past the contact"
+    assert result.press_n == pytest.approx(dp.COMPLIANT_KQ[2] * (note["held_pad_xyz"][2] - note["end_z"]), rel=0.05)
 
 
 def test_the_stiffness_at_the_pads_is_the_joint_springs_seen_through_the_arm():
@@ -3813,7 +3899,7 @@ def test_a_ctrl_c_in_the_compliant_hold_lets_go_once_and_still_stops_the_run(ctx
     asked = _releases(ctx)
     real_hold = dp.compliant_hold
 
-    def hold(ctx_, cfg, runner, stroke, top_z, seen):
+    def hold(ctx_, cfg, runner, stroke, top_z, seen, contact=None):
         def ctrl_c(*a, **k):
             raise KeyboardInterrupt
 

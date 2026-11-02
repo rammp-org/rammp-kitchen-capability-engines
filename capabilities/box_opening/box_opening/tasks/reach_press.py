@@ -2113,6 +2113,7 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
     # while the way in flies, so it is padded before it flies
     pad = ctx.contact_pad
     ctx.contact_pad = CONTACT_SHIFT_PAD_M
+    contact = dp.watch_press(ctx, legs, way.stroke, top_z)  # where the pads meet the box ends the stroke past it
     try:
         # The way home from the stroke's start, where the rise back up ends.
         # The end the lookahead is handed, the stroke's bottom inside the
@@ -2137,7 +2138,7 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
         if flown:
             runner.note("reach_slid_in", turned_down=way.down.walked, residual_nm=None)
             seen = {}
-            held = dp.compliant_hold(ctx, cfg, runner, way.stroke, top_z, seen)
+            held = dp.compliant_hold(ctx, cfg, runner, way.stroke, top_z, seen, contact=contact)
             result, homed = _way_home(
                 ctx,
                 cfg,

@@ -1257,14 +1257,42 @@ def press_text(stroke, cfg):
     )
 
 
-def compliant_hold(ctx, cfg, runner, stroke, top_z, seen):
+def watch_press(ctx, legs, stroke, top_z, cut=True):
+    """Contact detection for the compliant `stroke` (compliant_stroke's,
+    onto the button whose top the cameras put at `top_z`) flown in the
+    execution `legs` begin: a press_contact.PressContact on their lead, its
+    stop_when, watching from where the stroke's slow leg begins (TOUCH_SLOW_M
+    above the top) and, with `cut`, ending the stroke as far past where the
+    pads met the box as it was planned past the top — never deeper than
+    planned. Returns it (compliant_hold reads it), or None: nothing to watch."""
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_contact import PressContact
+
+    if not legs or stroke is None or top_z is None:
+        return None
+    contact = PressContact(
+        approach._chain(),
+        ctx.client,
+        top_z,
+        float(top_z) + TOUCH_SLOW_M,
+        float(top_z) - float(stroke.end_z),
+        stroke.end_z,
+        cut=cut,
+    )
+    legs[0].stop_when = contact
+    return contact
+
+
+def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
     """The compliant press's hold at the end of its stroke (`stroke`,
     compliant_stroke's) on the button whose top is at `top_z`: held
     push_hold_s where the springs left the pads, pressing — the hold IS the
     reading. What the pads pushed with is the joint springs' pull from the
-    held arm toward the stroke's end (stroke.q_end, under COMPLIANT_KQ) as
-    the pads feel it: the force f, world axes, with J^T f = Kq (q_end -
-    q_held), least squares, J fingertip_jacobian's at the held arm. Its
+    held arm toward the stroke's end (stroke.q_end, under COMPLIANT_KQ; a
+    stroke cut past where the pads met the box, `contact`'s held_ref, the
+    reference the driver holds there: watch_press) as the pads feel it:
+    the force f, world axes, with J^T f = Kq (q_end - q_held), least
+    squares, J fingertip_jacobian's at the held arm. Its
     downward part is the press, COMPLIANT_FELT_N or more a press, and the
     rest the sideways shove. seen["touch_xyz"] is where the pads were held,
     pressing, and seen["held_joints"] the arm held there, the way back up's
@@ -1278,6 +1306,9 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen):
     chain = approach._chain()
     k, end_z = stroke.k, stroke.end_z
     q_end = stroke.q_end if stroke.q_end is not None else (stroke.legs[-1][1][-1] if stroke.legs else stroke.q0)
+    cut = contact is not None and contact.held_ref is not None
+    if cut:  # the stroke ended past where the pads met the box: the reference held there
+        q_end, end_z = contact.held_ref, float(contact.stop_z)
     q_end = np.asarray(q_end, float)
     held = ctx.client.settled_efforts(duration_s=0.15, settle_s=max(0.0, float(cfg.push_hold_s) - 0.15))
     qh = held[1] if held is not None else ctx.client.joints()
@@ -1293,7 +1324,7 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen):
     off = pad[:2] - np.asarray(stroke.pad0, float)[:2]  # the held pads from the aim
     facts = dict(
         top_z=round(float(top_z), 4),
-        end_z=round(end_z, 4),
+        end_z=round(float(stroke.end_z), 4),  # as planned; a cut's is contact's end_z
         held_pad_xyz=[round(float(v), 4) for v in pad],
         stiffness_n_per_m=round(k, 1),
         press_n=round(force, 1),
@@ -1308,14 +1339,30 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen):
     lean = _lean_deg(stroke.quat)
     if lean >= LEAN_SAID_DEG:
         facts["lean_deg"] = lean
+    if contact is not None:
+        facts["contact"] = met = contact.record()  # where the pads met the box, and the stroke cut past it or not
+        if met.get("met"):
+            log.info(
+                "[press_demo] CONTACT: the pads met the box at %.3f, %+.0f mm from the top the cameras measured; %s"
+                % (
+                    met["z"],
+                    met["above_top_mm"],
+                    "the stroke cut %.0f mm short of its planned end, %.0f mm past it" % (met["cut_mm"], met["past_mm"])
+                    if met["cut"]
+                    else "the stroke flew as planned (%s)" % met.get("why", ""),
+                )
+            )
+        else:
+            log.info("[press_demo] CONTACT: none seen on the way down; the stroke flew as planned")
     runner.note("depth_compliant_press", **facts)
     log.info(
-        "[press_demo] %s, %.0f N sideways: the pads held %.0f mm above the stroke's end, %.0f mm %s the button's "
+        "[press_demo] %s, %.0f N sideways: the pads held %.0f mm above the stroke's %send, %.0f mm %s the button's "
         "top, %.0f mm from the aim"
         % (
             "PRESSED with ~%.0f N" % force if felt else "NOTHING PRESSED (%.0f N)" % force,
             aside,
             1000 * (pad[2] - end_z),
+            "cut " if cut else "",
             1000 * abs(float(top_z) - pad[2]),
             "below" if pad[2] < float(top_z) else "above",
             1000 * float(np.hypot(*off)),
@@ -1431,6 +1478,7 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
         return DepthPress(free=True, why=why)
     world = _full_world(ctx)
     legs = [compliant_line(ctx, name, pts, quat, speed, world) for name, pts, speed in stroke.legs]
+    contact = watch_press(ctx, legs, stroke, top_z)  # where the pads meet the box ends the stroke past it
     log.info("[press_demo] %s" % press_text(stroke, cfg))
     viz_hook("press", stroke, top_z, cfg)  # the stroke, drawn off this thread (perception/viz)
     try:
@@ -1451,7 +1499,9 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
         if any(not r.ok for r in res):
             rp.let_go(ctx)  # stopped part-way down, or on the button
             return DepthPress(free=False, why="the press stroke stopped (%s) — the arm holds" % res[-1].detail)
-        return compliant_rise(ctx, runner, stroke, compliant_hold(ctx, cfg, runner, stroke, top_z, seen))
+        return compliant_rise(
+            ctx, runner, stroke, compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=contact)
+        )
     except BaseException:
         # a Ctrl+C in the hold's read lands with no goal in flight (abort.py
         # raises at once): the springs would push on into the box
