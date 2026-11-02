@@ -107,7 +107,9 @@ PUSH_TOOL_ABOVE_TOP_M = 0.0  # ... to this height above the door top, pointing d
 #   FINGERTIP_PAST_TOOL (6 cm) below the top edge
 # then push straight left (toward the hinge: further open), the hand's x and height kept, until it is level with the
 # detected hinge (the door file's hinge): the door then stands square to the arm, ~90 deg (11-02: 6 and 12 cm along
-# the door's normal didn't open it enough)
+# the door's normal didn't open it enough) -- stopping PUSH_HINGE_SHORT_M short of it
+PUSH_HINGE_SHORT_M = 0.03  # the tool stops this short of the hinge's y, so the hand's far side, not its middle, lines
+#   up with the hinge (11-02: level with it opened the door further than needed)
 PUSH_BLEND_M = 0.02  # the stitched cuRobo motion passes its corners (up and back, above the door) this close, not
 #   stopping; small, so it doesn't cut the corner over the door top
 PUSH_TILT_TRY_DEG = (0, 30, 45, 60)  # the hand points down tilted this far from vertical, leaning away from the arm
@@ -180,7 +182,7 @@ def _push_poses(door, ee, clear_m, tilt_deg):
         up_back=up_back,
         above=above,
         inside=inside,
-        pushed=np.r_[inside[0], df.hinge[1], inside[2]],
+        pushed=np.r_[inside[0], df.hinge[1] - np.sign(df.hinge[1] - inside[1]) * PUSH_HINGE_SHORT_M, inside[2]],
         down=down,
         out=out,
         how=f"the hand {tilt_deg} deg off straight down, fingertips {clear_m * 100:.1f} cm over the door top",
