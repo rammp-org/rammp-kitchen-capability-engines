@@ -130,6 +130,7 @@ passes them as a params file.
 | `state_dir`        | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening` |
 | `owl`              | `true`                 | Run the wrist's and the scene camera's OWL detectors in this node's process  |
 | `video`            | `true`                 | Record both cameras from the grip to the set-down                            |
+| `mission_frames`   | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20)     |
 | `viz`              | `false`                | Draw what the perception sees and decides for Foxglove                       |
 | `speed_scale`      | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)             |
 

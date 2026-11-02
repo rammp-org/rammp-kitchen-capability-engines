@@ -44,6 +44,9 @@ params:
   video: true
   # what the perception sees and decides, drawn for Foxglove
   viz: false
+  # debug: each executed run also keeps what its cameras saw (~10 MB a run,
+  # the newest 20 kept)
+  mission_frames: false
   # every motion slowed to this fraction of its speed (0 < x <= 1)
   speed_scale: 1.0
 publishes: [/box_opening/status]

@@ -250,3 +250,30 @@ def test_the_recorder_plans_and_watches_in_the_worlds_frames():
     call = src[src.index("BoxTopWatcher(pnode") :]
     call = call[: call.index(")\n")]
     assert "base_frame=worlds.base_frame" in call and "camera_cfg_name=worlds.wrist_camera_config" in call
+
+
+def test_mission_frames_are_a_debug_switch_off_by_default():
+    """REVIEW_RULES R6: no always-on disk writes. A mission keeps its frames only where
+    $BOX_OPENING_MISSION_FRAMES says so."""
+    from box_opening.constants import mission_frames_enabled
+
+    assert not mission_frames_enabled({})
+    assert not mission_frames_enabled({"BOX_OPENING_MISSION_FRAMES": "0"})
+    assert all(mission_frames_enabled({"BOX_OPENING_MISSION_FRAMES": v}) for v in ("1", "on", "true", "YES"))
+
+
+def test_only_the_newest_missions_are_kept(tmp_path, monkeypatch):
+    from box_opening import detection_set
+    from box_opening.detection_set import MissionFrames
+
+    monkeypatch.setattr(detection_set, "MISSIONS_KEPT", 3)
+    set_dir = tmp_path / "missions"
+    for i in range(5):
+        (set_dir / ("p20261101-10000%d" % i)).mkdir(parents=True)
+        (set_dir / ("p20261101-10000%d" % i) / "truth.json").write_text("{}")
+    (set_dir / "manifest.json").write_text("{}")  # not a placement: never pruned
+    rec = MissionFrames(set_dir, "ankou_pink.yaml", 0.05, now=2e9)  # newer than every one above
+    rec.scene(scene_frame_arrays(), why="the segmenter saw no box")
+    out = rec.close(exit_code=2)
+    left = sorted(d.name for d in set_dir.iterdir())
+    assert left == ["manifest.json", "p20261101-100003", "p20261101-100004", out.name]

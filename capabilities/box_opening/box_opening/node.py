@@ -54,6 +54,8 @@ PARAMS = {
     "owl": True,
     "video": True,
     "viz": False,
+    # debug: each --execute run keeps its camera frames (~10 MB; the newest 20 kept)
+    "mission_frames": False,
     "speed_scale": 1.0,
 }
 EXECUTE = {"execute": {"type": "boolean", "default": False}}
@@ -332,8 +334,6 @@ class Capability(CapabilityEngine):
             code = self._follow(self._run, log, track, ctx)
         finally:
             run_, self._run = self._run, None
-        if ctx.cancelled():
-            raise Cancelled()
             if run_.proc.poll() is None:
                 # _follow raised with the run still going: nothing else would stop it, and it
                 # would go on moving the arm after its goal ended. Its own stop first (Ctrl+C:
@@ -343,6 +343,8 @@ class Capability(CapabilityEngine):
                 )
                 run_.stop(CANCEL_ESCALATE_S)
             self._progress(log, track, ctx)  # the last rows, written as it ended
+        if ctx.cancelled():
+            raise Cancelled()
         result = {
             "executed": execute,
             "lid_off": track.lid_off(code),
@@ -399,6 +401,7 @@ class Capability(CapabilityEngine):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         env["BOX_OPENING_VIDEO"] = "1" if self.cfg["video"] else "0"
         env["BOX_OPENING_VIZ"] = "1" if self.cfg["viz"] else "0"
+        env["BOX_OPENING_MISSION_FRAMES"] = "1" if self.cfg["mission_frames"] else "0"
         if self.cfg["state_dir"]:
             env["BOX_OPENING_STATE"] = self.cfg["state_dir"]
         return env

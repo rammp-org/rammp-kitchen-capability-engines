@@ -14,7 +14,8 @@ from pathlib import Path
 
 import numpy as np
 
-MISSIONS_SET = "missions"  # the set every --execute mission adds its placement to
+MISSIONS_SET = "missions"  # the set every --execute mission adds its placement to (when kept at all)
+MISSIONS_KEPT = 20  # newest mission placements kept (~10 MB each); older ones are pruned after each write
 
 # The grid, over the reachable table (the scene camera sees all of it: 187/187
 # points of a finer grid, 2026-09-23). Snake order keeps each hover short.
@@ -220,4 +221,17 @@ class MissionFrames:
         self.doc["truth_note"] = truth_note(self.doc)
         self.doc["frames"] = names
         (self.dir / "truth.json").write_text(json.dumps(self.doc, indent=1))
+        prune_missions(self.dir.parent)
         return self.dir
+
+
+def prune_missions(set_dir, kept=None):
+    """Keep the newest `kept` (MISSIONS_KEPT) mission placements p<stamp>/ of `set_dir`; the
+    older ones are removed whole. Never raises: pruning must not change how a run ends."""
+    kept = MISSIONS_KEPT if kept is None else kept
+    try:
+        olds = sorted(d for d in Path(set_dir).glob("p*") if d.is_dir())
+        for d in olds[: max(0, len(olds) - kept)]:
+            shutil.rmtree(d, ignore_errors=True)
+    except OSError:
+        pass

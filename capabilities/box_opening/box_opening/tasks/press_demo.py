@@ -71,6 +71,7 @@ from box_opening.constants import (
     REST_TOL_RAD,
     SEARCH_SPEED,
     TRANSIT_SPEED,
+    mission_frames_enabled,
     state_dir,
     viz_enabled,
 )
@@ -1385,10 +1386,11 @@ def main():
         )
 
         ctx.press_cfg = cfg  # recovery homes go to the mission's rest pose
-        if args.execute and not (args.detect_only or args.wrist_detect):
-            # every run keeps what its cameras saw and, when the press lands,
-            # where the button really was: a detection set that grows with the
-            # bench's own runs (detection_set.MissionFrames; written at the end)
+        if args.execute and not (args.detect_only or args.wrist_detect) and mission_frames_enabled():
+            # a debug switch ($BOX_OPENING_MISSION_FRAMES, off by default): the run keeps
+            # what its cameras saw and, when the press lands, where the button really
+            # was, as a placement of the detection set (detection_set.MissionFrames;
+            # written at the end, the newest MISSIONS_KEPT kept)
             ctx.mission_frames = MissionFrames(
                 state_dir() / "detection_sets" / MISSIONS_SET, Path(cfg_path).name, worlds.table_top_z
             )

@@ -16,6 +16,21 @@ def state_dir(env=None):
 
 
 VIZ_ENV = "BOX_OPENING_VIZ"  # 1 (or on, true, yes): a Foxglove view of the run (perception/viz)
+# 1 (or on, true, yes): each --execute mission keeps its camera frames (detection_set.MissionFrames)
+MISSION_FRAMES_ENV = "BOX_OPENING_MISSION_FRAMES"
+
+
+def _env_on(name, env=None):
+    env = os.environ if env is None else env
+    return str(env.get(name, "")).strip().lower() in ("1", "on", "true", "yes")
+
+
+def mission_frames_enabled(env=None):
+    """Whether an --execute mission keeps what its cameras saw (detection_set.MissionFrames):
+    only where $BOX_OPENING_MISSION_FRAMES says 1 (or on, true, yes). A debug switch, off by
+    default: a mission's frames are about 10 MB, written uncompressed, and only the newest
+    detection_set.MISSIONS_KEPT are kept."""
+    return _env_on(MISSION_FRAMES_ENV, env)
 
 
 def viz_enabled(env=None):
@@ -28,8 +43,7 @@ def viz_enabled(env=None):
     second, which may be a motion. Off, a run is what it was without it.
     Here, not in viz: a run with it off never imports that module
     (press_demo.start_viz)."""
-    env = os.environ if env is None else env
-    return str(env.get(VIZ_ENV, "")).strip().lower() in ("1", "on", "true", "yes")
+    return _env_on(VIZ_ENV, env)
 
 
 # Gen3 home joints in controller order (flatbot, new_adapter_plate_v3, 2026-10-21).
