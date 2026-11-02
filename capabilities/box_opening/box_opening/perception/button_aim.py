@@ -85,7 +85,13 @@ OBLIQUE_RADIUS_WINDOW = (0.85, 1.2)  # of OBLIQUE_BUTTON_PX; a lid off its prior
 # frame holds only up to 22): 18 keeps room under it (sweep 2026-11-01, aim-lidarc).
 OBLIQUE_HOUGH_VOTES = 18
 OBLIQUE_MAX_CIRCLES = 8
-LID_PRIOR_TOL_M = 0.035  # the measured lid within this of its prior height
+# the measured lid within this of its prior height. 0.035 let 3 real frames hold a
+# 51-58 mm circle 79-96 mm from the button that passed every oblique gate (its ring
+# 23-33 mm below h_gate); 0.030 stops 2 of them. True lid rings sit -8.8..+11.3 mm
+# from h_gate (n=46), and recall is unchanged on 50 real and 300 augmented frames
+# (sweep aim-lidtol). Straight down its margin is ~3-5 mm (the lid there 21-27 mm
+# below table + dims.z, until dims.z is re-measured); oblique, >= 19 mm
+LID_PRIOR_TOL_M = 0.030
 PRIOR_MAX_M = 0.15  # a circle farther than this from prior_xy is not the button
 # ... and from straight down, where a circle's place is read straight off the
 # frame: farther than this from where the box is, it is not this box's
