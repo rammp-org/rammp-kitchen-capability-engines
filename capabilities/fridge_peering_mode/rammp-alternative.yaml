@@ -1,0 +1,174 @@
+# This capability's contract, as code: sheppy's `alternative` schema plus
+# RAMMP's `tier` (and `implements`, once a role contract exists). It is
+# transcribed into rammp-deployments/december_2026/sheppy-manifest.yaml.
+#
+# Keys under `container:` are the compose subset sheppy supports: image,
+# command, entrypoint, environment, env_file, network_mode, volumes, devices,
+# gpus, privileged, cap_add, cap_drop, ports, user, working_dir. Declare
+# hardware here, never in a README step. Do not set RMW_IMPLEMENTATION or
+# CYCLONEDDS_URI; rammp-base owns them.
+id: fridge_peering_mode_real
+tier: experimental
+kind: docker
+container:
+  # :dev is mutable and overwritten on every merge to dev. A demo profile needs
+  # a release tag or digest; `tier: demo-ready` is rejected without one.
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge_peering_mode:dev
+  network_mode: host
+  ipc: host
+  # Runs the same node as the image's CMD, without the launch file. sheppy
+  # appends `--ros-args --params-file` to the command; with no command, those
+  # args replace the CMD and the node never starts. Run the node's installed
+  # executable itself: never `ros2 launch`, which rejects them, nor `ros2 run`,
+  # which as PID 1 swallows the stop signal and leaves the node to be SIGKILLed.
+  command: ["/module_ws/install/fridge_peering_mode/lib/fridge_peering_mode/fridge_peering_mode_node"]
+# Defaults for every value a deployment may change per robot or from the sheppy
+# TUI; a profile can override only keys listed here. Hosts, ports and file
+# paths go here too, never hard-coded in the node.
+params:
+  # false: every goal is a dry run (the standoff is planned, teleop streams nothing), whatever it
+  # asks. true only for attended runs, someone on the e-stop: there is no deadman.
+  allow_execute: false
+  # Teleop streams ee_twist at rate_hz; the driver closes the session after stream_timeout_s with no
+  # setpoint (> 1 / rate_hz).
+  rate_hz: 50.0
+  stream_timeout_s: 0.2
+  # The plane detector's wall frame: it publishes base_frame -> fridge_frame, +z INTO the back wall.
+  # A frame whose +z points toward the arm is refused (verify_fridge_z), never flipped.
+  base_frame: arm_mount
+  fridge_frame: fridge_frame
+  verify_fridge_z: true
+  # /ee_state reports driver_ee_frame (the flange, the driver's --ee-frame); ee_link is placed at
+  # the standoff, limited and oriented, rigid to it. static_tf_timeout_s: wait for driver_ee ->
+  # ee_link.
+  driver_ee_frame: arm_end_effector_link
+  ee_link: arm_tool_frame
+  static_tf_timeout_s: 5.0
+  # The camera: optical_axis of ee_link looks along fridge +z; with roll_deg 0,
+  # roll_reference_ee_axis lines up with roll_reference_fridge_axis (+-x or +-y); roll_deg turns it
+  # about the optical axis.
+  optical_axis: "+z"
+  roll_reference_ee_axis: "+x"
+  roll_reference_fridge_axis: "+x"
+  roll_deg: 180.0
+  # World up (up_axis of up_frame): the stick's u = left / v = up. Must match the plane detector's
+  # fixed_frame +z (a mismatch is warned about at homing).
+  up_frame: arm_mount
+  up_axis: "+z"
+  # The standoff (m): ee_link back from the wall, offset along fridge x / y. Homing fails without a
+  # fresh fridge TF within fridge_tf_wait_s. The detector drops depth closer than 0.20 m to the
+  # camera.
+  fridge_tf_wait_s: 5.0
+  standoff_distance: 0.4
+  offset_x: 0.0
+  offset_y: 0.0
+  # The axes ee_twist setpoints are in (the driver: arm_mount).
+  twist_frame: arm_mount
+  # The servo: target speeds at full stick (m/s), gains (1/s), caps on the commanded twist (m/s,
+  # rad/s), and how far the target may lead the arm (m), slowing past lead_slowdown_m.
+  max_speed: 0.08
+  standoff_speed: 0.05
+  kp_lin: 2.0
+  kp_ang: 2.0
+  max_lin: 0.12
+  max_ang: 0.4
+  max_lead_m: 0.05
+  lead_slowdown_m: 0.02
+  # The target's limits (m, ee_link origin): u (+ = left) and v (+ = up) from the homing plane
+  # origin, and the distance from the wall, which must contain standoff_distance.
+  u_limits: [-0.35, 0.35]
+  v_limits: [-0.3, 0.3]
+  standoff_limits: [0.08, 0.45]
+  # Following the detector's re-estimates of the wall: off | idle (stick at neutral only) |
+  # continuous (pair with the detector's max_joint_velocity gate). Gated, deadbanded, then a
+  # critically damped, rate-capped filter; see Parameters in docs/interface.md.
+  follow_mode: continuous
+  follow_settle_s: 0.5
+  follow_stale_s: 2.0
+  follow_w0: 2.0
+  follow_max_rate_deg_s: 4.0
+  follow_max_shift_rate: 0.02
+  follow_deadband_deg: 1.0
+  follow_deadband_m: 0.005
+  follow_max_tilt_deg: 15.0
+  follow_max_shift_m: 0.05
+  follow_max_step_deg: 5.0
+  follow_max_step_m: 0.03
+  # The joystick: an Xbox-style pad on joy_node (xpad layout); check every index with `ros2 topic
+  # echo /joy`. u + = left, v + = up, standoff + = closer (-1 = off).
+  joy_topic: /joy
+  axis_u: 0
+  axis_v: 1
+  axis_standoff: -1
+  axis_signs: [1.0, 1.0, 1.0]
+  deadzone: 0.1
+  expo: 2.0
+  # button_home (Back) goes back to the standoff; button_stop (X) ends the action with the arm
+  # holding (-1 disables). Neither is an e-stop: this node never publishes /estop.
+  button_home: 6
+  button_stop: 2
+  # Older than this is not used (s): /joy holds the target (> 1 / joy_node's autorepeat_rate), the
+  # fridge TF is not followed (<= 0 disables; a static TF is exempt), /ee_state sends a zero twist.
+  joy_timeout_s: 0.25
+  fridge_tf_timeout_s: 1.0
+  ee_state_timeout_s: 0.2
+  # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
+  "arm.tool_z": 0.12
+  "arm.dt": 0.02
+  "arm.joint_speed": 0.85
+  "arm.cart_speed": 0.16
+  "arm.contact_joint_speed": 0.5
+  "arm.contact_cart_speed": 0.09
+  "arm.min_duration_s": 1.0
+  "arm.cart_step_m": 0.02
+  "arm.cart_step_deg": 5.0
+  "arm.rot_equiv_m": 0.15
+  "arm.max_knot_jump_deg": 20.0
+  "arm.path_tol_rad": 0.15
+  "arm.gripper_force": 0.5
+  "arm.gripper_speed": 0.5
+  "arm.frame": "arm_mount"
+  "arm.go_to_speed_scale": 0.3
+  "arm.go_to_timeout_s": 120.0
+  "arm.go_to_track_m": 0.01
+  "arm.go_to_track_deg": 2.0
+  "arm.max_ik_err": 0.02
+  "arm.max_step_jump_deg": 20.0
+  "arm.j6_guard_deg": 115.0
+  "arm.j4_guard_deg": 144.0
+  "arm.max_continuous_delta_deg": 170.0
+  "arm.keep_out_err": 9.0
+  "arm.ik_max_iterations": 200
+  "arm.clearance_query_m": 0.5
+  "arm.fingertip_open_rad": 0.0
+  "arm.finger_closed_rad": 0.7
+  "arm.state_wait_s": 10.0
+  "arm.state_stale_s": 0.5
+  "arm.diagnostics_stale_s": 3.0
+  "arm.goal_accept_s": 5.0
+  "arm.result_margin_s": 30.0
+  "arm.poll_s": 0.01
+  "arm.cancel_settle_s": 0.4
+  "arm.halt_status_wait_s": 0.2
+  "arm.planner_wait_s": 5.0
+  "arm.go_to_settle_s": 0.3
+  "arm.gripper_period_s": 0.02
+  "arm.gripper_moved": 0.002
+  "arm.gripper_judge_after_s": 0.5
+  "arm.gripper_still_s": 0.3
+  "arm.plan_timeout_s": 30.0
+  "arm.service_wait_s": 5.0
+  "arm.service_call_s": 10.0
+  "arm.stream_timeout_s": 0.1
+  "arm.publisher_match_s": 1.0
+  "arm.close_stream_wait_s": 1.0
+  "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+  "arm.mock_urdf": ""
+# ~/goal_pose, ~/commanded_twist, ~/servo_target and ~/followed_plane exist only while an action
+# runs (create_action_publisher): not declared, since smoke checks every declared topic on an idle
+# mock. The arm driver's topics are self.arm's, as in every capability.
+publishes: [/fridge_peering_mode/status]
+subscribes:
+  - /tf
+  - /tf_static
+  - /joy

@@ -4,3 +4,5 @@ __pycache__/
 
 # Agent development docs (design specs, implementation plans): kept locally, not in the repo.
 docs/superpowers/
+
+.vscode/*
