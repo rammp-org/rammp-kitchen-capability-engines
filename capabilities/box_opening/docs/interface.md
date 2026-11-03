@@ -53,10 +53,10 @@ and is always offered.
 
 ## Publishes
 
-| Topic                 | Type              | Rate | Meaning                                                                                                   |
-| --------------------- | ----------------- | ---- | --------------------------------------------------------------------------------------------------------- |
-| `/box_opening/status` | `std_msgs/String` | 1 Hz | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
-| `/setpoint/gripper` | `rammp_arm_interfaces/GripperSetpoint` | per grip | The run's gripper commands, to the arm driver |
+| Topic                 | Type                                   | Rate     | Meaning                                                                                                   |
+| --------------------- | -------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `/box_opening/status` | `std_msgs/String`                      | 1 Hz     | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
+| `/setpoint/gripper`   | `rammp_arm_interfaces/GripperSetpoint` | per grip | The run's gripper commands, to the arm driver                                                             |
 
 With `viz: true` the run also draws what it sees on `/box_opening/viz/*`
 (`scene/annotated/compressed`, `wrist/annotated/compressed`, `markers`,
@@ -94,8 +94,8 @@ Served under `/box_opening/`, types from `rammp_orchestrator_interfaces`:
 It is activated when the user selects a `food container`. `open_box` is offered
 where `allow_execute` is on, until the world state holds the container `opened`.
 
-| Action     | Params | Result payload                                                                                                                     |
-| ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Action     | Params | Result payload                                                                                                                      |
+| ---------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `open_box` | none   | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log"}`, and `world_state` when the lid came off |
 
 `lid_xyz` is where the lid was set down, in `arm_mount` (m). `video` is the MP4
@@ -122,18 +122,18 @@ no video encoded and no frames written on the way out.
 
 A run that stops fails the action with one of these codes:
 
-| Code        | Recoverable | Meaning                                                                |
-| ----------- | ----------- | ---------------------------------------------------------------------- |
-| `bad_params` | no         | The goal had params; `open_box` takes none. Nothing ran                |
-| `not_allowed` | no        | `allow_execute` is off on this node. Nothing ran                       |
-| `timeout`   | yes         | The run was still going after 100 s and was stopped its own way (one Ctrl+C), before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers |
-| `not_ready` | yes         | Refused before anything moved: a driver, planner, camera or TF missing |
-| `not_found` | yes         | The scene camera found no container                                    |
-| `not_home`  | yes         | The arm could not get to its start pose                                |
-| `box_moved` | yes         | The press moved the container                                          |
-| `arm_holds` | no          | A motion stopped part of the way: the arm holds there until cleared    |
-| `stopped`   | no          | The run was ended from outside                                         |
-| `failed`    | yes         | Anything else; the message is the run's last STOP line                 |
+| Code          | Recoverable | Meaning                                                                                                                                                                       |
+| ------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bad_params`  | no          | The goal had params; `open_box` takes none. Nothing ran                                                                                                                       |
+| `not_allowed` | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                              |
+| `timeout`     | yes         | The run was still going after 100 s and was stopped its own way (one Ctrl+C), before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers |
+| `not_ready`   | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                        |
+| `not_found`   | yes         | The scene camera found no container                                                                                                                                           |
+| `not_home`    | yes         | The arm could not get to its start pose                                                                                                                                       |
+| `box_moved`   | yes         | The press moved the container                                                                                                                                                 |
+| `arm_holds`   | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                           |
+| `stopped`     | no          | The run was ended from outside                                                                                                                                                |
+| `failed`      | yes         | Anything else; the message is the run's last STOP line                                                                                                                        |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
