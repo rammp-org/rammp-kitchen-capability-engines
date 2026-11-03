@@ -6,6 +6,8 @@ pinned below is what feeding-deployment's own planner gives for the same inputs.
 """
 
 import json
+import sys
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -116,7 +118,7 @@ class _Arm:
 def door_sim(tmp_path, monkeypatch):
     """The sim on the arm the door was recorded with, door_common configured for the fridge,
     every constant restored afterwards."""
-    saved = dict(vars(dc)), dict(vars(shared))
+    saved = dict(vars(dc)), dict(vars(shared)), dict(vars(constants))
     scene, rb = cornell_sim()
     open_door.configure(tmp_path)
     monkeypatch.setattr(
@@ -137,6 +139,7 @@ def door_sim(tmp_path, monkeypatch):
     sim.reset_for_tests()
     vars(dc).update(saved[0])
     vars(shared).update(saved[1])
+    vars(constants).update(saved[2])
 
 
 def test_the_open_plans_the_full_pull_and_the_route_round_the_door(door_sim):
@@ -194,6 +197,36 @@ def test_a_30_degree_mount_plans_the_open_and_close_with_the_fridge_further_out(
     assert close_door.run(_Arm(scene, rb, TELEOP_START), False)
 
 
+def test_a_30_degree_mount_pulls_70_and_pushes_open_at_the_11_01_handle_height(door_sim, tmp_path):
+    sim.reset_for_tests()
+    scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
+    open_door.configure(tmp_path, 30)
+    assert constants.PUSH_OPEN_DZ_M == pytest.approx(0.10)
+    assert max(shared.GRASP_PITCHES_DEG) == 35
+    # the 11-01 flatbot handle, ~0.31 m above the arm base, door square to the chair
+    h, n = np.array([0.84, -0.28, 0.31]), np.array([-1.0, 0.0, 0.0])
+    hinge = shared.FIND_HINGE(h, HANDLE_QUAT, n, None)[0]
+    geom = {
+        "h_raw": h,
+        "orient": HANDLE_QUAT,
+        "n": n,
+        "hinge": hinge,
+        "hinge_seen": None,
+        "door_z": None,
+    }
+    plan, why = shared.plan_open(scene, rb, geom, TELEOP_START, 70, 70, push_open.PushOpen())
+    assert why is None
+    assert plan["swing"] == 70
+    assert plan["after"] == "push-open OK"
+
+
+def test_the_level_arm_keeps_door_commons_tilts_and_pushes_below_the_handle(door_sim, tmp_path):
+    open_door.configure(tmp_path, 30)
+    open_door.configure(tmp_path, 0)
+    assert constants.PUSH_OPEN_DZ_M == pytest.approx(-0.10)
+    assert shared.GRASP_PITCHES_DEG == (0, 10, 14, 17, 25)
+
+
 def test_the_mount_must_be_a_known_one(door_sim, tmp_path):
     with pytest.raises(ValueError, match="mount_tilt_deg"):
         open_door.configure(tmp_path, 15)
@@ -203,7 +236,9 @@ def test_a_door_not_measured_here_changes_the_model(door_sim, tmp_path):
     open_door.configure(tmp_path, door_width_m=0.5, door_depth_m=0.2, hinge_along_door_m=0.4)
     assert shared.DOOR_MODEL["door_past_handle"] == pytest.approx(0.1)
     assert shared.DOOR_MODEL["door_t"] == 0.2
-    assert shared.DOOR_Z_FROM_HANDLE == pytest.approx((-18 * 0.0254, 12.5 * 0.0254))
+    m = constants.MEASURED
+    expected = (-m["door_below_handle_m"], m["door_above_handle_m"])
+    assert shared.DOOR_Z_FROM_HANDLE == pytest.approx(expected)
 
 
 def test_the_close_finds_feeding_deployments_height_and_never_tilts(door_sim):
@@ -240,7 +275,7 @@ def test_a_close_without_an_opened_door_refuses(door_sim):
 def test_the_whole_open_sends_checked_joints_and_leaves_the_door_for_the_close(door_sim):
     scene, rb = door_sim
     arm = _Arm(scene, rb, TELEOP_START)
-    assert open_door.run(arm, True)
+    assert open_door.run(arm, True, push=False)
     kinds = [c[0] for c in arm.calls]
     assert kinds == ["curobo", "joints", "gripper", "joints", "gripper", "joints", "joints"]
     assert arm.calls[2] == ("gripper", 1.0, constants.GRASP_FORCE)
@@ -255,9 +290,53 @@ def test_the_whole_open_sends_checked_joints_and_leaves_the_door_for_the_close(d
 def test_a_dry_open_moves_nothing(door_sim):
     scene, rb = door_sim
     arm = _Arm(scene, rb, TELEOP_START)
-    assert open_door.run(arm, False)
+    assert open_door.run(arm, False, push=False)
     assert arm.calls == []
     assert not dc.DOOR_FILE.exists()
+
+
+def test_the_open_defaults_to_the_70_degree_pull_and_push(door_sim, monkeypatch):
+    scene, rb = door_sim
+    asked = {}
+
+    def open_task(ai, execute, max_swing, min_swing, after_swing):
+        asked.update(swing=(max_swing, min_swing), after=after_swing)
+        return True
+
+    monkeypatch.setattr(shared, "open_task", open_task)
+    monkeypatch.setattr(open_door, "push_open", lambda ai, execute: True)
+    assert open_door.run(_Arm(scene, rb, TELEOP_START), False)
+    assert asked["swing"] == (70, 70)
+    assert isinstance(asked["after"], push_open.PushOpen)
+
+
+def test_the_grasp_offset_moves_the_grasp_and_the_door_with_it(door_sim):
+    lo, hi = shared.DOOR_Z_FROM_HANDLE
+    open_door.set_grasp_offset(0.03)
+    assert shared.VERTICAL_CORR == pytest.approx(constants.VERTICAL_CORR + 0.03)
+    # the door stays where it is
+    assert shared.DOOR_Z_FROM_HANDLE == pytest.approx((lo - 0.03, hi - 0.03))
+    handle = np.array(FRIDGE_DOOR["closed_handle"])
+    h, grasp = shared.grasp_pose(handle, HANDLE_QUAT, np.array(FRIDGE_DOOR["closed_normal"]))
+    assert grasp.position[2] == pytest.approx(handle[2] + 0.03)
+    assert h[2] + shared.DOOR_Z_FROM_HANDLE[1] == pytest.approx(handle[2] + hi)
+    open_door.set_grasp_offset(0.0)  # each run sets its own: none left over
+    assert shared.VERTICAL_CORR == constants.VERTICAL_CORR
+    assert shared.DOOR_Z_FROM_HANDLE == pytest.approx((lo, hi))
+
+
+def test_the_grasp_offset_stays_on_the_measured_bar(door_sim, tmp_path):
+    open_door.configure(tmp_path, handle_length_m=0.20)
+    limit = 0.10 - constants.GRASP_END_MARGIN_M
+    assert open_door.grasp_offset_limit() == pytest.approx(limit)
+    open_door.set_grasp_offset(-limit)
+    with pytest.raises(dc.Refused, match="off the handle"):
+        open_door.set_grasp_offset(limit + 0.005)
+    scene, rb = door_sim
+    arm = _Arm(scene, rb, TELEOP_START)
+    with pytest.raises(dc.Refused, match="off the handle"):
+        open_door.run(arm, True, grasp_offset=0.2)
+    assert arm.calls == []
 
 
 def test_release_only_lets_go_and_backs_off(door_sim):
@@ -280,3 +359,121 @@ def test_the_close_settings_are_door_commons(door_sim):
     known = set(shared_close.CLOSE_DEFAULTS)
     assert set(constants.CLOSE_SETTINGS) <= known
     assert set(close_door.GOAL_SETTINGS) - {"chair_back", "close_to_deg", "chair_moved"} <= known
+
+
+def test_the_two_looks_compare_the_measured_hinge_not_a_door_edge(monkeypatch):
+    # door_common.perception's imports, which these tests don't have
+    for name in ("open3d", "message_filters"):
+        monkeypatch.setitem(sys.modules, name, MagicMock())
+    import door_common.perception
+    from fridge.perception import HandleDetector
+
+    base = door_common.perception.HandleDetector
+    look = {
+        "handle": np.array([0.5, -0.4, 0.3]),
+        "normal": np.array([-1.0, 0.0, 0.0]),
+        "hinge": np.zeros(3),
+    }
+    monkeypatch.setattr(base, "detect", lambda self, *a, **k: dict(look))
+    det = HandleDetector(np.array([0.1, 0.37, 0.0])).detect()
+    assert det["hinge"] == pytest.approx([0.6, -0.03, 0.3])
+
+    monkeypatch.setattr(base, "detect", lambda self, *a, **k: None)
+    assert HandleDetector(np.zeros(3)).detect() is None  # a miss stays a miss
+
+
+def test_a_close_plan_says_where_it_was_sent_to_move_the_chair_next(monkeypatch):
+    # door_common.perception's imports, which these tests don't have
+    for name in ("open3d", "message_filters"):
+        monkeypatch.setitem(sys.modules, name, MagicMock())
+    from fridge import node
+
+    monkeypatch.setattr(close_door, "run", lambda *a, **k: True)
+    monkeypatch.setattr(node, "WristCamera", MagicMock())
+    engine = MagicMock(mock=False, cfg={**node.PARAMS, "allow_execute": True}, instance_id="")
+    ctx = MagicMock()
+
+    out = node.Capability.execute(engine, "close", {"execute": False}, ctx)
+    assert out["note"].startswith("Plan OK. Move the WHEELCHAIR straight back ~30 cm")
+    assert "chair_moved true" in out["note"]
+    assert ctx.progress.call_args.args[2] == out["note"]  # the feedback T3 prints
+
+    ctx.reset_mock()
+    out = node.Capability.execute(engine, "close", {"execute": True, "chair_moved": True}, ctx)
+    assert out["note"] == ""  # the close itself: nothing more to do
+    assert all("WHEELCHAIR" not in str(c) for c in ctx.progress.call_args_list)
+
+
+def test_a_run_keeps_what_the_node_logged_in_its_console_log(door_sim, monkeypatch):
+    for name in ("open3d", "message_filters"):
+        monkeypatch.setitem(sys.modules, name, MagicMock())
+    from fridge import motion, node
+
+    scene, rb = door_sim
+    rcl = MagicMock()
+    logger = node.TeeLogger(rcl)
+    dc.set_output(logger.info)  # as the node sets it: the planner's lines
+    try:
+        logger.info("before the run")  # between runs: the terminal only
+        arm = _Arm(scene, rb, TELEOP_START)
+        assert open_door.run(arm, False, push=False)
+        logger.warning("after the run")
+    finally:
+        dc.set_output(None)
+    (run,) = dc.RUNS_DIR.glob("*_open")
+    console = (run / "console.log").read_text()
+    assert "INFO run log:" in console
+    assert "DRY RUN -- would grasp, then swing 90 deg" in console
+    assert "before the run" not in console and "after the run" not in console
+    assert (
+        rcl.info.call_count > 10 and rcl.warning.call_count == 1
+    )  # the terminal still gets every line
+    assert {p.name for p in run.iterdir()} >= {"run.json", "arm.npz", "console.log"}
+
+    def refuse():
+        logger.error("from the arm, mid-run")
+        raise dc.Refused("no plan")
+
+    with pytest.raises(dc.Refused):
+        motion.logged_run("close", _Arm(scene, rb, TELEOP_START), {}, 1.0, refuse)
+    (run,) = dc.RUNS_DIR.glob("*_close")
+    console = (run / "console.log").read_text()
+    assert "ERROR from the arm, mid-run" in console and "ERROR stopped: no plan" in console
+
+
+def test_a_run_records_its_rosbag_in_its_folder_and_closes_it(door_sim, monkeypatch):
+    from fridge import motion
+
+    made = []
+
+    class Recorder:
+        def __init__(self, run_dir):
+            made.append(self)
+            self.run_dir, self.closed = run_dir, False
+
+        def close(self):
+            self.closed = True
+            return 7
+
+    def refuse():
+        assert made and not made[-1].closed  # recording while the run runs
+        raise dc.Refused("no plan")
+
+    monkeypatch.setattr(motion, "BAG", Recorder)
+    scene, rb = door_sim
+    with pytest.raises(dc.Refused):  # a refusal still closes the bag
+        motion.logged_run("open", _Arm(scene, rb, TELEOP_START), {}, 1.0, refuse)
+    (run,) = dc.RUNS_DIR.glob("*_open")
+    (rec,) = made
+    assert rec.run_dir == run and rec.closed
+
+    def broken(run_dir):
+        raise RuntimeError("no rosbag2")
+
+    monkeypatch.setattr(motion, "BAG", broken)  # a recorder that fails: the run goes on
+    assert motion.logged_run("open", _Arm(scene, rb, TELEOP_START), {}, 1.0, lambda: True)
+
+    monkeypatch.setattr(motion, "BAG", Recorder)
+    monkeypatch.setattr(motion, "BAG_MIN_FREE_GB", 1e9)  # a full disk: no bag, the run goes on
+    assert motion.logged_run("open", _Arm(scene, rb, TELEOP_START), {}, 1.0, lambda: True)
+    assert len(made) == 1

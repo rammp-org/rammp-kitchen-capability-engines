@@ -1,4 +1,5 @@
-"""The push-open option: after a PUSH_OPEN_PULL_DEG pull (still holding the handle), let go and push the door on.
+"""The push-open, the open's default: after a PUSH_OPEN_PULL_DEG pull (still holding the handle), let go and push the
+door on.
 
 The route is computed for today's door, as one smooth sim-gated trajectory: straight out off the handle, along the open
 door to past its free edge, round it -- turning the hand PARALLEL to the door (fingers along it toward the hinge, rolled

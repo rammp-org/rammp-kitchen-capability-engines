@@ -1,11 +1,11 @@
 """The fridge capability: open and close the fridge door with the arm.
 
-Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, swing the door open, let go and go
-back round the door to its inner side (or, with `push_open`, a shorter pull and push it further open). Action `close`
-(close_door.run): push the door most of the way shut with the side of the hand -- no grasp, the gripper untouched (it
-may hold a container) -- against the door the open saved; it swings shut by itself from there. Every leg is planned and
-sim-gated before it moves, with the wheelchair keep-out on; any failed check stops the run with the arm holding where
-it is (EngineError "refused").
+Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, pull the door 70 deg open, let go and
+push it on to 90 (or, with `push_open` false, a 90-deg pull and go back round the door to its inner side). Action
+`close` (close_door.run): push the door most of the way shut with the side of the hand -- no grasp, the gripper
+untouched (it may hold a container) -- against the door the open saved; it swings shut by itself from there. Every leg
+is planned and sim-gated before it moves, with the wheelchair keep-out on; any failed check stops the run with the arm
+holding where it is (EngineError "refused").
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`. Otherwise the goal
 is a dry run (detect, plan and gate every leg; nothing moves) and the result says so. Someone stands at the e-stop
@@ -21,7 +21,7 @@ from capability_engine import Action, CapabilityEngine, EngineError, run
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import close_door, constants, open_door
+from . import close_door, constants, motion, open_door
 from .perception import WristCamera
 
 COMMON = {
@@ -57,7 +57,38 @@ PARAMS = {
     "sam3_threshold": 0.3,
     **constants.MEASURED,
     "chair_back_dir": list(constants.CHAIR_BACK_DIR),
+    # every run also records a rosbag into its run folder (bag.RunBag): the wrist camera this many times a second
+    # (~75 MB a minute at 1) and TF
+    "record_bag": True,
+    "bag_frame_hz": 1.0,
 }
+
+
+def _teed(level, name):
+    """TeeLogger's `name` method: to the run's console.log at `level`, then to the logger."""
+
+    def log(self, message, *args, **kwargs):
+        motion.to_console(level, str(message))
+        return getattr(self._logger, name)(message, *args, **kwargs)
+
+    return log
+
+
+class TeeLogger:
+    """The node's logger, each line also in the running goal's console.log (motion.to_console): what T2 shows, from
+    the planner, self.arm and the engine alike, kept with the run."""
+
+    def __init__(self, logger):
+        self._logger = logger
+
+    def __getattr__(self, name):
+        return getattr(self._logger, name)
+
+    info = _teed("INFO", "info")
+    warning = _teed("WARN", "warning")
+    warn = _teed("WARN", "warn")
+    error = _teed("ERROR", "error")
+    fatal = _teed("FATAL", "fatal")
 
 
 class Capability(CapabilityEngine):
@@ -73,7 +104,10 @@ class Capability(CapabilityEngine):
                 "properties": {
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
-                    "push_open": {"type": "boolean", "default": False},
+                    "push_open": {"type": "boolean", "default": True},
+                    # grasp this far (m) above the middle of the handle bar, below if negative; refused off the bar
+                    # (handle_length_m)
+                    "grasp_offset_m": {"type": "number", "default": 0.0},
                     # a run stopped holding the handle: let go, back off, nothing else
                     "release_only": {"type": "boolean", "default": False},
                 },
@@ -89,6 +123,9 @@ class Capability(CapabilityEngine):
         ),
     ]
 
+    def get_logger(self):
+        return TeeLogger(super().get_logger())
+
     def __init__(self):
         super().__init__("fridge")
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
@@ -102,6 +139,11 @@ class Capability(CapabilityEngine):
         if self.cfg["handle_source"] not in ("depth", "sam3"):
             raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
         shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
+        if self.cfg["record_bag"] and not self.mock:
+            from .bag import RunBag  # here, not at import: rosbag2, which the planning tests don't have
+
+            cam = (self.cfg["color_topic"], self.cfg["camera_info_topic"], self.cfg["depth_topic"])
+            motion.BAG = lambda run_dir: RunBag(self, run_dir, *cam, self.cfg["bag_frame_hz"])
         # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
         self.sam3 = None
         if self.cfg["handle_source"] == "sam3":
@@ -148,10 +190,11 @@ class Capability(CapabilityEngine):
                     self.arm,
                     execute,
                     swing_deg=params.get("swing_deg"),
-                    push=bool(params.get("push_open", False)),
+                    push=bool(params.get("push_open", True)),
                     release_only=bool(params.get("release_only", False)),
                     speed=speed,
                     log_args=log_args,
+                    grasp_offset=float(params.get("grasp_offset_m", 0.0)),
                 )
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.GOAL_SETTINGS}
@@ -163,6 +206,15 @@ class Capability(CapabilityEngine):
                     log_args=log_args,
                     **settings,
                 )
+                chair_back = float(settings.get("chair_back", constants.CHAIR_BACK_M))
+                if ok and not execute and chair_back > 0 and not settings.get("chair_moved"):
+                    # the plan passed: say, where the goal was sent (feedback and the result), what comes next
+                    next_step = (
+                        f"Plan OK. {close_door.move_chair(chair_back)}, then send the close with execute true and "
+                        "chair_moved true."
+                    )
+                    ctx.progress(action_id, 100.0, next_step)
+                    note = f"{note}. {next_step}" if note else next_step
         except dc.Refused as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         finally:

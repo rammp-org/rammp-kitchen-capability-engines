@@ -54,11 +54,17 @@ params:
   door_depth_m: 0.10668
   door_above_handle_m: 0.3175
   door_below_handle_m: 0.4572
+  # NOT MEASURED (an estimate from the 11-01 depth frames): measure the bar between its mounts.
+  handle_length_m: 0.13
   body_depth_m: 0.5
   # The wheelchair: the keep-out behind the arm base (m), and which way moving the chair back moves
   # the fridge in the arm's frame (x, y).
   chair_keep_out_behind_m: 0.381
   chair_back_dir: [1.0, 0.0]
+  # Every run also records a rosbag into its run folder: the wrist camera bag_frame_hz times a second and TF
+  # (~75 MB a minute at 1).
+  record_bag: true
+  bag_frame_hz: 1.0
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

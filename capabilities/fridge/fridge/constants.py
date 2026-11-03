@@ -27,6 +27,9 @@ MEASURED = {
     # door top / bottom above / below the middle of the handle bar (measured 10-24). The close pushes only within these
     "door_above_handle_m": 15 * INCH,
     "door_below_handle_m": 15.5 * INCH,
+    # the handle bar's grippable straight length, between its mounts. NOT MEASURED: ~12-15 cm read off the 11-01 depth
+    # frames. It limits how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
+    "handle_length_m": 0.13,
     "body_depth_m": 0.50,  # cabinet behind the door
     # The arm is mounted on the chair's left and the person sits just behind it, to its right (10-24: a close ran the
     # arm into the back of the chair). No part of the arm or gripper may be more than this far behind the arm base
@@ -41,6 +44,9 @@ GRIP_EXT = 0.088  # along the approach axis (negative = past the detected handle
 VERTICAL_CORR = 0.0  # world z
 GRASP_X_ADJUST = 0.040  # along the approach axis
 GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose, to let its bar turn)
+# the open's grasp_offset_m (up from the middle of the bar) keeps the middle of the finger pads at least this far in
+# from either end of handle_length_m: half the 2F-85 pad's ~2.2 cm width, plus ~2 cm for the detected middle being off
+GRASP_END_MARGIN_M = 0.03
 
 # --- handle position gates: the microwave's defaults (y >= -0.50, z <= 0.65) would refuse the fridge handles of 09-20/
 # 10-21 ---
@@ -48,7 +54,8 @@ PLAUSIBLE_Y = (-0.60, 0.60)
 PLAUSIBLE_Z = (0.25, 0.75)
 
 # --- swing ---
-SWING_DEG = 90  # the swing without a swing_deg. Exactly this swing or the run refuses: no smaller fallback
+SWING_DEG = 90  # the full pull (push_open false) without a swing_deg. Exactly this swing or the run refuses: no smaller
+# fallback
 
 # --- release: let go, then back straight out of the handle ---
 BACK_OFF_M = 0.06
@@ -62,17 +69,20 @@ AROUND_IN_M = 0.25  # ... round the edge to this far off it on the inside, turni
 AROUND_END_M = (0.25, 0.30)  # ... and in to this far from the hinge along the door, this far off its inside: beside
 # the open door, in front of the fridge opening
 
-# --- the push-open option (push_open.py): pull a little holding the handle, let go, push the door the rest of the way,
-# with the hand turned PARALLEL to the door: round its free edge at hand height (a fridge door is too tall to go over),
-# in behind it with the fingers pointing along it toward the hinge, rolled vertical, and the side of the hand pushing
-# the inner face. (Facing the hand into the cabinet, as the microwave's demo does, puts the gripper through the door.)
-PUSH_OPEN_PULL_DEG = 50  # the pull. An offline sim search (10-24 detection, 4.2 in door) found parallel hand poses
-# behind the door from 35 (2 poses, 2.8 cm clear) to 60; 50 has many (75 of 720, up to 7.3 cm clear)
+# --- the push-open, the open's default (push_open.py): pull part way holding the handle, let go, push the door the
+# rest of the way, with the hand turned PARALLEL to the door: round its free edge at hand height (a fridge door is too
+# tall to go over), in behind it with the fingers pointing along it toward the hinge, rolled vertical, and the side of
+# the hand pushing the inner face. (Facing the hand into the cabinet, as the microwave's demo does, puts the gripper
+# through the door.)
+PUSH_OPEN_PULL_DEG = 70  # the pull. On the 30-deg mount it plans at the 11-01 handle height (~0.31 m above the arm
+# base) with MOUNTS[30]'s push height and grasp tilts (sim). An earlier search (10-24 detection, level arm) found hand
+# poses behind the door at 35-60
 PUSH_OPEN_TO_DEG = 90  # push the door on to this
 PUSH_OPEN_OFF_HANDLE_M = BACK_OFF_M  # let go, then straight out off the handle this far ...
 PUSH_OPEN_EDGE_CLEAR_M = 0.16  # ... along the open door to this far past its free edge (tool point) ...
 PUSH_OPEN_GAP_M = 0.10  # ... round it to this far off the door's inner face (tool point), turning the hand ...
-PUSH_OPEN_DZ_M = -0.10  # ... and going this far below the handle's height (the search's best poses) ...
+PUSH_OPEN_DZ_M = -0.10  # ... and going this far above the handle's height (negative: below; configure sets it from
+# MOUNTS) ...
 PUSH_OPEN_AT_M = (0.40, 0.35, 0.30, 0.25)  # ... in along the inner face to this far from the hinge (tried in order) ...
 PUSH_OPEN_APPROACH_DEG = (0, 15, -15, 30)  # ... the fingers this far off "along the door toward the hinge", toward
 # pointing into the cabinet (tried in order, each with the tool's y up and down) ...
@@ -104,11 +114,30 @@ CLOSE_SETTINGS = dict(  # replace door_common.close_door.CLOSE_DEFAULTS
 # and shares the arm base's origin on every robot. The reach limits are measured from that origin, but a 30-deg lean
 # moves the shoulder ~14 cm forward, so the same arm reaches further from it and its upper arm needs the fridge further
 # away. 0: 09-20 grasps were 0.87-0.92 m out (door_common: 0.915 grasp / 0.90 swing), placement as passed in sim with a
-# push-open after a 70-deg pull from the Fridge start pose. 30: sim only (10-24 door shifted, flatbot model, 90-deg open
-# + route round the door + close), never run on the arm. ---
+# push-open after a 70-deg pull from the Fridge start pose. 30: sim only, never run on the arm: the 70-deg pull +
+# push-open with the handle at its 11-01 height (~0.31 m above the arm base, door square to the chair, flatbot model).
+# There the hand pushes from 10 cm ABOVE the handle and the grasp may tilt nose-down up to 35 deg: with the level arm's
+# values (10 cm below, up to 25) almost no placement plans (11-03 sweep). The placement window is ~3 cm inside the
+# largest rectangle where the open and the close both plan there (handle x 0.80-0.92, y -0.48 to -0.12); the 11-01 runs'
+# handle (x 0.85, y -0.27) is in it. push_open_dz_m: PUSH_OPEN_DZ_M, grasp_pitches_deg: door_common's
+# GRASP_PITCHES_DEG (0's is door_common's own). ---
 MOUNTS = {
-    0: dict(max_reach=0.94, swing_max_reach=0.94, placement_x=(0.50, 0.56), placement_y=(-0.45, -0.39)),
-    30: dict(max_reach=1.10, swing_max_reach=1.10, placement_x=(0.68, 0.76), placement_y=(-0.48, -0.38)),
+    0: dict(
+        max_reach=0.94,
+        swing_max_reach=0.94,
+        placement_x=(0.50, 0.56),
+        placement_y=(-0.45, -0.39),
+        push_open_dz_m=-0.10,
+        grasp_pitches_deg=(0, 10, 14, 17, 25),
+    ),
+    30: dict(
+        max_reach=1.10,
+        swing_max_reach=1.10,
+        placement_x=(0.82, 0.90),
+        placement_y=(-0.44, -0.16),
+        push_open_dz_m=0.10,
+        grasp_pitches_deg=(0, 10, 14, 17, 25, 30, 35),
+    ),
 }
 PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  # configure sets them
 PLACEMENT_YAW_DEG = (-10.0, 10.0)
@@ -117,9 +146,10 @@ PLACEMENT_YAW_DEG = (-10.0, 10.0)
 def configure(data_dir, mount_tilt_deg=0):
     """Point door_common's paths at `data_dir`, name the appliance and pick the mount's placement. No door-size
     defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
-    global PLACEMENT_X, PLACEMENT_Y
+    global PLACEMENT_X, PLACEMENT_Y, PUSH_OPEN_DZ_M
     if mount_tilt_deg not in MOUNTS:
         raise ValueError(f"mount_tilt_deg must be one of {sorted(MOUNTS)}, not {mount_tilt_deg!r}")
     PLACEMENT_X, PLACEMENT_Y = MOUNTS[mount_tilt_deg]["placement_x"], MOUNTS[mount_tilt_deg]["placement_y"]
+    PUSH_OPEN_DZ_M = MOUNTS[mount_tilt_deg]["push_open_dz_m"]
     dc.configure_paths(data_dir)
     dc.configure(APPLIANCE="fridge")

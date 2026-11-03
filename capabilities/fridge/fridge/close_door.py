@@ -57,6 +57,11 @@ def close_height(ai, door, settings, shift, close_to_deg):
     raise Refused("no height within the door gives a plan that passes every gate.")
 
 
+def move_chair(chair_back):
+    """What the person does to the wheelchair before an executed close, as the close's messages say it."""
+    return f"Move the WHEELCHAIR straight back ~{chair_back * 100:.0f} cm (away from the fridge, without turning it)"
+
+
 def run(
     ai,
     execute,
@@ -87,12 +92,11 @@ def run(
         z = close_height(ai, door, settings, shift, close_to_deg)
         say(f"swing height z {z:.3f}")
         if not execute:
-            say("(dry run: planned as if the wheelchair has already moved back)")
+            say("(plan only: planned as if the wheelchair has already moved back)")
         elif chair_back > 0 and not chair_moved:
             raise Refused(
-                f"Move the WHEELCHAIR straight back ~{chair_back * 100:.0f} cm (away from the fridge, without turning "
-                "it), then send this goal again with chair_moved true. If it is still back from the last close, leave "
-                "it."
+                f"{move_chair(chair_back)}, then send this goal again with chair_moved true. If it is still back from "
+                "the last close, leave it."
             )
         ok = _push_close(ai, execute, {**settings, "push_z": z}, shift, close_to_deg)
         if ok and execute:

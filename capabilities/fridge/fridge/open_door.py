@@ -1,13 +1,15 @@
 """Open the fridge: detect the handle, grasp it, swing the door open, let go, go back round the door -- one run.
 
 1. Detect, plan, grasp, swing: door_common.open_door, with this fridge's values (`configure`). The handle comes from the
-   whole image (perception.HandleDetector); the hinge is measured from the grasp, not detected. Exactly the asked swing
-   or the run refuses, and what follows the swing is planned with it, before anything moves.
-2. By default (`ReleaseAround`, a 90-deg pull): let go, back off the handle, then back along the open door past its free
-   edge, round it and in beside the door, facing the fridge -- so the arm ends on the door's inner side. It always ends
-   upright, as at the grasp; it may go round the edge upside down and roll upright on the way in. No park.
-3. The option (`push_open.PushOpen`): a shorter pull, then let go and push the door further open. Not the default: on
-   its one hardware run (10-24) it finished its trajectory but the door swung shut.
+   whole image (perception.HandleDetector); the hinge is measured from the grasp, not detected. The grasp is at the
+   middle of the bar, or `grasp_offset_m` above it (below if negative), within the measured bar (`set_grasp_offset`).
+   Exactly the asked swing or the run refuses, and what follows the swing is planned with it, before anything moves.
+2. By default (`push_open.PushOpen`): a 70-deg pull, then let go and push the door on to 90. On its one hardware run
+   (10-24, after a 50-deg pull) it finished its trajectory but the door swung shut.
+3. With push_open false (`ReleaseAround`, a 90-deg pull): let go, back off the handle, then back along the open door
+   past its free edge, round it and in beside the door, facing the fridge -- so the arm ends on the door's inner side.
+   It always ends upright, as at the grasp; it may go round the edge upside down and roll upright on the way in. No
+   park.
 
 Refusals raise door_common.common.Refused: the arm holds where it is.
 """
@@ -27,10 +29,10 @@ from .motion import AfterSwing, door_after, logged_run, send_legs
 from .push_open import PushOpen, push_open
 
 
-def _make_detector():
+def _make_detector(hinge_offset):
     from .perception import HandleDetector  # here, not at import: open3d, which the planning tests don't have
 
-    return HandleDetector()
+    return HandleDetector(hinge_offset)
 
 
 def placement_advice(handle, normal, start_joints=None, level=True):
@@ -67,19 +69,25 @@ def placement_advice(handle, normal, start_joints=None, level=True):
     return "\n".join(lines)
 
 
+_HANDLE_LENGTH = F.MEASURED["handle_length_m"]  # configure sets these two
+_DOOR_Z_FROM_HANDLE = (-F.MEASURED["door_below_handle_m"], F.MEASURED["door_above_handle_m"])
+
+
 def configure(data_dir, mount_tilt_deg=0, **measured):
     """Everything door_common needs from the fridge: call once at startup. `mount_tilt_deg`: a key of constants.MOUNTS.
     `measured`: constants.MEASURED's names."""
+    global _HANDLE_LENGTH, _DOOR_Z_FROM_HANDLE
     m = {**F.MEASURED, **measured}
+    _HANDLE_LENGTH = float(m["handle_length_m"])
+    _DOOR_Z_FROM_HANDLE = (-m["door_below_handle_m"], m["door_above_handle_m"])
     F.configure(data_dir, mount_tilt_deg)
     mount = F.MOUNTS[mount_tilt_deg]
+    # the measured offset from the closed-door grasp point, in the door's frame: into it, along it, up. Its last 09-20
+    # runs swung ~100 deg about this hinge. A wrong one drags the door or the fridge during the swing
+    hinge_offset = np.array([m["handle_centre_to_face_m"] + m["pin_behind_face_m"], m["hinge_along_door_m"], 0.0])
     shared.configure(
-        MAKE_DETECTOR=_make_detector,
-        # the measured offset from the closed-door grasp point, in the door's frame: into it, along it, up. Its last
-        # 09-20 runs swung ~100 deg about this hinge. A wrong one drags the door or the fridge during the swing
-        FIND_HINGE=shared.hinge_measured(
-            np.array([m["handle_centre_to_face_m"] + m["pin_behind_face_m"], m["hinge_along_door_m"], 0.0])
-        ),
+        MAKE_DETECTOR=partial(_make_detector, hinge_offset),
+        FIND_HINGE=shared.hinge_measured(hinge_offset),
         GRIP_EXT=F.GRIP_EXT,
         VERTICAL_CORR=F.VERTICAL_CORR,
         GRASP_X_ADJUST=F.GRASP_X_ADJUST,
@@ -88,6 +96,7 @@ def configure(data_dir, mount_tilt_deg=0, **measured):
         PLAUSIBLE_Z=F.PLAUSIBLE_Z,
         MAX_REACH=mount["max_reach"],
         SWING_MAX_REACH=mount["swing_max_reach"],
+        GRASP_PITCHES_DEG=mount["grasp_pitches_deg"],
         PLACEMENT_NOTE=partial(placement_advice, level=mount_tilt_deg == 0),
         DOOR_MODEL=dict(
             face_behind_grasp=m["handle_centre_to_face_m"],
@@ -95,10 +104,33 @@ def configure(data_dir, mount_tilt_deg=0, **measured):
             door_past_handle=m["door_width_m"] - m["hinge_along_door_m"],
             body_depth=m["body_depth_m"],
         ),
-        DOOR_Z_FROM_HANDLE=(-m["door_below_handle_m"], m["door_above_handle_m"]),  # the camera sees only part of it
+        DOOR_Z_FROM_HANDLE=_DOOR_Z_FROM_HANDLE,  # the camera sees only part of it
         KEEP_ARM_IN_FRAMES=True,
     )
     dc.enable_keep_out(m["chair_keep_out_behind_m"])  # every plan and every trajectory sent is checked
+
+
+def grasp_offset_limit():
+    """How far above or below the middle of the bar the grasp may be (m): the finger pads stay GRASP_END_MARGIN_M in
+    from either end of the measured bar."""
+    return max(0.0, _HANDLE_LENGTH / 2 - F.GRASP_END_MARGIN_M)
+
+
+def set_grasp_offset(offset):
+    """Grasp `offset` (m) above the detected middle of the bar (below if negative) for this run; Refused beyond
+    grasp_offset_limit. door_common's grasp height is the bar's middle + VERTICAL_CORR, and the door's top and bottom
+    are placed from that grasp height (DOOR_Z_FROM_HANDLE), so both move with the offset."""
+    limit = grasp_offset_limit()
+    if abs(offset) > limit + 1e-9:
+        raise Refused(
+            f"grasp_offset_m {offset:+.3f} is off the handle: at most +-{limit:.3f} for a "
+            f"{_HANDLE_LENGTH * 100:.1f} cm bar (handle_length_m), keeping the finger pads "
+            f"{F.GRASP_END_MARGIN_M * 100:.0f} cm in from its ends."
+        )
+    lo, hi = _DOOR_Z_FROM_HANDLE
+    shared.configure(VERTICAL_CORR=F.VERTICAL_CORR + offset, DOOR_Z_FROM_HANDLE=(lo - offset, hi - offset))
+    if offset:
+        say(f"grasping {abs(offset) * 100:.1f} cm {'above' if offset > 0 else 'below'} the middle of the bar")
 
 
 def _facing_fridge(df, y_up):
@@ -202,14 +234,16 @@ def release_around(ai, execute):
     return ok
 
 
-def run(ai, execute, swing_deg=None, push=False, release_only=False, speed=1.0, log_args=None):
-    """The open as the node runs it, logged to RUNS_DIR/<time>_open. Exactly `swing_deg` (default SWING_DEG, or
-    PUSH_OPEN_PULL_DEG with `push`), then what follows. `release_only`: let go and back off the handle, nothing else
-    (when a run stopped holding it). Returns True when it finished (or the dry run passed); raises Refused."""
+def run(ai, execute, swing_deg=None, push=True, release_only=False, speed=1.0, log_args=None, grasp_offset=0.0):
+    """The open as the node runs it, logged to RUNS_DIR/<time>_open. Exactly `swing_deg` (default PUSH_OPEN_PULL_DEG, or
+    SWING_DEG without `push`), then what follows. `grasp_offset`: grasp this far (m) above the middle of the bar
+    (set_grasp_offset). `release_only`: let go and back off the handle, nothing else (when a run stopped holding it).
+    Returns True when it finished (or the dry run passed); raises Refused."""
 
     def task():
         if release_only:
             return dc.release_and_back_off(ai, F.BACK_OFF_M, execute, park=False)
+        set_grasp_offset(grasp_offset)
         swing = swing_deg or (F.PUSH_OPEN_PULL_DEG if push else F.SWING_DEG)
         say("\n===== OPEN: grasp + swing =====")
         after = PushOpen() if push else ReleaseAround()
