@@ -10,11 +10,13 @@
 # torch/torchvision from your requirements (the base ships the Jetson wheels).
 # arm64 only.
 #
-# nightly-20261030 is the base the nightly arm driver is built on (interfaces
-# 73e7ed1716bf, which has GoToEEPoses / GoToJointConfigs), so self.arm speaks
-# the driver's exact messages. It carries the arm, common and orchestrator
-# interfaces; rammp_curobo_interfaces it does not.
-FROM ghcr.io/rammp-org/rammp-base:nightly-20261030
+# Build against 2.0.0-jp6: the release that carries rammp-interfaces-ros2
+# v2.0.0 (all seven interface packages: arm, common, orchestrator, perception,
+# base, peripheral, ui_bridge). kinova-gen3-ros2 2.0.0 builds on the same base,
+# so self.arm speaks the driver's exact messages. rammp_curobo_interfaces is
+# not in it. Move this tag only when the robot's modules move to a new
+# rammp-base release.
+FROM ghcr.io/rammp-org/rammp-base:2.0.0-jp6
 
 WORKDIR /module_ws
 

@@ -104,8 +104,10 @@ and both run the same launch file with the same two switches:
 ### Natively with colcon (the RAMMP hybrid workflow)
 
 Clone into the workspace from [developer setup](https://rammp-org.github.io/setup/),
-next to `rammp-interfaces-ros2` (at a version that carries
-`rammp_orchestrator_interfaces`, currently its `dev` branch):
+next to `rammp-interfaces-ros2` at **v2.0.0**
+(`git clone -b v2.0.0 git@github.com:rammp-org/rammp-interfaces-ros2.git`). That is
+the contract `rammp-base:2.0.0-jp6` carries, so the native build and the image speak
+the same messages:
 
 ```bash
 cd ~/ros2_ws/src
@@ -402,7 +404,7 @@ capabilities/<name>/             one ament_python package per capability (`make 
   package.xml, setup.py, setup.cfg
   <name>/node.py                the capability: a CapabilityEngine subclass
   launch/<name>.launch.py       what both the native build and the image run
-  Dockerfile                    FROM a pinned rammp-base / rammp-cuda tag, built from the repo root
+  Dockerfile                    FROM a pinned rammp-base / rammp-cuda tag (2.0.0-jp6), built from the repo root
   rammp-alternative.yaml        the real alternative: sheppy's schema plus `tier`
   rammp-alternative.mock.yaml   same topics, no hardware — CI smoke-tests this one
   docs/interface.md             the page rammp-docs pulls; keep its headings
