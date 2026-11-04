@@ -184,7 +184,15 @@ def test_a_run_that_stops_with_the_lid_in_the_fingers_leaves_it_said(engine, mon
         engine.execute("open_box", {}, ctx)
     assert e.value.error_code == "arm_holds" and not e.value.recoverable
     assert str(e.value).endswith("the lid is still in the fingers")
-    assert ctx.world == [{"gripper": {"holding": "food_container_1:lid"}}]
+    assert ctx.world[0] == {"gripper": {"holding": "food_container_1:lid"}}
+    # not recoverable: the arm's domain in error, which the orchestrator honours (must-fix, round 2)
+    (status,) = (w["system_status"] for w in ctx.world[1:])
+    assert status["arm"]["state"] == "error" and status["arm"]["error_code"] == "arm_holds"
+    assert "the lid is still in the fingers" in status["arm"]["message"]
+    # and open_box is not offered while the gripper holds it, whatever the container's record says
+    world = {"gripper": {"holding": "food_container_1:lid"}, "objects": {"food_container_1": {"opened": False}}}
+    (a,) = engine.availability("food_container_1", world)
+    assert not a.available and "food_container_1:lid" in a.reason
 
 
 def test_a_lid_put_back_on_the_box_leaves_the_gripper_empty_and_the_run_retryable(engine, monkeypatch):
@@ -210,6 +218,7 @@ def test_a_lid_put_back_on_the_box_leaves_the_gripper_empty_and_the_run_retryabl
         engine.execute("open_box", {}, ctx)
     assert e.value.error_code == "failed" and e.value.recoverable and "still in the fingers" not in str(e.value)
     assert not ctx.world or ctx.world[-1] == {"gripper": {"holding": None}}  # not left holding
+    assert not any("system_status" in w for w in ctx.world)  # recoverable: the arm is not in error
 
 
 def test_the_selection_is_read_once_as_the_goal_comes(engine, monkeypatch):
@@ -324,10 +333,14 @@ def test_a_run_the_driver_halted_is_arm_halted_and_not_recoverable(engine, monke
 
     say = ["[press_demo] STOP: HALTED: the driver ended the run's motion (HALTED: emergency stop) — nothing more"]
     given(monkeypatch, FULL_RUN[:5], say, code=EXIT_HALTED)
+    ctx = FakeCtx()
     with pytest.raises(EngineError) as e:
-        engine.execute("open_box", {}, FakeCtx())
+        engine.execute("open_box", {}, ctx)
     assert e.value.error_code == "arm_halted" and not e.value.recoverable
     assert "emergency stop" in str(e.value)
+    assert ctx.world == [
+        {"system_status": {"arm": {"state": "error", "error_code": "arm_halted", "message": str(e.value)}}}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -467,6 +480,14 @@ def test_open_box_is_offered_until_the_world_state_holds_the_container_opened(en
 
     assert offered({"opened": False}) == offered({"opened": None}) == offered(None) == {"open_box": True}
     assert offered({"opened": True}) == {"open_box": False}
+
+
+def test_open_box_is_not_offered_while_the_gripper_holds_anything(engine):
+    """Must-fix, round 2: a run stopped with the lid in the fingers says so in gripper.holding
+    (this engine writes it); the next run would start from wherever the arm stopped, holding it."""
+    for holding, offered in ((None, True), ("c1:lid", False), ("spoon_2", False)):
+        (a,) = engine.availability("c1", {"gripper": {"holding": holding}, "objects": {"c1": {"opened": False}}})
+        assert a.available is offered and (offered or holding in a.reason)
 
 
 def test_the_mock_holds_every_topic_the_real_run_publishes_and_the_real_node_none(ros):

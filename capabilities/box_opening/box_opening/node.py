@@ -432,10 +432,17 @@ class Capability(CapabilityEngine):
 
     def availability(self, instance_id, world_state):
         """open_box for a container the world state does not already hold opened (its object
-        record's `opened`, which a run that took the lid off writes)."""
+        record's `opened`, which a run writes as it lets the lid go on the table), while the
+        gripper holds nothing: a run that stopped with the lid in the fingers says so in
+        `gripper.holding`, and a run started from there would start holding it."""
         opened = ((world_state.get("objects") or {}).get(instance_id) or {}).get("opened") is True
-        # REVIEW_RULES O1: offered only where it will run. The mock moves nothing: always offered
-        why = "the container is already opened" if opened else "" if self.mock or self._allowed() else NOT_ALLOWED
+        holding = (world_state.get("gripper") or {}).get("holding")
+        if holding:
+            why = f"the gripper holds {holding}: empty it, attended, before the next run"
+        elif opened:
+            why = "the container is already opened"
+        else:  # REVIEW_RULES O1: offered only where it will run. The mock moves nothing: always offered
+            why = "" if self.mock or self._allowed() else NOT_ALLOWED
         return [ActionAvailability(action_id=a.action_id, available=not why, reason=why) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
@@ -470,8 +477,8 @@ class Capability(CapabilityEngine):
             self._progress(log, track, ctx)  # the last rows, written as it ended
             if not ctx.cancelled():
                 self._sync_world(track, ctx, world)  # the last rows' word: a release, a put-back
-            world.wait(WORLD_WAIT_S)  # every write answered before the result goes out
         if ctx.cancelled():
+            world.wait(WORLD_WAIT_S)  # those queued before the cancel
             raise Cancelled()
         result = {
             "executed": True,
@@ -483,20 +490,24 @@ class Capability(CapabilityEngine):
             "video": run_.video,
             "run_log": str(log.path) if log.path else None,
         }
+        error = None
         if run_.timed_out:
-            held = " -- the lid is still in the fingers" if track.held else ""
-            raise EngineError(
+            error = EngineError(
                 "timeout",
-                f"the run took longer than {RUN_BUDGET_S:.0f} s and was stopped its own way (Ctrl+C){held}",
-                recoverable=not track.held,
+                f"the run took longer than {RUN_BUDGET_S:.0f} s and was stopped its own way (Ctrl+C)",
+                recoverable=True,
             )
-        if code != 0:
+        elif code != 0:
             error = error_for(action_id, code, run_.lines)
+        if error is not None:
             if track.held:
-                error = EngineError(
-                    error.error_code, f"{error} -- the lid is still in the fingers", recoverable=error.recoverable
-                )
+                # the next run would start holding it (availability): nothing to retry until it is emptied
+                error = EngineError(error.error_code, f"{error} -- the lid is still in the fingers", recoverable=False)
+            if not error.recoverable:
+                self._report_arm_error(error, ctx, world)
+            world.wait(WORLD_WAIT_S)
             raise error
+        world.wait(WORLD_WAIT_S)  # every write answered before the result goes out
         if result["lid_off"] and track.instance_id:
             # `opened` is the object record's own field (the orchestrator refuses any other); where
             # the lid went is the result's lid_xyz. A refused write leaves open_box offered on an
@@ -551,6 +562,14 @@ class Capability(CapabilityEngine):
         track.held_said = track.held
         holding = f"{track.instance_id}:lid" if track.held else None
         world.put(f"the gripper holds {holding}", lambda: ctx.write_world_state(gripper={"holding": holding}))
+
+    @staticmethod
+    def _report_arm_error(error, ctx, world):
+        """A run that ended where a person must clear it (an e-stop, an arm held part way, the lid
+        still in the fingers) says so in the world state's system_status, which the orchestrator
+        honours: no object or action flow until the arm's domain is normal again."""
+        status = {"arm": {"state": "error", "error_code": error.error_code, "message": str(error)}}
+        world.put(f"the arm is in error ({error.error_code})", lambda: ctx.write_world_state(system_status=status))
 
     def _sync_world(self, track, ctx, world):
         """What the run's rows so far tell the world state: the gripper's `holding`, and the

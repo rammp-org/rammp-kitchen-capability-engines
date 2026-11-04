@@ -95,7 +95,9 @@ Served under `/box_opening/`, types from `rammp_orchestrator_interfaces`:
 | `/box_opening/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
 It is activated when the user selects a `food container`. `open_box` is offered
-where `allow_execute` is on, until the world state holds the container `opened`.
+where `allow_execute` is on, until the world state holds the container `opened`,
+and only while the world state's gripper holds nothing (`gripper.holding`, which
+a run stopped with the lid in the fingers leaves set).
 
 | Action     | Params | Result payload                                                                                                                      |
 | ---------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -125,7 +127,11 @@ cancel stops it at once. The cancel is the run's own Ctrl+C: the motion in
 flight is cancelled, and the action ends once the driver has confirmed it, with
 no video encoded and no frames written on the way out.
 
-A run that stops fails the action with one of these codes:
+A run that stops fails the action with one of these codes. One that is not
+recoverable also sets the world state's `system_status.arm` to
+`{"state": "error", "error_code", "message"}`, which the orchestrator honours:
+no object or action flow until the arm's domain is normal again. With the lid
+still in the fingers, no code is recoverable.
 
 | Code          | Recoverable | Meaning                                                                                                                                                                                                                                 |
 | ------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
