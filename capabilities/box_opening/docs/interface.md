@@ -163,18 +163,18 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name               | Default                | Meaning                                                                      |
-| ------------------ | ---------------------- | ---------------------------------------------------------------------------- |
-| `use_orchestrator` | `true`                 | `false` runs standalone: no registration, drive it by CLI                    |
-| `mock`             | `false`                | `true` skips hardware (the mock alternative sets it)                         |
-| `allow_execute`    | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs |
-| `container`        | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path        |
-| `world`            | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`  |
-| `state_dir`        | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening` |
-| `video`            | `true`                 | Record both cameras from the grip to the set-down                            |
-| `viz`              | `false`                | Draw what the perception sees and decides for Foxglove                       |
-| `mission_frames`   | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20)     |
-| `speed_scale`      | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)             |
+| Name               | Default                | Meaning                                                                                                 |
+| ------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator` | `true`                 | `false` runs standalone: no registration, drive it by CLI                                               |
+| `mock`             | `false`                | `true` skips hardware (the mock alternative sets it)                                                    |
+| `allow_execute`    | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                            |
+| `container`        | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path                                   |
+| `world`            | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`                             |
+| `state_dir`        | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening`                            |
+| `video`            | `false`                | Record both cameras from the grip to the set-down (the newest 20 kept); on for attended data collection |
+| `viz`              | `false`                | Draw what the perception sees and decides for Foxglove                                                  |
+| `mission_frames`   | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20)                                |
+| `speed_scale`      | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                        |
 
 The engine base declares the `arm.*` parameters too; box opening does not use
 `self.arm` yet, so they change nothing here.

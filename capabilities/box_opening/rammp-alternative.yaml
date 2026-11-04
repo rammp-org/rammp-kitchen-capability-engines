@@ -35,8 +35,9 @@ params:
   world: world_flatbot.yaml
   # where runs keep their logs, captures and videos (the volume above)
   state_dir: /state
-  # a video of both cameras from the grip to the set-down, written after each run
-  video: true
+  # a video of both cameras from the grip to the set-down, written after each
+  # run (the newest 20 kept): on for attended data collection only
+  video: false
   # what the perception sees and decides, drawn for Foxglove
   viz: false
   # debug: each executed run also keeps what its cameras saw (~10 MB a run,

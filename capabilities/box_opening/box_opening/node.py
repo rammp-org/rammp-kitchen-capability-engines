@@ -53,7 +53,8 @@ PARAMS = {
     "world": "world_flatbot.yaml",
     # where runs keep their logs, captures and videos; "" = ~/.ros/box_opening
     "state_dir": "",
-    "video": True,
+    # a video of both cameras from the grip to the set-down: for attended data collection
+    "video": False,
     "viz": False,
     # debug: each --execute run keeps its camera frames (~10 MB; the newest 20 kept)
     "mission_frames": False,

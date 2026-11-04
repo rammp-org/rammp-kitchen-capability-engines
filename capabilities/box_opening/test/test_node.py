@@ -516,7 +516,7 @@ def test_each_goal_reads_the_params_as_they_are_then(engine):
     at start-up, so a change from the sheppy TUI was accepted and ignored."""
     real = node.Capability._argv.__get__(engine)
     assert real("open_box")[real("open_box").index("--speed-scale") + 1] == "1.0"
-    engine.set_parameters([Parameter("video", value=False)])
+    # off by default (review round 2, R6 ask): the video is for attended data collection
     assert engine._env()["BOX_OPENING_VIDEO"] == "0" and engine._env()["BOX_OPENING_MISSION_FRAMES"] == "0"
     engine.set_parameters(
         [
