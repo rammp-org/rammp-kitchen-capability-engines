@@ -362,6 +362,30 @@ def test_a_run_the_driver_halted_is_arm_halted_and_not_recoverable(engine, monke
         (["[press_demo] STOP: no button from the look pose (no aim) — nothing was pressed"], 1, "no_button"),
         (["[press_demo] STOP: no reach-out press plans for the scene camera's box (IK); nothing moved"], 1, "no_press"),
         (["[press_demo] STOP: x — the lid is back on the box, and the arm is home"], 1, "lid_put_back"),
+        (
+            [
+                "[press_demo] STOP: the press met something 60 mm above the button's top as the cameras saw it (more "
+                "than 45): something else is in the way — the press was stopped there; nothing was pressed"
+            ],
+            1,
+            "contact_early",
+        ),
+        (
+            [
+                "[press_demo] STOP: the pads met nothing down to 28 mm below the button's top as the cameras saw it "
+                "(more than 25): the box is not where it was seen — the press was stopped there"
+            ],
+            1,
+            "contact_late",
+        ),
+        (
+            [
+                "[press_demo] STOP: the press stroke ended with the pads meeting nothing: "
+                "the box is not where it was seen"
+            ],
+            1,
+            "contact_late",
+        ),
     ],
 )
 def test_how_a_run_ended_is_its_error_code(engine, monkeypatch, say, code, error):
@@ -390,6 +414,11 @@ def test_how_a_run_ended_is_its_error_code(engine, monkeypatch, say, code, error
             "lid_dropped",
         ),
         (["[press_demo] STOP: something no rule names"], 1, "failed"),
+        (
+            ["[press_demo] STOP: the press's contact watch failed (ValueError: x) — the press was stopped there"],
+            1,
+            "watch_failed",
+        ),
         (["Traceback (most recent call last):", "ValueError: a bug"], 1, "failed"),
         ([], 1, "failed"),
         (["[press_demo] STOP: the stroke pressed nothing"], -9, "stopped"),

@@ -369,6 +369,11 @@ STOP_CODES = (
     (re.compile(r"NO BOX"), "not_found", True),
     # "— the arm holds", "it holds", "The arm holds over where it was": a person clears it
     (re.compile(r"\bholds\b|did not get home"), "arm_holds", False),
+    # the press's contact off the band around the cameras' top, none, or its watch failed
+    # (tasks/press_contact): stopped there, back up and home
+    (re.compile(r"something else is in the way"), "contact_early", True),
+    (re.compile(r"the box is not where it was seen"), "contact_late", True),
+    (re.compile(r"contact watch failed"), "watch_failed", False),
     (re.compile(r"MOVED the box"), "box_moved", True),
     (re.compile(r"slipped out of the fingers"), "lid_dropped", False),
     (re.compile(r"the lid is back on the box"), "lid_put_back", True),

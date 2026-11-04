@@ -1360,13 +1360,20 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     log.info("[press_demo] %s" % dp.press_text(way.stroke, cfg))
     ctx.home_ahead = None  # the arm leaves the look pose: no home planned before is flown from where it comes back
     viz_hook("press", way.stroke, top_z, cfg)  # the stroke, drawn off this thread (perception/viz)
-    # where the pads meet the box ends the first press's stroke past it; a press after it (the
-    # knob not up) flies its full stroke, watched
-    contact = dp.watch_press(ctx, legs, way.stroke, top_z, cut=press == 1)
+    # where the pads meet the box ends every press's stroke past it (review round 2: the second
+    # too), and a contact well off the cameras' top refuses it (dp.watch_press)
+    contact = dp.watch_press(ctx, legs, way.stroke, top_z)
     res = runner.run(legs, execute=True)
     last = res[-1]
     flown = all(r.ok for r in res)
     retimed = rp._note_flight(runner, "reach_way_in_flight", names, last) if last.flown_traj is not None else {}
+    refused = dp.refuse_press(ctx, runner, contact, res)
+    if refused is not None:
+        # stopped where it was judged, the springs let go: back to the look pose, then home
+        code = _way_back(
+            ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True, why=refused, judged=False)
+        )
+        return (code if code is not None else _stop_home(ctx, cfg, runner, refused)), None
     if not flown and not _started(last):
         return _stop_home(
             ctx,

@@ -163,6 +163,9 @@ _LENS_DOWN = np.diag([1.0, -1.0, -1.0])
 # and the box slid 6 mm. The slow stretch is the mount's own allowance
 # (AHEAD_TOL_M) and some depth noise.
 TOUCH_SLOW_M = AHEAD_TOL_M + 0.015
+# the compliant press's contact watch arms this far below where its stroke begins (the pads at
+# q0: the descent's top), on the execution's last stretch below it (watch_press)
+DESCENT_ARM_M = 0.002
 TOUCH_SPEED = CONTACT_SPEED
 # A box the press slid this little, still standing (its lid's depth within
 # LID_MOVED_M), is gripped where the camera sees it now; farther is a STOP
@@ -1250,10 +1253,14 @@ def press_text(stroke, cfg):
                 "; not bent: %s" % stroke.bend_why if stroke.bend_why else "",
             )
         )
-    return "PRESS (compliant)%s: %s; held %.1f s, then back up. Nothing stops it but the e-stop" % (
-        ", the hand leaning %.0f deg back toward the arm" % lean if lean >= LEAN_SAID_DEG else "",
-        how,
-        cfg.push_hold_s,
+    return (
+        "PRESS (compliant)%s: %s; held %.1f s, then back up. Watched all the way down: it ends past where the "
+        "pads meet the button, and a contact well off the cameras' top refuses it"
+        % (
+            ", the hand leaning %.0f deg back toward the arm" % lean if lean >= LEAN_SAID_DEG else "",
+            how,
+            cfg.push_hold_s,
+        )
     )
 
 
@@ -1261,23 +1268,35 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
     """Contact detection for the compliant `stroke` (compliant_stroke's,
     onto the button whose top the cameras put at `top_z`) flown in the
     execution `legs` begin: a press_contact.PressContact on their lead, its
-    stop_when, watching from where the stroke's slow leg begins (TOUCH_SLOW_M
-    above the top) and, with `cut`, ending the stroke as far past where the
-    pads met the box as it was planned past the top — never deeper than
-    planned. Returns it (compliant_hold reads it), or None: nothing to watch."""
+    stop_when. It watches the whole descent, the execution's last stretch
+    below where the stroke begins (DESCENT_ARM_M under its pads at q0; the
+    slow rise once the slow leg's start, TOUCH_SLOW_M above the top, has
+    settled) and, with `cut`, ends the stroke as far past where the pads met
+    the box as it was planned past the top — never deeper than planned. A
+    contact outside CONTACT_EARLY_M above to CONTACT_LATE_M below the top,
+    none at all, or a watch that fails, refuses the press, the stroke
+    stopped where that is judged (PressContact.refusal: the caller goes back
+    up). Returns it (compliant_hold reads it), or None: nothing to watch."""
     from box_opening.runtime import approach
-    from box_opening.tasks.press_contact import PressContact
+    from box_opening.tasks.press_contact import CONTACT_EARLY_M, CONTACT_LATE_M, PressContact
 
     if not legs or stroke is None or top_z is None:
         return None
+    slow_z = float(top_z) + TOUCH_SLOW_M
+    start_z = float(np.asarray(stroke.pad0, float)[2]) if stroke.pad0 is not None else slow_z
     contact = PressContact(
         approach._chain(),
         ctx.client,
         top_z,
-        float(top_z) + TOUCH_SLOW_M,
+        max(slow_z, start_z - DESCENT_ARM_M),
         float(top_z) - float(stroke.end_z),
         stroke.end_z,
         cut=cut,
+        final=True,
+        slow_z=slow_z,
+        early_m=CONTACT_EARLY_M,
+        late_m=CONTACT_LATE_M,
+        abort_on_failure=True,
     )
     legs[0].stop_when = contact
     return contact
@@ -1493,6 +1512,10 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
                 free=True,
                 why="the press stroke did not start (%s) — nothing was pressed" % (res[0].detail or res[0].outcome),
             )
+        refused = refuse_press(ctx, runner, contact, res)
+        if refused is not None:
+            # met well off the cameras' top, or not at all: stopped there, back up the stroke
+            return compliant_rise(ctx, runner, stroke, DepthPress(free=True, why=refused, judged=False))
         # the stroke meets the box by design: from here every world (home's
         # too) pads it for a shove, as _touch_lid's contact does
         ctx.contact_pad = CONTACT_SHIFT_PAD_M
@@ -1507,6 +1530,21 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
         # raises at once): the springs would push on into the box
         rp.let_go(ctx)
         raise
+
+
+def refuse_press(ctx, runner, contact, res):
+    """Why the compliant press flown (`res`, its execution's results) under the watch `contact`
+    (watch_press's) must not go on, or None: met well off the top the cameras measured, nothing
+    met, or the watch failed (PressContact.refusal). Then said and noted (press_refused), the
+    springs let go where the stroke stopped: the caller goes back up, and the run STOPs."""
+    refused = None if contact is None else contact.refusal()
+    if refused is None or not res or (not res[-1].ok and res[-1].outcome != "stopped"):
+        return None  # a motion that failed on its own is that failure's to say
+    verdict, why = refused
+    runner.note("press_refused", verdict=verdict, why=why, contact=contact.record())
+    log.info("[press_demo] PRESS REFUSED (%s): %s" % (verdict, why))
+    rp.let_go(ctx)
+    return why
 
 
 @dataclass

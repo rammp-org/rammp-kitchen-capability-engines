@@ -37,13 +37,26 @@ they said, the press is cut: replayed, 10-30 13:28's 45 N would have been
 ~23 N, 13:35's 89.5 N ~47 N. A press with no contact flies as planned
 (compliant_hold says what it felt, as before). Watching only, PressContact
 says where it met and what it would have cut, and cuts nothing
-(PRESS_FROM_CONTACT False, or cut=False: a second press flies its full
-stroke).
+(PRESS_FROM_CONTACT False, or cut=False).
+
+Review round 2 (KCE #23): the press watches its whole descent, from where
+its stroke begins to come down (watch_press's arm_z), not only its slow leg:
+something standing higher than that is met too. And a contact well away from
+where the cameras put the button refuses the press (`verdict`): met more
+than CONTACT_EARLY_M above their top, something else is in the way ("early");
+nothing met down to CONTACT_LATE_M below it, the box is not where it was seen
+("late"); the stroke ended with nothing met ("never"). The stroke is stopped
+where it is judged, nothing pressed past it, and the run goes back up and
+home. A watcher that fails stops the press there too (abort_on_failure),
+said; the set-down's watch (reach_lid_off.watch_setdown) flies its planned
+end instead, said.
 """
 
 from collections import deque
 
 import numpy as np
+
+from box_opening import LOGGER as log
 
 # where a press met the box (PressContact): the gap between the pads' height
 # measured and the reference's rose more than CONTACT_RISE_M above its least
@@ -67,6 +80,19 @@ HISTORY_S = 3.0  # how far back the onset is looked for
 PRESS_FROM_CONTACT = True
 # a cut shallower than this leaves the planned end: not worth a cancel
 CUT_MIN_M = 0.001
+# The refusal band around the top the cameras measured (PressContact's early_m, late_m; review
+# round 2). Replayed through the whole-descent watch, 29 of the 30 presses flown 2026-10-29 to
+# 11-03 met the box between CONTACT_SEEN_MM[0] and [1] mm of that top (+ above); the 30th, 10-30
+# 13:35 (89.5 N held: the wrist camera put that box ~50 mm low), met it 50 mm above, which the
+# watch armed at TOUCH_SLOW_M never saw. Early lies above the highest of the 29 and below where
+# the descent begins (~56 mm over the top: nothing higher is watched), late well below the lowest
+CONTACT_SEEN_MM = (-13.3, 37.5)
+CONTACT_EARLY_M = 0.045
+CONTACT_LATE_M = 0.025
+# nothing met is judged by the pads as measured, not the reference (which runs on past a contact
+# while its rise is counted): late once they stand this much below the limit, room for a contact
+# just above it that they press a little into before it is seen
+CONTACT_LAG_M = 0.003
 
 
 def pads_z(chain, q):
@@ -147,12 +173,34 @@ class PressContact:
     the set-down's, which flies in one execution from a lift off a box that
     may stand lower (reach_lid_off.watch_setdown)."""
 
-    def __init__(self, chain, client, top_z, arm_z, past_m, end_z, cut=True, final=False):
+    def __init__(
+        self,
+        chain,
+        client,
+        top_z,
+        arm_z,
+        past_m,
+        end_z,
+        cut=True,
+        final=False,
+        slow_z=None,
+        early_m=None,
+        late_m=None,
+        abort_on_failure=False,
+    ):
         self.chain, self.client = chain, client
         self.top_z, self.arm_z = float(top_z), float(arm_z)
+        # the slow rise is judged once the reference has stood below slow_z CONTACT_SETTLE_S (the
+        # slow leg's start: its speed change dips the gap); the fast one from arming on
+        self.slow_z = self.arm_z if slow_z is None else float(slow_z)
         self.past_m, self.end_z = float(past_m), float(end_z)
         self.cut = bool(cut) and PRESS_FROM_CONTACT
         self.final = bool(final)
+        # the refusal band (None: none): met more than early_m above top_z, or nothing met down
+        # to late_m below it, stops the stroke where it is judged (verdict)
+        self.early_m = None if early_m is None else float(early_m)
+        self.late_m = None if late_m is None else float(late_m)
+        self.abort_on_failure = bool(abort_on_failure)
         self.traj = None
         self._sent = None  # the info whose trajectory self.traj is
         self._reset()
@@ -177,6 +225,10 @@ class PressContact:
         self.held_ref = None
         self.samples = 0
         self.last_gap = None
+        self.slow_t = None  # when the reference first stood below slow_z
+        self.late_at = None  # (t, the pads measured) where nothing met was judged late
+        self.verdict = None  # "early" | "late" | "failed": the press refused, stopped where it was judged
+        self.failed = None  # what the watcher raised, where it failed
 
     # -- the samples ------------------------------------------------------------------
     def feed(self, t, frac, q):
@@ -194,10 +246,12 @@ class PressContact:
             if z_ref > self.arm_z:
                 return
             self.armed_t = t
+        if self.slow_t is None and z_ref <= self.slow_z:
+            self.slow_t = t
         z_meas = pads_z(self.chain, q)
         gap = z_meas - z_ref
         self.last_gap = gap
-        if self.contact is not None:
+        if self.contact is not None or self.verdict is not None:
             return
         sample = (t, gap, z_meas)
         win, hist = self._win, self._hist
@@ -214,7 +268,7 @@ class PressContact:
             least = min(win, key=lambda s: s[1])
             self._cand, self._n_above = (least, 1) if gap - least[1] > CONTACT_RISE_M else (None, 0)
         # a slow one: over the least since the slow leg's start settled
-        if t - self.armed_t >= CONTACT_SETTLE_S:
+        if self.slow_t is not None and t - self.slow_t >= CONTACT_SETTLE_S:
             if self._slow_least is None or gap < self._slow_least[1]:
                 self._slow_least, self._n_slow = sample, 0
             elif gap - self._slow_least[1] > CONTACT_SLOW_RISE_M:
@@ -225,6 +279,10 @@ class PressContact:
             self._met(t, frac, self._cand, "fast")
         elif self._n_slow >= CONTACT_SAMPLES:
             self._met(t, frac, self._slow_least, "slow")
+        elif self.late_m is not None and z_meas < self.top_z - self.late_m - CONTACT_LAG_M:
+            # the pads this far below the top the cameras measured, nothing met: the box is not
+            # where it was seen. Stopped here (the next poll), nothing pressed past it
+            self.verdict, self.f_stop, self.late_at = "late", frac, (t, z_meas)
 
     def _met(self, t, frac, least, how):
         """Contact, seen at `t` (`frac` of the trajectory) as a rise over the
@@ -237,6 +295,12 @@ class PressContact:
         t_c, g_c, z_c = onset
         self.contact = (t_c, z_c, g_c)
         self.detected_t, self.how = t, how
+        if self.early_m is not None and z_c > self.top_z + self.early_m:
+            self.verdict, self.f_stop = "early", frac  # something else is in the way: stopped now
+            return
+        if self.late_m is not None and z_c < self.top_z - self.late_m:
+            self.verdict, self.f_stop = "late", frac  # the box is not where it was seen: stopped now
+            return
         stop_z = z_c - self.past_m
         if stop_z > self.end_z + CUT_MIN_M:
             self.stop_z = stop_z
@@ -267,16 +331,51 @@ class PressContact:
     def __call__(self, progress):
         """stop_when: True once the reference stands where the stroke ends
         past the contact — the goal is cancelled and the driver holds it."""
+        if self.failed is not None:
+            return self.abort_on_failure
         try:
             self._feed_new()
-        except Exception:  # noqa: BLE001 -- a watcher that fails stops nothing: the stroke flies as planned
-            self.f_stop = None
-            return False
+        except Exception as e:  # noqa: BLE001 -- said; the press stops, the set-down flies as planned
+            self.failed = "%s: %s" % (type(e).__name__, e)
+            log.info(
+                "[press_demo] the contact watch failed (%s) — %s"
+                % (self.failed, "the press stops here" if self.abort_on_failure else "it flies its planned end")
+            )
+            if not self.abort_on_failure:
+                self.f_stop = None
+                return False
+            self.verdict = "failed"
+            self.stopped_frac = float(progress)
+            self.held_ref = None if self.traj is None else [float(v) for v in self.traj.at(progress)]
+            return True
         if self.f_stop is None or progress < self.f_stop:
             return False
         self.stopped_frac = float(progress)
         self.held_ref = [float(v) for v in self.traj.at(progress)]
         return True
+
+    def refusal(self):
+        """Why the press must not go on from here, once its execution is over: (verdict, the
+        STOP's words), or None. "never": watched to the stroke's end, nothing met, where a band
+        is set (a stroke that ends above the late limit)."""
+        above = None if self.contact is None else 1000 * (self.contact[1] - self.top_z)
+        if self.verdict == "early":
+            return self.verdict, (
+                "the press met something %.0f mm above the button's top as the cameras saw it (more than %.0f): "
+                "something else is in the way — the press was stopped there; nothing was pressed"
+                % (above, 1000 * self.early_m)
+            )
+        if self.verdict == "late":
+            how_low = -above if above is not None else 1000 * (self.top_z - self.late_at[1])
+            return self.verdict, (
+                "the pads met nothing down to %.0f mm below the button's top as the cameras saw it (more than %.0f): "
+                "the box is not where it was seen — the press was stopped there" % (how_low, 1000 * self.late_m)
+            )
+        if self.verdict == "failed":
+            return self.verdict, "the press's contact watch failed (%s) — the press was stopped there" % self.failed
+        if self.contact is None and self.armed_t is not None and self.late_m is not None:
+            return "never", ("the press stroke ended with the pads meeting nothing: the box is not where it was seen")
+        return None
 
     # -- the record --------------------------------------------------------------------
     def record(self):
@@ -285,12 +384,23 @@ class PressContact:
         the goal went out), the stroke's end past it and whether it was cut
         there (`cut_mm` how much short of its planned end), or why not."""
         sent = None if self._sent is None else self._sent.get("sent_at")
+        refused = self.refusal()
         out = {
             "watched": self.armed_t is not None,
             "cut_on": self.cut,
             "samples": self.samples,
             "past_mm": round(1000 * self.past_m, 1),
+            "armed_above_top_mm": round(1000 * (self.arm_z - self.top_z), 1),
+            "band_mm": None
+            if self.early_m is None and self.late_m is None
+            else [
+                None if self.late_m is None else -round(1000 * self.late_m),
+                None if self.early_m is None else round(1000 * self.early_m),
+            ],
+            "verdict": None if refused is None else refused[0],
         }
+        if self.failed is not None:
+            out["failed"] = self.failed
         if self.contact is None:
             out["met"] = False
             return out
@@ -307,7 +417,9 @@ class PressContact:
             cut_mm=None if self.stop_z is None else round(1000 * (self.stop_z - self.end_z), 1),
             cut=self.stopped_frac is not None,
         )
-        if self.stop_z is None:
+        if refused is not None:
+            out["why"] = refused[1]
+        elif self.stop_z is None:
             out["why"] = "the planned end is no deeper than that past the contact"
         elif not self.cut:
             out["why"] = "watched only"

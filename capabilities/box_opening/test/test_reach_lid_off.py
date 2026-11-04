@@ -1268,28 +1268,61 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
     assert got.cut is True and got.final is True and rlo.SETDOWN_WATCH_M == rlo.SETDOWN_SLOW_M
 
 
-def test_the_first_press_is_cut_at_its_contact_and_a_press_once_more_flies_its_full_stroke(ctx, monkeypatch, tmp_path):
-    """Contact detection rides each press's way in (its lead's stop_when):
-    the first press's stroke ends as far past where the pads met the box as
-    it was planned past the top; a press once more, the knob not up after
-    the first, flies its full stroke, the contact only watched."""
-    from box_opening.tasks.press_contact import PressContact
+def test_every_press_is_cut_at_its_contact_and_watched_all_the_way_down(ctx, monkeypatch, tmp_path):
+    """Contact detection rides each press's way in (its lead's stop_when). Review round 2: every
+    press's stroke ends as far past where the pads met the box as it was planned past the top, a
+    press once more (the knob not up after the first) too; each watches its whole descent
+    (final, from where its stroke begins), refuses a contact off the band, and stops on a watch
+    that fails."""
+    from box_opening.tasks import press_contact as pc
 
     real, watched = dp.watch_press, []
 
     def watch(ctx_, legs, stroke, top_z, cut=True):
         got = real(ctx_, legs, stroke, top_z, cut=cut)
-        watched.append((legs[0].name, legs[0].stop_when is got, got.cut))
+        watched.append((legs[0].name, legs[0].stop_when is got, got))
         return got
 
     monkeypatch.setattr(dp, "watch_press", watch)
     code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, NOT_UP_TWICE)
     assert code == 1
-    assert [(lead, on, cut) for lead, on, cut in watched] == [
-        ("reach:re-aim", True, True),
-        ("reach:re-aim", True, False),
-    ]
-    assert isinstance(rec.legs["reach:re-aim"].stop_when, PressContact)
+    assert [(lead, on, got.cut) for lead, on, got in watched] == [("reach:re-aim", True, True)] * 2
+    for _lead, _on, got in watched:
+        assert isinstance(got, pc.PressContact) and got.final and got.abort_on_failure
+        assert (got.early_m, got.late_m) == (pc.CONTACT_EARLY_M, pc.CONTACT_LATE_M)
+        assert got.slow_z == pytest.approx(got.top_z + dp.TOUCH_SLOW_M) and got.arm_z >= got.slow_z
+
+
+@pytest.mark.parametrize("verdict", ["early", "late", "never", "failed"])
+def test_a_press_refused_by_its_contact_goes_back_up_and_home(ctx, monkeypatch, tmp_path, capsys, verdict):
+    """Review round 2: a contact well off the cameras' top, none at all, or a watch that failed:
+    the press is not pressed on, the springs let go where the stroke stopped, the arm goes back
+    to the look pose and home, and the run STOPs with why (the node's contact_* codes)."""
+    real = dp.watch_press
+    why = {
+        "early": "the press met something 60 mm above the button's top as the cameras saw it (more than 45): "
+        "something else is in the way — the press was stopped there; nothing was pressed",
+        "late": "the pads met nothing down to 28 mm below the button's top as the cameras saw it (more than 25): "
+        "the box is not where it was seen — the press was stopped there",
+        "never": "the press stroke ended with the pads meeting nothing: the box is not where it was seen",
+        "failed": "the press's contact watch failed (ValueError: x) — the press was stopped there",
+    }[verdict]
+
+    def watch(ctx_, legs, stroke, top_z, cut=True):
+        got = real(ctx_, legs, stroke, top_z, cut=cut)
+        got.refusal = lambda: (verdict, why)
+        return got
+
+    monkeypatch.setattr(dp, "watch_press", watch)
+    let_go = []
+    monkeypatch.setattr(rp, "let_go", lambda ctx_: let_go.append(1))
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 1 and rec.events[-1] == "home"
+    assert "reach:slide-out" in rec.events and not any(e.startswith("grip:") for e in rec.events)
+    (refused,) = (r for r in rows if r["leg"] == "press_refused")
+    assert refused["verdict"] == verdict and refused["why"] == why
+    assert not any(r["leg"] == "depth_compliant_press" for r in rows)  # no hold: nothing pressed on
+    assert let_go and ("STOP: " + why) in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("push, flown", [(0.03, True), (0.05, False)])
