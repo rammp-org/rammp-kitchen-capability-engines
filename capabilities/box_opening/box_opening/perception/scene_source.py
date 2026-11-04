@@ -1125,6 +1125,7 @@ class SceneLocator:
         if self.instance_id is not None:
             seg["selected"] = look["selected"]  # frames the selected container was in
             seg["followed"] = look.get("followed")  # ... by where it was, under that id (its own lost)
+            seg["resolved"] = look.get("resolved")  # ... the holder under it, the selected box its lid
         rec["segmenter"] = seg
         return rec
 
@@ -1152,6 +1153,7 @@ class SceneLocator:
             "boxes": 0,
             "selected": 0,
             "followed": None,  # the id a frame took by where the selected container was (SegFrame.followed)
+            "resolved": None,  # the holder's id, where the selected box is its lid (SegFrame.resolved)
             "tried": tried,
             "sightings": 0,
             "ambiguous": 0,
@@ -1230,6 +1232,13 @@ class SceneLocator:
             last_seg = m_seg
             n_seg += 1
             n_selected += bool(getattr(m_seg, "selected", None))
+            resolved = getattr(m_seg, "resolved", None)
+            if resolved and look.get("resolved") != resolved:
+                look["resolved"] = resolved
+                log.info(
+                    "[scene] the selected container (%s) is boxed as the lid on %s's holder: the holder is read, "
+                    "its lid on it" % (self.instance_id, resolved)
+                )
             followed = getattr(m_seg, "followed", None)
             if followed and look.get("followed") != followed:
                 look["followed"] = followed

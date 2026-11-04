@@ -18,7 +18,10 @@ beside the container, and goes home. It has one action, `open_box`:
    `/perception/object_detections`, and a lid box stacked on it), with its lid's
    height from the scene camera's depth. Nothing about the table or the
    container's place is configured: both come from the cameras on every run.
-   The id finds it at this first look. From then on it is also followed by
+   A selected box that stands on another container's box (RF-DETR sometimes
+   boxes the lid as a second container, with its own id) is resolved to the
+   holder under it, the selected box its lid. The id finds it at this first
+   look. From then on it is also followed by
    where it was boxed: a track perception drops while the arm hides the box,
    and finds again under a new id, is still the selected container. Every
    world-state write names the id the goal came with.

@@ -240,6 +240,44 @@ def test_from_a_fix_on_the_selected_container_is_followed_by_where_it_was():
     assert rung.latest.followed == "food_container_8" and rung.latest.selected is True
 
 
+def test_a_selected_lid_box_is_resolved_to_the_holder_under_it():
+    """Review round 2's algorithm risk: RF-DETR boxes the lid as a second food container stacked
+    on the holder, with its own id, which the orchestrator lists as selectable. With that id
+    selected, the holder was dropped and the lid's box taken for a holder: its lid band lay above
+    the real lid. Now the selection resolves to the holder under it, its lid on it: the gate is
+    offered the lid as it is and the band above the holder, never a band above the lid."""
+    holder = HOLDER_162417
+    lid = (holder[0] + 15.0, holder[1] - 30.0, holder[2] - 15.0, holder[1] + 5.0)
+    m = _msg(
+        [_obj(box=holder, instance_id="food_container_2"), _obj(box=lid, score=0.5, instance_id="food_container_7")]
+    )
+    f = sg.frame_of(m, FOOD, now_s=0.0, instance_id="food_container_7")
+    assert [o[2] for o in f.objects] == [pytest.approx(holder), pytest.approx(lid)]
+    assert f.selected is True and f.resolved == "food_container_2" and f.mine == pytest.approx(holder)
+    cands = sg.segmenter_candidates(f.objects, FOOD, WH)
+    assert [(c.kind, c.box) for c in cands] == [("lid", pytest.approx(lid)), ("band", pytest.approx(_band(holder)))]
+    assert all(c.box != pytest.approx(_band(lid)) for c in cands)  # what the lid alone made: above the real lid
+    # the holder selected, as usual: nothing to resolve
+    f = sg.frame_of(m, FOOD, now_s=0.0, instance_id="food_container_2")
+    assert f.resolved is None and [o[2] for o in f.objects] == [pytest.approx(holder), pytest.approx(lid)]
+    # the rung reads the holder's id from then on, the selected lid's again where it is gone
+    rung, node = _rung()
+    rung.instance_id = "food_container_7"
+    _type, _topic, cb = node.subs[0]
+    cb(m)
+    assert rung.holder_id == "food_container_2" and rung.latest.resolved == "food_container_2"
+    cb(_msg([_obj(box=holder, instance_id="food_container_2")]))  # the lid's box not drawn in this frame
+    assert [o[2] for o in rung.latest.objects] == [pytest.approx(holder)] and rung.latest.selected is True
+    cb(_msg([_obj(box=holder, instance_id="food_container_9"), _obj(box=lid, instance_id="food_container_7")]))
+    assert rung.holder_id == "food_container_9"  # the holder's track lost and found again: resolved again
+    cb(_msg([_obj(box=lid, instance_id="food_container_7")]))  # the lid's box alone: never taken for a holder
+    assert rung.latest.objects == () and rung.latest.selected is False
+
+
+def _band(holder):
+    return sg.lid_band(holder, WH)[0]
+
+
 def test_a_segmenter_nothing_publishes_is_absent_at_once_not_after_a_silent_second():
     """A profile that does not select the segmenter: no message will ever
     come, and it is said at once rather than after SEG_SILENT_S. One that has

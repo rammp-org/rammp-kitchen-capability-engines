@@ -1314,8 +1314,9 @@ class _World:
             shot = rest[2] if len(rest) > 2 else t - 0.075  # its frame was taken this long before it arrives
             selected = rest[3] if len(rest) > 3 else None
             mine = rest[4] if len(rest) > 4 else None
+            resolved = rest[5] if len(rest) > 5 else None
             self.rung.latest = SegFrame(
-                t, stamp_ns(_stamp(shot)), frame_id, wh, tuple(objects), len(objects), selected, mine
+                t, stamp_ns(_stamp(shot)), frame_id, wh, tuple(objects), len(objects), selected, mine, None, resolved
             )
             self.rung.count += 1  # as the rung's callback counts what it heard
 
@@ -1610,6 +1611,52 @@ def test_a_fix_of_the_selected_container_has_the_segmenter_follow_it_from_there(
     world = _World(seg_msgs=list(msgs))
     loc, _gated = _locator(monkeypatch, world, {_band(holder): SEG_TOP})
     assert loc.locate(2.0) is not None and world.rung.near is None
+
+
+def _selected_lid_frames(holder, lid, t0=0.1, t1=3.0):
+    """The segmenter's frames with the LID's id selected (food_container_7, stacked on the holder
+    food_container_2), read as the rung reads them (frame_of)."""
+    from test_segmenter_source import _msg, _obj
+
+    from box_opening.perception.segmenter_source import frame_of
+
+    m = _msg(
+        [_obj(box=holder, instance_id="food_container_2"), _obj(box=lid, score=0.5, instance_id="food_container_7")]
+    )
+    f = frame_of(m, ("food container",), 0.0, instance_id="food_container_7")
+    return [
+        (t, list(f.objects), SCENE_FRAME, (640, 400), t - 0.075, f.selected, f.mine, f.resolved)
+        for t in np.arange(t0, t1, 0.2)
+    ]
+
+
+def test_a_selected_lid_locates_the_real_lid(monkeypatch):
+    """Review round 2's algorithm risk, the unit test it asks for: the lid's id selected, on a
+    frame with both boxes. The holder under it is read, its lid on it: the real lid is located
+    (both candidates put it in one place), never a band above it."""
+    holder = _holder()
+    lid = (holder[0] + 15.0, holder[1] - 30.0, holder[2] - 15.0, holder[1] + 5.0)
+    outcomes = {lid: SEG_TOP, _band(holder): SEG_TOP, _band(lid): "no top at lid height"}
+    world = _World(seg_msgs=_selected_lid_frames(holder, lid))
+    loc, _gated = _locator(monkeypatch, world, outcomes, instance_id="food_container_7")
+    fix = loc.locate(2.0)
+    assert fix is not None, loc.last_why
+    assert fix.top_xyz == pytest.approx(SEG_TOP)
+    assert loc.look_record()["segmenter"]["resolved"] == "food_container_2"
+
+
+def test_a_box_behind_taken_for_the_selected_lid_is_two_places_and_never_commits(monkeypatch):
+    """Where the resolution is wrong — the selected container stands BEHIND another, its box
+    drawn just above the other's in the image — its own box and the band over the one in front
+    pass in two places: no sighting, so the wrong container is never opened (NO BOX instead)."""
+    holder = _holder()
+    behind = (holder[0] + 15.0, holder[1] - 30.0, holder[2] - 15.0, holder[1] + 5.0)
+    far = (SEG_TOP[0] + 0.12, SEG_TOP[1], SEG_TOP[2])  # its own lid, 12 cm farther from the camera
+    outcomes = {behind: far, _band(holder): SEG_TOP, _band(behind): "no top at lid height"}
+    world = _World(seg_msgs=_selected_lid_frames(holder, behind))
+    loc, _gated = _locator(monkeypatch, world, outcomes, instance_id="food_container_7")
+    assert loc.locate(2.0) is None
+    assert loc.look_record()["segmenter"]["ambiguous"] > 0
 
 
 def _two_places():
