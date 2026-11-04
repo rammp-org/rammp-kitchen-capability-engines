@@ -1,5 +1,8 @@
 """One `peer` action: plan to a standoff in front of the fridge's back wall, then teleop.
 
+This is the old FridgeTeleopNode's logic, run inside one execute() instead of a node's timer.
+Everything the old node did to talk to the driver is now self.arm's:
+
   homing   self.arm.go_to_ee_pose(): cuRobo plans the tool frame (flange + arm.tool_z) to the
            standoff pose in arm.frame and the driver runs it. Blocking; False on a refusal or
            failure, with the reason in self.arm.last_error.
@@ -18,13 +21,13 @@ Two teleop modes, one servo:
   search   no usable fridge TF within fridge_tf_wait_s (and search_when_no_fridge): the stick
            moves the camera in a box of +-search_range_m around where it is, its orientation
            held, so the plane detector gets another view. u = left, v = up, standoff = forward /
-           back level with the floor. The home button (or, with search_auto_home, the first fridge
-           TF measured with the arm still) leaves the stream and homes; no fridge after all goes
-           back to searching.
+           back level with the floor. The first fridge TF measured with the arm still (let go of
+           the stick) ends the search: the stream closes and it homes by itself, then wall teleop
+           starts. No fridge after all goes back to searching.
 
-Teleop ends on the joystick's stop button (the action succeeds), on the orchestrator's cancel
-(Cancelled: the block exits and the stream closes), on max_teleop_s, or on an arm error. The home
-button leaves the stream, goes back to the standoff and re-latches the plane.
+The joystick only moves the camera: no buttons are read. Teleop ends on max_teleop_s (the action
+succeeds), on the orchestrator's cancel (Cancelled: the block exits and the stream closes), or on
+an arm error.
 
 Homing uses only a fridge TF stamped follow_settle_s after the arm last moved (measured from
 /ee_state's twist, and the end of every stream): an estimate from a moving camera is not a goal.
@@ -67,9 +70,6 @@ LATCHED = QoSProfile(
 )
 
 WALL, SEARCH = "wall", "search"
-
-# Buttons that act on a press (rising edge) rather than while held.
-_EDGE_BUTTONS = ("home", "stop")
 
 _FOLLOW_REJECT = {
     pf.TILT: "more than follow_max_tilt_deg from the homing plane",
@@ -175,7 +175,6 @@ class PeerSession:
         self.follow_stale_s = float(c["follow_stale_s"])
         self.search_when_no_fridge = bool(c["search_when_no_fridge"])
         self.search_range_m = float(c["search_range_m"])
-        self.search_auto_home = bool(c["search_auto_home"])
         self.joy_topic = c["joy_topic"]
         self.axis_u = int(c["axis_u"])
         self.axis_v = int(c["axis_v"])
@@ -183,8 +182,6 @@ class PeerSession:
         self.axis_signs = [float(v) for v in c["axis_signs"]]
         self.deadzone = float(c["deadzone"])
         self.expo = float(c["expo"])
-        self.button_home = int(c["button_home"])
-        self.button_stop = int(c["button_stop"])
         self.joy_timeout_s = float(c["joy_timeout_s"])
         self.fridge_tf_timeout_s = float(c["fridge_tf_timeout_s"])
         self.ee_state_timeout_s = float(c["ee_state_timeout_s"])
@@ -203,7 +200,6 @@ class PeerSession:
         self._frame_checked = False
         self._joy = None
         self._joy_rx = 0.0
-        self._prev_buttons = None
         self._bad_indices = set()
         self._faults = set()
         self._input_armed = False  # the stick has been seen at neutral since teleop began
@@ -243,10 +239,11 @@ class PeerSession:
     # ------------------------------------------------------------------ the action
 
     def run(self, *, teleop: bool, max_teleop_s) -> dict:
-        """Home, then (with `teleop`) servo until the stop button, a cancel or `max_teleop_s`.
-        With no fridge TF to home on, search (with `teleop` and search_when_no_fridge)."""
+        """Home, then (with `teleop`) servo until a cancel or `max_teleop_s`. With no fridge TF
+        to home on, search (with `teleop` and search_when_no_fridge) until one appears, then home
+        by itself."""
         self._wait_arm_tf()
-        homes, rehomes, searches, teleop_s, deadline = 0, 0, 0, 0.0, None
+        homes, searches, teleop_s, deadline = 0, 0, 0.0, None
         while True:
             found, why = self._wait_for_fridge()
             if found is None:
@@ -267,8 +264,7 @@ class PeerSession:
                 self._home(found)
                 homes += 1
                 if not teleop:
-                    return {"ended": "homed", "homes": homes, "rehomes": 0, "searches": 0,
-                            "teleop_s": 0.0}
+                    return {"ended": "homed", "homes": homes, "searches": 0, "teleop_s": 0.0}
                 mode = WALL
             if deadline is None and max_teleop_s is not None:
                 deadline = time.monotonic() + float(max_teleop_s)
@@ -277,11 +273,9 @@ class PeerSession:
             # The stream has closed: the arm comes to rest now. No fridge TF from before is a goal.
             self._moved_ns = self._now_ns()
             teleop_s += time.monotonic() - started
-            if why != "home":
-                return {"ended": why, "homes": homes, "rehomes": rehomes, "searches": searches,
+            if why != "found":  # only a search ends with "found": home on it
+                return {"ended": why, "homes": homes, "searches": searches,
                         "teleop_s": round(teleop_s, 1)}
-            if mode == WALL:
-                rehomes += 1
 
     def _wait_arm_tf(self) -> None:
         deadline = time.monotonic() + self.static_tf_timeout_s
@@ -479,16 +473,8 @@ class PeerSession:
             self._bad_indices.add((kind, idx))
             self._log.error(
                 f"joy {kind} index {idx} is out of range (the joystick reports {n}); treating "
-                f"it as released. Fix the axis_* / button_* indices"
+                f"it as released. Fix the axis_* indices"
             )
-
-    def _button(self, joy, idx: int) -> bool:
-        if idx < 0:
-            return False
-        if idx >= len(joy.buttons):
-            self._warn_index("button", idx, len(joy.buttons))
-            return False
-        return bool(joy.buttons[idx])
 
     def _axis(self, joy, idx: int) -> float:
         if idx < 0:
@@ -500,10 +486,9 @@ class PeerSession:
         return v if math.isfinite(v) else 0.0
 
     def _read_input(self, joy):
-        """(button presses, whether `joy` is fresh). Also sets self._cmd."""
+        """Whether `joy` is fresh. Also sets self._cmd (the stick; no buttons are read)."""
         fresh = joy is not None and time.monotonic() - self._joy_rx <= self.joy_timeout_s
         if not fresh:
-            self._prev_buttons = None
             self._input_armed = False
             self._cmd = (0.0, 0.0, 0.0)
             self._fault(
@@ -511,18 +496,10 @@ class PeerSession:
                 f"no {self.joy_topic} message for > {self.joy_timeout_s}s; holding position. Is "
                 f"joy_node running with autorepeat_rate > 0?",
             )
-            return set(), False
+            return False
         self._clear_fault("joy")
-        now = {
-            "home": self._button(joy, self.button_home),
-            "stop": self._button(joy, self.button_stop),
-        }
-        prev, self._prev_buttons = self._prev_buttons, now
-        edges = set()
-        if prev is not None:  # first fresh sample: a held button is not a press
-            edges = {name for name in _EDGE_BUTTONS if now[name] and not prev[name]}
         self._cmd = self._read_stick(joy)
-        return edges, True
+        return True
 
     def _read_stick(self, joy):
         """(u, v, standoff) in -1..1: deadzone, sign, then expo. u + = LEFT, v + = UP,
@@ -559,9 +536,8 @@ class PeerSession:
     # ------------------------------------------------------------------ teleop
 
     def _teleop(self, mode: str, deadline) -> str:
-        """Servo in `mode` (WALL or SEARCH) until the stop button ("stop"), the home button or a
-        found fridge ("home") or `deadline` ("max_teleop_s"). A cancel raises Cancelled out of
-        it."""
+        """Servo in `mode` (WALL or SEARCH) until a search finds the fridge ("found") or
+        `deadline` ("max_teleop_s"). A cancel raises Cancelled out of it."""
         self._mode = mode
         if mode == WALL:
             self._latch = self._pending_latch  # the plane homing just used
@@ -574,22 +550,16 @@ class PeerSession:
         self._target_G = None  # seeded from the measured pose on the first tick
         self._ff_prev = None
         self._input_armed = False
-        self._prev_buttons = None
         self._cmd = (0.0, 0.0, 0.0)
-        stop = f", stop (button {self.button_stop}) ends" if self.button_stop >= 0 else ""
         if mode == WALL:
             phase = "teleop"
-            message = (
-                f"teleop: move the stick to move the camera, let go to hold; home (button "
-                f"{self.button_home}) re-homes{stop}"
-            )
+            message = "teleop: move the stick to move the camera, let go to hold"
         else:
             phase = "searching"
-            auto = " (or it homes by itself once it sees one)" if self.search_auto_home else ""
             message = (
                 f"no fridge frame: move the stick to look around (within "
-                f"{self.search_range_m:.2f} m); home (button {self.button_home}) homes once the "
-                f"fridge is detected{auto}{stop}"
+                f"{self.search_range_m:.2f} m); once the fridge is detected, let go of the stick "
+                f"and it goes to the standoff by itself"
             )
         self._log.info(message)
         # A stream ignores pause (holding still in a paused send() would expire the session): say
@@ -608,19 +578,14 @@ class PeerSession:
             now = time.monotonic()
             dt = min(max(now - last, 0.0), 0.1)
             last = now
-            edges, fresh = self._read_input(self._joy)
-            if "stop" in edges:
-                self._log.info("teleop: stop button")
-                return "stop"
-            if "home" in edges and self._home_pressed():
-                return "home"
+            fresh = self._read_input(self._joy)
             if deadline is not None and now > deadline:
                 self._log.info("teleop: max_teleop_s reached")
                 return "max_teleop_s"
             if self._mode == SEARCH and now >= self._next_check:
                 self._next_check = now + SEARCH_CHECK_S
                 if self._search_check():
-                    return "home"
+                    return "found"
             v, w = self._command(dt, self._engaged(fresh))
             if send is not None:
                 send([*v, *w])  # raises Cancelled once cancelled; the block's exit closes
@@ -633,22 +598,9 @@ class PeerSession:
             else:
                 next_t = time.monotonic()  # fell behind: don't burst to catch up
 
-    def _home_pressed(self) -> bool:
-        """Whether the home button ends this teleop. Searching, only once there is a fridge TF
-        to home on (else there is nothing to go to: say why and keep searching)."""
-        if self._mode == WALL:
-            self._log.info("teleop: home button, back to the standoff")
-            return True
-        found, why = self._find_fridge(gated=False)
-        if found is None:
-            self._log.warning(f"search: home pressed, but no usable fridge TF yet ({why})")
-            return False
-        self._log.info("search: home button, holding still to home on the fridge")
-        return True
-
     def _search_check(self) -> bool:
-        """Announce a fridge TF appearing (or going) while searching; True to home on it now
-        (search_auto_home, and measured with the arm still)."""
+        """Announce a fridge TF appearing (or going) while searching; True to home on it now (one
+        measured with the arm still)."""
         found, why = self._find_fridge(gated=False)
         if found is None:
             if self._found_announced:
@@ -657,14 +609,10 @@ class PeerSession:
             return False
         if not self._found_announced:
             self._found_announced = True
-            message = (
-                f"fridge detected: press home (button {self.button_home}) to go to the standoff"
-                if not self.search_auto_home
-                else "fridge detected: homing once the arm is still"
-            )
+            message = "fridge detected: let go of the stick, it goes to the standoff once still"
             self._log.info(f"search: {message}")
             self._ctx.progress("searching", 50.0, message, pausable=not self.execute)
-        if self.search_auto_home and self._settled(found[1].stamp_ns):
+        if self._settled(found[1].stamp_ns):
             self._log.info("search: fridge TF measured with the arm still, homing")
             return True
         return False
@@ -742,8 +690,8 @@ class PeerSession:
             elif res in _FOLLOW_REJECT:
                 self._log.warning(
                     f"following: ignored a {self.fridge_frame} estimate, {_FOLLOW_REJECT[res]}; "
-                    f"holding the followed plane. Re-home (button {self.button_home}) if the "
-                    f"wall really is there",
+                    f"holding the followed plane. If the wall really is there, cancel and run "
+                    f"peer again",
                     throttle_duration_sec=2.0,
                 )
             return

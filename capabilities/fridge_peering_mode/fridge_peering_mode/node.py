@@ -3,12 +3,12 @@
 Action `peer` (streaming.PeerSession.run): wait for the plane detector's fridge TF, plan to a
 standoff in front of the back wall with go_to_ee_pose, then (unless `teleop` is false) stream
 ee_twist as a closed-loop servo: the joystick slides the camera along the wall, which the servo
-follows as the detector re-estimates it. Teleop runs until the joystick's stop button (success), a
-cancel, or `max_teleop_s`; the joystick's home button goes back to the standoff.
+follows as the detector re-estimates it. Teleop runs until `max_teleop_s` (success) or a cancel.
+The joystick only moves the camera: no buttons are read.
 
 No fridge TF to home on (and `search_when_no_fridge`): the same servo runs in a search mode, the
-stick moving the camera a little (orientation held) so the detector gets another view; the home
-button homes once the fridge is detected (`search_auto_home`: by itself).
+stick moving the camera a little (orientation held) so the detector gets another view. Once a
+fridge TF is measured with the arm still (the stick let go), it homes by itself.
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`.
 Otherwise the goal is a dry run: the standoff is planned (nothing moves) and teleop publishes what
@@ -81,12 +81,11 @@ PARAMS = {
     "offset_y": 0.0,
     # no usable fridge TF within fridge_tf_wait_s: with teleop, search -- the stick moves ee_link
     # within +-search_range_m (m) of where it was, its orientation held (u = left, v = up, standoff
-    # = forward / back, level), so the detector gets another view. The home button homes once the
-    # fridge is detected; search_auto_home homes by itself once a fridge TF is measured with the
-    # arm still. false: fail with no_fridge (as teleop: false always does)
+    # = forward / back, level), so the detector gets another view. It homes by itself once a
+    # fridge TF is measured with the arm still. false: fail with no_fridge (as teleop: false
+    # always does)
     "search_when_no_fridge": True,
     "search_range_m": 0.15,
-    "search_auto_home": False,
     # the axes ee_twist setpoints are in (the driver: arm_mount)
     "twist_frame": "arm_mount",
     # the servo: full stick slides the target at max_speed on the wall and standoff_speed toward it
@@ -127,7 +126,7 @@ PARAMS = {
     "follow_max_step_m": 0.03,
     # the joystick (an Xbox-style pad on joy_node, xpad layout: check every index with ros2 topic
     # echo /joy). Axes: u + = left, v + = up, standoff + = closer (-1 = off); deadzone, then sign,
-    # then expo
+    # then expo. No buttons are read
     "joy_topic": "/joy",
     "axis_u": 0,
     "axis_v": 1,
@@ -135,11 +134,6 @@ PARAMS = {
     "axis_signs": [1.0, 1.0, 1.0],
     "deadzone": 0.1,
     "expo": 2.0,
-    # button_home (Back) goes back to the standoff and re-latches the plane (searching: homes once
-    # the fridge is detected); button_stop (X) ends the action with the arm holding (-1 disables).
-    # Neither is an e-stop
-    "button_home": 6,
-    "button_stop": 2,
     # older than this is not used (s): /joy holds the target (> 1 / joy_node's autorepeat_rate), the
     # fridge TF is not followed (<= 0 disables; a static TF is exempt), /ee_state sends a zero twist
     "joy_timeout_s": 0.25,
@@ -222,8 +216,7 @@ class Capability(CapabilityEngine):
                     },
                     # false: stop at the standoff (and fail with no_fridge instead of searching)
                     "teleop": {"type": "boolean", "default": True},
-                    # end teleop (successfully) after this long in total; null: only on the stop
-                    # button or a cancel
+                    # end teleop (successfully) after this long in total; null: only on a cancel
                     "max_teleop_s": {
                         "type": ["number", "null"],
                         "exclusiveMinimum": 0,
