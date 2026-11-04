@@ -24,6 +24,15 @@ only that object's boxes are read, with a box stacked on it (its lid), never
 another container's on the table. Without one (a standalone run), every box
 of the container's classes is a candidate.
 
+The id is how it is found at the first look, not after (review round 2):
+perception drops a track it has not seen for track_buffer_frames (10, ~2 s
+at flatbot's 5 Hz), and the box it acquires again gets a new id, as when
+the arm hides the box through a press. From the first fix on, the rung
+follows the selected container by where it was boxed (SegmenterRung.follow,
+which every fix moves on): a frame without its id takes the box of its
+classes that overlaps that one most, FOLLOW_IOU or more (the scene camera
+does not move), and says which id it took (SegFrame.followed).
+
 Every candidate still goes through box opening's own depth gate
 (scene_source.scene_fix_from_boxes): a box only ever says WHERE to look.
 
@@ -53,6 +62,10 @@ BAND_HALF_W, BAND_ABOVE, BAND_BELOW = 0.36, 0.45, 0.10
 CUT_GROW = 0.5  # a holder box cut at the frame's side: grown up by this much of its height
 STACK_LO, STACK_HI = 0.15, 0.5  # a stacked lid's bottom edge lies in [top - LO*h, top + HI*h] of the box under it
 STATE_VISIBLE = 0  # rammp_perception_interfaces/DetectedObject.STATE_VISIBLE
+# a frame without the selected id takes, from the first fix on, the box that overlaps where the
+# selected container was boxed at the last fix most, this much or more (intersection over union):
+# its own box again under a new id. A lid boxed on top of it overlaps it far less
+FOLLOW_IOU = 0.3
 
 _LATEST = object()  # state()/describe(): read the rung's newest frame
 
@@ -74,6 +87,8 @@ class SegFrame(NamedTuple):
     objects: tuple  # ((perception_class, score, (x0, y0, x1, y1)), ...) of the rung's classes
     n_objects: int  # every object it published, of any class
     selected: object = None  # with an instance_id to follow: whether that object was in it (else None)
+    mine: object = None  # ... and its own box (x0, y0, x1, y1), as read: what the rung follows from a fix
+    followed: object = None  # the id it took by where the selected one was (its own id not in it), else None
 
 
 class SceneCand(NamedTuple):
@@ -159,13 +174,26 @@ def segmenter_candidates(objects, classes, image_wh, box_kind="holder", k=SEG_TO
     return lids + rest
 
 
-def frame_of(msg, classes, now_s, instance_id=None):
+def box_iou(a, b):
+    """Intersection over union of two pixel boxes (x0, y0, x1, y1)."""
+    ix = max(0.0, min(float(a[2]), float(b[2])) - max(float(a[0]), float(b[0])))
+    iy = max(0.0, min(float(a[3]), float(b[3])) - max(float(a[1]), float(b[1])))
+    inter = ix * iy
+    union = (float(a[2]) - float(a[0])) * (float(a[3]) - float(a[1])) + (float(b[2]) - float(b[0])) * (
+        float(b[3]) - float(b[1])
+    )
+    return inter / union if union > 0.0 else 0.0
+
+
+def frame_of(msg, classes, now_s, instance_id=None, near=None):
     """A rammp_perception_interfaces/ObjectDetections message as a SegFrame:
     only the VISIBLE objects of `classes` with a finite, non-empty box, a
     score in [0, 1] and (when it sent masks) a box inside its label image
     to within a pixel. With `instance_id`, of those only the object of that
     id and a box stacked on one of its boxes (stacked_on: the lid, boxed as
-    a second bowl on its holder)."""
+    a second bowl on its holder). With `near` too (where it was boxed at the
+    last fix: SegmenterRung.follow), a frame without that id takes the box
+    that overlaps `near` most, FOLLOW_IOU or more, as the selected one."""
     li = getattr(msg, "label_image", None)
     wh = (int(li.width), int(li.height)) if li is not None else (0, 0)
     kept = []
@@ -183,14 +211,21 @@ def frame_of(msg, classes, now_s, instance_id=None):
         if wh != (0, 0) and (box[0] < -1.0 or box[1] < -1.0 or box[2] > wh[0] + 1.0 or box[3] > wh[1] + 1.0):
             continue
         kept.append((str(o.perception_class), score, box, str(getattr(o, "instance_id", ""))))
-    selected = None
+    selected = mine_box = followed = None
     if instance_id:
         mine = [k for k in kept if k[3] == instance_id]
+        if not mine and near is not None and kept:
+            best = max(kept, key=lambda k: box_iou(k[2], near))
+            if box_iou(best[2], near) >= FOLLOW_IOU:
+                mine, followed = [best], best[3]
         selected = bool(mine)
-        lids = [k for k in kept if k[3] != instance_id and stacked_on(k[2], [m[2] for m in mine])]
+        mine_box = mine[0][2] if mine else None
+        lids = [k for k in kept if k not in mine and stacked_on(k[2], [m[2] for m in mine])]
         kept = mine + lids
     objects = tuple(k[:3] for k in kept)
-    return SegFrame(float(now_s), stamp_ns(msg.header.stamp), str(msg.header.frame_id), wh, objects, n, selected)
+    return SegFrame(
+        float(now_s), stamp_ns(msg.header.stamp), str(msg.header.frame_id), wh, objects, n, selected, mine_box, followed
+    )
 
 
 def _import_types():
@@ -218,6 +253,7 @@ class SegmenterRung:
         self.node = node
         self.classes = tuple(classes)
         self.instance_id = instance_id or None
+        self.near = None  # where the selected container was boxed at the last fix (follow); None before one
         self.latest = None  # SegFrame, replaced whole by the callback (one attribute store)
         self.count = 0
         self.available = False
@@ -253,12 +289,18 @@ class SegmenterRung:
         # serves. A message it cannot read keeps the frame before, which goes
         # silent in SEG_SILENT_S: the look then says the segmenter is silent.
         try:
-            frame = frame_of(msg, self.classes, time.monotonic(), self.instance_id)
+            frame = frame_of(msg, self.classes, time.monotonic(), self.instance_id, self.near)
         except Exception as e:  # noqa: BLE001 -- someone else's node publishes this
             self.cb_error = repr(e)
             return
         self.latest = frame
         self.count += 1
+
+    def follow(self, box):
+        """From a fix on, follow the selected container by where it was boxed then (`box`, its own
+        box in that fix's frame: SegFrame.mine) as well as by its id (frame_of's `near`)."""
+        if box is not None:
+            self.near = tuple(float(v) for v in box[:4])  # one attribute store: the callback reads it
 
     def publishers(self, now_s):
         """How many publishers the graph has on SEGMENTER_TOPIC (asked at

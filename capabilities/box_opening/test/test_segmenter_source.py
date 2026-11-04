@@ -196,6 +196,50 @@ def test_with_a_selected_container_only_its_boxes_and_its_lid_are_read():
     assert [o[2] for o in rung.latest.objects] == [pytest.approx(other)] and rung.latest.selected is True
 
 
+def test_from_a_fix_on_the_selected_container_is_followed_by_where_it_was():
+    """Review round 2: perception drops a track unseen for ~2 s (track_buffer_frames 10 at 5 Hz),
+    and the box it acquires again gets a new id, as when the arm hides the box through a press.
+    From a fix on (`near`: where the selected one was boxed then), a frame without its id takes
+    the box that overlaps that most, FOLLOW_IOU or more, and says which id it took; never another
+    container's, nor its lid's box alone."""
+    holder = HOLDER_162417
+    lid = (holder[0] + 15.0, holder[1] - 30.0, holder[2] - 15.0, holder[1] + 5.0)
+    other = (420.0, 216.0, 500.0, 260.0)
+    again = (holder[0] + 4.0, holder[1] + 2.0, holder[2] + 3.0, holder[3] + 1.0)  # a few px on, under a new id
+    m = _msg(
+        [
+            _obj(box=again, instance_id="food_container_8"),
+            _obj(box=lid, score=0.5, instance_id="food_container_9"),
+            _obj(box=other, score=0.95, instance_id="food_container_3"),
+        ]
+    )
+    assert sg.box_iou(again, holder) > sg.FOLLOW_IOU > sg.box_iou(lid, holder)
+    f = sg.frame_of(m, FOOD, now_s=0.0, instance_id="food_container_2")  # by id alone: lost
+    assert f.objects == () and f.selected is False and f.followed is None
+    f = sg.frame_of(m, FOOD, now_s=0.0, instance_id="food_container_2", near=holder)
+    assert [o[2] for o in f.objects] == [pytest.approx(again), pytest.approx(lid)]  # it, and its lid stacked on it
+    assert f.selected is True and f.followed == "food_container_8" and f.mine == pytest.approx(again)
+    # its own id in the frame: read by it, wherever `near` is
+    m2 = _msg([_obj(box=holder, instance_id="food_container_2"), _obj(box=again, instance_id="food_container_8")])
+    f = sg.frame_of(m2, FOOD, now_s=0.0, instance_id="food_container_2", near=other)
+    assert [o[2] for o in f.objects] == [pytest.approx(holder)] and f.followed is None
+    # nothing overlapping where it was: the lid alone, another container — not taken
+    m3 = _msg([_obj(box=lid, instance_id="food_container_9"), _obj(box=other, instance_id="food_container_3")])
+    f = sg.frame_of(m3, FOOD, now_s=0.0, instance_id="food_container_2", near=holder)
+    assert f.objects == () and f.selected is False
+    # the rung follows from where follow() says
+    rung, node = _rung()
+    rung.instance_id = "food_container_2"
+    _type, _topic, cb = node.subs[0]
+    cb(m)
+    assert rung.latest.objects == ()
+    rung.follow(None)  # a fix with no box of its own: nothing to follow from
+    assert rung.near is None
+    rung.follow(holder)
+    cb(m)
+    assert rung.latest.followed == "food_container_8" and rung.latest.selected is True
+
+
 def test_a_segmenter_nothing_publishes_is_absent_at_once_not_after_a_silent_second():
     """A profile that does not select the segmenter: no message will ever
     come, and it is said at once rather than after SEG_SILENT_S. One that has

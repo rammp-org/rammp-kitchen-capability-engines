@@ -1313,7 +1313,10 @@ class _World:
             wh = rest[1] if len(rest) > 1 else (640, 400)
             shot = rest[2] if len(rest) > 2 else t - 0.075  # its frame was taken this long before it arrives
             selected = rest[3] if len(rest) > 3 else None
-            self.rung.latest = SegFrame(t, stamp_ns(_stamp(shot)), frame_id, wh, tuple(objects), len(objects), selected)
+            mine = rest[4] if len(rest) > 4 else None
+            self.rung.latest = SegFrame(
+                t, stamp_ns(_stamp(shot)), frame_id, wh, tuple(objects), len(objects), selected, mine
+            )
             self.rung.count += 1  # as the rung's callback counts what it heard
 
 
@@ -1588,6 +1591,25 @@ def test_a_selected_container_the_segmenter_has_not_seen_is_said_by_its_id(monke
     loc, gated = _locator(monkeypatch, world, {}, instance_id="food_container_2")
     assert loc.locate(2.0) is None and gated == []
     assert loc.last_why.startswith("scene segmenter: the selected container (food_container_2) was in none of its")
+
+
+def test_a_fix_of_the_selected_container_has_the_segmenter_follow_it_from_there(monkeypatch):
+    """Review round 2: the id finds the container at the first look; from its fix on the rung
+    also follows it by where it was boxed (SegmenterRung.follow), so the looks after a press
+    find it under a new id. Without a selection there is nothing to follow."""
+    holder = _holder()
+    msgs = [
+        (t, [("food container", 0.88, holder)], SCENE_FRAME, (640, 400), t - 0.075, True, holder)
+        for t in np.arange(0.1, 3.0, 0.2)
+    ]
+    world = _World(seg_msgs=list(msgs))
+    loc, _gated = _locator(monkeypatch, world, {_band(holder): SEG_TOP}, instance_id="food_container_1")
+    assert world.rung.near is None
+    assert loc.locate(2.0) is not None, loc.last_why
+    assert world.rung.near == pytest.approx(holder)
+    world = _World(seg_msgs=list(msgs))
+    loc, _gated = _locator(monkeypatch, world, {_band(holder): SEG_TOP})
+    assert loc.locate(2.0) is not None and world.rung.near is None
 
 
 def _two_places():

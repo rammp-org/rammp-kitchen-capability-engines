@@ -18,6 +18,10 @@ beside the container, and goes home. It has one action, `open_box`:
    `/perception/object_detections`, and a lid box stacked on it), with its lid's
    height from the scene camera's depth. Nothing about the table or the
    container's place is configured: both come from the cameras on every run.
+   The id finds it at this first look. From then on it is also followed by
+   where it was boxed: a track perception drops while the arm hides the box,
+   and finds again under a new id, is still the selected container. Every
+   world-state write names the id the goal came with.
 1. **Look:** the arm moves to a pose looking down at the lid at 45 degrees, and
    the wrist camera aims at the button.
 1. **Press:** the fingers, closed, press the button in joint impedance. The arm

@@ -1124,6 +1124,7 @@ class SceneLocator:
         }
         if self.instance_id is not None:
             seg["selected"] = look["selected"]  # frames the selected container was in
+            seg["followed"] = look.get("followed")  # ... by where it was, under that id (its own lost)
         rec["segmenter"] = seg
         return rec
 
@@ -1150,6 +1151,7 @@ class SceneLocator:
             "frames": 0,
             "boxes": 0,
             "selected": 0,
+            "followed": None,  # the id a frame took by where the selected container was (SegFrame.followed)
             "tried": tried,
             "sightings": 0,
             "ambiguous": 0,
@@ -1228,6 +1230,13 @@ class SceneLocator:
             last_seg = m_seg
             n_seg += 1
             n_selected += bool(getattr(m_seg, "selected", None))
+            followed = getattr(m_seg, "followed", None)
+            if followed and look.get("followed") != followed:
+                look["followed"] = followed
+                log.info(
+                    "[scene] the selected container (%s) is not in the segmenter's frame: followed where it was, "
+                    "as %s" % (self.instance_id, followed)
+                )
             self.last_timing.setdefault("seg_s", round(now - t_ready, 2))
             self.last_boxes["segmenter"] = [[c, float(s)] + [float(v) for v in b] for c, s, b in m_seg.objects]
             n_seg_boxes += len(m_seg.objects)
@@ -1310,6 +1319,9 @@ class SceneLocator:
             top, _why = commit_fix(sightings)
             if top is not None:
                 found = (top, sightings[-VOTE_N:], pts_base, uv, got, T_base_color)
+                follow = getattr(seg, "follow", None)
+                if self.instance_id is not None and follow is not None:
+                    follow(getattr(m_seg, "mine", None))  # from here on, by where it is too
                 t_fix = clock()
                 self.last_timing["fix_s"] = round(t_fix - t_ready, 2)
                 self.last_timing["lift_s"] = round(t_fix - t_cloud, 2)
