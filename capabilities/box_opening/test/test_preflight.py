@@ -108,3 +108,16 @@ def test_the_drivers_link_to_the_arm_is_checked():
     assert preflight.driver_health_verdict(None)[0] == "WARN"
     level, text = preflight.driver_health_verdict({"link_state": "running", "estopped": False})
     assert level == "PASS" and "running" in text
+
+
+def test_the_planners_world_passes_empty_or_its_robots_own_config():
+    """rammp-deployments #146: flatbot's nightly planner reads its robot's own planner.yaml
+    (/config/robot/curobo/), which names its world (the MEBot chair, seat and occupant in every
+    world) with `world` "". Box opening sends the planner no world: either is one it plans in."""
+    from box_opening.tasks import preflight
+
+    assert preflight.planner_world_verdict("world_empty.yaml", "gen3_real.yaml")[0] == "PASS"
+    level, text = preflight.planner_world_verdict(None, "/config/robot/curobo/planner.yaml")
+    assert level == "PASS" and "/config/robot/curobo/planner.yaml" in text
+    assert preflight.planner_world_verdict("world_real_bench.yaml", "gen3_real.yaml")[0] == "WARN"
+    assert preflight.planner_world_verdict(None, None)[0] == "WARN"

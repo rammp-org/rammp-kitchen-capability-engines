@@ -234,24 +234,43 @@ def _gripper_state(node, timeout_s=3.0):
     return got[0] if got else None
 
 
-def planner_world(node, timeout_s=3.0):
+def planner_world(node, timeout_s=3.0, with_config=False):
     """The planner node's `world` parameter (rammp_curobo's own name for the
-    world it was started with), or None when it does not answer."""
+    world it was started with), or None when it does not answer; with
+    `with_config`, (world, config): its `config` too (a robot's own
+    planner.yaml, rammp-deployments #146, names its world itself: `world`
+    is then "")."""
     from rcl_interfaces.srv import GetParameters
 
     cli = node.create_client(GetParameters, "/rammp_curobo/get_parameters")
+    got = (None, None)
     try:
-        if not cli.wait_for_service(timeout_sec=timeout_s):
-            return None
-        fut = cli.call_async(GetParameters.Request(names=["world"]))
-        t_end = time.monotonic() + timeout_s
-        while not fut.done() and time.monotonic() < t_end:
-            rclpy.spin_once(node, timeout_sec=0.05)
-        if not fut.done() or fut.result() is None or not fut.result().values:
-            return None
-        return fut.result().values[0].string_value or None
+        if cli.wait_for_service(timeout_sec=timeout_s):
+            fut = cli.call_async(GetParameters.Request(names=["world", "config"]))
+            t_end = time.monotonic() + timeout_s
+            while not fut.done() and time.monotonic() < t_end:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            if fut.done() and fut.result() is not None and fut.result().values:
+                values = [v.string_value or None for v in fut.result().values]
+                got = (values[0], values[1] if len(values) > 1 else None)
     finally:
         node.destroy_client(cli)
+    return got if with_config else got[0]
+
+
+def planner_world_verdict(world, config):
+    """(level, text) for the world the planner was started with: box opening sends it none, so it
+    plans in that one. PASS world_empty.yaml (the arm alone), or a robot's own planner config that
+    names its world (world "": flatbot's, its MEBot chair, seat and occupant in every world). WARN
+    otherwise: said, not failed, the deployment owns it."""
+    if world == PLANNER_WORLD:
+        return "PASS", "planner started with %s" % world
+    if not world and config and str(config).startswith("/config/robot/"):
+        return "PASS", "planner started with its robot's own config (%s), the world it names" % config
+    return "WARN", (
+        "planner started with %s, not %s — box opening plans in it as it is (the deployment's "
+        "planner `world` parameter sets it)" % (world or "an unknown world", PLANNER_WORLD)
+    )
 
 
 def main():
@@ -305,14 +324,8 @@ def main():
     #    and nothing else. Said, not failed: the deployment owns it.
     store = WorldStore(args.bench_world or cli_common.default_bench_yaml())
     client._base_frame = store.base_frame
-    world = planner_world(node)
-    if world == PLANNER_WORLD:
-        log.info("PASS  planner started with %s" % world)
-    else:
-        log.info(
-            "WARN  planner started with %s, not %s — box opening plans in it as it is (the deployment's "
-            "planner `world` parameter sets it)" % (world or "an unknown world", PLANNER_WORLD)
-        )
+    level, text = planner_world_verdict(*planner_world(node, with_config=True))
+    log.info("%-4s  %s" % (level, text))
 
     # 5. TF for the finger tips (robot_state_publisher from the launch)
     tips = client.contact_xyz(timeout_s=3.0)
