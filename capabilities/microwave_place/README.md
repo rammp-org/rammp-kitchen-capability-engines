@@ -1,16 +1,12 @@
 # microwave_place
 
-Put the tupperware the gripper is already holding (after `grab_container`) into the open microwave
-(`place`), and take it out again (`take_out`).
+Put the tupperware the gripper is already holding (after `grab_container`) into the open microwave.
 
 - `microwave_place/microwave_detection.py`: where the microwave is and where the container goes, from the
   **scene camera** (not the wrist camera: the held container blocks its view).
 - `microwave_place/place_motion.py`: planning, checking and running the arm: Walter Hsieh's
   `place_container` motion (arm model, impedance lowering), with the transit, the straight lines and the
   release the microwave needs.
-- `microwave_place/rim_detection.py`: `take_out`: where the container's rim is, from the **wrist camera**
-  (`grab_container`'s SAM3 rim detection).
-- `microwave_place/take_out.py`: `take_out`: planning and running the arm.
 - `microwave_place/microwave_place_node.py`: the `CapabilityEngine` action server: parameters, the actions, the plan and
   state files.
 
@@ -45,7 +41,8 @@ How it works:
 1. **The point** follows from the dimensions: centred sideways, `DEPTH / 2` behind the frame plane,
    `FLOOR` above the opening's bottom edge.
 
-Any check that fails raises `NotDetected` with the reason. Nothing is filled in.
+Any check that fails raises `NotDetected` with the reason (`estimate_interior` returns `None`).
+Nothing is filled in.
 
 `locate(...)` runs it on the live camera inside an action (`SceneCamera`). It first gets one frame of
 SAM3's "microwave" mask (`microwave_prompt`), with its depth and camera pose, in a call of its own
@@ -143,67 +140,18 @@ they leave about 2 cm free on each side of the container's wall.
 A faulted arm makes the driver reject the approach: the place stops there, nothing moved, and says so;
 clear the fault and re-run.
 
-## The take-out: `rim_detection.py`, `take_out.py`
-
-`take_out` starts from the take-out start pose: the arm in front of the open oven, the hand pointing into
-it, the wrist camera looking at the tupperware from about 0.4-0.5 m, the gripper open. It uses neither the
-scene camera nor a model of the oven: the grasp comes from the rim the wrist camera finds, the line in
-from the hand's own heading.
-
-1. **Detect** (`rim_detection.detect_rim`, `grab_container`'s wrist detection on this node). SAM3
-   (`/perception/sam3/detect`) masks `container_prompt` (the container with its sleeve) on the wrist
-   colour frame; the best-scoring object is the container. The same frame is republished on
-   `/microwave_place/wrist_query_image` and SAM3 masks `rim_prompt` on it (a combined call's label image
-   holds one object per pixel, and the rim lies inside the container); the rim is a wide, flat object
-   mostly (85%) inside the container mask. It waits for `rim_frames` consecutive frames whose container
-   and rim masks overlap every earlier one of the streak by at least `rim_mask_iou` (intersection over
-   union). On each of them the 5 nearest depths inside both masks (the wrist depth aligned to colour,
-   0.2-2 m), back-projected and put in `arm_mount` with TF at the frame's stamp, are averaged; the rim
-   point is the mean over the frames. Nothing within `rim_timeout_s`: it refuses with every reason a
-   frame was rejected.
-1. **Grasp pose** (`take_out.grasp_pose`). The hand's level heading at the start is the line in's
-   direction. The hand is turned 90 deg about its own axis, the way that points the line between the
-   fingers (tool x) straight up, so the fingers come in above and below the brim, and levelled. The
-   tool frame's target is `grasp_depth` along the heading and `grasp_up` above the rim point; the
-   pre-grasp pose is `reach_in` back from it along the heading. The offsets are measured on the arm:
-   the nearest rim depths read the bowl wall behind the brim's thin edge (the wrist stereo is 320 x 200),
-   and the tool frame is about 6 cm behind the fingertips.
-1. **Plan** (`plan_take_out`, on the arm model, joint waypoints by IK): from the start, a straight move to
-   the pre-grasp pose while the hand turns (slerped; refused if a step moves any joint more than 15 deg),
-   the straight level line in (every pose on its line and heading, ending within 1 cm / 2 deg of the
-   target), the raise and the line out. A **dry run** stops here and returns the plan (also written to
-   `state_dir/plans/take_out_*.json`).
-1. **Execute**. The gripper set to `grip_open`. The turn and the line in up to `impedance_in` short of
-   the grasp run as **one** position-control motion, timed by `pose_lengths` at `insert_speed` peak; a
-   short stop there; the arm settles in joint impedance (`take_impedance_kq`, `take_impedance_zeta`,
-   `impedance_torque_limit`) for `settle_s` and does the rest of the line in at `impedance_speed` peak.
-   It must end within 3 cm of the target. Impedance is switched off (`exit_impedance`: the position
-   setpoint on the measured joints, so nothing jumps) before the gripper closes, whatever happened.
-   Then, in position control: the gripper closes with `grab_container`'s force and is checked (the
-   fingers stopped, closed past 0.6, not to 1.0 = on nothing; otherwise it stops in the oven without
-   lifting), the hand goes straight up `take_lift`, and the level line out to above the pre-grasp pose.
-
-Compliance is used only where the open fingers go over the brim; everything carrying the container is
-stiff (the place's soft gains let the arm sag ~5 cm under it). The library runs one trajectory goal at a
-time, so the switch into impedance is a short stop. Nothing is collision-checked: the start faces the
-opening, and the line in runs straight along the hand's heading.
-
-The wrist camera's stereo returns nothing nearer than about 0.22 m; from 0.4-0.5 m the rim has 90-100%
-depth. At about 0.55 m SAM3's rim mask drops out on many frames.
-
 ## Actions
 
-| Action     | Params            | What it does                                                                                    |
-| ---------- | ----------------- | ----------------------------------------------------------------------------------------------- |
-| `place`    | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it      |
-| `take_out` | `execute` (false) | Finds the rim from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
+| Action  | Params            | What it does                                                                               |
+| ------- | ----------------- | ------------------------------------------------------------------------------------------ |
+| `place` | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it |
 
 A refusal fails the goal with error code `refused` (recoverable).
 
 ## Running it standalone
 
 The arm moves only if the node runs with `allow_execute:=true` **and** the goal sets `execute`.
-Otherwise every goal is a dry run: it detects, plans and checks, and returns the plan. It needs
+Otherwise every `place` is a dry run: it locates, plans and checks, and returns the plan. It needs
 SAM3 (rammp-perception) and the cuRobo planner up; the planner must read `worlds_dir` at the same path
 (mounted in both containers).
 
@@ -219,7 +167,6 @@ On the arm, attended, someone on the e-stop:
 ros2 launch microwave_place microwave_place.launch.py use_orchestrator:=false allow_execute:=true \
   state_dir:=$HOME/.microwave_place
 make action CAP=microwave_place ACTION=place PARAMS='{"execute": true}'
-make action CAP=microwave_place ACTION=take_out PARAMS='{"execute": true}'   # from the take-out start pose
 ```
 
 ## Parameters
@@ -247,13 +194,3 @@ All are ROS parameters, with their defaults in `rammp-alternative.yaml`:
 | `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`          | joint impedance for the lowering, the gripper opening and the release tilt                                   |
 | `flange_to_tip`                                            | 0.17955                                     | flange face to the closed fingertips (m)                                                                     |
 | `state_dir`                                                | /config/microwave_place                     | plans and the descent recordings                                                                             |
-| `wrist_topics`                                             | the wrist camera's colour, depth, info      | take_out: the camera the rim is found on                                                                     |
-| `container_prompt`, `rim_prompt`                           | the container with its blue sleeve; its rim | take_out: SAM3's prompts                                                                                     |
-| `sam3_threshold`                                           | 0.5                                         | take_out: SAM3's score threshold                                                                             |
-| `rim_frames`, `rim_mask_iou`, `rim_timeout_s`              | 3, 0.85, 60.0                               | take_out: consecutive frames whose masks overlap this much, at most this long                                |
-| `grasp_depth`, `grasp_up`                                  | -0.05, 0.035                                | take_out: the tool frame this far (m) along the heading (- = short of it) and above the rim point            |
-| `reach_in`                                                 | 0.25                                        | take_out: the pre-grasp pose this far back (m): the line in's length                                         |
-| `grip_open`                                                | 0.0                                         | take_out: the gripper's opening for the reach in (0 = fully open)                                            |
-| `impedance_in`, `impedance_speed`                          | 0.10, 0.08                                  | take_out: the last this far (m) of the line in in joint impedance, at this peak speed (m/s)                  |
-| `take_impedance_kq`, `take_impedance_zeta`                 | 400 x 4, 200 x 3; 0.7                       | take_out: that joint impedance (the driver caps kq at 400)                                                   |
-| `take_lift`                                                | 0.03                                        | take_out: straight up this far (m) after the close                                                           |
