@@ -67,3 +67,5 @@ subscribes:
   - /scene_camera/depth/image_rect_raw
   - /scene_camera/depth/camera_info
   - /perception/object_detections
+  # the arm driver's diagnostics: its link to the arm, its e-stop (readiness, a refused goal)
+  - /diagnostics

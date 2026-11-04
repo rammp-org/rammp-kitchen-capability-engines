@@ -104,6 +104,51 @@ def result_message(error_code, error_string=""):
     return text
 
 
+# The arm driver says on /diagnostics (diagnostic_msgs/DiagnosticArray, ~1 Hz) what its link to the
+# arm is doing — its "Arm link" status: link_state connecting | running | faulted, and the reason —
+# and its arbitration's "Arbitration" status: estopped (kinova_gen3_ros2 link_server.cpp,
+# arbitration_server.cpp). A goal sent while the link is not running is refused with no reason
+# given (supervisor.cpp on_trajectory_goal: "faulted or reconnecting"). Flatbot 2026-11-04
+# 12:23: the link faulted as the driver started (WRONG_SERVOING_MODE), and four homes were
+# refused as "a stream session open, a mode change while moving, or its MEDIUM gains refused"
+DIAGNOSTICS_TOPIC = "/diagnostics"
+
+
+def driver_health_from(msg, health=None):
+    """`health` (a dict, or None for a new one) with what a DiagnosticArray `msg` says of the arm
+    driver: its "Arm link" status (link_state, link_reason) and its "Arbitration" (estopped).
+    Statuses of other names (every other node's) leave it as it was."""
+    out = dict(health or {})
+    for st in getattr(msg, "status", ()):
+        name = str(getattr(st, "name", ""))
+        values = {str(kv.key): str(kv.value) for kv in getattr(st, "values", ())}
+        if name.endswith("Arm link"):
+            out["link_state"] = values.get("link_state", "")
+            out["link_reason"] = values.get("reason", "") or str(getattr(st, "message", ""))
+        elif name.endswith("Arbitration"):
+            out["estopped"] = values.get("estopped", "").strip().lower() in ("true", "1", "yes")
+    return out
+
+
+def health_refusal(health):
+    """Why the arm driver can take no goal now, from what its diagnostics said (driver_health_from),
+    or None: its link to the arm not running (faulted, reconnecting), or its e-stop latched. None
+    where nothing was heard: the driver's own answer is then the word."""
+    if not health:
+        return None
+    state = health.get("link_state")
+    if state and state != "running":
+        reason = " ".join(str(health.get("link_reason") or "").split())  # the Kortex reason runs over lines
+        return (
+            "the arm driver's link to the arm is %s%s — check the arm (e-stop released, no fault light, nothing "
+            "else driving it: the Kinova web app, its joystick), then clear it (`ros2 service call /clear_faults "
+            "std_srvs/srv/Trigger`) or restart sheppy's `arm` node" % (state, " (%s)" % reason if reason else "")
+        )
+    if health.get("estopped"):
+        return "the arm driver is e-stopped (its /estop is latched) — clear it before the next run"
+    return None
+
+
 def setpoint_position(knuckle_rad):
     """A knuckle-radian gripper command as the driver's 0 (open) .. 1 (closed)."""
     return min(1.0, max(0.0, float(knuckle_rad) / KNUCKLE_CLOSED_RAD))

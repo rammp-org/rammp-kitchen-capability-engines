@@ -797,8 +797,54 @@ def test_a_compliant_rejection_names_the_gains_it_sent():
     assert "its MEDIUM gains refused" in info["message"]
     c.compliant = False  # a position goal sends none, so none is named
     _o, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
-    assert info["message"] == "goal rejected by the driver (a stream session open, or a mode change while moving)"
+    assert info["message"] == (
+        "goal rejected by the driver (its link to the arm down, a contact stop latched, a stream session open, "
+        "or a mode change while moving)"
+    )
     assert info["gains"] is None and d.goals[-1].gains.profile == 0
+
+
+def _diagnostics(link_state="running", reason="", estopped=False):
+    """The arm driver's /diagnostics as its updaters publish them (kinova_gen3_ros2)."""
+    kv = lambda k, v: SimpleNamespace(key=k, value=v)  # noqa: E731
+    return SimpleNamespace(
+        status=[
+            SimpleNamespace(name="kinova_gen3_node: Arm", message="OK", values=[kv("fault", "False")]),
+            SimpleNamespace(
+                name="kinova_gen3_node: Arm link",
+                message=link_state,
+                values=[kv("link_state", link_state), kv("reason", reason), kv("faults", "1")],
+            ),
+            SimpleNamespace(name="kinova_gen3_node: Arbitration", message="", values=[kv("estopped", str(estopped))]),
+            SimpleNamespace(name="oak: scene camera", message="OK", values=[kv("link_state", "faulted")]),
+        ]
+    )
+
+
+def test_a_goal_refused_while_the_drivers_link_is_down_ends_the_run_and_says_so():
+    """Flatbot 2026-11-04 12:23: the driver's link to the arm faulted as it started
+    (WRONG_SERVOING_MODE) and four homes were refused, said as "a stream session open, a mode
+    change while moving, or its MEDIUM gains refused". The driver's diagnostics say its link's
+    state: a goal refused while it is not running is the arm not the run's to move ("halted",
+    latched, REVIEW_RULES C5), and says why; with the link running it is the refusal it was."""
+    d = _RejectingDriver()
+    c = _client(d)
+    reason = "KortexTransport: arm rejected the cyclic call: WRONG_SERVOING_MODE"
+    c._diag_cb(_diagnostics("faulted", reason))
+    assert c.driver_health() == {"link_state": "faulted", "link_reason": reason, "estopped": False}
+    outcome, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
+    assert outcome == "halted" and c.halted == info["message"]
+    assert "link to the arm is faulted" in info["message"] and "WRONG_SERVOING_MODE" in info["message"]
+    assert "restart sheppy's `arm` node" in info["message"]
+    with pytest.raises(client_mod.ArmHalted):
+        c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
+    c = _client(_RejectingDriver())
+    c._diag_cb(_diagnostics("running"))
+    assert c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)[0] == "failed"
+    c = _client(_RejectingDriver())
+    c._diag_cb(_diagnostics("running", estopped=True))
+    outcome, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
+    assert outcome == "halted" and "e-stopped" in info["message"]
 
 
 def test_a_position_leg_sends_no_gains():

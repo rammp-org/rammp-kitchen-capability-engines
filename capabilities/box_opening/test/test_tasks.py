@@ -468,6 +468,30 @@ def test_the_driver_is_required_only_when_executing():
     assert press_demo.readiness_refusal(_Readiness(driver=False), execute=False) is None
 
 
+def test_a_run_refuses_before_any_motion_while_the_drivers_link_is_down():
+    """Flatbot 2026-11-04 12:23: the driver up, its link to the arm faulted, every goal refused.
+    Readiness reads the driver's diagnostics and refuses the run before anything moves; nothing
+    heard (no diagnostics) refuses nothing, the driver's own answer is the word."""
+    from box_opening.tasks import press_demo
+
+    class Faulted(_Readiness):
+        def __init__(self, health):
+            super().__init__()
+            self.health = health
+
+        def driver_health(self, timeout_s=0.0):
+            return self.health
+
+    down = {"link_state": "faulted", "link_reason": "WRONG_SERVOING_MODE", "estopped": False}
+    why = press_demo.readiness_refusal(Faulted(down), execute=True)
+    assert why is not None and "link to the arm is faulted (WRONG_SERVOING_MODE)" in why and "Nothing moved" in why
+    assert press_demo.readiness_refusal(Faulted({"link_state": "connecting"}), execute=True) is not None
+    assert press_demo.readiness_refusal(Faulted({"link_state": "running", "estopped": True}), execute=True)
+    assert press_demo.readiness_refusal(Faulted({"link_state": "running", "estopped": False}), execute=True) is None
+    assert press_demo.readiness_refusal(Faulted(None), execute=True) is None
+    assert press_demo.readiness_refusal(Faulted(down), execute=False) is None  # a dry run moves nothing
+
+
 def test_a_run_refuses_before_any_motion_without_the_arms_tf_or_beside_adl():
     """Bench 2026-09-25: box_opening had stopped (no /tf at all) and the run
     flew to staging before it could not place a single wrist frame; and the

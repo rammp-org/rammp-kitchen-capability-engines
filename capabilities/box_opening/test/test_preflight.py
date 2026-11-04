@@ -95,3 +95,16 @@ def test_tf_and_other_client_verdicts():
     lvl, text = other_clients_verdict(["rammp_adl_runtime"])
     assert lvl == "FAIL" and "rammp_adl_runtime" in text
     assert other_clients_verdict([])[0] == "PASS"
+
+
+def test_the_drivers_link_to_the_arm_is_checked():
+    """Preflight says the driver's link (its diagnostics): FAIL faulted, connecting, or e-stopped;
+    WARN when none was heard; PASS running."""
+    from box_opening.tasks import preflight
+
+    level, text = preflight.driver_health_verdict({"link_state": "faulted", "link_reason": "WRONG_SERVOING_MODE"})
+    assert level == "FAIL" and "faulted (WRONG_SERVOING_MODE)" in text
+    assert preflight.driver_health_verdict({"link_state": "running", "estopped": True})[0] == "FAIL"
+    assert preflight.driver_health_verdict(None)[0] == "WARN"
+    level, text = preflight.driver_health_verdict({"link_state": "running", "estopped": False})
+    assert level == "PASS" and "running" in text

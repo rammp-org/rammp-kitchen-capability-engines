@@ -253,6 +253,15 @@ class PlannerClient:
         # the driver publishes /joint_states best-effort (SensorDataQoS): a
         # reliable subscription would match nothing and hear nothing
         node.create_subscription(JointState, "/joint_states", self._js_cb, qos_profile_sensor_data)
+        # what the driver's diagnostics say of its link to the arm and its e-stop (driver.
+        # driver_health_from): why a goal it refuses was refused, and readiness's check
+        self._driver_health = None
+        try:
+            from diagnostic_msgs.msg import DiagnosticArray
+
+            node.create_subscription(DiagnosticArray, driver.DIAGNOSTICS_TOPIC, self._diag_cb, 10)
+        except ImportError:  # an install without diagnostic_msgs: nothing heard, nothing refused by it
+            pass
         self._plan_pose = ActionClient(node, PlanToPose, NODE_NAMESPACE + "/plan_to_pose")
         self._plan_joints = ActionClient(node, PlanToJoints, NODE_NAMESPACE + "/plan_to_joints")
         self._execute = ActionClient(node, ExecuteJointTrajectory, EXECUTE_ACTION)
@@ -566,6 +575,23 @@ class PlannerClient:
     def driver_reachable(self, timeout_s=5.0):
         """True when the driver's trajectory action responds."""
         return self._execute.wait_for_server(timeout_sec=timeout_s)
+
+    def _diag_cb(self, msg):
+        # on whichever thread spins this node; never raises (someone else's node publishes it)
+        try:
+            if any(str(st.name).endswith(("Arm link", "Arbitration")) for st in msg.status):
+                self._driver_health = driver.driver_health_from(msg, getattr(self, "_driver_health", None))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def driver_health(self, timeout_s=0.0):
+        """What the driver's diagnostics said last of its link to the arm and its e-stop
+        (driver.driver_health_from), waiting up to `timeout_s` for a first word; None where
+        none came (the driver publishes them about once a second)."""
+        t0 = time.monotonic()
+        while getattr(self, "_driver_health", None) is None and time.monotonic() - t0 < timeout_s:
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+        return getattr(self, "_driver_health", None)
 
     def tf_ready(self, target, source, timeout_s=2.0):
         """True once TF can give `target` <- `source` (the latest): the arm's
@@ -1176,13 +1202,23 @@ class PlannerClient:
                 10.0,
             )
             if send is None or not send.accepted:
+                down = driver.health_refusal(getattr(self, "_driver_health", None))
+                if down:
+                    # the driver's link to the arm is down, or it is e-stopped: the arm is not the
+                    # run's to move, as after a HALTED goal (REVIEW_RULES C5). Latched
+                    info["message"] = "goal rejected by the driver: " + down
+                    self.halted = info["message"]
+                    return "halted", info
                 if compliant:
                     why = "a mode change while moving, or its %s gains refused" % IMPEDANCE_NAMES.get(
                         info["gains"], "profile %s" % (info["gains"],)
                     )
                 else:
                     why = "or a mode change while moving"
-                info["message"] = "goal rejected by the driver (a stream session open, %s)" % why
+                info["message"] = (
+                    "goal rejected by the driver (its link to the arm down, a contact stop latched, a stream "
+                    "session open, %s)" % why
+                )
                 return "failed", info
             result_future = send.get_result_async()
             contact = False

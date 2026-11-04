@@ -184,3 +184,26 @@ def test_the_closed_knuckle_has_one_value_the_urdfs_limit():
     root = ET.parse(fixture_path("arm_flatbot_20261021.urdf")).getroot()
     (knuckle,) = (j for j in root.iter("joint") if j.get("name", "").endswith("robotiq_85_left_knuckle_joint"))
     assert float(knuckle.find("limit").get("upper")) == constants.GRIPPER_CMD_CLOSED
+
+
+def test_the_drivers_diagnostics_say_its_link_and_its_e_stop():
+    from types import SimpleNamespace
+
+    from box_opening.runtime.driver import driver_health_from, health_refusal
+
+    kv = lambda k, v: SimpleNamespace(key=k, value=v)  # noqa: E731
+    link = SimpleNamespace(
+        name="kinova_gen3_node: Arm link", message="faulted", values=[kv("link_state", "faulted"), kv("reason", "")]
+    )
+    arb = SimpleNamespace(name="kinova_gen3_node: Arbitration", message="", values=[kv("estopped", "True")])
+    other = SimpleNamespace(name="scene_camera: Arm link?", message="", values=[kv("link_state", "running")])
+    h = driver_health_from(SimpleNamespace(status=[link]))
+    assert h == {"link_state": "faulted", "link_reason": "faulted"}  # no reason: the status's message
+    h = driver_health_from(SimpleNamespace(status=[arb, other]), h)  # another node's status changes nothing
+    assert h["link_state"] == "faulted" and h["estopped"] is True
+    assert "faulted" in health_refusal(h) and "/clear_faults" in health_refusal(h)
+    two_lines = {"link_state": "faulted", "link_reason": "KortexTransport: WRONG_SERVOING_MODE\ndescription: low level"}
+    assert "(KortexTransport: WRONG_SERVOING_MODE description: low level)" in health_refusal(two_lines)
+    assert "e-stopped" in health_refusal({"link_state": "running", "estopped": True})
+    assert health_refusal({"link_state": "running", "estopped": False}) is None
+    assert health_refusal(None) is None and health_refusal({}) is None

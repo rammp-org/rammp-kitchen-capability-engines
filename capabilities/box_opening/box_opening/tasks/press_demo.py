@@ -99,7 +99,7 @@ from box_opening.primitives.core import (
     as_home,
 )
 from box_opening.primitives.look import look_joints, sweep_targets
-from box_opening.runtime import fingers
+from box_opening.runtime import driver, fingers
 from box_opening.runtime.abort import EXIT_HALTED, ArmHalted
 from box_opening.runtime.runner import Runner
 from box_opening.tasks import cli_common
@@ -992,6 +992,9 @@ def _spin_detect(node):
 PLANNER_WAIT_S = 30.0
 
 
+DRIVER_HEALTH_WAIT_S = 2.5  # the driver's diagnostics come about once a second
+
+
 def readiness_refusal(client, execute, planner_wait_s=PLANNER_WAIT_S, camera_cfg_name=None):
     """Why this run must not start, or None. Checked before ANYTHING is
     actuated — the gripper close included.
@@ -1012,6 +1015,12 @@ def readiness_refusal(client, execute, planner_wait_s=PLANNER_WAIT_S, camera_cfg
             "the arm driver is not answering — is sheppy's `arm` node up? "
             "(its log is in ~/.sheppy/logs/arm/). Nothing moved."
         )
+    if execute and hasattr(client, "driver_health"):
+        # up, but its link to the arm faulted, or e-stopped: every goal would be refused
+        # (flatbot 2026-11-04 12:23, WRONG_SERVOING_MODE at the driver's start)
+        down = driver.health_refusal(client.driver_health(timeout_s=DRIVER_HEALTH_WAIT_S))
+        if down:
+            return "%s. Nothing moved." % down
     if execute:
         others = client.other_arm_clients()
         if others:
@@ -1627,7 +1636,7 @@ def main():
         # the driver halted a goal (the e-stop) or took control away: the run ended where it was,
         # nothing sent after it (REVIEW_RULES C5); the node reports it arm_halted, not recoverable
         log.info(
-            "[press_demo] STOP: HALTED: the driver ended the run's motion (%s) — nothing more was sent; "
+            "[press_demo] STOP: HALTED: the arm is not the run's to move (%s) — nothing more was sent; "
             "the arm stands where it stopped. Clear the e-stop and the arm, attended, before the next run" % e
         )
         sys.exit(EXIT_HALTED)

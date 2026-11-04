@@ -26,6 +26,7 @@ import rclpy
 
 from box_opening import LOGGER as log
 from box_opening.constants import GRIPPER_STATE_TOPIC
+from box_opening.runtime import driver
 from box_opening.runtime.client import PlannerClient
 from box_opening.runtime.driver import rmw_refusal
 from box_opening.tasks import cli_common
@@ -121,6 +122,25 @@ def tf_verdicts(checks, ok):
         else:
             out.append(("FAIL" if required else "WARN", "no TF %s -> %s — %s" % (target, source, fix)))
     return out
+
+
+DRIVER_HEALTH_WAIT_S = 3.0  # the driver's diagnostics come about once a second
+
+
+def driver_health_verdict(health):
+    """(level, text) for what the driver's diagnostics said of its link to the arm and its
+    e-stop (driver.driver_health_from; None: nothing heard)."""
+    if health is None or not health.get("link_state"):
+        return "WARN", (
+            "the arm driver's link state not heard on %s in %.0f s — a run will find out at its first goal"
+            % (driver.DIAGNOSTICS_TOPIC, DRIVER_HEALTH_WAIT_S)
+        )
+    why = driver.health_refusal(health)
+    if why:
+        return "FAIL", why
+    return "PASS", "the arm driver's link to the arm is running%s" % (
+        "" if "estopped" not in health else ", its e-stop clear"
+    )
 
 
 def other_clients_verdict(others):
@@ -266,6 +286,12 @@ def main():
     else:
         log.info("FAIL  /execute_joint_trajectory unreachable — is sheppy's `arm` node up?")
         failures += 1
+
+    # 2b. the driver's link to the arm, and its e-stop, as its diagnostics say (a driver up with
+    #     its link faulted refuses every goal: flatbot 2026-11-04 12:23)
+    level, text = driver_health_verdict(client.driver_health(timeout_s=DRIVER_HEALTH_WAIT_S))
+    log.info("%-4s  %s" % (level, text))
+    failures += level == "FAIL"
 
     # 3. the planner's actions
     if client.planner_reachable(timeout_s=5.0):
