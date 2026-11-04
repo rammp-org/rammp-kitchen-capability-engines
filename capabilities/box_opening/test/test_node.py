@@ -511,6 +511,28 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     assert argv[argv.index("--instance-id") + 1] == "food_container_2"
 
 
+def test_each_goal_reads_the_params_as_they_are_then(engine):
+    """Review round 2: allow_execute was read per goal, but speed_scale, video and the rest once
+    at start-up, so a change from the sheppy TUI was accepted and ignored."""
+    real = node.Capability._argv.__get__(engine)
+    assert real("open_box")[real("open_box").index("--speed-scale") + 1] == "1.0"
+    engine.set_parameters([Parameter("video", value=False)])
+    assert engine._env()["BOX_OPENING_VIDEO"] == "0" and engine._env()["BOX_OPENING_MISSION_FRAMES"] == "0"
+    engine.set_parameters(
+        [
+            Parameter("speed_scale", value=0.5),
+            Parameter("video", value=True),
+            Parameter("mission_frames", value=True),
+            Parameter("container", value="/configs/other.yaml"),
+        ]
+    )
+    argv = real("open_box")
+    assert (
+        argv[argv.index("--speed-scale") + 1] == "0.5" and argv[argv.index("--container") + 1] == "/configs/other.yaml"
+    )
+    assert engine._env()["BOX_OPENING_VIDEO"] == "1" and engine._env()["BOX_OPENING_MISSION_FRAMES"] == "1"
+
+
 def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):
     given(monkeypatch, say=["[ERROR] [1793385477.635189323] [box_opening_run]: no arm kinematics", "plain line"])
     said = []

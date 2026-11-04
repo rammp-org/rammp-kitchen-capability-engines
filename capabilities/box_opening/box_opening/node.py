@@ -407,7 +407,8 @@ class Capability(CapabilityEngine):
 
     def __init__(self, **node_kwargs):
         super().__init__("box_opening", **node_kwargs)
-        self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
+        for name, default in PARAMS.items():
+            self.declare_parameter(name, default)
         self._run = None  # the Run under way
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
@@ -443,9 +444,14 @@ class Capability(CapabilityEngine):
             self.create_publisher(String, viz.STATUS_TOPIC, 1),
         ]
 
+    def _param(self, name):
+        """A PARAMS value as it is now: each goal reads its own (a deployment, or the sheppy TUI,
+        may set one while the node runs), never a copy taken at start-up."""
+        return self.get_parameter(name).value
+
     def _allowed(self):
         """allow_execute as it is now (a deployment may set it while the node runs)."""
-        return bool(self.get_parameter("allow_execute").value)
+        return bool(self._param("allow_execute"))
 
     def availability(self, instance_id, world_state):
         """open_box for a container the world state does not already hold opened (its object
@@ -469,7 +475,8 @@ class Capability(CapabilityEngine):
         if not self._allowed():
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
         ctx.checkpoint()  # cancelled before it started: nothing runs
-        runs = state_dir(self._env()) / "runs"
+        env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
+        runs = state_dir(env) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
         # the selection as the goal came: read once, used for every write and the run's argv
         track = Tracker(action_id, self.instance_id)
@@ -477,7 +484,7 @@ class Capability(CapabilityEngine):
         first = MOCK_PHASES[action_id][0][0]
         ctx.progress(first, 0.0, "starting", pausable=False)
         world = WorldWriter(self.get_logger())
-        self._run = Run(self._argv(action_id, track.instance_id), self._env(), LOGGER.log)
+        self._run = Run(self._argv(action_id, track.instance_id), env, LOGGER.log)
         code = None
         try:
             code = self._follow(self._run, log, track, ctx, world)
@@ -620,20 +627,20 @@ class Capability(CapabilityEngine):
 
     def _argv(self, action_id, instance_id=""):
         argv = [executable(EXECUTABLES[action_id])]
-        argv += ["--container", config_path(self.cfg["container"], "containers")]
-        argv += ["--bench-world", config_path(self.cfg["world"])]
-        argv += ["--speed-scale", str(float(self.cfg["speed_scale"]))]
+        argv += ["--container", config_path(self._param("container"), "containers")]
+        argv += ["--bench-world", config_path(self._param("world"))]
+        argv += ["--speed-scale", str(float(self._param("speed_scale")))]
         if instance_id:  # the container the orchestrator selected; standalone: any of its class
             argv += ["--instance-id", instance_id]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
 
     def _env(self):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-        env["BOX_OPENING_VIDEO"] = "1" if self.cfg["video"] else "0"
-        env["BOX_OPENING_VIZ"] = "1" if self.cfg["viz"] else "0"
-        env["BOX_OPENING_MISSION_FRAMES"] = "1" if self.cfg["mission_frames"] else "0"
-        if self.cfg["state_dir"]:
-            env["BOX_OPENING_STATE"] = self.cfg["state_dir"]
+        env["BOX_OPENING_VIDEO"] = "1" if self._param("video") else "0"
+        env["BOX_OPENING_VIZ"] = "1" if self._param("viz") else "0"
+        env["BOX_OPENING_MISSION_FRAMES"] = "1" if self._param("mission_frames") else "0"
+        if self._param("state_dir"):
+            env["BOX_OPENING_STATE"] = self._param("state_dir")
         return env
 
     def _mock(self, action_id, ctx):
