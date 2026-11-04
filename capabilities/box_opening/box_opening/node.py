@@ -353,6 +353,24 @@ class Tracker:
         return self.action_id == "open_box" and code == 0 and self.lid_down()
 
 
+# The run's last STOP line -> (error code, recoverable), first match wins (REVIEW_RULES U4).
+# Recoverable only where the run says nothing moved, or that the arm got home with nothing
+# held: a retry may then succeed. A STOP no rule names, and an exit with none (a traceback),
+# is `failed`, not recoverable: nothing says where the arm is.
+STOP_CODES = (
+    (re.compile(r"not starting"), "not_ready", True),
+    (re.compile(r"NO BOX"), "not_found", True),
+    # "— the arm holds", "it holds", "The arm holds over where it was": a person clears it
+    (re.compile(r"\bholds\b|did not get home"), "arm_holds", False),
+    (re.compile(r"MOVED the box"), "box_moved", True),
+    (re.compile(r"slipped out of the fingers"), "lid_dropped", False),
+    (re.compile(r"the lid is back on the box"), "lid_put_back", True),
+    (re.compile(r"did not pop|the knob is not up|pressed nothing"), "not_popped", True),
+    (re.compile(r"no button"), "no_button", True),
+    (re.compile(r"nothing was pressed|nothing moved"), "no_press", True),
+)
+
+
 def error_for(action_id, code, lines):
     """The EngineError a run that ended with `code` reports, from what it said last."""
     said = [ln for ln in lines if "STOP" in ln or "not starting" in ln or "FAIL" in ln or "NO BOX" in ln]
@@ -360,20 +378,19 @@ def error_for(action_id, code, lines):
     if code == EXIT_HALTED:
         # the e-stop, or control lost: the run sent nothing after it (REVIEW_RULES C5)
         return EngineError("arm_halted", why, recoverable=False)
-    if "not starting" in why:
-        return EngineError("not_ready", why, recoverable=True)
-    if code == 2 or "NO BOX" in why:
+    if code == 2:
         return EngineError("not_found", why, recoverable=True)
     if code == 3:
         return EngineError("not_home", why, recoverable=True)
-    if "the arm holds" in why or "did not get home" in why:
-        clear = "the arm holds where it stopped: clear it, attended, before the next run"
-        return EngineError("arm_holds", f"{why} -- {clear}", recoverable=False)
-    if "MOVED the box" in why or "left the table" in why:
-        return EngineError("box_moved", why, recoverable=True)
-    if code is not None and code < 0:
+    if code is not None and code < 0:  # killed: whatever it said last, it did not end its own way
         return EngineError("stopped", f"the run was ended by signal {-code}: {why}", recoverable=False)
-    return EngineError("failed", why, recoverable=True)
+    if said:
+        for pattern, error_code, recoverable in STOP_CODES:
+            if pattern.search(why):
+                if error_code == "arm_holds":
+                    why = f"{why} -- the arm holds where it stopped: clear it, attended, before the next run"
+                return EngineError(error_code, why, recoverable=recoverable)
+    return EngineError("failed", why, recoverable=False)
 
 
 class Capability(CapabilityEngine):

@@ -58,7 +58,10 @@ if os.environ.get("WAIT"):
     except KeyboardInterrupt:
         sys.stdout.write("[press_demo] stopped by Ctrl+C\\n")
         sys.exit(130)
-sys.exit(int(os.environ["EXIT"]))
+code = int(os.environ["EXIT"])
+if code < 0:  # killed by that signal, as the node's kill ends a run that does not stop
+    os.kill(os.getpid(), -code)
+sys.exit(code)
 """
 
 
@@ -216,7 +219,7 @@ def test_a_lid_put_back_on_the_box_leaves_the_gripper_empty_and_the_run_retryabl
     engine.instance_id = "food_container_1"
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, ctx)
-    assert e.value.error_code == "failed" and e.value.recoverable and "still in the fingers" not in str(e.value)
+    assert e.value.error_code == "lid_put_back" and e.value.recoverable and "still in the fingers" not in str(e.value)
     assert not ctx.world or ctx.world[-1] == {"gripper": {"holding": None}}  # not left holding
     assert not any("system_status" in w for w in ctx.world)  # recoverable: the arm is not in error
 
@@ -350,14 +353,54 @@ def test_a_run_the_driver_halted_is_arm_halted_and_not_recoverable(engine, monke
         (["[press_demo] NO BOX — scene camera: no candidate"], 2, "not_found"),
         (["[press_demo] the arm is not at its rest pose"], 3, "not_home"),
         (["[press_demo] STOP: the press MOVED the box — check it is still standing on the table"], 1, "box_moved"),
-        (["[press_demo] STOP: the stroke pressed nothing (3 N at its end)"], 1, "failed"),
+        (["[press_demo] STOP: the stroke pressed nothing (3 N at its end)"], 1, "not_popped"),
+        (["[press_demo] STOP: pressed, but the knob did not pop (2 mm up)"], 1, "not_popped"),
+        (["[press_demo] STOP: no button from the look pose (no aim) — nothing was pressed"], 1, "no_button"),
+        (["[press_demo] STOP: no reach-out press plans for the scene camera's box (IK); nothing moved"], 1, "no_press"),
+        (["[press_demo] STOP: x — the lid is back on the box, and the arm is home"], 1, "lid_put_back"),
     ],
 )
 def test_how_a_run_ended_is_its_error_code(engine, monkeypatch, say, code, error):
+    """REVIEW_RULES U4: the run's STOP reasons as named codes, recoverable where the run says
+    nothing moved, or that the arm got home with nothing held."""
     given(monkeypatch, say=say, code=code)
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, FakeCtx())
     assert e.value.error_code == error and e.value.recoverable
+
+
+@pytest.mark.parametrize(
+    ("say", "code", "error"),
+    [
+        (
+            [
+                "[press_demo] STOP: neither camera finds the box after the press — it may have left the table. "
+                "The arm holds at the look pose; check the box"
+            ],
+            1,
+            "arm_holds",
+        ),
+        (
+            ["[press_demo] STOP: the arm is home, but the lid slipped out of the fingers on the way to [0.60, -0.07]"],
+            1,
+            "lid_dropped",
+        ),
+        (["[press_demo] STOP: something no rule names"], 1, "failed"),
+        (["Traceback (most recent call last):", "ValueError: a bug"], 1, "failed"),
+        ([], 1, "failed"),
+        (["[press_demo] STOP: the stroke pressed nothing"], -9, "stopped"),
+        (["the run said nothing it could be judged by"], -9, "stopped"),
+    ],
+)
+def test_an_unknown_end_is_not_recoverable(engine, monkeypatch, say, code, error):
+    """REVIEW_RULES U4: a STOP no rule names, a traceback, a signal: nothing says where the arm
+    is, so nothing is retried; the arm's domain is in error."""
+    given(monkeypatch, say=say, code=code)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == error and not e.value.recoverable
+    assert ctx.world[-1]["system_status"]["arm"]["error_code"] == error
 
 
 def test_a_cancel_is_the_runs_own_ctrl_c_and_ends_the_action_cancelled(engine, monkeypatch):
