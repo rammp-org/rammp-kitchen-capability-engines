@@ -35,16 +35,14 @@ params:
   # The arm moves only with this true AND `execute` in the goal; otherwise every goal is a dry run.
   # true only for attended runs, someone on the e-stop.
   allow_execute: false
-  # flange face to the closed fingertips (m): sets where the container centre is (model.reach)
+  # flange face to the closed fingertips (m)
   flange_to_tip: 0.17955
-  # the hold the model checks a carried container against (reset's tilt check)
-  pitch_deg: 5.0
   # contact: vz (m/s, + up) back up to this after moving down; 0.0 came 4.5 s late on the flatbot
   vz_stop: -0.01
   # the hold after contact, this far (m) below the contact point, while the gripper opens
   hold_press: 0.003
   # held in impedance at the start of the lowering this long (s); must end still
-  settle_s: 3.0
+  settle_s: 0.2
   # contact more than this (m) above where the box's bottom meets the glass = not the glass
   early_stop: 0.03
   # joint impedance for the settle, lowering, hold, back-out and reset (one set: the stiffness never
@@ -53,41 +51,38 @@ params:
   impedance_zeta: 0.5
   impedance_torque_limit: [39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]
   # the hand's speed where the glass should be (m/s): what the contact test was tuned at
-  lower_speed: 0.02
-  # speed_scale of reset's joint moves (move_joints)
-  reset_speed_scale: 1.0
-  # the arm's tool frame vs the model's (m): further apart = wrong model or tool configuration
-  tool_frame_tol: 0.015
+  lower_speed: 0.12
   # the plans (plans/, last_plan.json), the start position and the descent recordings (descents/)
   state_dir: /config/microwave_place
   # locate: the scene camera's depth and intrinsics (the 3D detections are not used)
   depth_topic: /scene_camera/depth/image_rect_raw
   camera_info_topic: /scene_camera/color/camera_info
   detections_topic: /perception/object_detections_3d
-  # up to max_frames detected frames within timeout_s; at least `frames` of them within agree_m / agree_deg
-  # of their median
+  # detect continuously until `frames` consecutive detected frames lie within agree_m / agree_deg of their
+  # median (at most timeout_s)
   frames: 3
-  max_frames: 5
   timeout_s: 20.0
   agree_m: 0.01
   agree_deg: 2.0
   # SAM3's prompt for the whole oven (its outside, for the obstacles)
   microwave_prompt: microwave
   # the tool this far (m) over the turntable glass at the end of the line in, then lowered from there
-  above: 0.08
+  above: 0.055
+  # the container's spot this far (m) back from the turntable's middle toward the opening, along the oven's axis
+  closer: 0.02
   # the hand's heading off the oven's axis (deg, + = left), tried in this order; the first that passes wins
-  heading_offsets_deg: [0.0, 5.0, -5.0, 10.0, -10.0, 15.0, -15.0, 20.0, -20.0, 25.0, -25.0, 30.0, -30.0, 35.0, -35.0, 40.0, -40.0]
-  # every arm and gripper link at least this far (m) from every true obstacle box
+  heading_offsets_deg: [0.0]
+  # before the transit, the hand moved this far (cm) level to its left (- = right), tried in this order
+  # (each with every heading); the first that passes wins
+  side_shifts_cm: [3.0, -3.0, 6.0, -6.0, 9.0, -9.0]
+  # the side shift and the transit: every arm and gripper link at least this far (m) from the microwave box
   clear_min: 0.01
   # the hand's tilt vs the start, anywhere on the transit and the lines (deg)
   tilt_max_deg: 2.0
-  # also keep the held box clear_min from the obstacles
-  check_container: false
   # cuRobo's world files go here; the planner's container must see this directory at the SAME path
   worlds_dir: /home/snorlax/.ros/rammp_box_opening/worlds
-  # the transit at this fraction of cuRobo's timing
-  transit_speed: 1.0
-  # the hand's speed (m/s; position control) on the line in, the release lift and the back-out
+  # the hand's peak speed (m/s; position control, min-jerk: about half of it on average) on the approach
+  # (side shift + transit + line in, one motion) and the back-out
   insert_speed: 0.16
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
