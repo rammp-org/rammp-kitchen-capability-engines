@@ -112,6 +112,10 @@ params:
   joy_timeout_s: 0.25
   fridge_tf_timeout_s: 1.0
   ee_state_timeout_s: 0.2
+  # for when no fridge transform exists:
+  search_when_no_fridge: true
+  search_range_m: 0.15
+  search_auto_home: false
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -164,6 +168,7 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
+  
 # ~/goal_pose, ~/commanded_twist, ~/servo_target and ~/followed_plane exist only while an action
 # runs (create_action_publisher): not declared, since smoke checks every declared topic on an idle
 # mock. The arm driver's topics are self.arm's, as in every capability.
