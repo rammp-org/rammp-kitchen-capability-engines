@@ -1293,6 +1293,23 @@ def test_every_press_is_cut_at_its_contact_and_watched_all_the_way_down(ctx, mon
         assert got.slow_z == pytest.approx(got.top_z + dp.TOUCH_SLOW_M) and got.arm_z >= got.slow_z
 
 
+def test_the_drivers_force_is_logged_at_the_press_and_the_set_down(ctx, monkeypatch, tmp_path):
+    """Owner 2026-11-04: log the driver's estimate of the force on the tool (/ee_state) beside the
+    run's own (the springs' pull at the hold; the set-down's), never instead of it."""
+    asked = []
+
+    def ee_force(since=None, span_s=None):
+        asked.append((since, span_s))
+        return {"mean_n": [0.4, -0.3, 18.2], "peak_up_n": 21.0, "peak_n": 21.1, "samples": 15}
+
+    monkeypatch.setattr(ctx.client, "ee_force", ee_force, raising=False)
+    code, _rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0
+    (sd,) = (r for r in rows if r["leg"] == "reach_setdown")  # the hold's: test_depth_press
+    assert sd["driver_force"]["at_release"]["mean_n"] == [0.4, -0.3, 18.2]
+    assert (None, 0.2) in asked
+
+
 @pytest.mark.parametrize("verdict", ["early", "late", "never", "failed"])
 def test_a_press_refused_by_its_contact_goes_back_up_and_home(ctx, monkeypatch, tmp_path, capsys, verdict):
     """Review round 2: a contact well off the cameras' top, none at all, or a watch that failed:

@@ -1330,6 +1330,9 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
         q_end, end_z = contact.held_ref, float(contact.stop_z)
     q_end = np.asarray(q_end, float)
     held = ctx.client.settled_efforts(duration_s=0.15, settle_s=max(0.0, float(cfg.push_hold_s) - 0.15))
+    # the driver's own estimate of the force on the tool over the same last 0.15 s of the hold
+    # (/ee_state): beside the springs' pull below, never instead of it
+    driver_force = getattr(ctx.client, "ee_force", lambda **k: None)(span_s=0.15)
     qh = held[1] if held is not None else ctx.client.joints()
     seen["held_joints"] = [float(v) for v in qh]
     qh = np.asarray(on_branch(qh, q_end), float)  # the reading is wrapped into (-pi, pi], the stroke's joints are not
@@ -1355,6 +1358,9 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
     )
     if stroke.bend_why:
         facts["bend_why"] = stroke.bend_why
+    if driver_force is not None:
+        # the world pushing up on the pressing tool: its z, against press_n
+        facts["driver_force"] = dict(driver_force, press_n=driver_force["mean_n"][2])
     lean = _lean_deg(stroke.quat)
     if lean >= LEAN_SAID_DEG:
         facts["lean_deg"] = lean

@@ -1933,7 +1933,15 @@ def test_a_bend_past_bend_max_m_flies_straight_and_the_run_says_why(ctx, monkeyp
     assert list(stroke.legs[-1][1][-1]) == pytest.approx(stroke.q_end)
     assert "; not bent: a bend would move the pads' reference 60 mm sideways" in dp.press_text(stroke, cfg)
     q_b = np.linalg.solve(chain.A, [end[0], end[1], bottom])  # the pads held at the bottom, over the aim
+    # the driver's own estimate of the force on the tool, beside the springs' (owner 2026-11-04)
+    ctx.client.ee_force = lambda since=None, span_s=None: {
+        "mean_n": [1.0, 0.0, 18.7],
+        "peak_up_n": 19.0,
+        "peak_n": 19.0,
+        "samples": 15,
+    }
     result, note = _hold_note(ctx, monkeypatch, tmp_path, chain, stroke, list(q_b) + [0.0] * 4)
+    assert note["driver_force"]["press_n"] == 18.7 and note["driver_force"]["samples"] == 15
     assert not note["bent"] and note["bend_why"] == stroke.bend_why and note["bend_mm"] == 0.0
     # held there the springs push 19.2 N down and 9.6 N sideways (A^T f = Kq (q_end - q_b))
     assert note["press_n"] == pytest.approx(19.2, abs=0.05) and note["sideways_n"] == pytest.approx(9.6, abs=0.05)

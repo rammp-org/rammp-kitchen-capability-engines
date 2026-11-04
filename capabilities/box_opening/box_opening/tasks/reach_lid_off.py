@@ -3076,7 +3076,23 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
     ok_q, pos, _stalled = ctx.client.gripper_cmd(None)  # query only: still on the knob?
     kept = not ok_q or pos is None or in_band(pos, cfg.grip_band)
     watched = None if getattr(carry, "contact", None) is None else carry.contact.record()
-    runner.note("reach_setdown", knuckle=None if pos is None else round(float(pos), 3), kept=kept, contact=watched)
+    # the driver's estimate of the force on the tool as the lid stands on the table, before the
+    # fingers open (the last 0.2 s; the lid's own weight is in it), and its peak over the carry
+    ee = getattr(ctx.client, "ee_force", None)
+    last = getattr(ctx.client, "last_execution", None) or {}
+    driver_force = None
+    if ee is not None:
+        at = ee(span_s=0.2)
+        over = ee(since=last.get("sent_at")) if last.get("sent_at") is not None else None
+        if at is not None or over is not None:
+            driver_force = {"at_release": at, "over_the_carry": over}
+    runner.note(
+        "reach_setdown",
+        knuckle=None if pos is None else round(float(pos), 3),
+        kept=kept,
+        contact=watched,
+        driver_force=driver_force,
+    )
     if watched and watched.get("met"):
         log.info(
             "[press_demo] SET-DOWN CONTACT: the lid met the table %+.0f mm from where the plan put it; %s"
