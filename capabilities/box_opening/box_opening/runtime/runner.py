@@ -37,6 +37,7 @@ from box_opening.constants import (
 )
 from box_opening.geometry import ang_diff
 from box_opening.runtime.abort import ArmHalted
+from box_opening.runtime.driver import contact_profile_for
 from box_opening.runtime.guards import (
     ARM_AFTER_CAP,
     GROUP_SETTLE_S,
@@ -111,6 +112,10 @@ class LegResult:
     # arm standing at its end while a lookahead it hosted still planned
     # (_stood_s; 0.01-1.50 s per grip rise). None: nothing was sent
     stood_s: float = None
+    # what the arm driver's contact monitor said of this execution (client.contact_window): the
+    # residual's peak |r| a joint, the profile and thresholds in force, its mode and its would-be
+    # trips so far; the profile this run asked for it (Runner._contact_profile). None: not heard
+    driver_contact: dict = None
     # what tripped the guard (guards.TorqueGuard.trip_report): the joint, its
     # deviation from the baseline in force, and the run-up — so a false trip
     # can be read off the log instead of re-flown
@@ -1151,6 +1156,7 @@ class Runner:
 
         self.wait_flights()  # the last flight's file written before this goal goes out
         self._note_settle()  # the last arrival's, its window cut by this goal
+        asked = self._contact_profile([reflex.name])
         t0 = time.monotonic()
         try:
             outcome, info = self.client.execute(traj, 1.0, guard=None, while_running=hook)
@@ -1168,6 +1174,7 @@ class Runner:
             progress=info.get("progress"),
             t_wall=arrived[0] - t0,
             flight=self._keep_flight([reflex.name], outcome, flew, info, traj, arrived),
+            driver_contact=self._contact_seen(info, arrived, asked),
             **flew,
         )
         self._end_if_halted(rres, [reflex])
@@ -1416,6 +1423,7 @@ class Runner:
         gains = group[0].gains
         self.wait_flights()  # the last flight's file written before this goal goes out
         self._note_settle()  # the last arrival's, its window cut by this goal
+        asked = self._contact_profile([g.name for g in group])
         t0 = time.monotonic()
         try:
             outcome, info = self.client.execute(
@@ -1470,10 +1478,57 @@ class Runner:
             retime=self.last_retime,
             flight=self._keep_flight([g.name for g in group], outcome, flew, info, traj, arrived),
             stood_s=None if stood is None else round(stood, 4),
+            driver_contact=self._contact_seen(info, arrived, asked),
             **flew,
         )
         self._end_if_halted(res, group)
         return res
+
+    def _contact_profile(self, names):
+        """The driver's contact thresholds for an execution of the legs `names`
+        (driver.contact_profile_for: DEFAULT in free air, LOOSE where it meets
+        anything), set where its monitor enforces (client.set_contact_profile);
+        the profile asked, or None where nothing was. A refusal is said, never
+        what stops the run: the backstop is the driver's, the run its own."""
+        setter = getattr(self.client, "set_contact_profile", None)
+        if setter is None:
+            return None
+        name = contact_profile_for(names)
+        try:
+            got = setter(name)
+        except Exception as e:  # noqa: BLE001 -- a backstop's setting never costs the run
+            log.info("[runner] the driver's contact profile %s was not set (%s)" % (name, e))
+            return None
+        if got is None:
+            return None
+        if not got[0]:
+            log.info("[runner] the driver refused its contact profile %s: %s" % (name, got[1]))
+        return name if got[0] else None
+
+    def _contact_seen(self, info, arrived, asked):
+        """LegResult.driver_contact: what the driver's contact monitor said of the execution
+        `info` (client.contact_window, from its goal going out to `arrived`), with the profile
+        this run asked for it. None where nothing was heard. A measurement only."""
+        window = getattr(self.client, "contact_window", None)
+        if window is None:
+            return None
+        try:
+            seen = window(info.get("sent_at"), arrived[0])
+        except Exception:  # noqa: BLE001
+            return None
+        if seen is not None and asked is not None:
+            seen["asked"] = asked
+        return seen
+
+    def restore_contact_profile(self):
+        """The driver's contact thresholds back to DEFAULT where this run set any other (the
+        driver serves every program on the arm; a run leaves it as it found it)."""
+        setter = getattr(self.client, "set_contact_profile", None)
+        if setter is not None and getattr(self.client, "_contact_profile", None) not in (None, "default"):
+            try:
+                setter("default")
+            except Exception as e:  # noqa: BLE001
+                log.info("[runner] the driver's contact profile was not restored to DEFAULT (%s)" % e)
 
     def _end_if_halted(self, res, legs):
         """An execution the driver ended HALTED (the e-stop) or NOT_AUTHORIZED (control lost)

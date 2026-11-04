@@ -1626,3 +1626,98 @@ def test_still_is_the_newest_readings_each_joint_under_the_limit_none_further_ap
     unstamped = [S(3.0 + 0.02 * k, 0.0, q, rest, None) for k in range(5)]
     assert client_mod.still_for(unstamped, 0.02, gap) == pytest.approx(0.08)
     assert client_mod.still_for([], 0.02, gap) == 0.0
+
+
+def test_the_drivers_contact_stop_ends_the_run_and_names_the_joint(monkeypatch):
+    """rammp_arm_interfaces 2.0: CONTACT_STOP (-11) — the driver's contact monitor stopped the
+    arm (it floats, latched until /clear_faults). The arm is not the run's to move: "halted"."""
+    d = _Driver(error_code=-11, error_string="contact stop")
+    c = _client(d)
+    c._diag_cb(_diagnostics("running"))
+    kv = lambda k, v: SimpleNamespace(key=k, value=v)  # noqa: E731
+    c._diag_cb(
+        SimpleNamespace(
+            status=[
+                SimpleNamespace(
+                    name="kinova_gen3_node: Contact detection",
+                    message="stopped on contact",
+                    values=[kv("detection", "enforce"), kv("phase", "latched"), kv("last_trip_joint", "2")],
+                )
+            ]
+        )
+    )
+    outcome, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
+    assert outcome == "halted" and "CONTACT_STOP" in info["message"] and "(joint 2)" in info["message"]
+    assert "/clear_faults" in info["message"] and c.halted == info["message"]
+
+
+def test_what_the_driver_said_of_an_execution_is_kept_the_residual_peaks_and_the_force():
+    c = _client()
+    c._residual, c._wrench = client_mod.deque(maxlen=100), client_mod.deque(maxlen=100)
+    t = time.monotonic()
+    for r in ([1.0, -2.0, 0.5, 0, 0, 0, 0], [3.5, -1.0, -6.0, 0, 0, 0, 0.2]):
+        c._residual_cb(SimpleNamespace(effort=r))
+    for fz in (2.0, 14.0, 16.0):
+        c._ee_cb(SimpleNamespace(wrench=SimpleNamespace(force=SimpleNamespace(x=0.5, y=-0.5, z=fz))))
+    c._ee_cb(SimpleNamespace(wrench=SimpleNamespace(force=SimpleNamespace(x=float("nan"), y=0.0, z=0.0))))
+    c._diag_cb(
+        SimpleNamespace(
+            status=[
+                SimpleNamespace(
+                    name="kinova_gen3_node: Contact detection",
+                    message="",
+                    values=[
+                        SimpleNamespace(key="detection", value="observe"),
+                        SimpleNamespace(key="would_trips", value="3"),
+                        SimpleNamespace(key="profile", value="default"),
+                    ],
+                )
+            ]
+        )
+    )
+    seen = c.contact_window(t - 1.0, time.monotonic() + 1.0)
+    assert seen["r_peak_nm"] == [3.5, 2.0, 6.0, 0, 0, 0, 0.2] and seen["r_samples"] == 2
+    assert (seen["detection"], seen["would_trips"], seen["profile"]) == ("observe", 3, "default")
+    f = c.ee_force(since=t - 1.0)
+    assert f["mean_n"] == [0.5, -0.5, 10.7] and f["peak_up_n"] == 16.0 and f["samples"] == 3  # the NaN left out
+    assert c.ee_force(since=time.monotonic() + 5) is None
+
+
+def test_the_drivers_thresholds_are_set_only_where_it_enforces_and_only_on_a_change(monkeypatch):
+    srv_mod = pytest.importorskip("rammp_arm_interfaces.srv")
+    if not hasattr(srv_mod, "SetContactThresholds"):
+        pytest.skip("rammp_arm_interfaces < 2.0: no SetContactThresholds (the image's base predates it)")
+    SetContactThresholds = srv_mod.SetContactThresholds
+
+    class _Srv:
+        def __init__(self):
+            self.asked = []
+
+        def wait_for_service(self, timeout_sec=None):
+            return True
+
+        def call_async(self, req):
+            self.asked.append(int(req.profile))
+            return _Future(SetContactThresholds.Response(accepted=True, message="", profile=req.profile))
+
+    c = _client()
+    srv = _Srv()
+    c._set_thresholds = srv
+    monkeypatch.setattr(client_mod, "spin_until_done", lambda node, fut, timeout_s, abort=None: fut.result())
+    kv = lambda k, v: SimpleNamespace(key=k, value=v)  # noqa: E731
+
+    def mode(m):
+        c._diag_cb(
+            SimpleNamespace(
+                status=[
+                    SimpleNamespace(name="kinova_gen3_node: Contact detection", message="", values=[kv("detection", m)])
+                ]
+            )
+        )
+
+    mode("observe")
+    assert c.set_contact_profile("loose") is None and srv.asked == []  # observe stops nothing: left as it is
+    mode("enforce")
+    assert c.set_contact_profile("loose") == (True, "") and c.set_contact_profile("loose") is None
+    assert c.set_contact_profile("default") == (True, "")
+    assert srv.asked == [2, 0]  # LOOSE, then DEFAULT: once each

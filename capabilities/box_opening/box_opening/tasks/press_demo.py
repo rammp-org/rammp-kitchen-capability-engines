@@ -1669,6 +1669,7 @@ def main():
             # is noted, from what was heard (runner.flush), and its frames written,
             # except after a cancel, which must end at once (no frames kept)
             runner.flush()
+            runner.restore_contact_profile()  # the driver serves every program on the arm: as it was found
             if not ctrl_c:
                 keep_mission_frames(getattr(ctx, "mission_frames", None), ending)
 

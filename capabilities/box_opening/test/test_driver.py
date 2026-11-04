@@ -207,3 +207,54 @@ def test_the_drivers_diagnostics_say_its_link_and_its_e_stop():
     assert "e-stopped" in health_refusal({"link_state": "running", "estopped": True})
     assert health_refusal({"link_state": "running", "estopped": False}) is None
     assert health_refusal(None) is None and health_refusal({}) is None
+
+
+def test_the_drivers_contact_monitor_says_its_mode_its_thresholds_and_a_latched_stop():
+    from types import SimpleNamespace
+
+    from box_opening.runtime import driver as drv
+
+    kv = lambda k, v: SimpleNamespace(key=k, value=v)  # noqa: E731
+    observe = SimpleNamespace(
+        name="kinova_gen3_node: Contact detection",
+        message="observe mode: not stopping the arm; 2 would-be trips, last on joint 4",
+        values=[
+            kv("detection", "observe"),
+            kv("phase", "armed"),
+            kv("profile", "default"),
+            kv("thresholds_nm", "16, 16, 12, 12, 4, 4, 4"),
+            kv("would_trips", "2"),
+            kv("last_trip_joint", "4"),
+            kv("last_trip_residual_nm", "1, 2, 3, 13.5, 0, 0, 0"),
+        ],
+    )
+    h = drv.driver_health_from(SimpleNamespace(status=[observe]))
+    c = h["contact"]
+    assert (c["detection"], c["phase"], c["profile"], c["would_trips"]) == ("observe", "armed", "default", 2)
+    assert c["thresholds_nm"] == [16, 16, 12, 12, 4, 4, 4] and c["last_trip_residual_nm"][3] == 13.5
+    assert drv.health_refusal(h) is None  # observe stops nothing
+    latched = SimpleNamespace(
+        name="kinova_gen3_node: Contact detection",
+        message="stopped on contact: joint 2",
+        values=[kv("detection", "enforce"), kv("phase", "latched")],
+    )
+    why = drv.health_refusal(drv.driver_health_from(SimpleNamespace(status=[latched])))
+    assert "stopped the arm on contact" in why and "/clear_faults" in why
+    # the driver's contact stop is the arm not the run's to move, as the e-stop is
+    assert drv.CONTACT_STOP == -11 and drv.CONTACT_STOP in drv.LOST_CONTROL and drv.RESULT_NAMES[-11] == "CONTACT_STOP"
+
+
+def test_free_air_executions_fly_under_the_default_thresholds_and_the_rest_loose():
+    from box_opening.runtime.driver import contact_profile_for
+
+    assert contact_profile_for(["home"]) == contact_profile_for(["reach:look"]) == "default"
+    assert contact_profile_for(["clear-margin", "home"]) == "default"
+    for names in (
+        ["reach:re-aim", "reach:slide-in", "depth:approach", "depth:press"],
+        ["grip:down"],
+        ["lid:lift", "lid:clear", "lid:carry", "place:down", "place:touch"],
+        ["place:retreat"],
+        ["reach:look", "reach:re-aim"],
+        [],
+    ):
+        assert contact_profile_for(names) == "loose", names

@@ -69,3 +69,7 @@ subscribes:
   - /perception/object_detections
   # the arm driver's diagnostics: its link to the arm, its e-stop (readiness, a refused goal)
   - /diagnostics
+  # the driver's estimate of the force on the tool, logged at the press's hold and the set-down
+  - /ee_state
+  # the driver's contact monitor's residual, logged per motion (with its contact_debug_topic on)
+  - /contact_monitor/residual

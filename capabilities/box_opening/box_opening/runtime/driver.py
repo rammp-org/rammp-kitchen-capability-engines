@@ -33,13 +33,16 @@ RESULT_NAMES = {
     -8: "NOT_AUTHORIZED",
     -9: "HALTED",
     -10: "STREAM_REJECTED",
+    -11: "CONTACT_STOP",  # rammp_arm_interfaces 2.0 (#23): the driver's contact monitor stopped the arm
 }
 SUCCESSFUL = 0
 NOT_AUTHORIZED = -8
 HALTED = -9
-# the results after which the arm is not the run's to move: the e-stop (HALTED) and control
-# lost (NOT_AUTHORIZED). The client's outcome for either is "halted" (REVIEW_RULES C5)
-LOST_CONTROL = (HALTED, NOT_AUTHORIZED)
+CONTACT_STOP = -11
+# the results after which the arm is not the run's to move: the e-stop (HALTED), control lost
+# (NOT_AUTHORIZED), and the driver's own contact stop (CONTACT_STOP: the arm floats, latched until
+# /clear_faults). The client's outcome for each is "halted" (REVIEW_RULES C5)
+LOST_CONTROL = (HALTED, NOT_AUTHORIZED, CONTACT_STOP)
 
 # /joint_states reports the Robotiq knuckle as GripperSetpoint.position x 0.8,
 # the knuckle's URDF upper limit (the driver's gripper tier). Every gripper
@@ -114,10 +117,22 @@ def result_message(error_code, error_string=""):
 DIAGNOSTICS_TOPIC = "/diagnostics"
 
 
+DIAG_NAMES = ("Arm link", "Arbitration", "Contact detection")  # the statuses driver_health_from reads
+
+
+def _nums(text):
+    try:
+        return [float(v) for v in str(text).replace(",", " ").split()]
+    except ValueError:
+        return None
+
+
 def driver_health_from(msg, health=None):
     """`health` (a dict, or None for a new one) with what a DiagnosticArray `msg` says of the arm
-    driver: its "Arm link" status (link_state, link_reason) and its "Arbitration" (estopped).
-    Statuses of other names (every other node's) leave it as it was."""
+    driver: its "Arm link" status (link_state, link_reason), its "Arbitration" (estopped), and
+    its "Contact detection" (`contact`: detection off | observe | enforce, phase settling | armed |
+    latched, profile, thresholds_nm, would_trips and the last trip). Statuses of other names
+    (every other node's) leave it as it was."""
     out = dict(health or {})
     for st in getattr(msg, "status", ()):
         name = str(getattr(st, "name", ""))
@@ -127,6 +142,22 @@ def driver_health_from(msg, health=None):
             out["link_reason"] = values.get("reason", "") or str(getattr(st, "message", ""))
         elif name.endswith("Arbitration"):
             out["estopped"] = values.get("estopped", "").strip().lower() in ("true", "1", "yes")
+        elif name.endswith("Contact detection"):
+            c = {
+                "detection": values.get("detection", ""),
+                "phase": values.get("phase", ""),
+                "profile": values.get("profile", ""),
+                "thresholds_nm": _nums(values.get("thresholds_nm", "")),
+                "message": str(getattr(st, "message", "")),
+            }
+            try:
+                c["would_trips"] = int(values.get("would_trips", ""))
+            except ValueError:
+                c["would_trips"] = None
+            if "last_trip_joint" in values:
+                c["last_trip_joint"] = values["last_trip_joint"]
+                c["last_trip_residual_nm"] = _nums(values.get("last_trip_residual_nm", ""))
+            out["contact"] = c
     return out
 
 
@@ -146,7 +177,31 @@ def health_refusal(health):
         )
     if health.get("estopped"):
         return "the arm driver is e-stopped (its /estop is latched) — clear it before the next run"
+    contact = health.get("contact") or {}
+    if contact.get("phase") == "latched":
+        return (
+            "the arm driver stopped the arm on contact and holds it latched (%s) — clear the arm, then clear it "
+            "(`ros2 service call /clear_faults std_srvs/srv/Trigger`)" % (contact.get("message") or "no reason")
+        )
     return None
+
+
+# The driver's contact monitor as a backstop (contact_detection: enforce on the arm node): its
+# thresholds per execution, by what the execution does. Free air only — the run's look, its way
+# home, the clear before it — is held to the driver's DEFAULT; an execution that meets anything on
+# purpose (the way in to the button, the grip, the lift off the box and the set-down, the retreat
+# off the lid) to LOOSE. The planner holds no flatbot body (world_empty): a home that met it is what
+# DEFAULT stops. Observe mode stops nothing and is left at its profile; the residual's peaks per
+# execution are logged either way (Runner: driver_contact)
+CONTACT_PROFILES = {"default": 0, "sensitive": 1, "loose": 2}
+FREE_AIR_LEGS = ("reach:look", "home", "clear-margin", "retreat:home")
+
+
+def contact_profile_for(names):
+    """The contact profile an execution of the legs `names` flies under: "default" where every
+    leg is free air (FREE_AIR_LEGS, a leg's name or its prefix), else "loose"."""
+    free = all(any(str(n) == f or str(n).startswith(f + ":") for f in FREE_AIR_LEGS) for n in names)
+    return "default" if names and free else "loose"
 
 
 def setpoint_position(knuckle_rad):

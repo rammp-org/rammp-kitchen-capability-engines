@@ -97,6 +97,15 @@ While an action runs (its run subscribes; the node itself reads nothing).
 | `/perception/object_detections`      | `rammp_perception_interfaces/ObjectDetections` | yes      | The scene segmenter's boxes: the selected container's                                                                                                                     |
 | `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`                           | yes      | The finger tips and both cameras in `arm_mount`                                                                                                                           |
 | `/diagnostics`                       | `diagnostic_msgs/DiagnosticArray`              | no       | The arm driver's: its link to the arm and its e-stop. A run does not start while the link is not running, and a goal refused while it is down ends the run (`arm_halted`) |
+| `/ee_state`                          | `rammp_arm_interfaces/EeState`                 | no       | The driver's estimate of the force on the tool: logged at the press's hold and at the set-down (`driver_force`)                                                           |
+| `/contact_monitor/residual`          | `sensor_msgs/JointState`                       | no       | The driver's contact monitor's residual (with its `contact_debug_topic` on): its peaks logged per motion (`driver_contact`)                                               |
+
+Where the arm driver's contact monitor enforces (its `contact_detection`), each
+motion sets its thresholds by `/set_contact_thresholds`: the driver's `DEFAULT`
+in free air (the look, the way home), `LOOSE` where the run meets anything on
+purpose, and `DEFAULT` again as the run ends. Its contact stop (`CONTACT_STOP`)
+ends the run as the e-stop does (`arm_halted`). In `observe` the run sets
+nothing and logs what the monitor saw of each motion.
 
 ## Orchestrator interface
 

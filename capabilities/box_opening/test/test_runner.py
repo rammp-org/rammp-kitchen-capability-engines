@@ -271,6 +271,41 @@ def test_the_runs_folder_keeps_the_newest_records(tmp_path):
     ]
 
 
+def test_each_execution_asks_the_driver_for_its_contact_profile_and_keeps_what_it_said(tmp_path):
+    """The driver's contact monitor as a backstop: DEFAULT thresholds for free air (the look,
+    home), LOOSE for an execution that meets anything; what the monitor said of each execution
+    in its row; DEFAULT again as the run leaves (restore_contact_profile)."""
+    import json
+
+    class Asks(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.asked, self._contact_profile = [], None
+
+        def set_contact_profile(self, name, timeout_s=1.0):
+            if name == self._contact_profile:
+                return None
+            self.asked.append(name)
+            self._contact_profile = name
+            return True, ""
+
+        def contact_window(self, t0, t1):
+            return {"r_peak_nm": [1.0] * 7, "detection": "enforce", "would_trips": 0}
+
+    c = Asks()
+    r = runner(c, tmp_path)
+    r.run([leg("reach:look", Q0, Q1, chain=0)], execute=True)
+    r.run([leg("depth:press", Q1, Q2, chain=1)], execute=True)
+    r.run([leg("home", Q2, Q0, chain=2)], execute=True)
+    assert c.asked == ["default", "loose", "default"]
+    rows = [json.loads(line) for line in next(tmp_path.glob("run-*.jsonl")).read_text().splitlines()]
+    assert [x["driver_contact"]["asked"] for x in rows] == ["default", "loose", "default"]
+    assert rows[1]["driver_contact"]["r_peak_nm"] == [1.0] * 7
+    c._contact_profile = "loose"
+    r.restore_contact_profile()
+    assert c.asked[-1] == "default"
+
+
 def test_contact_invalidates_downstream(tmp_path):
     c = FakeClient()
     g = GuardSpec(touch_nm=3.0, trip="setdown")

@@ -24,6 +24,7 @@ import threading
 import time
 from collections import deque, namedtuple
 
+import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus
 from action_msgs.srv import CancelGoal
@@ -73,6 +74,14 @@ except ImportError:
 
 
 _GRIPPER_JOINT_HINTS = ("robotiq", "knuckle", "finger")
+
+# the arm driver's contact monitor and its force estimate (kinova_gen3_ros2): the residual r
+# (sensor_msgs/JointState, effort = r in N·m, 50 Hz, published with contact_debug_topic on),
+# the tool's state with the driver's estimate of the external wrench (rammp_arm_interfaces/
+# EeState, arm_mount), and the thresholds' service (SetContactThresholds, interfaces >= 2.0)
+CONTACT_RESIDUAL_TOPIC = "/contact_monitor/residual"
+EE_STATE_TOPIC = "/ee_state"
+CONTACT_THRESHOLDS_SERVICE = "/set_contact_thresholds"
 
 # ExecuteJointTrajectory.Goal.control_mode / .preemption (rammp_arm_interfaces)
 POSITION = 0
@@ -261,6 +270,20 @@ class PlannerClient:
 
             node.create_subscription(DiagnosticArray, driver.DIAGNOSTICS_TOPIC, self._diag_cb, 10)
         except ImportError:  # an install without diagnostic_msgs: nothing heard, nothing refused by it
+            pass
+        # the driver's contact monitor's residual (N·m a joint, 50 Hz, with contact_debug_topic on)
+        # and its estimate of the force at the tool (/ee_state's wrench, arm_mount): logged per
+        # execution and at the press's hold and the set-down (contact_window, ee_force)
+        self._residual = deque(maxlen=self.RESIDUAL_KEEP)
+        self._wrench = deque(maxlen=self.WRENCH_KEEP)
+        self._contact_profile = None  # the profile this client last set (set_contact_profile)
+        self._set_thresholds = None
+        node.create_subscription(JointState, CONTACT_RESIDUAL_TOPIC, self._residual_cb, qos_profile_sensor_data)
+        try:
+            from rammp_arm_interfaces.msg import EeState
+
+            node.create_subscription(EeState, EE_STATE_TOPIC, self._ee_cb, qos_profile_sensor_data)
+        except ImportError:  # interfaces without EeState: no force logged
             pass
         self._plan_pose = ActionClient(node, PlanToPose, NODE_NAMESPACE + "/plan_to_pose")
         self._plan_joints = ActionClient(node, PlanToJoints, NODE_NAMESPACE + "/plan_to_joints")
@@ -579,10 +602,90 @@ class PlannerClient:
     def _diag_cb(self, msg):
         # on whichever thread spins this node; never raises (someone else's node publishes it)
         try:
-            if any(str(st.name).endswith(("Arm link", "Arbitration")) for st in msg.status):
+            if any(str(st.name).endswith(driver.DIAG_NAMES) for st in msg.status):
                 self._driver_health = driver.driver_health_from(msg, getattr(self, "_driver_health", None))
         except Exception:  # noqa: BLE001
             pass
+
+    # ~60 s of each: the longest execution of a run is under 10 s (FEEDBACK_KEEP's note)
+    RESIDUAL_KEEP = 3000
+    WRENCH_KEEP = 6000
+
+    def _residual_cb(self, msg):
+        try:
+            self._residual.append((time.monotonic(), tuple(float(v) for v in msg.effort[:7])))
+        except Exception:  # noqa: BLE001 -- a measurement only
+            pass
+
+    def _ee_cb(self, msg):
+        try:
+            f = msg.wrench.force
+            self._wrench.append((time.monotonic(), float(f.x), float(f.y), float(f.z)))
+        except Exception:  # noqa: BLE001 -- a measurement only
+            pass
+
+    def contact_window(self, t0, t1):
+        """What the driver's contact monitor said of an execution heard from `t0` to `t1`
+        (time.monotonic()): the residual's peak |r| a joint (N·m; with contact_debug_topic on),
+        the thresholds and profile in force, its detection mode, and its would-be trips counted so
+        far (cumulative, as its diagnostics last said: ~1 s behind). None where it said nothing."""
+        out = {}
+        rs = [r for t, r in list(getattr(self, "_residual", ())) if t0 is not None and t0 <= t <= t1]
+        if rs:
+            out["r_peak_nm"] = [round(max(abs(r[j]) for r in rs), 2) for j in range(len(rs[0]))]
+            out["r_samples"] = len(rs)
+        c = (getattr(self, "_driver_health", None) or {}).get("contact")
+        if c:
+            out.update(
+                detection=c.get("detection"),
+                profile=c.get("profile"),
+                thresholds_nm=c.get("thresholds_nm"),
+                would_trips=c.get("would_trips"),
+            )
+        return out or None
+
+    def ee_force(self, since=None, span_s=None):
+        """The driver's estimate of the force the world puts on the tool (/ee_state, arm_mount,
+        N), over the samples heard since `since` (time.monotonic()) or in the last `span_s`:
+        {"mean_n": [fx, fy, fz], "peak_up_n", "peak_n", "samples"}, or None. Pressing down, the
+        world pushes up: fz > 0. A held payload reads as force too; NaN while the arm faults."""
+        now = time.monotonic()
+        lo = since if since is not None else (now - float(span_s or 0.0))
+        w = [x for x in list(getattr(self, "_wrench", ())) if x[0] >= lo and all(math.isfinite(v) for v in x[1:])]
+        if not w:
+            return None
+        f = np.array([x[1:] for x in w], float)
+        return {
+            "mean_n": [round(float(v), 1) for v in f.mean(axis=0)],
+            "peak_up_n": round(float(f[:, 2].max()), 1),
+            "peak_n": round(float(np.linalg.norm(f, axis=1).max()), 1),
+            "samples": len(w),
+        }
+
+    def set_contact_profile(self, name, timeout_s=1.0):
+        """The driver's contact thresholds to the profile `name` (driver.CONTACT_PROFILES), where
+        its contact monitor enforces (its diagnostics say so) and the profile is not already this
+        client's; a no-op otherwise (observe stops nothing, off has no monitor). (accepted, what
+        the driver said), or None where nothing was asked."""
+        c = (getattr(self, "_driver_health", None) or {}).get("contact") or {}
+        if c.get("detection") != "enforce" or name == getattr(self, "_contact_profile", None):
+            return None
+        try:
+            from rammp_arm_interfaces.srv import SetContactThresholds
+        except ImportError:
+            return False, "these interfaces have no SetContactThresholds (rammp_arm_interfaces < 2.0)"
+        if getattr(self, "_set_thresholds", None) is None:
+            self._set_thresholds = self.node.create_client(SetContactThresholds, CONTACT_THRESHOLDS_SERVICE)
+        if not self._set_thresholds.wait_for_service(timeout_sec=timeout_s):
+            return False, "%s does not answer" % CONTACT_THRESHOLDS_SERVICE
+        req = SetContactThresholds.Request()
+        req.profile = driver.CONTACT_PROFILES[name]
+        got = spin_until_done(self.node, self._set_thresholds.call_async(req), timeout_s)
+        if got is None:
+            return False, "%s did not answer in %.1f s" % (CONTACT_THRESHOLDS_SERVICE, timeout_s)
+        if got.accepted:
+            self._contact_profile = name
+        return bool(got.accepted), str(got.message or "")
 
     def driver_health(self, timeout_s=0.0):
         """What the driver's diagnostics said last of its link to the arm and its e-stop
@@ -1347,8 +1450,14 @@ class PlannerClient:
             return "arrived", info
         info["message"] = driver.result_message(result.error_code, result.error_string)
         if result.error_code in driver.LOST_CONTROL:
-            # the e-stop, or control lost: the arm is not the run's to move (REVIEW_RULES C5).
-            # Latched: every goal after this one is refused before it is sent
+            # the e-stop, control lost, or the driver's contact stop: the arm is not the run's to
+            # move (REVIEW_RULES C5). Latched: every goal after this one is refused before it is sent
+            if result.error_code == driver.CONTACT_STOP:
+                c = (getattr(self, "_driver_health", None) or {}).get("contact") or {}
+                info["message"] += (
+                    " — the driver's contact monitor stopped the arm%s; clear the arm, then /clear_faults"
+                    % (" (joint %s)" % c["last_trip_joint"] if c.get("last_trip_joint") else "")
+                )
             self.halted = info["message"]
             return "halted", info
         return "failed", info
