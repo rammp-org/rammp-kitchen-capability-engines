@@ -4,14 +4,15 @@
 # the same packages you build natively in ~/ros2_ws, capability_engine and this
 # capability, and runs the same node.
 #
-# nightly-20261030 is the base the nightly arm driver is built on (interfaces
-# 73e7ed1716bf, which capability_engine's self.arm needs), so box opening speaks
-# the driver's exact messages. It carries the
+# nightly-20261103 is the base the nightly arm driver is built on (interfaces
+# 788be6341a8c: SetContactThresholds and CONTACT_STOP, which box opening's use of
+# the driver's contact monitor needs), so box opening speaks the driver's exact
+# messages. It carries the
 # arm, common, orchestrator and perception interfaces; rammp_curobo_interfaces it
 # does not. Nothing in it uses the GPU since the OWL detectors went (the box comes
 # from the scene segmenter); the base is still rammp-cuda's, as built and tested so
 # far, and may move to rammp-base. arm64 only.
-FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261030
+FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261103
 
 WORKDIR /module_ws
 
