@@ -188,7 +188,7 @@ the deployment must run.
 
 ## Alternatives
 
-| id                 | What it is                                                                            |
-| ------------------ | ------------------------------------------------------------------------------------- |
-| `box_opening_real` | The capability proper                                                                 |
-| `box_opening_mock` | Same interface, no hardware: each action reports the real run's phases, nothing moves |
+| id                 | What it is                                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `box_opening_real` | The capability proper                                                                                                                                                                 |
+| `box_opening_mock` | Same interface, no hardware: a successful real run's phases, result (`mock: true`, a stand-in `lid_xyz`) and world-state writes (`holding`, `opened`); it cannot pause; nothing moves |

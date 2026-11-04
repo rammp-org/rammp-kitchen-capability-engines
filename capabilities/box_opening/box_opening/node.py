@@ -107,17 +107,22 @@ LEG_PHASES = (
     ("place:", "release", 0.9, "letting go of the lid"),
     ("home", "home", 1.0, "going home"),
 )
+# the mock's run: the real run's phases, in its words. "grip" holds the lid, "release" lets it go
+# on the table, as the real run's rows say (Tracker)
 MOCK_PHASES = {
     "open_box": (
-        ("locate", 0.05),
-        ("look", 0.1),
-        ("press", 0.35),
-        ("grip", 0.5),
-        ("carry", 0.85),
-        ("release", 0.9),
-        ("home", 1.0),
+        ("locate", 0.05, "found the container"),
+        ("look", 0.1, "looking for the button"),
+        ("press", 0.35, "pressing the button"),
+        ("grip", 0.5, "holding the lid"),
+        ("carry", 0.85, "setting the lid down"),
+        ("release", 0.9, "letting go of the lid"),
+        ("home", 1.0, "going home"),
     ),
 }
+# where the mock says it set the lid down (arm_mount, m): a stand-in, the mock sees nothing.
+# flatbot's 2026-10-30 13:28 run set it down here, beside the box
+MOCK_LID_XYZ = [0.597, -0.071, 0.209]
 VIDEO_LINE = re.compile(r"\] VIDEO: .*: (\S+)$")
 # a line the run's own rclpy logger wrote: "[ERROR] [1793385477.635189323] [box_opening_run]: ..."
 ROS_LINE = re.compile(r"^\[(DEBUG|INFO|WARN|ERROR|FATAL)\] \[[0-9.]+\] \[([^\]]*)\]: (.*)$")
@@ -481,7 +486,7 @@ class Capability(CapabilityEngine):
         # the selection as the goal came: read once, used for every write and the run's argv
         track = Tracker(action_id, self.instance_id)
         t0 = time.monotonic()
-        first = MOCK_PHASES[action_id][0][0]
+        first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
         world = WorldWriter(self.get_logger())
         self._run = Run(self._argv(action_id, track.instance_id), env, LOGGER.log)
@@ -644,20 +649,39 @@ class Capability(CapabilityEngine):
         return env
 
     def _mock(self, action_id, ctx):
-        for phase, pct in MOCK_PHASES[action_id]:
-            ctx.checkpoint()
-            ctx.progress(phase, pct, "mock: nothing detected or moved", pausable=False)
-        return {
-            "executed": False,
+        """A successful real run at the interface, nothing moved (review round 2): its phases in
+        its words, the gripper's `holding` from the grip to the release and the container `opened`
+        at the release, written as the real run writes them, and its result. Like the real run it
+        cannot pause; a cancel ends it."""
+        track = Tracker(action_id, self.instance_id)
+        world = WorldWriter(self.get_logger())
+        t0 = time.monotonic()
+        for phase, pct, doing in MOCK_PHASES[action_id]:
+            if ctx.cancelled():
+                world.wait(WORLD_WAIT_S)
+                raise Cancelled()
+            ctx.progress(phase, pct, doing, pausable=False)
+            if phase == "grip":
+                track.held = True
+            elif phase == "release":
+                track.held, track.set_down, track.released = False, True, True
+                track.lid_spot = list(MOCK_LID_XYZ)
+            self._sync_world(track, ctx, world)
+        world.wait(WORLD_WAIT_S)
+        result = {
+            "executed": True,
             "mock": True,
-            "lid_off": False,
-            "lid_xyz": None,
-            "presses": 0,
-            "grips": 0,
-            "duration_s": 0.0,
+            "lid_off": True,
+            "lid_xyz": track.lid_spot,
+            "presses": 1,
+            "grips": 1,
+            "duration_s": round(time.monotonic() - t0, 1),
             "video": None,
             "run_log": None,
         }
+        if track.instance_id:
+            result["world_state"] = "opened" if track.opened else "not updated"
+        return result
 
     def _on_shutdown(self):
         """SIGTERM (docker stop) or Ctrl+C: a run under way stops its own way first."""

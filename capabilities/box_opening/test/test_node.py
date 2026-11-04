@@ -598,9 +598,21 @@ def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
         ctx = FakeCtx()
         (a,) = cap.availability("c1", {})  # allow_execute off, as by default: the mock is offered all the same
         assert a.available
+        cap.instance_id = "c1"
         out = cap.execute("open_box", {}, ctx)
-        assert [p for p, *_ in ctx.said] == [p for p, _ in node.MOCK_PHASES["open_box"]]
-        assert out["mock"] and not out["executed"] and not out["lid_off"]
+        assert [p for p, *_ in ctx.said] == [p for p, *_ in node.MOCK_PHASES["open_box"]]
+        assert not any(pausable for *_, pausable in ctx.said)  # the real run cannot pause: neither can it
+        # review round 2: a successful real run at the interface — its result, and its writes
+        assert out["mock"] and out["executed"] and out["lid_off"] and out["lid_xyz"] == node.MOCK_LID_XYZ
+        assert (out["presses"], out["grips"], out["world_state"]) == (1, 1, "opened")
+        assert ctx.world == [{"gripper": {"holding": "c1:lid"}}, {"gripper": {"holding": None}}]
+        assert ctx.objects == {"c1": {"opened": True}}
+        world = {"gripper": {"holding": None}, "objects": {"c1": {"opened": True}}}
+        assert not cap.availability("c1", world)[0].available  # flipped, as in an all-mock profile
+        ctx = FakeCtx()
+        ctx.cancel = True
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
     finally:
         cap.destroy_node()
         LOGGER.handlers[:] = handlers
