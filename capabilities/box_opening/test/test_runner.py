@@ -212,6 +212,24 @@ def test_other_failure_stops_without_retry(tmp_path):
     assert len(res) == 1 and len(c.executed) == 1  # stopped, b never ran
 
 
+def test_a_halted_goal_ends_the_run_at_once_with_its_rows_written(tmp_path):
+    """REVIEW_RULES C5: a goal the driver ended HALTED (the e-stop) or NOT_AUTHORIZED is no
+    failure for the task to recover from: its rows are written, then ArmHalted, which no
+    task's let-go or way home catches; the legs after it never go out."""
+    import json
+
+    from box_opening.runtime.abort import ArmHalted
+
+    c = FakeClient()
+    c.exec_script = [("halted", {"message": "HALTED: emergency stop", "progress": 0.4, "torque_peak": None})]
+    with pytest.raises(ArmHalted, match="emergency stop"):
+        runner(c, tmp_path).run([leg("a", Q0, Q1, chain=0), leg("b", Q2, [0.3] * 7, chain=1)], execute=True)
+    assert len(c.executed) == 1  # b never went out
+    (log,) = tmp_path.glob("run-*.jsonl")
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [(r["leg"], r["outcome"], r["ok"]) for r in rows] == [("a", "halted", False)]
+
+
 def test_contact_invalidates_downstream(tmp_path):
     c = FakeClient()
     g = GuardSpec(touch_nm=3.0, trip="setdown")

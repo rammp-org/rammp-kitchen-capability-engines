@@ -203,11 +203,33 @@ def test_a_slowed_leg_reaches_the_driver_dilated_in_position_mode():
 
 
 def test_a_driver_failure_fails_the_leg_with_its_reason():
-    driver = _Driver(error_code=-9, error_string="halted: emergency stop")
+    driver = _Driver(error_code=-5, error_string="goal tolerance: joint_2 off by 0.02 rad")
     end = [v + 0.05 for v in LIVE]
-    outcome, info = _client(driver).execute(_traj(LIVE, end), 1.0)
-    assert outcome == "failed"
-    assert "HALTED" in info["message"] and "emergency stop" in info["message"]
+    c = _client(driver)
+    outcome, info = c.execute(_traj(LIVE, end), 1.0)
+    assert outcome == "failed" and getattr(c, "halted", None) is None
+    assert "GOAL_TOLERANCE_VIOLATED" in info["message"] and "joint_2" in info["message"]
+
+
+@pytest.mark.parametrize(("code", "name"), [(-9, "HALTED"), (-8, "NOT_AUTHORIZED")])
+def test_a_halt_or_lost_control_is_its_own_outcome_and_nothing_more_is_sent(monkeypatch, code, name):
+    """REVIEW_RULES C5: the e-stop (HALTED) and control lost (NOT_AUTHORIZED) are not a failure
+    to recover from: the outcome is "halted", latched, and every goal after it — a motion, a
+    gripper command, the let-go, the primer — is refused before it is sent."""
+    driver = _Driver(error_code=code, error_string="emergency stop")
+    end = [v + 0.05 for v in LIVE]
+    c = _client(driver)
+    c.compliant = True
+    _flowing(monkeypatch, c)
+    outcome, info = c.execute(_traj(LIVE, end), 1.0)
+    assert outcome == "halted" and name in info["message"] and c.halted == info["message"]
+    assert len(driver.goals) == 1
+    with pytest.raises(client_mod.ArmHalted):
+        c.execute(_traj(LIVE, end), 1.0)
+    with pytest.raises(client_mod.ArmHalted):
+        c.gripper_send(0.0)
+    assert c.release() is False and c.prime_compliant() is False
+    assert len(driver.goals) == 1 and c._gripper_pub.sent == []
 
 
 def test_execution_progress_arms_the_guard():

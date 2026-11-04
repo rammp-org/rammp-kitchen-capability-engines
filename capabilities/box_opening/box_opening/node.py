@@ -42,6 +42,7 @@ from rammp_orchestrator_interfaces.msg import ActionAvailability
 
 from . import LOGGER
 from .constants import state_dir
+from .runtime.abort import EXIT_HALTED
 
 # ROS parameter -> default. Container and world name files in the image's config/ (or are
 # absolute paths); the robot's per-run environment comes from its cameras, never from here.
@@ -300,6 +301,9 @@ def error_for(action_id, code, lines):
     """The EngineError a run that ended with `code` reports, from what it said last."""
     said = [ln for ln in lines if "STOP" in ln or "not starting" in ln or "FAIL" in ln or "NO BOX" in ln]
     why = (said or list(lines) or [f"exit {code}"])[-1]
+    if code == EXIT_HALTED:
+        # the e-stop, or control lost: the run sent nothing after it (REVIEW_RULES C5)
+        return EngineError("arm_halted", why, recoverable=False)
     if "not starting" in why:
         return EngineError("not_ready", why, recoverable=True)
     if code == 2 or "NO BOX" in why:

@@ -35,6 +35,18 @@ class LookaheadAborted(Exception):
     then cancels the motion in flight, as for a Ctrl+C that comes once the lookahead is done."""
 
 
+class ArmHalted(BaseException):
+    """The driver ended a goal HALTED (the e-stop) or NOT_AUTHORIZED (control lost): the arm is
+    no longer the run's to move (REVIEW_RULES C5). The run ends at once, sending nothing more —
+    no let-go, no home, no gripper: the client refuses every goal from then on (PlannerClient.
+    halted). A BaseException, as KeyboardInterrupt is, so that no `except Exception` on the way
+    out takes it for a failure to recover from; press_demo exits EXIT_HALTED on it."""
+
+
+# press_demo's exit code for a run ended by ArmHalted (the node: arm_halted, not recoverable)
+EXIT_HALTED = 4
+
+
 def check(client):
     """Raise LookaheadAborted where a Ctrl+C has been asked for (`client`'s AbortFlag). A
     lookahead's CPU loops call this on every pass, as spin_until_done does for its planner

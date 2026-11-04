@@ -36,6 +36,10 @@ RESULT_NAMES = {
 }
 SUCCESSFUL = 0
 NOT_AUTHORIZED = -8
+HALTED = -9
+# the results after which the arm is not the run's to move: the e-stop (HALTED) and control
+# lost (NOT_AUTHORIZED). The client's outcome for either is "halted" (REVIEW_RULES C5)
+LOST_CONTROL = (HALTED, NOT_AUTHORIZED)
 
 # /joint_states reports the Robotiq knuckle as GripperSetpoint.position x 0.8,
 # the knuckle's URDF upper limit (the driver's gripper tier). Every gripper

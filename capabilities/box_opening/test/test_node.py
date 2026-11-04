@@ -238,6 +238,19 @@ def test_a_run_that_stops_with_the_arm_holding_is_not_recoverable(engine, monkey
     assert "the fingers did not open" in str(e.value) and "clear it" in str(e.value)
 
 
+def test_a_run_the_driver_halted_is_arm_halted_and_not_recoverable(engine, monkeypatch):
+    """REVIEW_RULES C5: the e-stop (or control lost) ends the run with nothing sent after it,
+    press_demo's EXIT_HALTED: arm_halted, never retried."""
+    from box_opening.runtime.abort import EXIT_HALTED
+
+    say = ["[press_demo] STOP: HALTED: the driver ended the run's motion (HALTED: emergency stop) — nothing more"]
+    given(monkeypatch, FULL_RUN[:5], say, code=EXIT_HALTED)
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "arm_halted" and not e.value.recoverable
+    assert "emergency stop" in str(e.value)
+
+
 @pytest.mark.parametrize(
     ("say", "code", "error"),
     [

@@ -54,6 +54,7 @@ from box_opening.constants import (  # noqa: F401 - GAINS_* are re-exported: cal
     CustomGains,
 )
 from box_opening.runtime import driver, planner
+from box_opening.runtime.abort import ArmHalted
 from box_opening.runtime.approach import plan_with_vertical_approach
 from box_opening.runtime.branches import joint_time, nearest_branch, planner_branch
 from box_opening.runtime.stamps import set_stamp
@@ -208,6 +209,10 @@ class PlannerClient:
         # whatever it receives and has no dry-run parameter, so this is the
         # software gate on arm AND gripper motion.
         self._armed = bool(motion_enabled)
+        # the driver's word once a goal ended HALTED (the e-stop) or NOT_AUTHORIZED (control
+        # lost), None until then: from then on nothing more is sent (REVIEW_RULES C5) — execute()
+        # and gripper_send() raise abort.ArmHalted, prime_compliant() and release() send nothing
+        self.halted = None
         self._base_frame = "base_link"  # overridden by cli_common/preflight from WorldStore
         self._q = None
         self._eff = None
@@ -914,7 +919,7 @@ class PlannerClient:
         from, else that sample. Nothing waits for the goal's acceptance or
         its result: the planning that follows spins the node, and the next
         execute() waits on its own goal only."""
-        if not self._armed or not bool(getattr(self, "compliant", False)):
+        if not self._armed or not bool(getattr(self, "compliant", False)) or getattr(self, "halted", None):
             return False
         if self._abort is not None and self._abort.requested:
             return False
@@ -989,6 +994,11 @@ class PlannerClient:
         MEDIUM, would take over from RIGID and sag 5-7x as far."""
         if not self._armed or getattr(self, "_last_mode", None) != IMPEDANCE or getattr(self, "_released", False):
             return False
+        if getattr(self, "halted", None):
+            # the halt holds the measured joints itself, and nothing more goes to a driver that
+            # halted or took control away (REVIEW_RULES C5)
+            log.info("[client] not released: the driver halted (%s) — nothing more is sent" % self.halted)
+            return False
         try:
             live = self._fresh_joints(max_age=self.GUARD_STALE_S)
             if live is None:
@@ -1046,7 +1056,12 @@ class PlannerClient:
     FEEDBACK_KEEP = 6000
 
     def execute(self, traj, speed, guard=None, while_running=None, stop_when=None, gains=None):
-        """Run one trajectory on the driver; outcome 'arrived' | 'touch' | 'failed'.
+        """Run one trajectory on the driver; outcome 'arrived' | 'touch' | 'failed' | 'halted'.
+
+        'halted': the driver ended it HALTED (the e-stop) or NOT_AUTHORIZED
+        (control lost). It latches self.halted: from then on this raises
+        abort.ArmHalted before anything is sent, as gripper_send does, and
+        prime_compliant and release send nothing (REVIEW_RULES C5).
 
         A COMPLIANT client (self.compliant, press_demo's default since
         2026-10-27) flies it in the driver's joint impedance, under `gains`
@@ -1096,6 +1111,8 @@ class PlannerClient:
         self.last_execution = info
         if self._abort is not None and self._abort.requested:
             raise KeyboardInterrupt  # aborted before this leg ever started
+        if getattr(self, "halted", None):
+            raise ArmHalted(self.halted)  # the driver halted a goal before: nothing more is sent
         if not self._armed:
             info["message"] = "motion disabled: the client was not armed (--execute)"
             return "failed", info
@@ -1292,6 +1309,11 @@ class PlannerClient:
                 info["message"] = "arrived (compliant: the guard would have stopped it at %.1f Nm)" % info["would_trip"]
             return "arrived", info
         info["message"] = driver.result_message(result.error_code, result.error_string)
+        if result.error_code in driver.LOST_CONTROL:
+            # the e-stop, or control lost: the arm is not the run's to move (REVIEW_RULES C5).
+            # Latched: every goal after this one is refused before it is sent
+            self.halted = info["message"]
+            return "halted", info
         return "failed", info
 
     # -- services / gripper ------------------------------------------------
@@ -1326,6 +1348,8 @@ class PlannerClient:
         anything that depends on the fingers having arrived."""
         if self._abort is not None and self._abort.requested:
             raise KeyboardInterrupt  # the operator stopped the run: no more motion
+        if getattr(self, "halted", None):
+            raise ArmHalted(self.halted)  # the driver halted a goal: nothing more is sent
         if not self._armed:
             return None
         if self._gripper_pos is None:

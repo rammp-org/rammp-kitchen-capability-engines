@@ -34,6 +34,7 @@ from box_opening.constants import (
     state_dir,
 )
 from box_opening.geometry import ang_diff
+from box_opening.runtime.abort import ArmHalted
 from box_opening.runtime.guards import (
     ARM_AFTER_CAP,
     GROUP_SETTLE_S,
@@ -1145,6 +1146,7 @@ class Runner:
             flight=self._keep_flight([reflex.name], outcome, flew, info, traj, arrived),
             **flew,
         )
+        self._end_if_halted(rres, [reflex])
         planned = False
         if ok and next_group is not None:
             regroup, _chain = info.get("while_running") or (None, None)
@@ -1429,7 +1431,7 @@ class Runner:
             )
         t_wall = time.monotonic() - t0
         stood = _stood_s(info, arrived[0])
-        return LegResult(
+        res = LegResult(
             group[-1].name if len(group) > 1 else lead.name,
             outcome,
             ok,
@@ -1446,6 +1448,23 @@ class Runner:
             stood_s=None if stood is None else round(stood, 4),
             **flew,
         )
+        self._end_if_halted(res, group)
+        return res
+
+    def _end_if_halted(self, res, legs):
+        """An execution the driver ended HALTED (the e-stop) or NOT_AUTHORIZED (control lost)
+        ends the run here (REVIEW_RULES C5): its rows written, then abort.ArmHalted, which no
+        task's recovery catches — no let-go, no home, no gripper goes out after it (the client
+        refuses them: PlannerClient.halted)."""
+        if res.outcome != "halted":
+            return
+        for leg in legs:
+            self._log(res, leg)
+        log.info(
+            "STOP: leg %s -> halted (%s) — the arm is not the run's to move: nothing more is sent"
+            % (res.leg_name, res.detail)
+        )
+        raise ArmHalted(res.detail)
 
     def _how_it_flew(self, outcome, info, traj):
         """LegResult's mode, gains and end_err_* for one execution of `traj`,

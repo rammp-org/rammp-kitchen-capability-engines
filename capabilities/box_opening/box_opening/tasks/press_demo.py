@@ -100,6 +100,7 @@ from box_opening.primitives.core import (
 )
 from box_opening.primitives.look import look_joints, sweep_targets
 from box_opening.runtime import fingers
+from box_opening.runtime.abort import EXIT_HALTED, ArmHalted
 from box_opening.runtime.runner import Runner
 from box_opening.tasks import cli_common
 from box_opening.worlds import WorldStore
@@ -1622,6 +1623,14 @@ def main():
         sys.exit(run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator))
     except KeyboardInterrupt:
         sys.exit(130)  # the abort path already reported what was confirmed
+    except ArmHalted as e:
+        # the driver halted a goal (the e-stop) or took control away: the run ended where it was,
+        # nothing sent after it (REVIEW_RULES C5); the node reports it arm_halted, not recoverable
+        log.info(
+            "[press_demo] STOP: HALTED: the driver ended the run's motion (%s) — nothing more was sent; "
+            "the arm stands where it stopped. Clear the e-stop and the arm, attended, before the next run" % e
+        )
+        sys.exit(EXIT_HALTED)
     finally:
         ending = sys.exc_info()[1]  # how the run ended, for its record
         # a run unwinding from a Ctrl+C (the engine's cancel: the 130 above)

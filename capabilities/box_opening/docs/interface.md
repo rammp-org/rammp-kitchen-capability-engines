@@ -36,7 +36,10 @@ starts), it puts the lid back on the box first: back over the box and straight
 down to where the knob was gripped, the fingers open, the hand rises off the
 knob, and the arm goes home. The action still fails (`failed`, recoverable).
 After a cancel, an e-stop or a motion the driver stopped part way, nothing more
-moves: the arm holds where it stopped (`arm_holds`, or the cancel).
+moves: the arm holds where it stopped (`arm_holds`, or the cancel). After the
+e-stop (the driver's `HALTED`) or lost control (`NOT_AUTHORIZED`), the run ends
+at once and sends nothing more, no let-go, no home and no gripper command
+(`arm_halted`).
 
 The action runs box opening's command line (`press_demo`) as a child process,
 the way it ran on flatbot until now. Its
@@ -132,6 +135,7 @@ A run that stops fails the action with one of these codes:
 | `not_home`    | yes         | The arm could not get to its start pose                                                                                                                                       |
 | `box_moved`   | yes         | The press moved the container                                                                                                                                                 |
 | `arm_holds`   | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                           |
+| `arm_halted`  | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                   |
 | `stopped`     | no          | The run was ended from outside                                                                                                                                                |
 | `failed`      | yes         | Anything else; the message is the run's last STOP line                                                                                                                        |
 
