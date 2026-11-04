@@ -84,6 +84,37 @@ params:
   # the hand's peak speed (m/s; position control, min-jerk: about half of it on average) on the approach
   # (side shift + transit + line in, one motion) and the back-out
   insert_speed: 0.16
+  # take_out: the wrist camera (colour, aligned depth, camera_info); the rim is found on it
+  wrist_topics:
+    - /wrist_camera/color/image_raw
+    - /wrist_camera/depth/image_rect_raw
+    - /wrist_camera/color/camera_info
+  # SAM3's prompts: the whole container with its sleeve, then its rim on the same frame
+  container_prompt: food container together with its blue sleeve
+  rim_prompt: wide rim of blue sleeve
+  sam3_threshold: 0.5
+  # the rim: this many consecutive frames whose container and rim masks overlap (IoU) at least rim_mask_iou
+  rim_frames: 3
+  rim_mask_iou: 0.85
+  rim_timeout_s: 60.0
+  # the grasp: the tool frame this far (m) past the rim point along the hand's heading (- = short of it) ...
+  grasp_depth: -0.05
+  # ... and this far (m) above it
+  grasp_up: 0.035
+  # the pre-grasp pose this far (m) back from the grasp along the hand's level heading: the line in's length
+  reach_in: 0.25
+  # the gripper's opening for the reach in (0 = fully open .. 1 closed)
+  grip_open: 0.0
+  # the last this far (m) of the line in, in joint impedance (a short stop to switch); position control before it,
+  # and from the gripper's close on
+  impedance_in: 0.10
+  # take_out's joint impedance (the driver caps kq at 400); torque limits: impedance_torque_limit
+  take_impedance_kq: [400.0, 400.0, 400.0, 400.0, 200.0, 200.0, 200.0]
+  take_impedance_zeta: 0.7
+  # the hand's peak speed (m/s) on that impedance part of the line in
+  impedance_speed: 0.08
+  # after closing: straight up this far (m), then the level line back out
+  take_lift: 0.03
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -136,10 +167,13 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
-publishes: [/microwave_place/status]
+publishes: [/microwave_place/status, /microwave_place/wrist_query_image]
 subscribes:
   - /tf
   - /tf_static
   - /scene_camera/depth/image_rect_raw
   - /scene_camera/color/camera_info
   - /perception/object_detections_3d
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/depth/image_rect_raw
+  - /wrist_camera/color/camera_info
