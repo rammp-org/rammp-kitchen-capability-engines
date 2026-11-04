@@ -187,6 +187,7 @@ def test_a_run_that_stops_with_the_lid_in_the_fingers_leaves_it_said(engine, mon
     given(monkeypatch, FULL_RUN[:8] + [FULL_RUN[10]], [stop], code=1)  # the grip held, then the carry stopped
     ctx = FakeCtx()
     engine.instance_id = "food_container_1"
+    engine.orchestrated = True  # the arm's system_status is the orchestrator's (standalone: nothing to tell)
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, ctx)
     assert e.value.error_code == "arm_holds" and not e.value.recoverable
@@ -343,6 +344,11 @@ def test_a_run_the_driver_halted_is_arm_halted_and_not_recoverable(engine, monke
     ctx = FakeCtx()
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_halted" and not ctx.world  # standalone: no world state to tell
+    engine.orchestrated = True
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
     assert e.value.error_code == "arm_halted" and not e.value.recoverable
     assert "emergency stop" in str(e.value)
     assert ctx.world == [
@@ -430,6 +436,7 @@ def test_an_unknown_end_is_not_recoverable(engine, monkeypatch, say, code, error
     is, so nothing is retried; the arm's domain is in error."""
     given(monkeypatch, say=say, code=code)
     ctx = FakeCtx()
+    engine.orchestrated = True
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, ctx)
     assert e.value.error_code == error and not e.value.recoverable

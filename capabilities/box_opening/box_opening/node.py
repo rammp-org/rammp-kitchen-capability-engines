@@ -539,7 +539,7 @@ class Capability(CapabilityEngine):
             if track.held:
                 # the next run would start holding it (availability): nothing to retry until it is emptied
                 error = EngineError(error.error_code, f"{error} -- the lid is still in the fingers", recoverable=False)
-            if not error.recoverable:
+            if not error.recoverable and self.orchestrated:  # standalone: no world state to tell
                 self._report_arm_error(error, ctx, world)
             world.wait(WORLD_WAIT_S)
             raise error
