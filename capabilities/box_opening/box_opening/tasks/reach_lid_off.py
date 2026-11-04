@@ -413,6 +413,15 @@ NEAREST_HELD_MAX_M = 0.03
 NEAREST_STEP_M = 0.025
 NEAREST_MAX_M = 0.45
 NEAREST_DEG = 20
+# The no-land radius (owner 2026-11-04: "in run 2 the lid accidentally landed on the rim. we need
+# to make a no land radius around the box"). 11-04 12:40 set the lid down 114 mm from where the
+# press held the button (the old host build's 0.120 m ring) and it came down on the box's rim.
+# Whatever tier chose it — clear, most room, beside the box, nearest — no spot puts the lid's
+# disc within NO_LAND_CLEAR_M of the box's footprint (no_land_radius: 0.155 m centre to centre
+# for the pink canister, the first nearest ring's), round every place the run has the box: where
+# the press held its button and where ctx.cpose puts it (box_centres). The tiers measured from
+# one of them only, and the cameras put them 37-57 mm apart on 11-04 (the aims' lines)
+NO_LAND_CLEAR_M = NEAREST_CLEAR_M
 
 
 def _table_z(watcher, scene_fix, cpose):
@@ -641,6 +650,50 @@ def nearest_centre(ctx):
     return float(c.xyz[0]), float(c.xyz[1])
 
 
+def no_land_radius(m):
+    """How near the box's centre the lid's centre may never be set down (m): the box's footprint
+    (container_half), the lid's disc and NO_LAND_CLEAR_M between their rims."""
+    from box_opening.tasks.press_demo import container_half
+
+    return container_half(m) + 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1])) + NO_LAND_CLEAR_M
+
+
+def box_centres(ctx):
+    """Every place the run has the box's centre (x, y): ctx.cpose's (the aim's, the scene
+    camera's before it), and, once the press held the pads on its button (Ctx.held_xy), the box
+    whose button is there — wherever that is, unlike nearest_centre: a keep-out errs wide."""
+    out = [(float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1]))]
+    held = getattr(ctx, "held_xy", None)
+    if held is not None:
+        from box_opening.models.container import from_container
+
+        button = from_container(ctx.cpose, ctx.model.button_offset)
+        c = rp.cpose_for_button(
+            (float(held[0]), float(held[1]), float(button[2])), ctx.cpose.yaw, ctx.model.button_offset
+        )
+        out.append((float(c.xyz[0]), float(c.xyz[1])))
+    return out
+
+
+def box_clearance(ctx, drop):
+    """How far outside the no-land radius the lid set down at `drop` stands (m): the least over
+    box_centres, negative inside it (the spot is never taken: spot_candidates)."""
+    r = no_land_radius(ctx.model)
+    return min(math.hypot(float(drop.xyz[0]) - x, float(drop.xyz[1]) - y) for x, y in box_centres(ctx)) - r
+
+
+def no_land_note(ctx, drop):
+    """The lid_spot row's 'no_land': the radius, how far outside it the chosen spot stands, and the
+    box's centres it was measured from."""
+    if drop is None:
+        return None
+    return {
+        "radius_mm": round(1000 * no_land_radius(ctx.model), 1),
+        "clear_mm": round(1000 * box_clearance(ctx, drop), 1),
+        "centres": [[round(x, 4), round(y, 4)] for x, y in box_centres(ctx)],
+    }
+
+
 def _nearest_points(ctx, table_z, tmap=None):
     """spot_candidates' last resort: table points round the box (centred
     where the press held its button: nearest_centre), the lid's disc
@@ -682,9 +735,11 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
     `q`); 'most room' — nothing clear, the spots it judged, the most room
     first; 'beside the box' — the spots beside it in the set-down zone
     (press_demo.lid_drop_candidates, drop_zone); 'nearest' — the table
-    points round the box (_nearest_points). A generator: only as many as
-    are asked for are checked. `cache`: the room judged on `tmap` before
-    (room_ahead's, clear_table.clear_spots')."""
+    points round the box (_nearest_points). In every tier a spot inside the
+    no-land radius round the box (box_clearance) is passed over, never
+    counted as a try. A generator: only as many as are asked for are
+    checked. `cache`: the room judged on `tmap` before (room_ahead's,
+    clear_table.clear_spots')."""
     from box_opening.tasks import press_demo as pd
 
     m = ctx.model
@@ -769,6 +824,9 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
             if n >= TIER_TRIES[tier]:
                 break
             if not fresh(d):
+                continue
+            if box_clearance(ctx, d) < 0.0:
+                tried.append(d)  # inside the no-land radius: the lid would come down on the box's rim
                 continue
             n += 1
             tried.append(d)
@@ -2254,6 +2312,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             spot_ik_s=round(placed.ik_s, 3),
             plan_s=round(placed.plan_s, 3),
             host_stood_s=placed.host_stood_s,
+            no_land=no_land_note(ctx, drop),
             pooled=pooled_note(ctx, runner, placed.room, drop),  # the wrist's look-pose frame pooled in: shadow
         )
         _say_spot(ctx, eyes, (drop, placed.tier, placed.says), placed.refused, placed.tmap, placed.table_z)
@@ -2768,6 +2827,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         ik_s=round(reach.ik_s, 3),
         spot_checks=len(reach.found),  # the spots whose reach was judged here (the rest: ahead's)
         carry_s=round(carry_s, 3),
+        no_land=no_land_note(ctx, None if chosen is None else chosen[0]),
         ahead=note,
         pooled=pooled_note(ctx, runner, None if ahead is None else ahead.room, None if chosen is None else chosen[0]),
     )
@@ -2840,12 +2900,13 @@ def _say_spot(ctx, eyes, chosen, refused, tmap, table_z):
     drop, tier, says = chosen
     ctx.lid_drop = drop
     log.info(
-        "[press_demo] lid goes to [%.2f, %.2f, %.3f] — %.0f mm from the box, %s%s"
+        "[press_demo] lid goes to [%.2f, %.2f, %.3f] — %.0f mm from the box (%.0f mm outside its no-land radius), %s%s"
         % (
             drop.xyz[0],
             drop.xyz[1],
             drop.xyz[2],
             1000 * math.hypot(drop.xyz[0] - ctx.cpose.xyz[0], drop.xyz[1] - ctx.cpose.xyz[1]),
+            1000 * box_clearance(ctx, drop),
             says,
             "; the planner refused %s" % "; ".join(refused) if refused else "",
         )

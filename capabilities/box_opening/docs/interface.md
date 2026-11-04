@@ -37,7 +37,10 @@ beside the container, and goes home. It has one action, `open_box`:
    the button and close on it. A grip that misses goes back to the look pose and
    tries again from there, a centimetre lower.
 1. **Carry:** the lid is lifted, carried and set down beside the container in
-   one motion, at a spot the scene camera sees is clear.
+   one motion, at a spot the scene camera sees is clear. Never inside the
+   no-land radius: the lid's rim at least 50 mm off the container's (0.155 m
+   centre to centre for the pink canister), round both where the press held
+   the button and where the cameras put the container.
 1. **Release and home:** the fingers open as the arm rises off the lid, and the
    arm goes home.
 

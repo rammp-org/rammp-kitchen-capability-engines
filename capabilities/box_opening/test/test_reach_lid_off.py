@@ -1461,6 +1461,48 @@ def test_the_nearest_spot_keeps_the_lid_off_the_box_s_holder(ctx, monkeypatch, t
     assert ctx.held_xy == pytest.approx(BUTTON[:2])  # the fake hold held the pads on the button
 
 
+def test_no_spot_of_any_tier_lands_the_lid_inside_the_no_land_radius(ctx, monkeypatch):
+    """Owner 2026-11-04: "in run 2 the lid accidentally landed on the rim. we need to make a no
+    land radius around the box" — 12:40's lid set down 114 mm from where the press held the
+    button. Whatever tier offers a spot (here the clear tier's first, 0.12 m off, as 12:40's
+    ring was), one whose disc comes within NO_LAND_CLEAR_M of the box's footprint round where the
+    press held its button, or where ctx.cpose has the box, is passed over and never counted as
+    a try; the first spot outside both is taken, and the run record says how far outside."""
+    from box_opening.models.container import from_container
+    from box_opening.tasks import press_demo as pd
+    from box_opening.tasks.press_demo import container_half
+
+    r = rlo.no_land_radius(ctx.model)
+    assert r == pytest.approx(container_half(ctx.model) + 0.5 * max(ctx.model.lid_dims[:2]) + rlo.NO_LAND_CLEAR_M)
+    assert rlo.no_land_radius(ContainerModel.load(PINK)) == pytest.approx(0.155)  # the pink canister: 50 mm rim to rim
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    button = from_container(ctx.cpose, ctx.model.button_offset)
+    ctx.held_xy = (float(button[0]), float(button[1]) - 0.040)  # the aim 40 mm off where the press held it
+    cx, cy = rlo.box_centres(ctx)[1]
+    assert (cx, cy) == pytest.approx((bx, by - 0.040))
+    rim = ContainerPose(xyz=(cx, cy - 0.114, -0.07), yaw=0.0)  # 12:40's: 114 mm from the held button
+    aimed = ContainerPose(xyz=(bx, by - 0.180, -0.07), yaw=0.0)  # 180 mm from the aim, 140 from the held one
+    clear = ContainerPose(xyz=(bx, by + 0.200, -0.07), yaw=0.0)  # outside both
+    assert rlo.box_clearance(ctx, rim) < 0 and rlo.box_clearance(ctx, aimed) < 0 < rlo.box_clearance(ctx, clear)
+    spots = [SimpleNamespace(room_m=0.02, what="nothing", rotation=0.0)] * 3
+    monkeypatch.setattr(pd, "clear_lid_drops", lambda *a, **k: ([rim, aimed, clear], spots, None))
+    monkeypatch.setattr(rlo, "TIER_TRIES", dict(rlo.TIER_TRIES, clear=1))  # one try: the passed-over are not tries
+    checked = []
+    tmap = _standing_ring((bx, by), 0.5, 0.6)  # seen, nothing standing near the box
+
+    def reach(ctx_, d, q, seeds=()):
+        checked.append(d)
+        return None
+
+    drop, tier, _says = next(rlo.spot_candidates(ctx, tmap, -0.07, [0.0] * 7, reach=reach))
+    assert (drop, tier) == (clear, "clear") and checked == [clear]
+    note = rlo.no_land_note(ctx, drop)
+    assert note["radius_mm"] == pytest.approx(1000 * r, abs=0.1) and note["clear_mm"] > 0 and len(note["centres"]) == 2
+    # and with no camera's map at all (12:40's): every spot offered lies outside the radius
+    offered = list(rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=lambda *a, **k: None))
+    assert offered and all(rlo.box_clearance(ctx, d) >= 0.0 for d, _t, _s in offered)
+
+
 def _standing_ring(centre, inner, outer, cell=0.02, tall=0.03):
     """A TableMap with something `tall` standing from `inner` to `outer`
     round `centre` (a holder's flange), the rest seen bare."""
