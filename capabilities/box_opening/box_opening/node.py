@@ -345,8 +345,12 @@ class Tracker:
             return "locate", self.pct, f"refused: {row.get('why', '')}"
         return None
 
+    def lid_down(self):
+        """The lid set down on the table and let go (the container is open, whatever follows)."""
+        return self.set_down and self.released
+
     def lid_off(self, code):
-        return self.action_id == "open_box" and code == 0 and self.set_down and self.released
+        return self.action_id == "open_box" and code == 0 and self.lid_down()
 
 
 def error_for(action_id, code, lines):
@@ -465,9 +469,7 @@ class Capability(CapabilityEngine):
                 run_.stop(CANCEL_ESCALATE_S)
             self._progress(log, track, ctx)  # the last rows, written as it ended
             if not ctx.cancelled():
-                self._sync_held(track, ctx, world)  # the last rows' word: a release, a put-back
-                if track.lid_off(code):
-                    self._mark_opened(track, ctx, world)
+                self._sync_world(track, ctx, world)  # the last rows' word: a release, a put-back
             world.wait(WORLD_WAIT_S)  # every write answered before the result goes out
         if ctx.cancelled():
             raise Cancelled()
@@ -513,7 +515,7 @@ class Capability(CapabilityEngine):
         while run_.proc.poll() is None:
             self._progress(log, track, ctx)
             if not ctx.cancelled():
-                self._sync_held(track, ctx, world)
+                self._sync_world(track, ctx, world)
             now = time.monotonic()
             if ctx.cancelled() and sent is None:
                 self.get_logger().warning("cancelled: the run's own stop (Ctrl+C) sent")
@@ -550,9 +552,19 @@ class Capability(CapabilityEngine):
         holding = f"{track.instance_id}:lid" if track.held else None
         world.put(f"the gripper holds {holding}", lambda: ctx.write_world_state(gripper={"holding": holding}))
 
+    def _sync_world(self, track, ctx, world):
+        """What the run's rows so far tell the world state: the gripper's `holding`, and the
+        container `opened` once the lid is down on the table and let go."""
+        self._sync_held(track, ctx, world)
+        if track.lid_down():
+            self._mark_opened(track, ctx, world)
+
     @staticmethod
     def _mark_opened(track, ctx, world):
-        """The container's object record `opened` (once): track.opened is the answer."""
+        """The container's object record `opened`, once, as the lid is let go on the table
+        (REVIEW_RULES C6): a run that fails or is cancelled after that, on its way home, leaves
+        the container open, and open_box must not be offered on it again. track.opened is the
+        orchestrator's answer."""
         if not track.instance_id or track.opened is not None:
             return
         track.opened = False  # asked; True once the orchestrator takes it

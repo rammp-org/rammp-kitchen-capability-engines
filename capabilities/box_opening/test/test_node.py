@@ -260,6 +260,30 @@ def test_a_slow_world_state_write_never_holds_up_the_cancel(engine, monkeypatch)
     assert ctx.world == [{"gripper": {"holding": "food_container_1:lid"}}]  # and the write still went out
 
 
+def test_the_container_is_opened_as_the_lid_is_let_go_whatever_follows(engine, monkeypatch):
+    """REVIEW_RULES C6: `opened` is written as the release row comes, not at a clean exit: a
+    run that set the lid down and let it go, then stopped on the way home, leaves the container
+    open, and open_box is not offered on it again."""
+    stop = "[press_demo] STOP: the way home stopped during home (aborted) — the arm holds"
+    given(monkeypatch, FULL_RUN[:-1], [stop], code=1)  # everything but the way home
+    ctx = FakeCtx()
+    engine.instance_id = "food_container_1"
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_holds"
+    assert ctx.objects == {"food_container_1": {"opened": True}}
+    world = {"objects": {"food_container_1": {"opened": True}}}
+    assert not engine.availability("food_container_1", world)[0].available
+    # a run that never let go of the lid on the table (the carry stopped) does not
+    given(
+        monkeypatch, FULL_RUN[:9], ["[press_demo] STOP: the lid's way to the table stopped — the arm holds the lid"], 1
+    )
+    ctx = FakeCtx()
+    with pytest.raises(EngineError):
+        engine.execute("open_box", {}, ctx)
+    assert ctx.objects == {}
+
+
 def test_a_world_state_write_the_orchestrator_refuses_is_said_in_the_result(engine, monkeypatch):
     """REVIEW_RULES O6: a refused write would leave open_box offered on an open container."""
     given(monkeypatch, FULL_RUN)

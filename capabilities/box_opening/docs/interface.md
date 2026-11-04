@@ -102,10 +102,12 @@ where `allow_execute` is on, until the world state holds the container `opened`.
 | `open_box` | none   | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log"}`, and `world_state` when the lid came off |
 
 `lid_xyz` is where the lid was set down, in `arm_mount` (m). `video` is the MP4
-of both cameras from the grip to the set-down, where one was recorded. When the
-lid comes off, the container's object record gets `opened: true`; `world_state`
-says `opened`, or `not updated` where the orchestrator refused the write (also
-logged as an error). `open_box` takes no params: any fails with `bad_params`
+of both cameras from the grip to the set-down, where one was recorded. As the
+lid is let go on the table, the container's object record gets `opened: true`.
+It is written then, not at the run's end, so a run that stops or is cancelled on
+its way home still leaves the container open. `world_state` says `opened`, or
+`not updated` where the orchestrator refused the write (also logged as an
+error). `open_box` takes no params: any fails with `bad_params`
 before anything runs.
 
 While the lid is in the fingers the world state's gripper says so: `holding`
