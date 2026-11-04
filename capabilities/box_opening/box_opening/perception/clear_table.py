@@ -36,6 +36,12 @@ CELL_M = 0.02
 MAP_R_M = 0.6  # the map holds what the scene camera sees this far around the box
 MAP_PAD_M = 0.25  # ... on a grid this much wider, unseen: past its edge nothing is known
 PLANE_BAND_M = 0.08  # the table plane is fitted to points this close to the table's height
+# ... and only a plane this near level (its normal's |z|; 25.8 deg) is fitted as the table
+# (planes.fit_plane's min_nz). Flatbot 2026-11-04 12:40 and 12:42: the scene camera looks almost
+# level across the table and sees the thick top's front edge face on, the top at a grazing angle.
+# In the band, the edge held more points than the top (3246 against 2393; 3322 against 2804), the
+# fit took it (76 and 74 deg off level) and the map refused it: no map, the lid to the last resort
+TABLE_LEVEL_NZ = 0.9
 STANDS_M = 0.015  # a point this far above the table plane stands on it
 OFF_M = 0.03  # ... and this far below it is past the table's edge
 # a cell holds something only when enough of its points stand: a few
@@ -149,21 +155,28 @@ def _small_things(mask, min_cells):
     return out
 
 
-def _heights(pts, table_z, box_xy, radius):
+def _heights(pts, table_z, box_xy, radius, why=None):
     """(points within `radius` of the box, their heights above the table
-    plane they show), or None when they show none."""
+    plane they show), or None when they show none — said in `why` (a list).
+    Only a level plane (TABLE_LEVEL_NZ) is fitted: a vertical surface in the
+    band (the table's own front edge) is never taken for the table."""
     pts = np.asarray(pts, float)
     pts = pts[np.hypot(pts[:, 0] - box_xy[0], pts[:, 1] - box_xy[1]) < radius]
     band = pts[np.abs(pts[:, 2] - float(table_z)) < PLANE_BAND_M]
-    fit = fit_plane(band, tol_m=0.008, iters=300, max_points=5000) if len(band) >= 3 else None
-    if fit is None or abs(fit[0][2]) < 0.9:
+    fit = fit_plane(band, tol_m=0.008, iters=300, max_points=5000, min_nz=TABLE_LEVEL_NZ) if len(band) >= 3 else None
+    if fit is None or abs(fit[0][2]) < TABLE_LEVEL_NZ:
+        if why is not None:
+            why.append(
+                "no level plane among the %d points within %.0f mm of the table's height, %.1f m round the box"
+                % (len(band), 1000 * PLANE_BAND_M, radius)
+            )
         return None
     normal, centroid, _frac = fit
     normal = normal if normal[2] > 0 else -normal
     return pts, (pts - centroid) @ normal
 
 
-def table_map(clouds, box_xy, radius=MAP_R_M, cell=CELL_M):
+def table_map(clouds, box_xy, radius=MAP_R_M, cell=CELL_M, why=None):
     """The TableMap of `clouds` — [(points in the base frame, the table
     height they were measured on), ...]: the scene camera's, and the wrist
     camera's when it looked down at staging — within `radius` of the box,
@@ -178,7 +191,7 @@ def table_map(clouds, box_xy, radius=MAP_R_M, cell=CELL_M):
     top = np.full(n * n, -np.inf)
     shown = False
     for pts, table_z in clouds:
-        got = None if pts is None else _heights(pts, table_z, (cx, cy), radius)
+        got = None if pts is None else _heights(pts, table_z, (cx, cy), radius, why)
         if got is None:
             continue
         shown = True

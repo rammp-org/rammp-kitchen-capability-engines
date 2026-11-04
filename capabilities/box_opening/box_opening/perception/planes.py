@@ -30,13 +30,16 @@ def cloud_from_depth(depth_m, k, stride=1):
     return np.stack([x, y, z], axis=1), u[ok], v[ok]
 
 
-def fit_plane(points, tol_m=0.004, iters=300, max_points=40000, rng=None):
+def fit_plane(points, tol_m=0.004, iters=300, max_points=40000, rng=None, min_nz=None):
     """RANSAC plane through `points` -> (unit normal, centroid, inlier fraction).
 
     The normal's sign is arbitrary; callers orient it (toward the camera,
     upward, ...). Points beyond `max_points` are subsampled first — a
     histogram's worth of evidence is plenty and a 400k-point cloud is not
-    worth the wait. Returns None when there are too few points."""
+    worth the wait. `min_nz`: only planes this near level are fitted — a
+    hypothesis whose normal's |z| is less is never picked, however many
+    points it holds (a table's: clear_table._heights). Returns None when
+    there are too few points, or no hypothesis that level holds three."""
     P = np.asarray(points, dtype=float)
     if len(P) < 3:
         return None
@@ -56,6 +59,8 @@ def fit_plane(points, tol_m=0.004, iters=300, max_points=40000, rng=None):
     nn = np.linalg.norm(nrm, axis=1)
     keep = nn >= 1e-12  # a degenerate triple scores -1: never picked
     nrm[keep] /= nn[keep, None]
+    if min_nz is not None:
+        keep &= np.abs(nrm[:, 2]) >= float(min_nz)  # not level enough: never picked either
     off = np.einsum("ij,ij->i", a, nrm)
     counts = np.full(iters, -1, dtype=np.int64)
     block = max(1, 4_000_000 // len(P))

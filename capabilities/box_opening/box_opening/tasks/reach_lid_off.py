@@ -572,7 +572,14 @@ def spot_map(ctx, wrist, q, scene_fix, scene_q, table_z, lens_in_hand=None):
     tz = scene[1] if scene is not None else float(table_z)
     if wrist is not None and len(wrist):
         clouds.append((wrist_table(ctx, wrist, q, lens_in_hand), tz))
-    return clear_table.table_map(clouds, ctx.cpose.xyz[:2]) if clouds else None
+    if not clouds:
+        log.info("[press_demo] no map of the table for the lid: no camera kept points of it")
+        return None
+    why = []
+    tmap = clear_table.table_map(clouds, ctx.cpose.xyz[:2], why=why)
+    if tmap is None:
+        log.info("[press_demo] no map of the table for the lid: %s" % "; ".join(why))
+    return tmap
 
 
 def _scene_cloud(ctx, scene_fix, scene_q, table_z):

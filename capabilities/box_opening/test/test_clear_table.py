@@ -474,3 +474,40 @@ def test_a_batch_that_fails_is_judged_spot_by_spot(pink, monkeypatch, capsys):
     judged = []
     assert _spots(pink, tmap, BOX, judged_out=judged) == want and judged  # each judged spot once
     assert len(judged) == len({(s.xy, s.turn) for s in judged})
+
+
+def _front_edge(x=0.25, y0=-0.70, y1=0.20, depth=0.075, step=0.003):
+    """The table top's own front edge, face on to a scene camera that looks almost level across
+    the table (flatbot's): a vertical face from the top down `depth`, densely seen."""
+    ys, zs = np.meshgrid(np.arange(y0, y1, step), np.arange(TABLE_Z - depth, TABLE_Z - 0.004, step), indexing="ij")
+    return np.c_[np.full(ys.size, x), ys.ravel(), zs.ravel()]
+
+
+def test_the_tables_front_edge_is_never_taken_for_the_table(pink):
+    """Flatbot 2026-11-04 12:40 and 12:42: the scene camera saw the thick table top's front edge
+    face on and its top at a grazing angle. In the plane band the edge held more points than the
+    top (3246 against 2393), the fit took it — 76 deg off level — and the map refused it: no
+    map, and the lid went to the last resort. Only a level plane is fitted as the table now."""
+    top = _table(holes=[BOX_AT], step=0.015)  # the top, sparse: seen edge on
+    edge = _front_edge()
+    pts = np.concatenate([top, edge, _block(*BOX_AT, TABLE_Z + 0.121)])
+    band = pts[np.abs(pts[:, 2] - TABLE_Z) < ct.PLANE_BAND_M]
+    assert len(edge) > len(top)
+    # as it was: the plane with the most points is the edge's, and it is no table
+    loose = ct.fit_plane(band, tol_m=0.008, iters=300, max_points=5000)
+    assert abs(loose[0][2]) < ct.TABLE_LEVEL_NZ
+    why = []
+    tmap = ct.table_map([(pts, TABLE_Z)], BOX, why=why)
+    assert tmap is not None and why == []
+    X, Y = tmap.centres()
+    at_box = (np.abs(X - BOX[0]) < 0.04) & (np.abs(Y - BOX[1]) < 0.04)
+    assert np.nanmin(tmap.tall[at_box]) == pytest.approx(0.121, abs=0.02)  # heights from the top's plane
+    clear_of_box = np.hypot(X - BOX[0], Y - BOX[1]) > 0.12
+    on_table = (X > 0.30) & (X < 0.70) & (Y > -0.6) & (Y < 0.1) & clear_of_box
+    assert not np.isfinite(tmap.tall[on_table]).any()  # the top is bare where nothing stands
+
+
+def test_a_cloud_with_no_level_plane_has_no_map_and_says_why():
+    why = []
+    assert ct.table_map([(_front_edge(), TABLE_Z)], BOX, why=why) is None
+    assert len(why) == 1 and why[0].startswith("no level plane among the")

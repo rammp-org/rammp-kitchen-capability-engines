@@ -146,3 +146,18 @@ def test_the_one_good_hypothesis_is_scored_in_whichever_block_it_falls(good):
     got = fit_plane(cloud, rng=_ScriptedRng([good]), **kwargs)
     _assert_same(got, _fit_plane_loop(cloud, rng=_ScriptedRng([good]), **kwargs))
     assert got is not None and got[2] > 0.75
+
+
+def test_a_level_fit_never_takes_the_denser_vertical_plane():
+    """fit_plane's min_nz: a hypothesis less level than it is never picked, however many points
+    it holds (the table's front edge against its top: clear_table._heights)."""
+    rng = np.random.default_rng(3)
+    top = np.c_[rng.uniform(0.3, 0.8, 1500), rng.uniform(-0.5, 0.5, 1500), np.full(1500, 0.2)]
+    face = np.c_[np.full(3000, 0.25), rng.uniform(-0.5, 0.5, 3000), rng.uniform(0.13, 0.2, 3000)]
+    cloud = np.concatenate([top, face])
+    assert abs(fit_plane(cloud, tol_m=0.008)[0][2]) < 0.1  # the most points: the vertical face
+    n, c, _frac = fit_plane(cloud, tol_m=0.008, min_nz=0.9)
+    assert abs(n[2]) > 0.999 and c[2] == pytest.approx(0.2, abs=0.005)  # the face's top 8 mm count with it
+    assert (
+        fit_plane(face, tol_m=0.008, min_nz=0.9) is None or abs(fit_plane(face, tol_m=0.008, min_nz=0.9)[0][2]) >= 0.9
+    )
