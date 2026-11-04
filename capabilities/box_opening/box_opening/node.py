@@ -80,10 +80,14 @@ CANCEL_ESCALATE_S = 15.0
 CANCEL_KILL_S = 10.0
 SHUTDOWN_WAIT_S = 3.0  # on SIGTERM: the run's own stop first, inside docker stop's grace period
 # REVIEW_RULES O3: the orchestrator cancels any action still running after 120 s (fixed in
-# rammp-orchestrator; an engine cannot ask for more). A run still going at this budget is stopped
-# its own way (one Ctrl+C) and fails with `timeout`, so the end is the run's, with room left for
-# its stop before that cancel. The longest of 48 logged missions took 45 s, plus ~5 s to start.
-RUN_BUDGET_S = 100.0
+# rammp-orchestrator; an engine cannot ask for more), releases the arm and hibernates the engine.
+# A run still going at this budget is stopped its own way (one Ctrl+C) and fails with `timeout`,
+# so the end is the run's: its stop's worst (a second Ctrl+C after CANCEL_ESCALATE_S, a kill
+# CANCEL_KILL_S after that) and the last world-state writes (WORLD_WAIT_S) still end inside the
+# 120 s. The longest of 48 logged missions took 45 s, plus ~5 s to start.
+ORCHESTRATOR_TIMEOUT_S = 120.0
+WORLD_WAIT_S = 3.0
+RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORLD_WAIT_S - 2.0  # 90 s
 TAIL_LINES = 40
 
 # a leg's row -> (phase, the fraction of the run done) it ends (REVIEW_RULES U2: progress runs
@@ -238,10 +242,13 @@ class RunLog:
 
 
 class Tracker:
-    """A run's rows as it goes: the progress each says, and what the result reports."""
+    """A run's rows as it goes: the progress each says, and what the result reports.
+    `instance_id`: the container the orchestrator selected when the goal came, kept for the
+    whole run (a hibernate clears the engine's own mid-run; REVIEW_RULES O3)."""
 
-    def __init__(self, action_id):
+    def __init__(self, action_id, instance_id=""):
         self.action_id = action_id
+        self.instance_id = instance_id
         self.pct = 0.0
         self.presses = 0
         self.grips = 0
@@ -391,11 +398,12 @@ class Capability(CapabilityEngine):
         ctx.checkpoint()  # cancelled before it started: nothing runs
         runs = state_dir(self._env()) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
-        track = Tracker(action_id)
+        # the selection as the goal came: read once, used for every write and the run's argv
+        track = Tracker(action_id, self.instance_id)
         t0 = time.monotonic()
         first = MOCK_PHASES[action_id][0][0]
         ctx.progress(first, 0.0, "starting", pausable=False)
-        self._run = Run(self._argv(action_id), self._env(), LOGGER.log)
+        self._run = Run(self._argv(action_id, track.instance_id), self._env(), LOGGER.log)
         try:
             code = self._follow(self._run, log, track, ctx)
         finally:
@@ -436,14 +444,14 @@ class Capability(CapabilityEngine):
                     error.error_code, f"{error} -- the lid is still in the fingers", recoverable=error.recoverable
                 )
             raise error
-        if result["lid_off"] and self.instance_id:
+        if result["lid_off"] and track.instance_id:
             # `opened` is the object record's own field (the orchestrator refuses any other); where
             # the lid went is the result's lid_xyz. A refused write leaves open_box offered on an
             # open container: said, in the log and in the result (REVIEW_RULES O6)
-            result["world_state"] = "opened" if ctx.update_object(self.instance_id, opened=True) else "not updated"
+            result["world_state"] = "opened" if ctx.update_object(track.instance_id, opened=True) else "not updated"
             if result["world_state"] != "opened":
                 self.get_logger().error(
-                    f"the lid is off, but the world state was not updated: {self.instance_id} is not marked opened"
+                    f"the lid is off, but the world state was not updated: {track.instance_id} is not marked opened"
                 )
         return result
 
@@ -482,10 +490,10 @@ class Capability(CapabilityEngine):
         selected container's lid from the grip that held it to its release or put-back. A cancel,
         or a run stopped between the two, then leaves it said: the base class takes no world-state
         write once an action is cancelled, so it is written as it happens, never after."""
-        if not self.instance_id or track.held == track.held_said:
+        if not track.instance_id or track.held == track.held_said:
             return
         track.held_said = track.held
-        holding = f"{self.instance_id}:lid" if track.held else None
+        holding = f"{track.instance_id}:lid" if track.held else None
         if not ctx.write_world_state(gripper={"holding": holding}):
             self.get_logger().error(f"the world state was not told the gripper holds {holding}")
 
@@ -497,13 +505,13 @@ class Capability(CapabilityEngine):
             if said is not None:
                 ctx.progress(*said, pausable=False)
 
-    def _argv(self, action_id):
+    def _argv(self, action_id, instance_id=""):
         argv = [executable(EXECUTABLES[action_id])]
         argv += ["--container", config_path(self.cfg["container"], "containers")]
         argv += ["--bench-world", config_path(self.cfg["world"])]
         argv += ["--speed-scale", str(float(self.cfg["speed_scale"]))]
-        if self.instance_id:  # the container the orchestrator selected; standalone: any of its class
-            argv += ["--instance-id", self.instance_id]
+        if instance_id:  # the container the orchestrator selected; standalone: any of its class
+            argv += ["--instance-id", instance_id]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
 
     def _env(self):

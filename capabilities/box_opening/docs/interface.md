@@ -125,19 +125,19 @@ no video encoded and no frames written on the way out.
 
 A run that stops fails the action with one of these codes:
 
-| Code          | Recoverable | Meaning                                                                                                                                                                       |
-| ------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bad_params`  | no          | The goal had params; `open_box` takes none. Nothing ran                                                                                                                       |
-| `not_allowed` | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                              |
-| `timeout`     | yes         | The run was still going after 100 s and was stopped its own way (one Ctrl+C), before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers |
-| `not_ready`   | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                        |
-| `not_found`   | yes         | The scene camera found no container                                                                                                                                           |
-| `not_home`    | yes         | The arm could not get to its start pose                                                                                                                                       |
-| `box_moved`   | yes         | The press moved the container                                                                                                                                                 |
-| `arm_holds`   | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                           |
-| `arm_halted`  | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                   |
-| `stopped`     | no          | The run was ended from outside                                                                                                                                                |
-| `failed`      | yes         | Anything else; the message is the run's last STOP line                                                                                                                        |
+| Code          | Recoverable | Meaning                                                                                                                                                                                                                                 |
+| ------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bad_params`  | no          | The goal had params; `open_box` takes none. Nothing ran                                                                                                                                                                                 |
+| `not_allowed` | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                                                                                        |
+| `timeout`     | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers |
+| `not_ready`   | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                                                                                  |
+| `not_found`   | yes         | The scene camera found no container                                                                                                                                                                                                     |
+| `not_home`    | yes         | The arm could not get to its start pose                                                                                                                                                                                                 |
+| `box_moved`   | yes         | The press moved the container                                                                                                                                                                                                           |
+| `arm_holds`   | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                     |
+| `arm_halted`  | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                             |
+| `stopped`     | no          | The run was ended from outside                                                                                                                                                                                                          |
+| `failed`      | yes         | Anything else; the message is the run's last STOP line                                                                                                                                                                                  |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.

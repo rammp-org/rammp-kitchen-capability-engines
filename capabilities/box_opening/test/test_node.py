@@ -149,8 +149,7 @@ def test_the_world_state_holds_the_lid_from_the_grip_that_held_it_to_its_release
     """REVIEW_RULES C7, row by row as a run writes them: holding from the grip's held result,
     empty again at the release (or a put-back's), each change written once."""
     ctx = FakeCtx()
-    engine.instance_id = "food_container_1"
-    track = node.Tracker("open_box")
+    track = node.Tracker("open_box", "food_container_1")
     said = []
     for row in FULL_RUN:
         track.add(row)
@@ -158,8 +157,7 @@ def test_the_world_state_holds_the_lid_from_the_grip_that_held_it_to_its_release
         said.append(track.held)
     assert ctx.world == [{"gripper": {"holding": "food_container_1:lid"}}, {"gripper": {"holding": None}}]
     assert said.index(True) == 10 and said.index(False, 10) == 13  # reach_grip_result, then place:open
-    engine.instance_id = ""  # standalone: nothing to tell
-    track = node.Tracker("open_box")
+    track = node.Tracker("open_box")  # standalone: nothing to tell
     track.add(FULL_RUN[10])
     engine._sync_held(track, FakeCtx())
     assert track.held and not track.held_said
@@ -203,6 +201,27 @@ def test_a_lid_put_back_on_the_box_leaves_the_gripper_empty_and_the_run_retryabl
         engine.execute("open_box", {}, ctx)
     assert e.value.error_code == "failed" and e.value.recoverable and "still in the fingers" not in str(e.value)
     assert not ctx.world or ctx.world[-1] == {"gripper": {"holding": None}}  # not left holding
+
+
+def test_the_selection_is_read_once_as_the_goal_comes(engine, monkeypatch):
+    """REVIEW_RULES O3: a hibernate mid-run (the orchestrator's 120 s, or another selection)
+    clears the engine's instance_id. The run's writes still name the container it was started
+    for, never a later selection's, and never none."""
+    given(monkeypatch, FULL_RUN)
+    ctx = FakeCtx()
+    engine.instance_id = "food_container_1"
+    real = node.Capability._progress
+    calls = []
+
+    def progress(log, track, ctx_):
+        calls.append(1)
+        engine.instance_id = "" if len(calls) == 1 else "food_container_2"  # hibernated, then another selected
+        real(log, track, ctx_)
+
+    monkeypatch.setattr(node.Capability, "_progress", staticmethod(progress))
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and ctx.objects == {"food_container_1": {"opened": True}}
+    assert all(w["gripper"]["holding"] in (None, "food_container_1:lid") for w in ctx.world)
 
 
 def test_a_world_state_write_the_orchestrator_refuses_is_said_in_the_result(engine, monkeypatch):
@@ -323,7 +342,8 @@ def test_a_run_is_stopped_when_following_it_raises(engine, monkeypatch):
 def test_a_run_past_its_budget_is_stopped_its_own_way_before_the_orchestrators_cancel(engine, monkeypatch):
     """REVIEW_RULES O3: the orchestrator cancels an action after 120 s (fixed there). A run still
     going at RUN_BUDGET_S is stopped first, by its own Ctrl+C, and fails with `timeout`."""
-    assert node.RUN_BUDGET_S < 120.0
+    # the worst of its own stop (a second Ctrl+C, then a kill) and the last writes, inside the 120 s
+    assert node.RUN_BUDGET_S + node.CANCEL_ESCALATE_S + node.CANCEL_KILL_S + node.WORLD_WAIT_S < 120.0
     given(monkeypatch, FULL_RUN[:3], wait=True)
     monkeypatch.setattr(node, "RUN_BUDGET_S", 0.5)
     sent = []
@@ -367,8 +387,7 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     assert argv[argv.index("--container") + 1].endswith("config/containers/ankou_pink.yaml")
     assert argv[argv.index("--bench-world") + 1].endswith("config/world_flatbot.yaml")
     assert argv[-1] == "--execute" and "--instance-id" not in argv  # standalone: no selection
-    engine.instance_id = "food_container_2"
-    argv = real("open_box")
+    argv = real("open_box", "food_container_2")  # the selection as the goal came (execute)
     assert argv[argv.index("--instance-id") + 1] == "food_container_2"
 
 
