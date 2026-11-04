@@ -121,7 +121,9 @@ write once an action is cancelled.
 Progress `pct` is the fraction of the run done, from 0 to 1. The phases, in
 order: `locate` (0.05), `look` (0.1), `press` (0.35), `grip` (0.5), `carry`
 (0.85), `release` (0.9), `home` (1.0). A phase is reported as
-its motion ends. A run is one motion from the press to the set-down, so it
+its motion ends, its message what the run is doing then, in a person's words
+(`pressing the button`, `setting the lid down`; `: stopped` where that motion
+stopped). A run is one motion from the press to the set-down, so it
 cannot pause once it has started (every phase reports `pausable: false`); a
 cancel stops it at once. The cancel is the run's own Ctrl+C: the motion in
 flight is cancelled, and the action ends once the driver has confirmed it, with

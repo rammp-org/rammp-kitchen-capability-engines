@@ -148,6 +148,10 @@ def test_a_full_run_reports_its_phases_in_order_and_the_lid_off(engine, monkeypa
     pcts = [pct for _, pct, *_ in ctx.said]
     assert pcts == sorted(pcts) and 0.0 <= pcts[0] and pcts[-1] == 1.0  # REVIEW_RULES U2: 0 to 1, never backwards
     assert not any(pausable for *_, pausable in ctx.said)  # one motion: no pause once started
+    # REVIEW_RULES U2: a person's words, never a leg's name ("depth:press: arrived")
+    messages = [m for _, _, m, _ in ctx.said]
+    assert "pressing the button" in messages and "setting the lid down" in messages and messages[-1] == "going home"
+    assert not any(":" in m or "_" in m for m in messages)
     assert out["executed"] and out["lid_off"] and out["lid_xyz"] == [0.597, -0.071, 0.209]
     assert (out["presses"], out["grips"], out["video"]) == (1, 1, video)
     assert out["run_log"].endswith("run-20261030-140000.jsonl")

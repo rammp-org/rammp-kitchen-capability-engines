@@ -91,20 +91,21 @@ WORLD_WAIT_S = 3.0
 RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORLD_WAIT_S - 2.0  # 90 s
 TAIL_LINES = 40
 
-# a leg's row -> (phase, the fraction of the run done) it ends (REVIEW_RULES U2: progress runs
-# from 0 to 1); rows are written as their legs end. First match wins.
+# a leg's row -> (phase, the fraction of the run done it ends, what the run is doing then, for
+# the user) (REVIEW_RULES U2: progress runs from 0 to 1, its message a person's words, not a leg's
+# name); rows are written as their legs end. First match wins.
 LEG_PHASES = (
-    ("reach:look", "look", 0.1),
-    ("press:close", "look", 0.12),
-    ("reach:", "press", 0.2),
-    ("depth:approach", "press", 0.25),
-    ("depth:", "press", 0.35),
-    ("grip:", "grip", 0.5),
-    ("lid:", "carry", 0.7),
-    ("place:down", "carry", 0.8),
-    ("place:touch", "carry", 0.85),
-    ("place:", "release", 0.9),
-    ("home", "home", 1.0),
+    ("reach:look", "look", 0.1, "looking for the button"),
+    ("press:close", "look", 0.12, "reaching for the button"),
+    ("reach:", "press", 0.2, "reaching for the button"),
+    ("depth:approach", "press", 0.25, "pressing the button"),
+    ("depth:", "press", 0.35, "pressing the button"),
+    ("grip:", "grip", 0.5, "gripping the lid"),
+    ("lid:", "carry", 0.7, "lifting the lid off"),
+    ("place:down", "carry", 0.8, "carrying the lid to the table"),
+    ("place:touch", "carry", 0.85, "setting the lid down"),
+    ("place:", "release", 0.9, "letting go of the lid"),
+    ("home", "home", 1.0, "going home"),
 )
 MOCK_PHASES = {
     "open_box": (
@@ -317,32 +318,31 @@ class Tracker:
             self.released = True
         if leg in ("place:open", "lid:release") and ok:
             self.held = False
-        for start, phase, pct in LEG_PHASES:
+        for start, phase, pct, doing in LEG_PHASES:
             if leg.startswith(start):
                 self.pct = max(self.pct, pct)
-                return phase, self.pct, f"{leg}: {row.get('outcome') or ('ok' if ok else 'failed')}"
+                return phase, self.pct, doing if ok else f"{doing}: stopped"
         return None
 
     def _note(self, leg, row):
         if leg == "scene_fix" and row.get("origin_xyz"):
             x, y = row["origin_xyz"][:2]
             self.pct = max(self.pct, 0.05)
-            return "locate", self.pct, f"the box at [{x:.2f}, {y:.2f}] ({row.get('source', '?')})"
+            return "locate", self.pct, f"found the container at [{x:.2f}, {y:.2f}]"
         if leg == "lid_spot" and row.get("xyz"):
             self.lid_spot = [round(float(v), 3) for v in row["xyz"]]
             x, y = self.lid_spot[:2]
-            return "grip", self.pct, f"the lid goes to [{x:.2f}, {y:.2f}] ({row.get('tier', '')})"
+            return "grip", self.pct, f"the lid will go to [{x:.2f}, {y:.2f}] on the table"
         if leg == "reach_setdown":
             self.set_down = True
         if leg == "lid_put_back" and row.get("ok"):
             self.held = False
-            return "release", self.pct, f"the lid put back on the box ({row.get('why', '')})"
+            return "release", self.pct, "put the lid back on the container"
         if leg == "reach_grip_result":
             self.held = self.held or bool(row.get("ok"))
-            held = "held" if row.get("ok") else "missed"
-            return "grip", self.pct, f"the grip {held} ({row.get('detail', '')})"
+            return "grip", self.pct, "holding the lid" if row.get("ok") else "the grip missed the lid"
         if leg == "reach_refused":
-            return "locate", self.pct, f"refused: {row.get('why', '')}"
+            return "locate", self.pct, "stopping: the run refused to go on"
         return None
 
     def lid_down(self):
