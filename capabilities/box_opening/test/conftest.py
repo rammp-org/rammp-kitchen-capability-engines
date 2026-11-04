@@ -228,8 +228,10 @@ def leg(
     )
 
 
-def runner(client, tmp_path):
-    r = Runner(client, log_dir=tmp_path)
+def runner(client, tmp_path, side_files=True):
+    """A Runner logging to `tmp_path`, keeping its flight files (a run does only where it keeps
+    its frames: Runner.side_files)."""
+    r = Runner(client, log_dir=tmp_path, side_files=side_files)
     return r
 
 

@@ -56,7 +56,8 @@ PARAMS = {
     # a video of both cameras from the grip to the set-down: for attended data collection
     "video": False,
     "viz": False,
-    # debug: each --execute run keeps its camera frames (~10 MB; the newest 20 kept)
+    # debug: each --execute run keeps its camera frames (~10 MB; the newest 20 kept), and its
+    # run record's flight files and room maps
     "mission_frames": False,
     "speed_scale": 1.0,
 }

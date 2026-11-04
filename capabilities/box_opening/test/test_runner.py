@@ -7,6 +7,7 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 
 from box_opening.runtime.guards import GuardSpec
 from box_opening.runtime.legs import Kind
+from box_opening.runtime.runner import Runner
 
 
 def test_dry_run_executes_nothing(tmp_path):
@@ -228,6 +229,46 @@ def test_a_halted_goal_ends_the_run_at_once_with_its_rows_written(tmp_path):
     (log,) = tmp_path.glob("run-*.jsonl")
     rows = [json.loads(line) for line in log.read_text().splitlines()]
     assert [(r["leg"], r["outcome"], r["ok"]) for r in rows] == [("a", "halted", False)]
+
+
+def test_a_run_keeps_its_flight_files_only_where_it_keeps_its_frames(tmp_path, monkeypatch):
+    """REVIEW_RULES R6: the per-execution flight files and the room maps are a debug record,
+    kept only with mission frames ($BOX_OPENING_MISSION_FRAMES, off by default). The run log
+    is kept either way, and an arrival's settle is still noted."""
+    monkeypatch.delenv("BOX_OPENING_MISSION_FRAMES", raising=False)
+    c = FakeClient()
+    r = Runner(c, log_dir=tmp_path)
+    assert not r.side_files
+    res = r.run([leg("a", Q0, Q1, chain=0), leg("b", Q2, [0.3] * 7, chain=1)], execute=True)
+    assert all(x.ok for x in res) and all(x.flight is None for x in res) and r.side_file("room-maps.npz") is None
+    assert [p.suffix for p in tmp_path.iterdir()] == [".jsonl"]
+    monkeypatch.setenv("BOX_OPENING_MISSION_FRAMES", "1")
+    r = Runner(FakeClient(), log_dir=tmp_path / "on")
+    assert r.side_files and r.side_file("room-maps.npz").parent.name.endswith(".side")
+
+
+def test_the_runs_folder_keeps_the_newest_records(tmp_path):
+    """REVIEW_RULES R6: nothing else prunes runs/. Each run keeps the newest RUNS_KEPT records,
+    itself included, each with its side files; nothing else in the folder is touched."""
+    from box_opening.runtime import runner as runner_mod
+
+    for i in range(6):
+        stem = tmp_path / ("run-20261104-1200%02d" % i)
+        stem.with_suffix(".jsonl").write_text("{}\n")
+        (tmp_path / (stem.name + ".flights")).mkdir()
+        (tmp_path / (stem.name + ".flights") / "01-a.json").write_text("{}")
+    (tmp_path / "notes.txt").write_text("kept")
+    runner_mod.prune_runs(tmp_path, kept=3)
+    left = sorted(p.name for p in tmp_path.iterdir())
+    assert left == [
+        "notes.txt",
+        "run-20261104-120003.flights",
+        "run-20261104-120003.jsonl",
+        "run-20261104-120004.flights",
+        "run-20261104-120004.jsonl",
+        "run-20261104-120005.flights",
+        "run-20261104-120005.jsonl",
+    ]
 
 
 def test_contact_invalidates_downstream(tmp_path):

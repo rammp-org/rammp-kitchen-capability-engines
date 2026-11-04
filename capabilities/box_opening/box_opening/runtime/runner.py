@@ -9,6 +9,7 @@ never auto-continues past a cancel.
 import json
 import math
 import re
+import shutil
 import threading
 import time
 from collections import namedtuple
@@ -31,6 +32,7 @@ from box_opening.constants import (
     RECOIL_SPEED,
     SANITY_MARGIN_RAD,
     START_GATE_RAD,
+    mission_frames_enabled,
     state_dir,
 )
 from box_opening.geometry import ang_diff
@@ -504,12 +506,34 @@ def line_profile(leg, params, time_scale=1.0):
     return None
 
 
+RUNS_KEPT = 100  # newest run records kept in the runs folder, their side files with them (~20 KB a record)
+
+
+def prune_runs(log_dir, kept=RUNS_KEPT):
+    """Keep the newest `kept` run records of `log_dir`: each run-<stamp>.jsonl, with its
+    .flights/ and .side/ folders, older ones removed (REVIEW_RULES R6: nothing else prunes the
+    runs folder). The names sort as they were made. A record that cannot be removed is left."""
+    stems = sorted({p.name.split(".", 1)[0] for p in Path(log_dir).glob("run-*")})
+    for stem in stems[: max(0, len(stems) - kept)]:
+        for p in Path(log_dir).glob(stem + ".*"):
+            try:
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
+            except OSError:
+                pass
+
+
 class Runner:
-    def __init__(self, client, log_dir=None, margin_rad=SANITY_MARGIN_RAD):
+    def __init__(self, client, log_dir=None, margin_rad=SANITY_MARGIN_RAD, side_files=None):
         self.client = client
         self.margin_rad = margin_rad
         self._log_dir = Path(log_dir if log_dir is not None else state_dir() / "runs")
         self._log_path = None
+        # REVIEW_RULES R6: the run log is always kept; the per-execution flight files and the
+        # room maps beside it (side_file) only where the run keeps its camera frames too
+        # ($BOX_OPENING_MISSION_FRAMES, the node's `mission_frames`, off by default). The
+        # folder keeps the newest RUNS_KEPT records, this one made room for now
+        self.side_files = mission_frames_enabled() if side_files is None else bool(side_files)
+        prune_runs(self._log_dir, RUNS_KEPT - 1)
         # an overlapped gripper command that outlives a run(): sent at fix
         # commit or on arrival at the hop, joined lazily before anything
         # that needs the fingers settled (audit 2026-09-02)
@@ -1525,6 +1549,8 @@ class Runner:
                 )
             except Exception:  # noqa: BLE001 - no settle to note
                 self._settling = None
+        if not self.side_files:
+            return None  # its settle still noted; no file (REVIEW_RULES R6)
         try:
             path = self._record().with_suffix(".flights") / ("%02d-%s.json" % (seq, re.sub(r"[^\w.-]+", "_", names[0])))
             path.parent.mkdir(exist_ok=True)
@@ -1683,8 +1709,11 @@ class Runner:
     def side_file(self, name):
         """A path for a side file `name` next to the run record,
         <record>.side/<name>, its folder made; None where it cannot be made
-        (a side file must never cost the run). The record's folder relative
-        path is str(path.relative_to(self.log_dir))."""
+        (a side file must never cost the run), and where this run keeps
+        none (side_files). The record's folder relative path is
+        str(path.relative_to(self.log_dir))."""
+        if not self.side_files:
+            return None
         try:
             path = self._record().with_suffix(".side") / name
             path.parent.mkdir(exist_ok=True)

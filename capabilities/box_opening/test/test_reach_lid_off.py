@@ -1543,9 +1543,10 @@ def test_the_pooled_room_map_is_built_beside_the_scene_cameras_and_does_not_choo
         assert room.pooled.seen.sum() > room.scene_map.seen.sum()  # the wrist sees what the scene camera did not
     from box_opening.runtime.runner import Runner
 
-    runner = Runner(ctx.client, log_dir=tmp_path)
+    runner = Runner(ctx.client, log_dir=tmp_path, side_files=True)  # the maps: a run that keeps its frames
     drop = rlo.ContainerPose(xyz=(bx + 0.2, by, bz), yaw=0.0)
     note = rlo.pooled_note(ctx, runner, room, drop)
+    assert "maps" not in rlo.pooled_note(ctx, Runner(ctx.client, log_dir=tmp_path / "plain"), room, drop)
     assert note["chose"] is True and note["pooled_seen"] > note["scene_seen"] and note["aim_points"] == room.aim_points
     assert note["spot"] == pytest.approx([bx + 0.2, by, 0.0])
     press_demo.wait_capture_writes()  # the maps are written off the motion's way
