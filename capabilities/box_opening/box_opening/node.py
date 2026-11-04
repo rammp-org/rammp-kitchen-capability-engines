@@ -29,6 +29,7 @@ refused before anything runs. The mock moves nothing and is always available.
 import json
 import logging
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -241,6 +242,49 @@ class RunLog:
         return out
 
 
+class WorldWriter:
+    """A run's world-state writes, made in order on a thread of their own (REVIEW_RULES R4): an
+    orchestrator call waits up to 10 s for its service and 10 s for the answer, and the poll loop
+    that follows the run (its budget, its cancel) must never wait on one. `put` queues a write,
+    a callable that returns whether it was taken; `wait` joins what is queued, at most `timeout_s`."""
+
+    def __init__(self, log):
+        self._log = log
+        self._q = queue.Queue()
+        self._thread = threading.Thread(target=self._work, name="box-opening-world-state", daemon=True)
+        self._thread.start()
+
+    def put(self, what, write, done=None):
+        """Queue `write` (said as `what` where it is refused); `done(ok)` once it is answered."""
+        self._q.put((what, write, done))
+
+    def _work(self):
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            what, write, done = item
+            try:
+                ok = bool(write())
+            except Exception as e:  # noqa: BLE001 -- Cancelled included: no write once cancelled
+                self._log.error(f"the world state was not told {what}: {type(e).__name__}: {e}")
+                ok = False
+            else:
+                if not ok:
+                    self._log.error(f"the world state was not told {what}")
+            if done is not None:
+                done(ok)
+
+    def wait(self, timeout_s):
+        """Every write queued so far answered (True), or `timeout_s` gone (False: said)."""
+        self._q.put(None)
+        self._thread.join(timeout_s)
+        if self._thread.is_alive():
+            self._log.error(f"the world-state writes did not finish in {timeout_s:.0f} s: some may be missing")
+            return False
+        return True
+
+
 class Tracker:
     """A run's rows as it goes: the progress each says, and what the result reports.
     `instance_id`: the container the orchestrator selected when the goal came, kept for the
@@ -257,6 +301,7 @@ class Tracker:
         self.released = False
         self.held = False  # the lid in the fingers: from the grip that held it to its release or put-back
         self.held_said = False  # ... as the world state was last told (Capability._sync_held)
+        self.opened = None  # the object record's `opened`: None not asked, then the orchestrator's answer
 
     def add(self, row):
         """The (phase, %, message) this row says, or None."""
@@ -403,9 +448,11 @@ class Capability(CapabilityEngine):
         t0 = time.monotonic()
         first = MOCK_PHASES[action_id][0][0]
         ctx.progress(first, 0.0, "starting", pausable=False)
+        world = WorldWriter(self.get_logger())
         self._run = Run(self._argv(action_id, track.instance_id), self._env(), LOGGER.log)
+        code = None
         try:
-            code = self._follow(self._run, log, track, ctx)
+            code = self._follow(self._run, log, track, ctx, world)
         finally:
             run_, self._run = self._run, None
             if run_.proc.poll() is None:
@@ -417,6 +464,11 @@ class Capability(CapabilityEngine):
                 )
                 run_.stop(CANCEL_ESCALATE_S)
             self._progress(log, track, ctx)  # the last rows, written as it ended
+            if not ctx.cancelled():
+                self._sync_held(track, ctx, world)  # the last rows' word: a release, a put-back
+                if track.lid_off(code):
+                    self._mark_opened(track, ctx, world)
+            world.wait(WORLD_WAIT_S)  # every write answered before the result goes out
         if ctx.cancelled():
             raise Cancelled()
         result = {
@@ -429,7 +481,6 @@ class Capability(CapabilityEngine):
             "video": run_.video,
             "run_log": str(log.path) if log.path else None,
         }
-        self._sync_held(track, ctx)  # the last rows' word: a release, a put-back
         if run_.timed_out:
             held = " -- the lid is still in the fingers" if track.held else ""
             raise EngineError(
@@ -448,20 +499,21 @@ class Capability(CapabilityEngine):
             # `opened` is the object record's own field (the orchestrator refuses any other); where
             # the lid went is the result's lid_xyz. A refused write leaves open_box offered on an
             # open container: said, in the log and in the result (REVIEW_RULES O6)
-            result["world_state"] = "opened" if ctx.update_object(track.instance_id, opened=True) else "not updated"
+            result["world_state"] = "opened" if track.opened else "not updated"
             if result["world_state"] != "opened":
                 self.get_logger().error(
                     f"the lid is off, but the world state was not updated: {track.instance_id} is not marked opened"
                 )
         return result
 
-    def _follow(self, run_, log, track, ctx):
-        """Progress from the run's rows until it ends; a cancel is its Ctrl+C. Its exit code."""
+    def _follow(self, run_, log, track, ctx, world):
+        """Progress from the run's rows until it ends; a cancel is its Ctrl+C. Its exit code. The
+        world-state writes the rows call for are `world`'s, never this loop's to wait on."""
         sent = escalated = None
         while run_.proc.poll() is None:
             self._progress(log, track, ctx)
             if not ctx.cancelled():
-                self._sync_held(track, ctx)
+                self._sync_held(track, ctx, world)
             now = time.monotonic()
             if ctx.cancelled() and sent is None:
                 self.get_logger().warning("cancelled: the run's own stop (Ctrl+C) sent")
@@ -485,17 +537,30 @@ class Capability(CapabilityEngine):
             time.sleep(POLL_S)
         return run_.finish()
 
-    def _sync_held(self, track, ctx):
+    @staticmethod
+    def _sync_held(track, ctx, world):
         """The world state's gripper as the run's rows say it (REVIEW_RULES C7): holding the
         selected container's lid from the grip that held it to its release or put-back. A cancel,
         or a run stopped between the two, then leaves it said: the base class takes no world-state
-        write once an action is cancelled, so it is written as it happens, never after."""
+        write once an action is cancelled, so it is written as it happens, never after. Queued on
+        `world` (WorldWriter), in order."""
         if not track.instance_id or track.held == track.held_said:
             return
         track.held_said = track.held
         holding = f"{track.instance_id}:lid" if track.held else None
-        if not ctx.write_world_state(gripper={"holding": holding}):
-            self.get_logger().error(f"the world state was not told the gripper holds {holding}")
+        world.put(f"the gripper holds {holding}", lambda: ctx.write_world_state(gripper={"holding": holding}))
+
+    @staticmethod
+    def _mark_opened(track, ctx, world):
+        """The container's object record `opened` (once): track.opened is the answer."""
+        if not track.instance_id or track.opened is not None:
+            return
+        track.opened = False  # asked; True once the orchestrator takes it
+        world.put(
+            f"{track.instance_id} is opened",
+            lambda: ctx.update_object(track.instance_id, opened=True),
+            lambda ok: setattr(track, "opened", ok),
+        )
 
     @staticmethod
     def _progress(log, track, ctx):

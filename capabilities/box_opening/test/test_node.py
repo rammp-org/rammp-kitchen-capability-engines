@@ -91,6 +91,15 @@ class FakeCtx:
         return self.accepts
 
 
+class NowWriter:
+    """node.WorldWriter, each write made at once on the caller's thread."""
+
+    def put(self, what, write, done=None):
+        ok = write()
+        if done is not None:
+            done(ok)
+
+
 @pytest.fixture(scope="module")
 def ros():
     rclpy.init()
@@ -153,13 +162,13 @@ def test_the_world_state_holds_the_lid_from_the_grip_that_held_it_to_its_release
     said = []
     for row in FULL_RUN:
         track.add(row)
-        engine._sync_held(track, ctx)
+        engine._sync_held(track, ctx, NowWriter())
         said.append(track.held)
     assert ctx.world == [{"gripper": {"holding": "food_container_1:lid"}}, {"gripper": {"holding": None}}]
     assert said.index(True) == 10 and said.index(False, 10) == 13  # reach_grip_result, then place:open
     track = node.Tracker("open_box")  # standalone: nothing to tell
     track.add(FULL_RUN[10])
-    engine._sync_held(track, FakeCtx())
+    engine._sync_held(track, FakeCtx(), NowWriter())
     assert track.held and not track.held_said
 
 
@@ -222,6 +231,33 @@ def test_the_selection_is_read_once_as_the_goal_comes(engine, monkeypatch):
     out = engine.execute("open_box", {}, ctx)
     assert out["lid_off"] and ctx.objects == {"food_container_1": {"opened": True}}
     assert all(w["gripper"]["holding"] in (None, "food_container_1:lid") for w in ctx.world)
+
+
+def test_a_slow_world_state_write_never_holds_up_the_cancel(engine, monkeypatch):
+    """REVIEW_RULES R4: an orchestrator call can wait 10 s for its service and 10 s for its
+    answer. The writes go out on a thread of their own: the loop that follows the run delivers
+    a cancel as soon as it comes, whatever a write is waiting on."""
+    import threading
+
+    given(monkeypatch, FULL_RUN[:8] + [FULL_RUN[10]], wait=True)  # the grip held: `holding` is written
+    ctx = FakeCtx()
+    engine.instance_id = "food_container_1"
+    real_write = ctx.write_world_state
+
+    def slow_write(**updates):
+        time.sleep(2.0)
+        return real_write(**updates)
+
+    ctx.write_world_state = slow_write
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(time.monotonic()), real(run)))
+    t_cancel = []
+    threading.Timer(0.7, lambda: (t_cancel.append(time.monotonic()), setattr(ctx, "cancel", True))).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert len(sent) == 1 and sent[0] - t_cancel[0] < 0.3  # the next poll, not after the write
+    assert ctx.world == [{"gripper": {"holding": "food_container_1:lid"}}]  # and the write still went out
 
 
 def test_a_world_state_write_the_orchestrator_refuses_is_said_in_the_result(engine, monkeypatch):
