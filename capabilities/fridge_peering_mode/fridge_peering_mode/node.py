@@ -1,10 +1,14 @@
-"""The fridge_peering capability: look inside an open fridge with the wrist camera.
+"""The fridge_peering_mode capability: look inside an open fridge with the wrist camera.
 
-Action `peer` (session.PeerSession.run): wait for the plane detector's fridge TF, plan to a standoff
-in front of the back wall with go_to_ee_pose, then (unless `teleop` is false) stream ee_twist as
-a closed-loop servo: the joystick slides the camera along the wall, which the servo follows as
-the detector re-estimates it. Teleop runs until the joystick's stop button (success), a cancel, or
-`max_teleop_s`; the joystick's home button goes back to the standoff.
+Action `peer` (streaming.PeerSession.run): wait for the plane detector's fridge TF, plan to a
+standoff in front of the back wall with go_to_ee_pose, then (unless `teleop` is false) stream
+ee_twist as a closed-loop servo: the joystick slides the camera along the wall, which the servo
+follows as the detector re-estimates it. Teleop runs until the joystick's stop button (success), a
+cancel, or `max_teleop_s`; the joystick's home button goes back to the standoff.
+
+No fridge TF to home on (and `search_when_no_fridge`): the same servo runs in a search mode, the
+stick moving the camera a little (orientation held) so the detector gets another view; the home
+button homes once the fridge is detected (`search_auto_home`: by itself).
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`.
 Otherwise the goal is a dry run: the standoff is planned (nothing moves) and teleop publishes what
@@ -33,6 +37,7 @@ from capability_engine.driver_state import Refused
 from . import geometry as geo
 from .streaming import PeerSession, facing, follow_params
 
+ENGINE_ID = "fridge_peering_mode"  # = the package, its image and /<id>/... (make action CAP=)
 FOLLOW_MODES = ("off", "idle", "continuous")
 
 # ROS parameter -> default. Frames, topics and what is measured on the fridge are per robot (the
@@ -67,13 +72,21 @@ PARAMS = {
     "up_frame": "arm_mount",
     "up_axis": "+z",
     # the standoff: ee_link standoff_distance back from the wall (m), offset along fridge x / y (m).
-    # Homing fails without a fresh fridge TF within fridge_tf_wait_s. CHECK: the detector drops
-    # depth closer than its min_range (0.20 m) to the CAMERA; closer than that, following holds its
-    # plane
+    # Homing waits up to fridge_tf_wait_s for a fridge TF measured follow_settle_s after the arm
+    # last moved. CHECK: the detector drops depth closer than its min_range (0.20 m) to the CAMERA;
+    # closer than that, following holds its plane
     "fridge_tf_wait_s": 5.0,
     "standoff_distance": 0.40,
     "offset_x": 0.0,
     "offset_y": 0.0,
+    # no usable fridge TF within fridge_tf_wait_s: with teleop, search -- the stick moves ee_link
+    # within +-search_range_m (m) of where it was, its orientation held (u = left, v = up, standoff
+    # = forward / back, level), so the detector gets another view. The home button homes once the
+    # fridge is detected; search_auto_home homes by itself once a fridge TF is measured with the
+    # arm still. false: fail with no_fridge (as teleop: false always does)
+    "search_when_no_fridge": True,
+    "search_range_m": 0.15,
+    "search_auto_home": False,
     # the axes ee_twist setpoints are in (the driver: arm_mount)
     "twist_frame": "arm_mount",
     # the servo: full stick slides the target at max_speed on the wall and standoff_speed toward it
@@ -122,8 +135,9 @@ PARAMS = {
     "axis_signs": [1.0, 1.0, 1.0],
     "deadzone": 0.1,
     "expo": 2.0,
-    # button_home (Back) goes back to the standoff and re-latches the plane; button_stop (X) ends
-    # the action with the arm holding (-1 disables). Neither is an e-stop
+    # button_home (Back) goes back to the standoff and re-latches the plane (searching: homes once
+    # the fridge is detected); button_stop (X) ends the action with the arm holding (-1 disables).
+    # Neither is an e-stop
     "button_home": 6,
     "button_stop": 2,
     # older than this is not used (s): /joy holds the target (> 1 / joy_node's autorepeat_rate), the
@@ -139,7 +153,7 @@ def _problems(cfg) -> list[str]:
     out = []
     for name in ("rate_hz", "joy_timeout_s", "ee_state_timeout_s", "fridge_tf_wait_s",
                  "static_tf_timeout_s", "max_lin", "max_ang", "max_lead_m", "expo",
-                 "follow_stale_s", "standoff_distance"):
+                 "follow_stale_s", "standoff_distance", "search_range_m"):
         if not cfg[name] > 0.0:
             out.append(f"{name} must be > 0, got {cfg[name]}")
     for name in ("max_speed", "standoff_speed", "kp_lin", "kp_ang", "follow_settle_s"):
@@ -206,7 +220,7 @@ class Capability(CapabilityEngine):
                         "maximum": 1,
                         "default": 1.0,
                     },
-                    # false: stop at the standoff
+                    # false: stop at the standoff (and fail with no_fridge instead of searching)
                     "teleop": {"type": "boolean", "default": True},
                     # end teleop (successfully) after this long in total; null: only on the stop
                     # button or a cancel
@@ -221,13 +235,13 @@ class Capability(CapabilityEngine):
     ]
 
     def __init__(self):
-        super().__init__("fridge_peering")
+        super().__init__(ENGINE_ID)
         self.cfg = {
             name: self.declare_parameter(name, default).value for name, default in PARAMS.items()
         }
         bad = _problems(self.cfg)
         if bad:
-            raise ValueError("fridge_peering parameters: " + "; ".join(bad))
+            raise ValueError("fridge_peering_mode parameters: " + "; ".join(bad))
         moves = self.cfg["allow_execute"]
         self.get_logger().info(
             f"allow_execute={moves}: "

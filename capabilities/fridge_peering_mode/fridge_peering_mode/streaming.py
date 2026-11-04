@@ -1,8 +1,5 @@
 """One `peer` action: plan to a standoff in front of the fridge's back wall, then teleop.
 
-This is the old FridgeTeleopNode's logic, run inside one execute() instead of a node's timer.
-Everything the old node did to talk to the driver is now self.arm's:
-
   homing   self.arm.go_to_ee_pose(): cuRobo plans the tool frame (flange + arm.tool_z) to the
            standoff pose in arm.frame and the driver runs it. Blocking; False on a refusal or
            failure, with the reason in self.arm.last_error.
@@ -14,9 +11,23 @@ The joystick, the TF buffer and the debug publishers are this action's own entit
 (create_action_subscription / create_action_tf_buffer / create_action_publisher): they exist
 from the start of execute() to its end, and the engine destroys them safely.
 
+Two teleop modes, one servo:
+
+  wall     after homing: the stick slides the camera over the fridge's back wall (the followed
+           plane), the camera facing it.
+  search   no usable fridge TF within fridge_tf_wait_s (and search_when_no_fridge): the stick
+           moves the camera in a box of +-search_range_m around where it is, its orientation
+           held, so the plane detector gets another view. u = left, v = up, standoff = forward /
+           back level with the floor. The home button (or, with search_auto_home, the first fridge
+           TF measured with the arm still) leaves the stream and homes; no fridge after all goes
+           back to searching.
+
 Teleop ends on the joystick's stop button (the action succeeds), on the orchestrator's cancel
 (Cancelled: the block exits and the stream closes), on max_teleop_s, or on an arm error. The home
 button leaves the stream, goes back to the standoff and re-latches the plane.
+
+Homing uses only a fridge TF stamped follow_settle_s after the arm last moved (measured from
+/ee_state's twist, and the end of every stream): an estimate from a moving camera is not a goal.
 
 Fridge-frame convention: +z points INTO the back wall, away from the arm. The camera looks along
 +z, the standoff sits at z = -standoff_distance, and the arm base is always at z < 0 in it.
@@ -45,9 +56,17 @@ from . import plane_follow as pf
 
 CONTROLLER = "ee_twist"
 WAIT_STEP_S = 0.1  # how often the waits for TF poll (and honour pause and cancel)
+SEARCH_CHECK_S = 0.2  # how often a search looks for the fridge TF
+# /ee_state's twist above either of these means the arm is moving (homing waits for a fridge TF
+# measured follow_settle_s after it last was)
+STILL_LIN = 0.005  # m/s
+STILL_ANG = 0.03  # rad/s
+MIN_SPEED_SCALE = 0.01  # the driver refuses (not clamps) a go_to speed_scale below this
 LATCHED = QoSProfile(
     depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
 )
+
+WALL, SEARCH = "wall", "search"
 
 # Buttons that act on a press (rising edge) rather than while held.
 _EDGE_BUTTONS = ("home", "stop")
@@ -70,6 +89,7 @@ class _Latch(NamedTuple):
     # rotation from detector_rotation(n, up) to the fridge TF's own axes at homing (about z;
     # identity when up_frame / up_axis match the detector's fixed frame): keeps the homing roll.
     R_off: np.ndarray
+    off_deg: float  # R_off's angle (warned about at homing when > 1 deg)
     stamp_ns: int
 
 
@@ -100,6 +120,18 @@ def follow_params(cfg) -> pf.FollowParams:
         max_step_deg=float(cfg["follow_max_step_deg"]),
         max_step_m=float(cfg["follow_max_step_m"]),
     )
+
+
+def search_frame(R_SE: np.ndarray, p_SE: np.ndarray, optical_E, up_S) -> np.ndarray:
+    """T_SG for a search: origin at E, z = the optical axis made level (a virtual wall straight
+    ahead), so u is left, v up and the standoff axis horizontal. Looking within ~6 deg of straight
+    up or down, z is the optical axis itself. ValueError when it is exactly vertical."""
+    opt = R_SE @ np.asarray(optical_E, dtype=float)
+    up = np.asarray(up_S, dtype=float)
+    n = opt - float(opt @ up) * up
+    if float(np.linalg.norm(n)) < 0.1:
+        n = opt
+    return geo.make_transform(geo.gravity_aligned_rotation(n, up), p_SE)
 
 
 class PeerSession:
@@ -141,6 +173,9 @@ class PeerSession:
         self.follow_mode = c["follow_mode"]
         self.follow_settle_s = float(c["follow_settle_s"])
         self.follow_stale_s = float(c["follow_stale_s"])
+        self.search_when_no_fridge = bool(c["search_when_no_fridge"])
+        self.search_range_m = float(c["search_range_m"])
+        self.search_auto_home = bool(c["search_auto_home"])
         self.joy_topic = c["joy_topic"]
         self.axis_u = int(c["axis_u"])
         self.axis_v = int(c["axis_v"])
@@ -157,6 +192,7 @@ class PeerSession:
         # Target orientation of E in F, as in the original homing; fixed, because F itself moves
         # with the TF. (node.py's _problems() checked the axes at startup.)
         self._R_FE = facing(cfg)
+        self._optical_E = geo.axis_vector(c["optical_axis"])
         self._up_U = geo.axis_vector(c["up_axis"])
         self._follow_params = follow_params(cfg)
 
@@ -172,12 +208,17 @@ class PeerSession:
         self._faults = set()
         self._input_armed = False  # the stick has been seen at neutral since teleop began
         self._cmd = (0.0, 0.0, 0.0)  # stick (u, v, standoff), -1..1
+        self._mode = WALL
         self._pending_latch = None  # the plane the last homing goal was computed with
         self._latch = None
         self._follower = None
+        self._search = None  # (T_SG, R_SE) of the running search, fixed when it starts
+        self._found_announced = False
+        self._next_check = 0.0
         self._fridge_seen_ns = None
         self._follow_fresh_at = 0.0
-        self._motion_ns = 0
+        self._motion_ns = 0  # following's gate (follow_mode idle: while the stick moves)
+        self._moved_ns = 0  # homing's gate: when the arm last moved (node clock, ns)
         self._was_engaged = False
         self._target_G = None  # servo target of E in the plane frame
         self._ff_prev = None  # (p_SW, R_SW) target on the previous tick, for feedforward
@@ -196,24 +237,51 @@ class PeerSession:
         # Read when used, never at import: the engine sets it from the arm.frame parameter.
         return rammp_arm.FRAME
 
+    def _now_ns(self) -> int:
+        return self._node.get_clock().now().nanoseconds
+
     # ------------------------------------------------------------------ the action
 
     def run(self, *, teleop: bool, max_teleop_s) -> dict:
-        """Home, then (with `teleop`) servo until the stop button, a cancel or `max_teleop_s`."""
+        """Home, then (with `teleop`) servo until the stop button, a cancel or `max_teleop_s`.
+        With no fridge TF to home on, search (with `teleop` and search_when_no_fridge)."""
         self._wait_arm_tf()
-        rehomes, teleop_s, deadline = 0, 0.0, None
+        homes, rehomes, searches, teleop_s, deadline = 0, 0, 0, 0.0, None
         while True:
-            self._home()
-            if not teleop:
-                return {"ended": "homed", "rehomes": rehomes, "teleop_s": 0.0}
+            found, why = self._wait_for_fridge()
+            if found is None:
+                if not (teleop and self.search_when_no_fridge):
+                    raise EngineError(
+                        "no_fridge",
+                        f"no usable fridge TF within {self.fridge_tf_wait_s:.1f}s: {why} -- the "
+                        f"arm holds where it is",
+                        recoverable=True,
+                    )
+                mode = SEARCH
+                searches += 1
+                self._log.warning(
+                    f"no usable fridge TF ({why}): searching -- move the stick to give the "
+                    f"detector another view"
+                )
+            else:
+                self._home(found)
+                homes += 1
+                if not teleop:
+                    return {"ended": "homed", "homes": homes, "rehomes": 0, "searches": 0,
+                            "teleop_s": 0.0}
+                mode = WALL
             if deadline is None and max_teleop_s is not None:
                 deadline = time.monotonic() + float(max_teleop_s)
             started = time.monotonic()
-            why = self._teleop(deadline)
+            why = self._teleop(mode, deadline)
+            # The stream has closed: the arm comes to rest now. No fridge TF from before is a goal.
+            self._moved_ns = self._now_ns()
             teleop_s += time.monotonic() - started
             if why != "home":
-                return {"ended": why, "rehomes": rehomes, "teleop_s": round(teleop_s, 1)}
-            rehomes += 1
+                return {"ended": why, "homes": homes, "rehomes": rehomes, "searches": searches,
+                        "teleop_s": round(teleop_s, 1)}
+            if mode == WALL:
+                rehomes += 1
 
     def _wait_arm_tf(self) -> None:
         deadline = time.monotonic() + self.static_tf_timeout_s
@@ -243,32 +311,53 @@ class PeerSession:
 
     # ------------------------------------------------------------------ homing
 
-    def _home(self) -> None:
-        ctx, arm = self._ctx, self._arm
-        ctx.progress("homing", 0.0, "waiting for the fridge TF")
-        deadline = time.monotonic() + self.fridge_tf_wait_s
+    def _settled(self, stamp_ns: int) -> bool:
+        """Whether a fridge TF stamped `stamp_ns` was measured with the arm still (a static TF
+        always was)."""
+        return stamp_ns == 0 or stamp_ns >= self._moved_ns + int(self.follow_settle_s * 1e9)
+
+    def _find_fridge(self, *, gated: bool = True):
+        """(((position, rotation) of the tool frame goal in arm.frame, latch), '') from ONE fresh
+        fridge TF, or (None, why). `gated`: only a TF measured with the arm still."""
+        T_SF, why, stamp_ns = self._fridge_in(self._arm_frame)
+        if T_SF is None:
+            return None, why
+        if gated and not self._settled(stamp_ns):
+            return None, "the latest fridge TF was measured while the arm moved; waiting for one"
+        latch, why = self._latch_from(T_SF, stamp_ns)
+        if latch is None:
+            return None, why
+        return (self._goal_from(T_SF), latch), ""
+
+    def _wait_for_fridge(self):
+        """_find_fridge(), polled for up to fridge_tf_wait_s once the arm has settled: (found, '')
+        or (None, why)."""
+        self._ctx.progress("homing", 0.0, "waiting for the fridge TF")
+        # from when an estimate can first pass the settle gate, not from now
+        settle_left = (self._moved_ns - self._now_ns()) * 1e-9 + self.follow_settle_s
+        deadline = time.monotonic() + max(0.0, settle_left) + self.fridge_tf_wait_s
         while True:
-            goal, why = self._compute_goal()
-            latch = None
-            if goal is not None:  # the plane teleop will use: the one homing used
-                latch, why = self._latch_plane()
-            if goal is not None and latch is not None:
-                break
+            found, why = self._find_fridge()
+            if found is not None:
+                return found, ""
             if time.monotonic() > deadline:
-                raise EngineError(
-                    "no_fridge",
-                    f"no usable fridge TF within {self.fridge_tf_wait_s:.1f}s: {why} -- the arm "
-                    f"holds where it is",
-                    recoverable=True,
-                )
+                return None, why
             self._log.warning(
                 f"homing: waiting for the fridge TF ({why})", throttle_duration_sec=1.0
             )
-            ctx.checkpoint()
+            self._ctx.checkpoint()
             time.sleep(WAIT_STEP_S)
 
+    def _home(self, found) -> None:
+        ctx, arm = self._ctx, self._arm
+        (pos, R), latch = found
+        if latch.off_deg > 1.0:
+            self._log.warning(
+                f"{self.fridge_frame}'s in-plane axes are {latch.off_deg:.1f} deg from world down "
+                f"as up_frame / up_axis define it: the detector's fixed_frame +z is not this "
+                f"up (or it used its near-horizontal fallback). Teleop keeps the homing roll"
+            )
         self._pending_latch = latch
-        pos, R = goal
         quat = geo.matrix_to_quat(R)
         self._goal_pub.publish(self._pose_msg(pos, R))
         self._log.info(
@@ -279,9 +368,8 @@ class PeerSession:
         )
         if self.execute:
             ctx.progress("homing", 10.0, "planning and moving to the standoff")
-            ok = arm.go_to_ee_pose(
-                pos, quat, "to the fridge standoff", rammp_arm.GO_TO_SPEED_SCALE * self.speed
-            )
+            scale = max(MIN_SPEED_SCALE, rammp_arm.GO_TO_SPEED_SCALE * self.speed)
+            ok = arm.go_to_ee_pose(pos, quat, "to the fridge standoff", scale)
             if not ok:
                 raise EngineError(
                     "refused",
@@ -300,25 +388,22 @@ class PeerSession:
             self._log.info(f"dry run: cuRobo planned the standoff in {plan.planning_time:.2f}s")
             ctx.progress("homing", 100.0, "dry run: standoff planned, not moved")
 
-    def _compute_goal(self):
-        """((position, rotation) of the tool frame in arm.frame, '') or (None, why)."""
-        T_SF, why, _ = self._fridge_in(self._arm_frame)
-        if T_SF is None:
-            return None, why
+    def _goal_from(self, T_SF: np.ndarray):
+        """(position, rotation) of the tool frame in arm.frame, for E at the standoff."""
         p_FE = np.array([self.goal_offset[0], self.goal_offset[1], -self.standoff])
         T_SG = T_SF @ geo.make_transform(self._R_FE, p_FE) @ self._T_EG
-        return (T_SG[:3, 3], T_SG[:3, :3]), ""
+        return T_SG[:3, 3], T_SG[:3, :3]
 
-    def _latch_plane(self):
-        """The plane from the current fridge TF, in S, or (None, why)."""
-        T_SF, why, stamp_ns = self._fridge_in(self._arm_frame)
-        if T_SF is None:
-            return None, why
+    def _up_S(self) -> np.ndarray:
+        """World up in S. Raises TransformException."""
+        return self._lookup(self._arm_frame, self.up_frame)[:3, :3] @ self._up_U
+
+    def _latch_from(self, T_SF: np.ndarray, stamp_ns: int):
+        """The plane of fridge TF `T_SF` (in S), or (None, why)."""
         try:
-            R_SU = self._lookup(self._arm_frame, self.up_frame)[:3, :3]
+            up_S = self._up_S()
         except TransformException as exc:
             return None, f"no TF {self._arm_frame} -> {self.up_frame} ({exc})"
-        up_S = R_SU @ self._up_U
         n, origin = T_SF[:3, 2].copy(), T_SF[:3, 3].copy()
         try:
             geo.gravity_aligned_rotation(n, up_S)  # the stick's u/v must exist
@@ -327,13 +412,7 @@ class PeerSession:
             return None, f"{self.fridge_frame}: {exc}"
         R_off = R_rebuilt.T @ T_SF[:3, :3]
         off_deg = math.degrees(float(np.linalg.norm(geo.rotvec_from_matrix(R_off))))
-        if off_deg > 1.0:
-            self._log.warning(
-                f"{self.fridge_frame}'s in-plane axes are {off_deg:.1f} deg from world down as "
-                f"up_frame / up_axis define it: the detector's fixed_frame +z is not this "
-                f"up (or it used its near-horizontal fallback). Teleop keeps the homing roll"
-            )
-        return _Latch(n, float(n @ origin), origin, up_S, R_off, stamp_ns), ""
+        return _Latch(n, float(n @ origin), origin, up_S, R_off, off_deg, stamp_ns), ""
 
     # ------------------------------------------------------------------ TF
 
@@ -359,7 +438,7 @@ class PeerSession:
                     f"does not apply (and there is nothing to follow)"
                 )
         elif self.fridge_tf_timeout_s > 0.0:
-            age = (self._node.get_clock().now().nanoseconds - stamp_ns) * 1e-9
+            age = (self._now_ns() - stamp_ns) * 1e-9
             if age > self.fridge_tf_timeout_s:
                 return None, (
                     f"fridge TF is {age:.2f}s old (> fridge_tf_timeout_s = "
@@ -479,25 +558,44 @@ class PeerSession:
 
     # ------------------------------------------------------------------ teleop
 
-    def _teleop(self, deadline) -> str:
-        """Servo until the stop button ("stop"), the home button ("home") or `deadline`
-        ("max_teleop_s"). A cancel raises Cancelled out of it."""
-        self._latch = self._pending_latch  # the plane homing just used
-        self._start_follower()
+    def _teleop(self, mode: str, deadline) -> str:
+        """Servo in `mode` (WALL or SEARCH) until the stop button ("stop"), the home button or a
+        found fridge ("home") or `deadline` ("max_teleop_s"). A cancel raises Cancelled out of
+        it."""
+        self._mode = mode
+        if mode == WALL:
+            self._latch = self._pending_latch  # the plane homing just used
+            self._start_follower()
+        else:
+            self._latch = self._follower = None
+            self._search = None  # fixed on the first tick, from where the arm is
+            self._found_announced = False
+            self._next_check = 0.0
         self._target_G = None  # seeded from the measured pose on the first tick
         self._ff_prev = None
         self._input_armed = False
         self._prev_buttons = None
         self._cmd = (0.0, 0.0, 0.0)
         stop = f", stop (button {self.button_stop}) ends" if self.button_stop >= 0 else ""
-        message = (
-            f"teleop: move the stick to move the camera, let go to hold; home (button "
-            f"{self.button_home}) re-homes{stop}"
-        )
+        if mode == WALL:
+            phase = "teleop"
+            message = (
+                f"teleop: move the stick to move the camera, let go to hold; home (button "
+                f"{self.button_home}) re-homes{stop}"
+            )
+        else:
+            phase = "searching"
+            auto = " (or it homes by itself once it sees one)" if self.search_auto_home else ""
+            message = (
+                f"no fridge frame: move the stick to look around (within "
+                f"{self.search_range_m:.2f} m); home (button {self.button_home}) homes once the "
+                f"fridge is detected{auto}{stop}"
+            )
         self._log.info(message)
         # A stream ignores pause (holding still in a paused send() would expire the session): say
         # so. A dry run sends nothing and pauses at its checkpoint.
-        self._ctx.progress("teleop", 50.0, message, pausable=not self.execute)
+        self._ctx.progress(phase, 50.0 if mode == WALL else 0.0, message,
+                           pausable=not self.execute)
         if not self.execute:
             return self._loop(None, deadline)
         with self._arm.stream(CONTROLLER, timeout_s=self.stream_timeout_s) as s:
@@ -514,12 +612,15 @@ class PeerSession:
             if "stop" in edges:
                 self._log.info("teleop: stop button")
                 return "stop"
-            if "home" in edges:
-                self._log.info("teleop: home button, back to the standoff")
+            if "home" in edges and self._home_pressed():
                 return "home"
             if deadline is not None and now > deadline:
                 self._log.info("teleop: max_teleop_s reached")
                 return "max_teleop_s"
+            if self._mode == SEARCH and now >= self._next_check:
+                self._next_check = now + SEARCH_CHECK_S
+                if self._search_check():
+                    return "home"
             v, w = self._command(dt, self._engaged(fresh))
             if send is not None:
                 send([*v, *w])  # raises Cancelled once cancelled; the block's exit closes
@@ -531,6 +632,42 @@ class PeerSession:
                 time.sleep(sleep)
             else:
                 next_t = time.monotonic()  # fell behind: don't burst to catch up
+
+    def _home_pressed(self) -> bool:
+        """Whether the home button ends this teleop. Searching, only once there is a fridge TF
+        to home on (else there is nothing to go to: say why and keep searching)."""
+        if self._mode == WALL:
+            self._log.info("teleop: home button, back to the standoff")
+            return True
+        found, why = self._find_fridge(gated=False)
+        if found is None:
+            self._log.warning(f"search: home pressed, but no usable fridge TF yet ({why})")
+            return False
+        self._log.info("search: home button, holding still to home on the fridge")
+        return True
+
+    def _search_check(self) -> bool:
+        """Announce a fridge TF appearing (or going) while searching; True to home on it now
+        (search_auto_home, and measured with the arm still)."""
+        found, why = self._find_fridge(gated=False)
+        if found is None:
+            if self._found_announced:
+                self._found_announced = False
+                self._log.warning(f"search: lost the fridge TF ({why})")
+            return False
+        if not self._found_announced:
+            self._found_announced = True
+            message = (
+                f"fridge detected: press home (button {self.button_home}) to go to the standoff"
+                if not self.search_auto_home
+                else "fridge detected: homing once the arm is still"
+            )
+            self._log.info(f"search: {message}")
+            self._ctx.progress("searching", 50.0, message, pausable=not self.execute)
+        if self.search_auto_home and self._settled(found[1].stamp_ns):
+            self._log.info("search: fridge TF measured with the arm still, homing")
+            return True
+        return False
 
     # ------------------------------------------------------------------ faults
 
@@ -569,7 +706,7 @@ class PeerSession:
         self._fridge_seen_ns = latch.stamp_ns  # already used: it IS the latch
         self._follow_fresh_at = time.monotonic()
         # the arm has just been moving (homing): estimates from then are suspect
-        self._motion_ns = self._node.get_clock().now().nanoseconds
+        self._motion_ns = self._now_ns()
         self._was_engaged = False
 
     def _update_follow(self, dt: float, engaged: bool) -> None:
@@ -580,7 +717,7 @@ class PeerSession:
         if self.follow_mode == "idle" and engaged:
             if not self._was_engaged:
                 f.brake()  # come to a smooth stop; no new estimates while moving
-            self._motion_ns = self._node.get_clock().now().nanoseconds
+            self._motion_ns = self._now_ns()
         else:
             self._ingest_fridge()
         self._was_engaged = engaged
@@ -620,26 +757,51 @@ class PeerSession:
             )
 
     def _plane_now(self):
-        """(T_SG, R_SF, R_SE target) for the followed plane this tick. G here is the plane frame:
-        the latched anchor projected onto the followed plane, gravity-aligned (u left, v up)."""
+        """(T_SG, R_S of the plane frame to show, R_SE target) this tick. G is the plane frame,
+        gravity-aligned (u left, v up). WALL: the latched anchor projected onto the followed
+        plane, facing it. SEARCH: where the search started, its orientation held."""
+        if self._mode == SEARCH:
+            T_SG, R_SE = self._search
+            return T_SG, T_SG[:3, :3], R_SE
         latch, f = self._latch, self._follower
         n = f.normal
         T_SG = geo.make_transform(geo.gravity_aligned_rotation(n, latch.up), f.origin)
         R_SF = pf.detector_rotation(n, latch.up) @ latch.R_off
         return T_SG, R_SF, R_SF @ self._R_FE
 
+    def _start_search(self, T_SE: np.ndarray) -> None:
+        """Fix the search's frame at E's measured pose. TransformException without up."""
+        try:
+            T_SG = search_frame(T_SE[:3, :3], T_SE[:3, 3], self._optical_E, self._up_S())
+        except ValueError as exc:
+            raise EngineError(
+                "no_fridge",
+                f"no fridge TF, and the camera looks straight up or down ({exc}): cannot "
+                f"search -- the arm holds where it is",
+                recoverable=True,
+            ) from exc
+        self._search = (T_SG, T_SE[:3, :3].copy())
+
     # ------------------------------------------------------------------ the servo
+
+    def _limits(self):
+        """(u, v, standoff) limits of the target: the wall's, or a search's box."""
+        if self._mode == SEARCH:
+            r = self.search_range_m
+            return [-r, r], [-r, r], [-r, r]
+        return self.u_limits, self.v_limits, self.standoff_limits
 
     def _slide(self, cu: float, cv: float, cs: float, dt: float, scale: float):
         """The target after one tick of stick input at `scale` x full speed."""
         u, v, z = self._target_G
         s = -z
         k = scale * dt
+        u_lim, v_lim, s_lim = self._limits()
         return np.array(
             [
-                self._limited(u, u + cu * self.max_speed * k, self.u_limits),
-                self._limited(v, v + cv * self.max_speed * k, self.v_limits),
-                -self._limited(s, s - cs * self.standoff_speed * k, self.standoff_limits),
+                self._limited(u, u + cu * self.max_speed * k, u_lim),
+                self._limited(v, v + cv * self.max_speed * k, v_lim),
+                -self._limited(s, s - cs * self.standoff_speed * k, s_lim),
             ]
         )
 
@@ -660,14 +822,14 @@ class PeerSession:
     def _seed_target(self, T_SG: np.ndarray, p_SE: np.ndarray) -> None:
         self._target_G = (geo.invert_transform(T_SG) @ np.append(p_SE, 1.0))[:3]
         u, v, s = self._target_G[0], self._target_G[1], -self._target_G[2]
+        where = "the plane origin" if self._mode == WALL else "where the search started"
         self._log.info(
             f"servo target at u={u:+.3f} v={v:+.3f} standoff={s:.3f} m (u = left, v = up from "
-            f"the plane origin)"
+            f"{where})"
         )
+        u_lim, v_lim, s_lim = self._limits()
         if not (
-            self.u_limits[0] <= u <= self.u_limits[1]
-            and self.v_limits[0] <= v <= self.v_limits[1]
-            and self.standoff_limits[0] <= s <= self.standoff_limits[1]
+            u_lim[0] <= u <= u_lim[1] and v_lim[0] <= v <= v_lim[1] and s_lim[0] <= s <= s_lim[1]
         ):
             self._log.warning(
                 "the arm starts outside u_limits / v_limits / standoff_limits; the stick only "
@@ -698,19 +860,26 @@ class PeerSession:
                     f"arm.frame to the driver's frame"
                 )
         self._clear_fault("ee_state")
+        if (
+            float(np.linalg.norm(ee.linear)) > STILL_LIN
+            or float(np.linalg.norm(ee.angular)) > STILL_ANG
+        ):
+            self._moved_ns = self._now_ns()
         return ee
 
     def _command(self, dt: float, engaged: bool):
         """(linear, angular) twist for this tick, in twist_frame axes.
 
         The stick slides a target (u, v, standoff) for E in the plane frame; the plane and the
-        facing orientation come from the FOLLOWED plane. W is servoed onto the matching W pose,
+        target orientation come from the FOLLOWED plane (WALL) or the search's start (SEARCH). W
+        is servoed onto the matching W pose,
             v = v_ff + kp_lin * (p_target - p),  w = w_ff + kp_ang * rot_err,
         both capped, (v_ff, w_ff) being the rate of change of the W target. With no input and no
         new estimate the target stays put and the servo holds it (a zero twist would drift:
         ee_twist's null-space posture term moves the arm under a zero setpoint).
         """
-        self._update_follow(dt, engaged)
+        if self._mode == WALL:
+            self._update_follow(dt, engaged)
         ee = self._ee_state()
         if ee is None:
             self._ff_prev = None
@@ -723,9 +892,18 @@ class PeerSession:
             )
         self._clear_fault("twist_frame")
 
-        T_SG, R_SF, R_SE_t = self._plane_now()
         T_SW = geo.transform_from_pq(ee.position, ee.orientation)
-        p_SE = (T_SW @ self._T_WE)[:3, 3]
+        T_SE = T_SW @ self._T_WE
+        p_SE = T_SE[:3, 3]
+        if self._mode == SEARCH and self._search is None:
+            try:
+                self._start_search(T_SE)
+            except TransformException as exc:
+                return self._hold(
+                    "up_frame", f"no TF {self._arm_frame} -> {self.up_frame} ({exc}); zero twist"
+                )
+            self._clear_fault("up_frame")
+        T_SG, R_S_plane, R_SE_t = self._plane_now()
         if self._target_G is None:
             self._seed_target(T_SG, p_SE)
             self._ff_prev = None
@@ -774,7 +952,7 @@ class PeerSession:
             w_ff + self.kp_ang * geo.rotvec_from_matrix(R_SW_t @ T_SW[:3, :3].T), self.max_ang
         )
         self._servo_target_pub.publish(self._pose_msg(p_SE_t, R_SE_t))
-        self._followed_plane_pub.publish(self._pose_msg(T_SG[:3, 3], R_SF))
+        self._followed_plane_pub.publish(self._pose_msg(T_SG[:3, 3], R_S_plane))
         return self._emit(R_TS @ v, R_TS @ w)
 
     def _pose_msg(self, p, R) -> PoseStamped:
