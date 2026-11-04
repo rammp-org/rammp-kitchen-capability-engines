@@ -586,10 +586,11 @@ class PlannerClient:
 
     def driver_health(self, timeout_s=0.0):
         """What the driver's diagnostics said last of its link to the arm and its e-stop
-        (driver.driver_health_from), waiting up to `timeout_s` for a first word; None where
-        none came (the driver publishes them about once a second)."""
+        (driver.driver_health_from), waiting up to `timeout_s` for the link's word: each status
+        comes in a message of its own (about once a second each), the e-stop's maybe first.
+        None where none came."""
         t0 = time.monotonic()
-        while getattr(self, "_driver_health", None) is None and time.monotonic() - t0 < timeout_s:
+        while not (getattr(self, "_driver_health", None) or {}).get("link_state") and time.monotonic() - t0 < timeout_s:
             rclpy.spin_once(self.node, timeout_sec=0.1)
         return getattr(self, "_driver_health", None)
 

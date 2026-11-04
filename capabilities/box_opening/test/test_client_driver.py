@@ -821,7 +821,7 @@ def _diagnostics(link_state="running", reason="", estopped=False):
     )
 
 
-def test_a_goal_refused_while_the_drivers_link_is_down_ends_the_run_and_says_so():
+def test_a_goal_refused_while_the_drivers_link_is_down_ends_the_run_and_says_so(monkeypatch):
     """Flatbot 2026-11-04 12:23: the driver's link to the arm faulted as it started
     (WRONG_SERVOING_MODE) and four homes were refused, said as "a stream session open, a mode
     change while moving, or its MEDIUM gains refused". The driver's diagnostics say its link's
@@ -841,6 +841,16 @@ def test_a_goal_refused_while_the_drivers_link_is_down_ends_the_run_and_says_so(
     c = _client(_RejectingDriver())
     c._diag_cb(_diagnostics("running"))
     assert c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)[0] == "failed"
+    # the e-stop's status first, in a message of its own: the link's is still waited for
+    c = _client(_RejectingDriver())
+    c._diag_cb(SimpleNamespace(status=_diagnostics(estopped=False).status[2:3]))
+    spins = []
+    monkeypatch.setattr(
+        client_mod.rclpy,
+        "spin_once",
+        lambda node, timeout_sec=0.0: (spins.append(1), c._diag_cb(_diagnostics("faulted", reason))),
+    )
+    assert c.driver_health(timeout_s=2.0)["link_state"] == "faulted" and len(spins) == 1
     c = _client(_RejectingDriver())
     c._diag_cb(_diagnostics("running", estopped=True))
     outcome, info = c.execute(_traj(LIVE, [v + 0.05 for v in LIVE]), 1.0)
