@@ -58,7 +58,10 @@ def close_height(ai, door, settings, shift, close_to_deg):
 
 
 def move_chair(chair_back):
-    """What the person does to the wheelchair before an executed close, as the close's messages say it."""
+    """What the person does to the wheelchair (`chair_back` m: + back, - forward), as the close's and open's messages
+    say it."""
+    if chair_back < 0:
+        return f"Move the WHEELCHAIR straight forward ~{-chair_back * 100:.0f} cm (toward the fridge, not turning it)"
     return f"Move the WHEELCHAIR straight back ~{chair_back * 100:.0f} cm (away from the fridge, without turning it)"
 
 

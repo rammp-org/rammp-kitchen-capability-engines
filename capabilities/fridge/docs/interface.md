@@ -7,9 +7,13 @@
 ## What it does
 
 Opens and closes the fridge door with the Kinova arm. On an `open` goal it finds the handle from
-the wrist camera (door-plane fit over the whole image → the vertical bar sticking out of it),
+the wrist camera (with `handle_source: sam3`, SAM 3's mask of it and the handle's own depth, then
+a door plane beside it that the handle must stand on; with `depth`, a door-plane fit over the whole
+image → the vertical bar sticking out of it),
 grasps the handle squared to the door (at the middle of the bar, or `grasp_offset_m` above or
-below it), pulls the door 70° open, lets go and pushes it on to 90° with the side of the hand. With
+below it), pulls the door 60° open, lets go, backs off the handle and pushes it on to 90° with the
+side of the hand. If the push needs the wheelchair moved first, the goal stops after the back-off
+and its result (`note`) and feedback say how far; an `open` goal with `chair_moved` then pushes. With
 `push_open: false` it pulls 90° instead, lets go, backs off and goes back round the door's free edge
 to its inner side, facing the fridge, always ending upright. A `close` goal pushes the door to about 45° with the side of the hand and it
 swings shut by itself. Every leg is planned and sim-gated before anything moves; a failed check
@@ -37,12 +41,12 @@ frames, everything the node logged during it in `console.log`, and a rosbag in `
 
 ## Subscribes
 
-| Topic                                            | Type                     | Required | Meaning                                     |
-| ------------------------------------------------ | ------------------------ | -------- | ------------------------------------------- |
-| `/wrist_camera/color/image_raw`                  | `sensor_msgs/Image`      | yes      | Handle detection (`color_topic`)            |
-| `/wrist_camera/color/camera_info`                | `sensor_msgs/CameraInfo` | yes      | Intrinsics (`camera_info_topic`)            |
-| `/wrist_camera/aligned_depth_to_color/image_raw` | `sensor_msgs/Image`      | yes      | Depth **aligned to colour** (`depth_topic`) |
-| `/tf`, `/tf_static`                              | `tf2_msgs/TFMessage`     | yes      | Camera pose in `arm.frame` (hand-eye calib) |
+| Topic                                | Type                     | Required | Meaning                                                                                                                                          |
+| ------------------------------------ | ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`      | yes      | Handle detection (`color_topic`)                                                                                                                 |
+| `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo` | yes      | Intrinsics (`camera_info_topic`)                                                                                                                 |
+| `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`      | yes      | Depth **aligned to colour** (`depth_topic`; the OAK and D405 publish it aligned, a D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`) |
+| `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`     | yes      | Camera pose in `arm.frame` (hand-eye calib)                                                                                                      |
 
 The camera subscriptions exist only while an action runs; the engine destroys them when it ends.
 `self.arm` subscribes to the arm driver's state topics the same way. The SAM 3 client
@@ -59,12 +63,12 @@ Served under `/fridge/`, types from `rammp_orchestrator_interfaces`:
 | `/fridge/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/fridge/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action  | Params                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Result payload                                     |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `open`  | `execute` (bool, default false), `speed` ((0, 1\], default 1.0: scales every arm motion), `swing_deg` (30–110; default 70, or 90 with `push_open` false: exactly this swing or it refuses), `push_open` (bool, default true), `grasp_offset_m` (m, default 0: grasp this far above the middle of the handle bar, below if negative; refused beyond ±(`handle_length_m`/2 − 3 cm)), `release_only` (bool, default false: let go and back off the handle, after a stopped run) | `{"executed": bool, "note": str, "runs_dir": str}` |
-| `close` | `execute`, `speed` as above, plus the settings below                                                                                                                                                                                                                                                                                                                                                                                                                         | `{"executed": bool, "note": str, "runs_dir": str}` |
+| Action  | Params                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Result payload                                     |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `open`  | `execute` (bool, default false), `speed` ((0, 1\], default 1.0: scales every arm motion), `swing_deg` (30–110, at most 85 with the push; default 60, or 90 with `push_open` false: exactly this swing or it refuses), `push_open` (bool, default true), `grasp_offset_m` (m, default 0: grasp this far above the middle of the handle bar, below if negative; refused beyond ±(`handle_length_m`/2 − 3 cm)), `release_only` (bool, default false: let go and back off the handle, after a stopped run), `chair_moved` (bool, default false: after the push-open asked for a wheelchair move and it was made, only the push), `save_door` (bool, default false: a dry run that plans OK also writes the door file as the planned open would leave it, for testing the close) | `{"executed": bool, "note": str, "runs_dir": str}` |
+| `close` | `execute`, `speed` as above, plus the settings below                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | `{"executed": bool, "note": str, "runs_dir": str}` |
 
-`close` needs the door file the open saved. The gripper is never touched (it may hold a container)
+`close` needs the door file the open saved (an executed open, or a dry run with `save_door`). The gripper is never touched (it may hold a container)
 and the hand never tilts: every planned configuration keeps its roll and pitch within 2° of where it
 starts, or the close refuses before moving.
 
@@ -113,17 +117,21 @@ How to run it on the arm: [TESTING.md](TESTING.md).
 - **The 30° mount is sim-checked only.** Set `mount_tilt_deg: 30`. The planning runs in `arm_mount`,
   which is level on every robot; the parameter sets the reach limits and placement advice. All
   hardware runs were on a level arm. On the 30° model the 90° open and the close plan with the
-  fridge ~14–22 cm further from the arm than on the level one. The 70° pull + push-open plans
+  fridge ~14–22 cm further from the arm than on the level one. The 60° pull + push-open plans
   with the handle at its 2026-11-01 height (~0.31 m above the arm base) because the 30° mount
-  pushes from 10 cm above the handle and lets the grasp tilt up to 35° (`MOUNTS[30]`). With the
+  pushes from 10 cm above the handle and lets the grasp tilt up to 45° (`MOUNTS[30]`). With the
   level arm's values (10 cm below, up to 25°) it plans almost nowhere at that height.
   The wheelchair keep-out's size was measured on the level rig.
 - **The wheelchair is moved by a person.** An action can't prompt, so `chair_moved` stands in for
   the old script's prompt. A `MOVE_BASE` intent (`ctx.request_intent`) could replace it once an
   engine handles one.
 - **`handle_source: sam3` is unmeasured here.** Its grasp offsets were never measured on this
-  fridge: re-measure before using it. Depth stays the default, though the OAK may struggle on glossy
-  handles.
+  fridge: re-measure before using it. Depth stays the code's default; TESTING.md runs SAM 3, which
+  found the handle where depth didn't on 2026-11-04.
+- **A glossy door's depth can be its reflection.** On 2026-11-04 the black door read 0.9–1.1 m
+  everywhere behind a handle at 0.5 m. The handle then comes from its own depth, but no door plane
+  fits it and the open refuses ("no door plane fits the handle"). A matte surface on the door
+  around the handle fixes it.
 - **The push-open does not keep the door open.** Its one hardware run (2026-10-24) finished its
   trajectory and the door swung shut.
 - **The close has hit the handle.** On 2026-10-24 the hand shut the door by hitting the handle, not
@@ -138,40 +146,41 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name                      | Default                                          | Meaning                                                                                                                                                                                                                   |
-| ------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator`        | `true`                                           | `false` runs standalone: no registration, drive it by CLI                                                                                                                                                                 |
-| `mock`                    | `false`                                          | `true` skips hardware (the mock alternative sets it)                                                                                                                                                                      |
-| `allow_execute`           | `false`                                          | `true` lets execute goals move the arm. Attended runs only                                                                                                                                                                |
-| `data_dir`                | `/fridge_data`                                   | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                                                                       |
-| `color_topic`             | `/wrist_camera/color/image_raw`                  | Wrist colour image                                                                                                                                                                                                        |
-| `camera_info_topic`       | `/wrist_camera/color/camera_info`                | Wrist camera intrinsics                                                                                                                                                                                                   |
-| `depth_topic`             | `/wrist_camera/aligned_depth_to_color/image_raw` | Wrist depth, aligned to colour                                                                                                                                                                                            |
-| `mount_tilt_deg`          | `0`                                              | The arm's forward lean in its mount: `0` (dojo) or `30` (flatbot, gen_1_5)                                                                                                                                                |
-| `camera_frame`            | `""`                                             | Camera optical frame; `""` = the colour image's frame_id                                                                                                                                                                  |
-| `handle_source`           | `depth`                                          | `depth` (bar sticking out of the door) or `sam3` (SAM 3's handle mask)                                                                                                                                                    |
-| `sam3_service`            | `/perception/sam3/detect`                        | SAM 3's Detect service (`handle_source: sam3`)                                                                                                                                                                            |
-| `sam3_prompts`            | `[handle]`                                       | SAM 3 text prompts for the handle; the best-scoring instance is used                                                                                                                                                      |
-| `sam3_threshold`          | `0.3`                                            | SAM 3 score threshold                                                                                                                                                                                                     |
-| `handle_centre_to_face_m` | `0.0381`                                         | Middle of the handle bar to the door's front surface, perpendicular to it (m)                                                                                                                                             |
-| `pin_behind_face_m`       | `0.04675`                                        | Door's front surface to the hinge pin's axis, perpendicular to it (m)                                                                                                                                                     |
-| `hinge_along_door_m`      | `0.3683`                                         | Handle bar centre line to the hinge pin's axis, along the door at handle height (m)                                                                                                                                       |
-| `door_width_m`            | `0.4572`                                         | Hinge-side edge to free edge, measured at the door's top (m)                                                                                                                                                              |
-| `door_depth_m`            | `0.10668`                                        | Front face to the innermost point of its inside, bins and shelves included (m)                                                                                                                                            |
-| `door_above_handle_m`     | `0.381`                                          | Middle of the handle bar up to the door's top (m)                                                                                                                                                                         |
-| `door_below_handle_m`     | `0.3937`                                         | Middle of the handle bar down to the door's bottom (m)                                                                                                                                                                    |
-| `handle_length_m`         | `0.13`                                           | The handle bar's grippable length between its mounts (m). An estimate: measure it                                                                                                                                         |
-| `body_depth_m`            | `0.5`                                            | Cabinet behind the door (m)                                                                                                                                                                                               |
-| `chair_keep_out_behind_m` | `0.381`                                          | No part of the arm may be further than this behind the arm base while on its right (m)                                                                                                                                    |
-| `chair_back_dir`          | `[1.0, 0.0]`                                     | Which way moving the chair back moves the fridge in the arm's frame (x, y): forward = +x                                                                                                                                  |
-| `record_bag`              | `true`                                           | Every run also records a rosbag into its run folder: the wrist camera's colour, depth and intrinsics `bag_frame_hz` times a second, all of `/tf_static` and `/tf` at 5 Hz (~75 MB a minute). Skipped with under 2 GB free |
-| `bag_frame_hz`            | `1.0`                                            | Wrist camera frames a second in the run's rosbag (the camera runs at 15)                                                                                                                                                  |
+| Name                      | Default                              | Meaning                                                                                                                                                                                                                          |
+| ------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`        | `true`                               | `false` runs standalone: no registration, drive it by CLI                                                                                                                                                                        |
+| `mock`                    | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                                                                                                                             |
+| `allow_execute`           | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                                                                                                                       |
+| `data_dir`                | `/fridge_data`                       | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                                                                              |
+| `color_topic`             | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                                                                                                                               |
+| `camera_info_topic`       | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                                                                                                                          |
+| `depth_topic`             | `/wrist_camera/depth/image_rect_raw` | Wrist depth, aligned to colour (flatbot's OAK, the D405); a D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`                                                                                                         |
+| `mount_tilt_deg`          | `0`                                  | The arm's forward lean in its mount: `0` (dojo) or `30` (flatbot, gen_1_5)                                                                                                                                                       |
+| `camera_frame`            | `""`                                 | Camera optical frame; `""` = the colour image's frame_id                                                                                                                                                                         |
+| `handle_source`           | `depth`                              | `depth` (bar sticking out of the door) or `sam3` (SAM 3's handle mask)                                                                                                                                                           |
+| `sam3_service`            | `/perception/sam3/detect`            | SAM 3's Detect service (`handle_source: sam3`)                                                                                                                                                                                   |
+| `sam3_prompts`            | `[handle]`                           | SAM 3 text prompts for the handle; the largest upright instance is used (else the best-scoring)                                                                                                                                  |
+| `sam3_threshold`          | `0.3`                                | SAM 3 score threshold                                                                                                                                                                                                            |
+| `handle_centre_to_face_m` | `0.070`                              | Middle of the handle bar to the door's front surface, perpendicular to it (m). From the printed handle's STL, not measured on the fridge: measure it                                                                             |
+| `pin_behind_face_m`       | `0.04675`                            | Door's front surface to the hinge pin's axis, perpendicular to it (m)                                                                                                                                                            |
+| `hinge_along_door_m`      | `0.3683`                             | Handle bar centre line to the hinge pin's axis, along the door at handle height (m)                                                                                                                                              |
+| `door_width_m`            | `0.4572`                             | Hinge-side edge to free edge, measured at the door's top (m)                                                                                                                                                                     |
+| `door_depth_m`            | `0.10668`                            | Front face to the innermost point of its inside, bins and shelves included (m)                                                                                                                                                   |
+| `door_above_handle_m`     | `0.381`                              | Middle of the handle bar up to the door's top (m)                                                                                                                                                                                |
+| `door_below_handle_m`     | `0.3937`                             | Middle of the handle bar down to the door's bottom (m)                                                                                                                                                                           |
+| `handle_length_m`         | `0.188`                              | The handle bar's grippable straight length between its mounts (m). From the STL: measure it                                                                                                                                      |
+| `body_depth_m`            | `0.5`                                | Cabinet behind the door (m)                                                                                                                                                                                                      |
+| `chair_keep_out_behind_m` | `0.381`                              | No part of the arm may be further than this behind the arm base while on its right (m)                                                                                                                                           |
+| `chair_back_dir`          | `[1.0, 0.0]`                         | Which way moving the chair back moves the fridge in the arm's frame (x, y): forward = +x                                                                                                                                         |
+| `door_square_to_arm`      | `false`                              | **Testing only.** `true`: the door is taken to face the arm squarely (its normal along the arm base's -x), so no door plane is fit -- for a door whose depth is its reflection. A door yawed off it gets a wrong hinge and swing |
+| `record_bag`              | `true`                               | Every run also records a rosbag into its run folder: the wrist camera's colour, depth and intrinsics `bag_frame_hz` times a second, all of `/tf_static` and `/tf` at 5 Hz (~75 MB a minute). Skipped with under 2 GB free        |
+| `bag_frame_hz`            | `1.0`                                | Wrist camera frames a second in the run's rosbag (the camera runs at 15)                                                                                                                                                         |
 
 Per-rig constants that are not parameters yet, in `fridge/constants.py`: the grasp corrections
 (`GRIP_EXT`, `GRASP_X_ADJUST`, `VERTICAL_CORR`), the handle gates and the routes round the door. Per mount
 (`MOUNTS`): the reach limits, the placement window, the push-open's hand height (`PUSH_OPEN_DZ_M`) and the grasp's
 nose-down tilts (`door_common.open_door.GRASP_PITCHES_DEG`): on the level arm door_common's (up to 25°), on the 30°
-mount up to 35°.
+mount up to 45°.
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the

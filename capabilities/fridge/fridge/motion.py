@@ -8,6 +8,7 @@ import numpy as np
 import rammp_arm
 from door_common import open_door as shared
 from door_common.common import DoorFrame, Refused, RunLog, say
+from door_common.common import trajectory_keep_out as dc_trajectory_keep_out
 from scipy.spatial.transform import Rotation as R
 
 KEYPOINT_TOL_M = 0.01  # a path counts as done with the hand this close to its last keypoint
@@ -107,7 +108,7 @@ def door_after(geom, cand):
         door_z=list(h[2] + np.asarray(shared.DOOR_Z_FROM_HANDLE)),
         hinge=list(geom["hinge"]),
         door_open_deg=float(cand["swing"]),
-        **shared.DOOR_MODEL,
+        **shared.door_model(geom["n"], cand["grasp"].position, h),
     )
     door["open_sign"] = float(np.sign(DoorFrame(door, 1.0).angle_of(cand["wps"][-1][:3])) or 1.0)
     return door
@@ -126,15 +127,27 @@ class AfterSwing(shared.AfterSwing):
             )
 
 
-def send_legs(ai, pts, legs, speed_scale=1.0):
-    """The joints the plan checked, as one smooth trajectory timed like the Cartesian path they follow. `pts`: the
-    keypoints [(pos, quat)], `legs`: the joint list between each pair. Returns (reached the last keypoint, error m)."""
+def _leg_lengths(pts, legs):
+    """The Cartesian length of each joint step of `legs` (send_legs' timing)."""
     lengths = []
     for (p0, q0), (p1, q1), leg in zip(pts[:-1], pts[1:], legs, strict=True):
         n = len(leg)
         ang = float((R.from_quat(q0).inv() * R.from_quat(q1)).magnitude())
         step = max(1e-4, float(np.linalg.norm(np.asarray(p1) - p0)) / n, ang / n * rammp_arm.ROT_EQUIV_M)
         lengths += [step] * n
+    return lengths
+
+
+def trajectory_keep_out(q0, pts, legs, speed_scale=1.0):
+    """What self.arm.move_joints checks before send_legs sends `legs` from joints `q0` (common.trajectory_keep_out,
+    timed as send_legs times them): why the arm would refuse, or None."""
+    return dc_trajectory_keep_out(q0, [q for leg in legs for q in leg], _leg_lengths(pts, legs), speed_scale)
+
+
+def send_legs(ai, pts, legs, speed_scale=1.0):
+    """The joints the plan checked, as one smooth trajectory timed like the Cartesian path they follow. `pts`: the
+    keypoints [(pos, quat)], `legs`: the joint list between each pair. Returns (reached the last keypoint, error m)."""
+    lengths = _leg_lengths(pts, legs)
     sent = ai.move_joints([q for leg in legs for q in leg], cart_lengths=lengths, speed_scale=speed_scale)
     time.sleep(0.3)
     err = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - np.asarray(pts[-1][0])))

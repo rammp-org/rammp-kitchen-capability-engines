@@ -34,6 +34,7 @@ from pathlib import Path
 
 import numpy as np
 import pybullet as p
+import rammp_arm
 from capability_engine import sim
 from capability_engine.cornell_commands import (
     CartesianTrajectoryCommand,
@@ -704,6 +705,25 @@ def enable_keep_out(behind_m):
     sim.set_keep_out(keep_out)
 
 
+def trajectory_keep_out(q0, knots, cart_lengths=None, speed_scale=1.0):
+    """What self.arm.move_joints checks before sending `knots` from joints `q0`: the timed trajectory through them
+    (rammp_arm.joint_trajectory, as move_joints times it), every 2nd sample + the end, against the keep-out. A plan
+    checks only its own IK samples; between them the trajectory can graze the zone (11-05, sim: 0.0 cm in), and the arm
+    then refuses it mid-task. Why, or None -- always None while no keep-out is enabled (the microwave)."""
+    if not sim.keep_out_enabled():
+        return None
+    samples = rammp_arm.joint_trajectory(np.asarray(q0, float), list(knots), cart_lengths, speed_scale)
+    if samples is None:
+        return None
+    rb = sim.make_sim()[1]
+    q = samples[1]
+    for qi in list(q[::2]) + [q[-1]]:
+        msg = keep_out_message(rb, qi)
+        if msg is not None:
+            return msg
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Wrist-camera frames for the run log (and the open task's detection frames)
 # ---------------------------------------------------------------------------
@@ -754,6 +774,8 @@ def save_frame(frame, tag, out_dir, result=None, arm_state=None):
             extra = {"joints": np.asarray(arm_state["position"], float), "ee": np.asarray(arm_state["ee_pos"], float)}
         if frame.get("base_T_cam") is not None:
             extra["base_T_cam"] = frame["base_T_cam"]
+        if frame.get("handle_mask") is not None:  # the SAM 3 mask the detection used
+            extra["handle_mask"] = np.asarray(frame["handle_mask"], bool)
         np.savez_compressed(
             str(stem) + ".npz", depth_mm=np.clip(depth, 0, 65535).astype(np.uint16), K=frame["K"], **extra
         )

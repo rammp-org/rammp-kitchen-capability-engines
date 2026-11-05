@@ -340,7 +340,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
 def _shift_door(door, dxy):
     """Move the door's recorded positions by `dxy` (arm-base x, y) -- a planning copy."""
     for k in ("hinge", "closed_grasp_pos", "closed_handle", "door_mid"):
-        if k in door:
+        if door.get(k) is not None:  # the open writes door_mid null when the detector saw no door face
             door[k] = [door[k][0] + dxy[0], door[k][1] + dxy[1], *door[k][2:]]
 
 

@@ -36,9 +36,11 @@ params:
   # The arm's forward lean in its mount (deg): 0 (dojo) or 30 (flatbot, gen_1_5).
   mount_tilt_deg: 0
   # Wrist camera; depth must be aligned to colour. camera_frame "" = the colour image's frame_id.
+  # depth/image_rect_raw is aligned to colour on the D405 and the OAK (flatbot); the D435i's is not --
+  # with it, override this to /wrist_camera/aligned_depth_to_color/image_raw.
   color_topic: /wrist_camera/color/image_raw
   camera_info_topic: /wrist_camera/color/camera_info
-  depth_topic: /wrist_camera/aligned_depth_to_color/image_raw
+  depth_topic: /wrist_camera/depth/image_rect_raw
   camera_frame: ""
   # Where the handle comes from: depth (the vertical bar sticking out of the door) or sam3 (SAM 3's
   # mask of sam3_prompts on the wrist image; the door plane still comes from depth).
@@ -47,20 +49,23 @@ params:
   sam3_prompts: [handle]
   sam3_threshold: 0.3
   # Measured on the fridge being opened (m); see Before a run in docs/interface.md.
-  handle_centre_to_face_m: 0.053
+  # NOT MEASURED ON THE FRIDGE: the printed handle's STL (bar middle to the door). Measure it.
+  handle_centre_to_face_m: 0.070
   pin_behind_face_m: 0.04675
   hinge_along_door_m: 0.3683
   door_width_m: 0.4572
   door_depth_m: 0.10668
-  door_above_handle_m: 0.3175
-  door_below_handle_m: 0.4572
-  # NOT MEASURED (an estimate from the 11-01 depth frames): measure the bar between its mounts.
-  handle_length_m: 0.13
+  door_above_handle_m: 0.381
+  door_below_handle_m: 0.3937
+  # NOT MEASURED: the STL's straight bar between its mounts. Measure it.
+  handle_length_m: 0.188
   body_depth_m: 0.5
   # The wheelchair: the keep-out behind the arm base (m), and which way moving the chair back moves
   # the fridge in the arm's frame (x, y).
   chair_keep_out_behind_m: 0.381
   chair_back_dir: [1.0, 0.0]
+  # TESTING ONLY: true takes the door to face the arm squarely (no door plane fit from depth).
+  door_square_to_arm: false
   # Every run also records a rosbag into its run folder: the wrist camera bag_frame_hz times a second and TF
   # (~75 MB a minute at 1).
   record_bag: true
@@ -123,4 +128,4 @@ subscribes:
   - /tf_static
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
-  - /wrist_camera/aligned_depth_to_color/image_raw
+  - /wrist_camera/depth/image_rect_raw

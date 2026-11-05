@@ -10,9 +10,11 @@ INCH = 0.0254
 
 # --- measured on the fridge being opened (per fridge: the node's parameters) ---
 MEASURED = {
-    # middle of the handle bar (where the fingers close) -> door's front surface, perpendicular to the door, gap behind
-    # the bar included (measured 10-22; was 0.020, estimated by eye)
-    "handle_centre_to_face_m": 1.5 * INCH,
+    # middle of the handle bar (where the fingers close) -> door's front surface, perpendicular to the door. NOT
+    # MEASURED ON THE FRIDGE: the printed handle's STL (data/RAMMP.Fridge.Handle5.STL, 11-05): its bar, 18.7 mm deep,
+    # stands 60.5-79.2 mm off the door. The door's face, its inside and the hinge are placed from the handle by it.
+    # (1.5 in, measured 10-22, was the black handle's)
+    "handle_centre_to_face_m": 0.070,
     # door's front surface -> hinge pin axis: door thickness 1.25 in (measured 09-20, pin assumed at the back face) +
     # 1.5 cm (hinge side crept forward). If the pin depth is measured directly, use it alone.
     "pin_behind_face_m": 1.25 * INCH + 0.015,
@@ -27,9 +29,9 @@ MEASURED = {
     # door top / bottom above / below the middle of the handle bar (measured 10-24). The close pushes only within these
     "door_above_handle_m": 15 * INCH,
     "door_below_handle_m": 15.5 * INCH,
-    # the handle bar's grippable straight length, between its mounts. NOT MEASURED: ~12-15 cm read off the 11-01 depth
-    # frames. It limits how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
-    "handle_length_m": 0.13,
+    # the handle bar's grippable straight length, between its mounts. NOT MEASURED: the STL's straight bar (11-05). It
+    # limits how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
+    "handle_length_m": 0.188,
     "body_depth_m": 0.50,  # cabinet behind the door
     # The arm is mounted on the chair's left and the person sits just behind it, to its right (10-24: a close ran the
     # arm into the back of the chair). No part of the arm or gripper may be more than this far behind the arm base
@@ -47,11 +49,6 @@ GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose
 # the open's grasp_offset_m (up from the middle of the bar) keeps the middle of the finger pads at least this far in
 # from either end of handle_length_m: half the 2F-85 pad's ~2.2 cm width, plus ~2 cm for the detected middle being off
 GRASP_END_MARGIN_M = 0.03
-
-# --- handle position gates: the microwave's defaults (y >= -0.50, z <= 0.65) would refuse the fridge handles of 09-20/
-# 10-21 ---
-PLAUSIBLE_Y = (-0.60, 0.60)
-PLAUSIBLE_Z = (0.25, 0.75)
 
 # --- swing ---
 SWING_DEG = 90  # the full pull (push_open false) without a swing_deg. Exactly this swing or the run refuses: no smaller
@@ -74,10 +71,12 @@ AROUND_END_M = (0.25, 0.30)  # ... and in to this far from the hinge along the d
 # tall to go over), in behind it with the fingers pointing along it toward the hinge, rolled vertical, and the side of
 # the hand pushing the inner face. (Facing the hand into the cabinet, as the microwave's demo does, puts the gripper
 # through the door.)
-PUSH_OPEN_PULL_DEG = 70  # the pull. On the 30-deg mount it plans at the 11-01 handle height (~0.31 m above the arm
-# base) with MOUNTS[30]'s push height and grasp tilts (sim). An earlier search (10-24 detection, level arm) found hand
-# poses behind the door at 35-60
+PUSH_OPEN_PULL_DEG = 60  # the pull. 11-05 sim sweep (30-deg flatbot, chair keep-out, handle 0.10-0.70 m above the arm
+# base, chair turned up to +-10 deg): 60 gave the most chair placements where the open and the close plan at every
+# handle height, ahead of 70 (~20% fewer), 80 and the full 90-deg pull; 50 looked better still but was only run with the
+# chair square to the fridge. An earlier search (10-24 detection, level arm) found hand poses behind the door at 35-60
 PUSH_OPEN_TO_DEG = 90  # push the door on to this
+PUSH_OPEN_MIN_PUSH_DEG = 5  # ... at least this far past the pull: the pull is at most PUSH_OPEN_TO_DEG - this
 PUSH_OPEN_OFF_HANDLE_M = BACK_OFF_M  # let go, then straight out off the handle this far ...
 PUSH_OPEN_EDGE_CLEAR_M = 0.16  # ... along the open door to this far past its free edge (tool point) ...
 PUSH_OPEN_GAP_M = 0.10  # ... round it to this far off the door's inner face (tool point), turning the hand ...
@@ -89,6 +88,11 @@ PUSH_OPEN_APPROACH_DEG = (0, 15, -15, 30)  # ... the fingers this far off "along
 PUSH_OPEN_ROLL_DEG = 90  # ... rolled this far about the approach (90: fingers open vertically)
 PUSH_OPEN_PRELOAD_M = 0.01  # the push: the side of the hand this far past touching the inner face (sim) ...
 PUSH_OPEN_ARC_STEP_DEG = 10  # ... held in the door's frame, turned about the hinge in these steps
+# after the pull and the back-off off the handle, the push may need the wheelchair moved first (the open then stops and
+# asks for it; an open goal with chair_moved pushes). Tried in this order, the first after which the push plans:
+CHAIR_MOVES_M = (0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15, 0.20)  # + back (away from the fridge), - forward
+CHAIR_MOVE_MIN_CLEAR_M = 0.02  # the hand (still where the back-off left it) this far off the door all through the move
+CHAIR_MOVE_CHECK_STEPS = 5  # checked at this many points along the move
 
 # --- close: door_common's push-close, reached by backing out in front of the open door's free edge and going left
 # behind it, from further back, and only until the door is at CLOSE_TO_DEG (it swings shut by itself) ---
@@ -110,33 +114,28 @@ CLOSE_SETTINGS = dict(  # replace door_common.close_door.CLOSE_DEFAULTS
     hold_offset_x=-CONTAINER_M,
 )
 
-# --- what depends on the arm's mount (the node's mount_tilt_deg). Everything else plans in arm_mount, which is level
-# and shares the arm base's origin on every robot. The reach limits are measured from that origin, but a 30-deg lean
-# moves the shoulder ~14 cm forward, so the same arm reaches further from it and its upper arm needs the fridge further
-# away. 0: 09-20 grasps were 0.87-0.92 m out (door_common: 0.915 grasp / 0.90 swing), placement as passed in sim with a
-# push-open after a 70-deg pull from the Fridge start pose. 30: sim only, never run on the arm: the 70-deg pull +
-# push-open with the handle at its 11-01 height (~0.31 m above the arm base, door square to the chair, flatbot model).
-# There the hand pushes from 10 cm ABOVE the handle and the grasp may tilt nose-down up to 35 deg: with the level arm's
-# values (10 cm below, up to 25) almost no placement plans (11-03 sweep). The placement window is ~3 cm inside the
-# largest rectangle where the open and the close both plan there (handle x 0.80-0.92, y -0.48 to -0.12); the 11-01 runs'
-# handle (x 0.85, y -0.27) is in it. push_open_dz_m: PUSH_OPEN_DZ_M, grasp_pitches_deg: door_common's
-# GRASP_PITCHES_DEG (0's is door_common's own). ---
+# --- what depends on the arm's mount (the node's mount_tilt_deg). Everything else plans in arm_mount: level, at the arm
+# base's origin. A 30-deg lean moves the shoulder ~14 cm forward, so the arm reaches further and needs the fridge
+# further away. 0: grasps 0.87-0.92 m out on the arm (09-20), placement from sim. 30: sim only (flatbot model, handle
+# ~0.31 m above the arm base, door square to the chair). ---
 MOUNTS = {
     0: dict(
         max_reach=0.94,
         swing_max_reach=0.94,
         placement_x=(0.50, 0.56),
         placement_y=(-0.45, -0.39),
-        push_open_dz_m=-0.10,
-        grasp_pitches_deg=(0, 10, 14, 17, 25),
+        push_open_dz_m=-0.10,  # the push 10 cm below the handle
+        grasp_pitches_deg=(0, 10, 14, 17, 25),  # door_common's own
     ),
     30: dict(
         max_reach=1.10,
         swing_max_reach=1.10,
+        # ~3 cm inside where open and close both plan (handle x 0.80-0.92, y -0.48 to -0.12; 11-01's: 0.85, -0.27)
         placement_x=(0.82, 0.90),
         placement_y=(-0.44, -0.16),
-        push_open_dz_m=0.10,
-        grasp_pitches_deg=(0, 10, 14, 17, 25, 30, 35),
+        push_open_dz_m=0.10,  # 10 cm ABOVE the handle: with 0's values almost no placement plans (11-03 sweep)
+        # 40 and 45: ~10% more placements with the handle at 0.30 m, none at 0.40 m and above (11-05 sweep)
+        grasp_pitches_deg=(0, 10, 14, 17, 25, 30, 35, 40, 45),
     ),
 }
 PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  # configure sets them

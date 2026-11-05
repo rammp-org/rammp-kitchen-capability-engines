@@ -40,6 +40,7 @@ from .common import (
     save_frame,
     say,
     short_delta,
+    trajectory_keep_out,
 )
 
 # --- detection ---
@@ -47,6 +48,9 @@ MAX_LOOKS = 5  # keep looking until two detections agree within DETECT_AGREE
 MAX_EMPTY_RETRIES = 8  # per look: retries on an empty read (viewpoint-dependent YOLO misses)
 DETECT_AGREE = 0.03
 HINGE_AGREE = 0.03  # the two agreeing looks' hinges must agree this well too (horizontal)
+NORMAL_AGREE_DEG = None  # ... and their door normals this well (deg). None: not compared (a detected hinge says it)
+# where the handle is expected (lo, hi) in the arm's frame: a refusal outside. None: no gate (the planner's reach, IK
+# and collision checks decide). The microwave's bench values; the fridge sets None
 PLAUSIBLE_X = (0.30, 0.90)  # snorlax 10-30: was 0.85; the planner checks reach itself
 PLAUSIBLE_Y = (-0.50, 0.20)
 PLAUSIBLE_Z = (
@@ -74,7 +78,7 @@ GRASP_PITCHES_DEG = (0, 10, 14, 17, 25)  # snorlax 10-30: level first, up to 25.
 # horizontal across the vertical bar); the smallest reaching the largest swing wins. A low
 # handle needs one: 10-07, handle z ~0.14, level -> swing max 25-35 deg (J6 hits its guard),
 # 17 -> 70, 25 -> 75 with J6 ending at 92 (sim); the user's hand-placed touches were ~17.
-MAX_REACH, MIN_Z, MAX_Z = 0.915, 0.15, 0.75
+MAX_REACH, MIN_Z, MAX_Z = 0.915, 0.15, 0.75  # MIN_Z / MAX_Z (grasp and line-up height) None: no height gate
 GRASP_TRACK_ABORT = 0.03
 
 
@@ -92,7 +96,7 @@ J6_GUARD_DEG = 115.0  # J6 hard limit is +-119.7
 GRASP_FORCE = 0.25  # gripper current ceiling on the handle (self.arm default 0.5): a looser hold lets the
 # bar turn/shift in the fingers instead of tipping the microwave forward (10-07)
 SWING_FIT_MIN_DEG = 15  # fit a hinge to the measured path only over at least this much arc
-HINGE_RADIUS_RANGE = (0.25, 0.45)
+HINGE_RADIUS_RANGE = (0.25, 0.45)  # None: no gate (a measured hinge's radius is the measurement)
 
 # --- release ---
 BACK_OFF_M = 0.20
@@ -104,6 +108,9 @@ HANDLE_SOURCE = "depth"  # the node's handle_source: "depth" (what sticks out of
 PLACEMENT_NOTE = None  # (handle, door normal, start joints) -> how to place the appliance, printed after detection and
 #   added to the refusals. None: nothing
 DOOR_MODEL = {}  # door-model geometry written into the door file (common.door_dims). Empty: common's defaults
+DOOR_FACE_BEHIND_HANDLE = None  # the door's front face this far behind the detected handle (m, along the normal): the
+#   door file's face_behind_grasp is then worked out from each grasp (the tool point stands ~5 cm in front of the
+#   handle, more when tilted). None: DOOR_MODEL's face_behind_grasp, measured from the grasp itself
 DOOR_Z_FROM_HANDLE = None  # door bottom / top relative to the handle, when it is taller than any detection sees
 KEEP_ARM_IN_FRAMES = False  # each saved detection frame also keeps the arm's joints + tool pose
 LAST_PLAN = None  # the last open_task's chosen plan: {q0 (start joints), plan (plan_open's), geom} -- e.g. to save a
@@ -111,6 +118,12 @@ LAST_PLAN = None  # the last open_task's chosen plan: {q0 (start joints), plan (
 GRASPED_GAINS = None  # joint impedance {kq, zeta, torque_limit} from the grasp on (the swing, what follows it); None:
 #   stiff position control. The approach (line-up, straight in) stays in position control either way
 SWING_SPEED_SCALE = 1.0  # the swing's speed as a fraction of the free-air one (CART_SPEED x the goal's speed)
+PREFER_NEAR_START = False  # plan_open's pick among plans with the largest swing: False, most margin to the J4/J6
+#   guards; True, line-up joints in the nearest NEAR_START_BUCKET_DEG of the start joints first (least for cuRobo to
+#   reconfigure: 11-04's picks moved J1 by up to 112 deg, and the driver rejected them), then most margin
+NEAR_START_BUCKET_DEG = 45.0
+CHECKPOINT = None  # () -> None, raising to stop: called between planning steps (the running action's ctx.checkpoint,
+#   so a cancel stops a long plan). None: never
 REQUIRED = ("MAKE_DETECTOR", "FIND_HINGE", "GRIP_EXT", "VERTICAL_CORR", "GRASP_X_ADJUST")
 
 
@@ -221,6 +234,18 @@ def _rounded(x, decimals):
     return "-" if x is None else np.round(x, decimals)
 
 
+def _normal_angle_deg(na, nb):
+    return float(np.degrees(np.arccos(np.clip(np.dot(na, nb) / (np.linalg.norm(na) * np.linalg.norm(nb)), -1, 1))))
+
+
+def _looks_agree(a, b):
+    """Two looks (detect_handle's tuples) on one handle: within DETECT_AGREE, and their door normals within
+    NORMAL_AGREE_DEG when set."""
+    if np.linalg.norm(a[0] - b[0]) > DETECT_AGREE:
+        return False
+    return NORMAL_AGREE_DEG is None or _normal_angle_deg(a[2], b[2]) <= NORMAL_AGREE_DEG
+
+
 def detect_handle():
     """Two agreeing looks. Returns (handle position, handle orientation, door normal, door_z, door_mid, hinge)."""
     cam = dc.camera()
@@ -230,12 +255,35 @@ def detect_handle():
 
     def look(tag):
         for attempt in range(1, MAX_EMPTY_RETRIES + 1):
-            f = cam.grab()
+            instances = None
+            if HANDLE_SOURCE == "sam3" and hasattr(cam, "sam3_detect"):
+                # SAM 3 segments the newest image when asked: detect on that very frame (its depth, its camera pose)
+                instances, f = cam.sam3_detect()
+                if f is None:
+                    say(f"  no SAM 3 mask with its RGB-D frame on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
+                    time.sleep(0.5)
+                    continue
+            else:
+                f = cam.grab()
             if getattr(cam, "box_topic", "") and f["box"] is None:
                 det = None  # boxer has no usable microwave box yet (grab said why): retry, never YOLO instead
             else:
-                # handle_source "sam3": SAM 3 masks the handle on the wrist image (the door still comes from depth)
-                mask = cam.sam3_handle_mask() if HANDLE_SOURCE == "sam3" else None
+                # handle_source "sam3": SAM 3 masks the handle on the wrist image (the door still comes from depth).
+                # A detector with pick_handle_mask chooses among SAM 3's instances (with the frame: its depth); else the
+                # best-scoring one
+                mask = None
+                if instances is not None:  # SAM 3's instances on this frame (sam3_detect)
+                    if hasattr(detector, "pick_handle_mask"):
+                        mask = detector.pick_handle_mask(instances, f)
+                    elif instances:  # the best-scoring, as sam3_handle_mask
+                        score, mask, label = instances[0]
+                        say(f"  SAM 3: '{label}' {score:.2f} (best of {len(instances)})")
+                elif HANDLE_SOURCE == "sam3":
+                    if hasattr(detector, "pick_handle_mask") and hasattr(cam, "sam3_handle_instances"):
+                        mask = detector.pick_handle_mask(cam.sam3_handle_instances(), f)
+                    else:
+                        mask = cam.sam3_handle_mask()
+                f["handle_mask"] = mask  # kept with the saved frame
                 det = (
                     None
                     if HANDLE_SOURCE == "sam3" and mask is None
@@ -249,7 +297,8 @@ def detect_handle():
             say(f"  no detection on look {tag} (retry {attempt}/{MAX_EMPTY_RETRIES})")
             time.sleep(0.5)
         else:
-            raise Refused(f"NO DETECTION ({tag}) after {MAX_EMPTY_RETRIES} retries")
+            why = getattr(detector, "last_miss", "")
+            raise Refused(f"NO DETECTION ({tag}) after {MAX_EMPTY_RETRIES} retries{': ' + why if why else ''}")
         say(
             f"  look {tag}: handle {np.round(det['handle'], 4)}  hinge {_rounded(det['hinge'], 4)}  "
             f"door normal {np.round(det['normal'], 3)}  door z {_rounded(det['door_z'], 3)}"
@@ -258,18 +307,18 @@ def detect_handle():
 
     looks, pair = [], None
     for i in range(1, MAX_LOOKS + 1):
+        _checkpoint()
         looks.append(look(str(i)))
-        pair = next(
-            (looks[j] for j in range(len(looks) - 1) if np.linalg.norm(looks[j][0] - looks[-1][0]) <= DETECT_AGREE),
-            None,
-        )
+        pair = next((looks[j] for j in range(len(looks) - 1) if _looks_agree(looks[j], looks[-1])), None)
         if pair is not None:
             break
     if pair is None:
-        raise Refused(f"No two of {len(looks)} detections agreed within {DETECT_AGREE * 100:.0f} cm -- refusing.")
+        door = "" if NORMAL_AGREE_DEG is None else f" (and their doors within {NORMAL_AGREE_DEG:g} deg)"
+        raise Refused(f"No two of {len(looks)} detections agreed within {DETECT_AGREE * 100:.0f} cm{door} -- refusing.")
     (ha, _, na, zra, mida, hga), (hb, orient, nb, zrb, midb, hgb) = pair, looks[-1]
     say(
-        f"detections agree to {np.linalg.norm(ha - hb) * 100:.1f} cm after {len(looks)} look(s); "
+        f"detections agree to {np.linalg.norm(ha - hb) * 100:.1f} cm, doors to {_normal_angle_deg(na, nb):.0f} deg, "
+        f"after {len(looks)} look(s); "
         + (f"hinges to {np.linalg.norm(hga[:2] - hgb[:2]) * 100:.1f} cm" if hga is not None else "no hinge detected")
     )
     if hga is not None and np.linalg.norm(hga[:2] - hgb[:2]) > HINGE_AGREE:
@@ -277,12 +326,16 @@ def detect_handle():
     h = (ha + hb) / 2.0
     hinge = None if hga is None else (hga + hgb) / 2.0  # None: the detector sees no door
     n = (na + nb) / np.linalg.norm(na + nb)
-    door_z = None if zra is None else np.mean([zra, zrb], axis=0)
-    door_mid = None if mida is None else np.mean([mida, midb], axis=0)
+    # either look may have no door face (the fridge's door_square_to_arm fits none when the bar has depth)
+    door_z = None if zra is None or zrb is None else np.mean([zra, zrb], axis=0)
+    door_mid = None if mida is None or midb is None else np.mean([mida, midb], axis=0)
     if door_z is not None and not (door_z[0] < h[2] < door_z[1] and 0.15 <= door_z[1] - door_z[0] <= 0.60):
         say(f"door z range {np.round(door_z, 3)} doesn't fit a door around the handle -- not saving it")
         door_z = None
-    for nm, v, (lo, hi) in (("x", h[0], PLAUSIBLE_X), ("y", h[1], PLAUSIBLE_Y), ("z", h[2], PLAUSIBLE_Z)):
+    for nm, v, rng in (("x", h[0], PLAUSIBLE_X), ("y", h[1], PLAUSIBLE_Y), ("z", h[2], PLAUSIBLE_Z)):
+        if rng is None:
+            continue
+        lo, hi = rng
         if not lo <= v <= hi:
             raise Refused(f"handle {nm}={v:.3f} outside plausible {(lo, hi)} -- refusing.")
     say(f"handle (mean) {np.round(h, 4)}  hinge (mean) {_rounded(hinge, 4)}")
@@ -312,12 +365,44 @@ def grasp_pose(h, orient, n, pitch_deg=0.0):
     approach = np.r_[tilted[:2], 0.0] / np.linalg.norm(tilted[:2])
     pos = h + approach * (GRASP_X_ADJUST - GRIP_EXT) + (approach - tilted) * GRASP_PADS_PAST_TOOL
     say(f"grasp {np.round(pos, 4)}  range {np.linalg.norm(pos):.3f}")
-    if np.linalg.norm(pos) > MAX_REACH or not MIN_Z <= pos[2] <= MAX_Z:
+    if np.linalg.norm(pos) > MAX_REACH or not _height_ok(pos[2]):
         raise Refused(
             f"GATE FAILED at grasp: range {np.linalg.norm(pos):.3f} (max {MAX_REACH}), "
-            f"z {pos[2]:.3f} (range {MIN_Z}-{MAX_Z})"
+            f"z {pos[2]:.3f} ({_height_limits()})"
         )
     return h, Pose(tuple(pos), tuple(quat))
+
+
+def _height_limits():
+    """MIN_Z / MAX_Z in words, for a refusal."""
+    if MIN_Z is not None and MAX_Z is not None:
+        return f"range {MIN_Z}-{MAX_Z}"
+    if MIN_Z is not None:
+        return f"min {MIN_Z}, no max"
+    if MAX_Z is not None:
+        return f"max {MAX_Z}, no min"
+    return "no height limit"
+
+
+def _height_ok(z):
+    """Within MIN_Z..MAX_Z (either None: no bound that side)."""
+    return (MIN_Z is None or z >= MIN_Z) and (MAX_Z is None or z <= MAX_Z)
+
+
+def _checkpoint():
+    if CHECKPOINT is not None:
+        CHECKPOINT()
+
+
+def door_model(n, grasp_pos, handle):
+    """DOOR_MODEL for a door file whose closed grasp is `grasp_pos` on `handle` (door normal `n`, outward): with
+    DOOR_FACE_BEHIND_HANDLE, face_behind_grasp worked out from this grasp so the face is that far behind the handle."""
+    if DOOR_FACE_BEHIND_HANDLE is None:
+        return dict(DOOR_MODEL)
+    out = np.r_[np.asarray(n, float)[:2], 0.0]
+    out /= np.linalg.norm(out)
+    ahead = float(np.dot(np.asarray(grasp_pos, float) - np.asarray(handle, float), out))  # grasp in front of handle
+    return {**DOOR_MODEL, "face_behind_grasp": ahead + float(DOOR_FACE_BEHIND_HANDLE)}
 
 
 def pregrasp_point(grasp, standoff):
@@ -349,9 +434,10 @@ def hinge_detected(behind_face, past_edge):
     return find
 
 
-def hinge_measured(offset):
-    """The hinge from a measured `offset` from the closed-door grasp point, in the door's frame: into it, along it
-    toward the hinge, up. For FIND_HINGE, as hinge_detected."""
+def hinge_measured(offset, from_handle=False):
+    """The hinge from a measured `offset` from the closed-door grasp point (`from_handle`: from the handle, where the
+    fingers close -- the tool point stands ~5 cm in front of it), in the door's frame: into it, along it toward the
+    hinge, up. For FIND_HINGE, as hinge_detected."""
 
     def find(h_raw, orient, n, hinge_seen):
         h, grasp = grasp_pose(h_raw, orient, n)
@@ -359,8 +445,12 @@ def hinge_measured(offset):
         along /= np.linalg.norm(along)
         if hinge_seen is not None:
             say(f"detected door edge {np.round(hinge_seen, 4)} (not used: measured hinge)")
-        hinge = np.asarray(grasp.position) + into * offset[0] + along * offset[1] + np.array([0.0, 0.0, offset[2]])
-        say(f"hinge: grasp + measured offset {np.round(offset, 3)} (door frame) = {np.round(hinge, 4)}")
+        base = np.asarray(h, float) if from_handle else np.asarray(grasp.position)
+        hinge = base + into * offset[0] + along * offset[1] + np.array([0.0, 0.0, offset[2]])
+        say(
+            f"hinge: {'handle' if from_handle else 'grasp'} + measured offset {np.round(offset, 3)} (door frame) = "
+            f"{np.round(hinge, 4)}"
+        )
         # the door model turns about the measured pivot too
         return hinge, h, grasp, dict(hinge=hinge, hinge_pivot=hinge, detected_edge=hinge_seen)
 
@@ -420,7 +510,7 @@ def _approach_from(scene, rb, grasp, q_g):
     g_p, g_q = np.asarray(grasp.position), np.asarray(grasp.orientation)
     for standoff in PREGRASP_STANDOFFS:
         pre_p = pregrasp_point(grasp, standoff)
-        if not MIN_Z <= pre_p[2] <= MAX_Z:
+        if not _height_ok(pre_p[2]):
             continue
         q_pre, why = dc._ik_within_guards(scene, rb, pre_p, g_q, q_g)
         if q_pre is None:
@@ -433,9 +523,29 @@ def _approach_from(scene, rb, grasp, q_g):
             say(f"  to line-up {standoff * 100:.0f} cm out: {near} -- cuRobo refuses goals that close")
             continue
         leg = plan_cartesian(scene, rb, pre_p, g_q, g_p, g_q, q_pre, "straight in")
-        if leg is not None:
-            return standoff, pre_p, q_pre, leg
+        if leg is None:
+            continue
+        ko = trajectory_keep_out(q_pre, leg, _approach_lengths(g_p, pre_p, leg))
+        if ko is not None:  # the arm would refuse it, though every planned step passed
+            say(f"  straight in from {standoff * 100:.0f} cm out: the trajectory: {ko}")
+            continue
+        return standoff, pre_p, q_pre, leg
     return None
+
+
+def _approach_lengths(g_p, pre_p, leg):
+    """The straight-in leg's cart_lengths, as open_task sends it: the line's length split evenly over its steps."""
+    return [float(np.linalg.norm(np.asarray(g_p) - np.asarray(pre_p))) / len(leg)] * len(leg)
+
+
+def _swing_keep_out(q0, arc):
+    """trajectory_keep_out for the swing's joints `arc` from `q0`, timed as open_task sends them."""
+    return trajectory_keep_out(q0, arc, [SWING_WAYPOINT_SPACING_M] * len(arc), SWING_SPEED_SCALE)
+
+
+def _joint_dist_deg(qa, qb):
+    """Largest single-joint move (deg) from `qa` to `qb`, the short way round."""
+    return float(np.degrees(np.max(np.abs(short_delta(qa, qb)))))
 
 
 def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=False):
@@ -450,6 +560,7 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
         swings.append(min(min_swing, max_swing))
     cands, explained = [], quick  # explained: the first failing approach has been printed in full
     for pitch in GRASP_PITCHES_DEG:
+        _checkpoint()
         try:
             with quiet():
                 h, g = grasp_pose(h_raw, orient, n, pitch)
@@ -466,6 +577,7 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
                 configs.append(q_g)
         best, why = None, "no grasp configuration within the J4/J6 guards"
         for q_g in configs:
+            _checkpoint()
             with quiet():
                 appr = _approach_from(scene, rb, g, q_g)
             if appr is None:
@@ -479,6 +591,9 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
             for d in swings:
                 wps = _swing_waypoints(g, hinge, d)
                 ok, q_end, msg, arc = _check_arc(scene, rb, wps, leg[-1])
+                ko = _swing_keep_out(leg[-1], arc) if ok else None
+                if ko is not None:  # every waypoint passed, but the arm would refuse the trajectory between them
+                    ok, msg = False, f"the trajectory: {ko}"
                 if ok:
                     c = dict(
                         pitch=pitch,
@@ -505,7 +620,10 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
         )
     if not cands:
         return None, "no tilt and arm configuration gives a grasp + swing that passes the sim checks"
-    cands.sort(key=lambda c: (c["swing"], c["margin"]), reverse=True)
+    if PREFER_NEAR_START:  # largest swing; then least reconfiguration (in NEAR_START_BUCKET_DEG steps); then margin
+        cands.sort(key=lambda c: (-c["swing"], _joint_dist_deg(q0, c["q_pre"]) // NEAR_START_BUCKET_DEG, -c["margin"]))
+    else:
+        cands.sort(key=lambda c: (c["swing"], c["margin"]), reverse=True)
     reason = None
     for c in cands[: 3 if quick else SEARCH_AFTER_SWING_MAX]:
         ok, m = after_swing.check(scene, rb, geom, c, reason is None and not quick)
@@ -520,8 +638,17 @@ def _placement_advice(scene, rb, geom, q0, max_swing, min_swing, after_swing):
     """Where the appliance would work: the open re-planned (quick) with the detection shifted by PLACEMENT_SHIFTS_M."""
     works = []
     for dx, dy in PLACEMENT_SHIFTS_M:
+        _checkpoint()
         shift = np.array([dx, dy, 0.0])
-        g2 = dict(geom, h_raw=geom["h_raw"] + shift, hinge=geom["hinge"] + shift, hinge_seen=geom["hinge_seen"] + shift)
+        # hinge / hinge_seen may be None (a detector that reports no hinge, e.g. the fridge: it measures the hinge
+        # from the grasp instead). plan_open uses geom["hinge"], never geom["hinge_seen"]; shift what is there, leave
+        # None as None.
+        g2 = dict(
+            geom,
+            h_raw=geom["h_raw"] + shift,
+            hinge=None if geom["hinge"] is None else geom["hinge"] + shift,
+            hinge_seen=None if geom["hinge_seen"] is None else geom["hinge_seen"] + shift,
+        )
         with quiet():
             plan, _ = plan_open(scene, rb, g2, q0, max_swing, min_swing, after_swing, quick=True)
         if plan is not None:
@@ -578,7 +705,7 @@ def open_task(
         raise Refused(f"{e}{advice}") from e
     radius = float(np.linalg.norm(np.asarray(grasp.position)[:2] - hinge[:2]))
     say(f"hinge (detected) {np.round(hinge, 4)}  radius {radius * 100:.1f} cm")
-    if not HINGE_RADIUS_RANGE[0] <= radius <= HINGE_RADIUS_RANGE[1]:
+    if HINGE_RADIUS_RANGE is not None and not HINGE_RADIUS_RANGE[0] <= radius <= HINGE_RADIUS_RANGE[1]:
         raise Refused(f"hinge radius {radius * 100:.1f} cm is implausible (door ~35 cm) -- refusing.{advice}")
 
     # --- plan everything before any motion: tilts x arm configurations x swings, then what follows the swing ---
@@ -606,8 +733,7 @@ def open_task(
     if not ai.go_to_joint_config(plan["q_pre"], "to line-up"):
         raise Refused("Did not reach the line-up point -- ABORT before touching the handle, gripper untouched.")
     if hasattr(ai, "move_joints"):  # the checked joint path itself, timed as the straight line it is
-        step = float(np.linalg.norm(g_p - plan["pre_p"])) / len(plan["leg"])
-        ai.move_joints(list(plan["leg"]), cart_lengths=[step] * len(plan["leg"]))
+        ai.move_joints(list(plan["leg"]), cart_lengths=_approach_lengths(g_p, plan["pre_p"], plan["leg"]))
         time.sleep(0.3)
         e = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - g_p))
     else:
@@ -624,7 +750,7 @@ def open_task(
         closed_handle=h,
         door_z=door_z,
         door_mid=door_mid,
-        **DOOR_MODEL,
+        **door_model(n, g_p, h),
     )
     if hasattr(ai, "gripper"):
         ai.gripper(1.0, force=GRASP_FORCE)  # looser hold (sheppy)
@@ -654,6 +780,9 @@ def open_task(
         say(f"  the grasp joints are {off:.1f} deg off the plan's -- re-planning the swing from them")
         wps = _swing_waypoints(Pose(tuple(ee[:3]), tuple(ee[3:7])), hinge, deg)
         ok, _, msg, arc = _check_arc(scene, rb, wps, st["position"])
+        ko = _swing_keep_out(st["position"], arc) if ok else None
+        if ko is not None:
+            ok, msg = False, f"the trajectory: {ko}"
         if not ok:
             raise Refused(f"swing re-check from the real grasp failed ({msg}) -- stopping, still holding the handle.")
     after_swing.recheck(scene, rb, geom, {**plan, "wps": wps, "arc": arc}, advice)

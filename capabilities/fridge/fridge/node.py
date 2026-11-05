@@ -1,6 +1,6 @@
 """The fridge capability: open and close the fridge door with the arm.
 
-Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, pull the door 70 deg open, let go and
+Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, pull the door 60 deg open, let go and
 push it on to 90 (or, with `push_open` false, a 90-deg pull and go back round the door to its inner side). Action
 `close` (close_door.run): push the door most of the way shut with the side of the hand -- no grasp, the gripper
 untouched (it may hold a container) -- against the door the open saved; it swings shut by itself from there. Every leg
@@ -21,8 +21,9 @@ from capability_engine import Action, CapabilityEngine, EngineError, run
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import close_door, constants, motion, open_door
+from . import close_door, constants, motion, open_door, push_open
 from .perception import WristCamera
+from .tee_logger import TeeLogger
 
 COMMON = {
     "execute": {"type": "boolean", "default": False},
@@ -47,7 +48,8 @@ PARAMS = {
     "mount_tilt_deg": 0,
     "color_topic": "/wrist_camera/color/image_raw",
     "camera_info_topic": "/wrist_camera/color/camera_info",
-    "depth_topic": "/wrist_camera/aligned_depth_to_color/image_raw",
+    # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
+    "depth_topic": "/wrist_camera/depth/image_rect_raw",
     "camera_frame": "",
     # where the handle comes from: "depth" (the vertical bar sticking out of the door) or "sam3" (SAM 3's mask of
     # sam3_prompts on the wrist image, from sam3_service; the door plane still comes from depth)
@@ -57,38 +59,14 @@ PARAMS = {
     "sam3_threshold": 0.3,
     **constants.MEASURED,
     "chair_back_dir": list(constants.CHAIR_BACK_DIR),
+    # TESTING ONLY: the door taken to face the arm squarely (normal along the arm base's -x), no door plane fit -- for a
+    # door whose depth is its reflection. A door yawed off it gets a wrong hinge and swing
+    "door_square_to_arm": False,
     # every run also records a rosbag into its run folder (bag.RunBag): the wrist camera this many times a second
     # (~75 MB a minute at 1) and TF
     "record_bag": True,
     "bag_frame_hz": 1.0,
 }
-
-
-def _teed(level, name):
-    """TeeLogger's `name` method: to the run's console.log at `level`, then to the logger."""
-
-    def log(self, message, *args, **kwargs):
-        motion.to_console(level, str(message))
-        return getattr(self._logger, name)(message, *args, **kwargs)
-
-    return log
-
-
-class TeeLogger:
-    """The node's logger, each line also in the running goal's console.log (motion.to_console): what T2 shows, from
-    the planner, self.arm and the engine alike, kept with the run."""
-
-    def __init__(self, logger):
-        self._logger = logger
-
-    def __getattr__(self, name):
-        return getattr(self._logger, name)
-
-    info = _teed("INFO", "info")
-    warning = _teed("WARN", "warning")
-    warn = _teed("WARN", "warn")
-    error = _teed("ERROR", "error")
-    fatal = _teed("FATAL", "fatal")
 
 
 class Capability(CapabilityEngine):
@@ -105,11 +83,19 @@ class Capability(CapabilityEngine):
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
                     "push_open": {"type": "boolean", "default": True},
+                    # full-pull path only (push_open false): False tests the pull alone -- after the swing just let go
+                    # and back off the handle, no round-the-door, so the plan is not gated by it
+                    "around": {"type": "boolean", "default": True},
                     # grasp this far (m) above the middle of the handle bar, below if negative; refused off the bar
                     # (handle_length_m)
                     "grasp_offset_m": {"type": "number", "default": 0.0},
                     # a run stopped holding the handle: let go, back off, nothing else
                     "release_only": {"type": "boolean", "default": False},
+                    # the push-open asked for a wheelchair move after the pull and it was made: push the door on
+                    "chair_moved": {"type": "boolean", "default": False},
+                    # a dry run that plans OK also writes the door file as the planned open would leave it, so the
+                    # close can be tested without an executed open (open the door to that angle by hand)
+                    "save_door": {"type": "boolean", "default": False},
                 },
             },
         ),
@@ -134,7 +120,10 @@ class Capability(CapabilityEngine):
             k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
         }
         open_door.configure(
-            self.cfg["data_dir"], self.cfg["mount_tilt_deg"], **{k: self.cfg[k] for k in constants.MEASURED}
+            self.cfg["data_dir"],
+            self.cfg["mount_tilt_deg"],
+            self.cfg["door_square_to_arm"],
+            **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):
             raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
@@ -182,6 +171,7 @@ class Capability(CapabilityEngine):
             )
         )
         dc.set_output(self.get_logger().info)
+        shared_open.configure(CHECKPOINT=ctx.checkpoint)  # a cancel stops a long plan, not only a motion
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
         log_args = {**params, "execute": execute}
         try:
@@ -195,7 +185,14 @@ class Capability(CapabilityEngine):
                     speed=speed,
                     log_args=log_args,
                     grasp_offset=float(params.get("grasp_offset_m", 0.0)),
+                    save_door=bool(params.get("save_door", False)),
+                    around=bool(params.get("around", True)),
+                    chair_moved=bool(params.get("chair_moved", False)),
+                    chair_back_dir=self.cfg["chair_back_dir"],
                 )
+                if ok and push_open.NEXT_STEP:  # the wheelchair move it asks for, where the goal was sent
+                    ctx.progress(action_id, 100.0, push_open.NEXT_STEP)
+                    note = f"{note}. {push_open.NEXT_STEP}" if note else push_open.NEXT_STEP
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.GOAL_SETTINGS}
                 ok = close_door.run(
@@ -220,11 +217,14 @@ class Capability(CapabilityEngine):
         finally:
             dc.set_output(None)
             dc.set_camera(None)
+            shared_open.configure(CHECKPOINT=None)
         if not ok:
             raise EngineError(
                 "stopped", f"the {action_id} stopped short -- the arm holds where it is", recoverable=True
             )
-        if execute:
+        # an open that stopped for a wheelchair move left the door part way, the push still to come: not opened yet (the
+        # chair_moved goal that pushes it reports that)
+        if execute and not (action_id == "open" and push_open.NEXT_STEP):
             ctx.update_object(self.instance_id, opened=action_id == "open")
         return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
 
