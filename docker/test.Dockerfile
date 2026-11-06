@@ -64,7 +64,7 @@ RUN . /ws/install/setup.sh && fetch-commit rammp-org/rammp-deployments ${DEPLOYM
     && rm -rf /tmp/dep
 
 # Sources come from the mounted repo, so there is nothing to rebuild when they change.
-ENV PYTHONPATH=/repo/capability_engine
+ENV PYTHONPATH=/repo/capability_engine:/repo/shared/door_common:/repo/capabilities/microwave
 RUN printf '%s\n' '#!/bin/bash' \
         '. /opt/ros/humble/setup.bash' '. /ws/install/setup.bash' 'exec "$@"' \
         > /entrypoint.sh \
