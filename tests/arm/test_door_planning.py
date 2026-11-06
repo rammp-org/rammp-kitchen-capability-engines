@@ -12,6 +12,7 @@ from door_common import open_door
 from microwave import open_door as microwave_open
 
 from capability_engine import sim
+from capability_engine.arm_messages import Plan
 
 HANDLE_QUAT = np.array([-0.5, 0.5, 0.5, -0.5])
 MICROWAVE_DOOR = {
@@ -85,6 +86,47 @@ def test_chair_refuses_the_arm_but_not_its_base_and_shoulder():
         assert sim.keep_out_message(rb, q) is None
     finally:
         sim.reset_for_tests()
+
+
+class _Planner:
+    """plan_to_joints as a fake: every leg's plan is `samples(start, goal)`."""
+
+    def __init__(self, samples=None, fail_leg=None):
+        self.samples, self.fail_leg, self.legs = samples, fail_leg, 0
+
+    def plan_to_joints(self, goal, start):
+        self.legs += 1
+        if self.legs == self.fail_leg:
+            return Plan(False, "no path")
+        q = np.linspace(start, goal, 5) if self.samples is None else self.samples(start, goal)
+        return Plan(True, "ok", q=np.asarray(q))
+
+
+PATH = [np.full(7, 0.05 * k) for k in range(1, 10)]
+
+
+def test_curobo_gets_every_fourth_waypoint_and_the_last():
+    knots = open_door._curobo_knots(PATH)
+    assert [k[0] for k in knots] == pytest.approx([0.2, 0.4, 0.45])
+
+
+def test_curobo_path_passes_a_direct_plan():
+    assert open_door._check_curobo_path(_Planner(), np.zeros(7), PATH, "the swing") is None
+
+
+def test_curobo_path_refuses_a_leg_it_cant_plan():
+    why = open_door._check_curobo_path(_Planner(fail_leg=2), np.zeros(7), PATH, "the swing")
+    assert "leg 2" in why and "no path" in why
+
+
+def test_curobo_path_refuses_a_detour():
+    loop = lambda start, goal: [start, start + 1.0, goal]  # noqa: E731
+    why = open_door._check_curobo_path(_Planner(loop), np.zeros(7), PATH, "the swing")
+    assert "detour" in why
+
+
+def test_curobo_path_is_not_checked_without_a_planner():
+    assert open_door._check_curobo_path(object(), np.zeros(7), PATH, "the swing") is None
 
 
 def test_keep_out_is_off_until_enabled_and_refuses_when_enabled(door_sim):
