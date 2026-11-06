@@ -30,10 +30,10 @@ from .motion import AfterSwing, door_after, logged_run, send_legs, trajectory_ke
 from .push_open import PushOpen, push_after_chair_move, push_open
 
 
-def _make_detector(handle_centre_to_face_m, door_square_to_arm):
+def _make_detector(handle_centre_to_face_m, door_square_to_arm, door_normal_from_handle=False):
     from .perception import HandleDetector  # here, not at import: open3d, which the planning tests don't have
 
-    return HandleDetector(handle_centre_to_face_m, door_square_to_arm)
+    return HandleDetector(handle_centre_to_face_m, door_square_to_arm, door_normal_from_handle)
 
 
 def placement_advice(handle, normal, start_joints=None, level=True):
@@ -74,10 +74,13 @@ _HANDLE_LENGTH = F.MEASURED["handle_length_m"]  # configure sets these two
 _DOOR_Z_FROM_HANDLE = (-F.MEASURED["door_below_handle_m"], F.MEASURED["door_above_handle_m"])
 
 
-def configure(data_dir, mount_tilt_deg=0, door_square_to_arm=False, **measured):
+def configure(data_dir, mount_tilt_deg=0, door_square_to_arm=False, door_normal_from_handle=False, **measured):
     """Everything door_common needs from the fridge: call once at startup. `mount_tilt_deg`: a key of constants.MOUNTS.
     `door_square_to_arm` (testing only): the door taken to face the arm squarely, no door plane fit (perception).
+    `door_normal_from_handle`: the door's normal from the handle's own depth, no door plane fit (perception; SAM 3).
     `measured`: constants.MEASURED's names."""
+    if door_square_to_arm and door_normal_from_handle:
+        raise ValueError("door_square_to_arm and door_normal_from_handle both set the door's normal: pick one")
     global _HANDLE_LENGTH, _DOOR_Z_FROM_HANDLE
     m = {**F.MEASURED, **measured}
     _HANDLE_LENGTH = float(m["handle_length_m"])
@@ -89,7 +92,9 @@ def configure(data_dir, mount_tilt_deg=0, door_square_to_arm=False, **measured):
     # The offset in the door's frame: into it, along it, up. A wrong one drags the door or the fridge during the swing
     hinge_offset = np.array([m["handle_centre_to_face_m"] + m["pin_behind_face_m"], m["hinge_along_door_m"], 0.0])
     shared.configure(
-        MAKE_DETECTOR=partial(_make_detector, m["handle_centre_to_face_m"], door_square_to_arm),
+        MAKE_DETECTOR=partial(
+            _make_detector, m["handle_centre_to_face_m"], door_square_to_arm, door_normal_from_handle
+        ),
         FIND_HINGE=shared.hinge_measured(hinge_offset, from_handle=True),
         GRIP_EXT=F.GRIP_EXT,
         VERTICAL_CORR=F.VERTICAL_CORR,
@@ -104,7 +109,9 @@ def configure(data_dir, mount_tilt_deg=0, door_square_to_arm=False, **measured):
         MAX_Z=None,
         HINGE_RADIUS_RANGE=None,  # the measured hinge is always hinge_along_door_m from the grasp
         PREFER_NEAR_START=True,  # of the plans with the largest swing, the least reconfiguration for cuRobo
-        NORMAL_AGREE_DEG=10.0,  # no detected hinge to compare: the two looks' doors directly (11-04: 31 deg apart)
+        # no detected hinge to compare: the two looks' doors directly (11-04: 31 deg apart). From the handle, 5: on the
+        # RealSense frames, two looks within 5 deg put 90% of doors within 8.5 deg (13 without the check)
+        NORMAL_AGREE_DEG=5.0 if door_normal_from_handle else 10.0,
         MAX_REACH=mount["max_reach"],
         SWING_MAX_REACH=mount["swing_max_reach"],
         GRASP_PITCHES_DEG=mount["grasp_pitches_deg"],
@@ -250,13 +257,24 @@ def release_around(ai, execute):
     return ok
 
 
+class ReleaseBackOff(AfterSwing):
+    """Plans the release and the straight back-off off the handle with the swing (`around` False: nothing else follows
+    it). Unplanned, a back-off failing a gate (J6 at its guard) left the hand on the handle with the door open, and a
+    release_only goal refusing the same back-off (11-05 replay)."""
+
+    def check(self, scene, rb, geom, cand, explain):
+        if P.back_off(scene, rb, cand["wps"][-1], cand["arc"][-1]) is None:
+            return False, f"the {F.BACK_OFF_M * 100:.0f} cm back-off off the handle fails a gate"
+        return True, "release + back-off OK"
+
+
 def release_back_off(ai, execute):
     """After a full pull, with `around` False: open the gripper and back straight out of the handle BACK_OFF_M, and
     nothing else (no round the door). For testing the grasp + pull on its own. The hand ends just off the handle; the
     door is left wherever the pull put it."""
     say("\n===== release, back off the handle (no round the door) =====")
     if not execute:
-        say("  (would let go and back off the handle; nothing else)")
+        say("  (planned above with the swing; re-planned from the real end before letting go)")
         return True
     return dc.release_and_back_off(ai, F.BACK_OFF_M, True, park=False)
 
@@ -303,10 +321,10 @@ def run(
     `save_door`: a dry run that plans OK also writes DOOR_FILE as the planned open would leave it (save_planned_door),
     so the close can be tested without an executed open; an executed open writes it anyway. `around` (the full-pull
     path only, `push` false): False tests the pull alone -- after the swing just let go and back off the handle, no
-    round-the-door, so the plan is not gated by it either. With `push`, the open may stop after the pull and the
-    back-off, asking for a wheelchair move (push_open.NEXT_STEP); `chair_moved` then does the rest: the push, from
-    where the hand is (push_after_chair_move). `chair_back_dir`: which way moving the wheelchair back moves the fridge
-    in the arm's frame.
+    round-the-door: the plan is gated by the back-off only (ReleaseBackOff). With `push`, the open may stop after the
+    pull and the back-off, asking for a wheelchair move (push_open.NEXT_STEP); `chair_moved` then does the rest: the
+    push, from where the hand is (push_after_chair_move). `chair_back_dir`: which way moving the wheelchair back moves
+    the fridge in the arm's frame.
     Returns True when it finished (or the dry run passed); raises Refused."""
     P.NEXT_STEP = ""
 
@@ -331,7 +349,7 @@ def run(
             dc.save_door_geometry(push_after_chair_move=None)
         say("\n===== OPEN: grasp + swing =====")
         # what follows the swing, planned with it and gating it: push-open, round the door, or (around False) nothing
-        after = PushOpen(chair_back_dir) if push else (ReleaseAround() if around else shared.AfterSwing())
+        after = PushOpen(chair_back_dir) if push else (ReleaseAround() if around else ReleaseBackOff())
         shared.LAST_PLAN = None  # this run's plan, not an earlier one's
         if not shared.open_task(ai, execute, swing, swing, after_swing=after):
             say("swing did not finish -- stopping (still holding the handle).")

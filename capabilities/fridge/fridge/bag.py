@@ -1,8 +1,8 @@
 """A run's rosbag: enough to see again what the run saw, kept small.
 
-The wrist camera's colour, depth and intrinsics as matched sets, `frame_hz` of them a second (the camera runs at 15),
-all of /tf_static, and /tf at TF_HZ for each set of frames it carries (with /tf_static: where the camera was for each
-frame).
+Each camera's colour, depth and intrinsics (the wrist camera's, and the scene camera's when it has topics) as matched
+sets, `frame_hz` of them a second (the cameras run at 15); the extra topics (boxer's 3D boxes) at `frame_hz` too; all of
+/tf_static, and /tf at TF_HZ for each set of frames it carries (with /tf_static: where each camera was for each frame).
 The arm's joints, tool pose and gripper are not here: the run's arm.npz has them at 25 Hz. Raw, lossless, sqlite3.
 """
 
@@ -35,34 +35,44 @@ class RunBag:
     """Records into `run_dir`/bag from now until `close()`. Make it inside the action (its subscriptions are the
     action's, as create_action_subscription's)."""
 
-    def __init__(self, node, run_dir, color_topic, info_topic, depth_topic, frame_hz):
+    def __init__(self, node, run_dir, cameras, frame_hz, extra=()):
+        """`cameras`: [(colour, camera_info, depth topic)], the first the wrist camera's (close() counts its frames).
+        `extra`: [(topic, type name, message class)] thinned to `frame_hz` (no publisher: nothing recorded)."""
         self.node, self.period_ns = node, int(1e9 / frame_hz)
         self.tf_period_ns = int(1e9 / TF_HZ)
         self._lock = threading.Lock()
-        self._last_frame, self._last_tf = None, {}
-        self.frames = 0
+        self._last_frame, self._last_tf = {}, {}
+        self._counts = {cam: 0 for cam in cameras}
+        self._wrist = cameras[0]
         self._writer = rosbag2_py.SequentialWriter()
         self._writer.open(
             rosbag2_py.StorageOptions(uri=str(run_dir / "bag"), storage_id="sqlite3"),
             rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"),
         )
-        self.topics = {
-            color_topic: "sensor_msgs/msg/Image",
-            info_topic: "sensor_msgs/msg/CameraInfo",
-            depth_topic: "sensor_msgs/msg/Image",
-            "/tf": "tf2_msgs/msg/TFMessage",
-            "/tf_static": "tf2_msgs/msg/TFMessage",
-        }
+        self.topics = {"/tf": "tf2_msgs/msg/TFMessage", "/tf_static": "tf2_msgs/msg/TFMessage"}
+        for color_topic, info_topic, depth_topic in cameras:
+            self.topics.update(
+                {
+                    color_topic: "sensor_msgs/msg/Image",
+                    info_topic: "sensor_msgs/msg/CameraInfo",
+                    depth_topic: "sensor_msgs/msg/Image",
+                }
+            )
+        self.topics.update({topic: type_name for topic, type_name, _ in extra})
         for name, msg_type in self.topics.items():
             self._writer.create_topic(rosbag2_py.TopicMetadata(name=name, type=msg_type, serialization_format="cdr"))
-        self._camera = (color_topic, info_topic, depth_topic)
-        inputs = [
-            _Input(node, Image, color_topic, qos_profile_sensor_data),
-            _Input(node, CameraInfo, info_topic, qos_profile_sensor_data),
-            _Input(node, Image, depth_topic, qos_profile_sensor_data),
-        ]
-        self._sync = message_filters.ApproximateTimeSynchronizer(inputs, 10, SYNC_SLOP_S)
-        self._sync.registerCallback(self._on_frame)
+        self._syncs = []
+        for cam in cameras:
+            inputs = [
+                _Input(node, Image, cam[0], qos_profile_sensor_data),
+                _Input(node, CameraInfo, cam[1], qos_profile_sensor_data),
+                _Input(node, Image, cam[2], qos_profile_sensor_data),
+            ]
+            sync = message_filters.ApproximateTimeSynchronizer(inputs, 10, SYNC_SLOP_S)
+            sync.registerCallback(lambda c, i, d, cam=cam: self._on_frame(cam, c, i, d))
+            self._syncs.append(sync)
+        for topic, _, msg_class in extra:
+            node.create_action_subscription(msg_class, topic, lambda m, topic=topic: self._on_extra(topic, m), 10)
         node.create_action_subscription(TFMessage, "/tf", self._on_tf, TF_QOS)
         node.create_action_subscription(TFMessage, "/tf_static", self._on_tf_static, TF_STATIC_QOS)
 
@@ -73,15 +83,27 @@ class RunBag:
         if self._writer is not None:  # under the lock; None once closed (a late callback)
             self._writer.write(topic, serialize_message(msg), t)
 
-    def _on_frame(self, color, info, depth):
+    def _thinned(self, key, t):
+        """Under the lock: whether `key`'s message at `t` is due (frame_hz), noting it if so."""
+        if key in self._last_frame and t - self._last_frame[key] < self.period_ns:
+            return False
+        self._last_frame[key] = t
+        return True
+
+    def _on_frame(self, cam, color, info, depth):
         t = self._now()
         with self._lock:
-            if self._last_frame is not None and t - self._last_frame < self.period_ns:
+            if not self._thinned(cam, t):
                 return
-            self._last_frame = t
-            for topic, msg in zip(self._camera, (color, info, depth), strict=True):
+            for topic, msg in zip(cam, (color, info, depth), strict=True):
                 self._write(topic, msg, t)
-            self.frames += 1
+            self._counts[cam] += 1
+
+    def _on_extra(self, topic, msg):
+        t = self._now()
+        with self._lock:
+            if self._thinned(topic, t):
+                self._write(topic, msg, t)
 
     def _on_tf(self, msg):
         t = self._now()
@@ -97,9 +119,9 @@ class RunBag:
             self._write("/tf_static", msg, self._now())
 
     def close(self):
-        """Finish the bag (its metadata too). Returns how many camera frames it holds."""
+        """Finish the bag (its metadata too). Returns how many wrist camera frames it holds."""
         with self._lock:
             if self._writer is not None:
                 self._writer.close()
                 self._writer = None
-            return self.frames
+            return self._counts[self._wrist]

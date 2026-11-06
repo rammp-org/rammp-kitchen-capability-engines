@@ -90,7 +90,9 @@ def run(
         hold = settings.get("hold_offset_x", F.CLOSE_SETTINGS["hold_offset_x"])
         say(
             f"fridge close: door from {dc.DOOR_FILE}, planned {chair_back * 100:.0f} cm further back (the wheelchair), "
-            f"swung to ~{close_to_deg:.0f} deg, hand held back {-hold * 100:.1f} cm (container)"
+            f"swung to ~{close_to_deg:.0f} deg, holding a {F.CONTAINER_M * 100:.1f} cm container (hand kept "
+            f"{-hold * 100:.1f} cm back, incl. {F.CONTAINER_CLEARANCE_M * 100:.1f} cm margin); handle protrudes "
+            f"{F.HANDLE_PROTRUSION_M * 100:.1f} cm (modelled)"
         )
         z = close_height(ai, door, settings, shift, close_to_deg)
         say(f"swing height z {z:.3f}")

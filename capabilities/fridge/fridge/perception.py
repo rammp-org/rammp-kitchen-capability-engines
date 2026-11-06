@@ -24,6 +24,14 @@ With depth alone (handle_source "depth") the door plane comes from the whole ima
 door_square_to_arm (testing only): the door is taken to face the arm squarely -- its normal along the arm base's -x --
 and, with SAM 3, no door plane is fit at all (the door's depth on 11-04 was its reflection). A door yawed off that gets
 a wrong hinge and swing.
+
+door_normal_from_handle (SAM 3 only): the door's normal from the handle alone, no door plane (_normal_from_handle). The
+handle is flush on its door, so its faces are parallel to it: the bar's front (the nearest ~1 cm along the normal) and
+the plate it stands on (the densest ~1 cm slab 2-10 cm behind that) are fit as two parallel planes sharing one vertical
+normal, refound along each fit. Fitting the bar's front alone, or the whole handle, takes in the step from the bar to
+the wider plate and tilts by tens of degrees. On the 10-22 to 10-24 RealSense frames (a true door plane to check
+against): median error 4.3 deg, 90% within 13; with the two looks agreeing within 5 deg (NORMAL_AGREE_DEG with it),
+90% within 8.5.
 """
 
 import door_common.perception
@@ -62,6 +70,18 @@ DOOR_REGION_WIDTHS = 3.0  # the region: this many mask widths beside the handle 
 DOOR_REGION_ROWS = 0.25  # ... over the mask's rows, plus this fraction of its height above and below
 DOOR_REGION_MIN_PIXELS = 2000  # smaller (the hinge side out of view): a box round the handle instead
 SQUARE_DOOR_NORMAL = np.array([-1.0, 0.0, 0.0])  # door_square_to_arm: the door's outward normal, back along the arm's x
+# door_normal_from_handle (_normal_from_handle):
+HANDLE_NORMAL_ROWS = 0.15  # the mask's rows used: all but this fraction at its top and bottom (the legs' bends)
+HANDLE_NORMAL_MIN_POINTS = 200  # fewer handle points with depth there: no normal, the look is a miss
+HANDLE_FRONT_PCT = 97  # the bar's front: this percentile of the points along the normal (not the max: noise) ...
+HANDLE_FRONT_M = 0.008  # ... and the points within this behind it
+HANDLE_PLATE_BEHIND_M = (0.02, 0.10)  # the plate: the densest slab this far behind the bar's front ...
+HANDLE_PLATE_M = 0.012  # ... this thick
+HANDLE_LAYER_MIN_POINTS = 30  # a layer with fewer points is left out of the fit (the front one: no normal)
+HANDLE_MERGE_PX = 5  # SAM 3 instances within the handle's box (+ this): the bar and its plate given apart, merged
+HANDLE_PART_NEARER_M = (
+    0.02  # ... and one of them this much nearer the camera, bar-sized: the bar, standing on its plate
+)
 
 
 def _facing_deg(normal, up_cam):
@@ -87,11 +107,15 @@ def _handle_like(height, width):
 class HandleDetector(door_common.perception.HandleDetector):
     check_door_vertical = False  # _door_plane checks the normal itself, so it can try the next plane instead
 
-    def __init__(self, handle_centre_to_face_m=0.070, door_square_to_arm=False):
+    def __init__(self, handle_centre_to_face_m=0.070, door_square_to_arm=False, door_normal_from_handle=False):
+        if door_square_to_arm and door_normal_from_handle:
+            raise ValueError("door_square_to_arm and door_normal_from_handle both set the door's normal: pick one")
         self.min_standoff = handle_centre_to_face_m * DOOR_STANDOFF_MIN_FRACTION
         self.max_standoff = handle_centre_to_face_m + DOOR_STANDOFF_SLACK_M
         self.last_miss = ""  # why the last look found nothing, for the refusal
         self.door_square_to_arm = door_square_to_arm
+        self.door_normal_from_handle = door_normal_from_handle
+        self._merged = (None, None)  # (picked mask, it merged with the instances in its box): _normal_from_handle's
 
     def pick_handle_mask(self, instances, frame=None):
         """Of SAM 3's [(score, mask, class)] on `frame` (its depth_mm, K, base_T_cam): the largest instance that
@@ -123,7 +147,35 @@ class HandleDetector(door_common.perception.HandleDetector):
             return None
         px, score, mask, label, what = max(found, key=lambda t: t[0])
         say(f"  SAM 3: '{label}' {score:.2f}, {px} px, {what} -- of {len(instances)} instance(s)")
-        return mask
+        group = _merge_inside(mask, [m for _, m, _ in instances])
+        front = self._bar_in_front(mask, instances, frame)
+        self._merged = (front, group)  # _normal_from_handle fits the bar and its plate together
+        return front
+
+    def _bar_in_front(self, mask, instances, frame):
+        """`mask`, or -- when SAM 3 gave the bar and its plate apart and `mask` is the plate -- the bar: the instance
+        inside its box, bar-sized (HANDLE_HEIGHT_M's least), HANDLE_PART_NEARER_M or more nearer the camera. The handle
+        is placed from its mask's nearest surface, so the plate's would put the grasp ~6 cm behind the bar's front."""
+        size = self._instance_size(mask, frame)
+        vs, us = np.nonzero(mask)
+        u0, u1 = us.min() - HANDLE_MERGE_PX, us.max() + HANDLE_MERGE_PX
+        v0, v1 = vs.min() - HANDLE_MERGE_PX, vs.max() + HANDLE_MERGE_PX
+        best, best_rng = mask, size[2]
+        for score, m, label in instances:
+            if m is mask or m.shape != mask.shape or np.count_nonzero(m) < HANDLE_MASK_MIN_PIXELS:
+                continue
+            mv, mu = np.nonzero(m)
+            if mu.min() < u0 or mu.max() > u1 or mv.min() < v0 or mv.max() > v1:
+                continue
+            part = self._instance_size(m, frame)
+            if part is None or part[0] < HANDLE_HEIGHT_M[0] or part[2] > best_rng - HANDLE_PART_NEARER_M:
+                continue
+            best, best_rng = m, part[2]
+            say(
+                f"  SAM 3: '{label}' {score:.2f} inside it, {(size[2] - part[2]) * 100:.0f} cm nearer: the bar on its "
+                "plate -- the handle from it"
+            )
+        return best
 
     def _instance_size(self, mask, frame):
         """An instance's size: its whole silhouette (every mask pixel, as SAM 3 outlines it) placed at the distance of
@@ -279,6 +331,13 @@ class HandleDetector(door_common.perception.HandleDetector):
                 self._bar, self._bar_extent, self._bar_points = bar
         if self.door_square_to_arm and self._bar is not None:
             return self._square_door(base_T_cam)
+        if self.door_normal_from_handle:
+            normal = None if self._bar is None else self._normal_from_handle(handle_mask, depth, K, base_T_cam)
+            if normal is None:
+                self.last_miss = self.last_miss or "no handle depth for door_normal_from_handle"
+                say(f"  {self.last_miss}")
+                return None
+            return self._square_door(base_T_cam, normal)
         det = super().detect(rgb, K, depth, base_T_cam, box=box, handle_mask=handle_mask, debug=debug)
         if det is not None:
             det["hinge"] = None
@@ -287,21 +346,122 @@ class HandleDetector(door_common.perception.HandleDetector):
                 say("  door normal assumed square to the arm (door_square_to_arm)")
         return det
 
-    def _square_door(self, base_T_cam):
-        """door_square_to_arm with the handle from its own depth: the detection without any door plane."""
+    def _square_door(self, base_T_cam, normal=None):
+        """The detection without any door plane, the handle from its own depth: door_square_to_arm (`normal` None), or
+        door_normal_from_handle's `normal`."""
         Rb, tb = base_T_cam[:3, :3], base_T_cam[:3, 3]
         lo, hi = self._bar_extent
         z0 = float(tb[2])
+        how = (
+            "door normal assumed square to the arm (door_square_to_arm)"
+            if normal is None
+            else "door normal from the handle (door_normal_from_handle)"
+        )
         say(
             f"  handle from its own depth: {self._bar_points} pts on the bar's front, z {lo + z0:.3f} to {hi + z0:.3f}"
-            f" -> middle {(lo + hi) / 2 + z0:.3f}; door normal assumed square to the arm (door_square_to_arm), no "
-            "door plane fit"
+            f" -> middle {(lo + hi) / 2 + z0:.3f}; {how}, no door plane fit"
         )
         return {
             "handle": Rb @ self._bar + tb,
             "quat": door_common.perception.HANDLE_QUAT,
-            "normal": SQUARE_DOOR_NORMAL.copy(),
+            "normal": (SQUARE_DOOR_NORMAL if normal is None else normal).copy(),
             "hinge": None,
             "door_z": None,
             "door_mid": None,
         }
+
+    def _normal_from_handle(self, mask, depth, K, base_T_cam):
+        """door_normal_from_handle: the door's outward normal (arm frame, horizontal) from the handle's own depth --
+        the bar's front and its plate, two parallel layers sharing one normal (module docstring). Uses the picked mask
+        merged with SAM 3's other instances inside its box (the bar and its plate given apart). None (and last_miss) if
+        too little of the handle has depth, or the normal doesn't face the camera."""
+        merged_from, merged = self._merged
+        if merged_from is mask and merged is not None:
+            mask = merged
+        Rb, tb = base_T_cam[:3, :3], base_T_cam[:3, 3]
+        vs, us = np.nonzero(mask)
+        d = depth[vs, us] / 1000.0
+        ok = ~np.isnan(d) & (d >= DEPTH_RANGE_M[0]) & (d <= DEPTH_RANGE_M[1])
+        if ok.any():
+            v0, v1 = vs.min(), vs.max()
+            cut = HANDLE_NORMAL_ROWS * (v1 - v0)
+            ok &= (vs > v0 + cut) & (vs < v1 - cut)
+        if ok.sum() < HANDLE_NORMAL_MIN_POINTS:
+            self.last_miss = (
+                f"{int(ok.sum())} handle points with depth for door_normal_from_handle "
+                f"(needs {HANDLE_NORMAL_MIN_POINTS})"
+            )
+            return None
+        vs, us, d = vs[ok], us[ok], d[ok]
+        cam_pts = np.stack([(us - K[0, 2]) / K[0, 0] * d, (vs - K[1, 2]) / K[1, 1] * d, d], axis=1)
+        P = cam_pts @ Rb.T + tb
+        n = tb - P.mean(axis=0)  # first guess: back toward the camera
+        n[2] = 0.0
+        n /= np.linalg.norm(n)
+        for i in range(7):  # 4 on the bar's front alone, then 3 with the plate
+            layers = [_front_layer(P, n)] + ([_plate_layer(P, n)] if i >= 4 else [])
+            if len(layers[0]) < HANDLE_LAYER_MIN_POINTS:
+                self.last_miss = "too few points on the handle's front for door_normal_from_handle"
+                return None
+            n = _shared_normal(layers, n)
+        up_cam = Rb[2, :3]
+        facing = _facing_deg(Rb.T @ n, up_cam)
+        if facing > DOOR_FACING_MAX_DEG:
+            self.last_miss = f"door normal from the handle faces {facing:.0f} deg off the camera"
+            return None
+        plate = len(_plate_layer(P, n))
+        say(
+            f"  door normal from the handle: yaw {np.degrees(np.arctan2(-n[1], -n[0])):+.1f} deg off the arm's x, "
+            f"{len(_front_layer(P, n))} pts on the bar's front, {plate} on the plate"
+            + ("" if plate >= HANDLE_LAYER_MIN_POINTS else " (too few: the bar's front alone)")
+        )
+        return n
+
+
+def _merge_inside(mask, masks):
+    """`mask` with every other instance inside its box (+ HANDLE_MERGE_PX) or'd in."""
+    vs, us = np.nonzero(mask)
+    u0, u1, v0, v1 = (
+        us.min() - HANDLE_MERGE_PX,
+        us.max() + HANDLE_MERGE_PX,
+        vs.min() - HANDLE_MERGE_PX,
+        vs.max() + HANDLE_MERGE_PX,
+    )
+    out = mask.copy()
+    for m in masks:
+        if m is mask or m.shape != mask.shape or not m.any():
+            continue
+        mv, mu = np.nonzero(m)
+        if mu.min() >= u0 and mu.max() <= u1 and mv.min() >= v0 and mv.max() <= v1:
+            out |= m
+    return out
+
+
+def _front_layer(P, n):
+    """The bar's front: the points within HANDLE_FRONT_M of the HANDLE_FRONT_PCT percentile along `n`."""
+    s = P @ n
+    return P[s >= np.percentile(s, HANDLE_FRONT_PCT) - HANDLE_FRONT_M]
+
+
+def _plate_layer(P, n):
+    """The plate: the densest HANDLE_PLATE_M slab HANDLE_PLATE_BEHIND_M behind the bar's front along `n`."""
+    s = P @ n
+    f = float(np.percentile(s, HANDLE_FRONT_PCT))
+    near, far = HANDLE_PLATE_BEHIND_M
+    cand = s[(s < f - near) & (s > f - far)]
+    if len(cand) < HANDLE_LAYER_MIN_POINTS:
+        return np.empty((0, 3))
+    edges = np.arange(f - far, f - near, 0.002)
+    counts = [int(np.sum((cand >= e) & (cand < e + HANDLE_PLATE_M))) for e in edges]
+    e = edges[int(np.argmax(counts))]
+    return P[(s >= e) & (s < e + HANDLE_PLATE_M)]
+
+
+def _shared_normal(layers, toward):
+    """One normal for parallel layers (each centred on its own mean), made horizontal (the door is vertical), out
+    toward `toward`. Layers under HANDLE_LAYER_MIN_POINTS are left out."""
+    X = np.vstack([L - L.mean(axis=0) for L in layers if len(L) >= HANDLE_LAYER_MIN_POINTS])
+    n = np.linalg.svd(X, full_matrices=False)[2][2]
+    n[2] = 0.0
+    n /= np.linalg.norm(n)
+    return n if n @ toward > 0 else -n

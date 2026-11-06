@@ -10,10 +10,10 @@ INCH = 0.0254
 
 # --- measured on the fridge being opened (per fridge: the node's parameters) ---
 MEASURED = {
-    # middle of the handle bar (where the fingers close) -> door's front surface, perpendicular to the door. NOT
-    # MEASURED ON THE FRIDGE: the printed handle's STL (data/RAMMP.Fridge.Handle5.STL, 11-05): its bar, 18.7 mm deep,
-    # stands 60.5-79.2 mm off the door. The door's face, its inside and the hinge are placed from the handle by it.
-    # (1.5 in, measured 10-22, was the black handle's)
+    # the detected handle point -> door's front surface, perpendicular to the door: the door's face, its inside and
+    # the hinge are placed from the handle by it. Measured 11-06: the bar's back edge 2.5 in from the face, the bar
+    # ~0.5 in deep (front ~3.0 in). Still 0.070 (the STL's bar middle) until the camera's handle point is measured
+    # against the bar's real front (docs/TESTING.md, "Before the next run")
     "handle_centre_to_face_m": 0.070,
     # door's front surface -> hinge pin axis: door thickness 1.25 in (measured 09-20, pin assumed at the back face) +
     # 1.5 cm (hinge side crept forward). If the pin depth is measured directly, use it alone.
@@ -29,9 +29,9 @@ MEASURED = {
     # door top / bottom above / below the middle of the handle bar (measured 10-24). The close pushes only within these
     "door_above_handle_m": 15 * INCH,
     "door_below_handle_m": 15.5 * INCH,
-    # the handle bar's grippable straight length, between its mounts. NOT MEASURED: the STL's straight bar (11-05). It
-    # limits how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
-    "handle_length_m": 0.188,
+    # the handle bar's grippable straight length, between its mounts: 8 in, measured on the fridge (11-06). It limits
+    # how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
+    "handle_length_m": 8 * INCH,
     "body_depth_m": 0.50,  # cabinet behind the door
     # The arm is mounted on the chair's left and the person sits just behind it, to its right (10-24: a close ran the
     # arm into the back of the chair). No part of the arm or gripper may be more than this far behind the arm base
@@ -42,7 +42,9 @@ MEASURED = {
 
 # --- grasp: the microwave's corrections on the Jetson rig, the values every fridge run so far used (10-22, 10-24: the
 # door files' handle-to-grasp is 4.8 cm); nothing has checked them on this handle ---
-GRIP_EXT = 0.088  # along the approach axis (negative = past the detected handle)
+# along the approach axis (negative = past the detected handle). 11-05: the microwave's 0.088 grabbed too deep on
+# the fridge handle -> 3.8 cm (1.5 in) shallower
+GRIP_EXT = 0.126
 VERTICAL_CORR = 0.0  # world z
 GRASP_X_ADJUST = 0.040  # along the approach axis
 GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose, to let its bar turn)
@@ -100,9 +102,12 @@ CHAIR_BACK_M = 0.30  # the wheelchair is moved back this far first ...
 CHAIR_BACK_DIR = (1.0, 0.0)  # ... which moves the recorded fridge this way in the arm's frame (arm-base x = the
 # chair's forward): the node's chair_back_dir parameter. The plan uses the door from the open, shifted by this
 CLOSE_TO_DEG = 45.0  # swing the door shut until it is open this far, then back out (no torque push)
+CLOSE_SPEED = 0.7  # the close goal's default speed: slower, the swing doesn't carry the door shut from CLOSE_TO_DEG
 CLOSE_Z_MARGIN_M = 0.08  # without a push_z the close tries swing heights within the door, this far in from its top and
 CLOSE_Z_STEP_M = 0.05  # bottom, every this far, nearest the hand first
-CONTAINER_M = 6.5 * INCH  # the tupperware held for the close (measured 10-24): the hand is kept back by this much
+CONTAINER_M = 6.5 * INCH  # the container held for the close (measured 10-24): ~a 6.5 in diameter sphere (11-06)
+CONTAINER_CLEARANCE_M = 0.5 * INCH  # safety margin the container must keep from the door/handle/body (11-06)
+HANDLE_PROTRUSION_M = 3.5 * INCH  # how far the handle sticks out from the fridge's front face (measured 11-06)
 CLOSE_MAX_TILT_DEG = 2.0  # the close never tilts the hand -- no roll, no pitch; turning about vertical is fine (it may
 # hold a container). Every planned configuration must keep the tool's tilt within this of where it starts, or it refuses
 CLOSE_SETTINGS = dict(  # replace door_common.close_door.CLOSE_DEFAULTS
@@ -111,7 +116,18 @@ CLOSE_SETTINGS = dict(  # replace door_common.close_door.CLOSE_DEFAULTS
     push_stop_short=0.0,  # the swing ends AT the CLOSE_TO_DEG door model ...
     push_max=0.0,  # ... and there is no final push
     keep_orientation=True,  # holding a container
-    hold_offset_x=-CONTAINER_M,
+    # 11-06: the container is a 6.5 in sphere that sticks out ~6.5 in past the gripper tips. Keep the
+    # hand back by that reach + the 0.5 in margin (hold_offset_x) so the container -- not the hand --
+    # reaches the door and the hand routes back and around; this is what makes a valid swing start exist.
+    # The handle is modelled as a real box so the hand/container must clear it (the saved door model,
+    # two prisms -- door slab + fridge body -- leaves the handle out). The explicit container SPHERE is
+    # left off (container_diameter_m 0) because, without also shifting the hand's target poses, it has
+    # no valid swing start; the hold_offset setback plays the container's role for positioning + clearance.
+    hold_offset_x=-(CONTAINER_M + CONTAINER_CLEARANCE_M),
+    container_diameter_m=0.0,
+    container_clearance_m=CONTAINER_CLEARANCE_M,
+    handle_protrusion_m=HANDLE_PROTRUSION_M,
+    handle_length_m=MEASURED["handle_length_m"],
 )
 
 # --- what depends on the arm's mount (the node's mount_tilt_deg). Everything else plans in arm_mount: level, at the arm

@@ -49,7 +49,7 @@ params:
   sam3_prompts: [handle]
   sam3_threshold: 0.3
   # Measured on the fridge being opened (m); see Before a run in docs/interface.md.
-  # NOT MEASURED ON THE FRIDGE: the printed handle's STL (bar middle to the door). Measure it.
+  # The STL's bar middle; set from the 11-06 measurements once the camera's handle point is measured (TESTING.md).
   handle_centre_to_face_m: 0.070
   pin_behind_face_m: 0.04675
   hinge_along_door_m: 0.3683
@@ -58,7 +58,7 @@ params:
   door_above_handle_m: 0.381
   door_below_handle_m: 0.3937
   # NOT MEASURED: the STL's straight bar between its mounts. Measure it.
-  handle_length_m: 0.188
+  handle_length_m: 0.2032
   body_depth_m: 0.5
   # The wheelchair: the keep-out behind the arm base (m), and which way moving the chair back moves
   # the fridge in the arm's frame (x, y).
@@ -66,10 +66,16 @@ params:
   chair_back_dir: [1.0, 0.0]
   # TESTING ONLY: true takes the door to face the arm squarely (no door plane fit from depth).
   door_square_to_arm: false
-  # Every run also records a rosbag into its run folder: the wrist camera bag_frame_hz times a second and TF
-  # (~75 MB a minute at 1).
+  # The door's normal from the handle's own depth (its bar and plate), no door plane fit. SAM 3 only; not with the above.
+  door_normal_from_handle: false
+  # Every run also records a rosbag into its run folder: the wrist and scene cameras bag_frame_hz times a second,
+  # boxer's 3D boxes and TF (~150 MB a minute at 1). "" for any scene topic: no scene camera; for boxes_topic: no boxes.
   record_bag: true
   bag_frame_hz: 1.0
+  scene_color_topic: /scene_camera/color/image_raw
+  scene_camera_info_topic: /scene_camera/color/camera_info
+  scene_depth_topic: /scene_camera/depth/image_rect_raw
+  boxes_topic: /perception/object_detections_3d
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -129,3 +135,7 @@ subscribes:
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
   - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /perception/object_detections_3d

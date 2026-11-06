@@ -39,6 +39,7 @@ from .common import (
     add_door_model,
     clearance,
     continuous_ok,
+    door_dims,
     drop,
     ee_pose,
     execute_joint_plan,
@@ -60,14 +61,61 @@ CLOSE_HAND_HALF = 0.04  # half-width of the hand along the door, for the handle 
 # ended 27.6 cm out, handle bar at 33 cm, clear)
 
 
-def _chain(scene, rb, points, q, bodies, label, min_clear=None, closed=False):
+def _container_held(rb, diameter, clearance_m=0.0):
+    """A sphere of `diameter` (m) standing in for the container held in the gripper, centred on the
+    approach axis FINGERTIP_PAST_TOOL + radius ahead of the tool point (its near surface at the
+    fingertips, as the old hold_offset_x assumed). The collision sphere is grown by `clearance_m`
+    (a safety margin the container must keep from the door/handle/body), while the centre stays at
+    the real radius. Returns (body_id, (offset_pos, offset_quat)) for clearance(held=...); remove the
+    body with p.removeBody when done."""
+    c = rb.physics_client_id
+    r = diameter / 2.0
+    cs = p.createCollisionShape(p.GEOM_SPHERE, radius=r + clearance_m, physicsClientId=c)
+    bid = p.createMultiBody(0, cs, physicsClientId=c)
+    return bid, ([0.0, 0.0, FINGERTIP_PAST_TOOL + r], [0.0, 0.0, 0.0, 1.0])
+
+
+def _handle_body(rb, df, deg, protrusion, length, width=0.05):
+    """A box standing in for the handle, which the saved door model leaves out: at u_handle along the
+    door, protruding `protrusion` (m) from the front face toward the arm, `length` tall, `width` along
+    the door, swung to opening `deg`. Returns (id, "handle") -- remove it with `drop`."""
+    c = rb.physics_client_id
+    door_t = door_dims(df.door)[1]
+    center = df.pos(df.u_handle, door_t / 2.0 + protrusion / 2.0, deg, float(df.g0[2]))
+    n_deg = df._rot(deg) @ df.n
+    yaw = float(np.arctan2(n_deg[1], n_deg[0]))
+    cs = p.createCollisionShape(
+        p.GEOM_BOX, halfExtents=[protrusion / 2.0, width / 2.0, length / 2.0], physicsClientId=c
+    )
+    bid = p.createMultiBody(
+        0,
+        cs,
+        basePosition=center.tolist(),
+        baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
+        physicsClientId=c,
+    )
+    return bid, "handle"
+
+
+def _chain(scene, rb, points, q, bodies, label, min_clear=None, closed=False, held=None):
     """plan_cartesian through a list of (pos, quat) points; returns (legs, q_end) or (None, q).
     `min_clear`: optional per-leg clearance, {leg index (0-based): metres}, default MIN_CLEAR."""
     legs = []
     for i in range(len(points) - 1):
         (p0, q0), (p1, q1) = points[i], points[i + 1]
         leg = plan_cartesian(
-            scene, rb, p0, q0, p1, q1, q, f"{label} {i + 1}", bodies, min_clear=(min_clear or {}).get(i), closed=closed
+            scene,
+            rb,
+            p0,
+            q0,
+            p1,
+            q1,
+            q,
+            f"{label} {i + 1}",
+            bodies,
+            min_clear=(min_clear or {}).get(i),
+            closed=closed,
+            held=held,
         )
         if leg is None:
             return None, q
@@ -86,7 +134,7 @@ def _facing_forward(quat, fwd):
     return (turn * R.from_quat(quat)).as_quat()
 
 
-def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
+def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=None):
     """To `side_past_hinge` beyond the hinge and `push_radius` from it (diagonally, straight
     there, if that clears the door; else sideways in front of the free edge first), then swing
     about the hinge -- hand orientation unchanged the whole way, radius spiralling in to
@@ -126,6 +174,8 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
         return float(np.dot(pt - h, fwd))
 
     bodies = df.bodies(scene, rb, deg0)
+    if args.handle_protrusion_m:
+        bodies = bodies + [_handle_body(rb, df, deg0, args.handle_protrusion_m, args.handle_length_m)]
     free = add_door_model(scene, rb, df.door, df.bodies_point(deg0))
     drop(rb, free[0])
     free_edge = np.r_[free[1]["free_edge"], z]
@@ -151,7 +201,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
         if err >= sim.MAX_IK_ERR:
             tried.append((a_side, f"out of reach (IK {err * 100:.1f} cm off)"))
         else:
-            gap, link = clearance(rb, qs, bodies)
+            gap, link = clearance(rb, qs, bodies, held=held)
             if gap >= GAP:
                 break
             tried.append((a_side, f"{link} {gap * 100:.1f} cm from the door/body (needs {GAP * 100:.0f})"))
@@ -167,7 +217,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
         f"{np.round(R.from_quat(quat).as_matrix()[:, 2], 3)}"
     )
     try:
-        c0 = clearance(rb, q0, bodies)
+        c0 = clearance(rb, q0, bodies, held=held)
         say(f"  clearance now: {c0[0] * 100:.1f} cm ({c0[1]})")
         start = (p_now, tuple(st["ee_pos"][3:7]))
         goal = (pos(a_side, b_start), quat)
@@ -209,7 +259,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
         route = None
         for name, pts in routes:
             say(f" route: {name}")
-            route, q = _chain(scene, rb, pts, q0, bodies, "approach")
+            route, q = _chain(scene, rb, pts, q0, bodies, "approach", held=held)
             if route is not None:
                 break
     finally:
@@ -223,6 +273,8 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
     # last bit is the torque-watched push (_push_until_shut). With `stop_deg`, the door model at
     # that angle stands in for the closed one: the hand reaching it = the door pushed to there.
     closed = df.bodies(scene, rb, stop_deg)
+    if args.handle_protrusion_m:
+        closed = closed + [_handle_body(rb, df, stop_deg, args.handle_protrusion_m, args.handle_length_m)]
     stop = args.push_stop_short
     r0 = pos(a_side, b_start) - h
     # radius spirals in from push_radius to push_radius_end over the swing
@@ -242,21 +294,21 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
         while True:
             d_next = d + step
             nq, err = solve_ik(scene, rb, at(d_next), quat, qq)
-            c_door = clearance(rb, nq, [closed[0]])[0]
+            c_door = clearance(rb, nq, [closed[0]], held=held)[0]
             if c_door <= stop:
                 lo, hi = d, d_next  # last step: land exactly on the preload
                 for _ in range(12):
                     mid = (lo + hi) / 2
                     mq, _ = solve_ik(scene, rb, at(mid), quat, qq)
-                    if clearance(rb, mq, [closed[0]])[0] <= stop:
+                    if clearance(rb, mq, [closed[0]], held=held)[0] <= stop:
                         hi = mid
                     else:
                         lo = mid
                 d_next = hi
                 nq, err = solve_ik(scene, rb, at(d_next), quat, qq)
-                c_door = clearance(rb, nq, [closed[0]])[0]
+                c_door = clearance(rb, nq, [closed[0]], held=held)[0]
             jump = float(np.degrees(np.max(np.abs((nq - qq + np.pi) % (2 * np.pi) - np.pi))))
-            c_body = clearance(rb, nq, [closed[1]])
+            c_body = clearance(rb, nq, closed[1:], held=held)
             j6 = float(np.degrees(nq[5]))
             last = c_door <= stop + 1e-4
             bad = (
@@ -312,7 +364,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
                 break
             push.append(nq)
             pq_ = nq
-        c_max = clearance(rb, pq_, [closed[0]])[0]
+        c_max = clearance(rb, pq_, [closed[0]], held=held)[0]
         if n_push:
             say(
                 f"  push: up to {len(push)} x {PUSH_STEP_M * 1000:.0f} mm straight in, stopping when the joint "
@@ -330,7 +382,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0):
                     break
         if back is None:
             return None
-        c = clearance(rb, back[-1], closed)
+        c = clearance(rb, back[-1], closed, held=held)
         say(f"  after backing out: {c[0] * 100:.1f} cm from door/body ({c[1]})")
     finally:
         drop(rb, closed)
@@ -399,7 +451,24 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
         f"gripper {float(st['gripper_pos']):.3f} (left as is)"
     )
     scene, rb = make_sim()
-    plan = _plan_close(scene, rb, df, st, args, deg0, behind=behind, stop_deg=stop_deg)
+    held = (
+        _container_held(rb, args.container_diameter_m, args.container_clearance_m)
+        if args.container_diameter_m
+        else None
+    )
+    if held is not None:
+        say(
+            f"container: a {args.container_diameter_m * 100:.1f} cm sphere held in the gripper "
+            f"(+{args.container_clearance_m * 100:.1f} cm safety margin), checked against the door / handle / body "
+            "(the sphere, not the hand, contacts the door)"
+        )
+    if args.handle_protrusion_m:
+        say(f"handle modelled: a bar protruding {args.handle_protrusion_m * 100:.1f} cm from the door face")
+    try:
+        plan = _plan_close(scene, rb, df, st, args, deg0, behind=behind, stop_deg=stop_deg, held=held)
+    finally:
+        if held is not None:
+            p.removeBody(held[0], physicsClientId=rb.physics_client_id)
     if plan is None:
         say("\nno plan passes every gate -- refusing, arm untouched.")
         return False
@@ -507,6 +576,17 @@ CLOSE_DEFAULTS = {
     "over_above": 0.08,  # route_over: this far above the detected door top (m)
     "over_past": 0.05,  # route_over: this far further left than the swing start before coming down (m)
     "hold_offset_x": 0.0,  # plan with the door shifted this far in x (m); -0.152 holding a container
+    # a container held in the gripper, modelled as a sphere (diameter m) on the approach axis -- it,
+    # not the hand, is checked against the door/handle/body and contacts the closed door. 0: off (use
+    # hold_offset_x instead). Set this OR hold_offset_x, not both.
+    "container_diameter_m": 0.0,
+    # safety margin (m) the container sphere must keep from the door/handle/body (grows the collision
+    # sphere without moving its centre)
+    "container_clearance_m": 0.0,
+    # the handle protrudes this far (m) from the door's front face: modelled as a box the close must
+    # clear (the saved door model leaves the handle out). 0: off, handle avoided by margins only.
+    "handle_protrusion_m": 0.0,
+    "handle_length_m": 0.20,  # the modelled handle bar's height (m), centred on the grasp
     "retreat_dist": 0.20,  # after the push, back straight out up to this far (m)
     "smooth": False,  # the swing as one blended Cartesian trajectory instead of the checked joints
 }

@@ -170,8 +170,10 @@ def test_the_push_open_asks_for_the_smallest_wheelchair_move_that_lets_it_push(d
     after = push_open.PushOpen()
     plan, why = shared.plan_open(scene, rb, _detection(), TELEOP_START, 50, 50, after)
     assert why is None
-    assert after.chair_move == pytest.approx(0.10)  # tried 0 (refused above), +5, -5 cm first
-    assert plan["after"] == "push-open OK, after the wheelchair moves ~10 cm back"
+    # tried 0 (refused above), +5, -5, +10, -10 cm first. 15 since GRIP_EXT 0.126 (11-05: a
+    # grasp 3.8 cm shallower ends the pull elsewhere); 10 with the microwave's 0.088
+    assert after.chair_move == pytest.approx(0.15)
+    assert plan["after"] == "push-open OK, after the wheelchair moves ~15 cm back"
 
 
 def test_the_route_round_the_door_ends_upright_beside_it(door_sim):
@@ -1303,3 +1305,230 @@ def test_a_grasp_out_of_reach_says_there_is_no_height_limit(door_sim):
     with pytest.raises(dc.Refused) as e:
         shared.grasp_pose(np.array([0.8, -0.3, 0.3]), HANDLE_QUAT, np.array([-1.0, 0.0, 0.0]))
     assert "no height limit" in str(e.value) and "None" not in str(e.value)
+
+
+def _yawed_handle(yaw_deg, reflection_m=1.05, noise_mm=1.0, seed=0):
+    """Depth (mm) seen by CAM_T/CAM_K of the printed handle on a door yawed `yaw_deg` (outward
+    normal (-cos, -sin, 0)): a 2.5 x 19 cm bar front 7.9 cm off the door, on a 6.4 x 24.8 cm plate
+    1.2 cm off it, the bar's front centred 0.55 m ahead of the camera; the door itself reads as its
+    reflection (`reflection_m`). Returns (depth, bar mask, plate mask): SAM 3 giving them apart."""
+    y = np.radians(yaw_deg)
+    n = np.array([-np.cos(y), -np.sin(y), 0.0])
+    along = np.cross(n, [0.0, 0.0, 1.0])
+    front = np.array([0.55, 0.0, 0.5])
+    face = front - 0.079 * n
+    vv, uu = np.mgrid[0:400, 0:640]
+    rays = np.stack(
+        [(uu - CAM_K[0, 2]) / CAM_K[0, 0], (vv - CAM_K[1, 2]) / CAM_K[1, 1], np.ones(uu.shape)], -1
+    )
+    rays = (
+        rays @ CAM_T[:3, :3].T
+    )  # base frame; the camera's depth is a hit's base x (it looks along +x)
+    cam = CAM_T[:3, 3]
+    depth = np.full(uu.shape, reflection_m * 1000.0)
+    hit = {}
+    for name, out, half_w, half_h in (
+        ("plate", 0.012, 0.032, 0.124),
+        ("bar", 0.079, 0.0125, 0.095),
+    ):
+        p0 = face + out * n
+        t = ((p0 - cam) @ n) / (rays @ n)
+        P = cam + rays * t[..., None]
+        on = (np.abs((P - p0) @ along) <= half_w) & (np.abs(P[..., 2] - p0[2]) <= half_h) & (t > 0)
+        hit[name] = on
+        depth = np.where(on & (P[..., 0] * 1000 < depth), P[..., 0] * 1000, depth)
+    depth = depth + np.random.default_rng(seed).normal(0, noise_mm, depth.shape)
+    return depth.astype(np.float32), hit["bar"], hit["plate"] & ~hit["bar"]
+
+
+@pytest.mark.parametrize("yaw_deg", [0.0, 15.0, -20.0, 30.0])
+def test_door_normal_from_handle_finds_the_doors_yaw_from_the_bar_and_its_plate(
+    perception, monkeypatch, yaw_deg
+):
+    dp, fp = perception
+
+    def no_plane(self, *a):
+        raise AssertionError("fit a door plane")
+
+    monkeypatch.setattr(dp.HandleDetector, "_door_plane", no_plane)
+    depth, bar, plate = _yawed_handle(yaw_deg)  # the door's own depth: only its reflection
+    det = fp.HandleDetector(door_normal_from_handle=True)
+    det._merged = (bar, fp._merge_inside(bar | plate, [bar, plate]))  # pick_handle_mask's merge
+    got = det.detect(None, CAM_K, depth, CAM_T, handle_mask=bar)
+    yaw = np.degrees(np.arctan2(-got["normal"][1], -got["normal"][0]))
+    assert yaw == pytest.approx(yaw_deg, abs=1.0)
+    assert got["normal"][2] == 0.0 and got["hinge"] is None
+    assert got["handle"][0] == pytest.approx(0.55, abs=0.02)  # the bar's front
+
+
+@pytest.mark.parametrize("door_normal_from_handle", [True, False])
+def test_sam3_giving_the_bar_and_plate_apart_places_the_handle_on_the_bar(
+    perception, door_normal_from_handle
+):
+    # the plate is the larger handle-like instance: from it, the grasp aimed ~6 cm too deep
+    _, fp = perception
+    depth, bar, plate = _yawed_handle(15.0)
+    frame = dict(depth_mm=depth, K=CAM_K, base_T_cam=CAM_T)
+    det = fp.HandleDetector(
+        door_normal_from_handle=door_normal_from_handle,
+        door_square_to_arm=not door_normal_from_handle,
+    )
+    picked = det.pick_handle_mask([(0.8, plate, "handle"), (0.6, bar, "handle")], frame)
+    assert picked is bar
+    got = det.detect(None, CAM_K, depth, CAM_T, handle_mask=picked)
+    assert got["handle"][0] == pytest.approx(0.55, abs=0.01)  # the bar's front
+    if door_normal_from_handle:  # the plate still in the fit
+        assert np.degrees(np.arctan2(-got["normal"][1], -got["normal"][0])) == pytest.approx(
+            15.0, abs=1.0
+        )
+
+
+def test_door_normal_from_handle_merges_the_bar_and_plate_and_misses_without_depth(perception):
+    _, fp = perception
+    _, bar, plate = _yawed_handle(15.0)
+    far = np.zeros_like(bar)
+    far[10:30, 10:30] = True  # elsewhere in the image: not merged
+    merged = fp._merge_inside(bar | plate, [bar, plate, far])
+    assert merged.sum() == (bar | plate).sum()
+    det = fp.HandleDetector(door_normal_from_handle=True)
+    no_depth = np.zeros((400, 640), np.float32)
+    det._bar, det._bar_extent, det._bar_points = np.array([0.0, 0.0, 0.55]), (-0.1, 0.1), 999
+    assert det._normal_from_handle(bar, no_depth, CAM_K, CAM_T) is None
+    assert "handle points with depth" in det.last_miss
+
+
+def test_door_normal_from_handle_is_a_flag_and_not_with_door_square_to_arm(perception, tmp_path):
+    _, fp = perception
+    with pytest.raises(ValueError, match="pick one"):
+        fp.HandleDetector(door_square_to_arm=True, door_normal_from_handle=True)
+    saved = dict(vars(dc)), dict(vars(shared)), dict(vars(constants))
+    try:
+        open_door.configure(tmp_path, 30)
+        assert (
+            not shared.MAKE_DETECTOR().door_normal_from_handle and shared.NORMAL_AGREE_DEG == 10.0
+        )
+        open_door.configure(tmp_path, 30, door_normal_from_handle=True)
+        assert shared.MAKE_DETECTOR().door_normal_from_handle and shared.NORMAL_AGREE_DEG == 5.0
+        with pytest.raises(ValueError, match="pick one"):
+            open_door.configure(tmp_path, 30, door_square_to_arm=True, door_normal_from_handle=True)
+    finally:
+        vars(dc).update(saved[0])
+        vars(shared).update(saved[1])
+        vars(constants).update(saved[2])
+
+
+def test_the_run_bag_records_the_wrist_and_scene_cameras_and_extra_topics(tmp_path):
+    rosbag2_py = pytest.importorskip("rosbag2_py")
+    pytest.importorskip("message_filters")
+    from builtin_interfaces.msg import Time
+    from fridge.bag import RunBag
+    from sensor_msgs.msg import CameraInfo, Image
+    from std_msgs.msg import String
+
+    clock = {"t": 0}
+    subs = {}
+
+    class Node:
+        def create_action_subscription(self, msg_type, topic, cb, qos):
+            subs[topic] = cb
+
+        def get_clock(self):
+            return MagicMock(now=lambda: MagicMock(nanoseconds=clock["t"]))
+
+    wrist = ("/w/color", "/w/info", "/w/depth")
+    scene = ("/s/color", "/s/info", "/s/depth")
+    bag = RunBag(Node(), tmp_path, [wrist, scene], 1.0, [("/boxes", "std_msgs/msg/String", String)])
+    for i in range(30):  # 2 s at 15 Hz: 2 frames a camera at 1 Hz
+        clock["t"] = int(i * 1e9 / 15)
+        stamp = Time(sec=i // 15, nanosec=int((i % 15) * 1e9 / 15))
+        for color, info, depth in (wrist, scene):
+            for topic, msg in ((color, Image()), (info, CameraInfo()), (depth, Image())):
+                msg.header.stamp = stamp
+                subs[topic](msg)
+        subs["/boxes"](String(data=str(i)))
+    assert bag.close() == 2
+
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=str(tmp_path / "bag"), storage_id="sqlite3"),
+        rosbag2_py.ConverterOptions("cdr", "cdr"),
+    )
+    counts = {}
+    while reader.has_next():
+        topic = reader.read_next()[0]
+        counts[topic] = counts.get(topic, 0) + 1
+    assert counts == {t: 2 for t in (*wrist, *scene, "/boxes")}
+
+
+def test_the_pull_alone_is_planned_with_its_back_off(door_sim, monkeypatch):
+    # around false: a back-off failing a gate after the swing left the hand on the handle, the door
+    # open (11-05 replay: J6 at its guard); release_only then refused the same back-off
+    scene, rb = door_sim
+    arm = _Arm(scene, rb, TELEOP_START)
+    assert open_door.run(arm, True, push=False, around=False)  # plans and runs the back-off
+    assert [c[0] for c in arm.calls][-2:] == ["gripper", "joints"]
+    monkeypatch.setattr(push_open, "back_off", lambda *a: None)
+    arm = _Arm(scene, rb, TELEOP_START)
+    with pytest.raises(dc.Refused, match="back-off off the handle fails a gate"):
+        open_door.run(arm, True, push=False, around=False)
+    assert arm.calls == []  # refused before the line-up
+
+
+def test_a_held_container_sits_past_the_fingertips_and_counts_in_the_clearance(door_sim):
+    import pybullet as p
+
+    scene, rb = door_sim
+    bodies = dc.DoorFrame(FRIDGE_DOOR, FRIDGE_DOOR["open_sign"]).bodies(scene, rb, 0.0)  # closed
+    q = np.asarray(END_OF_PULL[1])  # the hand at the handle, the closed door just ahead of it
+    held = shared_close._container_held(rb, 0.165)
+    try:
+        hand = dc.clearance(rb, q, bodies)
+        with_container = dc.clearance(rb, q, bodies, held=held)
+        pos, quat = dc.ee_pose(rb).position, dc.ee_pose(rb).orientation
+        centre = p.getBasePositionAndOrientation(held[0], physicsClientId=rb.physics_client_id)[0]
+        ahead = R.from_quat(quat).apply([0.0, 0.0, dc.FINGERTIP_PAST_TOOL + 0.165 / 2])
+        assert np.asarray(centre) == pytest.approx(np.asarray(pos) + ahead, abs=1e-6)
+        assert with_container[0] < hand[0] and with_container[1].startswith("container vs")
+    finally:
+        p.removeBody(held[0], physicsClientId=rb.physics_client_id)
+        dc.drop(rb, bodies)
+
+
+def test_a_close_holding_a_container_checks_it_and_leaves_no_body_behind(door_sim):
+    import pybullet as p
+
+    scene, rb = door_sim
+    arm = _Arm(scene, rb, TELEOP_START)
+    shift = np.asarray(constants.CHAIR_BACK_DIR) * constants.CHAIR_BACK_M
+    dc.DOOR_FILE.write_text(json.dumps(FRIDGE_DOOR))
+    z = close_door.close_height(arm, FRIDGE_DOOR, {}, shift, constants.CLOSE_TO_DEG)
+    n0 = p.getNumBodies(physicsClientId=rb.physics_client_id)
+
+    def plans(**container):
+        return close_door._push_close(
+            arm, False, {"push_z": z, **container}, shift, constants.CLOSE_TO_DEG
+        )
+
+    assert plans()  # as configured: no sphere, the hand kept back by hold_offset_x
+    # a container too big for any route: the sphere, not the hand, is what fails the gates
+    assert not plans(container_diameter_m=1.0, container_clearance_m=0.0)
+    plans(container_diameter_m=0.165)  # a real one: may plan or not, but is cleaned up either way
+    assert p.getNumBodies(physicsClientId=rb.physics_client_id) == n0
+    assert arm.calls == []
+
+
+def test_the_close_runs_at_0_7_speed_unless_told_otherwise(door_sim, monkeypatch):
+    # slower, the swing doesn't carry the door shut from 45 deg (11-06)
+    for name in ("open3d", "message_filters"):
+        monkeypatch.setitem(sys.modules, name, MagicMock())
+    from fridge import node
+
+    speeds = []
+    monkeypatch.setattr(close_door, "run", lambda *a, speed, **k: speeds.append(speed) or True)
+    monkeypatch.setattr(node, "WristCamera", MagicMock())
+    engine = MagicMock(mock=False, cfg={**node.PARAMS, "allow_execute": True}, instance_id="")
+    node.Capability.execute(engine, "close", {"execute": False}, MagicMock())
+    node.Capability.execute(engine, "close", {"execute": False, "speed": 0.9}, MagicMock())
+    assert speeds == [constants.CLOSE_SPEED, 0.9] and constants.CLOSE_SPEED == 0.7
+    close = next(a for a in node.Capability.actions if a.action_id == "close")
+    assert close.params_schema["properties"]["speed"]["default"] == 0.7

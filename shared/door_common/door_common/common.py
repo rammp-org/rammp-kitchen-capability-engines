@@ -44,7 +44,6 @@ from capability_engine.cornell_commands import (
 from capability_engine.sim import (  # noqa: F401 -- re-exported for the task modules
     ARM,
     Pose,
-    clearance,
     continuous_ok,
     keep_out_message,
     make_sim,
@@ -54,6 +53,25 @@ from capability_engine.sim import (  # noqa: F401 -- re-exported for the task mo
     wrap_joints,
 )
 from scipy.spatial.transform import Rotation as R
+
+
+def clearance(rb, q, bodies, closed=False, held=None):
+    """capability_engine.sim.clearance (the smallest distance from any arm link to `bodies` at joints `q`, gripper open
+    or `closed`), and with `held` = (body_id, (offset_pos, offset_quat)) an object rigidly held in the gripper -- e.g.
+    the container -- posed at the tool link x offset and checked against every body too (named "container")."""
+    best = sim.clearance(rb, q, bodies, closed)  # leaves the arm at `q`
+    if held is None:
+        return best
+    c = rb.physics_client_id
+    held_id, (off_pos, off_quat) = held
+    ls = p.getLinkState(rb.robot_id, rb.end_effector_id, physicsClientId=c)
+    wp, wq = p.multiplyTransforms(ls[4], ls[5], off_pos, off_quat)
+    p.resetBasePositionAndOrientation(held_id, wp, wq, physicsClientId=c)
+    for bid, name in bodies:
+        for pt in p.getClosestPoints(held_id, bid, sim.CLEARANCE_QUERY_M, physicsClientId=c):
+            if pt[8] < best[0]:
+                best = (float(pt[8]), f"container vs {name}")
+    return best
 
 
 class Refused(Exception):
@@ -269,7 +287,9 @@ def plan_straight_line(scene, rb, start_pos, quat, direction, dist, seed_joints,
 BIG_MOVE_TIMEOUT_S = 40.0
 
 
-def plan_cartesian(scene, rb, p0, q0_quat, p1, q1_quat, seed_joints, label, bodies=None, min_clear=None, closed=False):
+def plan_cartesian(
+    scene, rb, p0, q0_quat, p1, q1_quat, seed_joints, label, bodies=None, min_clear=None, closed=False, held=None
+):
     """Straight line p0 -> p1 with the orientation slerped q0 -> q1, ~2 cm / <= 5 deg per step,
     each step IK-solved from the previous one. Gates: IK, per-step jump, J6, wrap and (if
     `bodies`) >= MIN_CLEAR from the door model, checked along each step too."""
@@ -294,7 +314,8 @@ def plan_cartesian(scene, rb, p0, q0_quat, p1, q1_quat, seed_joints, label, bodi
         jump = float(np.degrees(np.max(np.abs((nq - q + np.pi) % (2 * np.pi) - np.pi))))
         if bodies is not None:
             worst = min(
-                [worst] + [clearance(rb, q + short_delta(q, nq) * s_ / 3, bodies, closed) for s_ in (1, 2, 3)],
+                [worst]
+                + [clearance(rb, q + short_delta(q, nq) * s_ / 3, bodies, closed, held=held) for s_ in (1, 2, 3)],
                 key=lambda w: w[0],
             )
         bad = (

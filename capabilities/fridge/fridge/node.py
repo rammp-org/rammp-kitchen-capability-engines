@@ -62,10 +62,18 @@ PARAMS = {
     # TESTING ONLY: the door taken to face the arm squarely (normal along the arm base's -x), no door plane fit -- for a
     # door whose depth is its reflection. A door yawed off it gets a wrong hinge and swing
     "door_square_to_arm": False,
+    # the door's normal from the handle's own depth (bar front + plate), no door plane fit. SAM 3 only; not with
+    # door_square_to_arm
+    "door_normal_from_handle": False,
     # every run also records a rosbag into its run folder (bag.RunBag): the wrist camera this many times a second
     # (~75 MB a minute at 1) and TF
     "record_bag": True,
     "bag_frame_hz": 1.0,
+    # ... and the scene camera's frames too (any of its topics "": not recorded), and boxer's 3D boxes ("": not)
+    "scene_color_topic": "/scene_camera/color/image_raw",
+    "scene_camera_info_topic": "/scene_camera/color/camera_info",
+    "scene_depth_topic": "/scene_camera/depth/image_rect_raw",
+    "boxes_topic": "/perception/object_detections_3d",
 }
 
 
@@ -84,7 +92,7 @@ class Capability(CapabilityEngine):
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
                     "push_open": {"type": "boolean", "default": True},
                     # full-pull path only (push_open false): False tests the pull alone -- after the swing just let go
-                    # and back off the handle, no round-the-door, so the plan is not gated by it
+                    # and back off the handle, no round-the-door (the plan is gated by the back-off only)
                     "around": {"type": "boolean", "default": True},
                     # grasp this far (m) above the middle of the handle bar, below if negative; refused off the bar
                     # (handle_length_m)
@@ -104,7 +112,12 @@ class Capability(CapabilityEngine):
             "Close the door",
             params_schema={
                 "type": "object",
-                "properties": {**COMMON, **{k: _schema(v) for k, v in close_door.GOAL_SETTINGS.items()}},
+                "properties": {
+                    **COMMON,
+                    # at least this, or the swing doesn't carry the door shut
+                    "speed": {**COMMON["speed"], "default": constants.CLOSE_SPEED},
+                    **{k: _schema(v) for k, v in close_door.GOAL_SETTINGS.items()},
+                },
             },
         ),
     ]
@@ -123,16 +136,29 @@ class Capability(CapabilityEngine):
             self.cfg["data_dir"],
             self.cfg["mount_tilt_deg"],
             self.cfg["door_square_to_arm"],
+            self.cfg["door_normal_from_handle"],
             **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):
             raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
+        if self.cfg["door_normal_from_handle"] and self.cfg["handle_source"] != "sam3":
+            raise ValueError("door_normal_from_handle needs handle_source sam3 (the handle's mask)")
         shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
         if self.cfg["record_bag"] and not self.mock:
             from .bag import RunBag  # here, not at import: rosbag2, which the planning tests don't have
 
-            cam = (self.cfg["color_topic"], self.cfg["camera_info_topic"], self.cfg["depth_topic"])
-            motion.BAG = lambda run_dir: RunBag(self, run_dir, *cam, self.cfg["bag_frame_hz"])
+            cams = [(self.cfg["color_topic"], self.cfg["camera_info_topic"], self.cfg["depth_topic"])]
+            scene = (self.cfg["scene_color_topic"], self.cfg["scene_camera_info_topic"], self.cfg["scene_depth_topic"])
+            if all(scene):
+                cams.append(scene)
+            extra = []
+            if self.cfg["boxes_topic"]:
+                from rammp_perception_interfaces.msg import ObjectDetections
+
+                extra.append(
+                    (self.cfg["boxes_topic"], "rammp_perception_interfaces/msg/ObjectDetections", ObjectDetections)
+                )
+            motion.BAG = lambda run_dir: RunBag(self, run_dir, cams, self.cfg["bag_frame_hz"], extra)
         # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
         self.sam3 = None
         if self.cfg["handle_source"] == "sam3":
@@ -146,7 +172,7 @@ class Capability(CapabilityEngine):
         )
 
     def execute(self, action_id, params, ctx):
-        speed = float(params.get("speed", 1.0))
+        speed = float(params.get("speed", constants.CLOSE_SPEED if action_id == "close" else 1.0))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
