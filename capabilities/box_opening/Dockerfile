@@ -41,6 +41,10 @@ RUN . /opt/ros/humble/setup.sh \
     && colcon build \
     && rm -rf build log
 
+# The run's point-cloud work is numpy on one core at a time; one BLAS thread
+# keeps it from spreading over the Jetson's cores, the arm driver's included.
+ENV OPENBLAS_NUM_THREADS=1
+
 # `ros2 launch` on Humble has no SIGTERM handler. As PID 1 it ignores the
 # SIGTERM `docker stop` (and `sheppy woof`) sends and is SIGKILLed after the
 # grace period, leaving the node no chance to stop cleanly. On SIGINT it shuts
