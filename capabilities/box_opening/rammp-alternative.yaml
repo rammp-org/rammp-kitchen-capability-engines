@@ -21,6 +21,11 @@ container:
   volumes:
     # where runs keep their logs, captures and videos (state_dir)
     - /home/snorlax/.ros/box_opening:/state
+    # the active robot's config, read-only, as the planner (and arm_state_publisher) mount it: the
+    # planner config whose chair and user layers and arm spheres every plan-free line is held out of
+    # (body_layers below, runtime/body). Without it the node's runs stop before they move ("not
+    # starting: body model: cannot read /config/robot/curobo/planner.yaml ... Nothing moved.")
+    - ./config/robots/current:/config/robot:ro
   # No GPU: nothing in it runs a model. The box comes from the scene segmenter
   # (/perception/object_detections).
 # Defaults for every value a deployment may change per robot or from the sheppy
@@ -45,6 +50,11 @@ params:
   mission_frames: false
   # every motion slowed to this fraction of its speed (0 < x <= 1)
   speed_scale: 1.0
+  # the cuRobo planner config whose layers (the chair and its user) and robot spheres every
+  # plan-free line and planner goal is held out of (the volume above); unreadable, a run stops
+  # before it moves; a run also refuses a planner not started on this same config with world "".
+  # "" turns the check off (a bench with no chair)
+  body_layers: /config/robot/curobo/planner.yaml
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

@@ -202,6 +202,15 @@ passes them as a params file.
 | `viz`              | `false`                | Draw what the perception sees and decides for Foxglove                                                                    |
 | `mission_frames`   | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps |
 | `speed_scale`      | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                          |
+| `body_layers`      | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)          |
+
+`body_layers` defaults to `/config/robot/curobo/planner.yaml`, the planner's own
+config: the fragment mounts the robot's `config/robots/current` at `/config/robot`
+read-only, as the planner's node does. Its layers (the chair, the seat, the person
+in it) and its arm spheres, with the hand's own in `config/robot_body.yaml`, hold
+every plan-free line and every planner goal out of the chair and the user, and the
+same file slows the arm near the user. Unreadable, a run stops before it moves; on,
+a run starts only on a planner started with that same config and `world ""`.
 
 Every run keeps its run log, `<state_dir>/runs/run-<stamp>.jsonl` (about 20 KB).
 The folder keeps the newest 100, each with its side files.
