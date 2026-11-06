@@ -112,8 +112,9 @@ docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ro
      '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"chair_moved\": true, \"speed\": 0.2}"}'
    ```
 
-Any failed check refuses with nothing moved; a dry run (`"execute": false`) says in advance what it will do. **Keep the
-space in front of the arm's base clear:** the sim has no wheelchair or person. Watch where the fingers close and
+Any failed check refuses with nothing moved; a dry run (`"execute": false`) says in advance what it will do. The sim
+checks the arm against the planner's wheelchair and occupant boxes (2 cm padding), but those are best guesses: **keep
+the space in front of the arm's base clear**, and start from a pose outside them (the web app's Fridge pose). Watch where the fingers close and
 whether the fridge drags during the pull (hinge values off). A look failing with `no door plane fits the handle` means
 the door's depth is its reflection (use `door_square_to_arm`).
 

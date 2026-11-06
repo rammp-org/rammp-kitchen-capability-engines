@@ -60,8 +60,10 @@ params:
   # NOT MEASURED: the STL's straight bar between its mounts. Measure it.
   handle_length_m: 0.2032
   body_depth_m: 0.5
-  # The wheelchair: the keep-out behind the arm base (m), and which way moving the chair back moves
-  # the fridge in the arm's frame (x, y).
+  # The wheelchair: its collision layers ("": the package's copy of flatbot's, on the 30-deg mount),
+  # the level mount's stand-in box behind the arm base (m), and which way moving the chair back
+  # moves the fridge in the arm's frame (x, y).
+  chair_model_dir: ""
   chair_keep_out_behind_m: 0.381
   chair_back_dir: [1.0, 0.0]
   # TESTING ONLY: true takes the door to face the arm squarely (no door plane fit from depth).

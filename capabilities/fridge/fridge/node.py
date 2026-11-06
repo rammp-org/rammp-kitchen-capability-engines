@@ -69,6 +69,9 @@ PARAMS = {
     "sam3_prompts": ["handle"],
     "sam3_threshold": 0.3,
     **constants.MEASURED,
+    # the wheelchair + occupant collision layers (chair.py): a directory of the planner's layer_mebot_*.yaml, e.g. the
+    # robot's curobo/ config bind-mounted in; empty: this package's copy (flatbot's, rammp-deployments 63e7563)
+    "chair_model_dir": "",
     "chair_back_dir": list(constants.CHAIR_BACK_DIR),
     # TESTING ONLY: the door taken to face the arm squarely (normal along the arm base's -x), no door plane fit -- for a
     # door whose depth is its reflection. A door yawed off it gets a wrong hinge and swing
@@ -150,6 +153,7 @@ class Capability(CapabilityEngine):
             self.cfg["mount_tilt_deg"],
             self.cfg["door_square_to_arm"],
             self.cfg["door_normal_from_handle"],
+            chair_model_dir=self.cfg["chair_model_dir"] or None,
             **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):

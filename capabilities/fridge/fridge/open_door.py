@@ -24,6 +24,7 @@ from door_common.close_door import _chain
 from door_common.common import DoorFrame, Refused, drop, make_sim, plan_straight_line, quiet, say
 from scipy.spatial.transform import Rotation as R
 
+from . import chair
 from . import constants as F
 from . import push_open as P
 from .motion import AfterSwing, door_after, logged_run, send_legs, trajectory_keep_out
@@ -74,10 +75,19 @@ _HANDLE_LENGTH = F.MEASURED["handle_length_m"]  # configure sets these two
 _DOOR_Z_FROM_HANDLE = (-F.MEASURED["door_below_handle_m"], F.MEASURED["door_above_handle_m"])
 
 
-def configure(data_dir, mount_tilt_deg=0, door_square_to_arm=False, door_normal_from_handle=False, **measured):
+def configure(
+    data_dir,
+    mount_tilt_deg=0,
+    door_square_to_arm=False,
+    door_normal_from_handle=False,
+    chair_model_dir=None,
+    **measured,
+):
     """Everything door_common needs from the fridge: call once at startup. `mount_tilt_deg`: a key of constants.MOUNTS.
     `door_square_to_arm` (testing only): the door taken to face the arm squarely, no door plane fit (perception).
     `door_normal_from_handle`: the door's normal from the handle's own depth, no door plane fit (perception; SAM 3).
+    `chair_model_dir`: the wheelchair's collision layers (chair.py). None: this package's copy (flatbot's) on the 30-deg
+    mount; on the level mount (dojo, no chair) the old box behind the arm base, chair_keep_out_behind_m.
     `measured`: constants.MEASURED's names."""
     if door_square_to_arm and door_normal_from_handle:
         raise ValueError("door_square_to_arm and door_normal_from_handle both set the door's normal: pick one")
@@ -126,7 +136,11 @@ def configure(data_dir, mount_tilt_deg=0, door_square_to_arm=False, door_normal_
         DOOR_Z_FROM_HANDLE=_DOOR_Z_FROM_HANDLE,  # the camera sees only part of it
         KEEP_ARM_IN_FRAMES=True,
     )
-    dc.enable_keep_out(m["chair_keep_out_behind_m"])  # every plan and every trajectory sent is checked
+    # every plan and every trajectory sent is checked against the keep-out
+    if chair_model_dir or mount_tilt_deg != 0:
+        chair.enable(chair_model_dir)  # the wheelchair + occupant: the planner's collision layers
+    else:
+        dc.enable_keep_out(m["chair_keep_out_behind_m"])
 
 
 def grasp_offset_limit():

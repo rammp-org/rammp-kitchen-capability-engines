@@ -121,10 +121,15 @@ How to run it on the arm: [TESTING.md](TESTING.md).
 
 ## Known limits
 
-- **Not on flatbot yet.** The keep-out is a stand-in for an obstacle zone: it is checked on every
-  plan and in `move_joints`, but on `go_to_*` only at the goal, and cuRobo's path is not previewed.
-  flatbot's cuRobo world is empty on rammp-deployments dev (the chair world is on the unmerged
-  `feature/flatbot-curobo-chair`). No fridge motion on flatbot until that is resolved.
+- **The wheelchair model is the planner's, read from files.** On the 30° mount the keep-out is the
+  cuRobo planner's collision layers for flatbot (drive base, seat, person, floor), padded 2 cm as the planner pads
+  them (`chair.py`). They are checked on every plan and in `move_joints`, and on `go_to_*` at the
+  goal (cuRobo checks its own path against the same layers). The planner doesn't publish its world
+  over ROS, so the node reads the layer files: `chair_model_dir`, or this package's copy from
+  rammp-deployments `63e7563` (2026-11-06), which goes stale when the layers are regenerated. The
+  layers' measurements are best guesses apart from the arm's mount; the arm's 2026-11-04 start
+  pose sits 8 cm inside the arm-side armrest and the 2026-10-24 teleop start 13 cm inside the
+  person's torso, so start from a pose outside them (the web app's Fridge pose is).
 - **The 30° mount is sim-checked only.** Set `mount_tilt_deg: 30`. The planning runs in `arm_mount`,
   which is level on every robot; the parameter sets the reach limits and placement advice. All
   hardware runs were on a level arm. On the 30° model the 90° open and the close plan with the
@@ -132,7 +137,6 @@ How to run it on the arm: [TESTING.md](TESTING.md).
   with the handle at its 2026-11-01 height (~0.31 m above the arm base) because the 30° mount
   pushes from 10 cm above the handle and lets the grasp tilt up to 45° (`MOUNTS[30]`). With the
   level arm's values (10 cm below, up to 25°) it plans almost nowhere at that height.
-  The wheelchair keep-out's size was measured on the level rig.
 - **The wheelchair is moved by a person** unless the goal sets `drive_base`. An action can't
   prompt, so `chair_moved` stands in for the old script's prompt. `drive_base` uses `self.base`
   (the engine's drive base interface), so `required_resources` lists `base`. It has not yet run on
@@ -148,8 +152,8 @@ How to run it on the arm: [TESTING.md](TESTING.md).
   trajectory and the door swung shut.
 - **The close has hit the handle.** On 2026-10-24 the hand shut the door by hitting the handle, not
   the door face, and carried on with the planned swing after the door had shut.
-- **The close has hit the wheelchair.** Before the keep-out, a close ran the arm into the back of
-  the chair. It has not been run on the arm since.
+- **The close has hit the wheelchair.** Before any keep-out, a close ran the arm into the back of
+  the chair (2026-10-24). It has not been run on the arm since.
 - **The container is not in the collision model.** The plan only keeps the hand back by its size.
 
 ## Parameters
@@ -182,7 +186,8 @@ passes them as a params file.
 | `door_below_handle_m`                                               | `0.3937`                                                                                                 | Middle of the handle bar down to the door's bottom (m)                                                                                                                                                                                                        |
 | `handle_length_m`                                                   | `0.2032`                                                                                                 | The handle bar's grippable straight length between its mounts (m): 8 in, measured 11-06                                                                                                                                                                       |
 | `body_depth_m`                                                      | `0.5`                                                                                                    | Cabinet behind the door (m)                                                                                                                                                                                                                                   |
-| `chair_keep_out_behind_m`                                           | `0.381`                                                                                                  | No part of the arm may be further than this behind the arm base while on its right (m)                                                                                                                                                                        |
+| `chair_model_dir`                                                   | `""`                                                                                                     | The wheelchair + occupant collision layers (`layer_mebot_*.yaml`, `chair.py`): a directory of them, e.g. the robot's `curobo/` config mounted in; empty: this package's copy of flatbot's                                                                     |
+| `chair_keep_out_behind_m`                                           | `0.381`                                                                                                  | Level mount only (no wheelchair model there): no part of the arm may be further than this behind the arm base while on its right (m)                                                                                                                          |
 | `chair_back_dir`                                                    | `[1.0, 0.0]`                                                                                             | Which way moving the chair back moves the fridge in the arm's frame (x, y): forward = +x                                                                                                                                                                      |
 | `door_square_to_arm`                                                | `false`                                                                                                  | **Testing only.** `true`: the door is taken to face the arm squarely (its normal along the arm base's -x), so no door plane is fit -- for a door whose depth is its reflection. A door yawed off it gets a wrong hinge and swing                              |
 | `door_normal_from_handle`                                           | `false`                                                                                                  | `true`: the door's normal from the handle's own depth (its bar's front and the plate behind it, fit as parallel planes), no door plane fit; the two looks must agree within 5°. `handle_source: sam3` only; not with `door_square_to_arm`                     |

@@ -17,7 +17,7 @@ from conftest import cornell_sim
 from door_common import close_door as shared_close
 from door_common import common as dc
 from door_common import open_door as shared
-from fridge import close_door, constants, open_door, push_open
+from fridge import chair, close_door, constants, open_door, push_open
 from microwave import open_door as microwave_open
 from scipy.spatial.transform import Rotation as R
 
@@ -281,7 +281,8 @@ def test_a_30_degree_mount_plans_the_open_and_close_with_the_fridge_further_out(
     geom = _detection()
     geom = {k: geom[k] + shift if k in ("h_raw", "hinge", "hinge_seen") else geom[k] for k in geom}
     after = open_door.ReleaseAround()
-    plan, why = shared.plan_open(scene, rb, geom, TELEOP_START, 90, 90, after)
+    # from the web app's Fridge pose: the teleop start is inside the wheelchair model
+    plan, why = shared.plan_open(scene, rb, geom, FRIDGE_START, 90, 90, after)
     assert why is None
     assert plan["swing"] == 90
     door = {
@@ -291,7 +292,25 @@ def test_a_30_degree_mount_plans_the_open_and_close_with_the_fridge_further_out(
         for k, v in FRIDGE_DOOR.items()
     }
     dc.DOOR_FILE.write_text(json.dumps(door))
-    assert close_door.run(_Arm(scene, rb, TELEOP_START), False)
+    assert close_door.run(_Arm(scene, rb, FRIDGE_START), False)
+
+
+def test_the_30_degree_mount_plans_against_the_wheelchair_model_the_level_one_the_box(
+    door_sim, tmp_path
+):
+    sim.reset_for_tests()
+    scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
+    open_door.configure(tmp_path, 30)
+    # the planner's layers: the 10-24 teleop start has the forearm inside the occupant's torso,
+    # the Fridge pose is clear
+    assert "person/torso" in sim.keep_out_message(rb, TELEOP_START)
+    assert sim.keep_out_message(rb, FRIDGE_START) is None
+    layers = {name.split("/")[0] for name, _, _ in chair.load()}
+    assert layers == {"platform", "seat", "person", "floor"}
+    # the level mount (dojo: no wheelchair model): the box behind the arm base
+    open_door.configure(tmp_path, 0)
+    assert sim.keep_out_enabled()
+    assert sim.keep_out_message(rb, TELEOP_START) is None
 
 
 def test_a_30_degree_mount_pulls_60_and_pushes_open_at_the_11_01_handle_height(door_sim, tmp_path):
@@ -312,7 +331,7 @@ def test_a_30_degree_mount_pulls_60_and_pushes_open_at_the_11_01_handle_height(d
         "door_z": None,
     }
     pull = constants.PUSH_OPEN_PULL_DEG
-    plan, why = shared.plan_open(scene, rb, geom, TELEOP_START, pull, pull, push_open.PushOpen())
+    plan, why = shared.plan_open(scene, rb, geom, FRIDGE_START, pull, pull, push_open.PushOpen())
     assert why is None
     assert plan["swing"] == 60
     assert plan["after"].startswith("push-open OK")

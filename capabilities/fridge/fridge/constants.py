@@ -33,10 +33,10 @@ MEASURED = {
     # how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
     "handle_length_m": 8 * INCH,
     "body_depth_m": 0.50,  # cabinet behind the door
-    # The arm is mounted on the chair's left and the person sits just behind it, to its right (10-24: a close ran the
-    # arm into the back of the chair). No part of the arm or gripper may be more than this far behind the arm base
-    # (arm-base x) while on its right (y < 0). User, 10-24: ~8 in estimated, then 12, then 15; the real teleop start has
-    # the forearm ~14 in behind the base: inside 12, clear at 15.
+    # LEVEL MOUNT ONLY (dojo, which has no wheelchair model): no part of the arm or gripper may be more than this far
+    # behind the arm base (arm-base x) while on its right (y < 0) -- the stand-in for the chair (10-24: a close ran the
+    # arm into the back of the chair; user: ~8 in estimated, then 12, then 15). On the 30-deg mount the wheelchair and
+    # its occupant are the cuRobo planner's own collision layers instead (chair.py)
     "chair_keep_out_behind_m": 15 * INCH,
 }
 
