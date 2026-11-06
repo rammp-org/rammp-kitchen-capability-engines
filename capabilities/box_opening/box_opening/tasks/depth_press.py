@@ -62,7 +62,7 @@ from box_opening.constants import (
 from box_opening.models.container import ContainerPose
 from box_opening.primitives.core import CONTACT_SHIFT_PAD_M, _full_world, _push_guard_and_verify
 from box_opening.runtime.guards import GuardSpec, sanity_violations
-from box_opening.runtime.kinematics import mat_to_quat_xyzw
+from box_opening.runtime.kinematics import MAX_STEP_RAD, mat_to_quat_xyzw
 from box_opening.tasks import reach_press as rp
 
 DOWN_CONTACT_TOOL = (0.0, 0.0, TCP_OFFSET_M)  # the closed pads straight down, in tool_frame (the straight-down press's)
@@ -1215,6 +1215,29 @@ def compliant_line(ctx, name, pts, quat, speed, world):
     fly as one execution."""
     leg = rp.line_leg(ctx, name, pts, quat, speed, None, world)
     leg.gains = COMPLIANT_GAINS
+    return leg
+
+
+# A rise off the hold solved under the exit's looser gate
+# (kinematics.EXIT_MAX_STEP_RAD) flies each step that moves a joint more than
+# MAX_STEP_RAD with no joint faster than this, rad/s: the value of the wrist's
+# ceiling in the joint impedance (COMPLIANT_QD_CEILING), written as its own,
+# for every joint there. The press study's sim flew the 11-02 21:19 way back
+# without it, arm_joint_4 up to 0.71 rad/s; between two waypoints that far
+# apart the hand follows the driver's interpolation, not the straight line,
+# and nothing checks that path. From the recorded hold the one such step is the
+# rise's first (arm_joint_4 0.167 rad: the hand turned back to the stroke's
+# attitude), out of rest at about 0.2 rad/s without it: the cap binds where
+# such a step comes mid-line, at speed
+EXIT_STEP_QD = 0.45
+
+
+def exit_line(ctx, name, pts, quat, speed, world):
+    """compliant_line for a rise off the hold solved under the exit's looser
+    gate (kinematics.EXIT_MAX_STEP_RAD): its steps past MAX_STEP_RAD fly at
+    EXIT_STEP_QD at most (Leg.step_cap); a line without one flies as any."""
+    leg = compliant_line(ctx, name, pts, quat, speed, world)
+    leg.step_cap = (MAX_STEP_RAD, EXIT_STEP_QD)
     return leg
 
 

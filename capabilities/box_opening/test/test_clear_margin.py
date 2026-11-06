@@ -137,6 +137,42 @@ def test_a_continuous_joint_the_other_side_of_the_wrap_steps_the_short_way_round
     assert "a plan-free step 40% of the way to HOME first (the largest joint 0.120 rad" in capsys.readouterr().out
 
 
+def test_a_run_that_starts_too_near_a_limit_steps_clear_before_its_home_first(monkeypatch, tmp_path, capsys):
+    """press_demo.home_first planned HOME straight from the live joints, so a
+    start inside the planner's limit margin was refused START_IN_LIMIT_MARGIN
+    and the run ended before anything moved (the press study's replay, 11-06:
+    3 recorded run starts, arm_joint_4 at or near its limit, and 1 run end).
+    It takes home_arm's step first now, the shortest one HOME plans from,
+    then HOME planned from its end in the bench world: both fly."""
+    from conftest import runner as make_runner
+
+    from box_opening.tasks import press_demo
+
+    ctx = _flatbot_ctx(monkeypatch, STUCK, client=LivePlanner())
+    assert press_demo.home_first(ctx, make_runner(ctx.client, tmp_path), True, list(HOME))
+    tried = sorted({round(_along(q), 3) for q in ctx.client.joint_starts})
+    assert tried == pytest.approx([0.288, 0.382, 0.475], abs=1e-3)  # as home_arm's
+    assert ctx.client.joint_targets[-1] == pytest.approx(list(HOME), abs=1e-9)
+    assert len(ctx.client.executed) == 2 and ctx.client.guards[0] is not None  # the guarded step, then HOME
+    assert ctx.client.exec_starts[0] == pytest.approx(STUCK)
+    assert _along(ctx.client.exec_starts[1]) == pytest.approx(0.475, abs=1e-3)
+    out = capsys.readouterr().out
+    assert "HOME FIRST" in out and "joint_4 is 0.047 rad from its limit" in out
+    assert "a plan-free step 48% of the way to the rest pose first (the largest joint 0.254 rad" in out
+
+
+def test_a_home_first_no_step_lets_plan_moves_nothing_and_names_the_recovery(monkeypatch, tmp_path, capsys):
+    from conftest import runner as make_runner
+
+    from box_opening.tasks import press_demo
+
+    ctx = _flatbot_ctx(monkeypatch, STUCK, client=NeverPlans())
+    assert not press_demo.home_first(ctx, make_runner(ctx.client, tmp_path), True, list(HOME))
+    assert ctx.client.executed == [] and len(ctx.client.joint_starts) > 1
+    out = capsys.readouterr().out
+    assert "no plan-free step toward the rest pose of up to 0.35 rad per joint" in out and "home_arm --execute" in out
+
+
 def test_a_joint_just_outside_the_margin_plans_from_the_start_first(monkeypatch):
     start = list(STUCK)
     start[3] = -2.42  # 0.15 rad of room: outside the margin, inside the trajopt's band

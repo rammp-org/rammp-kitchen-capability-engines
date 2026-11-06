@@ -75,7 +75,7 @@ class _Chain:
         self.refuse = refuse
         self.lines = []
 
-    def straight_line(self, q0, xyz, quat):
+    def straight_line(self, q0, xyz, quat, max_step_rad=None):
         self.lines.append((list(xyz), list(quat)))
         for what in self.refuse:
             if what(xyz, quat):
@@ -2790,3 +2790,35 @@ def test_an_aim_asks_for_the_hits_it_is_given_else_the_reach_outs(monkeypatch):
     reach_press._aim(None, None, 0.0, 0.3, (0.6, -0.2), None, "reach-aim")
     reach_press._aim(None, None, 0.0, 0.3, (0.6, -0.2), None, "reach-regrip", min_hits=3)
     assert asked == [reach_press.REACH_AIM_HITS, 3]
+
+
+def test_a_rise_off_the_stroke_flies_under_the_exits_gate_its_big_step_slow(ctx, monkeypatch):
+    """11-02 21:19 (test_kinematics' HELD_1102): no way back up the stroke's
+    own samples, and the straight line from the hold to the stroke's start
+    jumped 0.17 rad in its first 2 mm step: refused, and the arm held on the
+    button. _rise_legs solves that line under EXIT_MAX_STEP_RAD now: it
+    flies as an exit line, its step past MAX_STEP_RAD capped at EXIT_STEP_QD
+    (Leg.step_cap). A rise back up the stroke's own samples (rise_back_up)
+    is the compliant line it was, uncapped."""
+    from test_kinematics import HELD_1102, STROKE_Q0_1102
+
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import MAX_STEP_RAD, ArmChain, mat_to_quat_xyzw
+    from box_opening.tasks import depth_press as dp
+
+    arm = ArmChain(path=flatbot_urdf(), root="arm_mount")
+    monkeypatch.setattr(approach, "_chain", lambda: arm)
+    R, t0 = arm.fk(STROKE_Q0_1102)
+    quat = [float(v) for v in mat_to_quat_xyzw(R)]
+    stroke = SimpleNamespace(legs=[], q0=list(STROKE_Q0_1102), t0=[float(v) for v in t0], quat=quat)
+    ctx.client.live = list(HELD_1102)
+    world = ("full", "full.yaml")
+    up, on_stroke, why = reach_press._rise_legs(ctx, stroke, HELD_1102, world)
+    assert why is None and not on_stroke and [lg.name for lg in up] == ["depth:rise"]
+    assert up[0].step_cap == (MAX_STEP_RAD, dp.EXIT_STEP_QD) and up[0].gains == dp.COMPLIANT_GAINS
+    pts = np.asarray([p.positions for p in up[0].traj.points], float)
+    assert np.allclose(pts[0], HELD_1102) and np.linalg.norm(arm.fk(pts[-1])[1] - t0) < 1e-4  # to the stroke's start
+    assert np.abs(np.diff(pts, axis=0)).max() == pytest.approx(0.167, abs=1e-3)
+    monkeypatch.setattr(dp, "rise_back_up", lambda chain, stroke_, q: [list(HELD_1102), list(STROKE_Q0_1102)])
+    up, on_stroke, why = reach_press._rise_legs(ctx, stroke, HELD_1102, world)
+    assert why is None and on_stroke and up[0].step_cap is None

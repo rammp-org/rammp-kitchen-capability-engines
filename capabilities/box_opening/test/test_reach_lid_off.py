@@ -1017,8 +1017,8 @@ class _ReachingChain(_Chain):
         super().__init__()
         self.at = {}
 
-    def straight_line(self, q0, xyz, quat):
-        pts, why = super().straight_line(q0, xyz, quat)
+    def straight_line(self, q0, xyz, quat, max_step_rad=None):
+        pts, why = super().straight_line(q0, xyz, quat, max_step_rad)
         if pts:
             self.at[tuple(round(float(v), 9) for v in pts[-1])] = list(xyz)
         return pts, why
@@ -1081,9 +1081,9 @@ def test_the_full_runs_free_air_lines_fly_at_the_compliant_speed_and_only_under_
         flown.extend((lg.name, lg.speed) for lg in legs if lg.kind.value == "motion")
         return real_run(self, legs, execute, lookahead)
 
-    def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None):  # noqa: B008 - frozen dataclass
+    def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None, step_caps=None):  # noqa: B008 - frozen dataclass
         timed.append((list(speeds), params))
-        return real_group(trajs, speeds, vmax, params, folds)
+        return real_group(trajs, speeds, vmax, params, folds, step_caps)
 
     monkeypatch.setattr(Runner, "run", run)
     monkeypatch.setattr(runner_mod, "retime_group", retime_group)
@@ -2926,16 +2926,20 @@ def test_the_grip_straight_from_the_press_takes_the_lid_off_with_no_way_back_and
 
 def test_the_grip_from_the_press_is_up_and_down_the_strokes_line(ctx, monkeypatch):
     """grip_from_hold_lines: up GRIP_RISE_M from the hold onto the stroke's
-    line, then down it to the pads GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M
-    over where they were held, the stroke's attitude."""
-    asked = []
+    line, under the exit's looser gate (EXIT_MAX_STEP_RAD), then down it to
+    the pads GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M over where they were
+    held under the line's own (MAX_STEP_RAD), the stroke's attitude."""
+    from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD
+
+    asked, gates = [], []
 
     class Chain:
         def fk(self, q):
             return np.eye(3), np.array([0.6 + q[0], -0.2 + q[1], 0.30 + q[2]])
 
-        def straight_line(self, q0, xyz, quat):
+        def straight_line(self, q0, xyz, quat, max_step_rad=None):
             asked.append((list(xyz), list(quat)))
+            gates.append(max_step_rad)
             return [list(q0), [xyz[0] - 0.6, xyz[1] + 0.2, xyz[2] - 0.30] + [0.0] * 4], None
 
     from box_opening.runtime import approach
@@ -2949,6 +2953,7 @@ def test_the_grip_from_the_press_is_up_and_down_the_strokes_line(ctx, monkeypatc
     assert top == pytest.approx([0.604, -0.203, 0.30 + rlo.GRIP_RISE_M])
     assert bottom == pytest.approx([0.604, -0.203, 0.30 + rlo.GRIP_LID_ABOVE_HELD_M - rlo.GRIP_BELOW_LID_M])
     assert q_top == q_bottom == [0, 1, 0, 0] and rise[0] == [0.0] * 7 and down[0] == rise[-1]
+    assert gates == [EXIT_MAX_STEP_RAD, None]  # None: the way down to the knob is asked under MAX_STEP_RAD
 
 
 def test_a_grip_from_the_press_on_air_goes_back_to_the_look_pose_and_grips_from_there(ctx, monkeypatch, tmp_path):

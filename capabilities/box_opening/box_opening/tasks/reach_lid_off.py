@@ -1557,10 +1557,13 @@ def _way_back(ctx, cfg, runner, way, q, held):
 def grip_from_hold_lines(ctx, way, q_held):
     """The grip straight from the hold, the arm at joints `q_held` on the
     button under `way`'s stroke: (rise, down, None) — GRIP_RISE_M straight
-    up onto the stroke's line, then down it to where the pads stand
+    up onto the stroke's line, under the exit's looser gate
+    (kinematics.EXIT_MAX_STEP_RAD: its steps past MAX_STEP_RAD fly slow,
+    depth_press.exit_line), then down it to where the pads stand
     GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M over where the hold held them
     (grip_lid_z), each as joint points — or (None, None, why)."""
     from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD
 
     chain = approach._chain()
     q_held = [float(v) for v in q_held]
@@ -1568,7 +1571,7 @@ def grip_from_hold_lines(ctx, way, q_held):
     _R, t_line = chain.fk([float(v) for v in way.stroke.q0])  # the stroke's line: the aimed knob
     quat = way.stroke.quat
     top = [float(t_line[0]), float(t_line[1]), float(t_held[2]) + GRIP_RISE_M]
-    rise, why = chain.straight_line(q_held, top, quat)
+    rise, why = chain.straight_line(q_held, top, quat, max_step_rad=EXIT_MAX_STEP_RAD)
     if rise is not None:
         why = dp.line_refusal(chain, rise)
     if rise is None or why is not None:
@@ -1641,7 +1644,7 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
     # sent under the rise once the pads have left the knob, as the arm measures them; never so, at its top
     off = PadsAbove(approach._chain(), ctx.client, held_z + GRIP_OPEN_ABOVE_HELD_M)
     opened.send_when = off
-    up = dp.compliant_line(ctx, "grip:rise", rise, quat, rp.free_line_speed(ctx), world)
+    up = dp.exit_line(ctx, "grip:rise", rise, quat, rp.free_line_speed(ctx), world)
     lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
     # the lookahead split over both (grip_ahead_rise, grip_ahead_down): the lift and the
     # first spot while the hand rises, the carry and home while it comes down

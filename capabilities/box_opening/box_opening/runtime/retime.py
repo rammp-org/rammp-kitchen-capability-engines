@@ -216,14 +216,41 @@ def velocity_caps(positions, vmax, margin):
     return cap, ds
 
 
-def joint_caps(positions, vmax, params):
+def joint_caps(positions, vmax, params, steps=None):
     """velocity_caps at params.vmax_margin, lowered where params.qd_ceiling
-    binds (rad/s, no margin): the per-sample path-speed bound under which
-    every interval keeps every joint below both. Returns (cap, ds)."""
+    binds (rad/s, no margin) and where `steps` (capped_steps') does: the
+    per-sample path-speed bound under which every interval keeps every
+    joint below all of them. Returns (cap, ds)."""
     cap, ds = velocity_caps(positions, vmax, params.vmax_margin)
     if params.qd_ceiling is not None:
         cap = np.minimum(cap, velocity_caps(positions, params.qd_ceiling, 1.0)[0])
+    if steps is not None:
+        cap = np.minimum(cap, steps)
     return cap, ds
+
+
+def capped_steps(positions, seg, step_caps):
+    """Per-sample path-speed cap from each leg's step cap (Leg.step_cap, one
+    per leg, None: none): on an interval of a leg so capped, (step_rad, qd),
+    that moves a joint more than step_rad, no joint runs faster than qd
+    rad/s — the near-singular stretch a rise off the hold flies where its
+    looser gate let it through (kinematics.EXIT_MAX_STEP_RAD). inf on every
+    other interval; None where no leg has one. An interval belongs to the
+    leg of the sample it ends at, as concat_paths gives a junction's."""
+    if step_caps is None or all(c is None for c in step_caps):
+        return None
+    dq = np.diff(positions, axis=0)
+    ds = np.linalg.norm(dq, axis=1)
+    big = np.abs(dq).max(axis=1)
+    cap_int = np.full(len(ds), np.inf)
+    for i in range(len(ds)):
+        c = step_caps[seg[i + 1]]
+        if c is not None and big[i] > float(c[0]):
+            cap_int[i] = float(c[1]) * ds[i] / big[i]
+    cap = np.empty(len(positions))
+    cap[0], cap[-1] = cap_int[0], cap_int[-1]
+    cap[1:-1] = np.minimum(cap_int[:-1], cap_int[1:])
+    return cap
 
 
 def corner_caps(positions, ds, params, fold=None):
@@ -307,15 +334,15 @@ def cruise_per_sample(seg, speeds, junction_cruise=None):
     return cr
 
 
-def speed_profile(positions, cruise, vmax, params, v_start=0.0, v_end=0.0, fold=None):
+def speed_profile(positions, cruise, vmax, params, v_start=0.0, v_end=0.0, fold=None, steps=None):
     """Path speed at every sample (rad/s of joint-space arc length); `fold`
-    as corner_caps takes it."""
+    as corner_caps takes it, and under `steps` too where given (capped_steps')."""
     cap, ds = velocity_caps(positions, vmax, params.vmax_margin)
     ccap, _stop = corner_caps(positions, ds, params, fold)
     target = np.minimum(np.minimum(np.asarray(cruise) * cap, ccap), cap)
     # the ceiling after the cruise fraction, never scaled by it; from here
     # on `cap` is the bound both set (the rounding's fill, the ends)
-    cap, _ = joint_caps(positions, vmax, params)
+    cap, _ = joint_caps(positions, vmax, params, steps)
     target = np.minimum(target, cap)
     n = len(positions)
     if params.smooth_pts > 0 and n > 2 * params.smooth_pts + 2:
@@ -426,12 +453,13 @@ def _fold_mask(seg, folds, m):
     return fold
 
 
-def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None):  # noqa: B008 - frozen dataclass
+def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None, step_caps=None):  # noqa: B008 - frozen dataclass
     """Chained unguarded legs -> ONE re-timed JointTrajectory + a report.
 
     speeds: each leg's cruise fraction (its Leg.speed); folds (None: none):
     whether each leg's junction with the one before it is a fold (its
-    Leg.fold), taken as params.fold_deg and fold_chord say. Returns
+    Leg.fold), taken as params.fold_deg and fold_chord say; step_caps, Returns
+    where given, each leg's Leg.step_cap (capped_steps).
     (trajectory, info) with info = {duration_s, junction_speeds (rad/s at
     each chained junction), stops (junctions taken at rest), n_points}.
     """
@@ -442,8 +470,9 @@ def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None):  # noq
         return trajs[0], {"duration_s": 0.0, "junction_speeds": [], "stops": 0, "n_points": len(positions)}
     cruise = cruise_per_sample(seg, speeds, params.junction_cruise)
     fold = None if folds is None else _fold_mask(seg, folds, params.fold_samples)
-    v, ds = speed_profile(positions, cruise, vmax, params, fold=fold)
-    cap, _ = joint_caps(positions, vmax, params)
+    steps = capped_steps(positions, seg, step_caps)
+    v, ds = speed_profile(positions, cruise, vmax, params, fold=fold, steps=steps)
+    cap, _ = joint_caps(positions, vmax, params, steps)
     t = times_from_profile(v, ds, params, cap)
     junctions = [k for k in range(1, len(seg)) if seg[k] != seg[k - 1]]
     jspeeds = [float(v[k - 1]) for k in junctions]

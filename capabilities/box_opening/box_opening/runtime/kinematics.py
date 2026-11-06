@@ -35,6 +35,16 @@ CONVERGE_M = 5e-5
 CONVERGE_RAD = 1e-4
 MAX_ITERS = 12
 MAX_STEP_RAD = 0.15  # a bigger joint jump per 2 mm is a singularity, refuse
+# The rise off a compliant hold (the exit's first line: the way home's, the
+# way back's, the grip's from the press) refuses only past this: from the
+# robot's held joints of 2026-11-02 21:19 (0.79 m out, turned 15 deg) both
+# rises jumped 0.17-0.22 rad over one 2 mm step and the arm held on the
+# button. At 0.25, in the press study's dynamic sim (11-06, I-R11), the way
+# back from there flew under RIGID, no joint past 0.71 rad/s nor 27 mrad
+# behind, nothing touched; 6 of 24 holds drawn near it still strand (10 at
+# 0.15). Its steps past MAX_STEP_RAD fly slow (depth_press.EXIT_STEP_QD).
+# The way in, the stroke and every other line keep MAX_STEP_RAD
+EXIT_MAX_STEP_RAD = 0.25
 REACH_STEP_M = 0.02  # reach(): the pose walked in steps this long ...
 REACH_STEP_RAD = math.radians(6.0)  # ... and this much turn
 MAX_REACH_STEP_RAD = 0.6  # a bigger joint jump over one such step is a branch change, refuse
@@ -424,10 +434,14 @@ class ArmChain:
         )
         return float(np.linalg.norm(wrist - (t0 + R0 @ par))) - reach
 
-    def straight_line(self, q_start, xyz_end, quat_xyzw, step_m=STEP_M):
+    def straight_line(self, q_start, xyz_end, quat_xyzw, step_m=STEP_M, max_step_rad=None):
         """Joint waypoints from q_start along the straight line from
-        tool_frame's current position to xyz_end, holding quat_xyzw.
-        Returns (points, None) with points[0] == q_start, or (None, why)."""
+        tool_frame's current position to xyz_end, holding quat_xyzw, no
+        joint moving more than max_step_rad between two (EXIT_MAX_STEP_RAD
+        for the rise off a hold; None: MAX_STEP_RAD, read at the call, as
+        the press study's sweeps set it). Returns (points, None) with
+        points[0] == q_start, or (None, why)."""
+        max_step_rad = MAX_STEP_RAD if max_step_rad is None else float(max_step_rad)
         q0 = np.array(q_start, float)
         R_goal = quat_to_mat(*quat_xyzw)
         _R, t0 = self.fk(q0)
@@ -441,7 +455,7 @@ class ArmChain:
             nxt = self.solve_pose(q, target, R_goal)
             if nxt is None:
                 return None, "IK did not converge %.0f mm down the line" % (1000.0 * length * k / n)
-            if float(np.abs(nxt - q).max()) > MAX_STEP_RAD:
+            if float(np.abs(nxt - q).max()) > max_step_rad:
                 return None, "joint jump %.2f rad over one %.0f mm step — near a singularity" % (
                     float(np.abs(nxt - q).max()),
                     1000 * step_m,

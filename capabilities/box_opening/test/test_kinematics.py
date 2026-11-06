@@ -81,6 +81,46 @@ def test_an_unreachable_line_is_refused_with_a_reason(chain):
     assert pts is None and why
 
 
+# flatbot 2026-11-02 21:19 (run-20261102-211902): the stroke's first joints
+# (the sent way in at depth:approach's start) and the arm as the hold left it
+# (its last feedback, on the stroke's branch), 0.79 m out, turned 15 deg
+STROKE_Q0_1102 = [0.54899, 0.47054, -2.55669, -0.33439, -0.83043, -1.70757, 1.78304]
+HELD_1102 = [0.43784, 0.39233, -2.52778, -0.56644, -0.75474, -1.54113, 1.87098]
+
+
+def test_the_rise_that_stranded_the_arm_flies_under_the_exits_gate():
+    """11-02 21:19: the rise back to the stroke's start from the hold was
+    refused, 'joint jump 0.17 rad over one 2 mm step' (the robot logged
+    0.18), and the arm held on the button. The hand stood turned off the
+    stroke's attitude and the line's first step takes that turn: under
+    EXIT_MAX_STEP_RAD it flies, that one step 0.167 rad of arm_joint_4, the
+    other six 0.009-0.012, ending at the stroke's start."""
+    arm = ArmChain(path=flatbot_urdf(), root="arm_mount")
+    R, t0 = arm.fk(STROKE_Q0_1102)
+    quat = mat_to_quat_xyzw(R)
+    pts, why = arm.straight_line(HELD_1102, list(t0), quat)
+    assert pts is None and why == "joint jump 0.17 rad over one 2 mm step — near a singularity"
+    pts, why = arm.straight_line(HELD_1102, list(t0), quat, max_step_rad=kin.EXIT_MAX_STEP_RAD)
+    assert why is None and np.allclose(pts[0], HELD_1102)
+    steps = np.abs(np.diff(np.asarray(pts), axis=0))
+    big = np.flatnonzero(steps.max(axis=1) > kin.MAX_STEP_RAD)
+    assert list(big) == [0] and int(np.argmax(steps[0])) == 3 and steps[0].max() == pytest.approx(0.167, abs=1e-3)
+    assert steps[1:].max() < 0.015
+    assert np.linalg.norm(arm.fk(pts[-1])[1] - t0) < 1e-4
+
+
+def test_a_lines_own_gate_is_the_one_set_when_it_is_solved(monkeypatch):
+    """straight_line with no gate of its own refuses past
+    kinematics.MAX_STEP_RAD as it stands at the call, not as it stood at
+    import: the press study's exit sweeps (I-R11) set it for the whole exit."""
+    arm = ArmChain(path=flatbot_urdf(), root="arm_mount")
+    R, t0 = arm.fk(STROKE_Q0_1102)
+    quat = mat_to_quat_xyzw(R)
+    monkeypatch.setattr(kin, "MAX_STEP_RAD", kin.EXIT_MAX_STEP_RAD)
+    pts, why = arm.straight_line(HELD_1102, list(t0), quat)
+    assert why is None and np.allclose(pts[0], HELD_1102)
+
+
 def test_the_reach_bound_never_refuses_a_pose_the_arm_holds():
     """past_reach_m on flatbot's URDF: the tool pose any joint values hold
     reads at or inside the reach — the arm stretched straight within 6 mm

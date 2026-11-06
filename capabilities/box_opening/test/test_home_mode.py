@@ -51,9 +51,9 @@ def test_a_home_after_a_position_leg_flies_in_impedance_under_medium_the_arm_wai
     ceilings = []
     real_group = runner_mod.retime_group
 
-    def retime_group(trajs, speeds, vmax, params, folds=None):
+    def retime_group(trajs, speeds, vmax, params, folds=None, step_caps=None):
         ceilings.append(params.qd_ceiling)
-        return real_group(trajs, speeds, vmax, params, folds)
+        return real_group(trajs, speeds, vmax, params, folds, step_caps)
 
     monkeypatch.setattr(runner_mod, "retime_group", retime_group)
     lift, home = make_leg("lift", start=Q0, end=Q1), _home()

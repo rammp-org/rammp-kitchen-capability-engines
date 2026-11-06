@@ -469,6 +469,12 @@ def _free_air_line(leg):
     )
 
 
+def _step_caps(group):
+    """Each leg's Leg.step_cap, for retime_group: the near-singular stretch
+    of a rise off the hold flies slow in whatever execution it merges into."""
+    return [getattr(g, "step_cap", None) for g in group]
+
+
 def _path_speed_peak(traj):
     pts = traj.points
     best = 0.0
@@ -626,7 +632,8 @@ class Runner:
                         [g.speed for g in group],
                         JOINT_VMAX,
                         replace(self.retime_params(group[0]), time_scale=self.time_scale),
-                        [g.fold for g in group],
+                        folds=[g.fold for g in group],
+                        step_caps=_step_caps(group),
                     )
                     per = info["duration_s"] / len(group)
                     for g in group:
@@ -1354,7 +1361,12 @@ class Runner:
             # them, and the descent keeps its own (slow) cruise fraction.
             params = replace(self.retime_params(), time_scale=self.time_scale)
             traj, self.last_retime = retime_group(
-                [g.traj for g in group], [g.speed for g in group], JOINT_VMAX, params, [g.fold for g in group]
+                [g.traj for g in group],
+                [g.speed for g in group],
+                JOINT_VMAX,
+                params,
+                folds=[g.fold for g in group],
+                step_caps=_step_caps(group),
             )
             exec_speed = 1.0
             hold = float(getattr(group[0], "start_hold_s", 0.0) or 0.0)

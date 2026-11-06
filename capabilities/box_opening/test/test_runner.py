@@ -1616,6 +1616,48 @@ def test_a_compliant_run_flows_through_a_fold_a_leg_marks_in_preview_and_flight(
     assert float(row.split()[5]) == pytest.approx(want["duration_s"] / 2, abs=0.006)
 
 
+def test_a_legs_step_cap_rides_into_the_execution_it_merges_into(tmp_path):
+    """Leg.step_cap (depth_press.exit_line: a rise off the hold that the
+    exit's looser gate let through a near-singular stretch) reaches the
+    re-timer: merged with the line after it, the capped leg's steps past
+    step_rad fly no joint faster than its qd, and the uncapped line's do as
+    before. The same legs with no cap fly as they always did."""
+    import numpy as np
+
+    from box_opening.runtime.retime import positions_to_traj
+    from box_opening.runtime.stamps import secs
+
+    def stepped(start):  # joint_4: 30 steps of 0.01 rad, 3 of 0.2, 30 of 0.01
+        q, pts = start, []
+        for d in [0.0] + [0.01] * 30 + [0.2] * 3 + [0.01] * 30:
+            q += d
+            pts.append([0.0, 0.0, 0.0, q, 0.0, 0.0, 0.0])
+        return pts
+
+    a = stepped(0.0)
+    b = stepped(a[-1][3])
+
+    def flown(cap):
+        c = _Flown(compliant=None)
+        r = runner(c, tmp_path)
+        legs = [leg("rise", a[0], a[-1], speed=1.0), leg("clear", b[0], b[-1], speed=1.0)]
+        legs[0].traj, legs[1].traj = positions_to_traj(c.joint_names, a), positions_to_traj(c.joint_names, b)
+        legs[0].step_cap = cap
+        assert all(res.ok for res in r.run(legs, execute=True)) and len(c.flown) == 1  # one execution
+        traj_ = c.flown[-1][0]
+        q = np.asarray([p.positions for p in traj_.points], float)[:, 3]
+        t = np.asarray([secs(p.time_from_start) for p in traj_.points])
+        big = np.abs(np.diff(q)) > 0.15
+        return (np.abs(np.diff(q)) / np.diff(t))[big], t[-1]
+
+    capped, slow = flown((0.15, 0.45))
+    plain, fast = flown(None)
+    assert len(capped) == len(plain) == 6
+    assert capped[:3].max() <= 0.45 * (1 + 1e-6) and plain[:3].min() > 1.0  # the rise's: capped
+    assert capped[3:] == pytest.approx(plain[3:], rel=1e-6)  # the clear's: as before
+    assert slow > fast
+
+
 @pytest.mark.parametrize("compliant", [None, False])
 def test_a_position_or_guarded_run_keeps_the_default_profile_and_no_ceiling(tmp_path, compliant):
     """A guarded reach-out flies in position (client.compliant False), as

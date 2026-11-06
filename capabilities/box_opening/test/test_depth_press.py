@@ -2197,10 +2197,10 @@ def test_a_reach_out_re_times_every_motion_on_its_own_runs_profile(ctx, monkeypa
     in_line = []
     real_group, real_line = runner_mod.retime_group, runner_mod.line_profile
 
-    def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None):  # noqa: B008 - frozen dataclass
+    def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None, step_caps=None):  # noqa: B008 - frozen dataclass
         if not in_line:  # line_profile's own re-timings scale the ease by the line's speed: what it is handed counts
             seen.append(params)
-        return real_group(trajs, speeds, vmax, params, folds)
+        return real_group(trajs, speeds, vmax, params, folds, step_caps)
 
     def line_profile(leg, params, time_scale=1.0):
         seen.append(params)
@@ -3945,7 +3945,7 @@ def test_a_compliant_press_whose_way_up_does_not_fly_lets_go_once(ctx, monkeypat
     asked = _releases(ctx)
     if way_up == "no line":
         monkeypatch.setattr(dp, "rise_back_up", lambda chain, stroke, q_held: None)
-        monkeypatch.setattr(rp, "_line", lambda ctx_, xyz, quat: (None, "IK did not converge 40% of the way"))
+        monkeypatch.setattr(rp, "_line", lambda ctx_, xyz, quat, **gate: (None, "IK did not converge 40% of the way"))
         why = "the way up is not a straight line the arm can fly (IK did not converge 40% of the way) — the arm holds"
     else:
         ctx.client.exec_script = [ARRIVED, ARRIVED, ("failed", {"message": "PATH_TOLERANCE_VIOLATED", "progress": 0.4})]

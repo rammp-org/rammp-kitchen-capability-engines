@@ -151,6 +151,12 @@ class Leg:
     # straight_line), built from live joints. Never re-planned: a planner
     # path is not that line, and its guard was set for the line
     plan_free: bool = False
+    # MOTION legs: (step_rad, qd) — each interval of the leg that moves a
+    # joint more than step_rad flies no joint faster than qd rad/s
+    # (retime_group's step_caps): a rise off the hold that its looser gate
+    # let through a near-singular stretch (kinematics.EXIT_MAX_STEP_RAD,
+    # depth_press.exit_line). None: no such cap
+    step_cap: tuple = None
     # MOTION legs of a compliant run (PlannerClient.compliant): the driver's
     # ImpedanceGains spec they fly under. None is the client's run default
     # (PlannerClient.compliant_gains, RIGID); an int names a driver profile

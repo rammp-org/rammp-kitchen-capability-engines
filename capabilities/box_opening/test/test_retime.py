@@ -609,3 +609,40 @@ def test_a_folds_samples_are_thinned_to_its_own_chord_and_the_leg_after_it_keeps
     assert any(np.allclose(walk[-2], x) for x in q)
     q, seg = concat_paths(legs, p.min_ds, 0.03, p.junction_window)
     assert 1 not in set(seg)
+
+
+def _stepped(start, n_small=30, small=0.01, n_big=3, big=0.2):
+    """joint_4 out from `start`: n_small steps of `small`, n_big of `big`
+    (a near-singular stretch), n_small more of `small`."""
+    q, pts = float(start), []
+    for d in [0.0] + [small] * n_small + [big] * n_big + [small] * n_small:
+        q += d
+        pts.append([0.0, 0.0, 0.0, q, 0.0, 0.0, 0.0])
+    return pts
+
+
+def test_a_capped_legs_big_steps_fly_no_joint_past_its_cap():
+    """Leg.step_cap, (step_rad, qd): a rise off the hold that the exit's
+    looser gate (kinematics.EXIT_MAX_STEP_RAD) let through a near-singular
+    stretch flies each of its intervals that moves a joint more than
+    step_rad with no joint faster than qd, in whatever execution it merges
+    into. An uncapped leg's big steps in the same execution cruise as
+    before, and with no cap anywhere the profile is today's."""
+    a = _stepped(0.0)
+    b = _stepped(a[-1][3])
+    legs = [_traj(a), _traj(b)]
+    out, info = retime_group(legs, [1.0, 1.0], JOINT_VMAX, step_caps=[(0.15, 0.45), None])
+    q, _v, t = _arrays(out)
+    steps = np.abs(np.diff(q[:, 3]))
+    speed = steps / np.diff(t)
+    big = np.flatnonzero(steps > 0.15)
+    assert len(big) == 6
+    mine, theirs = big[:3], big[3:]  # the capped leg's, the uncapped one's
+    assert speed[mine].max() <= 0.45 * (1 + 1e-6)
+    assert speed[theirs].min() > 0.9 * 0.9 * JOINT_VMAX[3]  # cruising at its own cap, as before
+    assert check_like_executor(out, JOINT_VMAX) == []
+    plain, was = retime_group(legs, [1.0, 1.0], JOINT_VMAX)
+    for caps in (None, [None, None], [(0.25, 0.45), None]):  # no cap, or none that binds: today's profile
+        same, got = retime_group(legs, [1.0, 1.0], JOINT_VMAX, step_caps=caps)
+        assert np.array_equal(_arrays(same)[2], _arrays(plain)[2]) and got == was
+    assert info["duration_s"] > was["duration_s"]

@@ -1490,9 +1490,11 @@ def _settled(ctx, where):
     return got
 
 
-def _line(ctx, xyz, quat):
+def _line(ctx, xyz, quat, **gate):
     """Joint waypoints for a straight line from where the arm is, or
-    ([], None) when it is already there."""
+    ([], None) when it is already there. `gate`: straight_line's
+    max_step_rad, where the line is a rise off the hold
+    (kinematics.EXIT_MAX_STEP_RAD)."""
     from box_opening.runtime import approach
 
     chain = approach._chain()
@@ -1500,7 +1502,7 @@ def _line(ctx, xyz, quat):
     _R, t = chain.fk(q)
     if float(np.linalg.norm(np.asarray(xyz, float) - np.asarray(t, float))) < LINE_MIN_M:
         return [], None
-    return chain.straight_line(q, xyz, quat)
+    return chain.straight_line(q, xyz, quat, **gate)
 
 
 REUSE_RAD = 1e-3  # the arm this close (every joint) to where a solved line starts: it is flown as solved
@@ -2285,19 +2287,24 @@ def _rise_legs(ctx, stroke, q, world):
     """The way up from a compliant hold, the arm held at joints `q` by the
     button under `stroke`, as the legs that fly it, labelled `world`:
     'depth:rise' back up the stroke to its start (depth_press.rise_back_up)
-    — else a straight line from where the arm stands to there; none when it
-    stands there — at free_line_speed. Returns (legs, True where it goes
-    back up the stroke, None), or (None, False, why) where no way up flies."""
+    — else a straight line from where the arm stands to there, under the
+    exit's looser gate (kinematics.EXIT_MAX_STEP_RAD; its steps past
+    MAX_STEP_RAD slow, depth_press.exit_line); none when it stands there —
+    at free_line_speed. Returns (legs, True where it goes back up the
+    stroke, None), or (None, False, why) where no way up flies."""
     from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD
     from box_opening.tasks import depth_press as dp
 
     pts = dp.rise_back_up(approach._chain(), stroke, q)
     on_stroke = pts is not None
+    line = dp.compliant_line
     if pts is None:
-        pts, why = _line(ctx, [float(v) for v in stroke.t0], stroke.quat)
+        pts, why = _line(ctx, [float(v) for v in stroke.t0], stroke.quat, max_step_rad=EXIT_MAX_STEP_RAD)
         if pts is None:
             return None, False, why
-    legs = [dp.compliant_line(ctx, "depth:rise", pts, stroke.quat, free_line_speed(ctx), world)] if pts else []
+        line = dp.exit_line
+    legs = [line(ctx, "depth:rise", pts, stroke.quat, free_line_speed(ctx), world)] if pts else []
     return legs, on_stroke, None
 
 

@@ -1332,7 +1332,7 @@ def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
     log.info("[press_demo] HOME FIRST: the arm is %.2f rad from its rest pose — going there before anything else" % off)
     world = ctx.worlds.push_name("bench", model=ctx.model)
     try:
-        leg = as_home(_plan_motion(ctx, _state(live), "home", ("joints", list(rest)), world, HOME_SPEED)[0])
+        legs = _home_first_legs(ctx, live, rest, world)
     except RuntimeError as e:
         log.info(
             "[press_demo] not starting: the move home was refused in the bench world (%s) — the arm is "
@@ -1340,8 +1340,47 @@ def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
             "    scripts/sheppy_task.sh home_arm --execute    (add --lift-first 0.08 if that is refused too)" % e
         )
         return False
-    res = runner.run([leg], execute=execute)
+    res = runner.run(legs, execute=execute)
     return all(r.ok for r in res)
+
+
+def _home_first_legs(ctx, live, rest, world):
+    """home_first's move from the live joints `live`: HOME (`rest`) planned
+    in `world` — after home_arm's plan-free step along the joint line toward
+    it, the shortest one HOME plans from (primitives.ClearMarginFree, as
+    try_home steps), where a joint stands too near its limit for the planner
+    to start from. Planned directly, the press study's replay (11-06, E-S8)
+    refused 3 recorded run starts (arm_joint_4 at its limit, 10-30 10:08 and
+    11-02 09:45, or 0.070 rad from it, 10-30 13:26) and 1 run end
+    (arm_joint_6 0.088 rad from it, 10-29 14:45) START_IN_LIMIT_MARGIN: exit
+    3 before anything moved. Raises the last refusal."""
+    clear = ClearMarginFree(rest)
+    near = clear.near(ctx, live)
+    if not near:
+        return [as_home(_plan_motion(ctx, _state(live), "home", ("joints", list(rest)), world, HOME_SPEED)[0])]
+    log.info(
+        "[press_demo] %s: too near for the planner to start from — trying plan-free steps along the joint line "
+        "toward the rest pose, shortest first" % ", ".join("%s is %.3f rad from its limit" % jr for jr in near)
+    )
+    last = None
+    for step, at, info in clear.steps(ctx, _state(live)):
+        try:
+            leg = as_home(_plan_motion(ctx, at, "home", ("joints", list(rest)), world, HOME_SPEED)[0])
+        except RuntimeError as e:
+            last = e
+            continue
+        if step:
+            d = info["tool_move"]
+            log.info(
+                "[press_demo] a plan-free step %.0f%% of the way to the rest pose first (the largest joint %.3f rad, "
+                "the tool %+.0f mm up and %.0f mm across; obstruction-guarded)"
+                % (100 * info["fraction"], info["largest_rad"], 1000 * d[2], 1000 * (d[0] ** 2 + d[1] ** 2) ** 0.5)
+            )
+        return step + [leg]
+    raise RuntimeError(
+        "no plan-free step toward the rest pose of up to %.2f rad per joint lets the planner plan home "
+        "(last: %s) — jog the arm clear by hand" % (CLEAR_MARGIN_MAX_STEP_RAD, last)
+    )
 
 
 def adopt_scene_table(ctx, worlds, watcher, scene_fix):
