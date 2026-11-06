@@ -26,14 +26,7 @@ docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 \
   ros2 run fridge fridge_node --ros-args -p use_orchestrator:=false -p allow_execute:=true \
   -p mount_tilt_deg:=30 -p handle_source:=sam3 -p door_square_to_arm:=true
 
-# T3: define `goal`, then send goals with it: goal <open|close> '<JSON options>'
-goal() {
-  docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-    -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-    ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-    ros2 action send_goal --feedback /fridge/execute_action rammp_orchestrator_interfaces/action/ExecuteAction \
-    "{engine_id: fridge, action_id: $1, params_json: '$2'}"
-}
+# T3: the goal commands below (Open, Close), each a docker run
 
 # T3, before any runs (and after any fault): clear the arm's faults
 docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
@@ -57,7 +50,7 @@ door's face and the hinge are all placed from that point, and the camera gets li
 likely a few cm too deep (`GRIP_EXT` 0.126 compensates by trial). With it, the grasp can be set from your measurements
 (fingers on the back edge). With the door closed and the wheelchair where it will be:
 
-1. Dry-run the open (`goal open '{"execute": false}'`) and note T2's `handle (mean) [x y z]`.
+1. Dry-run the open (the Open command with `\"execute\": false`) and note T2's `handle (mean) [x y z]`.
 1. Teleop the closed gripper straight onto the middle of the bar's front until it just touches; hold still.
 1. Record the hand:
    `docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 topic echo --once /ee_state'`
@@ -87,10 +80,32 @@ docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ro
 ## Open
 
 1. **Teleop the camera square-on to the closed door**, ~50–60 cm from it, the handle in view.
-1. **T3:** `goal open '{"execute": true, "speed": 0.2}'`. It pulls, lets go, backs off the handle and pushes on, or
-   stops with `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`.
+
+1. **T3, the open:**
+
+   ```bash
+   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+     ros2 action send_goal --feedback /fridge/execute_action \
+     rammp_orchestrator_interfaces/action/ExecuteAction \
+     '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2}"}'
+   ```
+
+   It pulls, lets go, backs off the handle and pushes on, or stops with
+   `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`.
+
 1. **Only if asked:** move the wheelchair as it says (without turning it), then
-   `goal open '{"execute": true, "chair_moved": true, "speed": 0.2}'` pushes the door on to 90°.
+   push the door on to 90°, in T3:
+
+   ```bash
+   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+     ros2 action send_goal --feedback /fridge/execute_action \
+     rammp_orchestrator_interfaces/action/ExecuteAction \
+     '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"chair_moved\": true, \"speed\": 0.2}"}'
+   ```
 
 Any failed check refuses with nothing moved; a dry run (`"execute": false`) says in advance what it will do. **Keep the
 space in front of the arm's base clear:** the sim has no wheelchair or person. Watch where the fingers close and
@@ -105,10 +120,35 @@ run that plans OK also writes `door.json`, for testing the close without an exec
 ## Close
 
 1. **Grip the container** by teleop, starting from a teleop-style pose (not where the open ended).
-1. **Plan, T3:** `goal close '{"execute": false}'`, the wheelchair where it was for the open. It ends
+
+1. **Plan, T3**, the wheelchair where it was for the open:
+
+   ```bash
+   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+     ros2 action send_goal --feedback /fridge/execute_action \
+     rammp_orchestrator_interfaces/action/ExecuteAction \
+     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": false}"}'
+   ```
+
+   It ends
    `Plan OK. Move the WHEELCHAIR straight back ~30 cm ...` or says which check failed.
+
 1. **Move the wheelchair straight back ~30 cm**, without turning it.
-1. **Close, T3:** `goal close '{"execute": true, "chair_moved": true}'`. It goes round the door's free edge, behind it,
+
+1. **Close, T3:**
+
+   ```bash
+   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+     ros2 action send_goal --feedback /fridge/execute_action \
+     rammp_orchestrator_interfaces/action/ExecuteAction \
+     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"chair_moved\": true}"}'
+   ```
+
+   It goes round the door's free edge, behind it,
    swings the door to ~45° and backs out; the door swings shut from there. Move the wheelchair forward again after.
 
 - **Speed:** the close runs at 0.7 by default. **Keep it at 0.7 or more**: slower, the swing doesn't carry the door
@@ -116,7 +156,7 @@ run that plans OK also writes `door.json`, for testing the close without an exec
 - **Several closes in a row:** a close that swings the door saves it as 45° open in `door.json`
   (`/tmp/fridge_data/door.json` on the robot). The next close then plans for a door at 45° and, with the door really
   open further, refuses with `no height within the door gives a plan that passes every gate.` Give the door's real
-  angle in the goal, e.g. `goal close '{"execute": true, "chair_moved": true, "door_deg": 90}'` (or set
+  angle in the close goal's `params_json`, e.g. `{\"execute\": true, \"chair_moved\": true, \"door_deg\": 90}` (or set
   `"door_open_deg"` in `door.json` back to it).
 - **Without an executed open:** dry-run the open with `"save_door": true` until it plans OK, then open the door by hand
   to the angle it prints (90° after the push-open).
