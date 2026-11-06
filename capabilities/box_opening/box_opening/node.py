@@ -60,6 +60,10 @@ PARAMS = {
     # run record's flight files and room maps
     "mission_frames": False,
     "speed_scale": 1.0,
+    # the cuRobo planner config whose layers (the chair and its user) and robot spheres every
+    # plan-free line is held out of (runtime/body); unreadable, the run stops before it moves;
+    # "" turns the check off (the bench). BOX_OPENING_BODY_LAYERS in the node's environment overrides
+    "body_layers": "/config/robot/curobo/planner.yaml",
 }
 NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
 
@@ -642,6 +646,8 @@ class Capability(CapabilityEngine):
         argv += ["--container", config_path(self._param("container"), "containers")]
         argv += ["--bench-world", config_path(self._param("world"))]
         argv += ["--speed-scale", str(float(self._param("speed_scale")))]
+        layers = self._param("body_layers")  # only an explicit "" turns the check off; unset is the default
+        argv += ["--body-layers", PARAMS["body_layers"] if layers is None else str(layers)]
         if instance_id:  # the container the orchestrator selected; standalone: any of its class
             argv += ["--instance-id", instance_id]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())

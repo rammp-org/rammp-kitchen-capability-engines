@@ -36,6 +36,7 @@ and 3 Nm of torque ripple in free air on the live run of 2026-09-17.
 """
 
 import math
+import os
 
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -46,6 +47,9 @@ from box_opening.runtime.stamps import secs, set_stamp
 _CHAIN = None
 _ROOT = "base_link"
 _URDF_PATH = None  # None = use kinematics.urdf_path() (the installed bench URDF)
+# runtime/body.BodyModel the chain is held out of; False: off (set so); None:
+# never set — offline, BOX_OPENING_BODY_LAYERS decides (runtime/body)
+_BODY = None
 
 
 def set_chain_root(root, urdf_path=None):
@@ -60,6 +64,45 @@ def set_chain_root(root, urdf_path=None):
     _URDF_PATH = urdf_path
     _CHAIN = None
     _GRAVITY = None
+
+
+def set_body_layers(param=None):
+    """Load the chair and user the plan-free lines are held out of: the
+    planner config runtime/body.resolve names (BOX_OPENING_BODY_LAYERS,
+    else `param`, else /config/robot/curobo/planner.yaml; '' off), then
+    the chain with it attached. Raises body.BodyModelError (a RuntimeError)
+    where it cannot be read or placed on this run's URDF: the caller stops
+    before anything moves. Returns the model, or None when off."""
+    global _BODY, _CHAIN
+    from box_opening.runtime import body
+
+    path = body.resolve(param)
+    _BODY = body.load(path) if path else False
+    _CHAIN = None
+    if _BODY and chain_ready()[0]:
+        _chain()  # placed on the URDF now, not on the first line
+    return _BODY or None
+
+
+def set_body(model):
+    """Attach `model` (a runtime/body.BodyModel; False off; None: back to
+    unset, the env var deciding) — tests and the press study."""
+    global _BODY, _CHAIN
+    _BODY = model
+    _CHAIN = None
+
+
+def body_model():
+    """The BodyModel in force, or None (off). Unset, BOX_OPENING_BODY_LAYERS
+    decides (an offline run's switch): set and non-empty, its file is loaded
+    (an unreadable one raises); unset or empty, off."""
+    global _BODY
+    if _BODY is None:
+        from box_opening.runtime import body
+
+        path = os.environ.get(body.BODY_LAYERS_ENV, "").strip()
+        _BODY = body.load(path) if path else False
+    return _BODY or None
 
 
 def chain_ready():
@@ -81,7 +124,13 @@ def _chain():
             raise RuntimeError(why)
         from box_opening.runtime.kinematics import ArmChain
 
-        _CHAIN = ArmChain(root=_ROOT, path=_URDF_PATH)
+        chain = ArmChain(root=_ROOT, path=_URDF_PATH)
+        model = body_model()
+        if model is not None:
+            from box_opening.runtime.kinematics import urdf_path
+
+            chain.body = model.check_for(chain, _URDF_PATH or urdf_path(), _ROOT)
+        _CHAIN = chain
     return _CHAIN
 
 

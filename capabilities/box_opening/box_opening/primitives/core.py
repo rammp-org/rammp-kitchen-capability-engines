@@ -561,6 +561,7 @@ class ClearMarginFree:
                 "%s refused: chain root %s != planning frame %s" % (self.name, approach._ROOT, ctx.worlds.base_frame)
             )
         from box_opening.runtime.branches import on_branch
+        from box_opening.runtime.kinematics import body_refusal
 
         chain = _chain()
         names = list(ctx.client.joint_names)
@@ -608,6 +609,13 @@ class ClearMarginFree:
                 raise RuntimeError(
                     "%s refused: the joint line toward the goal drops the tool %.0f mm — jog the "
                     "arm clear by hand first" % (self.name, 1000 * drop)
+                )
+            body = body_refusal(chain, pts)
+            if body is not None:
+                # a longer step runs the same line on: it goes in as far or further
+                raise RuntimeError(
+                    "%s refused: the joint line toward the goal enters %s — jog the arm clear by hand first"
+                    % (self.name, body)
                 )
             world_name, world_path = ctx.worlds.push_name("bench", model=None, tag="bare")
             leg = Leg(

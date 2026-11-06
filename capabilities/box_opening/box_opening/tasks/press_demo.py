@@ -1495,6 +1495,8 @@ def main():
             "[press_demo] not starting: /arm/robot_description not heard in 5 s (arm_state_publisher down?) — "
             "the arm kinematics for %s are unavailable (%s). Nothing moved." % (worlds.base_frame, why)
         )
+    # the chair and its user, every plan-free line held out of them (runtime/body)
+    cli_common.load_body_or_exit(args, "[press_demo]")
     runner = Runner(client)
     cli_common.apply_speed_scale(runner, args)
     # PERCEPTION ON ITS OWN THREAD. The cameras and the scene camera's

@@ -23,6 +23,7 @@ from box_opening.models.container import ContainerModel
 from box_opening.primitives.core import Ctx
 from box_opening.runtime import approach
 from box_opening.runtime.abort import AbortFlag, install_sigint
+from box_opening.runtime.body import BODY_LAYERS_ENV, DEFAULT_BODY_LAYERS
 from box_opening.runtime.client import PlannerClient
 from box_opening.runtime.driver import rmw_refusal
 from box_opening.runtime.runner import Runner
@@ -69,6 +70,13 @@ def make_parser(desc):
         "--bench-world",
         default=None,
         help="bench world YAML (default: installed world_bench.yaml)",
+    )
+    ap.add_argument(
+        "--body-layers",
+        default=None,
+        help="the cuRobo planner config whose layers (the chair and its user) and robot spheres every "
+        "plan-free line is held out of (default %s; BOX_OPENING_BODY_LAYERS overrides; '' turns the "
+        "check off: the bench). Unreadable: nothing moves" % DEFAULT_BODY_LAYERS,
     )
     ap.add_argument(
         "--speed-scale",
@@ -162,6 +170,43 @@ def _arm_urdf_path(node, base_frame):
     return str(out)
 
 
+def ap_prog():
+    return os.path.basename(sys.argv[0] or "box_opening")
+
+
+def load_body_or_exit(args, who):
+    """The chair and user every plan-free line is held out of
+    (approach.set_body_layers: --body-layers, BOX_OPENING_BODY_LAYERS over
+    it), loaded before anything moves: a file that cannot be read or placed
+    stops the run here, never a run without the check."""
+    try:
+        model = approach.set_body_layers(getattr(args, "body_layers", None))
+    except RuntimeError as e:
+        sys.exit(
+            "%s not starting: %s — the plan-free lines cannot be checked against the chair and user. "
+            "Nothing moved." % (who, e)
+        )
+    if model is None:
+        log.info(
+            "%s body check OFF (--body-layers / %s empty): plan-free lines are not checked against "
+            "the chair and user" % (who, BODY_LAYERS_ENV)
+        )
+    else:
+        log.info(
+            "%s body check: %d boxes (%s), %d spheres on %d links, padded %.0f + %.0f mm"
+            % (
+                who,
+                len(model.names),
+                model.source,
+                sum(len(r) for _c, r in model.spheres.values()),
+                len(model.spheres),
+                1000 * model.padding_m,
+                1000 * model.buffer_m,
+            )
+        )
+    return model
+
+
 def build_ctx(args):
     """Ctx + Runner for a CLI that has not detected a container (cpose
     None): only pre-detection (bench-world) legs can be planned from it."""
@@ -176,6 +221,7 @@ def build_ctx(args):
     # when the description is missing: HOME is a joint goal and needs no
     # chain; only a plan-free lift refuses (LiftFree)
     approach.set_chain_root(worlds.base_frame, urdf_path=_arm_urdf_path(node, worlds.base_frame))
+    load_body_or_exit(args, "[%s]" % ap_prog())
     ctx = Ctx(
         model=model,
         cpose=None,

@@ -543,6 +543,11 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     assert argv[argv.index("--container") + 1].endswith("config/containers/ankou_pink.yaml")
     assert argv[argv.index("--bench-world") + 1].endswith("config/world_flatbot.yaml")
     assert argv[-1] == "--execute" and "--instance-id" not in argv  # standalone: no selection
+    # the chair and user the run's plan-free lines are held out of: the planner's own files
+    assert argv[argv.index("--body-layers") + 1] == "/config/robot/curobo/planner.yaml"
+    engine.set_parameters([Parameter("body_layers", value="")])
+    assert real("open_box")[real("open_box").index("--body-layers") + 1] == ""  # off: the bench
+    engine.set_parameters([Parameter("body_layers", value="/config/robot/curobo/planner.yaml")])
     argv = real("open_box", "food_container_2")  # the selection as the goal came (execute)
     assert argv[argv.index("--instance-id") + 1] == "food_container_2"
 

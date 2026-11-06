@@ -35,6 +35,8 @@ from box_opening.runtime.runner import Runner  # noqa: E402
 
 # no test run records the lid-off's video of the cameras (perception/camera_video) unless it asks
 os.environ.setdefault("BOX_OPENING_VIDEO", "0")
+# nor holds its lines out of a chair (runtime/body) unless it asks: the bench has none
+os.environ.setdefault("BOX_OPENING_BODY_LAYERS", "")
 
 # The recorded fixtures (camera frames, flatbot's arm URDF and joint states, grip close-ups) are
 # kept out of this repo: no data files in git. Point BOX_OPENING_TEST_DATA at a copy, or put one

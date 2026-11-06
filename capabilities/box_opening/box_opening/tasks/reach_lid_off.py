@@ -345,12 +345,16 @@ def drop_reachable(ctx, drop, q_start, seeds=()):
     `q_start`, else from `seeds`), or no straight line down from it to the
     set-down's end."""
     from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
 
     chain = approach._chain()
     quat, contact, hover = setdown_poses(ctx, drop)
     q = chain.nearest_solution(list(q_start), hover, quat, seeds=tuple(seeds))
     if q is None:
         return "no straight-down hand reaches its carry height %.3f" % hover[2]
+    why = kin.body_refusal(chain, [q], start_exempt=False)  # the carry's end: the planner's world may be empty
+    if why is not None:
+        return "the hand at its carry height is in the way (%s)" % why
     pts, why = chain.straight_line(q, [contact[0], contact[1], contact[2] + SETDOWN_RELEASE_M], quat)
     if pts is None:
         return "the set-down is not a straight line the arm can fly (%s)" % why
@@ -1314,6 +1318,7 @@ def plan_carry(ctx, cfg, q_from, drop):
     from its end and the retreat's back up. Returns (Carry, None) or (None,
     why)."""
     from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
 
     chain = approach._chain()
     world = _full_world(ctx)
@@ -1328,6 +1333,12 @@ def plan_carry(ctx, cfg, q_from, drop):
     if carry.traj is not None:
         carry.traj = approach.on_branch_of(carry.traj, q_from)  # continues the clear, not a turn away
         carry.goal_joints = [float(v) for v in carry.traj.points[-1].positions]
+        # the planner's world may be empty (worlds.PLANNER_WORLD): the carry is held out of the
+        # chair and its user as the plan-free lines are (runtime/body), and a spot whose carry
+        # enters them is passed over for the next
+        why = kin.body_refusal(chain, [list(p.positions) for p in carry.traj.points])
+        if why is not None:
+            return None, "the carry (%s)" % why
     carry.gains = dp.COMPLIANT_GAINS
     lines = []
     q = carry.goal_joints

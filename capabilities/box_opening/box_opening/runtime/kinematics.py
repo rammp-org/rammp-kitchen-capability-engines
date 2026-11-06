@@ -146,6 +146,20 @@ class ArmChain:
         self._tail = (Racc, tacc)
         self._I3 = np.eye(3)
         self._nearest_memo = None  # (inputs, answer) of the last nearest_solution
+        # runtime/body.BodyCheck: the chair and its user, which every line
+        # flown without the planner (straight_line, walk) is held out of;
+        # None: no check (the bench; runtime/approach attaches it)
+        self.body = None
+
+    def body_refusal(self, pts, start_exempt=True):
+        """Why the joint path `pts` takes the arm into the chair or its user
+        (runtime/body: the planner's boxes, padded as it pads them), or None
+        — None too where no body model is attached. `start_exempt`: where
+        the path starts in a box it may move in it, not deeper (body.DEEPER_M);
+        False: its first state counts too (a pose yet to be flown to)."""
+        if self.body is None or pts is None:
+            return None
+        return self.body.refusal(pts, start_exempt=start_exempt)
 
     def _fk_axes(self, q):
         """fk()'s (R, t), plus each moving joint's world axis z_k and origin p_k."""
@@ -249,18 +263,27 @@ class ArmChain:
 
         The walk is only a way to FIND the goal joints; it is not flown. The
         planner still plans, and collision-checks, the path to them."""
-        pts, _why = self.walk(q_start, xyz, quat_xyzw, step_m=step_m, step_rad=step_rad)
+        pts, _why = self.walk(q_start, xyz, quat_xyzw, step_m=step_m, step_rad=step_rad, check_body=False)
         return None if pts is None else pts[-1]
 
     def walk(
-        self, q_start, xyz, quat_xyzw, step_m=REACH_STEP_M, step_rad=REACH_STEP_RAD, max_step_rad=MAX_REACH_STEP_RAD
+        self,
+        q_start,
+        xyz,
+        quat_xyzw,
+        step_m=REACH_STEP_M,
+        step_rad=REACH_STEP_RAD,
+        max_step_rad=MAX_REACH_STEP_RAD,
+        check_body=True,
     ):
         """reach()'s continuation with every step kept: joint waypoints from
         q_start to tool_frame at (xyz, quat_xyzw) — position in a straight
         line, orientation about one axis, each step solved from the last.
         With small steps and max_step_rad it is a path to FLY (a turn in
         place, tasks/depth_press). (points, None) with points[0] == q_start,
-        or (None, why)."""
+        or (None, why). A path to fly is refused where it enters the chair
+        or its user (body_refusal); reach()'s, never flown, is not checked
+        (`check_body`): the planner plans the path to its end."""
         q = np.array(q_start, float)
         R0, t0 = self.fk(q)
         R_goal = quat_to_mat(*quat_xyzw)
@@ -284,7 +307,8 @@ class ArmChain:
                 return None, "a joint limit %.0f%% of the way" % (100.0 * f)
             pts.append(nxt)
             q = nxt
-        return pts, None
+        why = self.body_refusal(pts) if check_body else None
+        return (None, why) if why else (pts, None)
 
     def nearest_solution(self, q_start, xyz, quat_xyzw, seeds=()):
         """Of the redundant arm's IK solutions for tool_frame at (xyz,
@@ -440,7 +464,8 @@ class ArmChain:
         joint moving more than max_step_rad between two (EXIT_MAX_STEP_RAD
         for the rise off a hold; None: MAX_STEP_RAD, read at the call, as
         the press study's sweeps set it). Returns (points, None) with
-        points[0] == q_start, or (None, why)."""
+        points[0] == q_start, or (None, why) — a line that enters the chair
+        or its user (body_refusal) refused like an unsolvable one."""
         max_step_rad = MAX_STEP_RAD if max_step_rad is None else float(max_step_rad)
         q0 = np.array(q_start, float)
         R_goal = quat_to_mat(*quat_xyzw)
@@ -464,7 +489,14 @@ class ArmChain:
                 return None, "a joint limit %.0f mm down the line" % (1000.0 * length * k / n)
             pts.append(nxt)
             q = nxt
-        return pts, None
+        why = self.body_refusal(pts)
+        return (None, why) if why else (pts, None)
+
+
+def body_refusal(chain, pts, start_exempt=True):
+    """`chain`.body_refusal(pts), or None for a chain that has none (the tests' stand-ins)."""
+    check = getattr(chain, "body_refusal", None)
+    return None if check is None else check(pts, start_exempt=start_exempt)
 
 
 G_MPS2 = 9.81
