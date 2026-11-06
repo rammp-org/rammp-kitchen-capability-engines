@@ -240,6 +240,44 @@ def test_from_a_fix_on_the_selected_container_is_followed_by_where_it_was():
     assert rung.latest.followed == "food_container_8" and rung.latest.selected is True
 
 
+def test_box_iou_is_the_intersection_over_the_union():
+    """The scene study (11-05, I-V9 and E-S3): box_iou divided the intersection by the SUM of the
+    two areas, so identical boxes scored 0.5. The overlap is now counted once."""
+    a = (100.0, 200.0, 200.0, 300.0)
+    assert sg.box_iou(a, a) == pytest.approx(1.0)
+    assert sg.box_iou(a, (150.0, 200.0, 250.0, 300.0)) == pytest.approx(1 / 3)  # half of each: 50 / 150
+    assert sg.box_iou(a, (100.0, 200.0, 150.0, 300.0)) == pytest.approx(0.5)  # half of it, inside it
+    assert sg.box_iou(a, (150.0, 250.0, 250.0, 350.0)) == pytest.approx(1 / 7)  # a quarter of each: 25 / 175
+    assert sg.box_iou(a, (200.0, 200.0, 300.0, 300.0)) == 0.0  # side by side
+    assert sg.box_iou(a, (300.0, 50.0, 400.0, 150.0)) == 0.0  # apart
+    b = (130.0, 180.0, 260.0, 290.0)
+    assert sg.box_iou(a, b) == pytest.approx(sg.box_iou(b, a))
+    assert sg.box_iou((5.0, 5.0, 5.0, 5.0), (5.0, 5.0, 5.0, 5.0)) == 0.0  # no area at all
+
+
+def test_a_box_is_followed_from_follow_iou_on_as_before_the_union_fix():
+    """FOLLOW_IOU was 0.3 of the old ratio inter / (A + B); 3/7 is the same decision as an IoU. A
+    box the size of where the selected one was, slid 40 px of its 100 sideways, overlaps it
+    60 / 140 = 3/7 (the old ratio 6000 / 20000 = 0.3): taken. Slid 41 px (59 / 141): not."""
+    near = (100.0, 200.0, 200.0, 300.0)
+
+    def followed(dx):
+        box = (near[0] + dx, near[1], near[2] + dx, near[3])
+        m = _msg([_obj(box=box, instance_id="food_container_8")])
+        return sg.frame_of(m, FOOD, now_s=0.0, instance_id="food_container_2", near=near)
+
+    assert sg.box_iou((140.0, 200.0, 240.0, 300.0), near) == sg.FOLLOW_IOU  # exactly at it
+    for dx, taken in ((0.0, True), (39.0, True), (40.0, True), (41.0, False), (60.0, False)):
+        f = followed(dx)
+        assert f.selected is taken and f.followed == ("food_container_8" if taken else None), dx
+    # the old ratio's decision at its 0.3, wherever two such boxes lie
+    for dx in range(0, 101, 5):
+        for dy in range(0, 101, 5):
+            b = (near[0] + dx, near[1] + dy, near[2] + dx, near[3] + dy)
+            old = (100.0 - dx) * (100.0 - dy) / 20000.0
+            assert (old >= 0.3) == (sg.box_iou(near, b) >= sg.FOLLOW_IOU), (dx, dy)
+
+
 def test_a_selected_lid_box_is_resolved_to_the_holder_under_it():
     """Review round 2's algorithm risk: RF-DETR boxes the lid as a second food container stacked
     on the holder, with its own id, which the orchestrator lists as selectable. With that id

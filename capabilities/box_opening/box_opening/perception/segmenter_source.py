@@ -74,8 +74,12 @@ STACK_LO, STACK_HI = 0.15, 0.5  # a stacked lid's bottom edge lies in [top - LO*
 STATE_VISIBLE = 0  # rammp_perception_interfaces/DetectedObject.STATE_VISIBLE
 # a frame without the selected id takes, from the first fix on, the box that overlaps where the
 # selected container was boxed at the last fix most, this much or more (intersection over union):
-# its own box again under a new id. A lid boxed on top of it overlaps it far less
-FOLLOW_IOU = 0.3
+# its own box again under a new id. A lid boxed on top of it overlaps it far less. 3/7 (0.43) is
+# the 0.3 it was tuned at while box_iou divided by the SUM of the two areas: that ratio
+# s = inter / (A + B) is the IoU inter / (A + B - inter) = s / (1 - s), and 0.3 / 0.7 = 3/7. In the
+# scene study's box pairs (10-22..10-28) the same box again overlaps 0.67 or more, a lid its holder
+# 0.19 or less: 3/7 lies midway.
+FOLLOW_IOU = 3 / 7
 
 _LATEST = object()  # state()/describe(): read the rung's newest frame
 
@@ -190,9 +194,9 @@ def box_iou(a, b):
     ix = max(0.0, min(float(a[2]), float(b[2])) - max(float(a[0]), float(b[0])))
     iy = max(0.0, min(float(a[3]), float(b[3])) - max(float(a[1]), float(b[1])))
     inter = ix * iy
-    union = (float(a[2]) - float(a[0])) * (float(a[3]) - float(a[1])) + (float(b[2]) - float(b[0])) * (
-        float(b[3]) - float(b[1])
-    )
+    area_a = (float(a[2]) - float(a[0])) * (float(a[3]) - float(a[1]))
+    area_b = (float(b[2]) - float(b[0])) * (float(b[3]) - float(b[1]))
+    union = area_a + area_b - inter  # the overlap counted once: identical boxes are 1.0, not 0.5
     return inter / union if union > 0.0 else 0.0
 
 
