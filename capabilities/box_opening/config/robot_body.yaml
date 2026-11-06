@@ -1,0 +1,72 @@
+# flatbot's hand as box_opening's body check sees it (runtime/body): ROBOT-BODY config (the owner's
+# rule allows the robot's own body here; the cabinet, the table and what is on them stay the cameras'
+# each run). Read beside the planner's own files (body_layers: the planner config's layers and its
+# robot file's collision_spheres); nothing here is the environment.
+#
+# hand_spheres: what the planner's robot file (robot.yaml, the stock Robotiq 2F-85 spheres, locked
+# OPEN as cuRobo locks the knuckle) misses of the real hand. Each group names its link, the boxes it
+# stands for (`covers`: centre and half extents, m, in that link's frame, with their source) and the
+# spheres that cover them (`spheres`: bare radii; the robot file's collision_sphere_buffer is added to
+# them as to its own). The load refuses a group whose spheres leave any part of its boxes uncovered
+# (sampled every 2.5 mm, 1 mm allowed), and skips a group whose boxes the robot file's own spheres
+# (bare, as the group's own are judged, on links rigidly fixed to the group's link) already cover: a
+# robot file that carries the same spheres (rammp-deployments feature/flatbot-hand-spheres) is not
+# doubled.
+hand_spheres:
+  # The 131 mm fingers, closed or closing. The press, the grip, the lift and the carry fly with the
+  # fingers shut, their tips on the tool axis 0.131 m out of the flange (constants.TCP_OFFSET_M: 11 mm
+  # past arm_tool_frame, measured 2026-09-03 two ways; presssim's TIP_L/R_EE [+-0.003, 0, 0.131]); the
+  # robot file's spheres model the fingers open (x +-0.045) and leave the axis bare past z 0.118: the
+  # chair study (sweep_after/results/coverage.json, 11-06) measured both fingertips and the 131 mm tool
+  # point 13.0-13.1 mm outside every buffered sphere. Covered: the closed pads (x +-0.012, the pads'
+  # 22-27 mm width as y +-0.0135, z 0.100-0.131) and the closing tips' arc out to the open fingers
+  # (x +-0.050, z 0.110-0.131; the real tips end at z 0.1175 open, 0.131 closed: the 2F-85 linkage of
+  # flatbot's URDF with presssim's 32.8 mm shorter tips). They reach z 0.1395 on the axis (8.5 mm past
+  # the real tips, 13.5 mm with the 5 mm buffer).
+  fingers_131mm:
+    link: arm_robotiq_85_base_link
+    covers:
+      - {name: closed_pads, centre: [0.0, 0.0, 0.1155], half: [0.012, 0.0135, 0.0155]}
+      - {name: closing_tips, centre: [0.0, 0.0, 0.1205], half: [0.050, 0.0135, 0.0105]}
+    spheres:
+      - {center: [-0.036, 0.0, 0.112], radius: 0.0275}
+      - {center: [-0.012, 0.0, 0.112], radius: 0.0275}
+      - {center: [0.012, 0.0, 0.112], radius: 0.0275}
+      - {center: [0.036, 0.0, 0.112], radius: 0.0275}
+  # The wrist OAK-D Pro PoE and its bracket, in arm_end_effector_link (the flange: the camera TF's
+  # parent; on flatbot's URDF arm_robotiq_85_base_link is the same frame). Two sources disagree by
+  # ~29 mm along the tool on where its body is, so both are covered until a calibration settles it:
+  #  - the deployed camera TF (rammp-deployments cameras.yaml, fitted 2026-10-22 from a depth-press
+  #    run, #128): the colour lens at [0, 0.065, 0.015], so the body behind it. presssim's hand model
+  #    (params/defaults.json arm.camera, the study's) is a 90 x 30 x 30 mm box at [0, 0.065, 0] and a
+  #    30 x 16 x 20 mm bracket at [0, 0.043, 0] to the bracelet's rim: the study measured its corners
+  #    up to 12.6 mm outside every buffered sphere. The real camera (OAK-D Pro PoE) is 111 x 40 x
+  #    31.3 mm: covered here too, its front face at the fitted lens;
+  #  - rammp-deployments origin/feature/sensor-puck 47fcef8's robot.yaml (hand-placed 2026-11-05 from
+  #    CAD KR44400): the camera on the sensor puck's tab, 111 x 40 x 31.3 mm, its back on the puck's
+  #    face, with 7 spheres on arm_robotiq_85_base_link of that branch's URDF, where the puck puts the
+  #    gripper 12.7 mm further out. On flatbot's URDF (no puck) they would sit 12.7 mm too close to the
+  #    wrist (study/chair README): here they are that branch's 7 spheres, z + 0.0127, unchanged else.
+  wrist_camera:
+    link: arm_end_effector_link
+    covers:
+      - {name: presssim_camera, centre: [0.0, 0.065, 0.0], half: [0.045, 0.015, 0.015]}
+      - {name: presssim_bracket, centre: [0.0, 0.043, 0.0], half: [0.015, 0.008, 0.010]}
+      - {name: oak_poe_at_the_fitted_lens, centre: [0.0, 0.065, -0.00065], half: [0.0555, 0.020, 0.01565]}
+      - {name: oak_poe_on_the_sensor_puck, centre: [0.0, 0.071, 0.02835], half: [0.0555, 0.020, 0.01565]}
+    spheres:
+      # the fitted lens's camera body: the sensor-puck pattern's 4 large spheres, centred on it
+      - {center: [-0.0416, 0.065, -0.00065], radius: 0.029}
+      - {center: [-0.0139, 0.065, -0.00065], radius: 0.029}
+      - {center: [0.0139, 0.065, -0.00065], radius: 0.029}
+      - {center: [0.0416, 0.065, -0.00065], radius: 0.029}
+      # presssim's bracket
+      - {center: [0.0, 0.043, 0.0], radius: 0.020}
+      # feature/sensor-puck's 7, moved 12.7 mm out onto this URDF's flange
+      - {center: [-0.0416, 0.071, 0.02835], radius: 0.029}
+      - {center: [-0.0139, 0.071, 0.02835], radius: 0.029}
+      - {center: [0.0139, 0.071, 0.02835], radius: 0.029}
+      - {center: [0.0416, 0.071, 0.02835], radius: 0.029}
+      - {center: [-0.029, 0.0615, 0.0032], radius: 0.024}
+      - {center: [0.0, 0.0615, 0.0032], radius: 0.024}
+      - {center: [0.029, 0.0615, 0.0032], radius: 0.024}

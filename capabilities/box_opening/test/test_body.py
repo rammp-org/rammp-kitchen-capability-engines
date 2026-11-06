@@ -23,6 +23,57 @@ PKG = Path(__file__).resolve().parents[1]
 FLATBOT_WORLD = str(PKG / "config" / "world_flatbot.yaml")
 CONTAINER = str(PKG / "config" / "containers" / "ankou_pink.yaml")
 DOWN = mat_to_quat_xyzw(np.diag([1.0, -1.0, -1.0]))  # the hand straight down
+# flatbot's robot.yaml (rammp-deployments dev 63e7563): the bracelet's and the stock 2F-85's spheres, the
+# gripper locked open, as the planner and the chair study have them
+STOCK_HAND = """robot_cfg:
+  kinematics:
+    base_link: arm_mount
+    collision_sphere_buffer: 0.005
+    collision_spheres:
+      arm_forearm_link:
+      - {center: [0.0, 0.0, 0.0], radius: 0.06}
+      arm_bracelet_link:
+      - {center: [0.0, 0.0, -0.045], radius: 0.045}
+      - {center: [0.0, -0.05, -0.045], radius: 0.045}
+      - {center: [0.045, 0.0, -0.05], radius: 0.036}
+      arm_robotiq_85_base_link:
+      - {center: [0.0, 0.0, 0.04], radius: 0.04}
+      - {center: [0.0, 0.0, 0.055], radius: 0.042}
+      - {center: [3.2e-05, 0.04, 0.06], radius: 0.032}
+      - {center: [-3.2e-05, -0.04, 0.06], radius: 0.032}
+      - {center: [-0.04, 3.2e-05, 0.06], radius: 0.032}
+      - {center: [0.04, -3.2e-05, 0.06], radius: 0.032}
+      - {center: [0.0, 0.0, 0.078], radius: 0.035}
+      - {center: [3.6e-05, 0.045, 0.1], radius: 0.026}
+      - {center: [-3.6e-05, -0.045, 0.1], radius: 0.026}
+      - {center: [-0.045, 3.6e-05, 0.1], radius: 0.026}
+      - {center: [0.045, -3.6e-05, 0.1], radius: 0.026}
+      - {center: [3.6e-05, 0.045, 0.13], radius: 0.022}
+      - {center: [-3.6e-05, -0.045, 0.13], radius: 0.022}
+      - {center: [-0.045, 3.6e-05, 0.13], radius: 0.022}
+      - {center: [0.045, -3.6e-05, 0.13], radius: 0.022}
+      - {center: [3.6e-05, 0.045, 0.145], radius: 0.018}
+      - {center: [-3.6e-05, -0.045, 0.145], radius: 0.018}
+      - {center: [-0.045, 3.6e-05, 0.145], radius: 0.018}
+      - {center: [0.045, -3.6e-05, 0.145], radius: 0.018}
+      arm_robotiq_85_left_finger_link:
+      - {center: [-0.010026, -4.3e-05, 0.019663], radius: 0.03}
+      arm_robotiq_85_left_finger_tip_link:
+      - {center: [-0.021578, -3.8e-05, 0.031998], radius: 0.02}
+      arm_robotiq_85_right_finger_link:
+      - {center: [0.010026, 4.1e-05, 0.019663], radius: 0.03}
+      arm_robotiq_85_right_finger_tip_link:
+      - {center: [0.021578, 3.7e-05, 0.031998], radius: 0.02}
+"""
+# the chair study's probe (sweep_after/selfcheck.py, results/coverage.json), in arm_end_effector_link: the 131 mm
+# fingertips and the tool point, and the corners of presssim's wrist OAK box (90 x 30 x 30 mm at [0, 0.065, 0])
+PROBE_TIPS = {"tip_left": (0.003, 0.0, 0.131), "tip_right": (-0.003, 0.0, 0.131), "tool_131": (0.0, 0.0, 0.131)}
+PROBE_CAMERA = {
+    "corner_%+d%+d%+d" % (sx, sy, sz): (0.045 * sx, 0.065 + 0.015 * sy, 0.015 * sz)
+    for sx in (-1, 1)
+    for sy in (-1, 1)
+    for sz in (-1, 1)
+}
 ROBOT = """robot_cfg:
   kinematics:
     base_link: arm_mount
@@ -255,3 +306,109 @@ def test_offline_the_env_var_alone_turns_it_on(monkeypatch, tmp_path):
     approach.set_body(None)
     approach.set_chain_root("arm_mount", flatbot_urdf())
     assert approach._chain().body is None
+
+
+def _outside_mm(chain, check, points, qs):
+    """{name: worst over `qs` of how far the hand point (arm_end_effector_link) lies outside every checked
+    sphere, buffered, mm} — the chair study's coverage probe."""
+    C, r, _links = check._centres(np.asarray(qs, float))
+    out = {}
+    for name, p in points.items():
+        worst = -np.inf
+        for i, q in enumerate(qs):
+            R, t = chain.fk(q)
+            ee = t - R @ np.array([0.0, 0.0, 0.120])  # tool_frame is 0.120 out of the flange
+            P = ee + R @ np.asarray(p, float)
+            worst = max(worst, float((np.linalg.norm(C[i] - P, axis=1) - r).min()))
+        out[name] = 1000.0 * worst
+    return out
+
+
+def _probe_poses(chain):
+    rng = np.random.default_rng(0)
+    return [list(np.asarray(HOME) + rng.uniform(-1.0, 1.0, 7)) for _ in range(20)]
+
+
+def test_the_hand_spheres_cover_the_131mm_fingertips_and_the_wrist_camera_the_robot_file_misses(tmp_path):
+    path = _model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=STOCK_HAND)
+    chain = ArmChain(root="arm_mount", path=flatbot_urdf())
+    qs = _probe_poses(chain)
+    stock = body.load(path, robot_body=False).check_for(chain, flatbot_urdf(), "arm_mount")
+    assert stock.hand_added == [] and "arm_end_effector_link" not in stock.spheres
+    tips, cam = _outside_mm(chain, stock, PROBE_TIPS, qs), _outside_mm(chain, stock, PROBE_CAMERA, qs)
+    # the study's numbers (coverage.json): the tips 13.0-13.1 mm, the camera's outer corners 12.6 mm outside
+    assert tips["tip_left"] == pytest.approx(13.1, abs=0.1) and tips["tool_131"] == pytest.approx(13.0, abs=0.1)
+    assert max(cam.values()) == pytest.approx(12.6, abs=0.1)
+    m = body.load(path)  # the shipped config/robot_body.yaml
+    assert m.hand_source.endswith("config/robot_body.yaml") and [g.name for g in m.hand] == [
+        "fingers_131mm",
+        "wrist_camera",
+    ]
+    check = m.check_for(chain, flatbot_urdf(), "arm_mount")
+    assert check.hand_added == ["fingers_131mm", "wrist_camera"] and check.hand_skipped == []
+    assert (
+        len(check.spheres["arm_robotiq_85_base_link"][1]) == 19 + 4
+        and len(check.spheres["arm_end_effector_link"][1]) == 12
+    )
+    tips, cam = _outside_mm(chain, check, PROBE_TIPS, qs), _outside_mm(chain, check, PROBE_CAMERA, qs)
+    # now inside: the tips 11.5 mm and the tool point 10 mm deep (5 of them the buffer), every camera corner >= 12 mm
+    assert max(tips.values()) <= -9.9 and max(cam.values()) <= -12.0, (tips, cam)
+    # and the bare spheres alone hold each group's boxes (the load checks it): none of them is the buffer's
+    for g in m.hand:
+        for _name, c, h in g.covers:
+            assert body.outside_m(body.box_points(c, h), g.centres, g.radii).max() <= body.HAND_COVER_TOL_M
+
+
+def test_a_hand_group_whose_spheres_miss_what_it_stands_for_stops_the_load(tmp_path):
+    path = _model_files(tmp_path, [("b", (1, 0, 0), (0.1, 0.1, 0.1))])
+    bad = tmp_path / "robot_body.yaml"
+    bad.write_text(
+        "hand_spheres:\n  tips:\n    link: arm_robotiq_85_base_link\n"
+        "    covers: [{name: pads, centre: [0, 0, 0.12], half: [0.01, 0.01, 0.011]}]\n"
+        "    spheres: [{center: [0, 0, 0.10], radius: 0.02}]\n"
+    )
+    with pytest.raises(body.BodyModelError, match="hand group tips leaves pads [0-9.]+ mm outside its spheres"):
+        body.load(path, robot_body=bad)
+    bad.write_text("hand_spheres:\n  tips: {link: arm_robotiq_85_base_link}\n")
+    with pytest.raises(body.BodyModelError, match="hand group tips is malformed"):
+        body.load(path, robot_body=bad)
+    with pytest.raises(body.BodyModelError, match="cannot read"):
+        body.load(path, robot_body=tmp_path / "nowhere.yaml")
+
+
+def test_a_robot_file_that_carries_the_hand_spheres_is_not_doubled(tmp_path):
+    import yaml
+
+    hand = body.load_hand(body.robot_body_path())
+    lines = []
+    for g in hand:  # on flatbot's URDF the flange and the gripper base are one frame: all on the gripper base
+        lines += [
+            "      - {center: %s, radius: %s}" % (list(map(float, c)), float(r))
+            for c, r in zip(g.centres, g.radii, strict=True)
+        ]
+    robot = STOCK_HAND.replace(
+        "      arm_robotiq_85_left_finger_link:", "\n".join(lines) + "\n      arm_robotiq_85_left_finger_link:"
+    )
+    assert len(yaml.safe_load(robot)["robot_cfg"]["kinematics"]["collision_spheres"]["arm_robotiq_85_base_link"]) == 35
+    path = _model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=robot)
+    check = body.load(path).check_for(ArmChain(root="arm_mount", path=flatbot_urdf()), flatbot_urdf(), "arm_mount")
+    assert check.hand_added == [] and check.hand_skipped == ["fingers_131mm", "wrist_camera"]
+    assert len(check.spheres["arm_robotiq_85_base_link"][1]) == 35 and "arm_end_effector_link" not in check.spheres
+
+
+def test_a_robot_file_whose_hand_spheres_fall_short_by_less_than_the_buffer_is_not_taken_for_them(tmp_path):
+    # the same spheres 3 mm smaller: buffered they would still reach every box the groups stand for, but the
+    # boxes would keep none of the buffer the groups add — judged bare, as the groups' own, both are added
+    hand = body.load_hand(body.robot_body_path())
+    lines = []
+    for g in hand:
+        lines += [
+            "      - {center: %s, radius: %s}" % (list(map(float, c)), float(r) - 0.003)
+            for c, r in zip(g.centres, g.radii, strict=True)
+        ]
+    robot = STOCK_HAND.replace(
+        "      arm_robotiq_85_left_finger_link:", "\n".join(lines) + "\n      arm_robotiq_85_left_finger_link:"
+    )
+    path = _model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=robot)
+    check = body.load(path).check_for(ArmChain(root="arm_mount", path=flatbot_urdf()), flatbot_urdf(), "arm_mount")
+    assert check.hand_added == ["fingers_131mm", "wrist_camera"] and check.hand_skipped == []

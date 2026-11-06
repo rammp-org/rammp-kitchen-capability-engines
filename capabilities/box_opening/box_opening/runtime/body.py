@@ -22,8 +22,14 @@ enable_chair_collision: they stand where the arm is mounted at every joint
 state, and the layers were carved around cuRobo's spheres of them. Every
 other link with spheres is placed by the run's own URDF (the gripper's
 fingers at 0, as cuRobo locks the knuckle open); robot.yaml's spheres are
-what is checked, so the 131 mm fingers past the stock 2F-85's and a wrist
-camera are covered only as far as its spheres cover them.
+the planner's, and box_opening adds what they miss of the real hand
+(config/robot_body.yaml `hand_spheres`, robot-body config): the 131 mm
+fingers closed on the tool axis (the stock 2F-85 spheres are locked open:
+the tips were 13 mm outside them) and the wrist OAK and its bracket (12.6
+mm outside them). Each group carries the boxes it stands for and its
+spheres must cover them, or the load stops; a group the robot file's own
+spheres already cover is skipped, never doubled (BodyCheck.hand_added /
+hand_skipped).
 
 A file that cannot be read, or that places nothing, is an error: the run
 stops before any motion (never a silent skip). An explicitly empty value
@@ -39,6 +45,12 @@ import numpy as np
 
 DEFAULT_BODY_LAYERS = "/config/robot/curobo/planner.yaml"
 BODY_LAYERS_ENV = "BOX_OPENING_BODY_LAYERS"
+# the robot-body config beside it: the hand's spheres the planner's robot file lacks (and, from
+# box_opening's own config/, the speed near the user)
+ROBOT_BODY_FILE = "robot_body.yaml"
+# a hand group's covers are sampled this finely, and a sample may lie this far outside its spheres
+HAND_COVER_STEP_M = 0.0025
+HAND_COVER_TOL_M = 0.001
 WORLD_PADDING_M = 0.02  # cuRobo's default world_padding, where the planner config names none
 # the arm's first two links: where it is mounted, at every joint state
 EXEMPT_LINKS = ("base_link", "shoulder_link")
@@ -82,6 +94,76 @@ def _bare(link):
     return link[4:] if link.startswith("arm_") else link
 
 
+def robot_body_path():
+    """config/robot_body.yaml: the installed package's, else this source tree's (an offline
+    copy of the package), or None."""
+    candidates = []
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        candidates.append(Path(get_package_share_directory("box_opening")) / "config" / ROBOT_BODY_FILE)
+    except Exception:  # noqa: BLE001 - no ament index offline: the source tree's
+        pass
+    candidates.append(Path(__file__).resolve().parents[2] / "config" / ROBOT_BODY_FILE)
+    return next((p for p in candidates if p.is_file()), None)
+
+
+def box_points(centre, half, step=HAND_COVER_STEP_M):
+    """(m, 3) points filling the box (centre, half extents) every `step` or finer, its faces and corners on."""
+    c, h = np.asarray(centre, float), np.asarray(half, float)
+    axes = [np.linspace(c[i] - h[i], c[i] + h[i], max(2, int(math.ceil(2.0 * h[i] / step)) + 1)) for i in range(3)]
+    return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
+
+
+def outside_m(points, centres, radii):
+    """(m,) how far each point lies outside the union of the spheres (<= 0: inside one)."""
+    P, C, r = np.asarray(points, float), np.asarray(centres, float), np.asarray(radii, float)
+    if not len(C):
+        return np.full(len(P), np.inf)
+    return (np.linalg.norm(P[:, None, :] - C[None], axis=-1) - r[None]).min(axis=1)
+
+
+@dataclass
+class HandGroup:
+    """Spheres box_opening adds to the robot file's (config/robot_body.yaml `hand_spheres`)."""
+
+    name: str
+    link: str
+    centres: np.ndarray  # (k, 3) in `link`
+    radii: np.ndarray  # (k,) bare: the robot file's buffer is added where they are placed
+    covers: list  # [(name, centre (3,), half (3,))] in `link`: what the spheres stand for
+
+
+def load_hand(path):
+    """The hand groups of robot-body config `path`, each checked to cover its boxes, or BodyModelError."""
+    data = _yaml(path).get("hand_spheres") or {}
+    if not isinstance(data, dict):
+        raise BodyModelError("body model: %s's hand_spheres is not a mapping" % path)
+    out = []
+    for name, g in data.items():
+        try:
+            link = str(g["link"])
+            cs = np.array([[float(v) for v in s["center"]] for s in g["spheres"]], float).reshape(-1, 3)
+            rs = np.array([float(s["radius"]) for s in g["spheres"]], float)
+            covers = [
+                (str(c.get("name", k)), np.array(c["centre"], float).reshape(3), np.array(c["half"], float).reshape(3))
+                for k, c in enumerate(g.get("covers") or [])
+            ]
+        except (KeyError, TypeError, ValueError) as e:
+            raise BodyModelError("body model: %s's hand group %s is malformed (%s)" % (path, name, e)) from e
+        if not len(rs) or not covers:
+            raise BodyModelError("body model: %s's hand group %s has no spheres or nothing it covers" % (path, name))
+        for cname, c, h in covers:
+            worst = float(outside_m(box_points(c, h), cs, rs).max())
+            if worst > HAND_COVER_TOL_M:
+                raise BodyModelError(
+                    "body model: %s's hand group %s leaves %s %.1f mm outside its spheres"
+                    % (path, name, cname, 1000.0 * worst)
+                )
+        out.append(HandGroup(name=str(name), link=link, centres=cs, radii=rs, covers=covers))
+    return out
+
+
 @dataclass
 class BodyModel:
     """The padded boxes and the arm's buffered spheres, as the planner pads them."""
@@ -94,14 +176,18 @@ class BodyModel:
     spheres: dict  # link -> (centres (k, 3), radii (k,)), buffer included, exempt links left out
     padding_m: float
     buffer_m: float
+    hand: list = None  # [HandGroup] from robot-body config, placed (or skipped) by BodyCheck
+    hand_source: str = None
 
     def check_for(self, chain, urdf_path, root):
         """A BodyCheck of this model on `chain`'s URDF, rooted at `root`."""
         return BodyCheck(self, chain, urdf_path, root)
 
 
-def load(planner_yaml):
-    """The BodyModel from cuRobo planner config `planner_yaml`, or BodyModelError."""
+def load(planner_yaml, robot_body=None):
+    """The BodyModel from cuRobo planner config `planner_yaml`, or BodyModelError. `robot_body`:
+    the robot-body config whose hand_spheres join the robot file's (None: robot_body_path(), which
+    must exist; False: none, the planner's spheres alone)."""
     planner_yaml = Path(planner_yaml)
     cfg = _yaml(planner_yaml)
     here = planner_yaml.parent
@@ -154,6 +240,14 @@ def load(planner_yaml):
         spheres[str(link)] = (cs, rs)
     if not spheres:
         raise BodyModelError("body model: %s has no spheres off the base and the shoulder" % robot)
+    hand, hand_source = [], None
+    if robot_body is not False:
+        hand_source = robot_body if robot_body is not None else robot_body_path()
+        if hand_source is None:
+            raise BodyModelError(
+                "body model: no %s (box_opening's config) to add the hand's spheres from" % ROBOT_BODY_FILE
+            )
+        hand = load_hand(hand_source)
     return BodyModel(
         source=str(planner_yaml),
         base_link=base,
@@ -163,6 +257,8 @@ def load(planner_yaml):
         spheres=spheres,
         padding_m=pad,
         buffer_m=buf,
+        hand=hand,
+        hand_source=None if hand_source is None else str(hand_source),
     )
 
 
@@ -224,11 +320,12 @@ class BodyCheck:
                 rpy,
                 axis,
             )
-        index = {n: k for k, n in enumerate(chain.joint_names)}
+        index = self.index = {n: k for k, n in enumerate(chain.joint_names)}
         # each sphere link's path from the root: (origin R, origin t, axis or None, arm joint index or None)
         self.paths = {}
         missing = []
-        for link in model.spheres:
+        hand = list(model.hand or [])
+        for link in list(model.spheres) + [g.link for g in hand if g.link not in model.spheres]:
             path, at = [], link
             while at != root:
                 if at not in joints:
@@ -245,15 +342,33 @@ class BodyCheck:
             raise BodyModelError(
                 "body model: the arm's URDF %s places no %s from %s" % (urdf_path, ", ".join(missing), root)
             )
+        # the spheres checked: the robot file's, and each hand group its own spheres do not already cover
+        self.spheres = dict(model.spheres)
+        self.hand_added, self.hand_skipped = [], []
+        for g in hand:
+            if self._robot_file_covers(g, joints):
+                self.hand_skipped.append(g.name)
+                continue
+            cs, rs = self.spheres.get(g.link, (np.zeros((0, 3)), np.zeros(0)))
+            self.spheres[g.link] = (np.vstack([cs, g.centres]), np.concatenate([rs, g.radii + model.buffer_m]))
+            self.hand_added.append(g.name)
+        self.paths = {link: p for link, p in self.paths.items() if link in self.spheres}
 
-    def _centres(self, Q):
-        """(n, S, 3) every checked sphere's centre at each row of Q, (S,) radii, [link per sphere]."""
+    @staticmethod
+    def _rigid_root(link, joints):
+        """The link `link` is fixed to: up its fixed joints to the first that moves."""
+        while link in joints and joints[link][1] == "fixed":
+            link = joints[link][2]
+        return link
+
+    def _link_frames(self, Q, links):
+        """{link: (R (n, 3, 3), t (n, 3))} in the root at each row of Q."""
         n = len(Q)
-        out, radii, links = [], [], []
-        for link, path in self.paths.items():
+        out = {}
+        for link in links:
             R = np.broadcast_to(np.eye(3), (n, 3, 3)).copy()
             t = np.zeros((n, 3))
-            for Ro, to, axis, k in path:
+            for Ro, to, axis, k in self.paths[link]:
                 t = t + R @ to
                 R = R @ Ro
                 if axis is not None:
@@ -261,7 +376,39 @@ class BodyCheck:
                     K = np.array([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
                     Rj = np.eye(3) + np.sin(th)[:, None, None] * K + (1.0 - np.cos(th))[:, None, None] * (K @ K)
                     R = R @ Rj
+            out[link] = (R, t)
+        return out
+
+    def _robot_file_covers(self, group, joints):
+        """Whether the robot file's own spheres, on the links fixed to `group`'s, already cover every
+        box the group stands for (HAND_COVER_TOL_M): a robot file with the hand's spheres. Judged BARE,
+        as load_hand judges the group's own: a robot file whose spheres fall short by less than the
+        buffer is not taken for them (the box would keep none of the buffer the group adds)."""
+        rigid = self._rigid_root(group.link, joints)
+        mates = [link for link in self.model.spheres if self._rigid_root(link, joints) == rigid]
+        if not mates:
+            return False
+        q0 = np.zeros((1, len(self.index)))
+        frames = self._link_frames(q0, mates + [group.link])
+        Rg, tg = frames[group.link]
+        C, r = [], []
+        for link in mates:
+            R, t = frames[link]
             cs, rs = self.model.spheres[link]
+            C.append(t[0] + cs @ R[0].T)
+            r.append(rs - self.model.buffer_m)  # model.spheres carry the buffer: bare, as the group's
+        C, r = np.concatenate(C), np.concatenate(r)
+        for _name, c, h in group.covers:
+            P = tg[0] + box_points(c, h) @ Rg[0].T
+            if float(outside_m(P, C, r).max()) > HAND_COVER_TOL_M:
+                return False
+        return True
+
+    def _centres(self, Q):
+        """(n, S, 3) every checked sphere's centre at each row of Q, (S,) radii, [link per sphere]."""
+        out, radii, links = [], [], []
+        for link, (R, t) in self._link_frames(Q, list(self.paths)).items():
+            cs, rs = self.spheres[link]
             out.append(t[:, None, :] + np.einsum("nij,kj->nki", R, cs))
             radii.append(rs)
             links += [link] * len(rs)

@@ -192,16 +192,26 @@ def load_body_or_exit(args, who):
             "the chair and user" % (who, BODY_LAYERS_ENV)
         )
     else:
+        check = getattr(approach._CHAIN, "body", None)  # placed on this run's URDF (set_body_layers)
+        spheres = check.spheres if check is not None else model.spheres
         log.info(
-            "%s body check: %d boxes (%s), %d spheres on %d links, padded %.0f + %.0f mm"
+            "%s body check: %d boxes (%s), %d spheres on %d links, padded %.0f + %.0f mm; the hand's own "
+            "(%s): %s"
             % (
                 who,
                 len(model.names),
                 model.source,
-                sum(len(r) for _c, r in model.spheres.values()),
-                len(model.spheres),
+                sum(len(r) for _c, r in spheres.values()),
+                len(spheres),
                 1000 * model.padding_m,
                 1000 * model.buffer_m,
+                model.hand_source or "none",
+                (
+                    "added %s, already in the robot file %s"
+                    % (", ".join(check.hand_added) or "none", ", ".join(check.hand_skipped) or "none")
+                    if check is not None
+                    else "%d groups, placed with the chain" % len(model.hand or [])
+                ),
             )
         )
     return model
