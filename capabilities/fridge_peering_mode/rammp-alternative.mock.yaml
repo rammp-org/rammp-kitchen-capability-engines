@@ -1,0 +1,13 @@
+id: fridge_peering_mode_mock
+tier: experimental
+kind: docker
+container:
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge_peering_mode:dev
+  network_mode: host
+  ipc: host
+  command: ["ros2", "launch", "fridge_peering_mode", "fridge_peering_mode.launch.py", "mock:=true"]
+publishes: [/fridge_peering_mode/status]
+subscribes:
+  - /tf
+  - /tf_static
+  - /joy
