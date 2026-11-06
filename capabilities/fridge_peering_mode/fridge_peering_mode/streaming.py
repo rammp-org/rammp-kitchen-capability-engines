@@ -1,5 +1,16 @@
 """One `peer` action: plan to a standoff in front of the fridge's back wall, then teleop.
 
+The phases, in order:
+
+  scene homing   (scene_homing) the scene camera's fridge box and depth place a point in the
+                 fridge (scene_homing.SceneFridge); go_to_ee_pose puts the wrist camera
+                 scene_standoff_m in front of it, looking along scene_approach. This only gets
+                 the wrist camera a view of the back wall; nothing is fine-tuned from it. No fridge
+                 in the scene camera, or no plan: it is skipped, with a warning.
+  fridge TF      wait up to fridge_tf_wait_s for the plane detector's fridge_frame (measured with
+                 the arm still). Found: home again on it, then wall teleop. Not found: search
+                 teleop until it is, then home on it and wall teleop.
+
 This is the old FridgeTeleopNode's logic, run inside one execute() instead of a node's timer.
 Everything the old node did to talk to the driver is now self.arm's:
 
@@ -42,6 +53,7 @@ twist_frame (the axes of the twist setpoint).
 """
 
 import math
+import re
 import time
 from typing import NamedTuple
 
@@ -56,6 +68,7 @@ from tf2_ros import TransformException
 
 from . import geometry as geo
 from . import plane_follow as pf
+from .scene_homing import SceneFridge
 
 CONTROLLER = "ee_twist"
 WAIT_STEP_S = 0.1  # how often the waits for TF poll (and honour pause and cancel)
@@ -65,6 +78,13 @@ SEARCH_CHECK_S = 0.2  # how often a search looks for the fridge TF
 STILL_LIN = 0.005  # m/s
 STILL_ANG = 0.03  # rad/s
 MIN_SPEED_SCALE = 0.01  # the driver refuses (not clamps) a go_to speed_scale below this
+# cuRobo's refusal to plan from a start inside its joint-limit margin, one match per joint
+LIMIT_MARGIN = re.compile(
+    r"arm_joint_(\d+) is [-\d.]+ rad from its position limit \[\s*([-\d.]+),\s*([-\d.]+)\]"
+    r",? inside joint_limit_margin_rad ([\d.]+)"
+)
+UNWIND_SPEED = 0.1  # rad/s, average joint speed of an unwind (min-jerk: peak ~1.9x)
+UNWIND_POINTS = 25
 LATCHED = QoSProfile(
     depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
 )
@@ -175,6 +195,15 @@ class PeerSession:
         self.follow_stale_s = float(c["follow_stale_s"])
         self.search_when_no_fridge = bool(c["search_when_no_fridge"])
         self.search_range_m = float(c["search_range_m"])
+        self.scene_homing = bool(c["scene_homing"])
+        self.scene_wait_s = float(c["scene_wait_s"])
+        self.scene_frames = int(c["scene_frames"])
+        self.scene_standoff = float(c["scene_standoff_m"])
+        self.scene_approach = c["scene_approach"]
+        self._scene_forward_B = geo.axis_vector(c["scene_forward_axis"])
+        self.unwind_limits = bool(c["unwind_limits"])
+        self.unwind_extra_rad = float(c["unwind_extra_rad"])
+        self.unwind_max_rad = float(c["unwind_max_rad"])
         self.joy_topic = c["joy_topic"]
         self.axis_u = int(c["axis_u"])
         self.axis_v = int(c["axis_v"])
@@ -227,6 +256,7 @@ class PeerSession:
         self._twist_pub = pub(TwistStamped, "~/commanded_twist", 10)
         self._servo_target_pub = pub(PoseStamped, "~/servo_target", 10)
         self._followed_plane_pub = pub(PoseStamped, "~/followed_plane", 10)
+        self._scene = SceneFridge(engine, cfg) if self.scene_homing else None
 
     @property
     def _arm_frame(self) -> str:
@@ -239,14 +269,19 @@ class PeerSession:
     # ------------------------------------------------------------------ the action
 
     def run(self, *, teleop: bool, max_teleop_s) -> dict:
-        """Home, then (with `teleop`) servo until a cancel or `max_teleop_s`. With no fridge TF
-        to home on, search (with `teleop` and search_when_no_fridge) until one appears, then home
-        by itself."""
+        """Scene-home, then home on the fridge TF and (with `teleop`) servo until a cancel or
+        `max_teleop_s`. With no fridge TF to home on, search (with `teleop` and
+        search_when_no_fridge) until one appears, then home on it by itself."""
         self._wait_arm_tf()
+        scene_homed = self.scene_homing and self._scene_home()
         homes, searches, teleop_s, deadline = 0, 0, 0.0, None
         while True:
             found, why = self._wait_for_fridge()
             if found is None:
+                if not teleop and scene_homed and homes == 0:
+                    self._log.warning(f"scene-homed, but no usable fridge TF ({why})")
+                    return {"ended": "scene_homed", "scene_homed": True, "homes": 0,
+                            "searches": 0, "teleop_s": 0.0, "fridge_tf": why}
                 if not (teleop and self.search_when_no_fridge):
                     raise EngineError(
                         "no_fridge",
@@ -264,7 +299,8 @@ class PeerSession:
                 self._home(found)
                 homes += 1
                 if not teleop:
-                    return {"ended": "homed", "homes": homes, "searches": 0, "teleop_s": 0.0}
+                    return {"ended": "homed", "scene_homed": scene_homed, "homes": homes,
+                            "searches": 0, "teleop_s": 0.0}
                 mode = WALL
             if deadline is None and max_teleop_s is not None:
                 deadline = time.monotonic() + float(max_teleop_s)
@@ -274,8 +310,8 @@ class PeerSession:
             self._moved_ns = self._now_ns()
             teleop_s += time.monotonic() - started
             if why != "found":  # only a search ends with "found": home on it
-                return {"ended": why, "homes": homes, "searches": searches,
-                        "teleop_s": round(teleop_s, 1)}
+                return {"ended": why, "scene_homed": scene_homed, "homes": homes,
+                        "searches": searches, "teleop_s": round(teleop_s, 1)}
 
     def _wait_arm_tf(self) -> None:
         deadline = time.monotonic() + self.static_tf_timeout_s
@@ -343,7 +379,6 @@ class PeerSession:
             time.sleep(WAIT_STEP_S)
 
     def _home(self, found) -> None:
-        ctx, arm = self._ctx, self._arm
         (pos, R), latch = found
         if latch.off_deg > 1.0:
             self._log.warning(
@@ -360,31 +395,149 @@ class PeerSession:
             f"[{self.ee_link} at standoff {self.standoff:.3f} m, offsets "
             f"({self.goal_offset[0]:.3f}, {self.goal_offset[1]:.3f}) in {self.fridge_frame}]"
         )
-        if self.execute:
-            ctx.progress("homing", 10.0, "planning and moving to the standoff")
-            scale = max(MIN_SPEED_SCALE, rammp_arm.GO_TO_SPEED_SCALE * self.speed)
-            ok = arm.go_to_ee_pose(pos, quat, "to the fridge standoff", scale)
-            if not ok:
-                raise EngineError(
-                    "refused",
-                    f"homing: {arm.last_error} -- the arm holds where it is",
-                    recoverable=True,
-                )
-            ctx.progress("homing", 100.0, "at the standoff")
-        else:
-            plan = arm.plan_to_pose(pos, quat, arm.raw_joints())
-            if not plan.success:
-                raise EngineError(
-                    "refused",
-                    f"dry run: no plan to the standoff ({plan.message})",
-                    recoverable=True,
-                )
-            self._log.info(f"dry run: cuRobo planned the standoff in {plan.planning_time:.2f}s")
-            ctx.progress("homing", 100.0, "dry run: standoff planned, not moved")
+        ok, why = self._move_to("homing", (pos, R), "to the fridge standoff")
+        if not ok:
+            raise EngineError("refused", f"homing: {why} -- the arm holds where it is",
+                              recoverable=True)
 
-    def _goal_from(self, T_SF: np.ndarray):
-        """(position, rotation) of the tool frame in arm.frame, for E at the standoff."""
-        p_FE = np.array([self.goal_offset[0], self.goal_offset[1], -self.standoff])
+    def _move_to(self, phase: str, goal, label: str):
+        """go_to_ee_pose the tool frame to `goal` = (position, rotation) in arm.frame; a dry run
+        only plans it. (True, '') or (False, why). A start inside cuRobo's joint-limit margin
+        (START_IN_LIMIT_MARGIN) is unwound first (unwind_limits) and the move tried once more."""
+        ok, why = self._try_move(phase, goal, label, None)
+        if ok or not self.unwind_limits or "START_IN_LIMIT_MARGIN" not in why:
+            return ok, why
+        ok, q_start, why_u = self._unwind(why)
+        if not ok:
+            return False, f"{why} (not unwound: {why_u})"
+        return self._try_move(phase, goal, label, q_start)
+
+    def _unwind(self, why: str):
+        """Turn each joint the planner said is inside its limit margin back to unwind_extra_rad
+        past the margin: one slow min-jerk joint trajectory, executed directly by the driver (no
+        cuRobo: it would refuse the same start), only those joints moving. (True, joints the next
+        plan starts from -- None: the measured ones --, '') or (False, None, why)."""
+        hits = LIMIT_MARGIN.findall(why)
+        if not hits:
+            return False, None, "could not read the joint and its limits from the planner's message"
+        q0 = np.asarray(self._arm.raw_joints(), dtype=float)
+        q1 = q0.copy()
+        for idx, lo, hi, margin in hits:
+            j, m = int(idx) - 1, float(margin) + self.unwind_extra_rad
+            q1[j] = min(max(q0[j], float(lo) + m), float(hi) - m)
+        delta = q1 - q0
+        big = float(np.max(np.abs(delta)))
+        moves = ", ".join(
+            f"{rammp_arm.JOINTS[j]} {math.degrees(delta[j]):+.1f} deg"
+            for j in range(len(delta)) if abs(delta[j]) > 1e-6
+        )
+        if big > self.unwind_max_rad:
+            return False, None, f"it needs {moves}, more than unwind_max_rad {self.unwind_max_rad}"
+        if big < 1e-6:
+            return False, None, "the joints are already outside the margin"
+        if not self.execute:
+            self._log.warning(f"dry run: would first turn {moves} away from the limit")
+            return True, q1, ""
+        self._log.warning(f"start inside cuRobo's joint-limit margin: turning {moves} first")
+        self._ctx.progress("unwind", 0.0, f"turning {moves} away from its limit")
+        T = max(1.0, big / UNWIND_SPEED)
+        points = []
+        for k in range(UNWIND_POINTS + 1):
+            tau = k / UNWIND_POINTS
+            s = 10 * tau**3 - 15 * tau**4 + 6 * tau**5
+            ds = (30 * tau**2 - 60 * tau**3 + 30 * tau**4) / T
+            points.append((tau * T, q0 + s * delta, ds * delta))
+        res = self._arm.execute_joint_trajectory(list(rammp_arm.JOINTS), points)
+        self._moved_ns = self._now_ns()
+        if res.error_code != 0:
+            return False, None, f"the unwind trajectory ended {res.error_code} {res.error_string}"
+        time.sleep(0.3)  # let /joint_states catch up before the next plan reads them
+        return True, None, ""
+
+    def _try_move(self, phase: str, goal, label: str, q_start):
+        """One go_to_ee_pose (dry run: plan_to_pose from `q_start`, else the measured joints)."""
+        ctx, arm = self._ctx, self._arm
+        pos, R = goal
+        quat = geo.matrix_to_quat(R)
+        if not self.execute:
+            start = arm.raw_joints() if q_start is None else q_start
+            plan = arm.plan_to_pose(pos, quat, start)
+            if not plan.success:
+                return False, f"dry run: no plan ({plan.message})"
+            self._log.info(f"dry run: cuRobo planned {label} in {plan.planning_time:.2f}s")
+            ctx.progress(phase, 100.0, f"dry run: planned {label}, not moved")
+            return True, ""
+        ctx.progress(phase, 10.0, f"planning and moving {label}")
+        scale = max(MIN_SPEED_SCALE, rammp_arm.GO_TO_SPEED_SCALE * self.speed)
+        ok = arm.go_to_ee_pose(pos, quat, label, scale)
+        self._moved_ns = self._now_ns()  # it moved (or tried): no fridge TF from before is a goal
+        if not ok:
+            return False, arm.last_error
+        ctx.progress(phase, 100.0, f"moved {label}")
+        return True, ""
+
+    # ------------------------------------------------------------------ scene homing
+
+    def _scene_home(self) -> bool:
+        """Put the wrist camera in front of the fridge the scene camera sees. True if it moved
+        there (a dry run: planned it); False, with a warning, if it was skipped."""
+        self._ctx.progress("scene_homing", 0.0, "locating the fridge in the scene camera")
+        est, why = self._scene.estimate(self._ctx, self.scene_wait_s, self.scene_frames)
+        if est is None:
+            self._log.warning(f"scene homing skipped: {why}")
+            return False
+        p_cam, frame_id, _, summary = est
+        try:
+            T_SC = self._lookup(self._arm_frame, frame_id)
+            up_S = self._up_S()
+            d, why = self._scene_direction(T_SC, (T_SC @ np.append(p_cam, 1.0))[:3], up_S)
+        except TransformException as exc:
+            self._log.warning(f"scene homing skipped: no TF to {self._arm_frame} ({exc})")
+            return False
+        if d is None:
+            self._log.warning(f"scene homing skipped: {why}")
+            return False
+        p_S = (T_SC @ np.append(p_cam, 1.0))[:3]
+        # a stand-in fridge frame at the point, +z along the approach, the detector's in-plane
+        # axes: the same facing (R_FE) and tool offset as homing on the real one
+        T_SF = geo.make_transform(pf.detector_rotation(d, up_S), p_S)
+        goal = self._goal_from(T_SF, standoff=self.scene_standoff, offset=(0.0, 0.0))
+        self._goal_pub.publish(self._pose_msg(*goal))
+        self._log.info(
+            f"scene homing: fridge point ({p_S[0]:.3f}, {p_S[1]:.3f}, {p_S[2]:.3f}) in "
+            f"{self._arm_frame} [{summary}], approach ({d[0]:+.2f}, {d[1]:+.2f}, {d[2]:+.2f}) "
+            f"({self.scene_approach}); {self.ee_link} {self.scene_standoff:.2f} m in front of it"
+        )
+        ok, why = self._move_to("scene_homing", goal, "in front of the fridge (scene camera)")
+        if not ok:
+            self._log.warning(f"scene homing skipped: {why}")
+        return ok
+
+    def _scene_direction(self, T_SC: np.ndarray, p_S: np.ndarray, up_S: np.ndarray):
+        """(the approach, level, unit, in S, '') or (None, why). Raises TransformException."""
+        if self.scene_approach == "robot_forward":
+            d = self._lookup(self._arm_frame, self.base_frame)[:3, :3] @ self._scene_forward_B
+        elif self.scene_approach == "camera_ray":
+            d = p_S - T_SC[:3, 3]
+        else:  # "from_arm": from the arm's base, S's origin
+            d = p_S.copy()
+        d = d - float(d @ up_S) * up_S
+        n = float(np.linalg.norm(d))
+        if n < 1e-3:
+            return None, f"scene_approach {self.scene_approach} is vertical"
+        d = d / n
+        if float(p_S @ d) <= 0.0:
+            return None, (
+                f"the fridge point is behind the arm along scene_approach {self.scene_approach}"
+            )
+        return d, ""
+
+    def _goal_from(self, T_SF: np.ndarray, standoff=None, offset=None):
+        """(position, rotation) of the tool frame in arm.frame, for E at the standoff (default
+        standoff_distance, offset_x / offset_y) in front of fridge frame T_SF."""
+        standoff = self.standoff if standoff is None else standoff
+        ox, oy = self.goal_offset if offset is None else offset
+        p_FE = np.array([ox, oy, -standoff])
         T_SG = T_SF @ geo.make_transform(self._R_FE, p_FE) @ self._T_EG
         return T_SG[:3, 3], T_SG[:3, :3]
 

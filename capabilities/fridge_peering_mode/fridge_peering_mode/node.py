@@ -1,7 +1,8 @@
 """The fridge_peering_mode capability: look inside an open fridge with the wrist camera.
 
-Action `peer` (streaming.PeerSession.run): wait for the plane detector's fridge TF, plan to a
-standoff in front of the back wall with go_to_ee_pose, then (unless `teleop` is false) stream
+Action `peer` (streaming.PeerSession.run): go to the fridge the scene camera sees (its 2D box and
+depth), wait for the plane detector's fridge TF, plan to a standoff in front of the back wall with
+go_to_ee_pose, then (unless `teleop` is false) stream
 ee_twist as a closed-loop servo: the joystick slides the camera along the wall, which the servo
 follows as the detector re-estimates it. Teleop runs until `max_teleop_s` (success) or a cancel.
 The joystick only moves the camera: no buttons are read.
@@ -39,6 +40,7 @@ from .streaming import PeerSession, facing, follow_params
 
 ENGINE_ID = "fridge_peering_mode"  # = the package, its image and /<id>/... (make action CAP=)
 FOLLOW_MODES = ("off", "idle", "continuous")
+SCENE_APPROACHES = ("robot_forward", "camera_ray", "from_arm")
 
 # ROS parameter -> default. Frames, topics and what is measured on the fridge are per robot (the
 # fragment's params:). /ee_state's frame and the goals' frame are arm.frame, not one of these.
@@ -86,6 +88,37 @@ PARAMS = {
     # always does)
     "search_when_no_fridge": True,
     "search_range_m": 0.15,
+    # scene homing, first: the scene camera's scene_class box (scene_detections_topic) and depth
+    # (scene_depth_topic, ALIGNED TO COLOUR) place a point at scene_box_point (fractions across /
+    # down the box: 0.75 = 1/4 from its right border), its depth the scene_depth_percentile of the
+    # fridge's mask pixels within scene_window_frac x the box around it (scene_depth_range_m, at
+    # least scene_min_samples), the median of scene_frames detections within scene_wait_s.
+    # ee_link goes scene_standoff_m in front of it, the camera looking along scene_approach (level):
+    # "robot_forward" (scene_forward_axis of base_frame), "camera_ray" (from the scene camera
+    # through the point) or "from_arm" (from the arm base through it). Skipped, with a warning, when
+    # it finds nothing or cannot plan
+    "scene_homing": True,
+    "scene_detections_topic": "/perception/object_detections",
+    "scene_depth_topic": "/scene_camera/depth/image_rect_raw",
+    "scene_camera_info_topic": "/scene_camera/color/camera_info",
+    "scene_class": "fridge",
+    "scene_min_score": 0.5,
+    "scene_box_point": [0.75, 0.5],
+    "scene_window_frac": 0.1,
+    "scene_depth_percentile": 50.0,
+    "scene_depth_range_m": [0.3, 3.0],
+    "scene_min_samples": 30,
+    "scene_frames": 5,
+    "scene_wait_s": 3.0,
+    "scene_standoff_m": 0.40,
+    "scene_approach": "robot_forward",
+    "scene_forward_axis": "+x",
+    # a go_to whose start is inside cuRobo's joint-limit margin (START_IN_LIMIT_MARGIN) is
+    # retried once after turning only those joints unwind_extra_rad (rad) past the margin, by a
+    # slow direct joint trajectory (not collision-checked; refused if it needs > unwind_max_rad)
+    "unwind_limits": True,
+    "unwind_extra_rad": 0.05,
+    "unwind_max_rad": 0.25,
     # the axes ee_twist setpoints are in (the driver: arm_mount)
     "twist_frame": "arm_mount",
     # the servo: full stick slides the target at max_speed on the wall and standoff_speed toward it
@@ -147,10 +180,12 @@ def _problems(cfg) -> list[str]:
     out = []
     for name in ("rate_hz", "joy_timeout_s", "ee_state_timeout_s", "fridge_tf_wait_s",
                  "static_tf_timeout_s", "max_lin", "max_ang", "max_lead_m", "expo",
-                 "follow_stale_s", "standoff_distance", "search_range_m"):
+                 "follow_stale_s", "standoff_distance", "search_range_m", "scene_wait_s",
+                 "scene_standoff_m", "scene_window_frac", "unwind_max_rad"):
         if not cfg[name] > 0.0:
             out.append(f"{name} must be > 0, got {cfg[name]}")
-    for name in ("max_speed", "standoff_speed", "kp_lin", "kp_ang", "follow_settle_s"):
+    for name in ("max_speed", "standoff_speed", "kp_lin", "kp_ang", "follow_settle_s",
+                 "unwind_extra_rad"):
         if cfg[name] < 0.0:
             out.append(f"{name} must be >= 0, got {cfg[name]}")
     if cfg["rate_hz"] > 0.0 and not cfg["stream_timeout_s"] > 1.0 / cfg["rate_hz"]:
@@ -171,12 +206,30 @@ def _problems(cfg) -> list[str]:
             f"standoff_distance {cfg['standoff_distance']} lies outside standoff_limits "
             f"[{lo}, {hi}]: teleop would start outside its own limits"
         )
+    if cfg["scene_approach"] not in SCENE_APPROACHES:
+        out.append(
+            f"scene_approach must be one of {SCENE_APPROACHES}, got {cfg['scene_approach']!r}"
+        )
+    bp = list(cfg["scene_box_point"])
+    if not (len(bp) == 2 and all(0.0 <= v <= 1.0 for v in bp)):
+        out.append("scene_box_point must be [across, down], each in [0, 1]")
+    zr = list(cfg["scene_depth_range_m"])
+    if not (len(zr) == 2 and 0.0 < zr[0] < zr[1]):
+        out.append("scene_depth_range_m must be [min, max], 0 < min < max")
+    if not 0.0 <= cfg["scene_depth_percentile"] <= 100.0:
+        out.append("scene_depth_percentile must be in [0, 100]")
+    if not 0.0 <= cfg["scene_min_score"] <= 1.0:
+        out.append("scene_min_score must be in [0, 1]")
+    for name in ("scene_frames", "scene_min_samples"):
+        if cfg[name] < 1:
+            out.append(f"{name} must be >= 1, got {cfg[name]}")
     if cfg["follow_mode"] not in FOLLOW_MODES:
         out.append(f"follow_mode must be one of {FOLLOW_MODES}, got {cfg['follow_mode']!r}")
     out += [f"follow_*: {p}" for p in follow_params(cfg).problems()]
     try:
         facing(cfg)
         geo.axis_vector(cfg["up_axis"])
+        geo.axis_vector(cfg["scene_forward_axis"])
     except ValueError as exc:
         out.append(str(exc))
     return out
