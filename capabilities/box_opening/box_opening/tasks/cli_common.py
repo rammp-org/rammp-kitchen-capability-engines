@@ -239,6 +239,29 @@ def load_body_or_exit(args, who):
     return model
 
 
+def planner_body_or_exit(node, model, execute, who):
+    """With the body model on, a run that moves the arm starts only where the planner plans around
+    the same chair and user (preflight.planner_body_verdict: its config the body model's, world
+    ""). An empty-world planner would fly the look, the carry and home through them while the
+    plan-free lines are held out: not starting, saying why. Without --execute, said only."""
+    if model is None:
+        return
+    from box_opening.tasks.preflight import planner_body_verdict, planner_world
+
+    try:
+        world, config = planner_world(node, with_config=True)
+    except Exception as e:  # noqa: BLE001 - no answer is an answer: refused below
+        log.info("%s the planner's parameters could not be read (%s)" % (who, e))
+        world, config = None, None
+    level, text = planner_body_verdict(world, config, model.source)
+    if level == "PASS":
+        log.info("%s %s" % (who, text))
+        return
+    if execute:
+        sys.exit("%s not starting: %s. Nothing moved." % (who, text))
+    log.info("%s WARN %s (nothing moves this run)" % (who, text))
+
+
 def build_ctx(args):
     """Ctx + Runner for a CLI that has not detected a container (cpose
     None): only pre-detection (bench-world) legs can be planned from it."""
@@ -253,7 +276,9 @@ def build_ctx(args):
     # when the description is missing: HOME is a joint goal and needs no
     # chain; only a plan-free lift refuses (LiftFree)
     approach.set_chain_root(worlds.base_frame, urdf_path=_arm_urdf_path(node, worlds.base_frame))
-    load_body_or_exit(args, "[%s]" % ap_prog())
+    # the body model, never in `model` (the container's: the Ctx below plans with it)
+    body_model = load_body_or_exit(args, "[%s]" % ap_prog())
+    planner_body_or_exit(node, body_model, bool(getattr(args, "execute", False)), "[%s]" % ap_prog())
     ctx = Ctx(
         model=model,
         cpose=None,

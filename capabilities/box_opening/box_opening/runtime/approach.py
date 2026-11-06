@@ -104,6 +104,59 @@ def body_check():
         return None
 
 
+# goals the body check never refuses: the robot's rest pose(s), config not chosen by a run. flatbot's
+# HOME stands inside the chair model's left armrest box today (the study's problem 1, the owner's to
+# settle): a goal box_opening chooses is refused there, the rest it was told to go to is not.
+_REST_GOALS = None  # None: [constants.HOME]
+REST_GOAL_TOL_RAD = 1e-3
+
+
+def set_rest_goals(goals):
+    """The joint goals goal_refusal lets through (the run's rest: press_demo's rest_joints, and
+    HOME); None: HOME alone."""
+    global _REST_GOALS
+    _REST_GOALS = None if goals is None else [[float(v) for v in q] for q in goals]
+
+
+def _is_rest_goal(q):
+    from box_opening.constants import HOME
+    from box_opening.geometry import ang_diff
+
+    for rest in [list(HOME)] if _REST_GOALS is None else _REST_GOALS:
+        if len(rest) == len(q) and max(abs(ang_diff(float(a), float(b))) for a, b in zip(q, rest, strict=True)) < (
+            REST_GOAL_TOL_RAD
+        ):
+            return True
+    return False
+
+
+def goal_refusal(target, start_joints=None, end_joints=None):
+    """Why a planner goal box_opening sends must not go, or None: the arm at it would stand inside
+    the body model (the chair, the user, a run's own boxes), strictly (Body.pose_refusal: no start
+    allowance). `target` is a Leg's ("joints", q7) or ("pose", xyz, quat[, offset]); a pose is
+    judged at the joints the client sends it as (client.pose_goal_joints, box_opening's own IK) —
+    and, where `end_joints` is given (a plan's end), at those. The rest pose (set_rest_goals) is
+    never refused. None with the check off."""
+    check = body_check()
+    if check is None:
+        return None
+    q = end_joints
+    if q is None:
+        kind, *rest = target
+        if kind == "joints":
+            q = rest[0]
+        else:
+            from box_opening.runtime.client import pose_goal_joints
+
+            q = pose_goal_joints(rest[0], rest[1], start_joints)
+            if q is None:
+                return None  # sent as a pose: the plan's end is judged (end_joints)
+    q = [float(v) for v in q]
+    if _is_rest_goal(q):
+        return None
+    return check.pose_refusal(q)
+
+
 def set_obstacles(boxes, pad_m=None):
     """Hold the chain's lines out of `boxes` too, found by this run (runtime/body
     Body.with_obstacles: (name, centre, half extents[, rotation]) in the chain's root, padded as

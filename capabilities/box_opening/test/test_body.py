@@ -11,7 +11,7 @@ import pytest
 from conftest import FakeClient, flatbot_urdf, traj
 
 from box_opening.constants import HOME
-from box_opening.models.container import ContainerPose
+from box_opening.models.container import ContainerModel, ContainerPose
 from box_opening.primitives import core
 from box_opening.runtime import approach, body
 from box_opening.runtime.kinematics import ArmChain, mat_to_quat_xyzw
@@ -291,10 +291,16 @@ def test_the_cli_loads_the_param_and_an_explicit_empty_value_turns_it_off(monkey
     monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), FakeClient()))
     monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
     path = _model_files(tmp_path, [("b", (1.0, 0.0, 0.5), (0.1, 0.1, 0.1))], layer="person")
-    cli_common.build_ctx(Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers=path))
+    ctx, _r = cli_common.build_ctx(
+        Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers=path)
+    )
     assert approach._chain().body is not None and approach._chain().body.model.names == ["person/b"]
-    cli_common.build_ctx(Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers=""))
+    assert isinstance(ctx.model, ContainerModel)  # the container's, never the body model
+    ctx, _r = cli_common.build_ctx(
+        Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers="")
+    )
     assert approach._chain().body is None
+    assert isinstance(ctx.model, ContainerModel)
 
 
 def test_offline_the_env_var_alone_turns_it_on(monkeypatch, tmp_path):
@@ -540,3 +546,101 @@ def test_a_body_model_without_the_users_layer_stops_the_run(monkeypatch, tmp_pat
     args = Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers=path)
     with pytest.raises(SystemExit, match="has no layer person, which .*robot_body.yaml's near_user slows"):
         cli_common.build_ctx(args)
+
+
+def _goal_chain(tmp_path):
+    """flatbot's chain with a person box under the hand 0.45 over (0.6, 0): the hand at 0.33 is inside it."""
+    path = _model_files(tmp_path, [("lap", (0.6, 0.0, 0.20), (0.30, 0.30, 0.20))], layer="person")
+    approach.set_body(body.load(path))
+    approach.set_chain_root("arm_mount", flatbot_urdf())
+    chain = approach._chain()
+    return chain, _over_table(chain), chain.nearest_solution(list(HOME), [0.6, 0.0, 0.33], DOWN)
+
+
+def test_a_goal_inside_the_body_model_is_refused_before_it_is_sent_but_never_the_rest(tmp_path):
+    chain, clear, inside = _goal_chain(tmp_path)
+    assert inside is not None and approach.goal_refusal(("joints", clear)) is None
+    why = approach.goal_refusal(("joints", inside))
+    assert why.startswith("the chair and user: arm_") and "into person/lap" in why
+    # a pose goal is judged at the joints the client sends it as (its own IK); a plan's end at the end
+    assert "person/lap" in approach.goal_refusal(("pose", [0.6, 0.0, 0.33], DOWN), list(clear))
+    assert approach.goal_refusal(("pose", [0.6, 0.0, 0.45], DOWN), list(clear)) is None
+    assert "person/lap" in approach.goal_refusal(("pose", [0.6, 0.0, 0.45], DOWN), list(clear), inside)
+    # the rest pose: flatbot's HOME is inside the chair model's armrest today, and is never refused
+    approach.set_rest_goals([inside])
+    assert approach.goal_refusal(("joints", inside)) is None
+    approach.set_rest_goals(None)
+    approach.set_body(False)  # off: nothing refused
+    assert approach.goal_refusal(("joints", inside)) is None
+
+
+def test_plan_motion_refuses_a_goal_inside_unsent_and_a_plan_that_ends_inside(ctx, tmp_path):
+    from box_opening.primitives.core import PlanState, _plan_motion
+
+    _chain_, clear, inside = _goal_chain(tmp_path)
+    world = ("full", "/w/full.yaml")
+    with pytest.raises(RuntimeError, match="look refused before it was sent to the planner: its goal puts the arm"):
+        _plan_motion(ctx, PlanState(joints=list(clear), chain=0), "look", ("joints", inside), world, 0.5)
+    assert ctx.client.joint_targets == []  # never sent
+    leg, _st = _plan_motion(ctx, PlanState(joints=list(clear), chain=0), "look", ("joints", clear), world, 0.5)
+    assert leg.goal_joints == pytest.approx(list(clear))
+    ctx.client.plans.append(
+        SimpleNamespace(success=True, message="", trajectory=traj(clear, inside), planning_time=0.1)
+    )
+    with pytest.raises(RuntimeError, match="carry refused before it was flown: its goal puts the arm inside the chair"):
+        _plan_motion(ctx, PlanState(joints=list(clear), chain=0), "carry", ("pose", [0.6, 0.0, 0.45], DOWN), world, 0.5)
+    approach.set_rest_goals([inside])  # a home to the rest: planned
+    try:
+        leg, _st = _plan_motion(ctx, PlanState(joints=list(clear), chain=0), "home", ("joints", inside), world, 0.4)
+        assert leg.goal_joints == pytest.approx(list(inside))
+    finally:
+        approach.set_rest_goals(None)
+
+
+def test_a_lazy_leg_replanned_into_the_body_model_is_refused(tmp_path):
+    from box_opening.runtime.runner import Runner
+
+    _chain_, clear, inside = _goal_chain(tmp_path)
+    client = FakeClient()
+    client.live = list(clear)
+    runner = Runner(client, log_dir=tmp_path / "runs")
+    leg = SimpleNamespace(
+        name="retreat", plan_free=False, world="full", world_path="/w/full.yaml", target=("joints", list(inside))
+    )
+    assert runner._replan_group([leg], 3) == (None, 3) and client.joint_targets == []
+
+
+def test_with_the_body_model_on_only_a_planner_on_the_same_chair_passes():
+    from box_opening.tasks import preflight
+
+    src = "/config/robot/curobo/planner.yaml"
+    assert preflight.planner_body_verdict("", src, src)[0] == "PASS"
+    assert preflight.planner_body_verdict(None, "/config/robot/curobo/../curobo/planner.yaml", src)[0] == "PASS"
+    level, text = preflight.planner_body_verdict("world_empty.yaml", src, src)
+    assert level == "FAIL" and "plans in world world_empty.yaml" in text and 'with world ""' in text
+    level, text = preflight.planner_body_verdict("", "/config/robot/curobo/planner_empty_world.yaml", src)
+    assert level == "FAIL" and "config /config/robot/curobo/planner_empty_world.yaml" in text
+    assert "did not say" in preflight.planner_body_verdict(None, None, src)[1]
+    # through the planner-world line: the body on decides; off, as before (world_empty.yaml passes)
+    assert preflight.planner_world_verdict("world_empty.yaml", "gen3_real.yaml", body_source=src)[0] == "FAIL"
+    assert preflight.planner_world_verdict("world_empty.yaml", "gen3_real.yaml")[0] == "PASS"
+
+
+def test_a_run_that_moves_refuses_an_empty_world_planner_with_the_body_model_on(monkeypatch, tmp_path):
+    from box_opening.tasks import preflight
+
+    monkeypatch.delenv(body.BODY_LAYERS_ENV, raising=False)
+    monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), FakeClient()))
+    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
+    path = _model_files(tmp_path, [("b", (1.0, 0.0, 0.5), (0.1, 0.1, 0.1))], layer="person")
+    said = {"world": ("world_empty.yaml", "/config/robot/curobo/planner_empty_world.yaml")}
+    monkeypatch.setattr(preflight, "planner_world", lambda node, with_config=False: said["world"])
+    args = Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=True, body_layers=path)
+    with pytest.raises(SystemExit, match="not starting: the body model is on .* but the planner plans in world"):
+        cli_common.build_ctx(args)
+    cli_common.build_ctx(Namespace(**{**vars(args), "execute": False}))  # nothing moves: said, not refused
+    said["world"] = ("", path)
+    ctx_, _runner = cli_common.build_ctx(args)  # the same chair: on
+    assert ctx_ is not None
+    said["world"] = ("world_empty.yaml", None)
+    cli_common.build_ctx(Namespace(**{**vars(args), "body_layers": ""}))  # the check off: no refusal

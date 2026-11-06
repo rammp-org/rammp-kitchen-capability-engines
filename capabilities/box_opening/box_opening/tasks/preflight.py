@@ -4,7 +4,10 @@ FAIL (nonzero exit): this shell not on Cyclone DDS; /joint_states missing
 or without effort fields; the driver's trajectory action or the planner's
 actions unreachable; the planner unable to load a world this repo writes
 (it runs in a container, so the worlds directory must be mounted into it
-at the same path); no TF for the finger tips, or for the wrist camera's
+at the same path); the body model on (body_layers) and unreadable, or the
+planner not planning around its same chair and user (its config and world
+"": an empty-world planner would fly the look, the carry and home through
+them); no TF for the finger tips, or for the wrist camera's
 parent frame; another program that moves this arm on the graph (both of
 which press_demo --execute refuses on); no gripper reported; a wrist
 camera stream the mission reads silent (colour, camera_info, and the
@@ -258,11 +261,40 @@ def planner_world(node, timeout_s=3.0, with_config=False):
     return got if with_config else got[0]
 
 
-def planner_world_verdict(world, config):
+def planner_body_verdict(world, config, body_source):
+    """(level, text) for whether the planner plans around the same chair and user box_opening holds
+    its own lines out of (its body model, read from `body_source`, a cuRobo planner config): PASS
+    only where the planner was started on that same config with world "" (the config composes its
+    layers into every world: flatbot's /config/robot/curobo/planner.yaml, both containers mounting
+    config/robots/current at /config/robot). FAIL otherwise — an empty-world planner
+    (world_empty.yaml, planner_empty_world.yaml) plans the look, the carry and home straight through
+    the chair and the user while box_opening's own lines are held out of them, and a planner that
+    does not say is not trusted to. Pure."""
+    want = os.path.normpath(str(body_source))
+    if world is None and config is None:
+        return "FAIL", (
+            "the planner did not say what it plans around (/rammp_curobo/get_parameters did not answer), and "
+            "the body model is on (%s): its moves must avoid the same chair and user" % want
+        )
+    if not world and config and os.path.normpath(str(config)) == want:
+        return "PASS", 'the planner plans around the body model\'s chair and user (%s, world "")' % config
+    return "FAIL", (
+        "the body model is on (%s) but the planner plans in %s: box_opening holds its own lines out of the "
+        "chair and user, the planner's moves (the look, the carry, home) would not be — start the planner on "
+        'config %s with world "" (profiles/box-opening.yaml), or turn the body check off (body_layers / '
+        '--body-layers "")'
+        % (want, ("world %s" % world) if world else ("config %s" % (config or "an unknown config")), want)
+    )
+
+
+def planner_world_verdict(world, config, body_source=None):
     """(level, text) for the world the planner was started with: box opening sends it none, so it
-    plans in that one. PASS world_empty.yaml (the arm alone), or a robot's own planner config that
-    names its world (world "": flatbot's, its MEBot chair, seat and occupant in every world). WARN
-    otherwise: said, not failed, the deployment owns it."""
+    plans in that one. With the body model on (`body_source`, its planner config), planner_body_verdict:
+    only that same config with world "" passes. Off: PASS world_empty.yaml (the arm alone), or a
+    robot's own planner config that names its world (world "": flatbot's, its MEBot chair, seat and
+    occupant in every world); WARN otherwise: said, not failed, the deployment owns it."""
+    if body_source:
+        return planner_body_verdict(world, config, body_source)
     if world == PLANNER_WORLD:
         return "PASS", "planner started with %s" % world
     if not world and config and str(config).startswith("/config/robot/"):
@@ -271,6 +303,27 @@ def planner_world_verdict(world, config):
         "planner started with %s, not %s — box opening plans in it as it is (the deployment's "
         "planner `world` parameter sets it)" % (world or "an unknown world", PLANNER_WORLD)
     )
+
+
+def body_source_verdict(body_layers):
+    """(level, text, source): the body model (runtime/body.resolve of `body_layers`, the CLI's
+    --body-layers) — PASS off (source None) or loaded (source its planner config), FAIL where it
+    cannot be read (source None: a run would stop there before it moves)."""
+    from box_opening.runtime import body
+
+    path = body.resolve(body_layers)
+    if not path:
+        return (
+            "PASS",
+            "body check off (--body-layers / %s empty): nothing holds the arm out of a chair" % (body.BODY_LAYERS_ENV),
+            None,
+        )
+    try:
+        model = body.load(path)
+    except body.BodyModelError as e:
+        return "FAIL", "%s — a run stops there before it moves" % e, None
+    layers = ", ".join(sorted({n.split("/", 1)[0] for n in model.names}))
+    return "PASS", "body model %s: %d boxes (%s)" % (path, len(model.names), layers), path
 
 
 def main():
@@ -320,12 +373,19 @@ def main():
         failures += 1
 
     # 4. the world the planner plans in: the one its deployment started it
-    #    with (box opening sends none, worlds.py) — world_empty.yaml, the arm
-    #    and nothing else. Said, not failed: the deployment owns it.
+    #    with (box opening sends none, worlds.py). With the body model on (the
+    #    chair and user box_opening's own lines are held out of), the planner
+    #    must plan around the same ones (FAIL otherwise: an empty-world planner
+    #    flies the look, the carry and home through them); off, world_empty.yaml
+    #    or the robot's own config, said, not failed: the deployment owns it.
     store = WorldStore(args.bench_world or cli_common.default_bench_yaml())
     client._base_frame = store.base_frame
-    level, text = planner_world_verdict(*planner_world(node, with_config=True))
+    level, text, source = body_source_verdict(getattr(args, "body_layers", None))
     log.info("%-4s  %s" % (level, text))
+    failures += level == "FAIL"
+    level, text = planner_world_verdict(*planner_world(node, with_config=True), body_source=source)
+    log.info("%-4s  %s" % (level, text))
+    failures += level == "FAIL"
 
     # 5. TF for the finger tips (robot_state_publisher from the launch)
     tips = client.contact_xyz(timeout_s=3.0)

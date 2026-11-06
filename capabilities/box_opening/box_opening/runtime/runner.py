@@ -39,6 +39,7 @@ from box_opening.constants import (
 )
 from box_opening.geometry import ang_diff
 from box_opening.runtime.abort import ArmHalted
+from box_opening.runtime.approach import goal_refusal
 from box_opening.runtime.driver import contact_profile_for
 from box_opening.runtime.guards import (
     ARM_AFTER_CAP,
@@ -1303,6 +1304,11 @@ class Runner:
                 log.info("REFUSED replan of %s — set_world failed: %s" % (leg.name, msg))
                 return None, next_chain
             kind, *rest = leg.target
+            inside = goal_refusal(leg.target, live)
+            if inside is not None:
+                # never sent: the planner may plan in an empty world (approach.goal_refusal)
+                log.info("REFUSED replan of %s — its goal puts the arm inside %s" % (leg.name, inside))
+                return None, next_chain
             n_refused = len(getattr(self.client, "refusals", ()))
             n_busy = getattr(self.client, "busy_retries", 0)
             t_plan = time.monotonic()
@@ -1324,6 +1330,10 @@ class Runner:
             )
             if plan is None or not plan.success:
                 self.note("replan_failed", name=leg.name, plan=record)
+                return None, next_chain
+            inside = goal_refusal(leg.target, live, list(plan.trajectory.points[-1].positions))
+            if inside is not None:
+                log.info("REFUSED replan of %s — its plan ends with the arm inside %s" % (leg.name, inside))
                 return None, next_chain
             # replanned trajectories pass the SAME sanity gate as pre-built
             # ones — a wandering replan executed ungated defeats spec §6

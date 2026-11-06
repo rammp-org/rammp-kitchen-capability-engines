@@ -169,6 +169,7 @@ def _plan_motion(
 ):
     world_name, world_path = world
     kind, *rest = target
+    _refuse_goal_inside(name, target, state.joints)
     if lazy or state.joints is None:
         # LAZY: this leg follows an expected touch, so its start is unknown
         # until the guard stops the arm. Pre-planning it was pure waste —
@@ -220,6 +221,7 @@ def _plan_motion(
         # (bowing) plan flies instead — say so, a press may land off-centre
         log.info("  NOTE %s: %s" % (name, plan.message))
     end = list(plan.trajectory.points[-1].positions)
+    _refuse_goal_inside(name, target, state.joints, end)
     leg = Leg(
         name=name,
         kind=Kind.MOTION,
@@ -252,6 +254,20 @@ def _plan_motion(
         ctx.contact_pad = CONTACT_SHIFT_PAD_M
     next_chain = state.chain + 1 if invalidates else state.chain
     return leg, PlanState(joints=end, chain=next_chain)
+
+
+def _refuse_goal_inside(name, target, start_joints, end=None):
+    """Raise where the goal of planned leg `name` would put the arm inside the body model
+    (approach.goal_refusal: strictly, the rest pose excepted) — before the planner is asked, and
+    again at the plan's end (`end`): flatbot's planner may plan in an empty world."""
+    from box_opening.runtime.approach import goal_refusal
+
+    why = goal_refusal(target, start_joints, end)
+    if why is not None:
+        raise RuntimeError(
+            "%s refused before it was %s: its goal puts the arm inside %s"
+            % (name, "flown" if end is not None else "sent to the planner", why)
+        )
 
 
 def as_home(leg):

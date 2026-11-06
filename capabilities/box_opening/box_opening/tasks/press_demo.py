@@ -1484,7 +1484,7 @@ def main():
     node, client = cli_common.init_runtime(args.execute)
     worlds = WorldStore(bench)
     client._base_frame = worlds.base_frame
-    from box_opening.runtime.approach import chain_ready, set_chain_root
+    from box_opening.runtime.approach import chain_ready, set_chain_root, set_rest_goals
 
     set_chain_root(worlds.base_frame, urdf_path=cli_common._arm_urdf_path(node, worlds.base_frame))
     ok, why = chain_ready()
@@ -1496,7 +1496,10 @@ def main():
             "the arm kinematics for %s are unavailable (%s). Nothing moved." % (worlds.base_frame, why)
         )
     # the chair and its user, every plan-free line held out of them (runtime/body)
-    cli_common.load_body_or_exit(args, "[press_demo]")
+    body_model = cli_common.load_body_or_exit(args, "[press_demo]")
+    # the goals the body check lets through: the rest this run starts and ends at (flatbot's HOME
+    # stands inside the chair model's armrest today; every goal the run chooses is held to it)
+    set_rest_goals([list(HOME), rest_joints(cfg)])
     runner = Runner(client)
     cli_common.apply_speed_scale(runner, args)
     # PERCEPTION ON ITS OWN THREAD. The cameras and the scene camera's
@@ -1583,6 +1586,9 @@ def main():
         why = readiness_refusal(client, args.execute, camera_cfg_name=worlds.wrist_camera_config)
         if why:
             sys.exit("[press_demo] not starting: %s" % why)
+        # the planner up: with the body model on, a run that moves must plan around the same chair and
+        # user (--detect-only moves nothing: said only)
+        cli_common.planner_body_or_exit(node, body_model, args.execute and not args.detect_only, "[press_demo]")
         if locator is None and not args.wrist_detect:
             sys.exit(
                 "[press_demo] not starting: the scene camera finds the box, and it is not calibrated (no %s: "
