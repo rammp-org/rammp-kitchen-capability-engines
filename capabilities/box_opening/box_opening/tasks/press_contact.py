@@ -50,6 +50,22 @@ where it is judged, nothing pressed past it, and the run goes back up and
 home. A watcher that fails stops the press there too (abort_on_failure),
 said; the set-down's watch (reach_lid_off.watch_setdown) flies its planned
 end instead, said.
+
+The press study (2026-11-05): beside the real watch, a shadow judges the same
+samples by a candidate fast rule (SHADOW_*, watch_beside), cutting and
+refusing nothing; the record says what it made of the press. And the record
+keeps the longest gap between the kept samples watched (feedback_gap_max_ms).
+What the watch decides follows from those samples alone — each judged once,
+in order, at the time it was heard — not from when it is polled; but a gap in
+them delays it, and one of 120 ms at the onset of the box met 50 mm high
+(10-30 13:35) turned its refusal into a press 1.57 s later (replayed). The
+samples are kept by the feedback callback on the thread that spins the
+client's node, the main one: a watch on a thread of its own would see the same
+gaps. On the 33 strokes flown none was longer than 21 ms. A change of the
+driver's global speed scale mid-stroke changes the arm's lag behind the
+reference, and a speed-up reads as a rise: the watch reads the scale the driver
+applies from how fast the fraction it reports goes (SCALE_*), and a change of
+it re-settles the watch, both rules started again.
 """
 
 from collections import deque
@@ -93,6 +109,33 @@ CONTACT_LATE_M = 0.025
 # while its rise is counted): late once they stand this much below the limit, room for a contact
 # just above it that they press a little into before it is seen
 CONTACT_LAG_M = 0.003
+# The fast rule a shadow watch judges beside the real one on every press (PressContact.watch_beside,
+# depth_press.watch_press): 4 mm over the least of the last 0.4 s, on 1 kept sample (both rules'
+# count, as CONTACT_SAMPLES is), the slow rule's settle and rise as they are. Replayed on the 33
+# strokes flown 10-29 to 11-04 (press study I-S2, its C3) it met all 32 by the fast rule, 254 / 320
+# / 412 ms after the onset (median / p90 / max) against today's 287 / 674 / 1355, none falsely, and
+# still refused the box met 50 mm above the cameras' top. But it was chosen on those same strokes,
+# and the largest free-air rise over 0.4 s before an onset was 3.4 mm. It cuts and refuses nothing:
+# its verdict is in the press's record, for the presses that fly to score
+SHADOW_RISE_M = 0.004
+SHADOW_WINDOW_S = 0.4
+SHADOW_SAMPLES = 1
+# The driver's global speed scale changed mid-stroke (press study E-S10): the reference speeds up or
+# slows down, the arm's lag behind it changes as at the slow leg's start, and a speed-up reads as a
+# rise (0.5 -> 1.0: 8 % of the changes injected false contacts, 0.25 -> 1.0 62 %). The client sees
+# the scale the driver applies, slewed: the driver's trajectory clock runs at it
+# (trajectory_executor.cpp tick: traj_t += dt x applied, fraction = traj_t / duration), so the
+# fraction it reports advances at scale / T, and T x dfrac / dt over the kept samples' heard times
+# is the applied scale (PressContact._scale). Over SCALE_SPAN_S it read 0.94-1.07 through the 198
+# impedance flights recorded 10-29 to 11-04 (all at 1.0; 0.96-1.06 on their last 60 mm), no change
+# of SCALE_CHANGE among them. A change of more than that from the scale the watch settled at
+# re-settles it (_resettle): both rules start again, as at the slow leg's start. A gap in the kept
+# samples (the node not spun) bunches the heard times after it: one longer than SCALE_GAP_S, the
+# scale is read afresh from SCALE_GAP_S after it (a shorter one puts it at most 15 % off; a 120 ms
+# one read across would put it 60 % off)
+SCALE_SPAN_S = 0.2
+SCALE_CHANGE = 0.2
+SCALE_GAP_S = 0.03
 
 
 def pads_z(chain, q):
@@ -171,7 +214,10 @@ class PressContact:
     record() is what the run record keeps of it. With `final` it watches
     only the execution's last stretch below `arm_z` (_Traj.frac_final_below):
     the set-down's, which flies in one execution from a lift off a box that
-    may stand lower (reach_lid_off.watch_setdown)."""
+    may stand lower (reach_lid_off.watch_setdown). `rise_m`, `window_s` and
+    `rise_samples` set its fast rule (None: CONTACT_RISE_M, CONTACT_WINDOW_S,
+    CONTACT_SAMPLES, read as it judges). A change of the driver's applied
+    speed scale while it watches re-settles it (_scale, SCALE_*)."""
 
     def __init__(
         self,
@@ -187,6 +233,9 @@ class PressContact:
         early_m=None,
         late_m=None,
         abort_on_failure=False,
+        rise_m=None,
+        window_s=None,
+        rise_samples=None,
     ):
         self.chain, self.client = chain, client
         self.top_z, self.arm_z = float(top_z), float(arm_z)
@@ -201,6 +250,10 @@ class PressContact:
         self.early_m = None if early_m is None else float(early_m)
         self.late_m = None if late_m is None else float(late_m)
         self.abort_on_failure = bool(abort_on_failure)
+        self.rise_m = None if rise_m is None else float(rise_m)
+        self.window_s = None if window_s is None else float(window_s)
+        self.rise_samples = None if rise_samples is None else int(rise_samples)
+        self.shadow = None  # a watch judging beside this one, on its samples (watch_beside)
         self.traj = None
         self._sent = None  # the info whose trajectory self.traj is
         self._reset()
@@ -208,6 +261,13 @@ class PressContact:
     def _reset(self):
         """Nothing seen yet: a new execution starts its watch afresh."""
         self._last_t = None  # the newest kept sample fed
+        self._prev_t = None  # ... the one fed before it (feed)
+        self.gap_max_s = None  # the longest between two kept samples, from where it arms on
+        self._scale_q = deque()  # (t, frac) of the armed samples the applied speed scale is read over
+        self._scale_from = None  # ... read again from this heard time on, after a gap (SCALE_GAP_S)
+        self.scale_ref = None  # the applied speed scale the watch settled at (_scale)
+        self.scale_seen = None  # (least, most) of the applied speed scale read
+        self.resettles = []  # (t, the scale from, to): where a change of it re-settled the watch
         self.armed_t = None
         self.arm_frac = 0.0  # where watching may begin (final: the last stretch below arm_z; None never)
         self._win = deque()  # (t, gap, pads z measured) since arming, the last CONTACT_WINDOW_S
@@ -237,36 +297,110 @@ class PressContact:
         if self.traj is None:
             return
         self.samples += 1
+        prev, self._prev_t = self._prev_t, t
         if self.armed_t is None and (self.arm_frac is None or frac < self.arm_frac):
             return  # before the stretch it watches (final): nothing to judge
         if self.armed_t is None and self.traj.z_at(frac) > self.arm_z + 0.005:
             return  # well above the slow leg: nothing to judge, no kinematics spent
         z_ref = pads_z(self.chain, self.traj.at(frac))
+        if self.armed_t is None and z_ref > self.arm_z:
+            return
+        if prev is not None:
+            # how long since the kept sample before, from where it arms on: the longest is in the
+            # record (feedback_gap_max_ms). A gap there delays what it decides, and one at the
+            # onset of a box met high may miss its fast rise (press study N12)
+            self.gap_max_s = max(self.gap_max_s or 0.0, t - prev)
+        self._arm(t, z_ref)
+        resettled = self._scale(t, frac, prev)
+        z_meas = pads_z(self.chain, q)
+        self._judge(t, frac, z_ref, z_meas)
+        if self.shadow is not None and self.shadow.failed is None:
+            try:  # the same sample judged by the shadow: no kinematics of its own
+                self.shadow._arm(t, z_ref)
+                if resettled:  # the same change of scale re-settles it too
+                    self.shadow._resettle(t)
+                self.shadow._judge(t, frac, z_ref, z_meas)
+            except Exception as e:  # noqa: BLE001 -- the shadow's own failure: in its record, nothing more
+                self.shadow.failed = "%s: %s" % (type(e).__name__, e)
+
+    def _arm(self, t, z_ref):
+        """A sample with the reference's pads at `z_ref`, at or below where it arms: watched from
+        here on, the slow rise once the reference has stood below slow_z."""
         if self.armed_t is None:
-            if z_ref > self.arm_z:
-                return
             self.armed_t = t
         if self.slow_t is None and z_ref <= self.slow_z:
             self.slow_t = t
-        z_meas = pads_z(self.chain, q)
+
+    def _scale(self, t, frac, prev):
+        """The driver's applied speed scale read at an armed sample heard at `t` (`prev` the kept
+        sample before it): the trajectory's time x how far its fraction went over the last
+        SCALE_SPAN_S of them, by their heard times (SCALE_*). A reading more than SCALE_CHANGE off
+        the scale the watch settled at re-settles it (_resettle). Returns whether it did."""
+        if prev is not None and t - prev > SCALE_GAP_S:
+            self._scale_q.clear()  # heard bunched after it: no measure of the driver's clock
+            self._scale_from = t + SCALE_GAP_S
+        if not 0.0 < frac < 1.0 or self.traj.T <= 0.0 or (self._scale_from is not None and t < self._scale_from):
+            return False  # not flying yet, or done: its clock stands
+        win = self._scale_q
+        win.append((t, frac))
+        while len(win) > 1 and t - win[1][0] >= SCALE_SPAN_S:
+            win.popleft()
+        t0, f0 = win[0]
+        if t - t0 < SCALE_SPAN_S:
+            return False
+        s = self.traj.T * (frac - f0) / (t - t0)
+        lo, hi = self.scale_seen or (s, s)
+        self.scale_seen = (min(lo, s), max(hi, s))
+        if self.scale_ref is None:
+            self.scale_ref = s
+            return False
+        if abs(s / max(self.scale_ref, 1e-3) - 1.0) <= SCALE_CHANGE:
+            return False
+        self.resettles.append((t, self.scale_ref, s))
+        self.scale_ref = s
+        self._resettle(t)
+        return True
+
+    def _resettle(self, t):
+        """The applied speed scale changed at `t` (_scale): the arm's lag behind the reference
+        changes with its speed, so both rules start again, as at the slow leg's start — the fast
+        rise over the least from here on, the slow one once it has settled again."""
+        self._win.clear()
+        self._cand, self._n_above = None, 0
+        self._slow_least, self._n_slow = None, 0
+        if self.slow_t is not None:
+            self.slow_t = t
+
+    def _rule(self):
+        """The fast rule it judges by: (rise, window, samples in a row — both rules')."""
+        return (
+            CONTACT_RISE_M if self.rise_m is None else self.rise_m,
+            CONTACT_WINDOW_S if self.window_s is None else self.window_s,
+            CONTACT_SAMPLES if self.rise_samples is None else self.rise_samples,
+        )
+
+    def _judge(self, t, frac, z_ref, z_meas):
+        """The rules on one armed sample: the pads measured at `z_meas`, the reference's at
+        `z_ref`."""
         gap = z_meas - z_ref
         self.last_gap = gap
         if self.contact is not None or self.verdict is not None:
             return
+        rise, window, in_a_row = self._rule()
         sample = (t, gap, z_meas)
         win, hist = self._win, self._hist
         win.append(sample)
         hist.append(sample)
-        while win and t - win[0][0] > CONTACT_WINDOW_S:
+        while win and t - win[0][0] > window:
             win.popleft()
         while hist and t - hist[0][0] > HISTORY_S:
             hist.popleft()
         # a fast rise: over the least of the last CONTACT_WINDOW_S
-        if self._cand is not None and gap - self._cand[1] > CONTACT_RISE_M:
+        if self._cand is not None and gap - self._cand[1] > rise:
             self._n_above += 1
         else:
             least = min(win, key=lambda s: s[1])
-            self._cand, self._n_above = (least, 1) if gap - least[1] > CONTACT_RISE_M else (None, 0)
+            self._cand, self._n_above = (least, 1) if gap - least[1] > rise else (None, 0)
         # a slow one: over the least since the slow leg's start settled
         if self.slow_t is not None and t - self.slow_t >= CONTACT_SETTLE_S:
             if self._slow_least is None or gap < self._slow_least[1]:
@@ -275,9 +409,9 @@ class PressContact:
                 self._n_slow += 1
             else:
                 self._n_slow = 0
-        if self._n_above >= CONTACT_SAMPLES:
+        if self._n_above >= in_a_row:
             self._met(t, frac, self._cand, "fast")
-        elif self._n_slow >= CONTACT_SAMPLES:
+        elif self._n_slow >= in_a_row:
             self._met(t, frac, self._slow_least, "slow")
         elif self.late_m is not None and z_meas < self.top_z - self.late_m - CONTACT_LAG_M:
             # the pads this far below the top the cameras measured, nothing met: the box is not
@@ -316,6 +450,9 @@ class PressContact:
             self._sent, self.traj = info, _Traj(self.chain, info["sent_traj"])
             if self.final:
                 self.arm_frac = self.traj.frac_final_below(self.arm_z)
+            if self.shadow is not None:  # the shadow afresh too, on the same trajectory
+                self.shadow._reset()
+                self.shadow._sent, self.shadow.traj, self.shadow.arm_frac = info, self.traj, self.arm_frac
         kept = info.get("feedback_q")
         if not kept or (self._last_t is not None and kept[-1][0] <= self._last_t):
             return  # polled at every spin (~1 kHz); a sample is kept every 10th feedback
@@ -354,6 +491,31 @@ class PressContact:
         self.held_ref = [float(v) for v in self.traj.at(progress)]
         return True
 
+    def watch_beside(self, rise_m, window_s, rise_samples):
+        """A shadow watch beside this one (self.shadow): the same press judged by the fast rule
+        `rise_m` over the least of the last `window_s`, on `rise_samples` kept samples in a row
+        (both rules' count, as CONTACT_SAMPLES is), the slow rule's settle and rise as they are.
+        It judges each sample this one does, as this one judges it (no kinematics of its own),
+        and cuts and refuses nothing: never a stop_when, it stops nothing, and one that fails
+        only says so. Its verdict is in this one's record ('shadow'). Returns it."""
+        self.shadow = PressContact(
+            self.chain,
+            self.client,
+            self.top_z,
+            self.arm_z,
+            self.past_m,
+            self.end_z,
+            cut=False,
+            final=self.final,
+            slow_z=self.slow_z,
+            early_m=self.early_m,
+            late_m=self.late_m,
+            rise_m=rise_m,
+            window_s=window_s,
+            rise_samples=rise_samples,
+        )
+        return self.shadow
+
     def refusal(self):
         """Why the press must not go on from here, once its execution is over: (verdict, the
         STOP's words), or None. "never": watched to the stroke's end, nothing met, where a band
@@ -382,13 +544,25 @@ class PressContact:
         """The run record's 'contact': where the pads met the box (the
         pads' height, how far above the top the cameras measured, when after
         the goal went out), the stroke's end past it and whether it was cut
-        there (`cut_mm` how much short of its planned end), or why not."""
+        there (`cut_mm` how much short of its planned end), or why not; the
+        longest between two kept samples it watched (`feedback_gap_max_ms`),
+        the driver's applied speed scale read (`speed_scale`, least and
+        most) and where a change of it re-settled the watch (`resettles`),
+        and what a shadow beside it made of the press (`shadow`)."""
         sent = None if self._sent is None else self._sent.get("sent_at")
         refused = self.refusal()
         out = {
             "watched": self.armed_t is not None,
             "cut_on": self.cut,
             "samples": self.samples,
+            "feedback_gap_max_ms": None if self.gap_max_s is None else round(1000 * self.gap_max_s, 1),
+            # the driver's applied speed scale as the fraction's rate read it, and where a change
+            # of it re-settled the watch (s after the goal went out, the scale from, to)
+            "speed_scale": None if self.scale_seen is None else [round(v, 3) for v in self.scale_seen],
+            "resettles": [
+                [None if sent is None else round(t - float(sent), 3), round(a, 3), round(b, 3)]
+                for t, a, b in self.resettles
+            ],
             "past_mm": round(1000 * self.past_m, 1),
             "armed_above_top_mm": round(1000 * (self.arm_z - self.top_z), 1),
             "band_mm": None
@@ -401,6 +575,8 @@ class PressContact:
         }
         if self.failed is not None:
             out["failed"] = self.failed
+        if self.shadow is not None:
+            out["shadow"] = self._shadow_record()
         if self.contact is None:
             out["met"] = False
             return out
@@ -425,6 +601,32 @@ class PressContact:
             out["why"] = "watched only"
         elif self.stopped_frac is None:
             out["why"] = "the stroke ended before its reference got there"
+        return out
+
+    def _shadow_record(self):
+        """The record's 'shadow': its rule; whether it met the box, how, where (the pads' height,
+        how far above the cameras' top) and how long after this watch's detection (ms, - before
+        it); its own verdict (early | late: it would have refused the press there); and
+        `stopped_first` where this watch stopped the stroke before it met anything."""
+        s = self.shadow
+        rise, window, in_a_row = s._rule()
+        out = {
+            "rule": {"rise_mm": round(1000 * rise, 1), "window_s": round(window, 3), "samples": in_a_row},
+            "met": s.contact is not None,
+            "verdict": s.verdict,
+        }
+        if s.failed is not None:
+            out["failed"] = s.failed
+        if s.contact is None:
+            out["stopped_first"] = self.stopped_frac is not None
+            return out
+        z_c = s.contact[1]
+        out.update(
+            how=s.how,
+            z=round(z_c, 4),
+            above_top_mm=round(1000 * (z_c - self.top_z), 1),
+            after_real_ms=None if self.detected_t is None else round(1000 * (s.detected_t - self.detected_t)),
+        )
         return out
 
 

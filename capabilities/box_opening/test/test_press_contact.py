@@ -44,20 +44,29 @@ def _ref(z0=0.40, z1=END, speed=0.025):
     return np.linspace(z0, z1, n + 1), 0.05
 
 
-def _fly(det, client, z_pads, dt, measured, cut_seen=None):
+def _fly(det, client, z_pads, dt, measured, cut_seen=None, lost=None, clock=None, heard=None):
     """The client flying `z_pads`: every kept sample, the measured pads at
-    measured(t, z_ref); stop_when polled after each. Returns (the fraction
-    it stopped at or None, the samples)."""
+    measured(t, z_ref); stop_when polled after each. lost(t): a sample the
+    client did not keep (a gap in the feedback). clock(t): the driver's
+    applied speed scale, its trajectory clock running at it (None: 1.0).
+    heard(t): when the client heard the sample sent at t (None: then).
+    Returns (the fraction it stopped at or None, the samples)."""
     traj = _traj(z_pads, dt)
     T = 0.02 + (len(z_pads) - 1) * dt
     info = {"sent_at": 100.0, "sent_traj": traj, "feedback_q": []}
     client.last_execution = info
-    t, frac = 100.0, 0.0
+    t, frac, traj_t = 100.0, 0.0, 0.0
     while frac < 1.0:
-        frac = min(1.0, (t - 100.0) / T)
+        frac = min(1.0, (t - 100.0) / T) if clock is None else min(1.0, traj_t / T)
         z_ref = float(np.interp(frac * T, [0.02 + i * dt for i in range(len(z_pads))], z_pads))
         z_m = measured(t - 100.0, z_ref)
-        info["feedback_q"].append((t, frac, [z_m - PAD] + [0.0] * 6, None))
+        if clock is not None:
+            traj_t += clock(t - 100.0) / HZ
+        if lost is not None and lost(t - 100.0) and frac < 1.0:
+            t += 1.0 / HZ
+            continue
+        at = t if heard is None else 100.0 + heard(t - 100.0)
+        info["feedback_q"].append((at, frac, [z_m - PAD] + [0.0] * 6, None))
         if det(frac):
             return frac, info
         t += 1.0 / HZ
@@ -437,3 +446,249 @@ def test_a_watch_that_fails_stops_the_press_there():
     assert det(0.4) is True and det(0.5) is True and det.stopped_frac == 0.4
     verdict, why = det.refusal()
     assert verdict == "failed" and "ValueError: no chain" in why
+
+
+# -- the press study (2026-11-05): a shadow beside the watch, and the feedback's gaps --------------
+
+
+def _shadowed(**kw):
+    """_descent's watch with the candidate fast rule judging beside it (watch_press's shadow)."""
+    det, client = _descent(**kw)
+    det.watch_beside(pc.SHADOW_RISE_M, pc.SHADOW_WINDOW_S, pc.SHADOW_SAMPLES)
+    return det, client
+
+
+def _without(rec):
+    return {k: v for k, v in rec.items() if k != "shadow"}
+
+
+# what the watch decides, one of each: (the measured pads, given free air), and its name
+_STREAMS = [
+    lambda free: lambda t, zr: max(free(t, zr), TOP + 0.010),  # met 10 mm high: cut past it
+    lambda free: lambda t, zr: max(free(t, zr), TOP + pc.CONTACT_EARLY_M + 0.010),  # refused early
+    lambda free: lambda t, zr: max(free(t, zr), TOP - 0.040),  # refused late
+    lambda free: _yield(TOP + 0.015),  # a slow yield
+    lambda free: free,  # free air to the end
+]
+_STREAM_IDS = ["cut", "early", "late", "yield", "free"]
+
+
+@pytest.mark.parametrize("measured", _STREAMS, ids=_STREAM_IDS)
+def test_a_shadow_beside_the_watch_changes_nothing_it_decides(measured):
+    """The real watch with a shadow beside it stops the stroke where it did without one, its
+    record the same but for the shadow's."""
+    alone, ac = _descent()
+    beside, bc = _shadowed()
+    z, dt = _ref()
+    a = _fly(alone, ac, z, dt, measured(_free()))[0]
+    b = _fly(beside, bc, z, dt, measured(_free()))[0]
+    assert a == b and alone.held_ref == beside.held_ref and alone.refusal() == beside.refusal()
+    assert _without(beside.record()) == alone.record() and "shadow" not in alone.record()
+    assert not beside.shadow.cut and beside.shadow.stopped_frac is None  # it cuts nothing, asked to stop nothing
+
+
+def test_the_shadow_meets_a_slow_yield_by_its_fast_rule_before_the_watch_does():
+    """A yield the pads press on into at half the reference's speed (12.5 mm/s): the real fast
+    rule needs 15 mm/s and the slow rule meets it once the slow leg's start has settled; the
+    candidate's 4 mm over 0.4 s meets it by the fast rule, earlier, near where it began."""
+    det, client = _shadowed()
+    z, dt = _ref()
+    onset = TOP + 0.015
+    stopped, _info = _fly(det, client, z, dt, _yield(onset))
+    assert stopped is not None and det.how == "slow"
+    shadow = det.record()["shadow"]
+    assert shadow["rule"] == {"rise_mm": 4.0, "window_s": 0.4, "samples": 1}
+    assert shadow["met"] and shadow["how"] == "fast" and shadow["verdict"] is None
+    assert shadow["after_real_ms"] < 0  # before the real watch's detection
+    assert shadow["z"] == pytest.approx(onset, abs=0.002) and shadow["above_top_mm"] == pytest.approx(15.0, abs=2.0)
+
+
+def test_the_shadow_says_it_would_have_refused_a_press_the_watch_let_go_on():
+    """A box met 55 mm above the cameras' top that yields at 12.5 mm/s (10-30 13:35's, the press
+    study's +50 mm box): the real fast rule misses it, and the slow rule meets it once the slow
+    leg's start has settled, 20 mm lower, inside the band — pressed and cut past there. The
+    shadow meets it where it began, and says it would have refused the press; it stops nothing."""
+    det, client = _shadowed()
+    z, dt = _ref()
+    stopped, _info = _fly(det, client, z, dt, _yield(TOP + 0.055))
+    rec = det.record()
+    assert stopped is not None and det.how == "slow" and det.verdict is None and rec["cut"]
+    assert rec["above_top_mm"] < 1000 * pc.CONTACT_EARLY_M
+    shadow = rec["shadow"]
+    assert shadow["met"] and shadow["how"] == "fast" and shadow["verdict"] == "early"
+    assert shadow["above_top_mm"] == pytest.approx(55.0, abs=2.0) and shadow["after_real_ms"] < -1000
+
+
+def test_a_stroke_the_watch_stopped_before_the_shadow_met_anything_says_so():
+    """A shadow that has met nothing where the real watch stops the stroke saw no more of it."""
+    det, client = _descent()
+    det.watch_beside(0.050, 0.4, 10_000)  # a rise no press makes, for longer than any stroke
+    z, dt = _ref()
+    free = _free()
+    stopped, _info = _fly(det, client, z, dt, lambda t, zr: max(free(t, zr), TOP + 0.010))
+    shadow = det.record()["shadow"]
+    assert stopped is not None and not shadow["met"] and shadow["stopped_first"] is True
+    det2, client2 = _descent(end=TOP - 0.020)
+    det2.watch_beside(0.050, 0.4, 10_000)
+    _fly(det2, client2, *_ref(z1=TOP - 0.020), _free())  # free air to the stroke's end: refused "never"
+    assert det2.record()["shadow"] == {
+        "rule": {"rise_mm": 50.0, "window_s": 0.4, "samples": 10_000},
+        "met": False,
+        "verdict": None,
+        "stopped_first": False,
+    }
+
+
+def test_a_shadow_that_fails_leaves_the_watch_as_it_is():
+    """The shadow raising: said in its record; the real watch decides as it would alone."""
+    alone, ac = _descent()
+    det, client = _shadowed()
+
+    def broken(*_a):
+        raise ValueError("shadow")
+
+    det.shadow._judge = broken
+    z, dt = _ref()
+    free_a, free_b = _free(), _free()
+    a = _fly(alone, ac, z, dt, lambda t, zr: max(free_a(t, zr), TOP + 0.010))[0]
+    b = _fly(det, client, z, dt, lambda t, zr: max(free_b(t, zr), TOP + 0.010))[0]
+    assert a == b is not None and det.failed is None and _without(det.record()) == alone.record()
+    assert det.record()["shadow"]["failed"] == "ValueError: shadow" and not det.record()["shadow"]["met"]
+
+
+def test_the_shadow_is_watched_afresh_with_each_execution():
+    det, client = _shadowed()
+    z, dt = _ref()
+    free = _free()
+    _fly(det, client, z, dt, lambda t, zr: max(free(t, zr), TOP + 0.010))
+    assert det.shadow.contact is not None
+    _fly(det, client, z, dt, _free(seed=1))  # the next execution: free air down to late
+    assert det.shadow.contact is None and det.shadow.traj is det.traj and det.shadow._sent is client.last_execution
+
+
+def test_the_record_keeps_the_longest_gap_in_the_feedback_watched():
+    """A 120 ms stretch the client kept no feedback of, on the watched descent: in the record.
+    A longer one before the watch arms is no part of it."""
+    det, client = _watch()
+    z, dt = _ref()
+    t_armed = 0.02 + (0.40 - (TOP + dp.TOUCH_SLOW_M)) / 0.025  # where the reference reaches arm_z
+
+    def lost(t):
+        return 0.5 <= t < 0.7 or t_armed + 0.2 <= t < t_armed + 0.32
+
+    stopped, _info = _fly(det, client, z, dt, _free(), lost=lost)
+    assert stopped is None and det.contact is None
+    assert 120.0 < det.record()["feedback_gap_max_ms"] < 120.0 + 2000.0 / HZ  # the samples either side of it
+    quiet, qc = _watch()
+    _fly(quiet, qc, z, dt, _free())
+    assert quiet.record()["feedback_gap_max_ms"] == pytest.approx(1000.0 / HZ, abs=0.2)  # every sample kept
+    unarmed, uc = _watch()
+    assert unarmed.record()["feedback_gap_max_ms"] is None  # nothing watched
+
+
+# -- the driver's global speed scale changed mid-stroke (press study E-S10) ---------------------
+
+
+def _lagging(k=0.4, tau=0.1, noise=0.0003, seed=0):
+    """Free air under the joint springs: the pads lag the reference by `k` (s) x its speed (the
+    slow leg's start dips the gap up to 0.41 mm per mm/s, press study E-S10), settling with time
+    constant `tau`: a change of its speed moves the gap as a contact's rise would."""
+    rng = np.random.default_rng(seed)
+    last = {}
+
+    def measured(t, zr):
+        if last:
+            dt = t - last["t"]
+            v = (last["z"] - zr) / dt if dt > 0 else 0.0
+            last["lag"] = k * v if last["lag"] is None else last["lag"] + (k * v - last["lag"]) * min(1.0, dt / tau)
+        else:
+            last["lag"] = None
+        last.update(t=t, z=zr)
+        return zr + (last["lag"] or 0.0) + float(rng.normal(0.0, noise))
+
+    return measured
+
+
+def _rescaled(t_c, s0, s1, slew=2.0):
+    """The driver's applied speed scale: `s0`, from `t_c` on slewed to `s1` at `slew` a second
+    (the supervisor's 2.0)."""
+
+    def clock(t):
+        if t < t_c:
+            return s0
+        return min(s1, s0 + slew * (t - t_c)) if s1 > s0 else max(s1, s0 - slew * (t - t_c))
+
+    return clock
+
+
+@pytest.mark.parametrize("s0, s1", [(0.25, 1.0), (0.5, 1.0), (1.0, 0.5)])
+def test_a_change_of_the_drivers_speed_scale_mid_stroke_re_settles_the_watch(s0, s1, monkeypatch):
+    """The driver's global speed scale changed while the pads come down through free air, 25 mm
+    above the box: the reference's speed changes and the pads' lag behind it with it. Raised,
+    the gap rises as on a contact, and a watch that never re-settles meets the box in free air.
+    The watch reads the applied scale from how fast the driver's fraction goes, and re-settles
+    where it changes: it meets the box where the pads do, as does the shadow beside it."""
+    box = TOP - 0.005
+    t_c = (0.40 - (TOP + 0.025)) / (0.025 * s0)  # the reference 25 mm above the top
+
+    def fly():
+        det, client = _shadowed(start=0.37)
+        lag = _lagging()
+        _fly(det, client, *_ref(), lambda t, zr: max(lag(t, zr), box), clock=_rescaled(t_c, s0, s1))
+        return det.record()
+
+    rec = fly()
+    assert rec["met"] and rec["above_top_mm"] == pytest.approx(-5.0, abs=1.5)
+    assert rec["how"] == ("fast" if s1 > s0 else "slow")  # met at 12.5 mm/s: slower than a fast rise
+    assert rec["speed_scale"] == pytest.approx([min(s0, s1), max(s0, s1)], abs=0.01)
+    assert rec["resettles"] and all(t_c < at < t_c + 0.4 + abs(s1 - s0) / 2.0 for at, _a, _b in rec["resettles"])
+    assert abs(s1 / rec["resettles"][-1][2] - 1.0) <= pc.SCALE_CHANGE  # settled at the new scale
+    shadow = rec["shadow"]
+    assert shadow["met"] and shadow["above_top_mm"] == pytest.approx(-5.0, abs=1.5) and shadow["verdict"] is None
+    monkeypatch.setattr(pc, "SCALE_CHANGE", float("inf"))  # never re-settled: the watch before E-S10
+    blind = fly()
+    assert blind["met"] and blind["resettles"] == []
+    if s1 > s0:  # sped up: met in free air, 20 mm and more above the box
+        assert blind["above_top_mm"] > 15.0
+    else:  # slowed: the lag shrinks, the gap falls, nothing read as a rise
+        assert blind["above_top_mm"] == pytest.approx(-5.0, abs=1.5)
+
+
+@pytest.mark.parametrize("scale", [1.0, 0.5])
+@pytest.mark.parametrize("measured", _STREAMS, ids=_STREAM_IDS)
+def test_a_steady_speed_scale_re_settles_nothing(measured, scale, monkeypatch):
+    """At a steady scale (1.0, or 0.5 all the way) the watch reads it and decides as one that
+    never re-settles: the same stop, the same record."""
+
+    def fly():
+        det, client = _shadowed()
+        clock = None if scale == 1.0 else (lambda t: scale)
+        stopped = _fly(det, client, *_ref(), measured(_free()), clock=clock)[0]
+        return stopped, det.held_ref, det.record()
+
+    watched = fly()
+    assert watched[2]["resettles"] == [] and watched[2]["speed_scale"] == pytest.approx([scale, scale], abs=1e-6)
+    monkeypatch.setattr(pc, "SCALE_CHANGE", float("inf"))
+    assert fly() == watched
+
+
+def test_a_gap_in_the_feedback_is_no_change_of_speed_scale(monkeypatch):
+    """The node not spun for 120 ms on the watched descent (press study N12): the samples sent
+    meanwhile are heard bunched at its end, as though the driver's clock had stood and then
+    run. The scale is read afresh after such a gap: nothing re-settles."""
+    t_s = 0.02 + (0.40 - (0.37 - dp.DESCENT_ARM_M)) / 0.025 + 0.5  # 0.5 s after it arms
+    t_e = t_s + 0.12
+
+    def heard(t):
+        return t_e - 1e-5 * HZ * (t_e - t) if t_s <= t < t_e else t  # in the order sent, at its end
+
+    def fly():
+        det, client = _shadowed(start=0.37)
+        _fly(det, client, *_ref(), _free(), heard=heard)
+        return det.record()
+
+    rec = fly()
+    assert rec["feedback_gap_max_ms"] > 110.0 and rec["resettles"] == []
+    assert rec["speed_scale"] == pytest.approx([1.0, 1.0], abs=0.15)
+    monkeypatch.setattr(pc, "SCALE_GAP_S", float("inf"))  # read across the gap: it would
+    assert fly()["resettles"]

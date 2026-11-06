@@ -1299,9 +1299,19 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
     contact outside CONTACT_EARLY_M above to CONTACT_LATE_M below the top,
     none at all, or a watch that fails, refuses the press, the stroke
     stopped where that is judged (PressContact.refusal: the caller goes back
-    up). Returns it (compliant_hold reads it), or None: nothing to watch."""
+    up). A shadow beside it judges the same samples by the candidate fast
+    rule (press_contact.SHADOW_*), cutting and refusing nothing: what it made
+    of the press is in the press's record. Returns it (compliant_hold reads
+    it), or None: nothing to watch."""
     from box_opening.runtime import approach
-    from box_opening.tasks.press_contact import CONTACT_EARLY_M, CONTACT_LATE_M, PressContact
+    from box_opening.tasks.press_contact import (
+        CONTACT_EARLY_M,
+        CONTACT_LATE_M,
+        SHADOW_RISE_M,
+        SHADOW_SAMPLES,
+        SHADOW_WINDOW_S,
+        PressContact,
+    )
 
     if not legs or stroke is None or top_z is None:
         return None
@@ -1321,6 +1331,7 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         late_m=CONTACT_LATE_M,
         abort_on_failure=True,
     )
+    contact.watch_beside(SHADOW_RISE_M, SHADOW_WINDOW_S, SHADOW_SAMPLES)
     legs[0].stop_when = contact
     return contact
 

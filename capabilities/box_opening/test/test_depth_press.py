@@ -1709,6 +1709,31 @@ def test_a_compliant_press_that_meets_the_box_above_its_top_is_cut_as_far_past_i
     assert cfg.button_travel_m < past
 
 
+def test_a_compliant_presss_record_says_what_the_shadow_beside_its_watch_made_of_it(ctx, monkeypatch, tmp_path):
+    """The press study (2026-11-05): watch_press sets the candidate fast rule judging beside the
+    watch, cutting nothing; the press's row says what it made of the press, beside the longest
+    gap in the feedback the watch judged and the driver's speed scale it read."""
+    from box_opening.tasks import press_contact as pc
+
+    meet = COMPLIANT_TOP + 0.020
+    _flies_onto(ctx, meet)
+    _result, _events, _arm, legs, note = _compliant(ctx, monkeypatch, tmp_path, held_up_m=0.0)
+    watch = legs["depth:approach"].stop_when
+    assert isinstance(watch, pc.PressContact) and isinstance(watch.shadow, pc.PressContact)
+    assert not watch.shadow.cut and watch.cut  # the real watch cuts; the shadow only watches
+    met = note["contact"]
+    assert met["met"] and met["cut"] and met["feedback_gap_max_ms"] == pytest.approx(1000.0 / 90.0, abs=0.2)
+    assert met["speed_scale"] == pytest.approx([1.0, 1.0], abs=1e-6) and met["resettles"] == []  # the scale held
+    shadow = met["shadow"]
+    assert shadow["rule"] == {
+        "rise_mm": 1000 * pc.SHADOW_RISE_M,
+        "window_s": pc.SHADOW_WINDOW_S,
+        "samples": pc.SHADOW_SAMPLES,
+    }
+    assert shadow["met"] and shadow["how"] == "fast" and shadow["verdict"] is None
+    assert shadow["z"] == pytest.approx(meet, abs=0.002) and shadow["after_real_ms"] is not None
+
+
 def test_a_compliant_press_that_meets_the_box_below_its_top_flies_its_stroke_as_planned(ctx, monkeypatch, tmp_path):
     """The box 8 mm lower than the cameras put it: as far past the contact
     as planned would be deeper than the stroke goes — never deeper than
