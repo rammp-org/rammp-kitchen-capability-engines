@@ -761,6 +761,22 @@ def build_approach_leg(ctx, cfg, start_joints=None):
 # refuses a push: a 5-12 mm "rim" band (2026-09-17) refused a good +6.2 mm
 # contact and homed the arm.
 KNOB_UP_MIN_MM = 6.0  # the camera: at or above this the knob is up
+# The reach-out's TILTED look is less sure than the camera straight down.
+# The wrist study of 2026-11-05 (I-Y2, M17, H5; 109 saved wrist captures
+# and the run records) read popped knobs 5.0-9.7 mm on tilted frames, 5 of
+# 18 under 6.0 (3 of the robot's 19 tilted fixes), and flush buttons up to
+# 2.6 mm (4.4 in the records). One look at 6.0 read an open box shut, and a
+# press on a popped knob latches it again (push-push; the physics study).
+# So the camera's call before a press is a band (knob_call): below
+# KNOB_SHUT_BELOW_MM the knob is flush and the box is pressed; at
+# KNOB_UP_MIN_MM or more it is open and its lid comes off unpressed. In
+# between the wrist looks once more, and still in between the box is taken
+# for open: never pressed. On the study's readings that takes an open box
+# pressed shut from 16 % of tilted looks to about none, for one more look
+# on 3-10 % of shut boxes (5 of the 52 pre-press reads on record were 3.0
+# mm or more). After a press the same holds: only a knob read below
+# KNOB_SHUT_BELOW_MM is pressed again (reach_lid_off).
+KNOB_SHUT_BELOW_MM = 3.0
 POPPED_MIN_M = 0.008  # the touch: pads stopped this far above the button top — on the raised knob
 POPPED_MAX_M = 0.035  # ... and above this it is not this button at all
 
@@ -780,9 +796,39 @@ def refuse_open_box(up_mm):
     )
 
 
+def refuse_band_box(reads_mm):
+    """Why this box must not be pressed: every look that read its knob
+    (`reads_mm`, in order; None where one read no height) put it between
+    KNOB_SHUT_BELOW_MM and KNOB_UP_MIN_MM, where a tilted look reads popped
+    knobs too. The full run takes such a box's lid off unpressed
+    (reach_press); this is what --press-only and --guarded stop on."""
+    return (
+        "the knob reads %s mm above its lid — neither flush (below %.0f) nor up (%.0f or more), and a popped "
+        "knob reads there too. Pressing an open box would shut it, so it is not pressed. Push the button down "
+        "flush and run again, or run without --press-only and --guarded: the full run takes the lid off a box "
+        "it cannot call shut" % (knob_reads_text(reads_mm), KNOB_SHUT_BELOW_MM, KNOB_UP_MIN_MM)
+    )
+
+
+def knob_reads_text(reads_mm):
+    """Knob readings in mm, in order, as the run says them: "4.2 then 1.1"; "?" for no reading."""
+    return " then ".join("?" if r is None else "%.1f" % r for r in reads_mm)
+
+
 def knob_is_up(up_mm):
     """The pop check's verdict on a camera reading (mm above the lid; None: no reading)."""
     return up_mm is not None and up_mm >= KNOB_UP_MIN_MM
+
+
+def knob_call(up_mm):
+    """The band's call on a camera reading (mm above the lid; None: no
+    reading): "shut" below KNOB_SHUT_BELOW_MM, "open" at KNOB_UP_MIN_MM or
+    more, "band" in between, "unread" with no reading. Pure."""
+    if up_mm is None or not math.isfinite(up_mm):
+        return "unread"
+    if knob_is_up(up_mm):
+        return "open"
+    return "shut" if up_mm < KNOB_SHUT_BELOW_MM else "band"
 
 
 def touch_verdict(off_m):

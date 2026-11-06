@@ -937,6 +937,58 @@ def test_every_reach_out_aim_waits_for_a_still_arm_and_the_record_says_how_long(
     ]
 
 
+@pytest.mark.parametrize(
+    "first, again, call, deciding, looks",
+    [
+        (1.1, "none", "shut", 0, 1),  # flush: pressed on the one look
+        (8.0, "none", "open", 0, 1),  # up: its lid off unpressed, no second look
+        (4.4, 1.0, "shut", 1, 2),  # in between, then flush: the second look decides, pressed
+        (5.6, 7.1, "open", 1, 2),
+        (4.4, 4.0, "band", 1, 2),  # in between twice: taken for open, never pressed
+        (5.0, None, "band", 0, 2),  # the second look found no button: the first reading stands
+        (3.0, "unread", "band", 0, 2),  # ... nor read the knob
+        (None, 1.0, "shut", 1, 2),  # not read, then flush
+        (None, "unread", "unread", 0, 2),
+    ],
+)
+def test_the_open_shut_call_before_the_press_looks_once_more_between_flush_and_up(
+    monkeypatch, tmp_path, first, again, call, deciding, looks
+):
+    """The wrist study of 2026-11-05 (I-Y2, M17, H5): one tilted look at
+    6.0 mm read an open box shut and pressed it. Below 3.0 mm the box is
+    shut, at 6.0 or more open; in between, or not read, the wrist aims once
+    more from the same pose, and that aim decides where it read the knob.
+    The record says every reading and the call."""
+    import json
+
+    from conftest import FakeClient
+
+    from box_opening.runtime.runner import Runner
+
+    first_aim = (((0.66, -0.57, 0.40), 0.0), "2 of 2 hits", first, (0.66, -0.57, 0.39))
+    second = {
+        "none": None,
+        None: (None, "no circle", None, None),
+        "unread": (((0.67, -0.57, 0.40), 0.0), "2 of 2 hits", None, (0.67, -0.57, 0.39)),
+    }.get(again, (((0.67, -0.57, 0.40), 0.0), "2 of 2 hits", again, (0.67, -0.57, 0.39)))
+    tags = []
+
+    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag, min_hits=None):
+        tags.append((tag, lid_z, prior_xy))
+        return second
+
+    monkeypatch.setattr(reach_press, "_aim", aim)
+    runner = Runner(FakeClient(), log_dir=tmp_path)
+    got, said, reads = reach_press.judge_knob(None, None, 0.0, (0.66, -0.57, 0.401), runner, first_aim)
+    assert said == call and got is (first_aim, second)[deciding]
+    assert tags == ([] if looks == 1 else [("reach-recheck", 0.401, (0.66, -0.57))])  # the look's own prior
+    want = [first] + ([] if second is None or second[0] is None else [second[2]])
+    assert reads == want
+    rows = [json.loads(line) for line in next(tmp_path.glob("run-*.jsonl")).read_text().splitlines()]
+    (note,) = (r for r in rows if r["leg"] == "knob_call")
+    assert (note["looks"], note["reads_mm"], note["call"], note["pressed"]) == (looks, want, call, call == "shut")
+
+
 def _reach_world_button(ctx):
     from box_opening.models.container import from_container
 

@@ -665,7 +665,7 @@ def test_a_knob_not_up_is_looked_at_again_then_pressed_once_more_and_its_lid_tak
 def test_a_knob_still_not_up_after_the_second_press_sends_the_arm_home_with_nothing_gripped(
     ctx, monkeypatch, tmp_path, capsys
 ):
-    aims = [(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (BUTTON, 3.0), (BUTTON, 2.5)]
+    aims = [(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (BUTTON, 2.8), (BUTTON, 2.5)]  # flush: under 3.0
     code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
     assert code == 1
     press = [*WAY_IN, "hold", *BACK]
@@ -681,8 +681,61 @@ def test_a_knob_still_not_up_after_the_second_press_sends_the_arm_home_with_noth
         "home",
     ]
     out = capsys.readouterr().out
-    assert "STOP: pressed 2 times and the knob is not up (3.0 mm above the lid) — the lid is not taken off" in out
+    assert "STOP: pressed 2 times and the knob is not up (2.8 mm above the lid) — the lid is not taken off" in out
     assert ctx.client.gripper_sent == []  # the fingers never opened
+
+
+@pytest.mark.parametrize(
+    "aims, presses",
+    [
+        ([(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 4.2)], 1),  # the recheck reads 4.2: the highest decides
+        ([(BUTTON, 0.4), (BUTTON, 5.6), (BUTTON, 5.1)], 1),
+        ([(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (BUTTON, 3.0), (BUTTON, 2.5)], 2),  # 3.0 is not flush
+    ],
+    ids=["after the first press", "read twice in between", "after the second press"],
+)
+def test_a_knob_neither_flush_nor_up_after_a_press_is_not_pressed_again_but_gripped_as_an_open_boxs(
+    ctx, monkeypatch, tmp_path, capsys, aims, presses
+):
+    """The wrist study of 2026-11-05 (I-Y2, H5): the tilted look reads
+    popped knobs down to 5.0 mm, and in its physics study a second press on
+    a popped knob latched the box again. After a press only a knob read
+    flush (below press_demo.KNOB_SHUT_BELOW_MM) is pressed again; one read
+    3.0 mm or more, but under KNOB_UP_MIN_MM, is gripped as an open box's."""
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 0
+    press = [*WAY_IN, "hold", *BACK]
+    looked = ["aim:reach-after", "aim:reach-after"]
+    assert rec.events == [
+        "reach:look",
+        "aim:reach-aim",
+        *(press + looked) * presses,
+        *GRIP,
+        *CLOSE,
+        *CARRY,
+        *HOME,
+    ]
+    knobs = [(r["press"], r["popped"], r["call"]) for r in rows if r["leg"] == "reach_knob"]
+    assert knobs == ([(1, False, "shut"), (2, False, "band")] if presses == 2 else [(1, False, "band")])
+    want = max(v for _p, v in aims[-2:])
+    assert "the knob is neither flush nor up (%.1f mm above the lid): not pressing it again" % want in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_knob_whose_height_the_look_does_not_read_after_a_press_is_not_pressed_again(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The button found after the press, but no look read the knob's
+    height: it is not judged, so it is neither pressed again nor gripped."""
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (BUTTON, None), (BUTTON, None)])
+    assert code == 1 and rec.events[-3:] == ["aim:reach-after", "aim:reach-after", "home"]
+    assert rec.events.count("depth:press") == 1 and ctx.client.gripper_sent == []
+    (knob,) = (r for r in rows if r["leg"] == "reach_knob")
+    assert (knob["knob_up_mm"], knob["call"]) == (None, "unread")
+    assert "STOP: the wrist read no height for the knob after press 1 — it is not pressed again" in (
+        capsys.readouterr().out
+    )
 
 
 BACK_OUT = ["grip:up", "depth:turn-back", "reach:slide-out"]  # the grip's way down backwards, to the look pose
@@ -1162,10 +1215,83 @@ def test_with_press_only_an_open_box_still_stops_the_run(ctx, monkeypatch, tmp_p
     assert code == 1 and rec.events == ["reach:look", "aim:reach-aim", "home"]
 
 
+def test_a_knob_read_between_flush_and_up_then_flush_is_pressed(ctx, monkeypatch, tmp_path):
+    """The look reads the knob 4.4 mm up (the highest flush button on
+    record), the second aim from the same pose 1.0: shut, pressed — on the
+    second aim's button."""
+    aims = [(BUTTON, 4.4), (BUTTON, 1.0), (UP, 9.0)]
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 0
+    assert rec.events == [
+        "reach:look",
+        "aim:reach-aim",
+        "aim:reach-recheck",
+        *WAY_IN,
+        "hold",
+        *BACK,
+        "aim:reach-after",
+        *GRIP,
+        *CLOSE,
+        *CARRY,
+        *HOME,
+    ]
+    (call,) = (r for r in rows if r["leg"] == "knob_call")
+    assert (call["reads_mm"], call["call"], call["pressed"]) == ([4.4, 1.0], "shut", True)
+    assert not [r for r in rows if r["leg"] == "open_box"]
+
+
+@pytest.mark.parametrize(
+    "aims, call",
+    [
+        ([(BUTTON, 4.4), (UP, 5.0)], "band"),  # in between twice: taken for open
+        ([(BUTTON, 5.6), None], "band"),  # the second aim finds no button: the first reading stands
+        ([(BUTTON, 5.0), (UP, 8.0)], "open"),
+    ],
+    ids=["in between twice", "no second reading", "then up"],
+)
+def test_a_knob_not_read_flush_on_a_second_look_is_not_pressed_and_its_lid_comes_off(
+    ctx, monkeypatch, tmp_path, capsys, aims, call
+):
+    """The wrist study of 2026-11-05 (I-Y2, M17, H5): one tilted look at
+    6.0 mm read popped knobs 5.0-9.7 mm, and an open box read shut was
+    pressed shut 16 % of the time. Between 3.0 and 6.0 mm the wrist aims
+    once more; still not flush, the box is not pressed: the full run takes
+    its lid off as an open box's, from the look pose, no stroke flown."""
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 0
+    assert rec.events == ["reach:look", "aim:reach-aim", "aim:reach-recheck", *GRIP, *CLOSE, *CARRY, *HOME]
+    assert "depth:press" not in rec.events
+    deciding = aims[1] or aims[0]
+    (note,) = (r for r in rows if r["leg"] == "knob_call")
+    assert (note["looks"], note["call"], note["pressed"]) == (2, call, False)
+    assert note["reads_mm"] == [a[1] for a in aims if a is not None]
+    assert [(r["button_above_lid_mm"], r["opened"], r["call"]) for r in rows if r["leg"] == "open_box"] == [
+        (deciding[1], True, call)
+    ]
+    out = capsys.readouterr().out
+    assert ("NOT CALLED SHUT" in out) == (call == "band") and ("ALREADY OPEN" in out) == (call == "open")
+
+
+def test_with_press_only_a_knob_read_between_flush_and_up_twice_stops_the_run(ctx, monkeypatch, tmp_path, capsys):
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 4.4), (BUTTON, 3.5)], press_only=True)
+    assert code == 1 and rec.events == ["reach:look", "aim:reach-aim", "aim:reach-recheck", "home"]
+    assert "STOP: the knob reads 4.4 then 3.5 mm above its lid — neither flush (below 3) nor up (6" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_knob_whose_height_no_look_reads_before_the_press_is_not_pressed(ctx, monkeypatch, tmp_path, capsys):
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, None), (BUTTON, None)])
+    assert code == 1 and rec.events == ["reach:look", "aim:reach-aim", "aim:reach-recheck", "home"]
+    (note,) = (r for r in rows if r["leg"] == "knob_call")
+    assert (note["reads_mm"], note["call"], note["pressed"]) == ([None, None], "unread", False)
+    assert "STOP: the wrist read no height for the knob on two looks" in capsys.readouterr().out
+
+
 # ---- home, planned from the look pose while the way back flies -----------------
 
 MOVED = (BUTTON[0] + 0.02, BUTTON[1], BUTTON[2] + 0.009)  # the aim after a press that moved the box 20 mm
-NOT_UP_TWICE = [(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (BUTTON, 3.0), (BUTTON, 2.5)]
+NOT_UP_TWICE = [(BUTTON, 0.4), (BUTTON, 2.0), (BUTTON, 1.5), (BUTTON, 2.8), (BUTTON, 2.5)]  # flush: under 3.0
 
 
 def _home_plans(monkeypatch, refuse=()):

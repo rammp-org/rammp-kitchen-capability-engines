@@ -57,7 +57,7 @@ down onto the flush lid before the fingertip reaches the button (the URDF's
 collision meshes with the measured 131 mm fingers: 8 mm of lid clearance at
 30 deg, 5.6 at 45, under 3 past 60). A guarded press ends the run there. A
 compliant depth press, the default, goes on to take the lid off — the look
-at the knob from the look pose, the press once more where it is not up, the
+at the knob from the look pose, the press once more where it reads flush, the
 grip, the lift, the carry and the set-down (tasks/reach_lid_off) — unless
 --press-only.
 
@@ -1428,6 +1428,37 @@ def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag, min_hits=None):
     return got, status, seen.get("button_up_mm"), measured
 
 
+def judge_knob(node, watcher, yaw, prior_button, runner, first):
+    """The open/shut call before the press (press_demo.knob_call) on
+    `first`, the look's aim (_aim's got, status, knob mm, measured). A
+    knob read neither flush nor up, or not read, is aimed at once more from
+    the same pose ('reach-recheck'), and that aim decides where it read the
+    knob: still in between, the box is taken for open (the wrist study's
+    band, press_demo.KNOB_SHUT_BELOW_MM). Returns (the deciding aim, its
+    call, every reading in order), the call noted ('knob_call')."""
+    from box_opening.tasks.press_demo import knob_call
+
+    aim, reads = first, [first[2]]
+    call = knob_call(first[2])
+    looks = 1
+    if call in ("band", "unread"):
+        again = _aim(node, watcher, yaw, prior_button[2], prior_button[:2], runner, "reach-recheck")
+        looks += 1
+        if again[0] is not None:
+            reads.append(again[2])
+            if knob_call(again[2]) != "unread":
+                aim, call = again, knob_call(again[2])
+    runner.note(
+        "knob_call",
+        before_press=1,
+        looks=looks,
+        reads_mm=[None if r is None else round(float(r), 1) for r in reads],
+        call=call,
+        pressed=call == "shut",
+    )
+    return aim, call, reads
+
+
 def aim_forward(xyz):
     """The wrist's aim `xyz` moved AIM_FORWARD_M farther from the arm along
     its bearing from arm_mount, its height kept: the cameras' error."""
@@ -2412,10 +2443,11 @@ def run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     THE FULL RUN (a compliant run without --press-only, the default since
     2026-10-28): from the one-execution way in and the hold
     on, tasks/reach_lid_off.run_full — back to the look pose, the knob
-    judged there, the press once more where it is not up, the lid off, its
+    judged there, the press once more where it reads flush, the lid off, its
     spot chosen with the lid lifted (the owner: never at the start, never a
     failure), set down, home: 0 only with the lid set down and the arm home.
-    A box the aim sees already open has its lid taken off unpressed.
+    A box the aim sees already open, or does not call shut (judge_knob),
+    has its lid taken off unpressed.
 
     COMPLIANT (args.compliant with args.depth_press, press_demo's default
     since 2026-10-27; press_demo sets depth_press on every run since
@@ -2465,7 +2497,16 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     from box_opening.models.container import from_container
     from box_opening.perception import camera_video
     from box_opening.runtime import approach
-    from box_opening.tasks.press_demo import CAPTURES_DIR, dump_wrist_frame, refuse_open_box, touch_verdict
+    from box_opening.tasks.press_demo import (
+        CAPTURES_DIR,
+        KNOB_SHUT_BELOW_MM,
+        KNOB_UP_MIN_MM,
+        dump_wrist_frame,
+        knob_reads_text,
+        refuse_band_box,
+        refuse_open_box,
+        touch_verdict,
+    )
 
     m = ctx.model
     why = unsupported(m)
@@ -2643,17 +2684,37 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         dump_wrist_frame(watcher, "reach-look")
         _go_home(ctx, cfg, runner, "STOP: no button from the look pose (%s) — nothing was pressed" % status)
         return 2
-    open_already = refuse_open_box(up_mm)
+    # pressed only with the knob read flush; in between, looked at once more (judge_knob)
+    (got, status, up_mm, measured), call, reads = judge_knob(
+        node, watcher, yaw, prior_button, runner, (got, status, up_mm, measured)
+    )
+    if call == "unread":
+        _go_home(
+            ctx,
+            cfg,
+            runner,
+            "STOP: the wrist read no height for the knob on two looks — the box may be open, and pressing an open "
+            "box shuts it; nothing was pressed",
+        )
+        return 1
+    open_already = refuse_open_box(up_mm) if call == "open" else refuse_band_box(reads) if call == "band" else None
     if open_already is not None:
-        runner.note("open_box", button_above_lid_mm=round(up_mm, 1), opened=lid_off)
+        runner.note("open_box", button_above_lid_mm=round(up_mm, 1), opened=lid_off, call=call)
         if not lid_off:
             _go_home(ctx, cfg, runner, "STOP: " + open_already)
             return 1
         # the full run takes an open box's lid off: nothing presses the knob
-        log.info(
-            "[press_demo] ALREADY OPEN: the knob stands %.0f mm above its lid — not pressing it, which would shut "
-            "the box; taking the lid off" % up_mm
-        )
+        if call == "open":
+            log.info(
+                "[press_demo] ALREADY OPEN: the knob stands %.0f mm above its lid — not pressing it, which would "
+                "shut the box; taking the lid off" % up_mm
+            )
+        else:
+            log.info(
+                "[press_demo] NOT CALLED SHUT: the knob reads %s mm above its lid, neither flush (below %.0f) nor "
+                "up (%.0f or more) — not pressing it, which would shut an open box; taking the lid off as an open "
+                "box's" % (knob_reads_text(reads), KNOB_SHUT_BELOW_MM, KNOB_UP_MIN_MM)
+            )
     # The fingers are shut before the arm moves toward the box. press_demo
     # sent press:close before the look, and the runner joins it before a
     # gripper leg or a guarded motion only: a compliant run has neither, so

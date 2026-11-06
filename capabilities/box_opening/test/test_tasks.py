@@ -757,6 +757,28 @@ def test_an_open_box_is_not_pressed_shut():
         assert refuse_open_box(up_mm) is None
 
 
+def test_the_tilted_looks_knob_call_is_a_band_between_flush_and_up():
+    """The wrist study of 2026-11-05 (I-Y2, M17, H5): tilted looks read
+    popped knobs 5.0-9.7 mm and flush buttons up to 2.6 mm (4.4 in the
+    records). Below KNOB_SHUT_BELOW_MM the knob is flush, at KNOB_UP_MIN_MM
+    or more it is up; in between it is neither, and a box there is not
+    pressed. The refusal says every reading."""
+    from box_opening.tasks.press_demo import KNOB_SHUT_BELOW_MM, KNOB_UP_MIN_MM, knob_call, refuse_band_box
+
+    assert (KNOB_SHUT_BELOW_MM, KNOB_UP_MIN_MM) == (3.0, 6.0)
+    for up_mm in (-2.4, 0.2, 2.6, 2.99):  # the study's flush reads
+        assert knob_call(up_mm) == "shut", up_mm
+    for up_mm in (3.0, 4.4, 5.0, 5.6, 5.99):  # its highest flush record, its lowest popped knobs
+        assert knob_call(up_mm) == "band", up_mm
+    for up_mm in (6.0, 7.2, 9.7, 11.0):
+        assert knob_call(up_mm) == "open", up_mm
+    for up_mm in (None, float("nan")):
+        assert knob_call(up_mm) == "unread", up_mm
+    why = refuse_band_box([4.4, None, 5.6])
+    assert why.startswith("the knob reads 4.4 then ? then 5.6 mm above its lid — neither flush (below 3) nor up (6")
+    assert "not pressed" in why
+
+
 def test_the_push_bound_leaves_room_for_the_buttons_travel():
     """The push ends at the button's stop (the force), and 10 mm is the
     room it has to get there — 4 mm from a 3 Nm contact was not enough on

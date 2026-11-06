@@ -20,8 +20,11 @@ after the press as before (reach_press._fly_way_in).
           edge 176-189 mm from the lens, inside the OAK's stereo minimum. From
           the look pose the button is at the frame's centre, 299 mm off, 29
           deg from the lens axis — the view the press was aimed from.
-  AGAIN   not up: the same press once more, its way in solved again from
-          where the arm stands, and the look again. Still not up: STOP, home.
+  AGAIN   flush (below press_demo.KNOB_SHUT_BELOW_MM): the same press once
+          more, its way in solved again from where the arm stands, and the
+          look again. Still flush: STOP, home. Neither flush nor up: not
+          pressed again (a popped knob pressed latches the box again), the
+          GRIP as for a knob up; no height read: STOP, home.
           Not up on a lid that rose (released, LID_POP_M): STOP, home, the
           box left open — a flush knob gives the fingers nothing to hold,
           and a released lid is not pressed again.
@@ -119,7 +122,11 @@ from box_opening.tasks import reach_press as rp
 
 # The press, then once more where the look does not see the knob up (owner
 # 2026-10-28) and the lid did not rise (LID_POP_M: a released lid is not
-# pressed again), then STOP.
+# pressed again), then STOP. Only a knob the look reads flush is pressed
+# again (press_demo.knob_call, below KNOB_SHUT_BELOW_MM): the tilted look
+# reads popped knobs down to 5.0 mm (the wrist study's I-Y2), and in the
+# physics study a second press on a popped knob latched the box again
+# (E-C20, 1 of 1 flown).
 PRESSES = 2
 # A knob the look reads down is looked at once more before it is judged
 # (as the staging run's after-look was): pressing a knob that popped shuts
@@ -203,8 +210,8 @@ GRIP_TRIES = 2
 # grip's height (grip_lid_z: where the hold held the pads), and closes — no
 # way back to the look pose, no look, no way down from it: 10:08's took 2.6
 # s back, 0.7 at the look and 3.2 down again. On air it goes back to the look
-# pose, and the look decides as before: the knob not up, the press once more;
-# up, the grip from there (attempt 1). Its own attempt is 0. With no look
+# pose, and the look decides as before: the knob flush, the press once more;
+# up or in between (KnobLook.shut), the grip from there (attempt 1). Its own attempt is 0. With no look
 # there is no rise measured (KnobLook.lid_dz_m): a lid that rose meets the
 # fingertips before the way down ends, the spring on it, and they close round
 # the knob's base.
@@ -972,6 +979,14 @@ class KnobLook:
 
         return self.found and knob_is_up(self.up_mm)
 
+    @property
+    def shut(self):
+        """The knob read flush (press_demo.knob_call, below
+        KNOB_SHUT_BELOW_MM): the only knob pressed again."""
+        from box_opening.tasks.press_demo import knob_call
+
+        return self.found and knob_call(self.up_mm) == "shut"
+
 
 def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
     """From the look pose after press number `press`: the oblique aim at
@@ -985,7 +1000,7 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
     (lid_rose): its knob up, the grip follows it up; its knob flush, STOP —
     nothing to hold, and a released lid is not pressed again. The reach_knob
     note says which, and why the run stops."""
-    from box_opening.tasks.press_demo import knob_is_up
+    from box_opening.tasks.press_demo import knob_call, knob_is_up
 
     best, last, status, looks = None, None, "", 0
     for _k in range(1 + KNOB_RECHECK_AIMS):
@@ -1033,6 +1048,7 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
         looks=looks,
         knob_up_mm=None if best is None else round(best, 1),
         popped=look.popped,
+        call=knob_call(best),  # the band's: "shut" is pressed again, "band" gripped as "open", "unread" stops
         shift_mm=round(1000 * shift, 1),
         lid_dz_mm=None if dz is None else round(1000 * dz, 1),
         lid_rose=rose,
@@ -1733,8 +1749,8 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
     """The full reach-out run from the aimed look pose, its way in `way`
     proven and flown as `legs` (reach_press._reach_press's, one execution):
     the press and the way back (_press_and_back), the look (knob_look), the
-    press once more where the knob is not up and the lid did not rise (risen
-    with its knob flush: knob_look's STOP), then the lid off
+    press once more only where the knob reads flush (KnobLook.shut) and the
+    lid did not rise (risen with its knob flush: knob_look's STOP), then the lid off
     (take_lid_off) at the aimed `button` (its top the press's), the grip
     going by the lid where the last hold held the pads (grip_lid_z). With
     GRIP_FROM_PRESS the first press's hold goes straight on to the grip
@@ -1781,6 +1797,23 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
             if knob.stop is not None:
                 return end(_stop_home(ctx, cfg, runner, knob.stop))
             if knob.popped:
+                break
+            if knob.up_mm is None:
+                return end(
+                    _stop_home(
+                        ctx,
+                        cfg,
+                        runner,
+                        "the wrist read no height for the knob after press %d — it is not pressed again, and the "
+                        "lid is not taken off" % press,
+                    )
+                )
+            if not knob.shut:
+                # neither flush nor up: a popped knob reads here too, and pressing it latches the box again
+                log.info(
+                    "[press_demo] the knob is neither flush nor up (%.1f mm above the lid): not pressing it again, "
+                    "which would shut an open box — taking the lid off as an open box's" % knob.up_mm
+                )
                 break
             if press == PRESSES:
                 return end(
