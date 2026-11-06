@@ -1,0 +1,20 @@
+# Scene OAK-D PoE (flatbot) — depthai-ros standard topic and TF frame names.
+#
+# The scene camera calibration (camera_scene.yaml) stores T(base <- child_frame);
+# for flatbot, run scripts/calibrate_scene_camera.py with this config active so
+# child_frame below matches what the calibration writes.
+ns: /scene_camera
+color_topic_suffix: /color/image_raw
+color_info_topic_suffix: /color/camera_info
+depth_topic_suffix: /depth/image_rect_raw
+depth_info_topic_suffix: /depth/camera_info
+# The link frame is the camera body in the calibration tree; the colour frame
+# is the optical frame the calibration solves for.  depthai-ros on this system
+# publishes TF frames as scene_camera_color_* (not rgb_camera_*).
+link_frame: scene_camera_color_optical_frame
+color_frame: scene_camera_color_optical_frame
+# Flatbot's scene OAK hangs upside down, and since rammp-deployments #133
+# (2026-10-27) the driver rotates its colour and depth 180° on the device
+# (i_rotation) under the upright mount in transforms/cameras.yaml: frames
+# arrive upright and nothing here turns them. SceneLocator refuses a camera
+# whose TF still has its frames upside down.

@@ -1,0 +1,271 @@
+"""What box-opening holds true about the kinova-gen3-ros2 driver.
+
+The planner-side executor this repo drove before (RAMMP-CuRobo
+feat/perceived-world, executor.py) refused a goal unless the arm stood at
+its first waypoint, its velocities sat under the URDF limits and its time
+ran forward, and it dilated time by a speed_scale. The driver's
+/execute_joint_trajectory does none of that: its executor samples the
+trajectory from t=0 and commands the first waypoint at once, wherever the
+arm is, and the ROS layer checks only that every point carries seven
+positions (kinova-gen3-driver v1.0.0 trajectory_executor.cpp,
+kinova-gen3-ros2 ros2_backend.cpp). So those gates run here, in front of
+every goal, and the driver's result codes, gripper units and middleware
+are translated in one place.
+"""
+
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+# REQUIRED_RMW re-exported: both containers of the arm module build on rammp-base, which selects Cyclone
+from box_opening.constants import GRIPPER_CMD_CLOSED, START_GATE_RAD
+from box_opening.constants import REQUIRED_RMW as REQUIRED_RMW
+from box_opening.geometry import ang_diff
+from box_opening.runtime.retime import check_like_executor
+from box_opening.runtime.stamps import secs, set_stamp
+
+# ExecuteJointTrajectory.Result.error_code (rammp_arm_interfaces v1.0.0)
+RESULT_NAMES = {
+    0: "SUCCESSFUL",
+    -1: "INVALID_GOAL",
+    -4: "PATH_TOLERANCE_VIOLATED",
+    -5: "GOAL_TOLERANCE_VIOLATED",
+    -6: "PREEMPTED",
+    -7: "PLANNING_FAILED",
+    -8: "NOT_AUTHORIZED",
+    -9: "HALTED",
+    -10: "STREAM_REJECTED",
+    -11: "CONTACT_STOP",  # rammp_arm_interfaces 2.0 (#23): the driver's contact monitor stopped the arm
+}
+SUCCESSFUL = 0
+NOT_AUTHORIZED = -8
+HALTED = -9
+CONTACT_STOP = -11
+# the results after which the arm is not the run's to move: the e-stop (HALTED), control lost
+# (NOT_AUTHORIZED), and the driver's own contact stop (CONTACT_STOP: the arm floats, latched until
+# /clear_faults). The client's outcome for each is "halted" (REVIEW_RULES C5)
+LOST_CONTROL = (HALTED, NOT_AUTHORIZED, CONTACT_STOP)
+
+# /joint_states reports the Robotiq knuckle as GripperSetpoint.position x 0.8,
+# the knuckle's URDF upper limit (the driver's gripper tier). Every gripper
+# number in this repo stays in knuckle radians; only the command on the wire
+# is normalized. One definition: constants.GRIPPER_CMD_CLOSED
+KNUCKLE_CLOSED_RAD = GRIPPER_CMD_CLOSED
+
+
+def dilate(traj, speed):
+    """`traj` to be flown at `speed` (> 0): time stretched by 1/speed,
+    velocities scaled by speed and accelerations by speed**2, so the
+    driver's Hermite interpolation still passes along the same path. A new
+    trajectory; the planned one is left as it was (replans reuse it)."""
+    speed = float(speed)
+    if speed <= 0.0:
+        raise ValueError("speed must be > 0, got %r" % speed)
+    out = JointTrajectory()
+    out.header = traj.header
+    out.joint_names = list(traj.joint_names)
+    for p in traj.points:
+        q = JointTrajectoryPoint()
+        q.positions = list(p.positions)
+        q.velocities = [v * speed for v in p.velocities]
+        q.accelerations = [a * speed * speed for a in p.accelerations]
+        set_stamp(q.time_from_start, secs(p.time_from_start) / speed)
+        out.points.append(q)
+    return out
+
+
+def start_gap_rad(live, traj):
+    """Largest wrap-aware distance between the live joints and the first waypoint."""
+    return max(abs(ang_diff(a, b)) for a, b in zip(live, traj.points[0].positions, strict=False))
+
+
+def refusal(traj, live, vmax):
+    """Why `traj` must not be sent to the driver from the `live` joints, or None."""
+    if not traj.points:
+        return "empty trajectory"
+    if any(len(p.velocities) != len(vmax) for p in traj.points):
+        return "trajectory has no velocity profile — the driver would fly it linearly, unchecked"
+    gap = start_gap_rad(live, traj)
+    if gap > START_GATE_RAD:
+        return (
+            "trajectory starts %.3f rad from the live arm (gate %.2f) — the driver "
+            "would jump to its first waypoint; re-plan from the current state" % (gap, START_GATE_RAD)
+        )
+    problems = check_like_executor(traj, vmax)
+    return "; ".join(problems) if problems else None
+
+
+def result_message(error_code, error_string=""):
+    """A driver result, readable: the code's name and the driver's own reason."""
+    code = int(error_code)
+    text = RESULT_NAMES.get(code, "error %d" % code)
+    if error_string:
+        text += ": " + error_string
+    if code == NOT_AUTHORIZED:
+        text += (
+            " — the driver is enforcing arbitration and box-opening sends no "
+            "control token (run the arm node with arbitration_mode: disabled)"
+        )
+    return text
+
+
+# The arm driver says on /diagnostics (diagnostic_msgs/DiagnosticArray, ~1 Hz) what its link to the
+# arm is doing — its "Arm link" status: link_state connecting | running | faulted, and the reason —
+# and its arbitration's "Arbitration" status: estopped (kinova_gen3_ros2 link_server.cpp,
+# arbitration_server.cpp). A goal sent while the link is not running is refused with no reason
+# given (supervisor.cpp on_trajectory_goal: "faulted or reconnecting"). Flatbot 2026-11-04
+# 12:23: the link faulted as the driver started (WRONG_SERVOING_MODE), and four homes were
+# refused as "a stream session open, a mode change while moving, or its MEDIUM gains refused"
+DIAGNOSTICS_TOPIC = "/diagnostics"
+
+
+DIAG_NAMES = ("Arm link", "Arbitration", "Contact detection")  # the statuses driver_health_from reads
+
+
+def _nums(text):
+    try:
+        return [float(v) for v in str(text).replace(",", " ").split()]
+    except ValueError:
+        return None
+
+
+def driver_health_from(msg, health=None):
+    """`health` (a dict, or None for a new one) with what a DiagnosticArray `msg` says of the arm
+    driver: its "Arm link" status (link_state, link_reason), its "Arbitration" (estopped), and
+    its "Contact detection" (`contact`: detection off | observe | enforce, phase settling | armed |
+    latched, profile, thresholds_nm, would_trips and the last trip). Statuses of other names
+    (every other node's) leave it as it was."""
+    out = dict(health or {})
+    for st in getattr(msg, "status", ()):
+        name = str(getattr(st, "name", ""))
+        values = {str(kv.key): str(kv.value) for kv in getattr(st, "values", ())}
+        if name.endswith("Arm link"):
+            out["link_state"] = values.get("link_state", "")
+            out["link_reason"] = values.get("reason", "") or str(getattr(st, "message", ""))
+        elif name.endswith("Arbitration"):
+            out["estopped"] = values.get("estopped", "").strip().lower() in ("true", "1", "yes")
+        elif name.endswith("Contact detection"):
+            c = {
+                "detection": values.get("detection", ""),
+                "phase": values.get("phase", ""),
+                "profile": values.get("profile", ""),
+                "thresholds_nm": _nums(values.get("thresholds_nm", "")),
+                "message": str(getattr(st, "message", "")),
+            }
+            try:
+                c["would_trips"] = int(values.get("would_trips", ""))
+            except ValueError:
+                c["would_trips"] = None
+            if "last_trip_joint" in values:
+                c["last_trip_joint"] = values["last_trip_joint"]
+                c["last_trip_residual_nm"] = _nums(values.get("last_trip_residual_nm", ""))
+            out["contact"] = c
+    return out
+
+
+def health_refusal(health):
+    """Why the arm driver can take no goal now, from what its diagnostics said (driver_health_from),
+    or None: its link to the arm not running (faulted, reconnecting), or its e-stop latched. None
+    where nothing was heard: the driver's own answer is then the word."""
+    if not health:
+        return None
+    state = health.get("link_state")
+    if state and state != "running":
+        reason = " ".join(str(health.get("link_reason") or "").split())  # the Kortex reason runs over lines
+        return (
+            "the arm driver's link to the arm is %s%s — check the arm (e-stop released, no fault light, nothing "
+            "else driving it: the Kinova web app, its joystick), then clear it (`ros2 service call /clear_faults "
+            "std_srvs/srv/Trigger`) or restart sheppy's `arm` node" % (state, " (%s)" % reason if reason else "")
+        )
+    if health.get("estopped"):
+        return "the arm driver is e-stopped (its /estop is latched) — clear it before the next run"
+    contact = health.get("contact") or {}
+    if contact.get("phase") == "latched":
+        return (
+            "the arm driver stopped the arm on contact and holds it latched (%s) — clear the arm, then clear it "
+            "(`ros2 service call /clear_faults std_srvs/srv/Trigger`)" % (contact.get("message") or "no reason")
+        )
+    return None
+
+
+# The driver's contact monitor as a backstop (contact_detection: enforce on the arm node): its
+# thresholds per execution, by what the execution does. Free air only — the run's look, its way
+# home, the clear before it — is held to the driver's DEFAULT; an execution that meets anything on
+# purpose (the way in to the button, the grip, the lift off the box and the set-down, the retreat
+# off the lid) to LOOSE. The planner holds no flatbot body (world_empty): a home that met it is what
+# DEFAULT stops. Observe mode stops nothing and is left at its profile; the residual's peaks per
+# execution are logged either way (Runner: driver_contact)
+CONTACT_PROFILES = {"default": 0, "sensitive": 1, "loose": 2}
+FREE_AIR_LEGS = ("reach:look", "home", "clear-margin", "retreat:home")
+
+
+def contact_profile_for(names):
+    """The contact profile an execution of the legs `names` flies under: "default" where every
+    leg is free air (FREE_AIR_LEGS, a leg's name or its prefix), else "loose"."""
+    free = all(any(str(n) == f or str(n).startswith(f + ":") for f in FREE_AIR_LEGS) for n in names)
+    return "default" if names and free else "loose"
+
+
+def setpoint_position(knuckle_rad):
+    """A knuckle-radian gripper command as the driver's 0 (open) .. 1 (closed)."""
+    return min(1.0, max(0.0, float(knuckle_rad) / KNUCKLE_CLOSED_RAD))
+
+
+def rmw_refusal(env):
+    """Why a process with environment `env` cannot talk to the driver, or None."""
+    rmw = env.get("RMW_IMPLEMENTATION", "")
+    if rmw == REQUIRED_RMW:
+        return None
+    return (
+        "RMW_IMPLEMENTATION is %s — the driver and planner containers speak "
+        "Cyclone DDS, and any other middleware discovers them and then loses "
+        "their data. export RMW_IMPLEMENTATION=%s" % ("unset (Fast DDS)" if not rmw else repr(rmw), REQUIRED_RMW)
+    )
+
+
+class GripperWait:
+    """When a gripper command has finished, read off the knuckle.
+
+    The driver's gripper is a latest-wins setpoint topic with no result, so
+    completion is observed in /joint_states: at the target; or moved and
+    then still for SETTLE_S — closed on something, a stall the grip band
+    then judges; or never moved within NO_MOTION_S, a failure. A sample
+    taken while the joint-state stream is stale never counts as stillness.
+    """
+
+    # A 2F-85 closed on air stops short of the 0.8 knuckle target: 0.987 and
+    # 0.991 of full travel on 2026-09-16, i.e. 0.7896 and 0.7928 rad. At 0.01
+    # a gripper already shut read as not-at-target, nothing moved, and "never
+    # moved" failed the close. On flatbot 2026-10-23 it shut at 0.7696 (0.962),
+    # and 0.02 failed a close the same way ("gripper at 0.770 (overlapped)"),
+    # stopping the run's home. 0.035 rad is 4.4 % of travel.
+    AT_TARGET_TOL = 0.035
+    MOVED_MIN = 0.01
+    SETTLE_TOL = 0.003
+    SETTLE_S = 0.15
+    NO_MOTION_S = 1.0
+
+    def __init__(self, target, start, t0):
+        self.target = float(target)
+        self.start = float(start)
+        self.t0 = float(t0)
+        self._last = float(start)
+        self._still_since = None
+
+    def update(self, pos, t, fresh):
+        """(ok, position, stalled) once the command has finished, else None."""
+        pos, t = float(pos), float(t)
+        if not fresh:
+            self._still_since = None
+            return None
+        if abs(pos - self.target) <= self.AT_TARGET_TOL:
+            return True, pos, False
+        moved = abs(pos - self.start) >= self.MOVED_MIN
+        if abs(pos - self._last) > self.SETTLE_TOL:
+            self._still_since = None
+        elif moved and self._still_since is None:
+            self._still_since = t
+        self._last = pos
+        if moved and self._still_since is not None and t - self._still_since >= self.SETTLE_S:
+            return True, pos, True
+        if not moved and t - self.t0 >= self.NO_MOTION_S:
+            return False, pos, False
+        return None

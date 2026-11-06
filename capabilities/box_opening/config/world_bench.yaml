@@ -1,0 +1,43 @@
+# Measured bench geometry — reconciled 2026-08-24 with RAMMP-CuRobo's
+# world_real_bench.yaml (feat/perceived-world HEAD), whose table was
+# MEASURED 2026-08-24 by their scripts/measure_bench.py from the
+# registered Orbbec (surface plane of 240k points; top at -0.027 m).
+# This file is the single source of truth for OUR generated worlds
+# (worlds.py extends it with container-derived cuboids); re-reconcile
+# only if the arm or bench moves (re-run measure_bench there, copy here).
+#
+# Names matter. `table` carries the TRUE surface height: the depth detector
+# bands containers above it and pins their origin to it. The planner pads
+# every obstacle except its no_pad names (the pedestal alone in RAMMP-CuRobo
+# v1.0.0), and a padded true-height table swallows the arm's own base
+# spheres — so worlds.py writes the table lowered by that padding. Keep
+# pedestal/table/floor_* names verbatim.
+base_frame: base_link
+# The table's normal in base_link, as the WRIST camera measures it from the
+# parked scan pose (capture 20260901-130610: six frames of 160-250k table
+# points each, normals within 1-2 deg of each other): 1.5 deg off the arm's
+# +z, leaning toward -y. The scene-camera calibration uses this as "up" so
+# that both cameras' planes are referenced to the same wrist calibration
+# (assuming exactly +z left a 3.7 deg door-to-table mismatch, 2026-09-16).
+# +z is assumed when absent.
+table_normal_base: [0.009, -0.024, 0.9997]
+
+obstacles:
+  - name: pedestal                   # the arm's mounting column (no_pad).
+    position: [0.0, 0.0, -0.05]
+    dims: [0.14, 0.14, 0.04]
+  - name: table                      # TRUE surface height (see above).
+    position: [0.488, -0.063, -0.057]
+    dims: [1.68, 1.89, 0.06]
+  - name: floor_front                # padded keep-out repeating the
+    position: [0.738, -0.063, -0.057]   # surface outside a 0.30 m square
+    dims: [1.18, 1.89, 0.06]            # around the base
+  - name: floor_back
+    position: [-0.250, -0.063, -0.057]
+    dims: [0.20, 1.89, 0.06]
+  - name: floor_left
+    position: [0.000, 0.517, -0.057]
+    dims: [0.30, 0.73, 0.06]
+  - name: floor_right
+    position: [0.000, -0.580, -0.057]
+    dims: [0.30, 0.86, 0.06]
