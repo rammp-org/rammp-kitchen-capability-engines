@@ -144,6 +144,25 @@ COMPLIANT_FREE_LINE_SPEED = 0.55
 # FREE_LINE_SPEED's value, written as its own: the junction ceiling must not follow
 # a change to the free-air lines' speed it was measured against (sweep motion_timing-g-02)
 COMPLIANT_JUNCTION_SPEED = 0.3
+# A compliant run's fold (RetimeParams.fold_deg and fold_chord,
+# Runner.retime_params): where the way in's slide in or turn meets the
+# stroke's approach (Leg.fold, reach_press.way_in_legs) the joint path folds
+# back 151-174 deg while the hand turns only 36-67 deg — still turning toward
+# straight down as the approach starts straight down — and past the re-timer's
+# 150 deg every such junction stopped at rest inside the one execution: 20 of
+# the 33 way ins recorded 10-29..11-04 (the kparam study 11-05 and its checks,
+# I-M1/I-M10). Re-timed by retime_group offline (which gives those 33 as flown
+# to 0.1 ms), flowed through up to 175 deg there and thinned to 0.03 rad
+# chords: no stop at the approach on those 33 nor on the study's 103 way ins
+# on flatbot's URDF (65 stopped), a way in 0.25 s quicker (median; up to 0.48
+# and 0.53, none more than 0.02 s slower), the driver's quintic at that
+# junction at most 17 rad/s^2 (today's 21 and 25), arm_joint_5/6 no faster
+# than today. A reversal_deg of 175 at every corner flowed the slide in into
+# the turn too, and there asked them 0.64 rad/s, past COMPLIANT_QD_CEILING
+# (11-02 21:19, 5 of the 103); chords of 0.03 at every junction made 3 of the
+# 103 up to 0.22 s slower; 0.015 at the fold doubled its quintic (35)
+COMPLIANT_FOLD_DEG = 175.0
+COMPLIANT_FOLD_CHORD = 0.03
 DRIFT_REPLAN_RAD = 0.04  # < START_GATE_RAD: replan before the gate would refuse
 # The driver commands a trajectory's first waypoint at once, wherever the arm
 # is; runtime/driver.py refuses a goal whose start is farther than this from

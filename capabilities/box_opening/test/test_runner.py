@@ -1570,6 +1570,52 @@ def test_a_compliant_run_retimes_gentler_and_under_the_wrist_ceiling_in_preview_
     assert plain < want - 0.1 and _flown_s(c.flown[-1][0]) == pytest.approx(plain, abs=1e-9)
 
 
+@pytest.mark.parametrize("compliant", [True, False])
+def test_a_compliant_run_flows_through_a_fold_a_leg_marks_in_preview_and_flight(tmp_path, compliant):
+    """Leg.fold: the junction into a leg so marked — the compliant way in's
+    approach, behind its walk in or its turn (reach_press.way_in_legs) —
+    folds the joint path back 151-174 deg, and a compliant run's profile
+    flows through it up to COMPLIANT_FOLD_DEG, thinned to
+    COMPLIANT_FOLD_CHORD, as retime_group re-times the group with the legs'
+    marks; its preview shows the time that flies. A position run, which has
+    no fold of its own, stops there as before."""
+    import math
+
+    import numpy as np
+
+    from box_opening.constants import COMPLIANT_FOLD_CHORD, COMPLIANT_FOLD_DEG, JOINT_VMAX
+    from box_opening.runtime.retime import RetimeParams, retime_group
+
+    d = np.array([1.0, 0, 0, 0.6, 0, 0.5, 0])
+    d /= np.linalg.norm(d)
+    e = np.array([0, 0.8, 0.3, 0, 0, 0, 0.0])
+    e -= e.dot(d) * d
+    e /= np.linalg.norm(e)
+    th = math.radians(170.0)
+    p1 = d * 0.4
+    p2 = p1 + (math.cos(th) * d + math.sin(th) * e) * 0.3
+    c = _Flown(compliant)
+    r = runner(c, tmp_path)
+    p = r.retime_params()
+    assert (p.fold_deg, p.fold_chord) == ((COMPLIANT_FOLD_DEG, COMPLIANT_FOLD_CHORD) if compliant else (None, None))
+    walk = _line_leg("reach:slide-in", [0.0] * 7, list(p1), speed=0.55)
+    approach = _line_leg("depth:approach", list(p1), list(p2), speed=0.175)
+    approach.fold = True
+    assert walk.fold is False  # unmarked by default
+    want = retime_group([walk.traj, approach.traj], [0.55, 0.175], JOINT_VMAX, p, [False, True])[1]
+    table = r.preview([walk, approach])
+    res = r.run([walk, approach], execute=True)
+    assert all(x.ok for x in res) and len(c.flown) == 1  # one execution
+    assert r.last_retime["duration_s"] == pytest.approx(want["duration_s"], abs=1e-9)
+    assert _flown_s(c.flown[-1][0]) == pytest.approx(want["duration_s"], abs=1e-9)
+    if compliant:
+        assert r.last_retime["stops"] == 0 and r.last_retime["junction_speeds"][0] > 0.05
+    else:
+        assert r.last_retime["stops"] == 1 and p == RetimeParams()
+    row = [line for line in table.splitlines() if line.startswith("reach:slide-in")][0]
+    assert float(row.split()[5]) == pytest.approx(want["duration_s"] / 2, abs=0.006)
+
+
 @pytest.mark.parametrize("compliant", [None, False])
 def test_a_position_or_guarded_run_keeps_the_default_profile_and_no_ceiling(tmp_path, compliant):
     """A guarded reach-out flies in position (client.compliant False), as

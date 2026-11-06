@@ -1347,7 +1347,11 @@ def test_the_reach_out_slides_in_turning_down_in_one_leg(ctx, monkeypatch, tmp_p
         "home",
     ]
     leg = rec.legs["reach:slide-in"]
-    ((goal, down, step_m, step_rad, jump),) = walks
+    from box_opening.runtime.kinematics import MAX_STEP_RAD, STEP_M
+
+    reaim, *walk_in = walks  # the re-aim turns the hand to its attitude on the way (rp.REAIM_STEP_RAD)
+    assert reaim[2:] == (STEP_M, rp.REAIM_STEP_RAD, MAX_STEP_RAD)
+    ((goal, down, step_m, step_rad, jump),) = walk_in
     assert leg.speed == CONTACT_SPEED and leg.guard.reference == trp.AT_LOOK2 and leg.guard.touch_nm == rp.DRAG_NM
     assert leg.target[2] == pytest.approx(down) and got["turned"] == pytest.approx(down)
     assert (step_m, step_rad, jump) == (dp.TURN_STEP_M, dp.TURN_STEP_RAD, dp.TURN_MAX_JUMP_RAD)
@@ -1417,7 +1421,7 @@ def test_where_no_walk_turns_down_on_the_way_it_slides_then_turns(ctx, monkeypat
     monkeypatch.setattr(
         trp._Chain,
         "walk",
-        lambda self, q0, xyz, quat, **k: (tried.append(quat), (None, "a joint limit"))[1],
+        lambda self, q0, xyz, quat, **k: (tried.append((quat, k["step_rad"])), (None, "a joint limit"))[1],
         raising=False,
     )
     real = rp.run_reach_press
@@ -1429,7 +1433,9 @@ def test_where_no_walk_turns_down_on_the_way_it_slides_then_turns(ctx, monkeypat
         ),
     )
     code, rec, _c, _h = trp._flow(ctx, monkeypatch, tmp_path, touch=ARRIVED)
-    assert code == 0 and len(tried) == len(dp.TURN_SHORT_DEG)
+    # the re-aim's walk (the line as it flew before, where it does not walk), then the walk in at each lean
+    assert code == 0 and [r for _q, r in tried] == [rp.REAIM_STEP_RAD] + [dp.TURN_STEP_RAD] * len(dp.TURN_SHORT_DEG)
+    assert rec.events[2] == "reach:re-aim"
     quat = rp.reach_quat(ctx.model, trp.BUTTON[:2], rp.REACH_TILTS_DEG[0])
     assert rec.legs["reach:slide-in"].target[2] == pytest.approx(quat)  # the tilted slide: the depth press turns
     assert got["turned"] is None and got["here"] == trp.AT_START
@@ -2191,10 +2197,10 @@ def test_a_reach_out_re_times_every_motion_on_its_own_runs_profile(ctx, monkeypa
     in_line = []
     real_group, real_line = runner_mod.retime_group, runner_mod.line_profile
 
-    def retime_group(trajs, speeds, vmax, params=RetimeParams()):  # noqa: B008 - frozen dataclass
+    def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None):  # noqa: B008 - frozen dataclass
         if not in_line:  # line_profile's own re-timings scale the ease by the line's speed: what it is handed counts
             seen.append(params)
-        return real_group(trajs, speeds, vmax, params)
+        return real_group(trajs, speeds, vmax, params, folds)
 
     def line_profile(leg, params, time_scale=1.0):
         seen.append(params)
@@ -2733,6 +2739,8 @@ def test_a_way_in_whose_slide_stroke_or_move_the_runner_would_refuse_is_no_way_i
     monkeypatch.setattr(_Arm, "straight_line", lambda self, q0, xyz, quat_: (_swung(q0, list(xyz) + list(quat_)), None))
     way, stroke, why = way_down([q_look, q_start])
     assert way is None and why.startswith("depth:approach: trajectory sanity gate: joint_1 excursion "), why
+    # the move walked as the re-aim is (rp.REAIM_STEP_RAD), swung as the lines are
+    monkeypatch.setattr(_Arm, "walk", lambda self, q0, xyz, quat_, **k: (_swung(q0, list(xyz) + list(quat_)), None))
     q_off = [look[0] - 0.02] + list(look[1:]) + list(quat)  # 20 mm off the aimed button's look pose
     way, why, kind = rp.solve_way_in(ctx, cfg, BUTTON, 30, q_off)
     assert way is None and kind == "lines"

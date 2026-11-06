@@ -109,6 +109,12 @@ class Leg:
     # after the retime: retime.hold_at_start). The release's retreat
     # (reach_lid_off.retreat_from_live): the fingers open first
     start_hold_s: float = 0.0
+    # MOTION legs, unguarded, chained behind another: where this leg meets
+    # the one before it the joint path folds back, and the re-timer flows
+    # through the fold up to RetimeParams.fold_deg where any other corner
+    # past reversal_deg stops (retime_group's `folds`). The compliant way
+    # in's approach, behind its slide in or its turn (reach_press.way_in_legs)
+    fold: bool = False
     # MOTION legs with a "press" guard: the TOUCH's trajectory this push
     # continues. The push alone is button_travel_m long; the reflex recoil
     # reverses it and then carries on back up this stroke until it has

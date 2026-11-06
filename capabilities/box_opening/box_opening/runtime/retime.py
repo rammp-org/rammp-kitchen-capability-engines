@@ -103,6 +103,18 @@ class RetimeParams:
     # free-air lines cruise faster and still meet as they did at
     # FREE_LINE_SPEED
     junction_cruise: float = None
+    # a chained junction its later leg marks as a fold (retime_group's
+    # `folds`, Leg.fold) stops only where the joint path folds back past
+    # fold_deg, not reversal_deg — over the fold_samples samples on either
+    # side of the junction's own — and its samples are thinned to fold_chord
+    # (None: junction_chord). None: a fold is taken as any other junction.
+    # A compliant run sets them (constants.COMPLIANT_FOLD_DEG and
+    # COMPLIANT_FOLD_CHORD): its way in's slide or turn into the stroke's
+    # approach, where the joints fold back 151-174 deg and the hand turns only
+    # 36-67 deg
+    fold_deg: float = None
+    fold_chord: float = None
+    fold_samples: int = 3
 
 
 def _dedup(positions, min_ds):
@@ -123,13 +135,15 @@ def _dedup(positions, min_ds):
     return np.asarray(keep)
 
 
-def _thin_junctions(q, seg, chord, window):
+def _thin_junctions(q, seg, chord, window, chords=None):
     """Keep samples near each chained junction at least `chord` apart (within
-    `window` of path on both sides). A planner crowds its samples where a
-    leg decelerates to rest; the JTC's quintic turns the kink inside the
-    two intervals adjacent to it, and 1e-3 rad intervals made that a
-    230-300 rad/s^2 kick (review 2026-09-03). Segment ends are never
-    dropped."""
+    `window` of path on both sides) — or, where `chords` (one per segment)
+    names one for the junction into a segment, that one, and that segment's
+    last sample kept however near: where the segment after it begins. A
+    planner crowds its samples where a leg decelerates to rest; the JTC's
+    quintic turns the kink inside the two intervals adjacent to it, and
+    1e-3 rad intervals made that a 230-300 rad/s^2 kick (review
+    2026-09-03). Segment ends are never dropped."""
     n = len(q)
     if n < 3:
         return np.arange(n)
@@ -139,11 +153,13 @@ def _thin_junctions(q, seg, chord, window):
     for k in range(1, n):
         if seg[k] == seg[k - 1]:
             continue
+        own = chords is not None and chords[seg[k]] is not None
+        c = chords[seg[k]] if own else chord
         j = k - 1  # the kink: last sample of the earlier segment
         last = j
         m = j - 1
         while m > 0 and seg[m] == seg[j] and cum[j] - cum[m] <= window:
-            if cum[last] - cum[m] < chord:
+            if cum[last] - cum[m] < c:
                 keep[m] = False
             else:
                 last = m
@@ -151,7 +167,11 @@ def _thin_junctions(q, seg, chord, window):
         last = j
         m = k
         while m < n - 1 and seg[m] == seg[k] and cum[m] - cum[j] <= window:
-            if cum[m] - cum[last] < chord:
+            if own and seg[m + 1] != seg[k]:
+                # a stroke's approach may be shorter than a fold's window: its end dropped, the press's slow
+                # start moved that far back up the path (0.18 s more on a way in on flatbot's URDF)
+                break
+            if cum[m] - cum[last] < c:
                 keep[m] = False
             else:
                 last = m
@@ -159,11 +179,13 @@ def _thin_junctions(q, seg, chord, window):
     return np.flatnonzero(keep)
 
 
-def concat_paths(trajs, min_ds=2e-4, junction_chord=0.0, junction_window=0.0):
+def concat_paths(trajs, min_ds=2e-4, junction_chord=0.0, junction_window=0.0, chords=None):
     """Chained trajectories -> (positions (N,dof), segment index per sample).
     Junction duplicates are dropped; the shared sample belongs to the
     EARLIER segment (its speed is the min of both, see cruise_per_sample);
-    the samples around each junction are thinned to real chords."""
+    the samples around each junction are thinned to real chords —
+    junction_chord, or the one `chords` (one per trajectory, None for
+    junction_chord) names for the junction into a trajectory."""
     parts, seg = [], []
     for i, tr in enumerate(trajs):
         q = np.asarray([[float(v) for v in pt.positions] for pt in tr.points])
@@ -173,8 +195,8 @@ def concat_paths(trajs, min_ds=2e-4, junction_chord=0.0, junction_window=0.0):
     seg = np.asarray(seg)
     keep = _dedup(q, min_ds)
     q, seg = q[keep], seg[keep]
-    if junction_chord > 0 and len(trajs) > 1:
-        keep = _thin_junctions(q, seg, junction_chord, junction_window)
+    if len(trajs) > 1 and (junction_chord > 0 or any(c for c in chords or ())):
+        keep = _thin_junctions(q, seg, junction_chord, junction_window, chords)
         q, seg = q[keep], seg[keep]
     return q, seg
 
@@ -204,7 +226,7 @@ def joint_caps(positions, vmax, params):
     return cap, ds
 
 
-def corner_caps(positions, ds, params):
+def corner_caps(positions, ds, params, fold=None):
     """Per-sample speed cap from the direction change at that sample, and
     which samples are genuine stops (reversal apexes).
 
@@ -218,14 +240,18 @@ def corner_caps(positions, ds, params):
         executed inside one sample interval, and a window-sized cap there
         commanded ~300 rad/s^2 (review 2026-09-03).
     A reversal (> reversal_deg) stops — only at its apex (the local
-    maximum of the turn), never across its whole neighbourhood.
+    maximum of the turn), never across its whole neighbourhood. At a
+    sample `fold` marks (one bool per sample: around a junction marked as a
+    fold, retime_group) only one past params.fold_deg does.
     Returns (cap, stop_mask)."""
     n = len(positions)
     cap = np.full(n, np.inf)
     turn = np.zeros(n)
     cum = np.concatenate([[0.0], np.cumsum(ds)])
     w = params.corner_window
-    rev = math.radians(params.reversal_deg)
+    rev = np.full(n, math.radians(params.reversal_deg))
+    if fold is not None and params.fold_deg is not None:
+        rev[np.asarray(fold, dtype=bool)] = math.radians(params.fold_deg)
 
     def angle(a, b):
         na, nb = np.linalg.norm(a), np.linalg.norm(b)
@@ -252,9 +278,9 @@ def corner_caps(positions, ds, params):
     stop = np.zeros(n, dtype=bool)
     k = 1
     while k < n - 1:
-        if turn[k] >= rev:
+        if turn[k] >= rev[k]:
             j = k
-            while j + 1 < n - 1 and turn[j + 1] >= rev:
+            while j + 1 < n - 1 and turn[j + 1] >= rev[j + 1]:
                 j += 1
             apex = k + int(np.argmax(turn[k : j + 1]))
             stop[apex] = True
@@ -281,10 +307,11 @@ def cruise_per_sample(seg, speeds, junction_cruise=None):
     return cr
 
 
-def speed_profile(positions, cruise, vmax, params, v_start=0.0, v_end=0.0):
-    """Path speed at every sample (rad/s of joint-space arc length)."""
+def speed_profile(positions, cruise, vmax, params, v_start=0.0, v_end=0.0, fold=None):
+    """Path speed at every sample (rad/s of joint-space arc length); `fold`
+    as corner_caps takes it."""
     cap, ds = velocity_caps(positions, vmax, params.vmax_margin)
-    ccap, _stop = corner_caps(positions, ds, params)
+    ccap, _stop = corner_caps(positions, ds, params, fold)
     target = np.minimum(np.minimum(np.asarray(cruise) * cap, ccap), cap)
     # the ceiling after the cruise fraction, never scaled by it; from here
     # on `cap` is the bound both set (the rounding's fill, the ends)
@@ -390,18 +417,32 @@ def _segment_start_fracs(seg, t, n_legs):
     return out
 
 
-def retime_group(trajs, speeds, vmax, params=RetimeParams()):  # noqa: B008 - frozen dataclass
+def _fold_mask(seg, folds, m):
+    """The samples within `m` of each junction into a segment `folds` marks."""
+    fold = np.zeros(len(seg), dtype=bool)
+    for k in range(1, len(seg)):
+        if seg[k] != seg[k - 1] and folds[seg[k]]:
+            fold[max(0, k - 1 - m) : k + m] = True
+    return fold
+
+
+def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None):  # noqa: B008 - frozen dataclass
     """Chained unguarded legs -> ONE re-timed JointTrajectory + a report.
 
-    speeds: each leg's cruise fraction (its Leg.speed). Returns
+    speeds: each leg's cruise fraction (its Leg.speed); folds (None: none):
+    whether each leg's junction with the one before it is a fold (its
+    Leg.fold), taken as params.fold_deg and fold_chord say. Returns
     (trajectory, info) with info = {duration_s, junction_speeds (rad/s at
     each chained junction), stops (junctions taken at rest), n_points}.
     """
-    positions, seg = concat_paths(trajs, params.min_ds, params.junction_chord, params.junction_window)
+    folds = None if params.fold_deg is None or not folds or not any(folds) else [bool(f) for f in folds]
+    chords = None if folds is None else [params.fold_chord if f else None for f in folds]
+    positions, seg = concat_paths(trajs, params.min_ds, params.junction_chord, params.junction_window, chords)
     if len(positions) < 2:
         return trajs[0], {"duration_s": 0.0, "junction_speeds": [], "stops": 0, "n_points": len(positions)}
     cruise = cruise_per_sample(seg, speeds, params.junction_cruise)
-    v, ds = speed_profile(positions, cruise, vmax, params)
+    fold = None if folds is None else _fold_mask(seg, folds, params.fold_samples)
+    v, ds = speed_profile(positions, cruise, vmax, params, fold=fold)
     cap, _ = joint_caps(positions, vmax, params)
     t = times_from_profile(v, ds, params, cap)
     junctions = [k for k in range(1, len(seg)) if seg[k] != seg[k - 1]]

@@ -393,6 +393,10 @@ def test_a_look_planned_to_end_off_its_proof_is_proven_again_from_its_end(ctx, m
     assert plan.look_joints == Q_LOOK and plan.look_leg.goal_joints == wound
 
 
+# the shifted proof's distance as it flew until PROOF_SHIFT_M became 0 (11-06): the tests of the proof itself ask it
+SHIFT_M = 0.03
+
+
 def test_a_shifted_press_plans_only_the_look_it_flies_from(ctx, monkeypatch):
     """plan_reach planned none of the looks it kept: plan_shifted_look plans
     the smallest tilt's once its shifted press flies, and none where it
@@ -421,7 +425,7 @@ def test_a_shifted_press_plans_only_the_look_it_flies_from(ctx, monkeypatch):
     looks = []
     plan, why = reach_press.plan_reach(ctx, cfg, BUTTON, [0.0] * 7, depth=True, looks=looks)
     assert plan is None and planned == [] and len(looks) == 4
-    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7)
+    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7, SHIFT_M)
     assert why is None and near == "nearer the arm" and plan.tilt_deg == 30 and plan.look_leg.goal_joints == Q_LOOK
     quat, _start, _bottom, look = reach_press.reach_geometry(ctx.model, BUTTON, 30, cfg.travel_m)
     assert planned == [(30, ("pose", look, quat))]  # the one look that flies, as the look always was
@@ -429,18 +433,18 @@ def test_a_shifted_press_plans_only_the_look_it_flies_from(ctx, monkeypatch):
     # no shifted press flies: nothing planned
     planned.clear()
     monkeypatch.setattr(reach_press, "way_down", _way_down([]))
-    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7)
+    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7, SHIFT_M)
     assert plan is None and near is None and planned == []
     assert why.startswith("at 30 deg: 30 mm nearer the arm: the way down (walk in: ")
     # ... nor where it flies only from a larger tilt and the smallest's look would not plan: the search ends there
     monkeypatch.setattr(reach_press, "way_down", _way_down([], lambda tilt, tip: tilt > 30 and off_scene(tilt, tip)))
     monkeypatch.setattr(reach_press, "_plan_motion", _planner(planned, refuse=(30,)))
-    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7)
+    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7, SHIFT_M)
     assert plan is None and near is None and planned == []
     assert why.startswith("at 30 deg: 30 mm nearer the arm: the way down (walk in: ")
     # the smallest tilt's look does not plan: the next one's
     monkeypatch.setattr(reach_press, "way_down", way_down)
-    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7)
+    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7, SHIFT_M)
     assert why is None and plan.tilt_deg == 35 and [t for t, _target in planned] == [30, 35]
     # planned to end elsewhere: proven again from there
     moved = list(Q_LOOK)
@@ -448,7 +452,7 @@ def test_a_shifted_press_plans_only_the_look_it_flies_from(ctx, monkeypatch):
     planned.clear()
     froms.clear()
     monkeypatch.setattr(reach_press, "_plan_motion", _planner(planned, end=lambda tilt: moved))
-    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7)
+    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, BUTTON, [0.0] * 7, SHIFT_M)
     assert why is None and plan.tilt_deg == 30 and plan.look_joints == moved and list(plan.slide_pts[0]) == moved
     assert froms == [Q_LOOK, moved] and len(planned) == 1
 
@@ -1329,11 +1333,13 @@ def test_a_scene_button_no_tilt_presses_even_30_mm_off_stops_before_anything_mov
     before it asked for the turn down, which no IK reaches there. Now the
     proof refuses at the rest pose: every tilt is named, then the button
     PROOF_SHIFT_M nearer the arm and to either side, at the smallest
-    tilt's look, and nothing is sent to the arm but the hold where it
-    stands that primes its joint impedance (client.prime_compliant). With
-    the arm's own IK solving every look (`ik`) the proof comes before the
-    planner and no look is planned (14:28:12 2026-10-28 planned four);
-    without, each look is the planner's pose plan, as before."""
+    tilt's look, where it is set (30 mm until 11-06), and nothing is sent
+    to the arm but the hold where it stands that primes its joint impedance
+    (client.prime_compliant). With the arm's own IK solving every look
+    (`ik`) the proof comes before the planner and no look is planned
+    (14:28:12 2026-10-28 planned four); without, each look is the planner's
+    pose plan, as before."""
+    monkeypatch.setattr(reach_press, "PROOF_SHIFT_M", SHIFT_M)
     asked = []
     code, rec, _chain, h, got = _depth_press_flow(
         ctx, monkeypatch, tmp_path, _way_down(asked), chain=_IKChain() if ik else None
@@ -1368,14 +1374,23 @@ def _refusals(tmp_path):
     return [r for f in tmp_path.glob("run-*.jsonl") for r in map(json.loads, open(f)) if r["leg"] == "reach_refused"]
 
 
-def test_a_refused_proof_is_noted_in_the_record_word_for_word_as_its_stop_line(ctx, monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("shift", [0.0, SHIFT_M], ids=["the scene's button", "and 30 mm off it"])
+def test_a_refused_proof_is_noted_in_the_record_word_for_word_as_its_stop_line(
+    ctx, monkeypatch, tmp_path, capsys, shift
+):
     """14:28:12, 14:29:19 and 14:29:54 2026-10-28 ended here, before the arm
     moved: the reason printed, the record ending at the scene fix. It is
-    noted now, as the STOP line says it."""
+    noted now, as the STOP line says it — the scene proof's own (PROOF_SHIFT_M
+    0, since 11-06), or the shifted one's where the shift is set."""
+    monkeypatch.setattr(reach_press, "PROOF_SHIFT_M", shift)
     code, rec, _chain, _h, _got = _depth_press_flow(ctx, monkeypatch, tmp_path, _way_down([]))
     assert code == 1 and rec.events == [] and ctx.client.executed == []
     (note,) = _refusals(tmp_path)
-    assert note["why"].startswith("no reach-out press for the scene camera's box — no tilt turns the hand down")
+    assert note["why"].startswith(
+        "no reach-out press for the scene camera's box — no tilt turns the hand down"
+        if shift
+        else "no reach-out press plans for the scene camera's box (30 deg: the way down ("
+    )
     assert "[press_demo] STOP: %s; nothing moved" % note["why"] in capsys.readouterr().out
 
 
@@ -1426,11 +1441,13 @@ def test_a_scene_button_the_press_reaches_30_mm_off_flies_the_look_and_the_aimed
     button's own way down, solved after the aim, takes the press in — the
     re-aim, the slide in, the turn and the stroke as one execution. With
     the arm's own IK solving every look (`ik`) the one look planned is the
-    one that flies (plan_shifted_look); without, each was planned."""
+    one that flies (plan_shifted_look); without, each was planned. With
+    PROOF_SHIFT_M set, as until 11-06 (30 mm)."""
     import json
 
     from box_opening.tasks import depth_press as dp
 
+    monkeypatch.setattr(reach_press, "PROOF_SHIFT_M", SHIFT_M)
     u = np.asarray(BUTTON[:2]) / np.hypot(*BUTTON[:2])
     aimed = (BUTTON[0] - 0.02 * u[0], BUTTON[1] - 0.02 * u[1], BUTTON[2])
     off_scene = lambda tilt, tip: np.hypot(tip[0] - BUTTON[0], tip[1] - BUTTON[1]) > 0.015  # noqa: E731
@@ -1455,6 +1472,67 @@ def test_a_scene_button_the_press_reaches_30_mm_off_flies_the_look_and_the_aimed
     (way,) = (r for r in rows if r["leg"] == "reach_way_in")
     assert (way["tilt_deg"], way["walked"], way["short_deg"], way["k"]) == (30, False, 0.0, 440.0)
     assert way["end_z"] == pytest.approx(BUTTON[2] - 0.03)
+
+
+@pytest.mark.parametrize("reached_off", [False, True], ids=["nowhere", "30 mm nearer the arm"])
+@pytest.mark.parametrize("ik", [False, True], ids=["planner's looks", "own IK's looks"])
+def test_with_no_proof_shift_only_the_scene_cameras_button_is_proven_and_nothing_moves(
+    ctx, monkeypatch, tmp_path, capsys, ik, reached_off
+):
+    """PROOF_SHIFT_M 0 (the reach study 11-05, I-K6/M21: the 30 mm shift
+    pressed no more boxes, 0.593 of the placements against 0.592, and twice
+    as many stopped after the look had flown, 9.7 % against 4.6 %). A scene
+    button no tilt presses stops at the proof, before anything moves, as
+    it does where nothing off it is reached either — whether or not the
+    press would reach it 30 mm nearer the arm: no button off it is asked,
+    no look kept or planned for one, and the STOP line and its note are the
+    scene proof's own."""
+    import json
+
+    assert reach_press.PROOF_SHIFT_M == 0
+    off_scene = lambda tilt, tip: np.hypot(tip[0] - BUTTON[0], tip[1] - BUTTON[1]) > 0.015  # noqa: E731
+    asked = []
+    solves = off_scene if reached_off else (lambda tilt, tip: False)
+    code, rec, _chain, h, got = _depth_press_flow(
+        ctx, monkeypatch, tmp_path, _way_down(asked, solves), chain=_IKChain() if ik else None
+    )
+    assert code == 1 and rec.events == [] and ctx.client.executed == [] and got == {}
+    assert len(h.get("look_cposes", [])) == (0 if ik else 4)  # the planner's looks are planned by the proof itself
+    assert [t for t, _xy, _z in asked] == list(reach_press.REACH_TILTS_DEG)  # the scene camera's button alone
+    out = capsys.readouterr().out
+    assert "nearer the arm" not in out and "shifted" not in out
+    (note,) = _refusals(tmp_path)
+    assert note["why"].startswith("no reach-out press plans for the scene camera's box (30 deg: the way down (")
+    assert "[press_demo] STOP: %s; nothing moved" % note["why"] in out
+    rows = [json.loads(line) for line in open(next(tmp_path.glob("run-*.jsonl")))]
+    assert not any(r["leg"] == "reach_plan" for r in rows)
+
+
+def test_with_no_proof_shift_the_shifted_proof_asks_nothing(ctx, monkeypatch):
+    """shifted_way_down and plan_shifted_look with a shift of 0 answer at
+    once: the scene camera's button, which plan_reach did not reach, is
+    not proven again three times, and no look is planned."""
+    from box_opening.runtime import approach
+
+    def no_chain():
+        raise AssertionError("no kinematics asked")
+
+    monkeypatch.setattr(approach, "_chain", no_chain)
+    monkeypatch.setattr(reach_press, "way_down", lambda *a: pytest.fail("no way down asked"))
+    planned = []
+    monkeypatch.setattr(reach_press, "_plan_motion", _planner(planned))
+    look = SimpleNamespace(tilt_deg=30, look_joints=Q_LOOK, look_leg=None)
+    cfg = load_press_demo(PINK)
+    assert reach_press.shifted_way_down(ctx, cfg, look, BUTTON, 0.0) == (
+        None,
+        "no button off it is asked (PROOF_SHIFT_M 0)",
+    )
+    assert reach_press.plan_shifted_look(ctx, cfg, [look], BUTTON, [0.0] * 7, 0.0) == (
+        None,
+        None,
+        "at 30 deg: no button off it is asked (PROOF_SHIFT_M 0)",
+    )
+    assert planned == []
 
 
 def test_where_no_straight_line_reaches_the_aimed_look_pose_the_planned_one_brings_its_own_proof(
@@ -1875,7 +1953,7 @@ def test_on_flatbot_1623s_scene_button_is_refused_before_the_look(ctx, monkeypat
     assert why.count("the way down (walk in: ") == len(reach_press.REACH_TILTS_DEG), why
     assert all("%d deg: the way down (walk in: " % t in why for t in reach_press.REACH_TILTS_DEG)
     assert [lk.tilt_deg for lk in looks] == list(reach_press.REACH_TILTS_DEG)
-    near, why = reach_press.shifted_way_down(ctx, cfg, looks[0], SCENE_1623)
+    near, why = reach_press.shifted_way_down(ctx, cfg, looks[0], SCENE_1623, SHIFT_M)
     assert near is None and all("30 mm %s: the way down (walk in: " % n in why for n in reach_press.SHIFTED), why
 
 
@@ -1920,6 +1998,106 @@ def test_on_flatbot_1623s_scene_button_is_proven_turning_short_after_the_slide(c
     # a box the guarded leans reached only 30 mm off (r 0.766 m, az -15 deg) is reached as it stands
     plan, why = reach_press.plan_reach(ctx, cfg, _at((0.766, -15.0)), home, depth=True)
     assert why is None and plan.tilt_deg == 30 and not plan.down.walked and plan.down.short_deg == 8.0
+
+
+# an aim 15 mm off 16:23's scene button, to its right and nearer the arm, as 10-27's aims were
+AIMED_1623 = (SCENE_1623[0] - 0.009, SCENE_1623[1] - 0.012, SCENE_1623[2])
+
+
+@pytest.mark.parametrize(
+    "scene, aimed, legs",
+    [
+        (SCENE_1519, AIMED_1519, ["reach:re-aim", "reach:slide-in", "depth:approach", "depth:press"]),
+        (SCENE_1623, AIMED_1623, ["reach:re-aim", "reach:slide-in", "depth:turn", "depth:approach", "depth:press"]),
+    ],
+    ids=["15:19 walked in", "16:23 turned"],
+)
+def test_on_flatbot_the_way_in_turns_the_hand_along_its_re_aim_and_flows_through_its_fold(
+    ctx, monkeypatch, scene, aimed, legs
+):
+    """From the look its scene button's proof flew to, the aimed button's
+    way in. Its re-aim turns the hand to the aimed attitude along the line,
+    a little each step (REAIM_STEP_RAD): held at the aimed attitude from its
+    first waypoint, as it flew until 11-06, its first 2 mm step made the
+    whole turn, a joint step 4-7x the walk's, where the driver's reference
+    was asked 93 rad/s^2 (median) at the start of 27 of 33 recorded way ins.
+    Re-timed as a compliant run flies it, where the walk in or the turn
+    meets the stroke's approach the joints fold back past the re-timer's
+    150 deg and today's profile stops there at rest; marked a fold
+    (way_in_legs, COMPLIANT_FOLD_DEG) the way in flows through it, a
+    quarter of a second or more quicker, the driver's quintic and the
+    wrist no harder pressed, and stops nowhere."""
+    from dataclasses import replace
+
+    from jtc_model import peak_accel
+
+    from box_opening.constants import COMPLIANT_QD_CEILING, JOINT_VMAX
+    from box_opening.runtime.kinematics import rotvec
+    from box_opening.runtime.retime import check_like_executor, retime_group
+    from box_opening.runtime.stamps import secs
+
+    chain, cfg, home = _on_flatbot(ctx, monkeypatch)
+    plan, why = reach_press.plan_reach(ctx, cfg, scene, home, depth=True)
+    assert why is None
+    q = plan.look_leg.goal_joints
+    way, why, kind = reach_press.solve_way_in(ctx, cfg, aimed, plan.tilt_deg, q)
+    assert way is not None, (why, kind)
+    quat, _start, _bottom, look = reach_press.reach_geometry(ctx.model, aimed, plan.tilt_deg, cfg.travel_m)
+    goal = quat_to_mat(*quat)
+    off = [float(np.linalg.norm(rotvec(goal @ np.asarray(chain.fk(p)[0]).T))) for p in way.move]
+    assert math.radians(0.9) < off[0] < math.radians(2.0)  # the aimed bearing's turn, ~1-1.6 deg
+    assert off[-1] < 1e-4 and all(b < a for a, b in zip(off, off[1:], strict=False))  # turned on the way, to it
+    assert max(a - b for a, b in zip(off, off[1:], strict=False)) <= reach_press.REAIM_STEP_RAD + 1e-6
+    assert chain.fk(way.move[-1])[1] == pytest.approx(list(look), abs=1e-4)
+    line, _why = chain.straight_line(q, look, quat)  # the re-aim as it flew until 11-06
+    assert len(way.move) == len(line)
+    step = lambda pts: float(np.linalg.norm(np.asarray(pts[1]) - np.asarray(pts[0])))  # noqa: E731
+    assert step(way.move) < 0.35 * step(line)
+    # the way in as one execution, re-timed as a compliant run flies it
+    flying = reach_press.way_in_legs(ctx, cfg, way)
+    assert [lg.name for lg in flying] == legs
+    assert [lg.fold for lg in flying] == [lg.name == "depth:approach" for lg in flying]
+    trajs, speeds, folds = [lg.traj for lg in flying], [lg.speed for lg in flying], [lg.fold for lg in flying]
+    params = reach_press.compliant_retime()
+    was, before = retime_group(trajs, speeds, JOINT_VMAX, replace(params, fold_deg=None, fold_chord=None))
+    flown, info = retime_group(trajs, speeds, JOINT_VMAX, params, folds)
+    at = legs.index("depth:approach") - 1  # the junction into the approach
+    assert before["stops"] == 1 and before["junction_speeds"][at] == 0.0
+    assert info["stops"] == 0 and info["junction_speeds"][at] > 0.25
+    assert info["duration_s"] < before["duration_s"] - 0.25
+    assert peak_accel(flown)[0] <= 1.05 * peak_accel(was)[0]
+    assert check_like_executor(flown, JOINT_VMAX) == []
+    qs = np.asarray([pt.positions for pt in flown.points])
+    t = np.asarray([secs(pt.time_from_start) for pt in flown.points])
+    wrist = (np.abs(np.diff(qs, axis=0))[:, 4:] / np.diff(t)[:, None]).max(axis=0)
+    assert (wrist <= np.asarray(COMPLIANT_QD_CEILING[4:]) * (1 + 1e-6)).all()
+
+
+def test_where_the_re_aim_does_not_walk_it_flies_as_the_line_it_was(ctx, monkeypatch):
+    """The arm's IK refusing the walk (a step past MAX_STEP_RAD, a joint
+    limit), the re-aim is the straight line at the aimed attitude, as it
+    flew until 11-06."""
+    from box_opening.runtime import approach
+
+    chain = _Chain()
+    walks = []
+
+    def walk(q0, xyz, quat, step_m=None, step_rad=None, max_step_rad=None):
+        walks.append((step_m, step_rad, max_step_rad))
+        return None, "a joint jump of 0.19 rad 44% of the way — near a singularity"
+
+    chain.walk = walk
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    cfg = load_press_demo(PINK)
+    ctx.model = ContainerModel.load(PINK)
+    q = [0.1] * 7
+    move, plan, why = reach_press.reach_from_here(ctx, cfg, BUTTON, 30, need_stroke=False, q=q)
+    assert why is None and plan is not None and move == [q, [v + 0.01 for v in q]]  # _Chain's line
+    from box_opening.runtime.kinematics import MAX_STEP_RAD, STEP_M
+
+    assert walks == [(STEP_M, reach_press.REAIM_STEP_RAD, MAX_STEP_RAD)]
+    _quat, _start, _bottom, look = reach_press.reach_geometry(ctx.model, BUTTON, 30, cfg.travel_m)
+    assert chain.lines[0][0] == pytest.approx(list(look))
 
 
 def test_on_flatbot_1519s_scene_button_walks_in_exactly_down_at_30_deg(ctx, monkeypatch):
@@ -2000,7 +2178,7 @@ def test_on_flatbot_a_scene_button_out_of_reach_by_a_little_still_flies_the_look
     looks = []
     plan, _why = reach_press.plan_reach(ctx, cfg, _at(scene), home, depth=True, looks=looks)
     assert plan is None and looks
-    assert reach_press.shifted_way_down(ctx, cfg, looks[0], _at(scene)) == (near, None)
+    assert reach_press.shifted_way_down(ctx, cfg, looks[0], _at(scene), SHIFT_M) == (near, None)
     way, why, kind = reach_press.solve_way_in(ctx, cfg, _at(aimed), looks[0].tilt_deg, looks[0].look_joints)
     assert way is not None, (why, kind)
     assert way.move and way.down.walked and way.slide is None and way.stroke.legs
@@ -2098,7 +2276,7 @@ def test_on_flatbot_the_look_is_planned_once_its_press_is_proven_and_as_it_alway
     assert plan is None and asked == [] and "30 deg: the slide in (" in why
     assert all("%d deg: the way down (" % t in why for t in (35, 40, 45))
     assert [lk.tilt_deg for lk in looks] == [35, 40, 45] and all(lk.look_leg is None for lk in looks)
-    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, SCENE_142812, home)
+    plan, near, why = reach_press.plan_shifted_look(ctx, cfg, looks, SCENE_142812, home, SHIFT_M)
     assert plan is None and near is None and asked == [] and why.startswith("at 35 deg: 30 mm nearer the arm: ")
 
 

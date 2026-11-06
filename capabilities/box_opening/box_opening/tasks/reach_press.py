@@ -82,6 +82,8 @@ from box_opening import LOGGER as log
 from box_opening.constants import (
     COMPLIANT_ACCEL,
     COMPLIANT_DECEL,
+    COMPLIANT_FOLD_CHORD,
+    COMPLIANT_FOLD_DEG,
     COMPLIANT_FREE_LINE_SPEED,
     COMPLIANT_JUNCTION_SPEED,
     COMPLIANT_QD_CEILING,
@@ -227,6 +229,19 @@ UNLOAD_CHECK_M = 0.015  # the first stop on the way up: past the button's travel
 GRAVITY_CHECK_NM = 1.0
 GRAVITY_CHECK_FRAC = 0.3
 LINE_MIN_M = 0.001  # a line shorter than this is not flown: the arm is there
+# The re-aim (reach_from_here's move to the aimed button's look pose) turns
+# the hand from the attitude it stands at to the aimed one along the line, no
+# more than this between two of its waypoints (kinematics.ArmChain.walk), each
+# kinematics.STEP_M on and solved from the last. Held at the aimed attitude
+# from its first waypoint, its first 2 mm step made the whole turn — the aimed
+# button's new bearing and the look's own arrival error — and in that one ~19
+# ms interval the driver's quintic asked up to 173 rad/s^2 (93 median) at the
+# start of 27 of the 33 way ins recorded 10-29..11-04 (the kparam study 11-05
+# and its checks, I-K1/I-M11). Walked so, offline on the 25 of them whose walk
+# ends within 1 mrad of the re-aim flown: 17 rad/s^2 median, 32 at most, and a
+# way in 0.15 s quicker (median). Where the walk does not solve, the line as
+# it flew before
+REAIM_STEP_RAD = math.radians(1.0)
 BOX_MOVED_M = 0.005  # the re-aimed button this far from the first aim: the press moved the box
 BOX_LIFTED_M = 0.008  # ... or its lid this much higher or lower
 SCENE_MOVED_M = 0.02  # the scene camera's box this far from where it was before the press
@@ -568,13 +583,15 @@ def compliant_retime():
     """The profile a compliant run re-times every motion with
     (runtime/runner.py Runner.retime_params for a compliant client — the
     depth press flies only in one): the compliant ease out of rest and into
-    it, the wrist's ceiling and the junction ceiling."""
+    it, the wrist's ceiling, the junction ceiling and the fold."""
     return dataclasses.replace(
         RetimeParams(),
         accel=COMPLIANT_ACCEL,
         decel=COMPLIANT_DECEL,
         qd_ceiling=COMPLIANT_QD_CEILING,
         junction_cruise=COMPLIANT_JUNCTION_SPEED,
+        fold_deg=COMPLIANT_FOLD_DEG,
+        fold_chord=COMPLIANT_FOLD_CHORD,
     )
 
 
@@ -934,7 +951,14 @@ def plan_reach(ctx, cfg, button, q_from, tilts=REACH_TILTS_DEG, depth=False, loo
 # aim brings into reach; two such were found offline (flatbot's URDF): the
 # scene's button at az -22.0 deg, r 0.700 m with the aim's at -23.6, 0.692,
 # and at r 0.766, az -15 with the aim's at 0.757, -16.6.
-PROOF_SHIFT_M = 0.03
+# 0: none is asked, the scene camera's button alone is proven. Offline (the
+# reach study 11-05, I-K6/M21: flatbot's URDF, each placement aimed at with
+# the 46 aim shifts recorded 10-27..11-03), the 30 mm shift pressed no more
+# boxes than none — 0.593 of the placements against 0.592 — but stopped twice
+# as many after the look had flown, no press reaching the aimed button: 9.7 %
+# against 4.6 %. Of the 18 placements near the edge of reach only the shift
+# let the look fly at, 87 % stopped after it.
+PROOF_SHIFT_M = 0.0
 SHIFTED = ("nearer the arm", "to its left", "to its right")  # _shifted_buttons' order, seen from the arm
 
 
@@ -954,9 +978,12 @@ def shifted_way_down(ctx, cfg, look, button, m=PROOF_SHIFT_M):
     from its look joints (look_joints: those it was proven from, planned or
     not) straight to that button's start at its tilt, then way_down.
     Returns (SHIFTED's name, None) for the first that does, or (None,
-    why)."""
+    why); with `m` 0, at once: the scene camera's button itself, which
+    plan_reach did not reach, is not proven again."""
     from box_opening.runtime import approach
 
+    if m <= 0:
+        return None, "no button off it is asked (PROOF_SHIFT_M 0)"
     chain = approach._chain()
     q = look.look_joints
     whys = []
@@ -983,7 +1010,8 @@ def plan_shifted_look(ctx, cfg, looks, button, q_from, m=PROOF_SHIFT_M):
     (14:28:12 2026-10-28: four looks planned, none pressed from). Where the
     press reaches but the look does not plan, the next look is asked in its
     place, as plan_reach passes over a look that does not plan; where the
-    press does not reach, the search ends there, unplanned. Until
+    press does not reach, and with `m` 0 (shifted_way_down), the search
+    ends there, unplanned. Until
     2026-10-28 a look that did not plan was never kept, so the next one was
     asked: a kept look that would not have planned now stops the run where
     a larger tilt's press might have flown — knowing would cost a plan on
@@ -1070,12 +1098,13 @@ def solve_way_in(ctx, cfg, button, tilt, q_from):
 
 def reach_from_here(ctx, cfg, button, tilt, need_stroke=True, q=None):
     """The reach for `button` at `tilt` as plan-free lines from where the arm
-    stands (`q`, else the arm's joints): a MOVE to its look pose at its
-    attitude, then the slide and the stroke (not solved without
-    `need_stroke`: the depth press flies its own). Returns (move points —
-    [] when already there —, ReachPlan with no look_leg, None) or (None,
-    None, why)."""
+    stands (`q`, else the arm's joints): a MOVE to its look pose (the
+    re-aim), turning the hand to its attitude on the way (REAIM_STEP_RAD),
+    then the slide and the stroke (not solved without `need_stroke`: the
+    depth press flies its own). Returns (move points — [] when already
+    there —, ReachPlan with no look_leg, None) or (None, None, why)."""
     from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import MAX_STEP_RAD, STEP_M
 
     chain = approach._chain()
     quat, start, bottom, look = reach_geometry(ctx.model, button, tilt, cfg.travel_m)
@@ -1084,7 +1113,9 @@ def reach_from_here(ctx, cfg, button, tilt, need_stroke=True, q=None):
     if float(np.linalg.norm(np.asarray(look, float) - np.asarray(t, float))) < LINE_MIN_M:
         move, q_look = [], q
     else:
-        move, why = chain.straight_line(q, look, quat)
+        move, why = chain.walk(q, look, quat, step_m=STEP_M, step_rad=REAIM_STEP_RAD, max_step_rad=MAX_STEP_RAD)
+        if move is None:  # the line as it flew before, at the new attitude from its first step
+            move, why = chain.straight_line(q, look, quat)
         if move is None:
             return None, None, "the move to its look pose (%s)" % why
         q_look = move[-1]
@@ -1131,17 +1162,21 @@ def line_leg(ctx, name, pts, quat, speed, guard, world, verify=None, chain=0):
 def way_in_legs(ctx, cfg, way):
     """The compliant depth press's way in (`way`, solve_way_in's) as the
     legs of ONE execution, in this order, the empty ones left out:
-    'reach:re-aim' (way.move, at the plan's attitude); 'reach:slide-in', the
-    walk turning down when the way down is walked, else the slide at the
-    plan's attitude, then 'depth:turn' in place; then the press stroke
+    'reach:re-aim' (way.move, turning to the plan's attitude on the way);
+    'reach:slide-in', the walk turning down when the way down is walked,
+    else the slide at the plan's attitude, then 'depth:turn' in place; then
+    the press stroke
     (way.stroke.legs: 'depth:approach' at press_speed, 'depth:press' at
     TOUCH_SPEED). The free-air lines fly at free_line_speed (a compliant
     run's COMPLIANT_FREE_LINE_SPEED). Each starts at the last waypoint of
     the one before — solve_way_in chains them — and every one is unguarded
     under depth_press.COMPLIANT_GAINS (compliant_line): the one gains spec
     legs.can_merge asks of one execution, and the spring the press is
-    modelled on. `cfg` is the press config the stroke was solved with (its
-    press_speed is in way.stroke)."""
+    modelled on. Where the slide in or the turn meets 'depth:approach' the
+    joints fold back while the hand still turns: that leg is marked a fold
+    (Leg.fold), which the re-timer flows through (COMPLIANT_FOLD_DEG). `cfg`
+    is the press config the stroke was solved with (its press_speed is in
+    way.stroke)."""
     from box_opening.tasks import depth_press as dp
 
     # Their world is a label: a plan-free line is never planned, re-planned
@@ -1157,11 +1192,14 @@ def way_in_legs(ctx, cfg, way):
     else:
         lines += [("reach:slide-in", way.slide, way.plan.quat, fast), ("depth:turn", way.down.pts, way.down.quat, fast)]
     lines += [(name, pts, way.stroke.quat, speed) for name, pts, speed in way.stroke.legs]
-    return [
+    legs = [
         dp.compliant_line(ctx, name, pts, quat, speed, world)
         for name, pts, quat, speed in lines
         if pts is not None and len(pts) > 0
     ]
+    for leg in legs[1:]:
+        leg.fold = leg.name == "depth:approach"
+    return legs
 
 
 def _wrist_gravity():
@@ -2396,8 +2434,9 @@ def run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     camera's aim 0.288). 0 then means pressed, by the spring's hold. Its
     press is proven by the arm's own kinematics before the arm moves
     toward the box: from the look pose the hand turns down and strokes —
-    for the scene camera's button, or one PROOF_SHIFT_M off it, before the
-    look (plan_reach depth=True, plan_shifted_look), and for the aimed
+    for the scene camera's button, or one PROOF_SHIFT_M off it where that
+    is set (0: none), before the look (plan_reach depth=True,
+    plan_shifted_look), and for the aimed
     button before the re-aim (solve_way_in). Where it does not, nothing
     moves, or the arm goes home from the look pose. Where it does, the way
     in flies as proven, as ONE execution from the aimed look pose to the
@@ -2466,7 +2505,9 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     # the wrist camera sees then — never here, never a refusal (owner
     # 2026-10-28: "it should go no matter what").
     lid_off = proof and not bool(getattr(args, "press_only", False))
-    looks = [] if proof else None
+    # the looks no tilt presses from, kept for the shifted proof: none with PROOF_SHIFT_M 0
+    shift = proof and PROOF_SHIFT_M > 0
+    looks = [] if shift else None
     # One read: the hold that primes the joint impedance and the look's plan
     # start from the same joints. The first compliant goal after a POSITION
     # one waits out the driver's switch (mode_settle_s 0.25 s) and starts on
@@ -2493,9 +2534,9 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     # look pose once the aim moved the button — the look's re-plan below keeps the elbow it flew there with
     plan, why = plan_reach(ctx, cfg, prior_button, q0, depth=proof, looks=looks, shortest_walk=True)
     proven = "scene" if proof and plan is not None else None
-    if plan is None and proof and looks:
+    if plan is None and shift and looks:
         # no look was planned for it: the shifted press's is, once it flies
-        plan, near, why_near = plan_shifted_look(ctx, cfg, looks, prior_button, q0)
+        plan, near, why_near = plan_shifted_look(ctx, cfg, looks, prior_button, q0, PROOF_SHIFT_M)
         if plan is None:
             stop = (
                 "no reach-out press for the scene camera's box — no tilt turns the hand down and strokes there, "

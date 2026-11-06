@@ -514,3 +514,98 @@ def test_lines_that_cruise_faster_under_the_junction_ceiling_meet_as_the_slower_
     assert info["duration_s"] < 0.85 * was["duration_s"] and info["stops"] == was["stops"] == 0
     assert np.array_equal(_arrays(held)[0], _arrays(loose)[0])  # positions never touched
     assert check_like_executor(held, JOINT_VMAX) == []
+
+
+# -- the fold (RetimeParams.fold_deg, fold_chord): a compliant way in's slide in or turn into its approach --
+
+
+def _folded(*turns_deg, steps=(0.023, 0.02, 0.01), n=(12, 10, 10)):
+    """Chained straight lines, each `steps` apart, the joint path turning
+    `turns_deg` where they meet (in one plane, so each folds back on the one
+    before by that much)."""
+    d = np.array([1.0, 0, 0, 0.6, 0, 0.5, 0])
+    d /= np.linalg.norm(d)
+    e = np.array([0, 0.8, 0.3, 0, 0, 0, 0.0])
+    e -= e.dot(d) * d
+    e /= np.linalg.norm(e)
+    legs, p, th = [], np.zeros(7), 0.0
+    for i in range(len(turns_deg) + 1):
+        u = math.cos(th) * d + math.sin(th) * e
+        q = p + u * steps[i] * (n[i] - 1)
+        legs.append(_traj(_line(p, q, n[i])))
+        p = q
+        th += math.radians(turns_deg[i]) if i < len(turns_deg) else 0.0
+    return legs
+
+
+def test_a_junction_marked_a_fold_flows_where_one_unmarked_folding_as_far_stops():
+    """Where the way in's walk in or turn meets the stroke's approach the
+    joints fold back 151-174 deg, and 20 of the 33 way ins recorded
+    10-29..11-04 stopped there at rest (the kparam study, 11-05). A junction
+    its later leg marks as a fold (retime_group's `folds`, Leg.fold) flows
+    through up to fold_deg; past it, as one unmarked past reversal_deg, it
+    stops. Unmarked, marked on the first leg (no junction into it), or with
+    no fold_deg (every run but a compliant one), it is taken as before.
+    Positions are never touched."""
+    legs = _folded(170.0)
+    p = RetimeParams(fold_deg=175.0)
+    _was, before = retime_group(legs, [0.3, 0.3], JOINT_VMAX, p)
+    assert before["stops"] == 1 and before["junction_speeds"] == [0.0]
+    flown, info = retime_group(legs, [0.3, 0.3], JOINT_VMAX, p, [False, True])
+    assert info["stops"] == 0 and info["junction_speeds"][0] > 0.05
+    assert info["duration_s"] < before["duration_s"] - 0.1
+    assert check_like_executor(flown, JOINT_VMAX) == []
+    q = _arrays(flown)[0]
+    assert np.allclose(q, np.vstack([_arrays(legs[0])[0], _arrays(legs[1])[0][1:]]))
+    for params, folds in ((p, [False, False]), (p, [True, False]), (RetimeParams(), [False, True]), (p, None)):
+        assert retime_group(legs, [0.3, 0.3], JOINT_VMAX, params, folds)[1] == before
+    assert RetimeParams().fold_deg is None and RetimeParams().fold_chord is None
+    # past fold_deg it still stops
+    assert retime_group(_folded(178.0), [0.3, 0.3], JOINT_VMAX, p, [False, True])[1]["stops"] == 1
+
+
+def test_only_the_marked_junction_flows_and_no_other_corner_near_it():
+    """Two 170 deg folds chained: only the one its later leg marks flows,
+    the other stops as before — and so does one inside a leg, past
+    fold_samples samples from the marked junction."""
+    p = RetimeParams(fold_deg=175.0)
+    legs = _folded(170.0, 170.0, n=(12, 12, 10))
+    _f, info = retime_group(legs, [0.3] * 3, JOINT_VMAX, p, [False, False, True])
+    assert info["stops"] == 1 and info["junction_speeds"][0] == 0.0 and info["junction_speeds"][1] > 0.05
+    _f, info = retime_group(legs, [0.3] * 3, JOINT_VMAX, p, [False, True, False])
+    assert info["stops"] == 1 and info["junction_speeds"][0] > 0.05 and info["junction_speeds"][1] == 0.0
+    # the same second fold inside the marked leg, 11 samples after its junction: a stop
+    one = _traj(np.vstack([_arrays(legs[1])[0], _arrays(legs[2])[0][1:]]))
+    flown, info = retime_group([legs[0], one], [0.3] * 2, JOINT_VMAX, p, [False, True])
+    q, v, _t = _arrays(flown)
+    corner = next(k for k, x in enumerate(q) if np.allclose(x, _arrays(legs[1])[0][-1]))
+    assert info["junction_speeds"][0] > 0.05 and np.allclose(v[corner], 0.0)
+
+
+def test_a_folds_samples_are_thinned_to_its_own_chord_and_the_leg_after_it_keeps_its_end():
+    """Within junction_window of the fold its samples are at least
+    fold_chord apart (a compliant run's 0.03; at the 0.015 every other
+    junction keeps, the driver's quintic at the fold asked 35 rad/s^2
+    against 17, offline on the 33 recorded way ins) — and the leg after it
+    keeps its last sample, where the one after that begins: a stroke's
+    approach may be shorter than the window, and with its end dropped (as
+    0.03 at every junction drops it) the press's slow start moved that far
+    back up the path. Every other junction keeps junction_chord. Samples
+    are only ever dropped, never moved."""
+    from box_opening.runtime.retime import concat_paths
+
+    # a walk 0.023 rad a step, folding into an approach 0.02 rad long, then the press on down
+    legs = _folded(170.0, 0.0, steps=(0.023, 0.01, 0.01), n=(12, 3, 10))
+    walk, approach, press = (_arrays(lg)[0] for lg in legs)
+    p = RetimeParams(fold_deg=175.0, fold_chord=0.03)
+    q, seg = concat_paths(legs, p.min_ds, p.junction_chord, p.junction_window, [None, 0.03, None])
+    assert not any(np.allclose(walk[-2], x) for x in q) and any(np.allclose(walk[-3], x) for x in q)
+    assert list(seg).count(1) == 1 and np.allclose(q[list(seg).index(1)], approach[-1])  # its end, kept
+    assert all(any(np.allclose(x, y) for y in np.vstack([walk, approach, press])) for x in q)  # dropped, not moved
+    _f, info = retime_group(legs, [0.3, 0.175, 0.075], JOINT_VMAX, p, [False, True, False])
+    assert len(info["junction_speeds"]) == 2 and info["stops"] == 0
+    # unmarked, the walk keeps its samples (0.015); at 0.03 everywhere the approach's end is dropped
+    q, seg = concat_paths(legs, p.min_ds, p.junction_chord, p.junction_window)
+    assert any(np.allclose(walk[-2], x) for x in q)
+    q, seg = concat_paths(legs, p.min_ds, 0.03, p.junction_window)
+    assert 1 not in set(seg)

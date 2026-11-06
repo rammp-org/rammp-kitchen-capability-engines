@@ -1028,9 +1028,9 @@ def test_the_full_runs_free_air_lines_fly_at_the_compliant_speed_and_only_under_
         flown.extend((lg.name, lg.speed) for lg in legs if lg.kind.value == "motion")
         return real_run(self, legs, execute, lookahead)
 
-    def retime_group(trajs, speeds, vmax, params=RetimeParams()):  # noqa: B008 - frozen dataclass
+    def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None):  # noqa: B008 - frozen dataclass
         timed.append((list(speeds), params))
-        return real_group(trajs, speeds, vmax, params)
+        return real_group(trajs, speeds, vmax, params, folds)
 
     monkeypatch.setattr(Runner, "run", run)
     monkeypatch.setattr(runner_mod, "retime_group", retime_group)
@@ -2533,13 +2533,16 @@ def test_on_flatbot_the_free_air_lines_fly_faster_under_the_wrists_ceiling_and_s
     from box_opening.runtime.stamps import secs
 
     def as_flown(group, p, slow=False):
-        # what Runner._run_motion sends for the execution `group` (one profile over it, a lone free-air line its
-        # own) and retime_group's report of it; its free-air lines at FREE_LINE_SPEED where `slow`
+        # what Runner._run_motion sends for the execution `group` (one profile over it, through the fold its
+        # legs mark, Leg.fold; a lone free-air line its own) and retime_group's report of it; its free-air lines
+        # at FREE_LINE_SPEED where `slow`
         group = [
             replace(lg, speed=FREE_LINE_SPEED) if slow and lg.speed == COMPLIANT_FREE_LINE_SPEED else lg for lg in group
         ]
         if len(group) > 1:
-            return retime_group([lg.traj for lg in group], [lg.speed for lg in group], JOINT_VMAX, p)
+            return retime_group(
+                [lg.traj for lg in group], [lg.speed for lg in group], JOINT_VMAX, p, [lg.fold for lg in group]
+            )
         traj = line_profile(group[0], p)
         return traj, {"duration_s": secs(traj.points[-1].time_from_start), "junction_speeds": [], "stops": 0}
 

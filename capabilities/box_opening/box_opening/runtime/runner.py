@@ -23,6 +23,8 @@ from box_opening import LOGGER as log
 from box_opening.constants import (
     COMPLIANT_ACCEL,
     COMPLIANT_DECEL,
+    COMPLIANT_FOLD_CHORD,
+    COMPLIANT_FOLD_DEG,
     COMPLIANT_JUNCTION_SPEED,
     COMPLIANT_QD_CEILING,
     CONTACT_SPEED,
@@ -573,7 +575,9 @@ class Runner:
         compliant client's (client.compliant) eases out of rest at
         COMPLIANT_ACCEL and into it at COMPLIANT_DECEL, no interval runs a
         joint past COMPLIANT_QD_CEILING, and no junction cruises faster than
-        COMPLIANT_JUNCTION_SPEED: what the arm follows in the driver's joint
+        COMPLIANT_JUNCTION_SPEED, and a junction a leg marks as a fold
+        (Leg.fold) flows up to COMPLIANT_FOLD_DEG, thinned to
+        COMPLIANT_FOLD_CHORD: what the arm follows in the driver's joint
         impedance (constants). The flag is read at every call, never kept:
         press_demo builds the runner before run_reach_press sets it.
         Positions are never touched. A stroke
@@ -591,6 +595,8 @@ class Runner:
             decel=COMPLIANT_DECEL,
             qd_ceiling=COMPLIANT_QD_CEILING,
             junction_cruise=COMPLIANT_JUNCTION_SPEED,
+            fold_deg=COMPLIANT_FOLD_DEG,
+            fold_chord=COMPLIANT_FOLD_CHORD,
         )
 
     # -- preview -----------------------------------------------------------
@@ -620,6 +626,7 @@ class Runner:
                         [g.speed for g in group],
                         JOINT_VMAX,
                         replace(self.retime_params(group[0]), time_scale=self.time_scale),
+                        [g.fold for g in group],
                     )
                     per = info["duration_s"] / len(group)
                     for g in group:
@@ -1346,7 +1353,9 @@ class Runner:
             # descent it leads into are one motion with no stop between
             # them, and the descent keeps its own (slow) cruise fraction.
             params = replace(self.retime_params(), time_scale=self.time_scale)
-            traj, self.last_retime = retime_group([g.traj for g in group], [g.speed for g in group], JOINT_VMAX, params)
+            traj, self.last_retime = retime_group(
+                [g.traj for g in group], [g.speed for g in group], JOINT_VMAX, params, [g.fold for g in group]
+            )
             exec_speed = 1.0
             hold = float(getattr(group[0], "start_hold_s", 0.0) or 0.0)
             if hold > 0.0 and guard_spec is None:
