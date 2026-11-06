@@ -34,6 +34,7 @@ from pathlib import Path
 
 import numpy as np
 import pybullet as p
+import yaml
 from capability_engine import sim
 from capability_engine.cornell_commands import (
     CartesianTrajectoryCommand,
@@ -700,6 +701,65 @@ def enable_keep_out(behind_m):
             f"{link} {-worst[8] * 100:.1f} cm into the wheelchair keep-out (> {behind_m * 100:.0f} cm "
             "behind the arm base, on its right)"
         )
+
+    sim.set_keep_out(keep_out)
+
+
+# ---------------------------------------------------------------------------
+# The chair and user: the boxes cuRobo plans around, for the moves PyBullet plans
+# ---------------------------------------------------------------------------
+CHAIR_DIR = Path(__file__).parent / "chair"  # copied from rammp-deployments by `make sync-chair`, see chair/SOURCE
+CHAIR_LAYERS = ("platform", "seat", "person")  # as flatbot's planner.yaml; its floor is not a chair part
+
+
+def load_chair_boxes():
+    """Every chair and user box as (name, centre in the arm's base frame, half extents), padded as cuRobo pads them.
+    A missing or unreadable file raises: no boxes must never mean no check."""
+    boxes = []
+    for layer in CHAIR_LAYERS:
+        data = yaml.safe_load((CHAIR_DIR / f"layer_mebot_{layer}.yaml").read_text())
+        pad = float(data["meta"]["padding_assumed_m"])
+        for o in data["obstacles"]:
+            half = [float(d) / 2 + pad for d in o["dims"]]
+            boxes.append((f"{layer}/{o['name']}", tuple(float(v) for v in o["position"]), half))
+    return boxes
+
+
+def enable_chair_collision(boxes=None):
+    """Check every plan (sim.solve_ik, the open's swing check), every move_joints (so every move_cartesian) and every
+    cuRobo goal against the chair and user: the sim's keep-out hook, `boxes` (load_chair_boxes) added to the sim on
+    first use. cuRobo's own paths are its own to check: these boxes are in its world.
+
+    The arm's base and shoulder don't count. They can't leave where they are, and the boxes were carved around
+    cuRobo's spheres of them, not the meshes here, so they could read as in a box at every joint state."""
+    boxes = load_chair_boxes() if boxes is None else boxes
+    bodies = {}  # physics client id -> [(body id, box name)]
+
+    def keep_out(rb, q):
+        """Why joints `q` put the arm in the chair or user, or None. The arm is left at `q`."""
+        c = rb.physics_client_id
+        if c not in bodies:
+            base = sim.make_sim()[0].robot_base_pose
+            bodies[c] = []
+            for name, centre, half in boxes:
+                at = multiply_poses(base, Pose(centre, (0.0, 0.0, 0.0, 1.0)))
+                cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=half, physicsClientId=c)
+                body = p.createMultiBody(
+                    0, cs, basePosition=list(at.position), baseOrientation=list(at.orientation), physicsClientId=c
+                )
+                bodies[c].append((body, name))
+        for j, jj in enumerate(ARM):
+            p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
+        fixed = {-1, *range(ARM[0] + 1)}  # the root, the links before joint 1, and the shoulder
+        worst = None
+        for body, name in bodies[c]:
+            for pt in p.getClosestPoints(rb.robot_id, body, 0.0, physicsClientId=c):
+                if pt[3] not in fixed and (worst is None or pt[8] < worst[0]):
+                    worst = (pt[8], pt[3], name)
+        if worst is None:
+            return None
+        link = p.getJointInfo(rb.robot_id, worst[1], physicsClientId=c)[12].decode()
+        return f"{link} {-worst[0] * 100:.1f} cm into {worst[2]} (the chair and user, padding included)"
 
     sim.set_keep_out(keep_out)
 

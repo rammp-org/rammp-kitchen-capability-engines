@@ -85,6 +85,7 @@ class Capability(CapabilityEngine):
             k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
         }
         open_door.configure(self.cfg["data_dir"])
+        dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
         open_door.HANDLE_DETECTOR_MODEL = self.cfg["yolo_model"]
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])

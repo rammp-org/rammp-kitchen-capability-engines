@@ -62,7 +62,32 @@ def test_microwave_open_plans(door_sim):
     assert plan["after"] == "push-open: not checked (no cuRobo)"
 
 
-def test_keep_out_is_off_for_the_microwave_and_refuses_when_enabled(door_sim):
+def test_chair_boxes_are_the_planners_with_its_padding():
+    boxes = {name: (centre, half) for name, centre, half in dc.load_chair_boxes()}
+    assert len(boxes) == 31  # 16 platform, 11 seat, 4 person
+    centre, half = boxes["person/torso"]
+    assert centre == (-0.11580, -0.35075, 0.70485)
+    assert half == pytest.approx([0.2318 / 2 + 0.02, 0.4827 / 2 + 0.02, 0.7749 / 2 + 0.02])
+
+
+def test_chair_refuses_the_arm_but_not_its_base_and_shoulder():
+    sim.reset_for_tests()
+    try:
+        scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
+        q = KINOVA_HOME
+        tool = sim.tool_pose(scene, rb, q)[0]
+        half = [0.05, 0.05, 0.05]
+        dc.enable_chair_collision([("at the tool", tuple(tool), half)])
+        assert "at the tool" in sim.keep_out_message(rb, q)
+        sim.reset_for_tests()
+        scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
+        dc.enable_chair_collision([("at the base", (0.0, 0.0, 0.05), half)])
+        assert sim.keep_out_message(rb, q) is None
+    finally:
+        sim.reset_for_tests()
+
+
+def test_keep_out_is_off_until_enabled_and_refuses_when_enabled(door_sim):
     scene, rb = door_sim
     assert not sim.keep_out_enabled()
     behind = sim.tool_pose(scene, rb, np.radians((-135.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)))

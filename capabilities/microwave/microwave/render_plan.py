@@ -19,7 +19,7 @@ import numpy as np
 import pybullet as p
 import rclpy
 from capability_engine import sim
-from door_common.common import DoorFrame, door_dims, say
+from door_common.common import DoorFrame, door_dims, load_chair_boxes, say
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from scipy.spatial.transform import Rotation as R
 from std_msgs.msg import String
@@ -29,6 +29,7 @@ STEP_DEG = 2.0  # at most this much joint motion per frame
 HOLD_FRAMES = 12  # frames for a gripper open / close, and at the end
 WIDTH, HEIGHT = 640, 480
 DOOR_RGBA, BODY_RGBA = (0.25, 0.5, 0.85, 0.85), (0.8, 0.8, 0.8, 1.0)
+CHAIR_RGBA = (0.85, 0.35, 0.25, 0.35)
 
 
 def _urdf(timeout_s=10.0):
@@ -82,6 +83,9 @@ class Scene3D:
         body = self._box([self.body_depth / 2, self.df.length / 2, self.zh], BODY_RGBA)
         self._place(body, self.df.length / 2, -(self.t / 2 + self.body_depth / 2), 0.0)
         self.set_door(0.0)
+        for _, centre, half in load_chair_boxes():
+            box = self._box(half, CHAIR_RGBA)
+            p.resetBasePositionAndOrientation(box, (self.base + centre).tolist(), (0, 0, 0, 1), physicsClientId=self.c)
 
     def _box(self, half, rgba):
         vs = p.createVisualShape(p.GEOM_BOX, halfExtents=half, rgbaColor=rgba, physicsClientId=self.c)
