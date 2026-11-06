@@ -98,9 +98,9 @@ def chain_state(monkeypatch, tmp_path):
     approach._ROOT, approach._URDF_PATH, approach._CHAIN, approach._GRAVITY, approach._BODY = saved
 
 
-def _model_files(tmp, boxes, robot=ROBOT, padding=None):
+def _model_files(tmp, boxes, robot=ROBOT, padding=None, layer="test"):
     """A planner config in `tmp` with one layer of `boxes` [(name, centre, dims)]: its path."""
-    lines = ["layer: test", "obstacles:"]
+    lines = ["layer: %s" % layer, "obstacles:"]
     lines += ["  - {name: %s, position: %s, dims: %s}" % (n, list(c), list(d)) for n, c, d in boxes]
     (tmp / "layer_test.yaml").write_text("\n".join(lines) + "\n")
     (tmp / "robot.yaml").write_text(robot)
@@ -290,9 +290,9 @@ def test_the_cli_loads_the_param_and_an_explicit_empty_value_turns_it_off(monkey
     monkeypatch.delenv(body.BODY_LAYERS_ENV, raising=False)
     monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), FakeClient()))
     monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
-    path = _model_files(tmp_path, [("b", (1.0, 0.0, 0.5), (0.1, 0.1, 0.1))])
+    path = _model_files(tmp_path, [("b", (1.0, 0.0, 0.5), (0.1, 0.1, 0.1))], layer="person")
     cli_common.build_ctx(Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers=path))
-    assert approach._chain().body is not None and approach._chain().body.model.names == ["test/b"]
+    assert approach._chain().body is not None and approach._chain().body.model.names == ["person/b"]
     cli_common.build_ctx(Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers=""))
     assert approach._chain().body is None
 
@@ -473,3 +473,70 @@ def test_a_run_adds_its_own_boxes_and_lines_into_them_are_refused_naming_them(tm
     assert approach.set_obstacles([]) is not None and chain.body.layers == ["test"]  # cleared
     pts, why = chain.straight_line(q, [0.6, 0.0, 0.33], DOWN)
     assert pts is not None, why
+
+
+def test_near_the_user_no_sphere_moves_faster_than_the_profile_allows(tmp_path):
+    from box_opening.constants import JOINT_VMAX
+    from box_opening.runtime.retime import RetimeParams, positions_to_traj, retime_group
+
+    # a lap whose top is 0.24: a 0.3 m sweep of the hand 0.33 over the table brings the fingers ~55 mm over it
+    path = _model_files(tmp_path, [("lap", (0.55, 0.0, 0.19), (0.30, 0.60, 0.10))], layer="person")
+    approach.set_body(body.load(path))
+    approach.set_chain_root("arm_mount", flatbot_urdf())
+    chain = approach._chain()
+    nu = chain.body.model.near_user
+    assert nu.layers == ("person",) and (nu.far_m, nu.near_m, nu.far_mps, nu.near_fraction) == (0.15, 0.05, 0.5, 0.25)
+    q = chain.nearest_solution(list(HOME), [0.55, -0.15, 0.33], DOWN)
+    assert q is not None
+    pts, why = chain.straight_line(q, [0.55, 0.15, 0.33], DOWN)
+    assert pts is not None, why
+    assert chain.body.distance(pts[len(pts) // 2], layers="person").m == pytest.approx(0.055, abs=0.01)
+    names = ["joint_%d" % (i + 1) for i in range(7)]
+    free, info0 = retime_group([positions_to_traj(names, pts)], [1.0], JOINT_VMAX, RetimeParams())
+    slow, info = retime_group(
+        [positions_to_traj(names, pts)], [1.0], JOINT_VMAX, RetimeParams(), speed_cap=chain.body.near_user_caps
+    )
+    assert info0["capped_samples"] == 0 and info["capped_samples"] > 0
+    assert info["duration_s"] > 1.5 * info0["duration_s"]
+    assert [list(p.positions) for p in slow.points] == [list(p.positions) for p in free.points]  # timing only
+
+    def worst_over(traj):
+        """The worst ratio of a sphere's speed to what the profile allows it, between samples."""
+        Q = np.array([p.positions for p in traj.points])
+        t = np.array([p.time_from_start.sec + 1e-9 * p.time_from_start.nanosec for p in traj.points])
+        d, _links = chain.body.sphere_distances(Q, ("person",))
+        C, _r, _l = chain.body._centres(Q)
+        speed = np.linalg.norm(np.diff(C, axis=0), axis=2) / np.diff(t)[:, None]
+        allowed = nu.speed_mps(np.minimum(d[:-1], d[1:]))
+        return float(np.max(speed / allowed))
+
+    assert worst_over(free) > 1.5  # at full speed the fingers sweep over the lap far faster
+    assert worst_over(slow) <= 1.05  # held to it (5 %: the profile's samples against its intervals)
+    high, why = chain.straight_line(_over_table(chain), [0.6, 0.0, 0.47], DOWN)  # the fingers 0.17 over the lap
+    assert high is not None, why
+    assert np.isinf(chain.body.near_user_caps(high)).all()
+
+
+def test_the_runner_slows_near_the_user_only_with_a_body_model(tmp_path):
+    from box_opening.runtime.runner import Runner
+
+    runner = Runner(FakeClient(), log_dir=tmp_path / "runs")
+    approach.set_body(False)
+    assert runner.near_user_cap() is None  # the bench: no body model
+    path = _model_files(tmp_path, [("lap", (0.6, 0.0, 0.10), (0.30, 0.30, 0.10))], layer="person")
+    approach.set_body(body.load(path))
+    approach.set_chain_root("arm_mount", flatbot_urdf())
+    cap = runner.near_user_cap()
+    assert cap is not None and cap.__self__ is approach._chain().body
+    runner.slow_near_user = False
+    assert runner.near_user_cap() is None
+
+
+def test_a_body_model_without_the_users_layer_stops_the_run(monkeypatch, tmp_path):
+    monkeypatch.delenv(body.BODY_LAYERS_ENV, raising=False)
+    monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), FakeClient()))
+    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
+    path = _model_files(tmp_path, [("b", (1.0, 0.0, 0.5), (0.1, 0.1, 0.1))])  # layer "test": no person
+    args = Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False, body_layers=path)
+    with pytest.raises(SystemExit, match="has no layer person, which .*robot_body.yaml's near_user slows"):
+        cli_common.build_ctx(args)

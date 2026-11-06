@@ -70,3 +70,18 @@ hand_spheres:
       - {center: [-0.029, 0.0615, 0.0032], radius: 0.024}
       - {center: [0.0, 0.0615, 0.0032], radius: 0.024}
       - {center: [0.029, 0.0615, 0.0032], radius: 0.024}
+
+# near_user: how fast the arm may move near the person in the chair (runtime/body
+# Body.near_user_caps, applied by the runner to every motion it re-times: runtime/retime
+# retime_group's speed_cap). Each checked sphere's centre, at its signed distance d to the
+# UNPADDED boxes of `layers` (its buffered surface to the box: an underestimate of the real gap),
+# moves no faster than: no limit for d >= far_m; far_mps at far_m, falling linearly to
+# near_fraction x far_mps at near_m, and that below near_m. A sphere that stands near the user but
+# barely moves (the upper arm's root beside the lap, ~40 mm from it at every joint state) caps
+# nothing: the cap is on each sphere's own speed, not on the distance alone.
+near_user:
+  layers: [person]
+  far_m: 0.15
+  near_m: 0.05
+  far_mps: 0.50
+  near_fraction: 0.25

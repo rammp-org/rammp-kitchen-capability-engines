@@ -50,6 +50,10 @@ reads it, approach.set_obstacles(boxes) adds a run's own boxes):
   Body.with_obstacles(boxes)           a Body that also checks boxes a run finds
                                        (name, centre, half extents, rotation),
                                        padded as the planner pads a world's
+  Body.near_user_caps(positions)       the path speed each sample may fly at so
+                                       no sphere near the user moves faster than
+                                       config/robot_body.yaml near_user allows
+                                       (the runner's re-timing applies it)
 Boxes are named "layer/obstacle": platform, seat and person from flatbot's
 layers, a run's own under the layer its name gives ("cabinet/counter")."""
 
@@ -182,6 +186,45 @@ def load_hand(path):
     return out
 
 
+@dataclass(frozen=True)
+class NearUser:
+    """How fast the arm may move near the user (config/robot_body.yaml `near_user`): a sphere at
+    signed distance d from the `layers`' unpadded boxes moves no faster than speed_mps(d)."""
+
+    layers: tuple
+    far_m: float
+    near_m: float
+    far_mps: float
+    near_fraction: float
+
+    def speed_mps(self, d):
+        """The speed allowed (m/s) a sphere's centre at distance(s) `d`: inf at far_m and beyond."""
+        d = np.asarray(d, float)
+        f = np.clip((d - self.near_m) / (self.far_m - self.near_m), 0.0, 1.0)
+        v = self.far_mps * (self.near_fraction + (1.0 - self.near_fraction) * f)
+        return np.where(d >= self.far_m, np.inf, v)
+
+
+def load_near_user(path):
+    """robot-body config `path`'s near_user, or None where it has none; malformed: BodyModelError."""
+    data = _yaml(path).get("near_user")
+    if data is None:
+        return None
+    try:
+        nu = NearUser(
+            layers=tuple(str(v) for v in data["layers"]),
+            far_m=float(data["far_m"]),
+            near_m=float(data["near_m"]),
+            far_mps=float(data["far_mps"]),
+            near_fraction=float(data["near_fraction"]),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        raise BodyModelError("body model: %s's near_user is malformed (%s)" % (path, e)) from e
+    if not (nu.layers and 0.0 <= nu.near_m < nu.far_m and nu.far_mps > 0.0 and 0.0 < nu.near_fraction <= 1.0):
+        raise BodyModelError("body model: %s's near_user is out of range (%s)" % (path, nu))
+    return nu
+
+
 @dataclass
 class BodyModel:
     """The padded boxes and the arm's buffered spheres, as the planner pads them."""
@@ -196,6 +239,7 @@ class BodyModel:
     buffer_m: float
     hand: list = None  # [HandGroup] from robot-body config, placed (or skipped) by Body
     hand_source: str = None
+    near_user: NearUser = None  # the speed near the user, from the same robot-body config
 
     def check_for(self, chain, urdf_path, root):
         """This model placed on `chain`'s URDF, rooted at `root`: a Body."""
@@ -266,6 +310,9 @@ def load(planner_yaml, robot_body=None):
                 "body model: no %s (box_opening's config) to add the hand's spheres from" % ROBOT_BODY_FILE
             )
         hand = load_hand(hand_source)
+        near_user = load_near_user(hand_source)
+    else:
+        near_user = None
     return BodyModel(
         source=str(planner_yaml),
         base_link=base,
@@ -277,6 +324,7 @@ def load(planner_yaml, robot_body=None):
         buffer_m=buf,
         hand=hand,
         hand_source=None if hand_source is None else str(hand_source),
+        near_user=near_user,
     )
 
 
@@ -625,6 +673,31 @@ class Body:
         if np.ndim(Q) == 1:
             return Clearance(m=float(m[0]), link=link[0], box=box[0])
         return Clearance(m=m, link=link, box=box)
+
+    def near_user_caps(self, positions):
+        """The path speed (rad/s of joint-space arc, retime's unit) each sample of the joint path
+        `positions` (n, 7) may fly at so that no checked sphere near the user moves faster than the
+        model's near_user allows (NearUser.speed_mps of its distance to the user's boxes): inf where
+        none is near, None with no near_user, none of its layers, or fewer than two samples. A sphere's speed per unit
+        of path is its centre's travel over the joint arc of the intervals either side."""
+        nu = self.model.near_user
+        P = np.asarray(positions, float)
+        layers = [lay for lay in (nu.layers if nu is not None else ()) if lay in self.box_layers]
+        if not layers or P.ndim != 2 or len(P) < 2:
+            return None  # a model without the user's layer: the CLIs refuse it (cli_common.load_body_or_exit)
+        d, _links = self.sphere_distances(P, layers)  # (n, S)
+        C, _r, _l = self._centres(P)
+        ds = np.linalg.norm(np.diff(P, axis=0), axis=1)  # (n - 1,)
+        travel = np.linalg.norm(np.diff(C, axis=0), axis=2)  # (n - 1, S)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            per = np.where(ds[:, None] > 1e-12, travel / ds[:, None], 0.0)  # m of sphere per rad of path
+        rate = np.empty_like(d)
+        rate[0], rate[-1] = per[0], per[-1]
+        rate[1:-1] = np.maximum(per[:-1], per[1:])
+        v = nu.speed_mps(d)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cap = np.where((rate > 1e-9) & np.isfinite(v), v / rate, np.inf)
+        return cap.min(axis=1)
 
     def with_obstacles(self, boxes, pad_m=None):
         """A Body that also checks `boxes`, found by a run (never config): each (name, centre,

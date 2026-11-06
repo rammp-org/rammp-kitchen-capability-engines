@@ -186,6 +186,15 @@ def load_body_or_exit(args, who):
             "%s not starting: %s — the plan-free lines cannot be checked against the chair and user. "
             "Nothing moved." % (who, e)
         )
+    nu = getattr(model, "near_user", None)
+    lacking = [] if nu is None else sorted(set(nu.layers) - {n.split("/", 1)[0] for n in model.names})
+    if lacking:
+        # the speed near the user would cap nothing: as unreadable as a missing file
+        sys.exit(
+            "%s not starting: body model: %s has no layer %s, which %s's near_user slows the arm near — "
+            "the arm's speed near the user cannot be held. Nothing moved."
+            % (who, model.source, ", ".join(lacking), model.hand_source)
+        )
     if model is None:
         log.info(
             "%s body check OFF (--body-layers / %s empty): plan-free lines are not checked against "
@@ -214,6 +223,19 @@ def load_body_or_exit(args, who):
                 ),
             )
         )
+        if nu is not None:
+            log.info(
+                "%s near the user (%s): a sphere within %.0f mm moves at most %.2f m/s there, falling to %.2f "
+                "m/s at %.0f mm and closer"
+                % (
+                    who,
+                    ", ".join(nu.layers),
+                    1000 * nu.far_m,
+                    nu.far_mps,
+                    nu.far_mps * nu.near_fraction,
+                    1000 * nu.near_m,
+                )
+            )
     return model
 
 
