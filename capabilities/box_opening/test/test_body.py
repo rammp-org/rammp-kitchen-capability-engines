@@ -412,3 +412,64 @@ def test_a_robot_file_whose_hand_spheres_fall_short_by_less_than_the_buffer_is_n
     path = _model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=robot)
     check = body.load(path).check_for(ArmChain(root="arm_mount", path=flatbot_urdf()), flatbot_urdf(), "arm_mount")
     assert check.hand_added == ["fingers_131mm", "wrist_camera"] and check.hand_skipped == []
+
+
+def test_distance_is_the_signed_gap_to_the_unpadded_boxes_per_state_and_vectorised(tmp_path):
+    chain = _chain(
+        tmp_path, [("lap", (0.6, 0.0, 0.20), (0.20, 0.20, 0.10)), ("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))]
+    )
+    q = _over_table(chain)  # the tool 0.45 over (0.6, 0): the box's top at 0.25
+    body_ = chain.body
+    one = body_.distance(q, layers=("test",))
+    assert isinstance(one.m, float) and one.box == "test/lap" and one.link.startswith("arm_robotiq_85_")
+    C, r, _links = body_.spheres_at(q)
+    lowest = float((C[:, 2] - r).min())  # the box lies under the whole hand: the gap is the lowest sphere's
+    assert one.m == pytest.approx(lowest - 0.25, abs=1e-9)
+    down, _ = chain.straight_line(q, [0.6, 0.0, 0.40], DOWN)
+    many = body_.distance(down, layers="test")
+    assert many.m.shape == (len(down),) and many.m[-1] == pytest.approx(one.m - 0.05, abs=0.002)
+    assert [body_.distance(p, layers="test").m for p in down] == pytest.approx(list(many.m))
+    per, links = body_.sphere_distances(down, layers="test")
+    assert per.shape == (len(down), len(links)) and per.min(axis=1) == pytest.approx(many.m)
+    assert body_.distance(q).m == pytest.approx(one.m)  # all layers: the far box is further
+    with pytest.raises(ValueError, match="no layer person"):
+        body_.distance(q, layers=("person",))
+
+
+def test_pose_clear_is_strict_where_a_line_from_inside_may_still_leave(tmp_path):
+    chain = _chain(tmp_path, [("slab", (0.6, 0.0, 0.39), (0.30, 0.30, 0.06))])  # padded top 0.44
+    q = _over_table(chain)
+    assert chain.body_refusal([q]) is None  # a line from where the arm stands: allowed to start inside
+    assert not chain.body.pose_clear(q) and "test/slab" in chain.body.pose_refusal(q)  # a goal: refused
+    up, why = chain.straight_line(q, [0.6, 0.0, 0.48], DOWN)
+    assert up is not None, why
+    assert chain.body.pose_clear(up[-1]) and chain.body.pose_refusal(up[-1]) is None
+
+
+def test_a_run_adds_its_own_boxes_and_lines_into_them_are_refused_naming_them(tmp_path):
+    chain = _chain(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))])
+    q = _over_table(chain)
+    base = chain.body
+    # a counter edge turned 30 deg about z, its top 0.30: what the camera's table map would give
+    c, s_ = np.cos(np.radians(30)), np.sin(np.radians(30))
+    R = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]])
+    edge = {"name": "cabinet/counter", "centre": (0.6, 0.0, 0.25), "half": (0.10, 0.30, 0.05), "rotation": R}
+    assert approach.set_obstacles([edge]) is chain.body and chain.body is not base and chain.body.base is base
+    assert chain.body.layers == ["cabinet", "test"] and base.layers == ["test"]
+    pts, why = chain.straight_line(q, [0.6, 0.0, 0.33], DOWN)
+    assert (
+        pts is None and why.startswith("the cabinet: arm_robotiq_85_") and "into cabinet/counter (padded 20 mm" in why
+    )
+    assert base.refusal(chain.straight_line(q, [0.6, 0.0, 0.47], DOWN)[0]) is None
+    C, r, _links = chain.body.spheres_at(q)
+    assert chain.body.distance(q, layers="cabinet").m == pytest.approx(float((C[:, 2] - r).min()) - 0.30, abs=1e-9)
+    quat = mat_to_quat_xyzw(R)  # a quaternion does as well as the matrix
+    same = base.with_obstacles([("cabinet/counter", (0.6, 0.0, 0.25), (0.10, 0.30, 0.05), quat)])
+    assert same.distance(q, layers="cabinet").m == pytest.approx(chain.body.distance(q, layers="cabinet").m)
+    loose = base.with_obstacles([("counter", (0.6, 0.0, 0.25), (0.10, 0.30, 0.05))], pad_m=0.0)
+    assert loose.layers == ["obstacle", "test"] and loose._pad[-1] == 0.0
+    with pytest.raises(ValueError, match="not a rotation"):
+        base.with_obstacles([("x", (0, 0, 0), (0.1, 0.1, 0.1), np.diag([1.0, 2.0, 1.0]))])
+    assert approach.set_obstacles([]) is not None and chain.body.layers == ["test"]  # cleared
+    pts, why = chain.straight_line(q, [0.6, 0.0, 0.33], DOWN)
+    assert pts is not None, why

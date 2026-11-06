@@ -92,6 +92,30 @@ def set_body(model):
     _CHAIN = None
 
 
+def body_check():
+    """The Body (runtime/body) the chain's plan-free lines are held out of, or None: off, or no
+    chain to place it on (no URDF yet). Never raises: a caller that only reads the body (the
+    runner's speed near the user) does without it where there is none."""
+    try:
+        if body_model() is None or not chain_ready()[0]:
+            return None
+        return getattr(_chain(), "body", None)
+    except Exception:  # noqa: BLE001 - an unreadable model stops the run where it loads, not here
+        return None
+
+
+def set_obstacles(boxes, pad_m=None):
+    """Hold the chain's lines out of `boxes` too, found by this run (runtime/body
+    Body.with_obstacles: (name, centre, half extents[, rotation]) in the chain's root, padded as
+    the planner pads a world's): the cabinet's keep-out from the camera's table map. Replaces the
+    boxes an earlier call set; [] clears them. Returns the Body, or None with the check off."""
+    chain = _chain()
+    if getattr(chain, "body", None) is None:
+        return None
+    chain.body = chain.body.base.with_obstacles(list(boxes), pad_m=pad_m)
+    return chain.body
+
+
 def body_model():
     """The BodyModel in force, or None (off). Unset, BOX_OPENING_BODY_LAYERS
     decides (an offline run's switch): set and non-empty, its file is loaded

@@ -28,12 +28,30 @@ fingers closed on the tool axis (the stock 2F-85 spheres are locked open:
 the tips were 13 mm outside them) and the wrist OAK and its bracket (12.6
 mm outside them). Each group carries the boxes it stands for and its
 spheres must cover them, or the load stops; a group the robot file's own
-spheres already cover is skipped, never doubled (BodyCheck.hand_added /
+spheres already cover is skipped, never doubled (Body.hand_added /
 hand_skipped).
 
 A file that cannot be read, or that places nothing, is an error: the run
 stops before any motion (never a silent skip). An explicitly empty value
-turns the check off (the bench: no chair)."""
+turns the check off (the bench: no chair).
+
+The API (load() -> BodyModel; BodyModel.check_for(chain, urdf, root) -> Body,
+which runtime/approach attaches to the chain as chain.body; approach.body_check()
+reads it, approach.set_obstacles(boxes) adds a run's own boxes):
+  Body.first_hit(pts) / refusal(pts)   a joint path: the first state entering a
+                                       padded box (a path from inside one may
+                                       move in it, not DEEPER_M deeper)
+  Body.pose_refusal(q) / pose_clear(q) one joint state, strictly: a goal
+  Body.distance(Q, layers=("person",)) signed distance (m, < 0 inside) from the
+                                       arm's buffered spheres to the layers'
+                                       UNPADDED boxes, with the link and the box
+                                       (a Clearance; vectorised over Q's rows)
+  Body.sphere_distances(Q, layers)     the same per sphere, (n, S)
+  Body.with_obstacles(boxes)           a Body that also checks boxes a run finds
+                                       (name, centre, half extents, rotation),
+                                       padded as the planner pads a world's
+Boxes are named "layer/obstacle": platform, seat and person from flatbot's
+layers, a run's own under the layer its name gives ("cabinet/counter")."""
 
 import math
 import os
@@ -176,12 +194,12 @@ class BodyModel:
     spheres: dict  # link -> (centres (k, 3), radii (k,)), buffer included, exempt links left out
     padding_m: float
     buffer_m: float
-    hand: list = None  # [HandGroup] from robot-body config, placed (or skipped) by BodyCheck
+    hand: list = None  # [HandGroup] from robot-body config, placed (or skipped) by Body
     hand_source: str = None
 
     def check_for(self, chain, urdf_path, root):
-        """A BodyCheck of this model on `chain`'s URDF, rooted at `root`."""
-        return BodyCheck(self, chain, urdf_path, root)
+        """This model placed on `chain`'s URDF, rooted at `root`: a Body."""
+        return Body(self, chain, urdf_path, root)
 
 
 def load(planner_yaml, robot_body=None):
@@ -282,24 +300,57 @@ class Hit:
     link: str
     box: str
     depth_m: float  # how far the sphere's surface is inside the padded box
+    what: str = "the chair and user"  # the body model's own boxes; a run-time box names its layer
+    padding_m: float = None  # the box's own padding (None: the model's)
 
     def why(self, model):
-        return "the chair and user: %s %.0f mm into %s (padded %.0f mm + %.0f mm), %.0f%% of the way" % (
+        return "%s: %s %.0f mm into %s (padded %.0f mm + %.0f mm), %.0f%% of the way" % (
+            self.what,
             self.link,
             1000.0 * self.depth_m,
             self.box,
-            1000.0 * model.padding_m,
+            1000.0 * (model.padding_m if self.padding_m is None else self.padding_m),
             1000.0 * model.buffer_m,
             100.0 * self.fraction,
         )
 
 
-class BodyCheck:
-    """A BodyModel placed on the arm by its URDF: which joint states put a
-    sphere of a link inside a padded box."""
+@dataclass
+class Clearance:
+    """Body.distance's answer: the signed distance (m, < 0 inside) from the nearest of the arm's
+    checked spheres (buffered) to the nearest UNPADDED box, with that sphere's link and the box.
+    For one joint state m is a float and link/box strings; for many, an (n,) array and lists."""
+
+    m: object
+    link: object
+    box: object
+
+
+class Body:
+    """A BodyModel placed on the arm by its URDF (BodyModel.check_for): which
+    joint states put a sphere of a link inside a padded box, how far the arm
+    stands from any of them, and the same with boxes a run adds.
+
+    The API the line checks and the other fixes use:
+      first_hit(pts) / refusal(pts): a joint PATH (its waypoints joined by
+        straight joint lines, sampled every CHECK_STEP_RAD) — the first state
+        that enters a padded box; a path that starts inside one may move in
+        it, not DEEPER_M deeper (start_exempt).
+      pose_refusal(q) / pose_clear(q): ONE joint state, strictly (no start
+        allowance): a goal the arm is yet to be flown to.
+      distance(Q, layers=("person",)): the signed distance (m, < 0 inside)
+        from the arm's spheres (buffered) to the named layers' UNPADDED boxes,
+        the link and the box — a Clearance, vectorised over the rows of Q.
+      sphere_distances(Q, layers): the same per sphere, (n, S), and the links.
+      with_obstacles(boxes): a Body that also checks boxes a run finds (name,
+        centre, half extents, rotation), padded as the planner pads a world's
+        (the model's padding unless given): the cabinet's keep-out from the
+        camera's table map. The robot body stays config; these never are.
+    `layers` lists the box layers (each box is named "layer/obstacle")."""
 
     def __init__(self, model, chain, urdf_path, root):
         self.model = model
+        self.base = self  # the Body without run-time boxes (with_obstacles)
         if model.base_link and model.base_link != root:
             raise BodyModelError(
                 "body model: %s's boxes are in %s, the arm's chain in %s" % (model.source, model.base_link, root)
@@ -353,6 +404,26 @@ class BodyCheck:
             self.spheres[g.link] = (np.vstack([cs, g.centres]), np.concatenate([rs, g.radii + model.buffer_m]))
             self.hand_added.append(g.name)
         self.paths = {link: p for link, p in self.paths.items() if link in self.spheres}
+        # the boxes: centre, UNPADDED half extents, padding, rotation (columns: the box's axes in the root)
+        lo, hi = np.asarray(model.lo, float).reshape(-1, 3), np.asarray(model.hi, float).reshape(-1, 3)
+        self.box_names = list(model.names)
+        self.box_layers = [n.split("/", 1)[0] for n in self.box_names]
+        self.box_own = [True] * len(self.box_names)  # the body model's (the chair and user), not a run's
+        self._c = (lo + hi) / 2.0
+        self._pad = np.full(len(lo), float(model.padding_m))
+        self._h = (hi - lo) / 2.0 - self._pad[:, None]
+        self._R = np.broadcast_to(np.eye(3), (len(lo), 3, 3)).copy()
+        self._rotated = False
+        self._bounds()
+
+    def _bounds(self):
+        """Each padded box's axis-aligned bounds in the root (the line check's coarse cut)."""
+        ext = np.einsum("bij,bj->bi", np.abs(self._R), self._h + self._pad[:, None])
+        self._lo, self._hi = self._c - ext, self._c + ext
+
+    @property
+    def layers(self):
+        return sorted(set(self.box_layers))
 
     @staticmethod
     def _rigid_root(link, joints):
@@ -414,6 +485,12 @@ class BodyCheck:
             links += [link] * len(rs)
         return np.concatenate(out, axis=1), np.concatenate(radii), links
 
+    def spheres_at(self, q):
+        """(S, 3) the checked spheres' centres at joint state `q` (the root frame), (S,) their
+        buffered radii, and the link of each."""
+        C, r, links = self._centres(np.asarray(q, float).reshape(1, -1))
+        return C[0], r, links
+
     def first_hit(self, pts, step_rad=CHECK_STEP_RAD, start_exempt=True):
         """The first state along joint path `pts` (its waypoints, joined by
         straight joint lines sampled every `step_rad`) that puts a sphere
@@ -443,36 +520,159 @@ class BodyCheck:
                 i = int(np.argwhere(hit.any(axis=(1, 2)))[0][0])
                 si, bi = np.unravel_index(int(np.argmax(np.where(hit[i], depth[i], -np.inf))), depth[i].shape)
                 k = s + i
+                own = self.box_own[bi]
                 return Hit(
                     index=k,
                     fraction=k / max(1, len(Q) - 1),
                     link=links[si],
-                    box=self.model.names[bi],
+                    box=self.box_names[bi],
                     depth_m=float(depth[i, si, bi]),
+                    what="the chair and user" if own else "the %s" % self.box_layers[bi],
+                    padding_m=None if own else float(self._pad[bi]),
                 )
         return None
+
+    def _box_index(self, layers):
+        """Indices of the boxes in `layers` (None: all); an unknown layer is an error."""
+        if layers is None:
+            return np.arange(len(self.box_names))
+        layers = (layers,) if isinstance(layers, str) else tuple(layers)
+        unknown = sorted(set(layers) - set(self.box_layers))
+        if unknown:
+            raise ValueError("body: no layer %s (the layers: %s)" % (", ".join(unknown), ", ".join(self.layers)))
+        return np.array([i for i, lay in enumerate(self.box_layers) if lay in layers], dtype=int)
+
+    def _excess(self, C, idx, padded):
+        """(n, S, b, 3): per axis, how far each centre in C (n, S, 3) lies outside box idx's faces
+        (< 0: inside on that axis), the padded box or the bare one."""
+        D = C[:, :, None, :] - self._c[idx]
+        if self._rotated:
+            D = np.einsum("nsbj,bji->nsbi", D, self._R[idx])
+        half = self._h[idx] + (self._pad[idx][:, None] if padded else 0.0)
+        return np.abs(D) - half
+
+    @staticmethod
+    def _signed(e):
+        """(…,) the signed distance from a point to its box from _excess's (…, 3): < 0 inside."""
+        m = e.max(axis=-1)
+        return np.where(m < 0.0, m, np.sqrt(np.square(np.maximum(e, 0.0)).sum(axis=-1)))
 
     def _depths(self, Q):
         """(n, S, B) how far each sphere's surface is inside each padded box
         (> 0 inside) at each row of Q, and the link of each sphere. A box no
         sphere comes within its radius of over all of Q reads -inf (never
         inside): on the Jetson the full (n, S, B, 3) sum cost ~20 ms a line."""
-        lo, hi = self.model.lo, self.model.hi
         C, r, links = self._centres(Q)
         n, S = C.shape[:2]
-        out = np.full((n, S, len(lo)), -np.inf)
+        out = np.full((n, S, len(self.box_names)), -np.inf)
         span_lo = C.min(axis=0) - r[:, None]  # (S, 3): where each sphere reaches over Q
         span_hi = C.max(axis=0) + r[:, None]
-        near = np.flatnonzero(np.any(np.all((span_lo[:, None, :] < hi) & (span_hi[:, None, :] > lo), axis=-1), axis=0))
+        near = np.flatnonzero(
+            np.any(np.all((span_lo[:, None, :] < self._hi) & (span_hi[:, None, :] > self._lo), axis=-1), axis=0)
+        )
         if near.size:
-            Cb = C[:, :, None, :]
-            d = np.maximum(lo[near] - Cb, Cb - hi[near])  # per axis: > 0 outside the box that side
-            m = d.max(axis=-1)  # < 0: inside, -m from the nearest face
-            dist = np.sqrt(np.square(np.maximum(d, 0.0)).sum(axis=-1))  # outside: to the box's nearest point
-            out[:, :, near] = r[None, :, None] - np.where(m < 0.0, m, dist)
+            out[:, :, near] = r[None, :, None] - self._signed(self._excess(C, near, padded=True))
         return out, links
 
     def refusal(self, pts, step_rad=CHECK_STEP_RAD, start_exempt=True):
         """Why joint path `pts` enters the chair or its user, or None."""
         hit = self.first_hit(pts, step_rad, start_exempt)
         return None if hit is None else hit.why(self.model)
+
+    def pose_refusal(self, q):
+        """Why the arm at joint state `q` would be inside a padded box, strictly (no DEEPER_M
+        allowance: a goal the arm is yet to be flown to), or None."""
+        return self.refusal([q], step_rad=0.0, start_exempt=False)
+
+    def pose_clear(self, q):
+        """Whether the arm at joint state `q` is clear of every padded box (pose_refusal is None)."""
+        return self.pose_refusal(q) is None
+
+    def sphere_distances(self, Q, layers=None):
+        """(n, S): each checked sphere's signed distance (m, < 0 inside; its buffered surface to the
+        nearest UNPADDED box of `layers`, None all) at each row of Q, and the link of each sphere."""
+        Q = np.atleast_2d(np.asarray(Q, float))
+        idx = self._box_index(layers)
+        out, links = [], None
+        for s in range(0, len(Q), _CHUNK):
+            C, r, links = self._centres(Q[s : s + _CHUNK])
+            if not idx.size:
+                out.append(np.full(C.shape[:2], np.inf))
+                continue
+            out.append(self._signed(self._excess(C, idx, padded=False)).min(axis=2) - r[None, :])
+        return np.concatenate(out), links
+
+    def distance(self, Q, layers=None):
+        """The Clearance of joint state(s) Q from the boxes of `layers` (None: all; e.g. ("person",)):
+        the signed distance (m) from the arm's spheres (buffered) to the UNPADDED boxes, < 0 inside,
+        with the nearest sphere's link and the box. Q (7,): one state, floats and strings; (n, 7):
+        arrays and lists, vectorised."""
+        Qa = np.atleast_2d(np.asarray(Q, float))
+        idx = self._box_index(layers)
+        m = np.full(len(Qa), np.inf)
+        link, box = [None] * len(Qa), [None] * len(Qa)
+        for s in range(0, len(Qa), _CHUNK):
+            C, r, links = self._centres(Qa[s : s + _CHUNK])
+            if not idx.size:
+                continue
+            d = self._signed(self._excess(C, idx, padded=False)) - r[None, :, None]  # (n, S, b)
+            flat = d.reshape(len(d), -1)
+            k = flat.argmin(axis=1)
+            si, bi = np.unravel_index(k, d.shape[1:])
+            m[s : s + len(d)] = flat[np.arange(len(d)), k]
+            for i in range(len(d)):
+                link[s + i], box[s + i] = links[si[i]], self.box_names[idx[bi[i]]]
+        if np.ndim(Q) == 1:
+            return Clearance(m=float(m[0]), link=link[0], box=box[0])
+        return Clearance(m=m, link=link, box=box)
+
+    def with_obstacles(self, boxes, pad_m=None):
+        """A Body that also checks `boxes`, found by a run (never config): each (name, centre,
+        half extents[, rotation]) or a mapping with those keys — `rotation` a 3x3 matrix (columns:
+        the box's axes in the root frame), a quaternion xyzw, or None (axis-aligned) — padded per
+        side by `pad_m` (None: the model's padding, as the planner pads every world obstacle). A
+        name without a layer goes in layer "obstacle". This Body is left as it was."""
+        import copy
+
+        names, layers, cs, hs, Rs = [], [], [], [], []
+        for b in boxes:
+            if isinstance(b, dict):
+                name, centre, half, rot = b["name"], b["centre"], b["half"], b.get("rotation")
+            else:
+                name, centre, half, rot = (list(b) + [None])[:4]
+            name = str(name) if "/" in str(name) else "obstacle/%s" % name
+            c, h = np.asarray(centre, float).reshape(3), np.asarray(half, float).reshape(3)
+            if (h < 0).any():
+                raise ValueError("body: box %s has a negative half extent" % name)
+            if rot is None:
+                R = np.eye(3)
+            else:
+                R = np.asarray(rot, float)
+                if R.shape == (4,):
+                    from box_opening.runtime.kinematics import quat_to_mat
+
+                    R = np.asarray(quat_to_mat(*R), float)
+                if R.shape != (3, 3) or not np.allclose(R.T @ R, np.eye(3), atol=1e-6):
+                    raise ValueError("body: box %s's rotation is not a rotation" % name)
+            names.append(name)
+            layers.append(name.split("/", 1)[0])
+            cs.append(c)
+            hs.append(h)
+            Rs.append(R)
+        out = copy.copy(self)
+        if not names:
+            return out
+        pad = float(self.model.padding_m if pad_m is None else pad_m)
+        out.box_names = self.box_names + names
+        out.box_layers = self.box_layers + layers
+        out.box_own = self.box_own + [False] * len(names)
+        out._c = np.vstack([self._c, cs])
+        out._h = np.vstack([self._h, hs])
+        out._pad = np.concatenate([self._pad, np.full(len(names), pad)])
+        out._R = np.concatenate([self._R, np.asarray(Rs)])
+        out._rotated = self._rotated or any(not np.allclose(R, np.eye(3)) for R in Rs)
+        out._bounds()
+        return out
+
+
+BodyCheck = Body  # the name fix/chair gave it

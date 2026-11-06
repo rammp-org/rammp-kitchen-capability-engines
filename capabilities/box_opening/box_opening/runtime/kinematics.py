@@ -146,7 +146,7 @@ class ArmChain:
         self._tail = (Racc, tacc)
         self._I3 = np.eye(3)
         self._nearest_memo = None  # (inputs, answer) of the last nearest_solution
-        # runtime/body.BodyCheck: the chair and its user, which every line
+        # runtime/body.Body: the chair and its user, which every line
         # flown without the planner (straight_line, walk) is held out of;
         # None: no check (the bench; runtime/approach attaches it)
         self.body = None
