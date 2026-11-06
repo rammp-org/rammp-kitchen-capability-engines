@@ -6,7 +6,9 @@
 3. The swing stops with the door at `close_to_deg` (it swings shut by itself from there): no torque push.
 
 The gripper is never touched (it may hold a container) and the hand never tilts. An action can't prompt, so an execute
-goal must say the chair has been moved (`chair_moved`); until then it refuses, arm untouched.
+goal must say the chair has been moved (`chair_moved`); until then it refuses, arm untouched. With the goal's
+`drive_base` the base drives the chair back instead (base_drive), after checking the arm stays clear of the open door
+all through the move, and the close is planned against the door shifted by the move the base really made.
 """
 
 import json
@@ -14,7 +16,7 @@ import json
 import numpy as np
 from door_common import close_door as shared
 from door_common import common as dc
-from door_common.common import Refused, quiet, say
+from door_common.common import Refused, make_sim, quiet, say
 
 from . import constants as F
 from .motion import logged_run
@@ -65,6 +67,22 @@ def move_chair(chair_back):
     return f"Move the WHEELCHAIR straight back ~{chair_back * 100:.0f} cm (away from the fridge, without turning it)"
 
 
+def clear_through_drive(ai, door, settings, chair_back, chair_back_dir):
+    """Before the base drives the chair `chair_back` m: the arm, held where it is, stays CHAIR_MOVE_MIN_CLEAR_M off the
+    open door model all through the move (the push-open's check for its own move). Raises Refused."""
+    from .push_open import _clear_through_move  # here: push_open imports this module
+
+    door = dict(door)
+    if settings.get("door_deg") is not None:
+        door["door_open_deg"] = float(settings["door_deg"])
+    scene, rb = make_sim()
+    if not _clear_through_move(scene, rb, door, ai.get_state()["position"], chair_back, chair_back_dir):
+        raise Refused(
+            f"drive_base: the arm, where it is, comes within {F.CHAIR_MOVE_MIN_CLEAR_M * 100:.0f} cm of the open door "
+            f"while the base drives {chair_back * 100:.0f} cm back -- the base not driven, nothing moved."
+        )
+
+
 def run(
     ai,
     execute,
@@ -74,11 +92,14 @@ def run(
     chair_back_dir=F.CHAIR_BACK_DIR,
     speed=1.0,
     log_args=None,
+    drive_chair=None,
     **settings,
 ):
     """The close as the node runs it, logged to RUNS_DIR/<time>_close: against the door the open saved, shifted by the
     chair's move, routed in front of the free edge, swinging the door only to `close_to_deg`. `settings`: GOAL_SETTINGS'
-    close_door ones. Returns True when it finished (or the dry run passed); raises Refused."""
+    close_door ones. `drive_chair` (the goal's drive_base: base_drive.move_chair): an execute goal drives
+    the chair back `chair_back` itself instead of needing `chair_moved`. Returns True when it finished (or the dry run
+    passed); raises Refused."""
 
     def task():
         if not dc.DOOR_FILE.exists():
@@ -96,18 +117,33 @@ def run(
         )
         z = close_height(ai, door, settings, shift, close_to_deg)
         say(f"swing height z {z:.3f}")
+        driven = False
         if not execute:
-            say("(plan only: planned as if the wheelchair has already moved back)")
-        elif chair_back > 0 and not chair_moved:
-            raise Refused(
-                f"{move_chair(chair_back)}, then send this goal again with chair_moved true. If it is still back from "
-                "the last close, leave it."
+            drives = drive_chair is not None and chair_back > 0
+            say(
+                "(plan only: planned as if the wheelchair has already moved back"
+                + (f"; with execute true the base drives it {chair_back * 100:.0f} cm back first)" if drives else ")")
             )
+        elif chair_back > 0 and not chair_moved:
+            if drive_chair is None:
+                raise Refused(
+                    f"{move_chair(chair_back)}, then send this goal again with chair_moved true. If it is still back "
+                    "from the last close, leave it."
+                )
+            clear_through_drive(ai, door, settings, chair_back, chair_back_dir)
+            say(f"\n>>> drive_base: driving the wheelchair ~{chair_back * 100:.0f} cm back for the close")
+            moved = drive_chair(chair_back)  # within the base_tolerance of chair_back, or it raises
+            driven = True
+            shift = np.asarray(chair_back_dir, float) * moved
+            say(f"the close re-planned against the door shifted by the {moved * 100:.1f} cm the base moved")
+            z = close_height(ai, door, settings, shift, close_to_deg)
+            say(f"swing height z {z:.3f}")
         ok = _push_close(ai, execute, {**settings, "push_z": z}, shift, close_to_deg)
         if ok and execute:
             say(
-                f"door left at ~{close_to_deg:.0f} deg to swing shut. Move the wheelchair forward again before the "
-                "next open (it detects the door afresh)."
+                f"door left at ~{close_to_deg:.0f} deg to swing shut. "
+                + ("The base stays where it drove: drive" if driven else "Move")
+                + " the wheelchair forward again before the next open (it detects the door afresh)."
             )
         return ok
 

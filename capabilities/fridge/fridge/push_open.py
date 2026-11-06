@@ -249,21 +249,32 @@ def _push(ai, pts, legs, placed, deg0):
     return ok
 
 
-def push_open(ai, execute, after):
+def push_open(ai, execute, after, drive_chair=None):
     """After the pull: let go, back off the handle, and push the door on -- or, if the push needs the wheelchair moved
-    (`after`, the PushOpen that planned it), stop there and ask for the move (NEXT_STEP). Planned and sim-gated from
-    where the arm really is before letting go (a failed gate: nothing moves, the hand stays on the handle)."""
+    (`after`, the PushOpen that planned it), stop there and ask for the move (NEXT_STEP); with `drive_chair` (the
+    goal's drive_base: base_drive.move_chair) drive the base that far instead and push from there. Planned
+    and sim-gated from where the arm really is before letting go (a failed gate: nothing moves, the hand stays on the
+    handle)."""
     global NEXT_STEP
     say("\n===== let go, back off the handle, push further open =====")
     if not execute:
         move = after.chair_move or 0.0
-        NEXT_STEP = (
-            "Plan OK: after the pull it lets go, backs off the handle and pushes the door open (no wheelchair move)."
-            if not move
-            else f"Plan OK: after the pull it lets go, backs off the handle and stops, asking you to "
-            f"{move_chair(move)[0].lower() + move_chair(move)[1:]}; then send the open with execute true and "
-            "chair_moved true to push the door open."
-        )
+        if not move:
+            NEXT_STEP = (
+                "Plan OK: after the pull it lets go, backs off the handle and pushes the door open (no wheelchair "
+                "move)."
+            )
+        elif drive_chair is not None:
+            NEXT_STEP = (
+                f"Plan OK: after the pull it lets go, backs off the handle, DRIVES THE BASE {_how(move)} "
+                "(drive_base) and pushes the door open."
+            )
+        else:
+            NEXT_STEP = (
+                f"Plan OK: after the pull it lets go, backs off the handle and stops, asking you to "
+                f"{move_chair(move)[0].lower() + move_chair(move)[1:]}; then send the open with execute true and "
+                "chair_moved true to push the door open."
+            )
         say(f"  {NEXT_STEP}")
         return True
     door = json.loads(dc.DOOR_FILE.read_text())
@@ -293,6 +304,15 @@ def push_open(ai, execute, after):
             f"~{deg0:.0f} deg open, the hand off it."
         )
     move = found[0]
+    if move and drive_chair is not None:
+        # the hand stays where the back-off left it, clear of the door all through the move (plan_after_chair_move
+        # checked it); the push is then planned against the door shifted by the move the base really made
+        say(f"\n>>> drive_base: driving the wheelchair {_how(move)} for the push")
+        moved = drive_chair(move)  # within the base_tolerance of `move`, or it raises
+        # only now: a drive stopped part way leaves no push waiting, so a chair_moved goal can't push a door that
+        # isn't where it would think
+        save_door_geometry(push_after_chair_move=float(moved))
+        return push_after_chair_move(ai, True, after.chair_dir)
     if move:
         save_door_geometry(push_after_chair_move=float(move))
         NEXT_STEP = (

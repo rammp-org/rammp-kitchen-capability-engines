@@ -1,0 +1,380 @@
+"""`self.base`: the drive base (the MIB), for a capability.
+
+One velocity command: a body-frame twist, sent as rammp_base_interfaces/TwistSetpoint on
+TWIST_TOPIC (best-effort, latest wins: rammp-rtps messages/control_message.hpp). One reading: the
+base's nav_msgs/Odometry on ODOM_TOPIC. The MIB drives on TwistSetpoint only in its AUTONOMOUS or
+SHARED state: request_mode() asks for one (or for ENABLED, "manual", where the joystick drives),
+and for a drive profile, with a DriveCommand on DRIVE_COMMAND_TOPIC, resending it until MibStatus
+on MIB_STATUS_TOPIC shows it (DriveCommand.msg's protocol). After that, a twist raises BaseError
+once the MIB has left that state (a joystick touch ends AUTONOMOUS): the user's decision, which
+nothing here re-requests. If the action switched the MIB into AUTONOMOUS or SHARED and the MIB is
+still in it, end_action() asks for DISABLE (IDLE), as that joystick touch would; manual is left
+alone, as the user's.
+
+Like self.arm, it lives on the engine's node and callback group and makes its ROS entities inside
+an action only: the setpoint publisher on the first send_twist() or stop(), the odometry
+subscription on the first odometry(), the DriveCommand publisher and MibStatus subscription on
+the first request_mode(), all in an ActionScope that end_action() closes. If the action published
+a setpoint, end_action() first sends a zero twist STOP_REPEATS times (the topics are best-effort),
+then the DISABLE, so a cancel, a failure or an exception leaves the base commanded still. Every
+publish is under _lock, where end_action() marks the action ended before it stops the base, so
+nothing is sent after that stop.
+
+In mock mode it makes no ROS entity: send_twist() and request_mode() send nothing, and odometry()
+is the commanded twist integrated from the origin of odom (dead reckoning), kept for the node's
+lifetime.
+"""
+
+import math
+import threading
+import time
+
+from nav_msgs.msg import Odometry
+from rammp_base_interfaces.msg import DriveCommand, MibStatus, TwistSetpoint
+from rclpy.qos import qos_profile_sensor_data
+
+from capability_engine.action_scope import ActionScope
+from capability_engine.arm import SETPOINT_QOS, wait_until
+
+TWIST_TOPIC = "/base/setpoint/twist"  # the MIB's rt/base/setpoint/twist
+ODOM_TOPIC = "/base/odom"  # nav_msgs/Odometry: pose in odom, twist in base_link
+ODOM_WAIT_S = 10.0  # how long odometry() waits for the first message of the action
+ODOM_STALE_S = 0.5  # odometry older than this is an error
+STOP_REPEATS = 3  # end_action() sends the zero twist this many times...
+STOP_PERIOD_S = 0.02  # ...this far apart (and then the DISABLE, as often)
+DRIVE_COMMAND_TOPIC = "/rammp/drive_command"  # the MIB's rt/rammp/drive_command
+MIB_STATUS_TOPIC = "/rammp/mib/status"  # the MIB's rt/rammp/mib/status, every 500 ms
+MIB_STATUS_STALE_S = 1.5  # three MibStatus periods: older than this is an error
+MODE_WAIT_S = 3.0  # request_mode(): how long the MIB has to show each requested state
+MODE_RESEND_S = 0.5  # request_mode(): resend an unanswered DriveCommand this often
+_S = MibStatus
+# request_mode()'s modes, from DriveCommand.msg: (the DriveCommand request, the MibStatus
+# system_state that answers it, the states the MIB accepts the request from, the states to DISABLE
+# out of first). AUTONOMOUS and SHARED are refused from either, and a profile change there too, so
+# those leave first; ENABLE is refused from all three of the states with their own way out.
+MODES = {
+    "autonomous": (
+        DriveCommand.REQUEST_AUTONOMOUS,
+        _S.SYSTEM_STATE_AUTONOMOUS,
+        {_S.SYSTEM_STATE_IDLE, _S.SYSTEM_STATE_ENABLED, _S.SYSTEM_STATE_PUSH_ASSIST},
+        {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED},
+    ),
+    "shared": (
+        DriveCommand.REQUEST_SHARED,
+        _S.SYSTEM_STATE_SHARED,
+        {_S.SYSTEM_STATE_IDLE, _S.SYSTEM_STATE_ENABLED, _S.SYSTEM_STATE_PUSH_ASSIST},
+        {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED},
+    ),
+    "manual": (  # the joystick drives; ENABLE from ENABLED is a profile change while driving
+        DriveCommand.REQUEST_ENABLE,
+        _S.SYSTEM_STATE_ENABLED,
+        {_S.SYSTEM_STATE_IDLE, _S.SYSTEM_STATE_ENABLED},
+        {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED, _S.SYSTEM_STATE_PUSH_ASSIST},
+    ),
+}
+TWIST_STATES = {_S.SYSTEM_STATE_AUTONOMOUS, _S.SYSTEM_STATE_SHARED}  # the MIB drives on twists
+PROFILES = {
+    "low": DriveCommand.PROFILE_LOW,
+    "normal": DriveCommand.PROFILE_NORMAL,
+    "high": DriveCommand.PROFILE_HIGH,
+}
+STATE_NAMES = {
+    getattr(MibStatus, n): n.removeprefix("SYSTEM_STATE_")
+    for n in dir(MibStatus)
+    if n.startswith("SYSTEM_STATE_")
+}
+NOT_IN_ACTION_MESSAGE = "the base is only available inside an action"
+NO_ODOM_MESSAGE = f"no {ODOM_TOPIC} -- is the base up, and ROS_DOMAIN_ID exported?"
+NO_STATUS_MESSAGE = f"no {MIB_STATUS_TOPIC} -- is the MIB up, and ROS_DOMAIN_ID exported?"
+MOCK_NOT_SENT = "mock: base twists not sent"
+
+
+class BaseError(Exception):
+    """A base call failed: outside an action, no fresh odometry or MibStatus, the MIB refused or
+    left the requested mode."""
+
+
+class BaseInterface:
+    """`self.base`: the drive base's mode, velocity commands and odometry, on the engine's
+    node."""
+
+    def __init__(self, node, callback_group, *, mock: bool = False):
+        self._node = node
+        self._group = callback_group
+        self._mock = mock
+        self._lock = threading.Lock()  # everything below
+        self._ctx = None  # the running action's; None: no action
+        self._scope = None
+        self._pub = None  # made by the first send_twist() or stop() of the action
+        self._cmd_pub = None  # the DriveCommand publisher, made by the first request_mode()
+        self._subs = set()  # the topics this action subscribed to
+        self._latest = {}  # topic -> (message, time.monotonic() received), this action's
+        self._mode = None  # the system_state request_mode() entered this action, if any
+        self._mock_logged = False
+        self._mock_pose = [0.0, 0.0, 0.0]  # mock mode: x, y, yaw in odom
+        self._mock_twist = (0.0, 0.0, 0.0)  # mock mode: the commanded vx, vy, wz in base_link
+        self._mock_t = time.monotonic()  # mock mode: when _mock_pose was last advanced
+
+    # -- lifecycle ----------------------------------------------------------------------------
+
+    def begin_action(self, ctx):
+        """Start an action: base calls are allowed until end_action()."""
+        self.end_action()  # the last action never ended: carry nothing
+        with self._lock:
+            self._ctx, self._scope = ctx, ActionScope(self._node, self._group)
+
+    def end_action(self):
+        """End the action: if it published a setpoint, send the zero twist STOP_REPEATS times;
+        if it switched the MIB into a mode it is still in, then DISABLE as often; then destroy its
+        entities and forget what they received. Takes at most worst_settle_s()."""
+        with self._lock:
+            sends = []  # (publisher, message), in order
+            if self._pub is not None:
+                sends += [(self._pub, _setpoint(0.0, 0.0, 0.0))] * STOP_REPEATS
+            status = self._latest.get(MIB_STATUS_TOPIC, (None,))[0]
+            # Only AUTONOMOUS or SHARED this action switched the MIB into, while it is still in it.
+            # Manual is the user's: an action that asked for it handed the chair back.
+            entered = self._cmd_pub is not None and status is not None
+            if entered and self._mode in TWIST_STATES and self._mode == status.system_state:
+                disable = DriveCommand(
+                    request=DriveCommand.REQUEST_DISABLE, profile=status.active_profile
+                )
+                sends += [(self._cmd_pub, disable)] * STOP_REPEATS
+            scope = self._scope
+            self._ctx = self._scope = self._pub = self._cmd_pub = self._mode = None
+            self._subs, self._latest = set(), {}
+            self._mock_logged = False
+            if self._mock:
+                self._mock_command((0.0, 0.0, 0.0))
+        try:
+            for i, (pub, msg) in enumerate(sends):
+                if i:
+                    time.sleep(STOP_PERIOD_S)
+                pub.publish(msg)
+        finally:
+            if scope is not None:
+                scope.close()
+
+    @staticmethod
+    def worst_settle_s() -> float:
+        """How long end_action() may take: the spacing of its zero twists and DISABLEs."""
+        return (2 * STOP_REPEATS - 1) * STOP_PERIOD_S
+
+    # -- commands -----------------------------------------------------------------------------
+
+    def send_twist(self, linear_x: float, angular_z: float, linear_y: float = 0.0):
+        """Command the base's velocity in base_link (REP 103): `linear_x` forward (m/s),
+        `angular_z` counter-clockwise seen from above (rad/s), `linear_y` left (m/s; a
+        differential drive ignores it). One message: resend it at a steady rate while you drive,
+        and stop() (or leave the action) to halt. Never blocks. Raises Cancelled once the action
+        is cancelled, BaseError outside an action or once the MIB has left the mode
+        request_mode() entered."""
+        with self._lock:
+            ctx = self._check_in_action()
+            if ctx.cancelled():
+                ctx.checkpoint()  # raises the engine's Cancelled; end_action() stops the base
+            if self._mode is not None:
+                state = self._latest[MIB_STATUS_TOPIC][0].system_state
+                if state != self._mode:
+                    self._fail(
+                        f"the MIB left {STATE_NAMES[self._mode]} for {_state_name(state)} "
+                        "(a joystick touch, an e-stop or a fault): not driving"
+                    )
+                if state not in TWIST_STATES:
+                    self._fail("manual mode: the joystick drives, not send_twist()")
+            self._publish((float(linear_x), float(linear_y), float(angular_z)))
+
+    def stop(self):
+        """Command a zero twist, even once the action is cancelled. BaseError outside an action."""
+        with self._lock:
+            self._check_in_action()
+            self._publish((0.0, 0.0, 0.0))
+
+    def _publish(self, twist):
+        """Send (vx, vy, wz), under _lock in an action."""
+        if self._mock:
+            if not self._mock_logged:
+                self._node.get_logger().info(MOCK_NOT_SENT)
+                self._mock_logged = True
+            self._mock_command(twist)
+            return
+        if self._pub is None:
+            self._pub = self._scope.create_publisher(TwistSetpoint, TWIST_TOPIC, SETPOINT_QOS)
+        self._pub.publish(_setpoint(*twist))
+
+    def request_mode(self, mode: str, profile: str | None = None):
+        """Ask the MIB for a drive mode: "autonomous" (it drives on this action's twists alone; a
+        joystick touch ends it), "shared" (on the twists and the joystick together) or "manual"
+        (the joystick alone: handing the chair back to the user). `profile` ("low", "normal",
+        "high") sets the drive profile; None keeps the one in force. Returns once MibStatus shows
+        both. When the MIB cannot take the request where it is (between autonomous and shared, a
+        new profile in either, or manual from them or from push assist), it first asks for
+        DISABLE (IDLE). Honours a pause before it starts. Raises Cancelled once the action is
+        cancelled, BaseError outside an action, for another mode or profile, when the MIB cannot
+        enter it now (INITIALIZING, ESTOP, ERROR), or when MibStatus does not show it within
+        MODE_WAIT_S."""
+        if mode not in MODES:
+            raise BaseError(f"request_mode: {mode!r} is not one of {sorted(MODES)}")
+        if profile is not None and profile not in PROFILES:
+            raise BaseError(f"request_mode: profile {profile!r} is not one of {sorted(PROFILES)}")
+        request, target, enterable, exit_first = MODES[mode]
+        with self._lock:
+            ctx = self._check_in_action()
+        ctx.checkpoint()
+        if self._mock:
+            with self._lock:
+                self._check_in_action()
+                self._node.get_logger().info(f"mock: drive mode {mode!r} not requested")
+            return
+        status = self._read(
+            MIB_STATUS_TOPIC, MibStatus, MODE_WAIT_S, MIB_STATUS_STALE_S, NO_STATUS_MESSAGE, ctx
+        )
+        state = status.system_state
+        want = status.active_profile if profile is None else PROFILES[profile]
+        if (state, status.active_profile) != (target, want):
+            if state in exit_first:
+                idle = MibStatus.SYSTEM_STATE_IDLE
+                state = self._drive(
+                    DriveCommand.REQUEST_DISABLE, status.active_profile, idle, None, ctx
+                )
+            if state not in enterable:
+                self._fail(
+                    f"request_mode {mode!r}: the MIB is in {_state_name(state)} "
+                    f"({status.error_message})"
+                )
+            self._drive(request, want, target, want, ctx)
+        with self._lock:
+            self._check_in_action()
+            self._mode = target
+
+    def _drive(self, request, profile, target, target_profile, ctx):
+        """Send DriveCommand `request` with `profile` every MODE_RESEND_S until MibStatus shows
+        `target` (and `target_profile`, unless None), for up to MODE_WAIT_S; returns `target`."""
+        msg = DriveCommand(request=request, profile=profile)
+        deadline = time.monotonic() + MODE_WAIT_S
+
+        def answered():
+            entry = self._received(MIB_STATUS_TOPIC)
+            return (
+                entry is not None
+                and entry[0].system_state == target
+                and (target_profile is None or entry[0].active_profile == target_profile)
+            )
+
+        while True:
+            with self._lock:
+                self._check_in_action()
+                if self._cmd_pub is None:
+                    self._cmd_pub = self._scope.create_publisher(
+                        DriveCommand, DRIVE_COMMAND_TOPIC, SETPOINT_QOS
+                    )
+                self._cmd_pub.publish(msg)
+            wait_s = min(MODE_RESEND_S, max(0.0, deadline - time.monotonic()))
+            if wait_until(answered, wait_s, ctx):
+                return target
+            if time.monotonic() >= deadline:
+                entry = self._received(MIB_STATUS_TOPIC)
+                now = (
+                    "no MibStatus"
+                    if entry is None
+                    else (
+                        f"{_state_name(entry[0].system_state)}, profile {entry[0].active_profile}"
+                    )
+                )
+                self._fail(
+                    f"the MIB did not enter {STATE_NAMES[target]} (profile "
+                    f"{target_profile if target_profile is not None else 'any'}) within "
+                    f"{MODE_WAIT_S} s: it is in {now}"
+                )
+
+    # -- state --------------------------------------------------------------------------------
+
+    def odometry(self) -> Odometry:
+        """The base's latest nav_msgs/Odometry: pose in odom, twist in base_link. The first call
+        of an action subscribes to ODOM_TOPIC and waits up to ODOM_WAIT_S for a message. Raises
+        Cancelled once the action is cancelled, BaseError outside an action, when no odometry
+        comes, or when the latest is older than ODOM_STALE_S."""
+        with self._lock:
+            ctx = self._check_in_action()
+            if self._mock:
+                return self._mock_odometry()
+        return self._read(ODOM_TOPIC, Odometry, ODOM_WAIT_S, ODOM_STALE_S, NO_ODOM_MESSAGE, ctx)
+
+    def _read(self, topic, msg_type, wait_s, stale_s, missing, ctx):
+        """The latest `msg_type` on `topic`: the action's first read subscribes and waits up to
+        `wait_s` for one. BaseError (`missing`) when none comes, or when it is older than
+        `stale_s`; Cancelled once the action is cancelled."""
+        with self._lock:
+            self._check_in_action()
+            if topic not in self._subs:
+                self._scope.create_subscription(
+                    msg_type, topic, lambda m: self._store(topic, m), qos_profile_sensor_data
+                )
+                self._subs.add(topic)
+        if not wait_until(lambda: self._received(topic) is not None, wait_s, ctx):
+            self._fail(missing)
+        msg, received = self._received(topic)
+        age = time.monotonic() - received
+        if age > stale_s:
+            self._fail(f"{topic} is {age:.2f} s old (limit {stale_s} s)")
+        return msg
+
+    def _store(self, topic, msg):
+        with self._lock:
+            if self._ctx is not None:
+                self._latest[topic] = (msg, time.monotonic())
+
+    def _received(self, topic):
+        """This action's latest (message, received) on `topic`, or None; BaseError once it has
+        ended."""
+        with self._lock:
+            self._check_in_action()
+            return self._latest.get(topic)
+
+    def _check_in_action(self):
+        """The running action's ctx; BaseError when none runs."""
+        if self._ctx is None:
+            self._fail(NOT_IN_ACTION_MESSAGE)
+        return self._ctx
+
+    def _fail(self, message):
+        self._node.get_logger().error(message)
+        raise BaseError(message)
+
+    # -- mock mode ----------------------------------------------------------------------------
+
+    def _mock_command(self, twist):
+        """Advance the mock pose under the twist commanded so far, then command `twist`."""
+        now = time.monotonic()
+        dt, self._mock_t = now - self._mock_t, now
+        vx, vy, wz = self._mock_twist
+        x, y, yaw = self._mock_pose
+        self._mock_pose = [
+            x + (vx * math.cos(yaw) - vy * math.sin(yaw)) * dt,
+            y + (vx * math.sin(yaw) + vy * math.cos(yaw)) * dt,
+            yaw + wz * dt,
+        ]
+        self._mock_twist = twist
+
+    def _mock_odometry(self) -> Odometry:
+        self._mock_command(self._mock_twist)
+        x, y, yaw = self._mock_pose
+        m = Odometry()
+        m.header.stamp = self._node.get_clock().now().to_msg()
+        m.header.frame_id, m.child_frame_id = "odom", "base_link"
+        m.pose.pose.position.x, m.pose.pose.position.y = x, y
+        m.pose.pose.orientation.z, m.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
+        vx, vy, wz = self._mock_twist
+        m.twist.twist.linear.x, m.twist.twist.linear.y, m.twist.twist.angular.z = vx, vy, wz
+        return m
+
+
+def _state_name(state) -> str:
+    return "no MibStatus" if state is None else STATE_NAMES.get(state, f"state {state}")
+
+
+def _setpoint(vx, vy, wz) -> TwistSetpoint:
+    """A TwistSetpoint with no token (all zeros): ExecuteAction carries none yet, as for the arm."""
+    m = TwistSetpoint()
+    m.twist.linear.x, m.twist.linear.y, m.twist.angular.z = vx, vy, wz
+    return m

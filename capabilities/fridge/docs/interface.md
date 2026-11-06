@@ -23,6 +23,15 @@ in the fridge.
 **The arm moves only if the node runs with `allow_execute: true` and the goal sets
 `execute`.** Otherwise every goal is a dry run: detect, plan and gate, nothing commanded.
 
+**The base moves only if, in addition, the goal sets `drive_base`.** Both actions take
+`drive_base` (bool, default false) and `base_speed` (m/s, default 0.05, at most `base_max_speed`). With it, an
+executing goal drives the wheelchair moves the plan needs itself (`self.base`: TwistSetpoint
+velocities, MIB in AUTONOMOUS on the `low` profile), closed loop on `/base/odom`, a fixed distance
+of at most `base_max_distance` straight along the chair's heading, ending within `base_tolerance`, and goes on in
+the same goal: no `chair_moved` goal (sending both is refused). A move that stops part way (wrong way, further than
+asked, timeout, arm e-stop, joystick touch, stale odometry) fails the goal with error code `base_stopped`, the base
+commanded still and the arm holding. Without it the chair is moved by hand, as below.
+
 cuRobo does the free-space move to the line-up point in front of the handle. Everything on or
 near the door (straight in, the swing, the route round the door, the push-open, the close) stays
 on joint paths planned and checked here, against a box model of the door and cabinet, and those
@@ -124,9 +133,10 @@ How to run it on the arm: [TESTING.md](TESTING.md).
   pushes from 10 cm above the handle and lets the grasp tilt up to 45° (`MOUNTS[30]`). With the
   level arm's values (10 cm below, up to 25°) it plans almost nowhere at that height.
   The wheelchair keep-out's size was measured on the level rig.
-- **The wheelchair is moved by a person.** An action can't prompt, so `chair_moved` stands in for
-  the old script's prompt. A `MOVE_BASE` intent (`ctx.request_intent`) could replace it once an
-  engine handles one.
+- **The wheelchair is moved by a person** unless the goal sets `drive_base`. An action can't
+  prompt, so `chair_moved` stands in for the old script's prompt. `drive_base` uses `self.base`
+  (the engine's drive base interface), so `required_resources` lists `base`. It has not yet run on
+  the base.
 - **`handle_source: sam3` is unmeasured here.** Its grasp offsets were never measured on this
   fridge: re-measure before using it. Depth stays the code's default; TESTING.md runs SAM 3, which
   found the handle where depth didn't on 2026-11-04.
@@ -180,6 +190,11 @@ passes them as a params file.
 | `bag_frame_hz`                                                      | `1.0`                                                                                                    | Wrist camera frames a second in the run's rosbag (the camera runs at 15)                                                                                                                                                                                      |
 | `scene_color_topic`, `scene_camera_info_topic`, `scene_depth_topic` | `/scene_camera/color/image_raw`, `/scene_camera/color/camera_info`, `/scene_camera/depth/image_rect_raw` | The scene camera's frames, recorded into the run's rosbag at `bag_frame_hz` too (doubles its size). Any `""`: not recorded                                                                                                                                    |
 | `boxes_topic`                                                       | `/perception/object_detections_3d`                                                                       | boxer's 3D boxes, recorded into the run's rosbag at `bag_frame_hz`. `""`: not recorded                                                                                                                                                                        |
+| `base_max_speed`                                                    | `0.15`                                                                                                   | drive_base: the most a goal's `base_speed` may be (m/s)                                                                                                                                                                                                       |
+| `base_max_distance`                                                 | `0.35`                                                                                                   | drive_base: the longest wheelchair move it drives (m)                                                                                                                                                                                                         |
+| `base_tolerance`                                                    | `0.01`                                                                                                   | drive_base: how close to the distance the move must end, and how far past it or the wrong way it may go (m)                                                                                                                                                   |
+| `base_timeout_margin`                                               | `5.0`                                                                                                    | drive_base: a move taking longer than distance / `base_speed` + this (s) is stopped                                                                                                                                                                           |
+| `base_profile`                                                      | `low`                                                                                                    | drive_base: the MIB's drive profile while it drives (`low`, `normal`, `high`)                                                                                                                                                                                 |
 
 Per-rig constants that are not parameters yet, in `fridge/constants.py`: the grasp corrections
 (`GRIP_EXT`, `GRASP_X_ADJUST`, `VERTICAL_CORR`), the handle gates and the routes round the door. Per mount

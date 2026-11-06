@@ -116,6 +116,11 @@ class _Arm:
     def execute_command(self, command):
         return self.gripper(0.0)
 
+    def control_status(self):  # base_drive watches it for the arm's e-stop
+        return type("ControlStatus", (), {"estopped": self.estopped})()
+
+    estopped = False
+
 
 @pytest.fixture
 def door_sim(tmp_path, monkeypatch):
@@ -445,7 +450,7 @@ def test_the_open_defaults_to_the_60_degree_pull_and_push(door_sim, monkeypatch)
         return True
 
     monkeypatch.setattr(shared, "open_task", open_task)
-    monkeypatch.setattr(open_door, "push_open", lambda ai, execute, after: True)
+    monkeypatch.setattr(open_door, "push_open", lambda ai, execute, after, drive_chair=None: True)
     assert open_door.run(_Arm(scene, rb, TELEOP_START), False)
     assert asked["swing"] == (60, 60)
     assert isinstance(asked["after"], push_open.PushOpen)

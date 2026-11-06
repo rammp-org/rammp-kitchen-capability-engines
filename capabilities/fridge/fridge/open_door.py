@@ -314,6 +314,7 @@ def run(
     around=True,
     chair_moved=False,
     chair_back_dir=F.CHAIR_BACK_DIR,
+    drive_chair=None,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. Exactly `swing_deg` (default PUSH_OPEN_PULL_DEG, or
     SWING_DEG without `push`), then what follows. `grasp_offset`: grasp this far (m) above the middle of the bar
@@ -324,7 +325,8 @@ def run(
     round-the-door: the plan is gated by the back-off only (ReleaseBackOff). With `push`, the open may stop after the
     pull and the back-off, asking for a wheelchair move (push_open.NEXT_STEP); `chair_moved` then does the rest: the
     push, from where the hand is (push_after_chair_move). `chair_back_dir`: which way moving the wheelchair back moves
-    the fridge in the arm's frame.
+    the fridge in the arm's frame. `drive_chair` (the goal's drive_base: base_drive.move_chair): the
+    push-open's wheelchair move is driven by the base within this goal, not asked for.
     Returns True when it finished (or the dry run passed); raises Refused."""
     P.NEXT_STEP = ""
 
@@ -355,7 +357,7 @@ def run(
             say("swing did not finish -- stopping (still holding the handle).")
             return False
         if push:
-            ok = push_open(ai, execute, after)
+            ok = push_open(ai, execute, after, drive_chair)
         elif around:
             ok = release_around(ai, execute)
         else:

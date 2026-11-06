@@ -11,23 +11,34 @@ SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the g
 is a dry run (detect, plan and gate every leg; nothing moves) and the result says so. Someone stands at the e-stop
 whenever allow_execute is on.
 
+The wheelchair moves the open and the close plan (back ~30 cm before the close; 5-20 cm before the push-open's push,
+when it needs one) are made by hand by default: the goal stops and asks, and a goal with `chair_moved` goes on. With
+`drive_base` true an executing goal drives the base that fixed distance itself (base_drive, self.base) at `base_speed`
+m/s and goes on in the same goal. A dry run with drive_base only checks the base's odometry is there.
+
     ros2 launch fridge fridge.launch.py use_orchestrator:=false
     make action CAP=fridge ACTION=open PARAMS='{"execute": false}'
     make action CAP=fridge ACTION=close PARAMS='{"execute": false}'
 """
 
+from functools import partial
+
 import rammp_arm
-from capability_engine import Action, CapabilityEngine, EngineError, run
+from capability_engine import Action, BaseError, CapabilityEngine, EngineError, run
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import close_door, constants, motion, open_door, push_open
+from . import base_drive, close_door, constants, motion, open_door, push_open
 from .perception import WristCamera
 from .tee_logger import TeeLogger
 
 COMMON = {
     "execute": {"type": "boolean", "default": False},
     "speed": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1.0},
+    # the base drives the wheelchair moves the plan needs (fixed distances, base_drive), instead of asking for them
+    "drive_base": {"type": "boolean", "default": False},
+    # ... at this speed (m/s), at most the node's base_max_speed
+    "base_speed": {"type": "number", "exclusiveMinimum": 0, "default": base_drive.SPEED_DEFAULT},
 }
 
 
@@ -74,13 +85,15 @@ PARAMS = {
     "scene_camera_info_topic": "/scene_camera/color/camera_info",
     "scene_depth_topic": "/scene_camera/depth/image_rect_raw",
     "boxes_topic": "/perception/object_detections_3d",
+    # drive_base: its limits and the MIB drive profile (base_drive.PARAMS)
+    **base_drive.PARAMS,
 }
 
 
 class Capability(CapabilityEngine):
     display_name = "Fridge"
     perception_classes = ["fridge"]
-    required_resources = ["arm", "gripper"]
+    required_resources = ["arm", "gripper", "base"]  # the base only with drive_base
     actions = [
         Action(
             "open",
@@ -177,6 +190,18 @@ class Capability(CapabilityEngine):
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
+        drive_base = bool(params.get("drive_base", False))
+        base_speed = float(params.get("base_speed", base_drive.SPEED_DEFAULT))
+        if drive_base and not 0.0 < base_speed <= self.cfg["base_max_speed"]:
+            raise EngineError(
+                "bad_params", f"'base_speed' must be in (0, {self.cfg['base_max_speed']}] m/s", recoverable=True
+            )
+        if drive_base and params.get("chair_moved"):
+            raise EngineError(
+                "bad_params",
+                "drive_base drives the wheelchair itself; chair_moved is for after you moved it by hand -- send one",
+                recoverable=True,
+            )
         if self.mock:
             ctx.progress(action_id, 100.0, "mock: nothing detected or moved")
             return {"executed": False, "mock": True}
@@ -200,7 +225,21 @@ class Capability(CapabilityEngine):
         shared_open.configure(CHECKPOINT=ctx.checkpoint)  # a cancel stops a long plan, not only a motion
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
         log_args = {**params, "execute": execute}
+        # a dry run gets it too, for its messages; it refuses to drive unless the goal executes
+        drive_chair = None
+        if drive_base:
+            base_cfg = {k: self.cfg[k] for k in base_drive.PARAMS}
+            drive_chair = partial(
+                base_drive.move_chair, self.base, self.arm, ctx, speed=base_speed, cfg=base_cfg, execute=execute
+            )
         try:
+            # before the arm moves, if this goal may drive the base: its odometry and the arm's e-stop status are there
+            if action_id == "open":
+                may_drive = bool(params.get("push_open", True)) and not params.get("release_only")
+            else:
+                may_drive = float(params.get("chair_back", constants.CHAIR_BACK_M)) > 0
+            if drive_base and may_drive:
+                base_drive.check(self.base, self.arm)
             if action_id == "open":
                 ok = open_door.run(
                     self.arm,
@@ -215,6 +254,7 @@ class Capability(CapabilityEngine):
                     around=bool(params.get("around", True)),
                     chair_moved=bool(params.get("chair_moved", False)),
                     chair_back_dir=self.cfg["chair_back_dir"],
+                    drive_chair=drive_chair,
                 )
                 if ok and push_open.NEXT_STEP:  # the wheelchair move it asks for, where the goal was sent
                     ctx.progress(action_id, 100.0, push_open.NEXT_STEP)
@@ -227,10 +267,18 @@ class Capability(CapabilityEngine):
                     chair_back_dir=self.cfg["chair_back_dir"],
                     speed=speed,
                     log_args=log_args,
+                    drive_chair=drive_chair,
                     **settings,
                 )
                 chair_back = float(settings.get("chair_back", constants.CHAIR_BACK_M))
-                if ok and not execute and chair_back > 0 and not settings.get("chair_moved"):
+                if ok and not execute and chair_back > 0 and drive_base:
+                    next_step = (
+                        f"Plan OK. With execute true and drive_base true the base drives the wheelchair "
+                        f"~{chair_back * 100:.0f} cm back at {base_speed:.2f} m/s, then closes."
+                    )
+                    ctx.progress(action_id, 100.0, next_step)
+                    note = f"{note}. {next_step}" if note else next_step
+                elif ok and not execute and chair_back > 0 and not settings.get("chair_moved"):
                     # the plan passed: say, where the goal was sent (feedback and the result), what comes next
                     next_step = (
                         f"Plan OK. {close_door.move_chair(chair_back)}, then send the close with execute true and "
@@ -240,6 +288,13 @@ class Capability(CapabilityEngine):
                     note = f"{note}. {next_step}" if note else next_step
         except dc.Refused as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
+        except BaseError as e:  # a wheelchair move stopped part way (or the MIB refused it): the base commanded still
+            raise EngineError(
+                "base_stopped",
+                f"{e} -- the base is stopped and the arm holds where it is; check where the wheelchair is before any "
+                "new goal",
+                recoverable=True,
+            ) from e
         finally:
             dc.set_output(None)
             dc.set_camera(None)

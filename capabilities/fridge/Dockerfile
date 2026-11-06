@@ -32,6 +32,15 @@ RUN pip freeze | grep -iE '^numpy==' > /tmp/keep.txt \
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
+# self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
+# rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
+# interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
+# geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
+# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
+# once the FROM moves to rammp-base 2.0.0.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
+RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
+
 # Dependencies first, from the package.xml files only, so a code-only change reuses this layer and
 # rebuilds in seconds (no apt). /module_ws is an overlay on the base's /ros2_ws (the RAMMP
 # interfaces); the base's entrypoint sources its install/ automatically. The base ships rosdep's
