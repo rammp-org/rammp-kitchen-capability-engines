@@ -552,29 +552,6 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     assert argv[argv.index("--instance-id") + 1] == "food_container_2"
 
 
-def test_the_wrist_survey_param_asks_the_run_to_survey_and_its_looks_are_the_locate_phase(engine):
-    """Off by default (the fragment declares it so): a run whose scene camera finds no box stops with NO BOX, as
-    the owner had it. On (a chair parked side-on to a counter), the run surveys with the wrist camera
-    (tasks/survey), and its looks report the locate phase."""
-    import yaml
-
-    real = node.Capability._argv.__get__(engine)
-    assert "--wrist-survey" not in real("open_box") and node.PARAMS["wrist_survey"] is False
-    engine.set_parameters([Parameter("wrist_survey", value=True)])
-    assert "--wrist-survey" in real("open_box") and "--wrist-survey" in real("open_box", "food_container_2")
-    engine.set_parameters([Parameter("wrist_survey", value=False)])
-    fragment = yaml.safe_load(open(FRAGMENT_MOCK.with_name("rammp-alternative.yaml")))["params"]
-    assert fragment["wrist_survey"] is False and set(node.PARAMS) <= set(fragment)
-    track = node.Tracker("open_box")
-    said = track.add({"leg": "survey:look-1", "kind": "motion", "ok": True, "outcome": "arrived"})
-    assert said == ("locate", 0.03, "looking for the container with the wrist camera")
-    assert track.add({"leg": "scene_fix", "kind": "note", "origin_xyz": [0.45, 0.4, 0.24], "source": "wrist"}) == (
-        "locate",
-        0.05,
-        "found the container at [0.45, 0.40]",
-    )
-
-
 def test_each_goal_reads_the_params_as_they_are_then(engine):
     """Review round 2: allow_execute was read per goal, but speed_scale, video and the rest once
     at start-up, so a change from the sheppy TUI was accepted and ignored."""

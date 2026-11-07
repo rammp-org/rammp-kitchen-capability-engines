@@ -249,8 +249,6 @@ def test_free_air_executions_fly_under_the_default_thresholds_and_the_rest_loose
 
     assert contact_profile_for(["home"]) == contact_profile_for(["reach:look"]) == "default"
     assert contact_profile_for(["clear-margin", "home"]) == "default"
-    # the wrist survey's looks (tasks/survey): free air, high over where a counter may stand
-    assert contact_profile_for(["survey:look-1"]) == contact_profile_for(["survey:look-again-1"]) == "default"
     for names in (
         ["reach:re-aim", "reach:slide-in", "depth:approach", "depth:press"],
         ["grip:down"],

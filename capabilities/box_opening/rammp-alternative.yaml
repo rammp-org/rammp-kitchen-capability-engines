@@ -55,11 +55,6 @@ params:
   # before it moves; a run also refuses a planner not started on this same config with world "".
   # "" turns the check off (a bench with no chair)
   body_layers: /config/robot/curobo/planner.yaml
-  # where the scene camera finds no container, look for it with the wrist camera from one or two
-  # poses over the arm's side (a chair parked side-on to a counter the scene camera cannot see);
-  # false: such a run stops with not_found before anything moves. Never for the orchestrator's
-  # selection, which is the scene camera's (docs/interface.md)
-  wrist_survey: false
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

@@ -2815,19 +2815,17 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         prime = getattr(ctx.client, "prime_compliant", None)
         if prime is not None and prime(q0):
             log.info("[press_demo] the driver enters its joint impedance now, while the reach is planned")
-    # the cabinet below the counter's edges the scene camera saw (the wrist survey's frames, where the survey
-    # found the box: its fix's table_points), held out of the proof, the look's goal and every line from here on
-    # (press_demo.keep_out_counter); the aim's frame adds its own once it is read
+    # the cabinet below the counter's edges the scene camera saw, held out of the proof, the look's goal and
+    # every line from here on (press_demo.keep_out_counter); the aim's frame adds its own once it is read
     from box_opening.tasks import press_demo as pd
     from box_opening.tasks import reach_lid_off as rlo
 
     counter_z = rlo._table_z(watcher, scene_fix, ctx.cpose)
-    seen_by = "the wrist survey" if getattr(scene_fix, "source", None) == "wrist" else "the scene camera"
     pd.keep_out_counter(
         ctx,
         rlo.counter_map(ctx, watcher, scene_fix, list(q0), counter_z),
         counter_z,
-        seen_by,
+        "the scene camera",
         runner,
         "look",
     )
@@ -3022,13 +3020,13 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     # the box is where its button is, not where the scene camera put it: every
     # world from here on holds its cuboid there
     ctx.cpose = cpose_for_button(button, yaw, m.button_offset)
-    # the counter's edges again, the scene camera's (or the survey's) points moved with the box and the aim's
-    # frame pooled in: every line of the way in is held out of the cabinet below them
+    # the counter's edges again, the scene camera's points moved with the box and the aim's frame pooled in:
+    # every line of the way in is held out of the cabinet below them
     pd.keep_out_counter(
         ctx,
         rlo.counter_map(ctx, watcher, scene_fix, list(q0), counter_z, aim=True),
         counter_z,
-        "%s and the wrist at the look" % seen_by,
+        "the scene camera and the wrist at the look",
         runner,
         "look",
     )

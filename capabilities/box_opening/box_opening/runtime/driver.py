@@ -187,15 +187,14 @@ def health_refusal(health):
 
 
 # The driver's contact monitor as a backstop (contact_detection: enforce on the arm node): its
-# thresholds per execution, by what the execution does. Free air only — the run's look, the wrist
-# survey's looks (tasks/survey), its way home, the clear before it — is held to the driver's
-# DEFAULT; an execution that meets anything on
+# thresholds per execution, by what the execution does. Free air only — the run's look, its way
+# home, the clear before it — is held to the driver's DEFAULT; an execution that meets anything on
 # purpose (the way in to the button, the grip, the lift off the box and the set-down, the retreat
 # off the lid) to LOOSE. The planner holds no flatbot body (world_empty): a home that met it is what
 # DEFAULT stops. Observe mode stops nothing and is left at its profile; the residual's peaks per
 # execution are logged either way (Runner: driver_contact)
 CONTACT_PROFILES = {"default": 0, "sensitive": 1, "loose": 2}
-FREE_AIR_LEGS = ("reach:look", "survey", "home", "clear-margin", "retreat:home")
+FREE_AIR_LEGS = ("reach:look", "home", "clear-margin", "retreat:home")
 
 
 def contact_profile_for(names):
