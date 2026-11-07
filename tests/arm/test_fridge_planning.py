@@ -372,14 +372,43 @@ def test_an_executed_close_needs_the_chair_moved(door_sim):
     arm = _Arm(scene, rb, TELEOP_START)
     dc.DOOR_FILE.write_text(json.dumps(FRIDGE_DOOR))
     with pytest.raises(dc.Refused, match="WHEELCHAIR"):
-        close_door.run(arm, True)
+        close_door.run(arm, True, chair_back=0.30)
     assert arm.calls == []
-    assert close_door.run(arm, False)  # a dry run plans as if it had
+    assert close_door.run(arm, False, chair_back=0.30)  # a dry run plans as if it had
     assert arm.calls == []
-    assert close_door.run(arm, True, chair_moved=True)
+    assert close_door.run(arm, True, chair_back=0.30, chair_moved=True)
     # the gripper is never touched, no cuRobo near the door
     assert all(c[0] == "joints" for c in arm.calls)
     assert json.loads(dc.DOOR_FILE.read_text())["door_open_deg"] == constants.CLOSE_TO_DEG
+
+
+def test_the_close_picks_the_smallest_chair_move_that_plans_and_the_executed_close_uses_it(door_sim):
+    scene, rb = door_sim
+    moves = constants.CLOSE_CHAIR_MOVES_M
+    assert moves[0] == 0.0 and max(map(abs, moves)) == pytest.approx(0.35)  # base_drive's base_max_distance
+    assert [abs(m) for m in moves] == sorted(abs(m) for m in moves)
+    arm = _Arm(scene, rb, TELEOP_START)
+    dc.DOOR_FILE.write_text(json.dumps(FRIDGE_DOOR))
+    assert close_door.run(arm, False)
+    move = close_door.LAST_CHAIR_BACK
+    assert move in moves
+    assert json.loads(dc.DOOR_FILE.read_text())["close_chair_back"] == move
+    for smaller in moves[: moves.index(move)]:  # every smaller move fails a gate
+        with pytest.raises(dc.Refused):
+            close_door.run(arm, False, chair_back=smaller)
+    if move:
+        with pytest.raises(dc.Refused, match="WHEELCHAIR"):
+            close_door.run(arm, True)
+    assert arm.calls == []
+    assert close_door.run(arm, True, chair_moved=True)  # the move the plan saved
+    assert close_door.LAST_CHAIR_BACK == move
+
+
+def test_chair_moved_without_a_planned_move_refuses(door_sim):
+    scene, rb = door_sim
+    dc.DOOR_FILE.write_text(json.dumps(FRIDGE_DOOR))
+    with pytest.raises(dc.Refused, match="dry run first"):
+        close_door.run(_Arm(scene, rb, TELEOP_START), True, chair_moved=True)
 
 
 def test_a_close_without_an_opened_door_refuses(door_sim):

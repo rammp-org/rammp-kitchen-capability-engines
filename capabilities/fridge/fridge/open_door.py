@@ -362,7 +362,7 @@ def run(
         if execute and dc.DOOR_FILE.exists():
             # this open moves the door: a push an earlier open left waiting for a wheelchair move no longer fits it
             # (the door file is merged, not replaced, so chair_moved would push a door that isn't there)
-            dc.save_door_geometry(push_after_chair_move=None)
+            dc.save_door_geometry(push_after_chair_move=None, close_chair_back=None)
         say("\n===== OPEN: grasp + swing =====")
         # what follows the swing, planned with it and gating it: push-open, round the door, or (around False) nothing
         after = PushOpen(chair_back_dir) if push else (ReleaseAround() if around else ReleaseBackOff())

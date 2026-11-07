@@ -85,8 +85,8 @@ starts, or the close refuses before moving.
 
 | Setting                           | Default         | Meaning                                                                                                     |
 | --------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
-| `chair_back`                      | `0.30`          | How far the wheelchair is moved back first (m); the plan shifts the recorded door by it. `0`: not moved     |
-| `chair_moved`                     | `false`         | The wheelchair has been moved back. Required to execute with `chair_back` > 0; a dry run plans as if it had |
+| `chair_back`                      | unset           | Wheelchair move first (m, + back, - forward); unset: the smallest that plans, up to 35 cm. `0`: none        |
+| `chair_moved`                     | `false`         | The wheelchair has been moved as the plan said. Required to execute with a move; a dry run plans as if      |
 | `close_to_deg`                    | `45.0`          | Swing the door shut until it is open this far (deg); it swings shut by itself from there                    |
 | `door_deg`                        | door file       | How far the door is open now (deg). Give it if the door was moved by hand                                   |
 | `push_radius` / `push_radius_end` | `0.30` / `0.28` | The hand's distance from the hinge during the swing, start / end (m)                                        |

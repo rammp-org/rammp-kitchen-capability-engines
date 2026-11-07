@@ -98,7 +98,12 @@ CHAIR_MOVE_CHECK_STEPS = 5  # checked at this many points along the move
 
 # --- close: door_common's push-close, reached by backing out in front of the open door's free edge and going left
 # behind it, from further back, and only until the door is at CLOSE_TO_DEG (it swings shut by itself) ---
-CHAIR_BACK_M = 0.30  # the wheelchair is moved back this far first ...
+CHAIR_BACK_M = 0.30  # what a close goal's chair_back used to default to (the goal now leaves it to the plan) ...
+# ... without a chair_back, the close tries these wheelchair moves (m, + back, - forward), smallest first, out to the
+# base's base_max_distance, and moves the chair by the first whose plan passes every gate
+CLOSE_CHAIR_MOVES_M = tuple(
+    sorted({round(s * k * 0.05, 2) for k in range(8) for s in (1, -1)}, key=lambda m: (abs(m), m < 0))
+)
 CHAIR_BACK_DIR = (1.0, 0.0)  # ... which moves the recorded fridge this way in the arm's frame (arm-base x = the
 # chair's forward): the node's chair_back_dir parameter. The plan uses the door from the open, shifted by this
 CLOSE_TO_DEG = 45.0  # swing the door shut until it is open this far, then back out (no torque push)

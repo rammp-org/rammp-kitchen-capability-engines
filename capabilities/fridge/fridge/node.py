@@ -241,7 +241,7 @@ class Capability(CapabilityEngine):
             if action_id == "open":
                 may_drive = bool(params.get("push_open", True)) and not params.get("release_only")
             else:
-                may_drive = float(params.get("chair_back", constants.CHAIR_BACK_M)) > 0
+                may_drive = params.get("chair_back") is None or float(params["chair_back"]) != 0
             if drive_base and may_drive:
                 base_drive.check(self.base, self.arm)
             if action_id == "open":
@@ -274,15 +274,15 @@ class Capability(CapabilityEngine):
                     drive_chair=drive_chair,
                     **settings,
                 )
-                chair_back = float(settings.get("chair_back", constants.CHAIR_BACK_M))
-                if ok and not execute and chair_back > 0 and drive_base:
+                chair_back = close_door.LAST_CHAIR_BACK or 0.0  # the move the plan used
+                if ok and not execute and chair_back != 0 and drive_base:
                     next_step = (
                         f"Plan OK. With execute true and drive_base true the base drives the wheelchair "
-                        f"~{chair_back * 100:.0f} cm back at {base_speed:.2f} m/s, then closes."
+                        f"{close_door.how_moved(chair_back)} at {base_speed:.2f} m/s, then closes."
                     )
                     ctx.progress(action_id, 100.0, next_step)
                     note = f"{note}. {next_step}" if note else next_step
-                elif ok and not execute and chair_back > 0 and not settings.get("chair_moved"):
+                elif ok and not execute and chair_back != 0 and not settings.get("chair_moved"):
                     # the plan passed: say, where the goal was sent (feedback and the result), what comes next
                     next_step = (
                         f"Plan OK. {close_door.move_chair(chair_back)}, then send the close with execute true and "

@@ -3,7 +3,7 @@
 - **Open** (`open`): detects the handle, grasps it, pulls the door 60° open, lets go and pushes it on to 90°. With
   `"push_open": false`: a 90° pull, then let go and go back round the door.
 - **Close** (`close`): pushes the door from behind with the side of the hand to 45°; it swings shut from there.
-- **Wheelchair moves:** the close needs the chair ~30 cm back; the open's push sometimes needs 5–20 cm. You make them
+- **Wheelchair moves:** the close picks the smallest straight move (up to 35 cm back or forward) its plan needs; the open's push sometimes needs 5–20 cm. You make them
   by hand when the goal asks, or the goal drives the base: [Driving the base](#driving-the-base-drive_base).
 
 T1–T4 are four terminals on the robot's computer: T1 sheppy, T2 the fridge node, T3 goals, T4 the e-stop.
@@ -139,9 +139,10 @@ run that plans OK also writes `door.json`, for testing the close without an exec
    ```
 
    It ends
-   `Plan OK. Move the WHEELCHAIR straight back ~30 cm ...` or says which check failed.
+   `Plan OK. Move the WHEELCHAIR straight back ~N cm ...` (or forward; the smallest move, up to 35 cm, after which
+   the close plans) or says which check failed.
 
-1. **Move the wheelchair straight back ~30 cm**, without turning it.
+1. **Move the wheelchair as it says**, straight, without turning it (the close goal then uses that move).
 
 1. **Close, T3:**
 
@@ -167,7 +168,7 @@ run that plans OK also writes `door.json`, for testing the close without an exec
 - **Without an executed open:** dry-run the open with `"save_door": true` until it plans OK, then open the door by hand
   to the angle it prints (90° after the push-open).
 
-Options: `door_deg`, `chair_back` (0.30 m), `close_to_deg` (45), `push_radius` / `push_radius_end` (0.30 / 0.28),
+Options: `door_deg`, `chair_back` (m, + back, - forward; default: the plan picks it), `close_to_deg` (45), `push_radius` / `push_radius_end` (0.30 / 0.28),
 `push_z`, `speed` (0.7), `hold_offset_x` (`0` if not holding the container), `side_past_hinge`, `retreat_dist`.
 
 ## Driving the base (`drive_base`)
@@ -195,7 +196,7 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2, \"drive_base\": true, \"base_speed\": 0.03}"}'
 ```
 
-**Close** (30 cm back first), after its dry run passes:
+**Close** (the move its plan picked first), after its dry run passes:
 
 ```bash
 docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
@@ -207,7 +208,7 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
 ```
 
 T2 logs `drive_base: driving the wheelchair ...` and `drive_base: stopped ...`. The base stays where it drove: if it
-is still back from a close, send the next close with `chair_moved` instead of `drive_base`, or it drives 30 cm more.
+is still back from a close, send the next close with `chair_moved` instead of `drive_base`, or it drives the picked move again.
 
 **Stopping it:** the T4 e-stop or Ctrl-C in T2, or the joystick if the base has one. It also stops by itself, failing
 the goal with `base_stopped` and leaving the arm holding, if it goes the wrong way or further than asked, takes more
