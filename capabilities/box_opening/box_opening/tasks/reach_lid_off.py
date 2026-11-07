@@ -296,6 +296,34 @@ SETDOWN_RELEASE_M = 0.010
 # down "too hard" (2026-10-29 14:45): the faster touch met the table at twice
 # the speed, the damper (zeta 1.0) pushing on while the reference ran on.
 PLACE_TOUCH_SPEED = dp.TOUCH_SPEED
+# Past every spot straight down (spot_candidates' second pass: none
+# reached, or the carries to those refused), the hand sets the lid down
+# leaning this far back toward the arm, facing
+# the spot (reach_press.reach_quat; the round lid's yaw is free), the lid
+# where the grip took it (setdown_poses). On the 0.86 / 0.91 m side counters
+# of the chair study (study/fixes/highcounter, 11-06) no straight-down hand
+# reaches its carry height (0.514 m, 0.564 on 0.91 m) over spots 10-112 mm
+# inside the arm's reach: joint_6's range is what fails, in 39 of the 225
+# press-planned rows outright and in every row once the clear goes no
+# higher than the carry's floor (lift_clear_targets). Leaning 10 / 20 / 30
+# deg the lid came off in 77 / 100 / 98 rows (30 deg no more, and it put
+# the lid below the rim over the canister in 6); the lean matched to the
+# grip's own, the lid level, in 98. At 20 deg the lid lands tilted 8 deg
+# median, 20 at most, the edge nearest the arm first: let go 10 mm above
+# that touch (SETDOWN_RELEASE_M), its far edge falls 15-36 mm and it settles
+# flat — as today's straight-down set-down after a grip leaning 0-15 deg
+# lands it 0-15 deg tilted. A bench run whose hand reaches a spot straight
+# down never leans.
+SETDOWN_LEAN_DEG = 20.0
+
+
+@dataclass(frozen=True)
+class LeanSpot(ContainerPose):
+    """A spot for the lid that the hand reaches only leaning `lean_deg`
+    back toward the arm (spot_candidates' second pass): setdown_poses sets
+    the lid down there leaning; `yaw` is the spot's own, unused there."""
+
+    lean_deg: float = SETDOWN_LEAN_DEG
 
 
 def lift_off_m(model):
@@ -323,15 +351,18 @@ def grip_lid_z(top_z, held_z=None):
     return float(held_z) + GRIP_LID_ABOVE_HELD_M
 
 
-def setdown_poses(ctx, drop):
+def setdown_poses(ctx, drop, held=None):
     """(attitude, tool where the lid meets the table, the carry's hover)
     for the spot `drop`: the hand straight down, turned by the spot's yaw
     (press_demo.place_quat, the attitude clear_lid_drops judged the room
     for); the lid hangs where the grip took it, GRIP_BELOW_LID_M under the
     pads' reference; the hover above it as Place.hover_for has it, high
-    enough for the lid to clear the box."""
+    enough for the lid to clear the box. A LeanSpot: the hand leaning
+    (_lean_setdown_poses), the lid as gripped by the hand at joints `held`."""
     from box_opening.tasks.press_demo import place_quat
 
+    if float(getattr(drop, "lean_deg", 0.0) or 0.0) != 0.0:
+        return _lean_setdown_poses(ctx, drop, held)
     quat = list(place_quat(ctx.model, drop))
     contact = [
         float(drop.xyz[0]),
@@ -341,24 +372,62 @@ def setdown_poses(ctx, drop):
     return quat, contact, [float(v) for v in Place.hover_for(ctx, contact)]
 
 
+def _lean_setdown_poses(ctx, drop, held):
+    """setdown_poses for a LeanSpot: the hand leaning drop.lean_deg back
+    toward the arm, facing the spot (reach_press.reach_quat). The lid as
+    the grip took it, the hand at the joints `held` — where the carry
+    starts: from the close on the lift and the clear hold the grip's
+    attitude — level there, its top GRIP_BELOW_LID_M over the pads'
+    reference (depth_press.DOWN_CONTACT_TOOL), held so in the hand: at the
+    lean its bottom's centre over the spot, its lowest point on the table
+    where the tool meets it; the hover over that as Place.hover_for has it,
+    its carry floor (the lid's underside CARRY_CLEAR_M over the box) taken
+    under the lid's lowest point. Straight down, held straight down, this
+    is setdown_poses' own."""
+    from box_opening.perception.d405 import quat_to_mat
+    from box_opening.runtime import approach
+
+    if held is None:
+        raise ValueError("a leaning set-down needs the joints the hand holds the lid at")
+    m = ctx.model
+    Rg, _t = approach._chain().fk([float(v) for v in held])
+    Rg = np.asarray(Rg, float)
+    up = np.array([0.0, 0.0, 1.0])
+    top = np.asarray(dp.DOWN_CONTACT_TOOL, float) + Rg.T @ (GRIP_BELOW_LID_M * up)  # in the tool frame
+    normal = Rg.T @ up
+    quat = [float(v) for v in rp.reach_quat(m, drop.xyz[:2], float(drop.lean_deg))]
+    R = np.asarray(quat_to_mat(*quat), float)
+    n = R @ normal
+    bottom = R @ top - float(m.lid_dims[2]) * n  # the lid's bottom centre, from the tool
+    lid_r = 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1]))
+    low = float(bottom[2]) - lid_r * math.sqrt(max(0.0, 1.0 - float(n[2]) ** 2))  # its lowest point, from the tool
+    contact = [float(drop.xyz[0]) - float(bottom[0]), float(drop.xyz[1]) - float(bottom[1]), float(drop.xyz[2]) - low]
+    floor = float(ctx.cpose.xyz[2]) + float(m.dims[2]) + core.CARRY_CLEAR_M + GRIP_BELOW_LID_M - low
+    hover = [contact[0], contact[1], max(contact[2] + float(m.hover_standoff) + float(m.lid_dims[2]), floor)]
+    return quat, contact, hover
+
+
 def _abort_check(ctx):
     """runtime.abort.check on this run's client: LookaheadAborted where a Ctrl+C has come."""
     abort.check(getattr(ctx, "client", None))
 
 
 def drop_reachable(ctx, drop, q_start, seeds=()):
-    """Why the hand does not set the lid down at `drop`, or None: no
-    straight-down hand at the carry's hover (the arm's own IK, from
-    `q_start`, else from `seeds`), or no straight line down from it to the
-    set-down's end."""
+    """Why the hand does not set the lid down at `drop`, or None: no hand
+    at the carry's hover at the set-down's attitude (straight down; for a
+    LeanSpot leaning, the lid as gripped at `q_start`: setdown_poses) — the
+    arm's own IK, from `q_start`, else from `seeds` — or no straight line
+    down from it to the set-down's end."""
     from box_opening.runtime import approach
     from box_opening.runtime import kinematics as kin
 
     chain = approach._chain()
-    quat, contact, hover = setdown_poses(ctx, drop)
+    quat, contact, hover = setdown_poses(ctx, drop, held=q_start)
     q = chain.nearest_solution(list(q_start), hover, quat, seeds=tuple(seeds))
     if q is None:
-        return "no straight-down hand reaches its carry height %.3f" % hover[2]
+        lean = float(getattr(drop, "lean_deg", 0.0) or 0.0)
+        hand = "straight-down hand" if lean == 0.0 else "hand leaning %.0f deg" % lean
+        return "no %s reaches its carry height %.3f" % (hand, hover[2])
     why = kin.body_refusal(chain, [q], start_exempt=False)  # the carry's end: the planner's world may be empty
     if why is not None:
         return "the hand at its carry height is in the way (%s)" % why
@@ -791,7 +860,11 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
     points round the box (_nearest_points). In every tier a spot inside the
     no-land radius round the box (box_clearance) is passed over, never
     counted as a try. A generator: only as many as are asked for are
-    checked. `cache`: the room judged on `tmap` before (room_ahead's,
+    checked. Past every tier, the same tiers once more as LeanSpots, the
+    hand leaning SETDOWN_LEAN_DEG (setdown_poses): a lid goes down leaning
+    only once every spot straight down is past (none reached, or the
+    carries the caller tried to those refused; its CARRY_TRIES counts both
+    passes). `cache`: the room judged on `tmap` before (room_ahead's,
     clear_table.clear_spots')."""
     from box_opening.tasks import press_demo as pd
 
@@ -871,34 +944,55 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
             ],
         )
     )
-    for tier, cands in tiers:
-        n = 0
-        for d, says in cands:
-            if n >= TIER_TRIES[tier]:
-                break
-            if not fresh(d):
-                continue
-            if box_clearance(ctx, d) < 0.0:
-                tried.append(d)  # inside the no-land radius: the lid would come down on the box's rim
-                continue
-            n += 1
-            tried.append(d)
-            _abort_check(ctx)  # each reach check is an IK walk: a Ctrl+C goes out between two
-            why = (reach or drop_reachable)(ctx, d, q, seeds)
-            if why is None:
-                yield d, tier, says
+    # every tier straight down first, as the bench's runs chose; only past
+    # them all, the same again with the hand leaning (SETDOWN_LEAN_DEG)
+    for lean in (0.0, SETDOWN_LEAN_DEG):
+        tried.clear()
+        for tier, cands in tiers:
+            n = 0
+            for d, says in cands:
+                if n >= TIER_TRIES[tier]:
+                    break
+                if not fresh(d):
+                    continue
+                if box_clearance(ctx, d) < 0.0:
+                    tried.append(d)  # inside the no-land radius: the lid would come down on the box's rim
+                    continue
+                n += 1
+                tried.append(d)
+                if lean:
+                    d = LeanSpot(xyz=d.xyz, yaw=d.yaw, lean_deg=lean)
+                    says = "%s; past every spot straight down: the hand leaning %.0f deg" % (says, lean)
+                _abort_check(ctx)  # each reach check is an IK walk: a Ctrl+C goes out between two
+                why = (reach or drop_reachable)(ctx, d, q, seeds)
+                if why is None:
+                    yield d, tier, says
+
+
+def _spot_lean(d):
+    """How far the hand leans setting the lid down at spot `d` (deg; 0: straight down)."""
+    return round(float(getattr(d, "lean_deg", 0.0) or 0.0), 3)
 
 
 def _spot_key(d):
-    """A spot's identity for _Reach: where, to 0.1 mm, and the hand's turn."""
-    return (round(float(d.xyz[0]), 4), round(float(d.xyz[1]), 4), round(float(d.yaw) % (2 * math.pi), 3))
+    """A spot's identity for _Reach: where, to 0.1 mm, the hand's turn and its lean."""
+    return (
+        round(float(d.xyz[0]), 4),
+        round(float(d.xyz[1]), 4),
+        round(float(d.yaw) % (2 * math.pi), 3),
+        _spot_lean(d),
+    )
 
 
 def _same_spot(a, b):
     """Whether spots `a` and `b` are the one spot for a carry planned to
-    either: AHEAD_SAME_SPOT_M apart at most, the hand turned the same."""
+    either: AHEAD_SAME_SPOT_M apart at most, the hand turned and leaning the same."""
     turn = abs(math.remainder(float(a.yaw) - float(b.yaw), 2 * math.pi))
-    return math.hypot(a.xyz[0] - b.xyz[0], a.xyz[1] - b.xyz[1]) <= AHEAD_SAME_SPOT_M and turn < 1e-3
+    return (
+        math.hypot(a.xyz[0] - b.xyz[0], a.xyz[1] - b.xyz[1]) <= AHEAD_SAME_SPOT_M
+        and turn < 1e-3
+        and _spot_lean(a) == _spot_lean(b)
+    )
 
 
 class _Reach:
@@ -1439,7 +1533,7 @@ def plan_carry(ctx, cfg, q_from, drop):
     chain = approach._chain()
     world = _full_world(ctx)
     q_from = [float(v) for v in q_from]
-    quat, contact, hover = setdown_poses(ctx, drop)
+    quat, contact, hover = setdown_poses(ctx, drop, held=q_from)
     try:
         carry, _st = rp._plan_motion(
             ctx, PlanState(joints=q_from, chain=0), "lid:carry", ("pose", hover, quat), world, TRANSIT_SPEED
@@ -2934,11 +3028,12 @@ def _ahead_note(ahead, off, flew, chosen, reach, stale=None):
             why = "no carry plans here"
         else:
             d = chosen[0]
-            why = "the spot chosen with the lid lifted is %.0f mm from it%s" % (
+            why = "the spot chosen with the lid lifted is %.0f mm from it%s%s" % (
                 1000 * math.hypot(d.xyz[0] - ahead.drop.xyz[0], d.xyz[1] - ahead.drop.xyz[1]),
                 ""
                 if abs(math.remainder(float(d.yaw) - float(ahead.drop.yaw), 2 * math.pi)) < 1e-3
                 else ", the hand turned otherwise",
+                "" if _spot_lean(d) == _spot_lean(ahead.drop) else ", the hand leaning otherwise",
             )
     return dict(
         flown=flew,

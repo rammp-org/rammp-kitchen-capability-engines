@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import test_reach_press as trp
-from conftest import fixture_path
+from conftest import fixture_path, flatbot_urdf
 
 from box_opening.constants import GAINS_MEDIUM, HOME_SPEED
 from box_opening.models.container import ContainerModel, ContainerPose, load_press_demo
@@ -2609,7 +2609,7 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     q_look = lift.legs[-1].goal_joints
     # where the lid goes, from the spot look: the first the hand reaches from there
     drop, tier, _says = next(rlo.spot_candidates(ctx, None, LID - 0.10, q_look, seeds=(home,)))
-    assert tier == "beside the box"
+    assert tier == "beside the box" and type(drop) is ContainerPose  # straight down: no lean was judged
     carry, why = rlo.plan_carry(ctx, cfg, q_look, drop)
     assert carry is not None, why
     # the way down to SETDOWN_SLOW_M over where the plan has the lid meet the table, the touch on down to
@@ -3234,3 +3234,87 @@ def test_the_clear_after_the_lift_goes_only_as_high_as_the_carrys_floor_where_to
     monkeypatch.setattr(approach, "_chain", lambda: chain)
     lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
     assert lift is None and "no way up and back" in why and "up to the carry's floor: 50 mm back" in why
+
+
+def test_where_no_hand_reaches_a_spot_straight_down_the_same_spots_follow_leaning(ctx):
+    """Every tier straight down first, as the bench's runs chose (a straight-down spot reached is
+    offered before any lean is judged); only past them all the same spots again as LeanSpots, the
+    hand leaning SETDOWN_LEAN_DEG — the chair study's high counters, where no straight-down hand
+    reaches its carry height over any spot."""
+    asked = []
+
+    def nothing_straight_down(ctx_, d, q, seeds=()):
+        asked.append(d)
+        return "no straight-down hand reaches its carry height 0.514" if rlo._spot_lean(d) == 0.0 else None
+
+    gen = rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=nothing_straight_down)
+    drop, tier, says = next(gen)
+    assert isinstance(drop, rlo.LeanSpot) and drop.lean_deg == rlo.SETDOWN_LEAN_DEG and "leaning 20 deg" in says
+    straight = [d for d in asked if rlo._spot_lean(d) == 0.0]
+    assert straight and asked[: len(straight)] == straight and asked[len(straight)] is drop
+    assert drop.xyz == straight[0].xyz and drop.yaw == straight[0].yaw and tier in ("beside the box", "nearest")
+    assert not rlo._same_spot(drop, straight[0]) and rlo._spot_key(drop) != rlo._spot_key(straight[0])
+    # a carry planned ahead to the spot straight down, the one chosen there leaning: the note says why
+    ahead = rlo.CarryAhead([0.0] * 7, drop=straight[0], carry=object())
+    note = rlo._ahead_note(ahead, 0.0, False, (drop, tier, says), rlo._Reach())
+    assert note["why"] == "the spot chosen with the lid lifted is 0 mm from it, the hand leaning otherwise"
+    # one straight-down spot reached, the third: it is offered, before any lean is judged
+    asked.clear()
+
+    def third_only(ctx_, d, q, seeds=()):
+        asked.append(d)
+        return None if len(asked) == 3 else "no straight-down hand reaches its carry height 0.514"
+
+    drop, _tier, _says = next(rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=third_only))
+    assert type(drop) is ContainerPose and len(asked) == 3 and all(rlo._spot_lean(d) == 0.0 for d in asked)
+
+
+def test_a_leaning_set_down_lands_the_lid_as_gripped_its_centre_over_the_spot_its_lowest_point_on_the_table(
+    ctx, monkeypatch
+):
+    """Flatbot's URDF, the pink canister's lid gripped straight down: setdown_poses for a LeanSpot
+    leans the hand SETDOWN_LEAN_DEG back toward the arm, facing the spot; the lid, level as the
+    grip took it, has its bottom's centre over the spot and its lowest point on the table where the
+    tool meets it, the hover over that at least Place.hover_for's, the carry floor under the lid's
+    lowest point. Straight down (lean 0) it is setdown_poses' own straight-down answer."""
+    from box_opening.constants import HOME
+    from box_opening.perception.d405 import quat_to_mat
+    from box_opening.primitives.look import look_joints
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    ctx.model = ContainerModel.load(PINK)
+    m = ctx.model
+    box = FLATBOT_BOXES[0]
+    ctx.cpose = rp.cpose_for_button((box[0], box[1], LID), 0.0, m.button_offset)
+    grip_quat = rp.reach_quat(m, box, 0.0)  # straight down, facing the box
+    pads = np.array([box[0], box[1], LID - rlo.GRIP_BELOW_LID_M])
+    tool = pads - rp._rot(grip_quat) @ np.asarray(dp.DOWN_CONTACT_TOOL)
+    q_grip = chain.nearest_solution(list(HOME), tool, grip_quat, seeds=(look_joints(HOME),))
+    assert q_grip is not None
+    spot = (box[0] - 0.05, box[1] - 0.20, LID - 0.121)
+    lean = rlo.LeanSpot(xyz=spot, yaw=0.3)
+    quat, contact, hover = rlo.setdown_poses(ctx, lean, held=q_grip)
+    R = np.asarray(quat_to_mat(*quat), float)
+    assert math.degrees(rp.hand_lean(R)) == pytest.approx(rlo.SETDOWN_LEAN_DEG, abs=1e-6)
+    assert quat == pytest.approx(rp.reach_quat(m, spot[:2], rlo.SETDOWN_LEAN_DEG))
+    # the lid in the tool frame as gripped: level, its top GRIP_BELOW_LID_M over the pads
+    Rg = np.asarray(chain.fk(q_grip)[0], float)
+    top = np.asarray(dp.DOWN_CONTACT_TOOL) + Rg.T @ np.array([0.0, 0.0, rlo.GRIP_BELOW_LID_M])
+    n = R @ (Rg.T @ np.array([0.0, 0.0, 1.0]))
+    bottom = np.asarray(contact) + R @ top - m.lid_dims[2] * n
+    assert bottom[:2] == pytest.approx(spot[:2], abs=1e-9)
+    tilt = math.acos(float(n[2]))
+    assert math.degrees(tilt) == pytest.approx(rlo.SETDOWN_LEAN_DEG, abs=0.5)  # a level grip: tilted by the lean
+    assert bottom[2] - 0.5 * m.lid_dims[0] * math.sin(tilt) == pytest.approx(spot[2], abs=1e-9)  # lowest point
+    assert hover[:2] == pytest.approx(contact[:2]) and hover[2] >= contact[2] + m.hover_standoff + m.lid_dims[2] - 1e-9
+    # leaning 0, held straight down: the straight-down set-down's own contact and hover
+    flat = rlo.LeanSpot(xyz=spot, yaw=0.0, lean_deg=0.0)
+    assert rlo.setdown_poses(ctx, flat, held=q_grip) == rlo.setdown_poses(ctx, ContainerPose(xyz=spot, yaw=0.0))
+    _q, c0, h0 = rlo._lean_setdown_poses(ctx, flat, q_grip)
+    _q, c1, h1 = rlo.setdown_poses(ctx, ContainerPose(xyz=spot, yaw=0.0))
+    assert c0 == pytest.approx(c1, abs=1e-5) and h0 == pytest.approx(h1, abs=1e-5)  # the IK's grip to 1e-4 rad
+    with pytest.raises(ValueError):
+        rlo.setdown_poses(ctx, lean)  # leaning, the lid's grip is needed
