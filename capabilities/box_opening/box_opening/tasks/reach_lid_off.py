@@ -1521,12 +1521,55 @@ def watch_setdown(ctx, legs, carry):
     return carry.contact
 
 
+# The carry the planner refuses for where it starts or ends, inside its limit
+# margin (PLANNER_LIMIT_MARGIN_RAD), flies as the arm's own walk instead
+# (walk_carry): to the same hover at the same attitude, every step solved
+# from the last, CARRY_WALK_STEP_M / CARRY_WALK_STEP_RAD apart, no joint
+# jumping more than kinematics.MAX_STEP_RAD between two — held out of the
+# chair and its user by the walk itself (runtime/body), in the runner's
+# trajectory gate (depth_press.line_refusal), at the free-air lines' speed.
+# The chair study's 0.86 / 0.91 m side counters (study/fixes/highcounter,
+# 11-06): with the clear to the carry's floor and the leaning set-down, the
+# planner refused the carry there in 58 of the 158 rows whose lid came up,
+# the joint_6 0.026-0.085 rad from its limit; walked, the lid came off in
+# all 158 (100 without), its way never nearer joint_6's limit than 0.021
+# rad (the walk's own bound: kinematics.LIMIT_MARGIN_RAD). Like every
+# plan-free line it knows nothing of a cabinet.
+CARRY_WALK_ON = ("START_IN_LIMIT_MARGIN", "GOAL_IN_LIMIT_MARGIN")
+CARRY_WALK_STEP_M = 0.01
+CARRY_WALK_STEP_RAD = math.radians(2.0)
+
+
+def walk_carry(ctx, chain, q_from, hover, quat, world):
+    """The carry from joints `q_from` to the tool at `hover`, `quat`, as the
+    arm's own walk (CARRY_WALK_ON's), a 'lid:carry' compliant line at
+    reach_press.free_line_speed: (Leg, None) or (None, why)."""
+    from box_opening.runtime import kinematics as kin
+
+    pts, why = chain.walk(
+        q_from,
+        hover,
+        quat,
+        step_m=CARRY_WALK_STEP_M,
+        step_rad=CARRY_WALK_STEP_RAD,
+        max_step_rad=kin.MAX_STEP_RAD,
+    )
+    if pts is None:
+        return None, why
+    pts = [[float(v) for v in p] for p in pts]
+    why = dp.line_refusal(chain, pts)
+    if why is not None:
+        return None, why
+    return dp.compliant_line(ctx, "lid:carry", pts, quat, rp.free_line_speed(ctx), world), None
+
+
 def plan_carry(ctx, cfg, q_from, drop):
     """The carry from joints `q_from` (where the spot look stands) to the
     spot `drop` (planned in the planner's own world, worlds.PLANNER_WORLD:
-    it is told nothing of the box or the table) — then the set-down's straight lines
-    from its end and the retreat's back up. Returns (Carry, None) or (None,
-    why)."""
+    it is told nothing of the box or the table; where it refuses the start
+    or the goal for its limit margin, the arm's own walk: walk_carry) —
+    then the set-down's straight lines from its end and the retreat's back
+    up. Returns (Carry, None) or (None, why)."""
     from box_opening.runtime import approach
     from box_opening.runtime import kinematics as kin
 
@@ -1534,13 +1577,20 @@ def plan_carry(ctx, cfg, q_from, drop):
     world = _full_world(ctx)
     q_from = [float(v) for v in q_from]
     quat, contact, hover = setdown_poses(ctx, drop, held=q_from)
+    walked = False
     try:
         carry, _st = rp._plan_motion(
             ctx, PlanState(joints=q_from, chain=0), "lid:carry", ("pose", hover, quat), world, TRANSIT_SPEED
         )
     except RuntimeError as e:
-        return None, "the carry (%s)" % rp._short(e)
-    if carry.traj is not None:
+        if not any(code in str(e) for code in CARRY_WALK_ON):
+            return None, "the carry (%s)" % rp._short(e)
+        carry, why = walk_carry(ctx, chain, q_from, hover, quat, world)
+        if carry is None:
+            return None, "the carry (%s; walked: %s)" % (rp._short(e), why)
+        walked = True
+        log.info("[press_demo] the planner refused the carry (%s): the arm's own walk instead" % rp._short(e))
+    if carry.traj is not None and not walked:
         carry.traj = approach.on_branch_of(carry.traj, q_from)  # continues the clear, not a turn away
         carry.goal_joints = [float(v) for v in carry.traj.points[-1].positions]
         # the planner's world may be empty (worlds.PLANNER_WORLD): the carry is held out of the

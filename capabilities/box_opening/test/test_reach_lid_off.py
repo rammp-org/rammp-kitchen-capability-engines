@@ -3318,3 +3318,39 @@ def test_a_leaning_set_down_lands_the_lid_as_gripped_its_centre_over_the_spot_it
     assert c0 == pytest.approx(c1, abs=1e-5) and h0 == pytest.approx(h1, abs=1e-5)  # the IK's grip to 1e-4 rad
     with pytest.raises(ValueError):
         rlo.setdown_poses(ctx, lean)  # leaning, the lid's grip is needed
+
+
+def test_a_carry_the_planner_refuses_inside_its_limit_margin_is_the_arms_own_walk(ctx, monkeypatch):
+    """The chair study's high counters: the planner refused the carry START_IN_LIMIT_MARGIN or
+    GOAL_IN_LIMIT_MARGIN in 58 of the rows whose lid came up (joint_6 0.026-0.085 rad from its
+    limit where the clear ends). There the carry flies as the arm's own walk to the same hover
+    (walk_carry: CARRY_WALK_STEP_M, CARRY_WALK_STEP_RAD, kinematics.MAX_STEP_RAD), a plan-free
+    'lid:carry' at the free-air lines' speed, the set-down's lines after it as ever; any other
+    refusal is the carry's refusal, as before."""
+    from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
+
+    cfg = load_press_demo(PINK)
+    chain = _HandAt(0.45)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
+    why_planner = ["START_IN_LIMIT_MARGIN: start: arm_joint_6 is 0.043 rad from its position limit"]
+
+    def refuses(ctx_, state, name, target, world, speed):
+        raise RuntimeError("planning failed for %s: %s" % (name, why_planner[0]))
+
+    monkeypatch.setattr(rp, "_plan_motion", refuses)
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert why is None and [lg.name for lg in carry.legs] == ["lid:carry", "place:down", "place:touch"]
+    walk = carry.legs[0]
+    assert walk.plan_free and walk.speed == pytest.approx(rp.free_line_speed(ctx)) and walk.gains == dp.COMPLIANT_GAINS
+    _quat, _contact, hover = rlo.setdown_poses(ctx, drop)
+    assert chain.walks == [
+        dict(xyz=hover, step_m=rlo.CARRY_WALK_STEP_M, step_rad=rlo.CARRY_WALK_STEP_RAD, max_step_rad=kin.MAX_STEP_RAD)
+    ]
+    why_planner[0] = "GOAL_IN_LIMIT_MARGIN: goal: arm_joint_6 is 0.020 rad from its position limit"
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert why is None and carry.legs[0].plan_free and len(chain.walks) == 2
+    why_planner[0] = "MotionGenStatus.IK_FAIL"
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert carry is None and why == "the carry (MotionGenStatus.IK_FAIL)" and len(chain.walks) == 2
