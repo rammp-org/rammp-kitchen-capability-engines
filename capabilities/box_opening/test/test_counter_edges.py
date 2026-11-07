@@ -1,16 +1,43 @@
 """The cabinet from the cameras: the counter's edges the table map shows (clear_table.counter_edges)
-and the solid below them (counter_keep_out), keep-out boxes for the body check (runtime/body
-Body.with_obstacles). No edge where the map saw none."""
+and the solid below them (counter_keep_out) held out of every line box_opening flies itself, as the
+chair is (runtime/body Body.with_obstacles, press_demo.keep_out_counter). Nothing is kept out where
+the map saw no edge."""
 
 import math
 
 import numpy as np
 import pytest
+from conftest import flatbot_urdf
 
+from box_opening.constants import HOME
+from box_opening.models.container import ContainerPose
 from box_opening.perception import clear_table as ct
+from box_opening.runtime import approach, body
+from box_opening.runtime.kinematics import mat_to_quat_xyzw
+from box_opening.tasks import press_demo
+from box_opening.tasks import reach_lid_off as rlo
 
+DOWN = mat_to_quat_xyzw(np.diag([1.0, -1.0, -1.0]))  # the hand straight down
 TOP = 0.389  # the chair study's 0.91 m counter, in arm_mount
 FLOOR = -0.52
+ROBOT = """robot_cfg:
+  kinematics:
+    base_link: arm_mount
+    collision_sphere_buffer: 0.005
+    collision_spheres:
+      arm_forearm_link:
+      - {center: [0.0, -0.1, 0.0], radius: 0.06}
+      arm_robotiq_85_base_link:
+      - {center: [0.0, 0.0, 0.05], radius: 0.04}
+"""
+
+
+@pytest.fixture(autouse=True)
+def chain_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOX_OPENING_STATE", str(tmp_path))
+    saved = (approach._ROOT, approach._URDF_PATH, approach._CHAIN, approach._GRAVITY, approach._BODY)
+    yield
+    approach._ROOT, approach._URDF_PATH, approach._CHAIN, approach._GRAVITY, approach._BODY = saved
 
 
 def _flat(x0, x1, y0, y1, z, step=0.006):
@@ -149,6 +176,71 @@ def test_the_keep_out_holds_the_edge_and_the_solid_behind_it_to_the_floor():
     assert ct.counter_keep_out([], TOP) == []
 
 
+def _model(tmp):
+    """A body model with one far box: flatbot's chain held out of only what a run adds."""
+    (tmp / "layer_test.yaml").write_text(
+        "layer: test\nobstacles:\n  - {name: far, position: [-1, -1, -1], dims: [0.1, 0.1, 0.1]}\n"
+    )
+    (tmp / "robot.yaml").write_text(ROBOT)
+    (tmp / "planner.yaml").write_text("robot: robot.yaml\nlayers: [layer_test.yaml]\n")
+    approach.set_body(body.load(str(tmp / "planner.yaml"), robot_body=False))
+    approach.set_chain_root("arm_mount", flatbot_urdf())
+    return approach._chain()
+
+
+def _down_to(chain, xy, low_z):
+    """From the hand straight down 0.45 over `xy`, the straight line down until the arm's lowest
+    sphere (buffered) reaches `low_z`: (points, why)."""
+    q = chain.nearest_solution(list(HOME), [xy[0], xy[1], 0.45], DOWN)
+    assert q is not None
+    C, r, _links = chain.body.base.spheres_at(q)
+    low = float((C[:, 2] - r).min())
+    return chain.straight_line(q, [xy[0], xy[1], 0.45 - (low - low_z)], DOWN)
+
+
+def test_a_line_into_the_counter_edge_is_refused_one_onto_the_counter_top_is_not(tmp_path):
+    chain = _model(tmp_path)
+    ctx = type("C", (), {"counter_boxes": None})()
+    tmap = ct.table_map([(_side_counter(face_y=-0.10, x=(0.30, 0.90), back=0.40, top=0.20), 0.20)], (0.60, 0.15))
+    (e,) = press_demo.keep_out_counter(ctx, tmap, 0.20, "the test camera")
+    assert chain.body.layers == ["cabinet", "test"] and sorted(ctx.counter_boxes) == ["the test camera"]
+    # straight down over the edge to 10 mm over the counter's top: into the edge's padding
+    pts, why = _down_to(chain, (0.60, -0.10), 0.20 + 0.010)
+    assert pts is None and why.startswith("the cabinet: arm_robotiq_85_base_link") and "cabinet/edge0" in why
+    assert _down_to(chain, (0.60, -0.10), 0.20 + 0.030)[0] is not None  # clear of it by more than the padding
+    # 10 cm back from it, onto the counter as the set-down's plan ends (19.5 mm over it, buffered): clear
+    pts, why = _down_to(chain, (0.60, 0.0), 0.20 + 0.0195)
+    assert pts is not None, why
+    # ... but never below the counter's top
+    pts, why = _down_to(chain, (0.60, 0.0), 0.20 - 0.010)
+    assert pts is None and "cabinet/counter0" in why
+
+
+def test_each_map_keeps_its_own_edges_a_map_without_one_keeps_nothing_out_and_says_so(tmp_path, capsys):
+    chain = _model(tmp_path)
+    ctx = type("C", (), {"counter_boxes": None, "cpose": ContainerPose(xyz=(0.6, 0.15, 0.2), yaw=0.0)})()
+    tmap = ct.table_map([(_side_counter(face_y=-0.10, x=(0.30, 0.90), back=0.40, top=0.20), 0.20)], (0.60, 0.15))
+    press_demo.keep_out_counter(ctx, tmap, 0.20, "the scene camera", key="look")
+    assert len(chain.body.box_names) == 1 + 2
+    capsys.readouterr()
+    # no map at all (its clouds unreadable, or no table in them) is no news: the look's edge stays in force
+    assert press_demo.keep_out_counter(ctx, None, 0.20, "the scene camera and the wrist", key="look") == []
+    assert len(chain.body.box_names) == 1 + 2 and len(ctx.counter_boxes["look"]) == 2
+    assert "no map of the table — nothing more is kept out (2 boxes its last map kept out stay in force" in (
+        capsys.readouterr().out
+    )
+    bare = ct.table_map([(_flat(0.40, 0.80, -0.05, 0.35, 0.20), 0.20)], (0.60, 0.15))  # no edge in view
+    assert press_demo.keep_out_counter(ctx, bare, 0.20, "the lid's spot map", key="spot") == []
+    assert "no edge seen — nothing past the counter is kept out there" in capsys.readouterr().out
+    assert len(chain.body.box_names) == 1 + 2  # the look's edge stays in force
+    assert press_demo.keep_out_counter(ctx, bare, 0.20, "the wrist at the look", key="look") == []
+    assert chain.body.layers == ["test"]  # the look's map replaced: no edge left anywhere
+    assert press_demo.keep_out_counter(ctx, None, 0.20, "nothing", key="x") == []
+    assert "no map of the table" in capsys.readouterr().out
+    approach.set_body(False)
+    assert press_demo.keep_out_counter(ctx, tmap, 0.20, "off") is None  # no body check: nothing to hold
+
+
 def test_the_bench_maps_grooves_are_no_edge_and_its_side_edge_is(tmp_path):
     """Flatbot's bench as its 2026-11-03 runs saw it (their room maps' past-the-edge cells): a line of
     them across the table 0.44 m out, the table going on in front of it (16:32), and the table's
@@ -160,3 +252,45 @@ def test_the_bench_maps_grooves_are_no_edge_and_its_side_edge_is(tmp_path):
     edges = ct.counter_edges(ct.table_map([(np.concatenate([near, groove, table, side]), 0.22)], (0.61, -0.13)))
     assert len(edges) == 1 and edges[0].out == pytest.approx((0.0, 1.0), abs=0.02)
     assert edges[0].point[1] == pytest.approx(0.17, abs=ct.CELL_M)
+
+
+def test_a_cloud_that_cannot_be_read_leaves_the_other_to_map_the_counter(monkeypatch, capsys):
+    """After the aim the counter's map pools the scene camera's cloud with the wrist's frame at the
+    look (reach_lid_off.counter_map): a wrist frame that cannot be read leaves the scene camera's
+    cloud to map it, never no map at all (which kept nothing of what the scene camera saw)."""
+    pts = _side_counter(face_y=-0.10, x=(0.30, 0.90), back=0.40, top=0.20)
+    ctx = type("C", (), {"cpose": ContainerPose(xyz=(0.6, 0.15, 0.2), yaw=0.0)})()
+    monkeypatch.setattr(rlo, "_scene_cloud", lambda *a: (pts, 0.20))
+
+    def unreadable(*a):
+        raise ValueError("a frame without its depth")
+
+    monkeypatch.setattr(rlo, "aim_cloud", unreadable)
+    tmap = rlo.counter_map(ctx, None, None, None, 0.20, aim=True)
+    assert "the wrist's frame at the look could not be read (a frame without its depth) — left out" in (
+        capsys.readouterr().out
+    )
+    (e,) = ct.counter_edges(tmap)
+    assert e.out == pytest.approx((0.0, -1.0), abs=1e-6)
+    monkeypatch.setattr(rlo, "_scene_cloud", unreadable)
+    assert rlo.counter_map(ctx, None, None, None, 0.20, aim=True) is None  # neither: no map
+
+
+def test_a_carry_planned_before_a_maps_edge_was_kept_out_is_refused_once_it_is(tmp_path):
+    """choose_and_carry flies the carry carry_ahead planned while the lift flew only where the boxes
+    in force since — the lid's own map's edges — let it (reach_lid_off.carry_refusal): its set-down
+    line onto the counter's edge was clear when it was planned, not once the edge is kept out."""
+    from box_opening.runtime.approach import line_trajectory
+
+    chain = _model(tmp_path)
+    ctx = type("C", (), {"counter_boxes": None})()
+    pts, why = _down_to(chain, (0.60, -0.10), 0.20 + 0.010)  # down onto the edge, nothing kept out yet
+    assert pts is not None, why
+    names = list(chain.joint_names)
+    touch = type("Leg", (), {"name": "place:touch", "traj": line_trajectory(names, pts), "target": None})()
+    carry = rlo.Carry([touch], [pts[-1], pts[0]], list(DOWN), None)
+    assert rlo.carry_refusal(carry) is None
+    tmap = ct.table_map([(_side_counter(face_y=-0.10, x=(0.30, 0.90), back=0.40, top=0.20), 0.20)], (0.60, 0.15))
+    press_demo.keep_out_counter(ctx, tmap, 0.20, "the lid's spot map, the lid lifted", key="spot")
+    why = rlo.carry_refusal(carry)
+    assert why.startswith("place:touch (the cabinet: arm_robotiq_85_base_link") and "cabinet/edge0" in why

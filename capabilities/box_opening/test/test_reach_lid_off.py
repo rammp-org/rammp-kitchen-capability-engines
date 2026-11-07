@@ -2269,6 +2269,37 @@ def test_the_lid_s_spot_is_mapped_and_its_carry_planned_from_where_the_arm_stood
     assert seen == [("spot_map", stood), ("spot_candidates", stood), ("plan_carry", stood)]
 
 
+def test_the_carry_planned_while_the_lift_flew_is_planned_again_where_the_lids_own_map_keeps_it_out(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The carry carry_ahead planned while the lift flew was held out of the boxes in force then; the
+    lid's own map, read after the lift (press_demo.keep_out_counter), may show a counter edge the
+    scene camera's did not. Where that carry would now go into its keep-out (carry_refusal) it is
+    not flown, even to the same spot: the carry is planned again here, against the boxes in force
+    now, and the record says why."""
+    from box_opening.runtime.runner import Runner
+
+    drop = ContainerPose(xyz=(0.45, -0.25, -0.027), yaw=0.0)
+    seen, notes = [], []
+    monkeypatch.setattr(rlo, "spot_look", lambda node, watcher, runner_: None)
+    monkeypatch.setattr(rlo, "spot_map", lambda *a, **k: None)
+    monkeypatch.setattr(rlo, "spot_candidates", lambda *a, **k: iter([(drop, "clear", "clear")]))
+    stale = "place:touch (the cabinet: arm_robotiq_85_base_link 9 mm into cabinet/edge0)"
+    monkeypatch.setattr(rlo, "carry_refusal", lambda carry: (seen.append(("checked", carry)), stale)[1])
+    monkeypatch.setattr(rlo, "plan_carry", lambda ctx_, cfg_, q, d: (seen.append(("plan_carry", d)), (None, "no"))[1])
+    ahead = rlo.CarryAhead([float(v) for v in ctx.client.joints()], drop=drop, tier="clear", carry="planned ahead")
+    runner = Runner(ctx.client, log_dir=tmp_path)
+    monkeypatch.setattr(runner, "note", lambda kind, **kw: notes.append((kind, kw)))
+    eyes = (None, SimpleNamespace(table_z=-0.027), None, None)
+    assert rlo.choose_and_carry(ctx, load_press_demo(PINK), runner, eyes, ahead=ahead) == 1
+    assert seen == [("checked", "planned ahead"), ("plan_carry", drop)]  # the same spot, planned again
+    (spot,) = (kw for kind, kw in notes if kind == "lid_spot")
+    assert spot["ahead"]["flown"] is False and spot["ahead"]["why"] == "the lid's own map keeps it out: " + stale
+    assert "the carry planned while the lift flew is not flown: the lid's own map keeps it out" in (
+        capsys.readouterr().out
+    )
+
+
 # ---- the carry planned while the lift flies ------------------------------------
 
 

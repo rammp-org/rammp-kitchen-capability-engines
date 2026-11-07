@@ -992,6 +992,84 @@ def room_map(watcher, scene_fix, cpose, at_staging):
     return clear_table.table_map(clouds, cpose.xyz[:2])
 
 
+def keep_out_counter(ctx, tmap, table_z, source, runner=None, key=None):
+    """Hold the arm out of the cabinet below the counter's edges `tmap` shows: clear_table
+    .counter_edges and counter_keep_out (the edge and the solid behind it, from the counter's top at
+    `table_z` to the floor) become the body check's run-time boxes (approach.set_obstacles), so every
+    line box_opening flies itself, every planner goal it sends and the lid's set-down are held out of
+    them as out of the chair. The environment from the cameras, this run (the owner's rule): each
+    `key` (default `source`, which map it is) keeps the edges its latest map showed, every key's in
+    force at once; a map that saw no edge keeps nothing out, and the log says so. No map at all
+    (None), or one that cannot be read, is no news of the counter: what the key's last map showed
+    stays in force. Noted 'counter_edges'. Returns the edges `tmap` showed, or None where there is no
+    body check to hold them (off)."""
+    from box_opening.runtime import approach
+
+    check = approach.body_check()
+    if check is None:
+        log.info("[press_demo] COUNTER (%s): the body check is off — the counter's edges are not kept out" % source)
+        return None
+    key = source if key is None else key
+    kept = dict(getattr(ctx, "counter_boxes", None) or {})
+    before = list(kept.get(key) or [])
+    if tmap is None:
+        edges, boxes = [], before
+    else:
+        try:
+            edges = clear_table.counter_edges(tmap)
+            boxes = clear_table.counter_keep_out(edges, table_z, pad_m=check.model.padding_m)
+        except Exception as e:  # noqa: BLE001 - a map that cannot be read shows no edge: said, never the run's end
+            log.info(
+                "[press_demo] COUNTER (%s): its map could not be read for the counter's edges (%s) — nothing more "
+                "is kept out (%d boxes its last map kept out stay in force)" % (source, e, len(before))
+            )
+            return []
+    kept[key] = boxes
+    ctx.counter_boxes = kept
+    every = [b for bs in kept.values() for b in bs]
+    approach.set_obstacles(every)
+    if edges:
+        log.info(
+            "[press_demo] COUNTER (%s): %d edge%s seen — %s; the arm is held out of the cabinet below %s (%d boxes "
+            "in force, padded %.0f mm)"
+            % (
+                source,
+                len(edges),
+                "" if len(edges) == 1 else "s",
+                "; ".join(
+                    "%.2f m of it through [%.2f, %.2f], the counter toward [%.2f, %.2f]"
+                    % (e.length_m, e.point[0], e.point[1], -e.out[0], -e.out[1])
+                    for e in edges
+                ),
+                "it" if len(edges) == 1 else "them",
+                len(every),
+                1000 * check.model.padding_m,
+            )
+        )
+    elif tmap is None:
+        log.info(
+            "[press_demo] COUNTER (%s): no map of the table — nothing more is kept out (%d boxes its last map kept "
+            "out stay in force; %d in all)" % (source, len(before), len(every))
+        )
+    else:
+        log.info(
+            "[press_demo] COUNTER (%s): no edge seen — nothing past the counter is kept out there (an edge the "
+            "cameras did not see is not known; %d boxes in force from the other maps)" % (source, len(every))
+        )
+    if runner is not None and hasattr(runner, "note"):
+        runner.note(
+            "counter_edges",
+            source=source,
+            mapped=tmap is not None,
+            table_z=round(float(table_z), 4),
+            edges=[e.summary() for e in edges],
+            boxes=[] if tmap is None else [b["name"] for b in boxes],
+            kept_from_before=len(before) if tmap is None else 0,
+            in_force=len(every),
+        )
+    return edges
+
+
 def container_half(m):
     """The half-width of the box's footprint about its centre, whatever its
     yaw: a round one's radius, a square one's half-diagonal."""

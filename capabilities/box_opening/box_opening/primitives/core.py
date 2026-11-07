@@ -84,6 +84,9 @@ class Ctx:
     # held_pad_xyz, felt), the box's button as the arm measured it: 'nearest'
     # set-down rings centre on the box there (reach_lid_off._nearest_points)
     held_xy: tuple = None
+    # the counter's edges each map of this run showed, as the body check's keep-out boxes (source ->
+    # [box]: press_demo.keep_out_counter); every source's are in force at once
+    counter_boxes: dict = None
 
 
 @dataclass

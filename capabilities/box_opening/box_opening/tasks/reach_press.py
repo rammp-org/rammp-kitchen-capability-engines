@@ -2578,6 +2578,20 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         prime = getattr(ctx.client, "prime_compliant", None)
         if prime is not None and prime(q0):
             log.info("[press_demo] the driver enters its joint impedance now, while the reach is planned")
+    # the cabinet below the counter's edges the scene camera saw, held out of the proof, the look's goal and
+    # every line from here on (press_demo.keep_out_counter); the aim's frame adds its own once it is read
+    from box_opening.tasks import press_demo as pd
+    from box_opening.tasks import reach_lid_off as rlo
+
+    counter_z = rlo._table_z(watcher, scene_fix, ctx.cpose)
+    pd.keep_out_counter(
+        ctx,
+        rlo.counter_map(ctx, watcher, scene_fix, list(q0), counter_z),
+        counter_z,
+        "the scene camera",
+        runner,
+        "look",
+    )
     # the proof also picks the look's posture for the shortest walks (quickest_look): from here, not from the
     # look pose once the aim moved the button — the look's re-plan below keeps the elbow it flew there with
     plan, why = plan_reach(ctx, cfg, prior_button, q0, depth=proof, looks=looks, shortest_walk=True)
@@ -2769,6 +2783,16 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     # the box is where its button is, not where the scene camera put it: every
     # world from here on holds its cuboid there
     ctx.cpose = cpose_for_button(button, yaw, m.button_offset)
+    # the counter's edges again, the scene camera's points moved with the box and the aim's frame pooled in:
+    # every line of the way in is held out of the cabinet below them
+    pd.keep_out_counter(
+        ctx,
+        rlo.counter_map(ctx, watcher, scene_fix, list(q0), counter_z, aim=True),
+        counter_z,
+        "the scene camera and the wrist at the look",
+        runner,
+        "look",
+    )
     if ctx.mission_frames is not None:
         # a "fix", not an "aim": the oblique aim goes through the wrist
         # camera's mount in TF, which is known to be off (76 mm high, 20:04)

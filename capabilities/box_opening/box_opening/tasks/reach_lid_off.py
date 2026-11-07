@@ -593,6 +593,34 @@ def spot_map(ctx, wrist, q, scene_fix, scene_q, table_z, lens_in_hand=None):
     return tmap
 
 
+def counter_map(ctx, watcher, scene_fix, scene_q, table_z, aim=False):
+    """The table map the counter's edges are read from before the lid is off
+    (press_demo.keep_out_counter): the scene camera's cloud as spot_map takes
+    it (moved by its error at the box, the arm when it looked left out) and,
+    `aim`, the wrist's frame at the look pose (aim_cloud): parked side-on to
+    a cabinet, the scene camera may not see the counter at all. A cloud that
+    cannot be read is left out (said), the other still maps; None where
+    neither shows a table, or where the map cannot be made (said: no map is
+    no news of the counter, never the run's end)."""
+    reads = [("the scene camera's cloud", lambda: _scene_cloud(ctx, scene_fix, scene_q, table_z))]
+    if aim:
+        reads.append(("the wrist's frame at the look", lambda: aim_cloud(ctx, watcher, table_z)[0]))
+    clouds = []
+    for name, read in reads:
+        try:
+            got = read()
+        except Exception as e:  # noqa: BLE001 - a cloud for the counter's edges only
+            log.info("[press_demo] the counter's edges: %s could not be read (%s) — left out" % (name, e))
+            continue
+        if got is not None:
+            clouds.append(got)
+    try:
+        return clear_table.table_map(clouds, ctx.cpose.xyz[:2]) if clouds else None
+    except Exception as e:  # noqa: BLE001 - a map for the counter's edges only
+        log.info("[press_demo] no map of the counter for its edges: its clouds could not be mapped (%s)" % e)
+        return None
+
+
 def _scene_cloud(ctx, scene_fix, scene_q, table_z):
     """spot_map's scene camera cloud: (its table points moved by its error
     at the box, the arm when it looked left out; the table they were
@@ -1362,6 +1390,33 @@ def plan_carry(ctx, cfg, q_from, drop):
         dp.compliant_line(ctx, "place:touch", lines[1], quat, PLACE_TOUCH_SPEED, world),
     ]
     return Carry(legs, lines[2], quat, drop, over_m=-SETDOWN_RELEASE_M, k_z=k_z), None
+
+
+def carry_refusal(carry):
+    """Why `carry` (plan_carry's) would go into the body check's boxes as they stand now — the chair
+    and its user, and the cabinet below every counter edge a map of this run showed
+    (press_demo.keep_out_counter) — or None: its planned leg's goal, strictly, and its path, its
+    set-down's lines and its retreat, each as plan_carry checked them when it was made. The carry
+    carry_ahead planned while the lift flew was held out of the boxes in force then; the lid's own
+    map, read after the lift, may show an edge they did not (choose_and_carry)."""
+    from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
+
+    chain = approach._chain()
+    for leg in carry.legs:
+        traj = getattr(leg, "traj", None)
+        if traj is None or not traj.points:
+            continue
+        pts = [[float(v) for v in p.positions] for p in traj.points]
+        target = getattr(leg, "target", None)
+        planned = target is not None and not getattr(leg, "plan_free", False)  # a plan-free line has no goal sent
+        why = approach.goal_refusal(target, pts[0], pts[-1]) if planned else None
+        if why is None:
+            why = kin.body_refusal(chain, pts)
+        if why is not None:
+            return "%s (%s)" % (leg.name, why)
+    why = kin.body_refusal(chain, carry.retreat) if carry.retreat else None
+    return None if why is None else "place:retreat (%s)" % why
 
 
 def plan_home_after(ctx, cfg, carry):
@@ -2536,6 +2591,8 @@ class CarrySearch:
         room_wait_s = None if self.room is None else time.monotonic() - t_room
         table_z = _table_z(watcher, scene_fix, ctx.cpose)
         tmap = judged.tmap if judged is not None else spot_map(ctx, None, self.q, scene_fix, scene_q, table_z)
+        # the counter's edges this map shows, kept out of the carry and the set-down planned from it
+        pd.keep_out_counter(ctx, tmap, table_z, "the lid's spot map", key="spot")
         rest = list(pd.rest_joints(self.cfg))
         self._reach = _Reach()
         self.ahead = CarryAhead(
@@ -2769,16 +2826,19 @@ def grip_ahead_down(first):
     return lift, None, search.finish()
 
 
-def _ahead_note(ahead, off, flew, chosen, reach):
+def _ahead_note(ahead, off, flew, chosen, reach, stale=None):
     """lid_spot's 'ahead': whether the carry carry_ahead planned flew, why
     not, how far the arm stood from where it was planned from (`off`, rad)
     and the time it saved at rest — its plan where it flew, and the reach
-    verdicts taken from it (`reach`, _Reach). None without one."""
+    verdicts taken from it (`reach`, _Reach); `stale`, why the lid's own map
+    refused it (carry_refusal). None without one."""
     if ahead is None:
         return None
     why = None
     if not flew:
-        if ahead.carry is None:
+        if stale is not None:
+            why = "the lid's own map keeps it out: %s" % stale
+        elif ahead.carry is None:
             why = "none planned (%s)" % ("; ".join(ahead.refused) or "no spot the hand reaches")
         elif off > DRIFT_REPLAN_RAD:
             why = "the arm stands %.3f rad from where it was planned from (gate %.2f)" % (off, DRIFT_REPLAN_RAD)
@@ -2843,6 +2903,8 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         table_z,
         getattr(getattr(watcher, "grab", None), "wrist_lens_in_hand_m", None),
     )
+    # the counter's edges the lifted lid's map shows (the wrist's frame in it), kept out of the carry
+    pd.keep_out_counter(ctx, tmap, table_z, "the lid's spot map, the lid lifted", runner, key="spot")
     t_map = time.monotonic()
     # the reach of a spot judged from where the clear was to end is the
     # reach from here where the arm stands as near as the runner flies a
@@ -2852,13 +2914,16 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
     near = off is not None and off <= DRIFT_REPLAN_RAD
     reach = _Reach(ahead.known if near else None)
     rest = list(pd.rest_joints(cfg))
-    carry, refused, chosen, carry_s, flew = None, [], None, 0.0, False
+    carry, refused, chosen, carry_s, flew, stale = None, [], None, 0.0, False, None
     for drop, tier, says in spot_candidates(ctx, tmap, table_z, q, seeds=(look_joints(rest), rest), reach=reach):
         if len(refused) >= CARRY_TRIES:
             break
-        if near and ahead.carry is not None and _same_spot(drop, ahead.drop):
-            carry, chosen, flew = ahead.carry, (ahead.drop, tier, says), True
-            break
+        if near and ahead.carry is not None and stale is None and _same_spot(drop, ahead.drop):
+            # planned before the lid's own map: held out of what that map shows too, or planned again
+            stale = carry_refusal(ahead.carry)
+            if stale is None:
+                carry, chosen, flew = ahead.carry, (ahead.drop, tier, says), True
+                break
         t = time.monotonic()
         carry, why = plan_carry(ctx, cfg, q, drop)
         carry_s += time.monotonic() - t
@@ -2867,7 +2932,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
             break
         refused.append("[%.2f, %.2f]: %s" % (drop.xyz[0], drop.xyz[1], why))
     t_end = time.monotonic()
-    note = _ahead_note(ahead, off, flew, chosen, reach)
+    note = _ahead_note(ahead, off, flew, chosen, reach, stale)
     runner.note(
         "lid_spot",
         xyz=None if chosen is None else [round(v, 4) for v in chosen[0].xyz],
