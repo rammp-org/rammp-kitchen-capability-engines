@@ -101,9 +101,16 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from box_opening import LOGGER as log
-from box_opening.constants import DRIFT_REPLAN_RAD, GRIPPER_CMD_CLOSED, GRIPPER_CMD_OPEN, TRANSIT_SPEED
+from box_opening.constants import (
+    DRIFT_REPLAN_RAD,
+    GRIPPER_CMD_CLOSED,
+    GRIPPER_CMD_OPEN,
+    PLANNER_LIMIT_MARGIN_RAD,
+    TRANSIT_SPEED,
+)
 from box_opening.models.container import ContainerPose
 from box_opening.perception import clear_table
+from box_opening.primitives import core
 from box_opening.primitives.core import (
     CONTACT_SHIFT_PAD_M,
     Place,
@@ -1220,15 +1227,71 @@ class LiftOff:
     quat: list = None  # the hand's attitude all the way
 
 
-def _clear_after_lift(ctx, chain, q, quat):
-    """The clear from the lifted lid at joints `q`: to the first of
-    reach_press.clear_targets whose straight line flies and leaves every
-    joint room for the planner to start from (reach_press._near_a_limit),
-    else the first that flies, as plan_way_out picks. Returns (points, how
-    far back, None) or (None, 0, why)."""
-    R, t = chain.fk(q)
+def lift_clear_targets(ctx, R, t, top_z=None):
+    """Where the clear after the lift goes where reach_press.clear_targets'
+    does not do (_clear_after_lift), in the order they are tried: as high as
+    the carry's floor (Place.hover_for's: the held lid's underside
+    CARRY_CLEAR_M over the box's top — the cameras', or the lid's top as the
+    grip took it, `top_z` (_gripped_lid_top), where that stands higher),
+    never lower than the hand, and back toward the arm along the box's
+    bearing CLEAR_BACK_M, then
+    REACH_PULLBACK_M, as clear_targets'. Theirs is HOME_CLEAR_M +
+    CLEAR_EXTRA_M over the box's padded cuboid (worlds.planned_top_z) and
+    what the hand's lean hangs the planner's gripper spheres lower: set for
+    a planner world holding the padded box, where flatbot's is empty
+    (world_empty.yaml). Over the pink canister this one stands 76 mm over
+    the box's top. On the 0.86 / 0.91 m side counters of the chair study
+    (study/fixes/highcounter, 11-06) the clear up to theirs met joint_6's
+    limit in all 80 rows whose lift flew and no clear did (the 150 mm one
+    entering seat/armrest_arm_1 in 28); and where one did fly it ended with
+    joint_6 0.026-0.108 rad from its limit, inside the planner's margin in
+    the 10 rows whose carry it refused there. Up to the carry's floor
+    instead joint_6 keeps ~0.2 rad: the carry and home plan from it. The
+    cameras' top alone put it too low where the lid stands higher than they
+    say: in the study's rows whose press met it 45 mm over their top, the
+    carry from a clear that stood at the lift's top took the lid's lowest
+    point 0.5-5.0 mm over the canister's rim; over the lid's top as gripped,
+    7.4 mm at least (today's clear's least)."""
+    m = ctx.model
+    top = float(ctx.cpose.xyz[2]) + float(m.dims[2])
+    if top_z is not None:
+        top = max(top, float(top_z))
+    floor = tcp_z(top + float(m.lid_dims[2]) + core.CARRY_CLEAR_M)
+    z = max(float(t[2]), floor)
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    d = math.hypot(bx, by)
+    return [[float(t[0]) - b * bx / d, float(t[1]) - b * by / d, z] for b in (rp.CLEAR_BACK_M, rp.REACH_PULLBACK_M)]
+
+
+def _gripped_lid_top(chain, q_grip):
+    """The lid's top as the grip took it, the knob held at joints `q_grip`:
+    GRIP_BELOW_LID_M over the closed pads' reference (grip_descent's end,
+    press_contact.pads_z) — the lid's height the grip went by (grip_lid_z:
+    the arm's own touch where the press held, else the press's top)."""
+    from box_opening.tasks.press_contact import pads_z
+
+    return pads_z(chain, q_grip) + GRIP_BELOW_LID_M
+
+
+def _least_room(chain, q):
+    """The least room any joint of joints `q` has to its URDF limit (rad);
+    inf for a chain that names none."""
+    rooms = [
+        min(float(v) - lo, hi - float(v))
+        for v, (lo, hi) in zip(q, getattr(chain, "limits", ()) or (), strict=False)
+        if lo is not None and hi is not None
+    ]
+    return min(rooms) if rooms else math.inf
+
+
+def _first_clear(ctx, chain, q, quat, targets):
+    """The clear from joints `q` to the first of `targets` whose straight
+    line flies and leaves every joint room for the planner to start from
+    (reach_press._near_a_limit), else the first that flies, as plan_way_out
+    picks: (points, how far back, None) or (None, 0, why)."""
+    _R, t = chain.fk(q)
     chosen, whys = None, []
-    for target in rp.clear_targets(ctx, np.asarray(R, float), t):
+    for target in targets:
         back = math.hypot(target[0] - float(t[0]), target[1] - float(t[1]))
         pts, why = chain.straight_line(q, target, quat)
         if pts is not None:
@@ -1244,7 +1307,31 @@ def _clear_after_lift(ctx, chain, q, quat):
         chosen = chosen or (pts, back)
     if chosen is not None:
         return chosen[0], chosen[1], None
-    return None, 0.0, "no way up and back from the lifted lid flies (%s)" % "; ".join(whys)
+    return None, 0.0, "; ".join(whys)
+
+
+def _clear_after_lift(ctx, chain, q, quat, top_z=None):
+    """The clear from the lifted lid at joints `q`: up and back toward the
+    arm to reach_press.clear_targets' (_first_clear), as the way home's
+    clear goes — unless none of their lines flies, or the one that does
+    ends inside the planner's limit margin (PLANNER_LIMIT_MARGIN_RAD: the
+    carry from there is refused START_IN_LIMIT_MARGIN, and no lid comes
+    off), where the clear up to the carry's floor (lift_clear_targets, over
+    the box's top or `top_z`, the lid's as gripped, the higher) is flown
+    that leaves more room. Where the lid comes off today, as on every lower
+    table recorded, nothing changes. Returns (points, how far back, None) or
+    (None, 0, why)."""
+    R, t = chain.fk(q)
+    R = np.asarray(R, float)
+    pts, back, why = _first_clear(ctx, chain, q, quat, rp.clear_targets(ctx, R, t))
+    if pts is not None and _least_room(chain, pts[-1]) >= PLANNER_LIMIT_MARGIN_RAD:
+        return pts, back, None
+    low, low_back, low_why = _first_clear(ctx, chain, q, quat, lift_clear_targets(ctx, R, t, top_z))
+    if low is not None and (pts is None or _least_room(chain, low[-1]) > _least_room(chain, pts[-1])):
+        return low, low_back, None
+    if pts is not None:
+        return pts, back, None
+    return None, 0.0, "no way up and back from the lifted lid flies (%s; up to the carry's floor: %s)" % (why, low_why)
 
 
 def plan_lift(ctx, cfg, q_grip, quat):
@@ -1258,13 +1345,14 @@ def plan_lift(ctx, cfg, q_grip, quat):
     world = _full_world(ctx)
     q_grip = [float(v) for v in q_grip]
     _R, t = chain.fk(q_grip)
+    top_z = _gripped_lid_top(chain, q_grip)  # the clear's floor never under the lid's top as gripped
     lift, why = chain.straight_line(q_grip, [float(t[0]), float(t[1]), float(t[2]) + lift_off_m(ctx.model)], quat)
     if lift is not None:
         why = dp.line_refusal(chain, lift)
     if lift is None or why is not None:
         return None, "the lift off the canister is not a straight line the arm can fly (%s)" % why
     lift = [[float(v) for v in p] for p in lift]
-    clear, back, why = _clear_after_lift(ctx, chain, lift[-1], quat)
+    clear, back, why = _clear_after_lift(ctx, chain, lift[-1], quat, top_z)
     if clear is None:
         return None, why
     return LiftOff(

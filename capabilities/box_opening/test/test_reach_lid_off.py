@@ -3149,3 +3149,88 @@ def test_with_the_grip_from_the_press_the_video_records_from_the_press_on(ctx, m
     steps = [t.split(" ")[0].rstrip(":") for t in v.said if not t.startswith("overlay")]
     assert steps == ["GRIP", "CLOSE", "RELEASE"] and "straight from the press" in v.said[0]
     assert v.finished[0] == "the end: the lid set down, the arm home"
+
+
+# ---- a high counter (the chair study's 0.86 / 0.91 m side cabinets) ----------------------
+
+
+class _HandAt(_Chain):
+    """The fake chain with the hand standing at height `z` (fk), at `R` (the
+    fake's own where none is said), and a walk that flies (straight to its
+    end, its asks kept)."""
+
+    def __init__(self, z, refuse=(), unreachable=(), R=None):
+        super().__init__(refuse, unreachable)
+        self.z = z
+        if R is not None:
+            self.R = R
+        self.walks = []
+
+    def fk(self, q):
+        return np.array(self.R, float), np.array([0.5, -0.4, self.z])
+
+    def walk(self, q0, xyz, quat, step_m=None, step_rad=None, max_step_rad=None):
+        self.walks.append(dict(xyz=list(xyz), step_m=step_m, step_rad=step_rad, max_step_rad=max_step_rad))
+        return [list(q0), [v + 0.01 for v in q0]], None
+
+
+def _carry_floor(ctx):
+    from box_opening.primitives.core import CARRY_CLEAR_M, tcp_z
+
+    m = ctx.model
+    return tcp_z(ctx.cpose.xyz[2] + m.dims[2] + m.lid_dims[2] + CARRY_CLEAR_M)
+
+
+def _grip_z(ctx, above=0.0):
+    """The straight-down hand's height (trp.STRAIGHT_DOWN) with the closed pads GRIP_BELOW_LID_M
+    under a lid whose top stands `above` over the cameras' top: the knob as the grip holds it."""
+    m = ctx.model
+    return ctx.cpose.xyz[2] + m.dims[2] + above - rlo.GRIP_BELOW_LID_M + dp.DOWN_CONTACT_TOOL[2]
+
+
+def test_the_clear_after_the_lift_goes_only_as_high_as_the_carrys_floor_where_todays_does_not_fly(ctx, monkeypatch):
+    """The chair study's 0.86 / 0.91 m side counters (study/fixes/highcounter): the clear up to
+    clear_targets' height met joint_6's limit in every row whose lift flew and no clear did. There
+    the clear goes up to the carry's floor (the held lid's underside CARRY_CLEAR_M over the box,
+    lift_clear_targets), back toward the arm as far as clear_targets' first; where clear_targets'
+    flies, as on every bench run, it is the one flown, nothing else asked. The box's top under that
+    floor is the lid's as the grip took it where that stands higher than the cameras': the study's
+    rows that met the lid 45 mm over their top carried it 0.5-5.0 mm over the rim from the clear
+    the cameras' top alone put at the lift's top."""
+    from box_opening.runtime import approach
+    from box_opening.worlds import planned_top_z
+
+    floor = _carry_floor(ctx)
+    want = planned_top_z(ctx.model, ctx.cpose) + rp.HOME_CLEAR_M + rp.CLEAR_EXTRA_M  # the fake hand: no lean
+    assert want > floor + 0.005
+    cfg = load_press_demo(PINK)
+    grip = _grip_z(ctx)  # the knob held where the cameras put the lid's top
+    assert grip < floor - 0.05
+    # the bench: clear_targets' first flies — the lift, then that one line, as before
+    chain = _HandAt(grip, R=trp.STRAIGHT_DOWN)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and [lg.name for lg in lift.legs] == ["lid:lift", "lid:clear"]
+    assert [xyz[2] for xyz, _q in chain.lines] == pytest.approx([grip + rlo.lift_off_m(ctx.model), want])
+    assert lift.back_m == pytest.approx(rp.CLEAR_BACK_M)
+    # a high counter: no line up to clear_targets' flies (joint_6), the one up to the carry's floor does
+    lifted = (0.5, -0.4)
+    over = [lambda xyz, q: xyz[2] > floor + 1e-6 and tuple(xyz[:2]) != lifted]
+    chain = _HandAt(grip, R=trp.STRAIGHT_DOWN, refuse=over)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and lift.back_m == pytest.approx(rp.CLEAR_BACK_M)
+    assert [round(xyz[2], 6) for xyz, _q in chain.lines[1:]] == [round(want, 6)] * 2 + [round(floor, 6)]
+    # the lid gripped 45 mm over the cameras' top (the study's highest contact): the floor stands
+    # over the lid's top as gripped, never the cameras' alone
+    todays = [lambda xyz, q: abs(xyz[2] - want) < 1e-6 and tuple(xyz[:2]) != lifted]
+    chain = _HandAt(_grip_z(ctx, 0.045), R=trp.STRAIGHT_DOWN, refuse=todays)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and lift.back_m == pytest.approx(rp.CLEAR_BACK_M)
+    assert [round(xyz[2], 6) for xyz, _q in chain.lines[1:]] == [round(want, 6)] * 2 + [round(floor + 0.045, 6)]
+    # and where neither flies, both are said
+    chain = _HandAt(grip, R=trp.STRAIGHT_DOWN, refuse=[lambda xyz, q: tuple(xyz[:2]) != lifted])
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert lift is None and "no way up and back" in why and "up to the carry's floor: 50 mm back" in why
