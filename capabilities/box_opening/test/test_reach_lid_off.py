@@ -2642,6 +2642,7 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     _R, t_grip = chain.fk(legs[-1].goal_joints)
     _R, t_lift = chain.fk(lift_leg.goal_joints)
     assert t_lift[2] - t_grip[2] == pytest.approx(rlo.lift_off_m(ctx.model), abs=1e-4)
+    assert lift.lift_m == pytest.approx(rlo.lift_off_m(ctx.model))  # the full lift, never the shorter one
     assert t_lift[:2] == pytest.approx(t_grip[:2], abs=1e-4)
     _R, t_clear = chain.fk(clear.goal_joints)
     from box_opening.worlds import planned_top_z
@@ -3212,7 +3213,7 @@ def test_the_clear_after_the_lift_goes_only_as_high_as_the_carrys_floor_where_to
     lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
     assert why is None and [lg.name for lg in lift.legs] == ["lid:lift", "lid:clear"]
     assert [xyz[2] for xyz, _q in chain.lines] == pytest.approx([grip + rlo.lift_off_m(ctx.model), want])
-    assert lift.back_m == pytest.approx(rp.CLEAR_BACK_M)
+    assert lift.back_m == pytest.approx(rp.CLEAR_BACK_M) and lift.lift_m == pytest.approx(rlo.lift_off_m(ctx.model))
     # a high counter: no line up to clear_targets' flies (joint_6), the one up to the carry's floor does
     lifted = (0.5, -0.4)
     over = [lambda xyz, q: xyz[2] > floor + 1e-6 and tuple(xyz[:2]) != lifted]
@@ -3234,6 +3235,29 @@ def test_the_clear_after_the_lift_goes_only_as_high_as_the_carrys_floor_where_to
     monkeypatch.setattr(approach, "_chain", lambda: chain)
     lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
     assert lift is None and "no way up and back" in why and "up to the carry's floor: 50 mm back" in why
+
+
+def test_a_lift_that_does_not_fly_its_full_height_flies_the_shorter_one_and_says_how_far(ctx, monkeypatch):
+    """The chair study's high counters: the 40 mm lift met joint_6's limit 24-40 mm up in 67 of 225
+    rows; where it does not fly, the lift goes LIFT_OFF_MIN_CLEAR_M past the cap (35 mm for the
+    pink canister's 25 mm cap), and the LiftOff says how far (lift_m: the put-back's rise off the
+    knob goes as far). Where neither flies, the full lift's refusal is the one said."""
+    from box_opening.runtime import approach
+
+    cfg = load_press_demo(PINK)
+    full, short = rlo.lift_off_m(ctx.model), rlo.lift_off_m(ctx.model, rlo.LIFT_OFF_MIN_CLEAR_M)
+    assert full > short and full - short == pytest.approx(rlo.LIFT_OFF_CLEAR_M - rlo.LIFT_OFF_MIN_CLEAR_M)
+    lifted = (0.5, -0.4)
+    chain = _HandAt(0.45, refuse=[lambda xyz, q: tuple(xyz[:2]) == lifted and xyz[2] > 0.45 + short + 1e-6])
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and lift.lift_m == pytest.approx(short) and rlo._lift_m(ctx, lift) == pytest.approx(short)
+    assert [xyz[2] for xyz, _q in chain.lines[:2]] == pytest.approx([0.45 + full, 0.45 + short])
+    chain = _HandAt(0.45, refuse=[lambda xyz, q: tuple(xyz[:2]) == lifted])
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert lift is None and why.startswith("the lift off the canister is not a straight line")
+    assert rlo._lift_m(ctx, rlo.LiftOff([])) == pytest.approx(full)  # a LiftOff that says none: the full lift
 
 
 def test_where_no_hand_reaches_a_spot_straight_down_the_same_spots_follow_leaning(ctx):
