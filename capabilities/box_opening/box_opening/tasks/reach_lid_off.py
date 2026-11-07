@@ -1569,7 +1569,9 @@ def watch_setdown(ctx, legs, carry):
 # the joint_6 0.026-0.085 rad from its limit; walked, the lid came off in
 # all 158 (100 without), its way never nearer joint_6's limit than 0.021
 # rad (the walk's own bound: kinematics.LIMIT_MARGIN_RAD). Like every
-# plan-free line it knows nothing of a cabinet.
+# plan-free line it is also held out of the cabinet below the counter's
+# edges this run's maps showed (press_demo.keep_out_counter's boxes are in
+# the walk's own body check); the study's numbers were measured without them.
 CARRY_WALK_ON = ("START_IN_LIMIT_MARGIN", "GOAL_IN_LIMIT_MARGIN")
 CARRY_WALK_STEP_M = 0.01
 CARRY_WALK_STEP_RAD = math.radians(2.0)
