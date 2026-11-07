@@ -87,6 +87,11 @@ class Ctx:
     # the counter's edges each map of this run showed, as the body check's keep-out boxes (source ->
     # [box]: press_demo.keep_out_counter); every source's are in force at once
     counter_boxes: dict = None
+    # the wrist survey's frames as points (tasks/survey: one {"points" (N, 3) float32 in the base
+    # frame, "cam_xyz", "tag"} per frame), where the scene camera saw no box and the survey found
+    # it: the counter round the box as the wrist saw it, for what else needs the counter (the
+    # cabinet edge's keep-out); the lid's spot gets the same points through the fix's table_points
+    survey_clouds: list = None
 
 
 @dataclass

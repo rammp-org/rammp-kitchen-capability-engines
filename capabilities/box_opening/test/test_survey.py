@@ -1,17 +1,20 @@
-"""The wrist survey's poses (tasks/survey): one or two for the wrist camera over the arm's side, chosen from the
-arm's kinematics and the chair model for any counter height, clear of the chair, its user and where a counter may
-stand; and the look again nearer above a place the finder could not check."""
+"""The wrist survey (tasks/survey): where the scene camera finds no container, one or two poses for the wrist camera
+over the arm's side, chosen from the arm's kinematics and the chair model, the finder on their frames, a look again
+where it asks, and the run's end where nothing (or two things) is found."""
 
+from argparse import Namespace
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from conftest import flatbot_urdf
+from conftest import FakeClient, flatbot_urdf
 
 from box_opening.constants import HOME, PLANNER_LIMIT_MARGIN_RAD
 from box_opening.models.container import ContainerModel
+from box_opening.perception import wrist_finder as wf
 from box_opening.runtime import approach, body
 from box_opening.runtime.kinematics import mat_to_quat_xyzw
+from box_opening.tasks import press_demo
 from box_opening.tasks import survey as sv
 
 CONTAINER = "capabilities/box_opening/config/containers/ankou_pink.yaml"
@@ -142,6 +145,10 @@ def test_the_band_keeps_the_arm_off_a_counter_beside_the_chair_no_nearer_than_th
     low = chain.nearest_solution(list(HOME), [0.45, 0.30, 0.30], DOWN)  # the hand down over the counter
     assert low is not None and "where a counter up to 0.45 m may stand beside the chair" in band.refusal(low)
     assert "of the way" in band.path_refusal([HOME, low])
+    # a look again's way there never rises above the survey's own poses (an upper cabinet may hang there)
+    band.ceiling_z = sv.sphere_top_z(check, HOME) - 0.01
+    assert "higher than the survey's own poses reached, 0% of the way" in band.path_refusal([HOME, HOME])
+    band.ceiling_z = None
     # a band built for lower counters only: the same hand stands inside it too, and one over it stands clear
     assert (
         "inside" in sv.Band(check, HOME, top_z=0.30).refusal(low)
@@ -181,7 +188,7 @@ def test_only_the_upper_arm_keeps_no_nearer_than_the_rest_pose_and_every_link_is
 def test_a_sphere_outside_the_band_where_a_way_starts_never_enters_it_one_inside_never_goes_deeper():
     """body.first_hit's rule: outside, not a millimetre in, however near the start; inside, DEEPER_M deeper at most."""
     band = object.__new__(sv.Band)
-    band.top_z = 0.45
+    band.ceiling_z, band.top_z = None, 0.45
     # the stub's one sphere stands as far from the band as the first joint says (m, < 0 inside)
     band.body = SimpleNamespace(
         sphere_distances=lambda Q, layers=None: (np.asarray(Q, float)[:, :1], ["arm_bracelet_link"])
@@ -239,6 +246,13 @@ def test_a_look_again_shows_the_place_whole_and_its_button_checkable_or_says_why
     )
     view, why = sv.look_again_view(chain, check, list(HOME), cam, model, (1.20, 0.60), 0.36)  # past the arm's reach
     assert view is None and why.startswith("no look again over [1.200, 0.600] the arm holds clear")
+    # never higher than the survey's own poses reached: over the box an upper cabinet may hang
+    views, _why, _stats = sv.survey_views(chain, check, list(HOME), cam, model)
+    ceiling = max(sv.sphere_top_z(check, v.joints) for v in views)
+    view, why = sv.look_again_view(chain, check, list(HOME), cam, model, (0.45, 0.40), 0.339, ceiling_z=ceiling)
+    assert view is not None and sv.sphere_top_z(check, view.joints) <= ceiling + 1e-3
+    view, why = sv.look_again_view(chain, check, list(HOME), cam, model, (0.45, 0.40), 0.339, ceiling_z=0.60)
+    assert view is None and why.startswith("no look again over [0.450, 0.400] the arm holds clear")
 
 
 def test_the_places_looked_at_again_are_the_unchecked_and_the_cut_strongest_first():
@@ -256,3 +270,220 @@ def test_the_places_looked_at_again_are_the_unchecked_and_the_cut_strongest_firs
         ),
     )
     assert sv.look_again_places(find, 0.105) == [((0.40, 0.40), 0.36), ((0.20, 0.50), 0.35)]
+
+
+# ----------------------------------------------------------------------------------------- the flow
+
+
+def _frame(tag="survey"):
+    return wf.WristFrame(
+        color=np.zeros((4, 4, 3), np.uint8),
+        depth=np.zeros((4, 4), np.float32),
+        k=np.eye(3),
+        rot_cam=np.eye(3),
+        trans_cam=np.zeros(3),
+        tag=tag,
+    )
+
+
+def _view(name):
+    return sv.SurveyView(
+        name, [0.0] * 7, (0.2, 0.2, 0.7), np.eye(3), np.ones(1, bool), np.ones(1, bool), 35.0, what=name
+    )
+
+
+class _Runner:
+    def __init__(self):
+        self.notes = []
+
+    def note(self, kind, **fields):
+        self.notes.append((kind, fields))
+
+    def wait_still(self, before):
+        return 0.0, False
+
+
+FIX = SimpleNamespace(top_xyz=(0.45, 0.40, 0.34), pose=None, table_z_scene=0.24)
+
+
+def _found(fix=FIX):
+    return wf.WristFind(fix, "the container at [0.450, 0.400]", 1.0, places=())
+
+
+def _unchecked(xy=(0.45, 0.40)):
+    q = wf.Place(xy=xy, top_z=0.34, table_z=0.24, patches=(SimpleNamespace(n_slab=300),), button="unchecked")
+    return wf.WristFind(
+        None, "wrist camera: a lid-sized top at [0.450, 0.400], but no view could check its button", places=(q,)
+    )
+
+
+def _flow(monkeypatch, finds, views=2, states=None, again=True):
+    """run_survey with its motions, frames and finder scripted: the views flown, in order."""
+    flown = []
+    monkeypatch.setattr(approach, "body_check", lambda: SimpleNamespace(layers=["person"]))
+    monkeypatch.setattr(approach, "_chain", lambda: None)
+    monkeypatch.setattr(sv, "Band", lambda check, rest: SimpleNamespace(ceiling_z=None))
+    monkeypatch.setattr(
+        sv,
+        "survey_views",
+        lambda *a, **k: (
+            [_view("survey:look-%d" % (i + 1)) for i in range(views)],
+            None,
+            {"checks": 0.3, "sees": 0.7, "choose_s": 0.1},
+        ),
+    )
+    monkeypatch.setattr(
+        sv,
+        "look_again_view",
+        lambda chain, check, q, cam, model, xy, z, rest=None, n=1, ceiling_z=None: (
+            (_view("survey:look-again-%d" % n), None) if again else (None, "no look again over there")
+        ),
+    )
+    monkeypatch.setattr(sv, "sphere_top_z", lambda check, q: 0.9)
+    states = list(states or [])
+
+    def fly(ctx, runner, view, band, execute):
+        flown.append(view.name)
+        return states.pop(0) if states else ("flown", None)
+
+    monkeypatch.setattr(sv, "fly_view", fly)
+    monkeypatch.setattr(sv, "grab_frame", lambda node, watcher, runner, tag, **k: (_frame(tag), None, None, None))
+    monkeypatch.setattr(sv, "save_frame", lambda *a, **k: None)
+    finds = list(finds)
+    monkeypatch.setattr(wf, "find_container", lambda frames, model, **k: finds.pop(0))
+    ctx = SimpleNamespace(client=FakeClient(), model=ContainerModel.load(CONTAINER))
+    runner = _Runner()
+    s = sv.run_survey(None, ctx, runner, SimpleNamespace(grab=None), True, rest=list(HOME))
+    return s, flown, runner
+
+
+def test_the_survey_stops_at_the_first_view_that_finds_the_box(monkeypatch):
+    s, flown, runner = _flow(monkeypatch, [_found()])
+    assert flown == ["survey:look-1"] and s.fix is FIX and not s.stopped and len(s.clouds) == 1
+    assert [f["stage"] for k, f in runner.notes if k == "wrist_survey"] == ["views", "survey:look-1"]
+
+
+def test_a_place_no_view_could_check_is_looked_at_again_before_it_is_a_fix(monkeypatch):
+    s, flown, _r = _flow(monkeypatch, [_unchecked(), _unchecked(), _found()])
+    assert flown == ["survey:look-1", "survey:look-2", "survey:look-again-1"] and s.fix is FIX
+    assert len(s.clouds) == 3  # every frame's points kept, for what else needs the counter
+
+
+def test_nothing_found_is_the_finders_why_and_a_refused_view_is_passed_over(monkeypatch):
+    nothing = wf.WristFind(None, "wrist camera: nothing on the counter is the container (2 things at lid height)")
+    s, flown, _r = _flow(monkeypatch, [nothing], states=[("refused", "planning failed for survey:look-1: IK_FAIL")])
+    assert flown == ["survey:look-1", "survey:look-2"] and s.fix is None and not s.stopped
+    assert s.why == nothing.why
+    s, flown, _r = _flow(
+        monkeypatch, [], views=1, states=[("refused", "its way there: arm_bracelet_link 12 mm into ...")]
+    )
+    assert s.fix is None and "survey:look-1" in s.why and "not flown: its way there" in s.why
+
+
+def test_a_place_the_arm_cannot_look_again_at_is_refused_with_the_finders_why(monkeypatch):
+    s, flown, runner = _flow(monkeypatch, [_unchecked(), _unchecked()], again=False)
+    assert flown == ["survey:look-1", "survey:look-2"] and s.fix is None and "no view could check its button" in s.why
+    assert (
+        "wrist_survey",
+        {"stage": "look-again", "xy": [0.45, 0.4], "flown": False, "why": "no look again over there"},
+    ) in runner.notes
+
+
+def test_a_survey_motion_stopped_part_way_holds_and_says_so(monkeypatch):
+    s, flown, _r = _flow(monkeypatch, [], states=[("stopped", "failed (aborted)")])
+    assert flown == ["survey:look-1"] and s.stopped and s.fix is None and "stopped part way" in s.why
+
+
+def test_a_view_the_runner_refuses_before_it_moves_is_not_flown_one_that_fails_in_flight_stopped_part_way(
+    monkeypatch,
+):
+    """fly_view: the runner's own gates (the sanity gate, an unarmed client) refuse a leg before anything moves: the
+    arm stands where it was, the next view is tried; a leg that failed in flight left the arm part way."""
+    from box_opening.primitives import core
+    from box_opening.runtime.runner import LegResult
+
+    leg = SimpleNamespace(traj=SimpleNamespace(points=[SimpleNamespace(positions=list(HOME))] * 2))
+    monkeypatch.setattr(core, "_plan_motion", lambda *a, **k: (leg, None))
+    monkeypatch.setattr(core, "_full_world", lambda ctx: ("full", "world_empty.yaml"))
+    ctx = SimpleNamespace(client=FakeClient())
+    band = SimpleNamespace(path_refusal=lambda traj: None)
+    for outcome, state in (("refused", "refused"), ("failed", "stopped")):
+        runner = SimpleNamespace(run=lambda legs, execute, o=outcome: [LegResult("survey:look-1", o, False, "why")])
+        assert sv.fly_view(ctx, runner, _view("survey:look-1"), band, True) == (state, "%s (why)" % outcome)
+    runner = SimpleNamespace(run=lambda legs, execute: [LegResult("survey:look-1", "arrived", True)])
+    assert sv.fly_view(ctx, runner, _view("survey:look-1"), band, True) == ("flown", None)
+    band = SimpleNamespace(path_refusal=lambda traj: "arm_forearm_link 3 mm into ...")
+    assert sv.fly_view(ctx, runner, _view("survey:look-1"), band, True) == (
+        "refused",
+        "its way there: arm_forearm_link 3 mm into ...",
+    )
+
+
+def test_without_the_body_model_there_is_no_survey(monkeypatch):
+    monkeypatch.setattr(approach, "body_check", lambda: None)
+    s = sv.run_survey(None, SimpleNamespace(client=FakeClient(), model=None), _Runner(), None, True)
+    assert s.fix is None and "body model" in s.why and not s.views
+
+
+# ----------------------------------------------------------------------------------------- press_demo
+
+
+def _no_box(monkeypatch, survey=None, wrist_survey=True, instance_id=None, execute=True):
+    """press_demo.wrist_survey_or_exit after a scene look that found nothing: (what it returned or its exit
+    code, the homes it asked for, the run's notes)."""
+    homes, runner = [], _Runner()
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why) or True)
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
+    locator = SimpleNamespace(
+        last_why="the segmenter boxed nothing of its classes in 70 frames", look_record=lambda: {"timing": {}}
+    )
+    ctx = SimpleNamespace(worlds=SimpleNamespace(wrist_camera_config="camera_oak_wrist.yaml"), survey_clouds=None)
+    args = Namespace(wrist_survey=wrist_survey, instance_id=instance_id, execute=execute)
+    cfg = SimpleNamespace(park_tool_down=False)
+    try:
+        got = press_demo.wrist_survey_or_exit(None, ctx, cfg, runner, None, args, locator)
+    except SystemExit as e:
+        got = e.code
+    return got, homes, runner.notes, ctx
+
+
+def test_without_the_survey_no_box_is_the_runs_end_as_before(monkeypatch):
+    got, homes, notes, _ctx = _no_box(monkeypatch, wrist_survey=False)
+    assert got == 2 and homes == ["NO BOX — scene camera: the segmenter boxed nothing of its classes in 70 frames"]
+    assert notes[0][0] == "reach_refused" and notes[0][1]["why"].startswith("NO BOX — scene camera:")
+
+
+def test_the_orchestrators_selection_is_never_surveyed_for(monkeypatch):
+    got, homes, notes, _ctx = _no_box(monkeypatch, survey=SimpleNamespace(fix=FIX), instance_id="food_container_2")
+    assert got == 2 and "no wrist survey for the selected container food_container_2" in homes[0]
+
+
+def test_the_surveys_fix_goes_on_to_the_reach_out_and_its_clouds_on_the_ctx(monkeypatch):
+    survey = sv.Survey(
+        fix=FIX, clouds=[{"points": np.zeros((3, 3), np.float32), "cam_xyz": (0, 0, 0), "tag": "survey:look-1"}]
+    )
+    got, homes, notes, ctx = _no_box(monkeypatch, survey=survey)
+    assert got is FIX and not homes and not notes and ctx.survey_clouds is survey.clouds
+
+
+def test_the_survey_finding_nothing_is_no_box_home_and_exit_2(monkeypatch):
+    survey = sv.Survey(
+        why="wrist camera: two places pass as this container, [0.400, 0.400] and [0.600, 0.300]: refusing to guess"
+    )
+    got, homes, notes, _ctx = _no_box(monkeypatch, survey=survey)
+    assert got == 2 and homes[0].endswith("; wrist survey: " + survey.why)
+    assert notes[0][1]["why"].startswith("NO BOX — scene camera: ") and "refusing to guess" in notes[0][1]["why"]
+
+
+def test_a_survey_motion_stopped_part_way_ends_the_run_with_the_arm_holding(monkeypatch, capsys):
+    got, homes, _n, _ctx = _no_box(
+        monkeypatch, survey=sv.Survey(stopped=True, why="the move to survey:look-1 stopped part way")
+    )
+    assert got == 1 and not homes
+
+
+def test_a_preview_ends_at_the_survey_pose(monkeypatch):
+    got, homes, _n, _ctx = _no_box(
+        monkeypatch, survey=sv.Survey(preview=True, why="a preview: no frames"), execute=False
+    )
+    assert got == 0 and not homes

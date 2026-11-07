@@ -7,8 +7,8 @@ reaches no further toward +y than y -0.36 to +0.04 (the scene study's frame-edge
 every box the side counter's sweep pressed stood at y 0.25-0.65. Until now that run stopped
 with NO BOX before anything moved.
 
-This module holds the survey's poses, chosen on each run (nothing calls them yet: the survey
-flow flies them):
+With the survey on (the node's wrist_survey, press_demo --wrist-survey; off by default), a run
+whose scene camera finds no container looks for it with the wrist camera instead:
 
 1. SURVEY POSES (survey_views): one or two poses for the wrist camera over the arm's side, chosen
    on this run from the arm's own kinematics and the body model, nothing about the room: the
@@ -27,20 +27,42 @@ flow flies them):
    holds to the band and off the user as the flight's is held (Band.path_refusal). A second pose
    only where it adds SECOND_GAIN of the first's score and its joints fly from the first's within
    SECOND_MAX_S.
-2. THE LOOK AGAIN: a place a survey frame shows a lid-sized top at but no view could check
-   its button on, or a lid the view cut, is looked at once more from nearer above it
+2. THE LOOK: each pose is planned by the planner as the reach-out's look is (the joint goal, the
+   full world, TRANSIT_SPEED), its way there held to the counter band and off the user, every
+   sphere of the arm (Band.path_refusal), flown, and the arm let stand still; SURVEY_FUSE_FRAMES
+   still frames from there are fused per pixel (button_aim.StillDepth's fusion) into one frame,
+   kept as a capture (wrist-survey-*).
+3. THE FINDER (perception/wrist_finder.find_container) on every frame so far. A lid-sized top no
+   view could check the button on, or a lid the view cut, is a place to LOOK AGAIN at
    (look_again_view: the camera LOOK_AGAIN_RANGE_M from its lid, at most LOOK_AGAIN_TILT_DEG off
-   straight down), at most LOOK_AGAIN_MAX places (look_again_places).
+   straight down, the arm no higher than the survey's own poses reached: over the box it may stand
+   under an upper cabinet the frames looking down never show), at most LOOK_AGAIN_MAX places, then
+   the finder once more on all the frames.
+4. THE HAND-OFF: its fix (a SceneFix, source "wrist") is the reach-out's prior, as the scene
+   camera's was — the tilted wrist look, the aim and the press unchanged — and its clouds the lid
+   spot's map (the fix's table_points, as the scene camera's were); every survey frame's points
+   are kept on the run's Ctx (ctx.survey_clouds) for what else needs the counter (the cabinet
+   edge's keep-out). Nothing found, or two places that pass, is a STOP before anything is
+   pressed: NO BOX — wrist survey: why.
 
-Every pose is robot-body geometry and the survey's own envelope; where the box stands, how high
-the counter is and what else is on it are the frames' to say.
+A run with the orchestrator's selection (--instance-id) does not survey: the selection is one of
+the scene camera's detections, and the wrist cannot tell which container the user selected
+(docs/interface.md: the interface's gap).
+
+Its heights are the wrist camera's own (wrist_finder's note: the lid's height above its counter
+is right, both read low by the wrist mount's error, more the more the view tilts). The press goes
+by the higher of the survey's top and the aim's, and the press's contact band (45 mm above, 25 mm
+below) judges the rest: a lid the wrist put too low is refused there (contact_early), never pressed
+from a guess.
 """
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
+
+from box_opening import LOGGER as log
 
 # --- where the survey looks -----------------------------------------------------------------
 # The box's centre on the arm's side, arm_mount (m): beside the chair parked side-on, its
@@ -141,6 +163,11 @@ PERSON_LAYERS = ("person",)
 LOOK_AGAIN_TILT_DEG = (0.0, 15.0, 25.0, 35.0, 40.0)
 LOOK_AGAIN_RANGE_M = (0.35, 0.42, 0.30)
 LOOK_AGAIN_MAX = 2  # places looked at again
+
+# --- the frames ---------------------------------------------------------------------------------
+SURVEY_FUSE_FRAMES = 3  # still frames fused per pose (button_aim.StillDepth: a glossy lid's holes)
+SURVEY_FRAME_S = 3.0  # ... within this long of the arm standing still
+SURVEY_CAPTURE_TAG = "survey"
 
 
 @dataclass(frozen=True)
@@ -301,6 +328,8 @@ class Band:
         # the user's boxes and their padding, as the planner pads them, for the way there (path_refusal)
         self.user_layers = tuple(lay for lay in PERSON_LAYERS if lay in check.layers)
         self.user_pad_m = float(check.model.padding_m)
+        # the highest any sphere may rise on the way (path_refusal), once the survey's own poses set it
+        self.ceiling_z = None
 
     def refusal(self, Q):
         """Why joint states Q ((n, 7), or one (7,)) bring a sphere nearer the band than kept, or None."""
@@ -325,10 +354,11 @@ class Band:
         """Why a planned trajectory (or joint points), joined by straight joint lines sampled every
         `step_rad` (body.CHECK_STEP_RAD) as the body check samples a path, takes a sphere of the
         arm (every one the body check holds: the base and the shoulder are not among them) into the
-        band or nearer the user than the planner pads them (PERSON_LAYERS), or None. The body
-        check's rule for a line out of where the arm stands (runtime/body; _first_nearer): a sphere
-        outside where the path starts never enters, one inside may move in it or out of it, never
-        DEEPER_M deeper. At the rest pose the upper arm,
+        band or nearer the user than the planner pads them (PERSON_LAYERS), or any sphere above
+        `ceiling_z` where that is set (a look again's way: no higher than the survey's own poses
+        reached), or None. The body check's rule for a line out of where the arm stands
+        (runtime/body; _first_nearer): a sphere outside where the path starts never enters, one
+        inside may move in it or out of it, never DEEPER_M deeper. At the rest pose the upper arm,
         the forearm and the wrist already stand inside the band's worst case (its highest top at
         its nearest face), which no counter the arm rests beside can be; a way out of the rest pose
         that sweeps the forearm deeper meets a lower counter there (the sim's straight line to the
@@ -350,6 +380,15 @@ class Band:
             m = max(1, int(math.ceil(float(np.abs(b - a).max()) / step)))
             rows.append(a + (np.arange(1, m + 1) / m)[:, None] * (b - a))
         Q = np.concatenate(rows)
+        if self.ceiling_z is not None:
+            C, r, _links = self.body._centres(Q)
+            tops = (C[..., 2] + r[None, :]).max(axis=1)
+            if float(tops.max()) > self.ceiling_z + 1e-3:
+                i = int(np.argmax(tops > self.ceiling_z + 1e-3))
+                return "the arm %.0f mm higher than the survey's own poses reached, %.0f%% of the way" % (
+                    1000 * (float(tops[i]) - self.ceiling_z),
+                    100.0 * i / max(1, len(Q) - 1),
+                )
         d, links = self.body.sphere_distances(Q, layers=(BAND_LAYER,))
         hit = _first_nearer(d, 0.0)
         if hit is not None:
@@ -524,14 +563,17 @@ def _damped_steps(chain, q, t_tool, R_tool, n=12, damping=0.05):
     return q
 
 
-def clear_posture(chain, check, band, q_from, t_tool, R_tool, seeds=None, swing_rad=POSTURE_SWING_RAD, way=False):
+def clear_posture(
+    chain, check, band, q_from, t_tool, R_tool, seeds=None, swing_rad=POSTURE_SWING_RAD, ceiling_z=None, way=False
+):
     """(joints, how far the elbow was swung, None) holding the tool at (t, R) clear of the chair
     and its user (`check`, strictly: Body.pose_refusal) and of the counter band (`band`: a Band),
-    inside the planner's joint limits, and (`way`) its way there from `q_from` as a straight joint
-    line held to the band and off the user (band.path_refusal, as the flight's is: the planner's
-    own is judged again when it flies): of the arm's IK solutions (reach() from `q_from`, then
-    solutions() from `seeds`), the quickest to fly to from `q_from` that clears as it is, else the
-    nearest along its self-motion that clears; or (None, 0, why)."""
+    inside the planner's joint limits, (`ceiling_z`) no sphere's top above that, and (`way`) its
+    way there from `q_from` as a straight joint line held to the band and off the user
+    (band.path_refusal, as the flight's is: the planner's own is judged again when it flies): of
+    the arm's IK solutions
+    (reach() from `q_from`, then solutions() from `seeds`), the quickest to fly to from `q_from`
+    that clears as it is, else the nearest along its self-motion that clears; or (None, 0, why)."""
     from box_opening.constants import PLANNER_LIMIT_MARGIN_RAD
     from box_opening.runtime.branches import CONTINUOUS_JOINTS, PLANNER_CONTINUOUS_LIMIT_RAD, joint_time, nearest_branch
     from box_opening.runtime.kinematics import mat_to_quat_xyzw
@@ -554,6 +596,10 @@ def clear_posture(chain, check, band, q_from, t_tool, R_tool, seeds=None, swing_
         if any(abs(qq[i]) > PLANNER_CONTINUOUS_LIMIT_RAD for i in CONTINUOUS_JOINTS):
             return None, "a continuous joint past the planner's bound"
         why = check.pose_refusal(qq) or band.refusal(qq)
+        if why is None and ceiling_z is not None:
+            top = sphere_top_z(check, qq)
+            if top > ceiling_z + 1e-3:
+                why = "the arm %.0f mm higher than the survey's own poses reached" % (1000 * (top - ceiling_z))
         if why is None and way:
             on_way = band.path_refusal([list(q_from), list(qq)], step_rad=WAY_STEP_RAD)
             why = None if on_way is None else "its way there: %s" % on_way
@@ -672,17 +718,28 @@ def survey_views(chain, check, q_from, cam, model, rest=None, grid=None, max_vie
     return [], why, stats
 
 
-def look_again_view(chain, check, q_from, cam, model, xy, top_z, rest=None, n=1):
+def sphere_top_z(check, q):
+    """The highest any of the arm's checked spheres reaches at joints `q` (m, base z)."""
+    C, r, _links = check.spheres_at(q)
+    return float((C[:, 2] + r).max())
+
+
+def look_again_view(chain, check, q_from, cam, model, xy, top_z, rest=None, n=1, ceiling_z=None):
     """A SurveyView over the place `xy` whose lid top stands at `top_z`: the lens LOOK_AGAIN_RANGE_M
     from it, tilted LOOK_AGAIN_TILT_DEG off straight down at most, back toward the arm, the lid
-    whole in view and its button checkable (cover), the arm clear as for a survey pose. (view,
-    None) or (None, why)."""
+    whole in view and its button checkable (cover), the arm clear as for a survey pose and no
+    higher than `ceiling_z` (run_survey: the survey poses' own highest sphere — over the box the
+    arm may stand under what the counter carries, an upper cabinet, which the frames looking down
+    never show), nor its way there from `q_from` as a straight joint line (clear_posture's `way`,
+    Band.path_refusal; the planner's own is judged again when it flies). (view, None) or (None,
+    why)."""
     from box_opening.constants import HOME
 
     p = np.array([float(xy[0]), float(xy[1]), float(top_z)])
     r = 0.5 * float(max(model.lid_dims[0], model.lid_dims[1]))
     one = Grid(lids=p[None], counter_z=np.array([float(top_z) - float(model.dims[2])]), weight=np.ones(1), lid_r=r)
     band = Band(check, list(HOME) if rest is None else rest)
+    band.ceiling_z = ceiling_z
     a = math.atan2(-p[1], -p[0])
     back = np.array([math.cos(a), math.sin(a), 0.0])
     refused = []
@@ -699,7 +756,8 @@ def look_again_view(chain, check, q_from, cam, model, xy, top_z, rest=None, n=1)
                 checks, sees = cover(cam, R_opt, lens, one)
                 if not checks[0]:
                     continue
-                q, swing, why = clear_posture(chain, check, band, q_from, t_tool, R_tool)
+                # its way there too, as a straight joint line (fly_view judges the planner's own)
+                q, swing, why = clear_posture(chain, check, band, q_from, t_tool, R_tool, ceiling_z=ceiling_z, way=True)
                 if q is None:
                     refused.append("%.2f m, %.0f deg, long side %s: %s" % (rng, tilt, roll, why))
                     continue
@@ -726,3 +784,276 @@ def look_again_places(find, d_lid):
                 out.append(((float(p.xy[0]), float(p.xy[1])), float(p.top_z), int(p.n_slab)))
     out.sort(key=lambda o: -o[2])
     return [(xy, z) for xy, z, _n in out[:LOOK_AGAIN_MAX]]
+
+
+# --- the run's survey -----------------------------------------------------------------------------
+
+
+@dataclass
+class Survey:
+    """What the survey did and found: `fix` (a SceneFix, source "wrist") or None with `why`; `find`
+    the finder's last answer; `clouds` every frame's points (ctx.survey_clouds); `stopped` where a
+    motion stopped part way (the arm holds there)."""
+
+    fix: object = None
+    why: str = ""
+    find: object = None
+    views: list = field(default_factory=list)
+    frames: list = field(default_factory=list)
+    clouds: list = field(default_factory=list)
+    stopped: bool = False
+    preview: bool = False
+    timing: dict = field(default_factory=dict)
+
+
+def grab_frame(node, watcher, runner, tag, n=SURVEY_FUSE_FRAMES, timeout_s=SURVEY_FRAME_S):
+    """One wrist frame from where the arm stands: up to `n` still frames shot after it stood still
+    (runner.wait_still), each paired with its depth and posed by TF at its stamp, fused per pixel
+    (button_aim.StillDepth); the newest one's colour and pose. (wrist_finder.WristFrame, its
+    snapshot, its pose, None), or (None, None, None, why) where none came in `timeout_s`."""
+    from box_opening.perception.button_aim import StillDepth
+    from box_opening.perception.d405 import frame_snapshot
+    from box_opening.perception.depth_source import camera_is_still, camera_pose_at, depth_key, depth_paired
+    from box_opening.perception.wrist_finder import WristFrame
+    from box_opening.tasks.press_demo import _spin_detect
+
+    g = getattr(watcher, "grab", None)
+    if g is None:
+        return None, None, None, "no wrist camera"
+    if runner is not None:
+        runner.wait_still(tag)
+    after_ns = node.get_clock().now().nanoseconds if node is not None else None
+    fused = StillDepth(n)
+    last_stamp, last_depth, got, why = None, None, None, "no new wrist frame"
+    t_end = time.monotonic() + float(timeout_s)
+    while time.monotonic() < t_end:
+        if node is not None:
+            _spin_detect(node)
+        f = frame_snapshot(g)
+        if f.color is None or f.depth is None or f.k is None or f.color_stamp is None:
+            time.sleep(0.02)
+            continue
+        stamp = (int(f.color_stamp.sec), int(f.color_stamp.nanosec))
+        if stamp == last_stamp or (after_ns is not None and stamp[0] * 10**9 + stamp[1] <= after_ns):
+            time.sleep(0.02)
+            continue
+        ok, why_pair = depth_paired(f, last_depth)
+        if not ok:
+            why = why_pair
+            time.sleep(0.01)
+            continue
+        cam = camera_pose_at(g, stamp=f.color_stamp)
+        if cam is None:  # TF lands after the frame: asked again next time round
+            why = "no camera pose for the frame (TF)"
+            time.sleep(0.01)
+            continue
+        last_stamp, last_depth = stamp, depth_key(f)
+        if got is not None and not camera_is_still(got[1], cam):
+            fused.reset()
+        got = (f, cam, fused.add(cam, f.depth))
+        if len(fused.depths) >= int(n):
+            break
+    if got is None:
+        return None, None, None, why
+    f, cam, depth = got
+    frame = WristFrame(
+        color=f.color,
+        depth=np.asarray(depth, np.float32),
+        k=np.asarray(f.k, float),
+        rot_cam=np.asarray(cam[0], float),
+        trans_cam=np.asarray(cam[1], float),
+        dist=None if getattr(f, "dist", None) is None else np.asarray(f.dist, float),
+        tag=tag,
+    )
+    return frame, f, cam, None
+
+
+def save_frame(watcher, snap, cam, frame, caption):
+    """A survey frame as a capture (wrist-<SURVEY_CAPTURE_TAG>-<stamp>, its fused depth as
+    depth_fused: wrist_finder.frame_from_capture replays it), written off this thread."""
+    from box_opening.tasks.press_demo import CAPTURES_DIR, _prune_captures, _save_wrist_frame, capture_stamp
+
+    folder = CAPTURES_DIR / ("wrist-%s-%s" % (SURVEY_CAPTURE_TAG, capture_stamp()))
+    extra = {"depth_fused": np.asarray(frame.depth, np.float32), "fused_frames": np.array([SURVEY_FUSE_FRAMES])}
+    return _save_wrist_frame(
+        getattr(watcher, "grab", None),
+        folder,
+        "%s: %s" % (frame.tag, caption),
+        background=True,
+        after=lambda: _prune_captures(SURVEY_CAPTURE_TAG),
+        frame=(snap, cam, extra),
+    )
+
+
+def fly_view(ctx, runner, view, band, execute):
+    """`view` planned as the reach-out's look is (the joint goal, the full world, TRANSIT_SPEED),
+    its way there held to the counter band (Band.path_refusal), and flown: ("flown" | "refused" |
+    "stopped", why)."""
+    from box_opening.constants import TRANSIT_SPEED
+    from box_opening.primitives.core import PlanState, _full_world, _plan_motion
+
+    q0 = ctx.client.joints()
+    try:
+        leg, _st = _plan_motion(
+            ctx,
+            PlanState(joints=list(q0), chain=0),
+            view.name,
+            ("joints", list(view.joints)),
+            _full_world(ctx),
+            TRANSIT_SPEED,
+        )
+    except RuntimeError as e:
+        return "refused", str(e)
+    why = band.path_refusal(leg.traj)
+    if why is not None:
+        return "refused", "its way there: %s" % why
+    res = runner.run([leg], execute=execute)
+    if any(not r.ok for r in res):
+        last = res[-1]
+        # the runner's own gates refuse a leg before it moves (Runner._refusal: the sanity gate, an
+        # unarmed client): not flown, the arm where it stood; anything else stopped it part way
+        return ("refused" if last.outcome == "refused" else "stopped"), "%s (%s)" % (last.outcome, last.detail)
+    return "flown", None
+
+
+def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=None):
+    """The survey (the module's note) from where the arm stands, its rest pose `rest`: a Survey.
+    Each step is noted ('wrist_survey'): the views chosen, and per view where it looked from and
+    what the finder said."""
+    from box_opening.constants import HOME
+    from box_opening.perception import wrist_finder as wf
+    from box_opening.runtime import approach
+
+    t0 = time.monotonic()
+    out = Survey()
+    check = approach.body_check()
+    if check is None:
+        out.why = "the survey keeps its poses clear of the chair by the body model, and it is off (body_layers)"
+        return out
+    rest = list(HOME) if rest is None else list(rest)
+    chain, cam, model = approach._chain(), camera_of(watcher, camera_cfg_name), ctx.model
+    views, why, stats = survey_views(chain, check, ctx.client.joints(), cam, model, rest=rest)
+    runner.note("wrist_survey", stage="views", views=[_view_row(v) for v in views], why=why, **stats)
+    if not views:
+        out.why = why
+        return _done(out, None, t0)
+    log.info(
+        "[press_demo] WRIST SURVEY: the scene camera finds no container — %d pose%s for the wrist camera over the "
+        "arm's side, checking the button on %.0f%% of the cells the arm presses and seeing %.0f%%, at every counter "
+        "height of %.2f-%.2f m (%.2f s to choose)"
+        % (
+            len(views),
+            "" if len(views) == 1 else "s",
+            100 * stats["checks"],
+            100 * stats["sees"],
+            COUNTER_Z_M[0],
+            COUNTER_Z_M[1],
+            stats["choose_s"],
+        )
+    )
+    band = Band(check, rest)
+    frames = []
+    d_lid = float(max(model.lid_dims[0], model.lid_dims[1]))
+    ceiling = max(sphere_top_z(check, v.joints) for v in views)  # a look again never rises above the survey
+
+    def look(view):
+        """Fly to `view` and judge what the wrist sees there: the finder's answer, or None."""
+        state, why = fly_view(ctx, runner, view, band, execute)
+        out.views.append(view)
+        if state != "flown":
+            runner.note("wrist_survey", stage=view.name, flown=False, why=why)
+            log.info("[press_demo] WRIST SURVEY %s (%s) not flown: %s" % (view.name, view.what, why))
+            out.why = (
+                "the move to %s stopped part way: %s" % (view.name, why)
+                if state == "stopped"
+                else "%s (%s) not flown: %s" % (view.name, view.what, why)
+            )
+            out.stopped = state == "stopped"
+            return None
+        if not execute:
+            out.preview = True
+            return None
+        frame, snap, pose, why = grab_frame(node, watcher, runner, view.name)
+        if frame is None:
+            runner.note("wrist_survey", stage=view.name, flown=True, frame=False, why=why)
+            log.info("[press_demo] WRIST SURVEY %s: no frame (%s)" % (view.name, why))
+            out.why = "no wrist frame at %s (%s)" % (view.name, why)
+            return None
+        frames.append(frame)
+        out.clouds.append(_cloud(frame))
+        t_find = time.monotonic()
+        find = wf.find_container(frames, model)
+        folder = save_frame(watcher, snap, pose, frame, find.why)
+        runner.note(
+            "wrist_survey",
+            stage=view.name,
+            flown=True,
+            frame=True,
+            cam=[round(float(v), 4) for v in frame.trans_cam],
+            tilt_deg=round(_tilt(frame.rot_cam), 1),
+            found=find.fix is not None,
+            why=find.why,
+            places=[[round(q.xy[0], 4), round(q.xy[1], 4), q.button] for q in find.places],
+            confidence=round(float(find.confidence), 2),
+            find_s=round(time.monotonic() - t_find, 3),
+            capture=None if folder is None else str(folder),
+        )
+        log.info("[press_demo] WRIST SURVEY %s (%s): %s" % (view.name, view.what, find.why))
+        return find
+
+    find = None
+    for view in views:
+        got = look(view)
+        find = got if got is not None else find
+        if out.stopped or out.preview or (find is not None and find.fix is not None):
+            return _done(out, find, t0)
+    if find is not None:
+        band.ceiling_z = ceiling  # nor on its way there
+        for i, (xy, top_z) in enumerate(look_again_places(find, d_lid)):
+            again, why = look_again_view(
+                chain, check, ctx.client.joints(), cam, model, xy, top_z, rest=rest, n=i + 1, ceiling_z=ceiling
+            )
+            if again is None:
+                runner.note("wrist_survey", stage="look-again", xy=[round(v, 4) for v in xy], flown=False, why=why)
+                log.info("[press_demo] WRIST SURVEY: %s" % why)
+                continue
+            got = look(again)
+            find = got if got is not None else find
+            if out.stopped or (find is not None and find.fix is not None):
+                break
+    return _done(out, find, t0)
+
+
+def _done(out, find, t0):
+    """`out` with the finder's last answer: its fix, or why there is none (the finder's, else the
+    last view's that was not looked from)."""
+    out.find = find
+    if find is not None:
+        out.fix = find.fix
+        if find.fix is None and not out.stopped:
+            out.why = find.why
+    elif not out.why:
+        out.why = "a preview: no frames" if out.preview else "no survey view was looked from"
+    out.timing["survey_s"] = round(time.monotonic() - t0, 2)
+    return out
+
+
+def _cloud(frame):
+    """A survey frame's points in the base frame (wrist_finder.lift: no hand, nothing past 1 m), the
+    lens and the frame's tag: what ctx.survey_clouds keeps for what else needs the counter."""
+    from box_opening.perception import wrist_finder as wf
+
+    pts, _uv, _edge = wf.lift(frame)
+    return {"points": pts.astype(np.float32), "cam_xyz": tuple(float(v) for v in frame.trans_cam), "tag": frame.tag}
+
+
+def _view_row(v):
+    return {
+        "name": v.name,
+        "joints": [round(float(q), 4) for q in v.joints],
+        "cam": [round(float(c), 3) for c in v.cam_xyz],
+        "tilt_deg": round(float(v.tilt_deg), 1),
+        "swing_rad": round(float(v.swing_rad), 2),
+        "person_mm": None if not math.isfinite(v.person_m) else round(1000 * v.person_m, 1),
+        "what": v.what,
+    }

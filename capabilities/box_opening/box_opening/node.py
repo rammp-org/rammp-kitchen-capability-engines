@@ -64,6 +64,11 @@ PARAMS = {
     # plan-free line is held out of (runtime/body); unreadable, the run stops before it moves;
     # "" turns the check off (the bench). BOX_OPENING_BODY_LAYERS in the node's environment overrides
     "body_layers": "/config/robot/curobo/planner.yaml",
+    # where the scene camera finds no container, look for it with the wrist camera from one or two
+    # poses over the arm's side (a chair parked side-on to a counter: tasks/survey); off, such a
+    # run stops with NO BOX before anything moves, as the owner had it (2026-10-22). Never with the
+    # orchestrator's selection: that is the scene camera's detection
+    "wrist_survey": False,
 }
 NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
 
@@ -101,6 +106,7 @@ TAIL_LINES = 40
 # the user) (REVIEW_RULES U2: progress runs from 0 to 1, its message a person's words, not a leg's
 # name); rows are written as their legs end. First match wins.
 LEG_PHASES = (
+    ("survey:", "locate", 0.03, "looking for the container with the wrist camera"),
     ("reach:look", "look", 0.1, "looking for the button"),
     ("press:close", "look", 0.12, "reaching for the button"),
     ("reach:", "press", 0.2, "reaching for the button"),
@@ -650,6 +656,8 @@ class Capability(CapabilityEngine):
         argv += ["--body-layers", PARAMS["body_layers"] if layers is None else str(layers)]
         if instance_id:  # the container the orchestrator selected; standalone: any of its class
             argv += ["--instance-id", instance_id]
+        if self._param("wrist_survey"):  # the run surveys only without a selection (tasks/survey)
+            argv += ["--wrist-survey"]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
 
     def _env(self):
