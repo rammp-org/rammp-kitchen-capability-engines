@@ -42,6 +42,9 @@ reads it, approach.set_obstacles(boxes) adds a run's own boxes):
                                        padded box (a path from inside one may
                                        move in it, not DEEPER_M deeper)
   Body.pose_refusal(q) / pose_clear(q) one joint state, strictly: a goal
+  Body.sphere_depths(Q)                each sphere's depth in its deepest padded box
+                                       (n, S): what a line re-planned round the body
+                                       (kinematics around_body) drives out
   Body.distance(Q, layers=("person",)) signed distance (m, < 0 inside) from the
                                        arm's buffered spheres to the layers'
                                        UNPADDED boxes, with the link and the box
@@ -631,6 +634,22 @@ class Body:
         """Why the arm at joint state `q` would be inside a padded box, strictly (no DEEPER_M
         allowance: a goal the arm is yet to be flown to), or None."""
         return self.refusal([q], step_rad=0.0, start_exempt=False)
+
+    def sphere_depths(self, Q):
+        """(n, S): how deep each checked sphere's surface stands in its deepest PADDED box at each
+        row of Q (m, > 0 inside — the depth the line check refuses, Hit.depth_m; < 0 how far
+        outside), every box counted, and the link of each sphere: what the re-plan round the body
+        (kinematics.ArmChain around_body) drives out along the arm's self-motion."""
+        Q = np.atleast_2d(np.asarray(Q, float))
+        out, links = [], None
+        for s in range(0, len(Q), _CHUNK):
+            C, r, links = self._centres(Q[s : s + _CHUNK])
+            if not len(self.box_names):
+                out.append(np.full(C.shape[:2], -np.inf))
+                continue
+            idx = np.arange(len(self.box_names))
+            out.append((r[None, :, None] - self._signed(self._excess(C, idx, padded=True))).max(axis=2))
+        return np.concatenate(out), links
 
     def pose_clear(self, q):
         """Whether the arm at joint state `q` is clear of every padded box (pose_refusal is None)."""

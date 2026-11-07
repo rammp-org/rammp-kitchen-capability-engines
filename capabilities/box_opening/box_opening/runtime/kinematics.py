@@ -49,6 +49,33 @@ REACH_STEP_M = 0.02  # reach(): the pose walked in steps this long ...
 REACH_STEP_RAD = math.radians(6.0)  # ... and this much turn
 MAX_REACH_STEP_RAD = 0.6  # a bigger joint jump over one such step is a branch change, refuse
 SELF_MOTION_STEP_RAD = 0.1  # self_motion(): the elbow swung in steps this long in joint space
+# A line the body model refuses (ArmChain.body: the chair and its user) is
+# RE-PLANNED round it where its caller asks (around_body): the hand on the
+# same path, the elbow swung out of the way. The 7-joint arm holds every pose
+# of the path with its elbow anywhere along its swing (self_motion), so each
+# waypoint is solved as the plain line solves it, then moved along the
+# Jacobian's null space by the Gauss-Newton step that takes the spheres that
+# motion moves (more than AROUND_MOVES_M of theirs per rad of it)
+# AROUND_MARGIN_M outside the padded boxes (Body.sphere_depths), no more than
+# AROUND_STEP_RAD, and solved back onto the pose — the step weighing, beside
+# the spheres, every limited joint it would leave less than
+# AROUND_LIMIT_ROOM_RAD from its limit (a radian short of it weighing as
+# AROUND_LIMIT_M_PER_RAD into a box): swung away from the chair without
+# care, two slides beside it ran a joint into its limit 58 and 94 mm down
+# the line (the chair study's 0.76 m side counter, (0.35, 0.30) and
+# (0.40, 0.30)). A step that leaves the arm no better off is not taken. The
+# whole line is then judged as the plain one
+# (the step and limit gates on the way, the body check, the caller's own guard
+# if it gives one); one that still enters is refused with the plain line's
+# reason. The chair study (11-06) refused 348 rows' way in so: the upper arm
+# through the armrest beside the shoulder (seat/armrest_arm_1) or the user's
+# torso, from the look pose.
+AROUND_MARGIN_M = 0.03
+AROUND_STEP_RAD = 0.05
+AROUND_PROBE_RAD = 0.01  # the derivative along the null space: a central difference this far each way
+AROUND_MOVES_M = 1e-3
+AROUND_LIMIT_ROOM_RAD = 0.15
+AROUND_LIMIT_M_PER_RAD = 0.1
 
 
 def _rpy(r, p, y):
@@ -266,6 +293,73 @@ class ArmChain:
         pts, _why = self.walk(q_start, xyz, quat_xyzw, step_m=step_m, step_rad=step_rad, check_body=False)
         return None if pts is None else pts[-1]
 
+    def _limit_shortfall(self, q, n):
+        """_off_body's joint-limit terms at `q`: for each limited joint less
+        than AROUND_LIMIT_ROOM_RAD from a limit, how far short of that room
+        it stands (weighted by AROUND_LIMIT_M_PER_RAD, so in m as the
+        spheres' depths are) and that shortfall's rate along the null-space
+        direction `n`."""
+        d, dd = [], []
+        for j, (lo, hi) in enumerate(self.limits):
+            if lo is None or hi is None:
+                continue
+            to_lo, to_hi = float(q[j]) - lo, hi - float(q[j])
+            room = min(to_lo, to_hi)
+            if room < AROUND_LIMIT_ROOM_RAD:
+                d.append(AROUND_LIMIT_M_PER_RAD * (AROUND_LIMIT_ROOM_RAD - room))
+                dd.append(AROUND_LIMIT_M_PER_RAD * (-float(n[j]) if to_lo < to_hi else float(n[j])))
+        return np.array(d, float), np.array(dd, float)
+
+    def _off_body(self, q, xyz, R):
+        """`q` (tool_frame at (xyz, R)) moved along the arm's self-motion by
+        the Gauss-Newton step that takes the spheres that motion moves
+        AROUND_MARGIN_M outside the body model's padded boxes, minding the
+        joints' room to their limits (_limit_shortfall), at most
+        AROUND_STEP_RAD, and solved back onto the pose: `q` itself where no
+        such sphere is that near, or where the step does not converge or
+        leaves the arm no better off (the AROUND comment above)."""
+        q = np.asarray(q, float)
+        n = np.linalg.svd(self._fk_jac(q)[2])[2][-1]  # the null space of the 6 x 7 Jacobian
+        h = AROUND_PROBE_RAD
+        D, _links = self.body.sphere_depths(np.array([q, q + h * n, q - h * n]))
+        d0 = np.maximum(D[0] + AROUND_MARGIN_M, 0.0)
+        if not d0.any():
+            return q
+        dd = (D[1] - D[2]) / (2.0 * h)  # each sphere's depth per rad along n
+        live = (d0 > 0.0) & (np.abs(dd) > AROUND_MOVES_M)
+        if not live.any():
+            return q  # only spheres the hand's pose holds where they are: nothing to swing out of the way
+        lim, dlim = self._limit_shortfall(q, n)
+        num = float(d0[live] @ dd[live]) + float(lim @ dlim)
+        s = float(np.clip(-num / (float(dd[live] @ dd[live]) + float(dlim @ dlim)), -AROUND_STEP_RAD, AROUND_STEP_RAD))
+        nxt = self.solve_pose(q + s * n, xyz, R)
+        if nxt is None:
+            return q
+        d1 = np.maximum(self.body.sphere_depths([nxt])[0][0] + AROUND_MARGIN_M, 0.0)
+        lim1, _ = self._limit_shortfall(nxt, n)
+        return nxt if float(d1 @ d1) + float(lim1 @ lim1) < float(d0 @ d0) + float(lim @ lim) else q
+
+    def _around(self, pts, why, again, around_body):
+        """straight_line's and walk's re-plan round the body: (pts, None)
+        where the plain line `pts` passed (`why` None) or nothing asks;
+        else `again()`'s line (the waypoints solved again, each moved off the
+        body) where it passes every gate the plain one did, the body check
+        and — `around_body` callable — the caller's own guard (it returns
+        why not, or None), else (None, the plain line's `why` and what the
+        re-plan met)."""
+        if not why:
+            return pts, None
+        if not around_body or self.body is None:
+            return None, why
+        alt, why_alt = again()
+        if alt is not None:
+            why_alt = self.body_refusal(alt)
+        if alt is not None and why_alt is None and callable(around_body):
+            why_alt = around_body(alt)
+        if alt is not None and why_alt is None:
+            return alt, None
+        return None, "%s; with the elbow swung round it: %s" % (why, why_alt)
+
     def walk(
         self,
         q_start,
@@ -275,6 +369,7 @@ class ArmChain:
         step_rad=REACH_STEP_RAD,
         max_step_rad=MAX_REACH_STEP_RAD,
         check_body=True,
+        around_body=None,
     ):
         """reach()'s continuation with every step kept: joint waypoints from
         q_start to tool_frame at (xyz, quat_xyzw) — position in a straight
@@ -282,33 +377,46 @@ class ArmChain:
         With small steps and max_step_rad it is a path to FLY (a turn in
         place, tasks/depth_press). (points, None) with points[0] == q_start,
         or (None, why). A path to fly is refused where it enters the chair
-        or its user (body_refusal); reach()'s, never flown, is not checked
+        or its user (body_refusal) — or, `around_body` given (the keyword
+        around_body() hands it), re-planned round them first (the AROUND
+        comment above); reach()'s, never flown, is not checked
         (`check_body`): the planner plans the path to its end."""
-        q = np.array(q_start, float)
-        R0, t0 = self.fk(q)
+        q0 = np.array(q_start, float)
+        R0, t0 = self.fk(q0)
         R_goal = quat_to_mat(*quat_xyzw)
         xyz = np.asarray(xyz, float)
         w = rotvec(R_goal @ R0.T)
         ang = float(np.linalg.norm(w))
         axis = w / ang if ang > 1e-9 else np.array([0.0, 0.0, 1.0])
         n = max(1, int(math.ceil(max(float(np.linalg.norm(xyz - t0)) / step_m, ang / step_rad))))
-        pts = [q]
-        for k in range(1, n + 1):
-            f = k / n
-            nxt = self.solve_pose(q, t0 + (xyz - t0) * f, _axis_rot(axis, ang * f) @ R0)
-            if nxt is None:
-                return None, "IK did not converge %.0f%% of the way" % (100.0 * f)
-            if float(np.abs(nxt - q).max()) > max_step_rad:
-                return None, "a joint jump of %.2f rad %.0f%% of the way — near a singularity" % (
-                    float(np.abs(nxt - q).max()),
-                    100.0 * f,
-                )
-            if not self.within_limits(nxt):
-                return None, "a joint limit %.0f%% of the way" % (100.0 * f)
-            pts.append(nxt)
-            q = nxt
+
+        def solve(around):
+            q = q0
+            pts = [q]
+            for k in range(1, n + 1):
+                f = k / n
+                target, R = t0 + (xyz - t0) * f, _axis_rot(axis, ang * f) @ R0
+                nxt = self.solve_pose(q, target, R)
+                if nxt is None:
+                    return None, "IK did not converge %.0f%% of the way" % (100.0 * f)
+                if around:
+                    nxt = self._off_body(nxt, target, R)
+                if float(np.abs(nxt - q).max()) > max_step_rad:
+                    return None, "a joint jump of %.2f rad %.0f%% of the way — near a singularity" % (
+                        float(np.abs(nxt - q).max()),
+                        100.0 * f,
+                    )
+                if not self.within_limits(nxt):
+                    return None, "a joint limit %.0f%% of the way" % (100.0 * f)
+                pts.append(nxt)
+                q = nxt
+            return pts, None
+
+        pts, why = solve(False)
+        if pts is None:
+            return None, why
         why = self.body_refusal(pts) if check_body else None
-        return (None, why) if why else (pts, None)
+        return self._around(pts, why, lambda: solve(True), around_body)
 
     def nearest_solution(self, q_start, xyz, quat_xyzw, seeds=()):
         """Of the redundant arm's IK solutions for tool_frame at (xyz,
@@ -458,14 +566,16 @@ class ArmChain:
         )
         return float(np.linalg.norm(wrist - (t0 + R0 @ par))) - reach
 
-    def straight_line(self, q_start, xyz_end, quat_xyzw, step_m=STEP_M, max_step_rad=None):
+    def straight_line(self, q_start, xyz_end, quat_xyzw, step_m=STEP_M, max_step_rad=None, around_body=None):
         """Joint waypoints from q_start along the straight line from
         tool_frame's current position to xyz_end, holding quat_xyzw, no
         joint moving more than max_step_rad between two (EXIT_MAX_STEP_RAD
         for the rise off a hold; None: MAX_STEP_RAD, read at the call, as
         the press study's sweeps set it). Returns (points, None) with
         points[0] == q_start, or (None, why) — a line that enters the chair
-        or its user (body_refusal) refused like an unsolvable one."""
+        or its user (body_refusal) refused like an unsolvable one, or,
+        `around_body` given (the keyword around_body() hands it), re-planned
+        round them first (the AROUND comment above)."""
         max_step_rad = MAX_STEP_RAD if max_step_rad is None else float(max_step_rad)
         q0 = np.array(q_start, float)
         R_goal = quat_to_mat(*quat_xyzw)
@@ -473,30 +583,52 @@ class ArmChain:
         xyz_end = np.asarray(xyz_end, float)
         length = float(np.linalg.norm(xyz_end - t0))
         n = max(1, int(math.ceil(length / step_m)))
-        pts = [q0]
-        q = q0
-        for k in range(1, n + 1):
-            target = t0 + (xyz_end - t0) * (k / n)
-            nxt = self.solve_pose(q, target, R_goal)
-            if nxt is None:
-                return None, "IK did not converge %.0f mm down the line" % (1000.0 * length * k / n)
-            if float(np.abs(nxt - q).max()) > max_step_rad:
-                return None, "joint jump %.2f rad over one %.0f mm step — near a singularity" % (
-                    float(np.abs(nxt - q).max()),
-                    1000 * step_m,
-                )
-            if not self.within_limits(nxt):
-                return None, "a joint limit %.0f mm down the line" % (1000.0 * length * k / n)
-            pts.append(nxt)
-            q = nxt
-        why = self.body_refusal(pts)
-        return (None, why) if why else (pts, None)
+
+        def solve(around):
+            pts = [q0]
+            q = q0
+            for k in range(1, n + 1):
+                target = t0 + (xyz_end - t0) * (k / n)
+                nxt = self.solve_pose(q, target, R_goal)
+                if nxt is None:
+                    return None, "IK did not converge %.0f mm down the line" % (1000.0 * length * k / n)
+                if around:
+                    nxt = self._off_body(nxt, target, R_goal)
+                if float(np.abs(nxt - q).max()) > max_step_rad:
+                    return None, "joint jump %.2f rad over one %.0f mm step — near a singularity" % (
+                        float(np.abs(nxt - q).max()),
+                        1000 * step_m,
+                    )
+                if not self.within_limits(nxt):
+                    return None, "a joint limit %.0f mm down the line" % (1000.0 * length * k / n)
+                pts.append(nxt)
+                q = nxt
+            return pts, None
+
+        pts, why = solve(False)
+        if pts is None:
+            return None, why
+        return self._around(pts, self.body_refusal(pts), lambda: solve(True), around_body)
 
 
 def body_refusal(chain, pts, start_exempt=True):
     """`chain`.body_refusal(pts), or None for a chain that has none (the tests' stand-ins)."""
     check = getattr(chain, "body_refusal", None)
     return None if check is None else check(pts, start_exempt=start_exempt)
+
+
+def around_body(chain, guard=None):
+    """The keyword asking `chain`'s straight_line or walk to re-plan a line
+    its body model refuses round the chair and its user (the AROUND comment
+    above), the re-planned line held to `guard` too (lines -> why not, or
+    None): {"around_body": ...} for a chain with a body model attached, {}
+    for one without (the bench, a test's stand-in), whose line is the plain
+    one as always. The way in asks it (tasks/reach_press, depth_press
+    turn_walk); the press stroke, the grip's descent, the lift, the set-down
+    and the exits do not."""
+    if getattr(chain, "body", None) is None:
+        return {}
+    return {"around_body": guard if guard is not None else True}
 
 
 G_MPS2 = 9.81

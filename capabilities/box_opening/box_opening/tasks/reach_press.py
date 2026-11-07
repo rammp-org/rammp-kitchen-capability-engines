@@ -348,6 +348,17 @@ def reach_geometry(model, button, tilt, travel_m):
     return quat, start, bottom, look
 
 
+def way_in_guard(ctx, chain, top_z=None):
+    """What a way-in line re-planned round the chair (kinematics.around_body)
+    is held to beside every gate the plain line meets: posture_refusal on
+    it — its centre line off the table and out of the box, the margin any
+    elbow swung elsewhere keeps (quickest_look) — for the box up to its top
+    or `top_z` (the button's or the lid's), whichever is higher. A run with
+    no box (ctx.cpose None) takes no re-planned line."""
+    top = (0.0, 0.0, -math.inf if top_z is None else float(top_z))
+    return lambda pts: posture_refusal(ctx, chain, [pts], top)
+
+
 def walk_or_turn(ctx, q_look, slide_pts, start_xyz, quat, top_z=None):
     """way_down's way to the hand turned down over the slide's end
     `start_xyz`, no stroke: one walk in from the look pose's joints
@@ -358,17 +369,21 @@ def walk_or_turn(ctx, q_look, slide_pts, start_xyz, quat, top_z=None):
     carried on straight down to TURN_LOW_ABOVE_M above it and the turn
     there (WayDown slide, start_xyz and above_m: the callers fly that
     slide). The reach-out's lid off comes down to the knob the same way
-    (reach_lid_off.solve_grip_way). Returns (depth_press.WayDown, None) or
-    (None, why)."""
+    (reach_lid_off.solve_grip_way). Each of those lines the chair's body
+    model refuses is re-planned round it first (kinematics.around_body,
+    held to way_in_guard). Returns (depth_press.WayDown, None) or (None,
+    why)."""
     from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import around_body
     from box_opening.tasks import depth_press as dp  # imports this module: not at the top
 
     chain = approach._chain()
-    pts, down, short, why_walk = dp.walk_down_path(chain, ctx.model, q_look, start_xyz, quat)
+    around = around_body(chain, way_in_guard(ctx, chain, top_z))
+    pts, down, short, why_walk = dp.walk_down_path(chain, ctx.model, q_look, start_xyz, quat, **around)
     if pts is not None:
         return dp.WayDown(pts, down, short, True), None
     pts, down, short, why_turn = dp.turn_down_path(
-        chain, ctx.model, slide_pts[-1], CONTACT_TOOL, dp.COMPLIANT_TURN_SHORT_DEG
+        chain, ctx.model, slide_pts[-1], CONTACT_TOOL, dp.COMPLIANT_TURN_SHORT_DEG, **around
     )
     if pts is not None:
         return dp.WayDown(pts, down, short, False), None
@@ -379,12 +394,12 @@ def walk_or_turn(ctx, q_look, slide_pts, start_xyz, quat, top_z=None):
             if float(tip[2]) <= float(top_z) + above + LINE_MIN_M:
                 continue  # the slide already ends this low
             low = tool_for_contact((float(tip[0]), float(tip[1]), float(top_z) + above), quat)
-            drop, why = chain.straight_line(slide_pts[-1], low, quat)
+            drop, why = chain.straight_line(slide_pts[-1], low, quat, **around)
             if drop is None:
                 whys.append("slid on down to %.0f mm above the button: %s" % (1000 * above, why))
                 continue
             pts, down, short, why_turn = dp.turn_down_path(
-                chain, ctx.model, drop[-1], CONTACT_TOOL, dp.COMPLIANT_TURN_SHORT_DEG
+                chain, ctx.model, drop[-1], CONTACT_TOOL, dp.COMPLIANT_TURN_SHORT_DEG, **around
             )
             if pts is None:
                 whys.append("turned %.0f mm above the button: %s" % (1000 * above, why_turn))
@@ -489,12 +504,16 @@ def _proven(ctx, cfg, chain, tilt, button, geometry, q_look, depth):
     """plan_reach's proof of `tilt` (`geometry`: reach_geometry's quat,
     start, bottom and look for `button`) from the look pose's joints
     `q_look`: (ReachPlan with no look leg yet, None, None) where the slide
-    and the stroke — with `depth`, the way down — fly from there; else
+    and the stroke — with `depth`, the way down — fly from there (the slide
+    and the way down re-planned round the chair where its body model
+    refuses them: kinematics.around_body; never the stroke); else
     (None, why, None), or, where the slide flies and the way down does not,
     (None, why, the ReachPlan plan_reach keeps in its `looks`)."""
+    from box_opening.runtime.kinematics import around_body
+
     quat, start, bottom, look = geometry
     q_look = [float(v) for v in q_look]
-    slide, why = chain.straight_line(q_look, start, quat)
+    slide, why = chain.straight_line(q_look, start, quat, **around_body(chain, way_in_guard(ctx, chain, button[2])))
     if slide is None:
         return None, "the slide in (%s)" % why, None
     if depth:
@@ -1184,6 +1203,7 @@ def shifted_way_down(ctx, cfg, look, button, m=PROOF_SHIFT_M):
     why); with `m` 0, at once: the scene camera's button itself, which
     plan_reach did not reach, is not proven again."""
     from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import around_body
 
     if m <= 0:
         return None, "no button off it is asked (PROOF_SHIFT_M 0)"
@@ -1192,7 +1212,7 @@ def shifted_way_down(ctx, cfg, look, button, m=PROOF_SHIFT_M):
     whys = []
     for name, b in zip(SHIFTED, _shifted_buttons(button, m), strict=False):
         quat, start, _bottom, _look = reach_geometry(ctx.model, b, look.tilt_deg, cfg.travel_m)
-        slide, why = chain.straight_line(q, start, quat)
+        slide, why = chain.straight_line(q, start, quat, **around_body(chain, way_in_guard(ctx, chain, b[2])))
         if slide is None:
             whys.append("%.0f mm %s: the slide in (%s)" % (1000 * m, name, why))
             continue
@@ -1223,6 +1243,7 @@ def plan_shifted_look(ctx, cfg, looks, button, q_from, m=PROOF_SHIFT_M):
     ReachPlan with its look leg planned, SHIFTED's name, None) or (None,
     None, why)."""
     from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import around_body
 
     whys = []
     for look in looks:
@@ -1248,7 +1269,9 @@ def plan_shifted_look(ctx, cfg, looks, button, q_from, m=PROOF_SHIFT_M):
                 "proven again from there" % (look.tilt_deg, gap)
             )
             q = [float(v) for v in leg.goal_joints]
-            slide, why = approach._chain().straight_line(q, look.start_xyz, look.quat)
+            chain = approach._chain()
+            guard = way_in_guard(ctx, chain, look.button[2])
+            slide, why = chain.straight_line(q, look.start_xyz, look.quat, **around_body(chain, guard))
             if slide is None:
                 whys.append("at %d deg, planned %.3f rad off: the slide in (%s)" % (look.tilt_deg, gap, why))
                 continue
@@ -1307,25 +1330,31 @@ def reach_from_here(ctx, cfg, button, tilt, need_stroke=True, q=None):
     stands (`q`, else the arm's joints): a MOVE to its look pose (the
     re-aim), turning the hand to its attitude on the way (REAIM_STEP_RAD),
     then the slide and the stroke (not solved without `need_stroke`: the
-    depth press flies its own). Returns (move points — [] when already
-    there —, ReachPlan with no look_leg, None) or (None, None, why)."""
+    depth press flies its own). The move and the slide the chair's body
+    model refuses are re-planned round it first (kinematics.around_body,
+    held to way_in_guard); the stroke never is. Returns (move points — []
+    when already there —, ReachPlan with no look_leg, None) or (None, None,
+    why)."""
     from box_opening.runtime import approach
-    from box_opening.runtime.kinematics import MAX_STEP_RAD, STEP_M
+    from box_opening.runtime.kinematics import MAX_STEP_RAD, STEP_M, around_body
 
     chain = approach._chain()
     quat, start, bottom, look = reach_geometry(ctx.model, button, tilt, cfg.travel_m)
     q = ctx.client.joints() if q is None else [float(v) for v in q]
+    around = around_body(chain, way_in_guard(ctx, chain, button[2]))
     _R, t = chain.fk(q)
     if float(np.linalg.norm(np.asarray(look, float) - np.asarray(t, float))) < LINE_MIN_M:
         move, q_look = [], q
     else:
-        move, why = chain.walk(q, look, quat, step_m=STEP_M, step_rad=REAIM_STEP_RAD, max_step_rad=MAX_STEP_RAD)
+        move, why = chain.walk(
+            q, look, quat, step_m=STEP_M, step_rad=REAIM_STEP_RAD, max_step_rad=MAX_STEP_RAD, **around
+        )
         if move is None:  # the line as it flew before, at the new attitude from its first step
-            move, why = chain.straight_line(q, look, quat)
+            move, why = chain.straight_line(q, look, quat, **around)
         if move is None:
             return None, None, "the move to its look pose (%s)" % why
         q_look = move[-1]
-    slide, why = chain.straight_line(q_look, start, quat)
+    slide, why = chain.straight_line(q_look, start, quat, **around)
     if slide is None:
         return None, None, "the slide in (%s)" % why
     stroke = None
@@ -1700,7 +1729,8 @@ def _line(ctx, xyz, quat, **gate):
     """Joint waypoints for a straight line from where the arm is, or
     ([], None) when it is already there. `gate`: straight_line's
     max_step_rad, where the line is a rise off the hold
-    (kinematics.EXIT_MAX_STEP_RAD)."""
+    (kinematics.EXIT_MAX_STEP_RAD), or its around_body, where a way-in line
+    is re-planned round the chair (kinematics.around_body)."""
     from box_opening.runtime import approach
 
     chain = approach._chain()
@@ -1714,13 +1744,14 @@ def _line(ctx, xyz, quat, **gate):
 REUSE_RAD = 1e-3  # the arm this close (every joint) to where a solved line starts: it is flown as solved
 
 
-def _line_from(ctx, pts, xyz, quat):
+def _line_from(ctx, pts, xyz, quat, **gate):
     """`pts` (a line solved earlier, ending at `xyz`) when the arm stands at
-    its start, else _line from where it stands. The runner refuses a
-    plan-free line that no longer starts where the arm is all the same."""
+    its start, else _line from where it stands (`gate`: _line's). The runner
+    refuses a plan-free line that no longer starts where the arm is all the
+    same."""
     if pts and float(np.abs(np.asarray(ctx.client.joints(), float) - np.asarray(pts[0], float)).max()) < REUSE_RAD:
         return pts, None
-    return _line(ctx, xyz, quat)
+    return _line(ctx, xyz, quat, **gate)
 
 
 def _home_legs(ctx, cfg, start=None):
@@ -3152,7 +3183,13 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     if walk is not None:
         slide, quat_in = walk, turned
     else:
-        slide, why = _line_from(ctx, plan2.slide_pts, plan2.start_xyz, plan2.quat)
+        # solved again where the arm stands off the slide's start: as the proof's slide, re-planned round the
+        # chair where its body model refuses the plain line (way_in_guard; reach_from_here, _proven)
+        from box_opening.runtime.kinematics import around_body
+
+        chain = approach._chain()
+        around = around_body(chain, way_in_guard(ctx, chain, button[2]))
+        slide, why = _line_from(ctx, plan2.slide_pts, plan2.start_xyz, plan2.quat, **around)
         if not slide:
             _go_home(
                 ctx,
