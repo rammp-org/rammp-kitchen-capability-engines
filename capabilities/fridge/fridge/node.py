@@ -2,10 +2,12 @@
 
 Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, pull the door 60 deg open, let go and
 push it on to 90 (or, with `push_open` false, a 90-deg pull and go back round the door to its inner side). Action
-`close` (close_door.run): push the door most of the way shut with the side of the hand -- no grasp, the gripper
-untouched (it may hold a container) -- against the door the open saved; it swings shut by itself from there. Every leg
-is planned and sim-gated before it moves, with the wheelchair keep-out on; any failed check stops the run with the arm
-holding where it is (EngineError "refused").
+`close` (close_door.run): push the door most of the way shut with the hand -- no grasp, the gripper untouched (it may
+hold a container) -- against the door the open saved; it swings shut by itself from there. cuRobo plans every motion
+(planning.py) against the fridge it is shown (world.py: the cabinet, the door at its angle, the handle, pushed into the
+planner with set_world) and the planner's own wheelchair layers, all of it before anything moves; any failed plan or
+check stops the run with the arm holding where it is (EngineError "refused"). The planner's world is put back when the
+action ends.
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`. Otherwise the goal
 is a dry run (detect, plan and gate every leg; nothing moves) and the result says so. Someone stands at the e-stop
@@ -29,8 +31,11 @@ from door_common import common as dc
 from door_common import open_door as shared_open
 
 from . import base_drive, close_door, constants, motion, open_door, push_open
+from .kinematics import Chain
 from .perception import WristCamera
+from .planning import Planner
 from .tee_logger import TeeLogger
+from .world import PlannerWorld, chair_stand_in, scene_camera
 
 COMMON = {
     "execute": {"type": "boolean", "default": False},
@@ -62,23 +67,32 @@ PARAMS = {
     # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
     "depth_topic": "/wrist_camera/depth/image_rect_raw",
     "camera_frame": "",
-    # where the handle comes from: "depth" (the vertical bar sticking out of the door) or "sam3" (SAM 3's mask of
-    # sam3_prompts on the wrist image, from sam3_service; the door plane still comes from depth)
-    "handle_source": "depth",
+    # which camera finds the handle and measures the door: "wrist" (color_topic, camera_info_topic, depth_topic: what
+    # every executed open has used, and what GRIP_EXT was tuned on) or "scene" (the scene_* topics below, as the side
+    # grasp measured the door on 11-06; its handle point is not the wrist camera's: GRIP_EXT is unchecked with it)
+    "detect_camera": "wrist",
+    # where the handle comes from: "sam3" (SAM 3's mask of sam3_prompts, from sam3_service) or "depth" (the vertical bar
+    # sticking out of the door)
+    "handle_source": "sam3",
+    # how each look measures the door's direction (open_door.DOOR_NORMALS): "handle_model" (the printed handle's model,
+    # RAMMP.Fridge.Handle5.STL, fit to SAM 3's handle mask on the depth: door_normal.py, from the side grasp), "handle"
+    # (the bar's front and its plate), "plane" (a door-plane fit over the whole image), "square" (TESTING ONLY: the door
+    # taken as square to the arm). handle_model and handle need handle_source sam3
+    "door_normal": "handle_model",
     "sam3_service": "/perception/sam3/detect",
     "sam3_prompts": ["handle"],
     "sam3_threshold": 0.3,
     **constants.MEASURED,
-    # the wheelchair + occupant collision layers (chair.py): a directory of the planner's layer_mebot_*.yaml, e.g. the
-    # robot's curobo/ config bind-mounted in; empty: this package's copy (flatbot's, rammp-deployments 63e7563)
-    "chair_model_dir": "",
+    # the fridge's collision world for the cuRobo planner (world.py): this node writes it into planner_world_dir, a host
+    # directory the planner container mounts too, at planner_world_dir_in_planner ("": the same path), and pushes it
+    # with set_world. planner_base_layers: the robot world's layers every pushed scene lists again (as the planner sees
+    # them; the chair's own layers are the planner config's and stay in every world). planner_restore_world: the world
+    # put back when the action ends, resolved next to the planner's config
+    "planner_world_dir": "/rammp_planner_worlds",
+    "planner_world_dir_in_planner": "",
+    "planner_base_layers": ["/config/robot/curobo/layer_mebot_floor.yaml"],
+    "planner_restore_world": "world.yaml",
     "chair_back_dir": list(constants.CHAIR_BACK_DIR),
-    # TESTING ONLY: the door taken to face the arm squarely (normal along the arm base's -x), no door plane fit -- for a
-    # door whose depth is its reflection. A door yawed off it gets a wrong hinge and swing
-    "door_square_to_arm": False,
-    # the door's normal from the handle's own depth (bar front + plate), no door plane fit. SAM 3 only; not with
-    # door_square_to_arm
-    "door_normal_from_handle": False,
     # every run also records a rosbag into its run folder (bag.RunBag): the wrist camera this many times a second
     # (~75 MB a minute at 1) and TF
     "record_bag": True,
@@ -87,6 +101,13 @@ PARAMS = {
     "scene_color_topic": "/scene_camera/color/image_raw",
     "scene_camera_info_topic": "/scene_camera/color/camera_info",
     "scene_depth_topic": "/scene_camera/depth/image_rect_raw",
+    # ... and the wrist camera's rectified stereo pair (the OAK's infra1 and infra2, each with its camera_info; any ""
+    # or no publisher: not recorded), to run a learned stereo matcher on later. The OAK names its left mono infra2: the
+    # camera_infos say which is left. ~30 MB a minute at 1 (two 640 x 400 mono images)
+    "wrist_infra1_topic": "/wrist_camera/infra1/image_rect_raw",
+    "wrist_infra1_info_topic": "/wrist_camera/infra1/camera_info",
+    "wrist_infra2_topic": "/wrist_camera/infra2/image_rect_raw",
+    "wrist_infra2_info_topic": "/wrist_camera/infra2/camera_info",
     "boxes_topic": "/perception/object_detections_3d",
     # drive_base: its limits and the MIB drive profile (base_drive.PARAMS)
     **base_drive.PARAMS,
@@ -151,15 +172,28 @@ class Capability(CapabilityEngine):
         open_door.configure(
             self.cfg["data_dir"],
             self.cfg["mount_tilt_deg"],
-            self.cfg["door_square_to_arm"],
-            self.cfg["door_normal_from_handle"],
-            chair_model_dir=self.cfg["chair_model_dir"] or None,
+            self.cfg["door_normal"],
             **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):
             raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
-        if self.cfg["door_normal_from_handle"] and self.cfg["handle_source"] != "sam3":
-            raise ValueError("door_normal_from_handle needs handle_source sam3 (the handle's mask)")
+        if self.cfg["door_normal"] in ("handle_model", "handle") and self.cfg["handle_source"] != "sam3":
+            raise ValueError(f"door_normal {self.cfg['door_normal']} needs handle_source sam3 (the handle's mask)")
+        if self.cfg["detect_camera"] not in ("scene", "wrist"):
+            raise ValueError(f"detect_camera must be 'scene' or 'wrist', not {self.cfg['detect_camera']!r}")
+        scene_cam = self.cfg["detect_camera"] == "scene"
+        self.detect_topics = tuple(
+            self.cfg[k]
+            for k in (
+                ("scene_color_topic", "scene_camera_info_topic", "scene_depth_topic")
+                if scene_cam
+                else ("color_topic", "camera_info_topic", "depth_topic")
+            )
+        )
+        if not all(self.detect_topics):
+            raise ValueError(
+                f"detect_camera {self.cfg['detect_camera']}: its colour, info and depth topics must be set"
+            )
         shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
         if self.cfg["record_bag"] and not self.mock:
             from .bag import RunBag  # here, not at import: rosbag2, which the planning tests don't have
@@ -175,7 +209,13 @@ class Capability(CapabilityEngine):
                 extra.append(
                     (self.cfg["boxes_topic"], "rammp_perception_interfaces/msg/ObjectDetections", ObjectDetections)
                 )
-            motion.BAG = lambda run_dir: RunBag(self, run_dir, cams, self.cfg["bag_frame_hz"], extra)
+            stereo = tuple(
+                self.cfg[f"wrist_{k}"]
+                for k in ("infra1_topic", "infra1_info_topic", "infra2_topic", "infra2_info_topic")
+            )
+            stereo = [stereo] if all(stereo) else []
+            motion.BAG = lambda run_dir: RunBag(self, run_dir, cams, self.cfg["bag_frame_hz"], extra, stereo)
+        self._fk = None  # the arm's forward kinematics, from its model (read in the first action)
         # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
         self.sam3 = None
         if self.cfg["handle_source"] == "sam3":
@@ -211,15 +251,29 @@ class Capability(CapabilityEngine):
             return {"executed": False, "mock": True}
 
         ctx.checkpoint()
+        if self._fk is None:  # the arm's own model, as the planner plans on it (/arm/robot_description)
+            self._fk = Chain(self.arm.robot_description())
+        layers = [x for x in self.cfg["planner_base_layers"] if x]
+        world = PlannerWorld(
+            self.arm,
+            self.cfg["planner_world_dir"],
+            self.cfg["planner_world_dir_in_planner"] or None,
+            layers,
+            self.cfg["planner_restore_world"],
+            # the level mount has no chair layers in its planner: the old stand-in box behind the arm base; flatbot's
+            # scene camera (not in its layers) is kept out of every world on the 30-deg mount
+            extra=[chair_stand_in(self.cfg["chair_keep_out_behind_m"])]
+            if self.cfg["mount_tilt_deg"] == 0
+            else [scene_camera(constants.SCENE_CAMERA_XYZ, constants.SCENE_CAMERA_BOX_M)],
+        )
+        planner = Planner(self.arm, world, self._fk, ctx.checkpoint, budget_s=constants.PLAN_BUDGET_S)
         # the camera's subscriptions and tf buffer are this action's: the engine destroys them when it ends
         dc.set_camera(
-            WristCamera(
+            WristCamera(  # the detection camera (detect_camera): the wrist's or the scene's
                 self,
-                self.cfg["color_topic"],
-                self.cfg["camera_info_topic"],
-                self.cfg["depth_topic"],
+                *self.detect_topics,
                 rammp_arm.FRAME,
-                self.cfg["camera_frame"],
+                self.cfg["camera_frame"] if self.cfg["detect_camera"] == "wrist" else "",
                 sam3=self.sam3,
                 sam3_prompts=self.cfg["sam3_prompts"],
                 sam3_threshold=self.cfg["sam3_threshold"],
@@ -247,6 +301,7 @@ class Capability(CapabilityEngine):
             if action_id == "open":
                 ok = open_door.run(
                     self.arm,
+                    planner,
                     execute,
                     swing_deg=params.get("swing_deg"),
                     push=bool(params.get("push_open", True)),
@@ -267,6 +322,7 @@ class Capability(CapabilityEngine):
                 settings = {k: v for k, v in params.items() if k in close_door.GOAL_SETTINGS}
                 ok = close_door.run(
                     self.arm,
+                    planner,
                     execute,
                     chair_back_dir=self.cfg["chair_back_dir"],
                     speed=speed,
@@ -300,6 +356,7 @@ class Capability(CapabilityEngine):
                 recoverable=True,
             ) from e
         finally:
+            world.restore()  # the robot's own planner world back, also after a refusal or a cancel
             dc.set_output(None)
             dc.set_camera(None)
             shared_open.configure(CHECKPOINT=None)

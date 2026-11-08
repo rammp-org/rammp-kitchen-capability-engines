@@ -1,17 +1,14 @@
-"""What the fridge's open, push-open and close share: run logged, plan what follows the swing, send checked joints."""
+"""What the fridge's open, push-open and close share: each run logged (events, console, rosbag), the door files."""
 
+import json
 import shutil
 import threading
 import time
 
 import numpy as np
 import rammp_arm
-from door_common import open_door as shared
-from door_common.common import DoorFrame, Refused, RunLog, say
-from door_common.common import trajectory_keep_out as dc_trajectory_keep_out
-from scipy.spatial.transform import Rotation as R
-
-KEYPOINT_TOL_M = 0.01  # a path counts as done with the hand this close to its last keypoint
+from door_common import common as dc
+from door_common.common import Refused, RunLog, say
 
 _CONSOLE = None  # the running goal's console.log (logged_run sets it), or None between runs
 _CONSOLE_LOCK = threading.Lock()  # the arm logs from its own threads too
@@ -36,7 +33,8 @@ def _set_console(path):
 
 
 BAG = None  # (run_dir) -> a recorder with close() (bag.RunBag; the node sets it, record_bag); None records nothing
-BAG_MIN_FREE_GB = 2.0  # no bag with less than this free on the data disk (~75 MB a minute at 1 frame a second)
+BAG_MIN_FREE_GB = 2.0  # no bag with less than this free on the data disk (~75 MB a minute a camera at 1 frame a
+# second, ~30 more with the wrist camera's stereo pair)
 
 
 def _start_bag(run_dir):
@@ -60,7 +58,19 @@ def _stop_bag(rec):
     if rec is None:
         return
     try:
-        say(f"rosbag: {rec.close()} camera frames")
+        frames = rec.close()
+        pairs = getattr(rec, "stereo_pairs", None)
+        if pairs is None:
+            say(f"rosbag: {frames} camera frames")
+        else:
+            say(f"rosbag: {frames} camera frames, {pairs} stereo pairs")
+            if pairs == 0:
+                say(
+                    "  (no stereo pair recorded: check the wrist_infra*_topic parameters name the topics the camera "
+                    "publishes (ros2 topic list), that it publishes them (on the OAK: depth.i_left_rect_publish_topic "
+                    "and depth.i_right_rect_publish_topic), and that both images carry the same stamp. "
+                    "docs/TESTING.md, Set up)"
+                )
     except Exception as e:  # noqa: BLE001 -- as _start_bag
         say(f"  (the rosbag did not close cleanly: {e!r})")
 
@@ -98,58 +108,29 @@ def logged_run(what, ai, log_args, speed, task):
         rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
 
 
-def door_after(geom, cand):
-    """The door dict as the open will have saved it once candidate `cand`'s swing ends (plan_open's `geom`, `cand`)."""
-    h = cand["h"]
-    door = dict(
-        closed_normal=list(geom["n"]),
-        closed_grasp_pos=list(cand["grasp"].position),
-        closed_handle=list(h),
-        door_z=list(h[2] + np.asarray(shared.DOOR_Z_FROM_HANDLE)),
-        hinge=list(geom["hinge"]),
-        door_open_deg=float(cand["swing"]),
-        **shared.door_model(geom["n"], cand["grasp"].position, h),
-    )
-    door["open_sign"] = float(np.sign(DoorFrame(door, 1.0).angle_of(cand["wps"][-1][:3])) or 1.0)
-    return door
+def opened(door, deg):
+    """A copy of door dict `door` (closed, or as saved) with the door open `deg`."""
+    return {**door, "door_open_deg": float(deg)}
 
 
-class AfterSwing(shared.AfterSwing):
-    """What follows the fridge's swing: `check` again from what the swing will really run, before it does."""
-
-    def recheck(self, scene, rb, geom, cand, advice):
-        ok, msg = self.check(scene, rb, geom, cand, True)
-        say(f"after-swing re-check from the real grasp: {msg}")
-        if not ok:
-            raise Refused(
-                f"{msg} from the real grasp -- stopping BEFORE the swing, still holding the handle (door closed). A "
-                f"release_only goal lets go and backs off.{advice}"
-            )
+def shifted(door, move, chair_dir):
+    """A copy of `door` as it stands in the arm's frame once the wheelchair has moved `move` (m, + back): its
+    recorded positions moved by `chair_dir` x that (the node's chair_back_dir)."""
+    dxy = np.asarray(chair_dir, float) * move
+    return shifted_by(door, dxy)
 
 
-def _leg_lengths(pts, legs):
-    """The Cartesian length of each joint step of `legs` (send_legs' timing)."""
-    lengths = []
-    for (p0, q0), (p1, q1), leg in zip(pts[:-1], pts[1:], legs, strict=True):
-        n = len(leg)
-        ang = float((R.from_quat(q0).inv() * R.from_quat(q1)).magnitude())
-        step = max(1e-4, float(np.linalg.norm(np.asarray(p1) - p0)) / n, ang / n * rammp_arm.ROT_EQUIV_M)
-        lengths += [step] * n
-    return lengths
+def shifted_by(door, dxy):
+    """A copy of `door` with its recorded positions moved by `dxy` (arm_mount x, y)."""
+    out = dict(door)
+    for k in ("hinge", "hinge_pivot", "closed_grasp_pos", "closed_handle", "door_mid"):
+        if out.get(k) is not None:
+            out[k] = [out[k][0] + dxy[0], out[k][1] + dxy[1], *out[k][2:]]
+    return out
 
 
-def trajectory_keep_out(q0, pts, legs, speed_scale=1.0):
-    """What self.arm.move_joints checks before send_legs sends `legs` from joints `q0` (common.trajectory_keep_out,
-    timed as send_legs times them): why the arm would refuse, or None."""
-    return dc_trajectory_keep_out(q0, [q for leg in legs for q in leg], _leg_lengths(pts, legs), speed_scale)
-
-
-def send_legs(ai, pts, legs, speed_scale=1.0):
-    """The joints the plan checked, as one smooth trajectory timed like the Cartesian path they follow. `pts`: the
-    keypoints [(pos, quat)], `legs`: the joint list between each pair. Returns (reached the last keypoint, error m)."""
-    lengths = _leg_lengths(pts, legs)
-    sent = ai.move_joints([q for leg in legs for q in leg], cart_lengths=lengths, speed_scale=speed_scale)
-    time.sleep(0.3)
-    err = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - np.asarray(pts[-1][0])))
-    say(f"hand {np.round(ai.get_state()['ee_pos'][:3], 3)}, {err * 100:.1f} cm from the last keypoint")
-    return bool(sent) and err < KEYPOINT_TOL_M, err
+def load_door():
+    """The door file (the open writes it), or Refused."""
+    if not dc.DOOR_FILE.exists():
+        raise Refused(f"need {dc.DOOR_FILE}: the open writes it.")
+    return json.loads(dc.DOOR_FILE.read_text())

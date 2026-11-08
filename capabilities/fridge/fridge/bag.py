@@ -3,6 +3,10 @@
 Each camera's colour, depth and intrinsics (the wrist camera's, and the scene camera's when it has topics) as matched
 sets, `frame_hz` of them a second (the cameras run at 15); the extra topics (boxer's 3D boxes) at `frame_hz` too; all of
 /tf_static, and /tf at TF_HZ for each set of frames it carries (with /tf_static: where each camera was for each frame).
+Optionally a camera's rectified stereo pair (`stereo`): both images and both camera_infos as one matched set, at
+`frame_hz` too, so a learned stereo matcher (FoundationStereo) can be run later on the same views as the camera's own
+depth. The camera_infos carry the rectified projections: the baseline, and which image is the left one (the right
+camera's P[0][3] = -fx * baseline). Don't assume it from the topic names: the OAK driver names its left mono infra2.
 The arm's joints, tool pose and gripper are not here: the run's arm.npz has them at 25 Hz. Raw, lossless, sqlite3.
 """
 
@@ -16,6 +20,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from tf2_msgs.msg import TFMessage
 
 SYNC_SLOP_S = 0.05  # colour, depth and camera_info within this of each other are one frame (perception.WristCamera's)
+STEREO_SLOP_S = 0.01  # a stereo pair's two images and infos: one exposure, one stamp (frames are 67 ms apart at 15 Hz)
 TF_HZ = 5.0
 TF_QOS = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE)
 TF_STATIC_QOS = QoSProfile(
@@ -35,14 +40,17 @@ class RunBag:
     """Records into `run_dir`/bag from now until `close()`. Make it inside the action (its subscriptions are the
     action's, as create_action_subscription's)."""
 
-    def __init__(self, node, run_dir, cameras, frame_hz, extra=()):
+    def __init__(self, node, run_dir, cameras, frame_hz, extra=(), stereo=()):
         """`cameras`: [(colour, camera_info, depth topic)], the first the wrist camera's (close() counts its frames).
-        `extra`: [(topic, type name, message class)] thinned to `frame_hz` (no publisher: nothing recorded)."""
+        `extra`: [(topic, type name, message class)] thinned to `frame_hz` (no publisher: nothing recorded).
+        `stereo`: [(image, camera_info, other image, other camera_info)], each a rectified pair recorded as one set at
+        `frame_hz` (stereo_pairs counts them; no publisher: nothing recorded)."""
         self.node, self.period_ns = node, int(1e9 / frame_hz)
         self.tf_period_ns = int(1e9 / TF_HZ)
         self._lock = threading.Lock()
         self._last_frame, self._last_tf = {}, {}
         self._counts = {cam: 0 for cam in cameras}
+        self._stereo_counts = {pair: 0 for pair in stereo}
         self._wrist = cameras[0]
         self._writer = rosbag2_py.SequentialWriter()
         self._writer.open(
@@ -58,6 +66,10 @@ class RunBag:
                     depth_topic: "sensor_msgs/msg/Image",
                 }
             )
+        for pair in stereo:
+            self.topics.update(
+                dict(zip(pair, ("sensor_msgs/msg/Image", "sensor_msgs/msg/CameraInfo") * 2, strict=True))
+            )
         self.topics.update({topic: type_name for topic, type_name, _ in extra})
         for name, msg_type in self.topics.items():
             self._writer.create_topic(rosbag2_py.TopicMetadata(name=name, type=msg_type, serialization_format="cdr"))
@@ -70,6 +82,14 @@ class RunBag:
             ]
             sync = message_filters.ApproximateTimeSynchronizer(inputs, 10, SYNC_SLOP_S)
             sync.registerCallback(lambda c, i, d, cam=cam: self._on_frame(cam, c, i, d))
+            self._syncs.append(sync)
+        for pair in stereo:
+            inputs = [
+                _Input(node, msg_type, topic, qos_profile_sensor_data)
+                for topic, msg_type in zip(pair, (Image, CameraInfo, Image, CameraInfo), strict=True)
+            ]
+            sync = message_filters.ApproximateTimeSynchronizer(inputs, 10, STEREO_SLOP_S)
+            sync.registerCallback(lambda *msgs, pair=pair: self._on_stereo(pair, msgs))
             self._syncs.append(sync)
         for topic, _, msg_class in extra:
             node.create_action_subscription(msg_class, topic, lambda m, topic=topic: self._on_extra(topic, m), 10)
@@ -98,6 +118,21 @@ class RunBag:
             for topic, msg in zip(cam, (color, info, depth), strict=True):
                 self._write(topic, msg, t)
             self._counts[cam] += 1
+
+    def _on_stereo(self, pair, msgs):
+        t = self._now()
+        with self._lock:
+            if not self._thinned(pair, t):
+                return
+            for topic, msg in zip(pair, msgs, strict=True):
+                self._write(topic, msg, t)
+            self._stereo_counts[pair] += 1
+
+    @property
+    def stereo_pairs(self):
+        """Stereo pairs recorded so far (over every pair of topics), or None with none asked for."""
+        with self._lock:
+            return sum(self._stereo_counts.values()) if self._stereo_counts else None
 
     def _on_extra(self, topic, msg):
         t = self._now()

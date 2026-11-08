@@ -28,8 +28,9 @@ RUN pip freeze | grep -iE '^numpy==' > /tmp/keep.txt \
     && rm /tmp/keep.txt
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
-# build it from a pinned RAMMP-CuRobo commit alongside the packages below.
-ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
+# build it from a pinned RAMMP-CuRobo commit (v2.0.1: self.arm.blend needs its Blend
+# action) alongside the packages below.
+ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 # self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
@@ -62,6 +63,10 @@ RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \
     && colcon build \
     && rm -rf build log
+
+# The planning's local IK solves thousands of tiny (6x6) systems: multi-threaded OpenBLAS made each
+# one ~1000x slower on a busy Jetson (fridge/__init__.py sets the same). One thread each.
+ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 
 # `ros2 launch` on Humble has no SIGTERM handler. As PID 1 it ignores the
 # SIGTERM `docker stop` (and `sheppy woof`) sends and is SIGKILLed after the

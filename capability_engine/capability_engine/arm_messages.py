@@ -16,6 +16,7 @@ from rammp_arm_interfaces.msg import (
     TwistSetpoint,
 )
 from scipy.spatial.transform import Rotation as R
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from capability_engine.driver_state import ArmError
 
@@ -141,6 +142,9 @@ class Plan:
     q: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
     qd: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
     planning_time: float = 0.0  # s
+    # blend(): per junction, how close the tool comes to that junction's waypoint (m; 0 where
+    # it stops on it). Empty for any other plan.
+    corner_m: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
 
 @dataclass
@@ -263,6 +267,21 @@ def _plan(res):
         np.array([[p.velocities[i] for i in idx] for p in points]).reshape(-1, len(JOINTS)),
         float(res.planning_time),
     )
+
+
+def _joint_trajectory(plan):
+    """A Plan as the JointTrajectory the planner returned it as (blend()'s legs): JOINTS, the
+    plan's sample times, positions and velocities."""
+    traj = JointTrajectory(joint_names=list(JOINTS))
+    for t, q, qd in zip(plan.t, plan.q, plan.qd, strict=True):
+        traj.points.append(
+            JointTrajectoryPoint(
+                positions=[float(x) for x in q],
+                velocities=[float(x) for x in qd],
+                time_from_start=_duration(float(t)),
+            )
+        )
+    return traj
 
 
 def _setpoint(channel, value):

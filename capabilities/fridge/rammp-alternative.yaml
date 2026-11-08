@@ -25,6 +25,10 @@ container:
   # kept on the host, across container restarts.
   volumes:
     - /tmp/fridge_data:/fridge_data
+    # The fridge's collision world for the cuRobo planner, written here and loaded by the planner
+    # (set_world with its path): the planner container must mount the same host directory at the same
+    # path (planner_world_dir), read-only is enough.
+    - /tmp/rammp_planner_worlds:/rammp_planner_worlds
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
@@ -42,9 +46,12 @@ params:
   camera_info_topic: /wrist_camera/color/camera_info
   depth_topic: /wrist_camera/depth/image_rect_raw
   camera_frame: ""
-  # Where the handle comes from: depth (the vertical bar sticking out of the door) or sam3 (SAM 3's
-  # mask of sam3_prompts on the wrist image; the door plane still comes from depth).
-  handle_source: depth
+  # Which camera finds the handle and measures the door: wrist (the topics above; what GRIP_EXT was
+  # tuned on) or scene (the scene_* topics below; its handle point is unchecked against GRIP_EXT).
+  detect_camera: wrist
+  # Where the handle comes from: sam3 (SAM 3's mask of sam3_prompts) or depth (the vertical bar
+  # sticking out of the door). door_normal handle_model and handle need sam3.
+  handle_source: sam3
   sam3_service: /perception/sam3/detect
   sam3_prompts: [handle]
   sam3_threshold: 0.3
@@ -60,23 +67,40 @@ params:
   # NOT MEASURED: the STL's straight bar between its mounts. Measure it.
   handle_length_m: 0.2032
   body_depth_m: 0.5
-  # The wheelchair: its collision layers ("": the package's copy of flatbot's, on the 30-deg mount),
-  # the level mount's stand-in box behind the arm base (m), and which way moving the chair back
-  # moves the fridge in the arm's frame (x, y).
-  chair_model_dir: ""
+  # The wheelchair: on the 30-deg mount it is the cuRobo planner's own collision layers, in every
+  # world; the level mount (no layers) gets this stand-in box behind the arm base (m) in the fridge's
+  # world. And which way moving the chair back moves the fridge in the arm's frame (x, y).
   chair_keep_out_behind_m: 0.381
   chair_back_dir: [1.0, 0.0]
-  # TESTING ONLY: true takes the door to face the arm squarely (no door plane fit from depth).
-  door_square_to_arm: false
-  # The door's normal from the handle's own depth (its bar and plate), no door plane fit. SAM 3 only; not with the above.
-  door_normal_from_handle: false
+  # cuRobo plans every motion against the fridge: the node writes its collision world into
+  # planner_world_dir (the volume above; the planner sees it at planner_world_dir_in_planner, "" = the
+  # same path) and loads it with set_world. A pushed world replaces the robot's world.yaml, so it lists
+  # that world's layers again (planner_base_layers, as the planner sees them: flatbot's floor; the
+  # chair's layers are the planner config's and stay in every world). planner_restore_world is put
+  # back when each action ends (resolved next to the planner's config).
+  planner_world_dir: /rammp_planner_worlds
+  planner_world_dir_in_planner: ""
+  planner_base_layers: [/config/robot/curobo/layer_mebot_floor.yaml]
+  planner_restore_world: world.yaml
+  # How each look measures the door's direction: handle_model (the printed handle's model fit to SAM 3's
+  # mask on the depth, as the side grasp's estimator), handle (the bar and its plate), plane (a door-plane
+  # fit over the whole image) or square (TESTING ONLY: the door taken as square to the arm).
+  door_normal: handle_model
   # Every run also records a rosbag into its run folder: the wrist and scene cameras bag_frame_hz times a second,
   # boxer's 3D boxes and TF (~150 MB a minute at 1). "" for any scene topic: no scene camera; for boxes_topic: no boxes.
+  # wrist_infra*: the wrist camera's rectified stereo pair with its camera_infos, for running FoundationStereo on later
+  # (~30 MB a minute more at 1; any "": not recorded). The wrist OAK publishes them only with
+  # depth.i_left_rect_publish_topic and depth.i_right_rect_publish_topic true (docs/TESTING.md: its 100 Mbit/s link
+  # needs them compressed). It names its left mono infra2: the camera_infos' projections say which is left.
   record_bag: true
   bag_frame_hz: 1.0
   scene_color_topic: /scene_camera/color/image_raw
   scene_camera_info_topic: /scene_camera/color/camera_info
   scene_depth_topic: /scene_camera/depth/image_rect_raw
+  wrist_infra1_topic: /wrist_camera/infra1/image_rect_raw
+  wrist_infra1_info_topic: /wrist_camera/infra1/camera_info
+  wrist_infra2_topic: /wrist_camera/infra2/image_rect_raw
+  wrist_infra2_info_topic: /wrist_camera/infra2/camera_info
   boxes_topic: /perception/object_detections_3d
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
@@ -140,4 +164,8 @@ subscribes:
   - /scene_camera/color/image_raw
   - /scene_camera/color/camera_info
   - /scene_camera/depth/image_rect_raw
+  - /wrist_camera/infra1/image_rect_raw
+  - /wrist_camera/infra1/camera_info
+  - /wrist_camera/infra2/image_rect_raw
+  - /wrist_camera/infra2/camera_info
   - /perception/object_detections_3d
