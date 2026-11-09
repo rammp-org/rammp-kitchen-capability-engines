@@ -121,6 +121,18 @@ def quiet():
         _quiet -= 1
 
 
+@contextmanager
+def captured():
+    """say() lines inside go into the yielded list instead of the log (even inside quiet()): to sum up many tries."""
+    global _output, _quiet
+    saved, lines = (_output, _quiet), []
+    _output, _quiet = lines.append, 0
+    try:
+        yield lines
+    finally:
+        _output, _quiet = saved
+
+
 # ---------------------------------------------------------------------------
 # Where a run's files go. The open saves the door geometry and the grasp; the close (a later
 # run, maybe another process) reads them back -- so this must be persistent (the node's

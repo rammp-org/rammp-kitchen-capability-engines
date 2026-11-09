@@ -43,7 +43,9 @@ the scene camera or boxer finding the microwave, the push-open that follows the 
 """
 
 import argparse
+import collections
 import json
+import re
 import sys
 import time
 from functools import partial
@@ -60,6 +62,7 @@ from door_common.common import (
     DoorFrame,
     Refused,
     RunLog,
+    captured,
     check_curobo_goal,
     quiet,
     release_and_back_off,
@@ -97,6 +100,15 @@ VIEW_SIDES = (0.10, 0.15, 0.05, 0.0)  # ... and this far sideways along the face
 # heights and distances: away from the user first (11-09)
 VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
+# ... and these when IK from it misses, lands past a guard or in the keep-out: PyBullet's IK ignores joint limits and
+# one seed can settle on an impossible elbow (11-09: J4 225.8 deg for a microwave 47 cm out). The elbow the same
+# way, more and less folded, and the arm swung toward either side
+VIEW_MORE_SEEDS_DEG = (
+    (0.0, 40.0, 180.0, -100.0, 0.0, 70.0, 90.0),
+    (0.0, -10.0, 180.0, -145.0, 0.0, 40.0, 90.0),
+    (-25.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0),
+    (25.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0),
+)
 BOX_WAIT_S = 10.0  # wait this long for boxer's first microwave box
 VIEW_AT_TOL_M = 0.05  # the hand this close to the view pose counts as there: a dry run goes on to detect and plan
 
@@ -435,6 +447,20 @@ def _detected_face():
     return face, np.asarray(door["normal"], dtype=float)
 
 
+def _why_kind(text):
+    """A refused goal's reason, coarsely: which keep-out box, past the guards, out of reach, or IK missed."""
+    m = re.search(r"([\w/]+) -?[\d.]+ cm into ([\w/]+)", text)  # "<link> 3.2 cm into person/lap (the chair ...)"
+    if m:
+        return f"{m.group(1)} in {m.group(2) if m.group(2) != 'the' else 'the wheelchair keep-out'}"
+    if "past the guards" in text:
+        return "J4/J6 past the guards (elbow folded too far)"
+    if "m out (max" in text:
+        return "beyond the arm's reach"
+    if "unreachable" in text:
+        return "IK can't reach it"
+    return text.strip()[:80] or "unknown"
+
+
 def plan_view(ai, scene, rb):
     """The view pose in front of the microwave: the wrist camera VIEW_DISTS out from its front face, VIEW_SIDES along it
     away from the user, VIEW_HEIGHTS above the face's middle, looking at the face's centre. The face comes from boxer's
@@ -451,7 +477,8 @@ def plan_view(ai, scene, rb):
     tool_T_cam = np.linalg.inv(_pose_T(st["ee_pos"][:3], st["ee_pos"][3:7])) @ f["base_T_cam"]
     side_dir = np.array([-n[1], n[0], 0.0]) / max(float(np.linalg.norm(n[:2])), 1e-9)  # along the face, level ...
     side_dir *= 1.0 if side_dir[1] >= 0 else -1.0  # ... toward +y: away from the user
-    tried = []
+    seeds = [np.radians(s) for s in VIEW_MORE_SEEDS_DEG] + [np.asarray(st["position"], float)]  # + where it is now
+    tried, whys = [], collections.Counter()
     # every (side, height, distance), away from the user first
     for side, height, dist in ((s, h, d) for s in VIEW_SIDES for h in VIEW_HEIGHTS for d in VIEW_DISTS):
         # optical frame: z at the face's centre (tilted down), y down in the image, x right
@@ -463,7 +490,7 @@ def plan_view(ai, scene, rb):
         T_cam[:3, :3], T_cam[:3, 3] = np.column_stack([np.cross(y, z), y, z]), pos
         T_tool = T_cam @ np.linalg.inv(tool_T_cam)
         label = f"to view pose {dist * 100:.0f} cm out, {side * 100:.0f} cm aside, {height * 100:.0f} cm up"
-        with quiet():
+        with captured() as lines:
             q = check_curobo_goal(
                 scene,
                 rb,
@@ -471,7 +498,10 @@ def plan_view(ai, scene, rb):
                 pos=T_tool[:3, 3],
                 quat=R.from_matrix(T_tool[:3, :3]).as_quat(),
                 seed=np.radians(VIEW_SEED_DEG),
+                more_seeds=seeds,
             )
+        if q is None:
+            whys[_why_kind(" ".join(lines))] += 1
         if q is not None:
             say(
                 f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
@@ -487,7 +517,10 @@ def plan_view(ai, scene, rb):
         pos=T_tool[:3, 3],
         quat=R.from_matrix(T_tool[:3, :3]).as_quat(),
         seed=np.radians(VIEW_SEED_DEG),
+        more_seeds=seeds,
     )
+    say("  why they failed: " + ", ".join(f"{n} x {k}" for k, n in whys.most_common()))
+    say(f"  the door face is {np.linalg.norm(face[:2]):.2f} m from the arm's base (60-65 cm is comfortable)")
     raise Refused(
         f"No view pose ({len(tried)} tried: {VIEW_DISTS} m out x {VIEW_SIDES} m aside x {VIEW_HEIGHTS} m up) passes "
         "the checks -- "
