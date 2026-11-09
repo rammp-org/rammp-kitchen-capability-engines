@@ -16,10 +16,9 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
 import rammp_arm
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
 from door_common import common as dc
-from door_common import open_door as shared_open
 
 from . import open_door, recording
-from .perception import YOLO_MODEL, WristCamera
+from .perception import WristCamera
 from .tee_logger import TeeLogger
 
 # ROS parameter -> default. Topics and paths are per robot (the fragment's params:).
@@ -46,13 +45,6 @@ PARAMS = {
     # above its middle (m), tried in order. Per camera and setup.
     "view_dists": list(open_door.VIEW_DISTS),
     "view_heights": list(open_door.VIEW_HEIGHTS),
-    # where the handle comes from: "depth" (the vertical bar sticking out of the door) or "sam3" (SAM 3's mask of
-    # sam3_prompts on the wrist image, from sam3_service; the door plane and hinge still come from depth)
-    "handle_source": "depth",
-    "sam3_service": "/perception/sam3/detect",
-    "sam3_prompts": ["handle"],
-    "sam3_threshold": 0.3,
-    "yolo_model": YOLO_MODEL,
     # every run also records a rosbag into its run folder (bag.RunBag): the wrist and scene cameras' colour, depth
     # and intrinsics bag_frame_hz times a second, and TF. A 640x400 frame (colour + depth) is ~1.3 MB, so at 0.5 Hz
     # the two cameras are ~75 MB a minute; past bag_max_mb no more frames (TF still). The arm's joints are in the
@@ -104,21 +96,10 @@ class Capability(CapabilityEngine):
         }
         open_door.configure(self.cfg["data_dir"])
         dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
-        open_door.HANDLE_DETECTOR_MODEL = self.cfg["yolo_model"]
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
-        if self.cfg["handle_source"] not in ("depth", "sam3"):
-            raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
-        shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
         if self.cfg["record_bag"] and not self.mock:
             self._set_up_bag()
-        # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
-        self.sam3 = None
-        if self.cfg["handle_source"] == "sam3":
-            from rammp_perception_interfaces.srv import Detect
-            from rclpy.callback_groups import ReentrantCallbackGroup
-
-            self.sam3 = self.create_client(Detect, self.cfg["sam3_service"], callback_group=ReentrantCallbackGroup())
         self.get_logger().info(
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
@@ -168,9 +149,6 @@ class Capability(CapabilityEngine):
             self.cfg["camera_frame"],
             self.cfg["box_topic"],
             self.cfg["box_class"],
-            self.sam3,
-            self.cfg["sam3_prompts"],
-            self.cfg["sam3_threshold"],
         )
         dc.set_camera(camera)
         if action_id == "open" and not self.cfg["box_topic"]:

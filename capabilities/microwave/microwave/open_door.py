@@ -6,7 +6,7 @@ go and push it further open -- one run.
     python3 -m microwave.open_door --no-push-open --execute   # stop after the swing
     python3 -m microwave.open_door --release --execute
 
-1. Detect (`perception.HandleDetector`): YOLO box around the microwave, depth -> door plane, the
+1. Detect (`perception.HandleDetector`): the scene camera's door (or boxer's box), depth -> door plane, the
    vertical cluster sticking out of it = handle, the door edge farthest from it = hinge. Looks
    until two agree within 3 cm (handle and hinge).
 2. Plan everything before any motion: the grasp (squared to the door face: cuRobo from the view pose to a
@@ -39,7 +39,7 @@ Under the engine: the node's `open` action (node.py -> `run`, which logs the run
 the commands above (rammp_arm.RammpArm). Refusals raise door_common.common.Refused: the arm holds where it is.
 
 The shared open (detect, plan, grasp, swing) is door_common.open_door; here is what is the microwave's: the view pose,
-YOLO or boxer finding the microwave, the push-open that follows the swing.
+the scene camera or boxer finding the microwave, the push-open that follows the swing.
 """
 
 import argparse
@@ -80,7 +80,6 @@ from .constants import (
     PUSH_OPEN_SPEED_SCALE,
     SWING_SPEED_SCALE,
     VERTICAL_CORR,
-    YOLO_MODEL,
 )
 
 # --- view pose: before detecting, the wrist camera goes square in front of the microwave (placed from boxer's box, or
@@ -124,7 +123,6 @@ PUSH_TILT_TRY_DEG = (0, 30, 45, 60)  # the hand points down tilted this far from
 #   at its guard, and IK 1-2 cm off on the way there)
 PRE_PARK_X = 0.216
 
-HANDLE_DETECTOR_MODEL = YOLO_MODEL  # the node sets its yolo_model parameter here
 SCENE_CAMERA = None  # without boxer, the camera whose view of the door places the view pose (set_scene_camera)
 SCENE_WAIT_S = 10.0  # wait this long for the scene camera's first frame
 
@@ -138,7 +136,7 @@ def set_scene_camera(cam):
 def _make_detector():
     from .perception import HandleDetector  # here, not at import: open3d, which the planning tests don't have
 
-    return HandleDetector(HANDLE_DETECTOR_MODEL)
+    return HandleDetector()
 
 
 def configure(data_dir):
@@ -383,7 +381,7 @@ def _box_face(cam):
 
 def _door_box(door, score):
     """The microwave as a box behind the door the scene camera found -- `door` (door_face's) its front face, BODY_DEPTH
-    deep -- in boxer's box form, so the wrist detection crops its points to it the same way (no YOLO)."""
+    deep -- in boxer's box form, so the wrist detection crops its points to it the same way."""
     n = np.asarray(door["normal"], dtype=float)
     up = np.array([0.0, 0.0, 1.0])
     lo, hi = door["door_z"]
@@ -399,7 +397,7 @@ def _door_box(door, score):
 
 def _detected_face():
     """Without boxer: the scene camera's view of the door places the view pose -- the scene segmenter's microwave box
-    (RF-DETR, not YOLO), the door plane in it (no handle: it is too small from there), the face's centre (the middle of
+    (RF-DETR), the door plane in it (no handle: it is too small from there), the face's centre (the middle of
     its width and of its height) and its normal. That door, as a box, is also what the wrist detection crops to.
     Returns (face centre, outward normal); raises Refused if it finds no door."""
     cam = SCENE_CAMERA
@@ -428,7 +426,7 @@ def _detected_face():
         f"door face {np.round(face, 3)} facing {np.round(door['normal'], 3)}, {door['width'] * 100:.0f} cm wide "
         f"(scene camera, {cam.box_class} {f['box2d']['score']:.2f})"
     )
-    dc.camera().fixed_box = _door_box(door, f["box2d"]["score"])  # the wrist detection crops to it, not YOLO
+    dc.camera().fixed_box = _door_box(door, f["box2d"]["score"])  # the wrist detection crops to it
     return face, np.asarray(door["normal"], dtype=float)
 
 

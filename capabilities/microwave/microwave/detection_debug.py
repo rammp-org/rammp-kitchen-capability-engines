@@ -1,11 +1,13 @@
-"""What the handle detector saw, per saved detection frame: the colour image with every stage drawn on it (YOLO box,
+"""What the handle detector saw, per saved detection frame: the colour image with every stage drawn on it (2D box,
 door-plane points, what sticks out of the door, the cluster taken as the bar, the handle and hinge), the depth
 image in colour, and that depth blended over the colour image. Re-runs the detector on the frames the open saved
 (data_dir/detections: colour, depth, K, camera pose); read-only. Run it in the microwave container:
 
     python3 -m microwave.detection_debug                       # the last 4 frames -> <frame>_debug.jpg beside them
     python3 -m microwave.detection_debug --live                # one frame from the wrist camera NOW (arm anywhere)
-    python3 -m microwave.detection_debug --last 10 --model /microwave_data/yolo26s.pt
+    python3 -m microwave.detection_debug --last 10
+
+Saved frames keep no box, so the replay fits the whole image (the open crops to the scene camera's door).
 """
 
 import argparse
@@ -15,7 +17,7 @@ import cv2
 import numpy as np
 from door_common.common import save_frame, say
 
-from .perception import YOLO_MODEL, HandleDetector
+from .perception import HandleDetector
 
 DEPTH_RANGE_VIEW_M = (0.15, 1.2)  # the depth colour scale
 OVERLAY_ALPHA = 0.5  # depth colour's weight in the overlay panel
@@ -120,7 +122,6 @@ def main():
     a = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     a.add_argument("--dir", default="/microwave_data/detections")
     a.add_argument("--last", type=int, default=4, help="how many of the newest frames")
-    a.add_argument("--model", default=YOLO_MODEL, help="YOLO weights (the node's yolo_model)")
     a.add_argument("--live", action="store_true", help="grab one frame from the wrist camera now instead")
     a.add_argument("--color", default="/wrist_camera/color/image_raw")
     a.add_argument("--info", default="/wrist_camera/color/camera_info")
@@ -128,13 +129,13 @@ def main():
     a.add_argument("--base", default="arm_mount", help="the arm's base frame (arm.frame)")
     args = a.parse_args()
     if args.live:
-        live(args, HandleDetector(args.model))
+        live(args, HandleDetector(whole_image=True))
         return
     stems = sorted(str(p)[: -len(".npz")] for p in Path(args.dir).glob("*.npz"))[-args.last :]
     if not stems:
         say(f"no saved frames in {args.dir}")
         return
-    detector = HandleDetector(args.model)
+    detector = HandleDetector(whole_image=True)
     for stem in stems:
         say(f"{Path(stem).name}:")
         out = render(stem, detector)

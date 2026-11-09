@@ -3,7 +3,6 @@
 from door_common import common as dc
 
 BENCH_DATA_DIR = "/tmp/microwave"  # the bench scripts' data_dir (the node's is its data_dir parameter)
-YOLO_MODEL = "yolo26s.pt"  # dev stand-in (the node's yolo_model parameter): the demo uses a different model
 
 # --- grasp (tuned on the arm, see NOTES.md) ---
 GRIP_EXT = 0.07  # along the approach axis (negative = past the detected handle). Was -0.010 (rchi-cpu-5);

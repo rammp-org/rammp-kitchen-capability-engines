@@ -26,9 +26,8 @@ container:
   # kept on the host, across container restarts.
   volumes:
     - /tmp/microwave_data:/microwave_data
-  # The handle detector's YOLO runs on the GPU (the mock has none and needs none). JetPack exposes it through the
-  # NVIDIA runtime, not --gpus (10-29 on snorlax: "invoking the NVIDIA Container Runtime Hook directly ... is not
-  # supported"), as every GPU node in the deployment manifest does.
+  # The GPU, through JetPack's NVIDIA runtime, not --gpus (10-29 on snorlax: "invoking the NVIDIA Container Runtime
+  # Hook directly ... is not supported"). It was for the YOLO handle detector, gone 11-09; nothing needs it now.
   runtime: nvidia
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
@@ -52,21 +51,23 @@ params:
   # The scene segmenter's 2D boxes on the scene camera (RF-DETR): its box_class box is where the door is looked for.
   scene_detections_topic: /perception/object_detections
   # boxer's 3D boxes (scene camera): the handle detector crops the wrist camera's points to the
-  # microwave's box. "" = YOLO on the wrist image instead (yolo_model).
+  # microwave's box. "" = the scene camera's door (scene_detections_topic) instead.
   box_topic: ""  # /perception/object_detections_3d to use boxer
   box_class: microwave
   # The view pose in front of the box: camera distances out from its front face and heights above
   # its middle (m), tried in order. Per camera and setup.
   view_dists: [0.35, 0.30, 0.40, 0.45]
   view_heights: [0.15, 0.20, 0.10, 0.25, 0.05]
-  # Where the handle comes from: depth (the vertical bar sticking out of the door) or sam3 (SAM 3's
-  # mask of sam3_prompts on the wrist image; the door plane and hinge still come from depth).
-  handle_source: depth
-  sam3_service: /perception/sam3/detect
-  sam3_prompts: [handle]
-  sam3_threshold: 0.3
-  # Dev stand-in for the microwave box (the demo uses a different detector).
-  yolo_model: yolo26s.pt
+  # Every run's rosbag (in its run folder): both cameras' colour, depth and intrinsics bag_frame_hz times a
+  # second, the detections and TF (~75 MB a minute at 0.5); no more frames past bag_max_mb.
+  record_bag: true
+  bag_frame_hz: 0.5
+  bag_max_mb: 300.0
+  # The wrist camera's rectified stereo pair in the bag too (~15 MB a minute more at 0.5); "" = not recorded.
+  wrist_infra1_topic: ""
+  wrist_infra1_info_topic: ""
+  wrist_infra2_topic: ""
+  wrist_infra2_info_topic: ""
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
