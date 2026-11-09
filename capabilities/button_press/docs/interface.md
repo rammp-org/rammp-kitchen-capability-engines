@@ -77,24 +77,27 @@ ROS parameters, declared with defaults under `params:` in the real fragment (fla
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy passes them as a
 params file.
 
-| Name                           | Default (fragment)                              | Meaning                                                                   |
-| ------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------- |
-| `use_orchestrator`             | `true`                                          | `false` runs standalone: no registration, drive it by CLI                 |
-| `mock`                         | `false`                                         | `true` skips hardware (the mock alternative sets it)                      |
-| `allow_execute`                | `false`                                         | `true` lets the action move the arm. Attended runs only                   |
-| `mount_rpy_deg`                | `[0.0, 30.0, 0.0]`                              | The arm base's orientation in `arm_mount` (the robot's `mount.yaml`)      |
-| `camera_frame`                 | `""`                                            | Wrist camera optical frame; `""` = the colour image's own `frame_id`      |
-| `camera_ns`                    | `/wrist_camera`                                 | Wrist camera namespace                                                    |
-| `depth_topic`                  | `depth/image_rect_raw`                          | Wrist depth under `camera_ns`, aligned to colour                          |
-| `far`                          | `scene`                                         | First look: `scene` (scene camera, falls back to wrist) or `wrist`        |
-| `scene_ns`                     | `/scene_camera`                                 | Scene camera namespace                                                    |
-| `scene_depth_topic`            | `depth/image_rect_raw`                          | Scene depth under `scene_ns`                                              |
-| `detections`                   | `true`                                          | Narrow the scene search to the segmenter's microwave box                  |
-| `log_dir`                      | `""`                                            | A JSONL run log per action in this directory; `""` = none                 |
-| `planner_world_dir`            | `/rammp_planner_worlds`                         | Where the microwave's cuRobo world is written; mounted in the planner too |
-| `planner_world_dir_in_planner` | `""`                                            | The same directory as the planner sees it; `""` = the same path           |
-| `planner_base_layers`          | `[/config/robot/curobo/layer_mebot_floor.yaml]` | The robot world's layers every pushed world lists again                   |
-| `planner_restore_world`        | `world.yaml`                                    | The planner's world put back when each action ends                        |
+| Name                           | Default (fragment)                              | Meaning                                                                                                                                            |
+| ------------------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`             | `true`                                          | `false` runs standalone: no registration, drive it by CLI                                                                                          |
+| `mock`                         | `false`                                         | `true` skips hardware (the mock alternative sets it)                                                                                               |
+| `allow_execute`                | `false`                                         | `true` lets the action move the arm. Attended runs only                                                                                            |
+| `mount_rpy_deg`                | `[0.0, 30.0, 0.0]`                              | The arm base's orientation in `arm_mount` (the robot's `mount.yaml`)                                                                               |
+| `camera_frame`                 | `""`                                            | Wrist camera optical frame; `""` = the colour image's own `frame_id`                                                                               |
+| `camera_ns`                    | `/wrist_camera`                                 | Wrist camera namespace                                                                                                                             |
+| `depth_topic`                  | `depth/image_rect_raw`                          | Wrist depth under `camera_ns`, aligned to colour                                                                                                   |
+| `far`                          | `scene`                                         | First look: `scene` (scene camera, falls back to wrist) or `wrist`                                                                                 |
+| `scene_ns`                     | `/scene_camera`                                 | Scene camera namespace                                                                                                                             |
+| `scene_depth_topic`            | `depth/image_rect_raw`                          | Scene depth under `scene_ns`                                                                                                                       |
+| `detections`                   | `true`                                          | Narrow the scene search to the segmenter's microwave box                                                                                           |
+| `prepress_aim_mm`              | `[0.0, 0.0]`                                    | The pre-press spot this far off the button's detected centre, x right / y up (mm): the per-rig sideways correction                                 |
+| `log_dir`                      | `/button_press_data`                            | A folder per action here: `run.jsonl`, `console.log`, `bag/`; `""` = none                                                                          |
+| `record_bag`                   | `true`                                          | A rosbag of every run in its folder (`bag.py`): cameras at `bag_frame_hz`, arm state at 10 Hz, every node's WARN+ log, tf. Skipped under 2 GB free |
+| `bag_frame_hz`                 | `1.0`                                           | Camera frames a second in the rosbag                                                                                                               |
+| `planner_world_dir`            | `/rammp_planner_worlds`                         | Where the microwave's cuRobo world is written; mounted in the planner too                                                                          |
+| `planner_world_dir_in_planner` | `""`                                            | The same directory as the planner sees it; `""` = the same path                                                                                    |
+| `planner_base_layers`          | `[/config/robot/curobo/layer_mebot_floor.yaml]` | The robot world's layers every pushed world lists again                                                                                            |
+| `planner_restore_world`        | `world.yaml`                                    | The planner's world put back when each action ends                                                                                                 |
 
 **Collision checking** (`collision.py`): every panel estimate (the first look, the re-detect at
 staging) models the microwave and its counter as boxes. Execute runs load them into cuRobo's world
@@ -105,9 +108,9 @@ strokes, the way back from the button and the straight retreats are not. The mic
 the counter's reach are guesses (`MICROWAVE_DEPTH_M`, `COUNTER_OUT_M`): measure them. The door
 handle is not modelled.
 
-Per-rig constants that are not parameters yet: `PREPRESS_EE_OFFSET_M` / `PREPRESS_EE_QUAT_PANEL`
-in `press_button.py`, and the scene finder's `FACE_CORNER_TO_START_MM` (refine with
-`tools/scene_offset_from_logs.py` from run logs).
+The pre-press spot is computed (README: The pre-press spot): `prepress_aim_mm` is its only per-rig
+correction. A per-rig constant that is not a parameter yet: the scene finder's
+`FACE_CORNER_TO_START_MM` (refine with `tools/scene_offset_from_logs.py` from run logs).
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other. The fragment sets

@@ -14,8 +14,8 @@ Steps:
   3. stage       always after a scene-camera estimate, otherwise when the camera is further
                  than CLOSE_VIEW_M: move (cuRobo) to a pose in front of the button and re-detect
                  the domes from ~25 cm. The press is only ever planned from the domes
-  4. plan        pre-press tool pose = PREPRESS_EE_OFFSET_M / PREPRESS_EE_QUAT_PANEL in the panel
-                 frame; the approach and every press stroke are solved and gated in the sim
+  4. plan        pre-press tool pose: straight in along the normal, fingertips STANDOFF_M in front
+                 of the button (prepress_pose); the approach and every press stroke are solved and gated in the sim
                  before anything moves
   5. go          straight line to the pre-press spot, wrist turning to face the panel
   6. press       `presses` times: in along the normal until the wrist torques feel the button,
@@ -44,7 +44,7 @@ import rammp_arm
 from geometry_msgs.msg import PoseStamped
 from scipy.spatial.transform import Rotation
 
-from button_press import Abort, MotionFailed, dome_pattern, say, scene_finder
+from button_press import Abort, MotionFailed, dome_pattern, say, scene_finder, set_tee
 from button_press.collision import Clearance, PlannerWorld, microwave_boxes
 from button_press.collision import describe as describe_boxes
 from button_press.geometry import PlaneFitError
@@ -86,41 +86,19 @@ from button_press.press_arm import (
 )
 
 # ---- the pre-press spot, in the panel frame (x right, y up, z out of the panel; origin = button)
-# Kinova tool-frame position and orientation with the LEFT fingertip STANDOFF_M in front of the
-# button. MEASURED 2026-10-03 on timer_clock, current fingers: panel frame from the dome layout
-# at 30.9 cm, then the fingertip hand-placed 2 cm in front of the button (tool z 10 deg off
-# straight-in). Re-measure (README: The pre-press spot) if the fingers or
-# camera mount change. (The 09-27 placeholder it replaced had the tool 4.2 cm below the button,
-# taught from a biased ~40 cm view -- it would have missed.)
-# RAMMP rig (Jetson, 2026-10-12): re-measured here. The rchi-cpu-5 values (-0.0049, -0.0114,
-# -0.0131 / -0.04947, 0.99522, -0.08381, -0.00846) absorb that rig's hand-eye bias and put the
-# fingertip ~7 cm INTO the panel on this one. Reference: the fingertip hand-placed at start_30s's
-# pre-press spot, tool (0.7128, 0.0474, 0.1554) in base_link, tool z 23 deg off straight-in; an
-# attended 1.0 cm push along the normal from there clicked start_30s. Expressed in the panel frame
-# from the CLOSE re-detect at the staging pose (23 cm) -- that is the frame press_button plans the
-# approach in. A first version expressed in the far (33.5 cm) frame put the run's spot 1.4 cm too
-# low and 0.5 cm too far out (missed); the close view reads start_30s ~0.6 cm lower than the far
-# one. Fingertip reads ~3 cm out of the detected plane here (detection short in depth); the offset
-# absorbs it. Verified on start_30s only.
-# HERL bench (Jetson abra, D405 wrist camera, cream microwave), 2026-10-13: re-measured with
-# measure_prepress_offset on start_30s from a 32.5 cm view (frame wrist_d405_color_optical, the
-# mount from rammp_box_opening's camera_d405_wrist.yaml), the fingertip hand-placed in front of the
-# button. Replaces the 10-12 values (-0.0050, 0.0339, 0.0849 / 0.12271, 0.97220, -0.19812,
-# -0.02295). NOT yet re-expressed in the close staging re-detect's frame (see above), and not yet
-# confirmed by a press.
-# y lowered 0.5 cm (-0.0024 -> -0.0074) at the user's request, 2026-10-13: press lower on the button.
-PREPRESS_EE_OFFSET_M = np.array([0.0026, -0.0074, 0.0456])
-PREPRESS_EE_QUAT_PANEL = np.array([0.08162, 0.98750, -0.11196, 0.07514])  # xyzw
+# COMPUTED, not hand-measured (2026-11-09): the tool straight in along the panel normal, the closed fingertips
+# STANDOFF_M in front of the button, aimed at the button's centre + prepress_aim_mm (the node parameter: a
+# per-rig sideways correction, x right / y up on the panel, for a wrist camera mount that is off). The
+# hand-measured constants this replaces (PREPRESS_EE_OFFSET_M / PREPRESS_EE_QUAT_PANEL, last on the HERL bench
+# 2026-10-13; see git history) absorbed each rig's camera bias, and put the fingertip cm INTO the panel on
+# another rig. The tool's roll about the normal is the one those measured poses had (170.6 deg, rounded to
+# 180): tool x = -panel x, tool y = panel y, tool z = -panel z (into the panel).
 STANDOFF_M = 0.02
-# Fingertip = tool frame + FINGERTIP_PAST_TOOL_M along the tool z. Was 0.05955 (robot.urdf
-# finger_tip_joint 0.17955 m from the flange - tool_frame 0.120; the microwave's touch check used
-# 0.062). On the HERL bench that put the hand-placed pre-press spot's fingertip 1.2 cm INSIDE the
-# detected panel, 3.2 cm from where it was held. Set 2026-10-13, at the user's request, so that
-# hand-placed spot reads as the intended STANDOFF_M (tool 4.56 cm out, tool z 15 deg off
-# straight-in: (0.0456 - 0.02) / 0.964). It absorbs this rig's whole depth disagreement (finger
-# length, camera mount, depth) in one number and assumes the hand-placed gap really was 2 cm --
-# a --touch measurement would pin it down.
-FINGERTIP_PAST_TOOL_M = 0.0265
+# Fingertip = tool frame + FINGERTIP_PAST_TOOL_M along the tool z: the closed 2F-85 fingertips, measured on
+# flatbot 2026-11-06 (fridge capability, docs/TESTING.md: "the closed fingertips touch 4.1 cm past the tool
+# frame"). Was 0.0265, a per-rig fit that absorbed the HERL bench's depth error.
+FINGERTIP_PAST_TOOL_M = 0.041
+PREPRESS_TOOL_R_PANEL = np.diag([-1.0, 1.0, -1.0])  # the tool's axes (columns) in the panel frame
 MIN_PREPRESS_FINGERTIP_CLEAR_M = 0.01  # pre-press fingertip must be at least this far out of the fitted plane
 # ---- refusals before anything moves
 # No cap on the start -> staging / pre-press distance (removed 2026-10-12 at the user's request; was
@@ -215,7 +193,9 @@ class Args:
     execute: bool = False  # actually move the arm (the node's allow_execute)
     presses: int = 1  # 0 = go to the spot and come back without pressing
     no_return: bool = False  # stay at the pre-press spot at the end
-    log_dir: str = ""  # a JSONL run log per action in this directory; "" = none
+    log_dir: str = ""  # a folder per action in this directory (run.jsonl, console.log, bag/); "" = none
+    record_bag: bool = True  # with log_dir: a rosbag of the run in its folder (bag.py)
+    bag_frame_hz: float = 1.0  # camera frames a second in the rosbag (the cameras run at 15)
     mount_rpy_deg: tuple = (0.0, 0.0, 0.0)  # the arm base's orientation in rammp_arm.FRAME (mount.yaml)
     camera_frame: str = CAMERA_FRAME  # the wrist camera's optical frame in tf; "" = the image's own
     camera_ns: str = "/wrist_camera"
@@ -228,6 +208,7 @@ class Args:
     stop_nm: float = CONTACT_STOP_NM  # contact press: stop when a wrist torque is this far off
     lead_in: float = STAGE_LEAD_IN_M  # cuRobo only to a point this much further out than staging
     stage_out: float | None = None  # scene estimate: stage this far out (None = SCENE_STAGE_OUT_M)
+    prepress_aim_mm: tuple = (0.0, 0.0)  # the pre-press spot this far off the button's centre, x right / y up
     # cuRobo's collision world (collision.PlannerWorld): written into planner_world_dir (seen by the planner at
     # planner_world_dir_in_planner, "" = the same path), listing planner_base_layers again; planner_restore_world
     # is put back when the action ends
@@ -237,9 +218,33 @@ class Args:
     planner_restore_world: str = "world.yaml"
 
 
+def start_bag(engine, run_dir, args):
+    """The run's rosbag (bag.RunBag) in run_dir/bag, or None (said why): too little disk, or rosbag2 missing. A run
+    is never refused for its bag."""
+    try:
+        from button_press import bag  # here, not at import: rosbag2, which the offline tests don't have
+    except ImportError as e:
+        say(f"  WARNING: no rosbag this run ({e})")
+        return None
+    gb = bag.free_gb(run_dir)
+    if gb < bag.MIN_FREE_GB:
+        say(f"  WARNING: no rosbag this run: {gb:.1f} GB free under {run_dir} (< {bag.MIN_FREE_GB:g})")
+        return None
+    scene = args.scene_ns if args.far == "scene" else None
+    cams, extra = bag.topics(args.camera_ns, args.depth_topic, scene, args.scene_depth_topic)
+    try:
+        rec = bag.RunBag(engine, run_dir, cams, args.bag_frame_hz, extra)
+    except Exception as e:  # noqa: BLE001 -- a run is never refused for its bag
+        say(f"  WARNING: no rosbag this run ({type(e).__name__}: {e})")
+        return None
+    say(f"  rosbag: recording into {run_dir / 'bag'} ({len(rec.topics)} topics)")
+    return rec
+
+
 class Run:
     """One press run: the action's camera subscriptions (Perception), the arm (PressArm) and an
-    optional JSONL run log in args.log_dir.
+    optional run folder in args.log_dir: run.jsonl (every check's record), console.log (every progress line)
+    and bag/ (a rosbag of the run, bag.py).
 
     `engine`: the running CapabilityEngine; `kin`: its Kinematics; `checkpoint`: the action's
     ctx.checkpoint; `step(phase, fraction, pausable)`: reports progress (ctx.progress)."""
@@ -249,12 +254,16 @@ class Run:
         self.checkpoint, self.step = checkpoint, step
         self._log_f = None
         self._log_lock = threading.Lock()  # scene frames are searched on worker threads
-        self.log_path = ""
+        self.log_path, self.run_dir, self.bag, self._console = "", None, None, None
         if args.log_dir:
-            self.log_dir = Path(args.log_dir)
-            self.log_dir.mkdir(parents=True, exist_ok=True)
-            self.log_path = str(self.log_dir / f"press_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
+            self.run_dir = Path(args.log_dir) / f"press_{time.strftime('%Y%m%d_%H%M%S')}"
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            self.log_path = str(self.run_dir / "run.jsonl")
             self._log_f = open(self.log_path, "a")  # noqa: SIM115 -- closed by close()
+            self._console = open(self.run_dir / "console.log", "a")  # noqa: SIM115 -- closed by close()
+            set_tee(self._console)
+            if args.record_bag:
+                self.bag = start_bag(engine, self.run_dir, args)
         self.arm = PressArm(engine.arm, kin, args.execute, checkpoint)
         # The microwave and its counter: cuRobo's world for the long moves, and the clearance check of the
         # straight legs (collision.py). Set from each panel estimate by set_obstacles().
@@ -299,8 +308,30 @@ class Run:
         if self.clear is not None:
             self.clear.close()
             self.clear = None
+        if self.bag is not None:
+            try:
+                frames = self.bag.close()
+                say(f"  rosbag: {frames} wrist camera frames -> {self.run_dir / 'bag'}")
+            except Exception as e:  # noqa: BLE001 -- the run is over either way
+                say(f"  WARNING: the rosbag did not close cleanly ({type(e).__name__}: {e})")
+            self.bag = None
+        if self._console is not None:
+            set_tee(None)
+            self._console.close()
+            self._console = None
         if self._log_f is not None:
             self._log_f.close()
+
+    def record_end(self, step, error=None):
+        """How the run ended, as the last line of console.log and run.jsonl (the bag has the node's log at WARN and
+        above, other nodes' too)."""
+        if error is None:
+            say(f"  run ended OK (last step: {step})")
+            self.log({"stage": "end", "result": "ok", "step": step})
+            return
+        what = f"{type(error).__name__}: {error}"
+        say(f"  RUN FAILED at step {step}: {what}")
+        self.log({"stage": "end", "result": "failed", "step": step, "error": what})
 
     def reanchor_seed(self, why):
         """Re-anchor the IK seed posture to the current joints, after a big move.
@@ -501,10 +532,16 @@ def publish_pose(pub, frame, p, Rm):
     pub.publish(msg)
 
 
-def prepress_pose(origin, R, out=0.0):
-    """Tool (xyz, R) for the stored pre-press spot, `out` metres further out along the normal."""
-    p = from_panel(PREPRESS_EE_OFFSET_M + np.array([0.0, 0.0, out]), origin, R)
-    return p, rot_from_panel(Rotation.from_quat(PREPRESS_EE_QUAT_PANEL).as_matrix(), R)
+def prepress_offset(aim_mm=(0.0, 0.0)) -> np.ndarray:
+    """The pre-press tool position in the panel frame: the button's centre + aim_mm (x right, y up), the tool
+    STANDOFF_M + FINGERTIP_PAST_TOOL_M out along the normal."""
+    return np.array([aim_mm[0] / 1000.0, aim_mm[1] / 1000.0, STANDOFF_M + FINGERTIP_PAST_TOOL_M])
+
+
+def prepress_pose(origin, R, out=0.0, aim_mm=(0.0, 0.0)):
+    """Tool (xyz, R) for the pre-press spot (prepress_offset), `out` metres further out along the normal."""
+    p = from_panel(prepress_offset(aim_mm) + np.array([0.0, 0.0, out]), origin, R)
+    return p, rot_from_panel(PREPRESS_TOOL_R_PANEL, R)
 
 
 def stamp_ns(msg) -> int:
@@ -859,14 +896,14 @@ def fingertip_out_of_panel(p_tool, R_tool, origin, R) -> float:
 
 def check_fingertip(p_tool, R_tool, origin, R, what):
     """Abort if this tool pose puts the fingertip less than MIN_PREPRESS_FINGERTIP_CLEAR_M in front
-    of the panel: the sign of a PREPRESS_EE_OFFSET_M measured on another rig."""
+    of the panel (a guard: the computed pre-press spot puts it STANDOFF_M out)."""
     out = fingertip_out_of_panel(p_tool, R_tool, origin, R)
     say(f"  fingertip at the {what}: {out*100:+.1f} cm out of the fitted panel plane")
     if out < MIN_PREPRESS_FINGERTIP_CLEAR_M:
         raise Abort(
-            f"the stored pre-press offset puts the fingertip {-out*100:.1f} cm INTO the panel at the {what} "
-            f"(need >= {MIN_PREPRESS_FINGERTIP_CLEAR_M*100:.0f} cm in front) -- PREPRESS_EE_OFFSET_M is from "
-            "another rig/calibration; re-measure it here (README: The pre-press spot)"
+            f"the pre-press spot puts the fingertip {-out*100:.1f} cm INTO the panel at the {what} "
+            f"(need >= {MIN_PREPRESS_FINGERTIP_CLEAR_M*100:.0f} cm in front) -- check STANDOFF_M and "
+            "FINGERTIP_PAST_TOOL_M"
         )
 
 
@@ -931,9 +968,12 @@ def plan_press(run: Run, a, pub, p0, origin, R, presses: int, back: bool):
     before anything moves. Returns (approach path, stroke in, stroke out, spot xyz, spot R)."""
     arm = run.arm
     n_out = R[:, 2]
-    p_goal, R_goal = prepress_pose(origin, R)
+    p_goal, R_goal = prepress_pose(origin, R, aim_mm=a.prepress_aim_mm)
     p_now, R_now = arm.ee_pose()
-    say(f"  pre-press tool pose: {describe(PREPRESS_EE_OFFSET_M)}")
+    say(
+        f"  pre-press tool pose: {describe(prepress_offset(a.prepress_aim_mm))} "
+        f"(straight in, aim {a.prepress_aim_mm} mm)"
+    )
     say(f"  tool xyz now  {np.round(p_now, 3)}")
     say(
         f"  tool xyz goal {np.round(p_goal, 3)}   ({np.linalg.norm(p_goal - p_now)*100:.1f} cm straight line, "
@@ -1011,8 +1051,8 @@ def press_button(run: Run, a, pub) -> dict:
     if stage_out is not None:
         # Go to a staging pose in front of the (rough) button, re-detect the domes from there, and
         # plan everything else from that close measurement.
-        check_fingertip(*prepress_pose(origin, R), origin, R, "pre-press spot (far estimate)")
-        p_st, R_st = prepress_pose(origin, R, out=stage_out)
+        check_fingertip(*prepress_pose(origin, R, aim_mm=a.prepress_aim_mm), origin, R, "pre-press spot (far estimate)")
+        p_st, R_st = prepress_pose(origin, R, out=stage_out, aim_mm=a.prepress_aim_mm)
         if source == "scene":
             say(
                 f"  scene camera estimate: staging {stage_out*100:.0f} cm out from the pre-press spot "

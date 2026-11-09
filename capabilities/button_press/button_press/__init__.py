@@ -20,6 +20,7 @@ Modules:
 import sys
 
 _output = None
+_tee = None  # the running action's console.log (set_tee), or None
 
 
 class Abort(Exception):  # noqa: N818 -- the run's name for it since feeding_deployment
@@ -38,9 +39,23 @@ def say(*parts, sep=" ", end="\n", flush=False):
     """A run's progress line, with print()'s signature. Goes to stdout, or wherever set_output()
     points it (the node: its log)."""
     out = _output or sys.stdout
-    out.write(sep.join(map(str, parts)) + end)
+    line = sep.join(map(str, parts)) + end
+    out.write(line)
     if flush:
         out.flush()
+    tee = _tee
+    if tee is not None:
+        try:
+            tee.write(line)
+            tee.flush()
+        except (OSError, ValueError):  # closed or disk full: the node's log still has it
+            pass
+
+
+def set_tee(stream):
+    """Also write every say() line to `stream` (the run's console.log); None stops."""
+    global _tee
+    _tee = stream
 
 
 def set_output(stream):

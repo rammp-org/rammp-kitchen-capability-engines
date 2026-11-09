@@ -38,6 +38,9 @@ PARAMS = {
     "scene_depth_topic": DEFAULTS.scene_depth_topic,
     "detections": DEFAULTS.detections,
     "log_dir": DEFAULTS.log_dir,
+    "prepress_aim_mm": list(DEFAULTS.prepress_aim_mm),
+    "record_bag": DEFAULTS.record_bag,
+    "bag_frame_hz": DEFAULTS.bag_frame_hz,
     "planner_world_dir": DEFAULTS.planner_world_dir,
     "planner_world_dir_in_planner": DEFAULTS.planner_world_dir_in_planner,
     "planner_base_layers": list(DEFAULTS.planner_base_layers),
@@ -121,6 +124,9 @@ class Capability(CapabilityEngine):
             no_return=no_return,
             execute=bool(s["allow_execute"]),
             log_dir=s["log_dir"],
+            prepress_aim_mm=tuple(float(v) for v in s["prepress_aim_mm"]),
+            record_bag=bool(s["record_bag"]),
+            bag_frame_hz=float(s["bag_frame_hz"]),
             mount_rpy_deg=tuple(s["mount_rpy_deg"]),
             camera_frame=s["camera_frame"],
             camera_ns=s["camera_ns"],
@@ -153,13 +159,19 @@ class Capability(CapabilityEngine):
         )
         try:
             done = press_button(run, args, self.target_pub)
+            run.record_end(phase[0])
         except Abort as e:
             # MotionFailed: the driver failed a motion (an e-stop, control lost) and the arm holds
             # where it stopped; someone has to look before it runs again.
+            run.record_end(phase[0], e)
             recoverable = not isinstance(e, MotionFailed) and phase[0] not in AT_PANEL
             raise EngineError(f"{phase[0]}_failed", str(e), recoverable=recoverable) from None
         except ArmError as e:
+            run.record_end(phase[0], e)
             raise EngineError(f"{phase[0]}_failed", f"{type(e).__name__}: {e}") from None
+        except BaseException as e:  # a cancel, or a bug: in the run's folder too, then as before
+            run.record_end(phase[0], e)
+            raise
         finally:
             run.close()
         ctx.progress("done", 1.0, "dry run: nothing moved" if done["dry_run"] else "done")

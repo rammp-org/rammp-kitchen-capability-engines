@@ -80,6 +80,7 @@ def test_a_failed_run_is_named_after_its_step_and_only_retried_away_from_the_pan
     class FakeRun:
         def __init__(self, args, eng, kin, checkpoint, step):
             self.step, self.log_path = step, ""
+            self.record_end = lambda step, error=None: None
             self.arm = SimpleNamespace(sent_goals=0)
 
         def close(self):
@@ -105,6 +106,7 @@ def test_the_steps_at_the_panel_are_not_pausable(engine, monkeypatch):
     class FakeRun:
         def __init__(self, args, eng, kin, checkpoint, step):
             self.step, self.log_path = step, ""
+            self.record_end = lambda step, error=None: None
             self.arm = SimpleNamespace(sent_goals=3)
 
         def close(self):

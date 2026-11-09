@@ -28,6 +28,8 @@ container:
     # (set_world with its path): the planner container must mount the same host directory at the same
     # path (planner_world_dir), read-only is enough. The fridge capability uses the same directory.
     - /tmp/rammp_planner_worlds:/rammp_planner_worlds
+    # Every run's folder (run.jsonl, console.log, bag/), kept on the host. /tmp on the Jetson: copy it off.
+    - /tmp/button_press_data:/button_press_data
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; see Parameters in docs/interface.md.
 params:
@@ -46,8 +48,15 @@ params:
   scene_depth_topic: depth/image_rect_raw
   # Narrow the scene camera's search to the segmenter's microwave box (/perception/object_detections).
   detections: true
-  # A JSONL run log per action in this directory (mount a volume for it); "" = none.
-  log_dir: ""
+  # A folder per action in this directory (the volume above): run.jsonl (every check), console.log (every
+  # progress line and how the run ended) and, record_bag, bag/ (a rosbag: cameras at bag_frame_hz, arm state,
+  # WARN+ logs of every node, tf). "" = none.
+  log_dir: /button_press_data
+  # The pre-press spot is computed (straight in, fingertips 2 cm out); this moves it off the button's detected
+  # centre, x right / y up on the panel, mm: set it if a presses-0 run stops off centre (wrist camera mount).
+  prepress_aim_mm: [0.0, 0.0]
+  record_bag: true
+  bag_frame_hz: 1.0
   # cuRobo plans the long moves (staging, back to start, bail) against the microwave and its counter: the
   # node writes them into planner_world_dir (the volume above; the planner sees it at
   # planner_world_dir_in_planner, "" = the same path) and loads them with set_world. A pushed world

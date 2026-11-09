@@ -31,18 +31,21 @@ start, or the pre-press spot after a press its own checks stopped). A motion the
 e-stop, control taken, a tracking abort) or a cancel leaves the arm holding where it stopped. The
 approach, press and return report `pausable: false`.
 
-## The pre-press spot (per rig)
+## The pre-press spot (computed)
 
-`PREPRESS_EE_OFFSET_M` / `PREPRESS_EE_QUAT_PANEL` in `press_button.py` were measured on
-rchi-cpu-5, in that rig's *detected* panel frame, so they absorb its hand-eye bias. With this
-URDF's fingertip (tool frame + 5.96 cm) they put the fingertip **7 cm into the panel**. The
-10-07 microwave port saw the same rig's grasp constants land 9.8 cm too deep on this Jetson.
-`check_fingertip` refuses any pre-press spot whose fingertip is less than 1 cm in front of the
-fitted plane. To re-measure, the
-`measure_prepress_offset` script (removed with the port, in this capability's history at
-`d5ed214`) detected from ~25 cm, then had you stop the driver, hand-guide the LEFT fingertip 2 cm
-in front of the button, bring the driver back, and printed the two constants to paste. It needs
-porting before the next rig.
+Since 2026-11-09 the pre-press spot is computed, not hand-measured: the tool straight in along the panel
+normal, the closed fingertips `STANDOFF_M` (2 cm) in front of the button's detected centre
+(`prepress_pose` in `press_button.py`). The fingertip is `FINGERTIP_PAST_TOOL_M` = 4.1 cm past the Kinova
+tool frame, measured on flatbot (2026-11-06). The hand-measured constants it replaces
+(`PREPRESS_EE_OFFSET_M` / `PREPRESS_EE_QUAT_PANEL`, in git history) absorbed each rig's camera bias and put
+the fingertip cm into the panel on another rig.
+
+How well it lands rests on the wrist camera's mount in tf (flatbot's `cameras.yaml` is hand-measured):
+an error in depth is taken up by the contact press (it goes in until it feels the button, up to 3 cm),
+one sideways is not (the domes are ~2 cm apart). Check it with `{"presses": 0, "no_return": true}`:
+if the fingertips stop off the button's centre, set `prepress_aim_mm` to the correction (x right, y up,
+mm, seen from the front) and run again. `check_fingertip` still refuses any spot whose fingertip is less
+than 1 cm in front of the fitted plane.
 
 ## Scene camera far stage
 
@@ -134,4 +137,5 @@ never use `go_to_ee_pose` (its path is not a straight line). The only gripper co
   were tuned on rchi-cpu-5's camera.
 - The calibration on this box is Capybara's (copied 2026-10-07). Touch-checked to ~2 cm for
   the door handle, never for buttons.
-- The first motion: `--presses 0 --no-return` from 23 cm, attended, before any press.
+- The first motion: `{"presses": 0, "no_return": true}`, attended, before any press: the computed
+  pre-press spot (above) is untested on any rig.

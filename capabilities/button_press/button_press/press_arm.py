@@ -43,7 +43,7 @@ from button_press.kinematics import MAX_REACH_M, Z_RANGE_M
 
 # /ee_state is the flange (end_effector_link): checked 2026-10-07, tf2 base_link -> end_effector_link
 # == /ee_state, and sim tool_frame FK at the real joints == /ee_state + 0.120 m along the flange z
-# to 0.1 mm. The button press's PREPRESS_EE_OFFSET_M was measured in Kinova's tool_frame (= the
+# to 0.1 mm. The button press's pre-press spot and fingertip length are in Kinova's tool_frame (= the
 # Kortex tool pose = flange + 0.120 m), so ee_pose() reports that. preflight re-checks it live
 # (TOOL_FRAME_CHECK_M): if the driver's /ee_state ever changes frame, the run refuses.
 TOOL_Z = 0.120
