@@ -65,9 +65,11 @@ def test_microwave_open_plans(door_sim):
 
 def test_chair_boxes_are_the_planners_with_its_padding():
     boxes = {name: (centre, half) for name, centre, half in dc.load_chair_boxes()}
-    assert len(boxes) == 31  # 16 platform, 11 seat, 4 person
+    # 16 platform, 10 seat (11-07: the arm-side armrest is no longer carved), 4 person
+    assert len(boxes) == 30
     centre, half = boxes["person/torso"]
-    assert centre == (-0.11580, -0.35075, 0.70485)
+    # 11-07: 0.2032 m back, the arm moved 8 in forward on the chair
+    assert centre == (-0.31900, -0.35075, 0.70485)
     assert half == pytest.approx([0.2318 / 2 + 0.02, 0.4827 / 2 + 0.02, 0.7749 / 2 + 0.02])
 
 
@@ -105,27 +107,55 @@ class _Planner:
 PATH = [np.full(7, 0.05 * k) for k in range(1, 10)]
 
 
+@pytest.fixture
+def curobo_paths(monkeypatch):
+    monkeypatch.setattr(open_door, "CUROBO_PATHS", True)
+
+
+def test_only_the_microwave_runs_its_paths_through_curobo(door_sim):
+    assert open_door.CUROBO_PATHS
+    assert open_door._sent_keep_out(np.zeros(7), PATH, None) is None
+
+
+def test_curobo_paths_are_off_by_default(monkeypatch):
+    monkeypatch.setattr(open_door, "CUROBO_PATHS", False)
+    planner = _Planner(fail_leg=1)
+    assert open_door._check_curobo_path(planner, np.zeros(7), PATH, "the swing") is None
+
+
 def test_curobo_gets_every_fourth_waypoint_and_the_last():
-    knots = open_door._curobo_knots(PATH)
+    knots = open_door.curobo_knots(PATH)
     assert [k[0] for k in knots] == pytest.approx([0.2, 0.4, 0.45])
 
 
-def test_curobo_path_passes_a_direct_plan():
+def test_curobo_passes_every_target_but_the_last_without_stopping():
+    sent = {}
+
+    class _Arm:
+        def go_to_joint_configs(self, targets, label, **kw):
+            sent["targets"] = targets
+            return True
+
+    assert dc.through_curobo_knots(_Arm(), PATH[:3], "three")
+    assert [t.blend_radius for t in sent["targets"]] == [dc.CUROBO_BLEND_M, dc.CUROBO_BLEND_M, 0.0]
+
+
+def test_curobo_path_passes_a_direct_plan(curobo_paths):
     assert open_door._check_curobo_path(_Planner(), np.zeros(7), PATH, "the swing") is None
 
 
-def test_curobo_path_refuses_a_leg_it_cant_plan():
+def test_curobo_path_refuses_a_leg_it_cant_plan(curobo_paths):
     why = open_door._check_curobo_path(_Planner(fail_leg=2), np.zeros(7), PATH, "the swing")
     assert "leg 2" in why and "no path" in why
 
 
-def test_curobo_path_refuses_a_detour():
+def test_curobo_path_refuses_a_detour(curobo_paths):
     loop = lambda start, goal: [start, start + 1.0, goal]  # noqa: E731
     why = open_door._check_curobo_path(_Planner(loop), np.zeros(7), PATH, "the swing")
     assert "detour" in why
 
 
-def test_curobo_path_is_not_checked_without_a_planner():
+def test_curobo_path_is_not_checked_without_a_planner(curobo_paths):
     assert open_door._check_curobo_path(object(), np.zeros(7), PATH, "the swing") is None
 
 

@@ -32,7 +32,8 @@ go and push it further open -- one run.
    real one before letting go.
 
 `--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
-handle, go toward the base to clear the door's free edge, joint move to `PARK_JOINTS` (constants).
+handle, go toward the base to clear the door's free edge (both straight legs through cuRobo, each asked of it
+before the gripper opens), cuRobo to `PARK_JOINTS` (constants).
 
 Under the engine: the node's `open` action (node.py -> `run`, which logs the run with RunLog). On the bench:
 the commands above (rammp_arm.RammpArm). Refusals raise door_common.common.Refused: the arm holds where it is.
@@ -68,7 +69,7 @@ from door_common.common import (
 from door_common.open_door import BACK_OFF_M, SWING_MAX_TRY_DEG, SWING_MIN_DEG
 from scipy.spatial.transform import Rotation as R
 
-from . import constants
+from . import constants, recording
 from .constants import (
     BODY_DEPTH,
     GAINS_RIGID,
@@ -151,6 +152,7 @@ def configure(data_dir):
         GRASP_X_ADJUST=GRASP_X_ADJUST,
         GRASPED_GAINS=GAINS_RIGID,
         SWING_SPEED_SCALE=SWING_SPEED_SCALE,
+        CUROBO_PATHS=True,
     )
 
 
@@ -612,8 +614,9 @@ def push_open(ai, execute, on_release=None):
 
 def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_only=False, on_hold=None):
     """The open task as the node runs it (was door_task.py `open`): to the view pose, grasp + swing, then
-    (`push`) let go and push the door further open, all logged to RUNS_DIR/<time>_open (RunLog). `speed` (0..1]
-    scales every arm motion for this run only. `view_only`: stop at the view pose. `on_hold(True)` once the gripper
+    (`push`) let go and push the door further open, all logged to RUNS_DIR/<time>_open (RunLog), with what the
+    node logs in its console.log and (recording.BAG) a rosbag in its bag/. `speed` (0..1] scales every arm motion
+    for this run only. `view_only`: stop at the view pose. `on_hold(True)` once the gripper
     closes on the handle, `on_hold(False)` once the push-open has let go of it. Returns True when it finished
     (or the dry run passed); raises Refused."""
     import rammp_arm
@@ -623,6 +626,9 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_o
     rammp_arm.JOINT_SPEED *= speed
     rammp_arm.GO_TO_SPEED_SCALE = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)
     log = RunLog("open", log_args or {}, ai)
+    recording.set_console(log.dir / "console.log")
+    recording.to_console("INFO", f"run log: {log.dir}")
+    bag = recording.start_bag(log.dir)
     ok = False
     try:
         log.frame("run_start")
@@ -642,9 +648,12 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_o
         return ok
     except BaseException as e:
         log.event("stopped", error=repr(e))
+        recording.to_console("ERROR", f"stopped: {e!r}")
         raise
     finally:
         log.close(ok)
+        recording.stop_bag(bag)
+        recording.set_console(None)
         rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
 
 
@@ -703,7 +712,7 @@ def main():
 
 def _run(ai, args, swing, min_swing):
     if args.release:
-        release_and_back_off(ai, BACK_OFF_M, args.execute, pre_park_x=PRE_PARK_X)
+        release_and_back_off(ai, BACK_OFF_M, args.execute, pre_park_x=PRE_PARK_X, curobo=shared.CUROBO_PATHS)
     elif open_task(ai, args.execute, swing, min_swing) and not args.no_push_open:
         push_open(ai, args.execute)
 

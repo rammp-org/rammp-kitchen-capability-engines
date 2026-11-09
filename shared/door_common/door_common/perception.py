@@ -29,6 +29,7 @@ Dropped vs the original: the hinge/placement/top-of-appliance poses, overlays, R
 image logging, the camera flip (this rig's camera is upright) and HANDLE_DEPTH_CORR (0 here).
 """
 
+import collections
 import threading
 import time
 
@@ -46,6 +47,7 @@ TF_TIMEOUT_S = 2.0  # wait this long for base <- camera at the frame's stamp, th
 SYNC_SLOP_S = 0.05  # colour, depth and camera_info within this of each other count as one frame
 BOX_MAX_AGE_S = 5.0  # a boxer box older than this is not used
 SAM3_TIMEOUT_S = 10.0  # one SAM 3 detect call (~0.5 s on the Orin, plus waiting for the next frame)
+FRAME_KEEP_S = 3.0  # recent synced frames kept, so SAM 3's mask is paired with the very frame it segmented
 
 
 class _Input(message_filters.SimpleFilter):
@@ -98,6 +100,8 @@ class WristCamera:
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest = None
+        self._recent = collections.deque()  # with SAM 3: (colour, info, depth) of the last FRAME_KEEP_S, oldest first
+        self._sam3 = sam3  # before the subscriptions: _on_frame reads it
         self._box = None  # (header, DetectedObject): the latest box_class object with a pose
         self._box2d = None  # (header, DetectedObject): the latest visible box_class object on box2d_topic
         self.box2d_topic, self.fixed_box = box2d_topic, None
@@ -122,12 +126,17 @@ class WristCamera:
             from rammp_perception_interfaces.msg import ObjectDetections
 
             subscribe(ObjectDetections, box2d_topic, self._on_boxes_2d, qos)
-        self._sam3 = sam3
         self.topics = (color_topic, info_topic, depth_topic)
 
     def _on_frame(self, color, info, depth):
         with self._lock:
             self._latest = (color, info, depth)
+            if self._sam3 is None:  # only SAM 3's masks need an older frame
+                return
+            self._recent.append(self._latest)
+            newest = _stamp_s(color.header.stamp)
+            while self._recent and newest - _stamp_s(self._recent[0][0].header.stamp) > FRAME_KEEP_S:
+                self._recent.popleft()
 
     def _on_boxes(self, msg):
         objs = [o for o in msg.objects if o.perception_class == self.box_class and o.has_pose]
@@ -163,11 +172,28 @@ class WristCamera:
     def sam3_handle_mask(self):
         """SAM 3's mask of the handle on this camera's next colour frame (bool, image-sized): the best-scoring instance
         of any of `sam3_prompts`. None (says why) without a service, a reply or an instance."""
-        if self._sam3 is None:
+        instances = self.sam3_handle_instances()
+        if not instances:
             return None
+        score, mask, label = instances[0]
+        say(f"  SAM 3: '{label}' {score:.2f} (best of {len(instances)})")
+        return mask
+
+    def sam3_handle_instances(self):
+        """Every instance SAM 3 finds of `sam3_prompts` on this camera's next colour frame, best score first:
+        [(score, mask (bool, image-sized), class)]. [] (says why) without a service, a reply or an instance."""
+        return self.sam3_detect()[0]
+
+    def sam3_detect(self):
+        """SAM 3 on this camera's colour image: (instances as sam3_handle_instances, the RGB-D frame they are masks
+        of, as `grab` returns it). SAM 3 segments the newest image on the topic when the request reaches it, not a
+        frame grabbed before asking, so the frame is the buffered one with the reply's stamp. ([], None) (says why)
+        without a service, a reply, an instance, or that frame still buffered."""
+        if self._sam3 is None:
+            return [], None
         if not self._sam3.wait_for_service(timeout_sec=2.0):
             say(f"  no SAM 3 service {self._sam3.srv_name} (is the sam3 node up?)")
-            return None
+            return [], None
         req = self._sam3.srv_type.Request(
             prompts=self.sam3_prompts, image_topic=self.color_topic, score_threshold=float(self.sam3_threshold)
         )
@@ -175,20 +201,27 @@ class WristCamera:
         fut.add_done_callback(lambda _: done.set())
         if not done.wait(SAM3_TIMEOUT_S):
             say(f"  SAM 3 did not answer in {SAM3_TIMEOUT_S:g} s")
-            return None
+            return [], None
         resp = fut.result()
         if not resp.success:
             say(f"  SAM 3: {resp.message}")
-            return None
-        objs = [o for o in resp.detections.objects if o.mask_id > 0]
+            return [], None
+        objs = sorted((o for o in resp.detections.objects if o.mask_id > 0), key=lambda o: -o.score)
         if not objs:
             say(f"  SAM 3 found no {' / '.join(self.sam3_prompts)} ({resp.message})")
-            return None
-        best = max(objs, key=lambda o: o.score)
+            return [], None
+        frame = self.frame_at(resp.detections.header.stamp)
+        if frame is None:
+            stamp = _stamp_s(resp.detections.header.stamp)
+            say(f"  SAM 3's image ({stamp:.3f}) is not among the buffered RGB-D frames (dropped by the sync, or old)")
+            return [], None
         li = resp.detections.label_image
+        if (li.height, li.width) != frame["rgb"].shape[:2]:
+            say(f"  SAM 3's mask is {li.width}x{li.height}, the frame {frame['rgb'].shape[1]}x{frame['rgb'].shape[0]}")
+            return [], None
         labels = np.frombuffer(bytes(li.data), dtype="<u2").reshape(li.height, li.step // 2)[:, : li.width]
-        say(f"  SAM 3: '{best.perception_class}' {best.score:.2f} (best of {len(objs)}; {resp.message})")
-        return labels == best.mask_id
+        say(f"  SAM 3: {len(objs)} instance(s) ({resp.message})")
+        return [(float(o.score), labels == o.mask_id, o.perception_class) for o in objs], frame
 
     def appliance_box(self):
         """The latest boxer box of `box_class` in the base frame: {center, R (3x3, columns = box axes), size, score},
@@ -251,7 +284,17 @@ class WristCamera:
         if not self.wait_for_frames(timeout_s):
             raise RuntimeError(f"no RGB-D frames on {', '.join(self.topics)} (depth aligned to colour?)")
         with self._lock:
-            color, info, depth = self._latest
+            latest = self._latest
+        return self._frame(*latest)
+
+    def frame_at(self, stamp):
+        """The buffered synced frame whose colour image has exactly `stamp`, as `grab` returns it; None if gone."""
+        want = (stamp.sec, stamp.nanosec)
+        with self._lock:
+            match = next((m for m in self._recent if (m[0].header.stamp.sec, m[0].header.stamp.nanosec) == want), None)
+        return None if match is None else self._frame(*match)
+
+    def _frame(self, color, info, depth):
         rgb = self._bridge.imgmsg_to_cv2(color, "bgr8")
         depth_mm = np.asarray(self._bridge.imgmsg_to_cv2(depth, "passthrough"), dtype=np.float32)
         return {
@@ -264,6 +307,10 @@ class WristCamera:
             "box": self.appliance_box() if self.box_topic else self.fixed_box,
             "box2d": self.appliance_box_2d() if self.box2d_topic else None,
         }
+
+
+def _stamp_s(stamp):
+    return stamp.sec + stamp.nanosec * 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +336,8 @@ HANDLE_QUAT = np.array([-0.5, 0.5, 0.5, -0.5])
 
 class HandleDetector:
     """Everything but which part of the image the door is in: a capability subclasses this with `door_region`."""
+
+    check_door_vertical = True  # refuse a door plane whose normal isn't ~horizontal (MAX_DOOR_NORMAL_VERTICAL)
 
     def door_region(self, rgb, box, debug):
         """The door's region of the image (bool, image-sized), or None (says why) -- see `detect` for `box`, `debug`."""
@@ -422,9 +471,17 @@ class HandleDetector:
         normal, offset = normal / nn, offset / nn
         if np.dot(normal, plane_pts.mean(axis=0)) > 0:  # point toward the camera: "in front" is +
             normal, offset = -normal, -offset
-        if abs(float(np.dot(normal, up_cam))) > MAX_DOOR_NORMAL_VERTICAL:
-            say("  plane is not a door (normal not horizontal -- table/floor?)")
-            return None
+        vertical = abs(float(np.dot(normal, up_cam)))
+        if vertical > MAX_DOOR_NORMAL_VERTICAL:
+            # base z of a camera-frame point p is p @ up_cam + the camera's height
+            what = (
+                f"plane {np.degrees(np.arcsin(min(vertical, 1.0))):.0f} deg from vertical at base z "
+                f"{float(np.median(plane_pts @ up_cam)) + tb[2]:+.2f}"
+            )
+            if self.check_door_vertical:
+                say(f"  plane is not a door (normal not horizontal -- table/floor?): {what}")
+                return None
+            say(f"  {what} -- not a door's, used anyway (check_door_vertical off)")
         return plane_pts, off_plane, normal, offset, up_cam, Rb, tb
 
     def door_face(self, rgb, K, depth, base_T_cam, box=None, debug=None):
@@ -482,6 +539,9 @@ class HandleDetector:
         lo, hi = float(np.percentile(proj, 1)), float(np.percentile(proj, 99))
         edge = lo if abs(h_proj - lo) > abs(h_proj - hi) else hi
         strip = plane_pts[np.abs(proj - edge) < 0.02]
+        if len(strip) == 0:  # a sparse plane (11-04, the fridge's): no point near its 1st/99th percentile
+            say("  no door-face points at its far edge -- a miss")
+            return None
         hinge_cam = strip[int(np.argmin(np.linalg.norm(strip - handle_cam, axis=1)))]
         if abs(float(hinge_cam @ axis) - h_proj) < 0.5 * max(abs(h_proj - lo), abs(h_proj - hi)):
             say("  far door edge is on the handle's side -- plane includes background")

@@ -9,7 +9,7 @@ meta:
     commit: 80908b9f73f02e094106c0b82640a23c3cd6f41c
     path: core/rammp_prototype_description/urdf/rammp_prototype_base.urdf
     sha256: 201ec24aeeff868557b13211eaa4571b8f11cd6709795537098bafaef032c0ec
-  arm_base_in_mebot: {position: [0.3207, 0.3508, 0.4374], rpy_deg: [0, 0, 0]}
+  arm_base_in_mebot: {position: [0.5239, 0.3508, 0.4374], rpy_deg: [0, 0, 0]}
   arm_base_joint: {rpy_deg: [0, 30, 0]}
   grid_m: 0.0001
   padding_assumed_m: 0.02
@@ -26,21 +26,21 @@ meta:
     cylinder_boxing_m3: 0.005440  # analytic: (4 - pi) r^2 L summed over the cylinders
     overlap_m3: 0.026491
     max_stack: 3
-  keep_out_clearance_m: 0.0871
+  keep_out_clearance_m: 0.1066
 obstacles:
-  - {name: drive_wheel_l, position: [0.16505, -0.04940, -0.33670], dims: [0.3683, 0.0754, 0.3682]}
-  - {name: drive_wheel_r, position: [0.16505, -0.65745, -0.33655], dims: [0.3681, 0.0751, 0.3681]}
-  - {name: front_caster_arm_mount, position: [0.24955, -0.37010, -0.29495], dims: [0.1855, 0.2176, 0.3545]}  # + front_caster_linkage front_caster_linkage_arm front_caster_linkage_aux front_caster_linkage_aux_arm
-  - {name: front_caster_swing_arm, position: [0.36510, -0.35080, -0.45420], dims: [0.2568, 0.4170, 0.0564]}
-  - {name: front_caster_wheel_l, position: [0.46660, -0.17085, -0.44165], dims: [0.1516, 0.0351, 0.1517]}
-  - {name: front_caster_wheel_r, position: [0.46660, -0.53090, -0.44165], dims: [0.1516, 0.0354, 0.1517]}
-  - {name: mebot, position: [-0.06360, -0.29065, -0.30670], dims: [0.5922, 0.4501, 0.3240]}  # + drive_motor_l dw_main_plate_l elevator_dampener_aux_link_l elevator_dampener_l elevator_dampener_link_l elevator_dampener_rod_l front_caster_motor front_caster_motor_rod motor_elevator_pivot_l motor_elevator_rod_l motor_elevator_rod_link_l motor_swing_arm_l rear_caster_motor rear_caster_motor_rod
-  - {name: motor_elevator_l, position: [-0.11890, -0.10265, -0.18290], dims: [0.3178, 0.1603, 0.1042]}
-  - {name: motor_elevator_r, position: [-0.11890, -0.60405, -0.18290], dims: [0.3178, 0.1603, 0.1042]}
-  - {name: motor_swing_arm_r, position: [-0.02500, -0.57035, -0.30100], dims: [0.5150, 0.1415, 0.3024]}  # + drive_motor_r dw_main_plate_r elevator_dampener_aux_link_r elevator_dampener_link_r elevator_dampener_r elevator_dampener_rod_r motor_elevator_pivot_r motor_elevator_rod_link_r motor_elevator_rod_r
-  - {name: rear_casteer_wheel_l, position: [-0.56200, -0.26555, -0.41560], dims: [0.2022, 0.0411, 0.2022]}
-  - {name: rear_caster_arm_mount, position: [-0.34090, -0.33240, -0.27985], dims: [0.0596, 0.2196, 0.3341]}
-  - {name: rear_caster_dampener, position: [-0.42780, -0.34630, -0.32935], dims: [0.0554, 0.1092, 0.2215]}  # + rear_caster_dampener_rod
-  - {name: rear_caster_suspension_arm, position: [-0.34715, -0.32320, -0.16505], dims: [0.1809, 0.1716, 0.1531]}  # + rear_caster_aux_linkage rear_caster_motor_dampener_pivot
-  - {name: rear_caster_swing_arm, position: [-0.46035, -0.35065, -0.42945], dims: [0.2567, 0.2951, 0.0551]}
-  - {name: rear_caster_wheel_r, position: [-0.56210, -0.43510, -0.41560], dims: [0.2022, 0.0414, 0.2022]}
+  - {name: drive_wheel_l, position: [-0.03815, -0.04940, -0.33670], dims: [0.3683, 0.0754, 0.3682]}
+  - {name: drive_wheel_r, position: [-0.03815, -0.65745, -0.33655], dims: [0.3681, 0.0751, 0.3681]}
+  - {name: front_caster_arm_mount, position: [0.04635, -0.37010, -0.29495], dims: [0.1855, 0.2176, 0.3545]}  # + front_caster_linkage front_caster_linkage_arm front_caster_linkage_aux front_caster_linkage_aux_arm
+  - {name: front_caster_swing_arm, position: [0.16190, -0.35080, -0.45420], dims: [0.2568, 0.4170, 0.0564]}
+  - {name: front_caster_wheel_l, position: [0.26340, -0.17085, -0.44165], dims: [0.1516, 0.0351, 0.1517]}
+  - {name: front_caster_wheel_r, position: [0.26340, -0.53090, -0.44165], dims: [0.1516, 0.0354, 0.1517]}
+  - {name: mebot, position: [-0.26680, -0.29065, -0.30670], dims: [0.5922, 0.4501, 0.3240]}  # + drive_motor_l dw_main_plate_l elevator_dampener_aux_link_l elevator_dampener_l elevator_dampener_link_l elevator_dampener_rod_l front_caster_motor front_caster_motor_rod motor_elevator_pivot_l motor_elevator_rod_l motor_elevator_rod_link_l motor_swing_arm_l rear_caster_motor rear_caster_motor_rod
+  - {name: motor_elevator_l, position: [-0.32210, -0.10265, -0.18290], dims: [0.3178, 0.1603, 0.1042]}
+  - {name: motor_elevator_r, position: [-0.32210, -0.60405, -0.18290], dims: [0.3178, 0.1603, 0.1042]}
+  - {name: motor_swing_arm_r, position: [-0.22820, -0.57035, -0.30100], dims: [0.5150, 0.1415, 0.3024]}  # + drive_motor_r dw_main_plate_r elevator_dampener_aux_link_r elevator_dampener_link_r elevator_dampener_r elevator_dampener_rod_r motor_elevator_pivot_r motor_elevator_rod_link_r motor_elevator_rod_r
+  - {name: rear_casteer_wheel_l, position: [-0.76520, -0.26555, -0.41560], dims: [0.2022, 0.0411, 0.2022]}
+  - {name: rear_caster_arm_mount, position: [-0.54410, -0.33240, -0.27985], dims: [0.0596, 0.2196, 0.3341]}
+  - {name: rear_caster_dampener, position: [-0.63100, -0.34630, -0.32935], dims: [0.0554, 0.1092, 0.2215]}  # + rear_caster_dampener_rod
+  - {name: rear_caster_suspension_arm, position: [-0.55035, -0.32320, -0.16505], dims: [0.1809, 0.1716, 0.1531]}  # + rear_caster_aux_linkage rear_caster_motor_dampener_pivot
+  - {name: rear_caster_swing_arm, position: [-0.66355, -0.35065, -0.42945], dims: [0.2567, 0.2951, 0.0551]}
+  - {name: rear_caster_wheel_r, position: [-0.76530, -0.43510, -0.41560], dims: [0.2022, 0.0414, 0.2022]}

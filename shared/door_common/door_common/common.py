@@ -11,8 +11,10 @@ Used by `open_door.py` and `demo_replay.py`, here and in each capability.
 cuRobo (RAMMP's planner, through the driver's go_to_ee_pose / go_to_joint_config) does the
 free-space moves: to park, to the regrasp back-off point, to the open-door view -- as
 rammp_button_press does. Everything on or along the door (straight on/off the handle, the
-swings, the pushes) stays on joint paths planned and checked here: the planner takes a goal
-only and can't follow a line or an arc. `check_curobo_goal` gates a cuRobo goal.
+swings, the pushes) is a joint path planned and checked here: the planner takes a goal
+only and can't follow a line or an arc. `check_curobo_goal` gates a cuRobo goal. A checked
+path can still be sent through cuRobo (`through_curobo`: some of its joints as blended targets,
+each leg asked of cuRobo first by `curobo_path_problem`) -- the microwave sends all of them that way.
 
 All gripper motion goes through `execute_command(Open/CloseGripperCommand())` --
 `ArmInterfaceClient` has no `open_gripper()` method.
@@ -34,8 +36,11 @@ from pathlib import Path
 
 import numpy as np
 import pybullet as p
+import rammp_arm
 import yaml
 from capability_engine import sim
+from capability_engine.arm import IMPEDANCE as IMPEDANCE_MODE
+from capability_engine.arm_messages import JointTarget
 from capability_engine.cornell_commands import (
     CartesianTrajectoryCommand,
     JointCommand,
@@ -420,7 +425,59 @@ def load_park():
     return wrap_joints(PARK_JOINTS)
 
 
-def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre_park_x=None):
+# ---------------------------------------------------------------------------
+# A checked joint path through cuRobo: every CUROBO_SEND_EVERY-th joints a target, asked of it first
+# ---------------------------------------------------------------------------
+CUROBO_SEND_EVERY = 4  # every 4th checked waypoint is a cuRobo target (+ the last)
+CUROBO_BLEND_M = 0.01  # the tool passes those targets this close, not stopping on each
+CUROBO_MAX_DETOUR = 1.5  # a leg may travel this many times the joints' direct distance (11-02: cuRobo alone took 78 cm
+# for a 12 cm push: not with the hand on the handle)
+CUROBO_DETOUR_FLOOR_DEG = 5.0  # legs shorter than this are measured against this
+
+
+def curobo_knots(path):
+    """The joints of a checked path that cuRobo is given as targets."""
+    path = list(path)
+    knots = path[CUROBO_SEND_EVERY - 1 :: CUROBO_SEND_EVERY]
+    if not knots or knots[-1] is not path[-1]:
+        knots.append(path[-1])
+    return knots
+
+
+def curobo_path_problem(ai, start, path, label):
+    """Ask cuRobo -- nothing moves -- for every leg of `path` from joints `start`: why it can't be used, or None.
+    Without cuRobo (no plan_to_joints: the bench's mock) it can't check, and passes."""
+    if not hasattr(ai, "plan_to_joints"):
+        return None
+    q = start
+    for k, goal in enumerate(curobo_knots(path), 1):
+        pl = ai.plan_to_joints(goal, q)
+        if not pl.success:
+            return f"cuRobo can't plan {label}, leg {k}: {pl.message}"
+        if len(pl.q) > 1:
+            direct = max(float(np.linalg.norm(short_delta(q, goal))), np.radians(CUROBO_DETOUR_FLOOR_DEG))
+            went = sum(float(np.linalg.norm(short_delta(a, b))) for a, b in zip(pl.q[:-1], pl.q[1:], strict=True))
+            if went > CUROBO_MAX_DETOUR * direct:
+                return f"cuRobo's path for {label}, leg {k}, takes a detour ({went / direct:.1f}x the direct distance)"
+        q = goal
+    return None
+
+
+def through_curobo(ai, path, label, speed_scale=None, gains=None):
+    """Move along a checked joint path as one cuRobo motion, stiff or (`gains`) compliant."""
+    return through_curobo_knots(ai, curobo_knots(path), label, speed_scale, gains)
+
+
+def through_curobo_knots(ai, knots, label, speed_scale=None, gains=None):
+    """One cuRobo motion through joints `knots`, passing each but the last within CUROBO_BLEND_M (not stopping)."""
+    targets = [
+        JointTarget(tuple(q), 0.0 if k == len(knots) - 1 else CUROBO_BLEND_M, speed_scale) for k, q in enumerate(knots)
+    ]
+    go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
+    return ai.go_to_joint_configs(targets, label, **go_to)
+
+
+def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre_park_x=None, curobo=False):
     """Record the current grasp, open the gripper, back straight off along -approach, then
     (park=True) cuRobo (go_to_joint_config) to the hand-placed park joints -- the end
     position of both the open and the close task. `pre_park_x`: before the park move, go
@@ -429,7 +486,9 @@ def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre
     The straight legs are planned and door-checked, and the park goal checked, before
     anything moves; a failed check means nothing is commanded. cuRobo's path to park is
     not previewed and its world has no door in it -- the straight legs get the hand out
-    of the door's way first."""
+    of the door's way first. `curobo`: the straight legs go through cuRobo too, every leg asked of it
+    (curobo_path_problem) before the gripper opens, and with park they and the park move are ONE blended
+    cuRobo motion (through_curobo_knots), not stopping between."""
     save_path = Path(save_path or LAST_GRASP_FILE)
     st = ai.get_state()
     ee = list(st["ee_pos"])
@@ -470,6 +529,14 @@ def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre
         if check_curobo_goal(scene, rb, "to park", q=q_park, bodies=bodies) is None:
             say("park goal fails a check -- NOT releasing, arm untouched.")
             return False
+    if curobo:
+        start = q0
+        for label, leg in legs:
+            why = curobo_path_problem(ai, start, leg, label)
+            if why:
+                say(f"{why} -- NOT releasing, arm untouched.")
+                return False
+            start = leg[-1]
     if not execute:
         say(f"\nDRY RUN (release + back-off{' + park' if park else ''}) -- nothing commanded.")
         return True
@@ -494,12 +561,18 @@ def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre
     say("Releasing ...")
     ai.execute_command(OpenGripperCommand())
     time.sleep(1.0)
-    ok = True
-    for label, leg in legs:
-        ok = ok and execute_joint_plan(ai, leg, label)
-    if ok and park:
-        ok = ai.go_to_joint_config(q_park, "to park")
-        say(f"  park: {'reached' if ok else 'did NOT reach the park joints'}")
+    if curobo and hasattr(ai, "go_to_joint_configs"):
+        knots = [q for _, leg in legs for q in curobo_knots(leg)] + ([q_park] if park else [])
+        label = " + ".join([lb for lb, _ in legs] + (["park"] if park else []))
+        say(f"  {label}: one cuRobo motion through {len(knots)} targets ...")
+        ok = through_curobo_knots(ai, knots, label)
+        if not ok:
+            say(f"  {label}: cuRobo stopped ({getattr(ai, 'last_error', '')}) -- stopping here.")
+    else:
+        ok = all(execute_joint_plan(ai, leg, label) for label, leg in legs)  # all(): stops at the first that fails
+        if ok and park:
+            ok = ai.go_to_joint_config(q_park, "to park")
+            say(f"  park: {'reached' if ok else 'did NOT reach the park joints'}")
     final = ai.get_state()
     say(
         f"\nRELEASE {'DONE' if ok else 'STOPPED EARLY'}. final EE:",
@@ -705,6 +778,25 @@ def enable_keep_out(behind_m):
     sim.set_keep_out(keep_out)
 
 
+def trajectory_keep_out(q0, knots, cart_lengths=None, speed_scale=1.0):
+    """What self.arm.move_joints checks before sending `knots` from joints `q0`: the timed trajectory through them
+    (rammp_arm.joint_trajectory, as move_joints times it), every 2nd sample + the end, against the keep-out. A plan
+    checks only its own IK samples; between them the trajectory can graze the zone (11-05, sim: 0.0 cm in), and the arm
+    then refuses it mid-task. Why, or None -- always None while no keep-out is enabled."""
+    if not sim.keep_out_enabled():
+        return None
+    samples = rammp_arm.joint_trajectory(np.asarray(q0, float), list(knots), cart_lengths, speed_scale)
+    if samples is None:
+        return None
+    rb = sim.make_sim()[1]
+    q = samples[1]
+    for qi in list(q[::2]) + [q[-1]]:
+        msg = keep_out_message(rb, qi)
+        if msg is not None:
+            return msg
+    return None
+
+
 # ---------------------------------------------------------------------------
 # The chair and user: the boxes cuRobo plans around, for the moves PyBullet plans
 # ---------------------------------------------------------------------------
@@ -814,6 +906,8 @@ def save_frame(frame, tag, out_dir, result=None, arm_state=None):
             extra = {"joints": np.asarray(arm_state["position"], float), "ee": np.asarray(arm_state["ee_pos"], float)}
         if frame.get("base_T_cam") is not None:
             extra["base_T_cam"] = frame["base_T_cam"]
+        if frame.get("handle_mask") is not None:  # the SAM 3 mask the detection used
+            extra["handle_mask"] = np.asarray(frame["handle_mask"], bool)
         np.savez_compressed(
             str(stem) + ".npz", depth_mm=np.clip(depth, 0, 65535).astype(np.uint16), K=frame["K"], **extra
         )
