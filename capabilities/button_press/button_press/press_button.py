@@ -45,6 +45,8 @@ from geometry_msgs.msg import PoseStamped
 from scipy.spatial.transform import Rotation
 
 from button_press import Abort, MotionFailed, dome_pattern, say, scene_finder
+from button_press.collision import Clearance, PlannerWorld, microwave_boxes
+from button_press.collision import describe as describe_boxes
 from button_press.geometry import PlaneFitError
 from button_press.kinematics import MAX_IK_ERR_M
 from button_press.panel_frame import (
@@ -226,6 +228,13 @@ class Args:
     stop_nm: float = CONTACT_STOP_NM  # contact press: stop when a wrist torque is this far off
     lead_in: float = STAGE_LEAD_IN_M  # cuRobo only to a point this much further out than staging
     stage_out: float | None = None  # scene estimate: stage this far out (None = SCENE_STAGE_OUT_M)
+    # cuRobo's collision world (collision.PlannerWorld): written into planner_world_dir (seen by the planner at
+    # planner_world_dir_in_planner, "" = the same path), listing planner_base_layers again; planner_restore_world
+    # is put back when the action ends
+    planner_world_dir: str = "/rammp_planner_worlds"
+    planner_world_dir_in_planner: str = ""
+    planner_base_layers: tuple = ("/config/robot/curobo/layer_mebot_floor.yaml",)
+    planner_restore_world: str = "world.yaml"
 
 
 class Run:
@@ -247,6 +256,17 @@ class Run:
             self.log_path = str(self.log_dir / f"press_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
             self._log_f = open(self.log_path, "a")  # noqa: SIM115 -- closed by close()
         self.arm = PressArm(engine.arm, kin, args.execute, checkpoint)
+        # The microwave and its counter: cuRobo's world for the long moves, and the clearance check of the
+        # straight legs (collision.py). Set from each panel estimate by set_obstacles().
+        self.world = PlannerWorld(
+            engine.arm,
+            args.planner_world_dir,
+            args.planner_world_dir_in_planner or None,
+            args.planner_base_layers,
+            args.planner_restore_world,
+            rammp_arm.FRAME,
+        )
+        self.clear = None
         self.per = Perception(
             engine,
             checkpoint,
@@ -272,8 +292,13 @@ class Run:
             self._log_f.flush()
 
     def close(self):
-        """End of the action: drop the scene camera if still subscribed, close the run log."""
+        """End of the action: drop the scene camera if still subscribed, put cuRobo's world back, close the
+        run log."""
         self.per.stop_scene()
+        self.world.restore()
+        if self.clear is not None:
+            self.clear.close()
+            self.clear = None
         if self._log_f is not None:
             self._log_f.close()
 
@@ -350,19 +375,47 @@ class Run:
             raise Abort("preflight failed -- nothing commanded: " + "; ".join(problems))
         say("  preflight OK")
 
+    def set_obstacles(self, origin, R, label):
+        """The microwave and its counter from this panel estimate: the clearance check's boxes, and (execute runs)
+        cuRobo's world. Abort if the driver's model and the gating sim disagree, or the planner refuses the world."""
+        boxes = microwave_boxes(origin, R, self.args.target)
+        if self.clear is not None:
+            self.clear.close()
+            self.clear = None
+        self.clear = Clearance(boxes)
+        self.clear.check_model(self.arm.kin, self.arm.joints())
+        self.log({"stage": "obstacles", "label": label, "boxes": boxes, "pushed": self.args.execute})
+        if self.args.execute:
+            self.world.push(boxes, label)
+        else:
+            say(f"  collision model: {describe_boxes(boxes)} ({label}; dry run: not pushed to cuRobo)")
+
+    def check_leg(self, name, start_q, knots):
+        """The leg through `knots` from joints `start_q` clear of the microwave and counter (Clearance.check_leg).
+        Abort if it isn't, or if no panel estimate has set the obstacles yet."""
+        if self.clear is None:
+            raise Abort(f"{name}: no collision model yet -- arm not commanded")
+        d, where = self.clear.check_leg(name, [np.asarray(start_q, dtype=float)] + [np.asarray(k) for k in knots])
+        self.log({"stage": "clearance", "leg": name, "clearance_m": d, "closest": where})
+        return d, where
+
     def pose_path(self, p0, R0, p1, R1, spacing=RAY_STEP_MAX_M):
         """Straight-line (xyz, R) points from one tool pose to another, chunked so that no
         point moves more than `spacing` or turns more than ROT_STEP_MAX_DEG."""
         return pose_path(p0, R0, p1, R1, spacing, ROT_STEP_MAX_DEG)
 
-    def move(self, path, name, track_abort_m=TRACK_ABORT_M, cart_speed=CART_SPEED):
-        """Execute one straight leg: re-check `path` in the sim from the arm's actual pose, then
-        send it (PressArm.smooth_poses). Dry run: does nothing (press_button already checked it)."""
+    def move(self, path, name, track_abort_m=TRACK_ABORT_M, cart_speed=CART_SPEED, collide=True):
+        """Execute one straight leg: re-check `path` in the sim from the arm's actual pose (and, `collide`, its
+        clearance from the microwave and counter), then send it (PressArm.smooth_poses). Dry run: does nothing
+        (press_button already checked it). collide=False only for legs that touch the panel on purpose or move
+        straight away from it."""
         if not self.args.execute:
             return
         p_now, R_now = self.arm.ee_pose()
         start = (self.arm.joints(), p_now, R_now)
         _, _, _, knots = self.arm.precheck_poses(path, name, self.log, posture=self.seed_posture, start=start)
+        if collide:
+            self.check_leg(name, start[0], knots)
         self.arm.smooth_poses(path, knots, start, name, self.log, track_abort_m=track_abort_m, cart_speed=cart_speed)
 
     def go_back(self, p0, R0, why, n_out=None):
@@ -387,6 +440,7 @@ class Run:
             self.pose_path(p, Rm, p + RETREAT_OUT_M * np.asarray(n_out, dtype=float), Rm),
             name,
             track_abort_m=LOOSE_TRACK_ABORT_M,
+            collide=False,  # straight out along the normal: only away from the panel
         )
 
     def back_to_spot(self, p_spot, R_spot, why):
@@ -404,11 +458,15 @@ class Run:
             self.pose_path(p_now, R_now, p_spot, R_spot, spacing=SMOOTH_PRESS_SPACING_M),
             "back to the spot",
             track_abort_m=LOOSE_TRACK_ABORT_M,
+            collide=False,  # from the button: the stroke reversed, starts touching the panel
         )
 
     def long_move(self, p, Rm, name):
         """A move that need not be straight (staging, back to start, bail): the driver's
-        go_to_ee_pose (cuRobo plans and the driver executes). Ends within LOOSE_TRACK_ABORT_M."""
+        go_to_ee_pose (cuRobo plans and the driver executes). Ends within LOOSE_TRACK_ABORT_M.
+        Refused unless cuRobo's world has the microwave in it (set_obstacles)."""
+        if self.args.execute and self.world.loaded is None:
+            raise Abort(f"{name}: cuRobo's world has no microwave in it yet -- arm not commanded")
         return self.arm.go_to_ee_pose(p, Rm, name, self.log, track_abort_m=LOOSE_TRACK_ABORT_M)
 
     def press(self, p_spot, R_spot, n_out):
@@ -752,7 +810,11 @@ def pick_lead_in(run: Run, p_st, R_st, n_out, wanted: float):
             )
             continue
         try:
-            arm.precheck_poses(leg, "lead-in", run.log, posture=run.seed_posture, start=(q_lead, p_lead, R_st))
+            _, _, _, knots = arm.precheck_poses(
+                leg, "lead-in", run.log, posture=run.seed_posture, start=(q_lead, p_lead, R_st)
+            )
+            d, where = run.check_leg("lead-in", q_lead, knots)
+            say(f"  lead-in clearance {d*100:.1f} cm ({where})")
         except Abort as e:
             why.append(f"{lead*100:.0f} cm: {e}")
             continue
@@ -835,6 +897,7 @@ def redetect_at_staging(run: Run, a, origin, R, source: str, stopped: int):
                 run.pose_path(p_s, R_s, p_s + RETRY_BACKOFF_M * R[:, 2], R_s),
                 "back out to re-detect",
                 track_abort_m=LOOSE_TRACK_ABORT_M,
+                collide=False,  # straight out along the normal
             )
             stopped = run.per.get_clock().now().nanoseconds
             origin, R = measure_panel_frame_domes(run, a.target, after=stopped)
@@ -904,9 +967,15 @@ def plan_press(run: Run, a, pub, p0, origin, R, presses: int, back: bool):
     if back:
         legs.append(("back out from the panel", run.pose_path(p_goal, R_goal, p_goal + RETREAT_OUT_M * n_out, R_goal)))
     state = None
+    q_from = arm.joints()
     for name, path in legs:
-        err, jump, state, _ = arm.precheck_poses(path, name, run.log, posture=run.seed_posture, start=state)
-        say(f"  {name:16s} {len(path):3d} pts  IK <= {err*1000:.1f} mm  joint step <= {jump:.1f} deg  ok")
+        err, jump, state, knots = arm.precheck_poses(path, name, run.log, posture=run.seed_posture, start=state)
+        clear = ""
+        if name == "to pre-press":  # the strokes touch the panel; backing out only moves away from it
+            d, where = run.check_leg(name, q_from, knots)
+            clear = f"  clearance {d*100:.1f} cm ({where})"
+        say(f"  {name:16s} {len(path):3d} pts  IK <= {err*1000:.1f} mm  joint step <= {jump:.1f} deg  ok{clear}")
+        q_from = state[0]
     if back:
         # go_to_ee_pose cannot plan without moving, so only the goal is checked here; the driver
         # plans the way back from the real joints when it runs.
@@ -934,6 +1003,7 @@ def press_button(run: Run, a, pub) -> dict:
     run.step("detect", 0.1)
     say(f"\n== detect: {a.target} ==")
     origin, R, source = first_look(run, a)
+    run.set_obstacles(origin, R, f"{source} estimate")
     cam_d = float(np.linalg.norm(origin - run.per.cam_position_in_base()))
     stage_out, limit_turn = staging_plan(source, cam_d)
     if source == "scene" and a.stage_out is not None:
@@ -975,6 +1045,7 @@ def press_button(run: Run, a, pub) -> dict:
         run.step("redetect", 0.4)
         say("\n== re-detect from the staging pose ==")
         origin, R = redetect_at_staging(run, a, origin, R, source, stopped)
+        run.set_obstacles(origin, R, "wrist re-detect at staging")
     n_out = R[:, 2]
     run.step("plan", 0.5)
     go, _, _, p_goal, R_goal = plan_press(run, a, pub, p0, origin, R, a.presses, not a.no_return)

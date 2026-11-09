@@ -75,8 +75,9 @@ as before.
 - If the wrist camera finds no domes at the staging pose, the run holds there and names the scene
   calibration or the corner offset as the likely cause.
 - **Not covered**: a front turned away from the scene camera, a front hidden by the fridge door
-  (recorded as `tools/frames/scene/neg_fridge_door_open_*`), other microwave models, the microwave
-  in cuRobo's world (it is not there: watch the staging move).
+  (recorded as `tools/frames/scene/neg_fridge_door_open_*`), other microwave models, the door
+  handle (cuRobo's world has the microwave and counter as boxes from the scene estimate, good to a
+  few cm: still watch the staging move).
 - **Tests**: `test/test_scene_finder.py` ray-casts a box model of the microwave (moved, turned,
   wrong size, no window, grey, two of them, hidden, floating, facing away) and runs the recorded
   scene frames in `tools/frames/scene/` (`record_scene_frames.py LABEL`; `neg_*` = must find nothing).
@@ -120,8 +121,10 @@ executes. The target is `tool_frame` in `base_link`, the same frame as `ee_pose(
 the path can't be previewed or gated before it runs (only the goal's reach and z band are checked,
 and a dry run checks only the goal). These moves run at `self.arm`'s
 `arm.go_to_speed_scale` (0.3 by default; 1.0 before the port): on
-2026-10-14 a 51 cm staging move from HOME took 1.2 s at full speed and hit the microwave. cuRobo's world
-has no microwave, counter, wheelchair or user. The approach and the press
+2026-10-14 a 51 cm staging move from HOME took 1.2 s at full speed and hit the microwave. Since then
+cuRobo's world has the microwave and its counter (`collision.py`, from each panel estimate; the
+wheelchair and user are the planner config's own layers on flatbot), and the approach and the straight
+lead-in are clearance-checked against the same boxes (docs/interface.md, Collision checking). The approach and the press
 never use `go_to_ee_pose` (its path is not a straight line). The only gripper command is preflight's close on an execute run (never in a dry run, never opened).
 
 ## Still to check on hardware

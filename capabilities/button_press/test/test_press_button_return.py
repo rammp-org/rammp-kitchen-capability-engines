@@ -35,11 +35,12 @@ def run_at(p, execute=True, fail=()):
     run.arm = FakeArm(p)
     run.sent, run.speeds = [], {}
 
-    def move(path, name, track_abort_m=pb.TRACK_ABORT_M, cart_speed=pb.CART_SPEED):
+    def move(path, name, track_abort_m=pb.TRACK_ABORT_M, cart_speed=pb.CART_SPEED, collide=True):
         if not execute:
             return
         run.sent.append(("straight", name, path))
         run.speeds[name] = cart_speed
+        run.collide[name] = collide
         if name in fail:
             run.arm.p = np.asarray(path[0][0], float)  # stopped partway along the leg
             raise Abort(f"{name}: ended 1.2 cm from the target -- HOLDING HERE")
@@ -50,6 +51,8 @@ def run_at(p, execute=True, fail=()):
         run.arm.p = np.asarray(p, float)
 
     run.move, run.long_move, run.log = move, long_move, lambda rec: None
+    run.collide = {}  # leg name -> whether run.move was asked to clearance-check it
+    run.check_leg = lambda name, q, knots: (1.0, "")  # collision.py has its own tests
     run.reanchor_seed = lambda why: run.sent.append(("reseed", why, None))
     return run
 
@@ -213,3 +216,31 @@ def test_preflight_waits_for_the_wrist_colour_image():
     run.args, run.arm, run.per, run.log = pb.Args(camera_frame=""), Arm(), Per(), lambda rec: None
     run.preflight()
     assert waited[:2] == ["info", "color"]
+
+
+def test_only_the_legs_toward_the_panel_are_clearance_checked():
+    """Straight out along the normal and back from the button: not checked (they touch the panel or only move
+    away from it); the straight lead-in to staging: checked."""
+    run = run_at(SPOT)
+    pb.back_to_start(run, HOME, np.eye(3), N_OUT)
+    assert run.collide == {"back out from the panel": False}
+    run = run_at(HOME)
+    pb.go_to_staging(run, SPOT + 0.15 * N_OUT, np.eye(3), N_OUT, 0.20)
+    assert run.collide == {"straight in to staging": True}
+
+
+def test_a_long_move_is_refused_until_curobo_has_the_microwave():
+    from types import SimpleNamespace
+
+    run = pb.Run.__new__(pb.Run)
+    run.args = argparse.Namespace(execute=True)
+    run.world = SimpleNamespace(loaded=None)
+    sent = []
+    run.arm = SimpleNamespace(go_to_ee_pose=lambda *a, **k: sent.append(a))
+    run.log = lambda rec: None
+    with pytest.raises(Abort, match="no microwave"):
+        run.long_move(HOME, np.eye(3), "to staging")
+    assert sent == []
+    run.world.loaded = [{"name": "microwave"}]
+    run.long_move(HOME, np.eye(3), "to staging")
+    assert len(sent) == 1

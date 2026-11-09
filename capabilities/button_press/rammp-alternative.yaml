@@ -23,6 +23,11 @@ container:
   # executable itself: never `ros2 launch`, which rejects them, nor `ros2 run`,
   # which as PID 1 swallows the stop signal and leaves the node to be SIGKILLed.
   command: ["/module_ws/install/button_press/lib/button_press/button_press_node"]
+  volumes:
+    # The microwave's collision world for the cuRobo planner, written here and loaded by the planner
+    # (set_world with its path): the planner container must mount the same host directory at the same
+    # path (planner_world_dir), read-only is enough. The fridge capability uses the same directory.
+    - /tmp/rammp_planner_worlds:/rammp_planner_worlds
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; see Parameters in docs/interface.md.
 params:
@@ -43,6 +48,16 @@ params:
   detections: true
   # A JSONL run log per action in this directory (mount a volume for it); "" = none.
   log_dir: ""
+  # cuRobo plans the long moves (staging, back to start, bail) against the microwave and its counter: the
+  # node writes them into planner_world_dir (the volume above; the planner sees it at
+  # planner_world_dir_in_planner, "" = the same path) and loads them with set_world. A pushed world
+  # replaces the robot's world.yaml, so it lists that world's layers again (planner_base_layers, as the
+  # planner sees them: flatbot's floor; the chair's layers are the planner config's and stay in every
+  # world). planner_restore_world is put back when each action ends.
+  planner_world_dir: /rammp_planner_worlds
+  planner_world_dir_in_planner: ""
+  planner_base_layers: [/config/robot/curobo/layer_mebot_floor.yaml]
+  planner_restore_world: world.yaml
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

@@ -38,6 +38,10 @@ PARAMS = {
     "scene_depth_topic": DEFAULTS.scene_depth_topic,
     "detections": DEFAULTS.detections,
     "log_dir": DEFAULTS.log_dir,
+    "planner_world_dir": DEFAULTS.planner_world_dir,
+    "planner_world_dir_in_planner": DEFAULTS.planner_world_dir_in_planner,
+    "planner_base_layers": list(DEFAULTS.planner_base_layers),
+    "planner_restore_world": DEFAULTS.planner_restore_world,
 }
 
 
@@ -125,6 +129,10 @@ class Capability(CapabilityEngine):
             scene_ns=s["scene_ns"],
             scene_depth_topic=s["scene_depth_topic"],
             detections=bool(s["detections"]),
+            planner_world_dir=s["planner_world_dir"],
+            planner_world_dir_in_planner=s["planner_world_dir_in_planner"],
+            planner_base_layers=tuple(s["planner_base_layers"]),
+            planner_restore_world=s["planner_restore_world"],
         )
 
     def execute(self, action_id, params, ctx):

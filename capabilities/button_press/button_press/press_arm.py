@@ -15,7 +15,8 @@ Moves:
                       timed by a minimum-jerk profile capped at CART_SPEED / JOINT_SPEED
   go_to_ee_pose()     long moves (staging, back to start, bail): the driver plans with cuRobo and
                       executes at the arm.go_to_speed_scale parameter. The path cannot be previewed
-                      and cuRobo's world has no microwave in it, so only the goal pose is gated
+                      and only the goal pose is gated here; cuRobo's world has the microwave
+                      and counter in it (collision.PlannerWorld, pushed by the run)
   press_contact()     the press: in along the panel normal until the wrist torques feel the button, on
                       the driver's ee_twist stream
   close_gripper()     once, at preflight, on execute runs only; the gripper is never opened
@@ -63,7 +64,8 @@ DIAG_LEVELS = {0: "OK", 1: "WARN", 2: "ERROR", 3: "STALE"}
 # asks RAMMP's cuRobo for a plan from the measured joints and executes it. Its target is the
 # Kinova tool_frame in rammp_arm.FRAME, the same frame as ee_pose(). What this side cannot do: see
 # or gate the planned path before it runs, or dry-run it. Only the goal pose is gated here.
-# cuRobo's world does NOT contain the microwave, counter, wheelchair or user.
+# cuRobo's world has the microwave and its counter as boxes (collision.py; the run pushes them before any
+# long move), and on flatbot the wheelchair and user as the planner config's own layers.
 # Speed: self.arm's arm.go_to_speed_scale parameter (0.3 by default). 2026-10-14: at 1.0 a 51 cm
 # staging move from HOME took 1.16 s and hit the microwave cuRobo cannot see, faster than anyone
 # could reach the e-stop; 0.15 made it ~8 s.
