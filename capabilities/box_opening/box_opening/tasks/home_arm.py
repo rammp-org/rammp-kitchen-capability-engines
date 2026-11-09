@@ -21,6 +21,13 @@ gets a plan-free step along the joint line toward HOME first, the shortest
 that HOME plans from (primitives.ClearMarginFree): refused if the tool
 would drop on the way, and obstruction-guarded.
 
+A start inside the chair and user's padded boxes, which the planner refuses
+outright, gets a plan-free step out of them first (primitives.EscapeBodyFree:
+never deeper, the tool held within 5 mm of its height, obstruction-guarded),
+and HOME is asked for up to three times, then through a waypoint along the
+joint line (primitives.home_any, 2026-11-09: the temporary HOME, the arm 8 in
+forward on flatbot's chair).
+
 The band stands on the table, so it exists only where a table is known.
 A world YAML without one (flatbot: the table changes with every place
 the chair goes) and a fresh home_arm process, which measures none, make
@@ -39,13 +46,12 @@ the box may be (review 2026-10-28). It stops, saying what is left.
 from box_opening import LOGGER as log
 from box_opening.constants import HOME, HOME_SPEED
 from box_opening.primitives.core import (
-    CLEAR_MARGIN_MAX_STEP_RAD,
-    ClearMarginFree,
     LiftFree,
     PlanRefused,
     PlanState,
     _plan_motion,
     as_home,
+    home_any,
 )
 from box_opening.tasks import cli_common
 
@@ -54,22 +60,23 @@ from box_opening.tasks import cli_common
 REFUSED_HOME_NEXT = "try --lift-first 0.08 (HOME planned from the top of a straight lift), or jog the arm clear by hand"
 
 
-def _plan_home(ctx, state, say=log.info):
-    """HOME from `state`: the guarded bench world first, then the bare
-    table world with a caution. Raises the bare world's refusal. With no
+def _plan_home(ctx, state, say=log.info, name="home", goal=None):
+    """HOME (or the joint goal `goal`, a waypoint toward it: leg `name`) from `state`: the guarded bench
+    world first, then the bare table world with a caution. Raises the bare world's refusal. With no
     table known the two are the same world: once, in the bare one (the
     caution was printed before planning). A home the client refused
     (core.PlanRefused) raises at once, with what is left to try."""
+    goal = list(HOME) if goal is None else list(goal)
     if ctx.worlds.table_top_z is None:
         bare = ctx.worlds.push_name("bench", model=None, tag="bare")
         try:
-            leg = as_home(_plan_motion(ctx, state, "home", ("joints", list(HOME)), bare, HOME_SPEED)[0])
+            leg = as_home(_plan_motion(ctx, state, name, ("joints", goal), bare, HOME_SPEED)[0])
         except PlanRefused as e:
             raise PlanRefused("%s — %s" % (e, REFUSED_HOME_NEXT)) from e
         return leg
     guarded = ctx.worlds.push_name("bench", model=ctx.model)
     try:
-        leg = as_home(_plan_motion(ctx, state, "home", ("joints", list(HOME)), guarded, HOME_SPEED)[0])
+        leg = as_home(_plan_motion(ctx, state, name, ("joints", goal), guarded, HOME_SPEED)[0])
         return leg
     except PlanRefused as e:
         # the planner did plan in this world: the bare one would plan the
@@ -90,7 +97,7 @@ def _plan_home(ctx, state, say=log.info):
         "without it first if the bench is not clear."
     )
     bare = ctx.worlds.push_name("bench", model=None, tag="bare")
-    leg = as_home(_plan_motion(ctx, state, "home", ("joints", list(HOME)), bare, HOME_SPEED)[0])
+    leg = as_home(_plan_motion(ctx, state, name, ("joints", goal), bare, HOME_SPEED)[0])
     return leg
 
 
@@ -113,44 +120,20 @@ def build_legs(ctx, lift_first_m=0.0):
         )
     if ctx.worlds.table_top_z is None:
         # no table, so no band: the guarded world would be the bare one.
-        # Say so before anything is planned, and plan once.
+        # Say so before anything is planned, and plan in it alone.
         log.info(
             "[home_arm] CAUTION: no table is known (this bench YAML has none and "
             "home_arm measures none) — this home knows neither the table nor the "
             "box. With --execute it flies NOW; run without it first, or use "
             "--lift-first 0.08 to rise straight up before the planned sweep."
         )
-    clear = ClearMarginFree(HOME)
-    near = clear.near(ctx, state.joints)
-    if not near:
-        return legs + [_plan_home(ctx, state)]
-    log.info(
-        "[home_arm] %s: too near for the planner to start from — trying plan-free steps "
-        "along the joint line toward HOME, shortest first"
-        % ", ".join("%s is %.3f rad from its limit" % jr for jr in near)
-    )
-    why = None
-    for step, at, info in clear.steps(ctx, state):
-        notes = []
-        try:
-            home = _plan_home(ctx, at, say=notes.append)
-        except RuntimeError as e:
-            why = e
-            continue
-        for note in notes:
-            log.info(note)
-        if step:
-            d = info["tool_move"]
-            log.info(
-                "[home_arm] a plan-free step %.0f%% of the way to HOME first (the largest joint "
-                "%.3f rad, the tool %+.0f mm up and %.0f mm across; obstruction-guarded) — HOME "
-                "is planned from where it ends"
-                % (100 * info["fraction"], info["largest_rad"], 1000 * d[2], 1000 * (d[0] ** 2 + d[1] ** 2) ** 0.5)
-            )
-        return legs + step + [home]
-    raise RuntimeError(
-        "no plan-free step toward HOME of up to %.2f rad per joint lets the planner plan HOME "
-        "(last: %s) — jog the arm clear by hand" % (CLEAR_MARGIN_MAX_STEP_RAD, why)
+    # out of the chair and user's padding, off a joint limit, asked again, through a waypoint: core.home_any
+
+    def plan_to(at, name, q):
+        return _plan_home(ctx, at, name=name, goal=q)
+
+    return legs + home_any(
+        ctx, state, HOME, plan_to, who="[home_arm]", step_tail=" — HOME is planned from where it ends"
     )
 
 

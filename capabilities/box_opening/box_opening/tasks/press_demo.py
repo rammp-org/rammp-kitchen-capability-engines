@@ -97,6 +97,7 @@ from box_opening.primitives.core import (
     _interaction_world,
     _plan_motion,
     as_home,
+    home_any,
 )
 from box_opening.primitives.look import look_joints, sweep_targets
 from box_opening.runtime import driver, fingers
@@ -1431,34 +1432,14 @@ def _home_first_legs(ctx, live, rest, world):
     refused 3 recorded run starts (arm_joint_4 at its limit, 10-30 10:08 and
     11-02 09:45, or 0.070 rad from it, 10-30 13:26) and 1 run end
     (arm_joint_6 0.088 rad from it, 10-29 14:45) START_IN_LIMIT_MARGIN: exit
-    3 before anything moved. Raises the last refusal."""
-    clear = ClearMarginFree(rest)
-    near = clear.near(ctx, live)
-    if not near:
-        return [as_home(_plan_motion(ctx, _state(live), "home", ("joints", list(rest)), world, HOME_SPEED)[0])]
-    log.info(
-        "[press_demo] %s: too near for the planner to start from — trying plan-free steps along the joint line "
-        "toward the rest pose, shortest first" % ", ".join("%s is %.3f rad from its limit" % jr for jr in near)
-    )
-    last = None
-    for step, at, info in clear.steps(ctx, _state(live)):
-        try:
-            leg = as_home(_plan_motion(ctx, at, "home", ("joints", list(rest)), world, HOME_SPEED)[0])
-        except RuntimeError as e:
-            last = e
-            continue
-        if step:
-            d = info["tool_move"]
-            log.info(
-                "[press_demo] a plan-free step %.0f%% of the way to the rest pose first (the largest joint %.3f rad, "
-                "the tool %+.0f mm up and %.0f mm across; obstruction-guarded)"
-                % (100 * info["fraction"], info["largest_rad"], 1000 * d[2], 1000 * (d[0] ** 2 + d[1] ** 2) ** 0.5)
-            )
-        return step + [leg]
-    raise RuntimeError(
-        "no plan-free step toward the rest pose of up to %.2f rad per joint lets the planner plan home "
-        "(last: %s) — jog the arm clear by hand" % (CLEAR_MARGIN_MAX_STEP_RAD, last)
-    )
+    3 before anything moved. Since 2026-11-09 through core.home_any, as home_arm: a start inside the chair
+    and user's padding steps out of it first (EscapeBodyFree), HOME is asked for again, and a waypoint
+    along the joint line is tried. Raises the last refusal."""
+
+    def plan_to(at, name, q):
+        return as_home(_plan_motion(ctx, at, name, ("joints", list(q)), world, HOME_SPEED)[0])
+
+    return home_any(ctx, _state(live), rest, plan_to, who="[press_demo]", goal_words="the rest pose", plan_words="home")
 
 
 def adopt_scene_table(ctx, worlds, watcher, scene_fix):
