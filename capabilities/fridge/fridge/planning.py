@@ -101,6 +101,8 @@ class Goal:
     through: list | None = None  # path "through": the tool poses [(pos, quat)] it passes, in order (the last = pos,
     # quat), solved here as ONE leg -- no junctions, no stops
     caps: list | None = None  # per pose of `through`: its speed there, a fraction of LOCAL_JOINT_SPEED
+    segment_worlds: list | None = None  # per pose of `through`: (label, obstacles) the way to it is checked against
+    # too, by cuRobo (a door that turns as the leg pushes it: each segment against the door where it is then)
 
     def __post_init__(self):
         self.pos = np.asarray(self.pos, float)[:3]
@@ -245,7 +247,34 @@ class Planner:
         self.plan_s += time.monotonic() - t0
         if not res.success:
             return None, f"{goal.label}: cuRobo rejects it ({_short(res.message)})"
+        if goal.segment_worlds is not None:
+            why = self._check_segments(goal, np.asarray(q_start, float), np.asarray(qs), segments(goal, p0, q0))
+            if why:
+                return None, f"{goal.label}: {why}"
         return plan, None
+
+    def _check_segments(self, goal, q_start, qs, segs):
+        """Each run of points of a through leg (`qs`, the pose `segs` each is on its way to) checked by cuRobo against
+        its segment's world (goal.segment_worlds): the states timed rest to rest on their own (only where they are is
+        checked; the leg's own timing was checked with it). Returns why it fails, or ''."""
+        start = 0
+        while start < len(qs):
+            k = segs[start]
+            end = start
+            while end + 1 < len(qs) and goal.segment_worlds[segs[end + 1]] is goal.segment_worlds[k]:
+                end += 1
+            label, world = goal.segment_worlds[k]
+            before = q_start if start == 0 else qs[start - 1]
+            t, qq, qd = timed(before, qs[start : end + 1])
+            self.world.push(world, label)
+            t0 = time.monotonic()
+            res = self.arm.blend([LocalPlan(True, "local IK", t, qq, qd)], [], speed_scale=[1.0], hold=[goal.hold],
+                                 hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None])
+            self.plan_s += time.monotonic() - t0
+            if not res.success:
+                return f"against {label}, cuRobo rejects it ({_short(res.message)})"
+            start = end + 1
+        return ""
 
     def motion(self, goals, q0, start_pose=None, from_arm=False):
         """Plan every goal in turn, each from where the last ends. Returns (Motion, None) or (None, why). `from_arm`:
@@ -367,6 +396,17 @@ class LocalPlan:
     q: np.ndarray
     qd: np.ndarray
     planning_time: float = 0.0
+
+
+def segments(goal, p0, q0):
+    """For each point of path_poses(goal, p0, q0) on a through leg: the index of the pose of goal.through it is on its
+    way to."""
+    out, prev = [], (p0, q0)
+    for k, (pos, quat) in enumerate(goal.through):
+        seg = Goal(np.asarray(pos, float), np.asarray(quat, float), "", [], path="line")
+        out += [k] * len(path_poses(seg, np.asarray(prev[0], float), np.asarray(prev[1], float))[0])
+        prev = (seg.pos, seg.quat)
+    return out
 
 
 def path_poses(goal, p0, q0):
@@ -509,13 +549,15 @@ def line(pos, quat, label, world, contact=True, blend=0.0, hold=HOLD_FIXED, worl
     return Goal(pos, quat, label, world, hold=hold, blend=blend, contact=contact, path="line", world_label=world_label)
 
 
-def through(poses, label, world, caps=None, blend=0.0, hold=HOLD_NONE, world_label=""):
+def through(poses, label, world, caps=None, blend=0.0, hold=HOLD_NONE, world_label="", segment_worlds=None):
     """ONE contact leg through the tool poses [(pos, quat)] in order (straight from one to the next: give them densely
-    along an arc), each with its speed cap (`caps`, a fraction of LOCAL_JOINT_SPEED): no junction, no stop."""
+    along an arc), each with its speed cap (`caps`, a fraction of LOCAL_JOINT_SPEED): no junction, no stop. Checked
+    against `world` whole, and the way to each pose against `segment_worlds` [(label, obstacles)] too, if given."""
     pos, quat = poses[-1]
     return Goal(pos, quat, label, world, hold=hold, blend=blend, contact=True, path="through",
                 through=[(np.asarray(p, float), np.asarray(q, float)) for p, q in poses],
-                caps=None if caps is None else list(caps), world_label=world_label)
+                caps=None if caps is None else list(caps), world_label=world_label,
+                segment_worlds=None if segment_worlds is None else list(segment_worlds))
 
 
 def arc(pos, quat, label, world, hinge, blend=0.01, hold=HOLD_NONE, world_label=""):

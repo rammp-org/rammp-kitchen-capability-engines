@@ -12,7 +12,8 @@ the printed handle's model (`RAMMP.Fridge.Handle5.STL`) to the handle's depth (`
 squared to the door (at the middle of the bar, or `grasp_offset_m` above or below it), the gripper
 closing as the pull starts, pulls the door 60° open and runs on 8° further while the gripper opens,
 then, in one motion, backs off the handle, goes round the door's free edge and pushes the door on to
-90° with the side of the hand. If the push needs the wheelchair moved first, the goal stops after the
+90° with the side of the hand, steps 10 cm off it and, in the same motion, turns to face into the fridge in front
+of its middle (if the arm can reach that). If the push needs the wheelchair moved first, the goal stops after the
 back-off and its result (`note`) and feedback say how far; an `open` goal with `chair_moved` then
 pushes. With `push_open: false` it pulls 90° instead, lets go the same way and goes round the door's
 free edge to its inner side, facing the fridge, always ending upright. A `close` goal pushes the door
@@ -36,9 +37,9 @@ commanded still and the arm holding. Without it the chair is moved by hand, as b
 (`planning.py`), each against its own collision world: the cabinet, the door at its angle and the
 handle (`world.py`), written to `planner_world_dir` and loaded into the planner with `set_world`,
 plus the planner's own wheelchair layers and the scene camera. A leg onto or along the door leaves
-out what the hand touches (the handle and the door round the hand, or the door it pushes) and must
-follow its line or its arc about the hinge to within 1–1.5 cm (checked with the arm's own forward
-kinematics), or it is refused. cuRobo picks the arm's configuration for every pose, with its joint
+out what the hand touches (the handle and the door round the hand) and is solved along its exact line
+or arc by local IK. The push-open's push is checked step by step against the door where it then is:
+its front 2.5 cm and edges always, its inner part except round the hand. cuRobo picks the arm's configuration for every pose, with its joint
 limits; if no grasp's swing plans from the configuration it picks, the line-up is planned again from
 other configurations (elbow turned, wrist flipped). cuRobo's blend joins each motion's legs into one
 trajectory, cutting the corners between them, which the driver runs. The swing and everything after

@@ -514,3 +514,91 @@ def test_a_leg_whose_curobo_plan_raised_is_asked_again(fridge):
     n = len(answers)
     assert planner.motion([planning.free(p + [0.06, 0, 0], quat, "y", [])], arm.q)[0] is None
     assert len(answers) == n + 1
+
+
+def test_the_push_open_ends_in_front_of_the_fridge_facing_it_in_the_same_leg(fridge):
+    """After the push and its step-off, on to finish_pose in the push's one leg: no stop, no blend."""
+    arm, planner, _ = fridge
+    assert open_door.run(arm, planner, True)
+    door = json.loads(dc.DOOR_FILE.read_text())
+    pos, quat = push_open.finish_pose(door)
+    df = DoorFrame(door, door["open_sign"])
+    # facing into the fridge (the closed door's inward normal), upright, mid-opening
+    np.testing.assert_allclose(R.from_quat(quat).as_matrix()[:, 2], -np.r_[df.n, 0.0], atol=1e-9)
+    assert R.from_quat(quat).as_matrix()[2, 1] == pytest.approx(1.0)
+    u = float((pos[:2] - df.hinge[:2]) @ df.e)
+    assert u == pytest.approx(df.length * F.PUSH_OPEN_FINISH_U, abs=1e-6)
+    ee = np.asarray(arm.get_state()["ee_pos"], float)  # at one of the stand-offs (the first that plans)
+    ends = [push_open.finish_pose(door, out) for out in F.PUSH_OPEN_FINISH_OUT_M]
+    assert min(np.linalg.norm(ee[:3] - p) for p, _ in ends) < 0.01
+    assert abs(float(np.dot(ee[3:7], quat))) == pytest.approx(1.0, abs=1e-3)
+    assert len(arm.sent) == 3  # approach, swing, and the push-open: still one trajectory
+
+
+def test_the_push_open_ends_at_its_step_off_if_the_hand_would_pass_near_the_door(fridge, monkeypatch):
+    arm, planner, _ = fridge
+    monkeypatch.setattr(F, "PUSH_OPEN_FINISH_CLEAR_M", 10.0)
+    assert open_door.run(arm, planner, False)
+    after = open_door.LAST_PLAN["after"]
+    assert "off the door" in after.finish and "from the door" in after.finish
+    assert "in front of the fridge" not in after.motion.goals[-1].label
+
+
+def test_the_pushed_door_keeps_its_front_and_leaves_out_the_hands_window(fridge, tmp_path):
+    door = {**_closed_door(tmp_path), "door_open_deg": 70.0}
+    model = FridgeModel(door)
+    df = model.df
+    u, z = 0.35, float(door["handle_mid_z"])
+    boxes = {b["name"]: b for b in model.pushed(70.0, u, z, 0.08, 0.25, 0.15, 0.025)}
+    assert {"body", "handle", "door_panel"} <= set(boxes)
+    panel = boxes["door_panel"]
+    assert panel["dims"][0] == pytest.approx(0.025) and panel["dims"][1] == pytest.approx(df.length)
+    # the panel sits in the door's front 2.5 cm, well clear of the inner face the hand presses
+    off = (df._rot(70.0).T @ (np.asarray(panel["position"][:2]) - df.hinge[:2])) @ df.n - df.mid
+    assert off == pytest.approx(df.t / 2 - 0.0125, abs=1e-4)
+    inner = [b for n, b in boxes.items() if n.startswith("door_inner")]
+    assert inner and all(b["dims"][0] == pytest.approx(df.t - 0.025) for b in inner)
+    # nothing of the inner part where the hand is
+    hand = df.pos(u, -df.t / 2, 70.0, z)
+    assert all(close_door._box_gap(hand[None], b) > 0.0 for b in inner)
+
+
+def test_a_through_leg_is_checked_segment_by_segment_against_its_own_worlds(fridge):
+    arm, planner, _ = fridge
+    p, quat = arm.fk.pose(arm.q)
+    def box(name, x):
+        return [{"name": name, "position": [x, 0, 0], "rpy_deg": [0, 0, 0], "dims": [0.1] * 3}]
+
+    worlds = [("first", box("a", 5)), ("second", box("b", 6))]
+    poses = [(p + [0.02, 0, 0], quat), (p + [0.04, 0, 0], quat)]
+    goal = planning.through(poses, "push", [], segment_worlds=worlds)
+    blends = len(arm.blends)
+    motion, why = planner.motion([goal], arm.q)
+    assert motion is not None and len(arm.blends) == blends + 3  # the whole leg, then each segment
+    assert [b["name"] for b in arm.worlds[-2]] == ["a"]
+    assert [b["name"] for b in arm.worlds[-1]] == ["b"]
+    seen = []
+    blend = arm.blend
+
+    def refuse_second(legs, radii, **kw):
+        seen.append(arm.worlds[-1])
+        if arm.worlds[-1] and arm.worlds[-1][0]["name"] == "b":
+            return Plan(False, "MotionGenStatus.COLLISION: b")
+        return blend(legs, radii, **kw)
+
+    arm.blend = refuse_second
+    goal = planning.through([(p + [0.03, 0, 0], quat), (p + [0.05, 0, 0], quat)], "push2", [],
+                            segment_worlds=worlds)
+    motion, why = planner.motion([goal], arm.q)
+    assert motion is None and "against second" in why
+
+
+def test_the_push_is_checked_against_the_door_where_it_is_at_each_step(fridge):
+    arm, planner, _ = fridge
+    assert open_door.run(arm, planner, False)
+    push = open_door.LAST_PLAN["after"].motion.goals[-1]
+    assert push.path == "through" and len(push.segment_worlds) == len(push.through)
+    labels = [label for label, _ in push.segment_worlds]
+    assert labels[0].startswith("the door at 68 deg")
+    assert labels[-1].startswith("the door at 90 deg")
+    assert all(any(b["name"] == "door_panel" for b in w) for _, w in push.segment_worlds)

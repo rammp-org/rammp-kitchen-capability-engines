@@ -517,14 +517,6 @@ def execute_open(ai, planner, plan):
 # --- what follows a full pull (push_open false) ---------------------------------------------------------------------
 
 
-def _facing_fridge(df, y_up):
-    """Approach along the closed door's inward normal (into the fridge), tool y up (+1, upright -- as the grasp) or
-    down (-1)."""
-    fwd = -np.r_[df.n, 0.0]
-    y = np.array([0.0, 0.0, y_up])
-    return R.from_matrix(np.column_stack([np.cross(y, fwd), y, fwd])).as_quat()
-
-
 class _AfterPull:
     """What follows a full pull: plan from the hand holding the handle (`plan`), run it re-planned from where the
     pull ended (`execute`)."""
@@ -580,7 +572,7 @@ class ReleaseAround(_AfterPull):
             out.append(pl.free(df.pos(df.length + F.AROUND_EDGE_CLEAR_M[0], max(v_now, F.AROUND_OUT_M), deg, z),
                                back.quat, "past the free edge", model.full(deg), blend=0.06,
                                world_label="the open door"))
-        out.append(pl.free(df.pos(F.AROUND_END_M[0], -F.AROUND_END_M[1], deg, z), _facing_fridge(df, 1.0),
+        out.append(pl.free(df.pos(F.AROUND_END_M[0], -F.AROUND_END_M[1], deg, z), P.facing_fridge(df, 1.0),
                            "beside the door, inner side, upright", model.full(deg), blend=0.0,
                            world_label="the open door"))
         return out

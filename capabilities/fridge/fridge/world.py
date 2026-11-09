@@ -74,13 +74,16 @@ class FridgeModel:
         return [self._box("body", df.length / 2, -df.t / 2 - body_depth / 2, 0.0, (lo + hi) / 2, df.length,
                           body_depth, hi - lo)]
 
-    def slab(self, deg, tag="door", window=None):
+    def slab(self, deg, tag="door", window=None, v=None):
         """The door slab open `deg`. `window` (u0, u1, z0, z1): leave this part of it out, through its thickness --
-        where the hand holds or pushes it."""
+        where the hand holds or pushes it. `v` (v0, v1): only this layer of it (off its mid-plane, + out of the door's
+        front), default all of it."""
         df = self.df
         lo, hi = _door_z(self.door)
+        v0, v1 = (-df.t / 2, df.t / 2) if v is None else v
+        vc, dv = (v0 + v1) / 2, v1 - v0
         if window is None:
-            return [self._box(tag, df.length / 2, 0.0, deg, (lo + hi) / 2, df.length, df.t, hi - lo)]
+            return [self._box(tag, df.length / 2, vc, deg, (lo + hi) / 2, df.length, dv, hi - lo)]
         u0, u1 = max(0.0, window[0]), min(df.length, window[1])
         z0, z1 = max(lo, window[2]), min(hi, window[3])
         pieces = [
@@ -92,8 +95,19 @@ class FridgeModel:
         out = []
         for name, ua, ub, za, zb in pieces:
             if ub - ua > MIN_DIM_M and zb - za > MIN_DIM_M:
-                out.append(self._box(f"{tag}_{name}", (ua + ub) / 2, 0.0, deg, (za + zb) / 2, ub - ua, df.t, zb - za))
+                out.append(self._box(f"{tag}_{name}", (ua + ub) / 2, vc, deg, (za + zb) / 2, ub - ua, dv, zb - za))
         return out
+
+    def pushed(self, deg, u, z, toward_hinge, toward_edge, half_z, panel):
+        """The door open `deg` as a hand pushing its inner face at (door-frame `u`, height `z`) may touch it: its outer
+        `panel` (the front face, and the outer part of every edge) whole; its inner part (the bins) with a window round
+        the hand left out (`toward_hinge` and `toward_edge` along the door, `half_z` up and down); the handle; the
+        cabinet. The hand may press into the inner face, never through to the front or round the free edge."""
+        df = self.df
+        front = df.t / 2
+        window = (u - toward_hinge, u + toward_edge, z - half_z, z + half_z)
+        return (self.body() + self.slab(deg, "door_panel", v=(front - panel, front))
+                + self.slab(deg, "door_inner", window=window, v=(-front, front - panel)) + self.handle(deg))
 
     def handle(self, deg, tag="handle"):
         """The handle bar open `deg`."""
