@@ -1,5 +1,9 @@
 """The joint-space helpers of the move home."""
 
+# isort: off
+import home_arm_testlib  # noqa: F401  (first: puts home_arm and capability_engine on sys.path)
+# isort: on
+
 from types import SimpleNamespace
 
 import numpy as np

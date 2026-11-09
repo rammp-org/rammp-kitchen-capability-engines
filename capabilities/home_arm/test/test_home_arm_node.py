@@ -1,5 +1,9 @@
 """go_home's flow, with a stand-in arm: what is planned, what is sent, and how it fails."""
 
+# isort: off
+import home_arm_testlib  # noqa: F401  (first: puts home_arm and capability_engine on sys.path)
+# isort: on
+
 import functools
 from types import SimpleNamespace
 

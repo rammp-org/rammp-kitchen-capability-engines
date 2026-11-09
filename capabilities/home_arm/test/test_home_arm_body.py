@@ -1,9 +1,13 @@
 """The planner's chair and user boxes, and the step out of their padding."""
 
+# isort: off
+import home_arm_testlib  # noqa: F401  (first: puts home_arm and capability_engine on sys.path)
+
+# isort: on
 import numpy as np
 import pytest
-from conftest import write_model
 from home_arm import body
+from home_arm_testlib import urdf_text_fixture, write_model  # noqa: F401  (the fixture urdf_text)
 from rammp_arm import JOINTS
 
 HOME = [0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]

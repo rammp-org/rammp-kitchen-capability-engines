@@ -1,4 +1,6 @@
-"""home_arm's tests: this package and capability_engine from the checkout. The URDF is flatbot's,
+"""home_arm's test helpers (not a conftest.py: `make test-arm` runs every test directory in one
+pytest session, where each conftest.py is the module `conftest`): this package and
+capability_engine from the checkout. The URDF is flatbot's,
 rendered from its mount.yaml as the driver renders it (the test image's /fixtures/urdf); a test that
 needs it skips where it is not there (HOME_ARM_TEST_URDF names another)."""
 
@@ -35,8 +37,8 @@ ROBOT = """robot_cfg:
 """
 
 
-@pytest.fixture
-def urdf_text():
+@pytest.fixture(name="urdf_text")
+def urdf_text_fixture():
     if not URDF.is_file():
         pytest.skip(f"no URDF at {URDF} (the test image's /fixtures/urdf, or HOME_ARM_TEST_URDF)")
     return URDF.read_text()
