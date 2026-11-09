@@ -465,9 +465,10 @@ def plan_view(ai, scene, rb):
     """The view pose in front of the microwave: the wrist camera VIEW_DISTS out from its front face, VIEW_SIDES along it
     away from the user, VIEW_HEIGHTS above the face's middle, looking at the face's centre. The face comes from boxer's
     box (box_topic) or, without boxer, from a first detection made from where the arm is. The hand pose comes from
-    where the camera sits on it now (TF), its joints from IK seeded at VIEW_SEED_DEG and checked like any cuRobo goal.
-    Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch) and the hand's goal position;
-    raises Refused."""
+    where the camera sits on it now (TF), its joints from IK seeded at VIEW_SEED_DEG (then VIEW_MORE_SEEDS_DEG),
+    checked like any cuRobo goal and then asked of cuRobo itself (plan_to_joints, nothing moves): the first that
+    cuRobo plans too. Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch) and the
+    hand's goal position; raises Refused."""
     cam = dc.camera()
     face, n = _box_face(cam) if getattr(cam, "box_topic", "") else _detected_face()
     f = cam.grab()
@@ -502,6 +503,12 @@ def plan_view(ai, scene, rb):
             )
         if q is None:
             whys[_why_kind(" ".join(lines))] += 1
+        elif hasattr(ai, "plan_to_joints"):  # cuRobo has the last word: its arm (padded spheres) is fatter than ours
+            start = ai.raw_joints() if hasattr(ai, "raw_joints") else st["position"]
+            pl = ai.plan_to_joints(q, start)
+            if not pl.success:  # 11-09: a pose our sim passed was cuRobo's IK_FAIL at motion time
+                whys[f"cuRobo: {str(pl.message).split(':')[0][:60]}"] += 1
+                q = None
         if q is not None:
             say(
                 f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
