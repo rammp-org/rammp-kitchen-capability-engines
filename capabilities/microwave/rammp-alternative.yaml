@@ -56,8 +56,10 @@ params:
   box_class: microwave
   # The view pose in front of the box: camera distances out from its front face and heights above
   # its middle (m), tried in order. Per camera and setup.
-  view_dists: [0.35, 0.30, 0.40, 0.45]
+  view_dists: [0.30, 0.25, 0.35, 0.40]
   view_heights: [0.15, 0.20, 0.10, 0.25, 0.05]
+  # ... and sideways along the face, away from the user (+y): tried first, so the hand stays off the user's lap.
+  view_sides: [0.10, 0.15, 0.05, 0.0]
   # Every run's rosbag (in its run folder): both cameras' colour, depth and intrinsics bag_frame_hz times a
   # second, the detections and TF (~75 MB a minute at 0.5); no more frames past bag_max_mb.
   record_bag: true

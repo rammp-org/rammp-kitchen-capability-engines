@@ -41,10 +41,11 @@ PARAMS = {
     # box wasn't accurate enough on snorlax) = the scene camera places the view pose.
     "box_topic": "",
     "box_class": "microwave",
-    # the view pose in front of the box (open_door.VIEW_*): camera distances out from its front face and heights
-    # above its middle (m), tried in order. Per camera and setup.
+    # the view pose in front of the box (open_door.VIEW_*): camera distances out from its front face, offsets along it
+    # away from the user (+y) and heights above its middle (m), every combination tried, sides first. Per setup.
     "view_dists": list(open_door.VIEW_DISTS),
     "view_heights": list(open_door.VIEW_HEIGHTS),
+    "view_sides": list(open_door.VIEW_SIDES),
     # every run also records a rosbag into its run folder (bag.RunBag): the wrist and scene cameras' colour, depth
     # and intrinsics bag_frame_hz times a second, and TF. A 640x400 frame (colour + depth) is ~1.3 MB, so at 0.5 Hz
     # the two cameras are ~75 MB a minute; past bag_max_mb no more frames (TF still). The arm's joints are in the
@@ -98,6 +99,7 @@ class Capability(CapabilityEngine):
         dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
+        open_door.VIEW_SIDES = tuple(float(v) for v in self.cfg["view_sides"])
         if self.cfg["record_bag"] and not self.mock:
             self._set_up_bag()
         self.get_logger().info(

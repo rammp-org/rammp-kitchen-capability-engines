@@ -84,12 +84,17 @@ from .constants import (
 
 # --- view pose: before detecting, the wrist camera goes square in front of the microwave (placed from boxer's box, or
 # without boxer from a first detection) ---
-VIEW_DISTS = (0.35, 0.30, 0.40, 0.45)  # camera this far out from the box's front face (horizontally) ...
+VIEW_DISTS = (0.30, 0.25, 0.35, 0.40)  # camera this far out from the box's front face (horizontally) ...
+# 11-09: was 0.35 first -- with the arm 8 in further forward on the chair that put the hand over the user's lap, and
+# every view pose IK'd into the person keep-out. The wrist OAK sees down to ~24 cm, so 0.25 is the closest
 # 10-30: was 0.50 first -- at 50 cm a 1-2 cm handle bar is ~1 pixel of the OAK's 320x200 near-range depth and comes and
 # goes between frames ("nothing protruding" / "no vertical bar" retries, and its height wandered)
 VIEW_HEIGHTS = (0.15, 0.20, 0.10, 0.25, 0.05)  # ... and this far above the box's middle, looking down at the face's
 # centre; the first (height, distance) that passes. Level at mid-height folded the elbow past its limit (10-30: J4
 # ~210 deg, door 72 cm out); the hand-placed view that worked (10-28) had the camera ~20 cm above the door, looking down
+VIEW_SIDES = (0.10, 0.15, 0.05, 0.0)  # ... and this far sideways along the face, toward the arm's left (+y): away
+# from the user, who sits to the arm's right (-y). The camera still looks at the face's centre. Tried before the
+# heights and distances: away from the user first (11-09)
 VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
 BOX_WAIT_S = 10.0  # wait this long for boxer's first microwave box
@@ -431,11 +436,12 @@ def _detected_face():
 
 
 def plan_view(ai, scene, rb):
-    """The view pose square in front of the microwave: the wrist camera VIEW_DISTS out from its front face, VIEW_HEIGHTS
-    above the face's middle, looking at the face's centre. The face comes from boxer's box (box_topic) or, without
-    boxer, from a first detection made from where the arm is. The hand pose comes from where the camera sits on it now
-    (TF), its joints from IK seeded at VIEW_SEED_DEG and checked like any cuRobo goal. Returns the goal joints (to
-    go_to_joint_config, so the arm arrives on that branch) and the hand's goal position; raises Refused."""
+    """The view pose in front of the microwave: the wrist camera VIEW_DISTS out from its front face, VIEW_SIDES along it
+    away from the user, VIEW_HEIGHTS above the face's middle, looking at the face's centre. The face comes from boxer's
+    box (box_topic) or, without boxer, from a first detection made from where the arm is. The hand pose comes from
+    where the camera sits on it now (TF), its joints from IK seeded at VIEW_SEED_DEG and checked like any cuRobo goal.
+    Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch) and the hand's goal position;
+    raises Refused."""
     cam = dc.camera()
     face, n = _box_face(cam) if getattr(cam, "box_topic", "") else _detected_face()
     f = cam.grab()
@@ -443,34 +449,36 @@ def plan_view(ai, scene, rb):
         raise Refused("No arm base <- camera transform -- can't place the camera for the view pose.")
     st = ai.get_state()
     tool_T_cam = np.linalg.inv(_pose_T(st["ee_pos"][:3], st["ee_pos"][3:7])) @ f["base_T_cam"]
+    side_dir = np.array([-n[1], n[0], 0.0]) / max(float(np.linalg.norm(n[:2])), 1e-9)  # along the face, level ...
+    side_dir *= 1.0 if side_dir[1] >= 0 else -1.0  # ... toward +y: away from the user
     tried = []
-    for height in VIEW_HEIGHTS:
-        for dist in VIEW_DISTS:
-            # optical frame: z at the face's centre (tilted down), y down in the image, x right
-            pos = face + n * dist + np.array([0.0, 0.0, height])
-            z = (face - pos) / np.linalg.norm(face - pos)
-            y = np.array([0.0, 0.0, -1.0]) - z * -z[2]
-            y /= np.linalg.norm(y)
-            T_cam = np.eye(4)
-            T_cam[:3, :3], T_cam[:3, 3] = np.column_stack([np.cross(y, z), y, z]), pos
-            T_tool = T_cam @ np.linalg.inv(tool_T_cam)
-            label = f"to view pose {dist * 100:.0f} cm out, {height * 100:.0f} cm up"
-            with quiet():
-                q = check_curobo_goal(
-                    scene,
-                    rb,
-                    label,
-                    pos=T_tool[:3, 3],
-                    quat=R.from_matrix(T_tool[:3, :3]).as_quat(),
-                    seed=np.radians(VIEW_SEED_DEG),
-                )
-            if q is not None:
-                say(
-                    f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
-                    f"{np.round(pos, 3)}, joints {np.round(np.degrees(q), 1)}"
-                )
-                return q, T_tool[:3, 3]
-            tried.append((label, T_tool))
+    # every (side, height, distance), away from the user first
+    for side, height, dist in ((s, h, d) for s in VIEW_SIDES for h in VIEW_HEIGHTS for d in VIEW_DISTS):
+        # optical frame: z at the face's centre (tilted down), y down in the image, x right
+        pos = face + n * dist + side_dir * side + np.array([0.0, 0.0, height])
+        z = (face - pos) / np.linalg.norm(face - pos)
+        y = np.array([0.0, 0.0, -1.0]) - z * -z[2]
+        y /= np.linalg.norm(y)
+        T_cam = np.eye(4)
+        T_cam[:3, :3], T_cam[:3, 3] = np.column_stack([np.cross(y, z), y, z]), pos
+        T_tool = T_cam @ np.linalg.inv(tool_T_cam)
+        label = f"to view pose {dist * 100:.0f} cm out, {side * 100:.0f} cm aside, {height * 100:.0f} cm up"
+        with quiet():
+            q = check_curobo_goal(
+                scene,
+                rb,
+                label,
+                pos=T_tool[:3, 3],
+                quat=R.from_matrix(T_tool[:3, :3]).as_quat(),
+                seed=np.radians(VIEW_SEED_DEG),
+            )
+        if q is not None:
+            say(
+                f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
+                f"{np.round(pos, 3)}, joints {np.round(np.degrees(q), 1)}"
+            )
+            return q, T_tool[:3, 3]
+        tried.append((label, T_tool))
     label, T_tool = tried[0]  # say why the preferred one failed
     check_curobo_goal(
         scene,
@@ -481,7 +489,8 @@ def plan_view(ai, scene, rb):
         seed=np.radians(VIEW_SEED_DEG),
     )
     raise Refused(
-        f"No view pose ({len(tried)} tried: {VIEW_DISTS} m out x {VIEW_HEIGHTS} m up) passes the checks -- "
+        f"No view pose ({len(tried)} tried: {VIEW_DISTS} m out x {VIEW_SIDES} m aside x {VIEW_HEIGHTS} m up) passes "
+        "the checks -- "
         "move the microwave or the robot."
     )
 
