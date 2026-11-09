@@ -339,6 +339,8 @@ def _ik_within_guards(scene, rb, pos, quat, seed):
         if err <= sim.MAX_IK_ERR:
             break
         q, err = solve_ik(scene, rb, pos, quat, q)
+    if err >= sim.KEEP_OUT_ERR:  # reached, but the arm is in the chair / user (solve_ik's keep-out code, not a miss)
+        return None, f"goal {np.round(pos, 3)}: the arm would be in the keep-out zone ({keep_out_message(rb, q)})"
     if err > sim.MAX_IK_ERR:
         return None, f"goal {np.round(pos, 3)} unreachable (IK err {err * 100:.1f} cm)"
     j4, j6 = abs(np.degrees(q[3])), abs(np.degrees(q[5]))
