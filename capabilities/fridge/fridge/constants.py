@@ -44,7 +44,12 @@ MEASURED = {
 # door files' handle-to-grasp is 4.8 cm); nothing has checked them on this handle ---
 # along the approach axis (negative = past the detected handle). 11-05: the microwave's 0.088 grabbed too deep on
 # the fridge handle -> 3.8 cm (1.5 in) shallower
-GRIP_EXT = 0.126
+# 11-09: 0.126 stopped the fingertips 3-4.6 cm SHORT of the bar (both executed runs missed it). Measured: the
+# fingertip ends are 4.3 cm past arm_tool_frame (robotiq finger_tip mesh reaches 5.1 cm past the tip link, which is
+# 0.8 cm behind the tool frame), not door_common's FINGERTIP_PAST_TOOL 6.2 cm; the detected bar front was right
+# to <0.5 cm (fingers teleoped onto it: /fridge_data/true_handle_20261109.json). A level grasp now puts the
+# fingertips 3 cm past the bar's front (tool = bar front - 1.3 cm). Backup constants.py.bak_20261109.
+GRIP_EXT = 0.053
 VERTICAL_CORR = 0.0  # world z
 GRASP_X_ADJUST = 0.040  # along the approach axis
 GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose, to let its bar turn)
@@ -56,24 +61,28 @@ GRASP_END_MARGIN_M = 0.03
 # (FridgeModel: cabinet, door at its angle, handle) plus the planner's own chair layers (scene camera included), the arm's
 # configuration cuRobo's to choose; legs on or along the door by local IK along their exact path, checked by cuRobo;
 # each motion one trajectory joined by cuRobo. The poses below are the only places a motion is told to pass ---
-GRASP_PITCHES_DEG = (15, 30, 45)  # the grasp's nose-down tilts tried (configure sets them per mount), each with the
+GRASP_PITCHES_DEG = (25, 30, 40)  # the grasp's nose-down tilts tried (configure sets them per mount), each with the
 # hand either way up (fingers across the bar both ways): the first of these whose whole open plans is used. Only
-# 15-45 deg: under 15 the fingers don't grip the bar firmly enough to pull the door (user, 2026-11-08)
+# 25-40 deg: under 15 the fingers don't grip the bar firmly enough to pull the door (user, 2026-11-08); 11-09 (user):
+# at least 25, and over 40 runs the wrist camera into the handle
 PREGRASP_STANDOFF_M = (0.12, 0.08)  # line up this far straight out from the grasp, then straight in (handle out of
 # the world for that leg only); the first that plans
 ALT_CONFIG_SEEDS = (("J3", -60.0), ("J3", 60.0), ("wrist", 0.0))  # if no grasp's swing plans from the configuration
 # cuRobo picks from the start joints, these: the start joints with the elbow (J3) turned, or the wrist flipped (J5+180,
 # -J6, J7+180), as cuRobo's start for planning the line-up pose -- other arm configurations at the same grasp
 SWING_CANDIDATES = 3  # what follows the swing is planned for at most this many grasps whose approach + swing plan
-PLAN_BUDGET_S = 120.0  # the time one search may take (the whole plan, or a re-plan after the arm or the base moved:
-# the time spent moving never counts); past it the search refuses
+PLAN_BUDGET_S = 240.0  # the time one search may take (the whole plan, or a re-plan after the arm or the base moved:
+# the time spent moving never counts); past it the search refuses. 120 until 11-09: a whole push-open search that ends
+# in a real refusal took 117 s in sim (11-09 detections, the Jetson's GPU), one that planned 98 s: twice that, so a
+# search ends with an answer, not out of time
 HAND_WINDOW_U_M = 0.15  # onto and off the handle: the door slab within this of the hand, along the door ...
 HAND_WINDOW_Z_M = 0.15  # ... and up or down, is out of cuRobo's check (the handle with it): the hand is there
 SWING_DEG = 90  # the full pull (push_open false) without a swing_deg. Exactly this swing or the run refuses: no smaller
 # fallback
 
 # --- how the open moves (the side grasp's 11-06 hardware runs, side_run/; run_general.py): the swing held compliant, the
-# gripper closing as the pull starts and opening while the arm still moves, everything after the release one motion ---
+# gripper closing as the pull starts, the swing stopping at its angle, then the gripper opening, everything after the
+# release one motion ---
 PULL_GAINS = {  # the driver's stiffest joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad, torque_limit <=
     # the URDF's effort limits), critically damped: the swing and everything after the release run under it
     "kq": (400.0,) * 7,
@@ -83,16 +92,17 @@ PULL_GAINS = {  # the driver's stiffest joint impedance (kinova-gen3-driver gain
 PULL_PATH_TOL_RAD = 0.15  # the swing's tracking limit (rad, per joint)
 GRIP_DURING_SWING = True  # the gripper closes on the bar as the swing starts (the 2F-85 takes ~1 s), no stop on the
 # handle; False: it closes first, then the swing
-RELEASE_ARC_DEG = 8.0  # the pull runs on this far along the door's arc while the gripper opens (a stopped hand that
-# opened pushed the door back shut, 11-06) ...
-OPEN_DURING_S = 2.0  # ... for at least this long past the pull's end ...
-OPEN_LEAD_S = 0.3  # ... the gripper starting to open this long before the hand passes the pull's end ...
-GRIP_OPEN_SPEED = 0.2  # ... slowly
+# the release (user, 11-09): the swing comes to a STOP at exactly swing_deg, the gripper then opens with the hand still
+# (confirmed open before anything else moves) -- the hand never pulls the door on past the angle asked for. Until 11-09
+# the pull ran on 8 deg further while the gripper opened (RELEASE_ARC_DEG): the door ended ~68 deg on a 60 deg pull,
+# was let go still moving and swung on into the fingers as they backed off. Stopped while held, it has no momentum left
+GRIP_OPEN_SPEED = 0.2  # the gripper opens this slowly
 AFTER_RELEASE_PATH_TOL_RAD = 0.25  # back off + round the door + the push, one motion under PULL_GAINS: this tracking
 # limit (free space until the push; impedance lags the path more the faster it goes: 11-06 at ~1 rad/s, past 0.15 rad)
 
-# --- release: let go, then back straight out of the handle ---
-BACK_OFF_M = 0.08
+# --- release: once the gripper is open, back straight out of the handle (the first leg of what follows the swing) ---
+BACK_OFF_M = 0.12  # 0.08 until 11-09: with the deeper grasp (GRIP_EXT 0.053) it left the hand 22 mm inside the
+# handle's padding in cuRobo's world, so no route to the push could start (sim, the 11-09 detections)
 
 # --- after the full pull (push_open false): back round the door to its inner side, so the arm ends beside the open
 # door. cuRobo routes there from the back-off; if it finds no route, it is given one point past the door's free edge ---
@@ -124,13 +134,18 @@ PUSH_DOOR_PANEL_M = 0.025  # ... checked (world.FridgeModel.pushed) against the 
 PUSH_DOOR_WINDOW_M = (0.08, 0.25, 0.15)  # ... the window: this far toward the hinge and toward the free edge from the
 # hand, and up and down (11-08: 5 cm toward the hinge reached the inner part by 19 mm; these, nothing)
 PUSH_OPEN_POINT_DEG = 2  # ... held in the door's frame, turned about the hinge (a pose every this much door) ...
-PUSH_OPEN_AWAY_M = 0.10  # ... then straight off the inner face this far (to the right): out of the planner's padding
+# ... coming to rest at exactly PUSH_OPEN_TO_DEG (the door isn't held: a hand still moving there lets it coast past; user,
+# 11-09: it must land on the angle at any speed), its last PUSH_EASE_DEG at most PUSH_END_JOINT_SPEED (rad/s, the
+# fastest joint) whatever the goal's speed. Not yet tuned on the arm: if the door still coasts past 90, lower it ...
+PUSH_EASE_DEG = 10.0
+PUSH_END_JOINT_SPEED = 0.10
+PUSH_OPEN_AWAY_M = 0.10  # ... then, from rest, straight off the inner face this far (to the right): out of the planner's padding
 # round the door (6 cm left the hand inside it, so nothing could be planned from there) ...
 PUSH_OPEN_FINISH_U = 0.5  # ... then to in front of the fridge, facing into it, upright (as the grasp): this fraction of
 # the door's width from the hinge (the middle of the opening) ...
 PUSH_OPEN_FINISH_OUT_M = (0.25, 0.18, 0.12)  # ... this far out from the closed door's face (tool point; the first that
 # plans: nearer the arm, the elbow (J4) runs into its limit facing forwards), at the door's mid-height ...
-PUSH_OPEN_FINISH_CLEAR_M = 0.03  # ... part of the push's one leg (no stop, no blend), the hand's real box this clear of
+PUSH_OPEN_FINISH_CLEAR_M = 0.03  # ... in the step-off's leg (no stop between), the hand's real box this clear of
 # the open door and its handle all the way. If it doesn't plan, the push-open ends at the step-off
 # the real 2F-85 (open) in the tool frame, from its collision meshes in the driver's URDF (measured 11-06): fingertips
 # +-8.0 cm across (tool x), the body +-3.8 cm thick (tool y; the bracelet +-4.2 cm), the tips 1.4 cm past the tool
@@ -213,7 +228,8 @@ MOUNTS = {
             (1.00, -0.25), (1.00, -0.20), (1.05, -0.35), (1.05, -0.30), (1.05, -0.25),
         ),
         push_open_dz_m=0.10,  # 10 cm ABOVE the handle
-        grasp_pitches_deg=(15, 30, 45),  # 15-45 only (GRASP_PITCHES_DEG)
+        grasp_pitches_deg=(25, 30, 40),  # 25-40 only (GRASP_PITCHES_DEG); 11-09: 45 ran the wrist camera into the
+        # handle
     ),
 }
 PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  # configure sets them

@@ -10,9 +10,10 @@ Opens and closes the fridge door with the Kinova arm. On an `open` goal it finds
 on the wrist camera (`detect_camera`, `handle_source`) and measures the door's direction by fitting
 the printed handle's model (`RAMMP.Fridge.Handle5.STL`) to the handle's depth (`door_normal: handle_model`, the side grasp's method); two looks must agree within 3°. It grasps the handle
 squared to the door (at the middle of the bar, or `grasp_offset_m` above or below it), the gripper
-closing as the pull starts, pulls the door 60° open and runs on 8° further while the gripper opens,
-then, in one motion, backs off the handle, goes round the door's free edge and pushes the door on to
-90° with the side of the hand, steps 10 cm off it and, in the same motion, turns to face into the fridge in front
+closing as the pull starts, pulls the door smoothly to exactly 60° and stops there, the door
+stopped with it; the gripper then opens with the hand still. Then, in one motion, it backs
+straight off the handle, goes round the door's free edge and pushes the door on to
+90° with the side of the hand, coming to rest exactly there (its last 10° slow, at any `speed`), steps 10 cm off it and, in the same motion, turns to face into the fridge in front
 of its middle (if the arm can reach that). If the push needs the wheelchair moved first, the goal stops after the
 back-off and its result (`note`) and feedback say how far; an `open` goal with `chair_moved` then
 pushes. With `push_open: false` it pulls 90° instead, lets go the same way and goes round the door's
@@ -44,7 +45,7 @@ limits; if no grasp's swing plans from the configuration it picks, the line-up i
 other configurations (elbow turned, wrist flipped). cuRobo's blend joins each motion's legs into one
 trajectory, cutting the corners between them, which the driver runs. The swing and everything after
 the release run under the driver's stiffest joint impedance. Each search (the whole plan before
-anything moves, and each re-plan after the arm or the base has moved) has `PLAN_BUDGET_S` (120 s);
+anything moves, and each re-plan after the arm or the base has moved) has `PLAN_BUDGET_S` (240 s: an exhaustive push-open search took up to 117 s in sim);
 past it, it refuses. The time spent detecting, moving or driving never counts against it. If the swing
 stops short, the gripper is not opened afterwards. The robot's own planner world is put back when the
 action ends.
@@ -120,15 +121,20 @@ the orchestrator is up.
 - **Start pose.** Nothing moves the camera to the fridge. The arm starts pointed at the closed door,
   roughly square-on, 50–60 cm from it, with the handle in view and the door filling most of the
   image.
-- **Placement.** The open prints where the wheelchair should go and refuses with a suggestion when
-  it does not fit. At the placement that passed (handle x 0.50–0.56, y −0.45 to −0.39), a 90° door's
-  free edge is ~10 cm in front of the arm's base, so the hand passes right beside the base (~0.67 m
+- **Placement.** The open prints where the wheelchair should go, from a sim sweep (`MOUNTS`'
+  `placement_cells`: a guide, the plan decides): the nearest point of the region that planned, no move
+  under 2 cm along an axis (two detections of one placement differ by 1–3 cm). When the plan refuses,
+  it plans the open again with the fridge shifted as wheelchair moves of 5 and 10 cm would shift it
+  (at most `PLACEMENT_SEARCH_S`, 90 s) and names the smallest move after which it plans, or says no
+  such move helps (then the refusal isn't about placement). On the level mount (dojo), at the placement
+  that passed (handle x 0.50–0.56, y −0.45 to −0.39), a 90° door's free edge is ~10 cm in front of the arm's base, so the hand passes right beside the base (~0.67 m
   up) and sweeps across in front of it. The sim has no wheelchair or person in it: keep that space
   clear.
 - **Measure** a new fridge: the `*_m` parameters below. A wrong hinge drags the door or the fridge
   during the swing.
-- **Watch where the fingers close:** `GRIP_EXT` is the microwave's and nothing checks the grasp on
-  this handle. If the fingers hit the door or close short of the bar, change it (bigger = shorter).
+- **Watch where the fingers close:** `GRIP_EXT` was set from a measurement on 2026-11-09 (the
+  fingertips 3 cm past the bar's front on a level grasp). If the fingers hit the door or close short
+  of the bar, change it (bigger = shorter).
 
 How to run it on the arm: [TESTING.md](TESTING.md).
 
@@ -140,6 +146,11 @@ How to run it on the arm: [TESTING.md](TESTING.md).
   from the arm's mount, and cuRobo plans nothing from a start pose inside them: the 2026-11-04 runs'
   start sits 3–10 cm inside the armrest and torso, 2026-11-06's 8–17 mm inside the armrest. The open
   refuses at once, naming the boxes; start from a pose outside them (the web app's Fridge pose is).
+  Which layer set the planner runs matters: on 2026-11-09 flatbot's planner ran the set from before
+  `rammp-deployments` #156 (11-07, the arm 8 in further forward on the chair), whose occupant's lap
+  reaches 20 cm further forward, where the forearm passes during the pull; most of that day's swings
+  were refused against it. The console's world summary says which: `seat 11` boxes (with
+  `armrest_arm_0`/`_1`) is the older set, `seat 10` the #156 one.
   The arm's own collision spheres (flatbot's `curobo/robot.yaml`) decide how close it may come: the
   file's 47 spheres reach 16–65 mm past the arm's meshes and miss parts of them (up to 2.5 cm at the
   finger tips); a 197-sphere fit to the meshes (≤ 12 mm past them) gets within about a centimetre of the

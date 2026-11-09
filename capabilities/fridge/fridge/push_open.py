@@ -1,5 +1,5 @@
-"""The push-open, the open's default: after the PUSH_OPEN_PULL_DEG pull and the release (the gripper opened while the hand
-ran on RELEASE_ARC_DEG), off the handle, round the door's free edge, and the door pushed on to PUSH_OPEN_TO_DEG with the
+"""The push-open, the open's default: after the PUSH_OPEN_PULL_DEG pull, stopped there, and the release (the gripper
+opened with the hand still), off the handle, round the door's free edge, and the door pushed on to PUSH_OPEN_TO_DEG with the
 side of the hand -- one trajectory under joint impedance, the wheelchair moved first if the push needs it.
 
 The motion (planning.py), planned with the open before anything moves and again from where the release leaves the arm:
@@ -19,8 +19,8 @@ A few hand placements are tried in order (PUSH_OPEN_AT_M x PUSH_OPEN_APPROACH_DE
 whole motion plans.
 
 If none plans with the wheelchair where it is, the smallest move of CHAIR_MOVES_M after which one does (+ back,
-- forward): the back-off runs alone, the hand waits while the chair moves (the push start's route is planned from
-there against the door at CHAIR_MOVE_STEPS points along the move), and the rest is planned again against the door
+- forward): the back-off runs alone, the hand waits while the chair moves (the push start's route is planned
+from there against the door at CHAIR_MOVE_STEPS points along the move), and the rest is planned again against the door
 where it really is. Without drive_base the goal ends there, asking for the move (NEXT_STEP); an open goal with
 chair_moved then pushes (push_after_chair_move).
 """
@@ -107,31 +107,47 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
                              "past the free edge", route_world, blend=0.06, world_label="the open door"))
     goals.append(pl.free(df.pos(u_push, v_in, deg0, z_in), q_in, "in behind the door", route_world, blend=0.02,
                          world_label="the open door"))
-    # ONE leg (no stop): onto the inner face, round with the door to PUSH_OPEN_TO_DEG (the hand held in the door's frame,
-    # a pose every PUSH_OPEN_POINT_DEG), then straight off the inner face -- the close starts from there, the door
-    # left at 90 stays
+    # the push: ONE leg onto the inner face and round with the door (the hand held in the door's frame, a pose every
+    # PUSH_OPEN_POINT_DEG) to exactly PUSH_OPEN_TO_DEG, where it comes to REST, still against the door: the door isn't
+    # held, so a hand still moving at 90 would let it coast on past. Its last PUSH_EASE_DEG at most PUSH_END_JOINT_SPEED
+    # whatever the goal's speed (push_caps), so the door is as slow at the end however fast the push ran
     n = max(1, int(np.ceil((F.PUSH_OPEN_TO_DEG - deg0) / F.PUSH_OPEN_POINT_DEG)))
-    poses = [(df.pos(u_push, v_push, deg0, z_in), q_in)]
-    for k in range(1, n + 1):
-        deg = deg0 + (F.PUSH_OPEN_TO_DEG - deg0) * k / n
-        poses.append((df.pos(u_push, v_push, deg, z_in), hand_quat(df, deg, approach_deg, y_up)))
-    deg = float(F.PUSH_OPEN_TO_DEG)
-    poses.append((df.pos(u_push, v_push - F.PUSH_OPEN_AWAY_M, deg, z_in), hand_quat(df, deg, approach_deg, y_up)))
-    label = f"onto the inner face, push to {F.PUSH_OPEN_TO_DEG} deg, {F.PUSH_OPEN_AWAY_M * 100:.0f} cm off it"
-    degs = [deg0] + [deg0 + (F.PUSH_OPEN_TO_DEG - deg0) * k / n for k in range(1, n + 1)] + [deg]
-    if finish is not None:
-        poses.append((np.asarray(finish[0], float), np.asarray(finish[1], float)))
-        degs.append(deg)
-        label += ", then in front of the fridge"
-    # each step against the door where it is then: its front panel, edges and inner part all but round the hand
+    degs = [deg0] + [deg0 + (F.PUSH_OPEN_TO_DEG - deg0) * k / n for k in range(1, n + 1)]
+    poses = [(df.pos(u_push, v_push, d, z_in), q_in if k == 0 else hand_quat(df, d, approach_deg, y_up))
+             for k, d in enumerate(degs)]
     worlds = {}
     for d in degs:
-        if d not in worlds:
+        if d not in worlds:  # each step against the door where it is then: its front panel, edges, inner part all but
+            # round the hand
             worlds[d] = (f"the door at {d:.0f} deg (its front and edges; the hand's window left out)",
                          model.pushed(d, u_push, z_in, *F.PUSH_DOOR_WINDOW_M, F.PUSH_DOOR_PANEL_M))
-    goals.append(pl.through(poses, label, model.cabinet(), world_label="the cabinet (pushing)",
+    goals.append(pl.through(poses, f"onto the inner face, push to {F.PUSH_OPEN_TO_DEG} deg and stop there",
+                            model.cabinet(), caps=push_caps(degs), world_label="the cabinet (pushing)",
                             segment_worlds=[worlds[d] for d in degs]))
+    # then, from rest, straight off the inner face -- the close starts from there, the door left at 90 stays -- and on
+    # to in front of the fridge (`finish`), one more leg
+    deg = float(F.PUSH_OPEN_TO_DEG)
+    off = [(df.pos(u_push, v_push - F.PUSH_OPEN_AWAY_M, deg, z_in), hand_quat(df, deg, approach_deg, y_up))]
+    label = f"{F.PUSH_OPEN_AWAY_M * 100:.0f} cm off the door"
+    if finish is not None:
+        off.append((np.asarray(finish[0], float), np.asarray(finish[1], float)))
+        label += ", then in front of the fridge"
+    goals.append(pl.through(off, label, model.cabinet(), world_label="the cabinet (off the door)",
+                            segment_worlds=[worlds[deg]] * len(off)))
     return goals
+
+
+def push_caps(degs):
+    """The push leg's speed caps (fractions of planning.LOCAL_JOINT_SPEED) at the door angles `degs`: 1 until the last
+    PUSH_EASE_DEG, then at most PUSH_END_JOINT_SPEED rad/s at the speed the run's contact legs get (planning.Planner.join
+    scales a local leg by rammp_arm's joint and contact speeds, which the goal's `speed` has scaled already: this is
+    planned inside the run). The leg ends at rest either way; this makes how slowly it gets there the same at any
+    speed."""
+    import rammp_arm
+
+    scale = rammp_arm.JOINT_SPEED * rammp_arm.contact_speed_scale() / pl.LOCAL_JOINT_SPEED
+    end = min(1.0, F.PUSH_END_JOINT_SPEED / max(1e-6, pl.LOCAL_JOINT_SPEED * scale))
+    return [end if d >= F.PUSH_OPEN_TO_DEG - F.PUSH_EASE_DEG - 1e-6 else 1.0 for d in degs]
 
 
 def finish_gap(model, step_off, finish):
@@ -180,6 +196,8 @@ def plan_push(planner, door, q_off, off_pose, route_world, model=None, from_arm=
             motion, why = planner.motion(goals, q_off, start_pose=off_pose, from_arm=from_arm)
             if motion is not None:
                 return motion, (*placement, via is not None)
+            if "START_STATE" in why:  # the hand's start is blocked in this world: no placement changes that
+                return None, why
             if pl.goal_unreachable(why):  # a pose of it can't be reached at all: a via point won't help
                 break
     return None, why
@@ -209,8 +227,8 @@ def _after(move):
 
 
 class PushOpen:
-    """What follows the pull: plans the release, back-off, wheelchair move and push from the hand holding the handle
-    (`plan`), and runs them (`execute`), re-planned from where the pull really ended."""
+    """What follows the pull: plans the back-off, wheelchair move and push from the hand on the handle, the gripper
+    open (`plan`), and runs them (`execute`), re-planned from where the pull really ended."""
 
     def __init__(self, chair_dir=F.CHAIR_BACK_DIR):
         self.chair_dir = chair_dir
@@ -221,8 +239,8 @@ class PushOpen:
         self.finish = ""  # how the push ends (plan_finished_push), in words
 
     def plan(self, planner, door, q_hold, hold_pose, from_arm=False):
-        """From the hand holding the handle (joints `q_hold`, tool `hold_pose`) with the door as `door` (open as far as
-        the pull leaves it). `from_arm`: that is where the arm is now. Returns (ok, message)."""
+        """From the hand on the handle (joints `q_hold`, tool `hold_pose`) with the door as `door` (open as far as the
+        pull leaves it). `from_arm`: that is where the arm is now. Returns (ok, message)."""
         model = FridgeModel(door)
         deg0 = float(door["door_open_deg"])
         back = back_off_goal(model, deg0, hold_pose)
@@ -276,10 +294,10 @@ class PushOpen:
         say(f"  {NEXT_STEP}")
 
     def execute(self, ai, planner, drive_chair=None):
-        """After the swing and the release (the gripper opened while the arm ran on): planned again from where the arm
-        is (else the plan checked before the swing, if the arm is where it starts), then off the bar, round the door
-        and the push as ONE motion under joint impedance. With a wheelchair move: the back-off, then the move (driven,
-        or asked for)."""
+        """After the swing (stopped at its angle) and the release (the gripper opened with the hand still): planned
+        again from where the arm is (else the plan checked before the swing, if the arm is where it starts), then off the
+        bar, round the door and the push as ONE motion under joint impedance. With a wheelchair move: the back-off,
+        then the move (driven, or asked for)."""
         global NEXT_STEP
         say("\n===== off the handle, round the door, push further open =====")
         door = load_door()
@@ -287,8 +305,7 @@ class PushOpen:
         if deg0 > F.PUSH_OPEN_TO_DEG - F.PUSH_OPEN_MIN_PUSH_DEG + 2:  # a pull may overshoot a little
             raise Refused(f"the door is already ~{deg0:.0f} deg open (push to {F.PUSH_OPEN_TO_DEG}).")
         say(f"  {after_release(self, planner, ai, door)}")
-        model = FridgeModel(door)
-        planner.join(self.motion, model.cabinet())
+        planner.join(self.motion, FridgeModel(door).cabinet())
         if not self.chair_move:
             ok = planner.run(self.motion, "off the handle + round the door + push-open", impedance=AFTER_RELEASE)
             say(f"PUSH-OPEN {'DONE' if ok else 'STOPPED SHORT'}")
@@ -318,17 +335,18 @@ AFTER_RELEASE = {**F.PULL_GAINS, "path_tol": F.AFTER_RELEASE_PATH_TOL_RAD}  # ev
 
 
 def _release(ai):
-    """The gripper fully open (the swing started opening it while the arm moved; this waits it out)."""
+    """Open the gripper, slowly, the hand still (the swing has stopped at its angle). Refused if the gripper's own
+    reported position (its joint state, not a camera) still says closed after the command: backing off then would drag
+    the door."""
     ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED)
     if float(ai.get_state()["gripper_pos"]) > 0.2:
         raise Refused("the gripper did not open -- the hand is still on the handle.")
 
 
 def after_release(after, planner, ai, door):
-    """What follows the release (`after`: PushOpen, ReleaseAround, ...), planned again from where the arm is now; if
-    that fails, the plan `after` checked before the swing, when the arm is where it starts. Returns what it did, in
-    words; raises Refused (the hand off the handle, the arm holding)."""
-    _release(ai)
+    """What follows the release (`after`: PushOpen, ReleaseAround, ...; execute_open let go), planned again from where
+    the arm is now; if that fails, the plan `after` checked before the swing, when the arm is where it starts. Returns
+    what it did, in words; raises Refused (the gripper open, the arm holding)."""
     st = ai.get_state()
     planner.search()  # a new search: the swing's time doesn't count against it
     checked = dict(after.__dict__)

@@ -145,6 +145,10 @@ class Planner:
         self.local = 0  # legs solved here (on or along the door)
         self.plan_s = 0.0
         self._cache = {}  # the same leg (goal, start, world) is planned once per action
+        # a free goal cuRobo found no collision-free arm configuration AT (goal_unreachable): that doesn't depend on
+        # where the leg starts, so it isn't asked again from another start (11-09 sim: the push-open's 16 hand
+        # placements x 8 wheelchair moves, all IK_FAIL, asked again for every grasp, ran a search out of its budget)
+        self._unreachable = {}
 
     def _key(self, goal, q_start, start_pose):
         r = lambda a: tuple(np.round(np.asarray(a, float).ravel(), 4))  # noqa: E731
@@ -176,10 +180,23 @@ class Planner:
         if key in self._cache:
             self.cached += 1
             return self._cache[key]
+        goal_key = self._goal_key(goal)
+        if goal_key in self._unreachable:
+            self.cached += 1
+            return self._unreachable[goal_key]
         if self.budget_s is not None and time.monotonic() - self.search_t0 > self.budget_s:
             raise OverBudget(f"planning took longer than its {self.budget_s:.0f} s budget ({self.plans} plans)")
         self._cache[key] = out = self._leg(goal, q_start, start_pose, from_arm)
+        if goal_key is not None and out[0] is None and goal_unreachable(out[1]):
+            self._unreachable[goal_key] = out
         return out
+
+    def _goal_key(self, goal):
+        """A free pose goal's key without its start (None for other legs: theirs depend on the start)."""
+        if goal.path != "free" or goal.joints is not None:
+            return None
+        key = self._key(goal, np.zeros(7), None)
+        return key[:6] + key[8:]  # without the start (joints, pose)
 
     def _leg(self, goal, q_start, start_pose, from_arm):
         self.world.push(goal.world, goal.world_label or goal.label)
@@ -308,24 +325,31 @@ class Planner:
         holds = [g.hold for g in motion.goals]
         quats = [g.quat if g.hold != HOLD_NONE else None for g in motion.goals]
         radii = [g.blend for g in motion.goals[:-1]]
-        # RAMMP-CuRobo 2.0.1's blend (blend.py) rejects a junction that stops (0) right after one that blends into a
-        # leg it may then use up whole ("overlap 0 at junction k is outside 0..-1"): such a stop gets BLEND_MIN_M --
-        # still all but a stop
-        for k in range(1, len(radii)):
-            if radii[k] == 0.0 and radii[k - 1] > 0.0:
-                radii[k] = BLEND_MIN_M
+        # RAMMP-CuRobo 2.0.1's blend (blend.py) rejects a junction that stops (0) right after one that blends, when that
+        # corner's overlap uses up the whole leg between them ("overlap 0 at junction k is outside 0..-1"; only a leg
+        # short enough for the corner to swallow). The true stops are asked for first; only if cuRobo refuses them
+        # does such a stop become a BLEND_MIN_M corner -- all but a stop (11-09: the push-open's stop at 90 deg follows
+        # a cut corner and must stay a stop; its 30-deg leg can't be swallowed)
+        bumped = list(radii)
+        for k in range(1, len(bumped)):
+            if bumped[k] == 0.0 and bumped[k - 1] > 0.0:
+                bumped[k] = BLEND_MIN_M
+        attempts = [radii] + ([bumped] if bumped != radii else []) + ([[0.0] * len(radii)] if any(radii) else [])
         self.world.push(world, world_label)
-        for attempt in (radii, [0.0] * len(radii)):
+        for attempt in attempts:
             self.checkpoint()
             plan = self.arm.blend(motion.legs, attempt, speed_scale=scales, hold=holds, hold_orientation=quats)
             if plan.success:
                 motion.joined = plan
-                if attempt is not radii and any(radii):
+                if attempt is bumped:
+                    motion.notes.append(f"stops after a cut corner made {BLEND_MIN_M * 1000:.0f} mm corners (blend "
+                                        "refused the stops)")
+                elif not any(attempt) and any(radii):
                     motion.notes.append("corners not cut (blend refused them): stops at every goal")
                 return motion
-            say(f"  blend {'with' if any(attempt) else 'without'} cut corners failed: {_short(plan.message)}")
-            if not any(radii):
-                break
+            what = "with true stops" if attempt is radii and any(radii) else (
+                "with stops made small corners" if attempt is bumped else "without cut corners")
+            say(f"  blend {what} failed: {_short(plan.message)}")
         raise Refused(f"cuRobo could not join the {len(motion.legs)} planned legs into one trajectory")
 
     # -- running ----------------------------------------------------------------------------------------------------

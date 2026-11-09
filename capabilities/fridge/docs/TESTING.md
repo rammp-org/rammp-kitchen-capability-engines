@@ -20,11 +20,13 @@ sheppy up flatbot --manifest december_2026/sheppy-manifest.yaml && sheppy status
 
 # T2, the fridge node (mount_tilt_deg 30 on flatbot, 0 on dojo; allow_execute:=false makes every goal a dry run)
 docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e 'CYCLONEDDS_URI=file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-  -v /tmp/fridge_data:/fridge_data -v /tmp/rammp_planner_worlds:/rammp_planner_worlds \
+  -e 'CYCLONEDDS_URI=<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>' \
+  -v /tmp/fridge_data:/fridge_data -v curobo_kernel_cache:/planner_cache \
   ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
   ros2 run fridge fridge_node --ros-args -p use_orchestrator:=false -p allow_execute:=true \
-  -p mount_tilt_deg:=30
+  -p mount_tilt_deg:=30 \
+  -p planner_world_dir:=/planner_cache/rammp_planner_worlds \
+  -p planner_world_dir_in_planner:=/root/.cache/rammp_planner_worlds
 
 # T3: the goal commands below (Open, Close), each a docker run
 
@@ -39,8 +41,9 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   `sheppy status` should show `sam3` running (`sheppy logs sam3` if not).
 - **The door's angle:** the handle model fit on the wrist camera (`door_normal: handle_model`); `-p door_normal:=square`
   assumes it square to the arm (place the wheelchair square). `-p detect_camera:=scene` uses the scene camera.
-- **The planner** needs `- /tmp/rammp_planner_worlds:/rammp_planner_worlds:ro` in its manifest `volumes:`, or every
-  plan refuses. If every plan fails with `EXCEPTION`: `sheppy restart planner`.
+- **The planner** reads the fridge world through the `curobo_kernel_cache` volume it already mounts at `/root/.cache`
+  (T2 mounts it too), so the manifest needs no extra volume. `config ... fridge_world.yaml not found` = T2 lacks it. If
+  every plan fails with `EXCEPTION`: `sheppy restart planner`.
 - **Depth instead of SAM 3:** `-p handle_source:=depth -p door_normal:=plane`. Needs a matte door.
 - **Wrist stereo (for FoundationStereo later, never yet seen live):** the bag records it only if the wrist OAK
   publishes it. Add to its params in the robot profile (compressed: the raw pair doesn't fit its 100 Mbit/s link):
@@ -56,20 +59,18 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   do. The names come from the driver's source: if the camera's differ, set the `wrist_infra*_topic` parameters. After a
   run the console should say `M stereo pairs` with M close to N; 0 means nothing was recorded.
 
-## Before the next run: one measurement for the grasp
+## Before a session: which chair layers the planner runs
 
-Already measured (11-06): the handle is 8 in long (`handle_length_m`), its back edge 2.5 in from the door's face and
-the bar ~0.5 in deep. **Still needed: how far the camera's handle point is from the bar's real front.** The grasp, the
-door's face and the hinge are all placed from that point, and the camera gets little depth off the glossy bar, so it is
-likely a few cm too deep (`GRIP_EXT` 0.126 compensates by trial). With it, the grasp can be set from your measurements
-(fingers on the back edge). With the door closed and the wheelchair where it will be:
+The planner keeps the arm out of a model of the wheelchair and its occupant (`rammp-deployments`,
+`december_2026/config/robots/flatbot/curobo`); flatbot has no real chair, so nothing physical shows if the model is
+not the one intended. On 2026-11-09 the planner ran the set from before #156 (11-07: the arm 8 in further forward on
+the chair), whose occupant's lap reaches 20 cm further forward, across the pull: most swings were refused against it.
+A refusal's world summary says which set is loaded: `seat 11` (with `armrest_arm_0`/`_1`) is the older one, `seat 10`
+the #156 one. To load dev's: `git pull` dev in `rammp-deployments`, `uv run scripts/set_robot.py
+december_2026/config/robots/flatbot`, `sheppy restart planner`.
 
-1. Dry-run the open (the Open command with `\"execute\": false`) and note T2's `handle (mean) [x y z]`.
-1. Teleop the closed gripper straight onto the middle of the bar's front until it just touches; hold still.
-1. Record the hand:
-   `docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 topic echo --once /ee_state'`
-
-Send both (the closed fingertips touch 4.1 cm past the tool frame, measured 11-06).
+The grasp depth was measured on 11-09 (`/fridge_data/true_handle_20261109.json`: the detected bar front was right to
+0.5 cm; `GRIP_EXT` 0.053 puts the fingertips 3 cm past it on a level grasp).
 
 ## How to stop the robot
 
@@ -82,16 +83,20 @@ Send both (the closed fingertips touch 4.1 cm past the tool frame, measured 11-0
 While the base drives, the same T4 e-stop stops it too (the node watches the arm's e-stop and stops the base),
 and so does Ctrl-C in T2. See [Driving the base](#driving-the-base-drive_base).
 
-Send the e-stop from the arm's own container: `~/ros2_ws` has a newer `EStop` than the driver (11-05), so a plain
-`ros2 topic pub` from T4 fails. Keep the stop typed out in T4:
+Send the e-stop from the arm's own container (`docker exec sheppy-arm`, both `source` lines). Since the arm
+image was updated (after 11-06) `EStop` is the NEW message: `uint8 state` (1 = engage, 0 = not), no `engaged` field
+-- the old `{engaged: true}` fails with `Failed to populate field: 'EStop' object has no attribute 'engaged'`.
+Check with `ros2 interface show rammp_common_interfaces/msg/EStop` in that container. **2026-11-09: these two are
+NOT yet verified on the arm** -- test at rest first (`docker logs -f sheppy-arm` should print
+`E-STOP engaged by 'operator'` then `e-stop RELEASED by 'operator'`), then while it moves. Keep the stop typed out in T4:
 
 ```bash
 # stop (repeats at 10 Hz; Ctrl-C once the arm has halted)
 docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
-  ros2 topic pub -r 10 /estop rammp_common_interfaces/msg/EStop "{engaged: true, source: operator, reason: stop}"'
-# clear, only right before you continue; then clear the faults (Set up, T3), or `sheppy restart arm` if that fails
+  ros2 topic pub -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 1, source: operator, reason: stop}"'
+# release, only right before you continue (if it does not release: `sheppy restart arm`); then clear the faults (Set up, T3)
 docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
-  ros2 topic pub --once /estop rammp_common_interfaces/msg/EStop "{engaged: false, source: operator, reason: clear}"'
+  ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear, clear_target: operator}"'
 ```
 
 ## Open
@@ -110,8 +115,11 @@ docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ro
      '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2}"}'
    ```
 
-   It pulls, lets go, backs off the handle and pushes on, or stops with
-   `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`.
+   It pulls to 60° and stops, lets go, backs off the handle and pushes on, or stops with
+   `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`. A refused plan
+   (dry run or not) then spends up to 90 s planning it again for wheelchair moves of 5 and 10 cm and ends
+   `checked by planning it: the open plans with ... -- move the wheelchair ...` (or that no such move helps:
+   the refusal isn't about placement). Prefer that over the `placement:` lines, which come from a sim.
 
 1. **Only if asked:** move the wheelchair as it says (without turning it), then
    push the door on to 90°, in T3:
