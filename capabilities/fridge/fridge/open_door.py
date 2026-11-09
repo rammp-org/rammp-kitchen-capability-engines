@@ -64,6 +64,28 @@ def _make_detector(handle_centre_to_face_m, door_normal="handle_model"):
     return HandleDetector(handle_centre_to_face_m, door_normal == "square", door_normal == "handle")
 
 
+PLACEMENT_CELL_M = 0.05  # constants.PLACEMENT_CELLS' grid step: a handle within half of it of a cell is in that cell
+PLACEMENT_SIM_PULL_DEG = 60  # the pull and handle height the cells come from (constants.MOUNTS) ...
+PLACEMENT_SIM_Z_M = 0.30
+PLACEMENT_Z_TOL_M = 0.05  # ... a handle further than this off that height gets a note that the placement may differ
+
+
+def _placement_target(x, y):
+    """None if the handle (x, y) is in a cell where the open planned in sim (constants.PLACEMENT_CELLS); else the
+    nearest cell whose four neighbours planned too (well inside, not on the edge), or the nearest cell if none is."""
+    cells = [tuple(c) for c in F.PLACEMENT_CELLS]
+    if any(abs(x - cx) <= PLACEMENT_CELL_M / 2 and abs(y - cy) <= PLACEMENT_CELL_M / 2 for cx, cy in cells):
+        return None
+    have = {(round(cx / PLACEMENT_CELL_M), round(cy / PLACEMENT_CELL_M)) for cx, cy in cells}
+
+    def inside(c):
+        i, j = round(c[0] / PLACEMENT_CELL_M), round(c[1] / PLACEMENT_CELL_M)
+        return all(n in have for n in ((i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1)))
+
+    pool = [c for c in cells if inside(c)] or cells
+    return min(pool, key=lambda c: (c[0] - x) ** 2 + (c[1] - y) ** 2)
+
+
 def placement_advice(handle, normal, start_joints=None, level=True):
     """Where to move the wheelchair to get the handle into the placement that passed in sim."""
     x, y = float(handle[0]), float(handle[1])
@@ -73,14 +95,26 @@ def placement_advice(handle, normal, start_joints=None, level=True):
         return f"~{max(1, round(d * 100))} cm"
 
     moves = []
-    if x > F.PLACEMENT_X[1]:
-        moves.append(f"move the wheelchair {cm(x - F.PLACEMENT_X[1])} closer to the fridge")
-    elif x < F.PLACEMENT_X[0]:
-        moves.append(f"move the wheelchair {cm(F.PLACEMENT_X[0] - x)} back from the fridge")
-    if y < F.PLACEMENT_Y[0]:
-        moves.append(f"move the wheelchair {cm(F.PLACEMENT_Y[0] - y)} to its right")
-    elif y > F.PLACEMENT_Y[1]:
-        moves.append(f"move the wheelchair {cm(y - F.PLACEMENT_Y[1])} to its left")
+    target = _placement_target(x, y) if F.PLACEMENT_CELLS else None
+    if target is not None:  # outside every cell where the open planned in sim: toward the nearest well-inside one
+        tx, ty = target
+        if x > tx:
+            moves.append(f"move the wheelchair {cm(x - tx)} closer to the fridge")
+        elif x < tx:
+            moves.append(f"move the wheelchair {cm(tx - x)} back from the fridge")
+        if y < ty:
+            moves.append(f"move the wheelchair {cm(ty - y)} to its right")
+        elif y > ty:
+            moves.append(f"move the wheelchair {cm(y - ty)} to its left")
+    elif not F.PLACEMENT_CELLS:
+        if x > F.PLACEMENT_X[1]:
+            moves.append(f"move the wheelchair {cm(x - F.PLACEMENT_X[1])} closer to the fridge")
+        elif x < F.PLACEMENT_X[0]:
+            moves.append(f"move the wheelchair {cm(F.PLACEMENT_X[0] - x)} back from the fridge")
+        if y < F.PLACEMENT_Y[0]:
+            moves.append(f"move the wheelchair {cm(F.PLACEMENT_Y[0] - y)} to its right")
+        elif y > F.PLACEMENT_Y[1]:
+            moves.append(f"move the wheelchair {cm(y - F.PLACEMENT_Y[1])} to its left")
     if yaw > F.PLACEMENT_YAW_DEG[1]:
         moves.append(f"turn the wheelchair ~{yaw - F.PLACEMENT_YAW_DEG[1]:.0f} deg so its front swings left")
     elif yaw < F.PLACEMENT_YAW_DEG[0]:
@@ -90,6 +124,12 @@ def placement_advice(handle, normal, start_joints=None, level=True):
         f"{F.PLACEMENT_X[1]:.2f}, y {F.PLACEMENT_Y[0]:.2f} to {F.PLACEMENT_Y[1]:.2f}, yaw "
         f"{F.PLACEMENT_YAW_DEG[0]:+.0f} to {F.PLACEMENT_YAW_DEG[1]:+.0f})"
     ]
+    if target is not None:
+        lines[0] += (f"; the nearest spot well inside where the {PLACEMENT_SIM_PULL_DEG} deg open planned: handle x "
+                     f"{target[0]:.2f} y {target[1]:.2f}")
+    if F.PLACEMENT_CELLS and abs(float(handle[2]) - PLACEMENT_SIM_Z_M) > PLACEMENT_Z_TOL_M:
+        lines.append(f"  (that sim had the handle {PLACEMENT_SIM_Z_M:.2f} m above the arm base; this one is "
+                     f"{float(handle[2]):.2f} m: the placement may differ)")
     lines += [f"  -> {m}" for m in moves] or ["  -> inside that placement"]
     if len(moves) > 1:
         lines.append("  (re-check after each move: turning the chair also shifts the handle)")
@@ -267,7 +307,7 @@ def swing_goals(model, cand, swing, release_cap=1.0):
     poses = [swung(cand["pos"], cand["quat"], df.hinge, df.sign, d) for d in degs]
     caps = [1.0 if d <= swing + 1e-6 else release_cap for d in degs]
     # the door turns with the hand, so no one world can hold it: the swing is checked against the cabinet (with the
-    # planner's chair layers, the scene camera and the arm itself), as the old planner's pull was
+    # planner's chair layers and the arm itself), as the old planner's pull was
     return [pl.through(poses, f"swing to {swing:.0f} deg and on to {total:.0f} letting go", model.cabinet(), caps,
                        world_label="the cabinet (the door turns with the hand)")]
 

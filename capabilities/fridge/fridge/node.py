@@ -35,7 +35,7 @@ from .kinematics import Chain
 from .perception import WristCamera
 from .planning import Planner
 from .tee_logger import TeeLogger
-from .world import PlannerWorld, chair_stand_in, scene_camera
+from .world import PlannerWorld, chair_stand_in
 
 COMMON = {
     "execute": {"type": "boolean", "default": False},
@@ -260,11 +260,9 @@ class Capability(CapabilityEngine):
             self.cfg["planner_world_dir_in_planner"] or None,
             layers,
             self.cfg["planner_restore_world"],
-            # the level mount has no chair layers in its planner: the old stand-in box behind the arm base; flatbot's
-            # scene camera (not in its layers) is kept out of every world on the 30-deg mount
-            extra=[chair_stand_in(self.cfg["chair_keep_out_behind_m"])]
-            if self.cfg["mount_tilt_deg"] == 0
-            else [scene_camera(constants.SCENE_CAMERA_XYZ, constants.SCENE_CAMERA_BOX_M)],
+            # the level mount has no chair layers in its planner: the old stand-in box behind the arm base (flatbot's
+            # layers, its scene camera included, are the planner's own)
+            extra=[chair_stand_in(self.cfg["chair_keep_out_behind_m"])] if self.cfg["mount_tilt_deg"] == 0 else [],
         )
         planner = Planner(self.arm, world, self._fk, ctx.checkpoint, budget_s=constants.PLAN_BUDGET_S)
         # the camera's subscriptions and tf buffer are this action's: the engine destroys them when it ends

@@ -329,7 +329,7 @@ def run(
                                           quiet=chair_back is None)
             except pl.StartNotClear as e:
                 # the hand starts inside the door (or its handle) as planned with this move: the door moves with the
-                # wheelchair, so another move may clear it -- only the chair's own layers (or the scene camera) rule
+                # wheelchair, so another move may clear it -- only the chair's own layers rule
                 # every move out. With no boxes named (the planner's explanation can fail), the other moves are tried:
                 # a start that is really blocked fails each of them after one plan (plan_close)
                 if e.blocking() and not e.only_fridge():

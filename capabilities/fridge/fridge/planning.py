@@ -4,7 +4,7 @@ the driver runs.
 A motion is a list of Goals, each planned from where the leg before it ends (the first from the arm's joints):
 - a free-space goal ("free"): cuRobo's plan_to_pose (or plan_to_joints) against the world the goal names (FridgeModel's
   boxes, pushed with PlannerWorld, plus the planner's own chair layers): routing round the door, the handle, the
-  cabinet, the wheelchair and the scene camera, the arm's configuration cuRobo's to choose;
+  cabinet and the wheelchair (its layers include the scene camera), the arm's configuration cuRobo's to choose;
 - a goal on or along the door ("line", "arc", "through": straight in to the handle, the swing, the release, the push,
   the close's sweep): solved here, because cuRobo can't follow a line or an arc -- its pose and joint goals both left
   them by 1.5-9 cm on 11-07. Local IK along the exact path every PATH_STEP_M (kinematics.Chain.ik: one branch, the
@@ -60,7 +60,7 @@ class StartNotClear(Refused):
 
     def only_fridge(self):
         """True when the start collides with the fridge's own boxes alone (FridgeModel's: they move with the
-        wheelchair, so another wheelchair move may clear them), never the chair's layers or the scene camera."""
+        wheelchair, so another wheelchair move may clear them), never the chair's layers."""
         boxes = self.blocking()
         return bool(boxes) and all(re.fullmatch(r"(m\d+_)?(body|door\w*|handle\w*)", b) for b in boxes)
 

@@ -209,16 +209,6 @@ def hand_reach(quat, direction, box):
     return float(np.max((hand_corners(np.zeros(3), quat, box)) @ (d / np.linalg.norm(d))))
 
 
-def scene_camera(xyz, size_m):
-    """The scene camera on its post (11-06: the arm hit it): a box `size_m` wide round its optical centre `xyz`."""
-    return {
-        "name": "scene_camera",
-        "position": [float(v) for v in xyz],
-        "rpy_deg": [0.0, 0.0, 0.0],
-        "dims": [float(size_m)] * 3,
-    }
-
-
 def chair_stand_in(behind_m):
     """The level mount's stand-in for the chair (no chair layers there): everything more than `behind_m` behind the
     arm base, on its right."""

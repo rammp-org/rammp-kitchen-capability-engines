@@ -13,7 +13,7 @@ from door_common.common import DoorFrame
 from fridge import close_door, open_door, planning, push_open
 from fridge import constants as F
 from fridge.kinematics import Chain
-from fridge.world import FridgeModel, PlannerWorld, chair_stand_in, hand_reach, scene_camera
+from fridge.world import FridgeModel, PlannerWorld, chair_stand_in, hand_reach
 from fridge_fake import (  # noqa: F401 -- fridge: the fixture
     HANDLE,
     URDF,
@@ -98,12 +98,12 @@ def test_the_door_model_is_the_slab_the_cabinet_and_the_handle_where_the_door_fi
 def test_the_planner_gets_the_scene_with_the_robots_layers_and_gets_its_own_world_back(tmp_path):
     arm = FakeCurobo()
     w = PlannerWorld(arm, tmp_path / "w", "/rammp_planner_worlds", ["/config/robot/curobo/layer_mebot_floor.yaml"],
-                     extra=[scene_camera(F.SCENE_CAMERA_XYZ, F.SCENE_CAMERA_BOX_M)])
+                     extra=[chair_stand_in(0.1)])
     box = {"name": "b", "position": [1.0, 0.0, 0.0], "rpy_deg": [0.0, 0.0, 0.0], "dims": [0.1, 0.1, 0.1]}
     w.push([box], "test")
     assert arm.world_calls == [("/rammp_planner_worlds/fridge_world.yaml", False)]  # as the planner sees it
     scene = (tmp_path / "w" / "fridge_world.yaml").read_text()
-    assert "layer_mebot_floor.yaml" in scene and "scene_camera" in scene and "base_frame: arm_mount" in scene
+    assert "layer_mebot_floor.yaml" in scene and "chair_stand_in" in scene and "base_frame: arm_mount" in scene
     w.push([box], "again")  # the planner holds it already: nothing sent
     assert len(arm.world_calls) == 1
     w.restore()

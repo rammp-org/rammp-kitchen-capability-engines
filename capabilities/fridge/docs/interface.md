@@ -36,7 +36,7 @@ commanded still and the arm holding. Without it the chair is moved by hand, as b
 **Planning: cuRobo plans every motion.** Each motion is a few cuRobo legs to tool poses
 (`planning.py`), each against its own collision world: the cabinet, the door at its angle and the
 handle (`world.py`), written to `planner_world_dir` and loaded into the planner with `set_world`,
-plus the planner's own wheelchair layers and the scene camera. A leg onto or along the door leaves
+plus the planner's own wheelchair layers (scene camera included). A leg onto or along the door leaves
 out what the hand touches (the handle and the door round the hand) and is solved along its exact line
 or arc by local IK. The push-open's push is checked step by step against the door where it then is:
 its front 2.5 cm and edges always, its inner part except round the hand. cuRobo picks the arm's configuration for every pose, with its joint
@@ -136,7 +136,7 @@ How to run it on the arm: [TESTING.md](TESTING.md).
 
 - **The wheelchair is the planner's own model.** On the 30° mount the wheelchair, seat and occupant
   are the cuRobo planner's collision layers for flatbot, in every world it plans in; the fridge's
-  pushed world only adds the fridge and the scene camera. Their measurements are best guesses apart
+  pushed world only adds the fridge (the layers include the scene camera). Their measurements are best guesses apart
   from the arm's mount, and cuRobo plans nothing from a start pose inside them: the 2026-11-04 runs'
   start sits 3–10 cm inside the armrest and torso, 2026-11-06's 8–17 mm inside the armrest. The open
   refuses at once, naming the boxes; start from a pose outside them (the web app's Fridge pose is).
@@ -144,8 +144,6 @@ How to run it on the arm: [TESTING.md](TESTING.md).
   file's 47 spheres reach 16–65 mm past the arm's meshes and miss parts of them (up to 2.5 cm at the
   finger tips); a 197-sphere fit to the meshes (≤ 12 mm past them) gets within about a centimetre of the
   old PyBullet planner's reach next to the occupant's lap.
-- **The scene camera is a fixed box** (`SCENE_CAMERA_XYZ`, flatbot's on 2026-11-06, from TF), not read
-  from TF: move the camera and it is wrong.
 - **The door's direction** (`door_normal: handle_model`) was measured on 2026-11-06 scene camera frames (±1° per look,
   handle 0.7–0.9 m away), not yet on the wrist camera's. The grasp corrections (`GRIP_EXT`, ...) were set with the
   wrist camera's handle point.

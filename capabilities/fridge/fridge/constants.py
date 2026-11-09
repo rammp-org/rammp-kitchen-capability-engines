@@ -53,7 +53,7 @@ GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose
 GRASP_END_MARGIN_M = 0.03
 
 # --- how the motions are planned (planning.py, world.py): free-space legs by cuRobo, in a collision world of the fridge
-# (FridgeModel: cabinet, door at its angle, handle) plus the planner's own chair layers and the scene camera, the arm's
+# (FridgeModel: cabinet, door at its angle, handle) plus the planner's own chair layers (scene camera included), the arm's
 # configuration cuRobo's to choose; legs on or along the door by local IK along their exact path, checked by cuRobo;
 # each motion one trajectory joined by cuRobo. The poses below are the only places a motion is told to pass ---
 GRASP_PITCHES_DEG = (15, 30, 45)  # the grasp's nose-down tilts tried (configure sets them per mount), each with the
@@ -90,10 +90,6 @@ OPEN_LEAD_S = 0.3  # ... the gripper starting to open this long before the hand 
 GRIP_OPEN_SPEED = 0.2  # ... slowly
 AFTER_RELEASE_PATH_TOL_RAD = 0.25  # back off + round the door + the push, one motion under PULL_GAINS: this tracking
 # limit (free space until the push; impedance lags the path more the faster it goes: 11-06 at ~1 rad/s, past 0.15 rad)
-# the scene camera on its post (not in the planner's chair layers; 11-06 the arm hit it): arm_mount ->
-# scene_camera_color_optical_frame from TF on flatbot, kept out of every fridge world as a box this big (30-deg mount)
-SCENE_CAMERA_XYZ = (0.132, -0.441, 0.328)
-SCENE_CAMERA_BOX_M = 0.18
 
 # --- release: let go, then back straight out of the handle ---
 BACK_OFF_M = 0.08
@@ -200,24 +196,39 @@ MOUNTS = {
     ),
     30: dict(
         max_reach=1.10,
-        # where open and close both planned with the PyBullet planner (11-05 sweep); not yet re-swept with cuRobo
-        placement_x=(0.82, 0.90),
-        placement_y=(-0.44, -0.16),
+        # the box the cells below span: the handle x, y where the open planned (cuRobo sweep, next comment)
+        placement_x=(0.60, 1.05),
+        placement_y=(-0.35, -0.15),
+        # every handle x, y (5 cm grid) where the cuRobo open (60 deg pull, then the push-open, a chair move between
+        # them if it needed one) planned in sim, the handle 0.30 m above the arm base: the placement advice sends the
+        # wheelchair toward the nearest of them (open_door.placement_advice). 11-08/09 sweep (fridge-grasp-sims:
+        # flatbot model with the arm base 8 in further forward on the chair, IMG_8622 start pose, door square to the
+        # chair, tilts 15-45); the close was not part of it
+        placement_cells=(
+            (0.60, -0.20), (0.65, -0.20), (0.65, -0.15), (0.70, -0.25), (0.70, -0.20), (0.70, -0.15),
+            (0.75, -0.35), (0.75, -0.20), (0.75, -0.15), (0.80, -0.35), (0.80, -0.30), (0.80, -0.25),
+            (0.80, -0.20), (0.80, -0.15), (0.85, -0.35), (0.85, -0.30), (0.85, -0.25), (0.85, -0.20),
+            (0.85, -0.15), (0.90, -0.35), (0.90, -0.30), (0.90, -0.25), (0.90, -0.20), (0.90, -0.15),
+            (0.95, -0.35), (0.95, -0.30), (0.95, -0.25), (0.95, -0.20), (1.00, -0.35), (1.00, -0.30),
+            (1.00, -0.25), (1.00, -0.20), (1.05, -0.35), (1.05, -0.30), (1.05, -0.25),
+        ),
         push_open_dz_m=0.10,  # 10 cm ABOVE the handle
         grasp_pitches_deg=(15, 30, 45),  # 15-45 only (GRASP_PITCHES_DEG)
     ),
 }
 PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  # configure sets them
+PLACEMENT_CELLS = MOUNTS[0].get("placement_cells")  # ... and this: None, the box above is the placement
 PLACEMENT_YAW_DEG = (-10.0, 10.0)
 
 
 def configure(data_dir, mount_tilt_deg=0):
     """Point door_common's paths at `data_dir`, name the appliance and pick the mount's placement. No door-size
     defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
-    global PLACEMENT_X, PLACEMENT_Y, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG
+    global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG
     if mount_tilt_deg not in MOUNTS:
         raise ValueError(f"mount_tilt_deg must be one of {sorted(MOUNTS)}, not {mount_tilt_deg!r}")
     PLACEMENT_X, PLACEMENT_Y = MOUNTS[mount_tilt_deg]["placement_x"], MOUNTS[mount_tilt_deg]["placement_y"]
+    PLACEMENT_CELLS = MOUNTS[mount_tilt_deg].get("placement_cells")
     PUSH_OPEN_DZ_M = MOUNTS[mount_tilt_deg]["push_open_dz_m"]
     GRASP_PITCHES_DEG = MOUNTS[mount_tilt_deg]["grasp_pitches_deg"]
     dc.configure_paths(data_dir)
