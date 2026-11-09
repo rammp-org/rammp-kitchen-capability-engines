@@ -49,14 +49,15 @@ smoke:
 lint:
 	pre-commit run --all-files
 
-# self.arm tests, in an x86 ROS 2 Humble image with the repo mounted at /repo (edits need
-# no rebuild). Directories that do not exist yet are skipped. ARGS replaces the paths:
+# self.arm tests, and every capability's own test/ directory, in an x86 ROS 2 Humble image with
+# the repo mounted at /repo (edits need no rebuild). Directories that do not exist yet are
+# skipped. ARGS replaces the paths:
 #   make test-arm ARGS=tests/arm/test_sim.py -k golden
 # ARM_CMD replaces pytest with another command in the same container:
 #   make test-arm ARM_CMD='python3 /repo/scripts/compare_models.py'
 ARM_CMD ?= python3 -m pytest -q -p no:cacheprovider $(or $(ARGS),$(ARM_TEST_DIRS))
 ARM_TEST_IMAGE = rammp-arm-test:dev
-ARM_TEST_DIRS = $(wildcard capability_engine/test tests/arm)
+ARM_TEST_DIRS = $(wildcard capability_engine/test tests/arm capabilities/*/test)
 test-arm:
 	docker build -f docker/test.Dockerfile -t $(ARM_TEST_IMAGE) docker
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
