@@ -674,6 +674,9 @@ ESCAPE_STEP_RAD = 0.02  # the step along the way out, its largest joint
 ESCAPE_MAX_RAD = 0.6  # plan-free, so it stays a step: no joint moves more than this
 ESCAPE_DROP_M = CLEAR_MARGIN_DROP_M  # nor the tool lower than its start by more than this (the table is below)
 ESCAPE_MAX_STEPS = 200
+# where no step gets further and the arm is already out of the padding by this much, the way out ends there
+# (2026-11-09 live check: 11 of the 23 refused had come out by 0-9 mm)
+ESCAPE_OUT_M = 0.001
 
 
 class EscapeBodyFree:
@@ -764,6 +767,8 @@ class EscapeBodyFree:
                     break
                 dq = dq / 2.0
             else:
+                if d <= -ESCAPE_OUT_M:
+                    break  # out of the padding, short of the margin: HOME is asked for from here
                 raise RuntimeError(
                     "%s refused: every way out of the padding (%.0f mm in) goes deeper, lowers the tool more than "
                     "%.0f mm or meets a joint limit — jog the arm clear by hand"
