@@ -11,6 +11,9 @@ from box_opening.perception.d405 import quat_to_mat
 from box_opening.runtime import kinematics as kin
 from box_opening.runtime.kinematics import ArmChain, _axis_rot, mat_to_quat_xyzw, rotvec
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 
 @pytest.fixture(scope="module")
 def chain():

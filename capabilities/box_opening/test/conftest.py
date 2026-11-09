@@ -57,6 +57,25 @@ def flatbot_urdf():
     return str(fixture_path("arm_flatbot_20261021.urdf"))
 
 
+# flatbot's HOME from 2026-10-21 until 2026-11-09, when the arm moved 8 in forward on the chair and
+# constants.HOME became a temporary one clear of the armrest. Every recorded flatbot run these tests
+# replay started here, and the poses many of them are built on were chosen near it: those tests pin it
+# (pytestmark = pytest.mark.usefixtures("home_20261021")) rather than follow constants.HOME.
+HOME_20261021 = [0.067, -1.897, -3.137, -2.269, -0.211, -0.683, 1.725]
+
+
+@pytest.fixture
+def home_20261021():
+    """constants.HOME set to the 2026-10-21 HOME for the test, and put back after. Every module that
+    imported HOME holds the same list (nothing copies it at import), so it is changed in place."""
+    from box_opening import constants
+
+    saved = list(constants.HOME)
+    constants.HOME[:] = HOME_20261021
+    yield constants.HOME
+    constants.HOME[:] = saved
+
+
 CFG = "capabilities/box_opening/config/containers/oxo_pop.yaml"
 
 Q0 = [0.0] * 7

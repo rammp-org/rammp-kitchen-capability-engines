@@ -19,6 +19,9 @@ from box_opening.tasks import cli_common, press_demo
 from box_opening.tasks import reach_lid_off as rlo
 from box_opening.tasks import reach_press as rp
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 PKG = Path(__file__).resolve().parents[1]
 FLATBOT_WORLD = str(PKG / "config" / "world_flatbot.yaml")
 CONTAINER = str(PKG / "config" / "containers" / "ankou_pink.yaml")

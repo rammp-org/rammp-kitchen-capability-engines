@@ -14,14 +14,17 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import HOME_20261021 as HOME  # the HOME these recorded runs started from; LINE below is built on it
 from conftest import FakeClient, flatbot_urdf
 
-from box_opening.constants import HOME
 from box_opening.primitives import core
 from box_opening.primitives.core import ClearMarginFree, PlanState
 from box_opening.runtime import approach
 from box_opening.runtime.kinematics import ArmChain
 from box_opening.tasks import cli_common, home_arm
+
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
 
 PKG = Path(__file__).resolve().parents[1]
 FLATBOT_WORLD = str(PKG / "config" / "world_flatbot.yaml")

@@ -13,6 +13,9 @@ from box_opening.models.container import ContainerModel, load_press_demo
 from box_opening.perception.d405 import quat_to_mat
 from box_opening.tasks import reach_press
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
 BOX = (0.675, -0.578)  # where the scene camera put it, 2026-10-22
 

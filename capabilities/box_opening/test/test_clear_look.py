@@ -14,6 +14,9 @@ from box_opening.runtime.branches import planner_branch
 from box_opening.runtime.client import pose_goal_joints
 from box_opening.tasks import reach_press as rp
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
 # 2026-10-28 16:23's scene camera box (r 0.66 m, az -26 deg) and the table it stood on
 BUTTON, TABLE_Z = (0.5921, -0.2869, 0.3123), 0.2105

@@ -20,6 +20,9 @@ from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_lid_off as rlo
 from box_opening.tasks import reach_press as rp
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 PINK = trp.PINK
 BUTTON = trp.BUTTON  # (0.66, -0.57, 0.40): the fake fk's box
 UP = (BUTTON[0], BUTTON[1], BUTTON[2] + 0.009)  # the aim's press point on a popped knob: its top
