@@ -150,6 +150,7 @@ SCENE_WAIT_S = 10.0  # wait this long for the scene camera's first frame
 # between the scene camera and the door (11-10: the door then read 32 cm wide, not 47, and the hinge came out 10 cm
 # short), so a run that starts there reuses this instead of looking again
 SCENE_DOOR = None
+SCENE_DOOR_CLEAR_M = 0.15  # ... kept only from a look with the hand this far from the view pose: out of the way
 SCENE_DOOR_REUSE_S = 900.0  # ... if it is this recent (s) and the hand is still at that view pose (VIEW_AT_TOL_M)
 
 
@@ -545,7 +546,9 @@ def plan_view(ai, scene, rb):
                 f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
                 f"{np.round(pos, 3)}, joints {np.round(np.degrees(q), 1)}"
             )
-            if not boxer and not reuse:
+            # remembered only if the arm was out of the camera's way (11-10: a look taken with the arm at the view
+            # pose read the door 32 cm wide, and reusing it kept the hinge short)
+            if not boxer and not reuse and float(np.linalg.norm(hand - T_tool[:3, 3])) > SCENE_DOOR_CLEAR_M:
                 SCENE_DOOR = dict(t=time.time(), face=face, n=n, box=cam.fixed_box, p_view=T_tool[:3, 3])
             return q, T_tool[:3, 3]
         tried.append((label, T_tool))
