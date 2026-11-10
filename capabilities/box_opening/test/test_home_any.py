@@ -106,6 +106,51 @@ def test_where_nothing_plans_the_refusal_names_what_was_tried(monkeypatch):
         core.home_any(ctx, core.PlanState(joints=list(START), chain=0), HOME, plan, say=lambda s: None)
 
 
+def _traj(start, goal, swing_j1=0.0):
+    """A JointTrajectory stand-in from `start` to `goal`, joint_1 taken `swing_j1` rad out past its start midway."""
+    mid = [(a + b) / 2 for a, b in zip(start, goal, strict=True)]
+    mid[0] = start[0] + swing_j1
+    pts = [SimpleNamespace(positions=list(q)) for q in (start, mid, goal)]
+    return SimpleNamespace(joint_names=["arm_joint_%d" % i for i in range(1, 8)], points=pts)
+
+
+class SwingingPlanner(Planner):
+    """Plans every leg, but HOME from `swing_from` swings joint_1 0.9 rad out and back (flatbot 2026-11-10)."""
+
+    def __init__(self, swing_from):
+        super().__init__()
+        self.swing_from = list(swing_from)
+
+    def __call__(self, at, name, q):
+        leg = super().__call__(at, name, q)
+        swing = 0.9 if name == "home" and np.allclose(at.joints, self.swing_from) else 0.0
+        leg.traj = _traj(list(at.joints), list(q), swing)
+        return leg
+
+
+def test_a_plan_home_that_swings_wide_is_refused_at_planning_and_home_goes_through_the_waypoint(monkeypatch):
+    ctx = _no_chain_ctx(monkeypatch)
+    plan = SwingingPlanner(START)
+    said = []
+    legs = core.home_any(ctx, core.PlanState(joints=list(START), chain=0), HOME, plan, say=said.append)
+    assert [leg.name for leg in legs] == ["home-waypoint", "home"]
+    assert [a[0] for a in plan.asked] == ["home", "home-waypoint", "home"]  # asked directly once: it answers alike
+    assert any("through a waypoint 50%" in s and "swings wide" in s for s in said)
+
+
+def test_where_every_plan_swings_wide_the_refusal_says_so(monkeypatch):
+    ctx = _no_chain_ctx(monkeypatch)
+
+    class Always(Planner):
+        def __call__(self, at, name, q):
+            leg = super().__call__(at, name, q)
+            leg.traj = _traj(list(at.joints), list(q), 0.9)
+            return leg
+
+    with pytest.raises(RuntimeError, match=r"1 times directly .*swings wide .*arm_joint_1 excursion"):
+        core.home_any(ctx, core.PlanState(joints=list(START), chain=0), HOME, Always(), say=lambda s: None)
+
+
 def _body_ctx(monkeypatch, tmp_path, boxes):
     """flatbot's ctx (bench world, FakeClient) with a body model of `boxes` attached to its chain."""
     client = FakeClient()

@@ -19,6 +19,7 @@ from box_opening.constants import (
     HOME_GAINS,
     HOME_SPEED,
     PLANNER_LIMIT_MARGIN_RAD,
+    SANITY_MARGIN_RAD,
     TCP_OFFSET_M,
     TIP_TO_TOOL_M,
     TRANSIT_SPEED,
@@ -26,6 +27,7 @@ from box_opening.constants import (
 from box_opening.runtime.guards import (
     GuardSpec,
     in_band,
+    sanity_violations,
 )
 from box_opening.runtime.legs import Kind, Leg
 from box_opening.runtime.planner import Refused, plan_record
@@ -820,16 +822,27 @@ HOME_TRIES = 3  # HOME asked for this many times from one start before the waypo
 HOME_WAYPOINTS = (0.5, 0.25, 0.75)  # fractions of the joint line toward HOME, each continuous joint the short way
 
 
+class PlanSwung(RuntimeError):
+    """A plan that the runner's trajectory sanity gate would refuse at execution (guards.sanity_violations,
+    SANITY_MARGIN_RAD): a joint swings wider than the straight way needs. 2026-11-10 on flatbot every plan HOME
+    from [1.006, -0.312, 2.699, -2.224, -2.790, -0.889, -0.623], and from a 4% clear-margin step near there, took
+    joint_1 out to 1.87 rad and back (1.15-1.45 rad for a 0.56 change, the hand toward the user): home_arm was
+    REFUSED at execution 3 times. Asked again, the planner answered alike; through the joint line's 50% waypoint both
+    legs passed the gate (plans only)."""
+
+
 def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="HOME", plan_words="HOME", step_tail=""):
     """The legs from `state` to the joint goal `goal` (HOME): plan_to(state, name, q) plans one leg (raising
     RuntimeError, or PlanRefused, where the planner or the client refuses). In order:
       1. a start inside the body model's padding steps out first (EscapeBodyFree);
       2. a joint too near its limit for the planner steps along the joint line first (ClearMarginFree), the
-         shortest step the goal plans from, each step's plan asked for once (as since 2026-10-23); where no step
-         up to the cap plans, refused as before;
-      3. otherwise the goal asked for up to HOME_TRIES times;
+         shortest step the goal plans from, each step's plan asked for once (as since 2026-10-23), or through a
+         waypoint from the step's end where that plan swings wide; where no step up to the cap plans, refused as
+         before;
+      3. otherwise the goal asked for up to HOME_TRIES times, stopping at the first plan that swings wide;
       4. then a waypoint HOME_WAYPOINTS of the way along the joint line, clear of the padding, planned to, and the
          goal planned from it.
+    Every leg passes the runner's trajectory sanity gate here, at planning (PlanSwung), not at execution.
     The caller's words name the goal in what is said (`goal_words`: "HOME", "the rest pose"; `plan_words`: what
     is planned, "HOME", "home"; `step_tail` after a clear-margin step's note). Raises RuntimeError with the last
     refusal where none plans."""
@@ -838,6 +851,35 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
     from box_opening.runtime.branches import on_branch
 
     legs = []
+
+    def planned(at, name, q):
+        """plan_to's leg, the runner's sanity gate applied now (PlanSwung) rather than at execution."""
+        leg = plan_to(at, name, q)
+        traj = getattr(leg, "traj", None)
+        bad = sanity_violations(traj, SANITY_MARGIN_RAD) if traj is not None else []
+        if bad:
+            raise PlanSwung("%s swings wide (%s): the runner's sanity gate would refuse it" % (name, "; ".join(bad)))
+        return leg
+
+    def via_waypoint(at, last):
+        """([waypoint leg, goal leg], f, last) from `at` through the first waypoint that plans, or (None, None,
+        last)."""
+        q0 = np.asarray(at.joints, float)
+        g = np.asarray(on_branch(goal, q0), float)
+        _chain, body = EscapeBodyFree()._body()
+        for f in HOME_WAYPOINTS:
+            w = [float(v) for v in q0 + f * (g - q0)]
+            if body is not None and not body.pose_clear(w):
+                continue
+            try:
+                a = planned(at, "home-waypoint", w)
+                b = planned(PlanState(joints=list(a.goal_joints), chain=at.chain), "home", list(goal))
+            except RuntimeError as e:
+                last = e
+                continue
+            return [a, b], f, last
+        return None, None, last
+
     esc = EscapeBodyFree()
     if esc.needed(state.joints if state.joints is not None else ctx.client.joints()):
         step, state, info = esc.plan(ctx, state)
@@ -859,7 +901,11 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
         )
         for step, at, info in clear.steps(ctx, state):
             try:
-                leg = plan_to(at, "home", list(goal))
+                rest, via = [planned(at, "home", list(goal))], None
+            except PlanSwung as e:  # asked again, the planner answers alike: through a waypoint from the step's end
+                rest, via, last = via_waypoint(at, e)
+                if rest is None:
+                    continue
             except RuntimeError as e:
                 last = e
                 continue
@@ -878,38 +924,37 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
                         step_tail,
                     )
                 )
-            return legs + step + [leg]
+            if via is not None:
+                say(
+                    "%s %s planned through a waypoint %.0f%% of the way along the joint line (the direct plan swung "
+                    "wide: %s)" % (who, plan_words, 100 * via, last)
+                )
+            return legs + step + rest
         raise RuntimeError(
             "no plan-free step toward %s of up to %.2f rad per joint lets the planner plan %s (last: %s) — "
             "jog the arm clear by hand" % (goal_words, CLEAR_MARGIN_MAX_STEP_RAD, plan_words, last)
         )
+    asked = 0
     for _attempt in range(HOME_TRIES):
+        asked += 1
         try:
-            return legs + [plan_to(state, "home", list(goal))]
+            return legs + [planned(state, "home", list(goal))]
+        except PlanSwung as e:  # asked again, the planner answers alike
+            last = e
+            break
         except RuntimeError as e:
             last = e
-    _chain, body = esc._body()
-    q0 = np.asarray(q, float)
-    g = np.asarray(on_branch(goal, q0), float)
-    for f in HOME_WAYPOINTS:
-        w = [float(v) for v in q0 + f * (g - q0)]
-        if body is not None and not body.pose_clear(w):
-            continue
-        try:
-            a = plan_to(state, "home-waypoint", w)
-            b = plan_to(PlanState(joints=list(a.goal_joints), chain=state.chain), "home", list(goal))
-        except RuntimeError as e:
-            last = e
-            continue
+    rest, via, last = via_waypoint(PlanState(joints=list(q), chain=state.chain), last)
+    if rest is not None:
         say(
-            "%s %s planned through a waypoint %.0f%% of the way along the joint line (asked for %d times directly)"
-            % (who, plan_words, 100 * f, HOME_TRIES)
+            "%s %s planned through a waypoint %.0f%% of the way along the joint line (asked for %d times directly; "
+            "last: %s)" % (who, plan_words, 100 * via, asked, last)
         )
-        return legs + [a, b]
+        return legs + rest
     raise RuntimeError(
         "%s did not plan from here, %d times directly nor through a waypoint %s of the way along the joint line "
         "(last: %s) — jog the arm clear by hand"
-        % (plan_words, HOME_TRIES, "/".join("%.0f%%" % (100 * f) for f in HOME_WAYPOINTS), last)
+        % (plan_words, asked, "/".join("%.0f%%" % (100 * f) for f in HOME_WAYPOINTS), last)
     )
 
 
