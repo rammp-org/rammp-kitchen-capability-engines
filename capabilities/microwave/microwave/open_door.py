@@ -196,12 +196,16 @@ def _make_detector():
 # no arm link or the tool lower than this on a cuRobo path (door_common.common.FREE_MOVE_MIN_Z): the table top is
 # ~0.19 in the arm's frame (11-10), + 5 cm
 FREE_MOVE_MIN_Z = 0.24
+# cuRobo's moves (go-to, and those run exactly as checked) at this fraction of their planned speed: rammp_arm's
+# GO_TO_SPEED_SCALE, 0.3 by default, was slow (11-10). Its full-speed J2 acceleration (~26 rad/s^2) is ~5 here
+CUROBO_SPEED = 0.45
 
 
 def configure(data_dir):
     """Everything door_common needs from the microwave: call once at startup."""
     constants.configure(data_dir)
     dc.FREE_MOVE_MIN_Z = FREE_MOVE_MIN_Z
+    rammp_arm.GO_TO_SPEED_SCALE = CUROBO_SPEED  # the open and the close (one process)
     shared.configure(
         MAKE_DETECTOR=_make_detector,
         FIND_HINGE=shared.hinge_detected(HINGE_BEHIND_FACE, HINGE_PAST_EDGE),

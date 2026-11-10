@@ -198,8 +198,12 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
             return None
         b_start = -np.sqrt(args.push_radius**2 - a_side**2)
         qs, err = solve_ik(scene, rb, pos(a_side, b_start), quat, q0)
-        if err >= sim.MAX_IK_ERR:
-            tried.append((a_side, f"out of reach (IK {err * 100:.1f} cm off)"))
+        at = np.round(pos(a_side, b_start), 3)
+        if err >= sim.KEEP_OUT_ERR:  # solve_ik's code for "in the keep-out", not a miss: say what hits what
+            ko = sim.keep_out_message(rb, qs)
+            tried.append((a_side, f"swing start {at}: the arm would be in the keep-out ({ko})"))
+        elif err >= sim.MAX_IK_ERR:
+            tried.append((a_side, f"swing start {at}: out of reach (IK {err * 100:.1f} cm off)"))
         else:
             gap, link = clearance(rb, qs, bodies, held=held)
             if gap >= GAP:
@@ -487,13 +491,46 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
         if tilt > max_tilt_deg:
             say("the hand would tilt -- refusing, arm untouched.")
             return False
+    curobo = args.curobo and all(hasattr(ai, a) for a in ("plan_to_joints", "execute_joint_trajectory", "raw_joints"))
+    swing_curobo = False
+    if curobo:  # previewed here (the dry run shows it), checked again from the real joints before each runs
+        if plan["before"]:
+            route = [q for _, leg in plan["before"] for q in leg]
+            why = _curobo_knots_problem(ai, scene, rb, df, deg0, args, ai.raw_joints(), route)
+            say(f"cuRobo, the route stitched: {why or 'every leg checked against the door, the body and the handle'}")
+            _, why = _curobo_door_plan(ai, scene, rb, df, deg0, args, ai.raw_joints(), plan["before"][-1][1][-1])
+            say(f"cuRobo to the swing start: {why or 'checked against the door, the body and the handle'}")
+        sweep = plan["sweep"][0]
+        for _ in range(CUROBO_TRIES):  # its plans vary
+            why = dc.curobo_path_problem(ai, sweep[0], sweep, "the swing")
+            if not why:
+                break
+        swing_curobo = not why
+        say(f"cuRobo for the swing: {why or 'previewed, no detours'}")
+        if plan["after"]:
+            _, why = _curobo_door_plan(
+                ai, scene, rb, df, stop_deg, args, sweep[-1], plan["after"][-1][1][-1], from_contact=True
+            )
+            say(f"cuRobo for the back-out: {why or 'checked against the closed door and the body'}")
     if not args.execute:
         say(f"\nDRY RUN (push-close from {deg0:.0f} deg) -- nothing commanded.")
         return True
-    for label, leg in plan["before"]:
-        if not execute_joint_plan(ai, leg, label):
+    routed = None
+    if curobo and plan["before"]:
+        routed = _curobo_route(ai, scene, rb, df, deg0, args, plan)  # stitched; else one cuRobo move
+        if routed is None:
+            routed = _curobo_leg(ai, scene, rb, df, deg0, args, plan["before"][-1][1][-1], "to the swing start")
+        if routed is False:
             return False
-    if not _run_sweep(ai, *plan["sweep"], args.smooth):
+    if routed is None:
+        for label, leg in plan["before"]:
+            if not execute_joint_plan(ai, leg, label):
+                return False
+    if swing_curobo:  # cuRobo through the checked arc joints, blended (it only pushes: no pulling the body)
+        say(f"sweep: cuRobo through {len(dc.curobo_knots(plan['sweep'][0]))} of its checked joints ...")
+        if not dc.through_curobo(ai, plan["sweep"][0], "sweep"):
+            return False
+    elif not _run_sweep(ai, *plan["sweep"], args.smooth):
         return False
     if plan["push"]:  # none with --push-max 0: it swings shut from stop_deg
         done = _push_until_shut(ai, plan["push"], args.push_contact_nm)
@@ -502,12 +539,131 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
         if not execute_joint_plan(ai, back_steps, "off the door"):
             return False
     save_door_geometry(door_open_deg=stop_deg, door_file=door_file)
-    for label, leg in plan["after"]:
-        if not execute_joint_plan(ai, leg, label):
+    backed = None
+    if curobo and plan["after"]:
+        backed = _curobo_leg(ai, scene, rb, df, stop_deg, args, plan["after"][-1][1][-1], "back out", True)
+        if backed is False:
             return False
+    if backed is None:
+        for label, leg in plan["after"]:
+            if not execute_joint_plan(ai, leg, label):
+                return False
     st = ai.get_state()
     say(f"\nPUSH-CLOSE DONE. final EE {np.round(st['ee_pos'][:3], 4)}  gripper {float(st['gripper_pos']):.3f}")
     return True
+
+
+def _door_bodies(scene, rb, df, deg, args):
+    """The door at `deg`, the microwave body and (handle_protrusion_m) the handle bar, as _plan_close checks them."""
+    bodies = df.bodies(scene, rb, deg)
+    if args.handle_protrusion_m:
+        bodies = bodies + [_handle_body(rb, df, deg, args.handle_protrusion_m, args.handle_length_m)]
+    return bodies
+
+
+CUROBO_TRIES = 3  # cuRobo's plans vary: each part of the close is asked this many times for one that passes
+
+
+def _curobo_door_plan(ai, scene, rb, df, deg, args, start, goal, from_contact=False):
+    """cuRobo's plan from joints `start` to `goal` (plan_to_joints, nothing moves) and why it can't be run as it is
+    ("" when it can): dc.free_move_problem's checks (the floor, joint swings, the end) and every sample MIN_CLEAR from
+    the door at `deg`, the microwave body and the handle -- cuRobo's world has none of them. `from_contact`: it starts
+    against the door (the back-out): no sample closer than the start, until MIN_CLEAR. Asked CUROBO_TRIES times."""
+    why = ""
+    for _ in range(CUROBO_TRIES):
+        pl, why = dc.free_move_problem(ai, start, goal, keep_shape=False)
+        if why:
+            continue
+        bodies = _door_bodies(scene, rb, df, deg, args)
+        try:
+            qs = np.asarray(pl.q, dtype=float)
+            shut = bool(args.close_gripper)  # the hand as it will be: closed fingers when the close closes them
+            need = min(MIN_CLEAR, clearance(rb, qs[0], bodies, shut)[0] - 0.002) if from_contact else MIN_CLEAR
+            for i, q in enumerate(qs):
+                gap, link = clearance(rb, q, bodies, shut)
+                if gap < need:
+                    why = (
+                        f"cuRobo's path brings {link} {gap * 100:.1f} cm from the door/body at sample {i}/{len(qs)} "
+                        f"(needs {need * 100:.1f})"
+                    )
+                    break
+        finally:
+            drop(rb, bodies)
+        if not why:
+            return pl, ""
+    return None, why
+
+
+def _curobo_knots_problem(ai, scene, rb, df, deg, args, start, path):
+    """Why cuRobo can't run joint `path` stitched (every leg between dc.curobo_knots, previewed by plan_to_joints from
+    joints `start`, nothing moves), "" when it can: each leg dc.free_move_problem's checks, no detour past
+    dc.CUROBO_MAX_DETOUR, every sample MIN_CLEAR from the door at `deg`, the body and the handle (the closed hand with
+    close_gripper). The legs asked CUROBO_TRIES times (its plans vary)."""
+    knots = dc.curobo_knots(path)
+    shut = bool(args.close_gripper)
+    why = ""
+    for _ in range(CUROBO_TRIES):
+        bodies = _door_bodies(scene, rb, df, deg, args)
+        try:
+            why, q = "", np.asarray(start, dtype=float)
+            for k, goal in enumerate(knots, 1):
+                pl, why = dc.free_move_problem(ai, q, goal, keep_shape=False)
+                if why:
+                    why = f"leg {k}: {why}"
+                    break
+                qs = np.asarray(pl.q, dtype=float)
+                direct = max(float(np.linalg.norm(dc.short_delta(q, goal))), np.radians(dc.CUROBO_DETOUR_FLOOR_DEG))
+                went = sum(float(np.linalg.norm(dc.short_delta(a, b))) for a, b in zip(qs[:-1], qs[1:], strict=True))
+                if went > dc.CUROBO_MAX_DETOUR * direct:
+                    why = f"leg {k} takes a detour ({went / direct:.1f}x the direct distance)"
+                    break
+                for qq in qs:
+                    gap, link = clearance(rb, qq, bodies, shut)
+                    if gap < MIN_CLEAR:
+                        need_cm = MIN_CLEAR * 100
+                        why = f"leg {k} brings {link} {gap * 100:.1f} cm from the door/body (needs {need_cm:.0f})"
+                        break
+                if why:
+                    break
+                q = np.asarray(goal, dtype=float)
+        finally:
+            drop(rb, bodies)
+        if not why:
+            return ""
+    return why
+
+
+def _curobo_route(ai, scene, rb, df, deg, args, plan):
+    """The route over the door as one stitched cuRobo motion, checked (_curobo_knots_problem) from where the arm is;
+    None when it can't be (says why), else whether it ran."""
+    path = [q for _, leg in plan["before"] for q in leg]
+    why = _curobo_knots_problem(ai, scene, rb, df, deg, args, ai.raw_joints(), path)
+    if why:
+        say(f"  route, cuRobo stitched: {why} -- one cuRobo move or the sim's legs instead")
+        return None
+    say(f"  route: cuRobo through {len(dc.curobo_knots(path))} of its {len(path)} checked joints, one stitched motion")
+    return bool(dc.through_curobo(ai, path, "route over the door"))
+
+
+def _run_exact(ai, pl, label):
+    """Run cuRobo's checked plan `pl` exactly as it is (execute_joint_trajectory) at the go-to speed."""
+    scale = float(rammp_arm.GO_TO_SPEED_SCALE)
+    say(f"  {label}: cuRobo's plan checked ({len(pl.q)} samples, {float(pl.t[-1]) / scale:.1f} s), run as it is")
+    points = [(float(t), q, qd) for t, q, qd in zip(pl.t, pl.q, pl.qd, strict=True)]
+    res = ai.execute_joint_trajectory(list(rammp_arm.JOINTS), points, speed_scale=scale)
+    if res.error_code != 0:
+        say(f"  {label}: ended {res.error_string or res.error_code}")
+    return res.error_code == 0
+
+
+def _curobo_leg(ai, scene, rb, df, deg, args, goal, label, from_contact=False):
+    """The move to joints `goal` through cuRobo, checked against the door at `deg` (_curobo_door_plan) from where the
+    arm is now and run exactly; None when cuRobo can't do it as checked (says why: the caller runs the sim's legs)."""
+    pl, why = _curobo_door_plan(ai, scene, rb, df, deg, args, ai.raw_joints(), goal, from_contact)
+    if why:
+        say(f"  {label}: {why} -- the sim's checked legs instead")
+        return None
+    return _run_exact(ai, pl, label)
 
 
 def _push_until_shut(ai, push, contact_nm):
@@ -589,6 +745,8 @@ CLOSE_DEFAULTS = {
     "handle_length_m": 0.20,  # the modelled handle bar's height (m), centred on the grasp
     "retreat_dist": 0.20,  # after the push, back straight out up to this far (m)
     "smooth": False,  # the swing as one blended Cartesian trajectory instead of the checked joints
+    "close_gripper": False,  # close the gripper before anything moves (a narrower hand); off: left as is
+    "curobo": True,  # route, swing and back-out through cuRobo, checked against the door model (push: not)
 }
 
 
@@ -613,6 +771,10 @@ def run(ai, execute, speed=1.0, log_args=None, **params):
     ok = False
     try:
         log.frame("close_start")
+        if args.close_gripper and execute:  # the planning checks the open hand, the widest: closed is inside it
+            say("closing the gripper first (close_gripper) ...")
+            ai.gripper(1.0)
+            time.sleep(0.8)
         ok = push_close(ai, args)
         log.event("close", ok=ok)
         log.frame("close_end")
