@@ -68,6 +68,7 @@ from door_common.common import (
     release_and_back_off,
     save_door_geometry,
     say,
+    short_delta,
 )
 from door_common.open_door import BACK_OFF_M, SWING_MAX_TRY_DEG, SWING_MIN_DEG
 from scipy.spatial.transform import Rotation as R
@@ -103,6 +104,7 @@ VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's
 # ... and these when IK from it misses, lands past a guard or in the keep-out: PyBullet's IK ignores joint limits and
 # one seed can settle on an impossible elbow (11-09: J4 225.8 deg for a microwave 47 cm out). The elbow the same
 # way, more and less folded, and the arm swung toward either side
+VIEW_GOAL_MATCH_DEG = 5.0  # cuRobo's plan to the view pose must end within this of the joints asked (every joint)
 VIEW_MORE_SEEDS_DEG = (
     (0.0, 40.0, 180.0, -100.0, 0.0, 70.0, 90.0),
     (0.0, -10.0, 180.0, -145.0, 0.0, 40.0, 90.0),
@@ -509,6 +511,11 @@ def plan_view(ai, scene, rb):
             if not pl.success:  # 11-09: a pose our sim passed was cuRobo's IK_FAIL at motion time
                 whys[f"cuRobo: {str(pl.message).split(':')[0][:60]}"] += 1
                 q = None
+            elif len(pl.q) and np.degrees(np.max(np.abs(short_delta(pl.q[-1], q)))) > VIEW_GOAL_MATCH_DEG:
+                # cuRobo's pose fallback: the same hand pose on other joints (11-10: J1 swung 131 deg, J3 177, the arm
+                # folded the other way, and the move then failed the joints check). Not these joints: the next
+                whys["cuRobo ends on other joints (its pose fallback)"] += 1
+                q = None
         if q is not None:
             say(
                 f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
@@ -535,28 +542,36 @@ def plan_view(ai, scene, rb):
     )
 
 
+VIEW_STOP = None  # why the last open ended at the view pose (_view_step), or None: it went on past it
+
+
 def _view_step(view_only, ai, scene, rb, execute):
     """Go to the view pose, so the handle is always detected from the same place. Already there (VIEW_AT_TOL_M), a dry
     run goes on to detect and plan from it; elsewhere it stops, since it can't detect from where the arm isn't.
-    Returns True when the open ends here."""
+    Returns True when the open ends here, saying why in VIEW_STOP."""
+    global VIEW_STOP
+    VIEW_STOP = None
     q_view, p_view = plan_view(ai, scene, rb)
     off = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - p_view))
     if off <= VIEW_AT_TOL_M:
         say(f"already at the view pose ({off * 100:.1f} cm) -- detecting from here")
         if view_only:
             say("\nAT THE VIEW POSE (view_only) -- stopping here.")
+            VIEW_STOP = "view_only"
         return view_only
     if not execute:
         say(
             f"\nDRY RUN -- would move to the view pose ({off * 100:.0f} cm away) and detect from there; nothing "
             "commanded. To dry-run the rest: a view_only goal (moves there), then this dry run again."
         )
+        VIEW_STOP = "dry run, not at the view pose"
         return True
     if not ai.go_to_joint_config(q_view, "to view pose"):
         raise Refused("Did not reach the view pose -- stopping before detection.")
     time.sleep(1.0)  # let the camera frames catch up with the arm
     if view_only:
         say("\nAT THE VIEW POSE (view_only) -- stopping here.")
+        VIEW_STOP = "view_only"
         return True
     return False
 
@@ -684,6 +699,10 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_o
         on_grasp = partial(on_hold, True) if on_hold else None
         shared.LAST_PLAN = None  # open_task sets it once it has a plan
         ok = open_task(ai, execute, swing, view_only=view_only, push=push and not view_only, on_grasp=on_grasp)
+        if ok and VIEW_STOP:  # ended at the view pose: no grasp, swing or push-open was planned or checked
+            log.event("open", ok=ok, stopped_at_view_pose=VIEW_STOP)
+            say(f"\nSTOPPED AT THE VIEW POSE ({VIEW_STOP}) -- nothing past it was planned or checked")
+            return ok
         if not ok:
             say("swing did not finish -- stopping (still holding the handle).")
         elif push and not view_only:
@@ -760,7 +779,7 @@ def main():
 def _run(ai, args, swing, min_swing):
     if args.release:
         release_and_back_off(ai, BACK_OFF_M, args.execute, pre_park_x=PRE_PARK_X, curobo=shared.CUROBO_PATHS)
-    elif open_task(ai, args.execute, swing, min_swing) and not args.no_push_open:
+    elif open_task(ai, args.execute, swing, min_swing) and not args.no_push_open and not VIEW_STOP:
         push_open(ai, args.execute)
 
 
