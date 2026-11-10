@@ -59,19 +59,6 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   do. The names come from the driver's source: if the camera's differ, set the `wrist_infra*_topic` parameters. After a
   run the console should say `M stereo pairs` with M close to N; 0 means nothing was recorded.
 
-## Before a session: which chair layers the planner runs
-
-The planner keeps the arm out of a model of the wheelchair and its occupant (`rammp-deployments`,
-`december_2026/config/robots/flatbot/curobo`); flatbot has no real chair, so nothing physical shows if the model is
-not the one intended. On 2026-11-09 the planner ran the set from before #156 (11-07: the arm 8 in further forward on
-the chair), whose occupant's lap reaches 20 cm further forward, across the pull: most swings were refused against it.
-A refusal's world summary says which set is loaded: `seat 11` (with `armrest_arm_0`/`_1`) is the older one, `seat 10`
-the #156 one. To load dev's: `git pull` dev in `rammp-deployments`, `uv run scripts/set_robot.py
-december_2026/config/robots/flatbot`, `sheppy restart planner`.
-
-The grasp depth was measured on 11-09 (`/fridge_data/true_handle_20261109.json`: the detected bar front was right to
-0.5 cm; `GRIP_EXT` 0.053 puts the fingertips 3 cm past it on a level grasp).
-
 ## How to stop the robot
 
 | How                                      | Effect                                                                   |
@@ -99,7 +86,56 @@ docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ro
   ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear, clear_target: operator}"'
 ```
 
-## Open
+
+## Arm + Drive Base
+
+Add `"drive_base": true, "base_speed": 0.03` to an executing goal and it makes the wheelchair move itself, straight,
+a fixed distance (at most 35 cm, ending within 1 cm), then carries on. No `chair_moved` goal. **Use 0.03 m/s while testing.**
+
+**Before:** clear 40 cm in front of and behind the base, and check that the MIB is talking (both should print):
+
+```bash
+docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+  bash -lc 'ros2 topic echo --once /rammp/mib/status && ros2 topic echo --once /base/odom'
+```
+
+### Open
+
+```bash
+docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+  ros2 action send_goal --feedback /fridge/execute_action \
+  rammp_orchestrator_interfaces/action/ExecuteAction \
+  '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2, \"drive_base\": true, \"base_speed\": 0.03}"}'
+```
+
+### Close
+
+```bash
+docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+  ros2 action send_goal --feedback /fridge/execute_action \
+  rammp_orchestrator_interfaces/action/ExecuteAction \
+  '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"drive_base\": true, \"base_speed\": 0.03}"}'
+```
+
+T2 logs `drive_base: driving the wheelchair ...` and `drive_base: stopped ...`. The base stays where it drove: if it
+is still back from a close, send the next close with `chair_moved` instead of `drive_base`, or it drives the picked move again.
+
+**Stopping it:** the T4 e-stop or Ctrl-C in T2, or the joystick if the base has one. It also stops by itself, failing
+the goal with `base_stopped` and leaving the arm holding, if it goes the wrong way or further than asked, takes more
+than distance / speed + 5 s, ends more than 1 cm off, or loses odometry. Check where the base is before the next goal.
+
+**First drive: test the e-stop.** Send the close, hit the T4 e-stop while the base moves, and check it stops at once.
+Do this before relying on it.
+
+## Without drive base
+
+### Open
 
 1. **Teleop the camera square-on to the closed door**, ~50–60 cm from it, the handle in view, the arm clear of the
    chair (aim for `handle (mean)` x 0.85–1.0, y −0.20 to −0.34).
@@ -145,7 +181,7 @@ Options: `execute` (`false`: dry run), `speed` (0–1, scales every motion), `pu
 `chair_moved`, `release_only` (only let go and back off, after a run stopped holding the handle), `save_door` (a dry
 run that plans OK also writes `door.json`, for testing the close without an executed open).
 
-## Close
+### Close
 
 1. **Grip the container** by teleop, the hand ≥5 cm from the door and clear of the chair.
 
@@ -192,52 +228,6 @@ run that plans OK also writes `door.json`, for testing the close without an exec
 
 Options: `door_deg`, `chair_back` (m, + back, - forward; default: the plan picks it), `close_to_deg` (45), `push_radius` / `push_radius_end` (0.30 / 0.28),
 `push_z`, `speed` (0.7), `hold_offset_x` (`0` if not holding the container), `side_past_hinge`, `retreat_dist`.
-
-## Driving the base (`drive_base`)
-
-Add `"drive_base": true, "base_speed": 0.03` to an executing goal and it makes the wheelchair move itself, straight,
-a fixed distance (at most 35 cm, ending within 1 cm), then carries on. No `chair_moved` goal. **Use 0.03 m/s while testing.**
-
-**Before:** clear 40 cm in front of and behind the base, and check that the MIB is talking (both should print):
-
-```bash
-docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  bash -lc 'ros2 topic echo --once /rammp/mib/status && ros2 topic echo --once /base/odom'
-```
-
-**Open** (the push's move, if it needs one):
-
-```bash
-docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  ros2 action send_goal --feedback /fridge/execute_action \
-  rammp_orchestrator_interfaces/action/ExecuteAction \
-  '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2, \"drive_base\": true, \"base_speed\": 0.03}"}'
-```
-
-**Close** (the move its plan picked first), after its dry run passes:
-
-```bash
-docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
-  ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  ros2 action send_goal --feedback /fridge/execute_action \
-  rammp_orchestrator_interfaces/action/ExecuteAction \
-  '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"drive_base\": true, \"base_speed\": 0.03}"}'
-```
-
-T2 logs `drive_base: driving the wheelchair ...` and `drive_base: stopped ...`. The base stays where it drove: if it
-is still back from a close, send the next close with `chair_moved` instead of `drive_base`, or it drives the picked move again.
-
-**Stopping it:** the T4 e-stop or Ctrl-C in T2, or the joystick if the base has one. It also stops by itself, failing
-the goal with `base_stopped` and leaving the arm holding, if it goes the wrong way or further than asked, takes more
-than distance / speed + 5 s, ends more than 1 cm off, or loses odometry. Check where the base is before the next goal.
-
-**First drive: test the e-stop.** Send the close, hit the T4 e-stop while the base moves, and check it stops at once.
-Do this before relying on it.
 
 ## Runs
 

@@ -6,9 +6,9 @@ go round it).
    (`door_normal: handle_model`, door_normal.py, the side grasp's method). The hinge is measured from the handle
    (hinge_along_door_m, ...). The grasp is at the middle of the bar, or `grasp_offset_m` above it (below if
    negative), within the measured bar (`set_grasp_offset`).
-2. Plan everything before anything moves (planning.py) -- for each grasp in turn (GRASP_PITCHES_DEG nose-down tilts,
-   each with the hand either way up), up to SWING_CANDIDATES whose approach and swing plan, then what follows the swing
-   on those:
+2. Plan everything before anything moves (planning.py) -- for each grasp in turn (GRASP_PITCHES_DEG tilts, + nose-down
+   and - nose-up, each with the hand either way up), up to SWING_CANDIDATES whose approach and swing plan, then what
+   follows the swing on those:
    - the approach: cuRobo to a line-up point PREGRASP_STANDOFF_M straight out from the grasp (the closed door, its
      handle and the cabinet in its world), then straight in (local IK). If no grasp's swing plans from the arm
      configuration cuRobo chose, the line-up is planned again from others (ALT_CONFIG_SEEDS: elbow turned, wrist
@@ -68,7 +68,7 @@ def _make_detector(handle_centre_to_face_m, door_normal="handle_model"):
 
 PLACEMENT_CELL_M = 0.05  # constants.PLACEMENT_CELLS' grid step: a handle within half of it of a cell is in that cell
 PLACEMENT_SIM_PULL_DEG = 60  # the pull and handle height the cells come from (constants.MOUNTS) ...
-PLACEMENT_SIM_Z_M = 0.30
+PLACEMENT_SIM_Z_M = 0.315
 PLACEMENT_Z_TOL_M = 0.05  # ... a handle further than this off that height gets a note that the placement may differ
 PLACEMENT_INSET_M = 0.01  # the advice aims this far inside the region (the edge of a cell is where planning gets flaky)
 PLACEMENT_DEADBAND_M = 0.02  # ... and never asks for a move smaller than this along an axis: two detections of the same
@@ -298,8 +298,9 @@ def swung(pos, quat, hinge, sign, deg):
 
 
 def grasp_candidates(geom):
-    """The grasps tried, in order: each nose-down tilt, the hand up then upside down (fingers across the bar both
-    ways). Dicts {pitch, flip, h, pos, quat}. A tilt whose grasp door_common refuses (beyond MAX_REACH) is skipped."""
+    """The grasps tried, in order: each tilt (+ nose-down, - nose-up), the hand up then upside down (fingers across the
+    bar both ways). Dicts {pitch, flip, h, pos, quat}. A tilt whose grasp door_common refuses (beyond MAX_REACH) is
+    skipped."""
     out = []
     for pitch in F.GRASP_PITCHES_DEG:
         try:

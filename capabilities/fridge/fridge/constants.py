@@ -61,10 +61,11 @@ GRASP_END_MARGIN_M = 0.03
 # (FridgeModel: cabinet, door at its angle, handle) plus the planner's own chair layers (scene camera included), the arm's
 # configuration cuRobo's to choose; legs on or along the door by local IK along their exact path, checked by cuRobo;
 # each motion one trajectory joined by cuRobo. The poses below are the only places a motion is told to pass ---
-GRASP_PITCHES_DEG = (25, 30, 40)  # the grasp's nose-down tilts tried (configure sets them per mount), each with the
-# hand either way up (fingers across the bar both ways): the first of these whose whole open plans is used. Only
-# 25-40 deg: under 15 the fingers don't grip the bar firmly enough to pull the door (user, 2026-11-08); 11-09 (user):
-# at least 25, and over 40 runs the wrist camera into the handle
+GRASP_PITCHES_DEG = (25, 30, 40, -25, -30, -40)  # the grasp's tilts tried, + nose-down, - nose-up (configure sets
+# them per mount), each with the hand either way up (fingers across the bar both ways): the first of these whose whole
+# open plans is used. Only 25-40 deg either way: under 15 the fingers don't grip the bar firmly enough to pull the door
+# (user, 2026-11-08); 11-09 (user): at least 25, and over 40 runs the wrist camera into the handle; 11-10 (user):
+# nose-up 25-40 too (-15 not valid)
 PREGRASP_STANDOFF_M = (0.12, 0.08)  # line up this far straight out from the grasp, then straight in (handle out of
 # the world for that leg only); the first that plans
 ALT_CONFIG_SEEDS = (("J3", -60.0), ("J3", 60.0), ("wrist", 0.0))  # if no grasp's swing plans from the configuration
@@ -212,24 +213,27 @@ MOUNTS = {
     30: dict(
         max_reach=1.10,
         # the box the cells below span: the handle x, y where the open planned (cuRobo sweep, next comment)
-        placement_x=(0.60, 1.05),
-        placement_y=(-0.35, -0.15),
+        placement_x=(0.65, 1.05),
+        placement_y=(-0.30, 0.00),
         # every handle x, y (5 cm grid) where the cuRobo open (60 deg pull, then the push-open, a chair move between
-        # them if it needed one) planned in sim, the handle 0.30 m above the arm base: the placement advice sends the
-        # wheelchair toward the nearest of them (open_door.placement_advice). 11-08/09 sweep (fridge-grasp-sims:
-        # flatbot model with the arm base 8 in further forward on the chair, IMG_8622 start pose, door square to the
-        # chair, tilts 15-45); the close was not part of it
+        # them if it needed one) planned in sim, the handle 0.315 m above the arm base (as detected on the robot on
+        # 11-09): the placement advice sends the wheelchair toward the nearest of them (open_door.placement_advice).
+        # 11-10 sweep on bcdc46e + the 11-09 uncommitted changes (GRIP_EXT 0.053, BACK_OFF_M 0.12) with the tilts below
+        # (+-25-40) and the push's chair move up to +-35 cm (it never needed more than 5 cm); every refusal re-checked
+        # in a fresh planner process (fridge-grasp-sims: flatbot model with the arm base 8 in further forward on the
+        # chair, the web app's Fridge start pose, door square to the chair); the close was not part of it
         placement_cells=(
-            (0.60, -0.20), (0.65, -0.20), (0.65, -0.15), (0.70, -0.25), (0.70, -0.20), (0.70, -0.15),
-            (0.75, -0.35), (0.75, -0.20), (0.75, -0.15), (0.80, -0.35), (0.80, -0.30), (0.80, -0.25),
-            (0.80, -0.20), (0.80, -0.15), (0.85, -0.35), (0.85, -0.30), (0.85, -0.25), (0.85, -0.20),
-            (0.85, -0.15), (0.90, -0.35), (0.90, -0.30), (0.90, -0.25), (0.90, -0.20), (0.90, -0.15),
-            (0.95, -0.35), (0.95, -0.30), (0.95, -0.25), (0.95, -0.20), (1.00, -0.35), (1.00, -0.30),
-            (1.00, -0.25), (1.00, -0.20), (1.05, -0.35), (1.05, -0.30), (1.05, -0.25),
+            (0.65, -0.15), (0.65, -0.10), (0.65, -0.05), (0.70, -0.15), (0.70, -0.10), (0.70, -0.05),
+            (0.75, -0.25), (0.75, -0.20), (0.75, -0.15), (0.75, -0.10), (0.75, -0.05), (0.80, -0.25),
+            (0.80, -0.20), (0.80, -0.15), (0.80, -0.10), (0.80, -0.05), (0.80, 0.00), (0.85, -0.30),
+            (0.85, -0.25), (0.85, -0.20), (0.85, -0.15), (0.85, -0.10), (0.85, -0.05), (0.90, -0.30),
+            (0.90, -0.25), (0.90, -0.20), (0.90, -0.15), (0.90, -0.10), (0.90, 0.00), (0.95, -0.25),
+            (0.95, -0.20), (0.95, -0.15), (0.95, -0.05), (0.95, 0.00), (1.00, -0.25), (1.00, -0.20),
+            (1.00, -0.15), (1.00, -0.10), (1.00, -0.05), (1.05, -0.15), (1.05, -0.10),
         ),
         push_open_dz_m=0.10,  # 10 cm ABOVE the handle
-        grasp_pitches_deg=(25, 30, 40),  # 25-40 only (GRASP_PITCHES_DEG); 11-09: 45 ran the wrist camera into the
-        # handle
+        grasp_pitches_deg=(25, 30, 40, -25, -30, -40),  # 25-40 either way (GRASP_PITCHES_DEG): nose-down first; 11-09:
+        # 45 ran the wrist camera into the handle
     ),
 }
 PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  # configure sets them
