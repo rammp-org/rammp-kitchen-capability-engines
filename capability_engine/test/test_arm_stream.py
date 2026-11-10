@@ -229,6 +229,28 @@ def test_cancel_during_service_call(arm_env, monkeypatch, phase):
     assert time.monotonic() - t0 < SLOW_ANSWER_S
 
 
+def test_set_world_even_if_cancelled(arm_env, monkeypatch):
+    """even_if_cancelled: a cancelled action still gets the planner's answer (putting its world
+    back), within the service's bounded wait."""
+    arm, node, _ = arm_env
+    path = "/test_set_world_after_cancel"
+    answered = []
+
+    def slow(request, response):
+        time.sleep(CANCEL_AFTER_S * 2)
+        answered.append(request.world)
+        response.success = True
+        return response
+
+    node.create_service(SetWorld, path, slow, callback_group=ReentrantCallbackGroup())
+    monkeypatch.setitem(arm_module.SERVICES, "set_world", (SetWorld, path))
+    ctx = FakeCtx()
+    arm.begin_action(ctx, None)
+    ctx.cancel()
+    assert arm.set_world("world.yaml", even_if_cancelled=True) == (True, "")
+    assert answered == ["world.yaml"]
+
+
 def test_stream_closed_by_driver_raises(arm_env):
     arm, _, fake = arm_env
     arm.begin_action(FakeCtx(), None)
@@ -336,6 +358,33 @@ def test_plan_to_pose_round_trip(arm_env):
     assert g.hold == PlanToPose.Goal.HOLD_LEVEL
     p = g.target.position
     np.testing.assert_allclose([p.x, p.y, p.z], [0.4, 0.1, 0.3])
+
+
+def test_blend_round_trip(arm_env):
+    """blend() sends each leg as the planner returned it, with its radii, speeds and holds, and
+    returns the one trajectory with a corner per junction."""
+    arm, _, fake = arm_env
+    q = np.arange(21.0).reshape(3, 7) / 10
+    fake.plan_result(q)
+    arm.begin_action(FakeCtx(), None)
+    legs = [
+        Plan(True, "", np.array([0.02, 0.04]), q[:2], np.zeros((2, 7))),
+        Plan(True, "", np.array([0.02, 0.04]), q[1:], np.ones((2, 7))),
+    ]
+    quat = [0.0, 0.0, 0.0, 1.0]
+    plan = arm.blend(legs, [0.02], speed_scale=[0.5, 1.0], hold=[0, HOLD_LEVEL],
+                     hold_orientation=[None, quat])
+    assert plan.success
+    np.testing.assert_allclose(plan.q, q)
+    np.testing.assert_allclose(plan.corner_m, [0.01])
+    g = fake.goals["blend"][-1]
+    assert len(g.legs) == 2 and list(g.legs[0].joint_names) == JOINTS
+    np.testing.assert_allclose(g.legs[1].points[0].positions, q[1])
+    np.testing.assert_allclose(g.legs[1].points[1].velocities, [1.0] * 7)
+    np.testing.assert_allclose(g.blend_radius, [0.02])
+    np.testing.assert_allclose(g.speed_scale, [0.5, 1.0])
+    assert list(g.hold) == [0, HOLD_LEVEL]
+    assert g.hold_orientation[1].w == 1.0
 
 
 def test_plan_with_planner_joint_names(arm_env):

@@ -1,6 +1,6 @@
 """fridge.base_drive: the fixed-distance wheelchair move, and the open and close driving the base
-(`drive_base`) on the sim. A fake base and a fake clock stand in for self.base and time; one test
-drives the engine's BaseInterface in mock mode. Nothing here can reach a real base or arm."""
+(`drive_base`) on the fake planner (fridge_fake.py). A fake base and a fake clock stand in for self.base and time;
+one test drives the engine's BaseInterface in mock mode. Nothing here can reach a real base or arm."""
 
 import json
 import math
@@ -8,17 +8,14 @@ import re
 import types
 from functools import partial
 
-import numpy as np
 import pytest
-import test_fridge_planning as planning
 from door_common import common as dc
 from fridge import base_drive, close_door, constants, open_door, push_open
+from fridge_fake import door_is_open, fridge  # noqa: F401 -- fridge: the fixture
 
 from capability_engine import BaseError, StateTimeout
 from capability_engine.engine import Cancelled
 
-FRIDGE_DOOR, TELEOP_START, _Arm = planning.FRIDGE_DOOR, planning.TELEOP_START, planning._Arm
-door_sim = planning.door_sim  # the planning tests' fixture
 CFG = dict(base_drive.PARAMS)
 TOL = CFG["base_tolerance"]
 
@@ -288,14 +285,17 @@ def _driver(clock, arm, fail_at_s=None):
     return base, partial(base_drive.move_chair, base, arm, ctx, speed=0.05, cfg=CFG, execute=True)
 
 
-def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(door_sim, clock, monkeypatch):
-    scene, rb = door_sim
-    arm = _Arm(scene, rb, TELEOP_START)
+def _needs_a_move(pos, quat, obstacles):
+    """cuRobo reaches nothing near the open door where it stands: only once the wheelchair has moved."""
+    return isinstance(obstacles, list) and door_is_open(obstacles)
+
+
+def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(fridge, clock, monkeypatch):
+    arm, planner, _ = fridge
+    arm.unreachable = _needs_a_move
     base, drive = _driver(clock, arm)
-    assert open_door.run(
-        arm, False, swing_deg=50, drive_chair=drive
-    )  # a dry run: says it will drive, drives nothing
-    assert "DRIVES THE BASE" in push_open.NEXT_STEP and base.sent == [] and arm.calls == []
+    assert open_door.run(arm, planner, False, drive_chair=drive)  # a dry run: says it will drive, drives nothing
+    assert "DRIVES THE BASE" in push_open.NEXT_STEP and base.sent == [] and arm.sent == []
     m = re.search(r"DRIVES THE BASE ~(\d+) cm (back|forward)", push_open.NEXT_STEP)
     planned = int(m.group(1)) * (1 if m.group(2) == "back" else -1)
 
@@ -304,82 +304,61 @@ def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(door_sim, 
 
     def recorded(*args):
         seen.update(json.loads(dc.DOOR_FILE.read_text()))
+        arm.unreachable = lambda *a: False  # the chair has moved: the push plans
         return push(*args)
 
     monkeypatch.setattr(push_open, "push_after_chair_move", recorded)
-    assert open_door.run(arm, True, swing_deg=50, drive_chair=drive)
-    assert [c[0] for c in arm.calls] == [
-        "curobo",
-        "joints",
-        "gripper",
-        "joints",
-        "gripper",
-        "joints",
-        "joints",
-    ]
+    assert open_door.run(arm, planner, True, drive_chair=drive)
+    # the approach, the swing + release, off the handle, (the drive), the push: one trajectory each
+    assert len(arm.sent) == 4
     assert push_open.NEXT_STEP == ""  # nothing asked of the person: opened
     moved = -base.x
-    assert abs(moved * 100 - planned) <= 5 + 1
+    assert abs(moved * 100 - planned) <= 1
     door = json.loads(dc.DOOR_FILE.read_text())
-    assert (
-        door["door_open_deg"] == constants.PUSH_OPEN_TO_DEG
-        and door["push_after_chair_move"] is None
-    )
+    assert door["door_open_deg"] == constants.PUSH_OPEN_TO_DEG and door["push_after_chair_move"] is None
     assert seen["push_after_chair_move"] == pytest.approx(moved)  # the drive really made
     assert door["hinge"][0] == pytest.approx(seen["hinge"][0] + moved)  # the door where it now is
 
 
-def test_an_open_whose_drive_stops_leaves_no_push_waiting(door_sim, clock):
-    scene, rb = door_sim
-    arm = _Arm(scene, rb, TELEOP_START)
+def test_an_open_whose_drive_stops_leaves_no_push_waiting(fridge, clock):
+    arm, planner, _ = fridge
+    arm.unreachable = _needs_a_move
     base, drive = _driver(clock, arm, fail_at_s=0.5)
     with pytest.raises(BaseError):
-        open_door.run(arm, True, swing_deg=50, drive_chair=drive)
+        open_door.run(arm, planner, True, drive_chair=drive)
     assert base.vx == 0.0 and arm.gripper_pos == 0.0  # off the handle, base stopped
     assert json.loads(dc.DOOR_FILE.read_text()).get("push_after_chair_move") is None
-    with pytest.raises(
-        dc.Refused, match="no push waiting"
-    ):  # a chair_moved goal can't push the wrong door
-        open_door.run(arm, True, chair_moved=True)
+    with pytest.raises(dc.Refused, match="no push waiting"):  # a chair_moved goal can't push the wrong door
+        open_door.run(arm, planner, True, chair_moved=True)
 
 
-def test_the_close_drives_the_base_back_then_closes(door_sim, clock):
-    scene, rb = door_sim
-    arm = _Arm(scene, rb, TELEOP_START)
-    dc.DOOR_FILE.write_text(json.dumps(FRIDGE_DOOR))
-    base, drive = _driver(clock, arm)
-    assert close_door.run(arm, False, drive_chair=drive)  # a dry run drives nothing
-    assert base.sent == [] and arm.calls == []
-    assert close_door.run(arm, True, drive_chair=drive)  # no chair_moved needed
-    assert -base.x == pytest.approx(constants.CHAIR_BACK_M, abs=TOL)
-    assert arm.calls and all(c[0] == "joints" for c in arm.calls)
+def test_the_close_drives_the_base_then_closes(fridge, clock):
+    arm, planner, _ = fridge
+    assert open_door.run(arm, planner, False, save_door=True)
+    arm.unreachable = _needs_a_move
+    base, move_base = _driver(clock, arm)
+
+    def drive(move):  # once driven, the close plans against the door where it now is
+        moved = move_base(move)
+        arm.unreachable = lambda *a: False
+        return moved
+
+    assert close_door.run(arm, planner, False, drive_chair=drive, hold_offset_x=0.0)  # a dry run drives nothing
+    assert base.sent == [] and arm.sent == []
+    planned = close_door.LAST_CHAIR_BACK
+    assert planned == constants.CLOSE_CHAIR_MOVES_M[1]
+    assert close_door.run(arm, planner, True, drive_chair=drive, hold_offset_x=0.0)  # no chair_moved needed
+    assert -base.x == pytest.approx(planned, abs=TOL)
+    assert len(arm.sent) == 1
     assert json.loads(dc.DOOR_FILE.read_text())["door_open_deg"] == constants.CLOSE_TO_DEG
 
 
-def test_the_close_refuses_to_drive_if_the_arm_would_meet_the_door(door_sim, clock, monkeypatch):
-    scene, rb = door_sim
-    arm = _Arm(scene, rb, TELEOP_START)
-    dc.DOOR_FILE.write_text(json.dumps(FRIDGE_DOOR))
+def test_the_close_with_chair_moved_never_drives(fridge, clock):
+    arm, planner, _ = fridge
+    assert open_door.run(arm, planner, False, save_door=True)
+    arm.unreachable = _needs_a_move
     base, drive = _driver(clock, arm)
-    monkeypatch.setattr(push_open, "_clear_through_move", lambda *a: False)
-    with pytest.raises(dc.Refused, match="open door"):
-        close_door.run(arm, True, drive_chair=drive)
-    assert base.sent == [] and arm.calls == []
-
-
-def test_the_close_with_chair_moved_never_drives(door_sim, clock):
-    scene, rb = door_sim
-    arm = _Arm(scene, rb, TELEOP_START)
-    dc.DOOR_FILE.write_text(json.dumps(FRIDGE_DOOR))
-    base, drive = _driver(clock, arm)
-    assert close_door.run(arm, True, chair_moved=True, drive_chair=drive)
-    assert base.sent == []
-
-
-def test_the_clearance_check_passes_for_the_arm_where_the_close_starts(door_sim):
-    scene, rb = door_sim
-    arm = _Arm(scene, rb, TELEOP_START)
-    close_door.clear_through_drive(
-        arm, FRIDGE_DOOR, {}, constants.CHAIR_BACK_M, constants.CHAIR_BACK_DIR
-    )
-    assert np.isfinite(arm.q).all()
+    assert close_door.run(arm, planner, False, drive_chair=drive, hold_offset_x=0.0)  # plans (and saves) the move
+    arm.unreachable = lambda *a: False
+    assert close_door.run(arm, planner, True, chair_moved=True, drive_chair=drive, hold_offset_x=0.0)
+    assert base.sent == [] and len(arm.sent) == 1

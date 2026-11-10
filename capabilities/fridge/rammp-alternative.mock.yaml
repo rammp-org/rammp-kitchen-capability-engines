@@ -21,4 +21,8 @@ subscribes:
   - /scene_camera/color/image_raw
   - /scene_camera/color/camera_info
   - /scene_camera/depth/image_rect_raw
+  - /wrist_camera/infra1/image_rect_raw
+  - /wrist_camera/infra1/camera_info
+  - /wrist_camera/infra2/image_rect_raw
+  - /wrist_camera/infra2/camera_info
   - /perception/object_detections_3d
