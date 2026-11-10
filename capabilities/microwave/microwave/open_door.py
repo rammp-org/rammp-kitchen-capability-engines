@@ -1,22 +1,37 @@
-"""Open the microwave on `rchi-cpu-5`: detect the handle, grasp it, swing the door open, let
-go and push it further open -- one run.
+"""Open the microwave: go to the view pose, detect the handle, grasp it, swing the door open, let go and push it
+further open -- one run.
+
+On the robot, the microwave node's `open` action (started with sheppy; the arm moves only with the node's
+allow_execute on AND the goal's execute), its params as JSON:
+
+    make action CAP=microwave ACTION=open PARAMS='{"execute": false}'                     # dry run
+    make action CAP=microwave ACTION=open PARAMS='{"execute": true, "view_only": true}'   # to the view pose, stop
+    make action CAP=microwave ACTION=open PARAMS='{"execute": true, "speed": 0.5}'        # the open, half speed
+    make action CAP=microwave ACTION=open PARAMS='{"execute": true, "push_open": false}'  # stop after the swing
+
+On the bench (rammp_arm.RammpArm, no node):
 
     python3 -m microwave.open_door             # dry run
     python3 -m microwave.open_door --execute   # grasp, 50-deg swing, push-open
     python3 -m microwave.open_door --no-push-open --execute   # stop after the swing
-    python3 -m microwave.open_door --release --execute
+    python3 -m microwave.open_door --release --execute       # after that: let go, back off, park
 
-1. Detect (`perception.HandleDetector`): the scene camera's door (or boxer's box), depth -> door plane, the
-   vertical cluster sticking out of it = handle, the door edge farthest from it = hinge. Looks
+0. View pose (plan_view, _view_step): the scene camera's door face (or boxer's box) gives a pose in front of it,
+   off to the side away from the user (VIEW_SIDES); its joints are asked of cuRobo (plan_to_joints) and refused if
+   it can't plan them or would end elsewhere. The door it saw is kept (SCENE_DOOR) only from a look the arm didn't
+   block, and reused while the arm is at the view pose. `view_only` stops there.
+1. Detect (`perception.HandleDetector`, depth only -- no YOLO, no SAM 3): the door from the scene camera, depth ->
+   door plane, the vertical cluster sticking out of it = handle, the door edge farthest from it = hinge. Looks
    until two agree within 3 cm (handle and hinge).
-2. Plan everything before any motion: the grasp (squared to the door face: cuRobo from the view pose to a
-   line-up point 25 cm out (or less) -- only that goal is checked, cuRobo's path is not previewed -- then
-   straight in along the door normal), and the largest swing (75 down to 45 deg) whose whole arc passes the
-   sim gates (IK, reach, joint jump, J4/J6 guards). cuRobo can't be asked for a line or an arc, so it is given
-   their checked joints as targets: every leg is asked of it before any motion, and a leg it can't plan, or plans
-   with a detour, refuses.
-3. Execute, all cuRobo: to the line-up point, straight in, close, one blended swing. The hand stays on the
-   handle at the end.
+2. Plan everything before any motion (door_common.open_door.plan_open): over tilts and arm configurations, a
+   line-up point 25 cm out (or less), straight in along the door normal, and the largest swing (75 down to 45 deg)
+   whose whole arc passes the sim gates (IK, reach, joint jump, J4/J6 guards, the chair and user boxes with
+   CHAIR_SIM_MARGIN_M to spare: cuRobo's arm is fatter). cuRobo can't be asked for a line or an arc, so it is
+   given their checked joints as targets; each candidate, best first, is asked of it before any motion, and one it
+   can't plan (or plans with a detour) is passed over for the next. Refused only when none passes, with where the
+   microwave would work.
+3. Execute, all cuRobo: to the line-up point and straight in (one blended motion), close, one blended swing. The
+   hand stays on the handle at the end.
 
 4. Push-open (default; `--no-push-open` to stop after the swing), from the door the swing left: open the gripper;
    cuRobo back PUSH_BACK_M off the handle, level, along the door's outward normal, the hand held (the fingers
@@ -31,11 +46,13 @@ go and push it further open -- one run.
    asked for each (plan_to_pose, nothing moves) from the planned swing's end before the grasp, and again from the
    real one before letting go.
 
-`--release` (separate run, after the swing; instead of the push-open): open the gripper, back straight off the
-handle, go toward the base to clear the door's free edge (both straight legs through cuRobo, each asked of it
-before the gripper opens), cuRobo to `PARK_JOINTS` (constants).
+`--release` (separate run, after the swing; instead of the push-open): open the gripper, then ONE blended cuRobo
+motion: back straight off the handle, toward the base to clear the door's free edge, on to `PARK_JOINTS`
+(constants) -- every leg asked of cuRobo before the gripper opens.
 
-Under the engine: the node's `open` action (node.py -> `run`, which logs the run with RunLog). On the bench:
+Under the engine: the node's `open` action (node.py -> `run`). Every run is recorded in RUNS_DIR/<time>_open: the
+arm's joints (RunLog, arm.npz), the node's log, errors too (console.log), and a size-capped rosbag (bag.RunBag:
+an occasional camera frame, colour and depth, and TF). On the bench:
 the commands above (rammp_arm.RammpArm). Refusals raise door_common.common.Refused: the arm holds where it is.
 
 The shared open (detect, plan, grasp, swing) is door_common.open_door; here is what is the microwave's: the view pose,
@@ -53,6 +70,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import rammp_arm
+from capability_engine import sim
 from capability_engine.arm import IMPEDANCE as IMPEDANCE_MODE
 from capability_engine.arm_messages import HOLD_FIXED, HOLD_NONE, PoseTarget
 from door_common import common as dc
@@ -88,7 +106,8 @@ from .constants import (
 
 # --- view pose: before detecting, the wrist camera goes square in front of the microwave (placed from boxer's box, or
 # without boxer from a first detection) ---
-VIEW_DISTS = (0.30, 0.25, 0.35, 0.40)  # camera this far out from the box's front face (horizontally) ...
+VIEW_DISTS = (0.40, 0.35, 0.45, 0.30)  # camera this far out from the box's front face (horizontally) ...
+# 11-10: 0.35 first again, now the camera looks square at the face: closer, the door (handle to hinge) didn't fit
 # 11-09: was 0.35 first -- with the arm 8 in further forward on the chair that put the hand over the user's lap, and
 # every view pose IK'd into the person keep-out. The wrist OAK sees down to ~24 cm, so 0.25 is the closest
 # 10-30: was 0.50 first -- at 50 cm a 1-2 cm handle bar is ~1 pixel of the OAK's 320x200 near-range depth and comes and
@@ -96,9 +115,17 @@ VIEW_DISTS = (0.30, 0.25, 0.35, 0.40)  # camera this far out from the box's fron
 VIEW_HEIGHTS = (0.15, 0.20, 0.10, 0.25, 0.05)  # ... and this far above the box's middle, looking down at the face's
 # centre; the first (height, distance) that passes. Level at mid-height folded the elbow past its limit (10-30: J4
 # ~210 deg, door 72 cm out); the hand-placed view that worked (10-28) had the camera ~20 cm above the door, looking down
-VIEW_SIDES = (0.10, 0.15, 0.05, 0.0)  # ... and this far sideways along the face, toward the arm's left (+y): away
-# from the user, who sits to the arm's right (-y). The camera still looks at the face's centre. Tried before the
-# heights and distances: away from the user first (11-09)
+VIEW_SIDES = (0.08, 0.04, 0.12, 0.0)  # ... and this far sideways along the face, toward the arm's left (+y): away
+# from the user, who sits to the arm's right (-y), and toward the hinge. The camera looks straight at the face (square
+# to it, tilted down), not back at the face's centre. Tried before the heights and distances. 11-10: 10 cm aside,
+# looking back at the centre, saw the door at a slant with its hinge edge out of the image; the scene camera's face
+# centre sits on the handle side (its door is short of the dark window). 15 cm first then put the handle at the
+# image's edge (seen 11 cm of its 14, one look missed it): 8 cm first, the camera further out
+# The view pose as fixed joints (deg), or None to place it from the scene camera's door (VIEW_DISTS/HEIGHTS/SIDES).
+# 11-10: hand-placed -- the camera 0.61 m up, square to the door, 27 deg down, J4 44 deg from its limit; the placed
+# ones folded J4 to within 7-11 deg, and the scene camera reads the door 13 cm short. For the microwave where it
+# stood then (door face ~0.69 m out, handle ~26 cm to the user's side)
+VIEW_JOINTS_DEG = (17.8, -28.7, -112.7, -102.6, -66.2, -84.6, -173.2)
 VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
 # ... and these when IK from it misses, lands past a guard or in the keep-out: PyBullet's IK ignores joint limits and
@@ -166,9 +193,15 @@ def _make_detector():
     return HandleDetector()
 
 
+# no arm link or the tool lower than this on a cuRobo path (door_common.common.FREE_MOVE_MIN_Z): the table top is
+# ~0.19 in the arm's frame (11-10), + 5 cm
+FREE_MOVE_MIN_Z = 0.24
+
+
 def configure(data_dir):
     """Everything door_common needs from the microwave: call once at startup."""
     constants.configure(data_dir)
+    dc.FREE_MOVE_MIN_Z = FREE_MOVE_MIN_Z
     shared.configure(
         MAKE_DETECTOR=_make_detector,
         FIND_HINGE=shared.hinge_detected(HINGE_BEHIND_FACE, HINGE_PAST_EDGE),
@@ -178,6 +211,9 @@ def configure(data_dir):
         GRASPED_GAINS=GAINS_RIGID,
         SWING_SPEED_SCALE=SWING_SPEED_SCALE,
         CUROBO_PATHS=True,
+        GRASP_FORCE=0.4,  # firmer: 0.25 (10-07) slipped off the bar on the exact swing, 11-10
+        SWING_EXACT=True,  # the swing on its checked arc joints (move_joints), not cuRobo: 11-10
+        APPROACH_EXACT=True,  # the straight-in run exactly as checked (move_joints), 11-10
     )
 
 
@@ -406,9 +442,16 @@ def _box_face(cam):
     return face, n
 
 
+# The wrist detection's crop box is this much wider than the scene camera's door, each side. 11-10: the scene camera
+# read the door 32 cm wide (its depth stops short of the dark window), and the wrist detection then found the "hinge"
+# at the crop's edge (radius 23-25 cm, refused). Its hinge is the door edge farthest from the handle
+DOOR_BOX_WIDTH_PAD_M = 0.05
+
+
 def _door_box(door, score):
     """The microwave as a box behind the door the scene camera found -- `door` (door_face's) its front face, BODY_DEPTH
-    deep -- in boxer's box form, so the wrist detection crops its points to it the same way."""
+    deep, DOOR_BOX_WIDTH_PAD_M wider each side -- in boxer's box form, so the wrist detection crops its points to it
+    the same way."""
     n = np.asarray(door["normal"], dtype=float)
     up = np.array([0.0, 0.0, 1.0])
     lo, hi = door["door_z"]
@@ -416,7 +459,7 @@ def _door_box(door, score):
     return {
         "center": face - n * BODY_DEPTH / 2,
         "R": np.column_stack([n, np.cross(up, n), up]),
-        "size": np.array([BODY_DEPTH, door["width"], hi - lo]),
+        "size": np.array([BODY_DEPTH, door["width"] + 2 * DOOR_BOX_WIDTH_PAD_M, hi - lo]),
         "score": score,
         "source": "scene camera",
     }
@@ -459,7 +502,8 @@ def _detected_face():
 
 def _why_kind(text):
     """A refused goal's reason, coarsely: which keep-out box, past the guards, out of reach, or IK missed."""
-    m = re.search(r"([\w/]+) -?[\d.]+ cm into ([\w/]+)", text)  # "<link> 3.2 cm into person/lap (the chair ...)"
+    # "<link> 3.2 cm into person/lap (the chair ...)", "<link> 0.4 cm from person/lap, under the 1.5 cm margin"
+    m = re.search(r"([\w/]+) -?[\d.]+ cm (?:into|from) ([\w/]+)", text)
     if m:
         return f"{m.group(1)} in {m.group(2) if m.group(2) != 'the' else 'the wheelchair keep-out'}"
     if "past the guards" in text:
@@ -473,12 +517,12 @@ def _why_kind(text):
 
 def plan_view(ai, scene, rb):
     """The view pose in front of the microwave: the wrist camera VIEW_DISTS out from its front face, VIEW_SIDES along it
-    away from the user, VIEW_HEIGHTS above the face's middle, looking at the face's centre. The face comes from boxer's
-    box (box_topic) or, without boxer, from a first detection made from where the arm is. The hand pose comes from
-    where the camera sits on it now (TF), its joints from IK seeded at VIEW_SEED_DEG (then VIEW_MORE_SEEDS_DEG),
-    checked like any cuRobo goal and then asked of cuRobo itself (plan_to_joints, nothing moves): the first that
-    cuRobo plans too. Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch) and the
-    hand's goal position; raises Refused."""
+    away from the user, VIEW_HEIGHTS above the face's middle, looking square at the face (tilted down). The face comes
+    from boxer's box (box_topic) or, without boxer, from a first detection made from where the arm is. The hand pose
+    comes from where the camera sits on it now (TF), its joints from IK seeded at VIEW_SEED_DEG (then
+    VIEW_MORE_SEEDS_DEG), checked like any cuRobo goal and then asked of cuRobo itself (plan_to_joints, nothing moves):
+    the first that cuRobo plans too. Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch)
+    and the hand's goal position; raises Refused."""
     cam = dc.camera()
     global SCENE_DOOR
     boxer = bool(getattr(cam, "box_topic", ""))
@@ -498,6 +542,8 @@ def plan_view(ai, scene, rb):
         )
     else:
         face, n = _box_face(cam) if boxer else _detected_face()
+    if VIEW_JOINTS_DEG is not None:
+        return _fixed_view(ai, scene, rb, face, n, hand, remember=not boxer and not reuse)
     f = cam.grab()
     if f["base_T_cam"] is None:
         raise Refused("No arm base <- camera transform -- can't place the camera for the view pose.")
@@ -509,9 +555,11 @@ def plan_view(ai, scene, rb):
     tried, whys = [], collections.Counter()
     # every (side, height, distance), away from the user first
     for side, height, dist in ((s, h, d) for s in VIEW_SIDES for h in VIEW_HEIGHTS for d in VIEW_DISTS):
-        # optical frame: z at the face's centre (tilted down), y down in the image, x right
-        pos = face + n * dist + side_dir * side + np.array([0.0, 0.0, height])
-        z = (face - pos) / np.linalg.norm(face - pos)
+        # optical frame: z square to the face, at the face point in front of the camera (tilted down), y down in the
+        # image, x right
+        aim = face + side_dir * side
+        pos = aim + n * dist + np.array([0.0, 0.0, height])
+        z = (aim - pos) / np.linalg.norm(aim - pos)
         y = np.array([0.0, 0.0, -1.0]) - z * -z[2]
         y /= np.linalg.norm(y)
         T_cam = np.eye(4)
@@ -571,6 +619,30 @@ def plan_view(ai, scene, rb):
     )
 
 
+def _fixed_view(ai, scene, rb, face, n, hand, remember):
+    """The view pose at VIEW_JOINTS_DEG: checked against the chair and user and asked of cuRobo (plan_to_joints,
+    nothing moves). The scene camera's door (`face`, `n`) only crops the wrist detection, and is remembered as
+    plan_view does. Returns (joints, the hand's position there); raises Refused."""
+    global SCENE_DOOR
+    q = np.radians(VIEW_JOINTS_DEG)
+    pos = np.asarray(sim.tool_pose(scene, rb, q)[0], dtype=float)
+    ko = sim.keep_out_message(rb, q)
+    if ko is not None:
+        raise Refused(f"The fixed view pose (VIEW_JOINTS_DEG) puts the arm in the keep-out: {ko}")
+    if hasattr(ai, "plan_to_joints"):
+        start = ai.raw_joints() if hasattr(ai, "raw_joints") else ai.get_state()["position"]
+        pl = ai.plan_to_joints(q, start)
+        if not pl.success:
+            raise Refused(f"cuRobo can't plan to the fixed view pose (VIEW_JOINTS_DEG): {pl.message}")
+    say(
+        f"view pose (fixed joints {VIEW_JOINTS_DEG}): hand {np.round(pos, 3)}; the scene camera's door face "
+        f"{np.round(face, 3)}, {float(np.linalg.norm(face[:2] - pos[:2])):.2f} m from the hand"
+    )
+    if remember and float(np.linalg.norm(hand - pos)) > SCENE_DOOR_CLEAR_M:
+        SCENE_DOOR = dict(t=time.time(), face=face, n=n, box=dc.camera().fixed_box, p_view=pos)
+    return q, pos
+
+
 VIEW_STOP = None  # why the last open ended at the view pose (_view_step), or None: it went on past it
 
 
@@ -604,7 +676,12 @@ def _view_step(view_only, ai, scene, rb, execute):
         )
         VIEW_STOP = "dry run, not at the view pose"
         return True
-    if not ai.go_to_joint_config(q_view, "to view pose"):
+    moved = (
+        dc.checked_curobo_move(ai, q_view, "to view pose", keep_shape=False)  # from wherever the arm was left
+        if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints")
+        else ai.go_to_joint_config(q_view, "to view pose")
+    )
+    if not moved:
         raise Refused("Did not reach the view pose -- stopping before detection.")
     time.sleep(1.0)  # let the camera frames catch up with the arm
     if view_only:
@@ -638,6 +715,16 @@ def open_task(
     )
 
 
+def _pose_move(ai, pos, quat, label, hold, speed=None, held=False, keep_shape=True):
+    """One push-open move: cuRobo's plan checked and run exactly as checked (dc.checked_pose_move) where the arm can,
+    else cuRobo's own go_to_ee_pose. `held`: under the grasp's joint impedance (GRASPED_GAINS)."""
+    gains = shared.GRASPED_GAINS if held else None
+    if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints"):
+        return dc.checked_pose_move(ai, pos, quat, label, hold, speed, gains, keep_shape)
+    go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
+    return ai.go_to_ee_pose(pos, quat, label, orientation_hold=hold, **go_to)
+
+
 def push_open(ai, execute, on_release=None):
     """After the swing: let go of the handle and push the door further open (see the module's step 4), all cuRobo.
     `on_release()`: called once the gripper has let go. Saves the door's new opening to the door file. Returns True
@@ -663,7 +750,7 @@ def push_open(ai, execute, on_release=None):
         on_release()
     # straight back off the handle, level, the hand held as it gripped: the open fingers slide off the bar
     say(f"push-open: back {PUSH_BACK_M * 100:.0f} cm off the handle (cuRobo, the hand held) ...")
-    if not ai.go_to_ee_pose(P.back, P.grip, "push-open: back off the handle", orientation_hold=HOLD_FIXED, **go_to):
+    if not _pose_move(ai, P.back, P.grip, "push-open: back off the handle", HOLD_FIXED, held=gains is not None):
         raise Refused(f"push-open: backing off the handle stopped ({getattr(ai, 'last_error', '')}) -- the arm holds.")
     # up and back (the hand turning down) on its own, then close the gripper -- a narrower hand to take round the
     # door (11-02) -- then over the door, down behind it, the push: ONE cuRobo motion, stitched (go_to_ee_poses),
@@ -671,7 +758,8 @@ def push_open(ai, execute, on_release=None):
     # held, the push at its own speed
     (up_label, up_pos, up_hold), *legs = _push_legs(P)
     say(f"push-open: {up_label} (cuRobo) ...")
-    if not ai.go_to_ee_pose(up_pos, P.down, f"push-open: {up_label}", orientation_hold=up_hold, **go_to):
+    # the hand turns from gripping to pointing down here: the wrist may turn far (no shape cap)
+    if not _pose_move(ai, up_pos, P.down, f"push-open: {up_label}", up_hold, held=gains is not None, keep_shape=False):
         raise Refused(
             f"push-open: '{up_label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
         )
@@ -690,19 +778,27 @@ def push_open(ai, execute, on_release=None):
         for k, (label, pos, hold) in enumerate(legs)
     ]
     say(f"push-open: {', '.join(label for label, _, _ in legs)} (cuRobo, one stitched motion) ...")
-    if not ai.go_to_ee_poses(targets, "push-open: over, down, push", **go_to):
+    if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints"):  # one checked move per leg (11-10)
+        for label, pos, hold in legs:
+            speed = push_speed if label == "push open" else None
+            if not _pose_move(ai, pos, P.down, f"push-open: {label}", hold, speed, held=gains is not None):
+                raise Refused(f"push-open: '{label}' stopped -- the arm holds where it is.")
+    elif not ai.go_to_ee_poses(targets, "push-open: over, down, push", **go_to):
         why = getattr(ai, "last_error", "")
         raise Refused(f"push-open: over, down, push stopped ({why}) -- the arm holds where it is.")
     # back the way it came, off the door and over it, so the arm can go home from there
     back = _back_legs(P)
-    ok, why, unmoved = _stitched(ai, P, back, "back the way it came", go_to)
+    if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints"):  # one checked move per leg (11-10)
+        ok, why, unmoved = False, "", True
+    else:
+        ok, why, unmoved = _stitched(ai, P, back, "back the way it came", go_to)
     if not ok and not unmoved:
         raise Refused(f"push-open: back the way it came stopped ({why}) -- the arm holds where it is.")
     if not ok:
         say("push-open: cuRobo can't stitch them here -- back one move at a time")
         for label, pos, hold in back:
             say(f"push-open: {label} (cuRobo) ...")
-            if not ai.go_to_ee_pose(pos, P.down, f"push-open: {label}", orientation_hold=hold, **go_to):
+            if not _pose_move(ai, pos, P.down, f"push-open: {label}", hold, held=gains is not None):
                 raise Refused(
                     f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is."
                 )

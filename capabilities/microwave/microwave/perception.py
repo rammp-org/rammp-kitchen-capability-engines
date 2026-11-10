@@ -17,7 +17,7 @@ from door_common.perception import WristCamera  # noqa: F401 -- re-exported for 
 BOX_MARGIN_M = np.array([0.10, 0.10, 0.02])
 # -- and from this far ABOVE the box's floor: the table it stands on is in no fit (its points in front of the door
 # fall inside the door plane's tolerance and drag the door's edge, i.e. the hinge, out sideways and down)
-BOX_FLOOR_CLEAR_M = 0.02
+BOX_FLOOR_CLEAR_M = 0.06
 BOX_MIN_POINTS = 500
 
 
