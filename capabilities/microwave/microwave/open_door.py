@@ -113,6 +113,8 @@ VIEW_MORE_SEEDS_DEG = (
 )
 BOX_WAIT_S = 10.0  # wait this long for boxer's first microwave box
 VIEW_AT_TOL_M = 0.05  # the hand this close to the view pose counts as there: a dry run goes on to detect and plan
+VIEW_AT_JOINTS_DEG = 20.0  # ... with every joint this close to the view pose's too. 11-10: the hand was there on an
+# arm folded the other way (J1 -105, toward the user), and every plan seeded from it put the forearm in the lap
 
 # --- push-open (after the swing): let go, up and back, over to the inside of the door, down, push it further open ---
 PUSH_OPEN_SWING_DEG = 50  # the swing before the push-open
@@ -576,7 +578,15 @@ def _view_step(view_only, ai, scene, rb, execute):
     global VIEW_STOP
     VIEW_STOP = None
     q_view, p_view = plan_view(ai, scene, rb)
-    off = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - p_view))
+    st = ai.get_state()
+    off = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - p_view))
+    joints_off = float(np.degrees(np.max(np.abs(short_delta(st["position"], q_view)))))
+    if off <= VIEW_AT_TOL_M and joints_off > VIEW_AT_JOINTS_DEG:
+        say(
+            f"the hand is at the view pose ({off * 100:.1f} cm) but the arm is folded differently (a joint "
+            f"{joints_off:.0f} deg off): going to the view pose's own joints"
+        )
+        off = float("inf")  # not there: move (or, a dry run, stop) as if elsewhere
     if off <= VIEW_AT_TOL_M:
         say(f"already at the view pose ({off * 100:.1f} cm) -- detecting from here")
         if view_only:
@@ -584,8 +594,9 @@ def _view_step(view_only, ai, scene, rb, execute):
             VIEW_STOP = "view_only"
         return view_only
     if not execute:
+        where = "to its joints" if off == float("inf") else f"{off * 100:.0f} cm away"
         say(
-            f"\nDRY RUN -- would move to the view pose ({off * 100:.0f} cm away) and detect from there; nothing "
+            f"\nDRY RUN -- would move to the view pose ({where}) and detect from there; nothing "
             "commanded. To dry-run the rest: a view_only goal (moves there), then this dry run again."
         )
         VIEW_STOP = "dry run, not at the view pose"
