@@ -3,10 +3,9 @@
 from door_common import common as dc
 
 BENCH_DATA_DIR = "/tmp/microwave"  # the bench scripts' data_dir (the node's is its data_dir parameter)
-YOLO_MODEL = "yolo26s.pt"  # dev stand-in (the node's yolo_model parameter): the demo uses a different model
 
 # --- grasp (tuned on the arm, see NOTES.md) ---
-GRIP_EXT = 0.07  # along the approach axis (negative = past the detected handle). Was -0.010 (rchi-cpu-5);
+GRIP_EXT = 0.06  # along the approach axis (negative = past the detected handle). Was -0.010 (rchi-cpu-5);
 # Jetson+sheppy+Capybara calib 10-07 touch check: planned grasp 9.8 cm too deep (0.088); snorlax 10-28: 0.100
 VERTICAL_CORR = 0.0  # world z. 0.025 (rchi-cpu-5) -> 0.046 (10-07 touch) -> 0: the detector now returns the
 # MIDDLE of the bar, not a point near its bottom end

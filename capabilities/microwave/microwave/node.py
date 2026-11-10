@@ -22,8 +22,9 @@ from door_common import close_door
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import open_door
-from .perception import YOLO_MODEL, WristCamera
+from . import open_door, recording
+from .perception import WristCamera
+from .tee_logger import TeeLogger
 
 COMMON = {
     "execute": {"type": "boolean", "default": False},
@@ -60,17 +61,31 @@ PARAMS = {
     # box wasn't accurate enough on snorlax) = the scene camera places the view pose.
     "box_topic": "",
     "box_class": "microwave",
-    # the view pose in front of the box (open_door.VIEW_*): camera distances out from its front face and heights
-    # above its middle (m), tried in order. Per camera and setup.
+    # the view pose in front of the box (open_door.VIEW_*): camera distances out from its front face, offsets along it
+    # away from the user (+y) and heights above its middle (m), every combination tried, sides first. Per setup.
     "view_dists": list(open_door.VIEW_DISTS),
     "view_heights": list(open_door.VIEW_HEIGHTS),
-    # where the handle comes from: "depth" (the vertical bar sticking out of the door) or "sam3" (SAM 3's mask of
-    # sam3_prompts on the wrist image, from sam3_service; the door plane and hinge still come from depth)
-    "handle_source": "depth",
-    "sam3_service": "/perception/sam3/detect",
-    "sam3_prompts": ["handle"],
-    "sam3_threshold": 0.3,
-    "yolo_model": YOLO_MODEL,
+    "view_sides": list(open_door.VIEW_SIDES),
+    # how far out (m, arm base to the tool point, 12 cm past the flange) any goal and the swing may reach. The Gen3
+    # is rated to 902 mm; past ~0.90 the arm nears full stretch (a singularity) -- raise it a little at a time
+    "max_reach_m": dc.MAX_REACH_M,
+    # ... and the grasp itself (m, arm base to the grasp point): the farthest point of the open, since the handle
+    # swings toward the arm as the door opens. Raise it with max_reach_m (the swing's first waypoint is the grasp)
+    "grasp_max_reach_m": shared_open.MAX_REACH,
+    # every run also records a rosbag into its run folder (bag.RunBag): the wrist and scene cameras' colour, depth
+    # and intrinsics bag_frame_hz times a second, and TF. A 640x400 frame (colour + depth) is ~1.3 MB, so at 0.5 Hz
+    # the two cameras are ~75 MB a minute; past bag_max_mb no more frames (TF still). The arm's joints are in the
+    # run's arm.npz (RunLog), what the node logs (errors too) in its console.log
+    "record_bag": True,
+    "bag_frame_hz": 0.5,
+    "bag_max_mb": 300.0,
+    # ... and the wrist camera's rectified stereo pair, for a learned stereo matcher later (+~15 MB a minute at 0.5):
+    # off ("") by default. The camera_infos say which is left (the OAK names its left mono infra2), e.g.
+    # /wrist_camera/infra1/image_rect_raw, /wrist_camera/infra1/camera_info and the same for infra2
+    "wrist_infra1_topic": "",
+    "wrist_infra1_info_topic": "",
+    "wrist_infra2_topic": "",
+    "wrist_infra2_info_topic": "",
 }
 
 
@@ -103,6 +118,9 @@ class Capability(CapabilityEngine):
         ),
     ]
 
+    def get_logger(self):
+        return TeeLogger(super().get_logger())
+
     def __init__(self):
         super().__init__("microwave")
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
@@ -111,22 +129,40 @@ class Capability(CapabilityEngine):
             k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
         }
         open_door.configure(self.cfg["data_dir"])
-        open_door.HANDLE_DETECTOR_MODEL = self.cfg["yolo_model"]
+        dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
-        if self.cfg["handle_source"] not in ("depth", "sam3"):
-            raise ValueError(f"handle_source must be 'depth' or 'sam3', not {self.cfg['handle_source']!r}")
-        shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
-        # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
-        self.sam3 = None
-        if self.cfg["handle_source"] == "sam3":
-            from rammp_perception_interfaces.srv import Detect
-            from rclpy.callback_groups import ReentrantCallbackGroup
-
-            self.sam3 = self.create_client(Detect, self.cfg["sam3_service"], callback_group=ReentrantCallbackGroup())
+        open_door.VIEW_SIDES = tuple(float(v) for v in self.cfg["view_sides"])
+        dc.MAX_REACH_M = float(self.cfg["max_reach_m"])  # check_curobo_goal reads it at call time
+        shared_open.configure(SWING_MAX_REACH=dc.MAX_REACH_M, MAX_REACH=float(self.cfg["grasp_max_reach_m"]))
+        if self.cfg["record_bag"] and not self.mock:
+            self._set_up_bag()
         self.get_logger().info(
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
+        )
+
+    def _set_up_bag(self):
+        from .bag import RunBag  # here, not at import: rosbag2, which the planning tests don't have
+
+        cams = [(self.cfg["color_topic"], self.cfg["camera_info_topic"], self.cfg["depth_topic"])]
+        scene = (self.cfg["scene_color_topic"], self.cfg["scene_camera_info_topic"], self.cfg["scene_depth_topic"])
+        if all(scene):
+            cams.append(scene)
+        from rammp_perception_interfaces.msg import ObjectDetections
+
+        # the scene segmenter's 2D boxes (where the view pose comes from without boxer) and boxer's 3D ones, if set
+        extra = [
+            (topic, "rammp_perception_interfaces/msg/ObjectDetections", ObjectDetections)
+            for topic in (self.cfg["scene_detections_topic"], self.cfg["box_topic"])
+            if topic
+        ]
+        stereo = tuple(
+            self.cfg[f"wrist_{k}"] for k in ("infra1_topic", "infra1_info_topic", "infra2_topic", "infra2_info_topic")
+        )
+        stereo = [stereo] if all(stereo) else []
+        recording.BAG = lambda run_dir: RunBag(
+            self, run_dir, cams, self.cfg["bag_frame_hz"], extra, stereo, self.cfg["bag_max_mb"]
         )
 
     def execute(self, action_id, params, ctx):
@@ -150,9 +186,6 @@ class Capability(CapabilityEngine):
             self.cfg["camera_frame"],
             self.cfg["box_topic"],
             self.cfg["box_class"],
-            self.sam3,
-            self.cfg["sam3_prompts"],
-            self.cfg["sam3_threshold"],
         )
         dc.set_camera(camera)
         if action_id == "open" and not self.cfg["box_topic"]:

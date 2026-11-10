@@ -7,7 +7,7 @@
 ## What it does
 
 Opens and closes the microwave door with the Kinova arm. On an `open` goal it finds the handle from the
-wrist camera (YOLO box → door-plane fit → the vertical bar sticking out of it, and the hinge
+wrist camera (the scene camera's door → door-plane fit → the vertical bar sticking out of it, and the hinge
 edge), grasps the handle squared to the door, swings the door open (the largest swing, 75 down
 to 45°, whose whole arc passes the sim gates), lets go and pushes the door further open by
 replaying the user's push-open demo relative to the door. Every leg is planned and sim-gated
@@ -42,7 +42,7 @@ frames) and every detection frame to `<data_dir>/detections/`.
 
 The camera subscriptions (and boxer's `box_topic`, when set) exist only while an action runs;
 the engine destroys them when it ends. `self.arm` subscribes to the arm driver's state topics
-the same way. The SAM 3 client (`handle_source: sam3`) is made once and lives as long as the node.
+the same way.
 
 ## Orchestrator interface
 
@@ -101,29 +101,31 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name                      | Default                              | Meaning                                                                                                                                                   |
-| ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator`        | `true`                               | `false` runs standalone: no registration, drive it by CLI                                                                                                 |
-| `mock`                    | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                                                      |
-| `allow_execute`           | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                                                |
-| `data_dir`                | `/microwave_data`                    | Door file, grasp record, run logs, detection frames (a host volume)                                                                                       |
-| `color_topic`             | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                                                        |
-| `camera_info_topic`       | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                                                   |
-| `depth_topic`             | `/wrist_camera/depth/image_rect_raw` | Wrist depth, aligned to colour (D405, OAK); the D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`                                              |
-| `camera_frame`            | `""`                                 | Camera optical frame; `""` = the colour image's frame_id                                                                                                  |
-| `scene_color_topic`       | `/scene_camera/color/image_raw`      | Scene camera colour: without boxer, the door plane inside the scene segmenter's microwave box places the view pose and the wrist detection's crop         |
-| `scene_camera_info_topic` | `/scene_camera/color/camera_info`    | Scene camera intrinsics                                                                                                                                   |
-| `scene_depth_topic`       | `/scene_camera/depth/image_rect_raw` | Scene camera depth, aligned to colour                                                                                                                     |
-| `scene_detections_topic`  | `/perception/object_detections`      | The scene segmenter's 2D boxes on the scene camera: the door is looked for inside its `box_class` box (no YOLO)                                           |
-| `box_topic`               | `""`                                 | boxer's 3D boxes (`/perception/object_detections_3d`): view pose + crop to the microwave's box. `""` = the scene camera places the view pose and the crop |
-| `box_class`               | `microwave`                          | The `perception_class` of the box to use                                                                                                                  |
-| `view_dists`              | `[0.35, 0.30, 0.40, 0.45]`           | View pose: camera distances out from the box's front face (m), in order                                                                                   |
-| `view_heights`            | `[0.15, 0.20, 0.10, 0.25, 0.05]`     | View pose: camera heights above the box's middle (m), in order                                                                                            |
-| `handle_source`           | `depth`                              | `depth` (bar sticking out of the door) or `sam3` (SAM 3's handle mask)                                                                                    |
-| `sam3_service`            | `/perception/sam3/detect`            | SAM 3's Detect service (`handle_source: sam3`)                                                                                                            |
-| `sam3_prompts`            | `[handle]`                           | SAM 3 text prompts for the handle; the best-scoring instance is used                                                                                      |
-| `sam3_threshold`          | `0.3`                                | SAM 3 score threshold                                                                                                                                     |
-| `yolo_model`              | `yolo26s.pt`                         | YOLO weights for the microwave box (dev stand-in)                                                                                                         |
+| Name                      | Default                              | Meaning                                                                                                                                                                     |
+| ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`        | `true`                               | `false` runs standalone: no registration, drive it by CLI                                                                                                                   |
+| `mock`                    | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                                                                        |
+| `allow_execute`           | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                                                                  |
+| `data_dir`                | `/microwave_data`                    | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                         |
+| `color_topic`             | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                                                                          |
+| `camera_info_topic`       | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                                                                     |
+| `depth_topic`             | `/wrist_camera/depth/image_rect_raw` | Wrist depth, aligned to colour (D405, OAK); the D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`                                                                |
+| `camera_frame`            | `""`                                 | Camera optical frame; `""` = the colour image's frame_id                                                                                                                    |
+| `scene_color_topic`       | `/scene_camera/color/image_raw`      | Scene camera colour: without boxer, the door plane inside the scene segmenter's microwave box places the view pose and the wrist detection's crop                           |
+| `scene_camera_info_topic` | `/scene_camera/color/camera_info`    | Scene camera intrinsics                                                                                                                                                     |
+| `scene_depth_topic`       | `/scene_camera/depth/image_rect_raw` | Scene camera depth, aligned to colour                                                                                                                                       |
+| `scene_detections_topic`  | `/perception/object_detections`      | The scene segmenter's 2D boxes on the scene camera: the door is looked for inside its `box_class` box                                                                       |
+| `box_topic`               | `""`                                 | boxer's 3D boxes (`/perception/object_detections_3d`): view pose + crop to the microwave's box. `""` = the scene camera places the view pose and the crop                   |
+| `box_class`               | `microwave`                          | The `perception_class` of the box to use                                                                                                                                    |
+| `view_dists`              | `[0.30, 0.25, 0.35, 0.40]`           | View pose: camera distances out from the box's front face (m), in order                                                                                                     |
+| `view_heights`            | `[0.15, 0.20, 0.10, 0.25, 0.05]`     | View pose: camera heights above the box's middle (m), in order                                                                                                              |
+| `view_sides`              | `[0.10, 0.15, 0.05, 0.0]`            | View pose: offsets along the face away from the user (+y, m), tried first                                                                                                   |
+| `max_reach_m`             | `0.90`                               | How far out (m, arm base to the tool point, 12 cm past the flange) any goal and the swing may reach; the Gen3 is rated to 902 mm, and past ~0.90 the arm nears full stretch |
+| `grasp_max_reach_m`       | `0.915`                              | How far out (m, arm base to the grasp point) the grasp may be: the farthest point of the open, since the handle swings toward the arm. Raise it together with `max_reach_m` |
+| `record_bag`              | `true`                               | Record a rosbag into each run's folder (skipped with under 5 GB free)                                                                                                       |
+| `bag_frame_hz`            | `0.5`                                | Camera frames a second in the bag, both cameras (~75 MB a minute)                                                                                                           |
+| `bag_max_mb`              | `300.0`                              | Past this the bag takes no more frames (TF still)                                                                                                                           |
+| `wrist_infra*_topic`      | `""`                                 | The wrist stereo pair (infra1/2 image + info) in the bag; any `""`: not recorded                                                                                            |
 
 Per-rig constants that are not parameters yet, in `microwave/constants.py`: the park pose
 (`PARK_JOINTS`, hand-placed on the Jetson rig 2026-10-07), the grasp corrections (`GRIP_EXT`,
@@ -196,8 +198,8 @@ engine id, so each capability sends its goals under its own name.
 
 No devices of its own: it reaches the arm, the gripper and the wrist camera through their
 drivers' topics. It needs the arm with a 2F-85 gripper, a wrist RGB-D camera with depth aligned
-to colour, and a calibrated camera tf (hand-eye) into `arm.frame`. The real alternative takes the
-GPU (`gpus: all`, the `rammp-cuda` image) for the handle detector's YOLO.
+to colour, and a calibrated camera tf (hand-eye) into `arm.frame`. The real alternative still takes the
+GPU (`runtime: nvidia`, the `rammp-cuda` image), chosen for the YOLO handle detector, which is gone; nothing needs it now.
 
 ## Alternatives
 
