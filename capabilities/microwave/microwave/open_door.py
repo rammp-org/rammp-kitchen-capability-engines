@@ -719,12 +719,17 @@ def open_task(
     )
 
 
+# the push-open's moves travel further than the line-up: their shape cap (the line-up's is 60, FREE_MOVE_MAX_JOINT_DEG).
+# 11-10: 'over the door' turned J3 60.x deg and was refused
+PUSH_MAX_JOINT_DEG = 90.0
+
+
 def _pose_move(ai, pos, quat, label, hold, speed=None, held=False, keep_shape=True):
     """One push-open move: cuRobo's plan checked and run exactly as checked (dc.checked_pose_move) where the arm can,
     else cuRobo's own go_to_ee_pose. `held`: under the grasp's joint impedance (GRASPED_GAINS)."""
     gains = shared.GRASPED_GAINS if held else None
     if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints"):
-        return dc.checked_pose_move(ai, pos, quat, label, hold, speed, gains, keep_shape)
+        return dc.checked_pose_move(ai, pos, quat, label, hold, speed, gains, keep_shape, PUSH_MAX_JOINT_DEG)
     go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
     return ai.go_to_ee_pose(pos, quat, label, orientation_hold=hold, **go_to)
 
