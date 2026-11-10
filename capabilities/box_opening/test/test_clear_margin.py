@@ -200,8 +200,14 @@ def test_without_the_arm_description_the_planner_has_the_last_word(monkeypatch):
 
 
 def test_no_step_up_to_the_cap_that_plans_is_refused(monkeypatch):
+    # where no clear-margin step plans, the soft step clear is tried too (2026-11-10), and HOME asked for from its
+    # end: refused there too, the refusal names both
     ctx = _flatbot_ctx(monkeypatch, STUCK, client=NeverPlans())
-    with pytest.raises(RuntimeError, match="no plan-free step toward HOME of up to 0.35 rad per joint"):
+    with pytest.raises(
+        RuntimeError,
+        match="did not plan from the end of the soft step clear .taken because no plan-free step toward HOME of up "
+        "to 0.35 rad per joint",
+    ):
         home_arm.build_legs(ctx)
     largest = max(np.max(np.abs(np.array(q) - STUCK)) for q in ctx.client.joint_starts)
     assert largest <= core.CLEAR_MARGIN_MAX_STEP_RAD + 1e-9

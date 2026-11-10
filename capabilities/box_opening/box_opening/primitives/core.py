@@ -15,9 +15,11 @@ from dataclasses import dataclass
 from box_opening import LOGGER as log
 from box_opening.constants import (
     CONTACT_SPEED,
+    GAINS_SOFT,
     GRIPPER_CMD_OPEN,
     HOME_GAINS,
     HOME_SPEED,
+    IMPEDANCE_NAMES,
     PLANNER_LIMIT_MARGIN_RAD,
     SANITY_MARGIN_RAD,
     TCP_OFFSET_M,
@@ -679,21 +681,39 @@ ESCAPE_MAX_STEPS = 200
 # where no step gets further and the arm is already out of the padding by this much, the way out ends there
 # (2026-11-09 live check: 11 of the 23 refused had come out by 0-9 mm)
 ESCAPE_OUT_M = 0.001
+# Owner 2026-11-10: "if the arm is close or in an obstacle, it slowly, and on max impedance ['the lightest it can
+# be'], moves to the closest valid point outside of the obstacle, then goes home". That afternoon home_arm refused
+# with the fingers 2 cm over the table, joint_4 0.107 rad from its limit and joint_1 folded 2.6 rad from HOME's: the
+# clear-margin line toward HOME dropped the tool 46 mm (to 7.5 cm, through the table), and nothing else was tried.
+# So the way out is the nearest point it can walk to that is clear of everything known, flown slowly and soft:
+ESCAPE_NEAR_M = ESCAPE_CLEAR_M  # a start within this of the padding (or in it) counts as close: stepped clear first
+ESCAPE_TABLE_M = 0.05  # with the table known (a run's measured one), the tool at least this far above it
+ESCAPE_ROOM_RAD = CLEAR_MARGIN_ROOM_RAD  # and every revolute joint this far from its limits
+ESCAPE_M_PER_RAD = 0.1  # a joint's missing room weighs this much against the tool's or a sphere's missing metres
+ESCAPE_SPEED = 0.10  # slowly: a cruise fraction (Leg.speed), below CONTACT_SPEED
+# the lightest the driver offers: its SOFT profile (Kq 40/15 N.m/rad, zeta 0.4, a 0.45 rad leash), a fifth of
+# MEDIUM's stiffness on joints 1-4, where a home flies. A custom spec could go to Kq 1, but nothing that soft has
+# flown, and an arm that soft may not follow the step at all. Flown compliant, nothing the run reads stops it (the
+# client's guards only watch): the arm gives way where it meets something; the e-stop and Ctrl+C remain.
+ESCAPE_GAINS = GAINS_SOFT
 
 
 class EscapeBodyFree:
-    """A plan-free step out of the chair and user's PADDED boxes, for a start the planner refuses for being in
-    one: down the deepest sphere's depth (Body.sphere_depths) in joint space, ESCAPE_STEP_RAD at a time, never
-    deeper (a path that starts inside may leave, not go in further: Body.first_hit's start rule), each revolute
-    joint kept CLEAR_MARGIN_ROOM_RAD from its limits (or no nearer than it stands), the tool no lower than
-    ESCAPE_DROP_M under its start (its downward pull projected out where it would go lower), until every
-    sphere is ESCAPE_CLEAR_M outside the padding. Flown as ClearMarginFree's step: a joint line through the
-    way out, guarded as an obstruction trip. Refused (RuntimeError) where no such way out of up to
-    ESCAPE_MAX_RAD a joint is found: the operator jogs the arm clear by hand."""
+    """A plan-free step to the nearest point clear of everything known, for an arm in or close to an obstacle:
+    every sphere ESCAPE_CLEAR_M outside the chair and user's PADDED boxes (Body.sphere_depths), the tool
+    ESCAPE_TABLE_M above the table where one is known, and every revolute joint ESCAPE_ROOM_RAD from its limits.
+    Walked in joint space ESCAPE_STEP_RAD at a time down what is still missing (the deepest sphere's depth, the
+    tool's height under the table's clearance, each short joint's room), never deeper in the padding than it
+    stands (a path that starts inside may leave, not go in further: Body.first_hit's start rule) nor into it from
+    outside, the tool never lower than ESCAPE_DROP_M under its start (its downward pull projected out where it
+    would go lower), no joint past its limit. Flown slowly (ESCAPE_SPEED) in the driver's joint impedance at its
+    lightest (ESCAPE_GAINS, SOFT): a joint line through the way out that gives way where it meets something.
+    Refused (RuntimeError) where no way of up to ESCAPE_MAX_RAD a joint gets there: the operator jogs the arm
+    clear by hand."""
 
     def __init__(self, name="escape-body", speed=None, touch_nm=4.0):
         self.name = name
-        self.speed = CONTACT_SPEED if speed is None else float(speed)
+        self.speed = ESCAPE_SPEED if speed is None else float(speed)
         self.touch_nm = float(touch_nm)
 
     @staticmethod
@@ -705,113 +725,167 @@ class EscapeBodyFree:
         chain = approach._chain()
         return chain, getattr(chain, "body", None)
 
-    def needed(self, q):
-        """Whether the arm at `q` stands inside a padded box of the body model (False with none)."""
-        _chain, body = self._body()
-        return body is not None and not body.pose_clear(q)
-
-    def plan(self, ctx, state):
-        """(legs, PlanState, info) of the way out from `state`; info: {"steps", "largest_rad", "depth_mm"
-        (the start's, in the padding), "tool_drop_mm"}. Raises RuntimeError with why where there is none."""
+    def needed(self, q, table_z=None):
+        """Why the arm at `q` is in or close to an obstacle: inside the body model's padding or within
+        ESCAPE_NEAR_M of it, or the tool within ESCAPE_TABLE_M of the table `table_z` (None: none known); '' where
+        it is clear of both (or no arm chain is known)."""
         import numpy as np
 
-        from box_opening.runtime import approach
+        chain, body = self._body()
+        if chain is None:
+            return ""
+        why = []
+        if body is not None:
+            d = float(body.sphere_depths(np.atleast_2d(np.asarray(q, float)))[0].max())
+            if d > 0.0:
+                why.append("stands %.0f mm inside the chair and user's padding" % (1000 * d))
+            elif d > -ESCAPE_NEAR_M:
+                why.append("stands within %.0f mm of the chair and user's padding" % (1000 * -d))
+        if table_z is not None:
+            over = float(chain.fk(list(q))[1][2]) - float(table_z)
+            if over < ESCAPE_TABLE_M:
+                why.append("holds the tool %.0f mm over the table" % (1000 * over))
+        return " and ".join(why)
+
+    def plan(self, ctx, state, table_z=None):
+        """(legs, PlanState, info) of the way to the nearest point clear of everything known from `state`, `table_z`
+        the table's height (None: none known); no legs where it is clear already. info: {"steps", "largest_rad",
+        "depth_mm" (the start's, > 0 in the padding), "tool_drop_mm", "tool_rise_mm"}. Raises RuntimeError with
+        why where there is none."""
+        import numpy as np
+
         from box_opening.runtime.approach import line_trajectory
         from box_opening.runtime.kinematics import body_refusal
 
         chain, body = self._body()
-        if body is None:
-            raise RuntimeError("%s refused: no body model" % self.name)
+        if chain is None:
+            raise RuntimeError("%s refused: no arm chain (no URDF): nothing to step clear with" % self.name)
         q0 = np.asarray(state.joints if state.joints is not None else ctx.client.joints(), float)
         n = len(q0)
-        lo = np.full(n, -np.inf)
+        lo = np.full(n, -np.inf)  # the hard limits, never crossed
         hi = np.full(n, np.inf)
+        limited = []
         for j, (a, b) in enumerate(chain.limits):
             if a is not None and b is not None:
-                lo[j] = min(a + CLEAR_MARGIN_ROOM_RAD, q0[j])
-                hi[j] = max(b - CLEAR_MARGIN_ROOM_RAD, q0[j])
+                lo[j], hi[j] = a + 0.005, b - 0.005
+                limited.append((j, a, b))
 
         def depth(Q):
-            return body.sphere_depths(np.atleast_2d(Q))[0].max(axis=1)
+            Q = np.atleast_2d(Q)
+            if body is None:
+                return np.full(len(Q), -np.inf)
+            return body.sphere_depths(Q)[0].max(axis=1)
 
         def tool_z(q):
-            return float(chain.fk(q)[1][2])
+            return float(chain.fk(list(q))[1][2])
+
+        def missing(q):
+            """(merit, [sphere m, table m, [joint rad ...]]): what the point `q` still lacks."""
+            vp = max(0.0, float(depth(q)[0]) + ESCAPE_CLEAR_M) if body is not None else 0.0
+            vt = max(0.0, float(table_z) + ESCAPE_TABLE_M - tool_z(q)) if table_z is not None else 0.0
+            vl = [max(0.0, ESCAPE_ROOM_RAD - min(q[j] - a, b - q[j])) for j, a, b in limited]
+            return vp + vt + ESCAPE_M_PER_RAD * sum(vl), (vp, vt, vl)
 
         z0 = tool_z(q0)
         q, d = q0.copy(), float(depth(q0)[0])
-        start_mm = 1000 * d
+        start_mm = 1000 * d if body is not None else float("-inf")
         pts = [q0.copy()]
         eye = np.eye(n) * 1e-4
+
+        def grad(f):
+            return np.array([(f(q + eye[i]) - f(q - eye[i])) / 2e-4 for i in range(n)])
+
         for _k in range(ESCAPE_MAX_STEPS):
-            if d <= -ESCAPE_CLEAR_M:
+            m, (vp, vt, vl) = missing(q)
+            if m <= 0.0:
                 break
             if float(np.max(np.abs(q - q0))) > ESCAPE_MAX_RAD:
                 raise RuntimeError(
-                    "%s refused: no way out of the padding within %.2f rad a joint (still %.0f mm in) — jog the "
-                    "arm clear by hand" % (self.name, ESCAPE_MAX_RAD, 1000 * d)
+                    "%s refused: no way clear within %.2f rad a joint (still short: %s) — jog the arm clear by hand"
+                    % (self.name, ESCAPE_MAX_RAD, _short_of(vp, vt, vl, limited))
                 )
-            D = depth(np.vstack([q + eye, q - eye]))
-            g = (D[:n] - D[n:]) / 2e-4
-            zg = np.array([(tool_z(q + eye[i]) - tool_z(q - eye[i])) / 2e-4 for i in range(n)])
-            way = -g
+            way = np.zeros(n)
+            if vp > 0.0:
+                g = grad(lambda x: float(depth(x)[0]))
+                way -= g / max(float(np.max(np.abs(g))), 1e-12)
+            zg = grad(tool_z)
+            if vt > 0.0:
+                way += zg / max(float(np.max(np.abs(zg))), 1e-12)
+            for (j, a, b), v in zip(limited, vl, strict=True):
+                if v > 0.0:
+                    way[j] += 1.0 if q[j] - a < b - q[j] else -1.0
             if tool_z(q) - z0 <= -ESCAPE_DROP_M + 0.001 and way @ zg < 0.0 and zg @ zg > 0.0:
                 way = way - (way @ zg) / (zg @ zg) * zg  # at the floor of the drop: nothing downward
             if float(np.max(np.abs(way))) < 1e-9:
                 raise RuntimeError(
-                    "%s refused: no direction out of the padding (%.0f mm in) — jog the arm "
-                    "clear by hand" % (self.name, 1000 * d)
+                    "%s refused: no direction clear (short: %s) — jog the arm clear by hand"
+                    % (self.name, _short_of(vp, vt, vl, limited))
                 )
             dq = way / float(np.max(np.abs(way))) * ESCAPE_STEP_RAD
-            for _half in range(4):
+            for _half in range(6):
                 qn = np.clip(q + dq, lo, hi)
                 dn = float(depth(qn)[0])
-                if dn <= d + 1e-6 and tool_z(qn) >= z0 - ESCAPE_DROP_M:
+                if (
+                    missing(qn)[0] < m - 1e-9
+                    and dn <= max(d, -ESCAPE_CLEAR_M) + 1e-6  # never deeper, nor in from outside
+                    and tool_z(qn) >= z0 - ESCAPE_DROP_M
+                ):
                     break
                 dq = dq / 2.0
             else:
-                if d <= -ESCAPE_OUT_M:
-                    break  # out of the padding, short of the margin: HOME is asked for from here
+                rooms = [min(q[j] - a, b - q[j]) for j, a, b in limited]
+                if d <= -ESCAPE_OUT_M and min(rooms, default=np.inf) >= CLEAR_MARGIN_FIRST_RAD:
+                    break  # out of the padding, off the limits, short of the margins: HOME is asked for from here
                 raise RuntimeError(
-                    "%s refused: every way out of the padding (%.0f mm in) goes deeper, lowers the tool more than "
-                    "%.0f mm or meets a joint limit — jog the arm clear by hand"
-                    % (self.name, 1000 * d, 1000 * ESCAPE_DROP_M)
+                    "%s refused: every way clear goes deeper into the padding, lowers the tool more than %.0f mm or "
+                    "meets a joint limit (short: %s) — jog the arm clear by hand"
+                    % (self.name, 1000 * ESCAPE_DROP_M, _short_of(vp, vt, vl, limited))
                 )
             q, d = qn, dn
             pts.append(q.copy())
         else:
-            raise RuntimeError("%s refused: no way out of the padding in %d steps" % (self.name, ESCAPE_MAX_STEPS))
+            raise RuntimeError("%s refused: not clear in %d steps" % (self.name, ESCAPE_MAX_STEPS))
+        z_all = [tool_z(p) for p in pts]
+        info = {
+            "steps": len(pts) - 1,
+            "largest_rad": float(np.max(np.abs(q - q0))),
+            "depth_mm": start_mm,
+            "tool_drop_mm": 1000 * max(0.0, z0 - min(z_all)),
+            "tool_rise_mm": 1000 * (z_all[-1] - z0),
+        }
         if len(pts) == 1:
-            return [], state, {"steps": 0, "largest_rad": 0.0, "depth_mm": start_mm, "tool_drop_mm": 0.0}
-        why = body_refusal(chain, pts)
+            return [], state, info
+        why = body_refusal(chain, pts) if body is not None else None
         if why is not None:
-            raise RuntimeError("%s refused: the way out enters %s — jog the arm clear by hand" % (self.name, why))
+            raise RuntimeError("%s refused: the way clear enters %s — jog the arm clear by hand" % (self.name, why))
         world_name, world_path = ctx.worlds.push_name("bench", model=None, tag="bare")
         leg = Leg(
             name=self.name,
             kind=Kind.MOTION,
             traj=line_trajectory(ctx.client.joint_names, [[float(v) for v in p] for p in pts]),
             speed=self.speed,
-            guard=GuardSpec(
-                touch_nm=self.touch_nm,
-                trip="obstruction",
-                gravity=approach._gravity().wrist_holding,
-                rebaseline_after=CLEAR_MARGIN_SETTLE,
-                arm_after=CLEAR_MARGIN_SETTLE,
-            ),
+            guard=None,  # flown compliant: no guard would stop it (the client's guards only watch); the arm gives way
             world=world_name,
             world_path=str(world_path),
             chain=state.chain,
             target=("joints", [float(v) for v in q]),
             goal_joints=[float(v) for v in q],
             plan_s=0.0,
+            gains=ESCAPE_GAINS,
+            compliant=True,
         )
-        info = {
-            "steps": len(pts) - 1,
-            "largest_rad": float(np.max(np.abs(q - q0))),
-            "depth_mm": start_mm,
-            "tool_drop_mm": 1000 * max(0.0, z0 - min(tool_z(p) for p in pts)),
-        }
         return [leg], PlanState(joints=list(leg.goal_joints), chain=state.chain + 1), info
+
+
+def _short_of(vp, vt, vl, limited):
+    """What a point still lacks, in words: the padding's margin, the table's clearance, each short joint's room."""
+    out = []
+    if vp > 0:
+        out.append("%.0f mm of the padding's margin" % (1000 * vp))
+    if vt > 0:
+        out.append("%.0f mm over the table" % (1000 * vt))
+    out += ["%.3f rad of joint_%d's room" % (v, j + 1) for (j, _a, _b), v in zip(limited, vl, strict=True) if v > 0]
+    return ", ".join(out) or "nothing"
 
 
 # home_any: HOME from wherever the arm stands. 2026-11-09 (the temporary HOME, the arm 8 in forward), the live
@@ -834,11 +908,13 @@ class PlanSwung(RuntimeError):
 def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="HOME", plan_words="HOME", step_tail=""):
     """The legs from `state` to the joint goal `goal` (HOME): plan_to(state, name, q) plans one leg (raising
     RuntimeError, or PlanRefused, where the planner or the client refuses). In order:
-      1. a start inside the body model's padding steps out first (EscapeBodyFree);
+      1. an arm in or close to an obstacle (inside the body model's padding or within ESCAPE_NEAR_M of it, the
+         tool within ESCAPE_TABLE_M of a known table) steps slowly, in the driver's lightest joint impedance, to
+         the nearest point clear of everything known, off the joint limits too (EscapeBodyFree);
       2. a joint too near its limit for the planner steps along the joint line first (ClearMarginFree), the
          shortest step the goal plans from, each step's plan asked for once (as since 2026-10-23), or through a
-         waypoint from the step's end where that plan swings wide; where no step up to the cap plans, refused as
-         before;
+         waypoint from the step's end where that plan swings wide; where none does (the line drops the tool, say,
+         or no step up to the cap plans), the soft step of 1. instead, and the goal asked for from its end;
       3. otherwise the goal asked for up to HOME_TRIES times, stopping at the first plan that swings wide;
       4. then a waypoint HOME_WAYPOINTS of the way along the joint line, clear of the padding, planned to, and the
          goal planned from it.
@@ -881,20 +957,33 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
         return None, None, last
 
     esc = EscapeBodyFree()
-    if esc.needed(state.joints if state.joints is not None else ctx.client.joints()):
-        step, state, info = esc.plan(ctx, state)
-        legs += step
-        say(
-            "%s the arm stands %.0f mm inside the chair and user's padding, where the planner cannot start: a "
-            "plan-free step out of it first (%d steps, the largest joint %.3f rad, the tool down %.0f mm at most; "
-            "obstruction-guarded) — %s is planned from where it ends"
-            % (who, info["depth_mm"], info["steps"], info["largest_rad"], info["tool_drop_mm"], plan_words)
-        )
-    q = state.joints if state.joints is not None else ctx.client.joints()
-    clear = ClearMarginFree(goal)
-    near = clear.near(ctx, q)
-    last = None
-    if near:
+    table_z = getattr(getattr(ctx, "worlds", None), "table_top_z", None)
+
+    def step_clear(st, why):
+        """The soft step to the nearest point clear of everything known from `st`, said: (legs, PlanState)."""
+        step, st, info = esc.plan(ctx, st, table_z)
+        if step:
+            say(
+                "%s the arm %s: slowly, in the driver's lightest joint impedance (%s), to the nearest point clear of "
+                "everything known first (%d steps, the largest joint %.3f rad, the tool %+.0f mm, down %.0f mm at "
+                "most; it gives way where it meets something) — %s is planned from where it ends"
+                % (
+                    who,
+                    why,
+                    IMPEDANCE_NAMES.get(ESCAPE_GAINS, ESCAPE_GAINS),
+                    info["steps"],
+                    info["largest_rad"],
+                    info["tool_rise_mm"],
+                    info["tool_drop_mm"],
+                    plan_words,
+                )
+            )
+        return step, st
+
+    def off_the_limit():
+        """The clear-margin step off a joint limit toward the goal and the legs from its end (ClearMarginFree), or
+        RuntimeError."""
+        last = None
         say(
             "%s %s: too near for the planner to start from — trying plan-free steps along the joint line toward "
             "%s, shortest first" % (who, ", ".join("%s is %.3f rad from its limit" % jr for jr in near), goal_words)
@@ -929,11 +1018,37 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
                     "%s %s planned through a waypoint %.0f%% of the way along the joint line (the direct plan swung "
                     "wide: %s)" % (who, plan_words, 100 * via, last)
                 )
-            return legs + step + rest
+            return step + rest
         raise RuntimeError(
             "no plan-free step toward %s of up to %.2f rad per joint lets the planner plan %s (last: %s) — "
             "jog the arm clear by hand" % (goal_words, CLEAR_MARGIN_MAX_STEP_RAD, plan_words, last)
         )
+
+    why = esc.needed(state.joints if state.joints is not None else ctx.client.joints(), table_z)
+    if why:
+        step, state = step_clear(state, why)
+        legs += step
+    q = state.joints if state.joints is not None else ctx.client.joints()
+    clear = ClearMarginFree(goal)
+    near = clear.near(ctx, q)
+    last = fell_back = None
+    if near:
+        try:
+            return legs + off_the_limit()
+        except RuntimeError as e:
+            # 2026-11-10: the line toward the goal dropped the tool through the table: the soft step clear instead,
+            # off the limits too, and the goal asked for from where it ends
+            try:
+                step, state = step_clear(
+                    state, "%s, and %s" % (", ".join("%s is %.3f rad from its limit" % jr for jr in near), e)
+                )
+            except RuntimeError as e2:
+                raise RuntimeError("%s; and %s" % (e, e2)) from e
+            if not step:
+                raise
+            legs += step
+            q = state.joints
+            last = fell_back = e
     asked = 0
     for _attempt in range(HOME_TRIES):
         asked += 1
@@ -952,9 +1067,15 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
         )
         return legs + rest
     raise RuntimeError(
-        "%s did not plan from here, %d times directly nor through a waypoint %s of the way along the joint line "
+        "%s did not plan from %s, %d times directly nor through a waypoint %s of the way along the joint line "
         "(last: %s) — jog the arm clear by hand"
-        % (plan_words, asked, "/".join("%.0f%%" % (100 * f) for f in HOME_WAYPOINTS), last)
+        % (
+            plan_words,
+            "here" if fell_back is None else "the end of the soft step clear (taken because %s)" % fell_back,
+            asked,
+            "/".join("%.0f%%" % (100 * f) for f in HOME_WAYPOINTS),
+            last,
+        )
     )
 
 

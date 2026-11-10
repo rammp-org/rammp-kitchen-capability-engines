@@ -187,7 +187,9 @@ def test_a_start_inside_the_padding_steps_out_first_never_deeper_the_tool_held_a
     assert depth[-1] <= -core.ESCAPE_CLEAR_M  # out by the margin
     z = np.array([chain.fk(p)[1][2] for p in pts])
     assert z.min() >= z[0] - core.ESCAPE_DROP_M - 1e-9  # the tool held
-    assert legs[0].guard.trip == "obstruction"
+    # slowly, in the driver's lightest joint impedance, unguarded (a compliant leg's guard only watches)
+    assert legs[0].compliant is True and legs[0].gains == core.GAINS_SOFT and legs[0].guard is None
+    assert legs[0].speed == core.ESCAPE_SPEED
     assert plan.asked == [("home", list(pts[-1]), list(HOME))]  # HOME planned from where it ends
     assert any("inside the chair and user's padding" in s for s in said)
 
@@ -199,3 +201,60 @@ def test_a_start_clear_of_the_padding_takes_no_step_out(monkeypatch, tmp_path):
     assert not core.EscapeBodyFree().needed(q)
     legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, Planner(), say=lambda s: None)
     assert [leg.name for leg in legs] == ["home"]
+
+
+def test_a_start_just_outside_the_padding_is_close_enough_to_step_clear_first(monkeypatch, tmp_path):
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, [("slab", (0.6, 0.0, 0.40), (0.30, 0.30, 0.06))])
+    q = chain.nearest_solution([0.0, 0.3, 0.0, 1.8, 0.0, 1.0, 1.57], [0.6, 0.0, 0.45], DOWN)
+    esc = core.EscapeBodyFree()
+    legs, state, _info = esc.plan(ctx, core.PlanState(joints=list(q), chain=0))
+    out = np.array(legs[0].goal_joints)  # 10 mm clear: now walk back toward the slab until 5 mm clear
+    d_out = float(chain.body.sphere_depths([out])[0].max())
+    assert d_out <= -core.ESCAPE_CLEAR_M + 1e-6
+    near = None
+    for u in np.linspace(0.0, 1.0, 101):
+        x = out + u * (np.array(q) - out)
+        d = float(chain.body.sphere_depths([x])[0].max())
+        if -core.ESCAPE_NEAR_M < d < 0.0:
+            near = x
+            break
+    assert near is not None
+    assert "within" in esc.needed(near)  # outside the padding, but close: it steps clear first
+    assert not esc.needed(out)
+
+
+def test_a_tool_low_over_a_known_table_is_lifted_clear_of_it(monkeypatch, tmp_path):
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, [("far", (-0.8, 0.8, 0.2), (0.1, 0.1, 0.1))])
+    q = chain.nearest_solution([0.0, 0.3, 0.0, 1.8, 0.0, 1.0, 1.57], [0.6, 0.0, 0.30], DOWN)
+    table = 0.28  # the tool 20 mm over it
+    esc = core.EscapeBodyFree()
+    assert "20 mm over the table" in esc.needed(q, table)
+    legs, _state, info = esc.plan(ctx, core.PlanState(joints=list(q), chain=0), table)
+    end = legs[0].goal_joints
+    assert chain.fk(end)[1][2] >= table + core.ESCAPE_TABLE_M - 1e-6
+    assert info["tool_drop_mm"] <= 1000 * core.ESCAPE_DROP_M + 1e-6
+    assert legs[0].gains == core.GAINS_SOFT
+
+
+def test_off_a_limit_where_the_line_home_would_drop_the_tool_it_steps_clear_softly_then_goes_home(
+    monkeypatch, tmp_path
+):
+    # flatbot 2026-11-10 14:57: the fingers 2 cm over the table, joint_4 0.107 rad from its limit, joint_1 folded
+    # 2.6 rad from HOME's: the clear-margin line toward HOME dropped the tool 46 mm, and home_arm refused
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, [("far", (-0.8, 0.8, 0.2), (0.1, 0.1, 0.1))])
+    q = [3.0500, 0.0205, 0.4103, -2.4632, 0.1825, 1.3171, 2.9466]
+    client.live = list(q)
+    plan = Planner()
+    said = []
+    legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append)
+    assert [leg.name for leg in legs] == ["escape-body", "home"]
+    step = legs[0]
+    assert step.compliant is True and step.gains == core.GAINS_SOFT
+    end = np.array(step.goal_joints)
+    lo, hi = chain.limits[3]
+    assert min(end[3] - lo, hi - end[3]) >= core.ESCAPE_ROOM_RAD - 1e-6  # off joint_4's limit
+    pts = np.array([p.positions for p in step.traj.points])
+    z = np.array([chain.fk(p)[1][2] for p in pts])
+    assert z.min() >= z[0] - core.ESCAPE_DROP_M - 1e-9  # the tool never lower
+    assert plan.asked == [("home", list(end), list(HOME))]  # HOME planned from where it ends
+    assert any("drops the tool" in s for s in said) and any("lightest joint impedance" in s for s in said)
