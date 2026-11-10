@@ -492,6 +492,15 @@ def hinge_measured(offset, from_handle=False):
 
 # --- the planner's search (plan_open): which arm configurations to try for each grasp, and how far to shift the
 # appliance when looking for a placement that works ---
+# Grasp IK seeds that don't depend on where the arm starts (J1 None: aimed at the handle), tried after _config_seeds.
+# 11-10: from the view pose's joints no seed found a grasp within the J4/J6 guards (0.87 m out); from an odd start, 10.
+# cuRobo's own check (CUROBO_PATHS) still passes over any of these it won't run
+GRASP_EXTRA_SEEDS_DEG = (
+    (None, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0),  # Kinova's Home, the elbow the usual way
+    (None, 40.0, 180.0, -90.0, 0.0, 50.0, 90.0),  # reaching out
+    (None, 60.0, 180.0, -50.0, 0.0, 70.0, 90.0),  # nearly stretched
+    (None, 30.0, 180.0, -110.0, 0.0, -60.0, 90.0),  # the wrist the other way
+)
 SEARCH_J3_OFFSETS_DEG = (0.0, -30.0, 30.0, -60.0, 60.0)  # the 7-DOF arm's redundant elbow angle, about the start's
 # J3; each also with the wrist flipped (J5 + 180, -J6, J7 + 180: the same hand, the other wrist branch)
 SEARCH_AFTER_SWING_MAX = 10  # how many swing-feasible candidates (best first) to try cuRobo and the push-open on
@@ -613,7 +622,9 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
             continue
         g_p, g_q = np.asarray(g.position), np.asarray(g.orientation)
         configs = []
-        for seed in _config_seeds(q0, quick):
+        aim = float(np.degrees(np.arctan2(g_p[1], g_p[0])))
+        extra = [] if quick else [np.radians([aim if v is None else v for v in s]) for s in GRASP_EXTRA_SEEDS_DEG]
+        for seed in _config_seeds(q0, quick) + extra:
             q_g, _ = dc._ik_within_guards(scene, rb, g_p, g_q, seed)
             if q_g is not None and all(
                 np.degrees(np.max(np.abs(short_delta(c, q_g)))) > SAME_CONFIG_DEG for c in configs
