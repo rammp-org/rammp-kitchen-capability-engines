@@ -50,6 +50,9 @@ PARAMS = {
     # how far out (m, arm base to the tool point, 12 cm past the flange) any goal and the swing may reach. The Gen3
     # is rated to 902 mm; past ~0.90 the arm nears full stretch (a singularity) -- raise it a little at a time
     "max_reach_m": dc.MAX_REACH_M,
+    # ... and the grasp itself (m, arm base to the grasp point): the farthest point of the open, since the handle
+    # swings toward the arm as the door opens. Raise it with max_reach_m (the swing's first waypoint is the grasp)
+    "grasp_max_reach_m": shared_open.MAX_REACH,
     # every run also records a rosbag into its run folder (bag.RunBag): the wrist and scene cameras' colour, depth
     # and intrinsics bag_frame_hz times a second, and TF. A 640x400 frame (colour + depth) is ~1.3 MB, so at 0.5 Hz
     # the two cameras are ~75 MB a minute; past bag_max_mb no more frames (TF still). The arm's joints are in the
@@ -105,7 +108,7 @@ class Capability(CapabilityEngine):
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
         open_door.VIEW_SIDES = tuple(float(v) for v in self.cfg["view_sides"])
         dc.MAX_REACH_M = float(self.cfg["max_reach_m"])  # check_curobo_goal reads it at call time
-        shared_open.configure(SWING_MAX_REACH=dc.MAX_REACH_M)
+        shared_open.configure(SWING_MAX_REACH=dc.MAX_REACH_M, MAX_REACH=float(self.cfg["grasp_max_reach_m"]))
         if self.cfg["record_bag"] and not self.mock:
             self._set_up_bag()
         self.get_logger().info(

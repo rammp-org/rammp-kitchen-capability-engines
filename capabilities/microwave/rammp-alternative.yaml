@@ -62,6 +62,8 @@ params:
   view_sides: [0.10, 0.15, 0.05, 0.0]
   # How far out (m, arm base to the tool point) any goal and the swing may reach. Near full stretch past ~0.90.
   max_reach_m: 0.90
+  # The grasp's own limit (arm base to the grasp point); raise it with max_reach_m.
+  grasp_max_reach_m: 0.915
   # Every run's rosbag (in its run folder): both cameras' colour, depth and intrinsics bag_frame_hz times a
   # second, the detections and TF (~75 MB a minute at 0.5); no more frames past bag_max_mb.
   record_bag: true
