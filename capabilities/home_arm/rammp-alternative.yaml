@@ -36,6 +36,8 @@ params:
   body_layers: "/config/robot/curobo/planner.yaml"
   plan_tries: 3
   tool_link: "arm_tool_frame"
+  # the plans home fly at this speed_scale (the go_to goals' default); the step clear is slow anyway
+  speed_scale: 0.3
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

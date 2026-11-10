@@ -9,35 +9,57 @@
 One action, `go_home`: the arm to its home pose (`home_joints`) from wherever it
 stands, around the wheelchair and the person in it. cuRobo plans the move in its
 world, which on a wheelchair-mounted arm holds the chair, the seat and the user,
-so the path keeps clear of them; the driver executes it. Three things stop a
+so the path keeps clear of them; the driver executes it. Four things stop a
 plain plan, and the action handles each before anything moves:
 
 1. **A start inside the padding round the chair and user.** The planner pads
    every box by its `world_padding` and refuses a start inside the padding, even
    when the arm is clear of the chair itself (left near the user by a stop or a
    jog). The engine reads the planner's own boxes and spheres (`body_layers`, the
-   robot's planner config), finds a short plan-free step out of the padding in
-   joint space (never deeper, the tool held within 5 mm of its height, no joint
-   more than 0.6 rad), and plans from its end. Where there is none, the action
-   fails `start_in_padding` before anything moves.
+   robot's planner config, padded by its `planner.world_padding`). Where they put
+   the start in the padding, the planner is asked first (it is the authority on
+   its own world, which another profile or a pushed world may change); where it
+   refuses, the engine finds a short plan-free step out of the padding in joint
+   space (never deeper, the tool held within 5 mm of its height, no joint more
+   than 0.6 rad), and plans from its end. Where there is none, the action fails
+   `start_in_padding` before anything moves. Where the files cannot be read, the
+   action goes on without them, and fails `body_model` only if the planner then
+   refuses the start as in collision.
 1. **A joint too near its limit.** The planner refuses a start inside its
    joint-limit margin (`START_IN_LIMIT_MARGIN`, 0.10 rad on flatbot) and often
    fails just outside it. A start with a joint nearer than 0.18 rad takes the
    shortest plan-free step along the joint line toward the home that clears
    0.12 rad and that the home plans from (0.05 rad longer each try, at most 0.35
-   rad), the tool never lower than 5 mm under its start and never into the
-   padding on the way. Where none plans, the action fails `near_limit`.
+   rad, the home asked for from each as below), the tool never lower than 5 mm
+   under its height at the start and never into the padding on the way. Where
+   none plans, the action fails `near_limit`.
 1. **A plan that fails or ends elsewhere.** The home is asked for up to
    `plan_tries` times (a plan that does not end at the home, the planner's other
    arm configuration at the same tool pose, counts as failed), then through a
    waypoint 50, 25 or 75 % of the way along the joint line toward it, clear of the
-   padding. Where none plans, the action fails `no_way_home`. All the planning
-   of one action stops after 60 s, well inside the orchestrator's 120 s timeout.
+   padding, its second leg planned from where its first one ends. Where none
+   plans, the action fails `no_way_home`.
+1. **A plan that swings wide.** A plan that ends at the home can still take a
+   joint far further than the straight way there: on flatbot (2026-11-10) every
+   plan home from one start took joint 1 0.9 rad out past it and back, the hand
+   toward the user. A plan that takes any joint more than 0.35 rad wider than the
+   straight way (box_opening's trajectory sanity gate) counts as failed. Asking
+   again gets the same plan, so the engine goes on to the waypoints.
 
-Then the plan-free step (if any) and the plan(s) are each sent to the driver once
-(`/execute_joint_trajectory`, position control). A goal the driver aborts or
-rejects fails the action (`motion_failed`), never retried; a cancel stops the arm
-where it is. `dry_run: true` plans and reports, and sends nothing.
+A plan is asked for only while a whole `arm.plan_timeout_s` still fits in 60 s of
+planning, and a way home that would take the action past 100 s at `speed_scale`
+fails `too_slow`: well inside the orchestrator's 120 s timeout.
+
+Before anything is sent the arm's joints are read again (`/joint_states`, at
+most `arm.state_stale_s` old): an arm that moved more than 0.02 rad while it was
+planned for is planned for again from where it stands, once, and one still moving
+fails `arm_moving`. Then the plan-free step (if any) and the plan(s) are each sent
+to the driver once (`/execute_joint_trajectory`, position control), the step on
+its own slow minimum-jerk timing (at most 0.15 rad/s), the plans at
+`speed_scale`. A step that ends short of where the way home starts, or a goal the
+driver aborts or rejects, fails the action (`motion_failed`), never retried; a
+cancel stops the arm where it is. `dry_run: true` plans and reports, and sends
+nothing.
 
 Without it, an arm left anywhere but home is recovered by hand: the planner
 refuses starts in the chair's padding, and a home planned without the chair can
@@ -71,19 +93,21 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `/home_arm/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/home_arm/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action    | Params                                                | Result payload                                                                                                              |
-| --------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s"}`, or `{"home": true, "moved": false}` when already home |
+| Action    | Params                                                | Result payload                                                                                                                             |
+| --------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s", "speed_scale"}`, or `{"home": true, "moved": false}` when already home |
 
-| Error code         | Recoverable | Meaning                                                                           |
-| ------------------ | ----------- | --------------------------------------------------------------------------------- |
-| `bad_params`       | yes         | A parameter other than `dry_run`, or `dry_run` not a boolean                      |
-| `bad_config`       | no          | `home_joints` is not 7 values                                                     |
-| `body_model`       | no          | The planner's config or the driver's URDF cannot be read; nothing moved           |
-| `start_in_padding` | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear |
-| `near_limit`       | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear         |
-| `no_way_home`      | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear         |
-| `motion_failed`    | no          | The driver did not complete a goal; the arm holds where it stopped                |
+| Error code         | Recoverable | Meaning                                                                                                                                   |
+| ------------------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `bad_params`       | yes         | A parameter other than `dry_run`, or `dry_run` not a boolean                                                                              |
+| `bad_config`       | no          | `home_joints` is not 7 values, or `speed_scale` not in (0, 1\]                                                                            |
+| `body_model`       | no          | The driver's URDF cannot be read, or the planner refuses the start as in collision and the planner's config cannot be read; nothing moved |
+| `start_in_padding` | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                         |
+| `near_limit`       | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                 |
+| `no_way_home`      | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                 |
+| `too_slow`         | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved                                                             |
+| `arm_moving`       | yes         | The arm moved while it was planned for, twice; nothing sent                                                                               |
+| `motion_failed`    | no          | The driver did not complete a goal; the arm holds where it stopped                                                                        |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up. It offers `go_home` on every selection (no perception
@@ -95,14 +119,15 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name               | Default                                                         | Meaning                                                                                                            |
-| ------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `use_orchestrator` | `true`                                                          | `false` runs standalone: no registration, drive it by CLI                                                          |
-| `mock`             | `false`                                                         | `true` skips hardware (the mock alternative sets it)                                                               |
-| `home_joints`      | `[0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]` | The home (rad, J1..J7, continuous joints in (-pi, pi\]): flatbot's, the arm 8 in forward on the chair (2026-11-09) |
-| `body_layers`      | `"/config/robot/curobo/planner.yaml"`                           | The planner config whose boxes and spheres the step out uses; `""` turns the step out off                          |
-| `plan_tries`       | `3`                                                             | How many times the home is asked for directly before the waypoints                                                 |
-| `tool_link`        | `"arm_tool_frame"`                                              | The link whose height the step out holds                                                                           |
+| Name               | Default                                                         | Meaning                                                                                                              |
+| ------------------ | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator` | `true`                                                          | `false` runs standalone: no registration, drive it by CLI                                                            |
+| `mock`             | `false`                                                         | `true` skips hardware (the mock alternative sets it)                                                                 |
+| `home_joints`      | `[0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]` | The home (rad, J1..J7, continuous joints in (-pi, pi\]): flatbot's, the arm 8 in forward on the chair (2026-11-09)   |
+| `body_layers`      | `"/config/robot/curobo/planner.yaml"`                           | The planner config whose boxes and spheres the step out uses; `""` turns the step out off                            |
+| `plan_tries`       | `3`                                                             | How many times the home is asked for directly before the waypoints                                                   |
+| `tool_link`        | `"arm_tool_frame"`                                              | The link whose height the step out holds                                                                             |
+| `speed_scale`      | `0.3`                                                           | The driver's speed_scale for the plans home (0..1, the go_to goals' default); the step clear has its own slow timing |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the

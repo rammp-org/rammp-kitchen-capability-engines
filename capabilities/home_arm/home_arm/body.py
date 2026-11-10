@@ -10,7 +10,8 @@ there.
 The files (robot config, never environment): `planner_yaml` (the planner's config, mounted at
 /config/robot/curobo/planner.yaml on the robot) names its `layers`, each obstacle an axis-aligned
 box {name, position, dims} in the robot's base frame, UNPADDED and padded here per side by its
-world_padding (cuRobo's default 0.02 m where it names none), and its `robot` file, whose
+planner.world_padding (rammp-curobo's default 0.02 m where it names none; every layer box is padded,
+no_pad_names exempting scene obstacles only), and its `robot` file, whose
 collision_spheres per link are grown by its collision_sphere_buffer. Those are exactly the planner's
 boxes and spheres. The links are placed by forward kinematics of the driver's URDF, every joint
 other than the arm's at 0 (cuRobo locks the gripper open). The base and the shoulder are left out:
@@ -300,6 +301,27 @@ class BodyModel:
         )
 
 
+def padding(cfg):
+    """The world_padding of planner config `cfg` (m), where rammp-curobo reads it: its `planner`
+    block, merged over the default (WORLD_PADDING_M). A top-level `world_padding` (this module's
+    reading before 2026-11-10, which the planner ignores) is refused rather than guessed at."""
+    block = cfg.get("planner") or {}
+    if not isinstance(block, dict):
+        raise BodyModelError("body model: the planner config's `planner` entry is not a mapping")
+    if "world_padding" in cfg and "world_padding" not in block:
+        raise BodyModelError(
+            "body model: world_padding is at the planner config's top level, where the planner "
+            "does not read it (it reads planner.world_padding)"
+        )
+    try:
+        pad = float(block.get("world_padding", WORLD_PADDING_M))
+    except (TypeError, ValueError) as e:
+        raise BodyModelError(f"body model: planner.world_padding is not a number ({e})") from e
+    if not (math.isfinite(pad) and pad >= 0.0):
+        raise BodyModelError(f"body model: planner.world_padding {pad} is not >= 0")
+    return pad
+
+
 def load(planner_yaml):
     """The BodyModel of cuRobo planner config `planner_yaml`, or BodyModelError."""
     planner_yaml = Path(planner_yaml)
@@ -308,7 +330,7 @@ def load(planner_yaml):
     layers = cfg.get("layers")
     if not layers:
         raise BodyModelError(f"body model: {planner_yaml} names no layers")
-    pad = float(cfg.get("world_padding", WORLD_PADDING_M))
+    pad = padding(cfg)
     names, lo, hi = [], [], []
     for name in layers:
         data = _yaml(here / str(name))
@@ -321,7 +343,8 @@ def load(planner_yaml):
                 raise BodyModelError(
                     f"body model: {name} has an obstacle without position/dims ({e})"
                 ) from e
-            if c.shape != (3,) or d.shape != (3,) or "pose" in o or "quat" in o:
+            turned = any(float(v) != 0.0 for v in o.get("rpy_deg") or [])
+            if c.shape != (3,) or d.shape != (3,) or "pose" in o or "quat" in o or turned:
                 raise BodyModelError(
                     f"body model: {layer}/{o.get('name')} is not an axis-aligned box"
                 )

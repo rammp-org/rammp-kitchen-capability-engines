@@ -1,17 +1,29 @@
 """Joint-space helpers for the move home: which way round a continuous joint goes, whether a plan
-ends where it was asked to, the waypoints along the joint line, and a timed trajectory from a path
-or from several plans. Pure numpy: no ROS."""
+ends where it was asked to and goes there without swinging wide, the waypoints along the joint
+line, and a timed trajectory from a path or from several plans. Pure numpy and rammp_arm's path
+helpers: no ROS."""
 
 import numpy as np
+from rammp_arm import CONTINUOUS, JOINT_SPEED, _wrap, joint_trajectory
 
-CONTINUOUS = (0, 2, 4, 6)  # joint_1, joint_3, joint_5, joint_7 turn without end
 # cuRobo bounds the continuous joints here, as plain revolute ones
 PLANNER_CONTINUOUS_LIMIT_RAD = 6.0
 PLAN_END_RAD = 0.01  # a plan ending further than this from its goal (any joint) is not the goal's
+# A plan may take a joint at most this much further than the straight way to its goal needs (its
+# range along the plan, against |goal - start|): box_opening's trajectory sanity gate
+# (SANITY_MARGIN_RAD). On flatbot (2026-11-10) cuRobo's every plan home from [1.006, -0.312, 2.699,
+# -2.224, -2.790, -0.889, -0.623] took joint_1 out to 1.87 rad and back to 0.44 (1.45 rad for a
+# 0.56 change), the hand toward the seated user; through the joint line's midpoint both legs
+# stayed inside this.
+SWING_MARGIN_RAD = 0.35
+# One plan's first sample is where the last one ended (each is planned from the last one's end):
+# further apart than this (any joint, not wrapped) is two plans that do not join
+JOIN_RAD = 1e-3
 WAYPOINTS = (0.5, 0.25, 0.75)  # fractions of the joint line toward HOME, tried in this order
-# the step out of the padding: the joint that moves most, at most this fast
+# The plan-free steps (out of the padding, off a limit): the joint that moves most at most this
+# fast at the peak of a minimum-jerk profile (rammp_arm.joint_trajectory), never in less than
+# rammp_arm.MIN_DURATION_S
 ESCAPE_SPEED_RAD_S = 0.15
-ESCAPE_MIN_S = 1.0  # and never in less than this
 # A joint too near its limit: rammp-curobo refuses a start inside joint_limit_margin_rad (0.10 on
 # flatbot: "START_IN_LIMIT_MARGIN ... jog it away from the limit first"), and its finetune failed
 # from up to 0.154 rad of room (box_opening, 2026-10-23, HOME planned from 0.161). So a start with a
@@ -47,10 +59,26 @@ def on_branch(goal, start):
 
 def end_error(q, goal):
     """(rad, joint index): how far `q` is from `goal`, each continuous joint the short way round."""
-    d = np.asarray(q, float) - np.asarray(goal, float)
-    d[list(CONTINUOUS)] = wrap(d[list(CONTINUOUS)])
+    d = _wrap(np.asarray(q, float) - np.asarray(goal, float))
     j = int(np.argmax(np.abs(d)))
     return float(abs(d[j])), j
+
+
+def swing(path, goal):
+    """(rad, joint index): how much further than the straight way the plan `path` (k, J) takes its
+    widest-swinging joint: the joint's range along the path (continuous joints followed round, not
+    wrapped) less |goal - start| (`goal` on the start's branch). A plan that spins a continuous
+    joint a whole turn to land on the same angle swings 2 pi."""
+    P = np.asarray(path, float)
+    if len(P) < 2:
+        return 0.0, 0
+    d = np.diff(P, axis=0)
+    d[:, CONTINUOUS] = wrap(d[:, CONTINUOUS])
+    U = np.vstack([P[:1], P[0] + np.cumsum(d, axis=0)])
+    straight = np.abs(on_branch(goal, P[0]) - P[0])
+    extra = (U.max(axis=0) - U.min(axis=0)) - straight
+    j = int(np.argmax(extra))
+    return float(extra[j]), j
 
 
 def waypoints(start, goal, fractions=WAYPOINTS):
@@ -60,31 +88,37 @@ def waypoints(start, goal, fractions=WAYPOINTS):
     return [start + f * (goal - start) for f in fractions]
 
 
-def timed_path(path, speed=ESCAPE_SPEED_RAD_S, min_s=ESCAPE_MIN_S):
-    """Trajectory points [(t s, q, qd)] through the joint states `path` (k, J): each segment timed
-    so the joint that moves most goes at `speed`, the whole at least `min_s`, at rest at both ends,
-    the velocities between them the path's slope."""
+def stepped(path, speed=ESCAPE_SPEED_RAD_S):
+    """Trajectory points [(t s, q, qd)] through the joint states `path` (k, J), from rest to rest
+    on a minimum-jerk profile (rammp_arm.joint_trajectory), the joint that moves most at most
+    `speed` at its peak; [] where the path does not move."""
     P = np.asarray(path, float)
-    seg = np.abs(np.diff(P, axis=0)).max(axis=1) / speed
-    total = float(seg.sum())
-    if total < min_s:
-        seg = seg * (min_s / total)
-    t = np.concatenate([[0.0], np.cumsum(seg)])
-    V = np.zeros_like(P)
-    if len(P) > 2:
-        V[1:-1] = (P[2:] - P[:-2]) / (t[2:] - t[:-2])[:, None]
-    return [(float(ti), q, v) for ti, q, v in zip(t, P, V, strict=True)]
+    if len(P) < 2:
+        return []
+    out = joint_trajectory(P[0], list(P[1:]), speed_scale=speed / JOINT_SPEED)
+    if out is None:
+        return []
+    t, q, qd = out
+    return [(float(ti), qi, vi) for ti, qi, vi in zip(t, q, qd, strict=True)]
 
 
 def joined(plans):
     """One trajectory's points [(t, q, qd)] through several plans (each with t, q, qd), one after
     the other, each starting where the last ended (both at rest, as the planner plans them): the
     second's first sample, the first's last, is dropped and its times run on from the first's end.
-    """
+    ValueError where a plan does not start within JOIN_RAD of the last one's end (any joint, not
+    wrapped: a whole turn apart is a jump too)."""
     out, t0 = [], 0.0
     for k, plan in enumerate(plans):
         rows = list(zip(plan.t, plan.q, plan.qd, strict=True))
         if k:
+            gap = np.abs(np.asarray(rows[0][1], float) - np.asarray(out[-1][1], float))
+            if float(gap.max()) > JOIN_RAD:
+                j = int(gap.argmax())
+                raise ValueError(
+                    f"plan {k + 1} starts {float(gap[j]):.4f} rad (joint {j + 1}) from where plan "
+                    f"{k} ends"
+                )
             rows = rows[1:]
         out += [(t0 + float(t), q, qd) for t, q, qd in rows]
         t0 = out[-1][0] if out else 0.0

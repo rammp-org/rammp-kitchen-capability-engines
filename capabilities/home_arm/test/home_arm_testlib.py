@@ -50,6 +50,6 @@ def write_model(tmp, boxes, padding=None, robot=ROBOT):
     lines += [f"  - {{name: {n}, position: {list(c)}, dims: {list(d)}}}" for n, c, d in boxes]
     (tmp / "layer_test.yaml").write_text("\n".join(lines) + "\n")
     (tmp / "robot.yaml").write_text(robot)
-    pad = "" if padding is None else f"world_padding: {padding}\n"
+    pad = "" if padding is None else f"planner:\n  world_padding: {padding}\n"
     (tmp / "planner.yaml").write_text("robot: robot.yaml\nlayers: [layer_test.yaml]\n" + pad)
     return tmp / "planner.yaml"

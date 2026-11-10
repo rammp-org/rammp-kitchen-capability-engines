@@ -48,6 +48,25 @@ def test_files_that_cannot_be_read_or_place_nothing_are_errors_never_skips(tmp_p
     )
     with pytest.raises(body.BodyModelError, match="not an axis-aligned box"):
         body.load(path)
+    (tmp_path / "layer_test.yaml").write_text(
+        "obstacles:\n"
+        "  - {name: turned, position: [0, 0, 0], dims: [1, 1, 1], rpy_deg: [0, 0, 30]}\n"
+    )
+    with pytest.raises(body.BodyModelError, match="not an axis-aligned box"):
+        body.load(path)
+
+
+def test_the_padding_is_read_where_the_planner_reads_it(tmp_path):
+    slab = [("slab", (0.5, 0.0, 0.3), (0.2, 0.4, 0.06))]
+    assert body.load(write_model(tmp_path, slab, padding=0.03)).padding_m == pytest.approx(0.03)
+    # rammp-curobo reads planner.world_padding only: one at the top level is not the planner's
+    path = write_model(tmp_path, slab)
+    path.write_text(path.read_text() + "world_padding: 0.03\n")
+    with pytest.raises(body.BodyModelError, match="top level"):
+        body.load(path)
+    path.write_text("robot: robot.yaml\nlayers: [layer_test.yaml]\nplanner:\n  world_padding: -1\n")
+    with pytest.raises(body.BodyModelError, match="not >= 0"):
+        body.load(path)
 
 
 def test_the_urdf_must_hold_the_arm_joints_and_the_sphere_links(tmp_path, urdf_text):
