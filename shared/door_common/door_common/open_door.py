@@ -172,6 +172,31 @@ class AfterSwing:
         """After the grasp, before the swing, from what the swing will really run. Raises Refused to stop there."""
 
 
+def _curobo_legs(cand):
+    """A candidate's joint paths that go through cuRobo: (start joints, path, label)."""
+    return ((cand["q_pre"], cand["leg"], "the straight-in"), (cand["leg"][-1], cand["arc"], "the swing"))
+
+
+class _CuroboFirst(AfterSwing):
+    """cuRobo is asked for a candidate's straight-in and swing (_check_curobo_path) before `inner` plans what follows,
+    so a candidate cuRobo can't run is passed over for the next instead of the whole open being refused. 11-10: the
+    chosen line-up was 2 mm into cuRobo's person/lap (its arm is padded spheres, fatter than the sim's meshes)."""
+
+    def __init__(self, ai, inner):
+        self.ai, self.inner = ai, inner
+
+    def check(self, scene, rb, geom, cand, explain):
+        for start, path, label in _curobo_legs(cand):
+            why = _check_curobo_path(self.ai, start, path, label)
+            if why:
+                return False, why
+        cand["curobo_ok"] = True
+        return self.inner.check(scene, rb, geom, cand, explain)
+
+    def recheck(self, scene, rb, geom, cand, advice):
+        return self.inner.recheck(scene, rb, geom, cand, advice)
+
+
 def _check_arc(scene, rb, wps, q0):
     """Chained sim IK over every swing waypoint from joints `q0`. Returns (ok, q_end, message, joints at each waypoint
     -- what the swing sends, so the arm runs exactly what was checked)."""
@@ -469,7 +494,8 @@ def hinge_measured(offset, from_handle=False):
 # appliance when looking for a placement that works ---
 SEARCH_J3_OFFSETS_DEG = (0.0, -30.0, 30.0, -60.0, 60.0)  # the 7-DOF arm's redundant elbow angle, about the start's
 # J3; each also with the wrist flipped (J5 + 180, -J6, J7 + 180: the same hand, the other wrist branch)
-SEARCH_AFTER_SWING_MAX = 6  # how many swing-feasible candidates (best first) to try the push-open on
+SEARCH_AFTER_SWING_MAX = 10  # how many swing-feasible candidates (best first) to try cuRobo and the push-open on
+# (11-10: 6 -> 10, now that cuRobo's own checks can pass a candidate over too)
 SAME_CONFIG_DEG = 10.0  # grasp IK solutions closer than this (every joint) are one configuration
 REPLAN_SWING_DEG = 3.0  # after the grasp, re-plan the swing from the real joints if they are further than this off
 PLACEMENT_SHIFTS_M = ((0.05, 0.0), (0.10, 0.0), (-0.05, 0.0), (0.0, 0.05), (0.0, -0.05), (0.05, 0.05), (0.05, -0.05))
@@ -696,6 +722,9 @@ def open_task(
     Returns True when the swing finished (or the dry run passed); raises Refused on any refusal."""
     scene, rb = make_sim()
     after_swing = after_swing or AfterSwing()
+    plain_after_swing = after_swing  # the placement advice's quick re-plans skip cuRobo (7 shifts x candidates)
+    if CUROBO_PATHS:
+        after_swing = _CuroboFirst(ai, after_swing)
     if before_detect is not None and before_detect(ai, scene, rb, execute):
         return True
 
@@ -731,7 +760,7 @@ def open_task(
     plan, why = plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing)
     if plan is None:
         say(f"  (refused -- looking for a {dc.APPLIANCE} placement that works ...)")
-        advice += _placement_advice(scene, rb, geom, q0, max_swing, min_swing, after_swing)
+        advice += _placement_advice(scene, rb, geom, q0, max_swing, min_swing, plain_after_swing)
         raise Refused(f"{why} -- refusing before any motion. Start joints {np.round(np.degrees(q0), 1)}.{advice}")
     global LAST_PLAN
     LAST_PLAN = dict(q0=q0, plan=plan, geom=geom)
@@ -742,10 +771,7 @@ def open_task(
         f"{plan['margin']:.0f} deg from the J4/J6 guards; grasp {np.round(g_p, 4)}; line-up joints "
         f"{np.round(np.degrees(plan['q_pre']), 1)}{'; ' + plan['after'] if plan.get('after') else ''}"
     )
-    for start, path, label in (
-        (plan["q_pre"], plan["leg"], "the straight-in"),
-        (plan["leg"][-1], plan["arc"], "the swing"),
-    ):
+    for start, path, label in () if plan.get("curobo_ok") else _curobo_legs(plan):  # asked in plan_open already
         why = _check_curobo_path(ai, start, path, label)
         if why:
             raise Refused(f"{why} -- refusing before any motion.{advice}")
