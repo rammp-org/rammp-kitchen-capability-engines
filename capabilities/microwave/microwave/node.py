@@ -102,7 +102,8 @@ class Capability(CapabilityEngine):
                 "properties": {
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 45, "maximum": 75},
-                    "push_open": {"type": "boolean", "default": True},
+                    # off until the scene camera is in the checks: 11-10 the push-open's 'up and back' hit it
+                    "push_open": {"type": "boolean", "default": False},
                     # stop at the view pose (the open always goes there first, to detect the handle from it)
                     "view_only": {"type": "boolean", "default": False},
                 },
@@ -219,7 +220,7 @@ class Capability(CapabilityEngine):
                     self.arm,
                     execute,
                     swing_deg=params.get("swing_deg"),
-                    push=bool(params.get("push_open", True)),
+                    push=bool(params.get("push_open", False)),
                     speed=speed,
                     log_args=log_args,
                     view_only=bool(params.get("view_only", False)),

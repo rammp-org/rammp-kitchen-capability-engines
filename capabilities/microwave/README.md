@@ -56,8 +56,9 @@ mw ros2 action send_goal --feedback /microwave/execute_action rammp_orchestrator
 # choose the swing, 45-75 (ARM MOVES)
 mw ros2 action send_goal --feedback /microwave/execute_action rammp_orchestrator_interfaces/action/ExecuteAction '{engine_id: microwave, action_id: open, params_json: "{\"execute\": true, \"swing_deg\": 60}"}'
 
-# stop after the swing, still holding the handle (ARM MOVES)
-mw ros2 action send_goal --feedback /microwave/execute_action rammp_orchestrator_interfaces/action/ExecuteAction '{engine_id: microwave, action_id: open, params_json: "{\"execute\": true, \"push_open\": false}"}'
+# the full open with the push-open -- off by default until the scene camera is in the checks (11-10 the
+# push-open's 'up and back' hit it); without push_open the open stops after the swing, still holding the handle
+mw ros2 action send_goal --feedback /microwave/execute_action rammp_orchestrator_interfaces/action/ExecuteAction '{engine_id: microwave, action_id: open, params_json: "{\"execute\": true, \"push_open\": true}"}'
 ```
 
 ## Stop
