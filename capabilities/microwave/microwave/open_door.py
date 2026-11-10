@@ -144,6 +144,11 @@ PRE_PARK_X = 0.216
 
 SCENE_CAMERA = None  # without boxer, the camera whose view of the door places the view pose (set_scene_camera)
 SCENE_WAIT_S = 10.0  # wait this long for the scene camera's first frame
+# The door as the scene camera saw it for the last view pose: {t, face, n, box, p_view}. At the view pose the arm stands
+# between the scene camera and the door (11-10: the door then read 32 cm wide, not 47, and the hinge came out 10 cm
+# short), so a run that starts there reuses this instead of looking again
+SCENE_DOOR = None
+SCENE_DOOR_REUSE_S = 900.0  # ... if it is this recent (s) and the hand is still at that view pose (VIEW_AT_TOL_M)
 
 
 def set_scene_camera(cam):
@@ -472,7 +477,24 @@ def plan_view(ai, scene, rb):
     cuRobo plans too. Returns the goal joints (to go_to_joint_config, so the arm arrives on that branch) and the
     hand's goal position; raises Refused."""
     cam = dc.camera()
-    face, n = _box_face(cam) if getattr(cam, "box_topic", "") else _detected_face()
+    global SCENE_DOOR
+    boxer = bool(getattr(cam, "box_topic", ""))
+    hand = np.asarray(ai.get_state()["ee_pos"][:3], dtype=float)
+    reuse = (
+        not boxer
+        and SCENE_DOOR is not None
+        and time.time() - SCENE_DOOR["t"] <= SCENE_DOOR_REUSE_S
+        and float(np.linalg.norm(hand - SCENE_DOOR["p_view"])) <= VIEW_AT_TOL_M
+    )
+    if reuse:  # the arm is at the view pose, in the scene camera's way: the door as seen before it came here
+        face, n = SCENE_DOOR["face"], SCENE_DOOR["n"]
+        cam.fixed_box = SCENE_DOOR["box"]
+        say(
+            f"scene camera: reusing the door seen {time.time() - SCENE_DOOR['t']:.0f} s ago, before the arm came to "
+            "the view pose (it now blocks the camera's view)"
+        )
+    else:
+        face, n = _box_face(cam) if boxer else _detected_face()
     f = cam.grab()
     if f["base_T_cam"] is None:
         raise Refused("No arm base <- camera transform -- can't place the camera for the view pose.")
@@ -521,6 +543,8 @@ def plan_view(ai, scene, rb):
                 f"view pose ({label}, looking {np.degrees(np.arcsin(-z[2])):.0f} deg down): camera "
                 f"{np.round(pos, 3)}, joints {np.round(np.degrees(q), 1)}"
             )
+            if not boxer and not reuse:
+                SCENE_DOOR = dict(t=time.time(), face=face, n=n, box=cam.fixed_box, p_view=T_tool[:3, 3])
             return q, T_tool[:3, 3]
         tried.append((label, T_tool))
     label, T_tool = tried[0]  # say why the preferred one failed
