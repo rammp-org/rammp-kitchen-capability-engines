@@ -1952,3 +1952,51 @@ def test_a_button_with_no_depth_at_its_very_centre_is_read_off_its_disc(pink):
     s2, why2 = find_button(color, holed, OAK_K, ROT_DOWN, cam, FLAT_TABLE_Z, pink)
     assert why2 is None, why2
     assert np.hypot(s2.xyz[0] - s.xyz[0], s2.xyz[1] - s.xyz[1]) < 0.002
+
+
+def test_a_flat_disc_with_streaks_across_it_is_flat_and_one_half_over_an_edge_is_not():
+    from box_opening.perception.button_aim import DISC_STD_MAX_M, disc_spread
+
+    rng = np.random.default_rng(1)
+    flat = 0.295 + rng.normal(0, 0.001, 1000)
+    assert disc_spread(flat)[0]
+    streaked = flat.copy()
+    streaked[:160] += 0.047  # 16 % of it read 47 mm high: the 11-11 look's disc
+    ok, spread, share = disc_spread(streaked)
+    assert ok and spread < 0.002 and share == pytest.approx(0.84, abs=0.01) and np.std(streaked) > DISC_STD_MAX_M
+    streaked[:300] += 0.047  # 30 %: no longer most of it
+    assert not disc_spread(streaked)[0]
+    edge = np.r_[flat[:500], flat[500:] - 0.03]  # half on the lid, half on what is 30 mm under it
+    assert not disc_spread(edge)[0]
+    rough = 0.295 + rng.normal(0, 0.010, 1000)  # no flat top at all
+    assert not disc_spread(rough)[0]
+    assert not disc_spread([])[0]
+
+
+def test_the_button_on_the_white_table_is_found_through_the_streaks_in_its_depth():
+    """Flatbot 2026-11-11 19:13: the wrist's look found the box and the reach-out's look stood over it, the lid and
+    its button plain in the colour image; "disc not flat in base z (std 30.3 mm)" on 51 of 51 frames, and the run
+    went home. The disc's cells: 84 % within 6 mm of their median, the rest a streak 47 mm high."""
+    from conftest import fixture_path
+
+    from box_opening.models.container import ContainerModel
+    from box_opening.perception.button_aim import find_button
+
+    d = np.load(fixture_path("wrist_reach_look_flatbot_20261111_1913.npz"))
+    model = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
+    s, why = find_button(
+        d["color"],
+        d["depth"].astype(np.float32),
+        d["k"],
+        d["rot_cam"],
+        d["trans_cam"],
+        0.186,  # the table and the lid as the wrist's look had them, and its box as the prior
+        model,
+        dist=d["dist"],
+        lid_z=0.277,
+        prior_xy=(0.685, -0.260),
+        prior_max_m=0.15,
+    )
+    assert s is not None, why
+    assert s.xyz[0] == pytest.approx(0.732, abs=0.005) and s.xyz[1] == pytest.approx(-0.287, abs=0.005)
+    assert s.xyz[2] == pytest.approx(0.294, abs=0.004)

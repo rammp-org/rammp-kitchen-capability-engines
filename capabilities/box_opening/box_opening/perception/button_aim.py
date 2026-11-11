@@ -45,6 +45,30 @@ from box_opening.perception.depth_source import (
 MIN_RANGE_M = 0.08  # closer than this the button fills the frame; no aim
 RADIUS_WINDOW = (0.7, 1.4)  # of the model diameter's pixel radius, as button_circle_refine
 DISC_STD_MAX_M = 0.006  # the button top is flat
+# ... as most of it reads. On a glossy lid over a plain table the wrist's stereo leaves streaks
+# across the disc, rows of it read 4-5 cm high (flatbot 2026-11-11 19:13, the look pose over the
+# pink canister on a white folding table: 84 % of the disc's 1117 cells within 6 mm of its median,
+# the rest at +47 mm; std 17-30 mm on 51 of 51 frames, "disc not flat", with every other gate
+# passing; 2026-11-10 the same on 49 of 49). The spread is the middle's (1.4826 x the median
+# absolute deviation: 1.1 mm there), and DISC_FLAT_SHARE of the disc must lie within twice
+# DISC_STD_MAX_M of its median: a circle half over an edge has two heights and neither rule
+# passes it. The disc's height was the median already.
+DISC_FLAT_SHARE = 0.75
+
+
+def disc_spread(z):
+    """(flat, spread m, share): is a button disc's depth flat (the note above); the spread of
+    its middle; the share of it within twice DISC_STD_MAX_M of its median."""
+    z = np.asarray(z, float)
+    if not z.size:
+        return False, 0.0, 0.0
+    med = float(np.median(z))
+    dev = np.abs(z - med)
+    spread = 1.4826 * float(np.median(dev))
+    share = float(np.mean(dev <= 2.0 * DISC_STD_MAX_M))
+    return spread <= DISC_STD_MAX_M and share >= DISC_FLAT_SHARE, spread, share
+
+
 ANNULUS = (1.15, 1.5)  # of r: the ring around the button is LID, not table
 ANNULUS_TOL_M = 0.012
 ANNULUS_MIN_FRAC = 0.8
@@ -238,8 +262,9 @@ def circle_gates(depth, k, rot_cam, trans_cam, u, v, r, lid_z):
     win = depth[v0 : v0 + d2.shape[0], u0 : u0 + d2.shape[1]]
     disc = win[d2 < (0.8 * r) ** 2]
     disc = disc[(disc > DEPTH_MIN_M) & (disc < DEPTH_MAX_M) & np.isfinite(disc)]
-    if disc.size < 20 or float(np.std(disc)) > DISC_STD_MAX_M:
-        return "disc not flat (%d px, std %.1f mm)" % (disc.size, 1000 * float(np.std(disc)) if disc.size else 0.0)
+    flat, spread, share = disc_spread(disc)
+    if disc.size < 20 or not flat:
+        return "disc not flat (%d px, spread %.1f mm, %.0f%% at its height)" % (disc.size, 1000 * spread, 100 * share)
     ring = (d2 > (ANNULUS[0] * r) ** 2) & (d2 < (ANNULUS[1] * r) ** 2)
     rd = win[ring]
     ok = (rd > DEPTH_MIN_M) & (rd < DEPTH_MAX_M) & np.isfinite(rd)
@@ -529,8 +554,9 @@ def _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate=None):
     expect = cells(math.pi * (0.8 * rb) ** 2, h_disc)
     if zd.size < max(20, DISC_MIN_FILL * expect):
         return None, "too little depth on the disc (%d of ~%.0f cells)" % (zd.size, expect)
-    if float(np.std(zd)) > DISC_STD_MAX_M:
-        return None, "disc not flat in base z (std %.1f mm)" % (1000 * float(np.std(zd)))
+    flat, spread, share = disc_spread(zd)
+    if not flat:
+        return None, "disc not flat in base z (spread %.1f mm, %.0f%% at its height)" % (1000 * spread, 100 * share)
     expect = cells(math.pi * (ANNULUS[1] ** 2 - ANNULUS[0] ** 2) * rb**2, h_ring)
     if zr.size < max(30, ANNULUS_MIN_FILL * expect):
         return None, "too little depth around the circle (%d of ~%.0f cells)" % (zr.size, expect)
