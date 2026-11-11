@@ -171,7 +171,8 @@ from the hand's own heading.
    acknowledge the persistent platform, seat and person layers and the floor scene layer. cuRobo
    plans from the measured start joints to the pre-grasp pose, including the hand's turn, with
    orientation free in transit. The approach can curve; only its endpoint must match the pre-grasp.
-   From its endpoint, the original local IK plans the straight level insertion, raise and retreat.
+   From its endpoint, local IK plans the straight insertion and lift. cuRobo then preplans
+   the exit from that nominal lifted configuration before any motion is allowed.
    A **dry run** stops here and saves the cuRobo samples, timing and velocities alongside those
    Cartesian paths in `state_dir/plans/take_out_*.json`. A planner failure refuses without a local
    IK fallback.
@@ -187,12 +188,13 @@ from the hand's own heading.
    setpoint on the measured joints, so nothing jumps) before the gripper closes, whatever happened.
    Then, in position control: the gripper closes with `grab_container`'s force and is checked (the
    fingers stopped, closed past 0.6, not to 1.0 = on nothing; otherwise it stops in the oven without
-   lifting), the hand goes straight up `take_lift`, and the level line out to above the pre-grasp pose.
+   lifting), and the hand goes straight up `take_lift`. The exit is replanned with cuRobo
+   from the measured lifted joints, then executed with its original samples and timing.
 
 Compliance is used only where the open fingers go over the brim; everything carrying the container is
 stiff (the place's soft gains let the arm sag ~5 cm under it). The library runs one trajectory goal at a
-time, so the switch into impedance is a short stop. Only the cuRobo approach is collision-checked;
-the straight insertion onward retains the legacy IK and is not collision-checked. The approach
+time, so the switch into impedance is a short stop. The cuRobo approach and exit are
+collision-checked; local insertion and lift are not collision-checked. The approach
 world contains the chair, person and floor, not a microwave model or the container. Run the planner
 with the current flatbot `planner.yaml` from rammp-deployments, its layers mounted at
 `/config/robot/curobo`, and `world:=""`; an empty-world or older planner without the required layer
@@ -288,3 +290,64 @@ reject samples farther from the local median than max(1 cm, 3 x 1.4826 x MAD).
 Then average the nearest 50 surviving samples per frame, refusing fewer than 50.
 The existing three-frame pairwise mask-IoU agreement and frame-point averaging remain unchanged.
 The overlay displays exactly the filtered samples used by the estimator.
+
+## Take-out starting home
+
+`take_home_joints` stores seven joint angles in radians in arm_joint_1..7 order,
+captured from the viewing pose on 2026-11-11. Executing take-out first uses cuRobo
+to reach this configuration before starting wrist detection (unless already within
+1 degree per joint). It uses `take_approach_speed_scale` and the confirmed flatbot
+collision world. This home step leaves the gripper unchanged. A dry run refuses
+when off-home because it cannot observe the future camera view without moving.
+The explicit `allow_execute` and goal `execute` gates apply to this move too.
+
+## Per-run recording
+
+`record_bag` defaults to `true` for place, take-out, dry runs and mock runs. Each
+accepted action creates `state_dir/runs/<action>_<UTC timestamp>_<unique id>/bag`
+(sqlite3 ROS 2 bag) and a sibling `run.json`. The existing `state_dir` volume keeps
+these across container restarts. A successful result includes `bag_path` and
+`recording_errors`; failed runs log their bag path before behavior begins.
+
+| Parameter      | Default | Meaning                                                       |
+| -------------- | ------- | ------------------------------------------------------------- |
+| `record_bag`   | `true`  | Record each action; startup failure refuses before motion     |
+| `bag_frame_hz` | `1.0`   | Maximum synchronized camera sets per second                   |
+| `bag_state_hz` | `25.0`  | Maximum joint, tool and gripper messages per second per topic |
+
+Take-out records its configured wrist color image, color calibration and aligned
+depth together (timestamps within 50 ms), plus the SAM3 overlay at `bag_frame_hz`.
+Place records the scene color, calibration and depth it uses. Images retain their
+original header timestamps and encodings, including raw depth units. These are
+sampled observations, not every exact frame consumed by SAM3.
+
+The bag also subscribes to `/joint_states`, `/ee_state`, `/gripper_state`, `/tf`
+(up to 10 Hz per transform group), `/tf_static`, `/arm/robot_description`,
+`/diagnostics` (1 Hz; errors unthrottled), and `/rosout` (this node's logs and all
+nodes' warnings/errors, unthrottled). Missing publishers produce empty topics,
+without blocking the run. Static-topic QoS is stored for replay. Recorder
+subscriptions belong to the action and do not remain active while idle.
+
+The bag-only `/microwave_place/run_event` topic stores start settings and the final
+result or exception. `run.json` also stores message counts and any recording I/O
+errors. Failures include a synchronous error log and traceback; cancellation and
+exceptions close the bag just like success. Startup recording errors refuse the
+action; later recording errors are reported without interrupting arm cleanup.
+SIGKILL, power loss, or disk failure can still prevent a clean final bag.
+
+Inspect using `ros2 bag info <bag_path>` or open the bag directory in Foxglove.
+
+## Take-out withdrawal
+
+After the 3 cm vertical lift, local IK generates a fixed-heading, level straight
+retreat to pre-grasp x/y at the measured lifted height, then stops. The local
+path is previewed before approach, insertion and lift, and regenerated from
+measured joints before retreat. This preserves the tested insertion/lift/retreat
+geometry. These local paths are not collision-checked against the cuRobo world;
+HOME and approach still use cuRobo with the configured collision layers.
+
+A fully closed gripper reading does not establish an empty grasp and does not
+block lifting or retreat. Finger motion and insufficient closure still refuse.
+Run results report `exit_collision_checked: false` and record the actual arm
+states. The experimental cuRobo exit helpers and `take_exit_speed_scale` /
+`take_pullback_m` settings are retained but are not used for removal.

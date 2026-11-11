@@ -9,11 +9,11 @@ gripper open).
      the wrist turns no faster than the hand travels), from pre-grasp up to `impedance_in` short of the grasp; there a
      short stop, and the rest of the line in in the driver's joint impedance (take_gains, at impedance_speed);
   3. impedance off (the position setpoint on the current joints), then the gripper closed on the brim (grab_container's
-     force), checked: the fingers stopped, closed on something;
+     force), checked: the fingers stopped and closed sufficiently;
   4. straight up `take_lift`;
-  5. the level line back out to above the pre-grasp pose (the place's plan_level_back_out).
-Steps 3-5 in position control. Only the cuRobo approach is collision-checked against the configured world;
-the straight insertion onward retains the local IK and is not collision-checked.
+  5. local fixed-heading level withdrawal to pre-grasp x/y at lifted height.
+Steps 3-5 use position control. HOME and approach use cuRobo collision checking;
+local insertion, lift and withdrawal retain IK and are not collision-checked.
 """
 
 import re
@@ -21,6 +21,7 @@ import time
 
 import numpy as np
 import rammp_arm
+from capability_engine.arm import HOLD_FIXED
 from scipy.spatial.transform import Rotation
 
 from . import place_motion as pm
@@ -29,11 +30,39 @@ GRIP_CLOSE, GRIP_FORCE, GRIP_SPEED = 1.0, 0.5, 1.0  # grab_container's close (gr
 GRIP_WAIT_S = 4.0  # the close streams until the fingers stop, at most this long
 STILL_CHECK_S, STILL_TOL = 0.3, 0.005  # before lifting: the fingers unmoved (within this) over this long ...
 CLOSED_MIN = 0.6  # ... and closed at least this far (on the brim, not stuck open)
-EMPTY_ABOVE = 0.998  # the gripper closed past this = nothing between the fingers (the brim stops it ~0.98-0.996)
 SET_TOL = 0.05  # the gripper may end at most this much more closed than asked ...
 OPEN_EXTRA = 0.15  # ... and at most this much more open
 LIFT_SPEED = 0.05  # m/s peak, the straight lift off the glass
 IMP_END_TOL = 0.03  # m: in impedance the hand lags its setpoint; this far off the grasp at most, or it does not close
+
+
+def prepare_home(arm, home_joints, execute, speed_scale, ctx, log):
+    """Reach the configured viewing configuration before acquiring wrist images.
+
+    A dry run cannot observe the future home camera view, so refuses off-home.
+    The gripper is unchanged here; normal take-out opens it after planning.
+    """
+    home = np.asarray(home_joints, dtype=float)
+    if home.shape != (7,) or not np.isfinite(home).all():
+        raise pm.Refused("take_home_joints must contain seven finite joint angles in radians")
+    ctx.checkpoint()
+    q = np.asarray(arm.raw_joints(), dtype=float)
+    off = float(np.max(np.abs(pm.wrap_deg(q - home))))
+    if off <= pm.START_TOL_DEG:
+        log(f"take-out home: already within {off:.2f} deg of configured viewing pose")
+        return q
+    if not execute:
+        raise pm.Refused(f"dry run: arm is {off:.1f} deg from take_home_joints; move home before detecting")
+    ctx.progress("home", 0.0)
+    log("-> cuRobo to configured take-out home, gripper unchanged")
+    if not arm.go_to_joint_config(home, "take-out home", speed_scale=speed_scale):
+        raise pm.Refused(f"take-out home failed: {arm.last_error}")
+    ctx.checkpoint()
+    q = np.asarray(arm.raw_joints(), dtype=float)
+    off = float(np.max(np.abs(pm.wrap_deg(q - home))))
+    if off > pm.START_TOL_DEG:
+        raise pm.Refused(f"take-out home ended {off:.1f} deg off target -- not detecting")
+    return q
 
 
 def grasp_pose(model, q0, point, reach_in, grasp_depth, grasp_up):
@@ -76,7 +105,7 @@ def set_approach_world(arm, world, log):
 
 
 def plan_from_pregrasp(model, q_pre, cand, cfg):
-    """Keep the original straight insertion, lift and retreat, seeded at pre-grasp.
+    """Keep the original straight insertion and lift, seeded at pre-grasp.
 
     Legacy IK remains here to preserve Cartesian lines and the impedance phase.
     These paths are not cuRobo collision-checked.
@@ -92,12 +121,116 @@ def plan_from_pregrasp(model, q_pre, cand, cfg):
     if end[0] > pm.END_TOL or end[1] > pm.END_TOL_DEG:
         raise pm.Refused(f"the line in ends {end[0] * 100:.1f} cm / {end[1]:.1f} deg off the grasp")
     lift = pm.plan_line(model, line[-1], np.r_[0.0, 0.0, cfg["take_lift"]], "lift", step=pm.LINE_STEP)
-    out = pm.plan_level_back_out(model, lift[-1], cand["pre"])
-    return dict(line=line, lift=lift, out=out, end=end)
+    return dict(line=line, lift=lift, end=end)
+
+
+def plan_exit(arm, model, q_start, pre, cfg):
+    """cuRobo withdrawal to pre-grasp x/y at the lifted height, orientation fixed.
+
+    A path leaving the existing 1 cm straight corridor is refused: the planner
+    knows the chair/person/floor, not the microwave interior or held container.
+    Never fall back to the old unchecked local-IK retreat.
+    """
+    speed = float(cfg["take_exit_speed_scale"])
+    if not np.isfinite(speed) or not 0.0 < speed <= 1.0:
+        raise pm.Refused("take_exit_speed_scale must be finite and in (0, 1]")
+    T = model.fk(np.asarray(q_start, dtype=float))
+    a = T[:3, 3].copy()
+    target = np.r_[np.asarray(pre, dtype=float)[:2], a[2]]
+    quat = Rotation.from_matrix(T[:3, :3]).as_quat()
+    plan = arm.plan_to_pose(target, quat, q_start, hold=HOLD_FIXED)
+    if not plan.success:
+        raise pm.Refused(f"take-out exit: cuRobo refused: {plan.message}")
+    if len(plan.q) < 2:
+        raise pm.Refused("take-out exit: cuRobo returned no executable trajectory")
+    if np.max(np.abs(pm.wrap_deg(np.asarray(plan.q[0]) - q_start))) > pm.START_TOL_DEG:
+        raise pm.Refused("take-out exit: trajectory does not start at the requested joints")
+    # Include the measured start and densely check the path between returned samples.
+    qs = [np.asarray(q_start, dtype=float), *np.asarray(plan.q, dtype=float)]
+    samples = pm.dense(qs, pm.LINE_STEP_DEG)
+    pm.check_line(model, samples, a, target, None, "cuRobo exit")
+    for q in samples:
+        R = model.fk(q)[:3, :3]
+        angle = float(np.degrees(Rotation.from_matrix(T[:3, :3].T @ R).magnitude()))
+        if angle > pm.END_TOL_DEG:
+            raise pm.Refused(f"cuRobo exit turns the held container {angle:.1f} deg -- refusing")
+    if np.linalg.norm(model.fk(plan.q[-1])[:3, 3] - target) > pm.END_TOL:
+        raise pm.Refused("cuRobo exit does not reach the retreat endpoint")
+    # Preserve planner timing/velocities; slow down rather than reinterpolate its path.
+    dt = np.diff(np.asarray(plan.t, dtype=float))
+    if len(dt) != len(plan.q) - 1 or not np.isfinite(dt).all() or np.any(dt <= 0):
+        raise pm.Refused("cuRobo exit returned invalid sample timing")
+    peak = float(np.max(np.asarray(pm.pose_lengths(model, plan.q)) / dt))
+    speed = min(speed, float(cfg["insert_speed"]) / max(peak, 1e-9))
+    if not 0.01 <= speed <= 1.0:
+        raise pm.Refused("cuRobo exit needs a speed scale below the driver minimum -- refusing")
+    return dict(out=plan.q, out_t=plan.t, out_qd=plan.qd, out_speed_scale=speed, out_target=target)
+
+
+def execute_exit(arm, model, pre, cfg, ctx, log):
+    """Replan from actual lifted joints and send only the validated cuRobo samples."""
+    ctx.checkpoint()
+    q = np.asarray(arm.raw_joints(), dtype=float)
+    exit_plan = plan_exit(arm, model, q, pre, cfg)
+    return _execute_checked_exit(arm, model, q, exit_plan, ctx, log)
+
+
+def _execute_checked_exit(arm, model, q, exit_plan, ctx, log):
+    """Send the checked samples only if their measured start is still current."""
+    ctx.checkpoint()
+    now = np.asarray(arm.raw_joints(), dtype=float)
+    if np.max(np.abs(pm.wrap_deg(now - q))) > pm.START_TOL_DEG:
+        raise pm.Refused("arm moved while planning the exit -- nothing sent")
+    log("-> cuRobo exit: fixed orientation, checked level withdrawal to above pre-grasp")
+    result = arm.execute_joint_trajectory(
+        rammp_arm.JOINTS,
+        zip(exit_plan["out_t"], exit_plan["out"], exit_plan["out_qd"], strict=True),
+        speed_scale=exit_plan["out_speed_scale"],
+    )
+    if result.error_code != pm.SUCCESSFUL:
+        raise pm.Refused(f"STOPPED holding the container: cuRobo exit failed ({result.error_string})")
+    time.sleep(pm.SETTLE_AFTER_S)
+    q_end = np.asarray(arm.raw_joints(), dtype=float)
+    T_end, T_start = model.fk(q_end), model.fk(q)
+    distance = float(np.linalg.norm(T_end[:3, 3] - exit_plan["out_target"]))
+    angle = float(np.degrees(Rotation.from_matrix(T_start[:3, :3].T @ T_end[:3, :3]).magnitude()))
+    if distance > pm.END_TOL or angle > pm.END_TOL_DEG:
+        raise pm.Refused(
+            f"STOPPED holding the container: exit ended {distance * 100:.1f} cm / {angle:.1f} deg off target"
+        )
+    return exit_plan
+
+
+def plan_withdrawal(arm, model, q_start, pre, cfg):
+    """Local straight withdrawal; deliberately not checked against the cuRobo world."""
+    start = model.fk(np.asarray(q_start, dtype=float))[:3, 3]
+    target = np.r_[np.asarray(pre)[:2], start[2]]
+    qs = pm.plan_line(model, q_start, target - start, "local withdrawal", step=pm.LINE_STEP)
+    pm.check_line(model, qs, start, target, None, "local withdrawal")
+    duration = sum(pm.pose_lengths(model, qs)) / cfg["insert_speed"]
+    empty = dict(out_t=[0.0], out_speed_scale=1.0, out_target=start)
+    return dict(out=qs, out_t=[0.0, duration], out_speed_scale=1.0, out_target=target, pullback=empty)
+
+
+def execute_withdrawal(arm, model, pre, cfg, ctx, log):
+    """Preserve fixed-heading local retreat to above pre-grasp, then stop."""
+    ctx.checkpoint()
+    q = np.asarray(arm.raw_joints(), dtype=float)
+    route = plan_withdrawal(arm, model, q, pre, cfg)
+    ctx.progress("retract", 0.0)
+    log("-> local straight retreat to pre-grasp x/y at lifted height (no cuRobo collision check)")
+    move_timed(arm, model, route["out"], "local withdrawal", cfg["insert_speed"], "holding the container")
+    actual = model.fk(np.asarray(arm.raw_joints(), dtype=float))[:3, 3]
+    if np.linalg.norm(actual - route["out_target"]) > pm.END_TOL:
+        raise pm.Refused("STOPPED holding container: local retreat endpoint tracking error")
+    return route
 
 
 def plan_take_out(arm, model, q0, cand, cfg):
-    """cuRobo to pre-grasp, then the existing local Cartesian paths; nothing moves."""
+    """Plan cuRobo approach and local insertion/lift/withdrawal before motion."""
+    exit_speed = cfg["take_exit_speed_scale"]
+    if not np.isfinite(exit_speed) or not 0.0 < exit_speed <= 1.0:
+        raise pm.Refused("take_exit_speed_scale must be finite and in (0, 1]")
     speed = cfg["take_approach_speed_scale"]
     if not np.isfinite(speed) or not 0.0 < speed <= 1.0:
         raise pm.Refused("take_approach_speed_scale must be finite and in (0, 1]")
@@ -107,7 +240,8 @@ def plan_take_out(arm, model, q0, cand, cfg):
     if len(approach.q) < 2:
         raise pm.Refused("take-out approach: cuRobo returned no executable trajectory")
     legs = plan_from_pregrasp(model, approach.q[-1], cand, cfg)
-    return dict(approach=approach.q, approach_t=approach.t, approach_qd=approach.qd, **legs)
+    exit_plan = plan_withdrawal(arm, model, legs["lift"][-1], cand["pre"], cfg)
+    return dict(approach=approach.q, approach_t=approach.t, approach_qd=approach.qd, **legs, **exit_plan)
 
 
 def set_gripper(arm, position, log, what):
@@ -147,18 +281,16 @@ def move_timed(arm, model, qs, what, speed, state, impedance=None):
 
 def close_on_brim(arm, log):
     """Close the gripper (grab_container's force) and check it: the fingers stopped, closed past CLOSED_MIN and not
-    on nothing. Returns its position; Refused otherwise."""
+    sufficiently. Fully closed readings do not reject the grasp. Returns its position."""
     arm.gripper(GRIP_CLOSE, timeout_s=GRIP_WAIT_S, force=GRIP_FORCE, speed=GRIP_SPEED)  # blocks: fingers stopped
     pos = float(arm.gripper_state().position)
     time.sleep(STILL_CHECK_S)
     pos2 = float(arm.gripper_state().position)
-    log(f"gripper closed to {pos2:.3f} (1.0 = closed on nothing)")
+    log(f"gripper closed to {pos2:.3f} (1.0 = fully closed; does not establish grasp success)")
     if abs(pos2 - pos) > STILL_TOL:
         raise pm.Refused(f"STOPPED in the oven: the fingers are still moving ({pos:.3f} -> {pos2:.3f}) -- not lifting")
     if pos2 < CLOSED_MIN:
         raise pm.Refused(f"STOPPED in the oven: the gripper only closed to {pos2:.3f} -- not lifting")
-    if pos2 > EMPTY_ABOVE:
-        raise pm.Refused(f"STOPPED in the oven: the gripper closed to {pos2:.3f}, on nothing -- not lifting")
     return pos2
 
 
@@ -193,6 +325,9 @@ def run_take_out(arm, model, q0, cand, legs, cfg, ctx, log):
     ctx.checkpoint()
     q_pre = np.asarray(arm.raw_joints(), dtype=float)
     insertion = plan_from_pregrasp(model, q_pre, cand, c)
+    # Refuse before insertion if the new local lift endpoint has no valid exit.
+    ctx.checkpoint()
+    plan_withdrawal(arm, model, insertion["lift"][-1], cand["pre"], c)
     line = [np.asarray(q, dtype=float) for q in insertion["line"]]
     k = max(1, len(line) - 1 - int(np.ceil(c["impedance_in"] / pm.LINE_STEP)))
     ctx.progress("reach", 0.0)
@@ -234,13 +369,20 @@ def run_take_out(arm, model, q0, cand, legs, cfg, ctx, log):
     log(f"-> raise {c['take_lift'] * 100:.0f} cm (position control)")
     q = np.asarray(arm.raw_joints(), dtype=float)
     lift = pm.plan_line(model, q, np.r_[0.0, 0.0, c["take_lift"]], "lift", step=pm.LINE_STEP)
+    # Account for impedance tracking error before committing to the lift.
+    ctx.checkpoint()
+    plan_withdrawal(arm, model, lift[-1], cand["pre"], c)
     move_timed(arm, model, lift, "the raise", LIFT_SPEED, "holding the container in the oven")
     ctx.checkpoint()
     ctx.progress("retract", 0.0)
-    log("-> retract: the level line out to above the pre-grasp pose (position control)")
-    q = np.asarray(arm.raw_joints(), dtype=float)
-    out = pm.plan_level_back_out(model, q, cand["pre"])
-    move_timed(arm, model, out, "the retract", c["insert_speed"], "holding the container")
+    exit_plan = execute_withdrawal(arm, model, cand["pre"], c, ctx, log)
     T = model.fk(np.asarray(arm.raw_joints(), dtype=float))
     log(f"Done: holding the container outside the oven, tool at {np.round(T[:3, 3], 3).tolist()}")
-    return {"executed": True, "gripper": pos}
+    return {
+        "executed": True,
+        "gripper": pos,
+        "exit_collision_checked": False,
+        "exit_speed_scale": exit_plan["out_speed_scale"],
+        "exit_target": exit_plan["out_target"].tolist(),
+        "pullback_target": exit_plan["pullback"]["out_target"].tolist(),
+    }

@@ -42,7 +42,8 @@ Action:
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`.
 Otherwise every goal is a dry run that locates, plans and checks, and returns the plan. Someone stands at
-the e-stop whenever allow_execute is on. Take-out checks only the cuRobo approach against flatbot layers.
+the e-stop whenever allow_execute is on. Take-out checks the cuRobo approach and exit against flatbot layers;
+insertion and lift remain local IK.
 For place, only the first motion (side shift, transit) is checked against the
 microwave; from the line in on nothing is collision-checked. Any check that fails refuses with the reason.
 
@@ -63,6 +64,9 @@ from . import microwave_detection, place_motion, rim_detection, take_out
 # ROS parameter -> default.
 PARAMS = {
     "allow_execute": False,
+    "record_bag": True,
+    "bag_frame_hz": 1.0,
+    "bag_state_hz": 25.0,
     # flange face to the closed fingertips (m)
     "flange_to_tip": place_motion.FLANGE_TO_TIP,
     # contact: vz (m/s, + up) back up to this after moving down; 0.0 came 4.5 s late on the flatbot
@@ -116,6 +120,18 @@ PARAMS = {
     # Resolved inside the planner container; its config must load flatbot's platform, seat and person.
     "take_approach_world": "/config/robot/curobo/world.yaml",
     "take_approach_speed_scale": rammp_arm.GO_TO_SPEED_SCALE,
+    "take_exit_speed_scale": rammp_arm.GO_TO_SPEED_SCALE,
+    "take_pullback_m": 0.05,
+    # Saved viewing configuration: arm_joint_1..7 in radians, captured 2026-11-11.
+    "take_home_joints": [
+        -2.9723690063395423,
+        0.4406113803695808,
+        -0.4320526131268245,
+        -2.4519407240189826,
+        2.8028915598374065,
+        -0.9451441529603253,
+        -1.413206432450548,
+    ],
     # take_out: whole-container detection on the wrist camera (colour, aligned depth, camera_info)
     "wrist_topics": [
         "/wrist_camera/color/image_raw",
@@ -199,6 +215,39 @@ class Capability(CapabilityEngine):
         )
 
     def execute(self, action_id, params, ctx):
+        if not self.cfg["record_bag"]:
+            return self._execute_behavior(action_id, params, ctx)
+        # Lazy imports keep the pure planning helpers usable without ROS bag tools.
+        try:
+            from .bag import RecordingError, RunBag
+        except ImportError as exc:
+            raise EngineError("recording", f"rosbag dependencies unavailable: {exc}", recoverable=True) from exc
+        c = self.cfg
+        camera = (
+            (c["wrist_topics"][0], c["wrist_topics"][2], c["wrist_topics"][1])
+            if action_id == "take_out"
+            else (microwave_detection.SAM3_IMAGE_TOPIC, c["camera_info_topic"], c["depth_topic"])
+        )
+        try:
+            recorder = RunBag(
+                self,
+                self.state_dir,
+                action_id,
+                params,
+                json.loads(json.dumps(c, default=_json_default)),
+                camera,
+                frame_hz=c["bag_frame_hz"],
+                state_hz=c["bag_state_hz"],
+            )
+        except RecordingError as exc:
+            raise EngineError("recording", str(exc), recoverable=True) from exc
+        with recorder:
+            self.get_logger().info(f"run bag: {recorder.path}")
+            result = self._execute_behavior(action_id, params, ctx)
+            recorder.result = json.loads(json.dumps(result, default=_json_default))
+        return {**result, "bag_path": str(recorder.path), "recording_errors": list(recorder.errors)}
+
+    def _execute_behavior(self, action_id, params, ctx):
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
@@ -256,7 +305,8 @@ class Capability(CapabilityEngine):
     def _take_out(self, model, execute, ctx, log):
         """Find the nearest container-mask point, approach, insert, close, lift and retract."""
         c = self.cfg
-        q0 = np.asarray(self.arm.raw_joints(), dtype=float)
+        world_message = take_out.set_approach_world(self.arm, c["take_approach_world"], log)
+        q0 = take_out.prepare_home(self.arm, c["take_home_joints"], execute, c["take_approach_speed_scale"], ctx, log)
         ctx.progress("detect", 0.0)
         wrist = rim_detection.WristCamera(self, rammp_arm.FRAME, list(c["wrist_topics"]))
         rim = rim_detection.detect_container(
@@ -272,13 +322,23 @@ class Capability(CapabilityEngine):
         cand = take_out.grasp_pose(model, q0, rim["point"], c["reach_in"], c["grasp_depth"], c["grasp_up"])
         ctx.progress("plan", 0.0)
         ctx.checkpoint()
-        world_message = take_out.set_approach_world(self.arm, c["take_approach_world"], log)
         legs = take_out.plan_take_out(self.arm, model, q0, cand, c)
         T_pre = model.fk(legs["approach"][-1])
         summary = dict(
+            home_joints=list(c["take_home_joints"]),
             approach_world=world_message,
             approach_collision_checked=True,
             insertion_collision_checked=False,
+            lift_collision_checked=False,
+            exit_collision_checked=False,
+            exit_speed_scale=float(legs["out_speed_scale"]),
+            exit_duration_s=round(
+                float(legs["out_t"][-1]) / legs["out_speed_scale"]
+                + float(legs["pullback"]["out_t"][-1]) / legs["pullback"]["out_speed_scale"],
+                2,
+            ),
+            pullback_m=0.0,
+            pullback_target=legs["pullback"]["out_target"].tolist(),
             approach_duration_s=round(float(legs["approach_t"][-1]) / c["take_approach_speed_scale"], 2),
             container_point=np.round(rim["point"], 3).tolist(),
             container_depths_m=rim["info"]["depths_m"],

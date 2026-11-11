@@ -20,7 +20,7 @@ It also takes the container out (`take_out`). SAM3 finds the whole tupperware ma
 image, with no rim query. It averages the 50 nearest locally consistent masked depths per frame, then the
 points from three consecutive frames with pairwise container-mask IoU at least 0.85. Each point
 uses TF at its depth timestamp. A failed detection or mask disagreement resets the streak.
-The existing grasp offsets and cuRobo approach are retained; insertion onward uses local IK.
+The grasp offsets and local insertion/lift are retained. Both approach and exit use cuRobo.
 
 ## Publishes
 
@@ -48,10 +48,11 @@ is preserved. No rim masks or rim query are used.
 It also calls `/perception/sam3/detect` (`rammp_perception_interfaces/srv/Detect`, prompts "inside of
 microwave" and "microwave" on `/scene_camera/color/image_raw`; for take_out, `container_prompt` on
 `/wrist_camera/color/image_raw`). Through `self.arm` it also uses the arm driver and
-the cuRobo planner (`plan_to_pose` with `HOLD_LEVEL` for place, no orientation hold for take-out,
+the cuRobo planner (`plan_to_pose` with `HOLD_LEVEL` for place, no hold for take-out approach and `HOLD_FIXED` for exit,
 and `set_world`). Take-out loads `take_approach_world` and requires the planner to confirm the platform,
 seat and person config layers and the floor scene layer. It executes the returned approach trajectory
-with the driver's `execute_joint_trajectory`; insertion onward keeps the existing local IK and impedance.
+with the driver's `execute_joint_trajectory`; insertion/lift keep local IK and insertion impedance.
+Exit is preplanned before approach and replanned from the measured lifted joints, with no local fallback.
 The planner must run the current flatbot configuration from rammp-deployments; this change does not
 update or restart the running planner.
 
@@ -121,3 +122,64 @@ reject samples farther from the local median than max(1 cm, 3 x 1.4826 x MAD).
 Then average the nearest 50 surviving samples per frame, refusing fewer than 50.
 The existing three-frame pairwise mask-IoU agreement and frame-point averaging remain unchanged.
 The overlay displays exactly the filtered samples used by the estimator.
+
+## Take-out starting home
+
+`take_home_joints` stores seven joint angles in radians in arm_joint_1..7 order,
+captured from the viewing pose on 2026-11-11. Executing take-out first uses cuRobo
+to reach this configuration before starting wrist detection (unless already within
+1 degree per joint). It uses `take_approach_speed_scale` and the confirmed flatbot
+collision world. This home step leaves the gripper unchanged. A dry run refuses
+when off-home because it cannot observe the future camera view without moving.
+The explicit `allow_execute` and goal `execute` gates apply to this move too.
+
+## Per-run recording
+
+`record_bag` defaults to `true` for place, take-out, dry runs and mock runs. Each
+accepted action creates `state_dir/runs/<action>_<UTC timestamp>_<unique id>/bag`
+(sqlite3 ROS 2 bag) and a sibling `run.json`. The existing `state_dir` volume keeps
+these across container restarts. A successful result includes `bag_path` and
+`recording_errors`; failed runs log their bag path before behavior begins.
+
+| Parameter      | Default | Meaning                                                       |
+| -------------- | ------- | ------------------------------------------------------------- |
+| `record_bag`   | `true`  | Record each action; startup failure refuses before motion     |
+| `bag_frame_hz` | `1.0`   | Maximum synchronized camera sets per second                   |
+| `bag_state_hz` | `25.0`  | Maximum joint, tool and gripper messages per second per topic |
+
+Take-out records its configured wrist color image, color calibration and aligned
+depth together (timestamps within 50 ms), plus the SAM3 overlay at `bag_frame_hz`.
+Place records the scene color, calibration and depth it uses. Images retain their
+original header timestamps and encodings, including raw depth units. These are
+sampled observations, not every exact frame consumed by SAM3.
+
+The bag also subscribes to `/joint_states`, `/ee_state`, `/gripper_state`, `/tf`
+(up to 10 Hz per transform group), `/tf_static`, `/arm/robot_description`,
+`/diagnostics` (1 Hz; errors unthrottled), and `/rosout` (this node's logs and all
+nodes' warnings/errors, unthrottled). Missing publishers produce empty topics,
+without blocking the run. Static-topic QoS is stored for replay. Recorder
+subscriptions belong to the action and do not remain active while idle.
+
+The bag-only `/microwave_place/run_event` topic stores start settings and the final
+result or exception. `run.json` also stores message counts and any recording I/O
+errors. Failures include a synchronous error log and traceback; cancellation and
+exceptions close the bag just like success. Startup recording errors refuse the
+action; later recording errors are reported without interrupting arm cleanup.
+SIGKILL, power loss, or disk failure can still prevent a clean final bag.
+
+Inspect using `ros2 bag info <bag_path>` or open the bag directory in Foxglove.
+
+## Take-out withdrawal
+
+After the 3 cm vertical lift, local IK generates a fixed-heading, level straight
+retreat to pre-grasp x/y at the measured lifted height, then stops. The local
+path is previewed before approach, insertion and lift, and regenerated from
+measured joints before retreat. This preserves the tested insertion/lift/retreat
+geometry. These local paths are not collision-checked against the cuRobo world;
+HOME and approach still use cuRobo with the configured collision layers.
+
+A fully closed gripper reading does not establish an empty grasp and does not
+block lifting or retreat. Finger motion and insufficient closure still refuse.
+Run results report `exit_collision_checked: false` and record the actual arm
+states. The experimental cuRobo exit helpers and `take_exit_speed_scale` /
+`take_pullback_m` settings are retained but are not used for removal.
