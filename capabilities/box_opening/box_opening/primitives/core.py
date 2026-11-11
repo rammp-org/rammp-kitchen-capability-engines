@@ -405,7 +405,7 @@ class Place:
                         "never felt the surface and the fingers read %.3f, "
                         "outside %s — the lid slipped" % (v.gripper_pos, list(self.band))
                     )
-                return False, ("full stroke with no trip — never felt the surface, " "set-down NOT confirmed")
+                return False, ("full stroke with no trip — never felt the surface, set-down NOT confirmed")
             return False, "set-down %s" % v.outcome
 
         # a set-down SUCCEEDS only on the touch: target exactly at surface
@@ -905,7 +905,94 @@ class PlanSwung(RuntimeError):
     legs passed the gate (plans only)."""
 
 
-def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="HOME", plan_words="HOME", step_tail=""):
+class PlanUnderTable(RuntimeError):
+    """A plan that takes the arm under a table the run knows about: the planner's world holds no table
+    (worlds.py), so a HOME it plans may sweep through one. 2026-11-11, plans only on the robot's planner: 24 of
+    344 homes from poses over a 29 in table went under its top (the tool up to 143 mm, the arm 211 mm), every
+    one from joint_1 >= 1.2 rad off HOME, and both poses the arm was left in on 2026-11-10 did (the tool to
+    z 0.211-0.215, that day's table at 0.2656)."""
+
+
+# a planned leg keeps every sphere's bottom (the tool frame, with no body model) this far over the table
+HOME_TABLE_M = 0.010
+HOME_TABLE_DIP_M = 0.010  # ... or no more than this under where that sphere starts / the lower of its two ends
+HOME_TABLE_STEP_RAD = 0.03  # the leg is checked at joint steps no longer than this
+HOME_LIFTS_M = (0.08, 0.12, 0.16)  # straight lifts tried, lowest first, where HOME plans under the table
+
+
+def under_table(chain, body, pts, table_z, extent=None):
+    """Why the joint path `pts` goes under the table at `table_z`, or None. Each of the arm's checked spheres
+    (Body.spheres_at; the tool frame alone with no body model) is followed at steps of HOME_TABLE_STEP_RAD. A
+    sphere whose bottom is under table_z + HOME_TABLE_M is under the table where
+      * it stands over the table the scene camera saw (`extent`, (x0, x1, y0, y1)) and more than
+        HOME_TABLE_DIP_M lower than it started (a start that low already may leave, not go lower) — unless the
+        path's END has a sphere that low inside the extent too: the extent is then not the table's (HOME stands
+        behind the table's edge) and only the next rule holds;
+      * or it is more than HOME_TABLE_DIP_M under the lower of its heights at the path's two ends: the table's
+        edge is not known beyond what the camera saw, and a path that dips under both its ends over a table it
+        does not know is not flown."""
+    import numpy as np
+
+    P = [np.asarray(p, float) for p in pts]
+    if len(P) < 2:
+        return None
+    Q = [P[0]]
+    for a, b in zip(P, P[1:], strict=False):
+        n = max(1, int(np.ceil(float(np.max(np.abs(b - a))) / HOME_TABLE_STEP_RAD)))
+        Q += [a + (b - a) * (k / n) for k in range(1, n + 1)]
+
+    def at(q):
+        if body is not None:
+            C, r, links = body.spheres_at(q)
+            return np.asarray(C, float)[:, :2], np.asarray(C, float)[:, 2] - np.asarray(r, float), list(links)
+        t = np.asarray(chain.fk(list(q))[1], float)
+        return t[None, :2], t[None, 2], ["the tool"]
+
+    floor = float(table_z) + HOME_TABLE_M
+    xy0, b0, links = at(Q[0])
+    xy1, b1, _ = at(Q[-1])
+
+    def over(xy):
+        if extent is None:
+            return np.zeros(len(xy), bool)
+        x0, x1, y0, y1 = extent
+        return (xy[:, 0] >= x0) & (xy[:, 0] <= x1) & (xy[:, 1] >= y0) & (xy[:, 1] <= y1)
+
+    seen = extent is not None and not bool(np.any(over(xy1) & (b1 < floor)))
+    ends = np.minimum(b0, b1)
+    worst = None
+    for q in Q[1:-1]:
+        xy, b, _ = at(q)
+        bad = (b < floor) & (b < ends - HOME_TABLE_DIP_M)
+        if seen:
+            bad |= (b < floor) & over(xy) & (b < b0 - HOME_TABLE_DIP_M)
+        if bool(np.any(bad)):
+            i = int(np.argmin(np.where(bad, b, np.inf)))
+            if worst is None or b[i] < worst[0]:
+                worst = (float(b[i]), links[i], float(xy[i][0]), float(xy[i][1]))
+    if worst is None:
+        return None
+    return "%s %.0f mm under the table's top (z %.3f) at x %.2f, y %.2f" % (
+        worst[1],
+        1000 * (float(table_z) - worst[0]),
+        float(table_z),
+        worst[2],
+        worst[3],
+    )
+
+
+def home_any(
+    ctx,
+    state,
+    goal,
+    plan_to,
+    say=log.info,
+    who="[home]",
+    goal_words="HOME",
+    plan_words="HOME",
+    step_tail="",
+    ask_again=True,
+):
     """The legs from `state` to the joint goal `goal` (HOME): plan_to(state, name, q) plans one leg (raising
     RuntimeError, or PlanRefused, where the planner or the client refuses). In order:
       1. an arm in or close to an obstacle (inside the body model's padding or within ESCAPE_NEAR_M of it, the
@@ -918,23 +1005,38 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
       3. otherwise the goal asked for up to HOME_TRIES times, stopping at the first plan that swings wide;
       4. then a waypoint HOME_WAYPOINTS of the way along the joint line, clear of the padding, planned to, and the
          goal planned from it.
-    Every leg passes the runner's trajectory sanity gate here, at planning (PlanSwung), not at execution.
+    Every leg passes the runner's trajectory sanity gate here, at planning (PlanSwung), not at execution, and
+    is kept over a table the run knows (under_table, PlanUnderTable: the planner's world holds none): where the
+    goal planned directly goes under it, the goal is planned from the top of a straight lift (HOME_LIFTS_M,
+    LiftFree), then through the waypoints.
     The caller's words name the goal in what is said (`goal_words`: "HOME", "the rest pose"; `plan_words`: what
-    is planned, "HOME", "home"; `step_tail` after a clear-margin step's note). Raises RuntimeError with the last
+    is planned, "HOME", "home"; `step_tail` after a clear-margin step's note). ask_again False (a run's own
+    home, whose caller has its own answer to a home the planner refuses: a back-off, the next way out): the goal
+    is asked for once and the planner's refusal raised as it is; a plan that swings wide or goes under the table
+    still goes through the lift and the waypoints. Raises RuntimeError with the last
     refusal where none plans."""
     import numpy as np
 
     from box_opening.runtime.branches import on_branch
 
     legs = []
+    esc = EscapeBodyFree()
+    table_z = getattr(getattr(ctx, "worlds", None), "table_top_z", None)
+    table_xy = getattr(getattr(ctx, "worlds", None), "table_extent", None)
+    tchain, tbody = esc._body()
 
     def planned(at, name, q):
-        """plan_to's leg, the runner's sanity gate applied now (PlanSwung) rather than at execution."""
+        """plan_to's leg, the runner's sanity gate applied now (PlanSwung) rather than at execution, and the leg
+        kept over a table the run knows (PlanUnderTable: the planner's world holds none)."""
         leg = plan_to(at, name, q)
         traj = getattr(leg, "traj", None)
         bad = sanity_violations(traj, SANITY_MARGIN_RAD) if traj is not None else []
         if bad:
             raise PlanSwung("%s swings wide (%s): the runner's sanity gate would refuse it" % (name, "; ".join(bad)))
+        if traj is not None and table_z is not None and tchain is not None:
+            low = under_table(tchain, tbody, [list(p.positions) for p in traj.points], table_z, table_xy)
+            if low:
+                raise PlanUnderTable("%s goes under the table (%s): the planner's world holds no table" % (name, low))
         return leg
 
     def via_waypoint(at, last):
@@ -956,8 +1058,28 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
             return [a, b], f, last
         return None, None, last
 
-    esc = EscapeBodyFree()
-    table_z = getattr(getattr(ctx, "worlds", None), "table_top_z", None)
+    def lifted(at, last):
+        """([lift leg, goal leg], dz, last) from `at`: a straight lift (LiftFree, obstruction-guarded) of the
+        first of HOME_LIFTS_M the goal plans from the top of, clear of the padding and over the table, or (None,
+        None, last)."""
+        from box_opening.runtime.kinematics import body_refusal
+
+        was = getattr(ctx, "last_pose", None)
+        for dz in HOME_LIFTS_M:
+            ctx.last_pose = was  # LiftFree sets it: a lift not taken leaves no trace
+            try:
+                lift, top = LiftFree(dz, name="home-lift").plan(ctx, at)
+                if tbody is not None:
+                    hit = body_refusal(tchain, [list(p.positions) for p in lift[0].traj.points])
+                    if hit is not None:
+                        raise RuntimeError("the lift of %.0f mm enters %s" % (1000 * dz, hit))
+                rest = [planned(top, "home", list(goal))]
+            except RuntimeError as e:
+                last = e
+                continue
+            return lift + rest, dz, last
+        ctx.last_pose = was
+        return None, None, last
 
     def step_clear(st, why):
         """The soft step to the nearest point clear of everything known from `st`, said: (legs, PlanState)."""
@@ -1050,14 +1172,27 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
             q = state.joints
             last = fell_back = e
     asked = 0
-    for _attempt in range(HOME_TRIES):
+    low = None
+    for _attempt in range(HOME_TRIES if ask_again else 1):
         asked += 1
         try:
             return legs + [planned(state, "home", list(goal))]
         except PlanSwung as e:  # asked again, the planner answers alike
             last = e
             break
+        except PlanUnderTable as e:  # from this start HOME sweeps low: from the top of a straight lift instead
+            last = low = e
+            rest, dz, last = lifted(PlanState(joints=list(q), chain=state.chain), last)
+            if rest is not None:
+                say(
+                    "%s %s planned from the top of a straight lift of %.0f mm (obstruction-guarded): planned from "
+                    "here it went under the table (%s)" % (who, plan_words, 1000 * dz, e)
+                )
+                return legs + rest
+            break
         except RuntimeError as e:
+            if not ask_again:
+                raise
             last = e
     rest, via, last = via_waypoint(PlanState(joints=list(q), chain=state.chain), last)
     if rest is not None:
@@ -1068,13 +1203,17 @@ def home_any(ctx, state, goal, plan_to, say=log.info, who="[home]", goal_words="
         return legs + rest
     raise RuntimeError(
         "%s did not plan from %s, %d times directly nor through a waypoint %s of the way along the joint line "
-        "(last: %s) — jog the arm clear by hand"
+        "(last: %s)%s — jog the arm clear by hand"
         % (
             plan_words,
             "here" if fell_back is None else "the end of the soft step clear (taken because %s)" % fell_back,
             asked,
             "/".join("%.0f%%" % (100 * f) for f in HOME_WAYPOINTS),
             last,
+            ""
+            if low is None
+            else "; planned directly it %s, and from the top of no straight lift of %s mm did it plan clear"
+            % (str(low).split(" ", 1)[1], "/".join("%.0f" % (1000 * d) for d in HOME_LIFTS_M)),
         )
     )
 

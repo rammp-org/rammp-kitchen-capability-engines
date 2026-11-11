@@ -258,3 +258,86 @@ def test_off_a_limit_where_the_line_home_would_drop_the_tool_it_steps_clear_soft
     assert z.min() >= z[0] - core.ESCAPE_DROP_M - 1e-9  # the tool never lower
     assert plan.asked == [("home", list(end), list(HOME))]  # HOME planned from where it ends
     assert any("drops the tool" in s for s in said) and any("lightest joint impedance" in s for s in said)
+
+
+# --- a table the run knows: the planner's world holds none, so every planned leg is checked against it ---
+
+
+class DippingPlanner(Planner):
+    """Plans every leg, but HOME from `dip_from` goes through `low` on the way (the tool under the table)."""
+
+    def __init__(self, dip_from, low):
+        super().__init__()
+        self.dip_from, self.low = list(dip_from), list(low)
+
+    def __call__(self, at, name, q):
+        leg = super().__call__(at, name, q)
+        via = [self.low] if name == "home" and np.allclose(at.joints, self.dip_from) else []
+        pts = [SimpleNamespace(positions=list(p)) for p in [list(at.joints), *via, list(q)]]
+        leg.traj = SimpleNamespace(joint_names=["arm_joint_%d" % i for i in range(1, 8)], points=pts)
+        return leg
+
+
+def _over_a_table(monkeypatch, tmp_path):
+    """The arm 0.6 out, the tool 0.40 up, over a table at 0.28 the scene camera saw from x 0.45 on; `low`: the
+    same hand 30 mm under that table's top."""
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, [("far", (-0.8, 0.8, 0.2), (0.1, 0.1, 0.1))])
+    seed = [0.0, 0.3, 0.0, 1.8, 0.0, 1.0, 1.57]
+    q = chain.nearest_solution(seed, [0.6, 0.0, 0.40], DOWN)
+    low = chain.nearest_solution(list(q), [0.6, 0.0, 0.25], DOWN)
+    assert q is not None and low is not None
+    client.live = list(q)
+    ctx.worlds.table_top_z = 0.28
+    ctx.worlds.table_extent = (0.45, 0.95, -0.40, 0.40)
+    return ctx, chain, list(q), list(low)
+
+
+def test_a_path_that_dips_under_the_table_is_named_and_one_that_stays_over_it_is_not(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    up = chain.nearest_solution(list(q), [0.6, 0.0, 0.48], DOWN)
+    assert up is not None
+    why = core.under_table(chain, chain.body, [q, low, up], 0.28, ctx.worlds.table_extent)
+    assert why is not None and "under the table's top" in why
+    assert core.under_table(chain, chain.body, [q, up], 0.28, ctx.worlds.table_extent) is None
+    # with no extent seen, a dip under both ends is still refused
+    assert core.under_table(chain, chain.body, [q, low, up], 0.28, None) is not None
+    # a path that starts low may leave: no lower than its start
+    assert core.under_table(chain, chain.body, [low, q, up], 0.28, ctx.worlds.table_extent) is None
+
+
+def test_a_home_planned_under_a_known_table_is_planned_from_the_top_of_a_straight_lift(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    plan = DippingPlanner(q, low)
+    said = []
+    legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append)
+    assert [leg.name for leg in legs] == ["home-lift", "home"]
+    lift = legs[0]
+    top = chain.fk(lift.goal_joints)[1]
+    assert top[2] == pytest.approx(0.40 + core.HOME_LIFTS_M[0], abs=2e-3)  # the lowest lift HOME plans from
+    assert lift.guard is not None and lift.guard.trip == "obstruction"
+    assert plan.asked[-1] == ("home", list(lift.goal_joints), list(HOME))
+    assert any("went under the table" in s for s in said)
+
+
+def test_where_every_home_goes_under_the_table_the_refusal_says_so(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+
+    class Always(Planner):
+        def __call__(self, at, name, q_goal):
+            leg = super().__call__(at, name, q_goal)
+            pts = [SimpleNamespace(positions=list(p)) for p in (list(at.joints), low, list(q_goal))]
+            leg.traj = SimpleNamespace(joint_names=["arm_joint_%d" % i for i in range(1, 8)], points=pts)
+            return leg
+
+    with pytest.raises(RuntimeError, match=r"goes under the table"):
+        core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, Always(), say=lambda s: None)
+
+
+def test_with_no_table_known_a_low_plan_is_not_judged(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    ctx.worlds.table_top_z = None
+    ctx.worlds.table_extent = None
+    if ctx.worlds.table_top_z is not None:
+        pytest.skip("this bench world carries its own table")
+    legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, DippingPlanner(q, low), say=lambda s: None)
+    assert [leg.name for leg in legs] == ["home"]
