@@ -923,9 +923,12 @@ HOME_LIFTS_M = (0.08, 0.12, 0.16)  # straight lifts tried, lowest first, where H
 # ... then the soft step (EscapeBodyFree) up to the tool this far over the table: where the straight lift meets a
 # joint limit or has no IK down its line (2026-11-11: 45 of 67 refused plans), a walk in joint space still rises
 HOME_RISES_M = (0.15, 0.25)
+# no further way up is started once the ways up have taken this long to plan (2026-11-11: a refusal after all five,
+# each with its waypoints, took 10.7 s at the median and 32 s at worst; every plan that homed took under 15 s)
+HOME_RAISE_S = 12.0
 
 
-def under_table(chain, body, pts, table_z, extent=None):
+def under_table(chain, body, pts, table_z, extent=None, rest=None):
     """Why the joint path `pts` goes under the table at `table_z`, or None. Each of the arm's checked spheres
     (Body.spheres_at; the tool frame alone with no body model) is followed at steps of HOME_TABLE_STEP_RAD. A
     sphere whose bottom is under table_z + HOME_TABLE_M is under the table where
@@ -935,7 +938,11 @@ def under_table(chain, body, pts, table_z, extent=None):
         behind the table's edge) and only the next rule holds;
       * or it is more than HOME_TABLE_DIP_M under the lower of its heights at the path's two ends: the table's
         edge is not known beyond what the camera saw, and a path that dips under both its ends over a table it
-        does not know is not flown."""
+        does not know is not flown.
+    No table stands where the arm rests: with `rest` (HOME's joints), a sphere no farther from the arm's base
+    axis than the farthest edge of a sphere `rest` itself holds under the table's top is not judged (2026-11-11:
+    HOME's own upper arm stands 35 mm under a 29 in table's top 0.14 m from the base, and five clear poses were
+    refused for that link 2-8 mm under the top beside it)."""
     import numpy as np
 
     P = [np.asarray(p, float) for p in pts]
@@ -949,13 +956,19 @@ def under_table(chain, body, pts, table_z, extent=None):
     def at(q):
         if body is not None:
             C, r, links = body.spheres_at(q)
-            return np.asarray(C, float)[:, :2], np.asarray(C, float)[:, 2] - np.asarray(r, float), list(links)
+            C, r = np.asarray(C, float), np.asarray(r, float)
+            return C[:, :2], C[:, 2] - r, list(links), r
         t = np.asarray(chain.fk(list(q))[1], float)
-        return t[None, :2], t[None, 2], ["the tool"]
+        return t[None, :2], t[None, 2], ["the tool"], np.zeros(1)
 
     floor = float(table_z) + HOME_TABLE_M
-    xy0, b0, links = at(Q[0])
-    xy1, b1, _ = at(Q[-1])
+    xy0, b0, links, _ = at(Q[0])
+    xy1, b1, _, _ = at(Q[-1])
+    r_rest = 0.0  # no table within this of the arm's base axis: the rest pose stands under its top there
+    if rest is not None:
+        xyr, br, _, rr = at(np.asarray(rest, float))
+        if bool(np.any(br < floor)):
+            r_rest = float(np.max((np.hypot(xyr[:, 0], xyr[:, 1]) + rr)[br < floor]))
 
     def over(xy):
         if extent is None:
@@ -967,10 +980,11 @@ def under_table(chain, body, pts, table_z, extent=None):
     ends = np.minimum(b0, b1)
     worst = None
     for q in Q[1:-1]:
-        xy, b, _ = at(q)
+        xy, b, _, _ = at(q)
         bad = (b < floor) & (b < ends - HOME_TABLE_DIP_M)
         if seen:
             bad |= (b < floor) & over(xy) & (b < b0 - HOME_TABLE_DIP_M)
+        bad &= np.hypot(xy[:, 0], xy[:, 1]) > r_rest
         if bool(np.any(bad)):
             i = int(np.argmin(np.where(bad, b, np.inf)))
             if worst is None or b[i] < worst[0]:
@@ -1014,7 +1028,9 @@ def home_any(
     is kept over a table the run knows (under_table, PlanUnderTable: the planner's world holds none): where the
     goal planned directly goes under it, the goal is planned from the top of a straight lift (HOME_LIFTS_M,
     LiftFree) or of the soft step higher over the table (HOME_RISES_M), then through the waypoints, each way
-    judged as one path from the start (a waypoint under the table is under the table).
+    judged as one path from the start (a waypoint under the table is under the table); no further way up is
+    started after HOME_RAISE_S of planning them. No table is taken to stand where the goal itself rests under
+    its top (under_table's `rest`).
     The caller's words name the goal in what is said (`goal_words`: "HOME", "the rest pose"; `plan_words`: what
     is planned, "HOME", "home"; `step_tail` after a clear-margin step's note). ask_again False (a run's own
     home, whose caller has its own answer to a home the planner refuses: a back-off, the next way out): the goal
@@ -1026,6 +1042,7 @@ def home_any(
     from box_opening.runtime.branches import on_branch
 
     legs = []
+    cut = []  # said in the refusal where the ways up ran out of planning time (HOME_RAISE_S)
     esc = EscapeBodyFree()
     table_z = getattr(getattr(ctx, "worlds", None), "table_top_z", None)
     table_xy = getattr(getattr(ctx, "worlds", None), "table_extent", None)
@@ -1040,7 +1057,7 @@ def home_any(
         if bad:
             raise PlanSwung("%s swings wide (%s): the runner's sanity gate would refuse it" % (name, "; ".join(bad)))
         if traj is not None and table_z is not None and tchain is not None:
-            low = under_table(tchain, tbody, [list(p.positions) for p in traj.points], table_z, table_xy)
+            low = under_table(tchain, tbody, [list(p.positions) for p in traj.points], table_z, table_xy, goal)
             if low:
                 raise PlanUnderTable("%s goes under the table (%s): the planner's world holds no table" % (name, low))
         return leg
@@ -1055,7 +1072,7 @@ def home_any(
         for leg in some:
             traj = getattr(leg, "traj", None)
             pts += [list(p.positions) for p in traj.points] if traj is not None else [list(leg.goal_joints)]
-        low = under_table(tchain, tbody, pts, table_z, table_xy)
+        low = under_table(tchain, tbody, pts, table_z, table_xy, goal)
         if low:
             raise PlanUnderTable("%s goes under the table (%s): the planner's world holds no table" % (what, low))
 
@@ -1086,8 +1103,15 @@ def home_any(
         from box_opening.runtime.kinematics import body_refusal
 
         was = getattr(ctx, "last_pose", None)
+        t0 = time.monotonic()
         for kind, m in [("lift", dz) for dz in HOME_LIFTS_M] + [("rise", m) for m in HOME_RISES_M]:
             ctx.last_pose = was  # LiftFree sets it: a lift not taken leaves no trace
+            if time.monotonic() - t0 > HOME_RAISE_S:
+                cut.append(
+                    " (the ways up had taken %.0f s to plan: the %s %.0f mm and any after it were not tried)"
+                    % (HOME_RAISE_S, "lift of" if kind == "lift" else "soft step up to", 1000 * m)
+                )
+                break
             try:
                 if kind == "lift":
                     up, top = LiftFree(m, name="home-lift").plan(ctx, at)
@@ -1256,11 +1280,12 @@ def home_any(
             ""
             if low is None
             else "; planned directly it %s, and it planned clear from the top of no straight lift of %s mm nor "
-            "soft step up to %s mm over the table"
+            "soft step up to %s mm over the table%s"
             % (
                 str(low).split(" ", 1)[1],
                 "/".join("%.0f" % (1000 * d) for d in HOME_LIFTS_M),
                 "/".join("%.0f" % (1000 * d) for d in HOME_RISES_M),
+                "".join(cut),
             ),
         )
     )

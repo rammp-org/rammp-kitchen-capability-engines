@@ -386,3 +386,38 @@ def test_where_no_straight_lift_plans_home_a_soft_step_higher_over_the_table_is_
     assert rise.compliant is True and rise.gains == core.GAINS_SOFT
     assert chain.fk(rise.goal_joints)[1][2] >= 0.28 + core.HOME_RISES_M[0] - 1e-6
     assert any("soft step up" in s for s in said)
+
+
+def test_no_table_stands_where_home_itself_rests_under_its_top(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    C, r, _ = chain.body.spheres_at(HOME)
+    C, r = np.asarray(C, float), np.asarray(r, float)
+    i = int(np.argmin(C[:, 2] - r))  # HOME's lowest sphere, on the upper arm beside the base
+    top = float(C[i, 2] - r[i]) + 0.03  # a table whose top is 30 mm over that sphere's bottom
+    raised = list(HOME)
+    raised[1] += 0.5 if chain.body.spheres_at(raised[:1] + [HOME[1] + 0.5] + raised[2:])[0][i][2] > C[i, 2] else -0.5
+    Cr, rr, _ = chain.body.spheres_at(raised)
+    assert float(np.asarray(Cr, float)[i, 2] - rr[i]) > top  # the same sphere over the top at both ends
+    path = [raised, list(HOME), raised]
+    assert core.under_table(chain, chain.body, path, top, None) is not None  # judged like any dip...
+    assert core.under_table(chain, chain.body, path, top, None, HOME) is None  # ...but not where HOME rests
+    # a dip out over the table is still one, HOME named or not
+    up = chain.nearest_solution(list(q), [0.6, 0.0, 0.48], DOWN)
+    assert core.under_table(chain, chain.body, [q, low, up], 0.28, None, HOME) is not None
+
+
+def test_the_ways_up_stop_being_tried_once_they_have_taken_too_long_to_plan(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    monkeypatch.setattr(core, "HOME_RAISE_S", -1.0)
+
+    class Always(Planner):
+        def __call__(self, at, name, q_goal):
+            leg = super().__call__(at, name, q_goal)
+            pts = [SimpleNamespace(positions=list(p)) for p in (list(at.joints), low, list(q_goal))]
+            leg.traj = SimpleNamespace(joint_names=["arm_joint_%d" % i for i in range(1, 8)], points=pts)
+            return leg
+
+    plan = Always()
+    with pytest.raises(RuntimeError, match=r"lift of 80 mm and any after it were not tried"):
+        core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=lambda s: None)
+    assert [a for _n, a, _g in plan.asked if not np.allclose(a, q)] == []  # nothing planned from the top of a way up
