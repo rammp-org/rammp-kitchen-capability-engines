@@ -368,3 +368,24 @@ def test_only_a_top_too_long_is_looked_at_again_by_its_rim():
     assert wf.by_its_rim(None, None, ring, model) is ring
     cut = replace(p, axes_m=(0.11, 0.18), cut=True)
     assert wf.by_its_rim(None, None, cut, model) is cut
+
+
+@pytest.mark.parametrize(
+    "name, button",
+    [
+        ("wrist_survey_flatbot_20261111_1913.npz", (0.731, -0.286)),
+        ("wrist_survey_flatbot_20261111_1929.npz", (0.622, -0.202)),
+    ],
+)
+def test_from_the_turned_wrist_the_lid_is_where_its_depth_tops_middle_is(name, button):
+    """Flatbot 2026-11-11, the wrist turned where the arm rests, the pink canister 0.6 m off and 60-65 deg off
+    straight down, at two places: the box where the reach-out's look then saw its button, within 15 mm — the first
+    a top 72 x 158 mm ("wider than the lid's"), taken at its middle; no circle of the colour laid flat is asked."""
+    from conftest import fixture_path
+
+    model = ContainerModel.load(PINK)
+    frame = wf.frame_from_capture(str(fixture_path(name)))
+    find = wf.find_container([frame], model, check_buttons=False)
+    assert find.fix is not None, find.why
+    assert np.hypot(find.fix.top_xyz[0] - button[0], find.fix.top_xyz[1] - button[1]) < 0.015
+    assert not any(q.rim for q in wf.frame_patches(frame, model)[0])

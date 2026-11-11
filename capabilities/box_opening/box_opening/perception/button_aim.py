@@ -51,9 +51,10 @@ DISC_STD_MAX_M = 0.006  # the button top is flat
 # the rest at +47 mm; std 17-30 mm on 51 of 51 frames, "disc not flat", with every other gate
 # passing; 2026-11-10 the same on 49 of 49). The spread is the middle's (1.4826 x the median
 # absolute deviation: 1.1 mm there), and DISC_FLAT_SHARE of the disc must lie within twice
-# DISC_STD_MAX_M of its median: a circle half over an edge has two heights and neither rule
-# passes it. The disc's height was the median already.
-DISC_FLAT_SHARE = 0.75
+# DISC_STD_MAX_M of its median (19:29 the same day, the look 11 cm elsewhere: 69 %, spread
+# 1.3 mm): a circle half over an edge has two heights and neither rule passes it. The disc's
+# height was the median already.
+DISC_FLAT_SHARE = 0.60
 
 
 def disc_spread(z):

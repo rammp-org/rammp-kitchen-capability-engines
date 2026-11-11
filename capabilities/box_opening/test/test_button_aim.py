@@ -1964,7 +1964,9 @@ def test_a_flat_disc_with_streaks_across_it_is_flat_and_one_half_over_an_edge_is
     streaked[:160] += 0.047  # 16 % of it read 47 mm high: the 11-11 look's disc
     ok, spread, share = disc_spread(streaked)
     assert ok and spread < 0.002 and share == pytest.approx(0.84, abs=0.01) and np.std(streaked) > DISC_STD_MAX_M
-    streaked[:300] += 0.047  # 30 %: no longer most of it
+    streaked[160:310] += 0.047  # 31 %, the 19:29 look's: still most of it
+    assert disc_spread(streaked)[0]
+    streaked[310:450] += 0.047  # 45 %: no longer
     assert not disc_spread(streaked)[0]
     edge = np.r_[flat[:500], flat[500:] - 0.03]  # half on the lid, half on what is 30 mm under it
     assert not disc_spread(edge)[0]
@@ -2000,3 +2002,18 @@ def test_the_button_on_the_white_table_is_found_through_the_streaks_in_its_depth
     assert s is not None, why
     assert s.xyz[0] == pytest.approx(0.732, abs=0.005) and s.xyz[1] == pytest.approx(-0.287, abs=0.005)
     assert s.xyz[2] == pytest.approx(0.294, abs=0.004)
+
+
+def test_the_button_is_found_through_streaks_over_a_third_of_it():
+    """Flatbot 2026-11-11 19:29, the box 11 cm from where it stood at 19:13: 69 % of the disc at its height."""
+    from box_opening.models.container import ContainerModel
+    from box_opening.perception.button_aim import find_button
+
+    d = np.load(fixture_path("wrist_reach_look_flatbot_20261111_1929.npz"))
+    model = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
+    s, why = find_button(
+        d["color"], d["depth"].astype(np.float32), d["k"], d["rot_cam"], d["trans_cam"], 0.187, model,
+        dist=d["dist"], lid_z=0.279, prior_xy=(0.624, -0.208), prior_max_m=0.15,
+    )  # fmt: skip
+    assert s is not None, why
+    assert s.xyz[0] == pytest.approx(0.622, abs=0.005) and s.xyz[1] == pytest.approx(-0.202, abs=0.005)

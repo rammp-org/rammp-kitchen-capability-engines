@@ -166,7 +166,9 @@ LOOK_AGAIN_MAX = 2  # places looked at again
 
 # --- the frames ---------------------------------------------------------------------------------
 SURVEY_FUSE_FRAMES = 3  # still frames fused per pose (button_aim.StillDepth: a glossy lid's holes)
-SURVEY_FRAME_S = 3.0  # ... within this long of the arm standing still
+# ... within this long of the arm standing still (3 s was too short once: flatbot 2026-11-11 19:27, the
+# run started 4 s after the wrist camera's driver, "no new wrist frame", and the scene camera's box was taken)
+SURVEY_FRAME_S = 10.0
 SURVEY_CAPTURE_TAG = "survey"
 
 

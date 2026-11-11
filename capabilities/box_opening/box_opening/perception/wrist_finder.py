@@ -466,6 +466,16 @@ RIM_HALF_M = 0.20  # the square laid flat reaches this far from the depth top's 
 RIM_R_FRAC = (0.85, 1.15)  # the circle's radius, of the lid's
 RIM_SHORT_FRAC = 2.0  # the depth top no more than this many lids across its short side: a smeared lid, not a tray
 RIM_HOUGH = (120.0, 22.0)  # cv2.HoughCircles param1 (the edge), param2 (the votes)
+# Only where the view looks down on the lid. Seen from far off to its side (the wrist turned where
+# the arm rests, 60-65 deg off straight down, 0.6 m away) the colour laid flat stretches 2 mm of
+# the lid's height into 4 mm along the view, and the circle found there stood 36-54 mm short of
+# the button the look pose then saw (flatbot 2026-11-11 19:13 and 19:29) — where the depth top's
+# own centre, long as it read (72 x 158 mm), stood 9 and 6 mm from it: from the side the stereo
+# carries the lid's depth out both ways along the view, and its middle stays the lid's. So past
+# RIM_MAX_INCIDENCE_DEG a top too long by no more than SIDE_LONG_FRAC lids, its short side a
+# lid's or less, is the lid where its centre is.
+RIM_MAX_INCIDENCE_DEG = 50.0
+SIDE_LONG_FRAC = 1.6
 
 
 def rim_circle(frame, plane, patch, model):
@@ -525,6 +535,10 @@ def by_its_rim(frame, plane, patch, model):
         return patch
     if patch.axes_m[0] > RIM_SHORT_FRAC * d_lid or patch.cut:
         return patch
+    p = np.array([patch.xy[0], patch.xy[1], patch.top_z])
+    if _incidence_deg(p, frame.trans_cam) > RIM_MAX_INCIDENCE_DEG:
+        side = patch.axes_m[1] <= SIDE_LONG_FRAC * d_lid and patch.axes_m[0] <= AXES_FRAC[1] * d_lid
+        return replace(patch, why="") if side else patch
     xy = rim_circle(frame, plane, patch, model)
     if xy is None:
         return patch
