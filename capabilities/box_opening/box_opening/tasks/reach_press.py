@@ -107,7 +107,6 @@ from box_opening.constants import (
 from box_opening.geometry import rotate_about_world_axis
 from box_opening.models.container import ContainerPose, attitude_quat
 from box_opening.primitives.core import (
-    CLEAR_MARGIN_MAX_STEP_RAD,
     CONTACT_SHIFT_PAD_M,
     ClearMarginFree,
     PlanState,
@@ -1757,45 +1756,28 @@ def _line_from(ctx, pts, xyz, quat, **gate):
 def _home_legs(ctx, cfg, start=None):
     """Home to the rest pose from where the arm stands — or from joints
     `start`, where it will stand (plan_way_out: the clear's end, planned
-    while the way in flies) — in the full world.
-    A joint too near its limit for the planner to start from gets home_arm's
-    plan-free step along the joint line toward the rest pose first, the
-    shortest one home plans from (primitives.ClearMarginFree): flatbot
-    2026-10-27 14:33, the depth press ended with arm_joint_6 0.043 rad from
-    its limit, home was refused START_IN_LIMIT_MARGIN, and the arm held over
-    the box until home_arm stepped it clear. Raises the last refusal."""
+    while the way in flies) — in the full world, the way every home is
+    planned (primitives.core.home_any, as press_demo's first home and
+    home_arm: the soft step clear of what is known, the plan-free step off a
+    joint limit — flatbot 2026-10-27 14:33, the depth press ended with
+    arm_joint_6 0.043 rad from its limit and home was refused
+    START_IN_LIMIT_MARGIN —, the runner's sanity gate at planning, the table
+    check, the waypoints). Until 2026-11-11 this home had the limit step
+    alone. The planner's own refusal is raised as it is, asked for once
+    (ask_again False): the callers answer it themselves (the back-off, the
+    next way out). Raises the last refusal."""
+    from box_opening.primitives.core import home_any
     from box_opening.tasks.press_demo import rest_joints
 
     rest = list(rest_joints(cfg))
     q = ctx.client.joints() if start is None else start
     state = PlanState(joints=[float(v) for v in q], chain=0)
-    clear = ClearMarginFree(rest)
-    near = clear.near(ctx, state.joints)
-    if not near:
-        leg = as_home(_plan_motion(ctx, state, "home", ("joints", rest), _full_world(ctx), HOME_SPEED)[0])
-        return [leg]
-    log.info(
-        "[press_demo] %s: too near for the planner to start from — trying plan-free steps along the joint line "
-        "toward the rest pose, shortest first" % ", ".join("%s is %.3f rad from its limit" % jr for jr in near)
-    )
-    last = None
-    for step, at, info in clear.steps(ctx, state):
-        try:
-            leg = as_home(_plan_motion(ctx, at, "home", ("joints", rest), _full_world(ctx), HOME_SPEED)[0])
-        except RuntimeError as e:
-            last = e
-            continue
-        if step:
-            d = info["tool_move"]
-            log.info(
-                "[press_demo] a plan-free step %.0f%% of the way to the rest pose first (the largest joint %.3f rad, "
-                "the tool %+.0f mm up and %.0f mm across; obstruction-guarded)"
-                % (100 * info["fraction"], info["largest_rad"], 1000 * d[2], 1000 * math.hypot(d[0], d[1]))
-            )
-        return step + [leg]
-    raise RuntimeError(
-        "no plan-free step toward the rest pose of up to %.2f rad per joint lets the planner plan home "
-        "(last: %s) — jog the arm clear by hand" % (CLEAR_MARGIN_MAX_STEP_RAD, last)
+
+    def plan_to(at, name, goal):
+        return as_home(_plan_motion(ctx, at, name, ("joints", list(goal)), _full_world(ctx), HOME_SPEED)[0])
+
+    return home_any(
+        ctx, state, rest, plan_to, who="[press_demo]", goal_words="the rest pose", plan_words="home", ask_again=False
     )
 
 
@@ -2912,7 +2894,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     if at_rest is None and not soft:
         runner.note(
             "reach_refused",
-            why="no steady joint efforts at the rest pose — the reach-out's guards cannot be " "referenced",
+            why="no steady joint efforts at the rest pose — the reach-out's guards cannot be referenced",
         )
         return 1
     res = runner.run([plan.look_leg], execute=True)
@@ -2935,7 +2917,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
                 ctx,
                 cfg,
                 runner,
-                "STOP: %s — the reach-out's guards would be judging the wrong arm; " "nothing was pressed" % mismatch,
+                "STOP: %s — the reach-out's guards would be judging the wrong arm; nothing was pressed" % mismatch,
             )
             return 1
 
