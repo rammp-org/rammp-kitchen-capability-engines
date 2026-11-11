@@ -541,7 +541,7 @@ def test_the_way_off_the_frame_is_said_in_the_planning_frame():
     assert frame_edges([10, 10, 600, 380], (640, 400)) == ()
     flatbot = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])  # columns: image +u, +v, view
     why = off_frame_why(0.45, ("right",), flatbot)
-    assert "toward arm_mount +y" in why and "move the box toward -y" in why
+    assert "toward arm_mount +y" in why and "in view -y of here" in why and "move the box" not in why
 
 
 def test_the_recorded_flatbot_frame_still_finds_its_canister_inside_the_frame():
@@ -1752,3 +1752,70 @@ def test_a_look_reads_the_table_off_its_frames_once(monkeypatch):
     monkeypatch.setattr(ss, "table_from_scene_points", table)
     assert loc.locate(2.0) is None
     assert len(reads) == 2  # the first message's no plane, the second's kept for the rest
+
+
+def _read_along_its_ray(p, dz, cam=SIDE_CAM):
+    """`p` moved along the camera's ray through it until it stands `dz` higher: the same pixel, another depth."""
+    k = (p[:, 2] + dz - cam[2]) / (p[:, 2] - cam[2])
+    return np.asarray(cam, float) + (p - np.asarray(cam, float)) * k[:, None]
+
+
+def test_a_table_read_above_the_boxs_foot_is_not_the_table():
+    """Flatbot 2026-11-11: the scene OAK's stereo had nothing to match on a
+    plain white table and the ring around the canister read 33-43 mm high —
+    its top 52-63 mm "under lid height", refused wherever it stood. The
+    detector's box ends where the thing meets the table: the ray through
+    its bottom edge, at the thing's front, is the table."""
+    from box_opening.perception.scene_source import FOOT_TABLE_SLACK_M, box_from_side_points, foot_table
+
+    model = ContainerModel.load(PINK)
+    pts, uv, canister, _tall = _side_scene(np.random.default_rng(4))
+    cap = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + model.dims[2] - 0.025]))
+    whole = _pixel_box(_project(canister), pad=(2, 0))
+    assert foot_table(pts, uv, whole, SIDE_CAM) == pytest.approx(SIDE_TABLE, abs=0.008)
+    # a good table: the foot changes nothing, to the last digit
+    plain = box_from_side_points(pts, uv, cap, None, model, SIDE_CAM)
+    assert box_from_side_points(pts, uv, cap, None, model, SIDE_CAM, foot_box=whole)[3] == plain[3]
+    # the table (not the canister) read 45 mm high, pixel for pixel
+    bad = pts.copy()
+    # (the table behind the canister, which this scene does not hide, left where it is)
+    seen = ~((uv[:, 0] >= whole[0]) & (uv[:, 0] <= whole[2]) & (uv[:, 1] >= whole[1]) & (uv[:, 1] <= whole[3]))
+    flat = seen & (np.abs(pts[:, 2] - SIDE_TABLE) < 0.015)
+    bad[flat] = _read_along_its_ray(pts[flat], 0.045)
+    pose, why, _n, tz = box_from_side_points(bad, uv, cap, None, model, SIDE_CAM)
+    assert pose is None and "from lid height" in why and tz == pytest.approx(SIDE_TABLE + 0.045, abs=0.006)
+    pose, top, _n, tz = box_from_side_points(bad, uv, cap, None, model, SIDE_CAM, foot_box=whole)
+    assert pose is not None, top
+    assert tz == pytest.approx(SIDE_TABLE, abs=0.008) and pose.xyz[2] == tz
+    assert np.hypot(pose.xyz[0] - 0.70, pose.xyz[1] + 0.55) < 0.012
+    # a box that stops short of the table reads its foot high: it never raises the table
+    short = (whole[0], whole[1], whole[2], whole[3] - 25)
+    assert foot_table(pts, uv, short, SIDE_CAM) > SIDE_TABLE + FOOT_TABLE_SLACK_M
+    assert box_from_side_points(pts, uv, cap, None, model, SIDE_CAM, foot_box=short)[3] == plain[3]
+    # a surveyed table is left alone, and a box the frame cuts at its bottom has no foot
+    assert box_from_side_points(bad, uv, cap, SIDE_TABLE + 0.045, model, SIDE_CAM, foot_box=whole)[0] is None
+    assert np.isnan(foot_table(pts, uv, (whole[0], whole[1], whole[2], 399.0), SIDE_CAM, image_wh=(640, 400)))
+
+
+def test_the_canister_on_the_plain_white_table_is_found_where_it_stands():
+    """Flatbot 2026-11-11 18:07: the frame the run kept when it refused the
+    box ("its fixes did not agree", its top 43-63 mm under lid height in
+    the run before). The ring reads the table at 0.283; the holder box's
+    foot is at 0.250, and the lid in the band above it 120 mm over that."""
+    from box_opening.perception.scene_source import scene_fix_from_boxes
+    from box_opening.perception.segmenter_source import segmenter_candidates
+
+    model = ContainerModel.load(PINK)
+    pts, uv, _tz, kw, objs, _z = _upright_at("scene_plain_table_flatbot_20261111_180747.npz")
+    cands = segmenter_candidates(objs, ("food container",), (640, 400))
+    assert cands[0].kind == "band"  # 3.6 px inside the frame's left edge: not cut
+    got = scene_fix_from_boxes(cands, pts, uv, None, model, src="segmenter", rivals=True, **kw)
+    assert got.pose is not None, got.tried
+    assert got.table_z == pytest.approx(0.250, abs=0.005)
+    assert got.top[2] - got.table_z == pytest.approx(model.dims[2], abs=0.010)
+    # where this frame puts it under that day's TF: a regression pin, not a tape truth
+    assert got.top[0] == pytest.approx(0.788, abs=0.01) and got.top[1] == pytest.approx(-0.237, abs=0.01)
+    # without the foot, the ring's table refuses it as the run did
+    bare = [(c.score, c.box) for c in cands]
+    old = scene_fix_from_boxes(bare, pts, uv, None, model, src="segmenter", **kw)
+    assert old.pose is None or old.table_z > 0.27

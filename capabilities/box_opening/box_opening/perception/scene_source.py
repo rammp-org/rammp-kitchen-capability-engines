@@ -242,8 +242,66 @@ def table_around(pts_base, centre_xy, below_z, ring=TABLE_RING_M):
     return float(c[2] - (n[0] * (centre_xy[0] - c[0]) + n[1] * (centre_xy[1] - c[1])) / n[2])
 
 
+# The table is no higher than the foot of what stands on it. The scene OAK
+# looks along the table nearly edge-on, and on a plain one its stereo has
+# nothing to match: flatbot 2026-11-11, a white folding table read 0.5-0.6 m
+# from the lens on every image row, 0.16 to 0.35 m high, and the ring's
+# commonest height (table_around) was 0.283-0.293 under a canister whose top
+# read 0.350 — "58-69 mm tall", refused 52-63 mm under lid height wherever it
+# stood (2026-11-10, a grey table: 58). Nothing in the ring told that reading
+# from a good one (slab share 0.26 against 0.31, plane inliers 0.97 against
+# 0.96). The detector's box does: it ends where the holder meets the table,
+# and the holder's own depth is good. The ray through the box's bottom edge,
+# at the holder's front, read the table at 0.228 and 0.250 on those three
+# frames (the canister 100-101 mm tall, as every good table had it: 97-103),
+# and within 2 mm of the ring on the two recorded frames whose box reaches
+# the table (20261023_172707, 20261027_162417). A box that stops short of
+# the table (20261022_144302, 20261023_133403: 18-26 mm) reads the foot
+# high, so the foot only ever LOWERS the ring's table, and only from this
+# far under it.
+FOOT_TABLE_SLACK_M = 0.02
+FOOT_ROWS_PX = 3.0  # the bottom edge: the cloud's pixels within this of it ...
+FOOT_COLS_FRAC = 0.25  # ... and this share of the box's width either side of its middle
+
+
+def foot_table(pts_base, uv, box, cam_xyz, image_wh=None):
+    """The table's height at the foot of what the pixel `box` holds: where
+    the ray through the middle of the box's bottom edge reaches the thing's
+    front (the nearest of its points in the box's lower half, horizontally
+    from the camera). The ray is read off the cloud's own pixels on that
+    edge — any depth, the direction is the pixel's. nan for a box the frame
+    cuts at its bottom, or with too few points."""
+    x0, y0, x1, y1 = (float(v) for v in box[:4])
+    if image_wh is not None and "bottom" in frame_edges((x0, y0, x1, y1), image_wh):
+        return float("nan")
+    cam = np.asarray(cam_xyz, float)
+    cols = (uv[:, 0] >= x0) & (uv[:, 0] <= x1)
+    low = cols & (uv[:, 1] >= 0.5 * (y0 + y1)) & (uv[:, 1] <= y1)
+    edge = (np.abs(uv[:, 1] - y1) <= FOOT_ROWS_PX) & (np.abs(uv[:, 0] - 0.5 * (x0 + x1)) <= FOOT_COLS_FRAC * (x1 - x0))
+    if low.sum() < MIN_LID_POINTS or edge.sum() < 10:
+        return float("nan")
+    front = float(np.percentile(np.hypot(pts_base[low, 0] - cam[0], pts_base[low, 1] - cam[1]), 5))
+    e = pts_base[edge]
+    run = np.hypot(e[:, 0] - cam[0], e[:, 1] - cam[1])
+    ok = run > 1e-6
+    if ok.sum() < 10:
+        return float("nan")
+    return float(cam[2] + np.median((e[ok, 2] - cam[2]) / run[ok]) * front)
+
+
 def box_from_side_points(
-    pts_base, uv, bbox, table_z, model, cam_xyz, partial=False, anchor_rng=None, sides=(), side_is_lid=True
+    pts_base,
+    uv,
+    bbox,
+    table_z,
+    model,
+    cam_xyz,
+    partial=False,
+    anchor_rng=None,
+    sides=(),
+    side_is_lid=True,
+    foot_box=None,
+    image_wh=None,
 ):
     """Coarse container pose from a camera level with the lid. It sees the
     box's side, never its top face, and the wall behind a round lid falls
@@ -253,6 +311,11 @@ def box_from_side_points(
     (`table_z` when surveyed), its centre half its width behind the face the
     camera sees. Returns (ContainerPose, top_xyz, n_points, table_z) or
     (None, why, n_points, table_z or nan).
+
+    `foot_box`: the detector's own box of the thing standing on the table
+    (the holder, or the container as it is). A table measured here that
+    reads more than FOOT_TABLE_SLACK_M above that box's foot (foot_table)
+    is not the table, and the foot is; a surveyed `table_z` is left alone.
 
     `partial`: the frame cuts the box off at its side (a round container
     only, scene_fix_from_boxes): what is in view is not centred on it and
@@ -313,6 +376,9 @@ def box_from_side_points(
 
     if table_z is None:
         table_z = table_around(pts_base, centre_of(upper), float(np.percentile(near[:, 2], TOP_PCTL)) - 0.03)
+        foot_z = float("nan") if foot_box is None else foot_table(pts_base, uv, foot_box, cam, image_wh)
+        if not np.isnan(foot_z) and not table_z <= foot_z + FOOT_TABLE_SLACK_M:  # nan: no table read around it
+            table_z = foot_z
         if np.isnan(table_z):
             return None, "no table around it", len(near), table_z
     obj = near[near[:, 2] > table_z + ABOVE_TABLE_M]
@@ -723,8 +789,8 @@ def off_frame_why(score, edges, R_base_color, frame="arm_mount", src="segmenter"
     back = ", ".join(("-" if w[0] == "+" else "+") + w[1] for w in ways)
     return (
         "the %s's box (%.2f) runs off the scene camera's frame toward %s %s: it sees part of the "
-        "container, and a part is not where the box is — move the box toward %s until all of it is "
-        "in the camera's view" % (src, score, frame, " and ".join(ways), back)
+        "container, and the part in view did not place it (all of it would be in view %s of here)"
+        % (src, score, frame, " and ".join(ways), back)
     )
 
 
@@ -815,18 +881,20 @@ def scene_fix_from_boxes(
         score, box = c[0], c[1]
         holder = c[2] if len(c) > 2 else None
         side_is_lid = getattr(c, "kind", None) not in HOLDER_SIDE_KINDS
+        # what stands on the table: the detector's own box — but a lid boxed on its holder stands on the holder
+        foot = None if getattr(c, "kind", None) == "lid" else getattr(c, "det_box", box)
         edges = frame_edges(box, image_wh) if image_wh is not None else ()
         if not edges:
-            cands.append((score, box, (), holder, side_is_lid))
+            cands.append((score, box, (), holder, side_is_lid, foot))
         elif model.round and cam_R is not None and side_cut(edges, cam_R):
-            cands.append((score, box, edges, None, side_is_lid))
+            cands.append((score, box, edges, None, side_is_lid, foot))
         else:
             clipped.append((score, box, edges))
             refused.append(("it runs off the frame at its %s edge (%s %.2f)" % (" and ".join(edges), src, score), box))
     got = None
     if table_z is not None:
         lid_z = float(table_z) + float(model.dims[2])
-        for score, box, edges, _holder, _side_is_lid in cands:
+        for score, box, edges, _holder, _side_is_lid, _foot in cands:
             if edges:
                 continue  # only the side lift finishes a box from part of it
             if cam_xyz is not None and not sees_top_face(pts_base, uv, box, lid_z, cam_xyz):
@@ -839,7 +907,7 @@ def scene_fix_from_boxes(
                 break
             refused.append(("%s (%s %.2f)" % (top, src, score), box))
     if got is None and cam_xyz is not None:
-        for score, box, edges, holder, side_is_lid in cands:
+        for score, box, edges, holder, side_is_lid, foot in cands:
             anchor = None if holder is None else holder_front_rng(pts_base, uv, holder, cam_xyz)
             sides = uncut_sides(box, edges, pts_base, uv, cam_xyz, cam_R) if edges else ()
             pose, top, n, tz = box_from_side_points(
@@ -853,6 +921,8 @@ def scene_fix_from_boxes(
                 anchor_rng=anchor,
                 sides=sides,
                 side_is_lid=side_is_lid,
+                foot_box=foot,
+                image_wh=image_wh,
             )
             if pose is not None:
                 got = SceneBoxFix(
