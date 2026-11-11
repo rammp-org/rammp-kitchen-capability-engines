@@ -1442,6 +1442,90 @@ def _home_first_legs(ctx, live, rest, world):
     return home_any(ctx, _state(live), rest, plan_to, who="[press_demo]", goal_words="the rest pose", plan_words="home")
 
 
+def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix):
+    """--wrist-first: the wrist turned where the arm rests (tasks/survey.run_survey, front) and
+    the container its camera finds in front of the arm: the fix (a SceneFix, source "wrist"), its
+    frames' points kept on ctx — or None where it finds none, the run going on with the scene
+    camera's `scene_fix` (None: its NO BOX). A turn stopped part way: the arm holds (exit 1); a
+    preview ends at the turned pose (exit 0)."""
+    from box_opening.tasks import survey as sv
+
+    survey = sv.run_survey(
+        node,
+        ctx,
+        runner,
+        watcher,
+        args.execute,
+        rest=rest_joints(cfg),
+        camera_cfg_name=ctx.worlds.wrist_camera_config,
+        front=True,
+    )
+    if survey.stopped:
+        log.info("[press_demo] STOP: the wrist look: %s — the arm holds; nothing was pressed" % survey.why)
+        sys.exit(1)
+    if survey.preview:
+        log.info("[press_demo] preview ends at the wrist look's pose: its frames, the aim and the press need --execute")
+        sys.exit(0)
+    if survey.fix is not None:
+        ctx.survey_clouds = survey.clouds
+        if scene_fix is not None:
+            a, b = survey.fix.top_xyz, scene_fix.top_xyz
+            log.info(
+                "[press_demo] WRIST LOOK: the box at [%.3f, %.3f, %.3f]; the scene camera had it at [%.3f, %.3f, "
+                "%.3f], %.0f mm away — the wrist's is taken" % (*a, *b, 1000 * math.hypot(a[0] - b[0], a[1] - b[1]))
+            )
+        return survey.fix
+    log.info(
+        "[press_demo] WRIST LOOK: no container (%s) — %s"
+        % (survey.why, "the scene camera's box is taken" if scene_fix is not None else "and the scene camera has none")
+    )
+    runner.note("wrist_first", found=False, why=survey.why, scene=scene_fix is not None)
+    return None
+
+
+def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator):
+    """The scene camera found no box (locator.last_why): the wrist survey's fix (tasks/survey) with
+    --wrist-survey, its frames' points kept on ctx (survey_clouds); else the run's end — NO BOX and
+    home (exit 2), as without the survey; a survey motion stopped part way: the arm holds (exit 1);
+    a preview: it ends at the survey pose (exit 0). A run given the orchestrator's selection
+    (--instance-id) does not survey: the selection is one of the scene camera's detections, and the
+    wrist cannot tell which container it is (docs/interface.md)."""
+    from box_opening.tasks import survey as sv
+
+    why = "scene camera: %s" % locator.last_why
+    if getattr(args, "wrist_survey", False) and args.instance_id:
+        why += (
+            "; no wrist survey for the selected container %s: the selection is the scene camera's, and the wrist "
+            "cannot tell which container the orchestrator selected" % args.instance_id
+        )
+    elif getattr(args, "wrist_survey", False):
+        survey = sv.run_survey(
+            node,
+            ctx,
+            runner,
+            watcher,
+            args.execute,
+            rest=rest_joints(cfg),
+            camera_cfg_name=ctx.worlds.wrist_camera_config,
+        )
+        if survey.stopped:
+            log.info("[press_demo] STOP: the wrist survey: %s — the arm holds; nothing was pressed" % survey.why)
+            sys.exit(1)
+        if survey.preview:
+            log.info(
+                "[press_demo] preview ends at the wrist survey's pose: its frames, the aim and the press need --execute"
+            )
+            sys.exit(0)
+        if survey.fix is not None:
+            ctx.survey_clouds = survey.clouds
+            return survey.fix
+        why += "; wrist survey: %s" % survey.why
+    # the look's seconds and the segmenter's verdict: what a NO BOX was
+    runner.note("reach_refused", why="NO BOX — %s" % why, **locator.look_record())
+    try_home(ctx, runner, args.execute, "NO BOX — %s" % why)
+    sys.exit(2)
+
+
 def adopt_scene_table(ctx, worlds, watcher, scene_fix):
     """No survey: this run's table, measured where the box stands, is the
     one every world from here on is planned around — and the one the
@@ -1526,6 +1610,19 @@ def main():
         default=None,
         help="the container to open: its instance_id on /perception/object_detections (the box_opening "
         "engine passes the orchestrator's selection). Without it, any box of the container's classes",
+    )
+    ap.add_argument(
+        "--wrist-first",
+        action="store_true",
+        help="the wrist camera finds the container: before anything else the wrist turns where the arm rests so "
+        "its camera sees the table in front, and what it finds there is the box (a table faced from the front; "
+        "tasks/survey); the scene camera's box only where the wrist finds none; not with --instance-id",
+    )
+    ap.add_argument(
+        "--wrist-survey",
+        action="store_true",
+        help="where the scene camera finds no container, look for it with the wrist camera from one or two poses "
+        "over the arm's side (a chair parked side-on to a counter; tasks/survey); not with --instance-id",
     )
     args = ap.parse_args()
     # the reach-out reads it (reach_press.run_reach_press): its depth press
@@ -1700,10 +1797,13 @@ def main():
             )
             sys.exit(1)
 
-        # THE SCENE CAMERA ALONE FINDS THE BOX. It sees the whole workspace
-        # from where it stands, so the box is found before the arm has moved
-        # toward it. The wrist never searches for it (owner, 2026-10-22): no
-        # scene fix, and the run stops.
+        # THE SCENE CAMERA FINDS THE BOX. It sees the workspace in front of
+        # the chair from where it stands, so the box is found before the arm
+        # has moved toward it. The wrist never searches for it (owner,
+        # 2026-10-22): no scene fix, and the run stops — unless the wrist
+        # survey is on (--wrist-survey, the node's wrist_survey: a chair
+        # parked side-on to a counter, which the scene camera cannot see;
+        # tasks/survey), which looks for it with the wrist camera then.
         t_scene = time.monotonic()
         scene_fix = locator.locate(SCENE_FIRST_LOCATE_S)
         viz_hook("scene", locator, scene_fix)  # what it judged, drawn off this thread (perception/viz)
@@ -1718,12 +1818,22 @@ def main():
             )
         if locator.moved_note and scene_fix is not None:
             log.info("[press_demo] scene camera: %s" % locator.moved_note)  # e.g. the tag was not in view
+        # the scene camera that checks the box again after the press: none for the wrist's box,
+        # which it never saw (a box it found elsewhere would be taken for this one moved)
+        reach_locator = locator
+        if getattr(args, "wrist_first", False) and not args.instance_id:
+            # THE WRIST CAMERA FINDS THE BOX (--wrist-first; owner, 2026-11-11: "having the wrist
+            # cam just find the box ... the arm would just need to angle itself so it can see the
+            # scene"): facing a table, the arm presses in front of itself, where the scene camera
+            # sees no lid whole and puts what it sees 7-9 cm out (tasks/survey's front note). The
+            # scene camera's box is kept for where the wrist finds none.
+            wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix)
+            if wrist_fix is not None:
+                scene_fix, reach_locator = wrist_fix, None
         if scene_fix is None:
-            # the look's seconds and the segmenter's verdict: what a NO BOX was
-            runner.note("reach_refused", why="NO BOX — scene camera: %s" % locator.last_why, **locator.look_record())
-            try_home(ctx, runner, args.execute, "NO BOX — scene camera: %s" % locator.last_why)
-            sys.exit(2)
-        if not scene_by_tf:
+            scene_fix = wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator)
+            reach_locator = None
+        if not scene_by_tf and reach_locator is not None:
             trusted, distrust = scene_trust(
                 residuals_path_for(args.scene_calib), args.scene_calib or scene_calib_path()
             )
@@ -1736,10 +1846,11 @@ def main():
         adopt_scene_table(ctx, worlds, watcher, scene_fix)
         surveyed = watcher.table_z
         log.info(
-            "[press_demo] SCENE: box at [%.3f, %.3f] yaw %.1f deg from %d lid points%s "
-            "(%s; the scene reads the table at %.3f%s, surveyed %s; %.1f s to locate "
+            "[press_demo] %s: box at [%.3f, %.3f] yaw %.1f deg from %d lid points%s "
+            "(%s; the %s reads the table at %.3f%s, surveyed %s; %.1f s to locate "
             "[%s], %.1f s since start) — reaching out"
             % (
+                "SCENE" if reach_locator is not None else "WRIST SURVEY",
                 sp.xyz[0],
                 sp.xyz[1],
                 math.degrees(sp.yaw),
@@ -1748,6 +1859,7 @@ def main():
                 if getattr(scene_fix, "partial", "")
                 else "",
                 scene_source_label(scene_fix),
+                "scene" if reach_locator is not None else "wrist camera",
                 scene_fix.table_z_scene,
                 table_seen_over(scene_fix.table_extent),
                 ("%.3f" % surveyed) if surveyed is not None else "n/a",
@@ -1781,7 +1893,7 @@ def main():
 
         ctx.cpose = scene_fix.pose  # the box every world and plan from here is built around
         watcher.roi = None  # the scene bbox never applied to the wrist frame
-        sys.exit(run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator))
+        sys.exit(run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, reach_locator))
     except KeyboardInterrupt:
         sys.exit(130)  # the abort path already reported what was confirmed
     except ArmHalted as e:

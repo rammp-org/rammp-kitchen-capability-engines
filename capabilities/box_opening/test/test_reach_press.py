@@ -1299,6 +1299,42 @@ def test_the_reach_out_preview_moves_nothing(ctx, monkeypatch, tmp_path, capsys,
     assert ("COMPLIANT: every move" in out) is soft and "enters its joint impedance" not in out
 
 
+@pytest.mark.parametrize("source, seen_by", [("segmenter", "the scene camera"), ("wrist", "the wrist survey")])
+def test_the_counter_kept_out_before_the_proof_is_named_for_the_camera_whose_fix_mapped_it(
+    ctx, monkeypatch, tmp_path, source, seen_by
+):
+    """The cabinet's keep-out before the proof (press_demo.keep_out_counter) is read off the fix's own
+    points: the scene camera's, or where the scene camera saw no box and the wrist survey found it
+    (tasks/survey, a fix with source "wrist") the survey's frames, and the log and its counter_edges
+    note say which."""
+    from box_opening.models.container import ContainerPose
+    from box_opening.runtime.runner import Runner
+    from box_opening.tasks import press_demo
+    from box_opening.tasks import reach_lid_off as rlo
+
+    class Kept(Exception):
+        pass
+
+    named = []
+
+    def keep_out(ctx, tmap, table_z, src, runner=None, key=None):
+        named.append((src, key))
+        raise Kept  # nothing past the first keep-out is under test
+
+    cfg = load_press_demo(PINK)
+    ctx.model = ContainerModel.load(PINK)
+    monkeypatch.setattr(reach_press, "oblique_aim_available", lambda: True)
+    monkeypatch.setattr(rlo, "_table_z", lambda watcher, fix, cpose: BUTTON[2] - 0.121)
+    monkeypatch.setattr(rlo, "counter_map", lambda *a, **k: None)
+    monkeypatch.setattr(press_demo, "keep_out_counter", keep_out)
+    pose = ContainerPose(xyz=(BUTTON[0], BUTTON[1], BUTTON[2] - 0.121), yaw=0.0)
+    fix = SimpleNamespace(pose=pose, top_xyz=BUTTON, source=source)
+    args = SimpleNamespace(execute=False, press_only=True, compliant=True, depth_press=True)
+    with pytest.raises(Kept):
+        reach_press.run_reach_press(None, ctx, cfg, Runner(ctx.client, log_dir=tmp_path), None, args, fix, None)
+    assert named == [(seen_by, "look")] and not ctx.client.executed
+
+
 def test_a_compliant_run_says_which_gains_every_move_flies(ctx, monkeypatch, capsys):
     """Owner 2026-10-27: "impedance mode needs to be firmer"; 2026-10-28:
     "extreamly rigid". The banner names the tuning in force — the client's
