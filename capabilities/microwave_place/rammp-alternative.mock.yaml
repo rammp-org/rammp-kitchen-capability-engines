@@ -1,0 +1,38 @@
+# The mock: the real alternative's exact interface, no hardware. Other teams
+# develop against it, the all-mock profile runs on it, and CI smoke-tests it.
+# check_capabilities.py rejects a mock whose topics differ from the real one.
+id: microwave_place_mock
+tier: experimental
+kind: docker
+container:
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/microwave_place:dev
+  network_mode: host
+  ipc: host
+  command: ["/module_ws/install/microwave_place/lib/microwave_place/microwave_place_node"]
+params:
+  record_bag: true
+  bag_frame_hz: 1.0
+  bag_state_hz: 25.0
+  mock: true
+  take_approach_world: /config/robot/curobo/world.yaml
+  take_approach_speed_scale: 0.3
+  take_exit_speed_scale: 0.3
+  take_pullback_m: 0.05
+  take_home_joints: [-2.9723690063395423, 0.4406113803695808, -0.4320526131268245, -2.4519407240189826, 2.8028915598374065, -0.9451441529603253, -1.413206432450548]
+publishes: [/microwave_place/status, /microwave_place/sam3_overlay]
+subscribes:
+  - /tf
+  - /tf_static
+  - /scene_camera/depth/image_rect_raw
+  - /scene_camera/color/camera_info
+  - /perception/object_detections_3d
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/depth/image_rect_raw
+  - /wrist_camera/color/camera_info
+  - /joint_states
+  - /ee_state
+  - /gripper_state
+  - /diagnostics
+  - /rosout
+  - /arm/robot_description
+  - /microwave_place/sam3_overlay
