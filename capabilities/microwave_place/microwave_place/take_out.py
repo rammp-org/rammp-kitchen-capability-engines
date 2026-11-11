@@ -1,26 +1,27 @@
 """Taking the container out of the microwave, from the take-out start pose (the wrist camera looking at it, the
 gripper open).
 
-  1. detect (rim_detection): the nearest point on the container's outer rim, in arm_mount;
-  2. reach: from the start, the hand turned 90 deg about its own axis (the fingers then above and below the brim)
-     while it moves straight to the pre-grasp pose, `reach_in` back from the grasp along the hand's level heading;
+  1. detect (rim_detection): the averaged nearest filtered points in the container mask, in arm_mount;
+  2. reach: cuRobo plans to the pre-grasp with the hand turned 90 deg about its own axis (the fingers then
+     above and below the brim), `reach_in` back from the grasp along the hand's level heading;
      then the straight level line in along that heading to the grasp: the tool frame `grasp_depth` along the heading
-     from the rim point and `grasp_up` above it. Position control, timed like the place's approach (pose_lengths:
-     the wrist turns no faster than the hand travels), as one motion up to `impedance_in` short of the grasp; there a
+     from the detected container point and `grasp_up` above it. Position control, timed by pose_lengths:
+     the wrist turns no faster than the hand travels), from pre-grasp up to `impedance_in` short of the grasp; there a
      short stop, and the rest of the line in in the driver's joint impedance (take_gains, at impedance_speed);
   3. impedance off (the position setpoint on the current joints), then the gripper closed on the brim (grab_container's
      force), checked: the fingers stopped, closed on something;
   4. straight up `take_lift`;
   5. the level line back out to above the pre-grasp pose (the place's plan_level_back_out).
-Steps 3-5 in position control. Nothing is collision-checked (the start is in front of the opening, the line in runs
-straight along the hand's heading into it).
+Steps 3-5 in position control. Only the cuRobo approach is collision-checked against the configured world;
+the straight insertion onward retains the local IK and is not collision-checked.
 """
 
+import re
 import time
 
 import numpy as np
 import rammp_arm
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 
 from . import place_motion as pm
 
@@ -33,8 +34,6 @@ SET_TOL = 0.05  # the gripper may end at most this much more closed than asked .
 OPEN_EXTRA = 0.15  # ... and at most this much more open
 LIFT_SPEED = 0.05  # m/s peak, the straight lift off the glass
 IMP_END_TOL = 0.03  # m: in impedance the hand lags its setpoint; this far off the grasp at most, or it does not close
-TURN_STEP_DEG = 2.0  # the turning move's waypoints: at most this much turn ...
-JUMP_DEG = 15.0  # ... and no joint more than this between two of them (more = the IK flipped the arm)
 
 
 def grasp_pose(model, q0, point, reach_in, grasp_depth, grasp_up):
@@ -56,39 +55,59 @@ def grasp_pose(model, q0, point, reach_in, grasp_depth, grasp_up):
     return dict(heading=h, quat=Rotation.from_matrix(R).as_quat(), target=target, pre=target - reach_in * h)
 
 
-def plan_turning_line(model, q_start, p_end, quat_end, step=pm.LINE_STEP):
-    """Joint waypoints along the straight line from q_start's tool position to p_end while the hand turns
-    (slerp) to quat_end; the first q_start. Refused where the IK can't follow."""
-    T = model.fk(np.asarray(q_start, dtype=float))
-    a, b = T[:3, 3], np.asarray(p_end, dtype=float)
-    rots = Rotation.from_matrix([T[:3, :3], Rotation.from_quat(quat_end).as_matrix()])
-    angle = np.degrees((rots[0].inv() * rots[1]).magnitude())
-    n = max(1, int(np.ceil(max(np.linalg.norm(b - a) / step, angle / TURN_STEP_DEG))))
-    slerp = Slerp([0.0, 1.0], rots)
-    qs, seed = [np.asarray(q_start, dtype=float)], np.asarray(q_start, dtype=float)
-    for k in range(1, n + 1):
-        u = k / n
-        q = model.ik(a + u * (b - a), slerp([u]).as_quat()[0], seed, restarts=0, stay=0.01)
-        if q is None or np.max(np.abs(pm.wrap_deg(q - seed))) > JUMP_DEG:
-            raise pm.Refused(f"reach: the arm can't turn and move there ({u * 100:.0f}% of the way)")
-        qs.append(q)
-        seed = q
-    return qs
+def set_approach_world(arm, world, log):
+    """Load the floor scene and require the planner's persistent flatbot layers.
+
+    The path is resolved by the planner, not by this capability's container.
+    Older planners without layer acknowledgements fail closed.
+    """
+    ok, message = arm.set_world(world)
+    if not ok:
+        raise pm.Refused(f"take-out: set_world({world}) failed: {message}")
+    config_layers = re.search(r"config layers: ([^|)]*)", message)
+    scene_layers = re.search(r"scene layers: ([^|)]*)", message)
+    for name in ("platform", "seat", "person"):
+        if config_layers is None or re.search(rf"\b{name} [1-9]\d*\b", config_layers[1]) is None:
+            raise pm.Refused(f"take-out: planner did not confirm config layer {name}: {message}")
+    if scene_layers is None or re.search(r"\bfloor [1-9]\d*\b", scene_layers[1]) is None:
+        raise pm.Refused(f"take-out: planner did not confirm the floor scene layer: {message}")
+    log(f"take-out approach world: {message}")
+    return message
 
 
-def plan_take_out(model, q0, cand, cfg):
-    """Every leg on the arm model: the turning move to the pre-grasp, the line in (on its line, along the heading,
-    ending on the grasp), the lift, the line out. Raises Refused."""
-    c = cfg
-    turn = plan_turning_line(model, q0, cand["pre"], cand["quat"])
-    line = pm.plan_line(model, turn[-1], cand["target"] - cand["pre"], "line in", step=pm.LINE_STEP)
+def plan_from_pregrasp(model, q_pre, cand, cfg):
+    """Keep the original straight insertion, lift and retreat, seeded at pre-grasp.
+
+    Legacy IK remains here to preserve Cartesian lines and the impedance phase.
+    These paths are not cuRobo collision-checked.
+    """
+    T = model.fk(np.asarray(q_pre, dtype=float))
+    distance = float(np.linalg.norm(T[:3, 3] - cand["pre"]))
+    angle = float(np.degrees((Rotation.from_matrix(T[:3, :3]).inv() * Rotation.from_quat(cand["quat"])).magnitude()))
+    if distance > pm.END_TOL or angle > pm.END_TOL_DEG:
+        raise pm.Refused(f"pre-grasp is {distance * 100:.1f} cm / {angle:.1f} deg off target -- not inserting")
+    line = pm.plan_line(model, q_pre, cand["target"] - T[:3, 3], "line in", step=pm.LINE_STEP)
     pm.check_line(model, line, cand["pre"], cand["target"], cand["heading"], "line in")
     end = pm.end_pose_error(model, line[-1], cand["target"], cand["heading"])
     if end[0] > pm.END_TOL or end[1] > pm.END_TOL_DEG:
         raise pm.Refused(f"the line in ends {end[0] * 100:.1f} cm / {end[1]:.1f} deg off the grasp")
-    lift = pm.plan_line(model, line[-1], np.r_[0.0, 0.0, c["take_lift"]], "lift", step=pm.LINE_STEP)
+    lift = pm.plan_line(model, line[-1], np.r_[0.0, 0.0, cfg["take_lift"]], "lift", step=pm.LINE_STEP)
     out = pm.plan_level_back_out(model, lift[-1], cand["pre"])
-    return dict(turn=turn, line=line, lift=lift, out=out, end=end)
+    return dict(line=line, lift=lift, out=out, end=end)
+
+
+def plan_take_out(arm, model, q0, cand, cfg):
+    """cuRobo to pre-grasp, then the existing local Cartesian paths; nothing moves."""
+    speed = cfg["take_approach_speed_scale"]
+    if not np.isfinite(speed) or not 0.0 < speed <= 1.0:
+        raise pm.Refused("take_approach_speed_scale must be finite and in (0, 1]")
+    approach = arm.plan_to_pose(cand["pre"], cand["quat"], q0)
+    if not approach.success:
+        raise pm.Refused(f"take-out approach: cuRobo refused: {approach.message}")
+    if len(approach.q) < 2:
+        raise pm.Refused("take-out approach: cuRobo returned no executable trajectory")
+    legs = plan_from_pregrasp(model, approach.q[-1], cand, cfg)
+    return dict(approach=approach.q, approach_t=approach.t, approach_qd=approach.qd, **legs)
 
 
 def set_gripper(arm, position, log, what):
@@ -158,22 +177,30 @@ def run_take_out(arm, model, q0, cand, legs, cfg, ctx, log):
     ctx.progress("gripper", 0.0)
     set_gripper(arm, c["grip_open"], log, "opened for the brim")
 
-    # 2a. turn and reach to the switch point, `impedance_in` short of the grasp along the line in: ONE motion, position
-    # control (the arm library runs one trajectory goal at a time, so the switch to impedance is a short stop there)
-    line = [np.asarray(q, dtype=float) for q in legs["line"]]
-    k = max(1, len(line) - 1 - int(np.ceil(c["impedance_in"] / pm.LINE_STEP)))  # the switch point's waypoint
-    knots = [np.asarray(q, dtype=float) for q in legs["turn"][1:]] + line[1 : k + 1]
-    lengths = pm.pose_lengths(model, [q_now, *knots])
-    ctx.progress("reach", 0.0)
-    log(
-        f"-> reach: turn the hand 90 deg on the way to the pre-grasp, line in to {c['impedance_in'] * 100:.0f} cm "
-        f"short of the grasp; {sum(lengths) * 100:.0f} cm of timed path at {c['insert_speed'] * 100:.0f} cm/s peak "
-        "(position control)"
+    # Execute the exact collision-checked samples, preserving cuRobo's timing and velocities.
+    ctx.checkpoint()
+    ctx.progress("approach", 0.0)
+    log("-> cuRobo approach to pre-grasp (position control, stops at pre-grasp)")
+    result = arm.execute_joint_trajectory(
+        rammp_arm.JOINTS,
+        zip(legs["approach_t"], legs["approach"], legs["approach_qd"], strict=True),
+        speed_scale=c["take_approach_speed_scale"],
     )
-    if not arm.move_joints(knots, cart_lengths=lengths, speed_scale=c["insert_speed"] / rammp_arm.CART_SPEED):
-        raise pm.Refused(f"STOPPED: the reach did not complete ({arm.last_error})")
+    if result.error_code != pm.SUCCESSFUL:
+        raise pm.Refused(f"STOPPED before insertion: cuRobo approach failed ({result.error_string})")
+
+    # Re-seed from the measured endpoint rather than bridging into a path from assumed joints.
+    ctx.checkpoint()
+    q_pre = np.asarray(arm.raw_joints(), dtype=float)
+    insertion = plan_from_pregrasp(model, q_pre, cand, c)
+    line = [np.asarray(q, dtype=float) for q in insertion["line"]]
+    k = max(1, len(line) - 1 - int(np.ceil(c["impedance_in"] / pm.LINE_STEP)))
+    ctx.progress("reach", 0.0)
+    log(f"-> straight line in to {c['impedance_in'] * 100:.0f} cm short of the grasp (position control)")
+    move_timed(arm, model, line[: k + 1], "the line in", c["insert_speed"], "at the opening, gripper open")
 
     # 2b. joint impedance for the last `impedance_in` of the line in only (cfg take_gains); it ends before the close
+    ctx.checkpoint()
     gains = c["take_gains"]
     try:
         log(f"impedance on (kq {gains['kq'][0]:g}/{gains['kq'][4]:g}): settle {c['settle_s']:.1f} s")
@@ -199,13 +226,16 @@ def run_take_out(arm, model, q0, cand, legs, cfg, ctx, log):
         raise pm.Refused(f"STOPPED in the oven, gripper open: {d * 100:.1f} cm off the grasp -- not closing")
 
     # 3. close on the brim, 4. raise, 5. the level retract: position control
+    ctx.checkpoint()
     ctx.progress("close", 0.0)
     pos = close_on_brim(arm, log)
+    ctx.checkpoint()
     ctx.progress("lift", 0.0)
     log(f"-> raise {c['take_lift'] * 100:.0f} cm (position control)")
     q = np.asarray(arm.raw_joints(), dtype=float)
     lift = pm.plan_line(model, q, np.r_[0.0, 0.0, c["take_lift"]], "lift", step=pm.LINE_STEP)
     move_timed(arm, model, lift, "the raise", LIFT_SPEED, "holding the container in the oven")
+    ctx.checkpoint()
     ctx.progress("retract", 0.0)
     log("-> retract: the level line out to above the pre-grasp pose (position control)")
     q = np.asarray(arm.raw_joints(), dtype=float)

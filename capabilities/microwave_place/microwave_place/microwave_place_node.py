@@ -32,15 +32,18 @@ Action:
                 out, the hand kept tilted, to above the pre-insert pose.
 
   take_out the container out of the open microwave, from the take-out start pose (the wrist camera looking at
-             it, the gripper open; take_out.py has the steps): the rim's nearest point from the wrist camera
-             (rim_detection), the hand turned 90 deg and reached straight in along its heading to `grasp_depth` /
+             it, the gripper open; take_out.py has the steps): the container's nearest point from the wrist camera
+             (rim_detection), cuRobo moves to pre-grasp with the hand turned 90 deg, then reaches straight in to
+             `grasp_depth` /
              `grasp_up` from that point (position control, the last `impedance_in` in joint impedance), the gripper
-             closed in position control, a `take_lift` raise and the level line back out. Planned on the arm model
+             closed in position control, a `take_lift` raise and the level line back out. cuRobo plans the approach
+             against flatbot collision layers; the insertion onward is planned on the arm model
              first; a dry run stops there and returns the plan (also written to state_dir/plans).
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`.
 Otherwise every goal is a dry run that locates, plans and checks, and returns the plan. Someone stands at
-the e-stop whenever allow_execute is on. Only the first motion (side shift, transit) is checked against the
+the e-stop whenever allow_execute is on. Take-out checks only the cuRobo approach against flatbot layers.
+For place, only the first motion (side shift, transit) is checked against the
 microwave; from the line in on nothing is collision-checked. Any check that fails refuses with the reason.
 
     ros2 launch microwave_place microwave_place.launch.py use_orchestrator:=false allow_execute:=true
@@ -110,28 +113,30 @@ PARAMS = {
     # the hand's peak speed (m/s; position control, min-jerk: about half of it on average) on the approach
     # (side shift + transit + line in, one motion) and the back-out
     "insert_speed": 0.16,
-    # take_out: the wrist camera (colour, aligned depth, camera_info); the rim is found on it (rim_detection)
+    # Resolved inside the planner container; its config must load flatbot's platform, seat and person.
+    "take_approach_world": "/config/robot/curobo/world.yaml",
+    "take_approach_speed_scale": rammp_arm.GO_TO_SPEED_SCALE,
+    # take_out: whole-container detection on the wrist camera (colour, aligned depth, camera_info)
     "wrist_topics": [
         "/wrist_camera/color/image_raw",
         "/wrist_camera/depth/image_rect_raw",
         "/wrist_camera/color/camera_info",
     ],
-    # SAM3's prompts: the whole container with its sleeve, then its rim on the same frame
+    # SAM3 prompt: the whole container with its sleeve
     "container_prompt": "food container together with its blue sleeve",
-    "rim_prompt": "wide rim of blue sleeve",
     "sam3_threshold": 0.5,
-    # the rim: this many consecutive frames whose container and rim masks overlap (IoU) at least rim_mask_iou
+    # Historical parameter names: agreement of whole-container masks; no rim detection.
     "rim_frames": 3,
     "rim_mask_iou": 0.85,
     "rim_timeout_s": 60.0,
-    # the grasp: the tool frame this far (m) past the rim point along the hand's heading (0: on it)
-    "grasp_depth": -0.05,
+    # the grasp: the tool frame this far (m) past the detected container point along the hand's heading (0: on it)
+    "grasp_depth": 0.0,
     # ... and this far (m) above it: the tool's height for the pinch over the detected rim point (2026-11-03: the hand
     # placed by hand at the right height, tool z 0.332, over the rim the wrist camera found at z 0.302; +0.5 cm
     # after the first runs)
     "grasp_up": 0.035,
     # the pre-grasp pose this far (m) back from the grasp along the hand's level heading: the line in's length
-    "reach_in": 0.25,
+    "reach_in": 0.30,
     # the gripper's opening for the reach in (0 = fully open .. 1 closed)
     "grip_open": 0.0,
     # the last this far (m) of the line in, in joint impedance (a short stop to switch); position control before it, and
@@ -169,6 +174,13 @@ class Capability(CapabilityEngine):
 
     def __init__(self, **node_kwargs):
         super().__init__("microwave_place", **node_kwargs)
+        from rclpy.qos import DurabilityPolicy, QoSProfile
+        from sensor_msgs.msg import Image
+
+        # Advertise debug images while idle; retain the last result for Foxglove.
+        self.sam3_overlay = self.create_publisher(
+            Image, rim_detection.OVERLAY_TOPIC, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        )
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
         self.cfg["gains"] = {
             "kq": [float(v) for v in self.cfg["impedance_kq"]],
@@ -242,15 +254,14 @@ class Capability(CapabilityEngine):
             checker.close()
 
     def _take_out(self, model, execute, ctx, log):
-        """take_out (take_out.py): the rim from the wrist camera, then turn + reach in, close, raise, retract."""
+        """Find the nearest container-mask point, approach, insert, close, lift and retract."""
         c = self.cfg
         q0 = np.asarray(self.arm.raw_joints(), dtype=float)
         ctx.progress("detect", 0.0)
         wrist = rim_detection.WristCamera(self, rammp_arm.FRAME, list(c["wrist_topics"]))
-        rim = rim_detection.detect_rim(
+        rim = rim_detection.detect_container(
             wrist,
             c["container_prompt"],
-            c["rim_prompt"],
             c["sam3_threshold"],
             int(c["rim_frames"]),
             c["rim_mask_iou"],
@@ -260,14 +271,20 @@ class Capability(CapabilityEngine):
         )
         cand = take_out.grasp_pose(model, q0, rim["point"], c["reach_in"], c["grasp_depth"], c["grasp_up"])
         ctx.progress("plan", 0.0)
-        legs = take_out.plan_take_out(model, q0, cand, c)
-        T_pre = model.fk(legs["turn"][-1])
+        ctx.checkpoint()
+        world_message = take_out.set_approach_world(self.arm, c["take_approach_world"], log)
+        legs = take_out.plan_take_out(self.arm, model, q0, cand, c)
+        T_pre = model.fk(legs["approach"][-1])
         summary = dict(
-            rim_point=np.round(rim["point"], 3).tolist(),
-            rim_depths_m=rim["info"]["depths_m"],
-            rim_frame_points=rim["info"]["frame_points"],
-            rim_frames_spread_cm=round(rim["info"]["frames_spread_m"] * 100, 1),
-            rim_mask_iou_min=round(rim["iou_min"], 3),
+            approach_world=world_message,
+            approach_collision_checked=True,
+            insertion_collision_checked=False,
+            approach_duration_s=round(float(legs["approach_t"][-1]) / c["take_approach_speed_scale"], 2),
+            container_point=np.round(rim["point"], 3).tolist(),
+            container_depths_m=rim["info"]["depths_m"],
+            container_frame_points=rim["info"]["frame_points"],
+            container_frames_spread_cm=round(rim["info"]["frames_spread_m"] * 100, 1),
+            container_mask_iou_min=round(rim["iou_min"], 3),
             start_tool=np.round(model.fk(q0)[:3, 3], 3).tolist(),
             pre_grasp=np.round(cand["pre"], 3).tolist(),
             grasp=np.round(cand["target"], 3).tolist(),
@@ -275,7 +292,9 @@ class Capability(CapabilityEngine):
             fingers_line_from_up_deg=round(float(np.degrees(np.arccos(np.clip(T_pre[2, 0], -1.0, 1.0)))), 1),
             hand_pitch_deg=round(float(np.degrees(np.arcsin(-T_pre[2, 2]))), 1),
             joint_change_deg=dict(
-                turn=np.round(np.degrees(place_motion.joint_delta(legs["turn"][0], legs["turn"][-1])), 1).tolist(),
+                approach=np.round(
+                    np.degrees(place_motion.joint_delta(legs["approach"][0], legs["approach"][-1])), 1
+                ).tolist(),
                 line_in=np.round(np.degrees(place_motion.joint_delta(legs["line"][0], legs["line"][-1])), 1).tolist(),
             ),
             end_off_cm=round(legs["end"][0] * 100, 1),

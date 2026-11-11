@@ -16,19 +16,22 @@ stops it, opens the gripper part way in place, pitches the hand 10 deg nose-down
 off the fingers, and backs out level with the hand tilted. Nothing from the line in on is
 collision-checked. Without it the microwave demo has no way to put the food in.
 
-It also takes the container out again (`take_out`), from a start pose in front of the open oven: it finds
-the nearest point of the container's rim with the wrist camera (SAM3's container and rim masks agreeing over
-3 frames, the nearest depths), turns the hand 90 deg (fingers above and below the brim) on the way to a
-pre-grasp pose and reaches straight in along its heading to a fixed offset from that point, the last 10 cm in
-stiff joint impedance, then switches back to position control, closes the gripper (checked), raises 3 cm and
-backs out level. Nothing is collision-checked; the scene camera is not used.
+It also takes the container out (`take_out`). SAM3 finds the whole tupperware mask on the wrist
+image, with no rim query. It averages the 50 nearest locally consistent masked depths per frame, then the
+points from three consecutive frames with pairwise container-mask IoU at least 0.85. Each point
+uses TF at its depth timestamp. A failed detection or mask disagreement resets the streak.
+The existing grasp offsets and cuRobo approach are retained; insertion onward uses local IK.
 
 ## Publishes
 
-| Topic                                | Type                | Rate                        | Meaning                                                                                                   |
-| ------------------------------------ | ------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/microwave_place/status`            | `std_msgs/String`   | 1 Hz                        | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
-| `/microwave_place/wrist_query_image` | `sensor_msgs/Image` | during take_out's detection | The frozen wrist frame SAM3's rim prompt runs on                                                          |
+| Topic                     | Type              | Rate | Meaning                                                                                                   |
+| ------------------------- | ----------------- | ---- | --------------------------------------------------------------------------------------------------------- |
+| `/microwave_place/status` | `std_msgs/String` | 1 Hz | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
+
+The `/microwave_place/sam3_overlay` debug topic (`sensor_msgs/Image`, RGB8) is advertised while the capability runs and updates during
+take-out detection. Cyan shows the container mask, yellow dots show its 50 nearest filtered
+valid depth samples, and a banner shows the score and sample count. The original color header
+is preserved. No rim masks or rim query are used.
 
 ## Subscribes
 
@@ -38,49 +41,56 @@ backs out level. Nothing is collision-checked; the scene camera is not used.
 | `/scene_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes      | Depth aligned to color, paired with SAM3's frame |
 | `/scene_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Intrinsics                                       |
 | `/perception/object_detections_3d`   | `rammp_perception_interfaces/ObjectDetections` | no       | Declared for the locate topics; not used         |
-| `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | take_out | The frame the container and its rim are found on |
+| `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | take_out | The frame used for whole-container detection     |
 | `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | take_out | Depth aligned to color                           |
 | `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | take_out | Intrinsics                                       |
 
 It also calls `/perception/sam3/detect` (`rammp_perception_interfaces/srv/Detect`, prompts "inside of
 microwave" and "microwave" on `/scene_camera/color/image_raw`; for take_out, `container_prompt` on
-`/wrist_camera/color/image_raw` and `rim_prompt` on `/microwave_place/wrist_query_image`), and through `self.arm` the arm driver and
-the cuRobo planner (`plan_to_pose` with `HOLD_LEVEL`, `set_world` with a world file in `worlds_dir`).
+`/wrist_camera/color/image_raw`). Through `self.arm` it also uses the arm driver and
+the cuRobo planner (`plan_to_pose` with `HOLD_LEVEL` for place, no orientation hold for take-out,
+and `set_world`). Take-out loads `take_approach_world` and requires the planner to confirm the platform,
+seat and person config layers and the floor scene layer. It executes the returned approach trajectory
+with the driver's `execute_joint_trajectory`; insertion onward keeps the existing local IK and impedance.
+The planner must run the current flatbot configuration from rammp-deployments; this change does not
+update or restart the running planner.
 
 ## Orchestrator interface
 
 Served under `/microwave_place/`, types from `rammp_orchestrator_interfaces`:
 
-| Name                                                       | Default                                            | Meaning                                                                                                                             |
-| ---------------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `allow_execute`                                            | `false`                                            | `true` lets `execute` goals move the arm (attended runs only)                                                                       |
-| `state_dir`                                                | `/config/microwave_place`                          | Plans and the descent recordings                                                                                                    |
-| `worlds_dir`                                               | `/home/snorlax/.ros/rammp_box_opening/worlds`      | cuRobo's world files; the planner's container sees it at the same path                                                              |
-| `frames`                                                   | `3`                                                | Locate: this many consecutive detected frames must agree                                                                            |
-| `agree_m`, `agree_deg`                                     | `0.01`, `2.0`                                      | ... within this of their median                                                                                                     |
-| `timeout_s`                                                | `20.0`                                             | Locate (with the "microwave" frame): give up after this (s)                                                                         |
-| `microwave_prompt`                                         | `"microwave"`                                      | SAM3's prompt for the oven's outside (the obstacle)                                                                                 |
-| `above`                                                    | `0.055`                                            | The tool over the glass at the end of the line in (m)                                                                               |
-| `closer`                                                   | `0.02`                                             | The spot this far back from the turntable's middle toward the opening, along the oven's axis (m); the pre-insert pose moves with it |
-| `side_shifts_cm`                                           | `[3, -3, 6, -6, 9, -9]`                            | The hand moved this far level to its left (- = right) before the transit, tried in order                                            |
-| `heading_offsets_deg`                                      | `[0.0]`                                            | The hand's headings off the oven's axis (+ = left), tried in order with each side shift                                             |
-| `clear_min`                                                | `0.01`                                             | The side shift and the transit: every arm and gripper link from the microwave box (m)                                               |
-| `tilt_max_deg`                                             | `2.0`                                              | The hand's tilt vs the start, on the transit and the lines                                                                          |
-| `insert_speed`                                             | `0.16`                                             | Peak speed of the approach (side shift + transit + line in, one motion) and the back-out (m/s)                                      |
-| `lower_speed`                                              | `0.12`                                             | The lowering's speed where the glass should be (m/s; contact tuned at it)                                                           |
-| `vz_stop`, `hold_press`, `settle_s`, `early_stop`          | `-0.01`, `0.003`, `0.2`, `0.03`                    | The lowering's contact test and hold                                                                                                |
-| `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`                 | Joint impedance for the lowering, the gripper opening and the release tilt                                                          |
-| `flange_to_tip`                                            | `0.17955`                                          | Flange face to the closed fingertips (m)                                                                                            |
-| `depth_topic`, `camera_info_topic`, `detections_topic`     | the scene camera's                                 | Locate's topics (the 3D detections are not used)                                                                                    |
-| `wrist_topics`                                             | the wrist camera's colour, depth, camera_info      | take_out: the camera the rim is found on                                                                                            |
-| `container_prompt`, `rim_prompt`, `sam3_threshold`         | the container with its blue sleeve; its rim; `0.5` | take_out: SAM3's prompts and score threshold                                                                                        |
-| `rim_frames`, `rim_mask_iou`, `rim_timeout_s`              | `3`, `0.85`, `60.0`                                | take_out: consecutive frames whose container and rim masks overlap this much (IoU), at most this long (s)                           |
-| `grasp_depth`, `grasp_up`                                  | `-0.05`, `0.035`                                   | take_out: the tool frame this far along the hand's heading (- = short of it) and above the rim point (m)                            |
-| `reach_in`                                                 | `0.25`                                             | take_out: the pre-grasp pose this far back from the grasp (m)                                                                       |
-| `grip_open`                                                | `0.0`                                              | take_out: the gripper's opening for the reach in (0 = fully open)                                                                   |
-| `impedance_in`, `impedance_speed`                          | `0.10`, `0.08`                                     | take_out: the last this far (m) of the line in in joint impedance, at this peak speed (m/s)                                         |
-| `take_impedance_kq`, `take_impedance_zeta`                 | `[400]*4 + [200]*3`, `0.7`                         | take_out: that joint impedance (torque limits: `impedance_torque_limit`)                                                            |
-| `take_lift`                                                | `0.03`                                             | take_out: straight up this far after the close (m)                                                                                  |
+| Name                                                       | Default                                       | Meaning                                                                                                                             |
+| ---------------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `allow_execute`                                            | `false`                                       | `true` lets `execute` goals move the arm (attended runs only)                                                                       |
+| `state_dir`                                                | `/config/microwave_place`                     | Plans and the descent recordings                                                                                                    |
+| `worlds_dir`                                               | `/home/snorlax/.ros/rammp_box_opening/worlds` | cuRobo's world files; the planner's container sees it at the same path                                                              |
+| `frames`                                                   | `3`                                           | Locate: this many consecutive detected frames must agree                                                                            |
+| `agree_m`, `agree_deg`                                     | `0.01`, `2.0`                                 | ... within this of their median                                                                                                     |
+| `timeout_s`                                                | `20.0`                                        | Locate (with the "microwave" frame): give up after this (s)                                                                         |
+| `microwave_prompt`                                         | `"microwave"`                                 | SAM3's prompt for the oven's outside (the obstacle)                                                                                 |
+| `above`                                                    | `0.055`                                       | The tool over the glass at the end of the line in (m)                                                                               |
+| `closer`                                                   | `0.02`                                        | The spot this far back from the turntable's middle toward the opening, along the oven's axis (m); the pre-insert pose moves with it |
+| `side_shifts_cm`                                           | `[3, -3, 6, -6, 9, -9]`                       | The hand moved this far level to its left (- = right) before the transit, tried in order                                            |
+| `heading_offsets_deg`                                      | `[0.0]`                                       | The hand's headings off the oven's axis (+ = left), tried in order with each side shift                                             |
+| `clear_min`                                                | `0.01`                                        | The side shift and the transit: every arm and gripper link from the microwave box (m)                                               |
+| `tilt_max_deg`                                             | `2.0`                                         | The hand's tilt vs the start, on the transit and the lines                                                                          |
+| `insert_speed`                                             | `0.16`                                        | Peak speed of the approach (side shift + transit + line in, one motion) and the back-out (m/s)                                      |
+| `lower_speed`                                              | `0.12`                                        | The lowering's speed where the glass should be (m/s; contact tuned at it)                                                           |
+| `vz_stop`, `hold_press`, `settle_s`, `early_stop`          | `-0.01`, `0.003`, `0.2`, `0.03`               | The lowering's contact test and hold                                                                                                |
+| `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`            | Joint impedance for the lowering, the gripper opening and the release tilt                                                          |
+| `flange_to_tip`                                            | `0.17955`                                     | Flange face to the closed fingertips (m)                                                                                            |
+| `depth_topic`, `camera_info_topic`, `detections_topic`     | the scene camera's                            | Locate's topics (the 3D detections are not used)                                                                                    |
+| `take_approach_world`                                      | `/config/robot/curobo/world.yaml`             | take_out: world path inside the planner container; must confirm flatbot layers and floor                                            |
+| `take_approach_speed_scale`                                | `0.3`                                         | take_out: fraction of planned approach speed, finite and in (0, 1\]                                                                 |
+| `wrist_topics`                                             | the wrist camera's colour, depth, camera_info | take_out: the camera the rim is found on                                                                                            |
+| `container_prompt`, `sam3_threshold`                       | the container with its blue sleeve; `0.5`     | take_out: SAM3's prompts and score threshold                                                                                        |
+| `rim_frames`, `rim_mask_iou`, `rim_timeout_s`              | `3`, `0.85`, `60.0`                           | take_out: historical parameter names; consecutive whole-container masks must overlap this much (IoU), at most this long (s)         |
+| `grasp_depth`, `grasp_up`                                  | `0.0`, `0.035`                                | take_out: the tool frame this far along the hand's heading (- = short of it) and above the rim point (m)                            |
+| `reach_in`                                                 | `0.30`                                        | take_out: the pre-grasp pose this far back from the grasp (m)                                                                       |
+| `grip_open`                                                | `0.0`                                         | take_out: the gripper's opening for the reach in (0 = fully open)                                                                   |
+| `impedance_in`, `impedance_speed`                          | `0.10`, `0.08`                                | take_out: the last this far (m) of the line in in joint impedance, at this peak speed (m/s)                                         |
+| `take_impedance_kq`, `take_impedance_zeta`                 | `[400]*4 + [200]*3`, `0.7`                    | take_out: that joint impedance (torque limits: `impedance_torque_limit`)                                                            |
+| `take_lift`                                                | `0.03`                                        | take_out: straight up this far after the close (m)                                                                                  |
 
 The capability engine itself also reads `use_orchestrator` (default `true`; `false` runs standalone: no
 registration, drive it by CLI) and `mock` (default `false`; `true` skips hardware, the mock alternative
@@ -101,3 +111,13 @@ cuRobo planner and rammp-perception's SAM3 node. No devices of its own.
 | ---------------------- | ---------------------------------------------------------------------------------- |
 | `microwave_place_real` | The module proper                                                                  |
 | `microwave_place_mock` | Same interface, no hardware — for developing against this module without owning it |
+
+The take-out grasp target is 5 cm deeper along the approach heading than before
+(`grasp_depth: 0.0`). `reach_in: 0.30` keeps the pre-grasp pose unchanged and
+extends the straight insertion by 5 cm (30 cm total); the last 10 cm remains in impedance.
+
+Depth filtering uses masked 5x5 neighborhoods: require at least five valid neighbors and
+reject samples farther from the local median than max(1 cm, 3 x 1.4826 x MAD).
+Then average the nearest 50 surviving samples per frame, refusing fewer than 50.
+The existing three-frame pairwise mask-IoU agreement and frame-point averaging remain unchanged.
+The overlay displays exactly the filtered samples used by the estimator.

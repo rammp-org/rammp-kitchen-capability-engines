@@ -147,36 +147,42 @@ clear the fault and re-run.
 
 `take_out` starts from the take-out start pose: the arm in front of the open oven, the hand pointing into
 it, the wrist camera looking at the tupperware from about 0.4-0.5 m, the gripper open. It uses neither the
-scene camera nor a model of the oven: the grasp comes from the rim the wrist camera finds, the line in
+scene camera nor a model of the oven: the grasp comes from the whole-container mask and filtered wrist depth, the line in
 from the hand's own heading.
 
-1. **Detect** (`rim_detection.detect_rim`, `grab_container`'s wrist detection on this node). SAM3
-   (`/perception/sam3/detect`) masks `container_prompt` (the container with its sleeve) on the wrist
-   colour frame; the best-scoring object is the container. The same frame is republished on
-   `/microwave_place/wrist_query_image` and SAM3 masks `rim_prompt` on it (a combined call's label image
-   holds one object per pixel, and the rim lies inside the container); the rim is a wide, flat object
-   mostly (85%) inside the container mask. It waits for `rim_frames` consecutive frames whose container
-   and rim masks overlap every earlier one of the streak by at least `rim_mask_iou` (intersection over
-   union). On each of them the 5 nearest depths inside both masks (the wrist depth aligned to colour,
-   0.2-2 m), back-projected and put in `arm_mount` with TF at the frame's stamp, are averaged; the rim
-   point is the mean over the frames. Nothing within `rim_timeout_s`: it refuses with every reason a
-   frame was rejected.
+1. **Detect** (`rim_detection.detect_container`; the filename is historical). SAM3 queries
+   `container_prompt` once on the wrist color image and selects the highest-scoring container mask.
+   There is no rim query or rim-shape filter. The existing `rim_frames` (default 3), `rim_mask_iou`
+   (0.85) and `rim_timeout_s` (60 s) parameter names are retained for deployment compatibility.
+   Every container mask must agree with every earlier mask in the consecutive-frame streak.
+   Disagreement or a failed detection resets that streak. Within each mask, average the 50
+   nearest locally consistent valid depth pixels (finite and strictly between 0.2 and 2 m), transformed into
+   `arm_mount` at the depth timestamp. Then average those per-frame points over the three frames.
+   This preserves the previous two-stage averaging, without adding a point-distance agreement gate.
+   Defaults use zero heading offset and a 3.5 cm upward tool offset from that averaged point.
 1. **Grasp pose** (`take_out.grasp_pose`). The hand's level heading at the start is the line in's
    direction. The hand is turned 90 deg about its own axis, the way that points the line between the
    fingers (tool x) straight up, so the fingers come in above and below the brim, and levelled. The
-   tool frame's target is `grasp_depth` along the heading and `grasp_up` above the rim point; the
-   pre-grasp pose is `reach_in` back from it along the heading. The offsets are measured on the arm:
-   the nearest rim depths read the bowl wall behind the brim's thin edge (the wrist stereo is 320 x 200),
-   and the tool frame is about 6 cm behind the fingertips.
-1. **Plan** (`plan_take_out`, on the arm model, joint waypoints by IK): from the start, a straight move to
-   the pre-grasp pose while the hand turns (slerped; refused if a step moves any joint more than 15 deg),
-   the straight level line in (every pose on its line and heading, ending within 1 cm / 2 deg of the
-   target), the raise and the line out. A **dry run** stops here and returns the plan (also written to
-   `state_dir/plans/take_out_*.json`).
-1. **Execute**. The gripper set to `grip_open`. The turn and the line in up to `impedance_in` short of
-   the grasp run as **one** position-control motion, timed by `pose_lengths` at `insert_speed` peak; a
-   short stop there; the arm settles in joint impedance (`take_impedance_kq`, `take_impedance_zeta`,
-   `impedance_torque_limit`) for `settle_s` and does the rest of the line in at `impedance_speed` peak.
+   tool frame's target is `grasp_depth` along the heading and `grasp_up` above the averaged container point; the
+   pre-grasp pose is `reach_in` back from it along the heading (30 cm by default).
+   The tool frame is about 6 cm behind the fingertips; offsets are tuned for this container.
+1. **Plan** (`plan_take_out`). Load `take_approach_world` (default
+   `/config/robot/curobo/world.yaml`, a path inside the planner container). Require `set_world` to
+   acknowledge the persistent platform, seat and person layers and the floor scene layer. cuRobo
+   plans from the measured start joints to the pre-grasp pose, including the hand's turn, with
+   orientation free in transit. The approach can curve; only its endpoint must match the pre-grasp.
+   From its endpoint, the original local IK plans the straight level insertion, raise and retreat.
+   A **dry run** stops here and saves the cuRobo samples, timing and velocities alongside those
+   Cartesian paths in `state_dir/plans/take_out_*.json`. A planner failure refuses without a local
+   IK fallback.
+1. **Execute**. Set the gripper to `grip_open`, execute the exact cuRobo trajectory through the
+   driver's `execute_joint_trajectory` in position control, at `take_approach_speed_scale` (default
+   0.3 of planned speed), and stop at pre-grasp. Check the measured pre-grasp position and full
+   orientation (1 cm / 2 deg), then rebuild the Cartesian paths from the measured joints. The
+   insertion up to `impedance_in` short of grasp uses the existing local IK and position control,
+   timed at `insert_speed`; the arm then settles in joint impedance (`take_impedance_kq`,
+   `take_impedance_zeta`, `impedance_torque_limit`) for `settle_s` and does the rest of the line in
+   at `impedance_speed` peak.
    It must end within 3 cm of the target. Impedance is switched off (`exit_impedance`: the position
    setpoint on the measured joints, so nothing jumps) before the gripper closes, whatever happened.
    Then, in position control: the gripper closes with `grab_container`'s force and is checked (the
@@ -185,18 +191,22 @@ from the hand's own heading.
 
 Compliance is used only where the open fingers go over the brim; everything carrying the container is
 stiff (the place's soft gains let the arm sag ~5 cm under it). The library runs one trajectory goal at a
-time, so the switch into impedance is a short stop. Nothing is collision-checked: the start faces the
-opening, and the line in runs straight along the hand's heading.
+time, so the switch into impedance is a short stop. Only the cuRobo approach is collision-checked;
+the straight insertion onward retains the legacy IK and is not collision-checked. The approach
+world contains the chair, person and floor, not a microwave model or the container. Run the planner
+with the current flatbot `planner.yaml` from rammp-deployments, its layers mounted at
+`/config/robot/curobo`, and `world:=""`; an empty-world or older planner without the required layer
+acknowledgement is refused. The capability does not install or update that deployment configuration.
 
-The wrist camera's stereo returns nothing nearer than about 0.22 m; from 0.4-0.5 m the rim has 90-100%
-depth. At about 0.55 m SAM3's rim mask drops out on many frames.
+The wrist camera's stereo returns nothing nearer than about 0.22 m. Start with a clear
+view of the container and enough locally consistent depth samples inside its mask.
 
 ## Actions
 
-| Action     | Params            | What it does                                                                                    |
-| ---------- | ----------------- | ----------------------------------------------------------------------------------------------- |
-| `place`    | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it      |
-| `take_out` | `execute` (false) | Finds the rim from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
+| Action     | Params            | What it does                                                                                                      |
+| ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `place`    | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it                        |
+| `take_out` | `execute` (false) | Finds the container grasp point from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
 
 A refusal fails the goal with error code `refused` (recoverable).
 
@@ -247,6 +257,8 @@ All are ROS parameters, with their defaults in `rammp-alternative.yaml`:
 | `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`          | joint impedance for the lowering, the gripper opening and the release tilt                                   |
 | `flange_to_tip`                                            | 0.17955                                     | flange face to the closed fingertips (m)                                                                     |
 | `state_dir`                                                | /config/microwave_place                     | plans and the descent recordings                                                                             |
+| `take_approach_world`                                      | `/config/robot/curobo/world.yaml`           | take_out: scene loaded by the planner; requires platform, seat, person and floor layers                      |
+| `take_approach_speed_scale`                                | `0.3`                                       | take_out: fraction of cuRobo approach speed, finite and in (0, 1\]                                           |
 | `wrist_topics`                                             | the wrist camera's colour, depth, info      | take_out: the camera the rim is found on                                                                     |
 | `container_prompt`, `rim_prompt`                           | the container with its blue sleeve; its rim | take_out: SAM3's prompts                                                                                     |
 | `sam3_threshold`                                           | 0.5                                         | take_out: SAM3's score threshold                                                                             |
@@ -257,3 +269,22 @@ All are ROS parameters, with their defaults in `rammp-alternative.yaml`:
 | `impedance_in`, `impedance_speed`                          | 0.10, 0.08                                  | take_out: the last this far (m) of the line in in joint impedance, at this peak speed (m/s)                  |
 | `take_impedance_kq`, `take_impedance_zeta`                 | 400 x 4, 200 x 3; 0.7                       | take_out: that joint impedance (the driver caps kq at 400)                                                   |
 | `take_lift`                                                | 0.03                                        | take_out: straight up this far (m) after the close                                                           |
+
+## SAM3 debug view
+
+In Foxglove, add an Image panel on `/microwave_place/sam3_overlay` during a planning-only
+`take_out` goal (`execute: false`, `allow_execute: false`). Cyan shows the whole container mask;
+yellow dots mark its 50 nearest locally consistent depth samples. The banner shows the score and sample count.
+The image preserves the source color header. The topic stays advertised while idle, retaining
+the latest image with transient-local durability. In Foxglove use automatic or transient-local
+durability to receive the retained image after detection finishes. No rim query or frozen-query topic is used.
+
+The take-out grasp target is 5 cm deeper along the approach heading than before
+(`grasp_depth: 0.0`). `reach_in: 0.30` keeps the pre-grasp pose unchanged and
+extends the straight insertion by 5 cm (30 cm total); the last 10 cm remains in impedance.
+
+Depth filtering uses masked 5x5 neighborhoods: require at least five valid neighbors and
+reject samples farther from the local median than max(1 cm, 3 x 1.4826 x MAD).
+Then average the nearest 50 surviving samples per frame, refusing fewer than 50.
+The existing three-frame pairwise mask-IoU agreement and frame-point averaging remain unchanged.
+The overlay displays exactly the filtered samples used by the estimator.

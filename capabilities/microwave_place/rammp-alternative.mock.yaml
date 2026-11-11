@@ -8,9 +8,12 @@ container:
   image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/microwave_place:dev
   network_mode: host
   ipc: host
-  command: ["ros2", "launch", "microwave_place", "microwave_place.launch.py", "mock:=true"]
-# No `params:` here: they would need the node's executable as the command, and this fragment uses `ros2 launch` for mock:=true.
-publishes: [/microwave_place/status, /microwave_place/wrist_query_image]
+  command: ["/module_ws/install/microwave_place/lib/microwave_place/microwave_place_node"]
+params:
+  mock: true
+  take_approach_world: /config/robot/curobo/world.yaml
+  take_approach_speed_scale: 0.3
+publishes: [/microwave_place/status, /microwave_place/sam3_overlay]
 subscribes:
   - /tf
   - /tf_static
