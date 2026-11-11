@@ -341,3 +341,48 @@ def test_with_no_table_known_a_low_plan_is_not_judged(monkeypatch, tmp_path):
         pytest.skip("this bench world carries its own table")
     legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, DippingPlanner(q, low), say=lambda s: None)
     assert [leg.name for leg in legs] == ["home"]
+
+
+def test_a_waypoint_that_is_itself_under_the_table_is_not_a_way_home(monkeypatch, tmp_path):
+    # 2026-11-11, the robot's planner: judged leg by leg, a waypoint under the table is an end of both its legs
+    # and passed; six poses homed under the table through one
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+
+    class ThroughLow(Planner):
+        """HOME planned directly dips under the table; every waypoint leg ends at `low` instead."""
+
+        def __call__(self, at, name, q_goal):
+            leg = super().__call__(at, name, q_goal)
+            if name == "home-waypoint":
+                seq = [list(at.joints), low]
+                leg.goal_joints = list(low)
+            elif np.allclose(at.joints, low):
+                seq = [low, list(q_goal)]
+            else:
+                seq = [list(at.joints), low, list(q_goal)]
+            pts = [SimpleNamespace(positions=list(p)) for p in seq]
+            leg.traj = SimpleNamespace(joint_names=["arm_joint_%d" % i for i in range(1, 8)], points=pts)
+            return leg
+
+    with pytest.raises(RuntimeError, match=r"home through the waypoint \d+% of the way goes under the table"):
+        core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, ThroughLow(), say=lambda s: None)
+
+
+def test_where_no_straight_lift_plans_home_a_soft_step_higher_over_the_table_is_tried(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+
+    def no_lift(self, ctx, state):
+        raise RuntimeError("plan-free lift refused: a joint limit down the line")
+
+    monkeypatch.setattr(core.LiftFree, "plan", no_lift)
+    start = chain.nearest_solution(list(q), [0.6, 0.0, 0.36], DOWN)  # the tool 80 mm over the table
+    assert start is not None
+    ctx.client.live = list(start)
+    plan = DippingPlanner(start, low)
+    said = []
+    legs = core.home_any(ctx, core.PlanState(joints=list(start), chain=0), HOME, plan, say=said.append)
+    assert [leg.name for leg in legs] == ["home-rise", "home"]
+    rise = legs[0]
+    assert rise.compliant is True and rise.gains == core.GAINS_SOFT
+    assert chain.fk(rise.goal_joints)[1][2] >= 0.28 + core.HOME_RISES_M[0] - 1e-6
+    assert any("soft step up" in s for s in said)
