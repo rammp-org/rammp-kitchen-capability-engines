@@ -39,6 +39,10 @@ EXEMPT_LINKS = ("base_link", "shoulder_link")  # with or without the arm_ prefix
 # ESCAPE_OUT_M out, the way out ends there. Measured on flatbot (2026-11-09, the arm 8 in forward on
 # the chair, cuRobo planning the home from each end): of 101 physically clear starts inside the
 # padding, 88 got out and planned home.
+# Only from a start IN THE PADDING, never from one where a sphere stands in a box itself (deeper
+# than the padding): "never deeper" holds the deepest sphere alone, so from there another link
+# could go as deep, into the box. Such a start is refused (in_a_box), here and for any other
+# plan-free path (path_refusal): a deliberate limit, the arm is jogged clear by hand.
 ESCAPE_CLEAR_M = 0.010
 ESCAPE_OUT_M = 0.001
 ESCAPE_STEP_RAD = 0.02
@@ -229,11 +233,28 @@ class BodyModel:
         """(n,) the tool link's height in the base frame."""
         return self.chain.tool_z(Q, self.tool_link)
 
+    def in_a_box(self, depth_m):
+        """Why no plan-free step is taken from a start whose deepest sphere stands `depth_m` in the
+        padded boxes, or '': '' in the padding or out of it, the reason where the sphere is in a
+        box itself, past the padding. Every sphere stands at most as deep as the deepest, so from a
+        start in the padding a path that goes no deeper keeps every link out of the boxes."""
+        inside = float(depth_m) - self.padding_m
+        if inside <= 1e-9:
+            return ""
+        return (
+            f"the arm stands {1000 * inside:.0f} mm inside a chair or user box itself, past its "
+            f"{1000 * self.padding_m:.0f} mm of padding, and a plan-free step from there is not "
+            "held out of the box"
+        )
+
     def path_refusal(self, path):
         """Why the joint path `path` (k, J; its points close together) would take the arm into the
         padding, or '': from a start outside it, no point enters; from a start inside it, no point
-        is deeper than the start."""
+        is deeper than the start; a start in a box itself is refused (in_a_box)."""
         depth = self.depth(path)
+        boxed = self.in_a_box(depth[0])
+        if boxed:
+            return boxed
         allowed = max(float(depth[0]), 0.0) + 1e-6
         k = int(np.argmax(depth))
         if depth[k] > allowed:
@@ -245,8 +266,8 @@ class BodyModel:
 
     def escape(self, q0):
         """The way out of the padding from joint state `q0`: (path (k, J) from q0, why). `path` None
-        with `why` where there is none within ESCAPE_MAX_RAD a joint; a path of q0 alone where q0 is
-        already out of the padding."""
+        with `why` where there is none within ESCAPE_MAX_RAD a joint, or where q0 stands in a box
+        itself (in_a_box); a path of q0 alone where q0 is already out of the padding."""
         q0 = np.asarray(q0, float)
         J = len(q0)
         lo = np.full(J, -np.inf)
@@ -259,6 +280,9 @@ class BodyModel:
         q, d = q0.copy(), float(self.depth(q0)[0])
         if d <= 0.0:
             return np.array([q0]), ""
+        boxed = self.in_a_box(d)
+        if boxed:
+            return None, boxed
         start_mm = 1000.0 * d
         path = [q0.copy()]
         eye = np.eye(J) * FD_RAD

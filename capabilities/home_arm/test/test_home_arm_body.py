@@ -128,18 +128,80 @@ def test_a_start_clear_of_the_padding_needs_no_step(tmp_path, urdf_text):
     assert why == "" and len(path) == 1
 
 
-def test_where_every_way_out_goes_deeper_or_down_the_step_is_refused_saying_why(
-    tmp_path, urdf_text
-):
+def test_an_arm_inside_a_box_itself_is_not_stepped_out_of(tmp_path, urdf_text):
     probe = _model(tmp_path, urdf_text, [("far", (-2.0, 2.0, 0.2), (0.1, 0.1, 0.1))])
     C = probe._sphere_centres(np.atleast_2d(HOME))[0]
     lo, hi = C.min(axis=0), C.max(axis=0)
-    # one box round the whole arm: no 0.6 rad step gets it out
+    # one box round the whole arm: every sphere deep in the box itself, not in its padding
     box = ("everything", tuple((lo + hi) / 2), tuple(hi - lo + 0.4))
     model = _model(tmp_path, urdf_text, [box])
     path, why = model.escape(HOME)
+    assert path is None and "inside a chair or user box itself" in why
+
+
+class _Slides:
+    """A stand-in chain of two links, each a sphere's: link k slides along x by joint k, link b a
+    metre over link a (the tool)."""
+
+    root, limits = "base", [(None, None), (None, None)]
+
+    def has(self, link):
+        return link in ("a", "b")
+
+    def frames(self, Q, links):
+        Q = np.atleast_2d(np.asarray(Q, float))
+        out = {}
+        for link in links:
+            T = np.broadcast_to(np.eye(4), (len(Q), 4, 4)).copy()
+            T[:, 0, 3] = Q[:, "ab".index(link)]
+            T[:, 2, 3] = float("ab".index(link))
+            out[link] = T
+        return out
+
+    def tool_z(self, Q, link):
+        return self.frames(Q, [link])[link][:, 2, 3]
+
+
+def _walls(*padded, padding=0.02):
+    """A model of two 50 mm spheres (links a and b of _Slides) and the PADDED boxes `padded`
+    [(lo, hi)], each a wall across a's line."""
+    one = (np.zeros((1, 3)), np.array([0.05]))
+    lo = np.array([[x0, -1.0, -0.5] for x0, _ in padded])
+    hi = np.array([[x1, 1.0, 0.5] for _, x1 in padded])
+    names = [f"wall{k}" for k in range(len(padded))]
+    model = body.BodyModel("test", names, lo, hi, {"a": one, "b": one}, padding)
+    return model.place(_Slides(), "a")
+
+
+def test_where_every_way_out_goes_deeper_the_step_is_refused_saying_why():
+    # sphere a between two walls, 12 mm into the padding of each: either way is deeper into one
+    model = _walls((-1.0, -0.038), (0.038, 1.0))
+    assert model.depth([0.0, 0.0])[0] == pytest.approx(0.012)
+    path, why = model.escape([0.0, 0.0])
     assert path is None
     assert "inside the padding round the chair and user" in why and "goes deeper" in why
+
+
+def test_no_plan_free_step_from_a_start_that_stands_in_a_box_itself():
+    """ "Never deeper" holds the deepest sphere alone: from a start deeper than the padding another
+    link could be taken as deep, into the box. From a start in the padding no link can (every
+    sphere stands at most as deep as the deepest). So only a start in the padding is stepped out
+    of, and a start in a box itself is refused, for the step out and for any other plan-free
+    path."""
+    wall = (0.038, 1.0)  # padded: its own face 20 mm further, at 0.058
+    model = _walls(wall)
+    assert model.depth([0.0, 0.0])[0] == pytest.approx(0.012)  # a 12 mm into the padding
+    path, why = model.escape([0.0, 0.0])
+    assert path is not None and why == "" and model.depth(path[-1])[0] <= -body.ESCAPE_OUT_M
+    assert model.in_a_box(0.012) == "" and model.in_a_box(0.02) == ""
+    deep = [0.018, 0.0]  # a 30 mm into the padded wall: 10 mm into the wall itself
+    assert model.depth(deep)[0] == pytest.approx(0.030)
+    path, why = model.escape(deep)
+    assert path is None and "10 mm inside a chair or user box itself" in why
+    # ... and no other plan-free path either, even one that only backs out
+    out = np.array([deep, [0.008, 0.0], [-0.03, 0.0]])
+    assert "inside a chair or user box itself" in model.path_refusal(out)
+    assert model.path_refusal(out[1:]) == ""  # from 20 mm in, the padding's edge: allowed
 
 
 def test_a_path_from_outside_must_not_enter_the_padding_and_one_from_inside_not_go_deeper(

@@ -80,6 +80,10 @@ NOT_PLANNED = "plan_to_joints: "
 # ... and how the planner's own begins for a goal that arrives while it plans another's
 # (rammp-curobo planner_node: "planner busy — one plan at a time", the goal aborted unplanned)
 PLANNER_BUSY = "planner busy"
+# How self.arm's word begins for a plan the planner DID make and self.arm cannot use (not positions
+# and velocities of the arm's seven joints at every point): a planner for another arm or
+# interface, which asking again does not change.
+PLAN_UNUSABLE = NOT_PLANNED + "the plan is not positions and velocities"
 # Why go_home does not run under an orchestrator (execute's refusal, activate's reason)
 STANDALONE_ONLY = (
     "go_home runs standalone only (use_orchestrator:=false): the orchestrator dispatches it on "
@@ -135,8 +139,8 @@ class Capability(CapabilityEngine):
     # object. Under an orchestrator any goal the engine gets was sent to it directly and would
     # move the arm outside the orchestrator's arm lock: execute() refuses it (standalone_only) and
     # activate reports go_home unavailable. Standalone it takes no part in that lock at all, so
-    # it is kept out of profiles that run the orchestrator (docs/interface.md, "Orchestrator
-    # interface").
+    # it is kept out of profiles that run the orchestrator or anything else that commands the
+    # arm (docs/interface.md, "Orchestrator interface").
     perception_classes = []
     required_resources = ["arm"]
     actions = [
@@ -618,6 +622,11 @@ class Capability(CapabilityEngine):
             )
         plan = self.arm.plan_to_joints(goal, start)
         said = str(plan.message or "")
+        if not plan.success and said.startswith(PLAN_UNUSABLE):
+            # the planner answered, with a plan no goal can be made of: every further plan is alike
+            raise _Stop(
+                "plan_unusable", f"the planner's plan cannot be used ({said}): nothing moved"
+            )
         if not plan.success and said.startswith((NOT_PLANNED, PLANNER_BUSY)):
             # no planner to ask, or one busy with another's plan, is no word on the way home:
             # said as it is, and not asked again through every waypoint (each ask waits

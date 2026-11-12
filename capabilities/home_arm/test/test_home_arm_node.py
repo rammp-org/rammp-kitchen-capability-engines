@@ -551,6 +551,21 @@ def test_a_planner_busy_with_anothers_plan_is_unavailable_not_no_way_home():
     assert e.value.error_code == "planner_unavailable" and len(arm.planned) == 4 and arm.sent == []
 
 
+def test_a_plan_the_arm_cannot_use_is_plan_unusable_not_a_planner_that_did_not_answer():
+    """self.arm hands back a plan that is not positions and velocities of the arm's seven joints
+    as a failed plan whose message begins with the call's name too. The planner did answer, and
+    asking again gets the same: not planner_unavailable, recoverable (REVIEW_RULES U4)."""
+    unusable = (
+        "plan_to_joints: the plan is not positions and velocities of arm_joint_1..7 or "
+        "joint_1..7 at every point (its joints: ['shoulder_pan'])"
+    )
+    arm = Arm(answers=[lambda g, s: _plan(g, s, ok=False, message=unusable)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "plan_unusable" and not e.value.recoverable
+    assert "shoulder_pan" in str(e.value) and len(arm.planned) == 1 and arm.sent == []
+
+
 def test_an_arm_that_must_not_be_commanded_is_said_so_before_anything_is_planned():
     """An e-stopped arm (or one the driver's arbitration keeps from this engine) was read and
     planned for, up to a minute, and failed motion_failed only at the send (REVIEW_RULES U4). The

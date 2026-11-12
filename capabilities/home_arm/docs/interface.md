@@ -24,7 +24,11 @@ plain plan, and the action handles each before anything moves:
    there as from any start), the engine finds a short plan-free step out of the padding in joint
    space (never deeper, the tool never more than 5 mm lower than it started, no
    joint more than 0.6 rad), and plans from its end. Where there is none, the action fails
-   `start_in_padding` before anything moves. Where the files cannot be read, the
+   `start_in_padding` before anything moves. So it does where a sphere stands in
+   a box itself, deeper than the padding: the step holds only the deepest
+   sphere's depth, so from there another link could be taken as deep, into the
+   box. No plan-free step is taken from such a start (the one off a joint limit
+   neither, which then fails `near_limit`). Where the files cannot be read, the
    action goes on without them, and fails `body_model` only if the planner then
    refuses the start as in collision, or a joint stands too near its limit (the
    plan-free step off it could not be checked against the chair and user). With
@@ -131,9 +135,9 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `/home_arm/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/home_arm/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action    | Params                                                | Result payload                                                                                                                                                                                                                                                       |
-| --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s", "speed_scale"}`, with `"off_rad"` (how near the home the arm was read) once flown, or `{"home": true, "moved": false}` when already home; the mock answers with the same keys and `"mock": true` |
+| Action    | Params                                                | Result payload                                                                                                                                                                                                                                                                                                   |
+| --------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s", "speed_scale"}`, with `"off_rad"` (how near the home the arm was read) once flown, and `"dry_run": true` on a dry run; `{"home": true, "moved": false, "off_rad"}` when already home; the mock answers with the same keys and `"mock": true` |
 
 | Error code            | Recoverable | Meaning                                                                                                                                                                                                                                                     |
 | --------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -143,10 +147,11 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in \[0.01, 1\] (the driver rejects a goal sent at less than 0.01)                                                                                                                                       |
 | `arm_not_ready`       | yes         | The driver says the arm must not be commanded now (an e-stop; arbitration enforced, the arm another sender's or no token given; or no `/control_status` from it); nothing planned or sent. A dry run is not held to it                                      |
 | `body_model`          | no          | The driver's URDF cannot be read; or the planner's config cannot be read and it is needed: the planner refuses the start as in collision, or a joint is too near its limit (the step off it could not be checked against the chair and user); nothing moved |
-| `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                                                                                                                                           |
+| `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up, or the arm stands in a chair or user box itself, past its padding (no plan-free step is taken from there); nothing moved: jog it clear                                                                |
 | `near_limit`          | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                                                                                                                                   |
 | `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                                                                                                   |
 | `planner_unavailable` | yes         | The planner did not plan a request: not running, no result in time, or busy with another client's plan; nothing moved                                                                                                                                       |
+| `plan_unusable`       | no          | The planner answered with a plan that is not positions and velocities of the arm's seven joints at every point (a planner for another arm or interface); nothing moved                                                                                      |
 | `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved, or (found at a pause after the step clear) the way home not sent                                                                                                             |
 | `paused_too_long`     | yes         | A pause left the way home no room in the action's 100 s; nothing sent, or after the step clear the way home not sent: run it again                                                                                                                          |
 | `arm_moving`          | yes         | The arm moved while it was planned for, twice, or during a pause before a goal was sent; nothing sent, or after the step clear the way home not sent                                                                                                        |
@@ -171,7 +176,8 @@ home.
 Standalone, the engine takes no part in the orchestrator's arbitration at all: on
 a robot where an orchestrator runs, a goal sent to it still moves the arm outside
 that lock. So this engine (tier `experimental`) is to be kept out of profiles
-that run the orchestrator until the orchestrator can dispatch `go_home`. The
+that run the orchestrator, or anything else that commands the arm (teleop),
+until the orchestrator can dispatch `go_home` and hand it a control token. The
 driver's own arbitration still applies: where it is enforced, the engine, which
 carries no token, is refused before it plans (`arm_not_ready`).
 
