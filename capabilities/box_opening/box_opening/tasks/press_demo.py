@@ -1890,6 +1890,11 @@ def main():
             source=getattr(scene_fix, "source", "segmenter"),
             n_sightings=int(getattr(scene_fix, "n_sightings", 1)),
             rough=bool(getattr(scene_fix, "rough", False)),
+            # the box's height as this run measured it: the lid's top over the table it was read on (the model's
+            # dims.z only bounds it, scene_source.lid_band_off)
+            box_height_mm=None
+            if scene_fix.table_z_scene != scene_fix.table_z_scene
+            else round(1000.0 * (float(scene_fix.top_xyz[2]) - float(scene_fix.table_z_scene)), 1),
             table_z_scene=None
             if scene_fix.table_z_scene != scene_fix.table_z_scene
             else round(scene_fix.table_z_scene, 4),

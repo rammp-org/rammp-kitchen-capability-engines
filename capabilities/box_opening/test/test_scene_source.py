@@ -1781,14 +1781,15 @@ def test_a_table_read_above_the_boxs_foot_is_not_the_table():
     # a good table: the foot changes nothing, to the last digit
     plain = box_from_side_points(pts, uv, cap, None, model, SIDE_CAM)
     assert box_from_side_points(pts, uv, cap, None, model, SIDE_CAM, foot_box=whole)[3] == plain[3]
-    # the table (not the canister) read 45 mm high, pixel for pixel
+    # the table (not the canister) read 55 mm high, pixel for pixel: the top then stands under the lid band
+    # (LID_BELOW_M, 45 mm since 2026-11-12; flatbot's stood 52-63 mm under lid height)
     bad = pts.copy()
     # (the table behind the canister, which this scene does not hide, left where it is)
     seen = ~((uv[:, 0] >= whole[0]) & (uv[:, 0] <= whole[2]) & (uv[:, 1] >= whole[1]) & (uv[:, 1] <= whole[3]))
     flat = seen & (np.abs(pts[:, 2] - SIDE_TABLE) < 0.015)
-    bad[flat] = _read_along_its_ray(pts[flat], 0.045)
+    bad[flat] = _read_along_its_ray(pts[flat], 0.055)
     pose, why, _n, tz = box_from_side_points(bad, uv, cap, None, model, SIDE_CAM)
-    assert pose is None and "from lid height" in why and tz == pytest.approx(SIDE_TABLE + 0.045, abs=0.006)
+    assert pose is None and "from lid height" in why and tz == pytest.approx(SIDE_TABLE + 0.055, abs=0.006)
     pose, top, _n, tz = box_from_side_points(bad, uv, cap, None, model, SIDE_CAM, foot_box=whole)
     assert pose is not None, top
     assert tz == pytest.approx(SIDE_TABLE, abs=0.008) and pose.xyz[2] == tz
@@ -1798,7 +1799,7 @@ def test_a_table_read_above_the_boxs_foot_is_not_the_table():
     assert foot_table(pts, uv, short, SIDE_CAM) > SIDE_TABLE + FOOT_TABLE_SLACK_M
     assert box_from_side_points(pts, uv, cap, None, model, SIDE_CAM, foot_box=short)[3] == plain[3]
     # a surveyed table is left alone, and a box the frame cuts at its bottom has no foot
-    assert box_from_side_points(bad, uv, cap, SIDE_TABLE + 0.045, model, SIDE_CAM, foot_box=whole)[0] is None
+    assert box_from_side_points(bad, uv, cap, SIDE_TABLE + 0.055, model, SIDE_CAM, foot_box=whole)[0] is None
     assert np.isnan(foot_table(pts, uv, (whole[0], whole[1], whole[2], 399.0), SIDE_CAM, image_wh=(640, 400)))
 
 
@@ -1988,3 +1989,37 @@ def test_only_a_box_cut_at_one_side_and_its_foot_is_a_corner_cut():
     assert ss.side_and_foot_cut(("left", "right", "bottom"), R) is None  # no uncut side to stand the circle against
     hung = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])  # the image's left edge lies down
     assert ss.side_and_foot_cut(("left", "bottom"), hung) is None
+
+
+def test_the_lids_height_is_the_runs_own_measurement_the_models_only_its_loose_bound():
+    """Flatbot: ankou_pink.yaml says the lid stands 121 mm over the table; the scene camera read it 88-112 mm on
+    the recorded frames of 10-22..11-04 and 94-99 mm on the four full runs of 11-02/11-03. The fix carries what
+    it measured (its top, the table it was read on, SceneFix.height_m); dims.z only bounds what may be this
+    container's lid, LID_BAND_M over it and LID_BELOW_M under."""
+    from box_opening.perception import scene_source as ss
+
+    model = ContainerModel.load(PINK)
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2], SIDE_TABLE, model) is None
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] + ss.LID_BAND_M - 0.001, SIDE_TABLE, model) is None
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] - ss.LID_BELOW_M + 0.001, SIDE_TABLE, model) is None
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] + ss.LID_BAND_M + 0.004, SIDE_TABLE, model) == pytest.approx(
+        ss.LID_BAND_M + 0.004
+    )
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] - ss.LID_BELOW_M - 0.004, SIDE_TABLE, model) == pytest.approx(
+        -ss.LID_BELOW_M - 0.004
+    )
+    # a canister 22 mm shorter than the yaml's, as flatbot's measures: found, and at the height it stands at
+    short = float(model.dims[2]) - 0.022
+    pts, uv, canister, _tall = _side_scene(np.random.default_rng(4), height=short)
+    bbox = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + short - 0.025]))
+    pose, top, _n, table_z = ss.box_from_side_points(pts, uv, bbox, None, model, SIDE_CAM)
+    assert pose is not None, top
+    assert top[2] - table_z == pytest.approx(short, abs=0.006)  # the measurement, not table + dims.z
+    fix = ss.SceneFix(pose=pose, top_xyz=top, n_points=1, score=0.5, table_z_scene=table_z)
+    assert fix.height_m == pytest.approx(short, abs=0.006)
+    # one that stands under the band is not this container's lid (the holder's brim, a lower bowl)
+    low = float(model.dims[2]) - ss.LID_BELOW_M - 0.012
+    pts, uv, canister, _tall = _side_scene(np.random.default_rng(4), height=low)
+    bbox = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + low - 0.025]))
+    pose, why, _n, _tz = ss.box_from_side_points(pts, uv, bbox, None, model, SIDE_CAM)
+    assert pose is None and "from lid height" in why and "its top is -" in why

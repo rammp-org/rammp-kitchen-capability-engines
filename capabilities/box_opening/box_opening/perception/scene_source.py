@@ -39,11 +39,31 @@ from box_opening.perception.d405 import stable_fix
 from box_opening.perception.depth_source import container_pose_from_top
 from box_opening.perception.planes import fit_plane
 
-LID_BAND_M = 0.035  # the top must sit this close to table + dims.z
+# The lid's height is MEASURED, every run: the fix's top over the table it was read on (SceneFix.height_m, the run
+# record's box_height_mm). The model's dims.z is no measure of it: ankou_pink.yaml's 121 mm stands against the
+# 88-112 mm of 85 recorded frames of 10-22..11-04 (median 99), the 94-99 of the four full runs of 11-02/11-03 and
+# the 118-124 of the white table's frames of 11-10/11-11 (over the foot's table). It only bounds, loosely, what may
+# be this container's lid: a top no more than LID_BAND_M over table + dims.z and no more than LID_BELOW_M under it
+# (lid_band_off). Under it the bound was the same 35 mm until 2026-11-12: the lowest good frame read 2 mm inside
+# it, the 11-10 17:45 box stood just outside it over a table the ring read high (NO BOX), and 32 re-cut boxes of
+# the edge sweep read 35-45 mm under (study/demo/scenebox: 28 of them within 15 mm of their uncut fix, none over
+# 30). 45 mm, the wrist finder's own LID_BELOW_M, takes those and moves no fix that passed before; 55 adds one
+# more and moves one good fix past 15 mm. A box that holds only the holder's brim under the lid (13-34 mm under the
+# lid's top) is refused by the lid that stands over it (PARTIAL_OVER_M), not by this band.
+LID_BAND_M = 0.035
+LID_BELOW_M = 0.045
 TOP_SLAB_M = 0.015  # the lid top: points within this of the highest surface
 TOP_PCTL = 97  # "highest" as a percentile, so flying pixels do not define it
 MIN_LID_POINTS = 40
 YAW_MIN_POINTS = 150  # fewer than this and the min-area rect's yaw is noise
+
+
+def lid_band_off(top_z, table_z, model):
+    """How far (m, signed) the measured top `top_z` stands from table + dims.z where that is outside the band a
+    lid of `model` may stand in over the table at `table_z` (LID_BAND_M over, LID_BELOW_M under), or None inside
+    it. What is refused is the measurement against the model's loose bound; inside it the measurement stands."""
+    off = float(top_z) - float(table_z) - float(model.dims[2])
+    return off if off > LID_BAND_M or off < -LID_BELOW_M else None
 
 
 def fitted_yaw(xy, n, model):
@@ -98,6 +118,12 @@ class SceneFix:
     # pose, which takes a prior this far off, says where its button is
     rough: bool = False
 
+    @property
+    def height_m(self):
+        """The lid's top over the table it stands on, as this fix measured both: the box's height this run (nan
+        with no table read; a rough fix's top is its own, but its place is not a measure of anything)."""
+        return float(self.top_xyz[2]) - float(self.table_z_scene)
+
 
 def robust_yaw(xy):
     """The square's orientation, mod 90 deg, as the angle whose axis-aligned
@@ -132,7 +158,7 @@ def box_from_scene_points(pts_base, uv, bbox, table_z, model):
         return None, "no depth inside the box", 0
     lid_z = float(table_z) + float(model.dims[2])
     z = pts_base[:, 2]
-    band = inside & (np.abs(z - lid_z) < LID_BAND_M)
+    band = inside & (z - lid_z < LID_BAND_M) & (z - lid_z > -LID_BELOW_M)
     if band.sum() < MIN_LID_POINTS:
         return (
             None,
@@ -391,12 +417,12 @@ def box_from_side_points(
     if n < MIN_LID_POINTS:
         return None, "only %d depth points above the table (need %d)" % (n, MIN_LID_POINTS), n, table_z
     top_z = float(np.percentile(obj[:, 2], TOP_PCTL))
-    lid_z = float(table_z) + float(model.dims[2])
-    if abs(top_z - lid_z) > LID_BAND_M:
+    off = lid_band_off(top_z, table_z, model)
+    if off is not None:
         return (
             None,
             "its top is %+.0f mm from lid height (the table at %.3f + %.0f mm)"
-            % (1000 * (top_z - lid_z), table_z, 1000 * model.dims[2]),
+            % (1000 * off, table_z, 1000 * model.dims[2]),
             n,
             table_z,
         )
@@ -861,12 +887,12 @@ def rough_from_cut_box(pts_base, uv, bbox, edges, table_z, model, cam_xyz, cam_R
             float(table_z),
         )
     top_z = float(np.percentile(obj[:, 2], TOP_PCTL))
-    lid_z = float(table_z) + float(model.dims[2])
-    if abs(top_z - lid_z) > LID_BAND_M:
+    off = lid_band_off(top_z, table_z, model)
+    if off is not None:
         return (
             None,
             "its top is %+.0f mm from lid height (the table at %.3f + %.0f mm)"
-            % (1000 * (top_z - lid_z), table_z, 1000 * model.dims[2]),
+            % (1000 * off, table_z, 1000 * model.dims[2]),
             len(obj),
             float(table_z),
         )
