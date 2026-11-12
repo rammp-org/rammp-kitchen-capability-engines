@@ -1169,11 +1169,18 @@ def test_a_box_the_press_moved_is_not_gripped(ctx, monkeypatch, tmp_path, capsys
     assert "STOP: the press MOVED the box 20 mm" in capsys.readouterr().out
 
 
-def test_a_box_the_wrist_no_longer_finds_after_the_press_is_not_pressed_again(ctx, monkeypatch, tmp_path, capsys):
+def test_a_button_the_wrist_no_longer_finds_after_the_press_is_gripped_for_not_pressed_again(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """2026-11-12, flatbot, twice: the button popped, the finder (a flat disc at the lid's height) lost it once it
+    stood up, and both runs stopped there with the box open. Where it was pressed is known and the fingers tell a
+    knob from air: the run goes on to the grip, and never presses a knob it could not judge."""
     code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), None, None])
-    assert code == 1 and rec.events[-3:] == ["aim:reach-after", "aim:reach-after", "home"]
     assert rec.events.count("depth:press") == 1
-    assert "the knob is not judged" in capsys.readouterr().out
+    after = rec.events[rec.events.index("aim:reach-after") :]
+    assert after[:2] == ["aim:reach-after", "aim:reach-after"] and "grip:close" in after, rec.events
+    assert code == 0 and rec.events[-1] == "home"
+    assert "the knob is not judged after press 1" in capsys.readouterr().out
 
 
 def test_an_open_box_has_its_lid_taken_off_unpressed(ctx, monkeypatch, tmp_path, capsys):
@@ -1320,11 +1327,11 @@ def _home_plans(monkeypatch, refuse=()):
     "aims, presses, grip_way",
     [
         ([(BUTTON, 0.4), (MOVED, 9.0)], 1, True),
-        ([(BUTTON, 0.4), None, None], 1, True),
         (NOT_UP_TWICE, 2, True),
         ([(BUTTON, 0.4), (UP, 9.0)], 1, False),
     ],
-    ids=["the box moved", "the box not found", "not up after the second press", "no way down to the knob"],
+    # (a button not found after the press is no stop since 2026-11-12: the run goes on to the grip)
+    ids=["the box moved", "not up after the second press", "no way down to the knob"],
 )
 def test_a_stop_at_the_look_pose_flies_the_home_planned_while_the_way_back_flew(
     ctx, monkeypatch, tmp_path, aims, presses, grip_way

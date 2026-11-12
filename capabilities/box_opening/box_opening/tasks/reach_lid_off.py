@@ -1177,11 +1177,10 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
         log.info(
             "[press_demo] AFTER PRESS %d: the wrist does not find the button from the look pose (%s)" % (press, status)
         )
-        return KnobLook(
-            False,
-            status=status,
-            stop="the wrist does not find the box after the press (%s) — the knob is " "not judged" % status,
-        )
+        # Not a stop (2026-11-12, flatbot, twice: the button popped and the finder, which looks for a flat disc at
+        # the lid's height, lost it once it stood up, its depth scattered 59 mm; both runs ended here with the box
+        # open). Where it was pressed is known, and the fingers tell a knob from air: the run goes on to the grip.
+        return KnobLook(False, status=status)
     got, up, measured = last
     shift = rp.judge_box_moved(button, got[0])
     lid_after = rp._lid_z(measured[2], up)
@@ -2139,6 +2138,13 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
             _note_frames(ctx, popped=bool(knob.popped) if knob.found else None)
             if knob.stop is not None:
                 return end(_stop_home(ctx, cfg, runner, knob.stop))
+            if not knob.found:
+                log.info(
+                    "[press_demo] the knob is not judged after press %d (the wrist does not find the button): going "
+                    "on to the grip where the press was aimed — the fingers close on a knob that is up, or on air"
+                    % press
+                )
+                break
             if knob.popped:
                 break
             if knob.up_mm is None:
