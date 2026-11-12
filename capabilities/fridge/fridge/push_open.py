@@ -36,6 +36,7 @@ from .motion import load_door, opened, shifted
 from .world import FridgeModel, hand_reach
 
 NEXT_STEP = ""  # what the person does next, said where the goal was sent (the node reads it): the wheelchair move
+NEXT_MOVE = 0.0  # ... and that move (m, + back), for the UI's prompt; 0: none asked for
 
 
 def hand_quat(df, deg, approach_deg, y_up):
@@ -298,7 +299,7 @@ class PushOpen:
         again from where the arm is (else the plan checked before the swing, if the arm is where it starts), then off the
         bar, round the door and the push as ONE motion under joint impedance. With a wheelchair move: the back-off,
         then the move (driven, or asked for)."""
-        global NEXT_STEP
+        global NEXT_STEP, NEXT_MOVE
         say("\n===== off the handle, round the door, push further open =====")
         door = load_door()
         deg0 = float(door["door_open_deg"])
@@ -323,6 +324,7 @@ class PushOpen:
             save_door_geometry(push_after_chair_move=float(moved))
             return push_after_chair_move(ai, planner, True, self.chair_dir)
         save_door_geometry(push_after_chair_move=float(move))
+        NEXT_MOVE = float(move)
         NEXT_STEP = (
             f"Pull done and the hand is off the handle. {move_chair(move)}, then send the open with execute true and "
             "chair_moved true to push the door open."

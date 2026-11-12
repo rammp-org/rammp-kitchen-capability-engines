@@ -782,7 +782,7 @@ def run(
     in the arm's frame. `drive_chair` (the goal's drive_base: base_drive.move_chair): the push-open's wheelchair move is
     driven by the base within this goal, not asked for. Returns True when it finished (or the dry run passed); raises
     Refused."""
-    P.NEXT_STEP = ""
+    P.NEXT_STEP, P.NEXT_MOVE = "", 0.0
 
     def task():
         global LAST_PLAN

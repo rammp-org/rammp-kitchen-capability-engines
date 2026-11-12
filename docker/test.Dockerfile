@@ -1,5 +1,5 @@
-# Test image for self.arm: x86 ROS 2 Humble with the arm/base/common/curobo/orchestrator
-# interfaces, the pure-Python deps, and the robot fixtures. It is NOT a production
+# Test image for self.arm: x86 ROS 2 Humble with the arm/base/common/curobo/orchestrator/
+# ui_bridge interfaces, the pure-Python deps, and the robot fixtures. It is NOT a production
 # image (those are arm64, FROM rammp-base); it only has to speak the same messages.
 # The repo is mounted at /repo at run time, so editing Python never needs a rebuild:
 #   make test-arm [ARGS=...]
@@ -36,7 +36,8 @@ WORKDIR /ws
 RUN mkdir src \
     && fetch-commit rammp-org/rammp-interfaces-ros2 ${INTERFACES_REF} /tmp/interfaces \
     && cp -r /tmp/interfaces/rammp_arm_interfaces /tmp/interfaces/rammp_base_interfaces \
-        /tmp/interfaces/rammp_common_interfaces /tmp/interfaces/rammp_orchestrator_interfaces src/ \
+        /tmp/interfaces/rammp_common_interfaces /tmp/interfaces/rammp_orchestrator_interfaces \
+        /tmp/interfaces/rammp_ui_bridge_interfaces src/ \
     && fetch-commit rammp-org/RAMMP-CuRobo ${CUROBO_REF} /tmp/curobo \
     && cp -r /tmp/curobo/rammp_curobo_interfaces src/ \
     && fetch-commit rammp-org/kinova-gen3-ros2 ${KINOVA_REF} /tmp/kinova \

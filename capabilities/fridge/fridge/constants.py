@@ -276,6 +276,12 @@ PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  #
 PLACEMENT_CELLS = MOUNTS[0].get("placement_cells")  # ... and this: None, the box above is the placement
 PLACEMENT_YAW_DEG = (-10.0, 10.0)
 
+# The UI's panels (node.py's UI_ACTIONS): the goal keeps the arm, gripper, base and the UI while one waits, so both
+# waits are bounded. A notice (Done: done, or failed) waits this long before the goal ends anyway ...
+UI_NOTICE_TIMEOUT_S = 30.0
+# ... and a question (Continue after a wheelchair move, or try again) this long before the goal fails no_answer
+UI_PROMPT_TIMEOUT_S = 600.0
+
 
 def configure(data_dir, mount_tilt_deg=0):
     """Point door_common's paths at `data_dir`, name the appliance and pick the mount's placement. No door-size

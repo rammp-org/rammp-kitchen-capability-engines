@@ -60,6 +60,38 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   do. The names come from the driver's source: if the camera's differ, set the `wrist_infra*_topic` parameters. After a
   run the console should say `M stereo pairs` with M close to N; 0 means nothing was recorded.
 
+## UI
+
+The fridge's buttons on the UI (`docs/interface.md`, "UI buttons"). Needs Unreal running and `~/ros2_ws` built with
+rammp-orchestrator (`feat/orchestrator`) and rammp-UI-bridge (`init`).
+
+```bash
+# U1-U3, each: Cyclone on eno1, as T2 (Fast DDS, or another interface, doesn't see the fridge node)
+source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>'
+ros2 run rammp_ui_bridge ui_bridge_node                    # U1
+ros2 run rammp_orchestrator orchestrator_node              # U2
+ros2 run rammp_orchestrator interactive_perception_node    # U3, then type: add fridge_1 fridge
+```
+
+T1 as in Set up; T2 as in Set up but `-p use_orchestrator:=true`. The buttons move the arm (`allow_execute:=true`);
+first try them with `-p mock:=true`: nothing moves and each ends "Mock: ... No arm motion."
+
+In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doing, then a panel with **Done**.
+
+- **Go to Fridge** → "The arm is in front of the fridge."
+- **Open Fridge Door** → "Fridge door opened." If the push needs it, first: "Move your wheelchair straight back ...
+  about N cm ..." Move it, press **Continue** (or **Stop**).
+- **Close Fridge Door** (grip the container first, as in Close step 1) → "Fridge door closed." It may first ask for a
+  wheelchair move, as the open does. Move the wheelchair forward again after.
+- **... (wheelchair drives)**: the same, but the base drives the move at 0.03 m/s (Arm + Drive Base, "Before").
+- A refusal: "Couldn't ... Press <button> to try again." with that button and **Stop**. Any other failure: an error
+  panel with **Done**; after a failed open, if it says the hand may still be holding the handle, send `release_only`.
+
+No panels: T2 logs `standalone/no session token` (check `use_orchestrator:=true`) or
+`request_user_input server unavailable` (U1 down, or not on Cyclone).
+
 ## How to stop the robot
 
 | How                                      | Effect                                                                   |

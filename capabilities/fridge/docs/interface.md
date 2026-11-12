@@ -81,12 +81,14 @@ The camera subscriptions exist only while an action runs; the engine destroys th
 
 Served under `/fridge/`, types from `rammp_orchestrator_interfaces`:
 
-| Name                     | Type                   | Meaning                                       |
-| ------------------------ | ---------------------- | --------------------------------------------- |
-| `/fridge/activate`       | `srv/Activate`         | Which actions are available for the selection |
-| `/fridge/execute_action` | `action/ExecuteAction` | Run an action; progress as feedback           |
-| `/fridge/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
-| `/fridge/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
+| Name                      | Type                                         | Meaning                                                               |
+| ------------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
+| `/fridge/activate`        | `srv/Activate`                               | Which actions are available for the selection                         |
+| `/fridge/execute_action`  | `action/ExecuteAction`                       | Run an action; progress as feedback                                   |
+| `/fridge/control`         | `srv/Control`                                | Pause, resume, cancel the running action                              |
+| `/fridge/hibernate`       | `srv/Hibernate`                              | Drop the selection                                                    |
+| `/fridge/acquire_control` | `rammp_common_interfaces/srv/AcquireControl` | The orchestrator pushes the execution's token (UI panels, `self.arm`) |
+| `/fridge/release_control` | `rammp_common_interfaces/srv/ReleaseControl` | Drops it                                                              |
 
 | Action        | Params                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Result payload                                     |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
@@ -117,6 +119,38 @@ doesn't see it) and lets it push. The close carries it exactly when the gripper 
 Failures: `refused` (a check failed; the message says which and the arm holds), `stopped`
 (a motion stopped short), `bad_params`. On an executed success it marks the object `opened`
 (true after `open`, false after `close`). Nothing measures whether the door shut: watch it.
+
+### UI buttons
+
+The UI is offered only these (`availability`); `go_to_start` / `open` / `close` stay callable directly. One press runs
+the whole action (`UI_ACTIONS` in `node.py`), executing: `allow_execute` must be true on hardware (else a panel says
+it is off). Panels go through the UI bridge (`ctx.update_user_panel()`; JSON in `docs/UI_JSON_SCHEMA.md`).
+
+| Action id             | Button                                | Runs                                               |
+| --------------------- | ------------------------------------- | -------------------------------------------------- |
+| `go_to_start_ui`      | Go to Fridge                          | `go_to_start` (to `start_joints_deg`), speed 0.7   |
+| `open_door_ui`        | Open Fridge Door                      | `open`, speed 0.2; a wheelchair move is asked for  |
+| `open_door_drive_ui`  | Open Fridge Door (wheelchair drives)  | `open`, speed 0.2, `drive_base` at 0.03 m/s        |
+| `close_door_ui`       | Close Fridge Door                     | `close`, speed 0.7; a wheelchair move is asked for |
+| `close_door_drive_ui` | Close Fridge Door (wheelchair drives) | `close`, speed 0.7, `drive_base` at 0.03 m/s       |
+
+Panels, in order:
+
+- While it runs: what it is doing (no buttons).
+- A wheelchair move (the open's push, or the close's planned move; not on the driving buttons): "Move your wheelchair
+  straight back, away from the fridge, about N cm, without turning it. Then press Continue ..." with **Continue**
+  (runs the rest with `chair_moved`) and **Stop**.
+- A recoverable refusal (`refused`, the hand not on the handle): the reason and the same button to try again, and
+  **Stop**.
+- The end: done ("Fridge door opened." ...; in mock "Mock: ... No arm motion.") or failed (error-styled, the reason
+  in plain words; after an open that stopped short or refused holding the handle, "The hand may still be holding the
+  handle."), with
+  **Done**. The full message stays in the log.
+
+Done waits at most `UI_NOTICE_TIMEOUT_S` (30 s) and a question `UI_PROMPT_TIMEOUT_S` (600 s; then `no_answer`):
+the goal keeps the arm, gripper and base meanwhile. **Stop** fails the goal `stopped_by_user`. A dropped question is
+sent again. With no UI session (no token) nothing is shown or waited for, and a move or retry ends the goal as the
+direct action would.
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
@@ -204,6 +238,7 @@ passes them as a params file.
 | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `use_orchestrator`                                                                               | `true`                                                                                                                                               | `false` runs standalone: no registration, drive it by CLI                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `mock`                                                                                           | `false`                                                                                                                                              | `true` skips hardware (the mock alternative sets it)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `ui_bridge_node_name`                                                                            | `ui_bridge_node`                                                                                                                                     | The UI bridge node the UI buttons' panels go to (`/<name>/request_user_input`)                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `allow_execute`                                                                                  | `false`                                                                                                                                              | `true` lets execute goals move the arm. Attended runs only                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `data_dir`                                                                                       | `/fridge_data`                                                                                                                                       | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `color_topic`                                                                                    | `/wrist_camera/color/image_raw`                                                                                                                      | Wrist colour image                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
