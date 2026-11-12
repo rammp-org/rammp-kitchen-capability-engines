@@ -10,6 +10,7 @@ container:
   ipc: host
   command: ["/module_ws/install/microwave_place/lib/microwave_place/microwave_place_node"]
 params:
+  ui_bridge_node_name: ui_bridge_node
   record_bag: true
   bag_frame_hz: 1.0
   bag_state_hz: 25.0

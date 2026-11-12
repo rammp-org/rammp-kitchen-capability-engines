@@ -181,11 +181,12 @@ def _json_default(o):
 
 class Capability(CapabilityEngine):
     display_name = "Place in microwave"
-    perception_classes = []
+    perception_classes = ["microwave"]
     required_resources = ["arm", "gripper"]
     actions = [
         Action("place", "Place the held container in the open microwave", params_schema=PLACE),
         Action("take_out", "Take the container out of the open microwave", params_schema=EXECUTE),
+        Action("retrieve", "Retrieve Tupperware from Microwave"),
     ]
 
     def __init__(self, **node_kwargs):
@@ -215,6 +216,8 @@ class Capability(CapabilityEngine):
         )
 
     def execute(self, action_id, params, ctx):
+        if action_id == "retrieve":
+            return self._retrieve(ctx)
         if not self.cfg["record_bag"]:
             return self._execute_behavior(action_id, params, ctx)
         # Lazy imports keep the pure planning helpers usable without ROS bag tools.
@@ -246,6 +249,64 @@ class Capability(CapabilityEngine):
             result = self._execute_behavior(action_id, params, ctx)
             recorder.result = json.loads(json.dumps(result, default=_json_default))
         return {**result, "bag_path": str(recorder.path), "recording_errors": list(recorder.errors)}
+
+    def _retrieve(self, ctx):
+        """One UI action runs the complete take-out; only HOME failures offer a retry."""
+        if not self.mock and not self.cfg["allow_execute"]:
+            message = "Retrieval is disabled: launch with allow_execute:=true for an attended run."
+            self._retrieval_notice(ctx, message)
+            raise EngineError("execution_disabled", message, recoverable=True)
+        while True:
+            ctx.checkpoint()
+            self._retrieval_panel(ctx, "Moving the arm home, then retrieving the tupperware.")
+            try:
+                # Preserve recording, execution gates and the existing uninterrupted motion sequence.
+                result = self.execute("take_out", {"execute": True}, ctx)
+            except EngineError as error:
+                if error.error_code != "home_failed":
+                    self._retrieval_notice(ctx, f"Retrieval failed: {error}")
+                    raise
+                self.get_logger().error(f"retrieval HOME failed: {error}")
+                panel = {
+                    "title": "Unable to move arm home",
+                    "message": f"{error}. Press Retrieve Tupperware from Microwave to try again.",
+                    "buttons": [{"button_id": "retrieve", "label": "Retrieve Tupperware from Microwave"}],
+                }
+                # Standalone has no UI session: fail recoverably instead of waiting for an impossible tap.
+                if not ctx.update_user_panel(panel_json=panel):
+                    raise
+                self._wait_for_button(ctx, "retrieve", panel)
+                continue
+            message = "Mock retrieval complete; no arm motion." if result.get("mock") else "Tupperware retrieved."
+            self._retrieval_notice(ctx, message)
+            return result
+
+    def _retrieval_notice(self, ctx, message):
+        panel = {
+            "title": "Microwave retrieval",
+            "message": message,
+            "buttons": [{"button_id": "done", "label": "Done"}],
+        }
+        if ctx.update_user_panel(panel_json=panel):
+            self._wait_for_button(ctx, "done", panel)
+
+    @staticmethod
+    def _retrieval_panel(ctx, message):
+        ctx.update_user_panel(panel_json={"title": "Microwave retrieval", "message": message, "buttons": []})
+
+    @staticmethod
+    def _wait_for_button(ctx, button_id, panel):
+        refresh_at = time.monotonic() + 1.0
+        while True:
+            ctx.checkpoint()
+            event = ctx.poll_ui_event()
+            if event and event.get("type") == "button" and event.get("button_id") == button_id:
+                return
+            # Reopen after a rejected/aborted UI goal or a temporary bridge outage.
+            if time.monotonic() >= refresh_at:
+                ctx.update_user_panel(panel_json=panel)
+                refresh_at = time.monotonic() + 1.0
+            time.sleep(0.1)
 
     def _execute_behavior(self, action_id, params, ctx):
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
@@ -305,8 +366,14 @@ class Capability(CapabilityEngine):
     def _take_out(self, model, execute, ctx, log):
         """Find the nearest container-mask point, approach, insert, close, lift and retract."""
         c = self.cfg
-        world_message = take_out.set_approach_world(self.arm, c["take_approach_world"], log)
-        q0 = take_out.prepare_home(self.arm, c["take_home_joints"], execute, c["take_approach_speed_scale"], ctx, log)
+        ctx.checkpoint()
+        try:
+            world_message = take_out.set_approach_world(self.arm, c["take_approach_world"], log)
+            q0 = take_out.prepare_home(
+                self.arm, c["take_home_joints"], execute, c["take_approach_speed_scale"], ctx, log
+            )
+        except place_motion.Refused as error:
+            raise EngineError("home_failed", str(error), recoverable=True) from error
         ctx.progress("detect", 0.0)
         wrist = rim_detection.WristCamera(self, rammp_arm.FRAME, list(c["wrist_topics"]))
         rim = rim_detection.detect_container(

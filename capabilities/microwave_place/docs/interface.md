@@ -58,6 +58,21 @@ update or restart the running planner.
 
 ## Orchestrator interface
 
+`retrieve` is the UI action **Retrieve Tupperware from Microwave**. It runs HOME
+then the entire take-out with no intermediate prompts and no world-state reads or
+writes. It requests execution; `allow_execute` must be true on hardware. HOME
+failures show their reason and restore the same button; retry waits for an explicit
+tap. Later failures show an error without retrying the grasp. Success/error notices
+remain until Done or cancellation. Each attempt uses the existing run recorder.
+The direct `take_out` dry-run/execute API is unchanged except that HOME refusals
+now have recoverable error code `home_failed`.
+
+The engine uses the counter example's direct UI bridge API, including the
+orchestrator-pushed execution token. `ui_bridge_node_name` (default
+`ui_bridge_node`) selects `/ui_bridge_node/request_user_input` and its `/update`
+service. No UI session means no panel; HOME failure returns recoverably. JSON
+shapes are documented in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
+
 Served under `/microwave_place/`, types from `rammp_orchestrator_interfaces`:
 
 | Name                                                       | Default                                       | Meaning                                                                                                                             |

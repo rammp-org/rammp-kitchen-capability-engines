@@ -205,6 +205,45 @@ view of the container and enough locally consistent depth samples inside its mas
 
 ## Actions
 
+The UI action `retrieve` is labelled **Retrieve Tupperware from Microwave**.
+One press runs the full existing take-out sequence, beginning with the configured
+HOME viewing pose, without intermediate confirmations or world-state dependencies.
+It requests execution automatically; the node must still have `allow_execute:=true`
+for an attended hardware run. `mock:=true` exercises the panel without arm motion.
+
+If HOME planning, collision-world setup or endpoint verification fails, the panel
+shows the reason and offers **Retrieve Tupperware from Microwave** again. It waits
+for that press before starting a fresh recorded attempt; detection and grasp do not
+start until HOME succeeds. Later retrieval errors are displayed without restarting
+the grasp. Done dismisses the final success/error notice; orchestrator cancellation
+works while waiting. The existing `take_out` action remains available for direct
+execution and dry runs.
+
+This uses `ctx.update_user_panel()` / `ctx.poll_ui_event()` from the
+`feat/engine_update` counter example. Run with the orchestrator and UI bridge,
+which must grant the same execution token to the engine, arm and bridge. The UI
+interface package is pinned in the Dockerfile; native builds need
+`rammp_ui_bridge_interfaces` in their workspace. `ui_bridge_node_name` defaults
+to `ui_bridge_node`. Without a UI session, HOME failures return a recoverable
+`home_failed` result instead of waiting for a button event.
+
+```bash
+make action CAP=microwave_place ACTION=retrieve
+```
+
+For the four-terminal Unreal panel demo, keep the UI bridge and orchestrator
+commands. In interactive perception enter `add microwave_1 microwave`, and
+replace the counter launch with:
+
+```bash
+ros2 launch microwave_place microwave_place.launch.py mock:=true state_dir:="$HOME/.microwave_place"
+```
+
+Select **microwave_1 → Retrieve Tupperware from Microwave** in Unreal. Mock mode
+shows completion without planning or moving the arm; it does not simulate HOME
+planning failure. Real retrieval requires the arm driver, cuRobo, wrist camera,
+TF and SAM3 stack in addition to these four demo terminals.
+
 | Action     | Params            | What it does                                                                                                      |
 | ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `place`    | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it                        |

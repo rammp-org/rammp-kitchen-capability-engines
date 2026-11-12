@@ -32,6 +32,7 @@ container:
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
 params:
+  ui_bridge_node_name: ui_bridge_node
   record_bag: true
   bag_frame_hz: 1.0
   bag_state_hz: 25.0

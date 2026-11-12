@@ -8,17 +8,17 @@
     ros2 launch microwave_place microwave_place.launch.py mock:=true               # no hardware
 """
 
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
     flags = ("use_orchestrator", "true"), ("mock", "false"), ("allow_execute", "false")
-    strings = ("mock_urdf", ""), ("state_dir", "/config/microwave_place")
+    strings = ("mock_urdf", ""), ("state_dir", "/config/microwave_place"), ("ui_bridge_node_name", "ui_bridge_node")
     return LaunchDescription(
         [DeclareLaunchArgument(name, default_value=default) for name, default in flags + strings]
         + [
@@ -29,7 +29,10 @@ def generate_launch_description():
                 parameters=[{name: ParameterValue(LaunchConfiguration(name), value_type=bool)} for name, _ in flags]
                 # arm.mock_urdf: the URDF make_sim() loads in mock runs ("" loads none)
                 + [{"arm.mock_urdf": ParameterValue(LaunchConfiguration("mock_urdf"), value_type=str)}]
-                + [{"state_dir": ParameterValue(LaunchConfiguration("state_dir"), value_type=str)}],
+                + [
+                    {name: ParameterValue(LaunchConfiguration(name), value_type=str)}
+                    for name in ("state_dir", "ui_bridge_node_name")
+                ],
             ),
         ]
     )
