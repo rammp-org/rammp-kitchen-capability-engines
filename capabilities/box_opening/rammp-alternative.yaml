@@ -61,8 +61,9 @@ params:
   # selection, which is the scene camera's (docs/interface.md)
   wrist_survey: false
   # the wrist camera finds the container: the wrist turns where the arm rests so its camera sees
-  # the table in front of the arm, and what it finds there is the box; the scene camera's box only
-  # where the wrist finds none. Never for the orchestrator's selection
+  # the table in front of the arm (up to four views of the wrist's three joints, first where the
+  # scene camera has the box; a lid a view cuts is looked at again), and what it finds there is the
+  # box; the scene camera's box only where the wrist finds none. Never for the orchestrator's selection
   wrist_first: false
   # the run's measured table handed to the planner while a way HOME is planned, and at no other time
   # (docs/interface.md, "The planner's world"). `planner_worlds_as` is the folder the PLANNER's container

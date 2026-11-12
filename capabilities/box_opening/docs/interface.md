@@ -224,6 +224,7 @@ passes them as a params file.
 | `planner_worlds_as`  | `""`                 | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world") |
 | `planner_worlds_dir` | `""`                 | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                         |
 | `wrist_survey`     | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on         |
+| `wrist_first`      | `false`                | Facing a table: the wrist camera finds the container in front of the arm, the wrist turned where the arm rests (see below) |
 
 ### The planner's world
 
@@ -266,6 +267,25 @@ the survey's frames are kept as captures (`captures/wrist-survey-*`). The
 heights the wrist reads are its own (its mount's error, more the more its view
 tilts): the press goes by the higher of the survey's top and the aim's, and
 the press's contact band refuses the rest (`contact_early`).
+
+`wrist_first` is off by default. On (a table faced from the front, where the
+scene camera sees no lid whole where the arm presses), a run without a selection
+looks for the container with the wrist camera before anything else: the three
+wrist joints turn where the arm rests, the arm above them standing still, so the
+camera sees the table in front. The views are chosen on each run from the arm's
+kinematics, the chair model and the camera's own view, for any table height of
+0.15-0.35 m in `arm_mount`: up to four, the one that shows the most of where the
+arm presses first, and before them one aimed where the scene camera has the
+container, if it has it at all (a fix placed roughly from a box its frame cut
+included). Each view is a planned move of the wrist (about a second), a still
+frame and the finder; the run goes on at the first that shows the lid whole. A
+lid a view cuts is looked at again with the wrist turned to it (at most twice a
+run) and is the container only where that look shows it whole. What the wrist
+finds is taken over the scene camera's; where it finds none the scene camera's
+fix is used, and with neither the run stops with `not_found`, saying what each
+camera said. It adds about 1.5 s where the first view shows the container and
+up to about 10 s where none does; its frames are kept as captures
+(`captures/wrist-survey-*`). Only with the body model on, never with a selection.
 
 ### The survey and the orchestrator's selection: an interface gap
 

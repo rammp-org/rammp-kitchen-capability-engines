@@ -58,7 +58,7 @@ from a guess.
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -170,6 +170,10 @@ SURVEY_FUSE_FRAMES = 3  # still frames fused per pose (button_aim.StillDepth: a 
 # run started 4 s after the wrist camera's driver, "no new wrist frame", and the scene camera's box was taken)
 SURVEY_FRAME_S = 10.0
 SURVEY_CAPTURE_TAG = "survey"
+# A view is asked of the planner at most this many times where the client refuses what it planned:
+# its joint plan at times ends on another turn of the wrist (its FK-pose fallback; private rig,
+# 2026-11-12: 2 of 31 wrist-turn plans, 0.14 and 0.31 rad off on joint 7), and asked again it plans
+SURVEY_PLAN_TRIES = 3
 
 
 @dataclass(frozen=True)
@@ -813,14 +817,27 @@ def look_again_places(find, d_lid):
 # can see the scene"): the three wrist joints (FRONT_JOINTS) alone, solved on this run so the
 # lens's axis meets a point of the front region at a lid's height, the image level.
 FRONT_X_M = (0.45, 0.85)  # the box's centre in front of the arm, arm_mount (m): the reach map's columns
-FRONT_Y_M = (-0.40, 0.30)
+FRONT_Y_M = (-0.40, 0.45)  # ... and its rows: the arm presses out to y +0.45 at x 0.60 (study/demo/reach)
 # the table in front: a 29 in table stands at z 0.216 (the demo), the 11-11 folding table at 0.25
 FRONT_TABLE_Z_M = (0.15, 0.35)
 FRONT_JOINTS = (4, 5, 6)  # joints 5-7
 FRONT_MAX_RAD = 1.0  # no wrist joint turns further than this from where the arm rests
-# where the lens's axis is put, (x, y) in arm_mount, far view first: the far one shows x >= 0.55
-# across the region from HOME; the near one the cells under it
-FRONT_AIMS = (("far", (0.65, -0.05)), ("near", (0.48, -0.05)))
+# Where the lens's axis may be put, (x, y) in arm_mount at a lid's height: each solved on this run by
+# the wrist alone (turn_to) and the views chosen from them by the cells each adds (angled_views).
+# One view does not show the front: the lens stands 0.26 m over a lid on a 29 in table, 0.21 m
+# behind the nearest row, so a row 0.50 m wide lies 50 deg either side of it, and the OAK's left
+# 60 px (the +y side) hold no depth. Offline (study/demo/wristlook, the reach map's 86 places the
+# arm opens the box at): the one view flown until 2026-11-12, aimed at [0.65, -0.05], showed 42 of
+# them whole and the finder on its rendered frames placed the box at 62 (34 of its fixes from a
+# lid the view cut, up to 16 mm out); from the views chosen here, a cut lid looked at again, at
+# all 86 (3 mm out at worst).
+FRONT_AIM_X_M = (0.45, 0.60)
+FRONT_AIM_Y_M = (-0.30, -0.15, 0.0, 0.15, 0.30)
+FRONT_MAX_VIEWS = 4  # views looked from at most, the one that shows the most first
+FRONT_MIN_GAIN = 0.03  # a further view only where it shows this share of the scored cells no view before does
+# A lid a view cuts is a place to look again at, the wrist turned to put it in the middle (as the
+# side survey looks again from above a place): at most this many times a run
+FRONT_AGAIN_MAX = 2
 FRONT_ROLL_WEIGHT = 0.5  # the image's long side held level, against the aim's (unit: half an image)
 FRONT_TURN_WEIGHT = 0.05  # ... and the least turn that does it
 FRONT_ITERS = 60
@@ -908,63 +925,156 @@ def turn_to(chain, cam, rest, aim_xyz, joints=FRONT_JOINTS, max_rad=FRONT_MAX_RA
     return [float(v) for v in q], best[2]
 
 
-def angled_views(chain, check, q_from, cam, model, rest=None, max_views=MAX_VIEWS):
+def _aimed(chain, check, band, cam, grid, rest, aim_xyz, name, what):
+    """The rest pose with its wrist turned at `aim_xyz` (turn_to), judged as a pose: (SurveyView,
+    None) where the aim lands (FRONT_AIM_TOL), the joints stand inside the planner's limits and the
+    arm stands clear of the chair and its user (strictly, as every pose box_opening chooses) and
+    of the front band; else (None, why). Its way there is the caller's to judge (_way)."""
+    from box_opening.constants import PLANNER_LIMIT_MARGIN_RAD
+
+    q, miss = turn_to(chain, cam, rest, aim_xyz)
+    if miss > FRONT_AIM_TOL:
+        return None, "no turn of the wrist within %.1f rad puts it in view" % FRONT_MAX_RAD
+    if not chain.within_limits(q, margin=PLANNER_LIMIT_MARGIN_RAD):
+        return None, "past a joint limit"
+    why = check.pose_refusal(q) or band.refusal(q)
+    if why is not None:
+        return None, why
+    R_opt, lens = _lens(chain, cam, q)
+    checks, sees = cover(cam, R_opt, lens, grid)
+    return _view(name, q, R_opt, lens, checks, sees, 0.0, check, what), None
+
+
+def _way(check, band, q_prev, q):
+    """Why the straight joint line from `q_prev` to `q` is not flown (the chair, its user, the
+    front band), or None."""
+    n = max(2, int(math.ceil(float(np.abs(np.subtract(q, q_prev)).max()) / WAY_STEP_RAD)) + 1)
+    line = np.linspace(np.asarray(q_prev, float), np.asarray(q, float), n)
+    why = check.refusal(line) or band.path_refusal(line)
+    return None if why is None else "its way there: %s" % why
+
+
+def angled_views(chain, check, q_from, cam, model, rest=None, max_views=FRONT_MAX_VIEWS, hint=None):
     """(views, why, stats) as survey_views gives them, for a box in FRONT of the arm: the rest
-    pose `rest` (None: HOME) with its wrist turned (turn_to) so the camera's axis meets each of
-    FRONT_AIMS at a lid's height over the middle of FRONT_TABLE_Z_M. A view is kept where the
-    aim lands (FRONT_AIM_TOL), the joints stand inside the planner's limits, the arm stands clear
-    of the chair and its user (strictly, as every pose box_opening chooses) and of the front
-    band (FrontBand), and the straight joint line there from `q_from` or the view before holds
-    to both; a second view only where it adds SECOND_GAIN of the first's score."""
-    from box_opening.constants import HOME, PLANNER_LIMIT_MARGIN_RAD
+    pose `rest` (None: HOME) with its wrist turned (turn_to) so the camera's axis meets a point of
+    the front region at a lid's height over the middle of FRONT_TABLE_Z_M. The points are the
+    FRONT_AIM_* grid's; a view is a candidate where the aim lands, the joints stand inside the
+    planner's limits and the arm stands clear of the chair, its user and the front band (_aimed).
+    The views are chosen by what they add: the one that shows the most scored cells whole first,
+    then the one that adds the most to it, while one adds FRONT_MIN_GAIN of the cells and its
+    straight joint line from the view before holds to the chair, the user and the band; at most
+    `max_views`.
+
+    `hint`: (x, y) where something says the box may stand (the scene camera's fix, rough or cut
+    as it may be): the wrist looks there first, where a turn reaches it, and the chosen views
+    follow for what that one does not show."""
+    from box_opening.constants import HOME
 
     t0 = time.monotonic()
     rest = list(HOME) if rest is None else list(rest)
     grid = survey_grid(chain, model, x=FRONT_X_M, y=FRONT_Y_M, z=FRONT_TABLE_Z_M)
     band = FrontBand(check, rest)
     total = float(grid.weight.sum())
-    stats = {"candidates": len(FRONT_AIMS), "scored_cells": int(total), "ik": 0}
     lid_z = 0.5 * (FRONT_TABLE_Z_M[0] + FRONT_TABLE_Z_M[1]) + float(model.dims[2])
+    aims = [(float(ax), float(ay)) for ax in FRONT_AIM_X_M for ay in FRONT_AIM_Y_M]
+    stats = {"candidates": len(aims) + (hint is not None), "scored_cells": int(total), "ik": 0}
     views, refused = [], []
     have_c = np.zeros(len(grid.lids), bool)
     have_s = np.zeros(len(grid.lids), bool)
     q_prev = list(q_from)
-    for name, (ax, ay) in FRONT_AIMS:
-        if len(views) >= int(max_views):
-            break
-        what = "the wrist turned to look %s, at [%.2f, %.2f]" % (name, ax, ay)
-        q, miss = turn_to(chain, cam, rest, (ax, ay, lid_z))
+
+    def take(view, gain):
+        nonlocal have_c, have_s, q_prev
+        views.append(replace(view, score=float(gain)))
+        have_c |= view.checks
+        have_s |= view.sees
+        q_prev = list(view.joints)
+
+    if hint is not None:
+        hx, hy = float(hint[0]), float(hint[1])
+        what = "the wrist turned to look where the box may stand, at [%.2f, %.2f]" % (hx, hy)
+        view, why = _aimed(chain, check, band, cam, grid, rest, (hx, hy, lid_z), "survey:angle-hint", what)
         stats["ik"] += 1
-        R_opt, lens = _lens(chain, cam, q)
-        checks, sees = cover(cam, R_opt, lens, grid)
-        gain = _score(grid, have_c | checks, have_s | sees) - _score(grid, have_c, have_s)
-        why = None
-        if miss > FRONT_AIM_TOL:
-            why = "no turn of the wrist within %.1f rad puts it in view" % FRONT_MAX_RAD
-        elif not chain.within_limits(q, margin=PLANNER_LIMIT_MARGIN_RAD):
-            why = "past a joint limit"
-        elif gain <= (SECOND_GAIN * views[0].score if views else 0.0):
-            why = "it adds too little to the first view" if views else "it shows no lid the arm presses"
+        why = why if view is None else _way(check, band, q_prev, view.joints)
+        if why is None:
+            take(view, _score(grid, view.checks, view.sees))
         else:
-            why = check.pose_refusal(q) or band.refusal(q)
-            if why is None:
-                n = max(2, int(math.ceil(float(np.abs(np.subtract(q, q_prev)).max()) / WAY_STEP_RAD)) + 1)
-                line = np.linspace(np.asarray(q_prev, float), np.asarray(q, float), n)
-                why = check.refusal(line) or band.path_refusal(line)
-                why = None if why is None else "its way there: %s" % why
-        if why is not None:
             refused.append("%s: %s" % (what, why))
+    cands = []
+    for ax, ay in aims:
+        what = "the wrist turned to look at [%.2f, %.2f]" % (ax, ay)
+        view, why = _aimed(chain, check, band, cam, grid, rest, (ax, ay, lid_z), "survey:angle", what)
+        stats["ik"] += 1
+        if view is None:
+            refused.append("%s: %s" % (what, why))
+        else:
+            cands.append(view)
+    n_hint = len(views)
+    while cands and len(views) < int(max_views) + n_hint:
+        gains = [_score(grid, have_c | v.checks, have_s | v.sees) - _score(grid, have_c, have_s) for v in cands]
+        i = int(np.argmax(gains))
+        view = cands.pop(i)
+        if gains[i] < FRONT_MIN_GAIN * SEE_WEIGHT * total:
+            if not views:
+                refused.append("%s: it shows no lid the arm presses" % view.what)
+            break
+        why = _way(check, band, q_prev, view.joints)
+        if why is not None:
+            refused.append("%s: %s" % (view.what, why))
             continue
-        views.append(_view("survey:angle-%s" % name, q, R_opt, lens, checks, sees, 0.0, check, what, gain))
-        have_c |= checks
-        have_s |= sees
-        q_prev = list(q)
+        take(replace(view, name="survey:angle-%d" % (len(views) - n_hint + 1)), gains[i])
     stats["checks"] = round(float((grid.weight * have_c).sum()) / max(total, 1.0), 3)
     stats["sees"] = round(float((grid.weight * have_s).sum()) / max(total, 1.0), 3)
+    stats["refused"] = refused[:6]
     stats["choose_s"] = round(time.monotonic() - t0, 3)
     if views:
         return views, None, stats
     return [], "no turn of the wrist shows the table in front (%s)" % "; ".join(refused[:3]), stats
+
+
+def again_place(find, d_lid, looked=()):
+    """Where the front look turns to look again: the strongest lid-sized top the views so far cut
+    (a passing place every sighting of which is cut, or a top refused only as cut off by the
+    view) that stands no nearer than half a lid to a place in `looked`: ((x, y), lid top z), or
+    None."""
+    passing, refused = [], []
+    for q in getattr(find, "places", ()):
+        if q.button != "none" and q.patches and all(getattr(p, "cut", False) for p in q.patches):
+            passing.append(((float(q.xy[0]), float(q.xy[1])), float(q.top_z), max(p.n_slab for p in q.patches)))
+    for p in getattr(find, "patches", ()):
+        if getattr(p, "why", "").endswith("cut off by the view"):
+            refused.append(((float(p.xy[0]), float(p.xy[1])), float(p.top_z), int(p.n_slab)))
+    # a place that passes cut before a top refused as cut, each the strongest first
+    out = sorted(passing, key=lambda o: -o[2]) + sorted(refused, key=lambda o: -o[2])
+    for xy, z, _n in out:
+        if all(math.hypot(xy[0] - x, xy[1] - y) >= 0.5 * d_lid for x, y in looked):
+            return xy, z
+    return None
+
+
+def again_view(chain, check, q_from, cam, model, xy, top_z, rest=None, n=1):
+    """(view, None) for a look again at the lid a view cut, at `xy` with its top at `top_z`: the
+    rest pose with the wrist turned to put it in the middle of the image, judged as every front
+    view is (_aimed) and its straight joint line from `q_from` too — or (None, why)."""
+    from box_opening.constants import HOME
+
+    rest = list(HOME) if rest is None else list(rest)
+    grid = Grid(
+        lids=np.array([[xy[0], xy[1], top_z]], float),
+        counter_z=np.array([top_z - float(model.dims[2])]),
+        weight=np.ones(1),
+        lid_r=0.5 * float(max(model.lid_dims[0], model.lid_dims[1])),
+    )
+    band = FrontBand(check, rest)
+    what = "the wrist turned to the lid a view cut, at [%.2f, %.2f]" % (xy[0], xy[1])
+    view, why = _aimed(chain, check, band, cam, grid, rest, (xy[0], xy[1], top_z), "survey:angle-again-%d" % n, what)
+    if view is not None:
+        why = _way(check, band, q_from, view.joints)
+        if why is None and not bool(view.sees[0]):
+            why = "the turn does not show it whole"
+    if why is not None:
+        return None, "no look again at [%.2f, %.2f]: %s" % (xy[0], xy[1], why)
+    return view, None
 
 
 @dataclass
@@ -1068,20 +1178,27 @@ def fly_view(ctx, runner, view, band, execute):
     its way there held to the counter band (Band.path_refusal), and flown: ("flown" | "refused" |
     "stopped", why)."""
     from box_opening.constants import TRANSIT_SPEED
-    from box_opening.primitives.core import PlanState, _full_world, _plan_motion
+    from box_opening.primitives.core import PlanRefused, PlanState, _full_world, _plan_motion
 
     q0 = ctx.client.joints()
-    try:
-        leg, _st = _plan_motion(
-            ctx,
-            PlanState(joints=list(q0), chain=0),
-            view.name,
-            ("joints", list(view.joints)),
-            _full_world(ctx),
-            TRANSIT_SPEED,
-        )
-    except RuntimeError as e:
-        return "refused", str(e)
+    leg = None
+    for _ask in range(SURVEY_PLAN_TRIES):
+        try:
+            leg, _st = _plan_motion(
+                ctx,
+                PlanState(joints=list(q0), chain=0),
+                view.name,
+                ("joints", list(view.joints)),
+                _full_world(ctx),
+                TRANSIT_SPEED,
+            )
+            break
+        except PlanRefused as e:  # a plan that ends elsewhere than asked: asked again (SURVEY_PLAN_TRIES)
+            why = str(e)
+        except RuntimeError as e:
+            return "refused", str(e)
+    if leg is None:
+        return "refused", why
     why = band.path_refusal(leg.traj)
     if why is not None:
         return "refused", "its way there: %s" % why
@@ -1094,16 +1211,20 @@ def fly_view(ctx, runner, view, band, execute):
     return "flown", None
 
 
-def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=None, front=False):
+def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=None, front=False, hint=None):
     """The survey (the module's note) from where the arm stands, its rest pose `rest`: a Survey.
     Each step is noted ('wrist_survey'): the views chosen, and per view where it looked from and
     what the finder said.
 
     `front`: the box stands in front of the arm (angled_views): the wrist turned where the arm
     rests, no pose over the arm's side and no look again from above a place. From there the lid
-    is seen 55-65 deg off straight down, where no button is checked (wrist_finder.CHECK_*): the
+    is seen 50-65 deg off straight down, where no button is checked (wrist_finder.CHECK_*): the
     finder goes by the lid's geometry alone, and the reach-out's own look and aim, nearer and
-    steeper, find the button or stop the run, as they do for the scene camera's box."""
+    steeper, find the button or stop the run, as they do for the scene camera's box. The views
+    are looked from in turn (the one at `hint`, (x, y) where the scene camera has the box, first)
+    until one shows the lid whole; a lid a view cuts is looked at again, the wrist turned to put
+    it in the middle (again_view, FRONT_AGAIN_MAX), and is a fix only where that look shows it
+    whole or could not be flown."""
     from box_opening.constants import HOME
     from box_opening.perception import wrist_finder as wf
     from box_opening.runtime import approach
@@ -1116,8 +1237,10 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
         return out
     rest = list(HOME) if rest is None else list(rest)
     chain, cam, model = approach._chain(), camera_of(watcher, camera_cfg_name), ctx.model
-    choose = angled_views if front else survey_views
-    views, why, stats = choose(chain, check, ctx.client.joints(), cam, model, rest=rest)
+    if front:
+        views, why, stats = angled_views(chain, check, ctx.client.joints(), cam, model, rest=rest, hint=hint)
+    else:
+        views, why, stats = survey_views(chain, check, ctx.client.joints(), cam, model, rest=rest)
     runner.note("wrist_survey", stage="views", front=bool(front), views=[_view_row(v) for v in views], why=why, **stats)
     if not views:
         out.why = why
@@ -1125,11 +1248,13 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
     if front:
         log.info(
             "[press_demo] WRIST LOOK: the wrist turns where the arm rests (%s rad on joints %s) for its camera to "
-            "see the table in front: %.0f%% of the cells the arm presses there, at every table height of "
-            "%.2f-%.2f m (%.2f s to choose)"
+            "see the table in front, %d view%s until one shows the box: %.0f%% of the cells the arm presses there, "
+            "at every table height of %.2f-%.2f m (%.2f s to choose)"
             % (
                 "; ".join("/".join("%+.2f" % (v.joints[j] - rest[j]) for j in FRONT_JOINTS) for v in views),
                 "-".join(str(j + 1) for j in (FRONT_JOINTS[0], FRONT_JOINTS[-1])),
+                len(views),
+                "" if len(views) == 1 else "s",
                 100 * stats["sees"],
                 FRONT_TABLE_Z_M[0],
                 FRONT_TABLE_Z_M[1],
@@ -1202,10 +1327,47 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
         return find
 
     find = None
-    for view in views:
+    queue = list(views)
+    looked, unshown, pending, n_again = [], [], None, 0
+    while queue:
+        view = queue.pop(0)
         got = look(view)
         find = got if got is not None else find
-        if out.stopped or out.preview or (find is not None and find.fix is not None):
+        if out.stopped or out.preview:
+            return _done(out, find, t0)
+        if pending is not None:
+            # the look again's own frame: the lid whole where the view before cut one, or not
+            if got is not None and not _shown_whole(got, pending, len(frames) - 1, d_lid):
+                unshown.append(pending)
+            pending = None
+        if front and find is not None and find.fix is not None and _near(find.fix.top_xyz, unshown, d_lid):
+            xy = find.fix.top_xyz
+            find = replace(
+                find,
+                fix=None,
+                why="wrist camera: a lid-sized top at [%.3f, %.3f] that a view cut, and the look again at it showed "
+                "no lid whole there" % (xy[0], xy[1]),
+            )
+        fix = find.fix if find is not None else None
+        if fix is not None and not (front and getattr(fix, "partial", "")):
+            return _done(out, find, t0)
+        if front and find is not None and n_again < FRONT_AGAIN_MAX:
+            place = again_place(find, d_lid, looked)
+            if place is not None:
+                n_again += 1
+                looked.append(place[0])
+                again, why = again_view(
+                    chain, check, ctx.client.joints(), cam, model, place[0], place[1], rest=rest, n=n_again
+                )
+                if again is not None:
+                    pending = place[0]
+                    queue.insert(0, again)
+                    continue
+                runner.note(
+                    "wrist_survey", stage="look-again", xy=[round(v, 4) for v in place[0]], flown=False, why=why
+                )
+                log.info("[press_demo] WRIST LOOK: %s" % why)
+        if fix is not None:  # a lid every view so far cut, and no look again at it to fly
             return _done(out, find, t0)
     if find is not None and not front:
         band.ceiling_z = ceiling  # nor on its way there
@@ -1222,6 +1384,20 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
             if out.stopped or (find is not None and find.fix is not None):
                 break
     return _done(out, find, t0)
+
+
+def _near(xyz, places, d_lid):
+    """Is (x, y) of `xyz` within half a lid of one of `places` [(x, y), ...]?"""
+    return any(math.hypot(xyz[0] - x, xyz[1] - y) < 0.5 * d_lid for x, y in places)
+
+
+def _shown_whole(find, xy, i_frame, d_lid):
+    """Did frame `i_frame` of `find` show a lid whole (a passing patch the view does not cut)
+    within half a lid of `xy`?"""
+    return any(
+        p.frame == i_frame and not p.why and not p.cut and math.hypot(p.xy[0] - xy[0], p.xy[1] - xy[1]) < 0.5 * d_lid
+        for p in getattr(find, "patches", ())
+    )
 
 
 def _done(out, find, t0):

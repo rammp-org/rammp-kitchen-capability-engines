@@ -421,6 +421,39 @@ def test_a_view_the_runner_refuses_before_it_moves_is_not_flown_one_that_fails_i
     )
 
 
+def test_a_view_whose_plan_the_client_refuses_is_asked_for_again(monkeypatch):
+    """The planner's joint plan at times ends on another turn of the wrist and the client refuses it (private rig,
+    2026-11-12: 2 of 31 wrist-turn plans); asked again it plans. A planner that cannot plan it is not asked twice."""
+    from box_opening.primitives import core
+    from box_opening.runtime.runner import LegResult
+
+    leg = SimpleNamespace(traj=SimpleNamespace(points=[SimpleNamespace(positions=list(HOME))] * 2))
+    monkeypatch.setattr(core, "_full_world", lambda ctx: ("full", "world_empty.yaml"))
+    ctx = SimpleNamespace(client=FakeClient())
+    band = SimpleNamespace(path_refusal=lambda traj: None)
+    runner = SimpleNamespace(run=lambda legs, execute: [LegResult("survey:angle-1", "arrived", True)])
+    asked = []
+
+    def plan(fails, error):
+        def _plan(*a, **k):
+            asked.append(a[2])
+            if len(asked) <= fails:
+                raise error("planning failed for survey:angle-1: the plan ends 0.1376 rad from its joint goal")
+            return leg, None
+
+        return _plan
+
+    monkeypatch.setattr(core, "_plan_motion", plan(2, core.PlanRefused))
+    assert sv.fly_view(ctx, runner, _view("survey:angle-1"), band, True) == ("flown", None) and len(asked) == 3
+    asked.clear()
+    monkeypatch.setattr(core, "_plan_motion", plan(9, core.PlanRefused))
+    state, why = sv.fly_view(ctx, runner, _view("survey:angle-1"), band, True)
+    assert state == "refused" and "ends 0.1376 rad" in why and len(asked) == sv.SURVEY_PLAN_TRIES
+    asked.clear()
+    monkeypatch.setattr(core, "_plan_motion", plan(9, RuntimeError))
+    assert sv.fly_view(ctx, runner, _view("survey:angle-1"), band, True)[0] == "refused" and len(asked) == 1
+
+
 def test_without_the_body_model_there_is_no_survey(monkeypatch):
     monkeypatch.setattr(approach, "body_check", lambda: None)
     s = sv.run_survey(None, SimpleNamespace(client=FakeClient(), model=None), _Runner(), None, True)
@@ -520,28 +553,98 @@ def test_the_wrist_turns_where_the_arm_rests_until_its_camera_sees_the_table_in_
     cam, model = sv.camera(), ContainerModel.load(CONTAINER)
     views, why, stats = sv.angled_views(chain, check, list(HOME), cam, model)
     assert views, why
-    far = views[0]
-    turn = np.subtract(far.joints, HOME)
-    assert np.allclose(turn[:4], 0.0) and 0.1 < np.abs(turn[4:]).max() <= sv.FRONT_MAX_RAD  # the wrist alone
     R0, lens0 = sv._lens(chain, cam, HOME)
-    assert np.linalg.norm(np.subtract(far.cam_xyz, lens0)) < 0.15  # the lens stays where the arm rests
-    # the 11-11 box, where the scene camera had it and where the wrist had it the day before: both whole in view
+    band = sv.FrontBand(check, list(HOME))
+    assert band.x_edge == pytest.approx(-0.0017 + 0.867 / 2 + sv.EDGE_GAP_M, abs=1e-6)  # past the user's legs
+    # the 11-11 box, where the scene camera had it and where the wrist had it the day before, and one on the
+    # arm's other side: each whole in some view
     lids = [(0.787, -0.240, 0.369), (0.71, -0.29, 0.31), (0.65, 0.10, 0.34)]
-    _checks, sees = sv.cover(cam, far.rot_cam, far.cam_xyz, _grid(lids))
-    assert sees.all()
+    shown = np.zeros(len(lids), bool)
+    q_prev = list(HOME)
+    for v in views:
+        turn = np.subtract(v.joints, HOME)
+        assert np.allclose(turn[:4], 0.0) and 0.1 < np.abs(turn[4:]).max() <= sv.FRONT_MAX_RAD  # the wrist alone
+        assert np.linalg.norm(np.subtract(v.cam_xyz, lens0)) < 0.15  # the lens stays where the arm rests
+        assert abs(float(v.rot_cam[2, 0])) < 0.1 and v.person_m > 0.02  # the image level, off the user
+        shown |= sv.cover(cam, v.rot_cam, v.cam_xyz, _grid(lids))[1]
+        # clear of the user and of where a table up to 0.35 m may stand in front, there and on the way
+        assert check.pose_refusal(v.joints) is None and band.refusal(v.joints) is None
+        assert band.path_refusal([q_prev, v.joints]) is None
+        # the hand stays over the user's lap, behind where a table may stand, and no lower than 0.35 m
+        C, r, links = check.spheres_at(v.joints)
+        hand = np.array([("robotiq" in lk or "bracelet" in lk) for lk in links])
+        assert (C[hand, 0] + r[hand]).max() < band.x_edge + 0.10 and (C[hand, 2] - r[hand]).min() > band.top_z
+        q_prev = v.joints
+    assert shown.all()
     _c0, sees0 = sv.cover(cam, R0, lens0, _grid(lids))
     assert not sees0.all()  # from HOME itself the wrist's place lies under the view
-    assert abs(float(far.rot_cam[2, 0])) < 0.1  # the image level
-    assert stats["sees"] > 0.4 and far.person_m > 0.02
-    # clear of the user and of where a table up to 0.35 m may stand in front, there and on the way
-    band = sv.FrontBand(check, list(HOME))
-    assert check.pose_refusal(far.joints) is None and band.refusal(far.joints) is None
-    assert band.path_refusal([list(HOME), far.joints]) is None
-    assert band.x_edge == pytest.approx(-0.0017 + 0.867 / 2 + sv.EDGE_GAP_M, abs=1e-6)  # past the user's legs
-    # the hand stays over the user's lap, behind where a table may stand, and no lower than 0.35 m
-    C, r, links = check.spheres_at(far.joints)
-    hand = np.array([("robotiq" in lk or "bracelet" in lk) for lk in links])
-    assert (C[hand, 0] + r[hand]).max() < band.x_edge + 0.10 and (C[hand, 2] - r[hand]).min() > band.top_z
+
+
+def test_the_front_views_are_chosen_by_what_each_adds_until_the_front_is_shown(tmp_path):
+    """One view does not show the front (study/demo/wristlook, 2026-11-12: the one view flown until then showed
+    42 of the 86 places the arm opens the box at): the views are chosen by the cells each adds, the one that
+    shows the most first."""
+    chain, check = _front_chair(tmp_path)
+    cam, model = sv.camera(), ContainerModel.load(CONTAINER)
+    views, why, stats = sv.angled_views(chain, check, list(HOME), cam, model)
+    assert 2 <= len(views) <= sv.FRONT_MAX_VIEWS and stats["sees"] > 0.9, (why, stats)
+    assert [v.name for v in views] == ["survey:angle-%d" % (i + 1) for i in range(len(views))]
+    assert all(a.score >= b.score for a, b in zip(views, views[1:], strict=False))
+    one, _why, alone = sv.angled_views(chain, check, list(HOME), cam, model, max_views=1)
+    assert len(one) == 1 and one[0].joints == views[0].joints and alone["sees"] < stats["sees"] - 0.2
+    # the places the first view does not show are on the arm's far side and under it: later views show them
+    lids = [(0.45, 0.25, 0.315), (0.50, -0.30, 0.315), (0.60, 0.40, 0.315), (0.75, 0.0, 0.315)]
+    shown = np.zeros(len(lids), bool)
+    for v in views:
+        shown |= sv.cover(cam, v.rot_cam, v.cam_xyz, _grid(lids))[1]
+    assert shown.all()
+
+
+def test_the_wrist_looks_first_where_the_scene_camera_has_the_box(tmp_path):
+    chain, check = _front_chair(tmp_path)
+    cam, model = sv.camera(), ContainerModel.load(CONTAINER)
+    plain, _why, _stats = sv.angled_views(chain, check, list(HOME), cam, model)
+    views, why, stats = sv.angled_views(chain, check, list(HOME), cam, model, hint=(0.55, 0.28))
+    assert views[0].name == "survey:angle-hint" and "[0.55, 0.28]" in views[0].what
+    assert sv.cover(cam, views[0].rot_cam, views[0].cam_xyz, _grid([(0.55, 0.28, 0.315)]))[1].all()
+    assert [v.name for v in views[1:]] == ["survey:angle-%d" % (i + 1) for i in range(len(views) - 1)]
+    assert stats["sees"] > 0.9  # the chosen views still follow, for what the hint's does not show
+    # a hint no turn of the wrist reaches is passed over, and says so: the views as without one
+    views, why, stats = sv.angled_views(chain, check, list(HOME), cam, model, hint=(0.30, -1.50))
+    assert [v.joints for v in views] == [v.joints for v in plain]
+    assert any("where the box may stand, at [0.30, -1.50]" in w for w in stats["refused"])
+
+
+def test_a_lid_a_view_cut_is_the_place_to_look_again_at_the_passing_one_first():
+    P = SimpleNamespace
+    cut = "its top 45x100 mm, cut off by the view"
+    find = P(
+        places=(
+            P(xy=(0.60, 0.20), top_z=0.32, button="unchecked", patches=(P(n_slab=150, cut=True),)),
+            P(xy=(0.70, -0.10), top_z=0.32, button="unchecked", patches=(P(n_slab=900, cut=False),)),  # whole
+        ),
+        patches=(
+            P(xy=(0.50, 0.30), top_z=0.31, why=cut, n_slab=400),
+            P(xy=(0.80, 0.00), top_z=0.31, why="its top a ring, 40% filled — an open cup's rim?", n_slab=900),
+        ),
+    )
+    assert sv.again_place(find, 0.105) == ((0.60, 0.20), 0.32)  # the place that passes, cut, before a refused top
+    assert sv.again_place(find, 0.105, looked=[(0.61, 0.21)]) == ((0.50, 0.30), 0.31)
+    assert sv.again_place(find, 0.105, looked=[(0.60, 0.20), (0.50, 0.30)]) is None
+    assert sv.again_place(P(places=find.places[1:], patches=find.patches[1:]), 0.105) is None  # nothing cut
+
+
+def test_the_look_again_turns_the_wrist_to_put_the_cut_lid_in_the_middle_or_says_why_not(tmp_path):
+    chain, check = _front_chair(tmp_path)
+    cam, model = sv.camera(), ContainerModel.load(CONTAINER)
+    view, why = sv.again_view(chain, check, list(HOME), cam, model, (0.55, 0.30), 0.315, n=2)
+    assert view is not None and why is None and view.name == "survey:angle-again-2"
+    assert np.allclose(np.subtract(view.joints, HOME)[:4], 0.0)  # the wrist alone, as every front view
+    pc = (np.array([0.55, 0.30, 0.315]) - np.asarray(view.cam_xyz)) @ view.rot_cam
+    u, v = cam.k[0, 0] * pc[0] / pc[2] + cam.k[0, 2], cam.k[1, 1] * pc[1] / pc[2] + cam.k[1, 2]
+    assert abs(u - cam.size[1] / 2) < 40 and abs(v - cam.size[0] / 2) < 40  # the lid in the middle of the image
+    view, why = sv.again_view(chain, check, list(HOME), cam, model, (0.30, -1.50), 0.315)
+    assert view is None and why.startswith("no look again at [0.30, -1.50]: ")
 
 
 def test_the_turn_puts_the_aim_in_the_middle_of_the_image_or_says_how_far_it_misses(tmp_path):
@@ -594,6 +697,109 @@ def test_the_front_look_goes_by_the_lids_geometry_and_never_looks_again_from_abo
     assert [f["stage"] for k, f in runner.notes if k == "wrist_survey"] == ["views", "survey:angle-far"]
 
 
+def _cut_lid(xy=(0.60, 0.20), passing=True, frames=(0,)):
+    """What the finder says of a lid a view cuts at `xy`: a fix every sighting of which is cut, or (passing
+    False) no fix and its top refused as cut off by the view."""
+    why = "" if passing else "its top 45x100 mm, cut off by the view"
+    patches = tuple(SimpleNamespace(frame=i, xy=xy, top_z=0.34, n_slab=200, cut=True, why=why) for i in frames)
+    if not passing:
+        return wf.WristFind(None, "wrist camera: the container may stand at ..., cut off by the view", patches=patches)
+    place = wf.Place(xy=xy, top_z=0.34, table_z=0.24, patches=patches, button="unchecked")
+    fix = SimpleNamespace(
+        top_xyz=(xy[0], xy[1], 0.34), table_z_scene=0.24, partial="cut off by the wrist camera's view"
+    )
+    return wf.WristFind(fix, "the container at ..., cut", 0.4, places=(place,), patches=patches)
+
+
+def _whole_lid(xy=(0.60, 0.20), frame=1):
+    patch = SimpleNamespace(frame=frame, xy=xy, top_z=0.34, n_slab=900, cut=False, why="")
+    place = wf.Place(xy=xy, top_z=0.34, table_z=0.24, patches=(patch,), button="unchecked")
+    fix = SimpleNamespace(top_xyz=(xy[0], xy[1], 0.34), table_z_scene=0.24, partial="")
+    return wf.WristFind(fix, "the container at ..., whole", 0.6, places=(place,), patches=(patch,))
+
+
+NOTHING = wf.WristFind(None, "wrist camera: nothing on the counter is the container (0 things at lid height)")
+
+
+def _front_flow(monkeypatch, finds, views=3, again=True, hint=None):
+    """run_survey(front=True) with its motions, frames and finder scripted: (the Survey, the views flown in order,
+    the runner, how the views were asked for)."""
+    flown, asked = [], {}
+    monkeypatch.setattr(approach, "body_check", lambda: SimpleNamespace(layers=["person"]))
+    monkeypatch.setattr(approach, "_chain", lambda: None)
+    monkeypatch.setattr(sv, "FrontBand", lambda check, rest: SimpleNamespace(ceiling_z=None))
+    monkeypatch.setattr(sv, "sphere_top_z", lambda check, q: 0.9)
+
+    def chosen(*a, **k):
+        asked.update(k)
+        names = ["survey:angle-%d" % (i + 1) for i in range(views)]
+        return [_view(n) for n in names], None, {"checks": 0.0, "sees": 0.96, "choose_s": 0.2}
+
+    monkeypatch.setattr(sv, "angled_views", chosen)
+    monkeypatch.setattr(
+        sv,
+        "again_view",
+        lambda chain, check, q, cam, model, xy, z, rest=None, n=1: (
+            (_view("survey:angle-again-%d" % n), None) if again else (None, "no look again at [%.2f, %.2f]" % xy)
+        ),
+    )
+    monkeypatch.setattr(sv, "look_again_view", lambda *a, **k: pytest.fail("a look again from above"))
+    monkeypatch.setattr(
+        sv, "fly_view", lambda ctx, runner, view, band, execute: flown.append(view.name) or ("flown", None)
+    )
+    monkeypatch.setattr(sv, "grab_frame", lambda node, watcher, runner, tag, **k: (_frame(tag), None, None, None))
+    monkeypatch.setattr(sv, "save_frame", lambda *a, **k: None)
+    finds = list(finds)
+    monkeypatch.setattr(wf, "find_container", lambda frames, model, **k: finds.pop(0))
+    ctx = SimpleNamespace(client=FakeClient(), model=ContainerModel.load(CONTAINER))
+    runner = _Runner()
+    s = sv.run_survey(None, ctx, runner, SimpleNamespace(grab=None), True, rest=list(HOME), front=True, hint=hint)
+    return s, flown, runner, asked
+
+
+def test_the_front_look_goes_from_view_to_view_until_one_shows_the_lid_whole(monkeypatch):
+    whole = _whole_lid(frame=1)
+    s, flown, _r, asked = _front_flow(monkeypatch, [NOTHING, whole], hint=(0.70, -0.20))
+    assert flown == ["survey:angle-1", "survey:angle-2"] and s.fix is whole.fix
+    assert asked["hint"] == (0.70, -0.20)  # where the scene camera has the box: the first view's aim
+    s, flown, _r, _a = _front_flow(monkeypatch, [NOTHING, NOTHING, NOTHING])
+    assert flown == ["survey:angle-1", "survey:angle-2", "survey:angle-3"] and s.fix is None
+    assert "nothing on the counter is the container" in s.why
+
+
+def test_a_lid_the_view_cut_is_looked_at_again_and_taken_where_that_look_shows_it_whole(monkeypatch):
+    whole = _whole_lid(frame=1)
+    for passing in (True, False):  # a fix every sighting of which is cut; a top refused only as cut
+        s, flown, _r, _a = _front_flow(monkeypatch, [_cut_lid(passing=passing), whole])
+        assert flown == ["survey:angle-1", "survey:angle-again-1"] and s.fix is whole.fix
+
+
+def test_a_cut_lid_the_look_again_does_not_show_whole_is_no_fix(monkeypatch):
+    """A wrong fix is worse than NO BOX: the turned wrist put the place in the middle of the image and no lid
+    showed whole there, so what the first view cut was not the lid."""
+    still_cut = _cut_lid(passing=True, frames=(0,))  # the look again's frame (1) holds no lid there
+    s, flown, _r, _a = _front_flow(monkeypatch, [_cut_lid(), still_cut, still_cut, still_cut])
+    assert flown == ["survey:angle-1", "survey:angle-again-1", "survey:angle-2", "survey:angle-3"]
+    assert s.fix is None and "the look again at it showed no lid whole there" in s.why
+
+
+def test_a_cut_lid_no_look_again_can_be_flown_at_is_taken_as_it_is_or_passed_over(monkeypatch):
+    cut = _cut_lid(passing=True)
+    s, flown, runner, _a = _front_flow(monkeypatch, [cut], again=False)
+    assert flown == ["survey:angle-1"] and s.fix is cut.fix  # as before the look again: a cut lid's fix, said so
+    assert [f for k, f in runner.notes if f.get("stage") == "look-again"][0]["flown"] is False
+    whole = _whole_lid(frame=1)
+    s, flown, _r, _a = _front_flow(monkeypatch, [_cut_lid(passing=False), whole], again=False)
+    assert flown == ["survey:angle-1", "survey:angle-2"] and s.fix is whole.fix
+
+
+def test_the_front_look_looks_again_no_more_than_twice(monkeypatch):
+    finds = [_cut_lid(xy=(0.50 + 0.1 * i, 0.2), passing=False) for i in range(6)]
+    s, flown, _r, _a = _front_flow(monkeypatch, finds)
+    assert [n for n in flown if "again" in n] == ["survey:angle-again-1", "survey:angle-again-2"]
+    assert len(flown) == 3 + sv.FRONT_AGAIN_MAX and s.fix is None
+
+
 def _first(monkeypatch, survey, scene_fix=None, execute=True):
     """press_demo.wrist_first with its look scripted: (what it returned or its exit code, how the look was asked
     for, the run's notes, the ctx)."""
@@ -622,6 +828,31 @@ def test_where_the_wrist_finds_none_the_run_goes_on_with_the_scene_cameras_or_no
     assert notes == [("wrist_first", {"found": False, "why": survey.why, "scene": True})]
     got, _asked, notes, _ctx = _first(monkeypatch, survey)
     assert got is None and notes[0][1]["scene"] is False
+
+
+def test_the_wrist_looks_first_at_the_scene_cameras_box_and_its_word_goes_into_the_no_box(monkeypatch):
+    survey = sv.Survey(why="wrist camera: nothing on the counter is the container (0 things at lid height)")
+    rough = SimpleNamespace(top_xyz=(0.787, -0.240, 0.369), rough=True, partial="cut off by the frame toward +y")
+    asked, runner, said = {}, _Runner(), []
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: asked.update(k) or survey)
+    ctx = SimpleNamespace(worlds=SimpleNamespace(wrist_camera_config="camera_oak_wrist.yaml"), survey_clouds=None)
+    args = Namespace(wrist_first=True, instance_id=None, execute=True)
+    cfg = SimpleNamespace(park_tool_down=False)
+    assert press_demo.wrist_first(None, ctx, cfg, runner, None, args, rough, said=said) is None
+    assert asked["hint"] == (0.787, -0.240) and said == [survey.why]
+    assert press_demo.wrist_first(None, ctx, cfg, runner, None, args, None, said=said) is None
+    assert asked["hint"] is None and len(said) == 2
+    # neither camera has it: the run's NO BOX says what each said, the robot's own words
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why) or True)
+    locator = SimpleNamespace(last_why="the segmenter boxed nothing of its classes", look_record=lambda: {})
+    args = Namespace(wrist_survey=False, instance_id=None, execute=True)
+    with pytest.raises(SystemExit) as e:
+        press_demo.wrist_survey_or_exit(None, ctx, cfg, runner, None, args, locator, wrist_look=said[0])
+    assert e.value.code == 2
+    assert homes == [
+        "NO BOX — scene camera: the segmenter boxed nothing of its classes; the wrist's look in front: " + survey.why
+    ]
 
 
 def test_a_wrist_turn_stopped_part_way_holds_and_a_preview_ends_turned(monkeypatch):
