@@ -153,6 +153,7 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
         "_off_the_limit",
         "_plan",
         "_pause_point",
+        "_last_pause",
         "_fits",
         "_fly",
     ):
@@ -391,10 +392,20 @@ def test_bad_params_are_refused():
     with pytest.raises(EngineError) as e:
         _go(_engine(Arm(), Model(), home_joints=[0.0] * 6))
     assert e.value.error_code == "bad_config"
-    for bad in (0.0, 1.5):
+    # under 0.01 too: the driver rejects a goal sent at less (its kMinSpeedScale)
+    for bad in (0.0, 0.005, 1.5, float("nan")):
+        arm = Arm()
         with pytest.raises(EngineError) as e:
-            _go(_engine(Arm(), Model(), speed_scale=bad))
-        assert e.value.error_code == "bad_config"
+            _go(_engine(arm, Model(), speed_scale=bad))
+        assert e.value.error_code == "bad_config" and arm.planned == [] and arm.sent == []
+
+    def brief(goal, start):
+        plan = _plan(goal, start)
+        plan.t = np.array([0.0, 0.5])  # 50 s at the floor: inside the action's time
+        return plan
+
+    out = _go(_engine(Arm(answers=[brief]), Model(), speed_scale=0.01), dry_run=True)
+    assert out["speed_scale"] == 0.01  # the floor itself is the driver's to take
 
 
 def test_params_that_are_no_json_object_are_bad_params_not_an_exception():
@@ -636,6 +647,47 @@ def test_a_pause_asked_for_before_the_arm_is_sent_anything_is_taken_there_and_th
     arm = Arm()
     out = Capability.execute(_engine(arm, Model()), "go_home", {}, paused_last(arm))
     assert out["home"] and len(arm.sent) == 1
+
+
+def test_a_pause_asked_for_while_the_step_clear_flies_is_taken_before_the_way_home_is_sent(
+    monkeypatch,
+):
+    """The base class takes a PAUSE during a step reported not pausable, and self.arm's own
+    checkpoint would block on it inside the next send, the arm last read before the pause
+    (REVIEW_RULES, Cancel and pause). It is taken at the step's end instead: an arm moved meanwhile
+    is not sent the way home, nor one paused too long for it; one that stood still goes home."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+    end = START + np.array([0.0, 0.1, 0.0, 0.05, 0.0, 0.0, 0.0])
+    path = np.array([START, end])
+
+    def run(moved_to=None, paused_s=5.0):
+        arm = Arm(answers=[_refuses_start(START)])
+
+        class AfterTheStep(Ctx):
+            def checkpoint(self):
+                if len(arm.sent) == 1:  # the step has flown, the way home is not sent yet
+                    now[0] += paused_s
+                    if moved_to is not None:
+                        arm.readings = [np.asarray(moved_to, float)]
+
+        eng = _engine(arm, Model(inside=0.012, escape=path))
+        return arm, lambda: Capability.execute(eng, "go_home", {}, AfterTheStep())
+
+    arm, go = run(moved_to=end + 0.1)
+    with pytest.raises(EngineError) as e:
+        go()
+    assert e.value.error_code == "arm_moving" and e.value.recoverable
+    assert "after the plan-free step clear" in str(e.value) and "nothing sent" not in str(e.value)
+    assert len(arm.sent) == 1  # the step alone: the way home was planned from its end
+    arm, go = run(paused_s=500.0)
+    with pytest.raises(EngineError) as e:
+        go()
+    assert e.value.error_code == "paused_too_long" and e.value.recoverable
+    assert "the way home was not sent" in str(e.value) and len(arm.sent) == 1
+    arm, go = run()
+    out = go()
+    assert out["home"] and out["stepped_out"] and len(arm.sent) == 2
 
 
 def test_an_arm_moved_while_planned_for_is_planned_for_again_from_where_it_stands():

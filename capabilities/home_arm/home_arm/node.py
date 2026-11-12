@@ -28,7 +28,11 @@ each sent to the driver once (`execute_joint_trajectory`), the plans at `speed_s
 goals' default, 0.3), each under the driver's divergence guard (arm.path_tol_rad: an arm held
 back further than that from its path is stopped there): a goal the driver aborts or rejects fails
 the action, never retried, and a cancel stops the arm where it is (self.arm cancels the goal
-first). The arm is read once more at the end, and "home" is said only of an arm that is there.
+first). A pause never stops a goal half way: one asked for while a goal flies is taken at its end,
+before the next is sent, and after any pause the arm is read again before anything is sent. The
+arm is read once more at the end, and "home" is said only of an arm that is there.
+
+Standalone only (use_orchestrator:=false): no selection dispatches go_home (perception_classes).
 
     ros2 launch home_arm home_arm.launch.py use_orchestrator:=false
 make action CAP=home_arm ACTION=go_home PARAMS='{"dry_run": true}'  # plans, sends nothing"""
@@ -61,6 +65,9 @@ ACTION_BUDGET_S = 100.0
 # (any joint) is an arm that moved while they were made. It is planned for again, once.
 START_MOVED_RAD = 0.02
 SUCCESSFUL = 0  # a driver goal's error_code when it succeeded
+# The driver's floor on a goal's speed_scale (kinova-gen3-driver kMinSpeedScale): it rejects a goal
+# sent at less, so a speed_scale under it is refused as bad_config before anything is planned.
+MIN_SPEED_SCALE = 0.01
 SWUNG = "the plan swings"  # how _judge's refusal of a wide plan begins: asking again gets the same
 NO_LAYERS = "body_layers is empty"  # why there is no body model where the deployment turned it off
 PAUSED_S = 0.05  # a checkpoint that blocked longer than this was a pause
@@ -110,8 +117,11 @@ def _settle_s():
 class Capability(CapabilityEngine):
     display_name = "Home arm"
     # Not tied to an object. An object's selection activates the engines of its class, so with no
-    # class no selection offers go_home: it is run standalone, or by an execute_action goal sent
-    # to it directly (docs/interface.md, "Orchestrator interface").
+    # class no selection offers go_home and the orchestrator never dispatches it. A deliberate,
+    # stated limit: go_home is for standalone use only (use_orchestrator:=false), until the
+    # orchestrator can dispatch an action that belongs to no object. A goal sent straight to an
+    # orchestrated engine would move the arm outside the orchestrator's arm lock, so that is not
+    # offered as a way to run it (docs/interface.md, "Orchestrator interface").
     perception_classes = []
     required_resources = ["arm"]
     actions = [
@@ -157,8 +167,10 @@ class Capability(CapabilityEngine):
                 "bad_config", f"home_joints has {home.size} values, not {len(JOINTS)}"
             )
         speed = float(self.get_parameter("speed_scale").value)
-        if not 0.0 < speed <= 1.0:
-            raise EngineError("bad_config", f"speed_scale {speed} is not in (0, 1]")
+        if not MIN_SPEED_SCALE <= speed <= 1.0:
+            raise EngineError(
+                "bad_config", f"speed_scale {speed:g} is not in [{MIN_SPEED_SCALE:g}, 1]"
+            )
         tries = max(1, int(self.get_parameter("plan_tries").value))
 
         ctx.progress("checking", 0.0, "reading where the arm is")
@@ -233,36 +245,29 @@ class Capability(CapabilityEngine):
             ctx.progress("done", 1.0, f"dry run: home planned {route.how}, nothing sent")
             return dict(result, dry_run=True)
 
-        # From here nothing is pausable. A pause asked for before this is taken HERE, not inside
-        # self.arm (whose own checkpoint would block with the plans already judged and the arm
-        # last read before it), and what a pause may have changed is looked at again.
+        # From here nothing is pausable. A pause asked for before a goal is sent is taken at
+        # _last_pause, not inside self.arm (whose own checkpoint would block with the plans already
+        # judged and the arm last read before it), and what it may have changed is looked at again.
         if step:
             ctx.progress("stepping clear", 0.4, "a short step clear first", pausable=False)
         else:
             ctx.progress("going home", 0.6, "going home", pausable=False)
-        paused = self._paused_s
-        self._pause_point(ctx)
-        if self._paused_s - paused > PAUSED_S:
-            moved, j = homing.end_error(self._joints(), q0)
-            if moved > START_MOVED_RAD:
-                raise EngineError(
-                    "arm_moving",
-                    f"the arm moved {moved:.3f} rad (joint {j + 1}) while the action was paused, "
-                    "after its way home was planned: nothing sent, run it again",
-                    recoverable=True,
-                )
-            self._fits(began, step_s + home_s, speed)
+        self._last_pause(ctx, q0, began, step_s + home_s, speed)
         if step:
-            self._fly(step, "the plan-free step clear", 1.0)
+            flown = "the plan-free step clear"
+            self._fly(step, flown, 1.0)
             result["moved"] = True
-            stopped, j = homing.end_error(self._joints("the plan-free step clear"), route.free[-1])
+            stopped, j = homing.end_error(self._joints(flown), route.free[-1])
             if stopped > START_MOVED_RAD:
                 raise EngineError(
                     "motion_failed",
-                    f"the plan-free step clear ended {stopped:.3f} rad (joint {j + 1}) short of "
+                    f"{flown} ended {stopped:.3f} rad (joint {j + 1}) short of "
                     "its end, where the way home starts: the arm holds where it stopped",
                 )
             ctx.progress("going home", 0.6, "going home", pausable=False)
+            # The base class takes a PAUSE while the step flies too (it only reports the step as
+            # not pausable): it is taken here, at the step's end, before the way home is sent.
+            self._last_pause(ctx, route.free[-1], began, home_s, speed, flown)
         self._fly(way, "the way home", speed)
         # The driver ends a goal when its clock runs out, wherever the arm is: "home" is said
         # only of an arm read there, as go_to_joint_config judges its own end.
@@ -299,10 +304,36 @@ class Capability(CapabilityEngine):
                 "arm_state", f"the arm's joints cannot be read ({e})", recoverable=True
             ) from e
 
-    def _fits(self, began, moving_s, speed):
+    def _last_pause(self, ctx, at, began, moving_s, speed, flown=""):
+        """The last moment a pause can be taken before a goal is sent. One asked for by now is
+        taken HERE, and what it may have changed is looked at again: the arm must still stand at
+        `at`, where what is sent next starts (arm_moving if not), and the `moving_s` still to fly
+        must still fit the action's time (_fits). `flown`: the goal already flown, '' before the
+        first."""
+        paused = self._paused_s
+        self._pause_point(ctx)
+        if self._paused_s - paused <= PAUSED_S:
+            return
+        if flown:
+            when = f"after {flown}"
+            unsent = "the way home was not sent, the arm holds where it stands"
+        else:
+            when, unsent = "after its way home was planned", "nothing sent"
+        moved, j = homing.end_error(self._joints(flown), at)
+        if moved > START_MOVED_RAD:
+            raise EngineError(
+                "arm_moving",
+                f"the arm moved {moved:.3f} rad (joint {j + 1}) while the action was paused, "
+                f"{when}: {unsent}, run it again",
+                recoverable=True,
+            )
+        self._fits(began, moving_s, speed, unsent)
+
+    def _fits(self, began, moving_s, speed, unsent="nothing sent"):
         """EngineError where the way home (`moving_s` at `speed`) no longer fits the action's time.
         By the wall clock, a pause and all: whatever cancels a long action counts the pause too,
-        and a way home refused here is better than one cancelled half way."""
+        and a way home refused here is better than one cancelled half way. `unsent`: what is not
+        sent, for the message."""
         elapsed = time.monotonic() - began
         if elapsed + moving_s <= ACTION_BUDGET_S:
             return
@@ -311,14 +342,14 @@ class Capability(CapabilityEngine):
                 "paused_too_long",
                 f"the action was paused {self._paused_s:.0f} s, and the way home "
                 f"({moving_s:.0f} s) no longer fits its {ACTION_BUDGET_S:.0f} s: "
-                "nothing sent, run it again",
+                f"{unsent}, run it again",
                 recoverable=True,
             )
         raise EngineError(
             "too_slow",
             f"the way home takes {moving_s:.0f} s at speed_scale {speed:g}, past the "
             f"action's {ACTION_BUDGET_S:.0f} s with the planning: raise speed_scale, or jog "
-            "the arm nearer home; nothing sent",
+            f"the arm nearer home; {unsent}",
         )
 
     def _kinematics(self):
