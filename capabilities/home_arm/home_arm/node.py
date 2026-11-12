@@ -59,10 +59,26 @@ ACTION_BUDGET_S = 100.0
 START_MOVED_RAD = 0.02
 SUCCESSFUL = 0  # a driver goal's error_code when it succeeded
 SWUNG = "the plan swings"  # how _judge's refusal of a wide plan begins: asking again gets the same
+# How self.arm's own refusal of a plan begins (no action server, no answer, a rejected goal, no
+# result in arm.plan_timeout_s): the planner did not plan, which says nothing of the way home.
+NOT_PLANNED = "plan_to_joints: "
+# The planner's words for a start it will not plan from (cuRobo's INVALID_START_STATE_*, and
+# rammp-curobo's START_IN_LIMIT_MARGIN, which is said before any collision is looked at).
+START_REFUSED = ("INVALID_START", "START_IN_LIMIT")
 
 
-class _OutOfTime(EngineError):
-    """The planning budget is spent: no step or waypoint is tried after it."""
+class _Stop(EngineError):
+    """Ends the search for a way home at once: no step or waypoint is tried after it."""
+
+
+class _OutOfTime(_Stop):
+    """The planning budget is spent."""
+
+
+def _refuses_start(plan):
+    """Whether the planner refused `plan`'s start itself, not a way from it."""
+    said = str(plan.message or "").upper()
+    return not plan.success and any(word in said for word in START_REFUSED)
 
 
 @dataclass
@@ -111,6 +127,7 @@ class Capability(CapabilityEngine):
 
     def execute(self, action_id, params, ctx):
         began = time.monotonic()
+        self._paused_s = 0.0  # what a pause took (_pause_point): no part of either budget
         if not isinstance(params, dict):  # the base class hands over whatever JSON the goal carried
             raise EngineError(
                 "bad_params",
@@ -134,14 +151,24 @@ class Capability(CapabilityEngine):
         tries = max(1, int(self.get_parameter("plan_tries").value))
 
         ctx.progress("checking", 0.0, "reading where the arm is")
-        if self.mock:
-            ctx.checkpoint()
+        if self.mock:  # the real path's payload, key for key: what is built on the mock runs on it
+            self._pause_point(ctx)
+            result = {
+                "home": not dry_run,
+                "moved": False,
+                "stepped_out": False,
+                "planned": "mock",
+                "notes": [],
+                "duration_s": 0.0,
+                "speed_scale": speed,
+                "mock": True,
+            }
             if dry_run:  # as the real path: planned, nothing sent
                 ctx.progress("done", 1.0, "dry run (mock): nothing sent")
-                return {"home": False, "moved": False, "mock": True, "dry_run": True}
+                return dict(result, dry_run=True)
             self.arm.go_to_joint_config(home, "home (mock)")
             ctx.progress("done", 1.0, "home (mock)")
-            return {"home": True, "moved": False, "mock": True}
+            return result
         q0 = self._joints()
         off, _ = homing.end_error(q0, home)
         if off <= AT_HOME_RAD:
@@ -152,7 +179,7 @@ class Capability(CapabilityEngine):
         self._plan_until = began + PLAN_BUDGET_S
         ctx.progress("planning", 0.2, "planning the way home around the chair")
         route = self._route(q0, home, tries, ctx, chain, model, no_model)
-        ctx.checkpoint()
+        self._pause_point(ctx)
         if not dry_run:
             now = self._joints()
             moved, j = homing.end_error(now, q0)
@@ -162,7 +189,7 @@ class Capability(CapabilityEngine):
                 q0 = now
                 route = self._route(q0, home, tries, ctx, chain, model, no_model)
                 route.notes.insert(0, note + ", and was planned for again")
-                ctx.checkpoint()
+                self._pause_point(ctx)
                 moved, j = homing.end_error(self._joints(), q0)
                 if moved > START_MOVED_RAD:
                     raise EngineError(
@@ -190,7 +217,7 @@ class Capability(CapabilityEngine):
             "duration_s": round(step_s + home_s, 2),
             "speed_scale": speed,
         }
-        over = time.monotonic() - began + step_s + home_s
+        over = time.monotonic() - began - self._paused_s + step_s + home_s
         if over > ACTION_BUDGET_S:
             raise EngineError(
                 "too_slow",
@@ -281,16 +308,20 @@ class Capability(CapabilityEngine):
             plan = self._plan(goal, q0)
             if not self._judge(plan, goal) and not homing.near_limits(q0, chain.limits):
                 return _Route(None, [plan], "directly", notes)
-            depth = float(model.depth(q0)[0])
-            path, why = model.escape(q0)
-            if path is None:
-                raise EngineError("start_in_padding", f"{why}: jog the arm clear by hand")
-            free, start = path, path[-1]
-            notes.append(
-                f"stepped {1000 * depth:.0f} mm out of the padding round the chair and user "
-                f"(the largest joint {float(np.abs(path[-1] - q0).max()):.3f} rad)"
-            )
-        ctx.checkpoint()
+            # Stepped out of only where the planner refuses the START. A plan that failed past
+            # it, swung or ended elsewhere is a planner that takes this start: the padding is the
+            # engine's copy's alone, and the home is asked for from here as from any start.
+            if _refuses_start(plan):
+                depth = float(model.depth(q0)[0])
+                path, why = model.escape(q0)
+                if path is None:
+                    raise EngineError("start_in_padding", f"{why}: jog the arm clear by hand")
+                free, start = path, path[-1]
+                notes.append(
+                    f"stepped {1000 * depth:.0f} mm out of the padding round the chair and user "
+                    f"(the largest joint {float(np.abs(path[-1] - q0).max()):.3f} rad)"
+                )
+        self._pause_point(ctx)
         try:
             near = homing.near_limits(start, chain.limits)
             if near:
@@ -327,7 +358,7 @@ class Capability(CapabilityEngine):
             raise EngineError("bad_config", str(e)) from e
         last = "no step up to the cap"
         for f, q1 in steps:
-            ctx.checkpoint()
+            self._pause_point(ctx)
             path = homing.line(start, q1)
             z = chain.tool_z(path, tool)
             if z.min() < z_from - body.ESCAPE_DROP_M:
@@ -340,7 +371,7 @@ class Capability(CapabilityEngine):
                 break  # a longer step runs the same line on: as deep or deeper
             try:
                 plans, how_home = self._plan_home(q1, home, tries, ctx, model)
-            except _OutOfTime:
+            except _Stop:
                 raise
             except EngineError as e:
                 last = str(e)
@@ -367,7 +398,7 @@ class Capability(CapabilityEngine):
         last = ""
         goal = homing.on_branch(home, start)
         for k in range(tries):
-            ctx.checkpoint()
+            self._pause_point(ctx)
             plan = self._plan(goal, start)
             last = self._judge(plan, goal)
             if not last:
@@ -377,7 +408,7 @@ class Capability(CapabilityEngine):
         for f, w in zip(homing.WAYPOINTS, homing.waypoints(start, home), strict=True):
             if model is not None and float(model.depth(w)[0]) > 0.0:
                 continue
-            ctx.checkpoint()
+            self._pause_point(ctx)
             first, why = self._to_waypoint(w, start, model)
             if why:
                 last = why
@@ -394,7 +425,7 @@ class Capability(CapabilityEngine):
                 continue
             plans, at, why = [], np.asarray(start, float), ""
             for w in ws:
-                ctx.checkpoint()
+                self._pause_point(ctx)
                 plan, why = self._to_waypoint(w, at, model)
                 if why:
                     break
@@ -429,13 +460,29 @@ class Capability(CapabilityEngine):
         """The planner's plan to `goal` from `start`, while the planning budget still holds a whole
         arm.plan_timeout_s."""
         wait = _plan_timeout_s()
-        if time.monotonic() + wait > self._plan_until:
+        if time.monotonic() + wait > self._plan_until + self._paused_s:
             raise _OutOfTime(
                 "no_way_home",
                 f"no plan home within {PLAN_BUDGET_S:.0f} s of planning (each plan may wait "
                 f"{wait:.0f} s): jog the arm clear by hand",
             )
-        return self.arm.plan_to_joints(goal, start)
+        plan = self.arm.plan_to_joints(goal, start)
+        if not plan.success and str(plan.message or "").startswith(NOT_PLANNED):
+            # no planner to ask is no word on the way home: said as it is, and not asked again
+            # through every waypoint (each ask waits arm.planner_wait_s for the server)
+            raise _Stop(
+                "planner_unavailable",
+                f"the planner did not plan ({plan.message}): nothing moved",
+                recoverable=True,
+            )
+        return plan
+
+    def _pause_point(self, ctx):
+        """ctx.checkpoint(): Cancelled once the action is cancelled, and while it is paused the
+        wait, which is given back to both budgets (a paused action is not planning)."""
+        t = time.monotonic()
+        ctx.checkpoint()
+        self._paused_s += time.monotonic() - t
 
     @staticmethod
     def _judge(plan, goal, end_rad=homing.PLAN_END_RAD):

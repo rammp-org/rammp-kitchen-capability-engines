@@ -4,7 +4,8 @@ line, and a timed trajectory from a path or from several plans. Pure numpy and r
 helpers: no ROS."""
 
 import numpy as np
-from rammp_arm import CONTINUOUS, JOINT_SPEED, _wrap, joint_trajectory
+import rammp_arm
+from rammp_arm import CONTINUOUS, _wrap, joint_trajectory
 
 # cuRobo bounds the continuous joints here, as plain revolute ones
 PLANNER_CONTINUOUS_LIMIT_RAD = 6.0
@@ -110,7 +111,9 @@ def stepped(path, speed=ESCAPE_SPEED_RAD_S):
     P = np.asarray(path, float)
     if len(P) < 2:
         return []
-    out = joint_trajectory(P[0], list(P[1:]), speed_scale=speed / JOINT_SPEED)
+    # rammp_arm.JOINT_SPEED as it is now: arm.joint_speed sets it at startup, after this module is
+    # imported, and a copy taken then would scale the step's cap by the two speeds' ratio
+    out = joint_trajectory(P[0], list(P[1:]), speed_scale=speed / rammp_arm.JOINT_SPEED)
     if out is None:
         return []
     t, q, qd = out

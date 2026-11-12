@@ -155,3 +155,16 @@ def test_a_home_too_near_a_limit_is_a_config_error():
 def test_line_samples_a_joint_line_finely_from_end_to_end():
     pts = homing.line(np.zeros(7), np.r_[0.05, np.zeros(6)])
     assert len(pts) == 6 and pts[0][0] == 0.0 and pts[-1][0] == pytest.approx(0.05)
+
+
+def test_the_plan_free_steps_speed_cap_holds_whatever_arm_joint_speed_is_set_to(monkeypatch):
+    """arm.joint_speed sets rammp_arm.JOINT_SPEED at startup, after homing is imported: the step is
+    capped by the speed as it is then, not by a copy taken at import."""
+    import rammp_arm
+
+    path = np.array([[0.0] * 7, [0.3] + [0.0] * 6])
+    for joint_speed in (0.85, 0.4, 1.5):
+        monkeypatch.setattr(rammp_arm, "JOINT_SPEED", joint_speed)
+        pts = homing.stepped(path)
+        peak = max(float(np.abs(qd).max()) for _t, _q, qd in pts)
+        assert peak == pytest.approx(homing.ESCAPE_SPEED_RAD_S, rel=0.05)

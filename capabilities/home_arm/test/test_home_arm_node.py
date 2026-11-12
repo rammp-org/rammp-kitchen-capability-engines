@@ -151,6 +151,7 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
         "_to_waypoint",
         "_off_the_limit",
         "_plan",
+        "_pause_point",
         "_fly",
     ):
         setattr(eng, name, functools.partial(getattr(Capability, name), eng))
@@ -443,9 +444,68 @@ def test_the_mock_plans_nothing_and_a_dry_run_of_it_sends_nothing():
     arm = SimpleNamespace(go_to_joint_config=lambda q, label: sent.append(label) or True)
     eng = _engine(arm, Model())
     eng.mock = True
-    assert _go(eng, dry_run=True) == {"home": False, "moved": False, "mock": True, "dry_run": True}
+    dry = _go(eng, dry_run=True)
+    assert (dry["home"], dry["moved"], dry["mock"], dry["dry_run"]) == (False, False, True, True)
     assert sent == []
-    assert _go(eng) == {"home": True, "moved": False, "mock": True} and sent == ["home (mock)"]
+    out = _go(eng)
+    assert (out["home"], out["moved"], out["mock"]) == (True, False, True) and sent == [
+        "home (mock)"
+    ]
+    # the real path's payload, key for key: what is built on the mock runs on the robot
+    real = _go(_engine(Arm(), Model()))
+    assert set(real) <= set(out) and set(_go(_engine(Arm(), Model()), dry_run=True)) <= set(dry)
+
+
+def test_a_planner_that_does_not_answer_is_said_so_and_not_asked_through_every_waypoint():
+    """self.arm turns "no action server", "no answer" and "no result in time" into a failed plan
+    whose message begins with the call's name: that is no word on the way home (REVIEW_RULES U4)."""
+    down = "plan_to_joints: no /rammp_curobo/plan_to_joints action server (the cuRobo planner)"
+    arm = Arm(answers=[lambda g, s: _plan(g, s, ok=False, message=down)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and e.value.recoverable
+    assert "no /rammp_curobo/plan_to_joints action server" in str(e.value)
+    assert len(arm.planned) == 1 and arm.sent == []
+    # ... off a joint limit too, where a failed home is otherwise answered with a longer step
+    near = HOME.copy()
+    near[1] = LIMITS[1][0] + 0.05
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False, message=down)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and len(arm.planned) == 1
+
+
+def test_a_pause_is_no_part_of_the_planning_or_the_action_budget(monkeypatch):
+    """ctx.checkpoint() blocks while the action is paused, and the planning step is pausable: the
+    time it took is given back, so a long pause does not end as no_way_home or too_slow."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+
+    class Paused(Ctx):
+        def checkpoint(self):
+            now[0] += 500.0  # paused this long at every checkpoint
+
+    arm = Arm()
+    out = Capability.execute(_engine(arm, Model()), "go_home", {}, Paused())
+    assert out["home"] and out["moved"] and len(arm.sent) == 1
+
+
+def test_inside_the_engines_padding_a_plan_that_fails_past_its_start_is_asked_again_not_stepped():
+    """Only a start the planner refuses is stepped out of: a plan that failed for another reason,
+    swung or ended elsewhere is a planner that takes this start."""
+    path = np.array([START, START + 0.05])
+    for first in (
+        lambda g, s: _plan(g, s, ok=False),  # FINETUNE_TRAJOPT_FAIL: the planner took the start
+        lambda g, s: _swinging(g, s),
+        lambda g, s: _plan(g, s, end=g + 0.4),
+    ):
+        arm = Arm(answers=[first, lambda g, s: _plan(g, s)])
+        out = _go(_engine(arm, Model(inside=0.012, escape=path)))
+        assert not out["stepped_out"] and len(arm.sent) == 1
+        assert all(np.allclose(s, START) for _g, s in arm.planned[:2])
+    # ... and a start it refuses for its limit margin is stepped out of, as one in collision is
+    arm = Arm(answers=[_refuses_start(START, "START_IN_LIMIT_MARGIN: jog it away from the limit")])
+    assert _go(_engine(arm, Model(inside=0.012, escape=path)))["stepped_out"]
 
 
 def test_an_arm_moved_while_planned_for_is_planned_for_again_from_where_it_stands():
