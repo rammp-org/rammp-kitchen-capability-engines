@@ -12,7 +12,7 @@ whenever allow_execute is on.
     make action CAP=button_press ACTION=press_button PARAMS='{"target": "start_30s"}'
 """
 
-from capability_engine import Action, ArmError, CapabilityEngine, EngineError, run
+from capability_engine import Action, ArmError, Cancelled, CapabilityEngine, EngineError, run
 from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import SetParametersResult
 
@@ -20,6 +20,7 @@ import button_press
 from button_press import Abort, MotionFailed, dome_pattern
 from button_press.kinematics import Kinematics
 from button_press.press_button import Args, Run, press_button
+from button_press.ui_panel import Panel
 
 MAX_PRESSES = 10
 # The steps that take the fingertip to the panel. A failure in one may leave it there, and a retry
@@ -147,13 +148,25 @@ class Capability(CapabilityEngine):
             ctx.progress("mock", 1.0, "mock: nothing detected or moved")
             return {"dry_run": True, "pressed": 0, "returned": False, "moved": False, "log_file": ""}
         phase = ["preflight"]
+        # The user's screen (ui_panel.py): each step, and a Stop button. Nothing is shown standalone.
+        panel = Panel(ctx, args.target, dry_run=not args.execute)
+
+        def checkpoint():
+            """ctx.checkpoint, and the panel's Stop: it ends the run as a cancel does (the arm holds
+            where it is). Like a cancel's, its effect waits for a checkpoint: a move already sent
+            to the driver finishes first."""
+            if panel.wait_out_pause():
+                self.get_logger().warning(f"press_button: Stop tapped on the panel during {phase[0]}")
+                raise Cancelled()
+            ctx.checkpoint()
 
         def step(name, fraction, pausable=True):
-            ctx.checkpoint()
+            checkpoint()
             phase[0] = name
             ctx.progress(name, fraction, f"{args.target}: {name}", pausable=pausable)
+            panel.show(name, fraction, pausable)
 
-        run = Run(args, self, self.kin, ctx.checkpoint, step)
+        run = Run(args, self, self.kin, checkpoint, step)
         self.get_logger().info(
             f"press_button: {args.target} x{args.presses} {'EXECUTE' if args.execute else 'dry run'}"
         )
@@ -175,6 +188,7 @@ class Capability(CapabilityEngine):
         finally:
             run.close()
         ctx.progress("done", 1.0, "dry run: nothing moved" if done["dry_run"] else "done")
+        panel.show("done", 1.0, pausable=False, stop=False)
         return dict(done, log_file=run.log_path, moved=run.arm.sent_goals > 0)
 
 

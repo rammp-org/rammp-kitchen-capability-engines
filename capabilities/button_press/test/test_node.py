@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("rclpy")
 node_mod = pytest.importorskip("button_press.node")
 import rclpy  # noqa: E402
-from capability_engine import EngineError, StreamClosed  # noqa: E402
+from capability_engine import Cancelled, EngineError, StreamClosed  # noqa: E402
 
 from button_press import Abort, MotionFailed  # noqa: E402
 
@@ -123,6 +123,47 @@ def test_the_steps_at_the_panel_are_not_pausable(engine, monkeypatch):
     assert out["moved"] is True and out["pressed"] == 1
     assert ("approach", 0.6, False) in ctx.progress_calls and ("press", 0.7, False) in ctx.progress_calls
     assert ctx.progress_calls[-1][:2] == ("done", 1.0)
+
+
+def test_each_step_is_on_the_users_panel_and_its_stop_button_ends_the_run_as_a_cancel(engine, monkeypatch):
+    closed, ended = [], []
+
+    class UiCtx(Ctx):
+        def __init__(self):
+            super().__init__()
+            self.panels, self.events = [], []
+
+        def update_user_panel(self, panel_json=None, objects=None, selected_instance_id=None):
+            self.panels.append(panel_json)
+            return True
+
+        def poll_ui_event(self):
+            return self.events.pop(0) if self.events else None
+
+    class FakeRun:
+        def __init__(self, args, eng, kin, checkpoint, step):
+            self.step, self.checkpoint, self.log_path = step, checkpoint, ""
+            self.record_end = lambda step, error=None: ended.append((step, type(error)))
+            self.arm = SimpleNamespace(sent_goals=0)
+
+        def close(self):
+            closed.append(True)
+
+    ctx = UiCtx()
+
+    def press_button(run, args, pub):
+        run.step("detect", 0.1)
+        run.step("stage", 0.25)
+        ctx.events.append({"type": "button", "button_id": "stop"})  # the user taps Stop during the move
+        run.checkpoint()
+        raise AssertionError("the run went on after Stop")
+
+    monkeypatch.setattr(node_mod, "Run", FakeRun)
+    monkeypatch.setattr(node_mod, "press_button", press_button)
+    with pytest.raises(Cancelled):
+        engine.execute("press_button", {}, ctx)
+    assert [(p["progress"]["phase"], p["progress"]["pct"]) for p in ctx.panels] == [("detect", 10.0), ("stage", 25.0)]
+    assert ended == [("stage", Cancelled)] and closed == [True]
 
 
 def test_the_run_settings_cannot_change_while_the_node_runs(engine):

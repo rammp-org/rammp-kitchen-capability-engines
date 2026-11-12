@@ -71,6 +71,20 @@ cancel during those steps. Move the arm clear by hand before the next action.
 make action CAP=button_press ACTION=press_button PARAMS='{"target": "start_30s"}'
 ```
 
+### The user's panel
+
+Run by the orchestrator, the action shows a panel on the UI (`ui_panel.py`, through the engine's
+`ctx.update_user_panel` / `ctx.poll_ui_event`): the current step in words, a progress bar, a pause
+control on the pausable steps, and a **Stop** button. A dry run says so on the panel.
+
+Stop ends the action as a cancel does: its status is cancelled and the arm holds where it is. It is
+read at the run's checkpoints (between moves, in the press's own waits, and while paused), so a move
+already sent to the driver finishes first. It is not an e-stop.
+
+Standalone (`use_orchestrator:=false`) there is no session token and nothing is shown. The engine
+needs the UI calls of rammp-kitchen-capability-engines#42; on an engine without them the panel is
+skipped and the run is unchanged.
+
 ## Parameters
 
 ROS parameters, declared with defaults under `params:` in the real fragment (flatbot's values). A
