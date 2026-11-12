@@ -568,8 +568,8 @@ def test_a_lid_that_rose_with_its_knob_flush_is_neither_gripped_nor_pressed_agai
     assert "knob %.1f mm above the lid, and its LID ROSE %+.0f mm — the box is open" % (knob_mm, 1000 * dz) in out
     assert (
         "STOP: the lid rose %+.0f mm (released) but its knob is not up (%.1f mm above the lid) — the fingers have "
-        "nothing to hold, so the lid is not taken off; the box is left open: lift the lid off by hand, or shut it, "
-        "before the next run (which would take it for shut and press it) — returning home" % (1000 * dz, knob_mm)
+        "nothing to hold, so the lid is not taken off; the box is left open, and the next run would take it for "
+        "shut and press it (its aim judges a box by its knob alone) — returning home" % (1000 * dz, knob_mm)
     ) in out
     assert "pressing once more" not in out and "GRIP" not in out
 

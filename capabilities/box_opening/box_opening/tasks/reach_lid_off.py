@@ -1192,8 +1192,8 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
         # (press_demo.refuse_open_box), and to it this one is shut
         look.stop = (
             "the lid rose %+.0f mm (released) but its knob is not up (%.1f mm above the lid) — the fingers "
-            "have nothing to hold, so the lid is not taken off; the box is left open: lift the lid off by "
-            "hand, or shut it, before the next run (which would take it for shut and press it)" % (1000 * dz, best)
+            "have nothing to hold, so the lid is not taken off; the box is left open, and the next run "
+            "would take it for shut and press it (its aim judges a box by its knob alone)" % (1000 * dz, best)
         )
     runner.note(
         "reach_knob",

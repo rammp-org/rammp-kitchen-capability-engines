@@ -308,6 +308,28 @@ def test_a_push_once_the_step_is_under_way_still_trips(monkeypatch):
     assert trips["step"] == pytest.approx(0.5, abs=0.011)
 
 
+def test_off_a_limit_no_longer_step_is_tried_once_the_steps_have_taken_too_long_to_plan(monkeypatch):
+    # 2026-11-11, the rig: one pose took 30 s to refuse, each step off the limit planning HOME and three waypoints
+    from types import SimpleNamespace
+
+    from conftest import traj
+
+    asked = []
+
+    def plan_to(at, name, q):
+        asked.append(name)
+        return SimpleNamespace(name=name, goal_joints=list(q), traj=traj(list(at.joints), list(q)))
+
+    monkeypatch.setattr(core, "HOME_LIMIT_S", -1.0)
+    ctx = _flatbot_ctx(monkeypatch, STUCK)
+    said = []
+    legs = core.home_any(ctx, PlanState(joints=list(STUCK), chain=0), list(HOME), plan_to, say=said.append)
+    # no step off the limit was planned from: the soft step clear instead (off the limits too), and HOME from its end
+    assert [leg.name for leg in legs] == ["escape-body", "home"]
+    assert asked == ["home"]
+    assert any("the steps had taken -1 s to plan and no longer one was tried" in s for s in said)
+
+
 def test_off_a_limit_a_plan_home_that_swings_wide_goes_through_a_waypoint_from_the_steps_end(monkeypatch):
     # flatbot 2026-11-10: after a 4% clear-margin step every plan HOME swung joint_1 0.9 rad out and back, and the
     # runner's sanity gate refused it at execution; now it is refused at planning, and HOME goes through the
