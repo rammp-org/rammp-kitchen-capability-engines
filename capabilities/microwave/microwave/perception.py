@@ -18,6 +18,10 @@ BOX_MARGIN_M = np.array([0.10, 0.10, 0.02])
 # -- and from this far ABOVE the box's floor: the table it stands on is in no fit (its points in front of the door
 # fall inside the door plane's tolerance and drag the door's edge, i.e. the hinge, out sideways and down)
 BOX_FLOOR_CLEAR_M = 0.06
+# -- but never higher than this (arm base z, m): the box's floor wanders (11-11: 0.281, then 0.327), and 6 cm
+# above a high one cut the door's lower third and the handle bar to 5 cm. Between the table top (~0.19) and the
+# door's bottom (~0.344)
+BOX_FLOOR_MAX_Z = 0.30
 BOX_MIN_POINTS = 500
 
 
@@ -48,7 +52,8 @@ class HandleDetector(door_common.perception.HandleDetector):
             return pts
         local = (pts @ base_R.T + base_t - box["center"]) @ box["R"]  # base -> the box's own axes
         lo, hi = -box["size"] / 2 - BOX_MARGIN_M, box["size"] / 2 + BOX_MARGIN_M
-        lo[2] = -box["size"][2] / 2 + BOX_FLOOR_CLEAR_M  # box z is up (boxer's boxes are gravity-aligned)
+        # box z is up (boxer's boxes are gravity-aligned), so base z = local z + the box centre's z
+        lo[2] = min(-box["size"][2] / 2 + BOX_FLOOR_CLEAR_M, BOX_FLOOR_MAX_Z - float(box["center"][2]))
         pts = pts[np.all((local >= lo) & (local <= hi), axis=1)]
         say(
             f"  {box.get('source', 'boxer')} {float(box['score']):.2f}: box {np.round(box['center'], 3)} "

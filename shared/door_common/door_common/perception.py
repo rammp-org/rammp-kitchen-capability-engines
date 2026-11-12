@@ -327,6 +327,8 @@ HANDLE_MIN_LENGTH_M = 0.06  # and at least this tall (5th-95th pct up it): a 2.3
 HANDLE_MIN_VERTICAL = 0.8  # the bar's long axis within ~37 deg of vertical (|cos| to up); checked FIRST (10-30: the
 # size filter used to run first and could drop the bar for the door's bottom lip / the table edge)
 MAX_DOOR_NORMAL_VERTICAL = 0.5  # door is vertical, so its normal must be ~horizontal
+DOOR_PLANE_TRIES = 3  # a horizontal biggest plane (the appliance's top, 11-11) is set aside and the next tried
+DOOR_PLANE_MIN_POINTS = 300  # ... while at least this many points are left
 # SAM 3 handle (handle_source "sam3")
 HANDLE_MASK_MIN_PIXELS = 50
 HANDLE_PROTRUSION_DEFAULT_M = 0.03  # how far the bar stands out when its own depth doesn't say (too thin to see)
@@ -458,30 +460,42 @@ class HandleDetector:
         if pts is None:
             return None
 
-        # door plane
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pts)
-        plane_model, inliers = pcd.segment_plane(distance_threshold=PLANE_DIST_M, ransac_n=3, num_iterations=500)
-        plane_pts = pts[inliers]
-        if debug is not None:
-            debug["door"] = plane_pts
-        off_plane = pts[np.setdiff1d(np.arange(len(pts)), inliers)]
-        normal, offset = np.asarray(plane_model[:3], float), float(plane_model[3])
-        nn = np.linalg.norm(normal)
-        normal, offset = normal / nn, offset / nn
-        if np.dot(normal, plane_pts.mean(axis=0)) > 0:  # point toward the camera: "in front" is +
-            normal, offset = -normal, -offset
-        vertical = abs(float(np.dot(normal, up_cam)))
-        if vertical > MAX_DOOR_NORMAL_VERTICAL:
+        # door plane: the biggest UPRIGHT plane in the box. A horizontal biggest one (the appliance's top seen from
+        # level with it, a shelf, the table) is set aside and the next biggest fitted on the rest (11-11: the
+        # microwave's top won 7 of 8 looks and the open failed NO DETECTION)
+        rest = pts
+        for k in range(1, DOOR_PLANE_TRIES + 1):
+            if len(rest) < DOOR_PLANE_MIN_POINTS:
+                say(f"  no upright plane: {len(rest)} points left after setting aside {k - 1} flat one(s)")
+                return None
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(rest)
+            plane_model, inliers = pcd.segment_plane(distance_threshold=PLANE_DIST_M, ransac_n=3, num_iterations=500)
+            plane_pts = rest[inliers]
+            off_plane = rest[np.setdiff1d(np.arange(len(rest)), inliers)]
+            normal, offset = np.asarray(plane_model[:3], float), float(plane_model[3])
+            nn = np.linalg.norm(normal)
+            normal, offset = normal / nn, offset / nn
+            if np.dot(normal, plane_pts.mean(axis=0)) > 0:  # point toward the camera: "in front" is +
+                normal, offset = -normal, -offset
+            vertical = abs(float(np.dot(normal, up_cam)))
+            if vertical <= MAX_DOOR_NORMAL_VERTICAL:
+                break
             # base z of a camera-frame point p is p @ up_cam + the camera's height
             what = (
                 f"plane {np.degrees(np.arcsin(min(vertical, 1.0))):.0f} deg from vertical at base z "
                 f"{float(np.median(plane_pts @ up_cam)) + tb[2]:+.2f}"
             )
-            if self.check_door_vertical:
-                say(f"  plane is not a door (normal not horizontal -- table/floor?): {what}")
+            if not self.check_door_vertical:
+                say(f"  {what} -- not a door's, used anyway (check_door_vertical off)")
+                break
+            if k == DOOR_PLANE_TRIES:
+                say(f"  plane {k} is not a door either: {what} -- no upright plane in {k} tries")
                 return None
-            say(f"  {what} -- not a door's, used anyway (check_door_vertical off)")
+            say(f"  plane {k} is not a door (flat -- the top, table/floor?): {what}; the next biggest ...")
+            rest = off_plane
+        if debug is not None:
+            debug["door"] = plane_pts
         return plane_pts, off_plane, normal, offset, up_cam, Rb, tb
 
     def door_face(self, rgb, K, depth, base_T_cam, box=None, debug=None):
