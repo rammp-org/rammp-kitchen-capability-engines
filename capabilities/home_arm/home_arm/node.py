@@ -25,8 +25,10 @@ it (home_arm.homing), the second leg planned from where the first one ends.
 Everything is planned before anything moves, then the arm's joints are read again: an arm that
 moved meanwhile is planned for again, once. Then the plan-free step (if any) and the plan(s) are
 each sent to the driver once (`execute_joint_trajectory`), the plans at `speed_scale` (the go_to
-goals' default, 0.3): a goal the driver aborts or rejects fails the action, never retried, and a
-cancel stops the arm where it is (self.arm cancels the goal first).
+goals' default, 0.3), each under the driver's divergence guard (arm.path_tol_rad: an arm held
+back further than that from its path is stopped there): a goal the driver aborts or rejects fails
+the action, never retried, and a cancel stops the arm where it is (self.arm cancels the goal
+first). The arm is read once more at the end, and "home" is said only of an arm that is there.
 
     ros2 launch home_arm home_arm.launch.py use_orchestrator:=false
 make action CAP=home_arm ACTION=go_home PARAMS='{"dry_run": true}'  # plans, sends nothing"""
@@ -36,6 +38,7 @@ import time
 from dataclasses import dataclass, field
 
 import numpy as np
+import rammp_arm
 from rammp_arm import GO_TO_SPEED_SCALE, JOINTS
 
 from capability_engine import Action, ArmError, CapabilityEngine, EngineError, run
@@ -97,10 +100,16 @@ def _plan_timeout_s():
     return float(getattr(importlib.import_module("capability_engine.arm"), "PLAN_TIMEOUT_S", 30.0))
 
 
+def _settle_s():
+    """How long self.arm lets /joint_states catch up with a move's end (arm.go_to_settle_s)."""
+    return float(getattr(importlib.import_module("capability_engine.arm"), "GO_TO_SETTLE_S", 0.3))
+
+
 class Capability(CapabilityEngine):
     display_name = "Home arm"
-    # Not tied to an object: offered standalone, or by an orchestrator that offers it on any
-    # selection.
+    # Not tied to an object. An object's selection activates the engines of its class, so with no
+    # class no selection offers go_home: it is run standalone, or by an execute_action goal sent
+    # to it directly (docs/interface.md, "Orchestrator interface").
     perception_classes = []
     required_resources = ["arm"]
     actions = [
@@ -168,7 +177,7 @@ class Capability(CapabilityEngine):
                 return dict(result, dry_run=True)
             self.arm.go_to_joint_config(home, "home (mock)")
             ctx.progress("done", 1.0, "home (mock)")
-            return result
+            return dict(result, off_rad=0.0)
         q0 = self._joints()
         off, _ = homing.end_error(q0, home)
         if off <= AT_HOME_RAD:
@@ -217,8 +226,18 @@ class Capability(CapabilityEngine):
             "duration_s": round(step_s + home_s, 2),
             "speed_scale": speed,
         }
-        over = time.monotonic() - began - self._paused_s + step_s + home_s
-        if over > ACTION_BUDGET_S:
+        # the wall clock, a pause and all: whatever cancels a long action counts the pause too, and
+        # a way home refused here is better than one cancelled half way
+        elapsed = time.monotonic() - began
+        if elapsed + step_s + home_s > ACTION_BUDGET_S:
+            if elapsed - self._paused_s + step_s + home_s <= ACTION_BUDGET_S:
+                raise EngineError(
+                    "paused_too_long",
+                    f"the action was paused {self._paused_s:.0f} s, and the way home "
+                    f"({step_s + home_s:.0f} s) no longer fits its {ACTION_BUDGET_S:.0f} s: "
+                    "nothing sent, run it again",
+                    recoverable=True,
+                )
             raise EngineError(
                 "too_slow",
                 f"the way home takes {step_s + home_s:.0f} s at speed_scale {speed:g}, past the "
@@ -242,8 +261,19 @@ class Capability(CapabilityEngine):
                 )
         ctx.progress("going home", 0.6, "going home", pausable=False)
         self._fly(way, "the way home", speed)
+        # The driver ends a goal when its clock runs out, wherever the arm is: "home" is said
+        # only of an arm read there, as go_to_joint_config judges its own end.
+        time.sleep(_settle_s())
+        off, j = homing.end_error(self._joints(), home)
+        reached = float(np.deg2rad(rammp_arm.GO_TO_TRACK_DEG))
+        if off > reached:
+            raise EngineError(
+                "motion_failed",
+                f"the way home ended {off:.3f} rad (joint {j + 1}) from the home (at most "
+                f"{reached:.3f}): the arm holds where it stopped",
+            )
         ctx.progress("done", 1.0, "home")
-        return dict(result, moved=True)
+        return dict(result, moved=True, off_rad=round(off, 4))
 
     # -- its parts --------------------------------------------------------------------------------
 
@@ -511,7 +541,12 @@ class Capability(CapabilityEngine):
         the action, and so does one it refuses or that self.arm does not send (an e-stop, control
         taken, no driver): motion_failed by name, never retried."""
         try:
-            res = self.arm.execute_joint_trajectory(JOINTS, points, speed_scale=speed_scale)
+            # path_tolerance: the driver's divergence guard. A goal that names none runs with the
+            # guard off (kinova-gen3-driver trajectory_executor: checked only where > 0), an arm
+            # that is blocked driven on to the end of its clock. self.arm's own moves set this one.
+            res = self.arm.execute_joint_trajectory(
+                JOINTS, points, speed_scale=speed_scale, path_tolerance=rammp_arm.PATH_TOL_RAD
+            )
         except ArmError as e:
             raise EngineError(
                 "motion_failed", f"{what} was not completed ({e}): the arm holds where it is"

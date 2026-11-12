@@ -57,7 +57,7 @@ class Arm:
     ):
         self.readings = [np.asarray(q, float) for q in (readings or [joints])]
         self.answers, self.codes = list(answers), list(codes)
-        self.planned, self.sent, self.speeds = [], [], []
+        self.planned, self.sent, self.speeds, self.path_tols = [], [], [], []
 
     def joint_states(self):
         q = self.readings.pop(0) if len(self.readings) > 1 else self.readings[0]
@@ -68,9 +68,10 @@ class Arm:
         answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
         return answer(np.asarray(goal, float), np.asarray(start, float))
 
-    def execute_joint_trajectory(self, names, points, speed_scale=1.0):
+    def execute_joint_trajectory(self, names, points, speed_scale=1.0, path_tolerance=None):
         self.sent.append(list(points))
         self.speeds.append(speed_scale)
+        self.path_tols.append(path_tolerance)
         code = self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
         if code == 0:
             self.readings = [np.asarray(points[-1][1], float)]
@@ -161,6 +162,7 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
 @pytest.fixture(autouse=True)
 def _plan_timeout(monkeypatch):
     monkeypatch.setattr(node, "_plan_timeout_s", lambda: 30.0)
+    monkeypatch.setattr(node, "_settle_s", lambda: 0.0)  # no waiting for the stand-in's joints
 
 
 def _go(eng, **params):
@@ -428,7 +430,7 @@ def test_a_goal_the_arm_refuses_fails_the_action_as_motion_failed_and_is_not_sen
     arm = Arm()
     tried = []
 
-    def refuse(names, points, speed_scale=1.0):
+    def refuse(names, points, speed_scale=1.0, path_tolerance=None):
         tried.append(len(points))
         raise getattr(driver_state, error)("execute_joint_trajectory: goal REJECTED")
 
@@ -482,12 +484,32 @@ def test_a_pause_is_no_part_of_the_planning_or_the_action_budget(monkeypatch):
     monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
 
     class Paused(Ctx):
-        def checkpoint(self):
-            now[0] += 500.0  # paused this long at every checkpoint
+        each = 20.0
 
+        def checkpoint(self):
+            now[0] += self.each  # paused this long at every checkpoint
+
+    # 60 s of pauses before the first plan: on the wall clock no whole plan_timeout would fit the
+    # 60 s of planning any more. The pause is not planning, and the home is planned and flown.
     arm = Arm()
     out = Capability.execute(_engine(arm, Model()), "go_home", {}, Paused())
     assert out["home"] and out["moved"] and len(arm.sent) == 1
+
+
+def test_a_pause_that_leaves_no_time_for_the_way_home_sends_nothing_and_says_so(monkeypatch):
+    """Whatever cancels a long action counts its pauses (the orchestrator's execute_timeout): a way
+    home that no longer fits is refused before anything is sent, not cancelled half way."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+
+    class Paused(Ctx):
+        def checkpoint(self):
+            now[0] += 500.0
+
+    arm = Arm()
+    with pytest.raises(EngineError) as e:
+        Capability.execute(_engine(arm, Model()), "go_home", {}, Paused())
+    assert e.value.error_code == "paused_too_long" and e.value.recoverable and arm.sent == []
 
 
 def test_inside_the_engines_padding_a_plan_that_fails_past_its_start_is_asked_again_not_stepped():
@@ -506,6 +528,40 @@ def test_inside_the_engines_padding_a_plan_that_fails_past_its_start_is_asked_ag
     # ... and a start it refuses for its limit margin is stepped out of, as one in collision is
     arm = Arm(answers=[_refuses_start(START, "START_IN_LIMIT_MARGIN: jog it away from the limit")])
     assert _go(_engine(arm, Model(inside=0.012, escape=path)))["stepped_out"]
+
+
+def test_every_goal_is_sent_under_the_drivers_divergence_guard(monkeypatch):
+    """A goal that names no path_tolerance runs with the driver's guard off (its executor checks a
+    joint only where the tolerance is > 0): a blocked arm would be driven on to the end of its
+    clock. Both the plan-free step and the way home carry arm.path_tol_rad, as it is set."""
+    import rammp_arm
+
+    monkeypatch.setattr(rammp_arm, "PATH_TOL_RAD", 0.11)  # as arm.path_tol_rad sets it at startup
+    path = np.array([START, START + 0.05])
+    arm = Arm(answers=[_refuses_start(START)])
+    out = _go(_engine(arm, Model(inside=0.012, escape=path)))
+    assert out["stepped_out"] and len(arm.sent) == 2 and arm.path_tols == [0.11, 0.11]
+
+
+def test_home_is_said_only_of_an_arm_that_is_read_there():
+    """The driver ends a goal when its clock runs out, wherever the arm is."""
+    arm = Arm()
+    short = HOME + np.array([0.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    def held_back(names, points, speed_scale=1.0, path_tolerance=None):
+        arm.sent.append(list(points))
+        arm.readings = [short]  # SUCCESSFUL, the arm 0.2 rad short on joint 2
+        return SimpleNamespace(error_code=0, error_string="")
+
+    arm.execute_joint_trajectory = held_back
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "motion_failed" and "0.200 rad (joint 2) from the home" in str(
+        e.value
+    )
+    assert len(arm.sent) == 1
+    out = _go(_engine(Arm(), Model()))  # ... and an arm that got there says how near
+    assert out["home"] and out["off_rad"] == 0.0
 
 
 def test_an_arm_moved_while_planned_for_is_planned_for_again_from_where_it_stands():

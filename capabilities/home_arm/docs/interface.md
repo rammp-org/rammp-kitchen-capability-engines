@@ -55,7 +55,9 @@ plain plan, and the action handles each before anything moves:
 A plan is asked for only while a whole `arm.plan_timeout_s` still fits in 60 s of
 planning, and a way home that would take the action past 100 s at `speed_scale`
 fails `too_slow`: well inside the orchestrator's 120 s timeout. Time the action
-spends paused counts toward neither. A planner that does not answer (no action
+spends paused is no part of the 60 s of planning; where a pause leaves the way
+home no room in the 100 s, the action fails `paused_too_long` before anything is
+sent (whatever cancels a long action counts its pauses too). A planner that does not answer (no action
 server, no result in `arm.plan_timeout_s`) fails `planner_unavailable` at the
 first plan, not `no_way_home` after every waypoint.
 
@@ -65,7 +67,11 @@ planned for is planned for again from where it stands, once, and one still movin
 fails `arm_moving`. Then the plan-free step (if any) and the plan(s) are each sent
 to the driver once (`/execute_joint_trajectory`, position control), the step on
 its own slow minimum-jerk timing (at most 0.15 rad/s), the plans at
-`speed_scale`. A step that ends short of where the way home starts, or a goal the
+`speed_scale`, each goal under the driver's divergence guard (`arm.path_tol_rad`
+per joint: a goal that names no tolerance runs with the guard off). The arm is
+read once more when the way home ends, and the action succeeds only where every
+joint is within `arm.go_to_track_deg` of the home: the driver ends a goal when
+its clock runs out, wherever the arm is. A step that ends short of where the way home starts, or a goal the
 driver aborts or rejects, fails the action (`motion_failed`), never retried; a
 cancel stops the arm where it is. `dry_run: true` plans and reports, and sends
 nothing.
@@ -107,27 +113,31 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `/home_arm/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/home_arm/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action    | Params                                                | Result payload                                                                                                                                                                                     |
-| --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s", "speed_scale"}`, or `{"home": true, "moved": false}` when already home; the mock answers with the same keys and `"mock": true` |
+| Action    | Params                                                | Result payload                                                                                                                                                                                                                                                       |
+| --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s", "speed_scale"}`, with `"off_rad"` (how near the home the arm was read) once flown, or `{"home": true, "moved": false}` when already home; the mock answers with the same keys and `"mock": true` |
 
-| Error code            | Recoverable | Meaning                                                                                                                                   |
-| --------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                           |
-| `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                   |
-| `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in (0, 1\]                                                                            |
-| `body_model`          | no          | The driver's URDF cannot be read, or the planner refuses the start as in collision and the planner's config cannot be read; nothing moved |
-| `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                         |
-| `near_limit`          | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                 |
-| `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                 |
-| `planner_unavailable` | yes         | The planner did not answer a plan request (not running, or no result in time); nothing moved                                              |
-| `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved                                                             |
-| `arm_moving`          | yes         | The arm moved while it was planned for, twice; nothing sent                                                                               |
-| `motion_failed`       | no          | The driver refused or did not complete a goal (an e-stop and control taken included); the arm holds where it stopped                      |
+| Error code            | Recoverable | Meaning                                                                                                                                                                    |
+| --------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                                                            |
+| `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                                                    |
+| `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in (0, 1\]                                                                                                             |
+| `body_model`          | no          | The driver's URDF cannot be read, or the planner refuses the start as in collision and the planner's config cannot be read; nothing moved                                  |
+| `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                                                          |
+| `near_limit`          | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                                                  |
+| `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                  |
+| `planner_unavailable` | yes         | The planner did not answer a plan request (not running, or no result in time); nothing moved                                                                               |
+| `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved                                                                                              |
+| `paused_too_long`     | yes         | A pause left the way home no room in the action's 100 s; nothing sent: run it again                                                                                        |
+| `arm_moving`          | yes         | The arm moved while it was planned for, twice; nothing sent                                                                                                                |
+| `motion_failed`       | no          | The driver refused or did not complete a goal (an e-stop, control taken and the divergence guard included), or the arm ended away from the home; it holds where it stopped |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
-the orchestrator is up. It offers `go_home` on every selection (no perception
-classes): it is not about an object.
+the orchestrator is up. It names no perception classes, because `go_home` is not
+about an object; an object's selection activates the engines of its class, so no
+selection offers `go_home` today. It is run standalone (`use_orchestrator:=false`)
+or by an `execute_action` goal sent to it directly, until the orchestrator has a
+way to offer an action that belongs to no object.
 
 ## Parameters
 
