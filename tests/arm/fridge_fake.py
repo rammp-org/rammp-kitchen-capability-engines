@@ -161,14 +161,16 @@ def _events_now(events, on_error):
     return types.SimpleNamespace(join=lambda timeout=None: None, cancel=lambda: None)
 
 
-@pytest.fixture
-def fridge(tmp_path, monkeypatch):
-    """The fridge configured for the 30-deg mount, its detection the handle at HANDLE on a door square to the arm, the
-    fake planner and arm at the Fridge pose: (arm, planner, world). Every module constant restored afterwards."""
+@pytest.fixture(params=constants.GRASPS)
+def fridge(request, tmp_path, monkeypatch):
+    """The fridge configured for the 30-deg mount and each grasp in turn (constants.GRASPS: the side
+    grasp, the branch's default, then the front), its detection the handle at HANDLE on a door
+    square to the arm, the fake planner and arm at the Fridge pose: (arm, planner, world). Every
+    module constant restored afterwards."""
     saved = [dict(vars(m)) for m in (dc, shared, constants, world, motion)]
     from fridge import open_door
 
-    open_door.configure(tmp_path, 30)
+    open_door.configure(tmp_path, 30, grasp=request.param)
     shared.configure(HANDLE_SOURCE="depth")
     monkeypatch.setattr(shared, "detect_handle", lambda: (HANDLE.copy(), HANDLE_QUAT, NORMAL.copy(), None, None, None))
     monkeypatch.setattr(planning, "_timed_events", _events_now)

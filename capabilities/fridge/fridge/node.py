@@ -1,6 +1,7 @@
 """The fridge capability: open and close the fridge door with the arm.
 
-Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, pull the door 60 deg open, let go and
+Action `open` (open_door.run): detect the handle from the wrist camera, grasp it (`grasp`: from the hinge side, one
+finger behind the bar -- side_grasp.py, the default -- or from the front), pull the door 60 deg open, let go and
 push it on to 90 (or, with `push_open` false, a 90-deg pull and go back round the door to its inner side). Action
 `close` (close_door.run): push the door most of the way shut with the hand -- no grasp, the gripper untouched (it may
 hold a container) -- against the door the open saved; it swings shut by itself from there. cuRobo plans every motion
@@ -71,6 +72,9 @@ PARAMS = {
     "data_dir": "/fridge_data",
     # the arm's forward lean in its mount (deg): 0 (dojo) or 30 (flatbot, gen_1_5). Picks constants.MOUNTS
     "mount_tilt_deg": 0,
+    # the open's grasp (constants.GRASPS): "side" (side_grasp.py: in along the door from the hinge side, one finger
+    # behind the bar, tilted -40..40 deg) or "front" (fingers across the bar, straight in). Picks the placement advice
+    "grasp": "side",
     "color_topic": "/wrist_camera/color/image_raw",
     "camera_info_topic": "/wrist_camera/color/camera_info",
     # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
@@ -230,6 +234,7 @@ class Capability(CapabilityEngine):
             self.cfg["data_dir"],
             self.cfg["mount_tilt_deg"],
             self.cfg["door_normal"],
+            self.cfg["grasp"],
             **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):

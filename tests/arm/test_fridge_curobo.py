@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from door_common import common as dc
 from door_common.common import DoorFrame
-from fridge import close_door, open_door, planning, push_open
+from fridge import close_door, open_door, planning, push_open, side_grasp
 from fridge import constants as F
 from fridge.kinematics import Chain
 from fridge.world import FridgeModel, PlannerWorld, chair_stand_in, hand_reach
@@ -253,9 +253,13 @@ def test_the_swing_stops_at_the_angle_asked_for_then_lets_go(fridge):
     plan = open_door.LAST_PLAN
     goal = plan["swing"].goals[0]
     df = plan["model"].df
-    end = open_door.swung(plan["cand"]["pos"], plan["cand"]["quat"], df.hinge, df.sign, 60)
+    if plan["cand"].get("side"):  # the bar carried round with the door, the hand turning about it
+        end = side_grasp.swing_poses(plan["cand"], df, 60, plan["lag"], [60.0])[0]
+    else:
+        end = open_door.swung(plan["cand"]["pos"], plan["cand"]["quat"], df.hinge, df.sign, 60)
     np.testing.assert_allclose(goal.through[-1][0], end[0], atol=1e-9)  # the swing's last pose: exactly 60 deg
-    assert all(abs(DoorFrame(plan["door"], 1.0).angle_of(p)) <= 60 + 1e-6 for p, _ in goal.through)
+    assert all(abs(open_door.hand_angle(plan["door"], [*p, *q])) <= 60 + 1e-6
+               for p, q in goal.through)
     # approach; close as the swing starts; the swing; THEN open (the arm still); then the back-off
     seq = order
     assert [k for k, _ in seq] == ["move", "grip", "move", "grip", "move"], order

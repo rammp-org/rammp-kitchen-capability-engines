@@ -31,6 +31,7 @@ from scipy.spatial.transform import Rotation as R
 
 from . import constants as F
 from . import planning as pl
+from . import side_grasp as S
 from .close_door import _box_gap, _hand_points, move_chair
 from .motion import load_door, opened, shifted
 from .world import FridgeModel, hand_reach
@@ -69,10 +70,49 @@ def finish_pose(door, out=None):
     return pos, facing_fridge(df, 1.0)
 
 
+def back_off_goals(model, deg, pose):
+    """Off the handle from the tool pose `pose` (pos, quat) holding it, the door open `deg`: [back_off_goal]; for the
+    side grasp then SIDE_BACK_OUT_M out from the door's face (its back-off leaves the hand alongside the door, inside
+    cuRobo's padding of it) and on to where the front grasp's back-off would have left the hand."""
+    back = back_off_goal(model, deg, pose)
+    if F.GRASP != "side":
+        return [back]
+    # out: cuRobo's own path (free space), not a straight line, and the hand turned about vertical toward the way the
+    # arm reaches (side_grasp.unbend): after the side grasp's swing the wrist (J6) is near its limit, and a hand kept
+    # turned along the door ends the move on it (11-10 sim: J6 114 of 119.7 deg, no plan could start from there)
+    out = np.r_[model.df._rot(deg) @ model.df.n, 0.0]
+    pos_out = back.pos + out * F.SIDE_BACK_OUT_M
+    goals = [back, pl.free(pos_out, S.unbend(pos_out, back.quat), f"{F.SIDE_BACK_OUT_M * 100:.0f} cm out from the door",
+                           back.world, blend=0.03, world_label=back.world_label)]
+    # then (cuRobo, round the door and its handle) to where the front grasp's back-off would have left the hand -- in
+    # front of the handle, facing the door, straight off it: the push-open (and what follows a full pull) go on from
+    # there as they do after the front grasp. From the side grasp's own end the arm is in a configuration the push
+    # can't follow (11-10 sim: J4 / J6 into their limits in every hand placement)
+    front = model.door.get("front_hold")
+    if front is not None:
+        p, q = _swung(model.df, np.asarray(front[:3], float), np.asarray(front[3:7], float), deg)
+        off = p - R.from_quat(q).as_matrix()[:, 2] * F.BACK_OFF_M
+        goals.append(pl.free(off, q, "in front of the handle, as after a front grasp", model.full(deg), blend=0.03,
+                             world_label="the open door"))
+    return goals
+
+
+def _swung(df, pos, quat, deg):
+    """Tool pose (pos, quat) on the closed door carried round the hinge with it, `deg` open."""
+    rot = R.from_euler("z", df.sign * deg, degrees=True)
+    return df.hinge + rot.apply(pos - df.hinge), (rot * R.from_quat(quat)).as_quat()
+
+
 def back_off_goal(model, deg, pose):
-    """Straight back off the handle from the tool pose `pose` (pos, quat) holding it, the door open `deg`."""
+    """Straight back off the handle from the tool pose `pose` (pos, quat) holding it, the door open `deg`, along the
+    hand's approach (the side grasp: SIDE_BACK_OFF_M, against side_grasp.hold_world)."""
     pos, quat = np.asarray(pose[0], float), np.asarray(pose[1], float)
     approach = R.from_quat(quat).as_matrix()[:, 2]
+    if F.GRASP == "side":  # back along the hand's own axis (the fingers' way off the bar, and away from the door
+        # whatever the hand's turn on the bar: side_grasp.swing_poses' lag), only until the bar is past the fingertips
+        label = f"back {F.SIDE_BACK_OFF_M * 100:.0f} cm off the handle"
+        return pl.line(pos - approach * F.SIDE_BACK_OFF_M, quat, label, S.hold_world(model, (deg,)), contact=False,
+                       blend=0.03, world_label="the door, the side grasp's window (face recessed)")
     world = model.holding((deg,), model.df.u_handle, float(model.door.get("handle_mid_z", model.door["closed_handle"][2])),
                           F.HAND_WINDOW_U_M, F.HAND_WINDOW_Z_M)
     return pl.line(
@@ -243,11 +283,11 @@ class PushOpen:
         pull leaves it). `from_arm`: that is where the arm is now. Returns (ok, message)."""
         model = FridgeModel(door)
         deg0 = float(door["door_open_deg"])
-        back = back_off_goal(model, deg0, hold_pose)
-        off, why = planner.motion([back], q_hold, start_pose=hold_pose, from_arm=from_arm)
+        backs = back_off_goals(model, deg0, hold_pose)
+        off, why = planner.motion(backs, q_hold, start_pose=hold_pose, from_arm=from_arm)
         if off is None:
             return False, f"push-open: {why}"
-        off_pose = (back.pos, back.quat)
+        off_pose = (backs[-1].pos, backs[-1].quat)
         for move in F.CHAIR_MOVES_M:
             if move == 0:
                 moved, route = door, model.full(deg0)

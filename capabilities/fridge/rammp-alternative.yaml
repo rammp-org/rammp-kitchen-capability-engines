@@ -39,6 +39,9 @@ params:
   data_dir: /fridge_data
   # The arm's forward lean in its mount (deg): 0 (dojo) or 30 (flatbot, gen_1_5).
   mount_tilt_deg: 0
+  # The open's grasp: side (in along the door from the hinge side, one finger behind the bar, tilted
+  # -40 to 40 deg) or front (fingers across the bar, straight in). Picks the placement advice.
+  grasp: side
   # Wrist camera; depth must be aligned to colour. camera_frame "" = the colour image's frame_id.
   # depth/image_rect_raw is aligned to colour on the D405 and the OAK (flatbot); the D435i's is not --
   # with it, override this to /wrist_camera/aligned_depth_to_color/image_raw.

@@ -123,7 +123,7 @@ def shifted(door, move, chair_dir):
 def shifted_by(door, dxy):
     """A copy of `door` with its recorded positions moved by `dxy` (arm_mount x, y)."""
     out = dict(door)
-    for k in ("hinge", "hinge_pivot", "closed_grasp_pos", "closed_handle", "door_mid"):
+    for k in ("hinge", "hinge_pivot", "closed_grasp_pos", "closed_hold_pos", "front_hold", "closed_handle", "door_mid"):
         if out.get(k) is not None:
             out[k] = [out[k][0] + dxy[0], out[k][1] + dxy[1], *out[k][2:]]
     return out

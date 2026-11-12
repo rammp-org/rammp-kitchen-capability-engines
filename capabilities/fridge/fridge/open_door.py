@@ -1,6 +1,19 @@
 """Open the fridge: detect the handle, grasp it, swing the door open and let go while still moving, then push it on (or
 go round it).
 
+The grasp (the node's `grasp`, constants.GRASP): "side" (side_grasp.py, the default) or "front" (fingers across the bar,
+GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs only up to the hand being off the handle:
+- its grasps: SIDE_TILTS_DEG (level first, then out to 40 deg nose-up / nose-down), in along the door from the hinge
+  side, 20 deg off its face, one finger between the bar and the door, from a line-up SIDE_SLIDE_M back along the
+  hand's level approach (cuRobo), then the slide (local IK) against side_grasp.hold_world;
+- its swing: the bar carried round the hinge, the hand turning about it up to SIDE_HAND_LAGS_DEG less than the door (the
+  first lag whose swing and back-off plan), checked against the door where it is at each step too;
+- its back-off (push_open.back_off_goals): SIDE_BACK_OFF_M back along the hand's axis, off the bar; SIDE_BACK_OUT_M
+  out from the door (cuRobo, the hand turned to unbend the wrist); then (cuRobo, round the door and handle) to where
+  the front grasp's back-off would have left the hand. From there the push-open (its wheelchair move included), the
+  full pull's way round the door, the placement advice and the close are the front grasp's code;
+- if no grasp gives a whole open, each is tried again from other arm configurations (side_configs, SIDE_CONFIGS).
+
 1. Detect: door_common's detection (two agreeing looks), with this fridge's values (`configure`): the handle from SAM 3's
    mask on the detection camera, the door's direction from the printed handle's model fit to the mask's depth
    (`door_normal: handle_model`, door_normal.py, the side grasp's method). The hinge is measured from the handle
@@ -31,14 +44,15 @@ import numpy as np
 import rammp_arm
 from door_common import common as dc
 from door_common import open_door as shared
-from door_common.common import DoorFrame, Refused, quiet, record_door_angle, save_door_geometry, say
+from door_common.common import Refused, quiet, save_door_geometry, say
 from scipy.spatial.transform import Rotation as R
 
 from . import constants as F
 from . import planning as pl
 from . import push_open as P
+from . import side_grasp as S
 from .motion import load_door, logged_run, opened
-from .push_open import PushOpen, back_off_goal, push_after_chair_move
+from .push_open import PushOpen, back_off_goals, push_after_chair_move
 from .world import FridgeModel, configure_handle
 
 GRASP_TRACK_ABORT_M = 0.03  # the approach must end the tool this close to the grasp, or the gripper stays open
@@ -191,10 +205,10 @@ _HANDLE_LENGTH = F.MEASURED["handle_length_m"]  # configure sets these two
 _DOOR_Z_FROM_HANDLE = (-F.MEASURED["door_below_handle_m"], F.MEASURED["door_above_handle_m"])
 
 
-def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", **measured):
+def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="side", **measured):
     """Everything the detection and the door model need from the fridge: call once at startup. `mount_tilt_deg`: a key
     of constants.MOUNTS. `door_normal`: how each look measures the door's direction (_make_detector, DOOR_NORMALS;
-    handle_model and handle need SAM 3's mask). `measured`: constants.MEASURED's names."""
+    handle_model and handle need SAM 3's mask). `grasp`: constants.GRASPS. `measured`: constants.MEASURED's names."""
     if door_normal not in DOOR_NORMALS:
         raise ValueError(f"door_normal must be one of {', '.join(DOOR_NORMALS)}, not {door_normal!r}")
     global _HANDLE_LENGTH, _DOOR_Z_FROM_HANDLE
@@ -202,7 +216,7 @@ def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", **measured
     _HANDLE_LENGTH = float(m["handle_length_m"])
     configure_handle(_HANDLE_LENGTH)
     _DOOR_Z_FROM_HANDLE = (-m["door_below_handle_m"], m["door_above_handle_m"])
-    F.configure(data_dir, mount_tilt_deg)
+    F.configure(data_dir, mount_tilt_deg, grasp)
     mount = F.MOUNTS[mount_tilt_deg]
     # the hinge and the door's face from the handle (where the fingers close), as they are measured. The offset in the
     # door's frame: into it, along it, up. A wrong one drags the door or the fridge during the swing
@@ -271,9 +285,16 @@ def opening_sign(n, hinge, handle):
     return 1.0 if (-e[1] * n2[0] + e[0] * n2[1]) > 0 else -1.0
 
 
-def closed_door(geom, h, grasp_pos):
+def closed_door(geom, h, grasp_pos, cand=None):
     """The door dict of the closed door: the door file's fields, from the detection `geom`, the handle `h` and the
-    grasp's tool point."""
+    grasp's tool point (`grasp_pos`: the door's frame is built on it). `cand`: the grasp (grasp_candidates'), if the
+    hand holds the door anywhere but at grasp_pos (the side grasp: grasp_pos is then side_grasp.door_reference): where
+    it holds the bar (closed_hold_pos, and hold_in_tool: that point in the tool frame), which the door's angle is read
+    from (hand_angle), and where the front grasp would have held it (front_hold)."""
+    hold, in_tool = np.asarray(grasp_pos, float), np.zeros(3)
+    if cand is not None and cand.get("bar") is not None:
+        hold = np.asarray(cand["bar"], float)
+        in_tool = R.from_quat(cand["quat"]).inv().apply(hold - np.asarray(cand["pos"], float))
     n, hinge = np.asarray(geom["n"], float), np.asarray(geom["hinge"], float)
     door = dict(
         closed_normal=list(n),
@@ -284,6 +305,10 @@ def closed_door(geom, h, grasp_pos):
         hinge=list(hinge),
         door_open_deg=0.0,
         handle_length_m=_HANDLE_LENGTH,
+        closed_hold_pos=list(map(float, hold)),
+        hold_in_tool=list(map(float, in_tool)),
+        grasp=F.GRASP,
+        **({"front_hold": list(map(float, cand["front"]))} if cand is not None and cand.get("front") else {}),
         **shared.door_model(n, grasp_pos, h),
     )
     door["open_sign"] = opening_sign(n, hinge, h)
@@ -297,10 +322,33 @@ def swung(pos, quat, hinge, sign, deg):
     return np.asarray(hinge, float) + rot.apply(p), (rot * R.from_quat(quat)).as_quat()
 
 
+def hand_angle(door, ee):
+    """The door's opening (deg, signed as DoorFrame.angle_of) from the hand holding the handle at tool pose `ee` (x y
+    z qx qy qz qw): how far the point it holds the bar by (hold_in_tool) has turned about the hinge from where it was
+    on the closed door (closed_hold_pos). A door file without them: the tool point against closed_grasp_pos."""
+    ref = np.asarray(door.get("closed_hold_pos") or door["closed_grasp_pos"], float)[:2]
+    p = np.asarray(ee[:3], float)
+    if door.get("hold_in_tool") is not None and len(ee) >= 7:
+        p = p + R.from_quat(np.asarray(ee[3:7], float)).apply(np.asarray(door["hold_in_tool"], float))
+    d = p[:2] - np.asarray(door["hinge"], float)[:2]
+    g = ref - np.asarray(door["hinge"], float)[:2]
+    return float(np.degrees(np.arctan2(g[0] * d[1] - g[1] * d[0], g @ d)))
+
+
+def record_hand_angle(ee):
+    """After the swing, the hand still on the handle: the door's angle and sense from it, into the door file (as
+    door_common's record_door_angle, read against where the hand held the closed door)."""
+    door = load_door()
+    a = hand_angle(door, ee)
+    save_door_geometry(door_open_deg=abs(a), open_sign=float(np.sign(a) or 1.0))
+
+
 def grasp_candidates(geom):
     """The grasps tried, in order: each tilt (+ nose-down, - nose-up), the hand up then upside down (fingers across the
     bar both ways). Dicts {pitch, flip, h, pos, quat}. A tilt whose grasp door_common refuses (beyond MAX_REACH) is
-    skipped."""
+    skipped. The side grasp (F.GRASP "side"): side_grasp.candidates."""
+    if F.GRASP == "side":
+        return S.candidates(geom)
     out = []
     for pitch in F.GRASP_PITCHES_DEG:
         try:
@@ -326,7 +374,8 @@ def lineup_point(cand, standoff):
 
 
 def approach_goals(model, cand, standoff, q_lineup=None):
-    """To the line-up point (a free leg; or a joint-space one to `q_lineup`, cuRobo's joints for it), then straight in."""
+    """To the line-up point (a free leg; or a joint-space one to `q_lineup`, cuRobo's joints for it), then straight in
+    (the side grasp: the slide along the door, against side_grasp.hold_world)."""
     pre = lineup_point(cand, standoff)
     if q_lineup is None:
         first = pl.free(pre, cand["quat"], f"line up {standoff * 100:.0f} cm out", model.full(0.0), blend=0.03,
@@ -334,27 +383,45 @@ def approach_goals(model, cand, standoff, q_lineup=None):
     else:
         first = pl.to_joints(q_lineup, pre, cand["quat"], f"line up {standoff * 100:.0f} cm out (other arm "
                              "configuration)", model.full(0.0), blend=0.03, world_label="the closed door")
+    if cand.get("side"):
+        return [first, pl.line(cand["pos"], cand["quat"], "slide in to the handle", hand_world(model, 0.0),
+                               world_label="the closed door, the side grasp's window (face recessed)")]
     return [first, pl.line(cand["pos"], cand["quat"], "straight in to the handle", hand_world(model, 0.0),
                            world_label="the closed door, hand window")]
 
 
+def standoffs(cand):
+    """The line-up distances tried for grasp `cand`, in order."""
+    return F.SIDE_SLIDE_M if cand.get("side") else F.PREGRASP_STANDOFF_M
+
+
 def hand_world(model, deg):
-    """The door open `deg` with a window round the hand on the handle (and the handle) left out: onto or off it."""
+    """The door open `deg` with a window round the hand on the handle (and the handle) left out: onto or off it. The
+    side grasp's: side_grasp.hold_world."""
+    if F.GRASP == "side":
+        return S.hold_world(model, (deg,))
     return model.holding((deg,), model.df.u_handle, float(model.door["handle_mid_z"]), F.HAND_WINDOW_U_M,
                          F.HAND_WINDOW_Z_M)
 
 
-def swing_goals(model, cand, swing):
+def swing_goals(model, cand, swing, lag=0.0):
     """Holding the handle: ONE leg round the hinge with the door to exactly `swing` deg, the hand turning with it,
     ending at rest there (the gripper opens only after: user, 11-09). Points every SWING_POINT_DEG along the arc (local
-    IK through them). Returns [goal]."""
+    IK through them). The side grasp: the hand turns about the bar `lag` deg less than the door (side_grasp.swing_poses),
+    and each step is checked against the door where it is then, too (side_grasp.swing_worlds: its arm runs alongside
+    the door). Returns [goal]."""
     df = model.df
     n = max(2, int(np.ceil(swing / SWING_POINT_DEG)))
-    poses = [swung(cand["pos"], cand["quat"], df.hinge, df.sign, swing * k / n) for k in range(1, n + 1)]
+    degs = [swing * k / n for k in range(1, n + 1)]
+    if cand.get("side"):
+        poses = S.swing_poses(cand, df, swing, lag, degs)
+    else:
+        poses = [swung(cand["pos"], cand["quat"], df.hinge, df.sign, d) for d in degs]
     # the door turns with the hand, so no one world can hold it: the swing is checked against the cabinet (with the
     # planner's chair layers and the arm itself), as the old planner's pull was
     return [pl.through(poses, f"swing to {swing:.0f} deg", model.cabinet(),
-                       world_label="the cabinet (the door turns with the hand)")]
+                       world_label="the cabinet (the door turns with the hand)",
+                       segment_worlds=S.swing_worlds(model, degs) if cand.get("side") else None)]
 
 
 SWING_POINT_DEG = 2.0  # the swing's path: a pose every this much door
@@ -386,21 +453,25 @@ def plan_open(planner, geom, q0, swing, after):
     if not cands:
         raise Infeasible("no grasp: every tilt's grasp is out of reach")
     # the door model is the same for every grasp (the face is placed from the handle); the file keeps the chosen one's
-    model = FridgeModel(closed_door(geom, cands[0]["h"], cands[0]["pos"]))
+    model = FridgeModel(closed_door(geom, cands[0]["h"], cands[0].get("ref", cands[0]["pos"]), cands[0]))
     tried = []
 
     def fail(what):
         tried.append(what)
         say(f"    {what}")
 
-    def grasp_and_swing(cand, hint_name=None, seed=None):
-        """The approach and the swing for grasp `cand` (from another arm configuration: `seed`), or None."""
-        name = f"tilt {cand['pitch']} deg, hand {'upside down' if cand['flip'] else 'up'}"
+    def grasp_and_swing(cand, hint_name=None, seed=None, lineup=None):
+        """The approach and the swing for grasp `cand` (from another arm configuration: `seed`; or `lineup`, (standoff,
+        joints): the side grasp's configurations, side_configs), or None."""
+        if cand.get("side"):
+            name = S.name(cand)
+        else:
+            name = f"tilt {cand['pitch']} deg, hand {'upside down' if cand['flip'] else 'up'}"
         if hint_name:
             name += f", {hint_name}"
         approach, why = None, ""
-        for standoff in F.PREGRASP_STANDOFF_M:
-            q_lineup = None
+        for standoff in standoffs(cand) if lineup is None else (lineup[0],):
+            q_lineup = None if lineup is None else lineup[1]
             if seed is not None:  # cuRobo's line-up joints, planned from another configuration
                 goal = pl.free(lineup_point(cand, standoff), cand["quat"], "line up (from another configuration)",
                                model.full(0.0), world_label="the closed door")
@@ -409,19 +480,40 @@ def plan_open(planner, geom, q0, swing, after):
                     continue
                 q_lineup = leg.q[-1]
             approach, why = planner.motion(approach_goals(model, cand, standoff, q_lineup), q0, from_arm=True)
-            if approach is not None or pl.goal_unreachable(why) and "straight in" in why:
+            if approach is not None or pl.goal_unreachable(why) and "in to the handle" in why:
                 break  # the grasp itself can't be reached: another line-up won't help
         if approach is None:
             fail(f"{name}: {why}")
             return None
-        sw, why = planner.motion(swing_goals(model, cand, swing), approach.q_end, start_pose=(cand["pos"], cand["quat"]))
+        sw, lag = None, 0.0
+        for lag in F.SIDE_HAND_LAGS_DEG if cand.get("side") else (0.0,):
+            if cand.get("side"):  # the joints alone first (local IK, no cuRobo): a swing or a slide off the bar
+                # that runs a joint into its limit is dropped before it costs a world load and a check per stretch
+                why = side_joints_why(planner, model, cand, swing, lag, approach.q_end)
+                if why and "of its limit" in why and lag < F.SIDE_HAND_LAGS_DEG[0]:
+                    break  # the turns left are smaller: the hand turns further with the door, the wrist bends more
+                if why:
+                    continue
+            sw, why = planner.motion(swing_goals(model, cand, swing, lag), approach.q_end,
+                                     start_pose=(cand["pos"], cand["quat"]))
+            if sw is not None and cand.get("side"):  # and the hand can get off the bar from where it ends (the start
+                # of what follows; planned once, the planner keeps it): else the next lag
+                end = (sw.goals[-1].pos, sw.goals[-1].quat)
+                off, why = planner.motion(back_off_goals(model, swing, end), sw.q_end, start_pose=end)
+                if off is None:
+                    why, sw = f"swing OK but {why}", None
+            if sw is not None:
+                break
         if sw is None:
             fail(f"{name}: {why}")
             return None
-        return dict(name=name, cand=cand, standoff=standoff, approach=approach, swing=sw, hint=hint_name)
+        if lag:
+            name = S.name(cand, lag) + (f", {hint_name}" if hint_name else "")
+        return dict(name=name, cand=cand, standoff=standoff, approach=approach, swing=sw, hint=hint_name, lag=lag)
 
     def after_swing(found):
-        door = closed_door(geom, found["cand"]["h"], found["cand"]["pos"])
+        c = found["cand"]
+        door = closed_door(geom, c["h"], c.get("ref", c["pos"]), c)
         sw = found["swing"]
         ok, msg = after.plan(planner, opened(door, swing), sw.q_end,
                              (sw.goals[-1].pos, sw.goals[-1].quat))
@@ -431,15 +523,59 @@ def plan_open(planner, geom, q0, swing, after):
         say(f"  plan: {found['name']}, line-up {found['standoff'] * 100:.0f} cm out, swing {swing} deg; {msg}")
         return dict(found, swing_deg=swing, door=door, model=model, after_msg=msg)
 
+    def configs(cand):
+        return side_configs(planner.fk, cand, q0)
+
     try:
-        return _search(cands, grasp_and_swing, after_swing, q0, tried)
+        return _search(cands, grasp_and_swing, after_swing, q0, tried, configs)
     except pl.OverBudget as e:
         raise Infeasible(f"{e}; {len(tried)} grasps failed before it: {why_not(tried)}") from e
 
 
-def _search(cands, grasp_and_swing, after_swing, q0, tried):
+def side_joints_why(planner, model, cand, swing, lag, q_grasp):
+    """The side grasp's swing (hand `lag` deg behind the door) and its slide off the bar, by local IK alone from the
+    grasp joints `q_grasp`, as planning.Planner._along solves them (one branch, every joint off its limits, no jumps):
+    why they can't be done, or "" (cuRobo then checks them as usual)."""
+    (swing_goal,) = swing_goals(model, cand, swing, lag)
+    end = (swing_goal.pos, swing_goal.quat)
+    back = back_off_goals(model, swing, end)[0]
+    q, pose = np.asarray(q_grasp, float), (cand["pos"], cand["quat"])
+    for goal in (swing_goal, back):
+        poses, _ = pl.path_poses(goal, np.asarray(pose[0], float), np.asarray(pose[1], float))
+        for k, (p, quat) in enumerate(poses):
+            nq, why = planner.fk.ik(p, quat, q)
+            if nq is None:
+                return f"{goal.label}: point {k + 1}/{len(poses)}: {why}"
+            if np.degrees(np.max(np.abs(nq - q))) > pl.MAX_STEP_DEG:
+                return f"{goal.label}: point {k + 1}/{len(poses)}: a joint jumps"
+            q = nq
+        pose = (goal.pos, goal.quat)
+    return ""
+
+
+def side_configs(fk, cand, q0):
+    """The side grasp's other arm configurations for grasp `cand`: [(name, (standoff, line-up joints))], local IK at
+    the first line-up (SIDE_SLIDE_M) from each of side_grasp.config_seeds(q0), every joint off its limits; one per
+    configuration (within SAME_CONFIG_DEG), the most room at J6 (the wrist: the swing bends it) first, then the least
+    reconfiguration from `q0`; at most SIDE_CONFIGS of them. The side branch's slide_configs, 11-06."""
+    standoff = F.SIDE_SLIDE_M[0]
+    pos = lineup_point(cand, standoff)
+    found = []
+    for name, seed in S.config_seeds(q0):
+        q, _ = fk.ik(pos, cand["quat"], seed)
+        if q is None or any(np.degrees(np.max(np.abs(pl._short_delta(q, f)))) < S.SAME_CONFIG_DEG for _, (_, f) in found):
+            continue
+        found.append((name, (standoff, q)))
+    found.sort(key=lambda c: (round(abs(np.degrees(c[1][1][5])) / 10.0),
+                              float(np.max(np.abs(pl._short_delta(q0, c[1][1]))))))
+    return found[: F.SIDE_CONFIGS]
+
+
+def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
     # 1. the grasps whose approach and swing plan, with cuRobo's own arm configuration (then, only if none does,
-    # from the other configurations), up to SWING_CANDIDATES of them; 2. what follows the swing, on those in order
+    # from the other configurations), up to SWING_CANDIDATES of them; 2. what follows the swing, on those in order.
+    # The side grasp (`configs`: side_configs): if nothing gives a whole open, every grasp again from its own other
+    # configurations, each one's whole open planned as soon as its swing plans
     swung = []
     for cand in cands:
         found = grasp_and_swing(cand)
@@ -462,6 +598,15 @@ def _search(cands, grasp_and_swing, after_swing, q0, tried):
         done = after_swing(found)
         if done:
             return done
+    if configs is not None and any(c.get("side") for c in cands):
+        say(f"  no whole open with the arm configurations tried ({len(tried)} attempts); the side grasp's others "
+            f"(up to {F.SIDE_CONFIGS} per grasp, the most wrist room first)")
+        for cand in cands:
+            for hint_name, lineup in configs(cand):
+                found = grasp_and_swing(cand, hint_name, lineup=lineup)
+                done = found and after_swing(found)
+                if done:
+                    return done
     raise Infeasible(f"no grasp gives a whole open that cuRobo plans ({len(tried)} tried): {why_not(tried)}")
 
 
@@ -614,7 +759,7 @@ def execute_open(ai, planner, plan):
     if off > REPLAN_DEG:
         say(f"  the grasp joints are {off:.1f} deg off the plan's -- planning the swing again from them")
         real = dict(cand, pos=np.asarray(st["ee_pos"][:3]), quat=np.asarray(st["ee_pos"][3:7]))
-        sw, why = planner.motion(swing_goals(model, real, plan["swing_deg"]), st["position"],
+        sw, why = planner.motion(swing_goals(model, real, plan["swing_deg"], plan.get("lag", 0.0)), st["position"],
                                  start_pose=(real["pos"], real["quat"]))
         if sw is None:
             raise Refused(f"swing from the real grasp: {why} -- stopping, the hand on the handle (door closed).")
@@ -633,7 +778,7 @@ def execute_open(ai, planner, plan):
     final = ai.get_state()
     say(f"SWING {'DONE' if ok else 'STOPPED SHORT'}: EE {np.round(final['ee_pos'][:3], 4)}, gripper "
         f"{float(final['gripper_pos']):.2f}")
-    record_door_angle(final["ee_pos"])  # the hand still holds the handle: it says where the door is
+    record_hand_angle(final["ee_pos"])  # the hand still holds the handle: it says where the door is
     if not ok:
         return False
     P._release(ai)  # stopped at the angle: let go, the hand still (Refused if the gripper doesn't open)
@@ -691,10 +836,9 @@ class ReleaseAround(_AfterPull):
 
     def goals(self, model, deg, hold_pose, via):
         df = model.df
-        back = back_off_goal(model, deg, hold_pose)
-        pos, quat = back.pos, back.quat
+        out = back_off_goals(model, deg, hold_pose)
+        pos, quat = out[-1].pos, out[-1].quat
         z = float(hold_pose[0][2])
-        out = [back]
         if via:
             d = df._rot(deg).T @ (pos[:2] - df.hinge[:2])
             v_now = float(d @ df.n) - df.mid
@@ -714,7 +858,7 @@ class ReleaseBackOff(_AfterPull):
     title = "back off the handle"
 
     def goals(self, model, deg, hold_pose, via):
-        return None if via else [back_off_goal(model, deg, hold_pose)]
+        return None if via else back_off_goals(model, deg, hold_pose)
 
 
 def release_back_off(ai, planner, execute):
@@ -723,11 +867,11 @@ def release_back_off(ai, planner, execute):
     say("\n===== release, back off the handle =====")
     door = load_door()
     st = ai.get_state()
-    door = opened(door, abs(DoorFrame(door, 1.0).angle_of(st["ee_pos"])))
+    door = opened(door, abs(hand_angle(door, st["ee_pos"])))
     model = FridgeModel(door)
     planner.search()
     pose = (np.asarray(st["ee_pos"][:3]), np.asarray(st["ee_pos"][3:7]))
-    motion, why = planner.motion([back_off_goal(model, float(door["door_open_deg"]), pose)], st["position"],
+    motion, why = planner.motion(back_off_goals(model, float(door["door_open_deg"]), pose), st["position"],
                                  start_pose=pose, from_arm=True)
     if motion is None:
         raise Refused(f"back-off: {why} -- NOT releasing, arm untouched.")

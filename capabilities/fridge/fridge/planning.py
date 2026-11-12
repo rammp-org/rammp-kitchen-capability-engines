@@ -44,6 +44,7 @@ BLEND_MIN_M = 0.002  # the smallest corner a stop after a blended junction gets 
 END_TOL_M = 0.01  # a planned leg must end this close to its goal (cuRobo's own tolerance is tighter)
 START_TOL_DEG = 1.0  # a planned motion runs only if the arm is this close to the joints it was planned from
 RAISED_RETRIES = 1  # a leg whose cuRobo plan raised (status EXCEPTION, not a planning answer) is asked again this often
+# ... and so is one whose start cuRobo calls INVALID_START_STATE_UNKNOWN_ISSUE (planning._leg)
 KEYPOINT_TOL_M = 0.015  # a motion counts as done with the tool this close to its last goal
 CONTACT_SPEED = 0.5  # a contact leg (`contact`) runs at this fraction of the free-space speed
 SETTLE_S = 0.3  # after a motion, let the arm's state catch up
@@ -71,6 +72,12 @@ class OverBudget(Refused):
 
 GOAL_FAILURES = ("IK_FAIL", "INVALID_GOAL", "solution AT the goal")  # cuRobo statuses that mean the goal pose itself can't be reached: no
 # route to it (a via point) can help
+
+
+def flaky(message):
+    """True for a cuRobo answer that isn't one (asked again: RAISED_RETRIES)."""
+    message = str(message)
+    return message.startswith("EXCEPTION") or "INVALID_START_STATE_UNKNOWN_ISSUE" in message
 
 
 def goal_unreachable(why):
@@ -220,10 +227,12 @@ class Planner:
             self.plans += 1
             # cuRobo raised (no planning answer: RAMMP-CuRobo 2.0.1 reports it as EXCEPTION; 11-08 a
             # "shape '[1, 1, 1, 3]' is invalid" seen in some runs and not others): ask again rather than take
-            # the goal as unreachable
-            if plan.success or not str(plan.message).startswith("EXCEPTION"):
+            # the goal as unreachable. The same for INVALID_START_STATE_UNKNOWN_ISSUE: the start fails cuRobo's whole
+            # check while passing each of its parts (limits, world, itself), and the same plan asked again at once
+            # plans (11-10 sim, the side grasp's push route, 3 of 3)
+            if plan.success or not flaky(plan.message):
                 break
-            say(f"    cuRobo raised planning {goal.label} ({_short(plan.message, 100)}); asking again")
+            say(f"    cuRobo gave no planning answer for {goal.label} ({_short(plan.message, 100)}); asking again")
         self.plan_s += time.monotonic() - t0
         if not plan.success:
             if from_arm and "START_STATE" in str(plan.message):
