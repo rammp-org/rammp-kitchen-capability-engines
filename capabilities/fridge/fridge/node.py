@@ -21,11 +21,19 @@ m/s and goes on in the same goal. A dry run with drive_base only checks the base
     ros2 launch fridge fridge.launch.py use_orchestrator:=false
     make action CAP=fridge ACTION=open PARAMS='{"execute": false}'
     make action CAP=fridge ACTION=close PARAMS='{"execute": false}'
+    make action CAP=fridge ACTION=go_to_start PARAMS='{"execute": false}'
+
+Action `go_to_start`, sent before an open: the arm to the fridge start pose (the joints `start_joints_deg`, the web
+app's Fridge pose), cuRobo's collision-free joint-space plan from where the arm is, against the robot's own planner
+world (the wheelchair's layers; on the level mount the chair stand-in too) -- the fridge isn't in it: nothing has
+detected it yet. The driver runs it (go_to_joint_config). The gripper is untouched. Gated like the others: a dry run
+plans only.
 """
 
 import time
 from functools import partial
 
+import numpy as np
 import rammp_arm
 from capability_engine import Action, BaseError, CapabilityEngine, EngineError, run
 from door_common import common as dc
@@ -94,6 +102,8 @@ PARAMS = {
     "planner_base_layers": ["/config/robot/curobo/layer_mebot_floor.yaml"],
     "planner_restore_world": "world.yaml",
     "chair_back_dir": list(constants.CHAIR_BACK_DIR),
+    # go_to_start's pose: the arm's joints J1..J7 (deg)
+    "start_joints_deg": list(constants.START_JOINTS_DEG),
     # every run also records a rosbag into its run folder (bag.RunBag): the wrist camera this many times a second
     # (~75 MB a minute at 1) and TF
     "record_bag": True,
@@ -121,6 +131,36 @@ ERROR_TITLES = {
     "stopped": "Stopped short",
 }
 ERROR_PANEL_TIMEOUT_S = 60.0  # how long an error panel waits for the user to tap OK
+BASE_CONTROL_STATUS_TOPIC = "/base/control_status"  # the MIB's rt/base/control_status (rammp-rtps control_message.hpp)
+
+
+def _base_topics():
+    """The drive base's topics for the run bag, every message (RunBag's `full`): what the MIB says (MibStatus: state,
+    profile, ground speed, error; ControlStatus: arbitration on, owner, commands it rejected), what was sent to it
+    (DriveCommand, and TwistSetpoint: this node's own twists, token included), and its odometry. Names from
+    capability_engine.base, so they are the ones self.base uses. QoS as their publishers': best-effort, except
+    ControlStatus (reliable, latched: transient_local, depth 1)."""
+    from capability_engine import base as B
+    from nav_msgs.msg import Odometry
+    from rammp_base_interfaces.msg import DriveCommand, MibStatus, TwistSetpoint
+    from rammp_common_interfaces.msg import ControlStatus
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+
+    latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    return [
+        (B.MIB_STATUS_TOPIC, "rammp_base_interfaces/msg/MibStatus", MibStatus, qos_profile_sensor_data),
+        (BASE_CONTROL_STATUS_TOPIC, "rammp_common_interfaces/msg/ControlStatus", ControlStatus, latched),
+        (B.DRIVE_COMMAND_TOPIC, "rammp_base_interfaces/msg/DriveCommand", DriveCommand, qos_profile_sensor_data),
+        (B.TWIST_TOPIC, "rammp_base_interfaces/msg/TwistSetpoint", TwistSetpoint, qos_profile_sensor_data),
+        (B.ODOM_TOPIC, "nav_msgs/msg/Odometry", Odometry, qos_profile_sensor_data),
+    ]
+
+
+def _joint_gap_deg(q_a, q_b):
+    """The largest joint difference between `q_a` and `q_b` (rad), deg; the free joints compared the short way."""
+    d = np.asarray(q_a, float) - np.asarray(q_b, float)
+    d[rammp_arm.CONTINUOUS] = (d[rammp_arm.CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
+    return float(np.degrees(np.max(np.abs(d))))
 
 
 class Capability(CapabilityEngine):
@@ -128,6 +168,14 @@ class Capability(CapabilityEngine):
     perception_classes = ["fridge"]
     required_resources = ["arm", "gripper", "base"]  # the base only with drive_base
     actions = [
+        Action(
+            "go_to_start",
+            "Go to the fridge start pose",
+            params_schema={
+                "type": "object",
+                "properties": {"execute": COMMON["execute"], "speed": COMMON["speed"]},
+            },
+        ),
         Action(
             "open",
             "Open the door",
@@ -204,6 +252,8 @@ class Capability(CapabilityEngine):
                 f"detect_camera {self.cfg['detect_camera']}: its colour, info and depth topics must be set"
             )
         shared_open.configure(HANDLE_SOURCE=self.cfg["handle_source"])
+        if len(self.cfg["start_joints_deg"]) != len(constants.START_JOINTS_DEG):
+            raise ValueError(f"start_joints_deg must be 7 joint angles (deg), not {self.cfg['start_joints_deg']!r}")
         if self.cfg["record_bag"] and not self.mock:
             from .bag import RunBag  # here, not at import: rosbag2, which the planning tests don't have
 
@@ -223,7 +273,8 @@ class Capability(CapabilityEngine):
                 for k in ("infra1_topic", "infra1_info_topic", "infra2_topic", "infra2_info_topic")
             )
             stereo = [stereo] if all(stereo) else []
-            motion.BAG = lambda run_dir: RunBag(self, run_dir, cams, self.cfg["bag_frame_hz"], extra, stereo)
+            full = _base_topics()
+            motion.BAG = lambda run_dir: RunBag(self, run_dir, cams, self.cfg["bag_frame_hz"], extra, stereo, full)
         self._fk = None  # the arm's forward kinematics, from its model (read in the first action)
         # SAM 3's client lives as long as the node (a client gets no messages; only subscriptions are per action)
         self.sam3 = None
@@ -281,6 +332,8 @@ class Capability(CapabilityEngine):
                 "drive_base drives the wheelchair itself; chair_moved is for after you moved it by hand -- send one",
                 recoverable=True,
             )
+        if action_id == "go_to_start":  # mock too: self.arm's mock plans and moves the mock joints
+            return self._go_to_start(ctx, execute, speed, note)
         if self.mock:
             ctx.progress(action_id, 100.0, "mock: nothing detected or moved")
             return {"executed": False, "mock": True}
@@ -288,17 +341,7 @@ class Capability(CapabilityEngine):
         ctx.checkpoint()
         if self._fk is None:  # the arm's own model, as the planner plans on it (/arm/robot_description)
             self._fk = Chain(self.arm.robot_description())
-        layers = [x for x in self.cfg["planner_base_layers"] if x]
-        world = PlannerWorld(
-            self.arm,
-            self.cfg["planner_world_dir"],
-            self.cfg["planner_world_dir_in_planner"] or None,
-            layers,
-            self.cfg["planner_restore_world"],
-            # the level mount has no chair layers in its planner: the old stand-in box behind the arm base (flatbot's
-            # layers, its scene camera included, are the planner's own)
-            extra=[chair_stand_in(self.cfg["chair_keep_out_behind_m"])] if self.cfg["mount_tilt_deg"] == 0 else [],
-        )
+        world = self._planner_world()
         planner = Planner(self.arm, world, self._fk, ctx.checkpoint, budget_s=constants.PLAN_BUDGET_S)
         # the camera's subscriptions and tf buffer are this action's: the engine destroys them when it ends
         dc.set_camera(
@@ -402,6 +445,74 @@ class Capability(CapabilityEngine):
         if execute and not (action_id == "open" and push_open.NEXT_STEP):
             ctx.update_object(self.instance_id, opened=action_id == "open")
         return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
+
+    def _planner_world(self):
+        """This action's PlannerWorld: the scenes it pushes list planner_base_layers, and on the level mount the chair
+        stand-in (it has no chair layers in its planner; flatbot's layers, its scene camera included, are the
+        planner's own)."""
+        return PlannerWorld(
+            self.arm,
+            self.cfg["planner_world_dir"],
+            self.cfg["planner_world_dir_in_planner"] or None,
+            [x for x in self.cfg["planner_base_layers"] if x],
+            self.cfg["planner_restore_world"],
+            extra=[chair_stand_in(self.cfg["chair_keep_out_behind_m"])] if self.cfg["mount_tilt_deg"] == 0 else [],
+        )
+
+    def _go_to_start(self, ctx, execute, speed, note):
+        """Action go_to_start: the arm to start_joints_deg by cuRobo's joint-space plan from where it is, against the
+        robot's world (no fridge: it isn't detected yet). Planned here first, so a dry run says whether it would go
+        and a refusal names the obstacle before anything moves; executing, the driver plans it again from the measured
+        joints and runs it (go_to_joint_config). A refusal or a stop leaves the arm holding where it is."""
+        action_id = "go_to_start"
+        target = np.radians(np.asarray(self.cfg["start_joints_deg"], float))
+        ctx.checkpoint()
+        q_now = np.asarray(self.arm.joint_states().position, float)
+        gap = _joint_gap_deg(target, q_now)
+        if gap <= constants.START_REACHED_DEG:
+            done = f"already at the fridge start pose (every joint within {gap:.1f} deg): nothing moved"
+            ctx.progress(action_id, 100.0, done)
+            return {"executed": False, "note": f"{note}. {done}" if note else done}
+        world = self._planner_world()
+        try:
+            if not self.mock:  # the mock planner has no world, and the node may not write planner_world_dir
+                world.push([], "go_to_start: the robot's world, no fridge (not detected yet)")
+            ctx.progress(action_id, 0.0, f"planning to the fridge start pose (furthest joint {gap:.0f} deg away)")
+            plan = self.arm.plan_to_joints(list(map(float, target)), list(map(float, q_now)))
+            if not plan.success:
+                msg = " ".join(str(plan.message).split())
+                hint = (
+                    " The arm's start is inside an obstacle of the planner's world (the boxes it names): teleop it "
+                    "clear first."
+                    if "START_STATE" in msg
+                    else ""
+                )
+                raise EngineError(
+                    "refused",
+                    f"cuRobo found no collision-free path to the fridge start pose: {msg}.{hint} -- the arm holds "
+                    "where it is",
+                    recoverable=True,
+                )
+            planned_s = float(plan.t[-1]) if len(plan.t) else 0.0
+            if not execute:
+                done = f"dry run: the fridge start pose plans ({planned_s:.1f} s at full speed); nothing moved"
+                ctx.progress(action_id, 100.0, f"{note}. {done}" if note else done)
+                return {"executed": False, "note": f"{note}. {done}" if note else done}
+            ctx.progress(action_id, 10.0, "moving to the fridge start pose")
+            scale = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)  # `speed` scales it, as in every fridge run
+            if not self.arm.go_to_joint_config(target, label="go_to_start", speed_scale=scale):
+                raise EngineError(
+                    "stopped",
+                    f"the move to the fridge start pose stopped short ({self.arm.last_error}) -- the arm holds where "
+                    "it is",
+                    recoverable=True,
+                )
+        except dc.Refused as e:  # the planner refused the world
+            raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
+        finally:
+            world.restore()  # the robot's own planner world back (only if this action pushed one)
+        ctx.progress(action_id, 100.0, "at the fridge start pose")
+        return {"executed": True, "note": note}
 
 
 def main():

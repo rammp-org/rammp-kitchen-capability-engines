@@ -7,7 +7,9 @@ Optionally a camera's rectified stereo pair (`stereo`): both images and both cam
 `frame_hz` too, so a learned stereo matcher (FoundationStereo) can be run later on the same views as the camera's own
 depth. The camera_infos carry the rectified projections: the baseline, and which image is the left one (the right
 camera's P[0][3] = -fx * baseline). Don't assume it from the topic names: the OAK driver names its left mono infra2.
-The arm's joints, tool pose and gripper are not here: the run's arm.npz has them at 25 Hz. Raw, lossless, sqlite3.
+Small message streams whose every message matters (`full`: the drive base's status, arbitration, commands and
+odometry) are recorded whole, not thinned. The arm's joints, tool pose and gripper are not here: the run's arm.npz has
+them at 25 Hz. Raw, lossless, sqlite3.
 """
 
 import threading
@@ -40,11 +42,14 @@ class RunBag:
     """Records into `run_dir`/bag from now until `close()`. Make it inside the action (its subscriptions are the
     action's, as create_action_subscription's)."""
 
-    def __init__(self, node, run_dir, cameras, frame_hz, extra=(), stereo=()):
+    def __init__(self, node, run_dir, cameras, frame_hz, extra=(), stereo=(), full=()):
         """`cameras`: [(colour, camera_info, depth topic)], the first the wrist camera's (close() counts its frames).
         `extra`: [(topic, type name, message class)] thinned to `frame_hz` (no publisher: nothing recorded).
         `stereo`: [(image, camera_info, other image, other camera_info)], each a rectified pair recorded as one set at
-        `frame_hz` (stereo_pairs counts them; no publisher: nothing recorded)."""
+        `frame_hz` (stereo_pairs counts them; no publisher: nothing recorded).
+        `full`: [(topic, type name, message class, QoS)] recorded message for message, unthinned (no publisher:
+        nothing recorded). The QoS must match the publisher's (a reliable subscription gets nothing from a best-effort
+        publisher). A topic this node publishes on itself is recorded too: what it really sent."""
         self.node, self.period_ns = node, int(1e9 / frame_hz)
         self.tf_period_ns = int(1e9 / TF_HZ)
         self._lock = threading.Lock()
@@ -71,6 +76,7 @@ class RunBag:
                 dict(zip(pair, ("sensor_msgs/msg/Image", "sensor_msgs/msg/CameraInfo") * 2, strict=True))
             )
         self.topics.update({topic: type_name for topic, type_name, _ in extra})
+        self.topics.update({topic: type_name for topic, type_name, _, _ in full})
         for name, msg_type in self.topics.items():
             self._writer.create_topic(rosbag2_py.TopicMetadata(name=name, type=msg_type, serialization_format="cdr"))
         self._syncs = []
@@ -93,6 +99,8 @@ class RunBag:
             self._syncs.append(sync)
         for topic, _, msg_class in extra:
             node.create_action_subscription(msg_class, topic, lambda m, topic=topic: self._on_extra(topic, m), 10)
+        for topic, _, msg_class, qos in full:
+            node.create_action_subscription(msg_class, topic, lambda m, topic=topic: self._on_full(topic, m), qos)
         node.create_action_subscription(TFMessage, "/tf", self._on_tf, TF_QOS)
         node.create_action_subscription(TFMessage, "/tf_static", self._on_tf_static, TF_STATIC_QOS)
 
@@ -139,6 +147,11 @@ class RunBag:
         with self._lock:
             if self._thinned(topic, t):
                 self._write(topic, msg, t)
+
+    def _on_full(self, topic, msg):
+        t = self._now()
+        with self._lock:
+            self._write(topic, msg, t)
 
     def _on_tf(self, msg):
         t = self._now()

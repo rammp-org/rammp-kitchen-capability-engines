@@ -82,6 +82,21 @@ class Chain:
                 T = T @ rot
         return T[:, :3, 3], R.from_matrix(T[:, :3, :3]).as_quat()
 
+    def joint_points(self, q):
+        """Positions (arm_mount) of each joint's origin along the chain, then the tool's, at joints `q`: the arm as a
+        polyline (the close checks it, as capsules, against where the door may be)."""
+        q = np.asarray(q, float)
+        T, pts = np.eye(4), []
+        for origin, axis, k in self.steps:
+            T = T @ origin
+            if axis is not None:
+                pts.append(T[:3, 3].copy())
+                rot = np.eye(4)
+                rot[:3, :3] = R.from_rotvec(axis * q[k]).as_matrix()
+                T = T @ rot
+        pts.append(T[:3, 3].copy())
+        return np.array(pts)
+
     def pose(self, q):
         """(position, quaternion xyzw) of the tool at joints `q`."""
         pos, quat = self.poses(q)
@@ -109,6 +124,49 @@ class Chain:
             J[3:, k] += z
         return J
 
+    def fk_jac_batch(self, qs):
+        """For joint configurations `qs` (N, 7): tool positions (N, 3), rotation matrices (N, 3, 3) and Jacobians
+        (N, 6, 7) as jacobian(), all at once."""
+        qs = np.atleast_2d(np.asarray(qs, float))
+        n = len(qs)
+        T = np.broadcast_to(np.eye(4), (n, 4, 4)).copy()
+        axes, points, cols = [], [], []
+        for origin, axis, k in self.steps:
+            T = T @ origin
+            if axis is not None:
+                axes.append(T[:, :3, :3] @ axis)
+                points.append(T[:, :3, 3].copy())
+                cols.append(k)
+                rot = np.broadcast_to(np.eye(4), (n, 4, 4)).copy()
+                rot[:, :3, :3] = R.from_rotvec(axis[None, :] * qs[:, k : k + 1]).as_matrix()
+                T = T @ rot
+        tip = T[:, :3, 3]
+        J = np.zeros((n, 6, qs.shape[1]))
+        for z, p, k in zip(axes, points, cols, strict=True):
+            J[:, :3, k] += np.cross(z, tip - p)
+            J[:, 3:, k] += z
+        return tip, T[:, :3, :3], J
+
+    def ik_batch(self, pos, quat, q_seed, iters=30, tol_m=0.003, tol_rad=np.radians(2.0)):
+        """ik() for many targets at once: tool positions `pos` (N, 3), quaternions `quat` (N, 4), seeds `q_seed`
+        (N, 7) -- damped least squares, all N together (no null-space step). Returns (q (N, 7), ok (N,)): ok where it
+        converged and is not within LIMIT_MARGIN_RAD of a limit."""
+        q = np.array(q_seed, float, copy=True)
+        target = R.from_quat(quat)
+        pos = np.asarray(pos, float)
+        done = np.zeros(len(q), bool)
+        lam = IK_DAMP**2 * np.eye(6)
+        for _ in range(iters + 1):
+            tip, rot, J = self.fk_jac_batch(q)
+            e = np.concatenate([pos - tip, (target * R.from_matrix(rot).inv()).as_rotvec()], axis=1)
+            done = (np.linalg.norm(e[:, :3], axis=1) < tol_m) & (np.linalg.norm(e[:, 3:], axis=1) < tol_rad)
+            if done.all():
+                break
+            step = np.einsum("nji,nj->ni", J, np.linalg.solve(J @ J.transpose(0, 2, 1) + lam, e[..., None])[..., 0])
+            q = np.where(done[:, None], q, q + np.clip(step, -IK_MAX_STEP_RAD, IK_MAX_STEP_RAD))
+        near = ((q < self.lower + LIMIT_MARGIN_RAD) | (q > self.upper - LIMIT_MARGIN_RAD)).any(axis=1)
+        return q, done & ~near
+
     def jacobian_fd(self, q, eps=1e-6):
         """jacobian by finite differences (eight forward passes): the check of the exact one."""
         q = np.asarray(q, float)
@@ -120,7 +178,7 @@ class Chain:
         J[3:] = ((R.from_quat(quat[1:]) * r0.inv()).as_rotvec() / eps).T
         return J
 
-    def ik(self, pos, quat, q_seed):
+    def ik(self, pos, quat, q_seed, iters=IK_ITERS, tol_m=IK_TOL_M, tol_rad=IK_TOL_RAD):
         """Joints putting the tool at (`pos`, `quat`), continued from `q_seed` (a nearby configuration, whose branch
         it keeps), the spare joint used to keep J2/J4/J6 toward the middle of their range. Returns (q, why): q None
         with why when it doesn't converge or ends within LIMIT_MARGIN_RAD of a limit."""
@@ -136,12 +194,12 @@ class Chain:
             m = float(np.max(np.abs(ns)))
             if m > 1e-12:
                 q = q + ns * min(1.0, NS_STEP_RAD / m)
-        for it in range(IK_ITERS + 1):  # the last pass only checks the last step's result
+        for it in range(iters + 1):  # the last pass only checks the last step's result
             p, qt = self.pose(q)
             e = np.r_[np.asarray(pos, float) - p, (target * R.from_quat(qt).inv()).as_rotvec()]
-            if np.linalg.norm(e[:3]) < IK_TOL_M and np.linalg.norm(e[3:]) < IK_TOL_RAD:
+            if np.linalg.norm(e[:3]) < tol_m and np.linalg.norm(e[3:]) < tol_rad:
                 break
-            if it == IK_ITERS:
+            if it == iters:
                 return None, f"local IK did not converge ({np.linalg.norm(e[:3]) * 1000:.1f} mm, {np.degrees(np.linalg.norm(e[3:])):.1f} deg off)"
             J = self.jacobian(q)
             Jp = J.T @ np.linalg.inv(J @ J.T + IK_DAMP**2 * np.eye(6))

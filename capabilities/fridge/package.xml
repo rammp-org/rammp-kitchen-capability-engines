@@ -17,6 +17,9 @@
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>rammp_perception_interfaces</exec_depend>
+  <exec_depend>rammp_base_interfaces</exec_depend>
+  <exec_depend>rammp_common_interfaces</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

@@ -167,6 +167,12 @@ class Planner:
         base driving, or the camera detecting) never counts against a later re-plan."""
         self.search_t0 = time.monotonic()
 
+    def check_budget(self):
+        """Raise OverBudget if the current search has used up budget_s (also for work done here, between plans)."""
+        self.checkpoint()
+        if self.budget_s is not None and time.monotonic() - self.search_t0 > self.budget_s:
+            raise OverBudget(f"planning took longer than its {self.budget_s:.0f} s budget ({self.plans} plans)")
+
     def tool(self, q):
         """(position, quat) of the tool at joints `q`."""
         return self.fk.pose(q)
@@ -224,7 +230,7 @@ class Planner:
                 raise StartNotClear(
                     f"the arm's start pose is not clear in cuRobo's world with {goal.world_label or 'the fridge'} in it: "
                     f"{' '.join(str(plan.message).split())} -- no plan can start from it. Move the arm out first (e.g. "
-                    "the web app's Fridge pose)"
+                    "the go_to_start action: the web app's Fridge pose)"
                 )
             return None, f"{goal.label}: cuRobo found no plan ({_short(plan.message)})"
         if not len(plan.q):  # mock mode: nothing to check

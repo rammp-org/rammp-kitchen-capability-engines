@@ -86,7 +86,6 @@ docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ro
   ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear, clear_target: operator}"'
 ```
 
-
 ## Arm + Drive Base
 
 Add `"drive_base": true, "base_speed": 0.03` to an executing goal and it makes the wheelchair move itself, straight,
@@ -102,6 +101,9 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
 ```
 
 ### Open
+
+First send the arm to the fridge start pose (`go_to_start`, as in [Without drive base](#without-drive-base), step 1),
+then:
 
 ```bash
 docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
@@ -137,8 +139,21 @@ Do this before relying on it.
 
 ### Open
 
-1. **Teleop the camera square-on to the closed door**, ~50–60 cm from it, the handle in view, the arm clear of the
-   chair (aim for `handle (mean)` x 0.85–1.0, y −0.20 to −0.34).
+1. **The start pose:** in T3, plan it first (`"execute": false`), then send it with `"execute": true`:
+
+   ```bash
+   docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
+     -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+     ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
+     ros2 action send_goal --feedback /fridge/execute_action \
+     rammp_orchestrator_interfaces/action/ExecuteAction \
+     '{engine_id: fridge, action_id: go_to_start, params_json: "{\"execute\": true, \"speed\": 0.2}"}'
+   ```
+
+   cuRobo plans round the wheelchair's layers, not the fridge (not detected yet): keep the way clear of it.
+
+1. **Point the camera square-on at the closed door**, ~50–60 cm from it, the handle in view, by placing the
+   wheelchair (aim for `handle (mean)` x 0.85–1.0, y −0.20 to −0.34).
 
 1. **T3, the open:**
 
@@ -226,8 +241,9 @@ run that plans OK also writes `door.json`, for testing the close without an exec
 - **Without an executed open:** dry-run the open with `"save_door": true` until it plans OK, then open the door by hand
   to the angle it prints (90° after the push-open).
 
-Options: `door_deg`, `chair_back` (m, + back, - forward; default: the plan picks it), `close_to_deg` (45), `push_radius` / `push_radius_end` (0.30 / 0.28),
-`push_z`, `speed` (0.7), `hold_offset_x` (`0` if not holding the container), `side_past_hinge`, `retreat_dist`.
+Options: `door_deg`, `chair_back` (m, + back, - forward; default: the plan picks it), `close_to_deg` (45), `push_radius`
+(default: searched), `push_z` (default: searched), `speed` (0.7), `retreat_dist`. The close carries the container
+when the gripper is closed at its start, and not when it is open.
 
 ## Runs
 

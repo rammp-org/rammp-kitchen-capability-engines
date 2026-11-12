@@ -40,6 +40,12 @@ MEASURED = {
     "chair_keep_out_behind_m": 15 * INCH,
 }
 
+# --- the start pose (action go_to_start, sent before an open): the web app's Fridge pose, the start every fridge sim
+# plans from (fridge-grasp-sims: FRIDGE_START), clear of the planner's wheelchair and occupant layers. Joints J1..J7
+# (deg); the node's start_joints_deg parameter, per robot ---
+START_JOINTS_DEG = (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
+START_REACHED_DEG = 2.0  # every joint already this close (self.arm's GO_TO_TRACK_DEG): nothing moves
+
 # --- grasp: the microwave's corrections on the Jetson rig, the values every fridge run so far used (10-22, 10-24: the
 # door files' handle-to-grasp is 4.8 cm); nothing has checked them on this handle ---
 # along the approach axis (negative = past the detected handle). 11-05: the microwave's 0.088 grabbed too deep on
@@ -155,12 +161,18 @@ PUSH_OPEN_FINISH_CLEAR_M = 0.03  # ... in the step-off's leg (no stop between), 
 HAND_BOX_TOOL_M = ((-0.080, 0.080), (-0.042, 0.042), (-0.21, 0.045))
 # after the pull and the back-off off the handle, the push may need the wheelchair moved first (the open then stops and
 # asks for it; an open goal with chair_moved pushes). Tried in this order, the first after which the push plans:
-CHAIR_MOVES_M = (0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15, 0.20)  # + back (away from the fridge), - forward
+CHAIR_MOVES_M = tuple(  # + back (away from the fridge), - forward: 0 to +-35 cm in 5 cm steps, smallest first (as the
+    # close's CLOSE_CHAIR_MOVES_M; up to +20 / -15 cm until 11-11)
+    sorted({round(s * k * 0.05, 2) for k in range(8) for s in (1, -1)}, key=lambda m: (abs(m), m < 0))
+)
 CHAIR_MOVE_STEPS = 3  # while the chair moves, the arm (held) must clear the door at this many points along the move
 
-# --- close: the hand pushes the open door round toward shut with whatever it holds, never tilting: cuRobo routes from
-# where the hand is to the swing start (past the hinge, beside the open door), the swing follows the arc about the
-# hinge, spiralling in, until the door is at CLOSE_TO_DEG (it swings shut by itself), and it backs straight out ---
+# --- close: the hand (and the container it may hold) pushes the open door round toward shut, never tilting. cuRobo routes
+# from where the hand is to a push start behind the door -- tried at several distances from the hinge, furthest first
+# (leverage) -- then the push follows the arc about the hinge at that distance until whatever part of the hand or the
+# container touches first has the door at CLOSE_TO_DEG (it swings shut by itself), and it backs straight out. Only the
+# push is scripted: it is contact, which cuRobo (every plan kept 2 cm off everything) can't plan. The door is where the
+# door file says (the push-open leaves it at PUSH_OPEN_TO_DEG) ---
 CHAIR_BACK_M = 0.30  # what a close goal's chair_back used to default to (the goal now leaves it to the plan) ...
 # ... without a chair_back, the close tries these wheelchair moves (m, + back, - forward), smallest first, out to the
 # base's base_max_distance, and moves the chair by the first whose plan passes every gate
@@ -171,31 +183,52 @@ CHAIR_BACK_DIR = (1.0, 0.0)  # ... which moves the recorded fridge this way in t
 # chair's forward): the node's chair_back_dir parameter. The plan uses the door from the open, shifted by this
 CLOSE_TO_DEG = 45.0  # swing the door shut until it is open this far, then back out (no torque push)
 CLOSE_SPEED = 0.7  # the close goal's default speed: slower, the swing doesn't carry the door shut from CLOSE_TO_DEG
-CLOSE_Z_MARGIN_M = 0.08  # without a push_z the close tries swing heights within the door, this far in from its top and
-CLOSE_Z_STEP_M = 0.05  # bottom, every this far, nearest the hand first ...
-CLOSE_Z_TRIES = 3  # ... at most this many
+CLOSE_Z_MARGIN_M = 0.08  # without a push_z the close searches push heights over the whole door, this far in from its
+CLOSE_Z_STEP_M = 0.05  # top and bottom, every this far (nearest the hand first)
 CLOSE_YAWS_DEG = (0, 45, -45, 90, -90, 135, -135, 180)  # the close may turn the hand about vertical by these (tried
-# in order, at each height): its tilt kept, so a held container stays upright
-CLOSE_START_GAP_M = 0.06  # the swing start: the hand this far off the open door (sideways past the hinge until it is)
-CLOSE_POINT_DEG = 2.0  # the swing: a pose every this much of the hand's way round the hinge
-CLOSE_HAND_HALF_M = 0.04  # the hand's half-width along the door: the swing must end clear of the handle by ...
-CLOSE_HANDLE_MARGIN_M = 0.02  # ... this
-CLOSE_RETREAT_M = (0.20, 0.15, 0.10)  # back straight out this far after the swing (the first that plans, at most
+# in order): its tilt kept, so a held container stays upright. Any part of the hand or the container may push
+CLOSE_PITCHES_DEG = (0, 45, 90)  # with an empty hand, also tipped nose-down this far (the container stays level): any
+# part of the hand may push at any angle (user, 11-09), and a hand tipped down reaches behind the open door far more
+# easily than a level one at the edge of the arm's reach (11-10 sim)
+CLOSE_RADII_FROM_EDGE_M = (-0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.20)  # without a push_radius, the push's distance
+# from the hinge (the tool point's): the door's length less each of these, furthest out first -- leverage. Negative:
+# past the free edge -- the hand's or the container's edge catches the door's edge (user, 11-10), and the push starts
+# just round it rather than all the way behind the door
+CLOSE_START_GAP_M = 0.02  # the push start: the hand and the container this clear of the door. cuRobo keeps its own 2 cm
+# from it too (with spheres bigger than the hand); this checks the container, which cuRobo doesn't see (6 cm until
+# 11-09, with no stated reason)
+CLOSE_START_STEP_DEG = 2.0  # the push start: round the hinge past the open door, every this much ...
+CLOSE_START_MAX_DEG = 175.0  # ... up to this (180: flat against the cabinet's side)
+CLOSE_TRIES = 12  # per wheelchair move, at most this many push starts (that pass the geometry) are planned by cuRobo ...
+CLOSE_TRIES_PER_RADIUS = 3  # ... at most this many at each distance from the hinge (furthest first), and only push
+# starts the arm can reach with the hand turned that way (its own IK, CLOSE_IK_SEEDS seeds; none beyond the mount's
+# max_reach): an unreachable distance or hand turn can't use up the tries (11-10: the 3 nearest the arm were hand turns
+# the wrist can't make out there, all IK_FAIL, while one further along planned)
+CLOSE_IK_SEEDS = 5  # ... the search's IK (close_door.search_starts: every start of a distance from the hinge from every
+# seed, solved together) starts from the arm's joints and these, skipping a start whose wrist is further from the
+# shoulder than the arm stretches ...
+CLOSE_SEARCH_MAX_IK = 400  # ... at most this many push starts per distance ...
+CLOSE_ARM_RADIUS_M = 0.06  # ... and keeps a start only if the arm there (its links as capsules this thick) is this
+CLOSE_ARM_CLEAR_M = 0.01  # clear of the door and the cabinet: the hand alone clearing it isn't enough
+CLOSE_POINT_DEG = 2.0  # the push: a pose every this much of the hand's way round the hinge
+CLOSE_PUSH_END_RADIUS_M = 0.30  # the push draws in to this far from the hinge by the end (close_door.sweep)
+CLOSE_RETREAT_M = (0.20, 0.15, 0.10)  # back straight out this far after the push (the first that plans, at most
 # the goal's retreat_dist)
 CLOSE_MAX_TILT_DEG = 2.0  # the close never tilts the hand -- no roll, no pitch; turning about vertical is fine (it may
 # hold a container). Every leg is planned holding the tilt (HOLD_LEVEL, which the planner checks to its own 2 deg) and the
 # joined trajectory is checked again: within this of where it starts, or it refuses
-CONTAINER_M = 6.5 * INCH  # the container held for the close (measured 10-24): ~a 6.5 in diameter sphere (11-06)
-CONTAINER_CLEARANCE_M = 0.5 * INCH  # safety margin the container must keep from the door/handle/body (11-06)
+CONTAINER_M = 6.5 * INCH  # the container held for the close (measured 10-24): ~a 6.5 in diameter sphere (11-06) ...
+CONTAINER_CLEARANCE_M = 0.5 * INCH  # ... which keeps this from the door and cabinet on the way to the push (11-06) ...
+CONTAINER_CENTRE_TOOL_M = 0.043 + CONTAINER_M / 2  # ... held sticking out ~6.5 in past the fingertips (11-06), which
+# are 4.3 cm past the tool frame (11-09): its centre this far along the tool's z, carried with the hand. cuRobo doesn't
+# see it: the close checks it itself (the push start, the route there, the push), and lets it push. The fridge is never
+# shifted to stand in for it (until 11-12 the whole fridge was planned 17.8 cm nearer the arm instead, which put the
+# push-open's end pose inside the door, 11-11)
+CLOSE_HOLDING_GRIPPER = 0.2  # the close carries the container exactly when the gripper reads more closed than this at
+# its start (0 open, 1 closed: 11-11, 0.004 with an empty open hand, 0.965 holding the container); the open never does
 CLOSE_SETTINGS = dict(  # the close's fixed settings; a goal may set the GOAL_SETTINGS among them
-    push_radius=0.30,  # the hand's distance from the hinge during the swing (handle at ~37 cm)
-    push_radius_end=0.28,
-    side_past_hinge=0.08,  # the swing start, sideways past the hinge
+    push_radius=None,  # the tool's distance from the hinge in the push (m); None: CLOSE_RADII_FROM_EDGE_M, furthest first
     retreat_dist=0.20,
-    # 11-06: the container is a 6.5 in sphere that sticks out ~6.5 in past the gripper tips; it is not in the
-    # collision model. The plan keeps the hand back by that reach + the 0.5 in margin instead: the door is planned
-    # shifted this far in x, so the container -- not the hand -- reaches the door
-    hold_offset_x=-(CONTAINER_M + CONTAINER_CLEARANCE_M),
 )
 
 # --- what depends on the arm's mount (the node's mount_tilt_deg). Everything else plans in arm_mount: level, at the arm

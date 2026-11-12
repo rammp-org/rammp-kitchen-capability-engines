@@ -109,6 +109,18 @@ class FakeCurobo:
         return Plan(False, IK_FAIL) if q is None else self._to(start_joints, q)
 
     def plan_to_joints(self, q_goal, start_joints):
+        # cuRobo checks a joint goal's start and the goal itself in its world as it does a pose goal's: the same hooks
+        # (a test's unreachable / start_blocked, or its own plan_to_pose standing in for cuRobo) apply
+        pos, quat = self.fk.pose(np.asarray(q_goal, float))
+        if "plan_to_pose" in self.__dict__:  # a test's stand-in
+            res = self.plan_to_pose(pos, quat, start_joints)
+            if not res.success:
+                return res
+        obstacles = self.worlds[-1] if self.worlds else []
+        if self.start_blocked:
+            return Plan(False, "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides")
+        if self.unreachable(np.asarray(pos, float), np.asarray(quat, float), obstacles):
+            return Plan(False, IK_FAIL)
         return self._to(start_joints, q_goal)
 
     def blend(self, legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None):

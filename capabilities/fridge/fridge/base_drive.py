@@ -16,6 +16,7 @@ from door_common.common import Refused, say
 
 PERIOD_S = 0.05  # a twist every 50 ms: the MIB stops the base 300 ms after the last one
 SETTLE_S = 0.5  # zero twists for this long before the end is measured
+PROGRESS_S = 1.0  # while driving, the distance so far is logged this often
 
 # node ROS parameters, per robot: the goal's base_speed limit, the longest move, how close to the distance it must
 # end, how long past distance / speed it may take, and the MIB's drive profile while it drives
@@ -73,20 +74,32 @@ def move_chair(base, arm, ctx, move, *, speed, cfg, execute):
     timeout_s = dist / speed + cfg["base_timeout_margin"]
     say(f"drive_base: driving the wheelchair {dist * 100:.0f} cm {'back' if move > 0 else 'forward'} at {speed} m/s")
     t0 = time.monotonic()
+    next_log, sent = t0 + PROGRESS_S, 0
     try:
         while True:
             if arm.control_status().estopped:
                 raise BaseError("the arm is e-stopped: base stopped")
             along, away = moved()
+            now = time.monotonic()
+            if now >= next_log:  # the run log says how the drive went even when it stalls (11-11: 0 cm, no trace)
+                say(
+                    f"drive_base: {now - t0:.1f} s, {sent} twists sent, moved {along * 100:+.1f} cm along the start "
+                    f"heading ({away * 100:.1f} cm from the start)"
+                )
+                next_log += PROGRESS_S
             if sign * along < -tol:
                 raise BaseError(f"the base moved the wrong way ({along * 100:+.1f} cm): stopped")
             if away > dist + tol:
                 raise BaseError(f"the base moved {away * 100:.1f} cm, more than asked: stopped")
-            if time.monotonic() - t0 > timeout_s:
-                raise BaseError(f"the base did not cover {dist * 100:.0f} cm in {timeout_s:.0f} s: stopped")
+            if now - t0 > timeout_s:
+                raise BaseError(
+                    f"the base did not cover {dist * 100:.0f} cm in {timeout_s:.0f} s: stopped after moving "
+                    f"{along * 100:+.1f} cm ({sent} twists sent; the run's bag has the MIB's status and arbitration)"
+                )
             if dist - sign * along <= speed * PERIOD_S:  # would pass the end before the next twist
                 break
             base.send_twist(sign * speed, 0.0)  # Cancelled once cancelled; BaseError once the MIB left AUTONOMOUS
+            sent += 1
             time.sleep(PERIOD_S)
     finally:
         base.stop()

@@ -343,11 +343,11 @@ def test_the_close_drives_the_base_then_closes(fridge, clock):
         arm.unreachable = lambda *a: False
         return moved
 
-    assert close_door.run(arm, planner, False, drive_chair=drive, hold_offset_x=0.0)  # a dry run drives nothing
+    assert close_door.run(arm, planner, False, drive_chair=drive)  # a dry run drives nothing
     assert base.sent == [] and arm.sent == []
     planned = close_door.LAST_CHAIR_BACK
     assert planned == constants.CLOSE_CHAIR_MOVES_M[1]
-    assert close_door.run(arm, planner, True, drive_chair=drive, hold_offset_x=0.0)  # no chair_moved needed
+    assert close_door.run(arm, planner, True, drive_chair=drive)  # no chair_moved needed
     assert -base.x == pytest.approx(planned, abs=TOL)
     assert len(arm.sent) == 1
     assert json.loads(dc.DOOR_FILE.read_text())["door_open_deg"] == constants.CLOSE_TO_DEG
@@ -358,7 +358,7 @@ def test_the_close_with_chair_moved_never_drives(fridge, clock):
     assert open_door.run(arm, planner, False, save_door=True)
     arm.unreachable = _needs_a_move
     base, drive = _driver(clock, arm)
-    assert close_door.run(arm, planner, False, drive_chair=drive, hold_offset_x=0.0)  # plans (and saves) the move
+    assert close_door.run(arm, planner, False, drive_chair=drive)  # plans (and saves) the move
     arm.unreachable = lambda *a: False
-    assert close_door.run(arm, planner, True, chair_moved=True, drive_chair=drive, hold_offset_x=0.0)
+    assert close_door.run(arm, planner, True, chair_moved=True, drive_chair=drive)
     assert base.sent == [] and len(arm.sent) == 1

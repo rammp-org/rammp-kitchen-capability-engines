@@ -72,6 +72,9 @@ params:
   # world. And which way moving the chair back moves the fridge in the arm's frame (x, y).
   chair_keep_out_behind_m: 0.381
   chair_back_dir: [1.0, 0.0]
+  # go_to_start's pose, sent before an open: the arm's joints J1..J7 (deg). The web app's Fridge pose,
+  # clear of the wheelchair and occupant layers; cuRobo plans the way there collision-free.
+  start_joints_deg: [98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1]
   # cuRobo plans every motion against the fridge: the node writes its collision world into
   # planner_world_dir (the volume above; the planner sees it at planner_world_dir_in_planner, "" = the
   # same path) and loads it with set_world. A pushed world replaces the robot's world.yaml, so it lists
