@@ -1197,6 +1197,25 @@ def test_a_box_only_the_scene_camera_finds_after_the_press_goes_home_around_it(c
     assert from_container(home["cpose"], ctx.model.button_offset) == pytest.approx([0.71, -0.57, 0.40])
 
 
+def test_after_a_rough_first_fix_the_scenes_second_look_judges_no_move(ctx, tmp_path):
+    """A box the scene frame cut, placed roughly (scene_source.SCENE_ROUGH): its first fix is tens of mm
+    off on its own, so the scene's look after the press, 50 mm from it, is no moved box, and the box
+    is left where the arm found it."""
+    from conftest import runner as make_runner
+
+    top = (0.66, -0.57, 0.40)
+    first = SimpleNamespace(top_xyz=top, rough=True)
+    again = SimpleNamespace(top_xyz=(top[0] + 0.05, top[1], top[2]))
+    locator = SimpleNamespace(locate=lambda s: again)
+    before = ctx.cpose
+    rec = make_runner(ctx.client, tmp_path)
+    lost = dp.DepthPress(free=False, contact=True, lost=True)
+    res = dp.after_scene_check(ctx, rec, lost, first, locator)
+    assert res.free and res.moved is False and ctx.cpose == before
+    careful = dp.after_scene_check(ctx, rec, lost, SimpleNamespace(top_xyz=top), locator)
+    assert careful.moved is True and ctx.cpose.xyz[0] == pytest.approx(before.xyz[0] + 0.05)
+
+
 def test_a_box_the_depth_press_moved_is_a_stop_before_the_arm_goes_home(ctx, monkeypatch, tmp_path, capsys):
     def moved(ctx_):
         return dp.DepthPress(free=True, contact=True, felt=True, popped=True, moved=True)

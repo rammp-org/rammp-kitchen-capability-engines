@@ -3381,3 +3381,19 @@ def test_a_carry_the_planner_refuses_inside_its_limit_margin_is_the_arms_own_wal
     why_planner[0] = "MotionGenStatus.IK_FAIL"
     carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
     assert carry is None and why == "the carry (MotionGenStatus.IK_FAIL)" and len(chain.walks) == 2
+
+
+def test_the_scene_cloud_is_moved_by_the_cameras_error_at_the_box_but_not_by_a_rough_fit(ctx):
+    """_scene_cloud moves the scene camera's table points by where the arm found the box against
+    where the scene put it: the camera's error. A ROUGH fix (a box the frame cut, scene_source.
+    SCENE_ROUGH) is off by its own fit, which is not the camera's: its cloud is kept as measured."""
+    from box_opening.models.container import ContainerPose
+
+    table = np.array([[0.40, -0.30, TABLE_Z], [0.45, -0.35, TABLE_Z]])
+    off = ContainerPose(xyz=(ctx.cpose.xyz[0] - 0.03, ctx.cpose.xyz[1], ctx.cpose.xyz[2]), yaw=ctx.cpose.yaw)
+    careful = SimpleNamespace(pose=off, table_points=table, table_z_scene=TABLE_Z)
+    pts, tz = rlo._scene_cloud(ctx, careful, None, TABLE_Z)
+    assert tz == TABLE_Z and pts[:, 0] == pytest.approx(table[:, 0] + 0.03)
+    rough = SimpleNamespace(pose=off, table_points=table, table_z_scene=TABLE_Z, rough=True)
+    pts, _tz = rlo._scene_cloud(ctx, rough, None, TABLE_Z)
+    assert pts == pytest.approx(table)

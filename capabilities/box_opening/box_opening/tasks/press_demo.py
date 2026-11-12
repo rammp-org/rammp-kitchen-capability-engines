@@ -1301,7 +1301,9 @@ def scene_detect_report(locator, duration_s=DETECT_REPORT_S):
                 table_seen_over(fix.table_extent),
                 scene_source_label(fix),
                 fix.n_points,
-                "; %s, finished from its lid's arc in view" % fix.partial if getattr(fix, "partial", "") else "",
+                ("; %s" if getattr(fix, "rough", False) else "; %s, finished from its lid's arc in view") % fix.partial
+                if getattr(fix, "partial", "")
+                else "",
             )
         )
     if not tops:
@@ -1804,6 +1806,11 @@ def main():
         # survey is on (--wrist-survey, the node's wrist_survey: a chair
         # parked side-on to a counter, which the scene camera cannot see;
         # tasks/survey), which looks for it with the wrist camera then.
+        # A box the frame cuts at its side that no look could finish is
+        # placed ROUGHLY from the part in view (scene_source.SCENE_ROUGH,
+        # owner 2026-11-04): never pressed on as it stands, it says only
+        # where the wrist looks, and the wrist's aim from there places the
+        # button (SceneFix.rough).
         t_scene = time.monotonic()
         scene_fix = locator.locate(SCENE_FIRST_LOCATE_S)
         viz_hook("scene", locator, scene_fix)  # what it judged, drawn off this thread (perception/viz)
@@ -1855,7 +1862,12 @@ def main():
                 sp.xyz[1],
                 math.degrees(sp.yaw),
                 scene_fix.n_points,
-                " (%s, finished from its lid's arc in view)" % scene_fix.partial
+                (
+                    " (%s from its lid's side in view — ROUGH: the wrist's aim from the look pose places it)"
+                    % scene_fix.partial
+                    if getattr(scene_fix, "rough", False)
+                    else " (%s, finished from its lid's arc in view)" % scene_fix.partial
+                )
                 if getattr(scene_fix, "partial", "")
                 else "",
                 scene_source_label(scene_fix),
@@ -1877,6 +1889,7 @@ def main():
             owl_score=round(scene_fix.score, 3),  # the detector's score (the run log's field name since 2026-09)
             source=getattr(scene_fix, "source", "segmenter"),
             n_sightings=int(getattr(scene_fix, "n_sightings", 1)),
+            rough=bool(getattr(scene_fix, "rough", False)),
             table_z_scene=None
             if scene_fix.table_z_scene != scene_fix.table_z_scene
             else round(scene_fix.table_z_scene, 4),

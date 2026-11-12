@@ -27,6 +27,7 @@ camera sees (box_from_side_points). With no survey, the table the box was
 found on is measured for the planner too (table_extent).
 """
 
+import math
 import time
 from dataclasses import dataclass, replace
 
@@ -92,6 +93,10 @@ class SceneFix:
     source: str = "segmenter"  # the newest sighting's detector
     n_sightings: int = 1  # the agreeing sightings behind it (commit_fix)
     sources: tuple = ()  # ... and each one's detector, oldest first
+    # a ROUGH fix (SCENE_ROUGH): no candidate passed, and the box the frame cuts at its side was
+    # placed roughly from the part in view (rough_from_cut_box). Only the wrist's aim from the look
+    # pose, which takes a prior this far off, says where its button is
+    rough: bool = False
 
 
 def robust_yaw(xy):
@@ -482,6 +487,9 @@ class SceneBoxFix:
     # own more than RIVAL_M from the winner's — two places, not one box
     rivals: tuple = ()
     tried_boxes: tuple = ()  # the box (the candidate's own object) each of `tried` refused: what perception/viz reads
+    # with no pose: (score, box, edges, top, n, table_z) of the best candidate cut at its side that
+    # rough_from_cut_box answered (SCENE_ROUGH), else ()
+    rough: tuple = ()
 
 
 # An OWL box this close to the frame's edge has its container running off
@@ -767,6 +775,21 @@ def side_cut(edges, R_base_color):
     return all(abs(R[2, col[e]]) < 0.5 for e in edges)
 
 
+def side_and_foot_cut(edges, R_base_color):
+    """The one side edge of `edges` when the frame cuts a box at ONE side and, besides, only where
+    its foot is (the image edge that lies down in the base frame: the bottom of an upright camera's
+    image), else None. The lid on such a box is cut at that side alone; the foot that is out of
+    view is no measure of the table (foot_table), which is read around the box as for any other
+    (scene_fix_from_boxes's corner candidates)."""
+    R = np.asarray(R_base_color, float)
+    out = {"right": R[:, 0], "left": -R[:, 0], "bottom": R[:, 1], "top": -R[:, 1]}
+    sides = [e for e in edges if e in ("left", "right") and abs(out[e][2]) < 0.5]
+    down = [e for e in edges if out[e][2] <= -0.5]
+    if len(sides) == 1 and down and len(sides) + len(down) == len(edges):
+        return sides[0]
+    return None
+
+
 def off_frame_ways(edges, R_base_color):
     """The base-frame axis ("+y", ...) each image edge in `edges` lies
     toward: the image's own left and right mean nothing on a camera hung
@@ -779,6 +802,144 @@ def off_frame_ways(edges, R_base_color):
         k = int(np.argmax(np.abs(d)))
         ways.append(("+" if d[k] > 0 else "-") + "xyz"[k])
     return ways
+
+
+# A round box the frame cuts at its side, which the partial lift could not finish (too few
+# points on the lid's arc in view, too short an arc, two places that arc fits), still says
+# roughly where the box is (owner 2026-11-04: a box at the scene frame's edge gives a rough
+# position, and the wrist's aim from the look pose finds the button from there; that aim
+# takes a prior up to button_aim.PRIOR_MAX_M off). The rough fit knows more than the
+# partial lift's RANSAC does, so it needs fewer points: the lid's radius, the side of the
+# lid the frame does not cut (its silhouette ray, from the camera), and that the centre
+# lies beyond that ray TOWARD the cut. That last is what the RANSAC cannot know, and its
+# two places (detbench P4: the lid and its mirror across that same ray) become one. One
+# unknown is left, how far away the centre is, fitted to the lid's side points in view.
+SCENE_ROUGH = True  # off: a cut box the partial lift refuses is refused, as before
+ROUGH_MIN_POINTS = 10  # lid points in view (MIN_LID_POINTS for a finished fix)
+ROUGH_SIL_PCTL = 5  # the silhouette: the band's bearing this percentile from the uncut side (smear)
+ROUGH_FIT_TOL_M = 0.012  # the lid points' median distance from the fitted circle
+ROUGH_FIT_STEP_M = 0.001
+# the lid's circle in view, at least (PARTIAL_MIN_ARC_DEG for a finished fix): over 128 cut lids it answered
+# on detbench (24 real, 104 re-cut), 17 deg arcs were 35-37 mm off and the worst, 43 mm, had 63: the arc
+# says little of the error, so this only refuses an arc too short to say which way it curves
+ROUGH_MIN_ARC_DEG = 15.0
+
+
+def rough_from_cut_box(pts_base, uv, bbox, edges, table_z, model, cam_xyz, cam_R, foot_box=None, image_wh=None):
+    """Where a round box cut off at its side (`edges`: "left" or "right", scene_fix_from_boxes's
+    side_cut) roughly is, from the lid's side points in view: the circle of the lid's radius
+    tangent to the lid's silhouette ray on the side the frame does not cut, its centre beyond
+    that ray toward the cut, at the distance that puts it through those points (SCENE_ROUGH's
+    note). Returns (top_xyz, None, n, table_z) or (None, why, n, table_z or nan). `table_z`:
+    the surveyed table, else the table around it is read (table_around), and no higher than the
+    foot of `foot_box`, the detector's own box of what stands on it (foot_table, as the side lift)."""
+    if len(edges) != 1 or edges[0] not in ("left", "right"):
+        return None, "cut at its %s edge, not at one side" % " and ".join(edges), 0, float("nan")
+    x0, y0, x1, y1 = bbox
+    inside = (uv[:, 0] >= x0) & (uv[:, 0] <= x1) & (uv[:, 1] >= y0) & (uv[:, 1] <= y1)
+    n_in = int(inside.sum())
+    if n_in < ROUGH_MIN_POINTS:
+        return None, "only %d depth points inside the box (need %d)" % (n_in, ROUGH_MIN_POINTS), n_in, float("nan")
+    cam = np.asarray(cam_xyz, float)
+    q = pts_base[inside]
+    rng = np.linalg.norm(q - cam, axis=1)
+    half = 0.5 * min(float(model.dims[0]), float(model.dims[1]))
+    near = q[rng <= np.percentile(rng, 5) + 2 * half + SIDE_DEPTH_SLACK_M]
+    if table_z is None:
+        table_z = table_around(pts_base, near[:, :2].mean(axis=0), float(np.percentile(near[:, 2], TOP_PCTL)) - 0.03)
+        foot_z = float("nan") if foot_box is None else foot_table(pts_base, uv, foot_box, cam, image_wh)
+        if not np.isnan(foot_z) and not table_z <= foot_z + FOOT_TABLE_SLACK_M:  # nan: no table read around it
+            table_z = foot_z
+        if np.isnan(table_z):
+            return None, "no table around it", len(near), table_z
+    obj = near[near[:, 2] > table_z + ABOVE_TABLE_M]
+    if len(obj) < ROUGH_MIN_POINTS:
+        return (
+            None,
+            "only %d depth points above the table (need %d)" % (len(obj), ROUGH_MIN_POINTS),
+            len(obj),
+            float(table_z),
+        )
+    top_z = float(np.percentile(obj[:, 2], TOP_PCTL))
+    lid_z = float(table_z) + float(model.dims[2])
+    if abs(top_z - lid_z) > LID_BAND_M:
+        return (
+            None,
+            "its top is %+.0f mm from lid height (the table at %.3f + %.0f mm)"
+            % (1000 * (top_z - lid_z), table_z, 1000 * model.dims[2]),
+            len(obj),
+            float(table_z),
+        )
+    band = obj[obj[:, 2] > top_z - float(model.lid_dims[2])][:, :2]
+    n = len(band)
+    if n < ROUGH_MIN_POINTS:
+        return None, "only %d points on the lid's side in view (need %d)" % (n, ROUGH_MIN_POINTS), n, float(table_z)
+    # what stands over its top, as the partial lift judges it (PARTIAL_OVER_M), at the rough fit's
+    # fewer points: a box holding only the holder under the lid, or a circle round something taller
+    d_lid = float(model.lid_dims[0])
+    reach = np.linalg.norm(pts_base - cam, axis=1) <= np.percentile(rng, 5) + 2 * half + SIDE_DEPTH_SLACK_M
+    above = (pts_base[:, 2] > top_z + PARTIAL_OVER_M[0]) & (pts_base[:, 2] <= top_z + PARTIAL_OVER_M[1])
+    seed = near[:, :2].mean(axis=0)
+    around = reach & (np.hypot(pts_base[:, 0] - seed[0], pts_base[:, 1] - seed[1]) <= d_lid + PARTIAL_REACH_M)
+    over = int((around & (uv[:, 0] >= x0) & (uv[:, 0] <= x1) & above).sum())
+    if over >= ROUGH_MIN_POINTS:
+        return (
+            None,
+            "%d depth points stand %.0f-%.0f mm over its top around it: the box holds what is under the lid, not the "
+            "lid" % (over, 1000 * PARTIAL_OVER_M[0], 1000 * PARTIAL_OVER_M[1]),
+            n,
+            float(table_z),
+        )
+    R = np.asarray(cam_R, float)
+    fwd = R[:2, 2] / np.linalg.norm(R[:2, 2])  # the view, horizontally
+    cut = (-1.0 if edges[0] == "left" else 1.0) * R[:2, 0]  # the image's way toward the cut, horizontally
+    cut = cut - (cut @ fwd) * fwd
+    cut /= np.linalg.norm(cut)
+    rel = band - cam[:2]
+    bearing = np.arctan2(rel @ cut, rel @ fwd)
+    sil = float(np.percentile(bearing, ROUGH_SIL_PCTL))  # the uncut side's silhouette
+    r = 0.5 * float(model.lid_dims[0])
+    # the centre stands one radius to one diameter behind the lid's nearest side in view: from its
+    # 5th percentile, as one stray point 11 cm nearer cut the search short of a re-cut lid (detbench P1)
+    near_m = float(np.percentile(np.linalg.norm(rel, axis=1), ROUGH_SIL_PCTL))
+    best = None
+    for d in np.arange(max(near_m, r + 0.005), near_m + 2 * r + SIDE_DEPTH_SLACK_M, ROUGH_FIT_STEP_M):
+        a = sil + math.asin(r / d)
+        c = cam[:2] + d * (math.cos(a) * fwd + math.sin(a) * cut)
+        miss = float(np.median(np.abs(np.linalg.norm(band - c, axis=1) - r)))
+        if best is None or miss < best[0]:
+            best = (miss, c)
+    if best is None or best[0] > ROUGH_FIT_TOL_M:
+        return (
+            None,
+            "no %.0f mm circle beyond its uncut side runs through the lid's side in view (%.0f mm off, max %.0f)"
+            % (2000 * r, 1000 * (best[0] if best else float("nan")), 1000 * ROUGH_FIT_TOL_M),
+            n,
+            float(table_z),
+        )
+    c = best[1]
+    under = reach & (np.hypot(pts_base[:, 0] - c[0], pts_base[:, 1] - c[1]) <= r + PARTIAL_OVER_PAD_M)
+    stand = int((under & above).sum())
+    if stand >= ROUGH_MIN_POINTS:
+        return (
+            None,
+            "%d depth points stand %.0f-%.0f mm over its top where the rough circle is: something taller than the "
+            "lid" % (stand, 1000 * PARTIAL_OVER_M[0], 1000 * PARTIAL_OVER_M[1]),
+            n,
+            float(table_z),
+        )
+    on = np.abs(np.linalg.norm(band - c, axis=1) - r) < ROUGH_FIT_TOL_M
+    ang = np.sort(np.arctan2(band[on, 1] - c[1], band[on, 0] - c[0]))
+    arc = 360.0 - float(np.degrees(np.diff(np.r_[ang, ang[0] + 2 * np.pi]).max())) if len(ang) > 1 else 0.0
+    if arc < ROUGH_MIN_ARC_DEG:
+        return (
+            None,
+            "only %.0f deg of the lid's circle in view (need %.0f for a rough fix)" % (arc, ROUGH_MIN_ARC_DEG),
+            n,
+            float(table_z),
+        )
+    rough_from_cut_box.last_arc_deg = arc  # how much of the lid it went by (read by the offline bench)
+    return (float(c[0]), float(c[1]), top_z), None, n, float(table_z)
 
 
 def off_frame_why(score, edges, R_base_color, frame="arm_mount", src="segmenter"):
@@ -877,6 +1038,9 @@ def scene_fix_from_boxes(
     # (score, box, the side edges a round box is finished across or (), the holder that anchors it or None,
     # whether the box's sides are its lid's)
     cands = []
+    # (score, box, edges, the side it is cut at) of each refused at the frame's edge that is cut at one side and
+    # at its foot (side_and_foot_cut): only the rough fit places these (SCENE_ROUGH)
+    corner = []
     for c in boxes:
         score, box = c[0], c[1]
         holder = c[2] if len(c) > 2 else None
@@ -891,6 +1055,9 @@ def scene_fix_from_boxes(
         else:
             clipped.append((score, box, edges))
             refused.append(("it runs off the frame at its %s edge (%s %.2f)" % (" and ".join(edges), src, score), box))
+            side = side_and_foot_cut(edges, cam_R) if model.round and cam_R is not None else None
+            if side is not None:
+                corner.append((score, box, edges, side))
     got = None
     if table_z is not None:
         lid_z = float(table_z) + float(model.dims[2])
@@ -941,7 +1108,31 @@ def scene_fix_from_boxes(
             else:
                 refused.append(("from the side, %s (%s %.2f)" % (top, src, score), box))
     if got is None:
-        return SceneBoxFix(None, None, 0, None, clipped=tuple(clipped), **_tried(refused))
+        rough = ()
+        if SCENE_ROUGH and cam_xyz is not None and cam_R is not None:
+            # every candidate refused: the best one the frame cuts at its side still says roughly where it is
+            # ... and one cut at its side and its foot (a box in the frame's corner): its lid is cut at the side alone
+            sided = [(s, b, e, e, f) for s, b, e, _h, _l, f in cands if e] + [
+                (s, b, e, (d,), None) for s, b, e, d in corner
+            ]
+            for score, box, edges, side, foot in sided:  # as offered, the side-cut ones first
+                top, why, n, tz = rough_from_cut_box(
+                    pts_base,
+                    uv,
+                    box,
+                    side,
+                    side_table_z,
+                    model,
+                    cam_xyz,
+                    cam_R,
+                    foot_box=foot,
+                    image_wh=image_wh,
+                )
+                if top is not None:
+                    rough = (float(score), box, tuple(edges), tuple(float(v) for v in top), int(n), float(tz))
+                    break
+                refused.append(("roughly too: %s (%s %.2f)" % (why, src, score), box))
+        return SceneBoxFix(None, None, 0, None, clipped=tuple(clipped), rough=rough, **_tried(refused))
     if rivals and len(boxes) > 1:
         won = box_key(got.box)
         others = []
@@ -1015,6 +1206,12 @@ def image_upside_down(T_base_color):
 # the two newest sightings of one locate() agree within VOTE_TOL_M. With the
 # segmenter at 5 Hz that costs one frame, 0.2 s.
 VOTE_N, VOTE_TOL_M = 2, 0.020
+# rough sightings (SCENE_ROUGH) commit on the same two, agreeing this closely: a rough fit's
+# frame-to-frame spread is its own, and the aim it leads to takes a prior far further off
+ROUGH_VOTE_TOL_M = 0.030
+# ... and only once the look has had this long to pass a box the careful way (press_demo.SCENE_LOCATE_S):
+# the run's first look keeps at a box for 15 s, and a cut one would wait it all out for nothing
+ROUGH_AFTER_S = 5.0
 SEG_DOWN = ("unavailable", "absent", "silent", "wrong_camera", "wrong_size", "stale")  # SegmenterRung.state
 
 
@@ -1253,6 +1450,10 @@ class SceneLocator:
         # passed, so nothing commits after it: the run must be told which.
         ambiguous = []
         sightings = []
+        # (Sighting, pts_base, uv, the gate's result, T_base_color) of each message whose candidates all
+        # failed but whose best one cut at its side the rough fit placed (SCENE_ROUGH): used only when
+        # the look ends with no fix
+        rough = []
         off_frame = None  # (score, edges, R_base_color, src) of the best candidate cut by the frame's edge
         looked_table_z = None  # the table this look read off its frames, once (no survey)
         state = seg_args = m_seg = None
@@ -1370,6 +1571,25 @@ class SceneLocator:
                 if off_frame is None or score > off_frame[0]:
                     off_frame = (score, edges, T_base_color[:3, :3], "segmenter")
             if got.pose is None:
+                if got.rough:
+                    score, rbox, redges, rtop, rn, rtz = got.rough
+                    rpose = container_pose_from_top(rtop, 0.0, self.model, rtz)  # round: yaw unused
+                    rough.append(
+                        (
+                            Sighting("segmenter", score, rtop, rpose, rn, redges, rtz, "rough", box_key(rbox), None),
+                            pts_base,
+                            uv,
+                            got,
+                            T_base_color,
+                        )
+                    )
+                    if (
+                        clock() - t0 >= ROUGH_AFTER_S
+                        and not sightings
+                        and not ambiguous
+                        and commit_fix([r[0] for r in rough], tol=ROUGH_VOTE_TOL_M)[0] is not None
+                    ):
+                        break  # long enough with only the rough fit answering: it does (below)
                 continue
             if got.rivals:
                 ambiguous.append((got.top, got.rivals))
@@ -1405,6 +1625,39 @@ class SceneLocator:
                 self.last_timing["fix_s"] = round(t_fix - t_ready, 2)
                 self.last_timing["lift_s"] = round(t_fix - t_cloud, 2)
                 break
+        if found is None and rough and not ambiguous and not sightings:
+            # nothing passed, and in no message did two places: the box the frame cuts at its side,
+            # placed roughly, when its newest rough sightings agree
+            top, _why = commit_fix([r[0] for r in rough], tol=ROUGH_VOTE_TOL_M)
+            if top is not None:
+                newest, pts_base, uv, got, T_base_color = rough[-1]
+                top = tuple(float(v) for v in top)
+                ways = " and ".join(off_frame_ways(newest.partial, T_base_color[:3, :3]))
+                near = np.hypot(pts_base[:, 0] - top[0], pts_base[:, 1] - top[1]) < MAP_R_M
+                extent = None
+                if self.table_z is None:
+                    extent, _assumed = seen_table_extent(pts_base, newest.table_z, top[:2])
+                self.last_timing["fix_s"] = round(clock() - t_ready, 2)
+                log.info(
+                    "[scene] no box passed in %.1f s, but the frame cuts this container off toward %s %s, and %d "
+                    "looks place it roughly at [%.3f, %.3f] from the %d lid points in view"
+                    % (clock() - t0, self.base_frame or "base_link", ways, len(rough), top[0], top[1], newest.n)
+                )
+                return SceneFix(
+                    pose=container_pose_from_top(top, 0.0, self.model, newest.table_z),
+                    top_xyz=top,
+                    n_points=newest.n,
+                    score=newest.score,
+                    table_z_scene=newest.table_z,
+                    table_extent=extent,
+                    partial="cut off by the frame toward %s %s, placed roughly"
+                    % (self.base_frame or "base_link", ways),
+                    table_points=pts_base[near].astype(np.float32),
+                    source=newest.source,
+                    n_sightings=min(len(rough), VOTE_N),
+                    sources=tuple(r[0].source for r in rough[-VOTE_N:]),
+                    rough=True,
+                )
         if found is None:
             if g.missing():
                 why = "scene camera streams missing: %s" % ", ".join(g.missing())
