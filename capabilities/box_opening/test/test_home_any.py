@@ -151,6 +151,48 @@ def test_where_every_plan_swings_wide_the_refusal_says_so(monkeypatch):
         core.home_any(ctx, core.PlanState(joints=list(START), chain=0), HOME, Always(), say=lambda s: None)
 
 
+class LongLegsSwing(Planner):
+    """Plans every leg, but one whose largest joint moves more than `longest` rad swings joint_1 0.9 rad out and
+    back: the planner on an arm whose elbow must straighten and fold the other way (the rig, 2026-11-12: every
+    direct plan and most single-waypoint legs from 12 such poses swung, the line in 4 or 6 legs planned clean)."""
+
+    def __init__(self, longest):
+        super().__init__()
+        self.longest = float(longest)
+
+    def __call__(self, at, name, q):
+        leg = super().__call__(at, name, q)
+        far = float(np.max(np.abs(np.asarray(q, float) - np.asarray(at.joints, float))))
+        leg.traj = _traj(list(at.joints), list(q), 0.9 if far > self.longest else 0.0)
+        return leg
+
+
+SPAN = float(np.max(np.abs(np.asarray(HOME) - np.asarray(START))))  # the joint line's largest joint, 0.67 rad
+
+
+@pytest.mark.parametrize("longest, n", [(0.30 * SPAN, 4), (0.20 * SPAN, 6)])
+def test_where_no_single_waypoint_plans_home_goes_along_the_joint_line_in_short_legs(monkeypatch, longest, n):
+    ctx = _no_chain_ctx(monkeypatch)
+    plan = LongLegsSwing(longest)
+    said = []
+    legs = core.home_any(ctx, core.PlanState(joints=list(START), chain=0), HOME, plan, say=said.append)
+    assert [leg.name for leg in legs] == ["home-waypoint"] * (n - 1) + ["home"]
+    for k, leg in enumerate(legs[:-1], 1):  # the waypoints: k/n of the way along the joint line
+        assert leg.goal_joints == pytest.approx([a + (k / n) * (b - a) for a, b in zip(START, HOME, strict=True)])
+    asked = plan.asked[-n:]
+    assert [a[1] for a in asked] == [list(START)] + [leg.goal_joints for leg in legs[:-1]]  # each from the last end
+    assert asked[-1][2] == list(HOME)
+    assert any("in %d legs along the joint line" % n in s and "swings wide" in s for s in said)
+
+
+def test_where_the_joint_line_in_short_legs_does_not_plan_either_the_refusal_names_them(monkeypatch):
+    ctx = _no_chain_ctx(monkeypatch)
+    with pytest.raises(RuntimeError, match=r"50%/25%/75% of the way along the joint line nor along it in 4/6 legs"):
+        core.home_any(
+            ctx, core.PlanState(joints=list(START), chain=0), HOME, LongLegsSwing(0.05 * SPAN), say=lambda s: None
+        )
+
+
 def test_a_waypoints_plan_may_end_near_it_and_home_is_planned_from_where_it_ends(monkeypatch):
     # 2026-11-12, the rig: from a pose 25% into a recorded home the planner's waypoint plans ended 0.08-0.32 rad
     # from the waypoint (its FK-pose fallback, the same arm along its self-motion), the client refused each, and
@@ -449,7 +491,7 @@ def test_a_waypoint_that_is_itself_under_the_table_is_not_a_way_home(monkeypatch
             leg.traj = SimpleNamespace(joint_names=["arm_joint_%d" % i for i in range(1, 8)], points=pts)
             return leg
 
-    with pytest.raises(RuntimeError, match=r"home through the waypoint \d+% of the way goes under the table"):
+    with pytest.raises(RuntimeError, match=r"home in \d legs along the joint line goes under the table"):
         core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, ThroughLow(), say=lambda s: None)
 
 

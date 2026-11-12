@@ -907,6 +907,14 @@ HOME_WAYPOINTS = (0.5, 0.25, 0.75)  # fractions of the joint line toward HOME, e
 # plan ends N rad from its joint goal" and no waypoint was left; another arm at the same tool pose ends 0.9-4.3 rad
 # off, and stays refused. The leg that ends at HOME keeps the client's own PLAN_END_RAD.
 HOME_WAYPOINT_END_RAD = 0.35
+# Where no single waypoint plans, the joint line in this many equal legs, fewest first, every waypoint clear of the
+# padding and each leg planned from where the one before ended. The planner swings wide on the long legs of an arm
+# whose elbow must straighten and fold the other way (joint_4's sign against HOME's: left so by a jog or a
+# recovery), and follows the line on short ones: 2026-11-12, raw plans from the 12 such demo poses baa140c refused
+# or homed only sometimes: of 24 direct plans 20 swung wide and the other 4 ended on another arm, and 29 of the 62
+# single-waypoint legs that planned swung (joint_1 0.43-2.12 rad out and back); in 4 legs 7 poses planned clean,
+# in 6 legs one more (0.5-0.9 s of planning in all).
+HOME_LINE_LEGS = (4, 6)
 JOG = " — jog the arm clear by hand"
 
 
@@ -1073,13 +1081,15 @@ def home_any(
          tool within ESCAPE_TABLE_M of a known table) steps slowly, in the driver's lightest joint impedance, to
          the nearest point clear of everything known, off the joint limits too (EscapeBodyFree);
       2. a joint too near its limit for the planner steps along the joint line first (ClearMarginFree), the
-         shortest step the goal plans from, each step's plan asked for once (as since 2026-10-23), or through a
-         waypoint from the step's end where that plan swings wide; where none does (the line drops the tool, say,
+         shortest step the goal plans from, each step's plan asked for once (as since 2026-10-23), or round as in
+         4. and 5. from the step's end where that plan swings wide; where none does (the line drops the tool, say,
          or no step up to the cap plans), the soft step of 1. instead, and the goal asked for from its end;
       3. otherwise the goal asked for up to HOME_TRIES times, stopping at the first plan that swings wide;
       4. then a waypoint HOME_WAYPOINTS of the way along the joint line, clear of the padding, planned to (its
          plan may end HOME_WAYPOINT_END_RAD from it, clear of the padding too), and the goal planned from where
-         that plan ends.
+         that plan ends;
+      5. then the joint line in HOME_LINE_LEGS equal legs, fewest first, each waypoint as in 4.: the way home of
+         an arm whose elbow must straighten and fold the other way, which the planner swings wide on in long legs.
     Every leg passes the runner's trajectory sanity gate here, at planning (PlanSwung), not at execution, and
     is kept over a table the run knows (under_table, PlanUnderTable: the planner's world holds none): where the
     goal planned directly goes under it, the goal is planned from the top of a straight lift (HOME_LIFTS_M,
@@ -1163,6 +1173,40 @@ def home_any(
                 last = e
                 continue
             return [a, b], f, last
+        return None, None, last
+
+    def in_short_legs(at, last):
+        """(legs, n, last) from `at` along the joint line cut into n equal legs (HOME_LINE_LEGS, fewest first),
+        every waypoint clear of the padding and each leg planned from where the one before ended, kept over the
+        table as one path; or (None, None, last)."""
+        q0 = np.asarray(at.joints, float)
+        g = np.asarray(on_branch(goal, q0), float)
+        for n in HOME_LINE_LEGS:
+            ws = [[float(v) for v in q0 + (k / n) * (g - q0)] for k in range(1, n)]
+            if tbody is not None and not all(tbody.pose_clear(w) for w in ws):
+                continue
+            some, st = [], at
+            try:
+                for w in ws:
+                    some.append(to_waypoint(st, w))
+                    st = PlanState(joints=list(some[-1].goal_joints), chain=at.chain)
+                some.append(planned(st, "home", list(goal)))
+                over_the_table(q0, some, "home in %d legs along the joint line" % n)
+            except RuntimeError as e:
+                last = e
+                continue
+            return some, n, last
+        return None, None, last
+
+    def around(at, last):
+        """(legs, words, last) from `at` where the goal does not plan directly: through one waypoint, then along
+        the joint line in short legs; or (None, None, last)."""
+        rest, f, last = via_waypoint(at, last)
+        if rest is not None:
+            return rest, "through a waypoint %.0f%% of the way along the joint line" % (100 * f), last
+        rest, n, last = in_short_legs(at, last)
+        if rest is not None:
+            return rest, "in %d legs along the joint line (no single waypoint planned)" % n, last
         return None, None, last
 
     def raised(at, last):
@@ -1250,8 +1294,8 @@ def home_any(
         for step, at, info in clear.steps(ctx, state):
             try:
                 rest, via = [planned(at, "home", list(goal))], None
-            except PlanSwung as e:  # asked again, the planner answers alike: through a waypoint from the step's end
-                rest, via, last = via_waypoint(at, e)
+            except PlanSwung as e:  # asked again, the planner answers alike: round it from the step's end
+                rest, via, last = around(at, e)
                 if rest is None:
                     continue
             except RuntimeError as e:
@@ -1273,10 +1317,7 @@ def home_any(
                     )
                 )
             if via is not None:
-                say(
-                    "%s %s planned through a waypoint %.0f%% of the way along the joint line (the direct plan swung "
-                    "wide: %s)" % (who, plan_words, 100 * via, last)
-                )
+                say("%s %s planned %s (the direct plan swung wide: %s)" % (who, plan_words, via, last))
             return step + rest
         raise RuntimeError(
             "no plan-free step toward %s of up to %.2f rad per joint lets the planner plan %s (last: %s)%s"
@@ -1332,16 +1373,13 @@ def home_any(
             if not ask_again:
                 raise
             last = e
-    rest, via, last = via_waypoint(PlanState(joints=list(q), chain=state.chain), last)
+    rest, via, last = around(PlanState(joints=list(q), chain=state.chain), last)
     if rest is not None:
-        say(
-            "%s %s planned through a waypoint %.0f%% of the way along the joint line (asked for %d times directly; "
-            "last: %s)" % (who, plan_words, 100 * via, asked, last)
-        )
+        say("%s %s planned %s (asked for %d times directly; last: %s)" % (who, plan_words, via, asked, last))
         return legs + rest
     raise RuntimeError(
         "%s did not plan from %s, %d times directly nor through a waypoint %s of the way along the joint line "
-        "(last: %s)%s%s"
+        "nor along it in %s legs (last: %s)%s%s"
         % (
             plan_words,
             "here"
@@ -1349,6 +1387,7 @@ def home_any(
             else "the end of the soft step clear (taken because %s)" % _without_jog(fell_back),
             asked,
             "/".join("%.0f%%" % (100 * f) for f in HOME_WAYPOINTS),
+            "/".join("%d" % n for n in HOME_LINE_LEGS),
             last,
             ""
             if low is None
