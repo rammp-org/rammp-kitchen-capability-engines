@@ -57,6 +57,7 @@ from a guess.
 """
 
 import math
+import os
 import time
 from dataclasses import dataclass, field, replace
 
@@ -869,7 +870,23 @@ FRONT_AGAIN_MAX = 2
 # a lid a view cut that no look again may turn to (8 mm out at worst); 0.150 loses the 5 places
 # nearest the user's side; 0.200 loses 39. Never asked to stand farther than the hand rests
 # (FrontBand).
-FRONT_HAND_USER_M = 0.0
+# BOX_OPENING_FRONT_HAND_USER_M in the run's environment sets it for a deployment (metres; the robot's own, as its
+# body model is): unset, empty or unreadable, none.
+FRONT_HAND_USER_ENV = "BOX_OPENING_FRONT_HAND_USER_M"
+
+
+def _hand_user_floor(env=None):
+    """The hand's floor from the user the environment names (FRONT_HAND_USER_ENV), 0.0 where it names none or
+    what it names is no finite number >= 0."""
+    raw = str((os.environ if env is None else env).get(FRONT_HAND_USER_ENV, "")).strip()
+    try:
+        v = float(raw) if raw else 0.0
+    except ValueError:
+        return 0.0
+    return v if math.isfinite(v) and v >= 0.0 else 0.0
+
+
+FRONT_HAND_USER_M = _hand_user_floor()
 HAND_LINKS = ("spherical_wrist", "bracelet", "end_effector", "robotiq")  # every link past joint 5, by its stem
 FRONT_ROLL_WEIGHT = 0.5  # the image's long side held level, against the aim's (unit: half an image)
 FRONT_TURN_WEIGHT = 0.05  # ... and the least turn that does it

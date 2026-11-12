@@ -901,3 +901,13 @@ def test_a_wrist_turn_stopped_part_way_holds_and_a_preview_ends_turned(monkeypat
     assert got == 1
     got, _a, _n, _c = _first(monkeypatch, sv.Survey(preview=True, why="a preview: no frames"), execute=False)
     assert got == 0
+
+
+def test_the_hands_floor_from_the_user_is_the_deployments_to_set():
+    """BOX_OPENING_FRONT_HAND_USER_M (metres) sets FRONT_HAND_USER_M for a deployment; nothing, or nothing a
+    distance could be, leaves the look without a floor of its own."""
+    assert sv._hand_user_floor({}) == 0.0
+    assert sv._hand_user_floor({sv.FRONT_HAND_USER_ENV: "0.10"}) == pytest.approx(0.10)
+    assert sv._hand_user_floor({sv.FRONT_HAND_USER_ENV: " 0.075 "}) == pytest.approx(0.075)
+    for bad in ("", "near", "-0.1", "nan", "inf"):
+        assert sv._hand_user_floor({sv.FRONT_HAND_USER_ENV: bad}) == 0.0
