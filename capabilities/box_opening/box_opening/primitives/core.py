@@ -1005,6 +1005,65 @@ def under_table(chain, body, pts, table_z, extent=None, rest=None):
     )
 
 
+# the planner's word for a start that stands in its world (cuRobo's MotionGenStatus, as the planner passes it on)
+PLANNER_START_IN_WORLD = "INVALID_START_STATE"
+
+
+def _with_the_table(home):
+    """home_any, the planner handed the run's measured table while it plans (owner 2026-11-12; worlds.py): every
+    leg planned inside names the table world (WorldStore.home_plans), and the planner's own world is put back
+    when the plans are made, or refused. Not where the goal itself would stand in the planner's table (a
+    measured extent that reaches under where the arm rests): every plan would be refused, so the planner keeps
+    its own world and the plans are judged afterwards as before (under_table)."""
+    import functools
+
+    @functools.wraps(home)
+    def planned_with_it(ctx, state, goal, *args, **kwargs):
+        worlds = getattr(ctx, "worlds", None)
+        plans = getattr(worlds, "home_plans", None)
+        if plans is None:
+            return home(ctx, state, goal, *args, **kwargs)
+        say, who = kwargs.get("say", log.info), kwargs.get("who", "[home]")
+        block = worlds.home_table_block()
+        stands = None if block is None else _rests_in(goal, block)
+        if stands:
+            say("%s the planner is not handed the table: the goal itself would stand in it (%s)" % (who, stands))
+        try:
+            with plans(table=block is not None and not stands) as held:
+                if held:
+                    say(
+                        "%s the planner holds the measured table while this is planned (its top at z %.3f, "
+                        "x %.2f..%.2f, y %.2f..%.2f)" % (who, block[4], *block[:4])
+                    )
+                return home(ctx, state, goal, *args, **kwargs)
+        finally:
+            back = getattr(getattr(ctx, "client", None), "planner_own_world", None)
+            if back is not None:
+                back()
+
+    return planned_with_it
+
+
+def _rests_in(q, block):
+    """Which of the arm's spheres at joints `q` reaches into `block` ((x0, x1, y0, y1, top): a table as the
+    planner holds it, everything under `top` inside the rectangle), said; None where none does or no body
+    model says."""
+    import numpy as np
+
+    _chain, body = EscapeBodyFree._body()
+    if body is None:
+        return None
+    C, r, links = body.spheres_at(list(q))
+    C, r = np.asarray(C, float), np.asarray(r, float)
+    x0, x1, y0, y1, top = block
+    inside = (C[:, 2] - r < top) & (C[:, 0] + r > x0) & (C[:, 0] - r < x1) & (C[:, 1] + r > y0) & (C[:, 1] - r < y1)
+    if not bool(np.any(inside)):
+        return None
+    i = int(np.argmax(np.where(inside, top - (C[:, 2] - r), -np.inf)))
+    return "%s %.0f mm under its top at x %.2f, y %.2f" % (links[i], 1000 * (top - (C[i, 2] - r[i])), C[i, 0], C[i, 1])
+
+
+@_with_the_table
 def home_any(
     ctx,
     state,
@@ -1056,7 +1115,16 @@ def home_any(
     def planned(at, name, q):
         """plan_to's leg, the runner's sanity gate applied now (PlanSwung) rather than at execution, and the leg
         kept over a table the run knows (PlanUnderTable: the planner's world holds none)."""
-        leg = plan_to(at, name, q)
+        try:
+            leg = plan_to(at, name, q)
+        except PlanRefused:
+            raise
+        except RuntimeError as e:
+            # the planner holding the table (worlds.home_plans) refuses a start that stands in it: up first, as
+            # for a plan that goes under it
+            if getattr(getattr(ctx, "worlds", None), "home_table_held", False) and PLANNER_START_IN_WORLD in str(e):
+                raise PlanUnderTable("%s starts in the table as the planner holds it (%s)" % (name, e)) from e
+            raise
         traj = getattr(leg, "traj", None)
         bad = sanity_violations(traj, SANITY_MARGIN_RAD) if traj is not None else []
         if bad:

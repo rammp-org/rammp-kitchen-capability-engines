@@ -1318,6 +1318,10 @@ class Runner:
             else:
                 plan = self.client.plan_to_joints(rest[0], live)
             plan_s = time.monotonic() - t_plan
+            # a way HOME is re-planned with the run's table in the planner's world (worlds.py): its own back
+            back = getattr(self.client, "planner_own_world", None)
+            if back is not None:
+                back()
             # the run record keeps what was planned at flight: the plan this
             # leg now flies, or the one that failed, in a note of its own —
             # the failure's row shows the leg's old plan, or none (lazy)

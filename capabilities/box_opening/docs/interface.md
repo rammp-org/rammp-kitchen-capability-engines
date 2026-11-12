@@ -221,7 +221,31 @@ passes them as a params file.
 | `mission_frames`   | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps |
 | `speed_scale`      | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                          |
 | `body_layers`      | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)          |
+| `planner_worlds_as`  | `""`                 | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world") |
+| `planner_worlds_dir` | `""`                 | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                         |
 | `wrist_survey`     | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on         |
+
+### The planner's world
+
+Box opening plans in the world the planner's deployment starts it with and sends
+it none, with one exception: while a way HOME is planned (the first home, a run's
+own homes, `home_arm`'s), the planner is handed the table the run's cameras
+measured, and nothing else. A planner that knows no table plans HOME through one;
+judging its plans afterwards refuses what it could have planned around.
+
+It is off unless the deployment shares a folder with the planner, the way
+rammp-feeding's does: `planner_worlds_as` names that folder as the planner's
+container mounts it (read-only), and the node writes into `planner_worlds_dir`
+(by default `planner_worlds` under `state_dir`). The file is the planner's own
+start-up scene (read from `body_layers`' planner config) with one block more, the
+measured table: the extent the scene camera saw, its top 20 mm under the measured
+top so that a hand resting near the table is still a start the planner accepts.
+It is sent by `set_world` before a home is planned and the planner's own world is
+put back by `set_world` as soon as the plans are made (and by the first plan of
+the next run, should a run die in between). Every planned home is still judged
+against the measured top afterwards. With no table measured, a planner whose own
+world is empty, a goal that would itself stand in the block, or a planner that
+does not take the file, the planner keeps its own world and nothing else changes.
 
 `body_layers` defaults to `/config/robot/curobo/planner.yaml`, the planner's own
 config: the fragment mounts the robot's `config/robots/current` at `/config/robot`

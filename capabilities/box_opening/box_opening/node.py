@@ -44,6 +44,7 @@ from rammp_orchestrator_interfaces.msg import ActionAvailability
 from . import LOGGER
 from .constants import state_dir
 from .runtime.abort import EXIT_HALTED
+from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
 # ROS parameter -> default. Container and world name files in the image's config/ (or are
 # absolute paths); the robot's per-run environment comes from its cameras, never from here.
@@ -74,6 +75,12 @@ PARAMS = {
     # wrist finds none (a table faced from the front: the scene camera sees no lid whole where the
     # arm presses, tasks/survey). Never with the orchestrator's selection
     "wrist_first": False,
+    # the folder box opening hands the planner worlds from (worlds.PlannerTable): the run's measured table,
+    # while a way HOME is planned. `planner_worlds_as` is that folder as the PLANNER's container mounts it
+    # (read-only); "" (the default) and box opening sends the planner no world. `planner_worlds_dir` is the
+    # same folder as this node writes it; "" = planner_worlds under state_dir
+    "planner_worlds_as": "",
+    "planner_worlds_dir": "",
 }
 NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
 
@@ -674,6 +681,9 @@ class Capability(CapabilityEngine):
         env["BOX_OPENING_MISSION_FRAMES"] = "1" if self._param("mission_frames") else "0"
         if self._param("state_dir"):
             env["BOX_OPENING_STATE"] = self._param("state_dir")
+        for name, var in (("planner_worlds_as", PLANNER_WORLDS_AS_ENV), ("planner_worlds_dir", PLANNER_WORLDS_DIR_ENV)):
+            if self._param(name):  # unset: whatever the node's own environment says, as BOX_OPENING_BODY_LAYERS
+                env[var] = str(self._param(name))
         return env
 
     def _mock(self, action_id, ctx):

@@ -64,6 +64,14 @@ params:
   # the table in front of the arm, and what it finds there is the box; the scene camera's box only
   # where the wrist finds none. Never for the orchestrator's selection
   wrist_first: false
+  # the run's measured table handed to the planner while a way HOME is planned, and at no other time
+  # (docs/interface.md, "The planner's world"). `planner_worlds_as` is the folder the PLANNER's container
+  # mounts read-only for it, as that container names it, e.g. /box_opening for a planner volume
+  #   - <state_dir on the host>/planner_worlds:/box_opening:ro
+  # "" (the default): box opening sends the planner no world. `planner_worlds_dir` is the same folder as
+  # this node writes it; "" = planner_worlds under state_dir
+  planner_worlds_as: ""
+  planner_worlds_dir: ""
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

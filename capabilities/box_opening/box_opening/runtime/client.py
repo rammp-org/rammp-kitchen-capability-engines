@@ -1468,9 +1468,67 @@ class PlannerClient:
         the one its deployment started it with, world_empty.yaml on flatbot,
         and refuses an empty scene sent at runtime anyway. Kept as the one
         place every plan and replan asks, so nothing sneaks a SetWorld in;
-        `path_or_name` (worlds.PLANNER_WORLD) is what it records as held."""
-        self.world_held = str(path_or_name)
-        return True, "box opening sends no world: the planner plans in the one it was started with"
+        `path_or_name` (worlds.PLANNER_WORLD) is what it records as held.
+
+        The one world it does send (owner 2026-11-12, worlds.PlannerTable):
+        the run's measured table while a way HOME is planned, where the
+        deployment shares a folder with the planner. `path_or_name` is then
+        that file as the planner reads it, sent by SetWorld; any other name
+        puts the planner's own world back, by SetWorld of the name its
+        config gives it (answered, so the next plan is made in it). The
+        first call puts the planner's own back whatever it holds: a run
+        that died while it held a table leaves none behind. A table world
+        the planner refuses (the folder not mounted, say) is said once and
+        the planner keeps its own: HOME is planned as without one."""
+        from box_opening import worlds
+
+        want = str(path_or_name)
+        table = worlds.planner_table()
+        if table is None:
+            self.world_held = want
+            return True, "box opening sends no world: the planner plans in the one it was started with"
+        if want == self.world_held:
+            return True, "held"
+        if table.ours(want):
+            if self.world_held is None:  # unknown what the planner holds: its own first, so a refusal leaves that
+                if self._send_world(table.boot_world)[0]:
+                    self.world_held = worlds.PLANNER_WORLD
+            ok, msg = self._send_world(want)
+            if ok:
+                self.world_held = want
+                return True, msg
+            if not getattr(self, "_table_world_refused", False):
+                self._table_world_refused = True
+                log.info("[client] the planner did not take the table world (%s): it keeps its own" % msg)
+            want = worlds.PLANNER_WORLD
+            if want == self.world_held:
+                return True, "the planner keeps its own world: %s" % msg
+        ok, msg = self._send_world(table.boot_world)
+        if ok:
+            self.world_held = want
+            return True, msg
+        # the planner may still hold the table: said, and asked again before the next plan
+        log.info("[client] the planner's own world was not put back (%s): its plans may still know the table" % msg)
+        return True, msg
+
+    def _send_world(self, world, timeout_s=10.0):
+        """(ok, message) of the planner's SetWorld for `world` (a path as it reads it, or a name beside its
+        config)."""
+        if SetWorld is None or not self._set_world.wait_for_service(timeout_sec=2.0):
+            return False, "no set_world service"
+        res = spin_until_done(self.node, self._set_world.call_async(SetWorld.Request(world=str(world))), timeout_s)
+        if res is None:
+            return False, "set_world did not answer in %.0f s" % timeout_s
+        return bool(res.success), str(res.message or "")
+
+    def planner_own_world(self):
+        """Put the planner's own world back if this client may have left another in it (after a way HOME is
+        planned or re-planned, and as a run ends). Nothing is sent where box opening sends no world."""
+        from box_opening import worlds
+
+        table = worlds.planner_table()
+        if table is not None and self.world_held is not None and table.ours(self.world_held):
+            self.set_world(worlds.PLANNER_WORLD)
 
     def gripper_cmd(self, position):
         """Command the gripper and wait (knuckle rad: 0.0 open .. 0.8 closed);
