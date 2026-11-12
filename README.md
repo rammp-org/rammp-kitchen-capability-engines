@@ -146,9 +146,11 @@ ros2 topic echo /example/status
 ```
 
 Standalone, the orchestrator calls a capability makes (`ctx.request_intent`,
-`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. Arm control
-arbitration (`AcquireControl`) is not wired in yet: the orchestrator does not
-call it today.
+`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. For direct
+UI panels, the orchestrator pushes a shared execution token to the engine's
+`/<engine_id>/acquire_control` server and grants it to the arm and UI bridge.
+The engine passes that token to `self.arm`; it never acquires control itself.
+Without a token, UI calls are logged no-ops.
 
 To run it on the robot, transcribe the capability's two fragments into
 [`rammp-deployments`](https://github.com/rammp-org/rammp-deployments)'s
