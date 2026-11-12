@@ -75,6 +75,9 @@ params:
   # this node writes it; "" = planner_worlds under state_dir
   planner_worlds_as: ""
   planner_worlds_dir: ""
+  # the UI bridge's node: the base class's panel calls (ctx.update_user_panel) go to its
+  # request_user_input, with the token the orchestrator pushes for each execution
+  ui_bridge_node_name: ui_bridge_node
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

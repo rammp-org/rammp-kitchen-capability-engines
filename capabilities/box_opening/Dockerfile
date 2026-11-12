@@ -8,8 +8,9 @@
 # 788be6341a8c: SetContactThresholds and CONTACT_STOP, which box opening's use of
 # the driver's contact monitor needs), so box opening speaks the driver's exact
 # messages. It carries the
-# arm, common, orchestrator and perception interfaces; rammp_curobo_interfaces it
-# does not. Nothing in it uses the GPU since the OWL detectors went (the box comes
+# arm, common, orchestrator, perception and UI-bridge interfaces (the base class's
+# panel calls: rammp_ui_bridge_interfaces 1.2.0, the definitions the example pins);
+# rammp_curobo_interfaces it does not. Nothing in it uses the GPU since the OWL detectors went (the box comes
 # from the scene segmenter); the base is still rammp-cuda's, as built and tested so
 # far, and may move to rammp-base. arm64 only.
 FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261103
