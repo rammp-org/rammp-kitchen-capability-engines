@@ -58,6 +58,7 @@ from pathlib import Path
 import numpy as np
 import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
+from capability_engine.driver_state import Refused as ArmRefused
 
 from . import microwave_detection, place_motion, rim_detection, take_out
 
@@ -372,7 +373,7 @@ class Capability(CapabilityEngine):
             q0 = take_out.prepare_home(
                 self.arm, c["take_home_joints"], execute, c["take_approach_speed_scale"], ctx, log
             )
-        except place_motion.Refused as error:
+        except (place_motion.Refused, ArmRefused) as error:
             raise EngineError("home_failed", str(error), recoverable=True) from error
         ctx.progress("detect", 0.0)
         wrist = rim_detection.WristCamera(self, rammp_arm.FRAME, list(c["wrist_topics"]))

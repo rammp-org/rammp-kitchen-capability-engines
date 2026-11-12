@@ -110,15 +110,22 @@ def test_no_ui_session_home_failure_returns_recoverable_error(flow):
     ctx.poll_ui_event.assert_not_called()
 
 
-def test_home_refusal_prevents_camera_detection():
+@pytest.mark.parametrize("stage", ["world", "home"])
+@pytest.mark.parametrize("driver_error", [False, True])
+def test_home_refusal_prevents_camera_detection(stage, driver_error):
     refused = type("Refused", (Exception,), {})
-    take = SimpleNamespace(set_approach_world=Mock(), prepare_home=Mock(side_effect=refused("no home plan")))
+    arm_refused = type("ArmRefused", (Exception,), {})
+    error_type = arm_refused if driver_error else refused
+    take = SimpleNamespace(set_approach_world=Mock(), prepare_home=Mock())
+    failure = take.set_approach_world if stage == "world" else take.prepare_home
+    failure.side_effect = error_type("no home plan")
     camera = Mock()
     cls = load_class(
         ROOT / "capabilities/microwave_place/microwave_place/microwave_place_node.py",
         "Capability",
         {"_take_out"},
         EngineError=EngineError,
+        ArmRefused=arm_refused,
         take_out=take,
         place_motion=SimpleNamespace(Refused=refused),
         rim_detection=camera,
@@ -129,6 +136,9 @@ def test_home_refusal_prevents_camera_detection():
     with pytest.raises(EngineError) as error:
         node._take_out(Mock(), True, Mock(), Mock())
     assert error.value.error_code == "home_failed"
+    assert error.value.recoverable
+    if stage == "world":
+        take.prepare_home.assert_not_called()
     camera.WristCamera.assert_not_called()
 
 
