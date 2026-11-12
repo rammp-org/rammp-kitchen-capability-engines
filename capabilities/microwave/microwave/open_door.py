@@ -282,6 +282,23 @@ def _back_legs(P):
     )
 
 
+PUSH_PLAN_TRIES = 2  # each push-open move is asked of cuRobo this many times for a plan that passes its checks
+PUSH_AT_START_DEG = 3.0  # a previewed move runs as planned only if the arm is this close (every joint) to its start
+
+
+def _push_moves(P):
+    """EVERY push-open move in order, as it runs: (label, tool position, quat, hold, keep_shape) -- back off the
+    handle (the hand as it gripped), up and back (the hand turning down: the wrist may turn far, no shape cap), over,
+    down, push, then back the way it came (the hand held pointing down)."""
+    (up_label, up_pos, up_hold), *legs = _push_legs(P)
+    return (
+        ("back off the handle", P.back, P.grip, HOLD_FIXED, True),
+        (up_label, up_pos, P.down, up_hold, False),
+        *((lb, pos, P.down, hold, True) for lb, pos, hold in legs),
+        *((lb, pos, P.down, hold, True) for lb, pos, hold in _back_legs(P)),
+    )
+
+
 def _stitched(ai, P, legs, label, go_to, speeds=None):
     """`legs` (as _push_legs) as ONE stitched cuRobo motion, passing every corner but the last within PUSH_BLEND_M;
     `speeds` {leg label: speed_scale}. Returns True, or (False, why) -- and whether nothing moved (it failed planning,
@@ -298,30 +315,31 @@ def _stitched(ai, P, legs, label, go_to, speeds=None):
 
 
 def _plan_push_open(ai, door, ee, q, loud=False):
-    """Ask cuRobo -- nothing moves -- for the push-open from the hand pose `ee` / joints `q` at the swing's end: each
-    of its moves (_push_legs, then back the way it came: _back_legs) from where the one before ends, for the first
-    variant that plans all of them -- the hand
-    PUSH_TILT_TRY_DEG off straight down, the fingertips PUSH_CLEAR_TRY_M over the door top. Not sim-gated: cuRobo is
-    trusted with it (11-02), and its world has no door. Returns (P, [(label, Plan)], None) or (None, None, why)."""
+    """Ask cuRobo -- nothing moves -- for the push-open from the hand pose `ee` / joints `q` at the swing's end: EVERY
+    move (_push_moves) from where the one before ends, each with the checks it runs under (dc.pose_plan_problem: the
+    shape cap, the floor, joint swings, the end), for the first variant whose moves ALL pass -- the hand
+    PUSH_TILT_TRY_DEG off straight down, the fingertips PUSH_CLEAR_TRY_M over the door top. 11-11: only "plans" was
+    asked here, so a variant whose "over the door" reshaped J3 79 deg was chosen, the handle let go, and the run refused
+    two moves in. cuRobo's world has no door or scene camera.
+    Returns (P, [(label, Plan)], None) or (None, None, why)."""
     whys = []
     for tilt_deg, clear_m in ((t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M):
         P = _push_poses(door, ee, clear_m, tilt_deg)
         if float((P.pushed - P.inside)[:2] @ P.out[:2]) <= 0:  # toward the hinge must open the door further
             return None, None, "push-open: the hinge's y is on the door's closing side of the hand -- refusing"
         start, plans = np.asarray(q, dtype=float), []
-        for label, pos, hold in (*_push_legs(P), *_back_legs(P)):
-            pl = ai.plan_to_pose(pos, P.down, start, hold=hold)
-            if not pl.success:
-                whys.append(f"{P.how}: cuRobo can't plan '{label}' ({pl.message})")
+        for label, pos, quat, hold, keep_shape in _push_moves(P):
+            pl, why = dc.pose_plan_problem(ai, start, pos, quat, hold, keep_shape, PUSH_PLAN_TRIES)
+            if why:
+                whys.append(f"{P.how}: '{label}': {why}")
                 if loud:
                     say(f"  push-open, {whys[-1]}")
                 break
             plans.append((label, pl))
-            if len(pl.q):
-                start = pl.q[-1]
+            start = np.asarray(pl.q, dtype=float)[-1]
         else:
             return P, plans, None
-    return None, None, f"push-open: cuRobo plans none of {len(whys)} variants (first: {whys[0]})"
+    return None, None, f"push-open: none of {len(whys)} variants passes every move (first: {whys[0]})"
 
 
 def _door_after_swing(geom, cand):
@@ -725,6 +743,41 @@ def _pose_move(ai, pos, quat, label, hold, speed=None, held=False, keep_shape=Tr
     return ai.go_to_ee_pose(pos, quat, label, orientation_hold=hold, **go_to)
 
 
+def _run_push_plans(ai, P, plans, gains, on_release):
+    """The push-open's moves, each run EXACTLY as _plan_push_open checked it (dc.run_checked_plan), in order: open the
+    gripper, back off the handle, up and back, close the gripper (a narrower hand round the door), over, down, the push
+    (at its own speed), back the way it came. A move whose start the arm isn't at (PUSH_AT_START_DEG) is planned and
+    checked afresh from where the arm is (dc.checked_pose_move). Saves the door's new opening; returns True."""
+    moves = {lb: (pos, quat, hold, keep) for lb, pos, quat, hold, keep in _push_moves(P)}
+    held = shared.GRASPED_GAINS if gains is not None else None
+    push_speed = rammp_arm.GO_TO_SPEED_SCALE * PUSH_OPEN_SPEED_SCALE
+    say("opening the gripper ...")
+    ai.gripper(0.0)
+    time.sleep(0.5)
+    if on_release is not None:
+        on_release()
+    for label, pl in plans:
+        if label == "over the door":
+            say("closing the gripper (a narrower hand round the door) ...")
+            ai.gripper(1.0)
+            time.sleep(0.8)
+        speed = push_speed if label == "push open" else None
+        off = float(np.degrees(np.max(np.abs(short_delta(ai.raw_joints(), np.asarray(pl.q, dtype=float)[0])))))
+        say(f"push-open: {label} ...")
+        if off <= PUSH_AT_START_DEG:
+            ok = dc.run_checked_plan(ai, pl, f"push-open: {label}", speed, held)
+        else:  # not where the preview started it: plan and check it again from here
+            say(f"  push-open: {label}: the arm is {off:.1f} deg from the checked start -- planned again from here")
+            pos, quat, hold, keep = moves[label]
+            ok = dc.checked_pose_move(ai, pos, quat, f"push-open: {label}", hold, speed, held, keep)
+        if not ok:
+            why = getattr(ai, "last_error", "")
+            raise Refused(f"push-open: '{label}' stopped ({why}) -- the arm holds where it is.")
+    save_door_geometry(door_open_deg=PUSH_OPEN_DOOR_DEG)
+    say(f"door file: open {PUSH_OPEN_DOOR_DEG:.0f} deg after the push (taken, not measured)")
+    return True
+
+
 def push_open(ai, execute, on_release=None):
     """After the swing: let go of the handle and push the door further open (see the module's step 4), all cuRobo.
     `on_release()`: called once the gripper has let go. Saves the door's new opening to the door file. Returns True
@@ -737,11 +790,13 @@ def push_open(ai, execute, on_release=None):
     door = json.loads(dc.DOOR_FILE.read_text())
     st = ai.get_state()
     start = ai.raw_joints() if hasattr(ai, "raw_joints") else st["position"]
-    P, _, why = _plan_push_open(ai, door, list(st["ee_pos"]), start)
+    P, plans, why = _plan_push_open(ai, door, list(st["ee_pos"]), start)
     if why:
         raise Refused(f"{why} from where the swing ended -- still holding the handle.")
-    say(f"push-open: {P.how}")
+    say(f"push-open: {P.how}; every move checked from the real joints before letting go")
     gains = shared.grasped_impedance()
+    if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints"):
+        return _run_push_plans(ai, P, plans, gains, on_release)
     go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=shared.GRASPED_GAINS)
     say("opening the gripper ...")
     ai.gripper(0.0)

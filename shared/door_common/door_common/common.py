@@ -654,30 +654,16 @@ def checked_pose_move(ai, pos, quat, label, hold=0, speed_scale=None, gains=None
     under joint impedance `gains` if given. Raises Refused before anything moves when a check fails; returns whether
     the motion succeeded."""
     start = np.asarray(ai.raw_joints(), dtype=float)
-    pl = ai.plan_to_pose(pos, quat, start, hold)
-    for _ in range(CUROBO_RETRIES):
-        if pl.success or _over_limit(pl.message) is None:
-            break
-        pl = ai.plan_to_pose(pos, quat, start, hold)
-    if not pl.success or len(pl.q) == 0:
-        raise Refused(f"{label}: cuRobo can't plan it ({pl.message}) -- nothing moved.")
-    qs = np.asarray(pl.q, dtype=float)
-    why = (reconfiguration(start, qs[-1]) if keep_shape else "") or path_below_floor(qs)
-    if not why:
-        off = np.abs(np.array([short_delta(start, q) for q in qs]))
-        swing = off.max(axis=0) - np.abs(short_delta(start, qs[-1]))
-        if float(swing.max()) > FREE_MOVE_MAX_SWING_RAD:
-            j = int(np.argmax(swing))
-            why = f"cuRobo's path swings J{j + 1} {np.degrees(swing[j]):.0f} deg past a straight move"
-    if not why:
-        scene, rb = make_sim()
-        p_end, o_end = sim.tool_pose(scene, rb, qs[-1])
-        d_m = float(np.linalg.norm(p_end - np.asarray(pos, dtype=float)))
-        d_deg = float(np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(o_end, np.asarray(quat, dtype=float))))))))
-        if d_m > POSE_END_TOL[0] or d_deg > POSE_END_TOL[1]:
-            why = f"cuRobo's plan ends the tool {d_m * 100:.1f} cm / {d_deg:.1f} deg off the pose"
+    pl, why = pose_plan_problem(ai, start, pos, quat, hold, keep_shape)
     if why:
         raise Refused(f"{label}: {why} -- nothing moved.")
+    return run_checked_plan(ai, pl, label, speed_scale, gains)
+
+
+def run_checked_plan(ai, pl, label, speed_scale=None, gains=None):
+    """Run cuRobo's checked plan `pl` EXACTLY (execute_joint_trajectory), under joint impedance `gains` if given;
+    whether the motion succeeded."""
+    qs = np.asarray(pl.q, dtype=float)
     scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
     secs = float(pl.t[-1]) / scale
     say(f"  {label}: cuRobo's plan checked ({len(qs)} samples, {secs:.1f} s at {scale:g} x), run as it is")
@@ -687,6 +673,42 @@ def checked_pose_move(ai, pos, quat, label, hold=0, speed_scale=None, gains=None
     if res.error_code != 0:
         say(f"  {label}: ended {res.error_string or res.error_code}")
     return res.error_code == 0
+
+
+def pose_plan_problem(ai, start, pos, quat, hold=0, keep_shape=True, tries=1):
+    """checked_pose_move's plan and checks, nothing moves: cuRobo's plan to the tool pose from joints `start` -- the
+    arm keeping its shape (reconfiguration, unless not `keep_shape`), the floor, no joint swinging
+    FREE_MOVE_MAX_SWING_RAD past its straight range, the tool ending within POSE_END_TOL of the pose. Asked `tries`
+    times (cuRobo's plans vary) for one that passes. (plan, "") when one does, else (the last plan or None, why)."""
+    start = np.asarray(start, dtype=float)
+    pl, why = None, ""
+    for _ in range(max(1, int(tries))):
+        pl = ai.plan_to_pose(pos, quat, start, hold)
+        for _ in range(CUROBO_RETRIES):
+            if pl.success or _over_limit(pl.message) is None:
+                break
+            pl = ai.plan_to_pose(pos, quat, start, hold)
+        if not pl.success or len(pl.q) == 0:
+            why = f"cuRobo can't plan it ({pl.message})"
+            continue
+        qs = np.asarray(pl.q, dtype=float)
+        why = (reconfiguration(start, qs[-1]) if keep_shape else "") or path_below_floor(qs)
+        if not why:
+            off = np.abs(np.array([short_delta(start, q) for q in qs]))
+            swing = off.max(axis=0) - np.abs(short_delta(start, qs[-1]))
+            if float(swing.max()) > FREE_MOVE_MAX_SWING_RAD:
+                j = int(np.argmax(swing))
+                why = f"cuRobo's path swings J{j + 1} {np.degrees(swing[j]):.0f} deg past a straight move"
+        if not why:
+            scene, rb = make_sim()
+            p_end, o_end = sim.tool_pose(scene, rb, qs[-1])
+            d_m = float(np.linalg.norm(p_end - np.asarray(pos, dtype=float)))
+            d_deg = float(np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(o_end, np.asarray(quat, dtype=float))))))))
+            if d_m > POSE_END_TOL[0] or d_deg > POSE_END_TOL[1]:
+                why = f"cuRobo's plan ends the tool {d_m * 100:.1f} cm / {d_deg:.1f} deg off the pose"
+        if not why:
+            return pl, ""
+    return pl, why
 
 
 _LIMIT_RE = re.compile(r"(\w+) (velocity|acceleration|jerk) ([\d.]+) > limit ([\d.]+)")
