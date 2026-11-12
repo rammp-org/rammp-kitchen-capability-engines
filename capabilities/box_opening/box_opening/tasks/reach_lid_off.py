@@ -285,6 +285,20 @@ LIFT_OFF_CLEAR_M = 0.015
 # over the rim: not until the cap's skirt is measured at 22 mm or less
 # (lid_dims.z is an estimate).
 LIFT_OFF_MIN_CLEAR_M = 0.010
+# ... and where no lift straight up flies at the hand's own lean, the hand
+# leans this much further back toward the arm as it rises (plan_lift), the
+# least of these that flies. Flatbot 2026-11-12 18:12: the box 0.71 m out on
+# a 29 in table, the knob held with the hand leaning 30 deg and the elbow 0.5
+# rad from straight — the arm at its reach, so the lift ran out 20-28 mm up
+# whatever the elbow's swing (every self-motion of that grip, offline), and
+# the run backed out of an open box ("the lid has no way off the box"). The
+# wrist rides 0.29 m up the hand's axis: each degree the hand leans back
+# lowers it 2.5-3.5 mm there and brings it in, and from that grip and 18:11's
+# (45 deg, 30 mm of lift) the full lift flies leaning 5 deg more. The lid
+# turns with the hand about the knob, its edge nearest the arm that much
+# lower: a lean is flown only where that edge still ends over the rim
+# (_lean_keeps_clear), 4 mm of the 15 at 5 deg for the pink canister's lid.
+LIFT_LEAN_DEG = (5.0, 10.0)
 # The set-down: at setdown_speed or faster (PLACE_TOUCH_SPEED below) to
 # SETDOWN_SLOW_M above where the plan has the lid meet the table — the scene
 # camera's table, the model's lid hanging from the grip (setdown_poses) —
@@ -1454,13 +1468,50 @@ def _clear_after_lift(ctx, chain, q, quat, top_z=None):
     return None, 0.0, "no way up and back from the lifted lid flies (%s; up to the carry's floor: %s)" % (why, low_why)
 
 
+def _lean_keeps_clear(model, lean_deg, clear_m):
+    """Whether the lid, turned `lean_deg` about the knob with the hand, still
+    ends the lift with its lowest edge over the rim: that edge hangs the
+    lid's radius times the lean's sine lower, of the `clear_m` the lift goes
+    past the cap."""
+    lid_r = 0.5 * max(float(model.lid_dims[0]), float(model.lid_dims[1]))
+    return lid_r * math.sin(math.radians(lean_deg)) < float(clear_m)
+
+
+def _lift_line(chain, q_grip, t, up, quat, lean_deg):
+    """The lift's joint waypoints from the knob held at `q_grip` (the tool
+    at `t`) to `up` straight above it: the hand at `quat` all the way, or,
+    `lean_deg` not 0, leaning that much further back toward the arm by the
+    top (reach_press.reach_quat's axis; kinematics.walk, in the straight
+    line's own steps). Returns (points, the hand's attitude at the top,
+    None) or (None, None, why): the solver's, or the runner's gate's
+    (dp.line_refusal)."""
+    from box_opening.runtime import kinematics
+
+    top = [float(t[0]), float(t[1]), float(t[2]) + up]
+    d = math.hypot(float(t[0]), float(t[1]))
+    if not lean_deg or d < 1e-6:
+        end, (pts, why) = quat, chain.straight_line(q_grip, top, quat)
+    else:
+        axis = (float(t[1]) / d, -float(t[0]) / d, 0.0)
+        end = list(rp.rotate_about_world_axis(quat, axis, math.radians(lean_deg)))
+        pts, why = chain.walk(q_grip, top, end, step_m=kinematics.STEP_M, max_step_rad=kinematics.MAX_STEP_RAD)
+    if pts is not None:
+        why = dp.line_refusal(chain, pts)
+    if pts is None or why is not None:
+        return None, None, why
+    return [[float(v) for v in p] for p in pts], [float(v) for v in end], None
+
+
 def plan_lift(ctx, cfg, q_grip, quat):
     """The lid's way off the box from the knob held at joints `q_grip`, the
     hand at `quat` (LiftOff): straight up lift_off_m, then the clear
     (_clear_after_lift) — where either does not fly, the same from the
-    shorter lift LIFT_OFF_MIN_CLEAR_M past the cap. The grip's lookahead,
-    while the hand comes down to the knob. Returns (LiftOff, None) or
-    (None, why): the full lift's."""
+    shorter lift LIFT_OFF_MIN_CLEAR_M past the cap; and where neither does
+    with the hand as it holds the knob, the same two with the hand leaning
+    further back as it rises (LIFT_LEAN_DEG, the least that flies; the
+    clear and all after it at that attitude, LiftOff.quat). The grip's
+    lookahead, while the hand comes down to the knob. Returns (LiftOff,
+    None) or (None, why): the full lift's, the hand as it holds the knob."""
     from box_opening.runtime import approach
 
     chain = approach._chain()
@@ -1469,34 +1520,44 @@ def plan_lift(ctx, cfg, q_grip, quat):
     _R, t = chain.fk(q_grip)
     top_z = _gripped_lid_top(chain, q_grip)  # the clear's floor never under the lid's top as gripped
     first = None
-    for clear_m in (LIFT_OFF_CLEAR_M, LIFT_OFF_MIN_CLEAR_M):
-        up = lift_off_m(ctx.model, clear_m)
-        if first is not None and up >= first[0] - 1e-9:
-            break  # no shorter than the one that did not fly
-        lift, why = chain.straight_line(q_grip, [float(t[0]), float(t[1]), float(t[2]) + up], quat)
-        if lift is not None:
-            why = dp.line_refusal(chain, lift)
-        if lift is None or why is not None:
-            first = first or (up, "the lift off the canister is not a straight line the arm can fly (%s)" % why)
-            continue
-        lift = [[float(v) for v in p] for p in lift]
-        clear, back, why = _clear_after_lift(ctx, chain, lift[-1], quat, top_z)
-        if clear is None:
-            first = first or (up, why)
-            continue
-        if first is not None:
-            log.info("[press_demo] %.0f mm up: %s — the lift %.0f mm instead" % (1000 * first[0], first[1], 1000 * up))
-        return LiftOff(
-            [
-                dp.compliant_line(ctx, "lid:lift", lift, quat, cfg.lift_speed, world),
-                dp.compliant_line(ctx, "lid:clear", clear, quat, rp.free_line_speed(ctx), world),
-            ],
-            back,
-            q_grip=q_grip,
-            q_top=lift[-1],
-            quat=[float(v) for v in quat],
-            lift_m=up,
-        ), None
+    for lean in (0.0, *LIFT_LEAN_DEG):
+        tried = None
+        for clear_m in (LIFT_OFF_CLEAR_M, LIFT_OFF_MIN_CLEAR_M):
+            up = lift_off_m(ctx.model, clear_m)
+            if tried is not None and up >= tried - 1e-9:
+                break  # no shorter than the one that did not fly
+            if lean and not _lean_keeps_clear(ctx.model, lean, clear_m):
+                continue  # the lid's low edge would end at the rim or under it
+            tried = up
+            lift, top_quat, why = _lift_line(chain, q_grip, t, up, quat, lean)
+            if lift is None:
+                first = first or (up, "the lift off the canister is not a straight line the arm can fly (%s)" % why)
+                continue
+            clear, back, why = _clear_after_lift(ctx, chain, lift[-1], top_quat, top_z)
+            if clear is None:
+                first = first or (up, why)
+                continue
+            if first is not None:
+                log.info(
+                    "[press_demo] %.0f mm up: %s — the lift %.0f mm%s instead"
+                    % (
+                        1000 * first[0],
+                        first[1],
+                        1000 * up,
+                        ", the hand leaning %.0f deg further back by its top" % lean if lean else "",
+                    )
+                )
+            return LiftOff(
+                [
+                    dp.compliant_line(ctx, "lid:lift", lift, top_quat, cfg.lift_speed, world),
+                    dp.compliant_line(ctx, "lid:clear", clear, top_quat, rp.free_line_speed(ctx), world),
+                ],
+                back,
+                q_grip=q_grip,
+                q_top=lift[-1],
+                quat=top_quat,
+                lift_m=up,
+            ), None
     return None, first[1]
 
 

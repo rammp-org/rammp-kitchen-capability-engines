@@ -3264,10 +3264,60 @@ def test_a_lift_that_does_not_fly_its_full_height_flies_the_shorter_one_and_says
     assert why is None and lift.lift_m == pytest.approx(short) and rlo._lift_m(ctx, lift) == pytest.approx(short)
     assert [xyz[2] for xyz, _q in chain.lines[:2]] == pytest.approx([0.45 + full, 0.45 + short])
     chain = _HandAt(0.45, refuse=[lambda xyz, q: tuple(xyz[:2]) == lifted])
+    chain.walk = lambda q0, xyz, quat, **k: (None, "IK did not converge")  # nor leaning further back
     monkeypatch.setattr(approach, "_chain", lambda: chain)
     lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
     assert lift is None and why.startswith("the lift off the canister is not a straight line")
     assert rlo._lift_m(ctx, rlo.LiftOff([])) == pytest.approx(full)  # a LiftOff that says none: the full lift
+
+
+def test_a_lift_no_straight_line_flies_goes_up_with_the_hand_leaning_further_back(ctx, monkeypatch):
+    """Flatbot 2026-11-12 18:12: the knob held at the arm's reach (the box 0.71 m out, the hand
+    leaning 30 deg), the lift ran out 20-28 mm up at that lean and the run backed out of an open
+    box. There the lift goes the same height with the hand leaning LIFT_LEAN_DEG further back
+    toward the arm by its top — the least lean first, the full lift before the shorter — and the
+    clear and all after it hold that attitude (LiftOff.quat). A lift that flies straight asks no
+    lean; a lean that would end the lid's low edge at the rim is not flown."""
+    from box_opening.geometry import rotate_about_world_axis
+    from box_opening.runtime import approach, kinematics
+
+    cfg = load_press_demo(PINK)
+    full = rlo.lift_off_m(ctx.model)
+    lifted = (0.5, -0.4)
+    quat = [0.0, 0.0, 0.0, 1.0]
+    chain = _HandAt(0.45)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, quat)
+    assert why is None and chain.walks == [] and lift.quat == quat  # straight up flies: no lean asked
+    # no line straight up at the hand's own attitude: the walk, leaning the least, to the full height
+    asked = []
+    chain = _HandAt(0.45, refuse=[lambda xyz, q: tuple(xyz[:2]) == lifted and tuple(q) == tuple(quat)])
+    walk = chain.walk
+    chain.walk = lambda q0, xyz, q, **k: (asked.append(list(q)), walk(q0, xyz, q, **k))[1]
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, quat)
+    d = math.hypot(*lifted)
+    leaned = list(
+        rotate_about_world_axis(quat, (lifted[1] / d, -lifted[0] / d, 0.0), math.radians(rlo.LIFT_LEAN_DEG[0]))
+    )
+    assert why is None and lift.lift_m == pytest.approx(full) and lift.quat == pytest.approx(leaned)
+    assert asked == [pytest.approx(leaned)]
+    assert chain.walks == [
+        dict(
+            xyz=[0.5, -0.4, pytest.approx(0.45 + full)],
+            step_m=kinematics.STEP_M,
+            step_rad=None,
+            max_step_rad=kinematics.MAX_STEP_RAD,
+        )
+    ]
+    assert [leg.name for leg in lift.legs] == ["lid:lift", "lid:clear"]
+    assert all(leg.target[2] == pytest.approx(leaned) for leg in lift.legs)  # the clear at the lift's top attitude
+    # the lid's low edge: its radius times the lean's sine, of the clearance past the cap
+    lid_r = 0.5 * max(ctx.model.lid_dims[0], ctx.model.lid_dims[1])
+    assert rlo._lean_keeps_clear(ctx.model, rlo.LIFT_LEAN_DEG[0], rlo.LIFT_OFF_CLEAR_M)
+    assert not rlo._lean_keeps_clear(
+        ctx.model, math.degrees(math.asin(rlo.LIFT_OFF_MIN_CLEAR_M / lid_r)) + 0.1, rlo.LIFT_OFF_MIN_CLEAR_M
+    )
 
 
 def test_where_no_hand_reaches_a_spot_straight_down_the_same_spots_follow_leaning(ctx):
