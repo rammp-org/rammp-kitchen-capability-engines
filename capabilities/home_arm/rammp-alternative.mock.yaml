@@ -1,0 +1,15 @@
+# The mock: the real alternative's exact interface, no hardware. Other teams
+# develop against it, the all-mock profile runs on it, and CI smoke-tests it.
+# check_capabilities.py rejects a mock whose topics differ from the real one.
+id: home_arm_mock
+tier: experimental
+kind: docker
+container:
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/home_arm:dev
+  network_mode: host
+  ipc: host
+  # To give make_sim() a model, append "mock_urdf:=/path/to/robot.urdf" (arm.mock_urdf).
+  command: ["ros2", "launch", "home_arm", "home_arm.launch.py", "mock:=true"]
+# No `params:` here: they would need the node's executable as the command, and this fragment uses `ros2 launch` for mock:=true.
+publishes: [/home_arm/status]
+subscribes: [/joint_states, /arm/robot_description]
