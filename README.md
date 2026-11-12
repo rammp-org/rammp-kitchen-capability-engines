@@ -146,9 +146,11 @@ ros2 topic echo /example/status
 ```
 
 Standalone, the orchestrator calls a capability makes (`ctx.request_intent`,
-`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. Arm control
-arbitration (`AcquireControl`) is not wired in yet: the orchestrator does not
-call it today.
+`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. For direct
+UI panels, the orchestrator pushes a shared execution token to the engine's
+`/<engine_id>/acquire_control` server and grants it to the arm and UI bridge.
+The engine passes that token to `self.arm`; it never acquires control itself.
+Without a token, UI calls are logged no-ops.
 
 To run it on the robot, transcribe the capability's two fragments into
 [`rammp-deployments`](https://github.com/rammp-org/rammp-deployments)'s
@@ -251,6 +253,17 @@ the orchestrator:
 | `request_intent(intent_type, params=None) -> Result` | Asks the orchestrator to hand an intent (such as `MOVE_BASE`) to another engine, and waits for its result |
 | `write_world_state(**updates) -> bool`               | Updates the world state. The keys are `gripper`, `doors`, `objects`, `arm` and `base_pose`                |
 | `update_object(instance_id, **fields) -> bool`       | Updates one object's fields in the world state                                                            |
+
+### UI (`ctx`)
+
+The direct UI bridge support is ported from `feat/engine_update`, as used by
+its counter-panel example. `ctx.update_user_panel(panel_json=...)` opens or
+refreshes the engine's panel without blocking. `ctx.poll_ui_event()` consumes
+the latest button/object event; a button ends the panel goal, so the next panel
+update opens a new one. `ctx.publish_overlay_image(image)` publishes the
+capability's camera view. These calls are independent of `ctx.progress()`,
+which reports only to the orchestrator. Panel goals are closed when the action
+ends. See [UI JSON schema](docs/UI_JSON_SCHEMA.md) for payloads and event shapes.
 
 ### `self.arm` (`ArmInterface`)
 

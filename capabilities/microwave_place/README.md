@@ -1,12 +1,16 @@
 # microwave_place
 
-Put the tupperware the gripper is already holding (after `grab_container`) into the open microwave.
+Put the tupperware the gripper is already holding (after `grab_container`) into the open microwave
+(`place`), and take it out again (`take_out`).
 
 - `microwave_place/microwave_detection.py`: where the microwave is and where the container goes, from the
   **scene camera** (not the wrist camera: the held container blocks its view).
 - `microwave_place/place_motion.py`: planning, checking and running the arm: Walter Hsieh's
   `place_container` motion (arm model, impedance lowering), with the transit, the straight lines and the
   release the microwave needs.
+- `microwave_place/rim_detection.py`: `take_out`: where the container's rim is, from the **wrist camera**
+  (`grab_container`'s SAM3 rim detection).
+- `microwave_place/take_out.py`: `take_out`: planning and running the arm.
 - `microwave_place/microwave_place_node.py`: the `CapabilityEngine` action server: parameters, the actions, the plan and
   state files.
 
@@ -41,8 +45,7 @@ How it works:
 1. **The point** follows from the dimensions: centred sideways, `DEPTH / 2` behind the frame plane,
    `FLOOR` above the opening's bottom edge.
 
-Any check that fails raises `NotDetected` with the reason (`estimate_interior` returns `None`).
-Nothing is filled in.
+Any check that fails raises `NotDetected` with the reason. Nothing is filled in.
 
 `locate(...)` runs it on the live camera inside an action (`SceneCamera`). It first gets one frame of
 SAM3's "microwave" mask (`microwave_prompt`), with its depth and camera pose, in a call of its own
@@ -140,18 +143,123 @@ they leave about 2 cm free on each side of the container's wall.
 A faulted arm makes the driver reject the approach: the place stops there, nothing moved, and says so;
 clear the fault and re-run.
 
+## The take-out: `rim_detection.py`, `take_out.py`
+
+`take_out` starts from the take-out start pose: the arm in front of the open oven, the hand pointing into
+it, the wrist camera looking at the tupperware from about 0.4-0.5 m, the gripper open. It uses neither the
+scene camera nor a model of the oven: the grasp comes from the whole-container mask and filtered wrist depth, the line in
+from the hand's own heading.
+
+1. **Detect** (`rim_detection.detect_container`; the filename is historical). SAM3 queries
+   `container_prompt` once on the wrist color image and selects the highest-scoring container mask.
+   There is no rim query or rim-shape filter. The existing `rim_frames` (default 3), `rim_mask_iou`
+   (0.85) and `rim_timeout_s` (60 s) parameter names are retained for deployment compatibility.
+   Every container mask must agree with every earlier mask in the consecutive-frame streak.
+   Disagreement or a failed detection resets that streak. Within each mask, average the 50
+   nearest locally consistent valid depth pixels (finite and strictly between 0.2 and 2 m), transformed into
+   `arm_mount` at the depth timestamp. Then average those per-frame points over the three frames.
+   This preserves the previous two-stage averaging, without adding a point-distance agreement gate.
+   Defaults use zero heading offset and a 3.5 cm upward tool offset from that averaged point.
+1. **Grasp pose** (`take_out.grasp_pose`). The hand's level heading at the start is the line in's
+   direction. The hand is turned 90 deg about its own axis, the way that points the line between the
+   fingers (tool x) straight up, so the fingers come in above and below the brim, and levelled. The
+   tool frame's target is `grasp_depth` along the heading and `grasp_up` above the averaged container point; the
+   pre-grasp pose is `reach_in` back from it along the heading (30 cm by default).
+   The tool frame is about 6 cm behind the fingertips; offsets are tuned for this container.
+1. **Plan** (`plan_take_out`). Load `take_approach_world` (default
+   `/config/robot/curobo/world.yaml`, a path inside the planner container). Require `set_world` to
+   acknowledge the persistent platform, seat and person layers and the floor scene layer. cuRobo
+   plans from the measured start joints to the pre-grasp pose, including the hand's turn, with
+   orientation free in transit. The approach can curve; only its endpoint must match the pre-grasp.
+   From its endpoint, local IK plans the straight insertion and lift. cuRobo then preplans
+   the exit from that nominal lifted configuration before any motion is allowed.
+   A **dry run** stops here and saves the cuRobo samples, timing and velocities alongside those
+   Cartesian paths in `state_dir/plans/take_out_*.json`. A planner failure refuses without a local
+   IK fallback.
+1. **Execute**. Set the gripper to `grip_open`, execute the exact cuRobo trajectory through the
+   driver's `execute_joint_trajectory` in position control, at `take_approach_speed_scale` (default
+   0.3 of planned speed), and stop at pre-grasp. Check the measured pre-grasp position and full
+   orientation (1 cm / 2 deg), then rebuild the Cartesian paths from the measured joints. The
+   insertion up to `impedance_in` short of grasp uses the existing local IK and position control,
+   timed at `insert_speed`; the arm then settles in joint impedance (`take_impedance_kq`,
+   `take_impedance_zeta`, `impedance_torque_limit`) for `settle_s` and does the rest of the line in
+   at `impedance_speed` peak.
+   It must end within 3 cm of the target. Impedance is switched off (`exit_impedance`: the position
+   setpoint on the measured joints, so nothing jumps) before the gripper closes, whatever happened.
+   Then, in position control: the gripper closes with `grab_container`'s force and is checked (the
+   fingers stopped, closed past 0.6, not to 1.0 = on nothing; otherwise it stops in the oven without
+   lifting), and the hand goes straight up `take_lift`. The exit is replanned with cuRobo
+   from the measured lifted joints, then executed with its original samples and timing.
+
+Compliance is used only where the open fingers go over the brim; everything carrying the container is
+stiff (the place's soft gains let the arm sag ~5 cm under it). The library runs one trajectory goal at a
+time, so the switch into impedance is a short stop. The cuRobo approach and exit are
+collision-checked; local insertion and lift are not collision-checked. The approach
+world contains the chair, person and floor, not a microwave model or the container. Run the planner
+with the current flatbot `planner.yaml` from rammp-deployments, its layers mounted at
+`/config/robot/curobo`, and `world:=""`; an empty-world or older planner without the required layer
+acknowledgement is refused. The capability does not install or update that deployment configuration.
+
+The wrist camera's stereo returns nothing nearer than about 0.22 m. Start with a clear
+view of the container and enough locally consistent depth samples inside its mask.
+
 ## Actions
 
-| Action  | Params            | What it does                                                                               |
-| ------- | ----------------- | ------------------------------------------------------------------------------------------ |
-| `place` | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it |
+The UI action `retrieve` is labelled **Retrieve Tupperware from Microwave**.
+One press runs the full existing take-out sequence, beginning with the configured
+HOME viewing pose, without intermediate confirmations or world-state dependencies.
+It requests execution automatically; the node must still have `allow_execute:=true`
+for an attended hardware run. `mock:=true` exercises the panel without arm motion.
+
+If HOME planning, collision-world setup or endpoint verification fails, the panel
+shows the reason and offers **Retrieve Tupperware from Microwave** again. It waits
+for that press before starting a fresh recorded attempt; detection and grasp do not
+start until HOME succeeds. Later retrieval errors are displayed without restarting
+the grasp. Done dismisses the final success/error notice; orchestrator cancellation
+works while waiting. The existing `take_out` action remains available for direct
+execution and dry runs.
+
+This uses `ctx.update_user_panel()` / `ctx.poll_ui_event()` from the
+`feat/engine_update` counter example. Run with the orchestrator and UI bridge,
+which must grant the same execution token to the engine, arm and bridge. The UI
+interface package is pinned in the Dockerfile; native builds need
+`rammp_ui_bridge_interfaces` in their workspace. `ui_bridge_node_name` defaults
+to `ui_bridge_node`. Without a UI session, HOME failures return a recoverable
+`home_failed` result instead of waiting for a button event.
+
+```bash
+make action CAP=microwave_place ACTION=retrieve
+```
+
+For the four-terminal Unreal panel demo, keep the UI bridge and orchestrator
+commands. In interactive perception enter `add microwave_1 microwave`, and
+replace the counter launch with:
+
+```bash
+ros2 launch microwave_place microwave_place.launch.py mock:=true state_dir:="$HOME/.microwave_place"
+```
+
+Select **microwave_1 → Retrieve Tupperware from Microwave** in Unreal. Mock mode
+shows completion without planning or moving the arm; it does not simulate HOME
+planning failure. Real retrieval requires the arm driver, cuRobo, wrist camera,
+TF and SAM3 stack in addition to these four demo terminals.
+
+The launch file and deployment fragments set `arm.service_call_s` to 30 seconds:
+Snorlax's cuRobo world reload completed after the previous 10-second timeout.
+Override this launch setting with `service_call_s:=30.0`. Cancellation remains
+available during the wait; the collision-world and HOME checks still apply.
+
+| Action     | Params            | What it does                                                                                                      |
+| ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `place`    | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it                        |
+| `take_out` | `execute` (false) | Finds the container grasp point from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
 
 A refusal fails the goal with error code `refused` (recoverable).
 
 ## Running it standalone
 
 The arm moves only if the node runs with `allow_execute:=true` **and** the goal sets `execute`.
-Otherwise every `place` is a dry run: it locates, plans and checks, and returns the plan. It needs
+Otherwise every goal is a dry run: it detects, plans and checks, and returns the plan. It needs
 SAM3 (rammp-perception) and the cuRobo planner up; the planner must read `worlds_dir` at the same path
 (mounted in both containers).
 
@@ -167,6 +275,7 @@ On the arm, attended, someone on the e-stop:
 ros2 launch microwave_place microwave_place.launch.py use_orchestrator:=false allow_execute:=true \
   state_dir:=$HOME/.microwave_place
 make action CAP=microwave_place ACTION=place PARAMS='{"execute": true}'
+make action CAP=microwave_place ACTION=take_out PARAMS='{"execute": true}'   # from the take-out start pose
 ```
 
 ## Parameters
@@ -194,3 +303,95 @@ All are ROS parameters, with their defaults in `rammp-alternative.yaml`:
 | `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`          | joint impedance for the lowering, the gripper opening and the release tilt                                   |
 | `flange_to_tip`                                            | 0.17955                                     | flange face to the closed fingertips (m)                                                                     |
 | `state_dir`                                                | /config/microwave_place                     | plans and the descent recordings                                                                             |
+| `take_approach_world`                                      | `/config/robot/curobo/world.yaml`           | take_out: scene loaded by the planner; requires platform, seat, person and floor layers                      |
+| `take_approach_speed_scale`                                | `0.3`                                       | take_out: fraction of cuRobo approach speed, finite and in (0, 1\]                                           |
+| `wrist_topics`                                             | the wrist camera's colour, depth, info      | take_out: the camera the rim is found on                                                                     |
+| `container_prompt`, `rim_prompt`                           | the container with its blue sleeve; its rim | take_out: SAM3's prompts                                                                                     |
+| `sam3_threshold`                                           | 0.5                                         | take_out: SAM3's score threshold                                                                             |
+| `rim_frames`, `rim_mask_iou`, `rim_timeout_s`              | 3, 0.85, 60.0                               | take_out: consecutive frames whose masks overlap this much, at most this long                                |
+| `grasp_depth`, `grasp_up`                                  | -0.05, 0.035                                | take_out: the tool frame this far (m) along the heading (- = short of it) and above the rim point            |
+| `reach_in`                                                 | 0.25                                        | take_out: the pre-grasp pose this far back (m): the line in's length                                         |
+| `grip_open`                                                | 0.0                                         | take_out: the gripper's opening for the reach in (0 = fully open)                                            |
+| `impedance_in`, `impedance_speed`                          | 0.10, 0.08                                  | take_out: the last this far (m) of the line in in joint impedance, at this peak speed (m/s)                  |
+| `take_impedance_kq`, `take_impedance_zeta`                 | 400 x 4, 200 x 3; 0.7                       | take_out: that joint impedance (the driver caps kq at 400)                                                   |
+| `take_lift`                                                | 0.03                                        | take_out: straight up this far (m) after the close                                                           |
+
+## SAM3 debug view
+
+In Foxglove, add an Image panel on `/microwave_place/sam3_overlay` during a planning-only
+`take_out` goal (`execute: false`, `allow_execute: false`). Cyan shows the whole container mask;
+yellow dots mark its 50 nearest locally consistent depth samples. The banner shows the score and sample count.
+The image preserves the source color header. The topic stays advertised while idle, retaining
+the latest image with transient-local durability. In Foxglove use automatic or transient-local
+durability to receive the retained image after detection finishes. No rim query or frozen-query topic is used.
+
+The take-out grasp target is 5 cm deeper along the approach heading than before
+(`grasp_depth: 0.0`). `reach_in: 0.30` keeps the pre-grasp pose unchanged and
+extends the straight insertion by 5 cm (30 cm total); the last 10 cm remains in impedance.
+
+Depth filtering uses masked 5x5 neighborhoods: require at least five valid neighbors and
+reject samples farther from the local median than max(1 cm, 3 x 1.4826 x MAD).
+Then average the nearest 50 surviving samples per frame, refusing fewer than 50.
+The existing three-frame pairwise mask-IoU agreement and frame-point averaging remain unchanged.
+The overlay displays exactly the filtered samples used by the estimator.
+
+## Take-out starting home
+
+`take_home_joints` stores seven joint angles in radians in arm_joint_1..7 order,
+captured from the viewing pose on 2026-11-11. Executing take-out first uses cuRobo
+to reach this configuration before starting wrist detection (unless already within
+1 degree per joint). It uses `take_approach_speed_scale` and the confirmed flatbot
+collision world. This home step leaves the gripper unchanged. A dry run refuses
+when off-home because it cannot observe the future camera view without moving.
+The explicit `allow_execute` and goal `execute` gates apply to this move too.
+
+## Per-run recording
+
+`record_bag` defaults to `true` for place, take-out, dry runs and mock runs. Each
+accepted action creates `state_dir/runs/<action>_<UTC timestamp>_<unique id>/bag`
+(sqlite3 ROS 2 bag) and a sibling `run.json`. The existing `state_dir` volume keeps
+these across container restarts. A successful result includes `bag_path` and
+`recording_errors`; failed runs log their bag path before behavior begins.
+
+| Parameter      | Default | Meaning                                                       |
+| -------------- | ------- | ------------------------------------------------------------- |
+| `record_bag`   | `true`  | Record each action; startup failure refuses before motion     |
+| `bag_frame_hz` | `1.0`   | Maximum synchronized camera sets per second                   |
+| `bag_state_hz` | `25.0`  | Maximum joint, tool and gripper messages per second per topic |
+
+Take-out records its configured wrist color image, color calibration and aligned
+depth together (timestamps within 50 ms), plus the SAM3 overlay at `bag_frame_hz`.
+Place records the scene color, calibration and depth it uses. Images retain their
+original header timestamps and encodings, including raw depth units. These are
+sampled observations, not every exact frame consumed by SAM3.
+
+The bag also subscribes to `/joint_states`, `/ee_state`, `/gripper_state`, `/tf`
+(up to 10 Hz per transform group), `/tf_static`, `/arm/robot_description`,
+`/diagnostics` (1 Hz; errors unthrottled), and `/rosout` (this node's logs and all
+nodes' warnings/errors, unthrottled). Missing publishers produce empty topics,
+without blocking the run. Static-topic QoS is stored for replay. Recorder
+subscriptions belong to the action and do not remain active while idle.
+
+The bag-only `/microwave_place/run_event` topic stores start settings and the final
+result or exception. `run.json` also stores message counts and any recording I/O
+errors. Failures include a synchronous error log and traceback; cancellation and
+exceptions close the bag just like success. Startup recording errors refuse the
+action; later recording errors are reported without interrupting arm cleanup.
+SIGKILL, power loss, or disk failure can still prevent a clean final bag.
+
+Inspect using `ros2 bag info <bag_path>` or open the bag directory in Foxglove.
+
+## Take-out withdrawal
+
+After the 3 cm vertical lift, local IK generates a fixed-heading, level straight
+retreat to pre-grasp x/y at the measured lifted height, then stops. The local
+path is previewed before approach, insertion and lift, and regenerated from
+measured joints before retreat. This preserves the tested insertion/lift/retreat
+geometry. These local paths are not collision-checked against the cuRobo world;
+HOME and approach still use cuRobo with the configured collision layers.
+
+A fully closed gripper reading does not establish an empty grasp and does not
+block lifting or retreat. Finger motion and insufficient closure still refuse.
+Run results report `exit_collision_checked: false` and record the actual arm
+states. The experimental cuRobo exit helpers and `take_exit_speed_scale` /
+`take_pullback_m` settings are retained but are not used for removal.
