@@ -235,34 +235,42 @@ def test_home_arm_does_not_answer_a_refused_home_with_the_bare_world(ctx):
     guarded world, to another arm at HOME's tool pose (its FK-pose fallback),
     and the bare world would plan the same home blind to where the box may
     be (review 2026-10-28): it stops, saying what is left to try, and the
-    bare world is never asked."""
-    from box_opening.primitives.core import PlanRefused
+    bare world is never asked — on none of the asks: HOME is asked for
+    HOME_TRIES times and through each waypoint since 2026-11-09
+    (core.home_any), whose refusal carries the last one's words."""
+    from box_opening.primitives import core
     from box_opening.tasks import home_arm
 
     c = _homing(ctx, _other_arm)
-    with pytest.raises(PlanRefused, match=r"the plan ends 0\.4000 rad from its joint goal") as refused:
+    with pytest.raises(RuntimeError, match=r"the plan ends 0\.4000 rad from its joint goal") as refused:
         home_arm.build_legs(ctx)
     assert "not re-planned in the bare world" in str(refused.value) and "--lift-first 0.08" in str(refused.value)
-    assert [kw.get("model") is None for kind, kw in ctx.worlds.pushes if kind == "bench"] == [False]  # guarded only
-    assert len(c.sent) == 1
+    asked = core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    guarded = [kw.get("model") is not None for kind, kw in ctx.worlds.pushes if kind == "bench"]
+    assert guarded == [True] * asked  # the guarded world every time, the bare one never
+    assert len(c.sent) == asked
 
 
 def test_home_arm_with_no_table_known_stops_on_a_refused_home(ctx, capsys):
-    """Flatbot: no table, so one plan in the bare world. Refused, it raises,
-    with what is left to try; the planner's own failure raises as before."""
-    from box_opening.primitives.core import PlanRefused
+    """Flatbot: no table, so every ask is in the bare world (HOME_TRIES
+    times and through each waypoint since 2026-11-09, core.home_any).
+    Refused, it raises, with what is left to try; the planner's own failure
+    raises as before, not dressed as a refusal."""
+    from box_opening.primitives import core
     from box_opening.tasks import home_arm
 
     ctx.worlds.table_top_z = None
     c = _homing(ctx, _other_arm)
-    with pytest.raises(PlanRefused, match=r"0\.4000 rad from its joint goal.*--lift-first 0\.08") as refused:
+    with pytest.raises(RuntimeError, match=r"0\.4000 rad from its joint goal.*--lift-first 0\.08") as refused:
         home_arm.build_legs(ctx)
     assert "bare world" not in str(refused.value)  # it planned in nothing else
-    assert len(c.sent) == 1 and "[client] plan refused" in capsys.readouterr().out
+    assert len(c.sent) == core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    assert all(kw.get("model") is None for kind, kw in ctx.worlds.pushes if kind == "bench")
+    assert "[client] plan refused" in capsys.readouterr().out
     _homing(ctx, lambda kind, g: _joints_result(success=False, message=FAILED))
     with pytest.raises(RuntimeError, match="TRAJOPT_FAIL") as failed:
         home_arm.build_legs(ctx)
-    assert not isinstance(failed.value, PlanRefused)
+    assert home_arm.REFUSED_HOME_NEXT not in str(failed.value)
 
 
 # -- a pose plan: it ends at its pose ---------------------------------------------

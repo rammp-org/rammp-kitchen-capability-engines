@@ -247,8 +247,9 @@ def test_the_recorder_plans_and_watches_in_the_worlds_frames():
 
     src = inspect.getsource(rds.main)
     assert "client._base_frame = worlds.base_frame" in src
-    call = src[src.index("BoxTopWatcher(pnode") :]
+    call = src[src.index("BoxTopWatcher(") :]  # the call, however it is wrapped (the import has no parenthesis)
     call = call[: call.index(")\n")]
+    assert call.split("(", 1)[1].lstrip().startswith("pnode")
     assert "base_frame=worlds.base_frame" in call and "camera_cfg_name=worlds.wrist_camera_config" in call
 
 
