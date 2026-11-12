@@ -125,7 +125,7 @@ VIEW_SIDES = (0.08, 0.04, 0.12, 0.0)  # ... and this far sideways along the face
 # 11-10: hand-placed -- the camera 0.61 m up, square to the door, 27 deg down, J4 44 deg from its limit; the placed
 # ones folded J4 to within 7-11 deg, and the scene camera reads the door 13 cm short. For the microwave where it
 # stood then (door face ~0.69 m out, handle ~26 cm to the user's side)
-VIEW_JOINTS_DEG = (17.8, -28.7, -112.7, -102.6, -66.2, -84.6, -173.2)
+VIEW_JOINTS_DEG = (21.4, -43.8, -92.2, -110.6, -58.8, -93.8, -165.7)  # 11-11: teleoped to the view the user chose
 VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
 # ... and these when IK from it misses, lands past a guard or in the keep-out: PyBullet's IK ignores joint limits and
