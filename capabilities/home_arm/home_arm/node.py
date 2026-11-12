@@ -22,8 +22,10 @@ seat and the person in it, so the path keeps clear of them. Four things stop a p
 The home is asked for up to `plan_tries` times, then through a waypoint along the joint line toward
 it (home_arm.homing), the second leg planned from where the first one ends.
 
-Everything is planned before anything moves, then the arm's joints are read again: an arm that
-moved meanwhile is planned for again, once. Then the plan-free step (if any) and the plan(s) are
+Before it plans (a dry run aside) the driver is asked whether the arm may be commanded at all: an
+e-stopped arm is said so at once (arm_not_ready), not after a minute of planning. Everything is
+planned before anything moves, then the arm's joints are read again: an arm that moved meanwhile
+is planned for again, once. Then the plan-free step (if any) and the plan(s) are
 each sent to the driver once (`execute_joint_trajectory`), the plans at `speed_scale` (the go_to
 goals' default, 0.3), each under the driver's divergence guard (arm.path_tol_rad: an arm held
 back further than that from its path is stopped there): a goal the driver aborts or rejects fails
@@ -75,6 +77,9 @@ PAUSED_S = 0.05  # a checkpoint that blocked longer than this was a pause
 # How self.arm's own refusal of a plan begins (no action server, no answer, a rejected goal, no
 # result in arm.plan_timeout_s): the planner did not plan, which says nothing of the way home.
 NOT_PLANNED = "plan_to_joints: "
+# ... and how the planner's own begins for a goal that arrives while it plans another's
+# (rammp-curobo planner_node: "planner busy — one plan at a time", the goal aborted unplanned)
+PLANNER_BUSY = "planner busy"
 # Why go_home does not run under an orchestrator (execute's refusal, activate's reason)
 STANDALONE_ONLY = (
     "go_home runs standalone only (use_orchestrator:=false): the orchestrator dispatches it on "
@@ -129,7 +134,9 @@ class Capability(CapabilityEngine):
     # launch file run it), until the orchestrator can dispatch an action that belongs to no
     # object. Under an orchestrator any goal the engine gets was sent to it directly and would
     # move the arm outside the orchestrator's arm lock: execute() refuses it (standalone_only) and
-    # activate reports go_home unavailable (docs/interface.md, "Orchestrator interface").
+    # activate reports go_home unavailable. Standalone it takes no part in that lock at all, so
+    # it is kept out of profiles that run the orchestrator (docs/interface.md, "Orchestrator
+    # interface").
     perception_classes = []
     required_resources = ["arm"]
     actions = [
@@ -217,6 +224,8 @@ class Capability(CapabilityEngine):
             ctx.progress("done", 1.0, "already home")
             return {"home": True, "moved": False, "off_rad": round(off, 4)}
 
+        if not dry_run:  # a dry run sends nothing: it plans for an arm that is e-stopped too
+            self._commandable()
         chain, model, no_model = self._kinematics()
         self._plan_until = began + PLAN_BUDGET_S
         ctx.progress("planning", 0.2, "planning the way home around the chair")
@@ -322,6 +331,24 @@ class Capability(CapabilityEngine):
             raise EngineError(
                 "arm_state", f"the arm's joints cannot be read ({e})", recoverable=True
             ) from e
+
+    def _commandable(self):
+        """EngineError("arm_not_ready") where the driver's /control_status says the arm must not
+        be commanded now (self.arm.not_ready(): an e-stop; arbitration enforced, with the arm
+        another sender's or no token given; no status at all): said before a minute of planning,
+        not as motion_failed at the send, where self.arm checks it again."""
+        try:
+            why = self.arm.not_ready()
+        except ArmError as e:
+            raise EngineError(
+                "arm_state", f"the arm's state cannot be read ({e})", recoverable=True
+            ) from e
+        if why is not None:
+            raise EngineError(
+                "arm_not_ready",
+                f"the arm must not be commanded now ({why}): nothing planned or sent",
+                recoverable=True,
+            )
 
     def _last_pause(self, ctx, at, began, moving_s, speed, flown=""):
         """The last moment a pause can be taken before a goal is sent. One asked for by now is
@@ -590,12 +617,14 @@ class Capability(CapabilityEngine):
                 f"{wait:.0f} s): jog the arm clear by hand",
             )
         plan = self.arm.plan_to_joints(goal, start)
-        if not plan.success and str(plan.message or "").startswith(NOT_PLANNED):
-            # no planner to ask is no word on the way home: said as it is, and not asked again
-            # through every waypoint (each ask waits arm.planner_wait_s for the server)
+        said = str(plan.message or "")
+        if not plan.success and said.startswith((NOT_PLANNED, PLANNER_BUSY)):
+            # no planner to ask, or one busy with another's plan, is no word on the way home:
+            # said as it is, and not asked again through every waypoint (each ask waits
+            # arm.planner_wait_s for the server; a busy planner answers each at once)
             raise _Stop(
                 "planner_unavailable",
-                f"the planner did not plan ({plan.message}): nothing moved",
+                f"the planner did not plan ({said}): nothing moved, run it again",
                 recoverable=True,
             )
         return plan

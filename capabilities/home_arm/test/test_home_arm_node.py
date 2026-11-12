@@ -50,7 +50,7 @@ class Arm:
     """plan_to_joints answers from `answers` (callables of (goal, start) -> plan, in order, the last
     repeating); execute_joint_trajectory records what is sent with its speed_scale and answers
     `codes` in order, a completed goal leaving the arm at its last point. joint_states reads
-    `readings` in order (the last repeating)."""
+    `readings` in order (the last repeating). not_ready answers `refusal` (None: commandable)."""
 
     def __init__(
         self, joints=START, answers=(lambda g, s: _plan(g, s),), codes=(0,), readings=None
@@ -58,6 +58,10 @@ class Arm:
         self.readings = [np.asarray(q, float) for q in (readings or [joints])]
         self.answers, self.codes = list(answers), list(codes)
         self.planned, self.sent, self.speeds, self.path_tols = [], [], [], []
+        self.refusal = None
+
+    def not_ready(self):
+        return self.refusal
 
     def joint_states(self):
         q = self.readings.pop(0) if len(self.readings) > 1 else self.readings[0]
@@ -149,6 +153,7 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
     )
     for name in (
         "_joints",
+        "_commandable",
         "_route",
         "_plan_home",
         "_to_waypoint",
@@ -523,6 +528,55 @@ def test_a_planner_that_does_not_answer_is_said_so_and_not_asked_through_every_w
     with pytest.raises(EngineError) as e:
         _go(_engine(arm, Model()))
     assert e.value.error_code == "planner_unavailable" and len(arm.planned) == 1
+
+
+def test_a_planner_busy_with_anothers_plan_is_unavailable_not_no_way_home():
+    """rammp-curobo plans one goal at a time and turns any other away unplanned ("planner busy —
+    one plan at a time", success false). That is no word on the way home either: left as a failed
+    plan it was asked again through every waypoint and ended no_way_home, not recoverable, "jog the
+    arm clear by hand" (REVIEW_RULES U4)."""
+    busy = "planner busy — one plan at a time"
+    arm = Arm(answers=[lambda g, s: _plan(g, s, ok=False, message=busy)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and e.value.recoverable
+    assert busy in str(e.value) and len(arm.planned) == 1 and arm.sent == []
+    # ... and at a later plan too: the first failed on its own, the waypoint's met a busy planner
+    arm = Arm(
+        answers=[lambda g, s: _plan(g, s, ok=False)] * 3
+        + [lambda g, s: _plan(g, s, ok=False, message=busy)]
+    )
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and len(arm.planned) == 4 and arm.sent == []
+
+
+def test_an_arm_that_must_not_be_commanded_is_said_so_before_anything_is_planned():
+    """An e-stopped arm (or one the driver's arbitration keeps from this engine) was read and
+    planned for, up to a minute, and failed motion_failed only at the send (REVIEW_RULES U4). The
+    driver's word is asked for first; a dry run, which sends nothing, plans regardless."""
+    arm = Arm()
+    arm.refusal = "arm is E-STOPPED -- clear it first"
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "arm_not_ready" and e.value.recoverable
+    assert "E-STOPPED" in str(e.value) and arm.planned == [] and arm.sent == []
+    out = _go(_engine(arm, Model()), dry_run=True)
+    assert out["dry_run"] and len(arm.planned) == 1 and arm.sent == []
+    arm = Arm(joints=HOME)  # already home: nothing to command, nothing to refuse
+    arm.refusal = "arm is E-STOPPED -- clear it first"
+    assert _go(_engine(arm, Model()))["home"]
+
+    from capability_engine import StateTimeout
+
+    def no_state():
+        raise StateTimeout("no /joint_states, /ee_state or /gripper_state")
+
+    arm = Arm()
+    arm.not_ready = no_state  # self.arm waits for the driver's state before it reads the status
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "arm_state" and e.value.recoverable and arm.planned == []
 
 
 def test_a_pause_is_no_part_of_the_planning_or_the_action_budget(monkeypatch):

@@ -61,8 +61,16 @@ fails `too_slow`: well inside the orchestrator's 120 s timeout. Time the action
 spends paused is no part of the 60 s of planning; where a pause leaves the way
 home no room in the 100 s, the action fails `paused_too_long` before anything is
 sent (whatever cancels a long action counts its pauses too). A planner that does not answer (no action
-server, no result in `arm.plan_timeout_s`) fails `planner_unavailable` at the
-first plan, not `no_way_home` after every waypoint.
+server, no result in `arm.plan_timeout_s`), or that is busy with another client's
+plan (it takes one at a time and turns the rest away unplanned), fails
+`planner_unavailable` at that plan, not `no_way_home` after every waypoint.
+
+Before it plans (not on a dry run, which sends nothing) the engine asks the
+driver whether the arm may be commanded at all (`/control_status`, through
+`self.arm`): an e-stopped arm, or one the driver's enforced arbitration keeps from
+this engine (another sender owns it, or no token was given), fails
+`arm_not_ready` at once, nothing planned. `self.arm` checks the same again
+before each goal is sent (`motion_failed` there).
 
 Before anything is sent the arm's joints are read again (`/joint_states`, at
 most `arm.state_stale_s` old): an arm that moved more than 0.02 rad while it was
@@ -98,13 +106,13 @@ go through the user.
 
 ## Subscribes
 
-| Topic                    | Type                                    | Required | Meaning                                                                      |
-| ------------------------ | --------------------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `/joint_states`          | `sensor_msgs/JointState`                | yes      | Where the arm starts (through `self.arm`, during the action only)            |
-| `/ee_state`              | `rammp_arm_interfaces/EeState`          | yes      | `self.arm` waits for it before a state read or a command; not otherwise read |
-| `/gripper_state`         | `rammp_arm_interfaces/GripperState`     | yes      | The same                                                                     |
-| `/control_status`        | `rammp_common_interfaces/ControlStatus` | yes      | The e-stop and who holds the arm, read by `self.arm` before a goal is sent   |
-| `/arm/robot_description` | `std_msgs/String`                       | yes      | The driver's URDF: places the planner's spheres (one-shot, latched)          |
+| Topic                    | Type                                    | Required | Meaning                                                                                        |
+| ------------------------ | --------------------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `/joint_states`          | `sensor_msgs/JointState`                | yes      | Where the arm starts (through `self.arm`, during the action only)                              |
+| `/ee_state`              | `rammp_arm_interfaces/EeState`          | yes      | `self.arm` waits for it before a state read or a command; not otherwise read                   |
+| `/gripper_state`         | `rammp_arm_interfaces/GripperState`     | yes      | The same                                                                                       |
+| `/control_status`        | `rammp_common_interfaces/ControlStatus` | yes      | The e-stop and who holds the arm, read before planning and by `self.arm` before a goal is sent |
+| `/arm/robot_description` | `std_msgs/String`                       | yes      | The driver's URDF: places the planner's spheres (one-shot, latched)                            |
 
 All of them through `self.arm`, opened when the action first needs them and closed
 as it ends. It calls the cuRobo planner's `/rammp_curobo/plan_to_joints` action
@@ -133,11 +141,12 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                                                                                                                                             |
 | `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                                                                                                                                     |
 | `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in \[0.01, 1\] (the driver rejects a goal sent at less than 0.01)                                                                                                                                       |
+| `arm_not_ready`       | yes         | The driver says the arm must not be commanded now (an e-stop; arbitration enforced, the arm another sender's or no token given; or no `/control_status` from it); nothing planned or sent. A dry run is not held to it                                      |
 | `body_model`          | no          | The driver's URDF cannot be read; or the planner's config cannot be read and it is needed: the planner refuses the start as in collision, or a joint is too near its limit (the step off it could not be checked against the chair and user); nothing moved |
 | `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                                                                                                                                           |
 | `near_limit`          | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                                                                                                                                   |
 | `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                                                                                                   |
-| `planner_unavailable` | yes         | The planner did not answer a plan request (not running, or no result in time); nothing moved                                                                                                                                                                |
+| `planner_unavailable` | yes         | The planner did not plan a request: not running, no result in time, or busy with another client's plan; nothing moved                                                                                                                                       |
 | `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved, or (found at a pause after the step clear) the way home not sent                                                                                                             |
 | `paused_too_long`     | yes         | A pause left the way home no room in the action's 100 s; nothing sent, or after the step clear the way home not sent: run it again                                                                                                                          |
 | `arm_moving`          | yes         | The arm moved while it was planned for, twice, or during a pause before a goal was sent; nothing sent, or after the step clear the way home not sent                                                                                                        |
@@ -158,6 +167,13 @@ and `activate` reports it unavailable with that reason: any goal an orchestrated
 engine gets was sent to it directly, outside the orchestrator's `arm` lock, so
 the orchestrator could dispatch another engine's arm action while the arm goes
 home.
+
+Standalone, the engine takes no part in the orchestrator's arbitration at all: on
+a robot where an orchestrator runs, a goal sent to it still moves the arm outside
+that lock. So this engine (tier `experimental`) is to be kept out of profiles
+that run the orchestrator until the orchestrator can dispatch `go_home`. The
+driver's own arbitration still applies: where it is enforced, the engine, which
+carries no token, is refused before it plans (`arm_not_ready`).
 
 ## Parameters
 

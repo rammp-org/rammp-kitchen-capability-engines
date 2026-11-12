@@ -33,6 +33,8 @@ container:
 params:
   # Standalone: the orchestrator cannot dispatch go_home (it belongs to no object), and under it the
   # engine refuses the goal (standalone_only). true registers it, for when the orchestrator can.
+  # Standalone, a goal moves the arm outside the orchestrator's arm lock: keep this engine out of
+  # profiles that run the orchestrator until then.
   use_orchestrator: false
   # The home (rad, J1..J7): flatbot's, the arm 8 in forward on the chair (2026-11-09). Per robot.
   home_joints: [0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]
