@@ -305,6 +305,22 @@ def test_a_path_that_dips_under_the_table_is_named_and_one_that_stays_over_it_is
     assert core.under_table(chain, chain.body, [low, q, up], 0.28, ctx.worlds.table_extent) is None
 
 
+def test_a_whole_turn_between_two_writings_of_one_pose_is_not_a_path(monkeypatch, tmp_path):
+    """The live joints and the planner's branch of them, or a leg's end and the next leg's start, write one pose
+    a whole turn apart on a continuous joint: nothing flies between them, and nothing is judged there."""
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    up = chain.nearest_solution(list(q), [0.6, 0.0, 0.48], DOWN)
+    turned = lambda p: [v + (2 * np.pi if j == 2 else 0.0) for j, v in enumerate(p)]  # noqa: E731
+    ext = ctx.worlds.table_extent
+    assert core.under_table(chain, chain.body, [q, turned(q)], 0.28, None) is None
+    assert core.under_table(chain, chain.body, [q, turned(q), turned(up)], 0.28, ext) is None
+    # a dip is a dip on whichever branch it is written
+    assert core.under_table(chain, chain.body, [q, turned(low), up], 0.28, ext) is not None
+    pts = [list(q), turned(q)]
+    core.under_table(chain, chain.body, pts, 0.28, None)
+    assert pts[1] == turned(q)  # the caller's points are left as they were
+
+
 def test_a_home_planned_under_a_known_table_is_planned_from_the_top_of_a_straight_lift(monkeypatch, tmp_path):
     ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
     plan = DippingPlanner(q, low)
