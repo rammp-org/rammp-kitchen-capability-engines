@@ -726,6 +726,45 @@ def _view_step(view_only, ai, scene, rb, execute):
     return False
 
 
+def close_view_step(ai, execute):
+    """Before the close: to the view pose (VIEW_JOINTS_DEG), so the close always plans from the same place -- where
+    the open now ends (PUSH_END_AT_VIEW). Already there (VIEW_AT_TOL_M and every joint within VIEW_AT_JOINTS_DEG):
+    nothing moves. Elsewhere, a dry run stops (it can't plan from where the arm isn't): returns why; a real run
+    moves there through a checked cuRobo move (cuRobo's world has no door: someone on the e-stop). Returns "" to go
+    on with the close, else why it stops here (nothing commanded). Raises Refused."""
+    if VIEW_JOINTS_DEG is None:
+        return ""
+    q_view = np.radians(VIEW_JOINTS_DEG)
+    scene, rb = dc.make_sim()
+    p_view = np.asarray(sim.tool_pose(scene, rb, q_view)[0], dtype=float)
+    ko = sim.keep_out_message(rb, q_view)
+    if ko is not None:
+        raise Refused(f"The fixed view pose (VIEW_JOINTS_DEG) puts the arm in the keep-out: {ko}")
+    st = ai.get_state()
+    off = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - p_view))
+    joints_off = float(np.degrees(np.max(np.abs(short_delta(st["position"], q_view)))))
+    if off <= VIEW_AT_TOL_M and joints_off <= VIEW_AT_JOINTS_DEG:
+        say(f"close: at the view pose ({off * 100:.1f} cm) -- planning the close from here")
+        return ""
+    if not execute:
+        why = (
+            f"DRY RUN -- the close first goes to the view pose ({off * 100:.0f} cm / a joint {joints_off:.0f} deg "
+            "away) and plans from there; nothing commanded. To dry-run the close: a view_only open goal (moves "
+            "there), then this dry run again."
+        )
+        say(f"\n{why}")
+        return why
+    say(f"close: to the view pose first ({off * 100:.0f} cm away) ...")
+    moved = (
+        dc.checked_curobo_move(ai, q_view, "close: to view pose", keep_shape=False)
+        if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints")
+        else ai.go_to_joint_config(q_view, "close: to view pose")
+    )
+    if not moved:
+        raise Refused("close: did not reach the view pose -- stopping before the close.")
+    return ""
+
+
 def open_task(
     ai,
     execute,

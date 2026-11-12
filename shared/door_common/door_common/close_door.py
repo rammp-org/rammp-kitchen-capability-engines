@@ -514,7 +514,7 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
             _, why = _curobo_door_plan(ai, scene, rb, df, deg0, args, ai.raw_joints(), plan["before"][-1][1][-1])
             say(f"cuRobo to the swing start: {why or 'checked against the door, the body and the handle'}")
         sweep = plan["sweep"][0]
-        for _ in range(CUROBO_TRIES):  # its plans vary
+        for _ in range(SWING_CUROBO_TRIES):  # its plans vary (11-12: one try came back at the detour limit)
             why = dc.curobo_path_problem(ai, sweep[0], sweep, "the swing")
             if not why:
                 break
@@ -528,8 +528,14 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
     if not args.execute:
         say(f"\nDRY RUN (push-close from {deg0:.0f} deg) -- nothing commanded.")
         return True
-    routed = None
-    if curobo and plan["before"]:
+    swung = False
+    if curobo and plan["before"] and swing_curobo:  # route and swing as ONE blended motion: no stop at the swing start
+        swung = _curobo_route_and_swing(ai, scene, rb, df, deg0, args, plan)
+        if swung is False:
+            return False
+        swung = swung is True
+    routed = True if swung else None
+    if not swung and curobo and plan["before"]:
         routed = _curobo_route(ai, scene, rb, df, deg0, args, plan)  # stitched; else one cuRobo move
         if routed is None:
             routed = _curobo_leg(ai, scene, rb, df, deg0, args, plan["before"][-1][1][-1], "to the swing start")
@@ -539,7 +545,9 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
         for label, leg in plan["before"]:
             if not execute_joint_plan(ai, leg, label):
                 return False
-    if swing_curobo:  # cuRobo through the checked arc joints, blended (it only pushes: no pulling the body)
+    if swung:
+        pass
+    elif swing_curobo:  # cuRobo through the checked arc joints, blended (it only pushes: no pulling the body)
         say(f"sweep: cuRobo through {len(dc.curobo_knots(plan['sweep'][0]))} of its checked joints ...")
         if not dc.through_curobo(ai, plan["sweep"][0], "sweep"):
             return False
@@ -656,6 +664,34 @@ def _curobo_route(ai, scene, rb, df, deg, args, plan):
         return None
     say(f"  route: cuRobo through {len(dc.curobo_knots(path))} of its {len(path)} checked joints, one stitched motion")
     return bool(dc.through_curobo(ai, path, "route over the door"))
+
+
+SWING_CUROBO_TRIES = 6  # the swing's cuRobo preview is asked this many times for a plan with no detour
+
+
+def _curobo_route_and_swing(ai, scene, rb, df, deg, args, plan):
+    """The route to the swing start and the swing as ONE blended cuRobo motion (the route's knots, then the swing's,
+    each passed within dc.CUROBO_BLEND_M: no stop at the swing start). The route checked as _curobo_route does
+    (_curobo_knots_problem, from where the arm is); the swing asked of cuRobo again from the route's end (it only
+    pushes the door: no clearance to it). None when either can't be (says why: the caller runs them apart), else
+    whether it ran."""
+    route = [q for _, leg in plan["before"] for q in leg]
+    why = _curobo_knots_problem(ai, scene, rb, df, deg, args, ai.raw_joints(), route)
+    sweep = plan["sweep"][0]
+    if not why:
+        for _ in range(SWING_CUROBO_TRIES):
+            why = dc.curobo_path_problem(ai, route[-1], sweep, "the swing")
+            if not why:
+                break
+    if why:
+        say(f"  route + swing, one blended motion: {why} -- the route and the swing apart instead")
+        return None
+    knots = dc.curobo_knots(route) + dc.curobo_knots(sweep)
+    say(
+        f"  route + swing: cuRobo through {len(knots)} of their {len(route) + len(sweep)} checked joints, one blended "
+        "motion (no stop at the swing start)"
+    )
+    return bool(dc.through_curobo_knots(ai, knots, "route and swing"))
 
 
 def _run_exact(ai, pl, label):

@@ -124,7 +124,12 @@ class Capability(CapabilityEngine):
             "Close the door",
             params_schema={
                 "type": "object",
-                "properties": {**COMMON, **{k: _schema(v) for k, v in close_door.CLOSE_DEFAULTS.items()}},
+                "properties": {
+                    **COMMON,
+                    # first to the open's view pose, so the close always plans from the same place (11-12)
+                    "from_view_pose": {"type": "boolean", "default": True},
+                    **{k: _schema(v) for k, v in close_door.CLOSE_DEFAULTS.items()},
+                },
             },
         ),
         # the UI's button: one press runs the whole open (UI_ACTIONS), panels on the UI bridge
@@ -318,7 +323,11 @@ class Capability(CapabilityEngine):
                 )
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
-                ok = close_door.run(self.arm, execute, speed=speed, log_args=log_args, **settings)
+                stop = open_door.close_view_step(self.arm, execute) if bool(params.get("from_view_pose", True)) else ""
+                if stop:  # a dry run away from the view pose: nothing planned or commanded
+                    ok, note = True, stop
+                else:
+                    ok = close_door.run(self.arm, execute, speed=speed, log_args=log_args, **settings)
         except dc.Refused as e:
             raise EngineError(
                 "refused", f"{e} -- the arm holds where it is{held if holding else ''}", recoverable=True
