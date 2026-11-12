@@ -1,6 +1,7 @@
 # UI bridge JSON schema
 
-`ctx.update_user_panel()` / `ctx.poll_ui_event()` / `ctx.publish_overlay_image()`
+`ctx.update_user_panel()` / `ctx.poll_ui_event()` / `ctx.publish_overlay_image()` /
+`ctx.set_overlay_visible()`
 (see the README's [`ctx` UI section](../README.md#ui-ctx)) talk to
 `rammp_ui_bridge`'s `RequestUserInput` action and `UpdateUserInputPanel`
 service, both of which carry a JSON string in a `*_json` field rather than
@@ -124,3 +125,14 @@ overwrites an unread earlier one rather than queuing.
 Takes a `sensor_msgs/Image`, not JSON — published as-is to the bridge's shared
 overlay topic, stamped with this run's session token. Its pixel frame is what
 an `objects` entry's `"source": "overlay"` refers to.
+
+## `set_overlay_visible(visible)`
+
+Takes a plain `bool`, not JSON — no overlay-pixel-frame interaction at all.
+Independent of `publish_overlay_image()`: it doesn't gate the frames
+themselves, it tells the bridge to call UE's own parameterless `Open Camera
+Feed`/`Close Camera Feed` Remote Control function, which shows/hides the
+overlay widget/material in-engine. The orchestrator already calls this with
+`visible=False` once this run's `execute_action` ends, so a capability only
+needs to call it itself to show/hide the overlay at some other specific
+moment mid-run.
