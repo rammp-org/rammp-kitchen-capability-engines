@@ -122,6 +122,30 @@ def test_a_joint_plan_flies_only_when_it_ends_on_the_joints_asked_for(off, flies
     assert got.message.endswith("(planner: %s)" % PLANNED)
 
 
+def test_a_waypoints_joint_plan_may_end_near_it_and_one_that_ends_on_another_arm_may_not():
+    """home_any's waypoint (primitives.core._EndsWithin, HOME_WAYPOINT_END_RAD): the planner's FK-pose fallback
+    0.2 rad along the arm's self-motion is handed on; another arm at the same tool pose is not; and outside the
+    waypoint's plan the client's own PLAN_END_RAD holds again."""
+    from box_opening.primitives import core
+
+    goal = list(START)
+    goal[1] += 0.3
+
+    def ends(off):
+        end = list(goal)
+        end[6] += off
+        return _joints_result([START, end], mismatch=off)
+
+    near, other = ends(0.2), ends(0.9)
+    c = _client(lambda kind, g: near)
+    with core._EndsWithin(c, core.HOME_WAYPOINT_END_RAD):
+        assert c.plan_to_joints(goal, START) is near
+        c._call = lambda kind, g: other
+        assert not c.plan_to_joints(goal, START).success
+    c._call = lambda kind, g: near
+    assert not c.plan_to_joints(goal, START).success
+
+
 def test_a_joint_goal_written_a_whole_turn_away_is_the_goal_its_plan_ends_on():
     """The goal goes out on the start's branch (nearest_branch): asked for
     joint_7 a turn and 0.2 rad round from where it stands, the planner is

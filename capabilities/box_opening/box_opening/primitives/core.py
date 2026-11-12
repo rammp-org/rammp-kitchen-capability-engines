@@ -901,6 +901,12 @@ def _short_of(vp, vt, vl, limited):
 # 3 planned when asked again and 10 through a waypoint along the joint line toward HOME.
 HOME_TRIES = 3  # HOME asked for this many times from one start before the waypoints: the planner is stochastic
 HOME_WAYPOINTS = (0.5, 0.25, 0.75)  # fractions of the joint line toward HOME, each continuous joint the short way
+# A waypoint's plan may end this far (any joint) from the waypoint it was sent, HOME planned from where it really
+# ends: the planner's FK-pose fallback lands on the same arm a little along its self-motion (2026-11-12, raw plans
+# from a pose 25% into a recorded home: 0.08-0.32 rad off on joints 1, 5 and 7), which the client refused as "the
+# plan ends N rad from its joint goal" and no waypoint was left; another arm at the same tool pose ends 0.9-4.3 rad
+# off, and stays refused. The leg that ends at HOME keeps the client's own PLAN_END_RAD.
+HOME_WAYPOINT_END_RAD = 0.35
 JOG = " — jog the arm clear by hand"
 
 
@@ -913,6 +919,27 @@ def _without_jog(e):
         if said.endswith(tail):
             return said[: -len(tail)]
     return said
+
+
+class _EndsWithin:
+    """While entered, the client lets a joint plan end up to `rad` from its goal (PlannerClient.PLAN_END_RAD):
+    a waypoint's plan, never the plan that ends at HOME."""
+
+    def __init__(self, client, rad):
+        self.client, self.rad = client, float(rad)
+
+    def __enter__(self):
+        self.own = "PLAN_END_RAD" in vars(self.client)
+        self.was = vars(self.client).get("PLAN_END_RAD")
+        self.client.PLAN_END_RAD = max(self.rad, float(getattr(self.client, "PLAN_END_RAD", 0.0) or 0.0))
+        return self
+
+    def __exit__(self, *exc):
+        if self.own:
+            self.client.PLAN_END_RAD = self.was
+        else:
+            del self.client.PLAN_END_RAD
+        return False
 
 
 class PlanSwung(RuntimeError):
@@ -1050,8 +1077,9 @@ def home_any(
          waypoint from the step's end where that plan swings wide; where none does (the line drops the tool, say,
          or no step up to the cap plans), the soft step of 1. instead, and the goal asked for from its end;
       3. otherwise the goal asked for up to HOME_TRIES times, stopping at the first plan that swings wide;
-      4. then a waypoint HOME_WAYPOINTS of the way along the joint line, clear of the padding, planned to, and the
-         goal planned from it.
+      4. then a waypoint HOME_WAYPOINTS of the way along the joint line, clear of the padding, planned to (its
+         plan may end HOME_WAYPOINT_END_RAD from it, clear of the padding too), and the goal planned from where
+         that plan ends.
     Every leg passes the runner's trajectory sanity gate here, at planning (PlanSwung), not at execution, and
     is kept over a table the run knows (under_table, PlanUnderTable: the planner's world holds none): where the
     goal planned directly goes under it, the goal is planned from the top of a straight lift (HOME_LIFTS_M,
@@ -1090,6 +1118,20 @@ def home_any(
                 raise PlanUnderTable("%s goes under the table (%s): the planner's world holds no table" % (name, low))
         return leg
 
+    def to_waypoint(at, w):
+        """planned()'s leg to the waypoint `w`, whose plan may end HOME_WAYPOINT_END_RAD from it (the planner's
+        FK-pose fallback: the same arm a little along its self-motion) where that end stands clear of the
+        padding; the leg after it is planned from where this one ends."""
+        client = getattr(ctx, "client", None)
+        if client is None:
+            leg = planned(at, "home-waypoint", w)
+        else:
+            with _EndsWithin(client, HOME_WAYPOINT_END_RAD):
+                leg = planned(at, "home-waypoint", w)
+        if tbody is not None and not tbody.pose_clear(list(leg.goal_joints)):
+            raise RuntimeError("home-waypoint ends inside the chair and user's padding, short of its waypoint")
+        return leg
+
     def over_the_table(q_from, some, what):
         """`some` legs flown one after another from `q_from`, kept over the table as ONE path: a waypoint between
         two legs is an end of both, and judged leg by leg a waypoint that is itself under the table passed
@@ -1114,7 +1156,7 @@ def home_any(
             if tbody is not None and not tbody.pose_clear(w):
                 continue
             try:
-                a = planned(at, "home-waypoint", w)
+                a = to_waypoint(at, w)
                 b = planned(PlanState(joints=list(a.goal_joints), chain=at.chain), "home", list(goal))
                 over_the_table(q0, [a, b], "home through the waypoint %.0f%% of the way" % (100 * f))
             except RuntimeError as e:
