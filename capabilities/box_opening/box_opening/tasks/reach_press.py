@@ -2242,8 +2242,12 @@ def _after_check(node, ctx, runner, watcher, scene_fix, locator, button, lid_bef
     lifted = None if lid_before is None or lid_after is None else lid_after - lid_before
     popped = knob_is_up(up_after)
     seen_again = locator.locate(SCENE_LOCATE_S) if locator is not None else None
-    scene_moved = None if seen_again is None else judge_box_moved(scene_fix.top_xyz, seen_again.top_xyz)
-    scene_dz = None if seen_again is None else float(seen_again.top_xyz[2]) - float(scene_fix.top_xyz[2])
+    # a ROUGH first fix (a box the frame cut, scene_source.SCENE_ROUGH) is no measure to judge a move
+    # by: its own error is tens of mm. The wrist's re-aim judges it alone
+    rough = bool(getattr(scene_fix, "rough", False))
+    judged = None if rough else seen_again
+    scene_moved = None if judged is None else judge_box_moved(scene_fix.top_xyz, judged.top_xyz)
+    scene_dz = None if judged is None else float(judged.top_xyz[2]) - float(scene_fix.top_xyz[2])
     runner.note(
         "reach_after",
         knob_up_mm=None if up_after is None else round(up_after, 1),
@@ -2251,6 +2255,7 @@ def _after_check(node, ctx, runner, watcher, scene_fix, locator, button, lid_bef
         lid_dz_mm=None if lifted is None else round(1000 * lifted, 1),
         scene_moved_mm=None if scene_moved is None else round(1000 * scene_moved, 1),
         scene_dz_mm=None if scene_dz is None else round(1000 * scene_dz, 1),
+        scene_rough=rough,
     )
     log.info(
         "[press_demo] AFTER THE PRESS: knob %s; the button %s; the scene camera %s"
@@ -2262,7 +2267,9 @@ def _after_check(node, ctx, runner, watcher, scene_fix, locator, button, lid_bef
             if moved is None
             else "%.0f mm from where it was%s"
             % (1000 * moved, "" if lifted is None else ", its lid %+.0f mm" % (1000 * lifted)),
-            "did not find the box"
+            ("found the box, not judged against its rough first fix" if seen_again is not None else "did not find it")
+            if rough
+            else "did not find the box"
             if scene_moved is None
             else "puts the box %.0f mm from where it was, %+.0f mm in height" % (1000 * scene_moved, 1000 * scene_dz),
         )
@@ -2991,10 +2998,17 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     measured = tuple(float(v) for v in measured)  # the wrist's own (_aim)
     lid_before = _lid_z(measured[2], up_mm)
     log.info(
-        "[press_demo] AIMED from the look pose: button at [%.3f, %.3f, %.3f], %.0f mm from the scene camera's"
-        % (button[0], button[1], button[2], 1000 * judge_box_moved(prior_button, button))
+        "[press_demo] AIMED from the look pose: button at [%.3f, %.3f, %.3f], %.0f mm from the scene camera's%s"
+        % (
+            button[0],
+            button[1],
+            button[2],
+            1000 * judge_box_moved(prior_button, button),
+            " rough fix" if getattr(scene_fix, "rough", False) else "",
+        )
     )
-    if soft and float(prior_button[2]) > button[2]:
+    rough = bool(getattr(scene_fix, "rough", False))  # a box the frame cut, placed roughly: its top is no measure
+    if soft and not rough and float(prior_button[2]) > button[2]:
         # the press goes by the higher top, the stroke reaching on past it
         log.info(
             "[press_demo] the scene camera puts the lid %.0f mm higher than the wrist's aim: pressing from that "
@@ -3024,7 +3038,9 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
 
         # the lid by the higher of the scene camera's top and the aim's knob
         # less its height: an estimate the grip errs low from (grip_lid_z)
-        lid_z = max(float(prior_button[2]), float(got[0][2]) - float(up_mm) / 1000.0)
+        lid_z = float(got[0][2]) - float(up_mm) / 1000.0
+        if not rough:
+            lid_z = max(float(prior_button[2]), lid_z)
         try:
             return reach_lid_off.take_lid_off(
                 ctx, cfg, runner, eyes, button, plan.tilt_deg, lid_z, "the open box's lid at %.3f" % lid_z, yaw=yaw

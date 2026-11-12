@@ -651,6 +651,7 @@ def _flow(
     chain=None,
     home_turns=0,
     closing=None,
+    rough=False,
 ):
     """Run run_reach_press with the arm, the cameras and the planner faked
     (`run_args`: press_demo's args, a guarded TF press by default; `chain`,
@@ -754,7 +755,9 @@ def _flow(
         ("arrived", {"message": "ok", "progress": 1.0}),  # slide in
         touch or ("touch", {"message": "torque guard trip", "progress": 0.8, "torque_peak": 3.1}),
     ]
-    fix = SimpleNamespace(pose=ContainerPose(xyz=(BUTTON[0], BUTTON[1], BUTTON[2] - 0.121), yaw=0.0), top_xyz=BUTTON)
+    fix = SimpleNamespace(
+        pose=ContainerPose(xyz=(BUTTON[0], BUTTON[1], BUTTON[2] - 0.121), yaw=0.0), top_xyz=BUTTON, rough=rough
+    )
     moved_pose = ContainerPose(xyz=(BUTTON[0] + 0.05, BUTTON[1], BUTTON[2] - 0.121), yaw=0.0)
     seen = {
         "same": fix,
@@ -1163,6 +1166,19 @@ def test_a_moved_box_stops_the_run_and_home_is_planned_around_where_it_now_is(ct
 def test_a_box_the_scene_camera_saw_move_stops_the_run_even_when_the_wrist_sees_it_in_place(ctx, monkeypatch, tmp_path):
     code, rec, _c, _h = _flow(ctx, monkeypatch, tmp_path, scene_after="moved")
     assert code == 1 and rec.events[-1] == "home"
+
+
+def test_a_rough_first_fix_is_no_measure_of_a_moved_box(ctx, monkeypatch, tmp_path):
+    """A box the scene frame cut, placed roughly (scene_source.SCENE_ROUGH): its first fix is tens
+    of mm off on its own, so the scene's look after the press, 50 mm from it, judges no move. The
+    wrist's re-aim, which found it in place, does."""
+    import json
+
+    code, rec, _c, _h = _flow(ctx, monkeypatch, tmp_path, scene_after="moved", rough=True)
+    assert code == 0 and rec.events[-1] == "home"
+    after = [json.loads(ln) for p in tmp_path.rglob("*.jsonl") for ln in p.read_text().splitlines()]
+    after = [r for r in after if r.get("leg") == "reach_after"]
+    assert after and after[-1]["scene_rough"] is True and after[-1]["scene_moved_mm"] is None
 
 
 def test_home_is_planned_around_the_scene_cameras_box_when_the_wrist_cannot_find_it(ctx, monkeypatch, tmp_path):

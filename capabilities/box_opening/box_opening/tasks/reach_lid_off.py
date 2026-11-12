@@ -729,11 +729,16 @@ def _scene_cloud(ctx, scene_fix, scene_q, table_z):
     pts = getattr(scene_fix, "table_points", None)
     if pts is None or not len(pts):
         return None
-    pts = np.asarray(pts, float) + [
-        float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]),
-        float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]),
-        0.0,
-    ]
+    pts = np.asarray(pts, float)
+    if not getattr(scene_fix, "rough", False):
+        # the scene camera's error at the box, taken out of all of it. A ROUGH fix (a box the frame
+        # cut, scene_source.SCENE_ROUGH) is off by its own fit, not by the camera's error: the cloud
+        # is kept as it was measured
+        pts = pts + [
+            float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]),
+            float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]),
+            0.0,
+        ]
     chain = approach._chain()
     if scene_q is not None and hasattr(chain, "points"):
         pts = _off_line(pts, chain.points(list(scene_q)), clear_table.ARM_CLEAR_M)

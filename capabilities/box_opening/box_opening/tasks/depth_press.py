@@ -1956,6 +1956,12 @@ def after_scene_check(ctx, runner, result, scene_fix, locator):
         return result
     d = np.asarray(again.top_xyz, float) - np.asarray(scene_fix.top_xyz, float)
     moved = math.hypot(d[0], d[1]) > rp.SCENE_MOVED_M or abs(d[2]) > rp.SCENE_MOVED_M
+    if getattr(scene_fix, "rough", False):
+        # a rough first fix (a box the frame cut, scene_source.SCENE_ROUGH) is tens of mm off on its
+        # own: the scene's two looks say nothing of a move. The box was found: that is all it says
+        runner.note("depth_after_scene", found=True, scene_rough=True)
+        log.info("[press_demo] AFTER: the scene camera finds the box again (its first fix was rough: no move judged)")
+        return dataclasses.replace(result, free=True, moved=False)
     runner.note(
         "depth_after_scene",
         found=True,
