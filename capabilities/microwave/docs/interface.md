@@ -92,13 +92,16 @@ Failures: `refused` (a check failed; the message says which and the arm holds), 
 (a motion stopped short), `bad_params`. On an executed success it marks the object `opened`
 (true after `open`, false after `close`). Nothing measures whether the door latched: watch it.
 
-`open_door_ui` is the UI action **Open Microwave Door**. It runs the whole `open` from one press, with no params
-and no intermediate prompts: `execute`, the push-open on, ending at the view pose. It requests execution;
+`open_door_ui` and `close_door_ui` are the UI actions **Open Microwave Door** and **Close Microwave Door**.
+Each runs the whole `open` or `close` from one press, with no params and no intermediate prompts: `open` with
+`execute` and `push_open` (explicitly: off by default on this branch; ending at the view pose); `close` with `execute` and the settings that closed the door
+on 11-12 (`face_door`, `route_over`, `over_above` 0.10, `side_past_hinge` 0.12, `push_radius` 0.31 to 0.25,
+`push_z` 0.46; the node's `UI_ACTIONS`), starting from the view pose. It requests execution;
 `allow_execute` must be true on hardware. A recoverable failure before the hand is on the handle (a check refused,
 nothing past it moved) shows its reason and restores the same button; retry waits for an explicit tap. A failure with
 the hand still on the handle, or an unrecoverable one, is shown with Done only and not retried. Success/error notices
 remain until Done or cancellation; a panel is re-sent only if the bridge dropped it. The UI is offered only the UI
-actions (`availability`); the direct `open` dry-run/execute API is unchanged.
+actions (`availability`); the direct `open` / `close` dry-run/execute API is unchanged.
 
 The engine uses the counter example's direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_ui_event()`,
 ported from `feat/engine_update` as on `feature/12-microwave-grab`), including the orchestrator-pushed execution

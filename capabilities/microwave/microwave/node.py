@@ -91,12 +91,29 @@ PARAMS = {
 }
 
 
-# The UI action (one press, no settings): what it runs.
+# The UI actions (one press each, no settings): what they run. The close's settings are the ones that closed the
+# door on 11-12 (hand pointing forward, over the door's top, swing high and spiralling in clear of the handle).
 UI_ACTIONS = {
-    "open_door_ui": ("open", "Open Microwave Door", {"execute": True}),
+    # the push-open on explicitly: off by default on this branch (d7b1b43), and without it the open ends holding the
+    # handle, so the close couldn't follow
+    "open_door_ui": ("open", "Open Microwave Door", {"execute": True, "push_open": True}),
+    "close_door_ui": (
+        "close",
+        "Close Microwave Door",
+        {
+            "execute": True,
+            "face_door": True,
+            "route_over": True,
+            "over_above": 0.10,
+            "side_past_hinge": 0.12,
+            "push_radius": 0.31,
+            "push_radius_end": 0.25,
+            "push_z": 0.46,
+        },
+    ),
 }
-UI_TITLE = {"open": "Open microwave"}
-UI_DONE = {"open": "Microwave door opened."}
+UI_TITLE = {"open": "Open microwave", "close": "Close microwave"}
+UI_DONE = {"open": "Microwave door opened.", "close": "Microwave door closed."}
 
 
 class Capability(CapabilityEngine):
@@ -132,7 +149,7 @@ class Capability(CapabilityEngine):
                 },
             },
         ),
-        # the UI's button: one press runs the whole open (UI_ACTIONS), panels on the UI bridge
+        # the UI's buttons: one press runs the whole open / close (UI_ACTIONS), panels on the UI bridge
         *(Action(ui_id, label) for ui_id, (_, label, _) in UI_ACTIONS.items()),
     ]
 
@@ -184,7 +201,7 @@ class Capability(CapabilityEngine):
         )
 
     def _ui_run(self, ui_id, ctx):
-        """One UI press runs the whole open (UI_ACTIONS) with no intermediate prompts. A recoverable failure
+        """One UI press runs the whole open or close (UI_ACTIONS) with no intermediate prompts. A recoverable failure
         before the hand is on the handle (a check refused, nothing past it moved) shows its reason and offers the
         same button again, waiting for an explicit tap; one with the hand still on the handle, or any other, is shown
         with Done only and not retried. Success / error notices remain until Done or cancellation."""
@@ -255,8 +272,8 @@ class Capability(CapabilityEngine):
             time.sleep(0.1)
 
     def availability(self, instance_id, world_state):
-        """The UI is offered only the one-press actions (UI_ACTIONS); `open` stays callable directly (its params
-        need setting: from the UI it would only dry-run)."""
+        """The UI is offered only the one-press actions (UI_ACTIONS); `open` / `close` stay callable directly (their
+        params need setting: from the UI they would only dry-run)."""
         return [a for a in super().availability(instance_id, world_state) if a.action_id in UI_ACTIONS]
 
     def execute(self, action_id, params, ctx):

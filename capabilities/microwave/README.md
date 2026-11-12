@@ -63,7 +63,8 @@ mw ros2 action send_goal --feedback /microwave/execute_action rammp_orchestrator
 
 ## UI
 
-The UI action **Open Microwave Door** (`open_door_ui`) runs the whole open from one press, executing (the node still
+The UI actions **Open Microwave Door** (`open_door_ui`) and **Close Microwave Door** (`close_door_ui`) run the
+whole open or close from one press, executing (the node still
 needs `allow_execute: true` and, for the UI, `use_orchestrator: true` in the profile's microwave overrides). A refused
 check before the grasp offers the same button again; a stop with the hand on the handle says so and is not retried.
 
@@ -94,7 +95,7 @@ ros2 run rammp_orchestrator interactive_perception_node --ros-args -r /perceptio
 Selection goes on its own topic: the microwave reads the scene segmenter's real boxes on `/perception/object_detections`
 to find the door, which a fixed fake box there would replace; and the orchestrator re-sends the UI's object list
 whenever a box moves, so live boxes' pixel jitter made the action panel flash and drop taps (11-12). In the UI: select
-`microwave_1`, then **Open Microwave Door**. The microwave registers with the orchestrator within ~15 s of it starting
+`microwave_1`, then **Open Microwave Door** / **Close Microwave Door**. The microwave registers with the orchestrator within ~15 s of it starting
 (`sheppy logs microwave | grep registered`).
 
 From the command line, through the orchestrator (panels still show):
@@ -102,6 +103,7 @@ From the command line, through the orchestrator (panels still show):
 ```bash
 mw ros2 service call /rammp_orchestrator/select_object rammp_orchestrator_interfaces/srv/SelectObject "{instance_id: 'microwave_1', perception_class: 'microwave'}"
 mw ros2 action send_goal --feedback /rammp_orchestrator/execute_action rammp_orchestrator_interfaces/action/ExecuteAction '{engine_id: microwave, action_id: open_door_ui, params_json: "{}"}'
+mw ros2 action send_goal --feedback /rammp_orchestrator/execute_action rammp_orchestrator_interfaces/action/ExecuteAction '{engine_id: microwave, action_id: close_door_ui, params_json: "{}"}'
 ```
 
 Under sheppy the microwave container bind-mounts this checkout's `capabilities/microwave/microwave` and
