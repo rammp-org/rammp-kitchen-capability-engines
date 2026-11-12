@@ -303,25 +303,26 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name                  | Default                | Meaning                                                                                                                                                                |
-| --------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator`    | `true`                 | `false` runs standalone: no registration, drive it by CLI                                                                                                              |
-| `mock`                | `false`                | `true` skips hardware (the mock alternative sets it)                                                                                                                   |
-| `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                     |
-| `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel) |
-| `allow_execute`       | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                                                                                           |
-| `container`           | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path                                                                                                  |
-| `world`               | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`                                                                                            |
-| `state_dir`           | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening`                                                                                           |
-| `video`               | `false`                | Record both cameras from the grip to the set-down (the newest 20 kept); on for attended data collection                                                                |
-| `viz`                 | `false`                | Draw what the perception sees and decides for Foxglove                                                                                                                 |
-| `mission_frames`      | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps                                              |
-| `speed_scale`         | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                                                                       |
-| `body_layers`         | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)                                                       |
-| `planner_worlds_as`   | `""`                   | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world")                       |
-| `planner_worlds_dir`  | `""`                   | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                                                                      |
-| `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                      |
-| `wrist_first`         | `false`                | Facing a table: the wrist camera finds the container in front of the arm, the wrist turned where the arm rests (see below)                                             |
+| Name                  | Default                | Meaning                                                                                                                                                                               |
+| --------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`    | `true`                 | `false` runs standalone: no registration, drive it by CLI                                                                                                                             |
+| `mock`                | `false`                | `true` skips hardware (the mock alternative sets it)                                                                                                                                  |
+| `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                                    |
+| `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel)                |
+| `allow_execute`       | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                                                                                                          |
+| `container`           | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path                                                                                                                 |
+| `world`               | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`                                                                                                           |
+| `state_dir`           | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening`                                                                                                          |
+| `video`               | `false`                | Record both cameras from the grip to the set-down (the newest 20 kept); on for attended data collection                                                                               |
+| `viz`                 | `false`                | Draw what the perception sees and decides for Foxglove                                                                                                                                |
+| `mission_frames`      | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps                                                             |
+| `speed_scale`         | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                                                                                      |
+| `body_layers`         | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)                                                                      |
+| `planner_worlds_as`   | `""`                   | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world")                                      |
+| `planner_worlds_dir`  | `""`                   | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                                                                                     |
+| `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                                     |
+| `wrist_first`         | `false`                | Facing a table: the wrist camera finds the container in front of the arm, the wrist turned where the arm rests (see below)                                                            |
+| `wrist_alone`         | `false`                | With `wrist_first`: a selection the scene camera's detections do not hold (a list typed by hand) is looked for by the wrist alone, taken only where it sees one container (see below) |
 
 ### The planner's world
 
@@ -403,6 +404,20 @@ where it is only a rough one or there is none, saying what each camera said.
 Where the selected container was in none of the scene camera's frames the wrist
 is not turned: nothing would tie its find to the selection. The instance the
 world state is written for is the selected one in every case.
+
+`wrist_alone` (off by default) is for that last case: a selection that is no
+detection of the scene camera's at all, as when the UI's objects come from a
+list typed by hand (the orchestrator's `interactive_perception_node`) and the
+selected id is in none of the segmenter's frames. With it on, the wrist looks
+from its own views, tied to nothing, and what it finds is taken only where it is
+the one container its frames hold; a second lid-sized top anywhere in them (a
+place that passes, or a top a view cut), or two places the finder cannot choose
+between, and the run stops with `not_found`, saying so. The look stops at the
+first view that shows a lid whole, so "one" is one in the views looked from by
+then, not on the whole table. With it on the arm opens whichever single
+container stands in front of it, under the selected id: nothing checks that it
+is the one the user meant. A selection the scene camera does hold is tied as
+above, with or without it.
 
 ### The side survey and the orchestrator's selection: an interface gap
 

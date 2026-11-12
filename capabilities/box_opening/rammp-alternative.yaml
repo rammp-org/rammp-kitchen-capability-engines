@@ -67,6 +67,14 @@ params:
   # wrist's box is taken only where it stands in the direction the scene camera has the selected
   # container (docs/interface.md); the instance the world state is written for is the selected one
   wrist_first: false
+  # with wrist_first, for a selection that is NO detection of the scene camera's: the selected id is
+  # in none of its frames (the UI's object list typed by hand, orchestrator's interactive_perception_node).
+  # true: the wrist looks from its own views, tied to nothing, and what it finds is taken only where
+  # it is the ONE container the wrist sees (two or more: not_found). The arm then opens whichever
+  # single container stands in front of it, under the selected id. false (the default): such a run
+  # ends not_found without turning the wrist. A selection the scene camera does hold is tied to it
+  # either way (docs/interface.md)
+  wrist_alone: false
   # the run's measured table handed to the planner while a way HOME is planned, and at no other time
   # (docs/interface.md, "The planner's world"). `planner_worlds_as` is the folder the PLANNER's container
   # mounts read-only for it, as that container names it, e.g. /box_opening for a planner volume

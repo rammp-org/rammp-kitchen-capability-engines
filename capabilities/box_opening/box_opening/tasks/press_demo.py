@@ -1575,7 +1575,29 @@ def selection_tie(locator, scene_fix, model, instance_id):
     )
 
 
-def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie=None):
+def selection_unseen(locator):
+    """Whether the scene look that just ended held the selected container in NONE of the segmenter's frames (its
+    look record's `selected`: 0 of however many it read, a segmenter that cannot be read included). The
+    selection is then no detection of the scene camera's at all: an object list typed by hand (the UI's on
+    snorlax), or an id its tracker has since dropped. False where the record does not say."""
+    record = locator.look_record() if locator is not None else None
+    seg = (record or {}).get("segmenter")
+    return seg is not None and seg.get("selected") == 0
+
+
+def other_tops(find, xy, lid_m):
+    """Every lid-sized top the wrist's frames hold besides the one at `xy` (a place that passes, or a top a view
+    cut), at least half a lid from it and from each other: [(x, y), ...]."""
+    tops = [q.xy for q in getattr(find, "places", ()) if getattr(q, "button", "") != "none"]
+    tops += [p.xy for p in getattr(find, "patches", ()) if getattr(p, "why", "").endswith("cut off by the view")]
+    out = []
+    for t in tops:
+        if all(math.hypot(t[0] - o[0], t[1] - o[1]) >= 0.5 * lid_m for o in [xy, *out]):
+            out.append((float(t[0]), float(t[1])))
+    return out
+
+
+def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie=None, alone=None):
     """--wrist-first: the wrist turned where the arm rests (tasks/survey.run_survey, front) and
     the container its camera finds in front of the arm: the fix (a SceneFix, source "wrist"), its
     frames' points kept on ctx — or None where it finds none, the run going on with the scene
@@ -1585,7 +1607,10 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
     `said`: a list the look's own word is added to where it finds none (the run's NO BOX says it).
     `tie` (a SelectionTie: the orchestrator's selection): what the wrist finds is taken only where
     it stands in the direction the scene camera has the selected container, and no second lid-sized
-    top does; else it is not taken (None), and said."""
+    top does; else it is not taken (None), and said.
+    `alone` (the selected id, --wrist-alone: a selection the scene camera's detections do not hold,
+    so nothing ties a find to it): what the wrist finds is taken only where it is the ONE container
+    its frames hold; a second lid-sized top anywhere in them, and it is not taken (None), and said."""
     from box_opening.tasks import survey as sv
 
     survey = sv.run_survey(
@@ -1622,6 +1647,25 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         log.info(
             "[press_demo] WRIST LOOK: the container it finds is the selected one (%s): %s" % (tie.instance_id, how)
         )
+    if survey.fix is not None and alone:
+        at = survey.fix.top_xyz
+        others = other_tops(survey.find, at[:2], float(max(ctx.model.lid_dims[0], ctx.model.lid_dims[1])))
+        if others:
+            why = (
+                "a container at [%.3f, %.3f] and another lid-sized top at [%.3f, %.3f]: two containers, and the "
+                "selected one (%s) is in none of the scene camera's detections, so nothing says which it is"
+                % (at[0], at[1], *others[0], alone)
+            )
+            log.info("[press_demo] WRIST LOOK: %s" % why)
+            runner.note("wrist_first", found=True, alone=True, taken=False, why=why, scene=False)
+            if said is not None:
+                said.append(why)
+            return None
+        log.info(
+            "[press_demo] WRIST LOOK: the one container it finds, at [%.3f, %.3f], is taken for the selected %s, "
+            "which is in none of the scene camera's detections (--wrist-alone)" % (at[0], at[1], alone)
+        )
+        runner.note("wrist_first", found=True, alone=True, taken=True, at=[round(float(v), 4) for v in at[:2]])
     if survey.fix is not None:
         ctx.survey_clouds = survey.clouds
         if scene_fix is not None:
@@ -1666,19 +1710,32 @@ def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
     container, unless that fix is a rough one (a box its frame cut): that is no place to open a
     container on by itself, and the run ends NO BOX. Where nothing the scene camera saw says where
     the selected container is, the wrist is not turned at all: it could not tell which container
-    it found."""
+    it found.
+
+    --wrist-alone (off unless a deployment sets it) is for a selection that is no detection of the
+    scene camera's: the selected id was in NONE of its frames (selection_unseen: an object list
+    typed by hand). The wrist then looks from its own views, tied to nothing, and its find is taken
+    only where it is the one container its frames hold (wrist_first's `alone`); two, and NO BOX. A
+    selection the scene camera did hold is tied as above, with or without it."""
     selected = getattr(args, "instance_id", None) or None
-    tie = None
+    tie, alone = None, None
     if selected:
         tie = selection_tie(locator, scene_fix, ctx.model, selected)
-        if tie is None:
+        if tie is None and getattr(args, "wrist_alone", False) and scene_fix is None and selection_unseen(locator):
+            alone = selected
+            log.info(
+                "[press_demo] WRIST LOOK: the selected container %s is in none of the scene camera's detections: the "
+                "wrist looks from its own views, and what it finds is taken only where it is the one container it "
+                "sees (--wrist-alone)" % selected
+            )
+        elif tie is None:
             said.append(
                 "not looked for: nothing the scene camera saw says where the selected container %s is, and the "
                 "wrist cannot tell which container was selected" % selected
             )
             log.info("[press_demo] WRIST LOOK: %s" % said[-1])
-    if not selected or tie is not None:
-        wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=said, tie=tie)
+    if not selected or tie is not None or alone:
+        wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=said, tie=tie, alone=alone)
         if wrist_fix is not None:
             return wrist_fix, None, None
     if selected and scene_fix is not None and getattr(scene_fix, "rough", False):
@@ -1832,6 +1889,14 @@ def main():
         "view cuts is looked at again), and what it finds there is the box (a table faced from the front; "
         "tasks/survey); the scene camera's box only where the wrist finds none; with --instance-id the wrist's "
         "box is taken only where it stands in the direction the scene camera has the selected container",
+    )
+    ap.add_argument(
+        "--wrist-alone",
+        action="store_true",
+        help="with --wrist-first and --instance-id: a selected container that is in NONE of the scene camera's "
+        "detections (an object list typed by hand) is looked for by the wrist from its own views, tied to nothing, "
+        "and what it finds is taken only where it is the one container the wrist sees (two or more: NO BOX). "
+        "Without it such a run ends NO BOX and the wrist is not turned",
     )
     ap.add_argument(
         "--wrist-survey",

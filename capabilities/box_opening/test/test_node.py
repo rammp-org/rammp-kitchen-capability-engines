@@ -735,6 +735,12 @@ def test_the_wrist_survey_param_asks_the_run_to_survey_and_its_looks_are_the_loc
     assert "--wrist-first" in real("open_box")
     engine.set_parameters([Parameter("wrist_first", value=False)])
     assert fragment["wrist_first"] is False
+    # the wrist alone for a selection no scene frame holds: the owner's to turn on, off in the code and the fragment
+    assert "--wrist-alone" not in real("open_box", "food_container_2") and node.PARAMS["wrist_alone"] is False
+    engine.set_parameters([Parameter("wrist_alone", value=True)])
+    assert "--wrist-alone" in real("open_box", "food_container_2")
+    engine.set_parameters([Parameter("wrist_alone", value=False)])
+    assert fragment["wrist_alone"] is False
     track = node.Tracker("open_box")
     said = track.add({"leg": "survey:look-1", "kind": "motion", "ok": True, "outcome": "arrived"})
     assert said == ("locate", 0.03, "looking for the container with the wrist camera")

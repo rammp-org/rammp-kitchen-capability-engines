@@ -939,15 +939,17 @@ def _scene_fix(xy=(0.787, -0.240), rough=False):
     return SimpleNamespace(top_xyz=(xy[0], xy[1], 0.369), rough=rough, partial=partial)
 
 
-def _locator(mine=None, k=SCENE_K, tf=SCENE_CAM, wh=(640, 400)):
+def _locator(mine=None, k=SCENE_K, tf=SCENE_CAM, wh=(640, 400), held=None, why=SCENE_WHY):
     """The scene locator after its look for the selected container: TF, the lens, the selected instance's own box
-    in the segmenter's newest frame (None: it was not in it)."""
+    in the segmenter's newest frame (None: it was not in it); `held`: how many of the 9 frames it read held the
+    selected container, as its look record says (None: the record does not say)."""
+    record = {} if held is None else {"segmenter": {"state": "ok", "frames": 9, "boxes": 9, "selected": held}}
     return SimpleNamespace(
         base_to_color=lambda: tf,
         seg=SimpleNamespace(latest=SimpleNamespace(mine=mine, wh=wh)),
         grab=SimpleNamespace(k=k, dist=None, color=None),
-        last_why=SCENE_WHY,
-        look_record=lambda: {},
+        last_why=why,
+        look_record=lambda: record,
     )
 
 
@@ -1006,15 +1008,16 @@ def test_with_no_scene_fix_the_selected_instances_own_box_in_the_scene_image_tie
     assert press_demo.selection_tie(_locator(tf=None), _scene_fix(), MODEL, SELECTED) is None
 
 
-def _look(monkeypatch, survey, scene_fix=None, instance_id=SELECTED, locator=None):
+def _look(monkeypatch, survey, scene_fix=None, instance_id=SELECTED, locator=None, alone=False):
     """press_demo.wrist_look with the wrist's look scripted: ((fix, the locator kept, the scene's word), what was
-    said, how the look was asked for (None: not at all), the run's notes, the ctx, the locator)."""
+    said, how the look was asked for (None: not at all), the run's notes, the ctx, the locator). `alone`: the
+    run's --wrist-alone."""
     asked, runner, said = {}, _Runner(), []
     monkeypatch.setattr(sv, "run_survey", lambda *a, **k: asked.update(k, called=True) or survey)
     ctx = SimpleNamespace(
         worlds=SimpleNamespace(wrist_camera_config="camera_oak_wrist.yaml"), survey_clouds=None, model=MODEL
     )
-    args = Namespace(wrist_first=True, wrist_survey=False, instance_id=instance_id, execute=True)
+    args = Namespace(wrist_first=True, wrist_survey=False, wrist_alone=alone, instance_id=instance_id, execute=True)
     locator = _locator() if locator is None else locator
     cfg = SimpleNamespace(park_tool_down=False)
     got = press_demo.wrist_look(None, ctx, cfg, runner, None, args, locator, scene_fix, said)
@@ -1117,3 +1120,113 @@ def test_without_a_selection_the_wrist_look_is_as_it_was(monkeypatch):
     rough = _scene_fix(rough=True)
     (fix, kept, scene_said), said, _a, _n, _c, loc = _look(monkeypatch, nothing, scene_fix=rough, instance_id=None)
     assert fix is rough and kept is loc and scene_said is None  # a standalone run flies its look to a rough fix
+
+
+# ------------------------------------------------- a selection that is no detection of the scene camera's
+
+UNSEEN_WHY = "scene segmenter: the selected container (%s) was in none of its 9 frames" % SELECTED
+
+
+def _clouds():
+    return [{"points": np.zeros((3, 3), np.float32), "tag": "a"}]
+
+
+def test_a_selection_no_frame_held_is_told_from_one_the_scene_camera_saw():
+    """--wrist-alone is for a selection the scene camera's detections do not hold at all (a list typed by hand):
+    the look's own record says so, `selected` 0 of the frames it read. Anything else is not that."""
+    assert press_demo.selection_unseen(_locator(held=0)) is True
+    assert press_demo.selection_unseen(_locator(held=3)) is False
+    assert press_demo.selection_unseen(_locator()) is False  # the record does not say
+    assert press_demo.selection_unseen(None) is False
+    down = SimpleNamespace(look_record=lambda: {"segmenter": {"state": "unavailable", "frames": 0, "selected": 0}})
+    assert press_demo.selection_unseen(down) is True  # no segmenter to read: it is in none of its frames
+
+
+def test_with_wrist_alone_a_selection_no_frame_held_is_the_one_container_the_wrist_finds(monkeypatch):
+    """The UI's object list typed by hand: the selected id is in none of the segmenter's frames. Off (the
+    default) the wrist is not turned and the run ends NO BOX, as before. On, the wrist looks from its own views,
+    tied to nothing, and the one container it finds is taken."""
+    wrist = _wrist_fix((0.52, -0.05))
+    survey = sv.Survey(fix=wrist, clouds=_clouds(), find=SimpleNamespace(places=(), patches=()))
+    loc = _locator(held=0, why=UNSEEN_WHY)
+    (fix, kept, scene_said), said, asked, notes, ctx, _l = _look(monkeypatch, survey, locator=loc)
+    assert fix is None and kept is loc and asked is None and not notes  # off: not looked for
+    assert said == [
+        "not looked for: nothing the scene camera saw says where the selected container %s is, and the wrist "
+        "cannot tell which container was selected" % SELECTED
+    ]
+    (fix, kept, scene_said), said, asked, notes, ctx, _l = _look(monkeypatch, survey, locator=loc, alone=True)
+    assert fix is wrist and kept is None and scene_said is None and not said
+    assert asked["hint"] is None and asked["front"] is True and ctx.survey_clouds is survey.clouds
+    assert notes == [("wrist_first", {"found": True, "alone": True, "taken": True, "at": [0.52, -0.05]})]
+    # the same lid in a second frame, or cut by another view, is still the one container
+    same = SimpleNamespace(xy=(0.53, -0.06), why="its top 60x100 mm, cut off by the view")
+    place = SimpleNamespace(xy=(0.52, -0.05), button="unchecked")
+    survey = sv.Survey(fix=wrist, clouds=_clouds(), find=SimpleNamespace(places=(place,), patches=(same,)))
+    (fix, *_), said, *_ = _look(monkeypatch, survey, locator=loc, alone=True)
+    assert fix is wrist and not said
+
+
+def test_with_wrist_alone_two_containers_in_the_wrists_frames_are_no_box(monkeypatch):
+    """Nothing says which of two is the selected one: neither is opened, and the NO BOX says so."""
+    loc = _locator(held=0, why=UNSEEN_WHY)
+    wrist = _wrist_fix((0.52, -0.05))
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why) or True)
+    args = Namespace(wrist_first=True, wrist_survey=False, wrist_alone=True, instance_id=SELECTED, execute=True)
+    others = (
+        SimpleNamespace(places=(SimpleNamespace(xy=(0.55, 0.20), button="unchecked"),), patches=()),
+        SimpleNamespace(
+            places=(), patches=(SimpleNamespace(xy=(0.70, -0.20), why="its top 45x100 mm, cut off by the view"),)
+        ),
+    )
+    for find, at in zip(others, ("[0.550, 0.200]", "[0.700, -0.200]"), strict=True):
+        survey = sv.Survey(fix=wrist, clouds=_clouds(), find=find)
+        (fix, kept, scene_said), said, _asked, notes, ctx, _l = _look(monkeypatch, survey, locator=loc, alone=True)
+        assert fix is None and kept is loc and ctx.survey_clouds is None
+        assert said == [
+            "a container at [0.520, -0.050] and another lid-sized top at %s: two containers, and the selected one "
+            "(%s) is in none of the scene camera's detections, so nothing says which it is" % (at, SELECTED)
+        ]
+        assert notes == [
+            ("wrist_first", {"found": True, "alone": True, "taken": False, "why": said[0], "scene": False})
+        ]
+        with pytest.raises(SystemExit) as e:
+            press_demo.wrist_survey_or_exit(None, ctx, None, _Runner(), None, args, loc, wrist_look="; ".join(said))
+        assert e.value.code == 2
+        assert homes[-1] == "NO BOX — scene camera: %s; the wrist's look in front: %s" % (UNSEEN_WHY, said[0])
+    # a place whose button the view showed absent is no container, and no second one
+    tin = SimpleNamespace(places=(SimpleNamespace(xy=(0.55, 0.20), button="none"),), patches=())
+    (fix, *_), said, *_ = _look(monkeypatch, sv.Survey(fix=wrist, clouds=_clouds(), find=tin), locator=loc, alone=True)
+    assert fix is wrist and not said
+    # two places the finder itself cannot choose between: its own word, no fix
+    two = sv.Survey(
+        why="wrist camera: two places pass as this container, [0.52, -0.05] and [0.55, 0.20] (button "
+        "unchecked, unchecked): refusing to guess"
+    )
+    (fix, kept, _s), said, _asked, _notes, _ctx, _l = _look(monkeypatch, two, locator=loc, alone=True)
+    assert fix is None and kept is loc and said == [two.why]
+
+
+def test_wrist_alone_changes_nothing_for_a_selection_the_scene_camera_holds_or_a_run_without_one(monkeypatch):
+    """With real detections behind the selection the tie stays the rule, --wrist-alone or not."""
+    survey = sv.Survey(fix=_wrist_fix((0.60, 0.10)), clouds=_clouds(), find=SimpleNamespace(places=(), patches=()))
+    # in the frames and boxed: tied by its box; a find outside it is not taken
+    boxed = _locator(mine=(380.0, 150.0, 440.0, 230.0), held=9)
+    (fix, kept, _s), said, asked, _n, _c, _l = _look(monkeypatch, survey, locator=boxed, alone=True)
+    assert fix is None and kept is boxed and asked is not None
+    assert said[0].endswith(": not taken for the selected container %s" % SELECTED)
+    # in the frames, and nothing ties (no TF): not looked for, as without the flag
+    blind = _locator(tf=None, held=9)
+    (fix, kept, _s), said, asked, _n, _c, _l = _look(monkeypatch, survey, locator=blind, alone=True)
+    assert fix is None and asked is None and said[0].startswith("not looked for")
+    # placed by the scene camera: tied by that fix
+    scene = _scene_fix()
+    (fix, kept, _s), said, asked, _n, _c, loc = _look(monkeypatch, survey, scene_fix=scene, alone=True)
+    assert fix is scene and kept is loc and asked["hint"] == (0.787, -0.240)
+    # the record does not say the selection was unseen: not looked for
+    (fix, _k, _s), said, asked, _n, _c, _l = _look(monkeypatch, survey, locator=_locator(), alone=True)
+    assert fix is None and asked is None
+    # no selection: the wrist's box, as it was
+    (fix, kept, _s), said, asked, notes, _c, _l = _look(monkeypatch, survey, instance_id=None, alone=True)
+    assert fix is survey.fix and kept is None and not said and not notes

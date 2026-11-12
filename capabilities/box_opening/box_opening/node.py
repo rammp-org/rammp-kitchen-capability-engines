@@ -84,6 +84,12 @@ PARAMS = {
     # taken only where it stands in the direction the scene camera has the selected container
     # (press_demo.SelectionTie); the instance marked opened is the selected one either way
     "wrist_first": False,
+    # with wrist_first, for a selection that is NO detection of the scene camera's (the selected id in none of
+    # its frames: the UI's object list typed by hand): the wrist looks from its own views, tied to nothing, and
+    # what it finds is taken only where it is the ONE container it sees; two or more, NO BOX. Off (the default):
+    # such a run ends NO BOX without turning the wrist. On, the arm opens whichever single container stands in
+    # front of it under the selected id: the owner's to turn on (press_demo.wrist_look)
+    "wrist_alone": False,
     # the folder box opening hands the planner worlds from (worlds.PlannerTable): the run's measured table,
     # while a way HOME is planned. `planner_worlds_as` is that folder as the PLANNER's container mounts it
     # (read-only); "" (the default) and box opening sends the planner no world. `planner_worlds_dir` is the
@@ -811,6 +817,8 @@ class Capability(CapabilityEngine):
             argv += ["--wrist-survey"]
         if self._param("wrist_first"):
             argv += ["--wrist-first"]
+        if self._param("wrist_alone"):  # read by the wrist look alone (--wrist-first), and only with a selection
+            argv += ["--wrist-alone"]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
 
     def _env(self):
