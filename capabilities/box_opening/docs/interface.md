@@ -207,9 +207,11 @@ said; it is written as the run goes, since the engine takes no world-state
 write once an action is cancelled.
 
 Progress `pct` is the fraction of the run done, from 0 to 1. The phases, in
-order: `locate` (0.03 for each wrist survey pose, its message
-`looking for the container with the wrist camera`; 0.05 once the container is
-found), `look` (0.1), `press` (0.35), `grip` (0.5), `carry`
+order: `locate` (0 with `looking for the container` once the run is up, and
+with `going to the start pose` where the arm does not rest at its start pose
+and the run's first motion takes it there; 0.03 for each wrist survey pose, its
+message `looking for the container with the wrist camera`; 0.05 once the
+container is found), `look` (0.1), `press` (0.35), `grip` (0.5), `carry`
 (0.85), `release` (0.9), `home` (1.0). A phase is reported as
 its motion ends, its message what the run is doing then, in a person's words
 (`pressing the button`, `setting the lid down`; `: stopped` where that motion

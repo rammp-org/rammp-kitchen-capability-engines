@@ -833,6 +833,36 @@ def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):
     assert (logging.INFO, "plain line") in said
 
 
+def test_a_runs_first_home_is_not_the_way_home_and_no_part_of_the_run_done():
+    """A run that does not start at rest homes first (press_demo.home_first), and its rows are home rows too:
+    flatbot 2026-11-11 18:06 (clear-margin, home, NO BOX, home) reported 100 % "going home" as it began."""
+    track = node.Tracker("open_box")
+    assert track.up() == ("locate", 0.0, "looking for the container") and track.up() is None  # said once
+    first = [
+        {"leg": "clear-margin", "kind": "motion", "ok": True, "outcome": "arrived"},
+        {"leg": "still", "kind": "note"},
+        {"leg": "settle", "kind": "note"},
+        {"leg": "home-waypoint", "kind": "motion", "ok": True, "outcome": "arrived"},
+        {"leg": "home", "kind": "motion", "ok": True, "outcome": "arrived"},
+    ]
+    said = [s for s in map(track.add, first) if s is not None]
+    assert said == [("locate", 0.0, "going to the start pose")] * 2
+    assert track.add({"leg": "home", "kind": "motion", "ok": False}) == (
+        "locate",
+        0.0,
+        "going to the start pose: stopped",
+    )
+    # past its start (it looked, and found none): the next home row is the way home
+    assert track.add({"leg": "reach_refused", "kind": "note", "why": "NO BOX"})[2].startswith("stopping")
+    assert track.add({"leg": "home", "kind": "motion", "ok": True}) == ("home", 1.0, "going home")
+    # ... as after any leg of the run itself, with no note read between
+    for leg in ("survey:angle-far", "reach:look", "place:open"):
+        track = node.Tracker("open_box")
+        track.add({"leg": "home", "kind": "motion", "ok": True})
+        track.add({"leg": leg, "kind": "motion", "ok": True})
+        assert track.add({"leg": "home", "kind": "motion", "ok": True}) == ("home", 1.0, "going home")
+
+
 def test_the_class_has_a_name_without_a_space_for_a_list_typed_by_hand(engine):
     """interactive_perception_node's `add <instance_id> <perception_class>` is split on spaces: a "food
     container" cannot be typed into it. Both names are claimed, the segmenter's first."""

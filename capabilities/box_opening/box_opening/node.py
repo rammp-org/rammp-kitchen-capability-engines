@@ -149,6 +149,10 @@ LEG_PHASES = (
     ("place:", "release", 0.9, "letting go of the lid"),
     ("home", "home", 1.0, "going home"),
 )
+# notes that say a run is past its start: it has looked for the container, or given up on it. A home row before
+# any of them (and before any leg above but the last) is the run's FIRST motion, to its start pose where the arm
+# does not rest there; from one of them on, a home row is the way home (Tracker.add)
+PAST_START = ("scene_fix", "wrist_survey", "wrist_first", "counter_edges", "reach_plan", "reach_refused")
 # the mock's run: the real run's phases, in its words. "grip" holds the lid, "release" lets it go
 # on the table, as the real run's rows say (Tracker)
 MOCK_PHASES = {
@@ -410,6 +414,8 @@ class Tracker:
         self.action_id = action_id
         self.instance_id = instance_id
         self.pct = 0.0
+        self.looking = False  # said once, as the run's log appears: it is up and looking for the container
+        self.past_start = False  # a row past the run's start was read: a home row from here on is the way home
         self.presses = 0
         self.grips = 0
         self.lid_spot = None
@@ -423,6 +429,7 @@ class Tracker:
         """The (phase, %, message) this row says, or None."""
         leg, kind = str(row.get("leg", "")), row.get("kind")
         if kind == "note":
+            self.past_start = self.past_start or leg in PAST_START
             return self._note(leg, row)
         ok = bool(row.get("ok"))
         if leg == "depth:press" and ok:
@@ -435,9 +442,24 @@ class Tracker:
             self.held = False
         for start, phase, pct, doing in LEG_PHASES:
             if leg.startswith(start):
+                if phase == "home" and not self.past_start:
+                    # the run's first motion, to its start pose (press_demo.home_first): not the way home, and
+                    # no part of the run done (flatbot 2026-11-11 18:06 began so, and reported 100 % at once)
+                    phase, pct, doing = "locate", self.pct, "going to the start pose"
+                else:
+                    self.past_start = True
                 self.pct = max(self.pct, pct)
                 return phase, self.pct, doing if ok else f"{doing}: stopped"
         return None
+
+    def up(self):
+        """("locate", %, message) the once, as the run's log appears: the run is up (its start-up and readiness
+        take a second or two) and looks for the container, which with the scene camera can take 15 s in which
+        no row is written."""
+        if self.looking:
+            return None
+        self.looking = True
+        return "locate", self.pct, "looking for the container"
 
     def _note(self, leg, row):
         if leg == "scene_fix" and row.get("origin_xyz"):
@@ -798,11 +820,13 @@ class Capability(CapabilityEngine):
     def _progress(log, track, ctx, panel):
         """The progress each new row of the run log says (a run cannot pause once started), to the
         orchestrator and on the run's panel."""
-        for row in log.rows():
-            said = track.add(row)
-            if said is not None:
-                ctx.progress(*said, pausable=False)
-                panel.say(*said)
+        rows = log.rows()  # finds the run's log once it is there
+        said = [track.up()] if log.path is not None else []
+        said += [track.add(row) for row in rows]
+        for progress in said:
+            if progress is not None:
+                ctx.progress(*progress, pausable=False)
+                panel.say(*progress)
 
     def _argv(self, action_id, instance_id=""):
         argv = [executable(EXECUTABLES[action_id])]
