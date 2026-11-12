@@ -11,7 +11,8 @@ _ARM_ERRORS = [
     "StateTimeout",
     "StreamClosed",
 ]
-__all__ = _ENGINE + _ARM_ERRORS
+_BASE_ERRORS = ["BaseError"]
+__all__ = _ENGINE + _ARM_ERRORS + _BASE_ERRORS
 
 
 def __getattr__(name):
@@ -20,4 +21,6 @@ def __getattr__(name):
         return getattr(importlib.import_module("capability_engine.engine"), name)
     if name in _ARM_ERRORS:
         return getattr(importlib.import_module("capability_engine.driver_state"), name)
+    if name in _BASE_ERRORS:
+        return getattr(importlib.import_module("capability_engine.base"), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

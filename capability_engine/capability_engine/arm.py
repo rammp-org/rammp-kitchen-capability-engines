@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import rammp_arm
 from diagnostic_msgs.msg import DiagnosticArray
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Quaternion
 from rammp_arm import CONTINUOUS, ERRORS, JOINTS, _wrap
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
@@ -49,7 +49,7 @@ from rammp_arm_interfaces.msg import GripperState as GripperStateMsg
 from rammp_arm_interfaces.msg import StreamStatus as StreamStatusMsg
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
 from rammp_common_interfaces.msg import ControlStatus as ControlStatusMsg
-from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
+from rammp_curobo_interfaces.action import Blend, PlanToJoints, PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.qos import (
     DurabilityPolicy,
@@ -93,6 +93,7 @@ from capability_engine.arm_messages import (  # re-exports: the arm's dataclasse
     _gripper_state,
     _impedance_gains,
     _joint_index,
+    _joint_trajectory,
     _joint_states,
     _plan,
     _setpoint,
@@ -170,6 +171,7 @@ ACTIONS = {
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),
+    "blend": (Blend, "/rammp_curobo/blend"),
 }
 SERVICES = {
     "open_stream": (OpenStream, "/open_stream"),
@@ -1324,11 +1326,40 @@ class ArmInterface:
         g.start_joints = [float(x) for x in start_joints]
         return self._plan_goal("plan_to_joints", g)
 
-    def set_world(self, world: str) -> tuple[bool, str]:
-        """Swap cuRobo's collision world for the packaged world `world`: (success, message)."""
+    def blend(
+        self, legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None
+    ) -> Plan:
+        """cuRobo's ONE trajectory through `legs` (Plans it returned, each planned from the last
+        joints of the leg before), passing junction k (the end of leg k) still moving where
+        `blend_radius[k]` (m, one per junction) > 0 and stopping on it where it is 0. The planner
+        collision-checks the overlaps against its current world. `speed_scale`: per leg, (0, 1]
+        of its planned speed (None: all 1); the result carries the speeds, so execute it at speed
+        scale 1. `hold`: per leg, the HOLD_* it was planned with (None: none), kept through its
+        overlaps; `hold_orientation`: per leg, the quat (xyzw) that hold keeps, as sent to
+        plan_to_pose (None: each held leg's planned end). Plans only, nothing moves. A failed
+        blend is Plan(success=False, message); a successful one carries corner_m."""
+        legs = list(legs)
+        g = Blend.Goal()
+        g.legs = [_joint_trajectory(leg) for leg in legs]
+        g.blend_radius = [float(r) for r in blend_radius]
+        g.speed_scale = [] if speed_scale is None else [float(s) for s in speed_scale]
+        g.hold = [] if hold is None else [int(h) for h in hold]
+        if hold_orientation is not None:
+            for quat in hold_orientation:
+                x, y, z, w = (0.0, 0.0, 0.0, 1.0) if quat is None else map(float, quat)
+                g.hold_orientation.append(Quaternion(x=x, y=y, z=z, w=w))
+        return self._plan_goal("blend", g)
+
+    def set_world(self, world: str, *, even_if_cancelled=False) -> tuple[bool, str]:
+        """Swap cuRobo's collision world for `world`: a world YAML path as the planner sees it, or
+        a name it resolves next to its config. (success, message). `even_if_cancelled`: wait for
+        the answer even once the action is cancelled (at most SERVICE_CALL_S), e.g. to put back
+        the world a capability changed while it ends."""
         if self._mock:
             return self._mock_sent("set_world"), MOCK_NOT_SENT
-        res = self._call("set_world", SetWorld.Request(world=world))
+        res = self._call(
+            "set_world", SetWorld.Request(world=world), cancellable=not even_if_cancelled
+        )
         return res.success, res.message
 
     def _plan_goal(self, name, g):
@@ -1348,6 +1379,8 @@ class ArmInterface:
             self._record(f"{name}: {res.message}")
             return Plan(False, res.message, planning_time=float(res.planning_time))
         plan = _plan(res)
+        if plan is not None and hasattr(res, "corner_m"):  # blend
+            plan.corner_m = np.array(res.corner_m, dtype=float)
         if plan is None:
             names = list(res.trajectory.joint_names)
             self._record(
@@ -1380,14 +1413,15 @@ class ArmInterface:
         res = self._call("set_gains", req)
         return res.accepted, res.message
 
-    def _call(self, name, request, on_sent=None):
+    def _call(self, name, request, on_sent=None, cancellable=True):
         """Call service `name` and return its response: Refused when the server is not up within
         SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
         ends, Cancelled once it is cancelled (both waits poll every POLL_S). Waits for no arm
         state. `on_sent`: called with the request's future once it is sent, so a caller can
-        settle a request the driver answers after this call has given up on it."""
+        settle a request the driver answers after this call has given up on it. `cancellable`
+        False: a cancel does not cut the waits short (they stay bounded)."""
         client = self._client(name)
-        ctx = self._ctx
+        ctx = self._ctx if cancellable else None
         path = SERVICES[name][1]
         if not wait_until(lambda: self._live(client.service_is_ready), SERVICE_WAIT_S, ctx):
             self._fail(Refused, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")

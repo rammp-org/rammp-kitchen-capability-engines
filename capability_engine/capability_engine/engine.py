@@ -14,8 +14,8 @@ contract (rammp_orchestrator_interfaces) once, for every capability:
   /<id>/acquire_control right before dispatching execute_action, and passes
   it on to self.arm so its commands carry the same token as the arm driver's
   own grant for that execution
-- gives each action ROS entities that live only while it runs (self.arm's, and the
-  capability's own through create_action_subscription() and friends)
+- gives each action ROS entities that live only while it runs (self.arm's, self.base's, and
+  the capability's own through create_action_subscription() and friends)
 - on SIGTERM or SIGINT, cancels the running action, lets it end, then exits
 - lets execute() talk to the UI bridge directly (rammp_ui_bridge_interfaces),
   bypassing the orchestrator, via ctx.update_user_panel()/ctx.poll_ui_event()
@@ -72,13 +72,14 @@ from capability_engine import sim
 from capability_engine.action_scope import ENDED_MESSAGE, ActionScope, ScopeClosed
 from capability_engine.arm import ArmInterface, wait_until
 from capability_engine.arm_params import PARAMS
+from capability_engine.base import BaseInterface
 
 ORCHESTRATOR = "/rammp_orchestrator"
 ARM_PARAMS_FIXED_MESSAGE = "arm.* parameters are read at startup; restart to change"
 REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
-STOP_MARGIN_S = 1.0  # on a stop, past self.arm's worst settle: for the action's own code
+STOP_MARGIN_S = 1.0  # on a stop, past self.arm's and self.base's worst settle: the action's code
 START_WAIT_S = 1.0  # an accepted goal not handed to execute within this was lost by rclpy
 SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them
 
@@ -95,10 +96,11 @@ class Action:
 
 
 def stop_wait_s() -> float:
-    """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's worst settle
-    (ArmInterface.worst_settle_s(), 7.8 s by default) plus STOP_MARGIN_S. docker stop's grace
-    (10 s) must cover it."""
-    return ArmInterface.worst_settle_s() + STOP_MARGIN_S
+    """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's and
+    self.base's worst settle (ArmInterface.worst_settle_s(), 7.8 s by default, and
+    BaseInterface.worst_settle_s(), 0.1 s) plus STOP_MARGIN_S. docker stop's grace (10 s) must
+    cover it."""
+    return ArmInterface.worst_settle_s() + BaseInterface.worst_settle_s() + STOP_MARGIN_S
 
 
 class Cancelled(Exception):
@@ -291,6 +293,7 @@ class CapabilityEngine(Node):
         self._declare_arm_params(engine_id)
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self.arm = ArmInterface(self, self._group, mock=self.mock)
+        self.base = BaseInterface(self, self._group, mock=self.mock)
         # make_sim() loads the driver's model (in mock mode, arm.mock_urdf's)
         sim.set_model_provider(self.arm.robot_description)
         # The lifecycle: idle (no _current), running one goal from its acceptance until its
@@ -913,6 +916,7 @@ class CapabilityEngine(Node):
                 # "nobody holds it", e.g. running standalone with no orchestrator).
                 token = self._assigned_token if self._assigned_token != bytes(16) else None
                 self.arm.begin_action(ctx, token=token)
+                self.base.begin_action(ctx)
                 params = json.loads(goal.params_json or "{}")
                 payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS
@@ -931,9 +935,13 @@ class CapabilityEngine(Node):
             finally:
                 try:
                     try:
-                        self.arm.end_action()  # settles its goals and stream, closes its scope
+                        # The base first: the arm's settle can take seconds, the base's does not.
+                        self.base.end_action()  # stops the base if this action drove it
                     finally:
-                        run.scope.close()  # destroys the capability's entities of this action
+                        try:
+                            self.arm.end_action()  # settles its goals and stream, closes its scope
+                        finally:
+                            run.scope.close()  # destroys the capability's entities of this action
                 except Exception as error:  # the run must still end and report its result
                     result.status = Result.STATUS_FAILED
                     result.error_code = "exception"

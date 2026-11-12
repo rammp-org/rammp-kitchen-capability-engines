@@ -1,4 +1,4 @@
-# Test image for self.arm: x86 ROS 2 Humble with the arm/common/curobo/orchestrator/
+# Test image for self.arm: x86 ROS 2 Humble with the arm/base/common/curobo/orchestrator/
 # ui_bridge interfaces, the pure-Python deps, and the robot fixtures. It is NOT a
 # production image (those are arm64, FROM rammp-base); it only has to speak the same
 # messages. The repo is mounted at /repo at run time, so editing Python never needs a
@@ -7,9 +7,9 @@
 FROM ros:humble-ros-base
 
 # Pins. Interfaces and curobo are full SHAs; kinova_gen3_description is dev.
-ARG INTERFACES_REF=73e7ed1716bf8a2df0c4f1614d8c360bde20d009
+ARG INTERFACES_REF=788be6341a8c5fa26fcd0cb023d08005aacad0f1
 ARG UI_BRIDGE_INTERFACES_REF=6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e
-ARG CUROBO_REF=fd8b89cb18fd854f3add36ab9b1b72933dbabf76
+ARG CUROBO_REF=10ad896883158247039a8bd850bcabcab016a50d
 ARG KINOVA_REF=2546edbab9cda031cdfe82b33289f05e01341f88
 ARG DEPLOYMENTS_REF=9e0cd960fd7e1876a8a592b8fdb33a27da82a734
 # feeding-deployment microwave-wip: the students' Cornell arm model.
@@ -37,8 +37,8 @@ RUN printf '%s\n' '#!/bin/sh' 'set -e' \
 WORKDIR /ws
 RUN mkdir src \
     && fetch-commit rammp-org/rammp-interfaces-ros2 ${INTERFACES_REF} /tmp/interfaces \
-    && cp -r /tmp/interfaces/rammp_arm_interfaces /tmp/interfaces/rammp_common_interfaces \
-        /tmp/interfaces/rammp_orchestrator_interfaces src/ \
+    && cp -r /tmp/interfaces/rammp_arm_interfaces /tmp/interfaces/rammp_base_interfaces \
+        /tmp/interfaces/rammp_common_interfaces /tmp/interfaces/rammp_orchestrator_interfaces src/ \
     && fetch-commit rammp-org/rammp-interfaces-ros2 ${UI_BRIDGE_INTERFACES_REF} /tmp/ui_bridge \
     && cp -r /tmp/ui_bridge/rammp_ui_bridge_interfaces src/ \
     && fetch-commit rammp-org/RAMMP-CuRobo ${CUROBO_REF} /tmp/curobo \
@@ -69,6 +69,7 @@ RUN . /ws/install/setup.sh && fetch-commit rammp-org/rammp-deployments ${DEPLOYM
 
 # Sources come from the mounted repo, so there is nothing to rebuild when they change.
 ENV PYTHONPATH=/repo/capability_engine:/repo/shared/door_common:/repo/capabilities/microwave
+ENV PYTHONPATH=${PYTHONPATH}:/repo/capabilities/fridge
 RUN printf '%s\n' '#!/bin/bash' \
         '. /opt/ros/humble/setup.bash' '. /ws/install/setup.bash' 'exec "$@"' \
         > /entrypoint.sh \
