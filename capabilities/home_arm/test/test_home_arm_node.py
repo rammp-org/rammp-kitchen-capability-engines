@@ -140,6 +140,8 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
     eng = SimpleNamespace(
         arm=arm,
         mock=False,
+        orchestrated=False,  # standalone, as the fragments and the launch file run it
+        actions=Capability.actions,
         get_parameter=lambda name: SimpleNamespace(value=values[name]),
         get_logger=lambda: SimpleNamespace(info=lambda *a: None, warning=lambda *a: None),
         _kinematics=lambda: (chain or Chain(), model, no_model),
@@ -406,6 +408,40 @@ def test_bad_params_are_refused():
 
     out = _go(_engine(Arm(answers=[brief]), Model(), speed_scale=0.01), dry_run=True)
     assert out["speed_scale"] == 0.01  # the floor itself is the driver's to take
+
+
+def test_under_an_orchestrator_go_home_is_refused_and_activate_says_it_is_unavailable():
+    """With no perception class the orchestrator never dispatches go_home, so a goal an orchestrated
+    engine gets was sent to it directly, outside the orchestrator's arm lock (REVIEW_RULES,
+    Arbitration): nothing is planned or sent, on the mock and for a dry run too, and activate
+    reports the action unavailable (O1: an action reported available must be runnable)."""
+    for mock, params in ((False, {}), (False, {"dry_run": True}), (True, {})):
+        arm = Arm()
+        eng = _engine(arm, Model())
+        eng.orchestrated, eng.mock = True, mock
+        with pytest.raises(EngineError) as e:
+            _go(eng, **params)
+        assert e.value.error_code == "standalone_only" and not e.value.recoverable
+        assert "use_orchestrator:=false" in str(e.value) and arm.planned == [] and arm.sent == []
+    (offered,) = Capability.availability(eng, "", {})
+    assert offered.action_id == "go_home" and not offered.available
+    assert offered.reason == node.STANDALONE_ONLY
+    (offered,) = Capability.availability(_engine(Arm(), Model()), "", {})  # standalone
+    assert offered.available and offered.reason == ""
+
+
+def test_the_fragments_and_the_launch_file_run_the_engine_standalone():
+    """The mode go_home runs in is the one a deployment gets: the real fragment's params (a profile
+    can override only what is listed there), the mock's command and the launch file's default."""
+    import yaml
+
+    here = home_arm_testlib.HERE.parent
+    real = yaml.safe_load((here / "rammp-alternative.yaml").read_text())
+    assert real["params"]["use_orchestrator"] is False
+    mock = yaml.safe_load((here / "rammp-alternative.mock.yaml").read_text())
+    assert "use_orchestrator:=false" in mock["container"]["command"]
+    launch = (here / "launch" / "home_arm.launch.py").read_text()
+    assert '("use_orchestrator", "false")' in launch
 
 
 def test_params_that_are_no_json_object_are_bad_params_not_an_exception():

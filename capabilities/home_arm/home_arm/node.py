@@ -32,7 +32,8 @@ first). A pause never stops a goal half way: one asked for while a goal flies is
 before the next is sent, and after any pause the arm is read again before anything is sent. The
 arm is read once more at the end, and "home" is said only of an arm that is there.
 
-Standalone only (use_orchestrator:=false): no selection dispatches go_home (perception_classes).
+Standalone only (use_orchestrator:=false, as the fragments and the launch file run it): no
+selection dispatches go_home (perception_classes), and under an orchestrator it is refused.
 
     ros2 launch home_arm home_arm.launch.py use_orchestrator:=false
 make action CAP=home_arm ACTION=go_home PARAMS='{"dry_run": true}'  # plans, sends nothing"""
@@ -74,6 +75,12 @@ PAUSED_S = 0.05  # a checkpoint that blocked longer than this was a pause
 # How self.arm's own refusal of a plan begins (no action server, no answer, a rejected goal, no
 # result in arm.plan_timeout_s): the planner did not plan, which says nothing of the way home.
 NOT_PLANNED = "plan_to_joints: "
+# Why go_home does not run under an orchestrator (execute's refusal, activate's reason)
+STANDALONE_ONLY = (
+    "go_home runs standalone only (use_orchestrator:=false): the orchestrator dispatches it on "
+    "no selection, so a goal an orchestrated engine gets was sent to it directly, outside the "
+    "orchestrator's arm lock"
+)
 # The planner's words for a start it will not plan from (cuRobo's INVALID_START_STATE_*, and
 # rammp-curobo's START_IN_LIMIT_MARGIN, which is said before any collision is looked at).
 START_REFUSED = ("INVALID_START", "START_IN_LIMIT")
@@ -118,10 +125,11 @@ class Capability(CapabilityEngine):
     display_name = "Home arm"
     # Not tied to an object. An object's selection activates the engines of its class, so with no
     # class no selection offers go_home and the orchestrator never dispatches it. A deliberate,
-    # stated limit: go_home is for standalone use only (use_orchestrator:=false), until the
-    # orchestrator can dispatch an action that belongs to no object. A goal sent straight to an
-    # orchestrated engine would move the arm outside the orchestrator's arm lock, so that is not
-    # offered as a way to run it (docs/interface.md, "Orchestrator interface").
+    # stated limit: go_home is standalone only (use_orchestrator:=false, as the fragments and the
+    # launch file run it), until the orchestrator can dispatch an action that belongs to no
+    # object. Under an orchestrator any goal the engine gets was sent to it directly and would
+    # move the arm outside the orchestrator's arm lock: execute() refuses it (standalone_only) and
+    # activate reports go_home unavailable (docs/interface.md, "Orchestrator interface").
     perception_classes = []
     required_resources = ["arm"]
     actions = [
@@ -146,7 +154,18 @@ class Capability(CapabilityEngine):
 
     # -- the action -------------------------------------------------------------------------------
 
+    def availability(self, instance_id, world_state):
+        """activate's answer: go_home, available standalone and not under an orchestrator, where
+        execute() refuses it (an action reported available must be runnable)."""
+        offered = CapabilityEngine.availability(self, instance_id, world_state)
+        if self.orchestrated:
+            for action in offered:
+                action.available, action.reason = False, STANDALONE_ONLY
+        return offered
+
     def execute(self, action_id, params, ctx):
+        if self.orchestrated:  # see perception_classes: not the orchestrator's to dispatch yet
+            raise EngineError("standalone_only", f"{STANDALONE_ONLY}: nothing planned or sent")
         began = time.monotonic()
         self._paused_s = 0.0  # what a pause took (_pause_point): no part of either budget
         if not isinstance(params, dict):  # the base class hands over whatever JSON the goal carried

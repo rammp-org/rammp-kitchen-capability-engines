@@ -9,7 +9,8 @@ container:
   network_mode: host
   ipc: host
   # To give make_sim() a model, append "mock_urdf:=/path/to/robot.urdf" (arm.mock_urdf).
-  command: ["ros2", "launch", "home_arm", "home_arm.launch.py", "mock:=true"]
+  # Standalone, as the real alternative: under an orchestrator the engine refuses go_home.
+  command: ["ros2", "launch", "home_arm", "home_arm.launch.py", "mock:=true", "use_orchestrator:=false"]
 # No `params:` here: they would need the node's executable as the command, and this fragment uses `ros2 launch` for mock:=true.
 publishes: [/home_arm/status]
 # through self.arm, during an action only: a read of /joint_states waits for the driver's /ee_state and

@@ -31,6 +31,9 @@ container:
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
 params:
+  # Standalone: the orchestrator cannot dispatch go_home (it belongs to no object), and under it the
+  # engine refuses the goal (standalone_only). true registers it, for when the orchestrator can.
+  use_orchestrator: false
   # The home (rad, J1..J7): flatbot's, the arm 8 in forward on the chair (2026-11-09). Per robot.
   home_joints: [0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]
   body_layers: "/config/robot/curobo/planner.yaml"

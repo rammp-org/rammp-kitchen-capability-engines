@@ -129,6 +129,7 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 
 | Error code            | Recoverable | Meaning                                                                                                                                                                                                                                                     |
 | --------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `standalone_only`     | no          | The engine runs under an orchestrator (`use_orchestrator` true), which cannot dispatch `go_home`: the goal was sent to it directly, outside the orchestrator's `arm` lock; nothing planned or sent                                                          |
 | `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                                                                                                                                             |
 | `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                                                                                                                                     |
 | `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in \[0.01, 1\] (the driver rejects a goal sent at less than 0.01)                                                                                                                                       |
@@ -142,18 +143,21 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `arm_moving`          | yes         | The arm moved while it was planned for, twice, or during a pause before a goal was sent; nothing sent, or after the step clear the way home not sent                                                                                                        |
 | `motion_failed`       | no          | The driver refused or did not complete a goal (an e-stop, control taken and the divergence guard included), the arm ended away from the home, or its joints could not be read after a goal flew; it holds where it stopped                                  |
 
-Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
-the orchestrator is up. It names no perception classes, because `go_home` is not
-about an object; an object's selection activates the engines of its class, so no
-selection offers `go_home` and the orchestrator never dispatches it.
+It names no perception classes, because `go_home` is not about an object; an
+object's selection activates the engines of its class, so no selection offers
+`go_home` and the orchestrator never dispatches it.
 
-That is a deliberate, stated limit: `go_home` is for standalone use only
-(`use_orchestrator:=false`, the goal sent with `make action` or
-`ros2 action send_goal`), on a robot where nothing else is commanding the arm,
-until the orchestrator can dispatch an action that belongs to no object. A goal
-sent straight to an orchestrated engine's `execute_action` is not a way to run
-it: the orchestrator's `arm` lock is not taken for such a goal, so it could
-dispatch another engine's arm action while the arm goes home.
+That is a deliberate, stated limit: `go_home` is standalone only, until the
+orchestrator can dispatch an action that belongs to no object. Both fragments and
+the launch file run the engine with `use_orchestrator:=false` (it registers with
+nothing), the goal sent with `make action` or `ros2 action send_goal`, on a robot
+where nothing else is commanding the arm. With `use_orchestrator:=true` it
+registers with `/rammp_orchestrator/register_engine` (retrying until the
+orchestrator is up) and refuses `go_home` (`standalone_only`, a dry run too),
+and `activate` reports it unavailable with that reason: any goal an orchestrated
+engine gets was sent to it directly, outside the orchestrator's `arm` lock, so
+the orchestrator could dispatch another engine's arm action while the arm goes
+home.
 
 ## Parameters
 
@@ -161,15 +165,15 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name               | Default                                                         | Meaning                                                                                                                 |
-| ------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator` | `true`                                                          | `false` runs standalone: no registration, drive it by CLI                                                               |
-| `mock`             | `false`                                                         | `true` skips hardware (the mock alternative sets it)                                                                    |
-| `home_joints`      | `[0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]` | The home (rad, J1..J7, continuous joints in (-pi, pi\]): flatbot's, the arm 8 in forward on the chair (2026-11-09)      |
-| `body_layers`      | `"/config/robot/curobo/planner.yaml"`                           | The planner config whose boxes and spheres the step out uses; `""` turns the step out off                               |
-| `plan_tries`       | `3`                                                             | How many times the home is asked for directly before the waypoints                                                      |
-| `tool_link`        | `"arm_tool_frame"`                                              | The link whose height the step out holds                                                                                |
-| `speed_scale`      | `0.3`                                                           | The driver's speed_scale for the plans home (0.01..1, the go_to goals' default); the step clear has its own slow timing |
+| Name               | Default                                                         | Meaning                                                                                                                                                    |
+| ------------------ | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator` | `true` (the fragments and the launch file set `false`)          | `false` runs standalone, the only mode `go_home` runs in: no registration, drive it by CLI; `true` registers, and `go_home` is refused (`standalone_only`) |
+| `mock`             | `false`                                                         | `true` skips hardware (the mock alternative sets it)                                                                                                       |
+| `home_joints`      | `[0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]` | The home (rad, J1..J7, continuous joints in (-pi, pi\]): flatbot's, the arm 8 in forward on the chair (2026-11-09)                                         |
+| `body_layers`      | `"/config/robot/curobo/planner.yaml"`                           | The planner config whose boxes and spheres the step out uses; `""` turns the step out off                                                                  |
+| `plan_tries`       | `3`                                                             | How many times the home is asked for directly before the waypoints                                                                                         |
+| `tool_link`        | `"arm_tool_frame"`                                              | The link whose height the step out holds                                                                                                                   |
+| `speed_scale`      | `0.3`                                                           | The driver's speed_scale for the plans home (0.01..1, the go_to goals' default); the step clear has its own slow timing                                    |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the
