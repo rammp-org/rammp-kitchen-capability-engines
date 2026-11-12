@@ -1103,24 +1103,29 @@ def test_a_home_planned_ahead_flies_as_planned_only_from_where_it_starts(ctx, tm
     DRIFT_REPLAN_RAD of where they start — joint_3 a whole turn round is
     where it starts, the short way round — they fly as planned and the
     planner is not asked; beyond it, home is planned from where the arm
-    stands, as with none. Either way in the run log."""
+    stands, as with none. Either way in the run log. The turn is on the
+    plan's side, where the robot has it: the planner plans on HOME's branch
+    (branches.planner_branch) and the driver reports the joint within pi."""
     import json
 
     from conftest import leg as make_leg
     from conftest import runner as make_runner
 
+    from box_opening.runtime.branches import planner_branch
     from box_opening.tasks import press_demo
 
     cfg = load_press_demo(PINK)
     ctx.press_cfg = cfg
     rest = list(press_demo.rest_joints(cfg))
     look = [0.3, -0.9, 0.4, -1.9, 0.2, -1.0, 1.5]
-    ahead = [make_leg("home", start=look, end=rest, speed=1.0)]
-    here = [v + (off if j == 1 else 2.0 * math.pi if j == 2 else 0.0) for j, v in enumerate(look)]
+    planned_from = planner_branch(look)
+    assert abs(planned_from[2] - look[2]) == pytest.approx(2.0 * math.pi)  # joint_3 a whole turn from the reading
+    ahead = [make_leg("home", start=planned_from, end=rest, speed=1.0)]
+    here = [v + (off if j == 1 else 0.0) for j, v in enumerate(look)]
     ctx.client.live = list(here)
     assert reach_press._go_home(ctx, cfg, make_runner(ctx.client, tmp_path), "STOP: test", ahead=ahead) is True
     if flown:
-        assert ctx.client.joint_starts == [] and ctx.client.exec_starts == [pytest.approx(look)]
+        assert ctx.client.joint_starts == [] and ctx.client.exec_starts == [pytest.approx(planned_from)]
     else:
         assert ctx.client.joint_starts == [pytest.approx(here)] and ctx.client.exec_starts == [pytest.approx(here)]
         assert "home is planned again from here" in capsys.readouterr().out
