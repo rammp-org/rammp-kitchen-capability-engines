@@ -75,7 +75,8 @@ which the engine does not know. So they are a deployment's choice:
 step beside the seated user. Off, nothing but the planner's own plans moves the
 arm: a start the planner refuses inside the padding fails `start_in_padding`, and
 a start near a joint limit is planned from as any other (the planner takes one
-outside its own margin) and fails `near_limit` where no way home is planned.
+outside its own margin) and fails `near_limit` where the planner refuses it for
+that margin or no way home is planned.
 
 A plan is asked for only while a whole `arm.plan_timeout_s` still fits in 60 s of
 planning, and a way home that would take the action past 100 s at `speed_scale`
@@ -166,7 +167,7 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `arm_not_ready`       | yes         | The driver says the arm must not be commanded now (an e-stop; arbitration enforced, the arm another sender's or no token given; or no `/control_status` from it); nothing planned or sent. A dry run is not held to it                                                           |
 | `body_model`          | no          | The driver's URDF cannot be read; or (plan-free steps on) the planner's config cannot be read and it is needed: the planner refuses the start as in collision, or a joint is too near its limit (the step off it could not be checked against the chair and user); nothing moved |
 | `start_in_padding`    | no          | The planner refuses a start inside the chair's padding, and plan-free steps are off (`plan_free_steps`), no step out keeps the tool up, or the arm stands in a chair or user box itself, past its padding (no plan-free step is taken from there); nothing moved: jog it clear   |
-| `near_limit`          | no          | A joint stands too near its limit: no step off it lets the home plan, or (plan-free steps off) the planner finds no way home from there; nothing moved: jog it clear                                                                                                             |
+| `near_limit`          | no          | A joint stands too near its limit: no step off it lets the home plan, or (plan-free steps off) the planner refuses the start for its limit margin or finds no way home from there; nothing moved: jog it clear                                                                   |
 | `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                                                                                                                        |
 | `planner_unavailable` | yes         | The planner did not plan a request: not running, no result in time, or busy with another client's plan; nothing moved                                                                                                                                                            |
 | `plan_unusable`       | no          | The planner answered with a plan that is not positions and velocities of the arm's seven joints at every point (a planner for another arm or interface); nothing moved                                                                                                           |

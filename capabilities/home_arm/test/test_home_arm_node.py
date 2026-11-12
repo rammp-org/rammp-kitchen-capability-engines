@@ -452,6 +452,12 @@ def test_with_plan_free_steps_off_a_start_the_planner_refuses_is_not_stepped_out
     arm = Arm()
     out = _go(_engine(arm, Model(inside=0.012, escape=path), plan_free_steps=False))
     assert out["planned"] == "directly" and not out["stepped_out"] and len(arm.sent) == 1
+    # a start it refuses for a joint's limit margin (said before it looks at any box) is named so
+    arm = Arm(answers=[_refuses_start(START, "START_IN_LIMIT_MARGIN: joint_6 0.05 rad from it")])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(inside=0.012, escape=path), plan_free_steps=False))
+    assert e.value.error_code == "near_limit" and "plan_free_steps" in str(e.value)
+    assert "START_IN_LIMIT_MARGIN" in str(e.value) and len(arm.planned) == 1 and arm.sent == []
 
 
 def test_with_plan_free_steps_off_a_start_near_a_joint_limit_is_planned_from_as_any_other():

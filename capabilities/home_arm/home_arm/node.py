@@ -472,6 +472,13 @@ class Capability(CapabilityEngine):
             # engine's copy's alone, and the home is asked for from here as from any start.
             if _refuses_start(plan):
                 depth = float(model.depth(q0)[0])
+                if not steps and "START_IN_LIMIT" in str(plan.message or "").upper():
+                    # its word is of a joint's limit margin, said before it looks at any box
+                    raise EngineError(
+                        "near_limit",
+                        f"the planner refuses the start ({plan.message}): a joint stands inside "
+                        f"its limit margin, and {STEPS_OFF}: jog the arm clear by hand",
+                    )
                 if not steps:
                     raise EngineError(
                         "start_in_padding",
