@@ -566,6 +566,8 @@ class CapabilityEngine(Node):
             request_payload["selected_instance_id"] = selected_instance_id
 
         with run.ui_lock:
+            if run.ui_closed:
+                return False
             # Merge into the run's full desired state regardless of which
             # branch below actually fires -- a later reopen (after a refusal,
             # or because a goal-open was already in flight) must still carry
@@ -650,9 +652,14 @@ class CapabilityEngine(Node):
 
     def _ui_open_goal(self, run: "_Run", token: bytes) -> bool:
         if not self._ui_request_client.server_is_ready():
+            with run.ui_lock:
+                run.ui_opening = False
             self.get_logger().warning("ui_bridge_node's ~/request_user_input server unavailable")
             return False
         with run.ui_lock:
+            if run.ui_closed:
+                run.ui_opening = False
+                return False
             # The run's full merged desired state, not just whichever call
             # triggered this (re)open -- so a replacement goal always carries
             # forward previously-set panel/objects/selection content.
@@ -699,6 +706,18 @@ class CapabilityEngine(Node):
         goal_handle.get_result_async().add_done_callback(
             lambda result_future: self._ui_on_result(run, goal_handle, result_future)
         )
+        # Updates can arrive while acceptance is in flight. Flush the merged state.
+        with run.ui_lock:
+            payload = dict(run.ui_desired_state)
+        if self._ui_update_client.service_is_ready():
+            future = self._ui_update_client.call_async(
+                UpdateUserInputPanel.Request(
+                    token=list(self._assigned_token), request_json=json.dumps(payload)
+                )
+            )
+            future.add_done_callback(
+                lambda f: self._ui_on_update_response(run, self._assigned_token, goal_handle, f)
+            )
 
     def _ui_on_feedback(self, run: "_Run", feedback_msg) -> None:
         try:

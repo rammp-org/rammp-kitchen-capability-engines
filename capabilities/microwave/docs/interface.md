@@ -1,0 +1,225 @@
+# Microwave Capability — Interface
+
+**Rung:** ad-hoc (declared by this module, not standardized)
+**Owner:** @dhyi-svg
+**Tier:** experimental
+
+## What it does
+
+Opens and closes the microwave door with the Kinova arm. On an `open` goal it finds the handle from the
+wrist camera (the scene camera's door → door-plane fit → the vertical bar sticking out of it, and the hinge
+edge), grasps the handle squared to the door, swings the door open (the largest swing, 75 down
+to 45°, whose whole arc passes the sim gates), lets go and pushes the door further open by
+replaying the user's push-open demo relative to the door. Every leg is planned and sim-gated
+before anything moves; a failed check stops the run with the arm holding where it is. Without
+it, no kitchen task can put anything in the microwave.
+
+**The arm moves only if the node runs with `allow_execute: true` and the goal sets
+`execute`.** Otherwise every goal is a dry run: detect, plan and gate, nothing commanded.
+
+The open saves the door's geometry (`<data_dir>/door.json`) for the close; every run is logged
+to `<data_dir>/runs/<time>_open/` (events, every trajectory sent, arm state at 25 Hz, camera
+frames) and every detection frame to `<data_dir>/detections/`.
+
+## Publishes
+
+| Topic               | Type              | Rate | Meaning                                                                                                   |
+| ------------------- | ----------------- | ---- | --------------------------------------------------------------------------------------------------------- |
+| `/microwave/status` | `std_msgs/String` | 1 Hz | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
+
+## Subscribes
+
+| Topic                                | Type                                           | Required      | Meaning                                                                                             |
+| ------------------------------------ | ---------------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------- |
+| `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | yes           | Handle detection (`color_topic`)                                                                    |
+| `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes           | Intrinsics (`camera_info_topic`)                                                                    |
+| `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes           | Depth **aligned to colour** (`depth_topic`)                                                         |
+| `/scene_camera/color/image_raw`      | `sensor_msgs/Image`                            | without boxer | `open`: places the view pose (`scene_color_topic`)                                                  |
+| `/scene_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | without boxer | Scene camera intrinsics (`scene_camera_info_topic`)                                                 |
+| `/scene_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | without boxer | Scene depth, **aligned to colour** (`scene_depth_topic`)                                            |
+| `/perception/object_detections`      | `rammp_perception_interfaces/ObjectDetections` | without boxer | The scene segmenter's (RF-DETR's) 2D `box_class` box on the scene camera (`scene_detections_topic`) |
+| `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`                           | yes           | Camera pose in `arm.frame` (hand-eye calib)                                                         |
+
+The camera subscriptions (and boxer's `box_topic`, when set) exist only while an action runs;
+the engine destroys them when it ends. `self.arm` subscribes to the arm driver's state topics
+the same way.
+
+## Orchestrator interface
+
+Served under `/microwave/`, types from `rammp_orchestrator_interfaces`:
+
+| Name                        | Type                   | Meaning                                       |
+| --------------------------- | ---------------------- | --------------------------------------------- |
+| `/microwave/activate`       | `srv/Activate`         | Which actions are available for the selection |
+| `/microwave/execute_action` | `action/ExecuteAction` | Run an action; progress as feedback           |
+| `/microwave/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
+| `/microwave/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
+
+| Action  | Params                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Result payload                                                             |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `open`  | `execute` (bool, default false), `swing_deg` (45–75; default 50 with the push-open, else 75), `push_open` (bool, default true), `speed` ((0, 1\], default 1.0: scales every arm motion), `view_only` (bool, default false: stop at the view pose). The open always goes to the view pose in front of the microwave first -- placed by boxer's box, or without boxer by the scene camera's view of the door -- and detects the handle from there; a dry run stops before it unless the arm is already there (`view_only` with `execute` first) | `{"executed": bool, "note": str, "runs_dir": str, "holding_handle": bool}` |
+| `close` | `execute`, `speed` as above, plus the push-close settings in `close_door.CLOSE_DEFAULTS` (below)                                                                                                                                                                                                                                                                                                                                                                                                                                              | `{"executed": bool, "note": str, "runs_dir": str, "holding_handle": bool}` |
+
+From the moment `open` closes the gripper on the handle until the push-open lets go of it, its progress is
+reported `pausable: false`: a pause or cancel there would leave the hand holding the door. If the open stops in
+that stretch, the error says the hand is still on the handle and `holding_handle` is true (a cancelled action can't
+move the arm, so the node logs it); release it with `python3 -m microwave.open_door --release --execute`. An open
+with `push_open: false` ends holding the handle by design.
+
+`close` pushes the open door shut with the side of the hand: no grasp, the gripper never touched (it
+may hold a container). It needs the door file the open saved, and the door not moved since. Its
+settings, by default the plain close (hand empty, fingers pointing left):
+
+| Setting                           | Default                        | Meaning                                                                                          |
+| --------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `door_deg`                        | door file                      | How far the door is open now (deg)                                                               |
+| `route_over`                      | `false`                        | Reach the swing start over the open door's top (keeps J4 off its limit)                          |
+| `over_above` / `over_past`        | `0.08` / `0.05`                | `route_over`: height above the door top / overshoot past the swing start (m)                     |
+| `side_past_hinge`                 | `0.08`                         | Swing start, sideways past the hinge (m)                                                         |
+| `push_radius` / `push_radius_end` | `0.28` / `0.26`                | Swing radius about the hinge, start / end (m)                                                    |
+| `push_z`                          | hand height                    | Height of the swing and push (m)                                                                 |
+| `keep_orientation` / `face_door`  | `false` / `false`              | Keep the hand as it is (holding a container) / face the closed door; neither: fingers point left |
+| `push_stop_short`                 | `0.03`                         | The swing stops this short of the modelled closed door (m)                                       |
+| `push_preload` / `push_max`       | `0.005` / stop_short + preload | The final push: past the closed door / at most (m)                                               |
+| `push_contact_nm`                 | `3.0`                          | Joint-torque change (J1–J4, Nm) whose double stops the push: door shut                           |
+| `hold_offset_x`                   | `0.0`                          | Plan with the door shifted in x (m); `-0.152` holding a container                                |
+| `retreat_dist`                    | `0.20`                         | Back straight out up to this far after the push (m)                                              |
+| `smooth`                          | `false`                        | The swing as one blended Cartesian trajectory                                                    |
+
+The close that latched on 2026-10-21, holding a container: `{"route_over": true, "keep_orientation": true, "door_deg": 90, "hold_offset_x": -0.152, "push_radius": 0.17, "push_radius_end": 0.15, "over_above": 0.18, "push_z": 0.22, "push_contact_nm": 6}`.
+
+Failures: `refused` (a check failed; the message says which and the arm holds), `stopped`
+(a motion stopped short), `bad_params`. On an executed success it marks the object `opened`
+(true after `open`, false after `close`). Nothing measures whether the door latched: watch it.
+
+`open_door_ui` and `close_door_ui` are the UI actions **Open Microwave Door** and **Close Microwave Door**.
+Each runs the whole `open` or `close` from one press, with no params and no intermediate prompts: `open` with
+`execute` and `push_open` (explicitly: off by default on this branch; ending at the view pose); `close` with `execute` and the settings that closed the door
+on 11-12 (`face_door`, `route_over`, `over_above` 0.10, `side_past_hinge` 0.12, `push_radius` 0.31 to 0.25,
+`push_z` 0.46; the node's `UI_ACTIONS`), starting from the view pose. It requests execution;
+`allow_execute` must be true on hardware. A recoverable failure before the hand is on the handle (a check refused,
+nothing past it moved) shows its reason and restores the same button; retry waits for an explicit tap. A failure with
+the hand still on the handle, or an unrecoverable one, is shown with Done only and not retried. Success/error notices
+remain until Done or cancellation; a panel is re-sent only if the bridge dropped it. The UI is offered only the UI
+actions (`availability`); the direct `open` / `close` dry-run/execute API is unchanged.
+
+The engine uses the counter example's direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_ui_event()`,
+ported from `feat/engine_update` as on `feature/12-microwave-grab`), including the orchestrator-pushed execution
+token. `ui_bridge_node_name` (default `ui_bridge_node`) selects the bridge. No UI session means no panel; a
+recoverable failure then returns as it is. JSON shapes are in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
+
+Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
+the orchestrator is up.
+
+## Parameters
+
+ROS parameters, declared with defaults under `params:` in the real fragment. A
+deployment sets one per robot with an `overrides:` entry in its profile; sheppy
+passes them as a params file.
+
+| Name                      | Default                              | Meaning                                                                                                                                                                     |
+| ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`        | `true`                               | `false` runs standalone: no registration, drive it by CLI                                                                                                                   |
+| `mock`                    | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                                                                        |
+| `allow_execute`           | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                                                                  |
+| `data_dir`                | `/microwave_data`                    | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                         |
+| `color_topic`             | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                                                                          |
+| `camera_info_topic`       | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                                                                     |
+| `depth_topic`             | `/wrist_camera/depth/image_rect_raw` | Wrist depth, aligned to colour (D405, OAK); the D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`                                                                |
+| `camera_frame`            | `""`                                 | Camera optical frame; `""` = the colour image's frame_id                                                                                                                    |
+| `scene_color_topic`       | `/scene_camera/color/image_raw`      | Scene camera colour: without boxer, the door plane inside the scene segmenter's microwave box places the view pose and the wrist detection's crop                           |
+| `scene_camera_info_topic` | `/scene_camera/color/camera_info`    | Scene camera intrinsics                                                                                                                                                     |
+| `scene_depth_topic`       | `/scene_camera/depth/image_rect_raw` | Scene camera depth, aligned to colour                                                                                                                                       |
+| `scene_detections_topic`  | `/perception/object_detections`      | The scene segmenter's 2D boxes on the scene camera: the door is looked for inside its `box_class` box                                                                       |
+| `box_topic`               | `""`                                 | boxer's 3D boxes (`/perception/object_detections_3d`): view pose + crop to the microwave's box. `""` = the scene camera places the view pose and the crop                   |
+| `box_class`               | `microwave`                          | The `perception_class` of the box to use                                                                                                                                    |
+| `view_dists`              | `[0.30, 0.25, 0.35, 0.40]`           | View pose: camera distances out from the box's front face (m), in order                                                                                                     |
+| `view_heights`            | `[0.15, 0.20, 0.10, 0.25, 0.05]`     | View pose: camera heights above the box's middle (m), in order                                                                                                              |
+| `view_sides`              | `[0.10, 0.15, 0.05, 0.0]`            | View pose: offsets along the face away from the user (+y, m), tried first                                                                                                   |
+| `max_reach_m`             | `0.90`                               | How far out (m, arm base to the tool point, 12 cm past the flange) any goal and the swing may reach; the Gen3 is rated to 902 mm, and past ~0.90 the arm nears full stretch |
+| `grasp_max_reach_m`       | `0.915`                              | How far out (m, arm base to the grasp point) the grasp may be: the farthest point of the open, since the handle swings toward the arm. Raise it together with `max_reach_m` |
+| `record_bag`              | `true`                               | Record a rosbag into each run's folder (skipped with under 5 GB free)                                                                                                       |
+| `bag_frame_hz`            | `0.5`                                | Camera frames a second in the bag, both cameras (~75 MB a minute)                                                                                                           |
+| `bag_max_mb`              | `300.0`                              | Past this the bag takes no more frames (TF still)                                                                                                                           |
+| `wrist_infra*_topic`      | `""`                                 | The wrist stereo pair (infra1/2 image + info) in the bag; any `""`: not recorded                                                                                            |
+
+Per-rig constants that are not parameters yet, in `microwave/constants.py`: the park pose
+(`PARK_JOINTS`, hand-placed on the Jetson rig 2026-10-07), the grasp corrections (`GRIP_EXT`,
+`GRASP_X_ADJUST`, `VERTICAL_CORR`) and the hinge corrections (`HINGE_BEHIND_FACE`,
+`HINGE_PAST_EDGE`). `GRASP_PITCHES_DEG` is `door_common.open_door`'s -- 14° first for that rig's
+tilted base.
+
+`self.arm` reads these `arm.*` parameters once at startup and refuses changes
+afterwards. They are set per robot like any other; `arm.mock_urdf` names the
+URDF `make_sim()` loads in mock runs (the real driver supplies its own).
+`arm.sender_id` is the one left out of the real fragment: its default is the
+engine id, so each capability sends its goals under its own name.
+
+| Name                           | Default                                            | Meaning                                                    |
+| ------------------------------ | -------------------------------------------------- | ---------------------------------------------------------- |
+| `arm.tool_z`                   | `0.12`                                             | Tool frame offset along the flange z (m)                   |
+| `arm.dt`                       | `0.02`                                             | Trajectory sample spacing (s)                              |
+| `arm.joint_speed`              | `0.85`                                             | Peak joint speed of joint moves (rad/s)                    |
+| `arm.cart_speed`               | `0.16`                                             | Peak tool speed of Cartesian paths (m/s)                   |
+| `arm.contact_joint_speed`      | `0.5`                                              | Peak joint speed of contact moves (rad/s)                  |
+| `arm.contact_cart_speed`       | `0.09`                                             | Peak tool speed of contact moves (m/s)                     |
+| `arm.min_duration_s`           | `1.0`                                              | Shortest trajectory duration (s)                           |
+| `arm.cart_step_m`              | `0.02`                                             | Longest Cartesian step before IK (m)                       |
+| `arm.cart_step_deg`            | `5.0`                                              | Largest Cartesian turn per step before IK (deg)            |
+| `arm.rot_equiv_m`              | `0.15`                                             | Travel a 1 rad turn counts as when timing a path (m)       |
+| `arm.max_knot_jump_deg`        | `20.0`                                             | Largest joint change between Cartesian knots (deg)         |
+| `arm.path_tol_rad`             | `0.15`                                             | Per-joint tracking tolerance of trajectories (rad)         |
+| `arm.gripper_force`            | `0.5`                                              | Default gripper force (0..1)                               |
+| `arm.gripper_speed`            | `0.5`                                              | Default gripper speed (0..1)                               |
+| `arm.frame`                    | `"arm_mount"`                                      | Frame of go_to_ee_pose goals and /ee_state                 |
+| `arm.sender_id`                | the engine id (RammpArm standalone: `"microwave"`) | sender_id on goals (the engine id under the engine)        |
+| `arm.go_to_speed_scale`        | `0.3`                                              | speed_scale of go_to goals (0.01..1)                       |
+| `arm.go_to_timeout_s`          | `120.0`                                            | go_to planning plus execution limit (s)                    |
+| `arm.go_to_track_m`            | `0.01`                                             | go_to_ee_pose: largest tool error at the end (m)           |
+| `arm.go_to_track_deg`          | `2.0`                                              | go_to_joint_config: largest end joint error (deg)          |
+| `arm.max_ik_err`               | `0.02`                                             | IK position error above which a pose is unreachable (m)    |
+| `arm.max_step_jump_deg`        | `20.0`                                             | Largest joint change of a planned step (deg)               |
+| `arm.j6_guard_deg`             | `115.0`                                            | Largest absolute J6 the sim accepts (deg)                  |
+| `arm.j4_guard_deg`             | `144.0`                                            | Largest absolute J4 the sim accepts (deg)                  |
+| `arm.max_continuous_delta_deg` | `170.0`                                            | Largest short-way step of a free joint (deg)               |
+| `arm.keep_out_err`             | `9.0`                                              | IK error reported for a keep-out solution (m)              |
+| `arm.ik_max_iterations`        | `200`                                              | PyBullet IK iterations per solve                           |
+| `arm.clearance_query_m`        | `0.5`                                              | clearance() ignores bodies farther than this (m)           |
+| `arm.fingertip_open_rad`       | `0.0`                                              | Sim finger joint angle with the gripper open (rad)         |
+| `arm.finger_closed_rad`        | `0.7`                                              | Sim finger joint angle with the gripper closed (rad)       |
+| `arm.state_wait_s`             | `10.0`                                             | First arm call: wait for the driver's state (s)            |
+| `arm.state_stale_s`            | `0.5`                                              | Motion state older than this is an error (s)               |
+| `arm.diagnostics_stale_s`      | `3.0`                                              | /diagnostics older than this is an error (s)               |
+| `arm.goal_accept_s`            | `5.0`                                              | Wait for the driver to accept or reject a goal (s)         |
+| `arm.result_margin_s`          | `30.0`                                             | A trajectory's result may come this long after its end (s) |
+| `arm.poll_s`                   | `0.01`                                             | Poll period of a running motion (s)                        |
+| `arm.cancel_settle_s`          | `0.4`                                              | Wait for a cancelled goal to settle (s)                    |
+| `arm.halt_status_wait_s`       | `0.2`                                              | After a HALTED goal, wait for an e-stop status (s)         |
+| `arm.planner_wait_s`           | `5.0`                                              | Wait for the cuRobo planner's action server (s)            |
+| `arm.go_to_settle_s`           | `0.3`                                              | After a go_to goal, let the state catch up (s)             |
+| `arm.gripper_period_s`         | `0.02`                                             | gripper() setpoint period (s)                              |
+| `arm.gripper_moved`            | `0.002`                                            | gripper(): position change that counts as moving (0..1)    |
+| `arm.gripper_judge_after_s`    | `0.5`                                              | gripper(): judge the fingers still only after (s)          |
+| `arm.gripper_still_s`          | `0.3`                                              | gripper(): still this long means settled (s)               |
+| `arm.plan_timeout_s`           | `30.0`                                             | Wait for a cuRobo plan (s)                                 |
+| `arm.service_wait_s`           | `5.0`                                              | Wait for a service server to come up (s)                   |
+| `arm.service_call_s`           | `10.0`                                             | Wait for a service's answer (s)                            |
+| `arm.stream_timeout_s`         | `0.1`                                              | stream(): default setpoint timeout of a session (s)        |
+| `arm.publisher_match_s`        | `1.0`                                              | Wait for a new publisher to reach the driver (s)           |
+| `arm.close_stream_wait_s`      | `1.0`                                              | Wait for /close_stream's answer (s)                        |
+| `arm.mock_joints`              | `[0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]`        | Mock mode: the joints it starts at (rad, J1..J7)           |
+| `arm.mock_urdf`                | `""`                                               | Mock mode: the URDF file make_sim() loads (empty: none)    |
+
+## Hardware
+
+No devices of its own: it reaches the arm, the gripper and the wrist camera through their
+drivers' topics. It needs the arm with a 2F-85 gripper, a wrist RGB-D camera with depth aligned
+to colour, and a calibrated camera tf (hand-eye) into `arm.frame`. The real alternative still takes the
+GPU (`runtime: nvidia`, the `rammp-cuda` image), chosen for the YOLO handle detector, which is gone; nothing needs it now.
+
+## Alternatives
+
+| id               | What it is                                                                         |
+| ---------------- | ---------------------------------------------------------------------------------- |
+| `microwave_real` | The module proper                                                                  |
+| `microwave_mock` | Same interface, no hardware — for developing against this module without owning it |
