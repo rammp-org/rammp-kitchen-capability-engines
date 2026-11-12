@@ -73,6 +73,11 @@ orchestrator-pushed execution token. `ui_bridge_node_name` (default
 service. No UI session means no panel; HOME failure returns recoverably. JSON
 shapes are documented in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
 
+`arm.service_call_s` is 30 seconds in the microwave launch file and deployment
+fragments, allowing cuRobo's collision-world reload to finish on Snorlax. The
+launch argument `service_call_s` overrides this value. The shared engine default
+remains 10 seconds when running the executable directly without a parameter file.
+
 Served under `/microwave_place/`, types from `rammp_orchestrator_interfaces`:
 
 | Name                                                       | Default                                       | Meaning                                                                                                                             |

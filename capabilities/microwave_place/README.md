@@ -244,6 +244,11 @@ shows completion without planning or moving the arm; it does not simulate HOME
 planning failure. Real retrieval requires the arm driver, cuRobo, wrist camera,
 TF and SAM3 stack in addition to these four demo terminals.
 
+The launch file and deployment fragments set `arm.service_call_s` to 30 seconds:
+Snorlax's cuRobo world reload completed after the previous 10-second timeout.
+Override this launch setting with `service_call_s:=30.0`. Cancellation remains
+available during the wait; the collision-world and HOME checks still apply.
+
 | Action     | Params            | What it does                                                                                                      |
 | ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `place`    | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it                        |

@@ -170,7 +170,7 @@ params:
   "arm.gripper_still_s": 0.3
   "arm.plan_timeout_s": 30.0
   "arm.service_wait_s": 5.0
-  "arm.service_call_s": 10.0
+  "arm.service_call_s": 30.0
   "arm.stream_timeout_s": 0.1
   "arm.publisher_match_s": 1.0
   "arm.close_stream_wait_s": 1.0
