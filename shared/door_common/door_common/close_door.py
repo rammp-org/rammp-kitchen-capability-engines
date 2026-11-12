@@ -254,11 +254,24 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
                 f"a {(a_side + args.over_past) * 100:+.0f} cm, down to z {z:.3f} (mid door), "
                 "right + forward to the swing start"
             )
+            # ... or cross at the SWING START's depth, not the hand's: up, forward (or back) to it above the door,
+            # left over the door, down, right. 11-12: from a view pose 28 cm out, crossing at the hand's depth wound
+            # J6 to its limit; from 41 cm out the same crossing passed. Above the door top the door is no obstacle.
+            fwd_hi = pos(a(p_now), b_start)
+            fwd_hi[2] = z_over
+            over_hi = pos(a_side + args.over_past, b_start)
+            over_hi[2] = z_over
+            over_down = pos(a_side + args.over_past, b_start)
             routes = [
                 (
                     "over the door: up, left, down, right + forward",
                     [start, (up, quat), (left_hi, quat), (down, quat), goal],
-                )
+                ),
+                (
+                    f"over the door at the swing start's depth (b {b_start * 100:+.0f} cm): up, forward, left, down, "
+                    "right",
+                    [start, (up, quat), (fwd_hi, quat), (over_hi, quat), (over_down, quat), goal],
+                ),
             ]
         route = None
         for name, pts in routes:
