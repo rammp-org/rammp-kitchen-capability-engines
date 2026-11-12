@@ -509,7 +509,10 @@ def error_for(action_id, code, lines):
 
 class Capability(CapabilityEngine):
     display_name = "Open the container"
-    perception_classes = ["food container"]
+    # "food container" is the class the scene segmenter publishes. "food_container" is the same class without
+    # its space, for a selection typed by hand: the orchestrator's interactive_perception_node (the UI's object
+    # list on snorlax) reads `add <instance_id> <perception_class>` split on spaces, so the first cannot be typed
+    perception_classes = ["food container", "food_container"]
     required_resources = ["arm", "gripper"]
     actions = [
         Action(

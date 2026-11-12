@@ -827,6 +827,15 @@ def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):
     assert (logging.INFO, "plain line") in said
 
 
+def test_the_class_has_a_name_without_a_space_for_a_list_typed_by_hand(engine):
+    """interactive_perception_node's `add <instance_id> <perception_class>` is split on spaces: a "food
+    container" cannot be typed into it. Both names are claimed, the segmenter's first."""
+    classes = list(engine._manifest().perception_classes)
+    assert classes == ["food container", "food_container"]
+    typed = "add food_container_1 food_container".split()
+    assert typed[2] in classes and len(typed) == 3 and not any(" " in c for c in classes[1:])
+
+
 def test_open_box_is_offered_until_the_world_state_holds_the_container_opened(engine):
     def offered(record):
         world = {"objects": {"c1": record}} if record is not None else {}

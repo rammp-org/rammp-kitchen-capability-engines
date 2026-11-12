@@ -178,7 +178,11 @@ panel by, see "The UI"):
 | `/box_opening/acquire_control` | `srv/AcquireControl` | The orchestrator hands the engine the execution's token |
 | `/box_opening/release_control` | `srv/ReleaseControl` | ... and takes it back when the action has ended         |
 
-It is activated when the user selects a `food container`. `open_box` is offered
+It is activated when the user selects a `food container` (the scene
+segmenter's class), or a `food_container`: the same class without its space,
+for an object list typed by hand (the orchestrator's
+`interactive_perception_node` reads `add <instance_id> <perception_class>` split
+on spaces). `open_box` is offered
 where `allow_execute` is on, until the world state holds the container `opened`,
 and only while the world state's gripper holds nothing (`gripper.holding`, which
 a run stopped with the lid in the fingers leaves set).
