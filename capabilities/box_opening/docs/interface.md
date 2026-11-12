@@ -304,8 +304,8 @@ tilts): the press goes by the higher of the survey's top and the aim's, and
 the press's contact band refuses the rest (`contact_early`).
 
 `wrist_first` is off by default. On (a table faced from the front, where the
-scene camera sees no lid whole where the arm presses), a run without a selection
-looks for the container with the wrist camera before anything else: the three
+scene camera sees no lid whole where the arm presses), a run looks for the
+container with the wrist camera before anything else: the three
 wrist joints turn where the arm rests, the arm above them standing still, so the
 camera sees the table in front. The views are chosen on each run from the arm's
 kinematics, the chair model and the camera's own view, for any table height of
@@ -320,9 +320,32 @@ finds is taken over the scene camera's; where it finds none the scene camera's
 fix is used, and with neither the run stops with `not_found`, saying what each
 camera said. It adds about 1.5 s where the first view shows the container and
 up to about 10 s where none does; its frames are kept as captures
-(`captures/wrist-survey-*`). Only with the body model on, never with a selection.
+(`captures/wrist-survey-*`). Only with the body model on.
 
-### The survey and the orchestrator's selection: an interface gap
+With the orchestrator's selection the wrist looks too, and what it finds is the
+selected container only where it is tied to the selection. The selection is one
+of the scene camera's detections, so the tie is the scene camera's own view of
+that instance: the wrist's lid must stand no more than 75 mm to either side of
+the scene camera's line of sight to it, and, where the scene camera placed the
+selected container (a fix: whole, cut by its frame, or placed roughly), within
+0.20 m of that place along the line; with no fix, between the lines of sight to
+the two sides of the instance's own box in the scene image (a lid's width more
+past a side the frame cuts it at). A camera has a thing's direction right and
+its range wrong (the two cameras' fixes of one box differed 80 mm along that
+line and 8 mm across it), and two containers cannot stand nearer than 152 mm
+centre to centre, so a lid within 75 mm of the line is the selected one and not
+a neighbour beside it. A second lid-sized top in the same direction, a find that
+is not tied, or no find: the run goes on with the scene camera's own fix of the
+selected container where that is a careful one, and stops with `not_found`
+where it is only a rough one or there is none, saying what each camera said.
+Where the selected container was in none of the scene camera's frames the wrist
+is not turned: nothing would tie its find to the selection. The instance the
+world state is written for is the selected one in every case.
+
+### The side survey and the orchestrator's selection: an interface gap
+
+(This is `wrist_survey`, the poses over the arm's side. `wrist_first`, above,
+does run with a selection.)
 
 The orchestrator selects a container from the scene camera's detections
 (`/perception/object_detections`, by `instance_id`), and passes that selection

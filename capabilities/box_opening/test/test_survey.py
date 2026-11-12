@@ -918,3 +918,202 @@ def test_the_hands_floor_from_the_user_is_the_deployments_to_set():
     assert sv._hand_user_floor({sv.FRONT_HAND_USER_ENV: " 0.075 "}) == pytest.approx(0.075)
     for bad in ("", "near", "-0.1", "nan", "inf"):
         assert sv._hand_user_floor({sv.FRONT_HAND_USER_ENV: bad}) == 0.0
+
+
+# ------------------------------------------------------------- the wrist look and the orchestrator's selection
+
+# flatbot's scene camera as it stands (the 2026-11-09 recalibration): the lens at [0.305, -0.608, 0.400], looking
+# along +x, its image's right toward -y; the colour optical axes as columns
+SCENE_CAM = np.eye(4)
+SCENE_CAM[:3, :3] = [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]]
+SCENE_CAM[:3, 3] = [0.305, -0.608, 0.400]
+SCENE_K = [[400.0, 0.0, 320.0], [0.0, 400.0, 200.0], [0.0, 0.0, 1.0]]
+SELECTED = "food_container_2"
+MODEL = ContainerModel.load(CONTAINER)
+SCENE_WHY = "scene segmenter: none of its 12 boxes is this container: too few lid points"
+
+
+def _scene_fix(xy=(0.787, -0.240), rough=False):
+    """The scene camera's fix of the selected container (2026-11-11 19:13's place by default)."""
+    partial = "cut off by the frame toward arm_mount +y, placed roughly" if rough else ""
+    return SimpleNamespace(top_xyz=(xy[0], xy[1], 0.369), rough=rough, partial=partial)
+
+
+def _locator(mine=None, k=SCENE_K, tf=SCENE_CAM, wh=(640, 400)):
+    """The scene locator after its look for the selected container: TF, the lens, the selected instance's own box
+    in the segmenter's newest frame (None: it was not in it)."""
+    return SimpleNamespace(
+        base_to_color=lambda: tf,
+        seg=SimpleNamespace(latest=SimpleNamespace(mine=mine, wh=wh)),
+        grab=SimpleNamespace(k=k, dist=None, color=None),
+        last_why=SCENE_WHY,
+        look_record=lambda: {},
+    )
+
+
+def _wrist_fix(xy):
+    return SimpleNamespace(top_xyz=(xy[0], xy[1], 0.276), table_z_scene=0.185, partial="")
+
+
+def _along(tie, m, side=0.0):
+    """The point `m` along the tie's first line of sight from the lens, `side` m to its left."""
+    return (tie.cam_xy[0] + m * tie.a[0] - side * tie.a[1], tie.cam_xy[1] + m * tie.a[1] + side * tie.a[0])
+
+
+def test_the_wrists_find_is_the_selected_container_where_the_scene_camera_has_it_along_its_line_of_sight():
+    """The selection is the scene camera's detection: the wrist's lid is that container no more than 75 mm to the
+    side of the scene camera's line of sight to its fix and within 0.20 m of the fix along it. 2026-11-11 19:13, one
+    box by both cameras: scene [0.787, -0.240], wrist [0.728, -0.295] — 80 mm along the line, 8 mm across it."""
+    tie = press_demo.selection_tie(_locator(), _scene_fix(), MODEL, SELECTED)
+    assert tie.at_xy == (0.787, -0.240) and tie.a == tie.b and tie.instance_id == SELECTED
+    tied, how = tie.judge((0.728, -0.295))
+    assert tied and how == (
+        "8 mm to the side of the scene camera's line of sight to it and 80 mm nearer along it than where the scene "
+        "camera placed it"
+    )
+    reach = float(np.hypot(0.787 - 0.305, -0.240 + 0.608))
+    assert tie.judge(_along(tie, reach, side=0.07))[0] and tie.judge(_along(tie, reach, side=-0.07))[0]
+    # a neighbour standing beside it (its holder's flange against the selected one's: 152 mm) is not it
+    tied, how = tie.judge(_along(tie, reach, side=0.152))
+    assert not tied and how.startswith("152 mm to the side of the scene camera's line of sight to it")
+    assert tie.judge(_along(tie, reach - 0.19))[0] and tie.judge(_along(tie, reach + 0.19))[0]
+    tied, how = tie.judge(_along(tie, reach - 0.25))
+    assert not tied and "250 mm nearer along it" in how
+    assert tie.judge(_along(tie, -0.3)) == (False, "behind the scene camera's view of it")
+    rough = press_demo.selection_tie(_locator(), _scene_fix(rough=True), MODEL, SELECTED)
+    assert "than where the scene camera placed it roughly" in rough.judge((0.728, -0.295))[1]
+
+
+def test_with_no_scene_fix_the_selected_instances_own_box_in_the_scene_image_ties_the_wrists_find():
+    """The selected instance is in the detections and gives no fix (too few lid points, no depth): its own box in
+    the scene image still says in which direction it stands — between the lines of sight to its two sides."""
+    tie = press_demo.selection_tie(_locator(mine=(380.0, 150.0, 440.0, 230.0)), None, MODEL, SELECTED)
+    assert tie.at_xy is None and tie.by == "its box in the scene camera's image" and tie.wider_m == (0.0, 0.0)
+    mid = (0.305 + 0.6, -0.608 - 0.6 * 0.225)  # along the line of sight through the box's middle column
+    assert tie.judge(mid) == (True, "0 mm to the side of the scene camera's line of sight to it")
+    left_of_it = _along(tie, 0.6, side=0.07)  # 70 mm outside the box's left side: within the 75 mm
+    assert tie.judge(left_of_it)[0] and not tie.judge(_along(tie, 0.6, side=0.10))[0]
+    assert not tie.judge((0.305 + 0.6, -0.608 - 0.6 * 0.50))[0]  # well to the right of its box
+    # a box the frame cuts at its right edge: the part out of view lies past that side, a lid's width more
+    cut = press_demo.selection_tie(_locator(mine=(600.0, 150.0, 639.0, 230.0)), None, MODEL, SELECTED)
+    assert cut.wider_m == (0.0, pytest.approx(0.105))
+    past = (cut.cam_xy[0] + 0.6 * cut.b[0] + 0.15 * cut.b[1], cut.cam_xy[1] + 0.6 * cut.b[1] - 0.15 * cut.b[0])
+    far = (cut.cam_xy[0] + 0.6 * cut.b[0] + 0.20 * cut.b[1], cut.cam_xy[1] + 0.6 * cut.b[1] - 0.20 * cut.b[0])
+    assert cut.judge(past)[0] and not cut.judge(far)[0]
+    # nothing says where the selected container is: no tie
+    assert press_demo.selection_tie(_locator(mine=None), None, MODEL, SELECTED) is None
+    assert press_demo.selection_tie(_locator(mine=(380.0, 150.0, 440.0, 230.0), k=None), None, MODEL, SELECTED) is None
+    assert press_demo.selection_tie(_locator(tf=None), _scene_fix(), MODEL, SELECTED) is None
+
+
+def _look(monkeypatch, survey, scene_fix=None, instance_id=SELECTED, locator=None):
+    """press_demo.wrist_look with the wrist's look scripted: ((fix, the locator kept, the scene's word), what was
+    said, how the look was asked for (None: not at all), the run's notes, the ctx, the locator)."""
+    asked, runner, said = {}, _Runner(), []
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: asked.update(k, called=True) or survey)
+    ctx = SimpleNamespace(
+        worlds=SimpleNamespace(wrist_camera_config="camera_oak_wrist.yaml"), survey_clouds=None, model=MODEL
+    )
+    args = Namespace(wrist_first=True, wrist_survey=False, instance_id=instance_id, execute=True)
+    locator = _locator() if locator is None else locator
+    cfg = SimpleNamespace(park_tool_down=False)
+    got = press_demo.wrist_look(None, ctx, cfg, runner, None, args, locator, scene_fix, said)
+    return got, said, asked or None, runner.notes, ctx, locator
+
+
+def test_with_a_selection_the_wrist_looks_where_the_scene_camera_has_it_and_its_tied_fix_is_taken(monkeypatch):
+    for rough in (False, True):  # a whole (or cut) fix, and one placed roughly: the hint either way
+        scene = _scene_fix(rough=rough)
+        wrist = _wrist_fix((0.728, -0.295))
+        survey = sv.Survey(fix=wrist, clouds=[{"points": np.zeros((3, 3), np.float32), "tag": "a"}])
+        (fix, kept, scene_said), said, asked, notes, ctx, _loc = _look(monkeypatch, survey, scene_fix=scene)
+        assert fix is wrist and kept is None and scene_said is None and not said and not notes
+        assert asked["hint"] == (0.787, -0.240) and asked["front"] is True and ctx.survey_clouds is survey.clouds
+
+
+def test_a_wrist_find_not_tied_to_the_selection_is_not_taken_for_it(monkeypatch):
+    """Another container the wrist happens to see is not the selected one: a wrong fix is worse than NO BOX."""
+    scene = _scene_fix()
+    other = _wrist_fix((0.60, 0.10))  # 0.3 m to the side of the scene camera's line of sight to the selected one
+    survey = sv.Survey(fix=other, clouds=[{"points": np.zeros((3, 3), np.float32), "tag": "a"}])
+    (fix, kept, scene_said), said, _asked, notes, ctx, loc = _look(monkeypatch, survey, scene_fix=scene)
+    assert fix is scene and kept is loc and scene_said is None and ctx.survey_clouds is None  # the scene's own fix
+    assert "a container at [0.600, 0.100]," in said[0] and "to the side of the scene camera's line of sight" in said[0]
+    assert said[0].endswith(": not taken for the selected container %s" % SELECTED)
+    assert notes == [("wrist_first", {"found": True, "tied": False, "why": said[0], "scene": True})]
+    # ... and with a second lid-sized top in the same direction nothing says which is the selected one
+    cut = SimpleNamespace(xy=(0.80, -0.23), why="its top 45x100 mm, cut off by the view")
+    find = SimpleNamespace(places=(), patches=(cut,))
+    survey = sv.Survey(fix=_wrist_fix((0.728, -0.295)), find=find)
+    (fix, _kept, _s), said, _asked, _notes, _ctx, _loc = _look(monkeypatch, survey, scene_fix=scene)
+    assert fix is scene and "another lid-sized top at [0.800, -0.230] in the same direction" in said[0]
+
+
+def test_where_the_wrist_finds_none_a_selection_goes_on_only_with_a_careful_scene_fix(monkeypatch):
+    nothing = sv.Survey(why="wrist camera: nothing on the counter is the container (0 things at lid height)")
+    scene = _scene_fix()
+    (fix, kept, scene_said), said, _asked, _notes, _ctx, loc = _look(monkeypatch, nothing, scene_fix=scene)
+    assert fix is scene and kept is loc and scene_said is None and said == [nothing.why]
+    # a rough fix (a box the scene frame cut) is where the wrist looks, never a place to open a container on
+    (fix, kept, scene_said), said, _asked, _notes, ctx, loc = _look(
+        monkeypatch, nothing, scene_fix=_scene_fix(rough=True)
+    )
+    assert fix is None and kept is None and said == [nothing.why]
+    assert scene_said == (
+        "the selected container %s is cut off by the frame toward arm_mount +y, placed roughly, at [0.787, -0.240]: "
+        "where the wrist does not find it there, that is no place to open it on" % SELECTED
+    )
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why) or True)
+    args = Namespace(wrist_first=True, wrist_survey=False, instance_id=SELECTED, execute=True)
+    with pytest.raises(SystemExit) as e:
+        press_demo.wrist_survey_or_exit(
+            None, ctx, None, _Runner(), None, args, loc, wrist_look="; ".join(said), scene_said=scene_said
+        )
+    assert e.value.code == 2
+    assert homes == ["NO BOX — scene camera: %s; the wrist's look in front: %s" % (scene_said, nothing.why)]
+
+
+def test_a_selection_the_scene_camera_boxed_but_could_not_place_is_tied_by_its_box(monkeypatch):
+    loc = _locator(mine=(380.0, 150.0, 440.0, 230.0))
+    inside = _wrist_fix((0.305 + 0.5, -0.608 - 0.5 * 0.225))
+    survey = sv.Survey(fix=inside, clouds=[{"points": np.zeros((3, 3), np.float32), "tag": "a"}])
+    (fix, kept, scene_said), said, asked, _notes, _ctx, _l = _look(monkeypatch, survey, locator=loc)
+    assert fix is inside and kept is None and scene_said is None and not said
+    assert asked["hint"] is None  # no place to look first: the look's own views
+    outside = sv.Survey(fix=_wrist_fix((0.60, 0.10)))
+    (fix, kept, scene_said), said, _asked, _notes, ctx, _l = _look(monkeypatch, outside, locator=loc)
+    assert fix is None and kept is loc and scene_said is None  # no fix of either camera's: the run's NO BOX
+    assert said[0].endswith(": not taken for the selected container %s" % SELECTED)
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why) or True)
+    args = Namespace(wrist_first=True, wrist_survey=False, instance_id=SELECTED, execute=True)
+    with pytest.raises(SystemExit) as e:
+        press_demo.wrist_survey_or_exit(None, ctx, None, _Runner(), None, args, loc, wrist_look="; ".join(said))
+    assert e.value.code == 2 and homes == [
+        "NO BOX — scene camera: %s; the wrist's look in front: %s" % (SCENE_WHY, said[0])
+    ]
+
+
+def test_a_selection_the_scene_camera_never_saw_is_not_looked_for_with_the_wrist(monkeypatch):
+    """Nothing would tie what the wrist finds to the selected container: the wrist is not turned at all."""
+    survey = sv.Survey(fix=_wrist_fix((0.60, 0.0)))
+    (fix, kept, scene_said), said, asked, notes, _ctx, loc = _look(monkeypatch, survey, locator=_locator(mine=None))
+    assert asked is None and fix is None and kept is loc and scene_said is None and not notes
+    assert said == [
+        "not looked for: nothing the scene camera saw says where the selected container %s is, and the wrist "
+        "cannot tell which container was selected" % SELECTED
+    ]
+
+
+def test_without_a_selection_the_wrist_look_is_as_it_was(monkeypatch):
+    far = _wrist_fix((0.60, 0.10))  # nowhere near the scene camera's box: taken all the same, as before
+    survey = sv.Survey(fix=far, clouds=[{"points": np.zeros((3, 3), np.float32), "tag": "a"}])
+    (fix, kept, scene_said), said, asked, _n, _c, _l = _look(
+        monkeypatch, survey, scene_fix=_scene_fix(), instance_id=None
+    )
+    assert fix is far and kept is None and scene_said is None and not said and asked["hint"] == (0.787, -0.240)
+    nothing = sv.Survey(why="wrist camera: nothing on the counter is the container")
+    rough = _scene_fix(rough=True)
+    (fix, kept, scene_said), said, _a, _n, _c, loc = _look(monkeypatch, nothing, scene_fix=rough, instance_id=None)
+    assert fix is rough and kept is loc and scene_said is None  # a standalone run flies its look to a rough fix

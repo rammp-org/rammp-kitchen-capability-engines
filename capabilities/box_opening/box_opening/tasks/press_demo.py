@@ -59,7 +59,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import rclpy
@@ -1444,14 +1444,148 @@ def _home_first_legs(ctx, live, rest, world):
     return home_any(ctx, _state(live), rest, plan_to, who="[press_demo]", goal_words="the rest pose", plan_words="home")
 
 
-def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None):
+# The orchestrator's selection (--instance-id) is one of the SCENE camera's detections, and the
+# wrist's finder knows a lid by its geometry, not which container was selected. What the wrist finds
+# is the selected container only where it stands in the direction the scene camera has that
+# container (SelectionTie): no farther than SELECTED_ACROSS_M to either side of the scene camera's
+# line of sight to it, and, where the scene camera placed it, within SELECTED_ALONG_M of that place
+# along the line. A camera has an object's direction right and its range wrong: the one pair of
+# fixes of one box by both cameras (2026-11-11 19:13, scene [0.787, -0.240], wrist [0.728, -0.295])
+# differs 80 mm along the scene camera's line of sight and 8 mm across it, and the calibration
+# study's offset for today's mount (+65, +50 mm, sd 30) lies along that line too for a box in front
+# of the arm. Across: two of these containers cannot stand with their centres nearer than 152 mm
+# (their holders' flanges touch), so a lid no more than 75 mm off the line is nearer to it than a
+# neighbour standing beside the selected one can be. Along: the range error seen (80-82 mm, sd 30)
+# and a rough fit's own (43 mm at worst). A second lid-sized top in the same direction, and nothing
+# says which is the selected one: neither is taken (a wrong fix is worse than NO BOX).
+SELECTED_ACROSS_M = 0.075
+SELECTED_ALONG_M = 0.20
+
+
+@dataclass(frozen=True)
+class SelectionTie:
+    """Where the scene camera has the selected container, as lines from its lens in the base
+    frame's horizontal plane: `a`, `b` the unit directions to the container's two sides as it sees
+    them — one line (a == b) through `at_xy` where it placed the lid (a fix: whole, cut or rough),
+    else the two sides of the instance's own box in its image, `wider_m` more past a side its frame
+    cuts the box at (the lid's width: the part out of view lies there)."""
+
+    instance_id: str
+    cam_xy: tuple
+    a: tuple
+    b: tuple
+    at_xy: tuple = None
+    wider_m: tuple = (0.0, 0.0)
+    lid_m: float = 0.105
+    by: str = "where the scene camera placed it"
+
+    def judge(self, xy):
+        """(tied, words): is (x, y) in the direction the scene camera has the selection, and how
+        far off it lies, said."""
+        rx, ry = float(xy[0]) - self.cam_xy[0], float(xy[1]) - self.cam_xy[1]
+        ahead = rx * (self.a[0] + self.b[0]) + ry * (self.a[1] + self.b[1])
+        if ahead <= 0.0:
+            return False, "behind the scene camera's view of it"
+        turn = self.a[0] * self.b[1] - self.a[1] * self.b[0]
+        s = -1.0 if turn < 0.0 else 1.0
+        out_a = -s * (self.a[0] * ry - self.a[1] * rx)  # > 0: outside, past the side `a`
+        out_b = -s * (rx * self.b[1] - ry * self.b[0])
+        across = max(out_a - self.wider_m[0], out_b - self.wider_m[1], 0.0)
+        words = "%.0f mm to the side of the scene camera's line of sight to it" % (1000 * across)
+        tied = across <= SELECTED_ACROSS_M
+        if self.at_xy is not None:
+            reach = math.hypot(self.at_xy[0] - self.cam_xy[0], self.at_xy[1] - self.cam_xy[1])
+            along = rx * self.a[0] + ry * self.a[1] - reach
+            words += " and %.0f mm %s along it than %s" % (
+                1000 * abs(along),
+                "nearer" if along < 0 else "farther",
+                self.by,
+            )
+            tied = tied and abs(along) <= SELECTED_ALONG_M
+        return tied, words
+
+    def rival(self, find, xy):
+        """(x, y) of another lid-sized top the wrist's frames hold in the selection's direction — a
+        place that passes, or a top a view cut — at least half a lid from `xy`; or None."""
+        tops = [q.xy for q in getattr(find, "places", ()) if getattr(q, "button", "") != "none"]
+        tops += [p.xy for p in getattr(find, "patches", ()) if getattr(p, "why", "").endswith("cut off by the view")]
+        for t in tops:
+            if math.hypot(t[0] - xy[0], t[1] - xy[1]) >= 0.5 * self.lid_m and self.judge(t)[0]:
+                return float(t[0]), float(t[1])
+        return None
+
+
+def selection_tie(locator, scene_fix, model, instance_id):
+    """The SelectionTie for the selected container `instance_id` after the scene look: by the scene
+    camera's own fix of it (`scene_fix`: whole, cut or rough) where it has one; else by the
+    instance's own box in the scene image (the segmenter's newest frame that holds it:
+    SegFrame.mine), its two sides as lines of sight from the lens; None where neither says where the
+    selected container is (it was in none of the frames, or TF or the intrinsics are missing):
+    nothing would tie what the wrist finds to it."""
+    import numpy as np
+
+    T = locator.base_to_color() if locator is not None else None
+    if T is None:
+        return None
+    T = np.asarray(T, float)
+    cam = (float(T[0, 3]), float(T[1, 3]))
+    lid_m = float(max(model.lid_dims[0], model.lid_dims[1]))
+
+    def unit(dx, dy):
+        n = math.hypot(dx, dy)
+        return None if n < 1e-6 else (dx / n, dy / n)
+
+    if scene_fix is not None:
+        at = (float(scene_fix.top_xyz[0]), float(scene_fix.top_xyz[1]))
+        d = unit(at[0] - cam[0], at[1] - cam[1])
+        if d is None:
+            return None
+        by = "where the scene camera placed it%s" % (" roughly" if getattr(scene_fix, "rough", False) else "")
+        return SelectionTie(str(instance_id), cam, d, d, at_xy=at, lid_m=lid_m, by=by)
+    frame = getattr(getattr(locator, "seg", None), "latest", None)
+    box = getattr(frame, "mine", None)
+    g = getattr(locator, "grab", None)
+    k = getattr(g, "k", None)
+    if box is None or k is None:
+        return None
+    k = np.asarray(k, float).reshape(3, 3)
+    v = 0.5 * (float(box[1]) + float(box[3]))
+    px = np.array([[float(box[0]), v], [float(box[2]), v]])
+    dist = getattr(g, "dist", None)
+    if dist is not None and np.any(np.asarray(dist, float)):
+        import cv2
+
+        n = cv2.undistortPoints(px.reshape(-1, 1, 2), k, np.asarray(dist, float)).reshape(-1, 2)
+    else:
+        n = np.stack([(px[:, 0] - k[0, 2]) / k[0, 0], (px[:, 1] - k[1, 2]) / k[1, 1]], 1)
+    rays = np.concatenate([n, np.ones((2, 1))], 1) @ T[:3, :3].T  # the two sides' lines of sight, base frame
+    a, b = unit(rays[0, 0], rays[0, 1]), unit(rays[1, 0], rays[1, 1])
+    if a is None or b is None:
+        return None
+    from box_opening.perception.scene_source import frame_edges
+
+    wh = getattr(frame, "wh", None) or (0, 0)
+    color = getattr(g, "color", None)
+    if not wh[0] and color is not None:
+        wh = (int(color.shape[1]), int(color.shape[0]))
+    cut = frame_edges(box, wh) if wh[0] else ()
+    wider = (lid_m if "left" in cut else 0.0, lid_m if "right" in cut else 0.0)
+    return SelectionTie(
+        str(instance_id), cam, a, b, wider_m=wider, lid_m=lid_m, by="its box in the scene camera's image"
+    )
+
+
+def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie=None):
     """--wrist-first: the wrist turned where the arm rests (tasks/survey.run_survey, front) and
     the container its camera finds in front of the arm: the fix (a SceneFix, source "wrist"), its
     frames' points kept on ctx — or None where it finds none, the run going on with the scene
     camera's `scene_fix` (None: its NO BOX). Where the scene camera has the box (a careful fix, or
     one placed roughly from a box its frame cut: SceneFix.rough) the wrist looks there first.
     A turn stopped part way: the arm holds (exit 1); a preview ends at the turned pose (exit 0).
-    `said`: a list the look's own word is added to where it finds none (the run's NO BOX says it)."""
+    `said`: a list the look's own word is added to where it finds none (the run's NO BOX says it).
+    `tie` (a SelectionTie: the orchestrator's selection): what the wrist finds is taken only where
+    it stands in the direction the scene camera has the selected container, and no second lid-sized
+    top does; else it is not taken (None), and said."""
     from box_opening.tasks import survey as sv
 
     survey = sv.run_survey(
@@ -1471,6 +1605,23 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None):
     if survey.preview:
         log.info("[press_demo] preview ends at the wrist look's pose: its frames, the aim and the press need --execute")
         sys.exit(0)
+    if survey.fix is not None and tie is not None:
+        at = survey.fix.top_xyz
+        tied, how = tie.judge(at[:2])
+        rival = tie.rival(survey.find, at[:2]) if tied else None
+        if not tied or rival is not None:
+            why = "a container at [%.3f, %.3f], %s" % (at[0], at[1], how)
+            if rival is not None:
+                why += ", and another lid-sized top at [%.3f, %.3f] in the same direction" % rival
+            why += ": not taken for the selected container %s" % tie.instance_id
+            log.info("[press_demo] WRIST LOOK: %s" % why)
+            runner.note("wrist_first", found=True, tied=False, why=why, scene=scene_fix is not None)
+            if said is not None:
+                said.append(why)
+            return None
+        log.info(
+            "[press_demo] WRIST LOOK: the container it finds is the selected one (%s): %s" % (tie.instance_id, how)
+        )
     if survey.fix is not None:
         ctx.survey_clouds = survey.clouds
         if scene_fix is not None:
@@ -1501,17 +1652,58 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None):
     return None
 
 
-def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator, wrist_look=None):
+def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
+    """--wrist-first after the scene look, with or without the orchestrator's selection: (the fix
+    the run goes on with or None, the scene locator that checks the box again after the press or
+    None, what the NO BOX says of the scene camera or None for its own word).
+
+    No selection: the wrist's fix where it finds the box (wrist_first), else the scene camera's.
+    A selection (--instance-id; the id the world state is written for is the caller's and never
+    changes here): the wrist looks first where the scene camera has the selected container and
+    its fix is taken where it is tied to the selection (SelectionTie: by the scene camera's fix of
+    it — whole, cut or rough — else by the instance's own box in the scene image). Where the wrist
+    finds none, or none tied, the run goes on with the scene camera's fix of the selected
+    container, unless that fix is a rough one (a box its frame cut): that is no place to open a
+    container on by itself, and the run ends NO BOX. Where nothing the scene camera saw says where
+    the selected container is, the wrist is not turned at all: it could not tell which container
+    it found."""
+    selected = getattr(args, "instance_id", None) or None
+    tie = None
+    if selected:
+        tie = selection_tie(locator, scene_fix, ctx.model, selected)
+        if tie is None:
+            said.append(
+                "not looked for: nothing the scene camera saw says where the selected container %s is, and the "
+                "wrist cannot tell which container was selected" % selected
+            )
+            log.info("[press_demo] WRIST LOOK: %s" % said[-1])
+    if not selected or tie is not None:
+        wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=said, tie=tie)
+        if wrist_fix is not None:
+            return wrist_fix, None, None
+    if selected and scene_fix is not None and getattr(scene_fix, "rough", False):
+        t = scene_fix.top_xyz
+        scene_said = (
+            "the selected container %s is %s, at [%.3f, %.3f]: where the wrist does not find it there, that is no "
+            "place to open it on" % (selected, scene_fix.partial or "placed roughly", t[0], t[1])
+        )
+        log.info("[press_demo] scene camera: %s" % scene_said)
+        return None, None, scene_said
+    return scene_fix, locator, None
+
+
+def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator, wrist_look=None, scene_said=None):
     """The scene camera found no box (locator.last_why): the wrist survey's fix (tasks/survey) with
     --wrist-survey, its frames' points kept on ctx (survey_clouds); else the run's end — NO BOX and
     home (exit 2), as without the survey; a survey motion stopped part way: the arm holds (exit 1);
     a preview: it ends at the survey pose (exit 0). A run given the orchestrator's selection
     (--instance-id) does not survey: the selection is one of the scene camera's detections, and the
     wrist cannot tell which container it is (docs/interface.md). `wrist_look`: what the wrist
-    look in front (--wrist-first) said where it found none too, said with the NO BOX."""
+    look in front (--wrist-first) said where it found none too, said with the NO BOX; `scene_said`:
+    what to say of the scene camera where its own last word is not it (a rough fix not opened on)."""
     from box_opening.tasks import survey as sv
 
-    why = "scene camera: %s" % locator.last_why
+    why = "scene camera: %s" % (scene_said or locator.last_why)
     if wrist_look:
         why += "; the wrist's look in front: %s" % wrist_look
     if getattr(args, "wrist_survey", False) and args.instance_id:
@@ -1638,7 +1830,8 @@ def main():
         help="the wrist camera finds the container: before anything else the wrist turns where the arm rests so "
         "its camera sees the table in front (up to four views, first where the scene camera has the box; a lid a "
         "view cuts is looked at again), and what it finds there is the box (a table faced from the front; "
-        "tasks/survey); the scene camera's box only where the wrist finds none; not with --instance-id",
+        "tasks/survey); the scene camera's box only where the wrist finds none; with --instance-id the wrist's "
+        "box is taken only where it stands in the direction the scene camera has the selected container",
     )
     ap.add_argument(
         "--wrist-survey",
@@ -1856,19 +2049,29 @@ def main():
         # the scene camera that checks the box again after the press: none for the wrist's box,
         # which it never saw (a box it found elsewhere would be taken for this one moved)
         reach_locator = locator
-        wrist_said = []
-        if getattr(args, "wrist_first", False) and not args.instance_id:
+        wrist_said, scene_said = [], None
+        if getattr(args, "wrist_first", False):
             # THE WRIST CAMERA FINDS THE BOX (--wrist-first; owner, 2026-11-11: "having the wrist
             # cam just find the box ... the arm would just need to angle itself so it can see the
             # scene"): facing a table, the arm presses in front of itself, where the scene camera
             # sees no lid whole and puts what it sees 7-9 cm out (tasks/survey's front note). The
-            # scene camera's box is kept for where the wrist finds none.
-            wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=wrist_said)
-            if wrist_fix is not None:
-                scene_fix, reach_locator = wrist_fix, None
+            # scene camera's box is kept for where the wrist finds none. With the orchestrator's
+            # selection too (--instance-id, 2026-11-12): the wrist's box is taken where it is tied
+            # to the selected container as the scene camera has it (wrist_look, SelectionTie).
+            scene_fix, reach_locator, scene_said = wrist_look(
+                node, ctx, cfg, runner, watcher, args, locator, scene_fix, wrist_said
+            )
         if scene_fix is None:
             scene_fix = wrist_survey_or_exit(
-                node, ctx, cfg, runner, watcher, args, locator, wrist_look="; ".join(wrist_said)
+                node,
+                ctx,
+                cfg,
+                runner,
+                watcher,
+                args,
+                locator,
+                wrist_look="; ".join(wrist_said),
+                scene_said=scene_said,
             )
             reach_locator = None
         if not scene_by_tf and reach_locator is not None:

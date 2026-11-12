@@ -75,7 +75,9 @@ PARAMS = {
     # the table in front (up to four views, first where the scene camera has the box; a lid a view
     # cuts is looked at again), and what it finds there is the box; the scene camera's only where
     # the wrist finds none (a table faced from the front: the scene camera sees no lid whole where
-    # the arm presses, tasks/survey). Never with the orchestrator's selection
+    # the arm presses, tasks/survey). With the orchestrator's selection too: the wrist's box is
+    # taken only where it stands in the direction the scene camera has the selected container
+    # (press_demo.SelectionTie); the instance marked opened is the selected one either way
     "wrist_first": False,
     # the folder box opening hands the planner worlds from (worlds.PlannerTable): the run's measured table,
     # while a way HOME is planned. `planner_worlds_as` is that folder as the PLANNER's container mounts it
