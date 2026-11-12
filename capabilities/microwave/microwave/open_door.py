@@ -321,9 +321,16 @@ def _plan_push_open(ai, door, ee, q, loud=False):
     PUSH_TILT_TRY_DEG off straight down, the fingertips PUSH_CLEAR_TRY_M over the door top. 11-11: only "plans" was
     asked here, so a variant whose "over the door" reshaped J3 79 deg was chosen, the handle let go, and the run refused
     two moves in. cuRobo's world has no door or scene camera.
+    The variant that last passed (PUSH_LAST_VARIANT: the planning before the grasp) is tried first, so the check while
+    holding the handle is usually one variant's moves, not all of them (11-12: it held the handle a long time).
     Returns (P, [(label, Plan)], None) or (None, None, why)."""
+    global PUSH_LAST_VARIANT
     whys = []
-    for tilt_deg, clear_m in ((t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M):
+    variants = [(t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M]
+    if PUSH_LAST_VARIANT in variants:
+        variants.remove(PUSH_LAST_VARIANT)
+        variants.insert(0, PUSH_LAST_VARIANT)
+    for tilt_deg, clear_m in variants:
         P = _push_poses(door, ee, clear_m, tilt_deg)
         if float((P.pushed - P.inside)[:2] @ P.out[:2]) <= 0:  # toward the hinge must open the door further
             return None, None, "push-open: the hinge's y is on the door's closing side of the hand -- refusing"
@@ -338,8 +345,12 @@ def _plan_push_open(ai, door, ee, q, loud=False):
             plans.append((label, pl))
             start = np.asarray(pl.q, dtype=float)[-1]
         else:
+            PUSH_LAST_VARIANT = (tilt_deg, clear_m)
             return P, plans, None
     return None, None, f"push-open: none of {len(whys)} variants passes every move (first: {whys[0]})"
+
+
+PUSH_LAST_VARIANT = None  # (tilt deg, clearance m) of the push-open variant that last passed _plan_push_open
 
 
 def _door_after_swing(geom, cand):

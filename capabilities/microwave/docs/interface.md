@@ -68,6 +68,19 @@ with `push_open: false` ends holding the handle by design.
 Failures: `refused` (a check failed; the message says which and the arm holds), `stopped`
 (a motion stopped short), `bad_params`. On an executed success it marks the object `opened`.
 
+`open_door_ui` is the UI action **Open Microwave Door**. It runs the whole `open` from one press, with no params
+and no intermediate prompts: `execute`, the push-open on, ending at the view pose. It requests execution;
+`allow_execute` must be true on hardware. A recoverable failure before the hand is on the handle (a check refused,
+nothing past it moved) shows its reason and restores the same button; retry waits for an explicit tap. A failure with
+the hand still on the handle, or an unrecoverable one, is shown with Done only and not retried. Success/error notices
+remain until Done or cancellation; a panel is re-sent only if the bridge dropped it. The UI is offered only the UI
+actions (`availability`); the direct `open` dry-run/execute API is unchanged.
+
+The engine uses the counter example's direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_ui_event()`,
+ported from `feat/engine_update` as on `feature/12-microwave-grab`), including the orchestrator-pushed execution
+token. `ui_bridge_node_name` (default `ui_bridge_node`) selects the bridge. No UI session means no panel; a
+recoverable failure then returns as it is. JSON shapes are in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
+
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
 
