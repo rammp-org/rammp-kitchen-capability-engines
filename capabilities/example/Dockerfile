@@ -26,8 +26,9 @@ WORKDIR /module_ws
 RUN pip install --no-cache-dir pybullet==3.2.7
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
-# build it from a pinned RAMMP-CuRobo commit alongside the packages below.
-ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
+# build it from a pinned RAMMP-CuRobo commit (v2.0.1: self.arm.blend needs its Blend
+# action) alongside the packages below.
+ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 # rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages, see
@@ -35,6 +36,15 @@ RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wi
 # is not in the base either: build it from a pinned rammp-interfaces-ros2 commit.
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e.tar.gz /tmp/ui_bridge.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
+
+# self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
+# rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
+# interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
+# geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
+# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
+# once the FROM moves to rammp-base 2.0.0.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
+RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
 
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/example/ src/example/

@@ -36,13 +36,23 @@ RUN pip freeze | grep -iE '^numpy==' > /tmp/keep.txt \
     && rm /tmp/keep.txt
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
-# build it from a pinned RAMMP-CuRobo commit alongside the packages below.
-ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
+# build it from a pinned RAMMP-CuRobo commit (v2.0.1: self.arm.blend needs its Blend
+# action) alongside the packages below.
+ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 # Direct engine/UI panels use the same pinned interface package as feat/engine_update.
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e.tar.gz /tmp/ui_bridge.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
+
+# self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
+# rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
+# interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
+# geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
+# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
+# once the FROM moves to rammp-base 2.0.0.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
+RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
 
 # Dependencies first, from the package.xml files only, so a code-only change reuses this layer and
 # rebuilds in seconds (no apt). /module_ws is an overlay on the base's /ros2_ws (the RAMMP

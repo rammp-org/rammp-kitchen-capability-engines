@@ -42,6 +42,12 @@ RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wi
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
 RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
 
+# rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages behind ctx.update_user_panel /
+# poll_ui_event / publish_overlay_image) is not in the base either: build it from a pinned
+# rammp-interfaces-ros2 commit, as the example does.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e.tar.gz /tmp/ui_bridge.tar.gz
+RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
+
 # Dependencies first, from the package.xml files only, so a code-only change reuses this layer and
 # rebuilds in seconds (no apt). /module_ws is an overlay on the base's /ros2_ws (the RAMMP
 # interfaces); the base's entrypoint sources its install/ automatically. The base ships rosdep's
