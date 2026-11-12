@@ -61,6 +61,21 @@ mw ros2 action send_goal --feedback /microwave/execute_action rammp_orchestrator
 mw ros2 action send_goal --feedback /microwave/execute_action rammp_orchestrator_interfaces/action/ExecuteAction '{engine_id: microwave, action_id: open, params_json: "{\"execute\": true, \"push_open\": true}"}'
 ```
 
+## UI
+
+The UI action **Open Microwave Door** (`open_door_ui`) runs the whole open from one press, executing (the node still
+needs `allow_execute: true` and, for the UI, `use_orchestrator: true`). A refused check before the grasp offers the
+same button again; a stop with the hand on the handle says so and is not retried. Run with the orchestrator and UI
+bridge, which must grant the same execution token to the engine, arm and bridge; native terminals need the same DDS
+setup as the containers (`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `ROS_DOMAIN_ID=0`, sheppy's `cyclonedds.xml`). The
+UI interface package (`rammp_ui_bridge_interfaces`) is pinned in the Dockerfile.
+
+```bash
+# through the orchestrator (panels show in the UI): select the microwave, then run the UI action
+mw ros2 service call /rammp_orchestrator/select_object rammp_orchestrator_interfaces/srv/SelectObject "{instance_id: 'microwave_N', perception_class: 'microwave'}"
+mw ros2 action send_goal --feedback /rammp_orchestrator/execute_action rammp_orchestrator_interfaces/action/ExecuteAction '{engine_id: microwave, action_id: open_door_ui, params_json: "{}"}'
+```
+
 ## Stop
 
 ```bash

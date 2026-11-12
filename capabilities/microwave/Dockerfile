@@ -40,6 +40,10 @@ RUN pip freeze | grep -iE '^numpy==' > /tmp/keep.txt \
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
+# Direct engine/UI panels use the same pinned interface package as feat/engine_update.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e.tar.gz /tmp/ui_bridge.tar.gz
+RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
+
 # Dependencies first, from the package.xml files only, so a code-only change reuses this layer and
 # rebuilds in seconds (no apt). /module_ws is an overlay on the base's /ros2_ws (the RAMMP
 # interfaces); the base's entrypoint sources its install/ automatically. The base ships rosdep's

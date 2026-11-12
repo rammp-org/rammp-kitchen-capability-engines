@@ -125,7 +125,7 @@ VIEW_SIDES = (0.08, 0.04, 0.12, 0.0)  # ... and this far sideways along the face
 # 11-10: hand-placed -- the camera 0.61 m up, square to the door, 27 deg down, J4 44 deg from its limit; the placed
 # ones folded J4 to within 7-11 deg, and the scene camera reads the door 13 cm short. For the microwave where it
 # stood then (door face ~0.69 m out, handle ~26 cm to the user's side)
-VIEW_JOINTS_DEG = (17.8, -28.7, -112.7, -102.6, -66.2, -84.6, -173.2)
+VIEW_JOINTS_DEG = (21.4, -43.8, -92.2, -110.6, -58.8, -93.8, -165.7)  # 11-11: teleoped to the view the user chose
 VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
 # ... and these when IK from it misses, lands past a guard or in the keep-out: PyBullet's IK ignores joint limits and
@@ -286,6 +286,23 @@ def _back_legs(P):
     )
 
 
+PUSH_PLAN_TRIES = 2  # each push-open move is asked of cuRobo this many times for a plan that passes its checks
+PUSH_AT_START_DEG = 3.0  # a previewed move runs as planned only if the arm is this close (every joint) to its start
+
+
+def _push_moves(P):
+    """EVERY push-open move in order, as it runs: (label, tool position, quat, hold, keep_shape) -- back off the
+    handle (the hand as it gripped), up and back (the hand turning down: the wrist may turn far, no shape cap), over,
+    down, push, then back the way it came (the hand held pointing down)."""
+    (up_label, up_pos, up_hold), *legs = _push_legs(P)
+    return (
+        ("back off the handle", P.back, P.grip, HOLD_FIXED, True),
+        (up_label, up_pos, P.down, up_hold, False),
+        *((lb, pos, P.down, hold, True) for lb, pos, hold in legs),
+        *((lb, pos, P.down, hold, True) for lb, pos, hold in _back_legs(P)),
+    )
+
+
 def _stitched(ai, P, legs, label, go_to, speeds=None):
     """`legs` (as _push_legs) as ONE stitched cuRobo motion, passing every corner but the last within PUSH_BLEND_M;
     `speeds` {leg label: speed_scale}. Returns True, or (False, why) -- and whether nothing moved (it failed planning,
@@ -302,30 +319,44 @@ def _stitched(ai, P, legs, label, go_to, speeds=None):
 
 
 def _plan_push_open(ai, door, ee, q, loud=False):
-    """Ask cuRobo -- nothing moves -- for the push-open from the hand pose `ee` / joints `q` at the swing's end: each
-    of its moves (_push_legs, then back the way it came: _back_legs) from where the one before ends, for the first
-    variant that plans all of them -- the hand
-    PUSH_TILT_TRY_DEG off straight down, the fingertips PUSH_CLEAR_TRY_M over the door top. Not sim-gated: cuRobo is
-    trusted with it (11-02), and its world has no door. Returns (P, [(label, Plan)], None) or (None, None, why)."""
+    """Ask cuRobo -- nothing moves -- for the push-open from the hand pose `ee` / joints `q` at the swing's end: EVERY
+    move (_push_moves) from where the one before ends, each with the checks it runs under (dc.pose_plan_problem: the
+    shape cap, the floor, joint swings, the end), for the first variant whose moves ALL pass -- the hand
+    PUSH_TILT_TRY_DEG off straight down, the fingertips PUSH_CLEAR_TRY_M over the door top. 11-11: only "plans" was
+    asked here, so a variant whose "over the door" reshaped J3 79 deg was chosen, the handle let go, and the run refused
+    two moves in. cuRobo's world has no door or scene camera.
+    The variant that last passed (PUSH_LAST_VARIANT: the planning before the grasp) is tried first, so the check while
+    holding the handle is usually one variant's moves, not all of them (11-12: it held the handle a long time).
+    Returns (P, [(label, Plan)], None) or (None, None, why)."""
+    global PUSH_LAST_VARIANT
     whys = []
-    for tilt_deg, clear_m in ((t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M):
+    variants = [(t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M]
+    if PUSH_LAST_VARIANT in variants:
+        variants.remove(PUSH_LAST_VARIANT)
+        variants.insert(0, PUSH_LAST_VARIANT)
+    for tilt_deg, clear_m in variants:
         P = _push_poses(door, ee, clear_m, tilt_deg)
         if float((P.pushed - P.inside)[:2] @ P.out[:2]) <= 0:  # toward the hinge must open the door further
             return None, None, "push-open: the hinge's y is on the door's closing side of the hand -- refusing"
         start, plans = np.asarray(q, dtype=float), []
-        for label, pos, hold in (*_push_legs(P), *_back_legs(P)):
-            pl = ai.plan_to_pose(pos, P.down, start, hold=hold)
-            if not pl.success:
-                whys.append(f"{P.how}: cuRobo can't plan '{label}' ({pl.message})")
+        for label, pos, quat, hold, keep_shape in _push_moves(P):
+            pl, why = dc.pose_plan_problem(
+                ai, start, pos, quat, hold, keep_shape, PUSH_PLAN_TRIES, PUSH_MAX_JOINT_DEG if keep_shape else None
+            )
+            if why:
+                whys.append(f"{P.how}: '{label}': {why}")
                 if loud:
                     say(f"  push-open, {whys[-1]}")
                 break
             plans.append((label, pl))
-            if len(pl.q):
-                start = pl.q[-1]
+            start = np.asarray(pl.q, dtype=float)[-1]
         else:
+            PUSH_LAST_VARIANT = (tilt_deg, clear_m)
             return P, plans, None
-    return None, None, f"push-open: cuRobo plans none of {len(whys)} variants (first: {whys[0]})"
+    return None, None, f"push-open: none of {len(whys)} variants passes every move (first: {whys[0]})"
+
+
+PUSH_LAST_VARIANT = None  # (tilt deg, clearance m) of the push-open variant that last passed _plan_push_open
 
 
 def _door_after_swing(geom, cand):
@@ -734,6 +765,97 @@ def _pose_move(ai, pos, quat, label, hold, speed=None, held=False, keep_shape=Tr
     return ai.go_to_ee_pose(pos, quat, label, orientation_hold=hold, **go_to)
 
 
+# The push-open's moves run blended (one cuRobo motion through the checked plans' joints) in these groups; the
+# others -- backing off the handle and off the door (the pull-backs) and "up and back" -- run exactly as checked.
+PUSH_BLENDED = (("over the door", "down inside the door", "push open"), ("back up", "back over the door"))
+PUSH_END_AT_VIEW = True  # after the push-open, on to the view pose in the same blended motion (11-12: the user)
+
+
+def _run_push_exact(ai, P, label, pl, speed, held):
+    """One push-open move EXACTLY as _plan_push_open checked it (dc.run_checked_plan); planned and checked afresh from
+    where the arm is (dc.checked_pose_move) if it isn't at the checked start (PUSH_AT_START_DEG). Raises Refused."""
+    off = float(np.degrees(np.max(np.abs(short_delta(ai.raw_joints(), np.asarray(pl.q, dtype=float)[0])))))
+    say(f"push-open: {label} ...")
+    if off <= PUSH_AT_START_DEG:
+        ok = dc.run_checked_plan(ai, pl, f"push-open: {label}", speed, held)
+    else:
+        say(f"  push-open: {label}: the arm is {off:.1f} deg from the checked start -- planned again from here")
+        moves = {lb: (pos, quat, hold, keep) for lb, pos, quat, hold, keep in _push_moves(P)}
+        pos, quat, hold, keep = moves[label]
+        ok = dc.checked_pose_move(ai, pos, quat, f"push-open: {label}", hold, speed, held, keep, PUSH_MAX_JOINT_DEG)
+    if not ok:
+        raise Refused(f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is.")
+
+
+def _run_push_blended(ai, P, plans, labels, speeds, held, end=None, end_label=""):
+    """The checked plans `labels` (in order) as ONE blended cuRobo motion: every dc.CUROBO_SEND_EVERY-th joints of
+    each plan and its end a target, passed within dc.CUROBO_BLEND_M except each plan's end before the push (the push
+    starts where it should); `speeds` {label: speed_scale}; `end` (joints) one more target after them (the view
+    pose). Each leg asked of cuRobo first (dc.curobo_path_problem). If it can't be (says why) or the driver plans
+    nothing, the plans run exactly one by one (and `end` through a checked cuRobo move). Raises Refused."""
+    by = dict(plans)
+    knots, sp, bl = [], [], []
+    for lb in labels:
+        qs = np.asarray(by[lb].q, dtype=float)
+        idx = sorted(set(range(dc.CUROBO_SEND_EVERY - 1, len(qs), dc.CUROBO_SEND_EVERY)) | {len(qs) - 1})
+        for i in idx:
+            knots.append(qs[i])
+            sp.append(speeds.get(lb))
+            stop = i == len(qs) - 1 and lb != labels[-1] and labels[labels.index(lb) + 1] == "push open"
+            bl.append(0.0 if stop else dc.CUROBO_BLEND_M)
+    if end is not None:
+        knots.append(np.asarray(end, dtype=float))
+        sp.append(None)
+        bl.append(dc.CUROBO_BLEND_M)
+    name = ", ".join(labels) + (f", {end_label}" if end is not None else "")
+    why = dc.curobo_path_problem(ai, ai.raw_joints(), knots, f"push-open: {name}", knots=knots)
+    if not why:
+        say(f"push-open: {name} -- cuRobo through {len(knots)} of their checked joints, one blended motion ...")
+        if dc.through_curobo_knots(ai, knots, f"push-open: {name}", gains=held, speeds=sp, blends=bl):
+            return
+        why = getattr(ai, "last_error", "")
+        if "PLANNING_FAILED" not in why:
+            raise Refused(f"push-open: {name} stopped ({why}) -- the arm holds where it is.")
+    say(f"push-open: {name} not blended ({why}) -- one checked move at a time")
+    for lb in labels:
+        _run_push_exact(ai, P, lb, by[lb], speeds.get(lb), held)
+    if end is not None and not dc.checked_curobo_move(ai, end, f"push-open: {end_label}", keep_shape=False):
+        raise Refused(f"push-open: {end_label} stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is.")
+
+
+def _run_push_plans(ai, P, plans, gains, on_release):
+    """The push-open's moves as _plan_push_open checked them, in order: open the gripper, back off the handle
+    (exact), up and back (exact, the gripper closing meanwhile: a narrower hand round the door), then over, down and
+    the push (at its own speed) blended, back off the door (exact), back up and over the door blended -- with
+    PUSH_END_AT_VIEW on to the view pose in the same motion. Saves the door's new opening; returns True."""
+    by = dict(plans)
+    held = shared.GRASPED_GAINS if gains is not None else None
+    push_speed = rammp_arm.GO_TO_SPEED_SCALE * PUSH_OPEN_SPEED_SCALE
+    say("opening the gripper ...")
+    ai.gripper(0.0)
+    time.sleep(0.5)
+    if on_release is not None:
+        on_release()
+    _run_push_exact(ai, P, "back off the handle", by["back off the handle"], None, held)
+    gripper_done = dc.gripper_on_the_move(ai, 1.0, "push-open: a narrower hand round the door")
+    try:
+        _run_push_exact(ai, P, "up and back", by["up and back"], None, held)
+    except BaseException:
+        try:  # never left running; the move's own error is the one raised
+            gripper_done()
+        except BaseException:  # noqa: BLE001
+            pass
+        raise
+    gripper_done()  # closed before the hand goes over the door
+    _run_push_blended(ai, P, plans, PUSH_BLENDED[0], {"push open": push_speed}, held)
+    _run_push_exact(ai, P, "back off the door", by["back off the door"], None, held)
+    save_door_geometry(door_open_deg=PUSH_OPEN_DOOR_DEG)
+    say(f"door file: open {PUSH_OPEN_DOOR_DEG:.0f} deg after the push (taken, not measured)")
+    end = np.radians(VIEW_JOINTS_DEG) if PUSH_END_AT_VIEW and VIEW_JOINTS_DEG is not None else None
+    _run_push_blended(ai, P, plans, PUSH_BLENDED[1], {}, held, end=end, end_label="to the view pose")
+    return True
+
+
 def push_open(ai, execute, on_release=None):
     """After the swing: let go of the handle and push the door further open (see the module's step 4), all cuRobo.
     `on_release()`: called once the gripper has let go. Saves the door's new opening to the door file. Returns True
@@ -746,11 +868,13 @@ def push_open(ai, execute, on_release=None):
     door = json.loads(dc.DOOR_FILE.read_text())
     st = ai.get_state()
     start = ai.raw_joints() if hasattr(ai, "raw_joints") else st["position"]
-    P, _, why = _plan_push_open(ai, door, list(st["ee_pos"]), start)
+    P, plans, why = _plan_push_open(ai, door, list(st["ee_pos"]), start)
     if why:
         raise Refused(f"{why} from where the swing ended -- still holding the handle.")
-    say(f"push-open: {P.how}")
+    say(f"push-open: {P.how}; every move checked from the real joints before letting go")
     gains = shared.grasped_impedance()
+    if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints"):
+        return _run_push_plans(ai, P, plans, gains, on_release)
     go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=shared.GRASPED_GAINS)
     say("opening the gripper ...")
     ai.gripper(0.0)

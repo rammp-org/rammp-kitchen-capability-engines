@@ -16,6 +16,8 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
     make action CAP=microwave ACTION=close PARAMS='{"execute": false, "route_over": true}'
 """
 
+import time
+
 import rammp_arm
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
 from door_common import close_door
@@ -89,6 +91,14 @@ PARAMS = {
 }
 
 
+# The UI action (one press, no settings): what it runs.
+UI_ACTIONS = {
+    "open_door_ui": ("open", "Open Microwave Door", {"execute": True}),
+}
+UI_TITLE = {"open": "Open microwave"}
+UI_DONE = {"open": "Microwave door opened."}
+
+
 class Capability(CapabilityEngine):
     display_name = "Microwave"
     perception_classes = ["microwave"]
@@ -117,6 +127,8 @@ class Capability(CapabilityEngine):
                 "properties": {**COMMON, **{k: _schema(v) for k, v in close_door.CLOSE_DEFAULTS.items()}},
             },
         ),
+        # the UI's button: one press runs the whole open (UI_ACTIONS), panels on the UI bridge
+        *(Action(ui_id, label) for ui_id, (_, label, _) in UI_ACTIONS.items()),
     ]
 
     def get_logger(self):
@@ -166,7 +178,85 @@ class Capability(CapabilityEngine):
             self, run_dir, cams, self.cfg["bag_frame_hz"], extra, stereo, self.cfg["bag_max_mb"]
         )
 
+    def _ui_run(self, ui_id, ctx):
+        """One UI press runs the whole open (UI_ACTIONS) with no intermediate prompts. A recoverable failure
+        before the hand is on the handle (a check refused, nothing past it moved) shows its reason and offers the
+        same button again, waiting for an explicit tap; one with the hand still on the handle, or any other, is shown
+        with Done only and not retried. Success / error notices remain until Done or cancellation."""
+        action_id, label, params = UI_ACTIONS[ui_id]
+        title = UI_TITLE[action_id]
+        if not self.mock and not self.cfg["allow_execute"]:
+            message = f"{title} is disabled: launch with allow_execute:=true for an attended run."
+            self._ui_notice(ctx, title, message)
+            raise EngineError("execution_disabled", message, recoverable=True)
+        while True:
+            ctx.checkpoint()
+            self._ui_panel(ctx, title, f"{label}: the arm is moving.")
+            try:
+                result = self.execute(action_id, dict(params), ctx)
+            except EngineError as error:
+                holding = "holding the handle" in str(error) or error.error_code == "holding_handle"
+                self.get_logger().error(f"{ui_id}: {error}")
+                if holding or not error.recoverable:
+                    note = " The hand is still on the handle: let go of it before anything else." if holding else ""
+                    self._ui_notice(ctx, title, f"{title} failed: {error}.{note}")
+                    raise
+                panel = {
+                    "title": f"Unable to {title.lower()}",
+                    "message": f"{error}. Press {label} to try again.",
+                    "buttons": [{"button_id": "retry", "label": label}],
+                }
+                # Standalone has no UI session: fail recoverably instead of waiting for an impossible tap.
+                if not ctx.update_user_panel(panel_json=panel):
+                    raise
+                self._wait_for_button(ctx, "retry", panel)
+                continue
+            message = f"Mock: {UI_DONE[action_id].lower()} No arm motion." if result.get("mock") else UI_DONE[action_id]
+            self._ui_notice(ctx, title, message)
+            return result
+
+    def _ui_notice(self, ctx, title, message):
+        panel = {"title": title, "message": message, "buttons": [{"button_id": "done", "label": "Done"}]}
+        if ctx.update_user_panel(panel_json=panel):
+            self._wait_for_button(ctx, "done", panel)
+
+    @staticmethod
+    def _ui_panel(ctx, title, message):
+        ctx.update_user_panel(panel_json={"title": title, "message": message, "buttons": []})
+
+    @staticmethod
+    def _panel_open(ctx):
+        """Whether the panel's UI goal is still open (or opening) -- the engine's own run record; True when it can't
+        tell, so nothing is re-sent needlessly."""
+        run = getattr(ctx, "_run", None)
+        if run is None or not hasattr(run, "ui_goal_handle"):
+            return True
+        return bool(run.ui_goal_handle is not None or getattr(run, "ui_opening", False))
+
+    @staticmethod
+    def _wait_for_button(ctx, button_id, panel):
+        refresh_at = time.monotonic() + 1.0
+        while True:
+            ctx.checkpoint()
+            event = ctx.poll_ui_event()
+            if event and event.get("type") == "button" and event.get("button_id") == button_id:
+                return
+            # Reopen only after a rejected/aborted UI goal or a bridge outage: re-sending an open panel every second
+            # redrew it on the UI, which flashed (11-12)
+            if time.monotonic() >= refresh_at:
+                if not Capability._panel_open(ctx):
+                    ctx.update_user_panel(panel_json=panel)
+                refresh_at = time.monotonic() + 1.0
+            time.sleep(0.1)
+
+    def availability(self, instance_id, world_state):
+        """The UI is offered only the one-press actions (UI_ACTIONS); `open` stays callable directly (its params
+        need setting: from the UI it would only dry-run)."""
+        return [a for a in super().availability(instance_id, world_state) if a.action_id in UI_ACTIONS]
+
     def execute(self, action_id, params, ctx):
+        if action_id in UI_ACTIONS:
+            return self._ui_run(action_id, ctx)
         speed = float(params.get("speed", 1.0))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)

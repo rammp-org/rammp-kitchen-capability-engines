@@ -487,13 +487,14 @@ def curobo_knots(path):
     return knots
 
 
-def curobo_path_problem(ai, start, path, label, in_front=None):
+def curobo_path_problem(ai, start, path, label, in_front=None, knots=None):
     """Ask cuRobo -- nothing moves -- for every leg of `path` from joints `start`: why it can't be used, or None.
-    Without cuRobo (no plan_to_joints: the bench's mock) it can't check, and passes."""
+    `knots`: the targets to ask for, instead of curobo_knots(path). Without cuRobo (no plan_to_joints: the bench's
+    mock) it can't check, and passes."""
     if not hasattr(ai, "plan_to_joints"):
         return None
     q = start
-    for k, goal in enumerate(curobo_knots(path), 1):
+    for k, goal in enumerate(knots if knots is not None else curobo_knots(path), 1):
         pl = ai.plan_to_joints(goal, q)
         for _ in range(CUROBO_RETRIES):
             if pl.success or _over_limit(pl.message) is None:
@@ -680,8 +681,36 @@ def checked_pose_move(ai, pos, quat, label, hold=0, speed_scale=None, gains=None
     plan that passes runs. Raises Refused before anything moves when none does; returns whether the motion
     succeeded."""
     start = np.asarray(ai.raw_joints(), dtype=float)
-    why = ""
-    for _ in range(POSE_MOVE_TRIES):
+    pl, why = pose_plan_problem(ai, start, pos, quat, hold, keep_shape, POSE_MOVE_TRIES, max_joint_deg)
+    if why:
+        raise Refused(f"{label}: {why} -- nothing moved.")
+    return run_checked_plan(ai, pl, label, speed_scale, gains)
+
+
+def run_checked_plan(ai, pl, label, speed_scale=None, gains=None):
+    """Run cuRobo's checked plan `pl` EXACTLY (execute_joint_trajectory), under joint impedance `gains` if given;
+    whether the motion succeeded."""
+    qs = np.asarray(pl.q, dtype=float)
+    scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+    secs = float(pl.t[-1]) / scale
+    say(f"  {label}: cuRobo's plan checked ({len(qs)} samples, {secs:.1f} s at {scale:g} x), run as it is")
+    points = [(float(t), q, qd) for t, q, qd in zip(pl.t, pl.q, pl.qd, strict=True)]
+    kw = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
+    res = ai.execute_joint_trajectory(list(rammp_arm.JOINTS), points, speed_scale=scale, **kw)
+    if res.error_code != 0:
+        say(f"  {label}: ended {res.error_string or res.error_code}")
+    return res.error_code == 0
+
+
+def pose_plan_problem(ai, start, pos, quat, hold=0, keep_shape=True, tries=1, max_joint_deg=None):
+    """checked_pose_move's plan and checks, nothing moves: cuRobo's plan to the tool pose from joints `start` -- the
+    arm keeping its shape (reconfiguration with `max_joint_deg`, unless not `keep_shape`), the floor, no joint
+    swinging FREE_MOVE_MAX_SWING_RAD past its straight range, the tool ending within POSE_END_TOL of the pose. Asked
+    `tries` times (cuRobo's plans vary) for one that passes. (plan, "") when one does, else (the last plan or None,
+    why)."""
+    start = np.asarray(start, dtype=float)
+    pl, why = None, ""
+    for _ in range(max(1, int(tries))):
         pl = ai.plan_to_pose(pos, quat, start, hold)
         for _ in range(CUROBO_RETRIES):
             if pl.success or _over_limit(pl.message) is None:
@@ -706,18 +735,8 @@ def checked_pose_move(ai, pos, quat, label, hold=0, speed_scale=None, gains=None
             if d_m > POSE_END_TOL[0] or d_deg > POSE_END_TOL[1]:
                 why = f"cuRobo's plan ends the tool {d_m * 100:.1f} cm / {d_deg:.1f} deg off the pose"
         if not why:
-            break
-    if why:
-        raise Refused(f"{label}: {why} -- nothing moved.")
-    scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
-    secs = float(pl.t[-1]) / scale
-    say(f"  {label}: cuRobo's plan checked ({len(qs)} samples, {secs:.1f} s at {scale:g} x), run as it is")
-    points = [(float(t), q, qd) for t, q, qd in zip(pl.t, pl.q, pl.qd, strict=True)]
-    kw = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
-    res = ai.execute_joint_trajectory(list(rammp_arm.JOINTS), points, speed_scale=scale, **kw)
-    if res.error_code != 0:
-        say(f"  {label}: ended {res.error_string or res.error_code}")
-    return res.error_code == 0
+            return pl, ""
+    return pl, why
 
 
 _LIMIT_RE = re.compile(r"(\w+) (velocity|acceleration|jerk) ([\d.]+) > limit ([\d.]+)")
@@ -756,13 +775,43 @@ def through_curobo(ai, path, label, speed_scale=None, gains=None):
     return through_curobo_knots(ai, curobo_knots(path), label, speed_scale, gains)
 
 
-def through_curobo_knots(ai, knots, label, speed_scale=None, gains=None):
-    """One cuRobo motion through joints `knots`, passing each but the last within CUROBO_BLEND_M (not stopping)."""
+def through_curobo_knots(ai, knots, label, speed_scale=None, gains=None, speeds=None, blends=None):
+    """One cuRobo motion through joints `knots`, passing each but the last within CUROBO_BLEND_M (not stopping).
+    `speeds`: a speed_scale per knot (None = `speed_scale`), e.g. a slow push inside the motion. `blends`: a blend
+    radius per knot instead (0 = reach it exactly, e.g. where a push must start); the last always stops."""
+    speeds = speeds if speeds is not None else [speed_scale] * len(knots)
+    blends = blends if blends is not None else [CUROBO_BLEND_M] * len(knots)
     targets = [
-        JointTarget(tuple(q), 0.0 if k == len(knots) - 1 else CUROBO_BLEND_M, speed_scale) for k, q in enumerate(knots)
+        JointTarget(tuple(q), 0.0 if k == len(knots) - 1 else bl, sp)
+        for k, (q, sp, bl) in enumerate(zip(knots, speeds, blends, strict=True))
     ]
     go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
     return ai.go_to_joint_configs(targets, label, **go_to)
+
+
+def gripper_on_the_move(ai, position, label, **kw):
+    """Start ai.gripper(position, **kw) in a thread so the arm can move meanwhile (self.arm may be called from any
+    thread during an action; the gripper is its own setpoint stream). Returns wait(): blocks until the gripper call
+    has ended, re-raises what it raised (Cancelled, Refused), returns its result."""
+    out = {}
+
+    def run():
+        try:
+            out["ok"] = ai.gripper(position, **kw)
+        except BaseException as e:  # noqa: BLE001 -- handed to wait(), which re-raises it in the caller's thread
+            out["error"] = e
+
+    t = threading.Thread(target=run, name=f"gripper: {label}", daemon=True)
+    say(f"{label}: gripper to {position:g} while the arm moves ...")
+    t.start()
+
+    def wait():
+        t.join()
+        if "error" in out:
+            raise out["error"]
+        return out.get("ok")
+
+    return wait
 
 
 def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre_park_x=None, curobo=False):
