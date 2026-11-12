@@ -173,7 +173,7 @@ def test_the_default_container_is_the_pink_canister(monkeypatch):
 
     from box_opening.tasks.cli_common import default_container_yaml
 
-    share = Path("src/box_opening").resolve()
+    share = Path("capabilities/box_opening").resolve()
     monkeypatch.setattr(pk, "get_package_share_directory", lambda name: str(share))
     got = default_container_yaml()
     assert got.endswith("/config/containers/ankou_pink.yaml")

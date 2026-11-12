@@ -92,17 +92,21 @@ def test_home_arm_on_a_tableless_world_cautions_first_and_plans_once(ctx, capsys
     assert "CAUTION" in out and "neither the table nor the box" in out and "--lift-first" in out
 
 
-def test_home_arm_on_a_tableless_world_refused_raises_without_a_second_plan(ctx, capsys):
+def test_home_arm_on_a_tableless_world_refused_raises_without_a_second_world(ctx, capsys):
+    """The guarded world would be the bare one there, so it is never asked. The plan itself is asked for again
+    since 2026-11-09 (core.home_any: HOME_TRIES times, then through each waypoint), always in the bare world."""
     import pytest
 
+    from box_opening.primitives import core
     from box_opening.tasks import home_arm
 
     c = ctx
     c.worlds.table_top_z = None
     plans = _PlanCounter(c.client, capsys, succeed=False)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="INVALID_START_STATE_WORLD_COLLISION"):
         home_arm.build_legs(c)
-    assert plans.n == 1
+    assert plans.n == core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    assert c.worlds.pushes and all(kind == "bench" and kw.get("model") is None for kind, kw in c.worlds.pushes)
 
 
 def _demo_cfg():
@@ -1099,9 +1103,15 @@ def test_the_same_hold_is_flown_home_with_the_default_tolerance(ctx, tmp_path, c
     from conftest import runner as make_runner
 
     from box_opening.constants import HOME
+    from box_opening.runtime.branches import nearest_branch, planner_branch
     from box_opening.tasks import press_demo
 
     ctx.client.live = _held(HOME)
+    # the plan as the real client's comes back (PlannerClient.plan_to_joints): from the start on HOME's side of
+    # the wrap, the goal the short way round from it. The fake's literal [live, goal] winds joint_3 a whole turn
+    # from _held's reading, and home_any reads every planned home against the table since 2026-11-11 (under_table)
+    plan = ctx.client._plan
+    ctx.client._plan = lambda end, start: plan(nearest_branch(end, planner_branch(start)), planner_branch(start))
     assert press_demo.home_first(ctx, make_runner(ctx.client, tmp_path), True, list(HOME))
     assert len(ctx.client.executed) == 1 and len(ctx.client.joint_targets) == 1
     assert ctx.client.joint_targets[-1] == pytest.approx(list(HOME), abs=1e-9)
@@ -1148,10 +1158,14 @@ def test_the_start_line_tells_a_stiff_hold_from_the_rest_pose(ctx, tmp_path, cap
 def test_a_home_the_bench_world_refuses_moves_nothing_and_names_the_recovery(ctx, tmp_path, capsys):
     """An arm down at the table is home_arm's case (bare-world and
     lift-first fallbacks, the operator's eye on the bench): the run does not
-    start, and says so."""
+    start, and says so. The planner refuses such a start every time it is
+    asked: since 2026-11-09 home_first asks again and through the waypoints
+    (core.home_any), and only a refusal that stands keeps the run from
+    starting."""
     from conftest import runner as make_runner
 
     from box_opening.constants import HOME
+    from box_opening.primitives import core
     from box_opening.tasks import press_demo
 
     class Refused:
@@ -1160,10 +1174,31 @@ def test_a_home_the_bench_world_refuses_moves_nothing_and_names_the_recovery(ctx
         trajectory = None
 
     ctx.client.live = [v + 0.3 for v in HOME]
-    ctx.client.plans = [Refused()]
+    asked = core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    ctx.client.plans = [Refused() for _ in range(asked)]
     assert not press_demo.home_first(ctx, make_runner(ctx.client, tmp_path), True, list(HOME))
-    assert ctx.client.executed == []
+    assert ctx.client.executed == [] and ctx.client.plans == []  # asked that many times, nothing flown
     assert "home_arm --execute" in capsys.readouterr().out
+
+
+def test_a_home_refused_once_and_planned_on_the_next_ask_flies(ctx, tmp_path, capsys):
+    """The other side of asking again (core.home_any, 2026-11-09: the planner is stochastic): one refusal no
+    longer keeps the run from starting. Before, the first refusal stopped it and named home_arm."""
+    from conftest import runner as make_runner
+
+    from box_opening.constants import HOME
+    from box_opening.tasks import press_demo
+
+    class Refused:
+        success = False
+        message = "MotionGenStatus.TRAJOPT_FAIL"
+        trajectory = None
+
+    ctx.client.live = [v + 0.3 for v in HOME]
+    ctx.client.plans = [Refused()]
+    assert press_demo.home_first(ctx, make_runner(ctx.client, tmp_path), True, list(HOME))
+    assert len(ctx.client.executed) == 1 and ctx.client.live == pytest.approx(list(HOME))
+    assert "home_arm --execute" not in capsys.readouterr().out
 
 
 def test_detect_only_reports_the_scene_cameras_fixes_with_nothing_moving(monkeypatch, capsys):
