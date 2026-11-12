@@ -792,8 +792,8 @@ def refuse_open_box(up_mm):
         return None
     return (
         "the button already stands %.0f mm above its lid — this box is already OPEN (left up by the "
-        "run before?). Pressing it would shut it. Push the button down flush and run again, or run without "
-        "--press-only and --guarded: the full run takes an open box's lid off" % up_mm
+        "run before?). Pressing it would shut it, so it is not pressed: --press-only and --guarded stop here. Run "
+        "without them: the full run takes an open box's lid off" % up_mm
     )
 
 
@@ -805,9 +805,9 @@ def refuse_band_box(reads_mm):
     (reach_press); this is what --press-only and --guarded stop on."""
     return (
         "the knob reads %s mm above its lid — neither flush (below %.0f) nor up (%.0f or more), and a popped "
-        "knob reads there too. Pressing an open box would shut it, so it is not pressed. Push the button down "
-        "flush and run again, or run without --press-only and --guarded: the full run takes the lid off a box "
-        "it cannot call shut" % (knob_reads_text(reads_mm), KNOB_SHUT_BELOW_MM, KNOB_UP_MIN_MM)
+        "knob reads there too. Pressing an open box would shut it, so it is not pressed: --press-only and "
+        "--guarded stop here. Run without them: the full run takes the lid off a box it cannot call shut"
+        % (knob_reads_text(reads_mm), KNOB_SHUT_BELOW_MM, KNOB_UP_MIN_MM)
     )
 
 
@@ -1415,7 +1415,7 @@ def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
     except RuntimeError as e:
         log.info(
             "[press_demo] not starting: the move home was refused in the bench world (%s) — the arm is "
-            "probably down at the table. Clear the bench and recover by hand:\n"
+            "probably down at the table, and this run does not start from there. Home the arm on its own first:\n"
             "    scripts/sheppy_task.sh home_arm --execute    (add --lift-first 0.08 if that is refused too)" % e
         )
         return False
