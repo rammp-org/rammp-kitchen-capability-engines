@@ -1442,12 +1442,14 @@ def _home_first_legs(ctx, live, rest, world):
     return home_any(ctx, _state(live), rest, plan_to, who="[press_demo]", goal_words="the rest pose", plan_words="home")
 
 
-def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix):
+def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None):
     """--wrist-first: the wrist turned where the arm rests (tasks/survey.run_survey, front) and
     the container its camera finds in front of the arm: the fix (a SceneFix, source "wrist"), its
     frames' points kept on ctx — or None where it finds none, the run going on with the scene
-    camera's `scene_fix` (None: its NO BOX). A turn stopped part way: the arm holds (exit 1); a
-    preview ends at the turned pose (exit 0)."""
+    camera's `scene_fix` (None: its NO BOX). Where the scene camera has the box (a careful fix, or
+    one placed roughly from a box its frame cut: SceneFix.rough) the wrist looks there first.
+    A turn stopped part way: the arm holds (exit 1); a preview ends at the turned pose (exit 0).
+    `said`: a list the look's own word is added to where it finds none (the run's NO BOX says it)."""
     from box_opening.tasks import survey as sv
 
     survey = sv.run_survey(
@@ -1459,6 +1461,7 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix):
         rest=rest_joints(cfg),
         camera_cfg_name=ctx.worlds.wrist_camera_config,
         front=True,
+        hint=None if scene_fix is None else tuple(float(v) for v in scene_fix.top_xyz[:2]),
     )
     if survey.stopped:
         log.info("[press_demo] STOP: the wrist look: %s — the arm holds; nothing was pressed" % survey.why)
@@ -1472,27 +1475,43 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix):
             a, b = survey.fix.top_xyz, scene_fix.top_xyz
             log.info(
                 "[press_demo] WRIST LOOK: the box at [%.3f, %.3f, %.3f]; the scene camera had it at [%.3f, %.3f, "
-                "%.3f], %.0f mm away — the wrist's is taken" % (*a, *b, 1000 * math.hypot(a[0] - b[0], a[1] - b[1]))
+                "%.3f]%s, %.0f mm away — the wrist's is taken"
+                % (
+                    *a,
+                    *b,
+                    " (placed roughly)" if getattr(scene_fix, "rough", False) else "",
+                    1000 * math.hypot(a[0] - b[0], a[1] - b[1]),
+                )
             )
         return survey.fix
     log.info(
         "[press_demo] WRIST LOOK: no container (%s) — %s"
-        % (survey.why, "the scene camera's box is taken" if scene_fix is not None else "and the scene camera has none")
+        % (
+            survey.why,
+            "the scene camera's box is taken%s" % (", placed roughly" if getattr(scene_fix, "rough", False) else "")
+            if scene_fix is not None
+            else "and the scene camera has none",
+        )
     )
     runner.note("wrist_first", found=False, why=survey.why, scene=scene_fix is not None)
+    if said is not None:
+        said.append(survey.why)
     return None
 
 
-def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator):
+def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator, wrist_look=None):
     """The scene camera found no box (locator.last_why): the wrist survey's fix (tasks/survey) with
     --wrist-survey, its frames' points kept on ctx (survey_clouds); else the run's end — NO BOX and
     home (exit 2), as without the survey; a survey motion stopped part way: the arm holds (exit 1);
     a preview: it ends at the survey pose (exit 0). A run given the orchestrator's selection
     (--instance-id) does not survey: the selection is one of the scene camera's detections, and the
-    wrist cannot tell which container it is (docs/interface.md)."""
+    wrist cannot tell which container it is (docs/interface.md). `wrist_look`: what the wrist
+    look in front (--wrist-first) said where it found none too, said with the NO BOX."""
     from box_opening.tasks import survey as sv
 
     why = "scene camera: %s" % locator.last_why
+    if wrist_look:
+        why += "; the wrist's look in front: %s" % wrist_look
     if getattr(args, "wrist_survey", False) and args.instance_id:
         why += (
             "; no wrist survey for the selected container %s: the selection is the scene camera's, and the wrist "
@@ -1615,7 +1634,8 @@ def main():
         "--wrist-first",
         action="store_true",
         help="the wrist camera finds the container: before anything else the wrist turns where the arm rests so "
-        "its camera sees the table in front, and what it finds there is the box (a table faced from the front; "
+        "its camera sees the table in front (up to four views, first where the scene camera has the box; a lid a "
+        "view cuts is looked at again), and what it finds there is the box (a table faced from the front; "
         "tasks/survey); the scene camera's box only where the wrist finds none; not with --instance-id",
     )
     ap.add_argument(
@@ -1821,17 +1841,20 @@ def main():
         # the scene camera that checks the box again after the press: none for the wrist's box,
         # which it never saw (a box it found elsewhere would be taken for this one moved)
         reach_locator = locator
+        wrist_said = []
         if getattr(args, "wrist_first", False) and not args.instance_id:
             # THE WRIST CAMERA FINDS THE BOX (--wrist-first; owner, 2026-11-11: "having the wrist
             # cam just find the box ... the arm would just need to angle itself so it can see the
             # scene"): facing a table, the arm presses in front of itself, where the scene camera
             # sees no lid whole and puts what it sees 7-9 cm out (tasks/survey's front note). The
             # scene camera's box is kept for where the wrist finds none.
-            wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix)
+            wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=wrist_said)
             if wrist_fix is not None:
                 scene_fix, reach_locator = wrist_fix, None
         if scene_fix is None:
-            scene_fix = wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator)
+            scene_fix = wrist_survey_or_exit(
+                node, ctx, cfg, runner, watcher, args, locator, wrist_look="; ".join(wrist_said)
+            )
             reach_locator = None
         if not scene_by_tf and reach_locator is not None:
             trusted, distrust = scene_trust(
