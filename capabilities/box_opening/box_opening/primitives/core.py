@@ -915,6 +915,9 @@ HOME_WAYPOINT_END_RAD = 0.35
 # single-waypoint legs that planned swung (joint_1 0.43-2.12 rad out and back); in 4 legs 7 poses planned clean,
 # in 6 legs one more (0.5-0.9 s of planning in all).
 HOME_LINE_LEGS = (4, 6)
+# no further plan-free step off a joint limit is tried once those steps have taken this long to plan (2026-11-11:
+# one pose took 30 s to refuse, each of its steps planning HOME and three waypoints)
+HOME_LIMIT_S = 10.0
 JOG = " — jog the arm clear by hand"
 
 
@@ -976,8 +979,11 @@ HOME_LIFTS_M = (0.08, 0.12, 0.16)  # straight lifts tried, lowest first, where H
 # joint limit or has no IK down its line (2026-11-11: 45 of 67 refused plans), a walk in joint space still rises
 HOME_RISES_M = (0.15, 0.25)
 # no further way up is started once the ways up have taken this long to plan (2026-11-11: a refusal after all five,
-# each with its waypoints, took 10.7 s at the median and 32 s at worst; every plan that homed took under 15 s)
-HOME_RAISE_S = 12.0
+# each with its waypoints, took 10.7 s at the median and 32 s at worst). One already started is planned out (3-5 s
+# more), so this bounds a refusal near 25 s, not at its own figure. At 12 s it cut off the last way up from the
+# pose the arm was left in on 2026-11-10 15:28, which homed by that very way on the plan beside it (14.1 s to plan)
+# and still took 15-17 s to refuse; every plan that homed in the 2026-11-11 checks was planned inside 15 s.
+HOME_RAISE_S = 20.0
 
 
 def under_table(chain, body, pts, table_z, extent=None, rest=None):
@@ -1082,8 +1088,9 @@ def home_any(
          the nearest point clear of everything known, off the joint limits too (EscapeBodyFree);
       2. a joint too near its limit for the planner steps along the joint line first (ClearMarginFree), the
          shortest step the goal plans from, each step's plan asked for once (as since 2026-10-23), or round as in
-         4. and 5. from the step's end where that plan swings wide; where none does (the line drops the tool, say,
-         or no step up to the cap plans), the soft step of 1. instead, and the goal asked for from its end;
+         4. and 5. from the step's end where that plan swings wide, no further step tried after HOME_LIMIT_S of
+         planning them; where none does (the line drops the tool, say, or no step up to the cap plans), the soft
+         step of 1. instead, and the goal asked for from its end;
       3. otherwise the goal asked for up to HOME_TRIES times, stopping at the first plan that swings wide;
       4. then a waypoint HOME_WAYPOINTS of the way along the joint line, clear of the padding, planned to (its
          plan may end HOME_WAYPOINT_END_RAD from it, clear of the padding too), and the goal planned from where
@@ -1291,7 +1298,14 @@ def home_any(
             "%s %s: too near for the planner to start from — trying plan-free steps along the joint line toward "
             "%s, shortest first" % (who, ", ".join("%s is %.3f rad from its limit" % jr for jr in near), goal_words)
         )
+        t0 = time.monotonic()
         for step, at, info in clear.steps(ctx, state):
+            if time.monotonic() - t0 > HOME_LIMIT_S:
+                last = "%sthe steps had taken %.0f s to plan and no longer one was tried" % (
+                    "" if last is None else "%s; " % last,
+                    HOME_LIMIT_S,
+                )
+                break
             try:
                 rest, via = [planned(at, "home", list(goal))], None
             except PlanSwung as e:  # asked again, the planner answers alike: round it from the step's end
