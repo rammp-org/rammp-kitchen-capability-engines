@@ -305,6 +305,22 @@ def test_a_path_that_dips_under_the_table_is_named_and_one_that_stays_over_it_is
     assert core.under_table(chain, chain.body, [low, q, up], 0.28, ctx.worlds.table_extent) is None
 
 
+def test_a_whole_turn_between_two_writings_of_one_pose_is_not_a_path(monkeypatch, tmp_path):
+    """The live joints and the planner's branch of them, or a leg's end and the next leg's start, write one pose
+    a whole turn apart on a continuous joint: nothing flies between them, and nothing is judged there."""
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    up = chain.nearest_solution(list(q), [0.6, 0.0, 0.48], DOWN)
+    turned = lambda p: [v + (2 * np.pi if j == 2 else 0.0) for j, v in enumerate(p)]  # noqa: E731
+    ext = ctx.worlds.table_extent
+    assert core.under_table(chain, chain.body, [q, turned(q)], 0.28, None) is None
+    assert core.under_table(chain, chain.body, [q, turned(q), turned(up)], 0.28, ext) is None
+    # a dip is a dip on whichever branch it is written
+    assert core.under_table(chain, chain.body, [q, turned(low), up], 0.28, ext) is not None
+    pts = [list(q), turned(q)]
+    core.under_table(chain, chain.body, pts, 0.28, None)
+    assert pts[1] == turned(q)  # the caller's points are left as they were
+
+
 def test_a_home_planned_under_a_known_table_is_planned_from_the_top_of_a_straight_lift(monkeypatch, tmp_path):
     ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
     plan = DippingPlanner(q, low)
@@ -421,3 +437,103 @@ def test_the_ways_up_stop_being_tried_once_they_have_taken_too_long_to_plan(monk
     with pytest.raises(RuntimeError, match=r"lift of 80 mm and any after it were not tried"):
         core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=lambda s: None)
     assert [a for _n, a, _g in plan.asked if not np.allclose(a, q)] == []  # nothing planned from the top of a way up
+
+
+# --- the planner handed the run's measured table while HOME is planned (owner 2026-11-12, worlds.py) ---
+
+START_IN_WORLD = "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides with the world"
+
+
+def _shared_folder(monkeypatch, tmp_path):
+    """_body_ctx's planner config given a world of its own, and a folder shared with the planner."""
+    from box_opening import worlds
+
+    (tmp_path / "planner.yaml").write_text("robot: robot.yaml\nworld: world.yaml\nlayers: [layer_test.yaml]\n")
+    (tmp_path / "world.yaml").write_text("base_frame: arm_mount\nobstacles: []\n")
+    table = worlds.PlannerTable(tmp_path / "out", "/box_opening", tmp_path / "planner.yaml")
+    monkeypatch.setattr(worlds, "_PLANNER_TABLE", [table])
+    return table
+
+
+class Sees(Planner):
+    """Plans every leg, noting the world a leg planned now would name."""
+
+    def __init__(self, ctx):
+        super().__init__()
+        self.ctx, self.worlds = ctx, []
+
+    def __call__(self, at, name, q):
+        self.worlds.append(self.ctx.worlds.push_name("bench", tag="bare")[1])
+        return super().__call__(at, name, q)
+
+
+def test_the_planner_holds_the_measured_table_while_home_is_planned_and_its_own_world_after(monkeypatch, tmp_path):
+    from box_opening.worlds import PLANNER_WORLD
+
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    table = _shared_folder(monkeypatch, tmp_path)
+    back = []
+    ctx.client.planner_own_world = lambda: back.append(ctx.worlds.home_table_held)
+    plan, said = Sees(ctx), []
+    legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append)
+    assert [leg.name for leg in legs] == ["home"]
+    assert plan.worlds and all(table.ours(w) for w in plan.worlds)  # every leg planned inside names the table world
+    assert back == [False]  # the planner's own asked back once the plans are made, the table no longer named
+    assert ctx.worlds.push_name("bench", tag="bare")[1] == PLANNER_WORLD
+    assert any("the planner holds the measured table" in s for s in said)
+
+
+def test_the_planners_own_world_is_put_back_where_no_home_plans(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    _shared_folder(monkeypatch, tmp_path)
+    back = []
+    ctx.client.planner_own_world = lambda: back.append(1)
+    plan = Planner(home_fails=99, from_start_only=False, waypoints_fail=True)
+    monkeypatch.setattr(core, "START", list(q), raising=False)
+    with pytest.raises(RuntimeError):
+        core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=lambda s: None)
+    assert back == [1] and not ctx.worlds.home_table_held
+
+
+def test_with_no_folder_shared_home_is_planned_in_the_planners_own_world(monkeypatch, tmp_path):
+    from box_opening.worlds import PLANNER_WORLD
+
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    plan, said = Sees(ctx), []
+    core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append)
+    assert plan.worlds and set(plan.worlds) == {PLANNER_WORLD}
+    assert not any("the planner holds" in s for s in said)
+
+
+def test_a_start_the_planner_refuses_for_its_table_is_lifted_clear_first(monkeypatch, tmp_path):
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+
+    class InTable(Planner):
+        def __call__(self, at, name, q_goal):
+            if np.allclose(at.joints, q):
+                raise RuntimeError("planning failed for %s: %s" % (name, START_IN_WORLD))
+            return super().__call__(at, name, q_goal)
+
+    # with no table in the planner's world that refusal is the planner's own word, and nothing is lifted
+    with pytest.raises(RuntimeError, match="INVALID_START_STATE"):
+        core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, InTable(), say=lambda s: None)
+    _shared_folder(monkeypatch, tmp_path)
+    said = []
+    legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, InTable(), say=said.append)
+    assert [leg.name for leg in legs] == ["home-lift", "home"]
+    assert any("starts in the table as the planner holds it" in s for s in said)
+
+
+def test_a_goal_that_would_itself_stand_in_the_planners_table_keeps_the_planner_its_own_world(monkeypatch, tmp_path):
+    from box_opening.worlds import PLANNER_WORLD
+
+    ctx, chain, q, low = _over_a_table(monkeypatch, tmp_path)
+    _shared_folder(monkeypatch, tmp_path)
+    assert core._rests_in(HOME, ctx.worlds.home_table_block()) is None  # HOME rests clear of the table seen
+    everywhere = (-2.0, 2.0, -2.0, 2.0, 5.0)  # a block that takes in the whole arm
+    assert "under its top" in core._rests_in(HOME, everywhere)
+    monkeypatch.setattr(core, "_rests_in", lambda goal, block: "arm_forearm_link 12 mm under its top at x 0.20, y 0.10")
+    plan, said = Sees(ctx), []
+    core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append)
+    assert set(plan.worlds) == {PLANNER_WORLD}
+    assert any("the planner is not handed the table" in s for s in said)
