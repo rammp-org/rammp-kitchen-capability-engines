@@ -12,4 +12,6 @@ container:
   command: ["ros2", "launch", "home_arm", "home_arm.launch.py", "mock:=true"]
 # No `params:` here: they would need the node's executable as the command, and this fragment uses `ros2 launch` for mock:=true.
 publishes: [/home_arm/status]
-subscribes: [/joint_states, /arm/robot_description]
+# through self.arm, during an action only: a read of /joint_states waits for the driver's /ee_state and
+# /gripper_state too, and a goal is sent only after its /control_status
+subscribes: [/joint_states, /ee_state, /gripper_state, /control_status, /arm/robot_description]

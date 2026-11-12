@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from rammp_arm import GO_TO_SPEED_SCALE, JOINTS
 
-from capability_engine import Action, CapabilityEngine, EngineError, run
+from capability_engine import Action, ArmError, CapabilityEngine, EngineError, run
 from home_arm import body, homing
 
 # flatbot (2026-11-09, the arm 8 in forward on the chair): the hand where the arm was left that day
@@ -111,6 +111,12 @@ class Capability(CapabilityEngine):
 
     def execute(self, action_id, params, ctx):
         began = time.monotonic()
+        if not isinstance(params, dict):  # the base class hands over whatever JSON the goal carried
+            raise EngineError(
+                "bad_params",
+                f"params must be a JSON object, not {type(params).__name__}",
+                recoverable=True,
+            )
         unknown = sorted(set(params) - {"dry_run"})
         if unknown:
             raise EngineError("bad_params", f"unknown parameters {unknown}", recoverable=True)
@@ -130,6 +136,9 @@ class Capability(CapabilityEngine):
         ctx.progress("checking", 0.0, "reading where the arm is")
         if self.mock:
             ctx.checkpoint()
+            if dry_run:  # as the real path: planned, nothing sent
+                ctx.progress("done", 1.0, "dry run (mock): nothing sent")
+                return {"home": False, "moved": False, "mock": True, "dry_run": True}
             self.arm.go_to_joint_config(home, "home (mock)")
             ctx.progress("done", 1.0, "home (mock)")
             return {"home": True, "moved": False, "mock": True}
@@ -213,8 +222,14 @@ class Capability(CapabilityEngine):
 
     def _joints(self):
         """The arm's joints now, as the driver reports them (/joint_states, at most
-        arm.state_stale_s old: self.arm refuses an older one)."""
-        return np.asarray(self.arm.joint_states().position, float)
+        arm.state_stale_s old: self.arm refuses an older one). EngineError("arm_state") where the
+        driver's state does not come or is stale: nothing is planned or sent on it."""
+        try:
+            return np.asarray(self.arm.joint_states().position, float)
+        except ArmError as e:
+            raise EngineError(
+                "arm_state", f"the arm's joints cannot be read ({e})", recoverable=True
+            ) from e
 
     def _kinematics(self):
         """(chain, model, why there is no model): the driver's URDF as a kinematic chain (joint
@@ -239,6 +254,10 @@ class Capability(CapabilityEngine):
                 raise body.BodyModelError(f"body model: the URDF has no tool link {tool}")
         except body.BodyModelError as e:
             raise EngineError("body_model", str(e)) from e
+        except ArmError as e:  # no /arm/robot_description: the driver is not up
+            raise EngineError(
+                "arm_state", f"the arm's URDF cannot be read ({e})", recoverable=True
+            ) from e
         if model is not None:
             try:
                 model = model.place(chain, tool)
@@ -442,8 +461,14 @@ class Capability(CapabilityEngine):
 
     def _fly(self, points, what, speed_scale):
         """Send `points` to the driver once, at `speed_scale`; a goal it does not complete fails
-        the action."""
-        res = self.arm.execute_joint_trajectory(JOINTS, points, speed_scale=speed_scale)
+        the action, and so does one it refuses or that self.arm does not send (an e-stop, control
+        taken, no driver): motion_failed by name, never retried."""
+        try:
+            res = self.arm.execute_joint_trajectory(JOINTS, points, speed_scale=speed_scale)
+        except ArmError as e:
+            raise EngineError(
+                "motion_failed", f"{what} was not completed ({e}): the arm holds where it is"
+            ) from e
         if res.error_code != SUCCESSFUL:
             raise EngineError(
                 "motion_failed",

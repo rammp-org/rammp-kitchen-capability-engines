@@ -393,6 +393,61 @@ def test_bad_params_are_refused():
         assert e.value.error_code == "bad_config"
 
 
+def test_params_that_are_no_json_object_are_bad_params_not_an_exception():
+    """The base class hands execute() whatever JSON the goal carried (REVIEW_RULES O4)."""
+    for bad in (None, [], ["dry_run"], 3, True):
+        with pytest.raises(EngineError) as e:
+            Capability.execute(_engine(Arm(), Model()), "go_home", bad, Ctx())
+        assert e.value.error_code == "bad_params" and e.value.recoverable
+
+
+def test_an_arm_whose_state_does_not_come_fails_by_name_before_anything_is_planned():
+    """self.arm's own errors are not EngineErrors: left alone, the action would fail as a bare
+    "exception" (REVIEW_RULES U4)."""
+    from capability_engine import StateTimeout
+
+    arm = Arm()
+
+    def no_state():
+        raise StateTimeout("no /joint_states, /ee_state or /gripper_state")
+
+    arm.joint_states = no_state
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "arm_state" and e.value.recoverable
+    assert "no /joint_states" in str(e.value) and arm.planned == [] and arm.sent == []
+
+
+@pytest.mark.parametrize("error", ["Refused", "EStopped", "ControlTaken"])
+def test_a_goal_the_arm_refuses_fails_the_action_as_motion_failed_and_is_not_sent_again(error):
+    """A rejected goal, an e-stop or control taken raises from self.arm (REVIEW_RULES C5, U4): the
+    action fails by name, and nothing is sent after it."""
+    from capability_engine import driver_state
+
+    arm = Arm()
+    tried = []
+
+    def refuse(names, points, speed_scale=1.0):
+        tried.append(len(points))
+        raise getattr(driver_state, error)("execute_joint_trajectory: goal REJECTED")
+
+    arm.execute_joint_trajectory = refuse
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "motion_failed" and not e.value.recoverable
+    assert "REJECTED" in str(e.value) and len(tried) == 1
+
+
+def test_the_mock_plans_nothing_and_a_dry_run_of_it_sends_nothing():
+    sent = []
+    arm = SimpleNamespace(go_to_joint_config=lambda q, label: sent.append(label) or True)
+    eng = _engine(arm, Model())
+    eng.mock = True
+    assert _go(eng, dry_run=True) == {"home": False, "moved": False, "mock": True, "dry_run": True}
+    assert sent == []
+    assert _go(eng) == {"home": True, "moved": False, "mock": True} and sent == ["home (mock)"]
+
+
 def test_an_arm_moved_while_planned_for_is_planned_for_again_from_where_it_stands():
     moved = START + np.r_[0.1, 0, 0, 0, 0, 0, 0]
     arm = Arm(readings=[START, moved])

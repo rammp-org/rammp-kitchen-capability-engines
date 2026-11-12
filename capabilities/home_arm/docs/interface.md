@@ -77,14 +77,19 @@ go through the user.
 
 ## Subscribes
 
-| Topic                    | Type                     | Required | Meaning                                                             |
-| ------------------------ | ------------------------ | -------- | ------------------------------------------------------------------- |
-| `/joint_states`          | `sensor_msgs/JointState` | yes      | Where the arm starts (through `self.arm`, during the action only)   |
-| `/arm/robot_description` | `std_msgs/String`        | yes      | The driver's URDF: places the planner's spheres (one-shot, latched) |
+| Topic                    | Type                                    | Required | Meaning                                                                      |
+| ------------------------ | --------------------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `/joint_states`          | `sensor_msgs/JointState`                | yes      | Where the arm starts (through `self.arm`, during the action only)            |
+| `/ee_state`              | `rammp_arm_interfaces/EeState`          | yes      | `self.arm` waits for it before a state read or a command; not otherwise read |
+| `/gripper_state`         | `rammp_arm_interfaces/GripperState`     | yes      | The same                                                                     |
+| `/control_status`        | `rammp_common_interfaces/ControlStatus` | yes      | The e-stop and who holds the arm, read by `self.arm` before a goal is sent   |
+| `/arm/robot_description` | `std_msgs/String`                       | yes      | The driver's URDF: places the planner's spheres (one-shot, latched)          |
 
-It calls the cuRobo planner's `/plan_to_joints` (plans only) and the driver's
-`/execute_joint_trajectory`, both through `self.arm`, and reads the planner's
-config files from `/config/robot` (the robot config, mounted read-only).
+All of them through `self.arm`, opened when the action first needs them and closed
+as it ends. It calls the cuRobo planner's `/rammp_curobo/plan_to_joints` action
+(plans only) and the driver's `/execute_joint_trajectory` action, both through
+`self.arm`, and reads the planner's config files from `/config/robot` (the robot
+config, mounted read-only).
 
 ## Orchestrator interface
 
@@ -103,7 +108,8 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 
 | Error code         | Recoverable | Meaning                                                                                                                                   |
 | ------------------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `bad_params`       | yes         | A parameter other than `dry_run`, or `dry_run` not a boolean                                                                              |
+| `bad_params`       | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                           |
+| `arm_state`        | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                   |
 | `bad_config`       | no          | `home_joints` is not 7 values, or `speed_scale` not in (0, 1\]                                                                            |
 | `body_model`       | no          | The driver's URDF cannot be read, or the planner refuses the start as in collision and the planner's config cannot be read; nothing moved |
 | `start_in_padding` | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                         |
@@ -111,7 +117,7 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | `no_way_home`      | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                 |
 | `too_slow`         | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved                                                             |
 | `arm_moving`       | yes         | The arm moved while it was planned for, twice; nothing sent                                                                               |
-| `motion_failed`    | no          | The driver did not complete a goal; the arm holds where it stopped                                                                        |
+| `motion_failed`    | no          | The driver refused or did not complete a goal (an e-stop and control taken included); the arm holds where it stopped                      |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up. It offers `go_home` on every selection (no perception

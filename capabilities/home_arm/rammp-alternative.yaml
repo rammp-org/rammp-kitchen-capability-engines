@@ -91,4 +91,6 @@ params:
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
 publishes: [/home_arm/status]
-subscribes: [/joint_states, /arm/robot_description]
+# through self.arm, during an action only: a read of /joint_states waits for the driver's /ee_state and
+# /gripper_state too, and a goal is sent only after its /control_status
+subscribes: [/joint_states, /ee_state, /gripper_state, /control_status, /arm/robot_description]
