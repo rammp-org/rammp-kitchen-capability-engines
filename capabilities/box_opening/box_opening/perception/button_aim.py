@@ -73,6 +73,65 @@ def disc_spread(z):
 ANNULUS = (1.15, 1.5)  # of r: the ring around the button is LID, not table
 ANNULUS_TOL_M = 0.012
 ANNULUS_MIN_FRAC = 0.8
+# ANNULUS_MIN_FRAC, of the ring at the lid's height and of the ring's rays meeting it, says from the depth alone
+# that the circle lies on a lid and not across its rim. On a glossy lid over a plain table the wrist's depth is
+# wrong in rows and patches (flatbot 2026-11-11 19:29, the look's one saved frame: 87 % of the ring at its
+# height and 84-89 % of its rays on it, a sixth of the ring's cells reading the table through the lid;
+# 2026-10-30 10:59 the ring 78 %, refused), a few points over that floor: wrong depth on a fifth more of the
+# ring refuses every frame (study/demo/button). The colour can say the same thing and is not wrong there: a
+# ROUND lid's rim, and every circle moulded into its top, has the button's centre for its own. Where Hough
+# finds a circle of the lid's kind in the rectified image (LID_MIDDLE_SPAN: from the ring's outer edge to the
+# lid's own radius and a tenth, LID_MIDDLE_VOTES edge cells voting its centre: a texture votes none) whose
+# centre stands within LID_MIDDLE_AT_M of the candidate's, the candidate is at the lid's middle and its ring on
+# the lid, and the ring's depth need be the lid's only for the most part: LID_MIDDLE_SHARE in place of
+# ANNULUS_MIN_FRAC, both times. Only a button read flush with its lid (KNOB_NOISE_M) and at a settled height is
+# taken so (_oblique_circle), and every other gate holds as it was: the disc flat (its share stays: with half
+# a disc at another height the circle's own height, and so its place, is not known), the fills, the heights
+# against the prior, the place. Without that circle, or with a lid that is not round or a button not at its
+# middle, nothing changes. On the 56 buttons of the saved oblique frames such a circle's centre stood within
+# 2.9 mm of the button's, and of the 818 such circles Hough found in those frames' rectified images (the foam
+# plate, the cables and the table's edge in them) every one was centred within 20 mm of the button, 795
+# within 12: on the lid's top, where a ring is on the lid. A rendered lid with one plain rim gets 70 votes
+# at 39 deg.
+LID_MIDDLE_SHARE = 0.60
+LID_MIDDLE_SPAN = (1.5, 1.1)
+LID_MIDDLE_VOTES = 60
+LID_MIDDLE_AT_M = 0.004
+LID_MIDDLE_OFFSET_M = 0.002  # the model's button stands at its lid's middle: button_offset xy within this
+
+
+def lid_circles(gray, ratio):
+    """(n, 3) the circles of a round lid's kind in the rectified grey image, (u, v, r) in its cells
+    (LID_MIDDLE_*): LID_MIDDLE_SPAN[0] button radii to LID_MIDDLE_SPAN[1] lid radii across (`ratio`: the lid's
+    diameter over the button's; the image holds the button OBLIQUE_BUTTON_PX in radius), each with
+    LID_MIDDLE_VOTES edge cells voting its centre, however near another's its centre stands."""
+    import cv2
+
+    lo = int(math.floor(LID_MIDDLE_SPAN[0] * OBLIQUE_BUTTON_PX))
+    hi = int(math.ceil(LID_MIDDLE_SPAN[1] * float(ratio) * OBLIQUE_BUTTON_PX))
+    if hi <= lo:
+        return np.zeros((0, 3), np.float32)
+    circles = cv2.HoughCircles(
+        np.ascontiguousarray(gray),
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=3,
+        param1=90,
+        param2=LID_MIDDLE_VOTES,
+        minRadius=lo,
+        maxRadius=hi,
+    )
+    return np.zeros((0, 3), np.float32) if circles is None else circles[0][:, :3]
+
+
+def at_lid_middle(circles, cu, cv, s):
+    """Whether the rectified circle centred (cu, cv) has one of `circles` (lid_circles) about its own centre, to
+    LID_MIDDLE_AT_M (`s`: the image's cells per metre)."""
+    if not len(circles):
+        return False
+    return bool(np.min(np.hypot(circles[:, 0] - cu, circles[:, 1] - cv)) <= LID_MIDDLE_AT_M * s)
+
+
 AGREE_M = 0.004  # hits that agree within this (planar) count together
 MIN_HITS = 3
 # A tilted view's aim may fix on two hits that agree (ButtonAimer's min_hits,
@@ -206,6 +265,9 @@ class ButtonSighting:
     # include it.
     table_offset_m: float = float("nan")
     table_offset_raw_m: float = float("nan")
+    # taken on the colour's word that the circle is at a round lid's middle (LID_MIDDLE_*): the depth's own
+    # shares would have refused it
+    lid_middle: bool = False
 
 
 def centre_depth(depth, u, v, r):
@@ -470,7 +532,7 @@ def _incidence_deg(p, cam):
     return math.degrees(math.acos(max(-1.0, min(1.0, ray[2] / float(np.linalg.norm(ray))))))
 
 
-def _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate=None):
+def _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate=None, middle=None):
     """((P, h_disc, h_ring, f), None) for the rectified circle (cu, cv, r),
     or (None, why). lifted: (n, n, 3) base points of the cells' depth; f
     scales the rectified circle to metric at the height it lies at. Only the
@@ -478,8 +540,18 @@ def _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate=None):
     gate counts lies within 2.5 rb of the centre and a knob's height of it,
     and such a sample's ray crosses h0 no farther out than that. h_gate:
     where this frame should see the lid (h0 moved by the table offset,
-    default h0); the two prior-height gates alone read it."""
+    default h0); the two prior-height gates alone read it. middle: asked
+    (no arguments, at most once) only by a ring share that would refuse
+    the circle — True where the colour says it is at a round lid's middle,
+    and that share then need be LID_MIDDLE_SHARE."""
     h_gate = h0 if h_gate is None else float(h_gate)
+    said, relaxed = [], []  # the colour's word, once asked; the depth's own refusals it stood in for
+
+    def at_middle():
+        if not said:
+            said.append(bool(middle()) if middle is not None else False)
+        return said[0]
+
     half = int(math.ceil(OBLIQUE_WINDOW * r))
     i0, j0 = max(0, int(cv) - half), max(0, int(cu) - half)
     win = lifted[i0 : int(cv) + half + 1, j0 : int(cu) + half + 1]
@@ -563,7 +635,10 @@ def _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate=None):
         return None, "too little depth around the circle (%d of ~%.0f cells)" % (zr.size, expect)
     frac = float(np.mean(np.abs(zr - h_ring) < ANNULUS_TOL_M))
     if frac < ANNULUS_MIN_FRAC:
-        return None, "ring around it is not one lid (%.0f%% at its height) — a corner?" % (100 * frac)
+        why = "ring around it is not one lid (%.0f%% at its height) — a corner?" % (100 * frac)
+        if not (frac >= LID_MIDDLE_SHARE and at_middle()):
+            return None, why
+        relaxed.append(why)
     # The same ring by where each cell's RAY crosses its plane. Past the
     # lid's far rim the box hides the table from this view, so no sample's
     # own xy lands there and the ring above reads all lid for a circle
@@ -579,16 +654,37 @@ def _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate=None):
     if on_lid + past < 30:
         return None, "no lid seen around the circle (%d cells)" % (on_lid + past)
     if on_lid < ANNULUS_MIN_FRAC * (on_lid + past):
-        return None, "ring around it is not one lid (%.0f%% of its rays meet it) — a corner?" % (
+        why = "ring around it is not one lid (%.0f%% of its rays meet it) — a corner?" % (
             100.0 * on_lid / (on_lid + past)
         )
+        if not (on_lid >= LID_MIDDLE_SHARE * (on_lid + past) and at_middle()):
+            return None, why
+        relaxed.append(why)
     if abs(h_ring - h_gate) > LID_PRIOR_TOL_M:
         return None, "lid ring %.0f mm from its prior height" % (1000 * (h_ring - h_gate))
     up = h_disc - h_ring
     if up < -TOP_RESIDUAL_MAX_M or up > KNOB_MAX_UP_M:
         return None, "disc %.0f mm from the lid around it" % (1000 * up)
+    if relaxed and (
+        abs(up) > KNOB_NOISE_M
+        or abs({"disc": h_disc, "ring": h_ring, "mid": 0.5 * (h_disc + h_ring)}[at] - h_circle) > KNOB_NOISE_M
+    ):
+        # the colour's word stands in for the ring's depth only for a button read flush with its lid (a knob
+        # read proud moves the press point along the ray and calls the box open, and depth wrong in places
+        # reads one: 14 mm on a rendered disc half of whose rows read 16 mm high) and at a settled height:
+        # the height the circle was placed at is the one measured around where that put it (to 0.5 mm on
+        # every right sighting of the saved frames and of those with errors put in; 13-16 mm on the two that
+        # were 9-10 mm off, depth on a sixth of a disc and wrong depth on more of it than that)
+        return None, relaxed[0]
     fill = zd.size / max(cells(math.pi * (0.8 * rb) ** 2, h_disc), 1.0)
-    return (np.r_[p[:2], h_disc], h_disc, h_ring, (cam[2] - h_circle) / (cam[2] - h0), fill), None
+    return (
+        np.r_[p[:2], h_disc],
+        h_disc,
+        h_ring,
+        (cam[2] - h_circle) / (cam[2] - h0),
+        fill,
+        bool(relaxed),
+    ), None
 
 
 def _table_offset(lifted, h0, table_z, inc_deg):
@@ -798,12 +894,25 @@ def find_button_oblique(color_bgr, depth, k, rot_cam, trans_cam, table_z, model,
         cands = [cands[i] for i in near]
     cands = cands[:OBLIQUE_MAX_CIRCLES]
     whys = []
+    # the colour's word on a circle (LID_MIDDLE_*): only a round lid with its button at its middle has one, and
+    # its circles are sought once, when a circle first needs it
+    lid_ratio, rims = None, []
+    if getattr(model, "round", False) and math.hypot(*model.button_offset[:2]) <= LID_MIDDLE_OFFSET_M:
+        lid_ratio = float(model.lid_dims[0]) / float(model.button_diameter_m)
     for cu, cv, r in cands:
-        hit, why = _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate)
+        middle = None
+        if lid_ratio is not None:
+
+            def middle(cu=cu, cv=cv):
+                if not rims:
+                    rims.append(lid_circles(gray, lid_ratio))
+                return at_lid_middle(rims[0], cu, cv, s)
+
+        hit, why = _oblique_circle(lifted, cu, cv, r, s, c0, g, h0, cam, rb, h_gate, middle)
         if hit is None:
             whys.append(why)
             continue
-        p, h_disc, h_ring, f, fill = hit
+        p, h_disc, h_ring, f, fill, by_middle = hit
         if prior_xy is not None and math.hypot(p[0] - prior_xy[0], p[1] - prior_xy[1]) > PRIOR_MAX_M:
             whys.append("%.0f mm from the prior" % (1000 * math.hypot(p[0] - prior_xy[0], p[1] - prior_xy[1])))
             continue
@@ -827,6 +936,7 @@ def find_button_oblique(color_bgr, depth, k, rot_cam, trans_cam, table_z, model,
             disc_fill=min(1.0, fill),
             table_offset_m=table_off,
             table_offset_raw_m=table_raw,
+            lid_middle=by_middle,
         ), None
     return None, "%d circle(s) on the rectified lid plane, none the button: %s%s" % (
         len(cands),
@@ -1008,6 +1118,7 @@ class ButtonAimer:
         self.table_offsets = []  # each hit's (accepted, raw) table offset, nan where none (ButtonSighting)
         self.hit_s = []  # each hit's time since the aimer was built (s)
         self.oblique = []  # each hit: found by find_button_oblique
+        self.by_lid_middle = 0  # hits taken on the colour's word (ButtonSighting.lid_middle)
         self._last_stamp = None
         self._last_depth_stamp = None  # the depth that last voted (depth_paired)
         self._last_cam = None
@@ -1090,6 +1201,7 @@ class ButtonAimer:
         self.table_offsets.append((s.table_offset_m, s.table_offset_raw_m))
         self.hit_s.append(time.monotonic() - self.t0)
         self.oblique.append(bool(getattr(s, "oblique", False)))  # a sighting without the flag: straight down
+        self.by_lid_middle += bool(getattr(s, "lid_middle", False))
         dt = pair_dt_ms(f)
         if dt is not None:
             self.pair_dt_ms.append(dt)
