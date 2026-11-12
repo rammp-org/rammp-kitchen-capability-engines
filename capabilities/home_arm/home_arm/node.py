@@ -342,8 +342,9 @@ class Capability(CapabilityEngine):
     def _plan_home(self, start, home, tries, ctx, model):
         """([plans], how) to the home from `start`: up to `tries` times directly (stopping at the
         first plan that swings wide: the planner answers alike), then through each waypoint along
-        the joint line clear of the padding, its second leg planned from where its first one ends.
-        EngineError("no_way_home") otherwise."""
+        the joint line clear of the padding, its second leg planned from where its first one ends
+        (up to homing.WAYPOINT_END_RAD from the waypoint, clear of the padding too), then along
+        the joint line in homing.LINE_LEGS equal legs. EngineError("no_way_home") otherwise."""
         last = ""
         goal = homing.on_branch(home, start)
         for k in range(tries):
@@ -358,9 +359,9 @@ class Capability(CapabilityEngine):
             if model is not None and float(model.depth(w)[0]) > 0.0:
                 continue
             ctx.checkpoint()
-            first = self._plan(w, start)
-            last = self._judge(first, w)
-            if last:
+            first, why = self._to_waypoint(w, start, model)
+            if why:
+                last = why
                 continue
             reached = np.asarray(first.q[-1], float)
             to_home = homing.on_branch(home, reached)
@@ -368,11 +369,42 @@ class Capability(CapabilityEngine):
             last = self._judge(second, to_home)
             if not last:
                 return [first, second], f"through a waypoint {100 * f:.0f}% of the way"
+        for n in homing.LINE_LEGS:
+            ws = homing.waypoints(start, home, [k / n for k in range(1, n)])
+            if model is not None and any(float(model.depth(w)[0]) > 0.0 for w in ws):
+                continue
+            plans, at, why = [], np.asarray(start, float), ""
+            for w in ws:
+                ctx.checkpoint()
+                plan, why = self._to_waypoint(w, at, model)
+                if why:
+                    break
+                plans.append(plan)
+                at = np.asarray(plan.q[-1], float)
+            if not why:
+                to_home = homing.on_branch(home, at)
+                plans.append(self._plan(to_home, at))
+                why = self._judge(plans[-1], to_home)
+            if not why:
+                return plans, f"in {n} legs along the joint line (no single waypoint planned)"
+            last = why
+        legs = "/".join(str(n) for n in homing.LINE_LEGS)
         raise EngineError(
             "no_way_home",
             f"the planner found no way home around the chair, {tries} times directly nor through "
-            f"a waypoint along the joint line (last: {last}): jog the arm clear by hand",
+            f"a waypoint along the joint line nor along it in {legs} legs (last: {last}): jog the "
+            "arm clear by hand",
         )
+
+    def _to_waypoint(self, w, start, model):
+        """(plan, why not) to the waypoint `w` from `start`: the plan may end up to
+        homing.WAYPOINT_END_RAD from `w` (the next leg is planned from where it ends), outside
+        the padding."""
+        plan = self._plan(w, start)
+        why = self._judge(plan, w, homing.WAYPOINT_END_RAD)
+        if not why and model is not None and float(model.depth(plan.q[-1])[0]) > 0.0:
+            why = "the plan to the waypoint ends inside the padding round the chair and user"
+        return plan, why
 
     def _plan(self, goal, start):
         """The planner's plan to `goal` from `start`, while the planning budget still holds a whole
@@ -387,15 +419,15 @@ class Capability(CapabilityEngine):
         return self.arm.plan_to_joints(goal, start)
 
     @staticmethod
-    def _judge(plan, goal):
-        """'' for a plan that succeeded, ends at `goal` and swings no joint more than
-        SWING_MARGIN_RAD wider than the straight way there, else why not."""
+    def _judge(plan, goal, end_rad=homing.PLAN_END_RAD):
+        """'' for a plan that succeeded, ends within `end_rad` of `goal` (any joint) and swings no
+        joint more than SWING_MARGIN_RAD wider than the straight way there, else why not."""
         if not plan.success:
             return plan.message or "the plan failed"
         if len(plan.q) == 0:
             return "the plan has no samples"
         rad, j = homing.end_error(plan.q[-1], goal)
-        if rad > homing.PLAN_END_RAD:
+        if rad > end_rad:
             return (
                 f"the plan ends {rad:.3f} rad from its goal (joint {j + 1}): "
                 "another arm configuration"

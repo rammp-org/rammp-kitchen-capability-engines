@@ -20,6 +20,21 @@ SWING_MARGIN_RAD = 0.35
 # further apart than this (any joint, not wrapped) is two plans that do not join
 JOIN_RAD = 1e-3
 WAYPOINTS = (0.5, 0.25, 0.75)  # fractions of the joint line toward HOME, tried in this order
+# A waypoint's plan may end this far (any joint) from the waypoint it was sent, the home planned
+# from where it really ends: cuRobo's FK-pose fallback lands on the same arm a little along its
+# self-motion (box_opening's planner rig, 2026-11-12: 0.08-0.32 rad off on joints 1, 5 and 7 from
+# a pose 25% into a recorded home, each refused and no waypoint left), while another arm at the
+# same tool pose ends 0.9-4.3 rad off and stays refused. The plan that ends at the home keeps
+# PLAN_END_RAD.
+WAYPOINT_END_RAD = 0.35
+# Where no single waypoint plans, the joint line in this many equal legs, fewest first. cuRobo
+# swings wide on the long legs of an arm whose elbow must straighten and fold the other way
+# (joint 4's sign against the home's, left so by a jog or a recovery) and follows the line on
+# short ones: on that rig, from the 12 such poses over a 29 in table that were refused or homed
+# only sometimes, of 24 direct plans 20 swung wide and the other 4 ended on another arm, and 29
+# of the 62 single-waypoint legs that planned swung (joint 1 0.43-2.12 rad out and back); in 4
+# legs 7 poses planned clean, in 6 legs one more.
+LINE_LEGS = (4, 6)
 # The plan-free steps (out of the padding, off a limit): the joint that moves most at most this
 # fast at the peak of a minimum-jerk profile (rammp_arm.joint_trajectory), never in less than
 # rammp_arm.MIN_DURATION_S

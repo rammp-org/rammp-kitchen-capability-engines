@@ -37,8 +37,12 @@ plain plan, and the action handles each before anything moves:
    `plan_tries` times (a plan that does not end at the home, the planner's other
    arm configuration at the same tool pose, counts as failed), then through a
    waypoint 50, 25 or 75 % of the way along the joint line toward it, clear of the
-   padding, its second leg planned from where its first one ends. Where none
-   plans, the action fails `no_way_home`.
+   padding, its second leg planned from where its first one ends (the plan to a
+   waypoint may end up to 0.35 rad from it, outside the padding: the planner's
+   pose fallback lands a little along the arm's self-motion), then along that
+   joint line in 4, then 6, equal legs: an arm whose elbow must straighten and
+   fold the other way swings wide on long legs and follows the line on short
+   ones. Where none plans, the action fails `no_way_home`.
 1. **A plan that swings wide.** A plan that ends at the home can still take a
    joint far further than the straight way there: on flatbot (2026-11-10) every
    plan home from one start took joint 1 0.9 rad out past it and back, the hand

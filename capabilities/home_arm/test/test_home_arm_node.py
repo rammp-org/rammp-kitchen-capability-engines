@@ -144,7 +144,15 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
         _kinematics=lambda: (chain or Chain(), model, no_model),
         _judge=Capability._judge,
     )
-    for name in ("_joints", "_route", "_plan_home", "_off_the_limit", "_plan", "_fly"):
+    for name in (
+        "_joints",
+        "_route",
+        "_plan_home",
+        "_to_waypoint",
+        "_off_the_limit",
+        "_plan",
+        "_fly",
+    ):
         setattr(eng, name, functools.partial(getattr(Capability, name), eng))
     return eng
 
@@ -252,7 +260,54 @@ def test_where_nothing_plans_it_fails_before_anything_moves():
         _go(_engine(arm, Model()))
     assert e.value.error_code == "no_way_home" and "jog the arm clear by hand" in str(e.value)
     assert arm.sent == []
-    assert len(arm.planned) == 6  # 3 direct, then each waypoint's first leg
+    # 3 direct, each waypoint's first leg, then the first leg of the line in 4 and in 6
+    assert len(arm.planned) == 8
+    assert "nor along it in 4/6 legs" in str(e.value)
+
+
+def test_a_waypoints_plan_may_end_near_it_and_one_that_ends_on_another_arm_may_not():
+    # box_opening's planner rig, 2026-11-12: cuRobo's FK-pose fallback ended 0.08-0.32 rad from the
+    # waypoint (the same arm along its self-motion) and was refused; another arm ends 0.9-4.3 off
+    off = np.r_[0.2, 0, 0, 0, -0.2, 0, 0.2]
+
+    def answer(goal, start):
+        if _direct(goal, start):
+            return _plan(goal, start, ok=False)
+        if np.allclose(start, START):  # a waypoint's plan
+            half = np.allclose(goal, (START + node.homing.on_branch(HOME, START)) / 2)
+            return _plan(goal, start, end=goal + (4.5 * off if half else off))
+        return _plan(goal, start)
+
+    arm = Arm(answers=[answer])
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == "through a waypoint 25% of the way"  # the 50% one ended on another arm
+    w = arm.planned[4][0]
+    assert np.allclose(arm.planned[5][1], w + off)  # home planned from where the plan ended
+    assert np.allclose(arm.planned[5][0], node.homing.on_branch(HOME, w + off))
+
+
+def _long_legs_swing(longest):
+    """Plans every leg, but one whose largest joint moves more than `longest` rad swings joint 1."""
+
+    def answer(goal, start):
+        far = float(np.abs(np.asarray(goal, float) - np.asarray(start, float)).max())
+        return _swinging(goal, start) if far > longest else _plan(goal, start)
+
+    return answer
+
+
+@pytest.mark.parametrize("share, n", [(0.30, 4), (0.20, 6)])
+def test_where_no_single_waypoint_plans_home_goes_along_the_joint_line_in_short_legs(share, n):
+    # an arm whose elbow must straighten and fold the other way: cuRobo swings wide on long legs
+    span = float(np.abs(node.homing.on_branch(HOME, START) - START).max())
+    arm = Arm(answers=[_long_legs_swing(share * span)])
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == f"in {n} legs along the joint line (no single waypoint planned)"
+    legs = arm.planned[-n:]
+    assert np.allclose(legs[0][1], START) and np.allclose(legs[-1][0], HOME)
+    for (goal, _start), (_goal, start) in zip(legs, legs[1:], strict=False):
+        assert np.allclose(goal, start)  # each leg from where the one before ended
+    assert len(arm.sent) == 1 and len(arm.sent[0]) == n + 1  # one goal through every waypoint
 
 
 def _refuses_start(at, message="MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION"):
