@@ -697,6 +697,47 @@ def test_the_front_look_goes_by_the_lids_geometry_and_never_looks_again_from_abo
     assert [f["stage"] for k, f in runner.notes if k == "wrist_survey"] == ["views", "survey:angle-far"]
 
 
+def test_the_hand_keeps_its_floor_from_the_user_at_every_front_view_and_on_its_way(tmp_path, monkeypatch):
+    """FRONT_HAND_USER_M: the hand (every link past joint 5) no nearer the user's boxes than the floor at a view, a
+    hint's view or a look again, nor on the way there; one that would bring it nearer is not flown and says so.
+    0.0 (the default): no floor of the look's own, the views as they were first chosen."""
+    chain, check = _front_chair(tmp_path)
+    cam, model = sv.camera(), ContainerModel.load(CONTAINER)
+    assert sv.FRONT_HAND_USER_M == 0.0
+    free = sv.FrontBand(check, list(HOME))
+    views0, _why, stats0 = sv.angled_views(chain, check, list(HOME), cam, model)
+    assert free.hand_user_m == 0.0 and stats0["hand_refused"] == 0 and stats0["hand_kept_mm"] == 0.0
+    hand = [float(free._hand_m(v.joints)[0].min()) for v in views0]
+    rest_m = float(free._hand_m(HOME)[0].min())
+    near = views0[int(np.argmin(hand))]  # the view turned toward the user's side
+    assert min(hand) < rest_m - 0.05 and min(hand) < 0.15
+    again0, _w = sv.again_view(chain, check, list(HOME), cam, model, (0.45, -0.25), 0.315)
+    assert again0 is not None and float(free._hand_m(again0.joints)[0].min()) < min(hand)  # a look again goes nearer
+    assert free.refusal(near.joints) is None and free.path_refusal([list(HOME), near.joints]) is None
+
+    floor = min(hand) + 0.02
+    monkeypatch.setattr(sv, "FRONT_HAND_USER_M", floor)
+    band = sv.FrontBand(check, list(HOME))
+    assert band.hand_user_m == pytest.approx(floor)
+    said = "mm from the user, nearer than the look keeps it (%.0f mm)" % (1000 * floor)
+    assert said in band.refusal(near.joints) and band.refusal(list(HOME)) is None
+    assert said + ", " in band.path_refusal([list(HOME), near.joints])  # ... and where on the way
+    views, _why, stats = sv.angled_views(chain, check, list(HOME), cam, model)
+    assert views and all(float(band._hand_m(v.joints)[0].min()) >= floor for v in views)
+    assert near.joints not in [v.joints for v in views] and stats["hand_refused"] >= 1
+    assert stats["hand_kept_mm"] == pytest.approx(1000 * floor, abs=0.1) and stats["sees"] <= stats0["sees"]
+    # the hint's view and a look again are held to it too, and say so
+    aim = [float(x) for x in near.what.split("[")[1].rstrip("]").split(",")]
+    hinted, _why, hstats = sv.angled_views(chain, check, list(HOME), cam, model, hint=aim)
+    assert all(v.name != "survey:angle-hint" for v in hinted)
+    assert any("where the box may stand" in w and said in w for w in hstats["refused"])
+    again, why = sv.again_view(chain, check, list(HOME), cam, model, (0.45, -0.25), 0.315)
+    assert again is None and why.startswith("no look again at [0.45, -0.25]: the hand (") and said in why
+    # never asked to stand farther from the user than it rests
+    assert sv.FrontBand(check, list(HOME), hand_user_m=1.0).hand_user_m < rest_m
+    assert sv.FrontBand(check, list(HOME), hand_user_m=1.0).refusal(list(HOME)) is None
+
+
 def _cut_lid(xy=(0.60, 0.20), passing=True, frames=(0,)):
     """What the finder says of a lid a view cuts at `xy`: a fix every sighting of which is cut, or (passing
     False) no fix and its top refused as cut off by the view."""

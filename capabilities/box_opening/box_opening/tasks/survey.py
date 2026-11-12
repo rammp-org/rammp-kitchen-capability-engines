@@ -434,6 +434,23 @@ class Band:
         )
 
 
+def _sampled(traj_or_points, step_rad=None):
+    """A planned trajectory's (or joint points') states joined by straight joint lines sampled every
+    `step_rad` (body.CHECK_STEP_RAD), as Band.path_refusal samples a way: (n, 7), or None with none."""
+    from box_opening.runtime.body import CHECK_STEP_RAD
+
+    pts = getattr(traj_or_points, "points", None)
+    P = np.array([list(p.positions) for p in pts] if pts is not None else [list(q) for q in traj_or_points], float)
+    if P.ndim != 2 or not len(P):
+        return None
+    step = CHECK_STEP_RAD if step_rad is None else float(step_rad)
+    rows = [P[:1]]
+    for a, b in zip(P[:-1], P[1:], strict=False):
+        m = max(1, int(math.ceil(float(np.abs(b - a).max()) / step)))
+        rows.append(a + (np.arange(1, m + 1) / m)[:, None] * (b - a))
+    return np.concatenate(rows)
+
+
 def _first_nearer(d, keep_m):
     """The first (state, sphere) of a way's signed distances `d` ((n, S), m) nearer than `keep_m`,
     where that sphere started no nearer, or DEEPER_M nearer than it started where it did (the body
@@ -838,6 +855,22 @@ FRONT_MIN_GAIN = 0.03  # a further view only where it shows this share of the sc
 # A lid a view cuts is a place to look again at, the wrist turned to put it in the middle (as the
 # side survey looks again from above a place): at most this many times a run
 FRONT_AGAIN_MAX = 2
+# The hand no nearer the user than this at a front view, the hint's and a look again's alike, nor
+# on its way there (m): the least distance from a sphere of the links the wrist's turn moves
+# (HAND_LINKS: the two wrist links, the bracelet, the gripper with its fingers and the wrist camera;
+# the sphere's buffered surface) to the user's UNPADDED boxes (PERSON_LAYERS; Body.sphere_distances).
+# A view that would bring the hand nearer is not flown, and says so. 0.0: no floor of the look's own
+# — the body check's alone (the planner's 20 mm padding and the spheres' 5 mm), as the look was
+# first flown. On flatbot_fwd8 the hand rests 204 mm from the user; the views chosen bring it to
+# 155, 204, 75 (the one turned toward the user's side: the fingertips over the lap's corner) and
+# 179 mm, a look again to 50 mm at the nearest (a lid at [0.45, -0.25]). What a floor costs
+# (study/demo/wristlook, the 86 places the arm opens the box at, rendered frames): 0.075 or 0.100
+# still finds the box at all 86, other views chosen in the near one's place and 8-9 fixes then from
+# a lid a view cut that no look again may turn to (8 mm out at worst); 0.150 loses the 5 places
+# nearest the user's side; 0.200 loses 39. Never asked to stand farther than the hand rests
+# (FrontBand).
+FRONT_HAND_USER_M = 0.0
+HAND_LINKS = ("spherical_wrist", "bracelet", "end_effector", "robotiq")  # every link past joint 5, by its stem
 FRONT_ROLL_WEIGHT = 0.5  # the image's long side held level, against the aim's (unit: half an image)
 FRONT_TURN_WEIGHT = 0.05  # ... and the least turn that does it
 FRONT_ITERS = 60
@@ -852,13 +885,63 @@ class FrontBand(Band):
 
     where = "in front of the chair"
 
-    def __init__(self, check, rest, top_z=FRONT_TABLE_Z_M[1], keep_m=KEEP_ABOVE_M):
+    def __init__(self, check, rest, top_z=FRONT_TABLE_Z_M[1], keep_m=KEEP_ABOVE_M, hand_user_m=None):
         super().__init__(check, rest, top_z=top_z, keep_m=keep_m)
         from box_opening.runtime.body import DEEPER_M
 
         # every sphere as near as the rest pose has it, where that is nearer than the keep: the
         # arm rests over the user's lap, and a table's edge may stand under its hand
         self.required = np.minimum(self.keep_m, self.rest_m - DEEPER_M)
+        # the hand's floor from the user (FRONT_HAND_USER_M; 0: none), never farther than it rests
+        floor = float(FRONT_HAND_USER_M if hand_user_m is None else hand_user_m)
+        self.hand_user_m = 0.0
+        if floor > 0.0 and self.user_layers:
+            d, _links = self._hand_m(rest)
+            self.hand_user_m = min(floor, float(d.min()) - DEEPER_M) if d.size else 0.0
+
+    def _hand_m(self, Q):
+        """((n, H) the distances of the hand's spheres (HAND_LINKS) to the user's unpadded boxes at
+        each row of Q, their links)."""
+        d, links = self.body.sphere_distances(np.atleast_2d(np.asarray(Q, float)), layers=self.user_layers)
+        hand = np.array([_bare(lk).startswith(HAND_LINKS) for lk in links], bool)
+        return d[:, hand], [lk for lk, h in zip(links, hand, strict=False) if h]
+
+    def refusal(self, Q):
+        """Band.refusal, and the hand no nearer the user than its floor (hand_user_m)."""
+        why = super().refusal(Q)
+        if why is not None or self.hand_user_m <= 0.0:
+            return why
+        d, links = self._hand_m(Q)
+        if not d.size or float(d.min()) >= self.hand_user_m:
+            return None
+        i, s = np.unravel_index(int(np.argmin(d)), d.shape)
+        return "the hand (%s) %.0f mm from the user, nearer than the look keeps it (%.0f mm)%s" % (
+            _bare(links[s]),
+            1000 * float(d[i, s]),
+            1000 * self.hand_user_m,
+            "" if len(d) == 1 else ", %.0f%% of the way" % (100.0 * i / max(1, len(d) - 1)),
+        )
+
+    def path_refusal(self, traj_or_points, step_rad=None):
+        """Band.path_refusal, and the hand held to its floor from the user along the way (a sphere
+        nearer than the floor where the way starts never goes nearer: _first_nearer)."""
+        why = super().path_refusal(traj_or_points, step_rad)
+        if why is not None or self.hand_user_m <= 0.0:
+            return why
+        Q = _sampled(traj_or_points, step_rad)
+        if Q is None:
+            return None
+        d, links = self._hand_m(Q)
+        hit = _first_nearer(d, self.hand_user_m) if d.size else None
+        if hit is None:
+            return None
+        i, s = hit
+        return "the hand (%s) %.0f mm from the user, nearer than the look keeps it (%.0f mm), %.0f%% of the way" % (
+            _bare(links[s]),
+            1000 * float(d[i, s]),
+            1000 * self.hand_user_m,
+            100.0 * i / max(1, len(Q) - 1),
+        )
 
     def _box(self, check, top_z):
         m = check.model
@@ -1026,6 +1109,9 @@ def angled_views(chain, check, q_from, cam, model, rest=None, max_views=FRONT_MA
     stats["checks"] = round(float((grid.weight * have_c).sum()) / max(total, 1.0), 3)
     stats["sees"] = round(float((grid.weight * have_s).sum()) / max(total, 1.0), 3)
     stats["refused"] = refused[:6]
+    # the views the hand's floor from the user kept the wrist from (FRONT_HAND_USER_M), said by the run
+    stats["hand_kept_mm"] = round(1000 * band.hand_user_m, 1)
+    stats["hand_refused"] = sum(": the hand (" in r or "its way there: the hand (" in r for r in refused)
     stats["choose_s"] = round(time.monotonic() - t0, 3)
     if views:
         return views, None, stats
@@ -1261,6 +1347,12 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
                 stats["choose_s"],
             )
         )
+        if stats.get("hand_refused"):
+            log.info(
+                "[press_demo] WRIST LOOK: %d turn%s of the wrist not looked from: the hand would come nearer the user "
+                "than the look keeps it (%.0f mm)"
+                % (stats["hand_refused"], "" if stats["hand_refused"] == 1 else "s", stats["hand_kept_mm"])
+            )
     else:
         log.info(
             "[press_demo] WRIST SURVEY: the scene camera finds no container — %d pose%s for the wrist camera over "
