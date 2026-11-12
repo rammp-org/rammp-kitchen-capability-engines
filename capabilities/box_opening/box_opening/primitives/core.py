@@ -901,6 +901,18 @@ def _short_of(vp, vt, vl, limited):
 # 3 planned when asked again and 10 through a waypoint along the joint line toward HOME.
 HOME_TRIES = 3  # HOME asked for this many times from one start before the waypoints: the planner is stochastic
 HOME_WAYPOINTS = (0.5, 0.25, 0.75)  # fractions of the joint line toward HOME, each continuous joint the short way
+JOG = " — jog the arm clear by hand"
+
+
+def _without_jog(e):
+    """A refusal's words without its closing advice to jog the arm clear by hand: for the line that goes on to
+    say what is done instead (2026-11-11: the soft step's line carried the limit step's "jog the arm clear by
+    hand first" inside it)."""
+    said = str(e)
+    for tail in (JOG + " first", JOG):
+        if said.endswith(tail):
+            return said[: -len(tail)]
+    return said
 
 
 class PlanSwung(RuntimeError):
@@ -1225,8 +1237,8 @@ def home_any(
                 )
             return step + rest
         raise RuntimeError(
-            "no plan-free step toward %s of up to %.2f rad per joint lets the planner plan %s (last: %s) — "
-            "jog the arm clear by hand" % (goal_words, CLEAR_MARGIN_MAX_STEP_RAD, plan_words, last)
+            "no plan-free step toward %s of up to %.2f rad per joint lets the planner plan %s (last: %s)%s"
+            % (goal_words, CLEAR_MARGIN_MAX_STEP_RAD, plan_words, last, JOG)
         )
 
     why = esc.needed(state.joints if state.joints is not None else ctx.client.joints(), table_z)
@@ -1245,7 +1257,8 @@ def home_any(
             # off the limits too, and the goal asked for from where it ends
             try:
                 step, state = step_clear(
-                    state, "%s, and %s" % (", ".join("%s is %.3f rad from its limit" % jr for jr in near), e)
+                    state,
+                    "%s, and %s" % (", ".join("%s is %.3f rad from its limit" % jr for jr in near), _without_jog(e)),
                 )
             except RuntimeError as e2:
                 raise RuntimeError("%s; and %s" % (e, e2)) from e
@@ -1286,10 +1299,12 @@ def home_any(
         return legs + rest
     raise RuntimeError(
         "%s did not plan from %s, %d times directly nor through a waypoint %s of the way along the joint line "
-        "(last: %s)%s — jog the arm clear by hand"
+        "(last: %s)%s%s"
         % (
             plan_words,
-            "here" if fell_back is None else "the end of the soft step clear (taken because %s)" % fell_back,
+            "here"
+            if fell_back is None
+            else "the end of the soft step clear (taken because %s)" % _without_jog(fell_back),
             asked,
             "/".join("%.0f%%" % (100 * f) for f in HOME_WAYPOINTS),
             last,
@@ -1303,6 +1318,7 @@ def home_any(
                 "/".join("%.0f" % (1000 * d) for d in HOME_RISES_M),
                 "".join(cut),
             ),
+            JOG,
         )
     )
 

@@ -151,6 +151,16 @@ def test_where_every_plan_swings_wide_the_refusal_says_so(monkeypatch):
         core.home_any(ctx, core.PlanState(joints=list(START), chain=0), HOME, Always(), say=lambda s: None)
 
 
+def test_a_refusals_advice_to_jog_is_said_once():
+    assert core._without_jog("the joint line drops the tool 46 mm — jog the arm clear by hand first") == (
+        "the joint line drops the tool 46 mm"
+    )
+    assert core._without_jog(RuntimeError("no step plans (last: x) — jog the arm clear by hand")) == (
+        "no step plans (last: x)"
+    )
+    assert core._without_jog("planning failed for home") == "planning failed for home"
+
+
 def _body_ctx(monkeypatch, tmp_path, boxes):
     """flatbot's ctx (bench world, FakeClient) with a body model of `boxes` attached to its chain."""
     client = FakeClient()
@@ -258,6 +268,7 @@ def test_off_a_limit_where_the_line_home_would_drop_the_tool_it_steps_clear_soft
     assert z.min() >= z[0] - core.ESCAPE_DROP_M - 1e-9  # the tool never lower
     assert plan.asked == [("home", list(end), list(HOME))]  # HOME planned from where it ends
     assert any("drops the tool" in s for s in said) and any("lightest joint impedance" in s for s in said)
+    assert not any("jog the arm" in s for s in said)  # the limit step's advice is not carried into the soft step's
 
 
 # --- a table the run knows: the planner's world holds none, so every planned leg is checked against it ---
