@@ -11,7 +11,7 @@ LAUNCH_ARGS = use_orchestrator:=$(if $(filter 1,$(STANDALONE)),false,true) \
 ACTION ?=
 PARAMS ?= {}
 
-.PHONY: new build run action check smoke lint test-arm
+.PHONY: new build run action check smoke lint test-arm sync-chair
 
 # Start a capability from the example: make new CAP=button_press
 new:
@@ -61,3 +61,19 @@ test-arm:
 	docker build -f docker/test.Dockerfile -t $(ARM_TEST_IMAGE) docker
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
 		-v $(CURDIR):/repo $(ARM_TEST_IMAGE) $(ARM_CMD)
+
+# The chair and user boxes PyBullet checks, the same ones cuRobo plans around. Run this whenever
+# rammp-deployments changes them; chair/SOURCE records the commit they came from.
+CHAIR_REPO = rammp-org/rammp-deployments
+CHAIR_SRC = december_2026/config/robots/flatbot/curobo
+CHAIR_DIR = shared/door_common/door_common/chair
+CHAIR_REF ?= dev
+sync-chair:
+	@set -e; sha=$$(gh api repos/$(CHAIR_REPO)/commits/$(CHAIR_REF) --jq .sha); \
+	for l in platform seat person; do \
+		gh api -H "Accept: application/vnd.github.raw" \
+			"repos/$(CHAIR_REPO)/contents/$(CHAIR_SRC)/layer_mebot_$$l.yaml?ref=$$sha" \
+			> $(CHAIR_DIR)/layer_mebot_$$l.yaml; \
+	done; \
+	echo "$(CHAIR_REPO)@$$sha:$(CHAIR_SRC)" > $(CHAIR_DIR)/SOURCE; \
+	cat $(CHAIR_DIR)/SOURCE

@@ -770,7 +770,7 @@ class ArmInterface:
         if samples is None:
             return True
         t, q, qd = samples
-        # fridge runs only: the wheelchair keep-out, every 2nd sample + end
+        # when a capability set one: the wheelchair keep-out, every 2nd sample + end
         if sim.keep_out_enabled():
             rb = sim.make_sim()[1]
             for qi in list(q[::2]) + [q[-1]]:
