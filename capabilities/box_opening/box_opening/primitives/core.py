@@ -950,9 +950,20 @@ def under_table(chain, body, pts, table_z, extent=None, rest=None):
     refused for that link 2-8 mm under the top beside it)."""
     import numpy as np
 
-    P = [np.asarray(p, float) for p in pts]
+    from box_opening.runtime.branches import CONTINUOUS_JOINTS
+
+    P = [np.array(p, float) for p in pts]
     if len(P) < 2:
         return None
+    # One pose is written a whole turn apart where a continuous joint's reading and the planner's branch of it
+    # differ: the live joints against a plan's first point, a leg's end against the next leg's start. Each point
+    # is put on the branch of the one before, so a turn nothing flies is not followed (2026-11-12: joined
+    # literally, the start of a way home read as a full turn of joint_3, the hand "290 mm under the table"
+    # beside the arm's base, in 366 of 526 poses with a wrapped joint)
+    for i in range(1, len(P)):
+        for j in CONTINUOUS_JOINTS:
+            if j < len(P[i]):
+                P[i][j] += 2 * np.pi * np.round((P[i - 1][j] - P[i][j]) / (2 * np.pi))
     Q = [P[0]]
     for a, b in zip(P, P[1:], strict=False):
         n = max(1, int(np.ceil(float(np.max(np.abs(b - a))) / HOME_TABLE_STEP_RAD)))
