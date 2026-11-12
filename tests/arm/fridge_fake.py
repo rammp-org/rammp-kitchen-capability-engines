@@ -8,6 +8,7 @@ tests cover the control flow, the worlds pushed, the trajectories sent and the f
 world)` lets a test say which goals cuRobo finds no arm configuration for. Nothing here can reach a real arm.
 """
 
+import json
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,11 +43,24 @@ class Plan:
 
 
 def door_is_open(obstacles):
-    """True when `obstacles` (a pushed world) holds an unshifted door slab turned off the cabinet (open)."""
+    """True when `obstacles` (a pushed world) holds a door slab turned off the cabinet (open), wherever it is: also
+    one shifted by a planned wheelchair move (door_where_it_stands tells them apart)."""
     by = {b["name"]: b for b in obstacles}
     if "door" not in by or "body" not in by:
         return False
     return abs(by["door"]["rpy_deg"][2] - by["body"]["rpy_deg"][2]) > 1.0
+
+
+def door_where_it_stands(obstacles):
+    """True when `obstacles` holds the open door where the door file puts it: not shifted by a wheelchair move. The
+    close plans against the door shifted by a move under the same box names (the after-move check, 11-12), so a fake
+    cuRobo that means "the door where it stands now is in the way" must check where the door is, not its name."""
+    if not door_is_open(obstacles) or not dc.DOOR_FILE.exists():
+        return False
+    door = json.loads(dc.DOOR_FILE.read_text())
+    want = world.FridgeModel(door).slab(float(door["door_open_deg"]))[0]["position"]
+    got = next(b for b in obstacles if b["name"] == "door")["position"]
+    return float(np.linalg.norm(np.subtract(got[:2], want[:2]))) < 1e-3
 
 
 class FakeCurobo:

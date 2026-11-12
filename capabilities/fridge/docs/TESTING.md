@@ -18,7 +18,8 @@ docker build --network host -f capabilities/fridge/Dockerfile -t ghcr.io/rammp-o
 uv run scripts/set_robot.py december_2026/config/robots/flatbot
 sheppy up flatbot --manifest december_2026/sheppy-manifest.yaml && sheppy status
 
-# T2, the fridge node (mount_tilt_deg 30 on flatbot, 0 on dojo; allow_execute:=false makes every goal a dry run)
+# T2, the fridge node (mount_tilt_deg 30 on flatbot, 0 on dojo; allow_execute:=false makes every goal a dry run).
+# On eno1, the sensor network the MIB (the base) is on; the default config picks enp3s0 and never sees the base.
 docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 \
   -e 'CYCLONEDDS_URI=<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>' \
   -v /tmp/fridge_data:/fridge_data -v curobo_kernel_cache:/planner_cache \
@@ -91,14 +92,30 @@ docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ro
 Add `"drive_base": true, "base_speed": 0.03` to an executing goal and it makes the wheelchair move itself, straight,
 a fixed distance (at most 35 cm, ending within 1 cm), then carries on. No `chair_moved` goal. **Use 0.03 m/s while testing.**
 
-**Before:** clear 40 cm in front of and behind the base, and check that the MIB is talking (both should print):
+**Before:** clear 40 cm in front of and behind the base, and check that the MIB is talking and odometry is live:
 
 ```bash
 docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+  -e CYCLONEDDS_URI='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>' \
   ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  bash -lc 'ros2 topic echo --once /rammp/mib/status && ros2 topic echo --once /base/odom'
+  bash -lc 'ros2 topic echo --once /rammp/mib/status rammp_base_interfaces/msg/MibStatus --field system_state; \
+    echo "live odom (5 s):"; timeout 5 ros2 topic echo /base/odom nav_msgs/msg/Odometry \
+    --qos-durability volatile --qos-reliability best_effort --field header.stamp.sec'
 ```
+
+- **Pass:** a `system_state` (1 = IDLE), then a steady stream of odom stamps (20 Hz) for 5 s.
+- **Status prints, odom prints nothing:** the MIB is up but the drive motor boards are not reporting to it. The MIB
+  publishes `/base/odom` only from fresh drive-wheel motor states (RAMMP-mib-fw `publish_odometry`), even at rest, so
+  `drive_base` refuses with `no /base/odom`. Fix it on the base (motor power, power-cycle the base, or the MIB panel
+  `tools/mib_panel` in RAMMP-mib-fw, which shows each motor online/offline and its faults), not in this code.
+- **Nothing prints, or `does not appear to be published yet`:** the command is not on `eno1`, the sensor network the
+  MIB is on (the default Cyclone config picks `enp3s0`, the arm's cable), or the MIB is off.
+
+Why this command: the message types are given because without them `echo` looks the topic up before the MIB has
+been discovered and gives up (`Could not determine the type`). The odom echo is `volatile` because `/base/odom` is
+transient-local: a plain `echo --once` gets the last saved message replayed and "passes" even when odometry stopped
+long ago. "Malformed packet received from vendor 13.37" lines come from a device on the sensor network and can be
+ignored here. T2 must run on `eno1` too (see Set up), or `drive_base` refuses with `no /base/odom`.
 
 ### Open
 
@@ -122,7 +139,7 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
   ros2 action send_goal --feedback /fridge/execute_action \
   rammp_orchestrator_interfaces/action/ExecuteAction \
-  '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"drive_base\": true, \"base_speed\": 0.03}"}'
+  '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"speed\": 0.7, \"drive_base\": true, \"base_speed\": 0.03}"}'
 ```
 
 T2 logs `drive_base: driving the wheelchair ...` and `drive_base: stopped ...`. The base stays where it drove: if it
@@ -208,7 +225,7 @@ run that plans OK also writes `door.json`, for testing the close without an exec
      ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
      ros2 action send_goal --feedback /fridge/execute_action \
      rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": false}"}'
+     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": false, \"speed\": 0.7}"}'
    ```
 
    It ends
@@ -225,7 +242,7 @@ run that plans OK also writes `door.json`, for testing the close without an exec
      ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
      ros2 action send_goal --feedback /fridge/execute_action \
      rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"chair_moved\": true}"}'
+     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"chair_moved\": true, \"speed\": 0.7}"}'
    ```
 
    It goes round the door's free edge, behind it,
