@@ -23,6 +23,7 @@ m/s and goes on in the same goal. A dry run with drive_base only checks the base
     make action CAP=fridge ACTION=close PARAMS='{"execute": false}'
 """
 
+import time
 from functools import partial
 
 import rammp_arm
@@ -112,6 +113,14 @@ PARAMS = {
     # drive_base: its limits and the MIB drive profile (base_drive.PARAMS)
     **base_drive.PARAMS,
 }
+
+ERROR_TITLES = {
+    "bad_params": "Bad request",
+    "refused": "Couldn't plan that move",
+    "base_stopped": "Wheelchair stopped",
+    "stopped": "Stopped short",
+}
+ERROR_PANEL_TIMEOUT_S = 60.0  # how long an error panel waits for the user to tap OK
 
 
 class Capability(CapabilityEngine):
@@ -229,6 +238,32 @@ class Capability(CapabilityEngine):
         )
 
     def execute(self, action_id, params, ctx):
+        try:
+            return self._execute(action_id, params, ctx)
+        except EngineError as e:
+            self._show_error(ctx, ERROR_TITLES.get(e.error_code, "Error"), str(e))
+            raise
+        except Exception as e:  # a bug, not a refusal: say so rather than fail blank
+            self._show_error(ctx, "Unexpected error", repr(e))
+            raise
+
+    def _show_error(self, ctx, title, message):
+        """Show an error on the UI panel and wait (up to ERROR_PANEL_TIMEOUT_S) for the user to tap OK.
+        The engine closes the panel when execute() ends, so a panel shown right before raising would vanish."""
+        update = getattr(ctx, "update_user_panel", None)  # absent until the UI API (PR #42) is in this branch
+        if update is None or ctx.cancelled():  # a cancel isn't an error to show
+            return
+        panel = {"title": title, "message": message, "buttons": [{"button_id": "dismiss", "label": "OK"}]}
+        if not update(panel_json=panel):  # no session token (standalone) or the bridge is down: already logged
+            return
+        deadline = time.monotonic() + ERROR_PANEL_TIMEOUT_S
+        while time.monotonic() < deadline and not ctx.cancelled():
+            event = ctx.poll_ui_event()
+            if event and event.get("type") == "button" and event.get("button_id") == "dismiss":
+                return
+            time.sleep(0.1)
+
+    def _execute(self, action_id, params, ctx):
         speed = float(params.get("speed", constants.CLOSE_SPEED if action_id == "close" else 1.0))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
