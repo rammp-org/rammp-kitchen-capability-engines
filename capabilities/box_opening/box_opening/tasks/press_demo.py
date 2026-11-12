@@ -1742,6 +1742,14 @@ def main():
                     base_frame=worlds.base_frame,
                     instance_id=args.instance_id,
                 )
+                # a second container the arm cannot reach is no rival of one it can (scene_source.within_reach_rivals)
+
+                def _within_reach(top, _m=model):
+                    from box_opening.tasks.reach_press import out_of_reach
+
+                    return not out_of_reach(_m, top)
+
+                locator.reachable = _within_reach
                 locator.prime()  # the segmenter's state, for the log
         # camera on from here to exit
         ctx = Ctx(

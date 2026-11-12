@@ -607,13 +607,15 @@ def _xy(p):
     return "[%.3f, %.3f]" % (p.xy[0], p.xy[1])
 
 
-def find_container(frames, model, check_buttons=True):
+def find_container(frames, model, check_buttons=True, reachable=None):
     """The container in wrist frames (WristFrame, one or more), as a WristFind: its `fix` a
     scene_source.SceneFix with source "wrist" — or None, and `why`, when no counter shows,
     nothing on it is the container, the one lid-sized top shows no button where the view
     shows its top, no view could check its button (look again nearer above it), or two
     places pass (it refuses to guess). `check_buttons` False: geometry alone (no circle
-    detector), a top no button was asked of a fix at 0.6-0.7."""
+    detector), a top no button was asked of a fix at 0.6-0.7. `reachable` (a lid top's (x, y, z) -> bool; None: every
+    place counts): a place it calls out of reach is no candidate beside one it does not, and where
+    none is within reach there is no fix (it says so)."""
     import time
 
     from box_opening.models.container import ContainerPose
@@ -665,6 +667,18 @@ def find_container(frames, model, check_buttons=True):
         q = places[0]
         why = next((p.button_why for p in q.patches if p.button == "none"), "")
         return refuse("a lid-sized top at %s, but no button circle where the view shows it (%s)" % (_xy(q), why))
+    if reachable is not None and live:
+        # What the arm cannot reach is not a container this run could open, so it is no rival of one it can
+        # (2026-11-12, a wooden table with a bowl and two tape rolls 1.0-1.2 m out behind the box at 0.81 m:
+        # "two places pass", twice, and nothing opened). `reachable`: the run's own word on a lid top's place
+        # (reach_press.out_of_reach), the arm's kinematic bound and no number of the scene's.
+        near = [q for q in live if reachable((q.xy[0], q.xy[1], q.top_z))]
+        if not near:
+            return refuse(
+                "the lid-sized top%s at %s stand%s out of the arm's reach"
+                % ("s" if len(live) > 1 else "", " and ".join(_xy(q) for q in live[:3]), "" if len(live) > 1 else "s")
+            )
+        live = near
     if len(live) > 1:
         boxed = [q for q in live if any(p.boxed for p in q.patches)]
         if len(boxed) != 1:

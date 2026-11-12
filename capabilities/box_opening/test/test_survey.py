@@ -685,7 +685,7 @@ def test_the_front_look_goes_by_the_lids_geometry_and_never_looks_again_from_abo
     monkeypatch.setattr(sv, "save_frame", lambda *a, **k: None)
     monkeypatch.setattr(sv, "look_again_view", lambda *a, **k: pytest.fail("a look again from above"))
 
-    def find(frames, model, check_buttons=True):
+    def find(frames, model, check_buttons=True, reachable=None):
         asked.append(check_buttons)
         return _unchecked()
 

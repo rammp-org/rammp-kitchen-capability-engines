@@ -2023,3 +2023,15 @@ def test_the_lids_height_is_the_runs_own_measurement_the_models_only_its_loose_b
     bbox = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + low - 0.025]))
     pose, why, _n, _tz = ss.box_from_side_points(pts, uv, bbox, None, model, SIDE_CAM)
     assert pose is None and "from lid height" in why and "its top is -" in why
+
+
+def test_a_rival_out_of_the_arms_reach_does_not_make_a_container_within_it_ambiguous():
+    from box_opening.perception.scene_source import within_reach_rivals
+
+    top, far, near = (0.83, -0.15, 0.33), (1.18, -0.42, 0.33), (0.60, 0.10, 0.33)
+    reach = lambda p: p[0] < 1.0  # noqa: E731
+    assert within_reach_rivals(top, (far,), reach) == ()
+    assert within_reach_rivals(top, (far, near), reach) == (near,)
+    assert within_reach_rivals(top, (far,), None) == (far,)  # no word on reach: every rival counts
+    assert within_reach_rivals(far, (top,), reach) == (top,)  # the top itself out of reach: nothing is settled by reach
+    assert within_reach_rivals(top, (), reach) == ()

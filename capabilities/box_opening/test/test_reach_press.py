@@ -2882,3 +2882,24 @@ def test_a_rise_off_the_stroke_flies_under_the_exits_gate_its_big_step_slow(ctx,
     monkeypatch.setattr(dp, "rise_back_up", lambda chain, stroke_, q: [list(HELD_1102), list(STROKE_Q0_1102)])
     up, on_stroke, why = reach_press._rise_legs(ctx, stroke, HELD_1102, world)
     assert why is None and on_stroke and up[0].step_cap is None
+
+
+def test_a_lid_past_every_look_poses_reach_is_out_of_reach_and_the_box_before_it_is_not(monkeypatch):
+    """reach_press.out_of_reach: the run's own bound on what it could look at for a press (every tilt's look pose
+    past the arm's reach), which the finders use so that what the arm cannot reach is no rival container. Flatbot,
+    2026-11-12: the box at [0.81, -0.155], a bowl and tape rolls at 1.0-1.2 m behind it."""
+    from box_opening.models.container import ContainerModel
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
+    monkeypatch.setattr(approach, "chain_ready", lambda: (True, ""))
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    model = ContainerModel.load(PINK)
+    assert not reach_press.out_of_reach(model, (0.81, -0.155, 0.33))
+    assert not reach_press.out_of_reach(model, (0.60, 0.10, 0.32))
+    for far in ((1.095, -0.535, 0.33), (1.011, -0.541, 0.33), (1.145, -0.396, 0.33), (1.183, -0.418, 0.33)):
+        assert reach_press.out_of_reach(model, far), far
+    # no kinematics, or geometry that cannot be worked out: nothing is ruled out
+    monkeypatch.setattr(approach, "chain_ready", lambda: (False, "no URDF"))
+    assert not reach_press.out_of_reach(model, (1.183, -0.418, 0.33))

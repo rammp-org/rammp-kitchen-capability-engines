@@ -206,6 +206,28 @@ def test_two_canisters_are_two_places_and_no_fix(pink):
     assert "two places pass" in found.why and len(found.places) == 2
 
 
+def test_a_place_the_arm_cannot_reach_is_no_rival_of_one_it_can(pink):
+    """2026-11-12, flatbot: the box at 0.81 m and a bowl and tape rolls 1.0-1.2 m out behind it were "two places",
+    twice, and nothing was opened. What the arm cannot reach is not a container this run could open."""
+    things = canister(0.30, 0.30) + canister(0.52, 0.30)
+    f = render((0.41, 0.30, COUNTER_Z + LID_H + 0.40), (0.41 + 1e-4, 0.30, COUNTER_Z), things)
+    asked = []
+
+    def near_only(top):
+        asked.append(tuple(round(float(v), 2) for v in top))
+        return top[0] < 0.40
+
+    found = wf.find_container([f], pink, reachable=near_only)
+    assert found.fix is not None, found.why
+    assert found.fix.top_xyz[0] == pytest.approx(0.30, abs=0.005) and len(found.places) == 2  # both still recorded
+    assert len(asked) == 2 and all(len(t) == 3 for t in asked)  # asked of each place's lid top, x y z
+    # none within reach: no fix, and it says so in the robot's words
+    none = wf.find_container([f], pink, reachable=lambda top: False)
+    assert none.fix is None and "out of the arm's reach" in none.why and "two places" not in none.why
+    # all within reach: two places, as before
+    assert "two places pass" in wf.find_container([f], pink, reachable=lambda top: True).why
+
+
 def test_a_detector_box_on_one_of_two_breaks_the_tie(pink):
     things = canister(0.30, 0.30) + canister(0.52, 0.30)
     f = render((0.41, 0.30, COUNTER_Z + LID_H + 0.40), (0.41 + 1e-4, 0.30, COUNTER_Z), things)

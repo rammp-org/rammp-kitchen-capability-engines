@@ -1290,6 +1290,18 @@ def _top_xy(top):
     return "[%.3f, %.3f]" % (float(top[0]), float(top[1]))
 
 
+def within_reach_rivals(top, rivals, reachable):
+    """The `rivals` of the place `top` (other tops that pass as this container) that still count: with
+    `reachable` (a top's xyz -> bool; None: all count) and `top` itself within reach, only those within reach
+    too. What the arm cannot reach is not a container this run could open, so it does not make a container it
+    can reach ambiguous (2026-11-12: a second "food container" 1.18 m out, the box at 0.83 m). A `top` out of
+    reach keeps every rival: which one is meant is then not settled by reach."""
+    rivals = tuple(rivals or ())
+    if not rivals or reachable is None or not reachable(top):
+        return rivals
+    return tuple(r for r in rivals if reachable(r))
+
+
 class SceneLocator:
     """The ROS side: the scene grabber, the scene segmenter's rung and the
     calibration, answering `locate()` with a SceneFix or None.
@@ -1617,8 +1629,9 @@ class SceneLocator:
                     ):
                         break  # long enough with only the rough fit answering: it does (below)
                 continue
-            if got.rivals:
-                ambiguous.append((got.top, got.rivals))
+            rivals = within_reach_rivals(got.top, got.rivals, getattr(self, "reachable", None))
+            if rivals:
+                ambiguous.append((got.top, rivals))
                 look["ambiguous"] = len(ambiguous)
                 continue
             if ambiguous and self.instance_id is None:

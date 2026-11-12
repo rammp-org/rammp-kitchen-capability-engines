@@ -462,6 +462,30 @@ def way_down(ctx, cfg, q_look, slide_pts, start_xyz, quat, top_z):
 # looks' wrists stood 99, 73, 47 and 21 mm past, and the planner answered
 # IK_FAIL to each (~1.15 s); 14:29:54 (r 1.04 m): the 30 deg look's 22 mm.
 LOOK_PAST_REACH_M = 0.04
+
+
+def out_of_reach(model, top_xyz, travel_m=0.015, tilts=None):
+    """Whether a lid whose top stands at `top_xyz` is where no reach-out could even look at it: at every tilt the
+    press is tried at (REACH_TILTS_DEG) the look pose's wrist stands more than LOOK_PAST_REACH_M past everything
+    the arm reaches (kinematics.ArmChain.past_reach_m), which is what find_reach refuses a tilt for before any
+    planner is asked. The arm's own bound, read off its URDF: what it says is out of reach no joint values
+    reach. False where no arm chain is known or the geometry cannot be worked out (nothing is ruled out on no
+    kinematics)."""
+    from box_opening.runtime import approach
+
+    try:
+        if not approach.chain_ready()[0]:
+            return False
+        chain = approach._chain()
+        for tilt in REACH_TILTS_DEG if tilts is None else tilts:
+            quat, _start, _bottom, look = reach_geometry(model, [float(v) for v in top_xyz], tilt, travel_m)
+            if chain.past_reach_m(look, quat) <= LOOK_PAST_REACH_M:
+                return False
+    except Exception:  # noqa: BLE001 - a kinematics problem must never rule a place out
+        return False
+    return True
+
+
 # A planned look that ends further than this from the joints its press was
 # proven from (any joint; a continuous one the short way round) is proven
 # again from where it ends, as every look was until 2026-10-28. The

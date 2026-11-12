@@ -247,6 +247,18 @@ class Grid:
     lid_r: float
 
 
+def _within_reach(model):
+    """lid top (x, y, z) -> whether a reach-out could look at a lid there (reach_press.out_of_reach: the arm's
+    own kinematic bound), for the finder's choice among several lid-sized tops."""
+
+    def within(top_xyz):
+        from box_opening.tasks import reach_press
+
+        return not reach_press.out_of_reach(model, top_xyz)
+
+    return within
+
+
 def survey_grid(chain, model, x=SIDE_X_M, y=SIDE_Y_M, z=COUNTER_Z_M, step=GRID_M, heights=HEIGHTS):
     """The Grid for `model` (its lid's top dims.z above the counter): a cell weighs 1 where a
     tool straight down over its lid stands inside the arm's reach (ArmChain.past_reach_m)."""
@@ -1416,7 +1428,7 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
         frames.append(frame)
         out.clouds.append(_cloud(frame))
         t_find = time.monotonic()
-        find = wf.find_container(frames, model, check_buttons=not front)
+        find = wf.find_container(frames, model, check_buttons=not front, reachable=_within_reach(model))
         folder = save_frame(watcher, snap, pose, frame, find.why)
         runner.note(
             "wrist_survey",
