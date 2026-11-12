@@ -2,7 +2,10 @@
 its user, from wherever it stands.
 
 The move is planned by cuRobo in its world, which on a wheelchair-mounted arm holds the chair, the
-seat and the person in it, so the path keeps clear of them. Four things stop a plain plan:
+seat and the person in it, so the path keeps clear of them. Four things stop a plain plan. The
+first two are met with a plan-free step, flown only where the deployment turns those on
+(plan_free_steps, off by default: STEPS_OFF says why); off, such a start fails and the arm is
+jogged clear by hand:
 
 * a start inside the padding round those boxes (clear of the chair itself, but within the planner's
   world_padding) is refused outright. Where the engine's copy of the planner's boxes
@@ -84,6 +87,12 @@ PLANNER_BUSY = "planner busy"
 # and velocities of the arm's seven joints at every point): a planner for another arm or
 # interface, which asking again does not change.
 PLAN_UNUSABLE = NOT_PLANNED + "the plan is not positions and velocities"
+# The plan-free steps (out of the padding, off a joint limit) are checked against the planner's
+# chair, seat and user boxes, the tool's height and the joint limits, and end at a start the
+# planner takes; they are NOT checked against the arm itself or the rest of the planner's scene,
+# which the engine does not know. So they are flown only where a deployment says so
+# (plan_free_steps, default false): a deliberate, stated limit.
+STEPS_OFF = "plan-free steps are off (plan_free_steps)"
 # Why go_home does not run under an orchestrator (execute's refusal, activate's reason)
 STANDALONE_ONLY = (
     "go_home runs standalone only (use_orchestrator:=false): the orchestrator dispatches it on "
@@ -162,6 +171,7 @@ class Capability(CapabilityEngine):
         self.declare_parameter("plan_tries", 3)
         self.declare_parameter("tool_link", "arm_tool_frame")
         self.declare_parameter("speed_scale", GO_TO_SPEED_SCALE)
+        self.declare_parameter("plan_free_steps", False)  # see STEPS_OFF
 
     # -- the action -------------------------------------------------------------------------------
 
@@ -443,32 +453,54 @@ class Capability(CapabilityEngine):
 
     def _route(self, q0, home, tries, ctx, chain, model, no_model):
         """The _Route home from `q0`. EngineError (start_in_padding, near_limit, no_way_home,
-        body_model, bad_config) where there is none; nothing has moved."""
+        body_model, bad_config) where there is none; nothing has moved. A plan-free step (out of
+        the padding, off a joint limit) is part of it only where plan_free_steps is on (see
+        STEPS_OFF): off, a start the planner refuses fails, and one near a joint limit is planned
+        from as any other."""
+        steps = bool(self.get_parameter("plan_free_steps").value)
         start, free, notes = q0, None, []
+        asked = False  # the home was asked for directly from `start` already
         if model is not None and float(model.depth(q0)[0]) > 0.0:
             # in the padding by the engine's copy of the planner's boxes: the planner, the
             # authority on its own world (another profile's, a pushed one), is asked first
             goal = homing.on_branch(home, q0)
-            plan = self._plan(goal, q0)
-            if not self._judge(plan, goal) and not homing.near_limits(q0, chain.limits):
+            plan, asked = self._plan(goal, q0), True
+            if not self._judge(plan, goal):  # its own good plan, before any plan-free step
                 return _Route(None, [plan], "directly", notes)
             # Stepped out of only where the planner refuses the START. A plan that failed past
             # it, swung or ended elsewhere is a planner that takes this start: the padding is the
             # engine's copy's alone, and the home is asked for from here as from any start.
             if _refuses_start(plan):
                 depth = float(model.depth(q0)[0])
+                if not steps:
+                    raise EngineError(
+                        "start_in_padding",
+                        f"the planner refuses the start ({plan.message}), which stands "
+                        f"{1000 * depth:.0f} mm inside the padding round the chair and user, and "
+                        f"{STEPS_OFF}: jog the arm clear by hand",
+                    )
                 path, why = model.escape(q0)
                 if path is None:
                     raise EngineError("start_in_padding", f"{why}: jog the arm clear by hand")
-                free, start = path, path[-1]
+                free, start, asked = path, path[-1], False
                 notes.append(
                     f"stepped {1000 * depth:.0f} mm out of the padding round the chair and user "
                     f"(the largest joint {float(np.abs(path[-1] - q0).max()):.3f} rad)"
                 )
         self._pause_point(ctx)
+        near = homing.near_limits(start, chain.limits)
         try:
-            near = homing.near_limits(start, chain.limits)
-            if near:
+            if near and steps and not asked:
+                # Outside the planner's own margin it may well plan from here (it often fails
+                # just outside it, not always): its plan, where it gives a good one, is taken
+                # before any plan-free step off the limit.
+                if min(room for _j, room in near) >= homing.PLANNER_LIMIT_MARGIN_RAD:
+                    goal = homing.on_branch(home, start)
+                    plan = self._plan(goal, start)
+                    if not self._judge(plan, goal):
+                        return _Route(free, [plan], "directly", notes)
+                    self._pause_point(ctx)
+            if near and steps:
                 z_from = float(chain.tool_z(q0, str(self.get_parameter("tool_link").value))[0])
                 if model is None and no_model != NO_LAYERS:
                     # body_layers names the chair and user and they cannot be read: a plan-free
@@ -488,13 +520,24 @@ class Capability(CapabilityEngine):
                 how = "from the end of the step off the limit"
             else:
                 plans, how = self._plan_home(start, home, tries, ctx, model)
+        except _Stop:
+            raise
         except EngineError as e:
-            if model is None and no_model and "INVALID_START" in str(e).upper():
+            if steps and model is None and no_model and "INVALID_START" in str(e).upper():
                 raise EngineError(
                     "body_model",
                     f"the planner refuses the start as in collision, and there is no body model "
                     f"to step out of the chair's padding with ({no_model}): jog the arm clear by "
                     "hand",
+                ) from e
+            if near and not steps:
+                named = ", ".join(
+                    f"joint {j + 1} is {room:.3f} rad from its limit" for j, room in near
+                )
+                raise EngineError(
+                    "near_limit",
+                    f"{named}, and {STEPS_OFF}: the planner was asked from where the arm stands "
+                    f"and found no way home ({e})",
                 ) from e
             raise
         return _Route(free, plans, how, notes)

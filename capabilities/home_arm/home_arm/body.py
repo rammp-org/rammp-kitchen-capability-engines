@@ -116,7 +116,20 @@ class Chain:
         self._by_child = {}
         self.limits = [(None, None)] * len(self.joints)
         found = set()
-        for j in ET.fromstring(urdf_text).findall("joint"):
+        try:
+            self._read(ET.fromstring(urdf_text), index, found)
+        except (ET.ParseError, AttributeError, TypeError, ValueError) as e:
+            raise BodyModelError(f"body model: the URDF cannot be read ({e!r})") from e
+        self.root = root
+        missing = [n for n in self.joints if n not in found]
+        if missing:
+            raise BodyModelError(
+                f"body model: the URDF has no revolute or continuous joints {missing}"
+            )
+
+    def _read(self, robot, index, found):
+        """The joints of the URDF element `robot` into _by_child and limits."""
+        for j in robot.findall("joint"):
             o = j.find("origin")
             xyz = [float(v) for v in (o.get("xyz", "0 0 0") if o is not None else "0 0 0").split()]
             rpy = [float(v) for v in (o.get("rpy", "0 0 0") if o is not None else "0 0 0").split()]
@@ -139,12 +152,6 @@ class Chain:
             lim = j.find("limit")
             if name in index and kind == "revolute" and lim is not None:
                 self.limits[index[name]] = (float(lim.get("lower")), float(lim.get("upper")))
-        self.root = root
-        missing = [n for n in self.joints if n not in found]
-        if missing:
-            raise BodyModelError(
-                f"body model: the URDF has no revolute or continuous joints {missing}"
-            )
 
     def tool_z(self, Q, link):
         """(n,) the height of `link` in the root frame at the joint states Q."""
@@ -347,7 +354,18 @@ def padding(cfg):
 
 
 def load(planner_yaml):
-    """The BodyModel of cuRobo planner config `planner_yaml`, or BodyModelError."""
+    """The BodyModel of cuRobo planner config `planner_yaml`, or BodyModelError: a file that cannot
+    be read, and one whose entries are not what the planner's are (a sphere without a radius, a
+    buffer that is no number, a robot_cfg that is no mapping), never another exception."""
+    try:
+        return _load(planner_yaml)
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
+        raise BodyModelError(
+            f"body model: {planner_yaml} or a file it names is malformed ({e!r})"
+        ) from e
+
+
+def _load(planner_yaml):
     planner_yaml = Path(planner_yaml)
     cfg = _yaml(planner_yaml)
     here = planner_yaml.parent

@@ -43,7 +43,8 @@ ESCAPE_SPEED_RAD_S = 0.15
 # A joint too near its limit: rammp-curobo refuses a start inside joint_limit_margin_rad (0.10 on
 # flatbot: "START_IN_LIMIT_MARGIN ... jog it away from the limit first"), and its finetune failed
 # from up to 0.154 rad of room (box_opening, 2026-10-23, HOME planned from 0.161). So a start with a
-# joint nearer than LIMIT_NEED_RAD takes a plan-free step along the joint line toward the home
+# joint nearer than LIMIT_NEED_RAD (asked for directly once where it stands outside the margin, and
+# given no good plan; node._route) takes a plan-free step along the joint line toward the home
 # first: the shortest that leaves every joint LIMIT_FIRST_RAD clear, then LIMIT_STRIDE_RAD longer
 # each time, up to LIMIT_MAX_STEP_RAD (the joint that moves most), the home planned from each in
 # turn.

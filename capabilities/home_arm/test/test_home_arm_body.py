@@ -56,6 +56,45 @@ def test_files_that_cannot_be_read_or_place_nothing_are_errors_never_skips(tmp_p
         body.load(path)
 
 
+def test_malformed_entries_are_body_model_errors_too_never_another_exception(tmp_path):
+    """The engine goes on without a model it cannot read (BodyModelError); a KeyError or ValueError
+    from a malformed entry would fail the action as a bare "exception" (REVIEW_RULES C4)."""
+    slab = [("slab", (0.5, 0.0, 0.3), (0.2, 0.4, 0.06))]
+    for robot in (
+        "robot_cfg:\n  kinematics:\n    collision_spheres:\n"
+        "      arm_forearm_link:\n      - {center: [0.0, 0.0, 0.0]}\n",  # no radius
+        "robot_cfg:\n  kinematics:\n    collision_spheres:\n"
+        "      arm_forearm_link:\n      - {center: [0.0, 0.0], radius: 0.05}\n",  # two coordinates
+        "robot_cfg:\n  kinematics:\n    collision_spheres:\n"
+        "      arm_forearm_link:\n      - {center: [0.0, 0.0, x], radius: 0.05}\n",  # no number
+        "robot_cfg:\n  kinematics:\n    collision_spheres:\n      arm_forearm_link:\n",  # none
+        home_arm_testlib.ROBOT.replace("0.005", "thick"),  # a buffer that is no number
+        "robot_cfg: [kinematics]\n",  # no mapping
+    ):
+        with pytest.raises(body.BodyModelError, match="body model: "):
+            body.load(write_model(tmp_path, slab, robot=robot))
+    path = write_model(tmp_path, slab)
+    (tmp_path / "layer_test.yaml").write_text(
+        "obstacles:\n  - {name: slab, position: [0, 0, 0], dims: [1, 1, 1], rpy_deg: [0, 0, x]}\n"
+    )
+    with pytest.raises(body.BodyModelError, match="malformed"):
+        body.load(path)
+
+
+def test_a_urdf_that_cannot_be_read_is_a_body_model_error():
+    with pytest.raises(body.BodyModelError, match="the URDF cannot be read"):
+        body.Chain("<robot><joint", "arm_mount", JOINTS)  # no XML
+    no_child = '<robot><joint name="arm_joint_1" type="revolute"><parent link="a"/></joint></robot>'
+    with pytest.raises(body.BodyModelError, match="the URDF cannot be read"):
+        body.Chain(no_child, "arm_mount", JOINTS)
+    bad_limit = (
+        '<robot><joint name="arm_joint_2" type="revolute"><parent link="a"/><child link="b"/>'
+        '<limit lower="-2.24"/></joint></robot>'
+    )
+    with pytest.raises(body.BodyModelError, match="the URDF cannot be read"):
+        body.Chain(bad_limit, "arm_mount", JOINTS)
+
+
 def test_the_padding_is_read_where_the_planner_reads_it(tmp_path):
     slab = [("slab", (0.5, 0.0, 0.3), (0.2, 0.4, 0.06))]
     assert body.load(write_model(tmp_path, slab, padding=0.03)).padding_m == pytest.approx(0.03)

@@ -10,7 +10,9 @@ One action, `go_home`: the arm to its home pose (`home_joints`) from wherever it
 stands, around the wheelchair and the person in it. cuRobo plans the move in its
 world, which on a wheelchair-mounted arm holds the chair, the seat and the user,
 so the path keeps clear of them; the driver executes it. Four things stop a
-plain plan, and the action handles each before anything moves:
+plain plan, and the action handles each before anything moves. The first two are
+met with a plan-free step, which is flown only where the deployment turns those
+on (`plan_free_steps`, off by default; see "The plan-free steps" below):
 
 1. **A start inside the padding round the chair and user.** The planner pads
    every box by its `world_padding` and refuses a start inside the padding, even
@@ -36,7 +38,9 @@ plain plan, and the action handles each before anything moves:
    the tool's height alone.
 1. **A joint too near its limit.** The planner refuses a start inside its
    joint-limit margin (`START_IN_LIMIT_MARGIN`, 0.10 rad on flatbot) and often
-   fails just outside it. A start with a joint nearer than 0.18 rad takes the
+   fails just outside it. A start with a joint nearer than 0.18 rad is asked for
+   directly once where every joint stands outside that margin (the planner's own
+   plan, where it gives a good one, is taken before any step), then takes the
    shortest plan-free step along the joint line toward the home that clears
    0.12 rad and that the home plans from (0.05 rad longer each try, at most 0.35
    rad, the home asked for from each as below), the tool never lower than 5 mm
@@ -58,6 +62,20 @@ plain plan, and the action handles each before anything moves:
    toward the user. A plan that takes any joint more than 0.35 rad wider than the
    straight way (box_opening's trajectory sanity gate) counts as failed. Asking
    again gets the same plan, so the engine goes on to the waypoints.
+
+**The plan-free steps.** The step out of the padding and the step off a joint
+limit are the only motion the planner has not planned. They are checked against
+the planner's chair, seat and user boxes, the tool's height and the joint limits,
+they end at a start the planner takes (the home is planned from their end before
+anything moves), and they are short and slow (at most 0.6 and 0.35 rad a joint,
+0.15 rad/s, under the driver's divergence guard). They are not checked against
+the arm itself or against the rest of the planner's scene (a table, a counter),
+which the engine does not know. So they are a deployment's choice:
+`plan_free_steps` is `false` by default, and whoever turns it on accepts such a
+step beside the seated user. Off, nothing but the planner's own plans moves the
+arm: a start the planner refuses inside the padding fails `start_in_padding`, and
+a start near a joint limit is planned from as any other (the planner takes one
+outside its own margin) and fails `near_limit` where no way home is planned.
 
 A plan is asked for only while a whole `arm.plan_timeout_s` still fits in 60 s of
 planning, and a way home that would take the action past 100 s at `speed_scale`
@@ -139,23 +157,23 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | --------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s", "speed_scale"}`, with `"off_rad"` (how near the home the arm was read) once flown, and `"dry_run": true` on a dry run; `{"home": true, "moved": false, "off_rad"}` when already home; the mock answers with the same keys and `"mock": true` |
 
-| Error code            | Recoverable | Meaning                                                                                                                                                                                                                                                     |
-| --------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `standalone_only`     | no          | The engine runs under an orchestrator (`use_orchestrator` true), which cannot dispatch `go_home`: the goal was sent to it directly, outside the orchestrator's `arm` lock; nothing planned or sent                                                          |
-| `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                                                                                                                                             |
-| `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                                                                                                                                     |
-| `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in \[0.01, 1\] (the driver rejects a goal sent at less than 0.01)                                                                                                                                       |
-| `arm_not_ready`       | yes         | The driver says the arm must not be commanded now (an e-stop; arbitration enforced, the arm another sender's or no token given; or no `/control_status` from it); nothing planned or sent. A dry run is not held to it                                      |
-| `body_model`          | no          | The driver's URDF cannot be read; or the planner's config cannot be read and it is needed: the planner refuses the start as in collision, or a joint is too near its limit (the step off it could not be checked against the chair and user); nothing moved |
-| `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up, or the arm stands in a chair or user box itself, past its padding (no plan-free step is taken from there); nothing moved: jog it clear                                                                |
-| `near_limit`          | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                                                                                                                                   |
-| `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                                                                                                   |
-| `planner_unavailable` | yes         | The planner did not plan a request: not running, no result in time, or busy with another client's plan; nothing moved                                                                                                                                       |
-| `plan_unusable`       | no          | The planner answered with a plan that is not positions and velocities of the arm's seven joints at every point (a planner for another arm or interface); nothing moved                                                                                      |
-| `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved, or (found at a pause after the step clear) the way home not sent                                                                                                             |
-| `paused_too_long`     | yes         | A pause left the way home no room in the action's 100 s; nothing sent, or after the step clear the way home not sent: run it again                                                                                                                          |
-| `arm_moving`          | yes         | The arm moved while it was planned for, twice, or during a pause before a goal was sent; nothing sent, or after the step clear the way home not sent                                                                                                        |
-| `motion_failed`       | no          | The driver refused or did not complete a goal (an e-stop, control taken and the divergence guard included), the arm ended away from the home, or its joints could not be read after a goal flew; it holds where it stopped                                  |
+| Error code            | Recoverable | Meaning                                                                                                                                                                                                                                                                          |
+| --------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `standalone_only`     | no          | The engine runs under an orchestrator (`use_orchestrator` true), which cannot dispatch `go_home`: the goal was sent to it directly, outside the orchestrator's `arm` lock; nothing planned or sent                                                                               |
+| `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                                                                                                                                                                  |
+| `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                                                                                                                                                          |
+| `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in \[0.01, 1\] (the driver rejects a goal sent at less than 0.01)                                                                                                                                                            |
+| `arm_not_ready`       | yes         | The driver says the arm must not be commanded now (an e-stop; arbitration enforced, the arm another sender's or no token given; or no `/control_status` from it); nothing planned or sent. A dry run is not held to it                                                           |
+| `body_model`          | no          | The driver's URDF cannot be read; or (plan-free steps on) the planner's config cannot be read and it is needed: the planner refuses the start as in collision, or a joint is too near its limit (the step off it could not be checked against the chair and user); nothing moved |
+| `start_in_padding`    | no          | The planner refuses a start inside the chair's padding, and plan-free steps are off (`plan_free_steps`), no step out keeps the tool up, or the arm stands in a chair or user box itself, past its padding (no plan-free step is taken from there); nothing moved: jog it clear   |
+| `near_limit`          | no          | A joint stands too near its limit: no step off it lets the home plan, or (plan-free steps off) the planner finds no way home from there; nothing moved: jog it clear                                                                                                             |
+| `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                                                                                                                        |
+| `planner_unavailable` | yes         | The planner did not plan a request: not running, no result in time, or busy with another client's plan; nothing moved                                                                                                                                                            |
+| `plan_unusable`       | no          | The planner answered with a plan that is not positions and velocities of the arm's seven joints at every point (a planner for another arm or interface); nothing moved                                                                                                           |
+| `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved, or (found at a pause after the step clear) the way home not sent                                                                                                                                  |
+| `paused_too_long`     | yes         | A pause left the way home no room in the action's 100 s; nothing sent, or after the step clear the way home not sent: run it again                                                                                                                                               |
+| `arm_moving`          | yes         | The arm moved while it was planned for, twice, or during a pause before a goal was sent; nothing sent, or after the step clear the way home not sent                                                                                                                             |
+| `motion_failed`       | no          | The driver refused or did not complete a goal (an e-stop, control taken and the divergence guard included), the arm ended away from the home, or its joints could not be read after a goal flew; it holds where it stopped                                                       |
 
 It names no perception classes, because `go_home` is not about an object; an
 object's selection activates the engines of its class, so no selection offers
@@ -175,9 +193,10 @@ home.
 
 Standalone, the engine takes no part in the orchestrator's arbitration at all: on
 a robot where an orchestrator runs, a goal sent to it still moves the arm outside
-that lock. So this engine (tier `experimental`) is to be kept out of profiles
-that run the orchestrator, or anything else that commands the arm (teleop),
-until the orchestrator can dispatch `go_home` and hand it a control token. The
+that lock. So this engine (tier `experimental`, for attended runs) is to be kept
+out of profiles that run the orchestrator, or anything else that commands the
+arm (teleop), and is not to be made demo-ready, until the orchestrator can
+dispatch `go_home` and hand it a control token. The
 driver's own arbitration still applies: where it is enforced, the engine, which
 carries no token, is refused before it plans (`arm_not_ready`).
 
@@ -187,15 +206,16 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name               | Default                                                         | Meaning                                                                                                                                                    |
-| ------------------ | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator` | `true` (the fragments and the launch file set `false`)          | `false` runs standalone, the only mode `go_home` runs in: no registration, drive it by CLI; `true` registers, and `go_home` is refused (`standalone_only`) |
-| `mock`             | `false`                                                         | `true` skips hardware (the mock alternative sets it)                                                                                                       |
-| `home_joints`      | `[0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]` | The home (rad, J1..J7, continuous joints in (-pi, pi\]): flatbot's, the arm 8 in forward on the chair (2026-11-09)                                         |
-| `body_layers`      | `"/config/robot/curobo/planner.yaml"`                           | The planner config whose boxes and spheres the step out uses; `""` turns the step out off                                                                  |
-| `plan_tries`       | `3`                                                             | How many times the home is asked for directly before the waypoints                                                                                         |
-| `tool_link`        | `"arm_tool_frame"`                                              | The link whose height the step out holds                                                                                                                   |
-| `speed_scale`      | `0.3`                                                           | The driver's speed_scale for the plans home (0.01..1, the go_to goals' default); the step clear has its own slow timing                                    |
+| Name               | Default                                                         | Meaning                                                                                                                                                                                                   |
+| ------------------ | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator` | `true` (the fragments and the launch file set `false`)          | `false` runs standalone, the only mode `go_home` runs in: no registration, drive it by CLI; `true` registers, and `go_home` is refused (`standalone_only`)                                                |
+| `mock`             | `false`                                                         | `true` skips hardware (the mock alternative sets it)                                                                                                                                                      |
+| `home_joints`      | `[0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]` | The home (rad, J1..J7, continuous joints in (-pi, pi\]): flatbot's, the arm 8 in forward on the chair (2026-11-09)                                                                                        |
+| `body_layers`      | `"/config/robot/curobo/planner.yaml"`                           | The planner config whose boxes and spheres the step out uses; `""` turns the step out off                                                                                                                 |
+| `plan_tries`       | `3`                                                             | How many times the home is asked for directly before the waypoints                                                                                                                                        |
+| `plan_free_steps`  | `false`                                                         | `true` lets the engine fly its two plan-free steps (out of the padding, off a joint limit), which are not checked against the arm itself or the scene: a deployment's choice. `false`: such a start fails |
+| `tool_link`        | `"arm_tool_frame"`                                              | The link whose height the step out holds                                                                                                                                                                  |
+| `speed_scale`      | `0.3`                                                           | The driver's speed_scale for the plans home (0.01..1, the go_to goals' default); the step clear has its own slow timing                                                                                   |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the

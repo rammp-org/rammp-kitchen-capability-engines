@@ -8,6 +8,8 @@
 # hardware here, never in a README step. Do not set RMW_IMPLEMENTATION or
 # CYCLONEDDS_URI; rammp-base owns them.
 id: home_arm_real
+# experimental, for attended runs: standalone and with no control token (see use_orchestrator
+# below), it is not to be made demo-ready before the orchestrator dispatches go_home with a token.
 tier: experimental
 kind: docker
 container:
@@ -40,6 +42,11 @@ params:
   home_joints: [0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]
   body_layers: "/config/robot/curobo/planner.yaml"
   plan_tries: 3
+  # The plan-free steps (out of the padding round the chair and user, off a joint limit). They are
+  # checked against the planner's chair, seat and user boxes, the tool's height and the joint
+  # limits, not against the arm itself or the rest of the scene: off unless a deployment that
+  # accepts that beside its user turns them on (docs/interface.md). Off, such a start fails.
+  plan_free_steps: false
   tool_link: "arm_tool_frame"
   # the plans home fly at this speed_scale (0.01..1; the go_to goals' default); the step clear is slow anyway
   speed_scale: 0.3

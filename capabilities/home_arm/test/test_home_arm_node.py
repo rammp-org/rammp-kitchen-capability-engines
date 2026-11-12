@@ -139,6 +139,7 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
         "plan_tries": 3,
         "tool_link": "arm_tool_frame",
         "speed_scale": 0.3,
+        "plan_free_steps": True,  # the deployment's opt-in (off by default: see the tests of it)
     }
     values.update(params)
     eng = SimpleNamespace(
@@ -435,6 +436,53 @@ def test_under_an_orchestrator_go_home_is_refused_and_activate_says_it_is_unavai
     assert offered.available and offered.reason == ""
 
 
+def test_with_plan_free_steps_off_a_start_the_planner_refuses_is_not_stepped_out_of():
+    """The plan-free steps are checked against the chair, seat and user boxes, the tool's height
+    and the joint limits, not against the arm itself or the rest of the scene (REVIEW_RULES,
+    General correctness: an ask). They fly only where the deployment says so; off, the default,
+    nothing but the planner's own plans moves the arm."""
+    path = np.array([START, START + 0.05])
+    arm = Arm(answers=[_refuses_start(START)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(inside=0.012, escape=path), plan_free_steps=False))
+    assert e.value.error_code == "start_in_padding" and "plan_free_steps" in str(e.value)
+    assert "12 mm inside the padding" in str(e.value) and "INVALID_START" in str(e.value)
+    assert len(arm.planned) == 1 and arm.sent == []
+    # ... and a start in the engine's padding that the planner takes goes home as ever
+    arm = Arm()
+    out = _go(_engine(arm, Model(inside=0.012, escape=path), plan_free_steps=False))
+    assert out["planned"] == "directly" and not out["stepped_out"] and len(arm.sent) == 1
+
+
+def test_with_plan_free_steps_off_a_start_near_a_joint_limit_is_planned_from_as_any_other():
+    near = START.copy()
+    near[5] = 2.09 - 0.15  # joint 6, 0.15 rad from its limit: outside the planner's 0.10 margin
+    arm = Arm(joints=near)
+    out = _go(_engine(arm, Model(), plan_free_steps=False))
+    assert out["planned"] == "directly" and not out["stepped_out"]
+    assert len(arm.sent) == 1 and np.allclose(arm.planned[0][1], near)  # planned from the start
+    # in the padding too, where the planner is asked first: its plan is taken, no step first
+    arm = Arm(joints=near)
+    model = Model()
+    model.depth = lambda Q: np.full(len(np.atleast_2d(Q)), 0.012)
+    out = _go(_engine(arm, model, plan_free_steps=False))
+    assert out["planned"] == "directly" and len(arm.planned) == 1 and len(arm.sent) == 1
+    # ... and where the planner refuses it (inside its margin), near_limit says the steps are off
+    near[5] = 2.09 - 0.094
+    refuses = "START_IN_LIMIT_MARGIN: joint_6 is 0.094 rad from its limit"
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False, message=refuses)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(), plan_free_steps=False))
+    assert e.value.error_code == "near_limit" and "plan_free_steps" in str(e.value)
+    assert "joint 6 is 0.094 rad from its limit" in str(e.value) and arm.sent == []
+    # a planner that does not answer stays what it is
+    down = "plan_to_joints: no /rammp_curobo/plan_to_joints action server (the cuRobo planner)"
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False, message=down)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(), plan_free_steps=False))
+    assert e.value.error_code == "planner_unavailable"
+
+
 def test_the_fragments_and_the_launch_file_run_the_engine_standalone():
     """The mode go_home runs in is the one a deployment gets: the real fragment's params (a profile
     can override only what is listed there), the mock's command and the launch file's default."""
@@ -443,6 +491,7 @@ def test_the_fragments_and_the_launch_file_run_the_engine_standalone():
     here = home_arm_testlib.HERE.parent
     real = yaml.safe_load((here / "rammp-alternative.yaml").read_text())
     assert real["params"]["use_orchestrator"] is False
+    assert real["params"]["plan_free_steps"] is False  # a deployment's to turn on
     mock = yaml.safe_load((here / "rammp-alternative.mock.yaml").read_text())
     assert "use_orchestrator:=false" in mock["container"]["command"]
     launch = (here / "launch" / "home_arm.launch.py").read_text()
@@ -819,6 +868,23 @@ def test_a_joint_too_near_its_limit_steps_off_it_along_the_joint_line_and_home_p
     step_end = arm.planned[0][1]
     assert 2.09 - step_end[5] >= node.homing.LIMIT_FIRST_RAD - 1e-9  # clear of the margin
     assert len(arm.sent) == 2 and np.allclose(arm.sent[0][-1][1], step_end)
+
+
+def test_near_a_limit_but_outside_the_planners_margin_its_own_plan_is_taken_before_any_step():
+    """The planner refuses a start inside its 0.10 rad margin and often, not always, fails just
+    outside it: where it gives a good plan from where the arm stands, that is flown and no
+    plan-free step is; where it does not, the step off the limit as before."""
+    near = START.copy()
+    near[5] = 2.09 - 0.15  # joint 6: nearer than 0.18, outside the planner's 0.10
+    arm = Arm(joints=near)
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == "directly" and not out["stepped_out"] and len(arm.sent) == 1
+    assert len(arm.planned) == 1 and np.allclose(arm.planned[0][1], near)
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False), lambda g, s: _plan(g, s)])
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == "from the end of the step off the limit" and out["stepped_out"]
+    assert np.allclose(arm.planned[0][1], near) and not np.allclose(arm.planned[1][1], near)
+    assert len(arm.sent) == 2
 
 
 def test_off_a_limit_home_is_asked_for_again_before_a_longer_step():
