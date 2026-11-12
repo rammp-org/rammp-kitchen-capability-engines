@@ -22,11 +22,14 @@ plain plan, and the action handles each before anything moves:
    refuses the start itself (a plan that fails past the start, swings or ends
    elsewhere is a planner that takes it, and the home is then asked for from
    there as from any start), the engine finds a short plan-free step out of the padding in joint
-   space (never deeper, the tool held within 5 mm of its height, no joint more
-   than 0.6 rad), and plans from its end. Where there is none, the action fails
+   space (never deeper, the tool never more than 5 mm lower than it started, no
+   joint more than 0.6 rad), and plans from its end. Where there is none, the action fails
    `start_in_padding` before anything moves. Where the files cannot be read, the
    action goes on without them, and fails `body_model` only if the planner then
-   refuses the start as in collision.
+   refuses the start as in collision, or a joint stands too near its limit (the
+   plan-free step off it could not be checked against the chair and user). With
+   `body_layers` empty there is no chair to check against: that step is held to
+   the tool's height alone.
 1. **A joint too near its limit.** The planner refuses a start inside its
    joint-limit margin (`START_IN_LIMIT_MARGIN`, 0.10 rad on flatbot) and often
    fails just outside it. A start with a joint nearer than 0.18 rad takes the
@@ -117,20 +120,20 @@ Served under `/home_arm/`, types from `rammp_orchestrator_interfaces`:
 | --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `go_home` | `dry_run` (bool, default false: plan only, send none) | `{"home", "moved", "stepped_out", "planned", "notes", "duration_s", "speed_scale"}`, with `"off_rad"` (how near the home the arm was read) once flown, or `{"home": true, "moved": false}` when already home; the mock answers with the same keys and `"mock": true` |
 
-| Error code            | Recoverable | Meaning                                                                                                                                                                    |
-| --------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                                                            |
-| `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                                                    |
-| `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in (0, 1\]                                                                                                             |
-| `body_model`          | no          | The driver's URDF cannot be read, or the planner refuses the start as in collision and the planner's config cannot be read; nothing moved                                  |
-| `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                                                          |
-| `near_limit`          | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                                                  |
-| `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                  |
-| `planner_unavailable` | yes         | The planner did not answer a plan request (not running, or no result in time); nothing moved                                                                               |
-| `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved                                                                                              |
-| `paused_too_long`     | yes         | A pause left the way home no room in the action's 100 s; nothing sent: run it again                                                                                        |
-| `arm_moving`          | yes         | The arm moved while it was planned for, twice; nothing sent                                                                                                                |
-| `motion_failed`       | no          | The driver refused or did not complete a goal (an e-stop, control taken and the divergence guard included), or the arm ended away from the home; it holds where it stopped |
+| Error code            | Recoverable | Meaning                                                                                                                                                                                                                                                     |
+| --------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bad_params`          | yes         | Params that are not a JSON object, a parameter other than `dry_run`, or `dry_run` not a boolean                                                                                                                                                             |
+| `arm_state`           | yes         | The driver's `/joint_states` or URDF did not come, or is stale; nothing planned or sent                                                                                                                                                                     |
+| `bad_config`          | no          | `home_joints` is not 7 values, or `speed_scale` not in (0, 1\]                                                                                                                                                                                              |
+| `body_model`          | no          | The driver's URDF cannot be read; or the planner's config cannot be read and it is needed: the planner refuses the start as in collision, or a joint is too near its limit (the step off it could not be checked against the chair and user); nothing moved |
+| `start_in_padding`    | no          | No step out of the chair's padding keeps the tool up; nothing moved: jog it clear                                                                                                                                                                           |
+| `near_limit`          | no          | No step off a joint limit lets the home plan; nothing moved: jog it clear                                                                                                                                                                                   |
+| `no_way_home`         | no          | No plan home, directly or through a waypoint; nothing moved: jog it clear                                                                                                                                                                                   |
+| `planner_unavailable` | yes         | The planner did not answer a plan request (not running, or no result in time); nothing moved                                                                                                                                                                |
+| `too_slow`            | no          | The way home at `speed_scale` would take the action past 100 s; nothing moved                                                                                                                                                                               |
+| `paused_too_long`     | yes         | A pause left the way home no room in the action's 100 s; nothing sent: run it again                                                                                                                                                                         |
+| `arm_moving`          | yes         | The arm moved while it was planned for, twice, or during a pause after it was planned; nothing sent                                                                                                                                                         |
+| `motion_failed`       | no          | The driver refused or did not complete a goal (an e-stop, control taken and the divergence guard included), the arm ended away from the home, or its joints could not be read after a goal flew; it holds where it stopped                                  |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up. It names no perception classes, because `go_home` is not

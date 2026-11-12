@@ -7,8 +7,8 @@ seat and the person in it, so the path keeps clear of them. Four things stop a p
 * a start inside the padding round those boxes (clear of the chair itself, but within the planner's
   world_padding) is refused outright. Where the engine's copy of the planner's boxes
   (home_arm.body) puts the start in the padding and the planner refuses it too, the engine first
-  takes a short plan-free step out of the padding, never deeper, the tool held within 5 mm of its
-  height, and plans from its end;
+  takes a short plan-free step out of the padding, never deeper, the tool never more than 5 mm
+  lower than it started, and plans from its end;
 * a joint too near its limit is refused too (START_IN_LIMIT_MARGIN): the engine takes the shortest
   plan-free step along the joint line toward the home that clears it and that the home plans from
   (homing.limit_steps), the tool held and never into the padding;
@@ -62,6 +62,8 @@ ACTION_BUDGET_S = 100.0
 START_MOVED_RAD = 0.02
 SUCCESSFUL = 0  # a driver goal's error_code when it succeeded
 SWUNG = "the plan swings"  # how _judge's refusal of a wide plan begins: asking again gets the same
+NO_LAYERS = "body_layers is empty"  # why there is no body model where the deployment turned it off
+PAUSED_S = 0.05  # a checkpoint that blocked longer than this was a pause
 # How self.arm's own refusal of a plan begins (no action server, no answer, a rejected goal, no
 # result in arm.plan_timeout_s): the planner did not plan, which says nothing of the way home.
 NOT_PLANNED = "plan_to_joints: "
@@ -226,45 +228,46 @@ class Capability(CapabilityEngine):
             "duration_s": round(step_s + home_s, 2),
             "speed_scale": speed,
         }
-        # the wall clock, a pause and all: whatever cancels a long action counts the pause too, and
-        # a way home refused here is better than one cancelled half way
-        elapsed = time.monotonic() - began
-        if elapsed + step_s + home_s > ACTION_BUDGET_S:
-            if elapsed - self._paused_s + step_s + home_s <= ACTION_BUDGET_S:
-                raise EngineError(
-                    "paused_too_long",
-                    f"the action was paused {self._paused_s:.0f} s, and the way home "
-                    f"({step_s + home_s:.0f} s) no longer fits its {ACTION_BUDGET_S:.0f} s: "
-                    "nothing sent, run it again",
-                    recoverable=True,
-                )
-            raise EngineError(
-                "too_slow",
-                f"the way home takes {step_s + home_s:.0f} s at speed_scale {speed:g}, past the "
-                f"action's {ACTION_BUDGET_S:.0f} s with the planning: raise speed_scale, or jog "
-                "the arm nearer home; nothing sent",
-            )
+        self._fits(began, step_s + home_s, speed)
         if dry_run:
             ctx.progress("done", 1.0, f"dry run: home planned {route.how}, nothing sent")
             return dict(result, dry_run=True)
 
+        # From here nothing is pausable. A pause asked for before this is taken HERE, not inside
+        # self.arm (whose own checkpoint would block with the plans already judged and the arm
+        # last read before it), and what a pause may have changed is looked at again.
         if step:
             ctx.progress("stepping clear", 0.4, "a short step clear first", pausable=False)
+        else:
+            ctx.progress("going home", 0.6, "going home", pausable=False)
+        paused = self._paused_s
+        self._pause_point(ctx)
+        if self._paused_s - paused > PAUSED_S:
+            moved, j = homing.end_error(self._joints(), q0)
+            if moved > START_MOVED_RAD:
+                raise EngineError(
+                    "arm_moving",
+                    f"the arm moved {moved:.3f} rad (joint {j + 1}) while the action was paused, "
+                    "after its way home was planned: nothing sent, run it again",
+                    recoverable=True,
+                )
+            self._fits(began, step_s + home_s, speed)
+        if step:
             self._fly(step, "the plan-free step clear", 1.0)
             result["moved"] = True
-            stopped, j = homing.end_error(self._joints(), route.free[-1])
+            stopped, j = homing.end_error(self._joints("the plan-free step clear"), route.free[-1])
             if stopped > START_MOVED_RAD:
                 raise EngineError(
                     "motion_failed",
                     f"the plan-free step clear ended {stopped:.3f} rad (joint {j + 1}) short of "
                     "its end, where the way home starts: the arm holds where it stopped",
                 )
-        ctx.progress("going home", 0.6, "going home", pausable=False)
+            ctx.progress("going home", 0.6, "going home", pausable=False)
         self._fly(way, "the way home", speed)
         # The driver ends a goal when its clock runs out, wherever the arm is: "home" is said
         # only of an arm read there, as go_to_joint_config judges its own end.
         time.sleep(_settle_s())
-        off, j = homing.end_error(self._joints(), home)
+        off, j = homing.end_error(self._joints("the way home"), home)
         reached = float(np.deg2rad(rammp_arm.GO_TO_TRACK_DEG))
         if off > reached:
             raise EngineError(
@@ -277,16 +280,46 @@ class Capability(CapabilityEngine):
 
     # -- its parts --------------------------------------------------------------------------------
 
-    def _joints(self):
+    def _joints(self, flown=None):
         """The arm's joints now, as the driver reports them (/joint_states, at most
         arm.state_stale_s old: self.arm refuses an older one). EngineError("arm_state") where the
-        driver's state does not come or is stale: nothing is planned or sent on it."""
+        driver's state does not come or is stale: nothing is planned or sent on it. Read after
+        `flown` (a goal that was sent) it is motion_failed instead: the arm moved, and where it
+        stopped is not known."""
         try:
             return np.asarray(self.arm.joint_states().position, float)
         except ArmError as e:
+            if flown:
+                raise EngineError(
+                    "motion_failed",
+                    f"{flown} was flown and the arm's joints cannot be read after it ({e}): "
+                    "where it stopped is not known",
+                ) from e
             raise EngineError(
                 "arm_state", f"the arm's joints cannot be read ({e})", recoverable=True
             ) from e
+
+    def _fits(self, began, moving_s, speed):
+        """EngineError where the way home (`moving_s` at `speed`) no longer fits the action's time.
+        By the wall clock, a pause and all: whatever cancels a long action counts the pause too,
+        and a way home refused here is better than one cancelled half way."""
+        elapsed = time.monotonic() - began
+        if elapsed + moving_s <= ACTION_BUDGET_S:
+            return
+        if elapsed - self._paused_s + moving_s <= ACTION_BUDGET_S:
+            raise EngineError(
+                "paused_too_long",
+                f"the action was paused {self._paused_s:.0f} s, and the way home "
+                f"({moving_s:.0f} s) no longer fits its {ACTION_BUDGET_S:.0f} s: "
+                "nothing sent, run it again",
+                recoverable=True,
+            )
+        raise EngineError(
+            "too_slow",
+            f"the way home takes {moving_s:.0f} s at speed_scale {speed:g}, past the "
+            f"action's {ACTION_BUDGET_S:.0f} s with the planning: raise speed_scale, or jog "
+            "the arm nearer home; nothing sent",
+        )
 
     def _kinematics(self):
         """(chain, model, why there is no model): the driver's URDF as a kinematic chain (joint
@@ -303,7 +336,7 @@ class Capability(CapabilityEngine):
             except body.BodyModelError as e:
                 why = str(e)
         else:
-            why = "body_layers is empty"
+            why = NO_LAYERS
         try:
             root = (model.base_link if model is not None else "") or "arm_mount"
             chain = body.Chain(self.arm.robot_description(), root, JOINTS)
@@ -356,6 +389,16 @@ class Capability(CapabilityEngine):
             near = homing.near_limits(start, chain.limits)
             if near:
                 z_from = float(chain.tool_z(q0, str(self.get_parameter("tool_link").value))[0])
+                if model is None and no_model != NO_LAYERS:
+                    # body_layers names the chair and user and they cannot be read: a plan-free
+                    # step would fly unchecked against them. (Empty, the deployment says there
+                    # is no chair: the step is checked for the tool's height alone.)
+                    raise EngineError(
+                        "body_model",
+                        "a joint is too near its limit for the planner to start from, and the "
+                        "plan-free step off it cannot be checked against the chair and user "
+                        f"({no_model}): jog the arm clear by hand",
+                    )
                 step, plans, how = self._off_the_limit(
                     start, home, near, chain, model, ctx, tries, z_from
                 )

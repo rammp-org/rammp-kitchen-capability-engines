@@ -153,6 +153,7 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
         "_off_the_limit",
         "_plan",
         "_pause_point",
+        "_fits",
         "_fly",
     ):
         setattr(eng, name, functools.partial(getattr(Capability, name), eng))
@@ -562,6 +563,79 @@ def test_home_is_said_only_of_an_arm_that_is_read_there():
     assert len(arm.sent) == 1
     out = _go(_engine(Arm(), Model()))  # ... and an arm that got there says how near
     assert out["home"] and out["off_rad"] == 0.0
+
+
+def test_joints_that_cannot_be_read_after_a_goal_flew_fail_as_motion_failed_not_arm_state():
+    """arm_state says nothing was planned or sent. After a goal flew that is not so: the arm moved
+    and where it stopped is not known (REVIEW_RULES U4)."""
+    from capability_engine import StateTimeout
+
+    arm = Arm()
+    fly = arm.execute_joint_trajectory
+
+    def fly_then_lose_state(names, points, speed_scale=1.0, path_tolerance=None):
+        res = fly(names, points, speed_scale=speed_scale, path_tolerance=path_tolerance)
+
+        def stale():
+            raise StateTimeout("/joint_states is stale: last message 0.80 s ago")
+
+        arm.joint_states = stale
+        return res
+
+    arm.execute_joint_trajectory = fly_then_lose_state
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "motion_failed" and not e.value.recoverable
+    assert "the way home was flown" in str(e.value) and len(arm.sent) == 1
+
+
+def test_off_a_limit_with_layers_that_cannot_be_read_nothing_is_stepped_unchecked():
+    """The plan-free step off a joint limit is held out of the chair and user by the body model.
+    Where body_layers names one that cannot be read, the step is refused; where the deployment
+    says there is none (body_layers empty), it flies on the tool's height alone."""
+    near = HOME.copy()
+    near[1] = LIMITS[1][0] + 0.05
+    arm = Arm(joints=near)
+    with pytest.raises(EngineError) as e:
+        _go(
+            _engine(arm, None, no_model="body model: cannot read /config/robot/curobo/planner.yaml")
+        )
+    assert e.value.error_code == "body_model" and "cannot be checked against the chair" in str(
+        e.value
+    )
+    assert arm.planned == [] and arm.sent == []
+    arm = Arm(joints=near)
+    out = _go(_engine(arm, None, no_model=node.NO_LAYERS))
+    assert out["home"] and len(arm.sent) == 2  # the step off the limit, then the way home
+
+
+def test_a_pause_asked_for_before_the_arm_is_sent_anything_is_taken_there_and_the_arm_read_again(
+    monkeypatch,
+):
+    """self.arm's own checkpoint would block on a pause inside the send, the plans already judged
+    and the arm last read before it. The pause is taken at the last pausable moment instead: an
+    arm moved meanwhile is sent nothing, and one that stood still goes home."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+
+    def paused_last(arm, moved_to=None):
+        class Last(Ctx):
+            def checkpoint(self):
+                if self.reports and self.reports[-1][2] is False:  # after the first unpausable step
+                    now[0] += 5.0
+                    if moved_to is not None:
+                        arm.readings = [np.asarray(moved_to, float)]
+
+        return Last()
+
+    arm = Arm()
+    with pytest.raises(EngineError) as e:
+        Capability.execute(_engine(arm, Model()), "go_home", {}, paused_last(arm, START + 0.1))
+    assert e.value.error_code == "arm_moving" and e.value.recoverable and arm.sent == []
+    assert "while the action was paused" in str(e.value)
+    arm = Arm()
+    out = Capability.execute(_engine(arm, Model()), "go_home", {}, paused_last(arm))
+    assert out["home"] and len(arm.sent) == 1
 
 
 def test_an_arm_moved_while_planned_for_is_planned_for_again_from_where_it_stands():
