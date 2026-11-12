@@ -78,6 +78,10 @@ params:
   # the UI bridge's node: the base class's panel calls (ctx.update_user_panel) go to its
   # request_user_input, with the token the orchestrator pushes for each execution
   ui_bridge_node_name: ui_bridge_node
+  # the mock only (mock: true): how long each of its seven phases lasts, in seconds. 0: its run
+  # is over at once. A second or two and the UI can be rehearsed on it with no arm: the run's
+  # panel, its bar, Cancel
+  mock_phase_s: 0.0
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

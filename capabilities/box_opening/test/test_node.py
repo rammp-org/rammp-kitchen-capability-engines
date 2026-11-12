@@ -72,9 +72,20 @@ class FakeCtx:
         self.objects = {}
         self.world = []  # every world-state write, in order
         self.accepts = accepts  # what the orchestrator answers a world-state write
+        self.panels = []  # every panel sent to the UI, in order
+        self.events = []  # what the UI reports, oldest first: read one at a time
+        self.ui_sends = True  # what a send to the UI answers
 
     def progress(self, phase, pct, message="", pausable=True):
         self.said.append((phase, pct, message, pausable))
+
+    def update_user_panel(self, panel_json=None, objects=None, selected_instance_id=None):
+        if self.ui_sends:
+            self.panels.append(panel_json)
+        return self.ui_sends
+
+    def poll_ui_event(self):
+        return self.events.pop(0) if self.events else None
 
     def checkpoint(self):
         if self.cancel:
@@ -239,10 +250,10 @@ def test_the_selection_is_read_once_as_the_goal_comes(engine, monkeypatch):
     real = node.Capability._progress
     calls = []
 
-    def progress(log, track, ctx_):
+    def progress(log, track, ctx_, panel):
         calls.append(1)
         engine.instance_id = "" if len(calls) == 1 else "food_container_2"  # hibernated, then another selected
-        real(log, track, ctx_)
+        real(log, track, ctx_, panel)
 
     monkeypatch.setattr(node.Capability, "_progress", staticmethod(progress))
     out = engine.execute("open_box", {}, ctx)
@@ -464,6 +475,159 @@ def test_a_cancel_is_the_runs_own_ctrl_c_and_ends_the_action_cancelled(engine, m
     assert time.monotonic() - t0 < 5.0
 
 
+CANCEL_PRESS = {"type": "button", "button_id": "cancel"}
+
+
+def test_the_panel_says_what_the_run_does_with_a_bar_and_one_button_cancel():
+    """REVIEW_RULES U3: valid panel_json that always includes `buttons`, and a cancel path. No Pause is
+    offered (a run cannot pause); the bar is the UI's 0-100, the progress the orchestrator gets stays 0-1."""
+    ctx, clock = FakeCtx(), [10.0]
+    panel = node.Panel(ctx, lambda: True, clock=lambda: clock[0])
+    assert panel.tick() is False
+    assert ctx.panels == [
+        {
+            "title": "Opening the container",
+            "message": "Starting",
+            "progress": {"phase": "locate", "pct": 0.0, "message": "Starting", "pausable": False},
+            "buttons": [{"button_id": "cancel", "label": "Cancel"}],
+        }
+    ]
+    panel.say("press", 0.35, "pressing the button")
+    panel.tick()  # a change is sent at once
+    assert ctx.panels[-1]["message"] == "Pressing the button"
+    assert ctx.panels[-1]["progress"] == {
+        "phase": "press",
+        "pct": 35.0,
+        "message": "Pressing the button",
+        "pausable": False,
+    }
+    for sent in ctx.panels:
+        assert json.loads(json.dumps(sent)) == sent and [b["button_id"] for b in sent["buttons"]] == ["cancel"]
+    # unchanged, it is sent again only as PANEL_REFRESH_S passes (a goal the bridge ended is opened again)
+    for _ in range(5):
+        panel.tick()
+    assert len(ctx.panels) == 2
+    clock[0] += node.PANEL_REFRESH_S
+    panel.tick()
+    assert len(ctx.panels) == 3 and ctx.panels[2] == ctx.panels[1]
+
+
+def test_cancel_pressed_on_the_panel_is_said_once_and_leaves_no_button():
+    ctx, clock = FakeCtx(), [10.0]
+    panel = node.Panel(ctx, lambda: True, clock=lambda: clock[0])
+    panel.say("press", 0.35, "pressing the button")
+    panel.tick()
+    ctx.events.append(CANCEL_PRESS)
+    assert panel.tick() is True and panel.pressed
+    # the press took the bridge's panel down: it is sent again at once, saying the arm is stopping, no button
+    assert ctx.panels[-1]["message"] == node.PANEL_CANCELLED and ctx.panels[-1]["buttons"] == []
+    assert ctx.panels[-1]["progress"]["pausable"] is False and ctx.panels[-1]["progress"]["pct"] == 35.0
+    ctx.events.append(CANCEL_PRESS)  # a second one (a stale panel's): not a second cancel
+    assert panel.tick() is False and panel.pressed
+    # a press of anything else is no cancel
+    other = node.Panel(FakeCtx(), lambda: True, clock=lambda: clock[0])
+    other._ctx.events.append({"type": "button", "button_id": "pause"})
+    assert other.tick() is False and not other.pressed
+    other._ctx.events.append({"type": "object_tapped", "instance_id": "food_container_2"})
+    assert other.tick() is False and not other.pressed
+
+
+def test_the_panel_sends_nothing_without_the_ui_and_tries_a_failed_send_at_its_period():
+    ctx, clock, asked = FakeCtx(), [10.0], []
+    panel = node.Panel(ctx, lambda: asked.append(1) or False, clock=lambda: clock[0])  # standalone: no token
+    for _ in range(40):  # the follow loop's ticks in 2 s
+        panel.tick()
+        clock[0] += node.POLL_S
+    assert ctx.panels == [] and 2 <= len(asked) <= 3  # asked at the period, not at every tick
+    ctx.ui_sends = False  # the UI is there, and the bridge's client is not ready
+    panel = node.Panel(ctx, lambda: True, clock=lambda: clock[0])
+    panel.tick()
+    panel.say("look", 0.1, "looking for the button")
+    panel.tick()
+    ctx.ui_sends = True
+    panel.tick()
+    assert ctx.panels == []  # not before the period
+    clock[0] += node.PANEL_REFRESH_S
+    panel.tick()
+    assert [p["message"] for p in ctx.panels] == ["Looking for the button"]
+
+
+def test_a_run_from_the_ui_shows_its_panel_and_cancel_on_it_is_the_runs_own_ctrl_c(engine, monkeypatch):
+    """Cancel on the panel ends the run as the orchestrator's cancel does: one Ctrl+C to the run (the motion
+    in flight cancelled first), the action cancelled, nothing marked opened."""
+    given(monkeypatch, FULL_RUN[:5], wait=True)  # up to the press, then it waits
+    ctx = FakeCtx()
+    engine.instance_id = "food_container_1"
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    sent, base = [], []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda: base.append(1))
+    import threading
+
+    threading.Timer(1.5, ctx.events.append, args=(CANCEL_PRESS,)).start()
+    t0 = time.monotonic()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert sent == [signal.SIGINT] and base == [1] and time.monotonic() - t0 < 6.0
+    messages = [p["message"] for p in ctx.panels]
+    assert messages[0] == "Starting" and "Pressing the button" in messages
+    assert messages[-1] == node.PANEL_CANCELLED and ctx.panels[-1]["buttons"] == []
+    running = [p for p in ctx.panels if p["message"] != node.PANEL_CANCELLED]
+    assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in running)
+    pcts = [p["progress"]["pct"] for p in ctx.panels]
+    assert pcts == sorted(pcts) and pcts[-1] == 35.0  # the bar's 0-100, never backwards
+    assert ctx.objects == {} and ctx.world == []  # nothing opened, nothing held
+
+
+def test_the_panels_cancel_is_the_base_classs_own(engine):
+    """_cancel_from_ui cancels the goal running in the base class, as a Control.CANCEL does."""
+    from capability_engine.engine import _Run
+
+    engine._current = run = _Run("open_box", None)
+    try:
+        engine._cancel_from_ui()
+        assert run.cancelled.is_set()
+    finally:
+        engine._current = None
+
+
+def test_a_cancel_between_the_token_and_the_goal_is_kept_for_that_execution(engine, monkeypatch):
+    """The orchestrator pushes its token for an execution, then (up to seconds later) sends the goal. A
+    CANCEL in between had no run to cancel and was lost: the action ran to its end (uirig, 11-12)."""
+    from rammp_orchestrator_interfaces.srv import Control
+
+    given(monkeypatch, FULL_RUN)
+    lines = []
+    monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: lines.append(msg))
+    cancel = Control.Request(command=Control.Request.CANCEL)
+    # no token: no execution is coming, nothing is kept
+    assert engine._on_control(cancel, Control.Response()).message == "ok (no action running)"
+    engine.execute("open_box", {}, FakeCtx())
+    assert sum(ln.startswith("ARGV ") for ln in lines) == 1
+    # the token is here, the goal is not: the execution it is for ends cancelled, and nothing runs
+    engine._assigned_token = bytes(range(1, 17))
+    answer = engine._on_control(cancel, Control.Response())
+    assert answer.accepted and "about to start" in answer.message
+    ctx = FakeCtx()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert ctx.said == [] and sum(ln.startswith("ARGV ") for ln in lines) == 1
+    # once: the next goal under the same token runs
+    engine.execute("open_box", {}, FakeCtx())
+    assert sum(ln.startswith("ARGV ") for ln in lines) == 2
+    # kept for ITS execution only: another token's runs
+    engine._on_control(cancel, Control.Response())
+    engine._assigned_token = bytes(range(2, 18))
+    engine.execute("open_box", {}, FakeCtx())
+    assert sum(ln.startswith("ARGV ") for ln in lines) == 3
+    # a pause before the goal is nothing to keep
+    engine._on_control(Control.Request(command=Control.Request.PAUSE), Control.Response())
+    engine.execute("open_box", {}, FakeCtx())
+    assert sum(ln.startswith("ARGV ") for ln in lines) == 4
+    engine._assigned_token = bytes(16)
+
+
 def test_a_run_is_stopped_when_following_it_raises(engine, monkeypatch):
     """REVIEW_RULES R3: an exception while following the run (here, reading its progress) must
     not leave the child running, and moving the arm, after the goal has ended."""
@@ -481,7 +645,7 @@ def test_a_run_is_stopped_when_following_it_raises(engine, monkeypatch):
     monkeypatch.setattr(node.Run, "interrupt", interrupt)
     calls = []
 
-    def progress(log, track, ctx):
+    def progress(log, track, ctx, panel):
         calls.append(1)
         if len(calls) == 20:  # ~1 s in: the run is waiting for its Ctrl+C
             raise RuntimeError("a row the tracker cannot read")
@@ -734,6 +898,42 @@ def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
         ctx.cancel = True
         with pytest.raises(Cancelled):
             cap.execute("open_box", {}, ctx)
+        assert ctx.said == [] and ctx.world == []
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_the_paced_mock_rehearses_the_ui_its_panel_and_cancel(ros, monkeypatch):
+    """mock_phase_s: each of the mock's phases lasts that long, its panel on the UI as the real run's, and
+    Cancel on it ends it cancelled with nothing opened. 0 (the default): over at once, as it always was."""
+    handlers = list(LOGGER.handlers)
+    overrides = {"mock": True, "use_orchestrator": False, "mock_phase_s": 0.3}
+    cap = node.Capability(parameter_overrides=[Parameter(k, value=v) for k, v in overrides.items()])
+    try:
+        monkeypatch.setattr(cap, "_ui_live", lambda: True)
+        cap.instance_id = "c1"
+        ctx = FakeCtx()
+        t0 = time.monotonic()
+        out = cap.execute("open_box", {}, ctx)
+        phases = node.MOCK_PHASES["open_box"]
+        assert len(phases) * 0.3 <= time.monotonic() - t0 < len(phases) * 0.3 + 2.0
+        assert out["lid_off"] and ctx.objects == {"c1": {"opened": True}}
+        shown = [p["message"] for p in ctx.panels]
+        assert [m for m in dict.fromkeys(shown) if m != "Starting"] == [d[:1].upper() + d[1:] for _, _, d in phases]
+        assert [p["progress"]["pct"] for p in ctx.panels] == sorted(p["progress"]["pct"] for p in ctx.panels)
+        assert ctx.panels[-1]["progress"]["pct"] == 100.0
+        assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in ctx.panels)
+        # Cancel pressed while it "presses": cancelled, nothing held, nothing opened
+        ctx = FakeCtx()
+        import threading
+
+        threading.Timer(0.75, ctx.events.append, args=(CANCEL_PRESS,)).start()
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
+        assert [p for p, *_ in ctx.said] == ["locate", "look", "press"]
+        assert ctx.objects == {} and ctx.world == []
+        assert ctx.panels[-1]["message"] == node.PANEL_CANCELLED and ctx.panels[-1]["buttons"] == []
     finally:
         cap.destroy_node()
         LOGGER.handlers[:] = handlers

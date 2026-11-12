@@ -18,6 +18,10 @@ the perception already running on the robot: only the object the orchestrator se
 instance_id, passed to the run as --instance-id), and a lid box stacked on it. No detector
 runs in this node.
 
+Started from the UI (the orchestrator's token for the execution in hand), the run shows a panel
+for as long as it goes: what it is doing, a bar, and one button, Cancel, which is the
+orchestrator's cancel (Panel). No Pause: a run cannot pause.
+
 SAFETY: the arm moves only on a node with allow_execute:=true, set for an attended run (someone
 at the e-stop). With it false, open_box is reported unavailable and a goal that comes anyway is
 refused before anything runs. The mock moves nothing and is always available.
@@ -40,6 +44,7 @@ from pathlib import Path
 
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
 from rammp_orchestrator_interfaces.msg import ActionAvailability
+from rammp_orchestrator_interfaces.srv import Control
 
 from . import LOGGER
 from .constants import state_dir
@@ -85,6 +90,9 @@ PARAMS = {
     # same folder as this node writes it; "" = planner_worlds under state_dir
     "planner_worlds_as": "",
     "planner_worlds_dir": "",
+    # the mock only: how long each of its phases lasts (s). 0, the default, and its run is over at once, as it
+    # always was; a second or two and the UI can be rehearsed on it (the panel, its bar, Cancel) with no arm
+    "mock_phase_s": 0.0,
 }
 NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
 
@@ -319,6 +327,74 @@ class WorldWriter:
         return True
 
 
+# The run's panel on the UI (Panel). The bar's scale is the UI's, 0 to 100 (docs/UI_JSON_SCHEMA.md, the
+# base class's example); ctx.progress keeps REVIEW_RULES U2's fraction from 0 to 1.
+PANEL_TITLE = "Opening the container"
+PANEL_CANCEL = "cancel"  # the Cancel button's id
+PANEL_PCT = 100.0
+# an unchanged panel is sent again this often: a goal the bridge ended on its own (its abort, a refusal) is opened
+# again by the next send, and Cancel is back on the screen (the microwave engine's period)
+PANEL_REFRESH_S = 1.0
+PANEL_CANCELLED = "Cancelled: the arm is stopping where it is"
+PANEL_TIMED_OUT = "Taking too long: the arm is stopping where it is"
+
+
+class Panel:
+    """open_box's panel on the UI for as long as it runs (REVIEW_RULES U3): what the run is doing (the phase and
+    the message its progress reports), a bar, and ONE button, Cancel. No Pause, and `pausable` false: a run is one
+    motion and cannot pause. Once the run is being stopped (`stopping`: a cancel, its budget) it says so and has
+    no button left: there is nothing more to ask of it.
+
+    It asks the user nothing and waits for nothing: `tick()` (the follow loop's, every POLL_S) reads a press and
+    sends the panel where it changed or PANEL_REFRESH_S has passed, both calls the base class answers at once.
+    Its life is the run's: the base class closes it as execute() ends (at most RUN_BUDGET_S and the run's stop),
+    with the token it was shown by. `live()`: whether this execution has the UI at all (Capability._ui_live);
+    without it nothing is sent, and a run is as it was."""
+
+    def __init__(self, ctx, live, clock=time.monotonic):
+        self._ctx = ctx
+        self._live = live
+        self._clock = clock
+        self._said = ("locate", 0.0, "starting")
+        self._sent = None  # the panel as last sent, None where the last send did not go out
+        self._tried_at = None  # when a send was last tried
+        self.pressed = False  # Cancel was pressed on it (it stays said)
+        self.stopping = ""  # the run is being stopped, in the user's words: no button is offered
+
+    def say(self, phase, pct, message=""):
+        """What the run does now: the progress it just reported."""
+        self._said = (str(phase), float(pct), str(message))
+
+    def panel(self):
+        phase, pct, message = self._said
+        text = self.stopping or (message[:1].upper() + message[1:])
+        return {
+            "title": PANEL_TITLE,
+            "message": text,
+            "progress": {"phase": phase, "pct": round(PANEL_PCT * pct, 1), "message": text, "pausable": False},
+            "buttons": [] if self.stopping else [{"button_id": PANEL_CANCEL, "label": "Cancel"}],
+        }
+
+    def tick(self):
+        """Read a press, and send the panel where it is due: at once where it changed (or a press took the
+        bridge's panel down), every PANEL_REFRESH_S where it did not, and no oftener than that where the last
+        send did not go out. True the once Cancel is pressed: the panel says the arm is stopping from then on."""
+        event = self._ctx.poll_ui_event()
+        pressed = False
+        if event is not None and event.get("type") == "button":
+            # any press ends the bridge's goal, and its panel with it: the next send opens it again
+            self._sent = self._tried_at = None
+            pressed = event.get("button_id") == PANEL_CANCEL and not self.pressed and not self.stopping
+            if pressed:
+                self.pressed, self.stopping = True, PANEL_CANCELLED
+        panel, now = self.panel(), self._clock()
+        due = self._tried_at is None or now - self._tried_at >= PANEL_REFRESH_S
+        if due or (self._sent is not None and panel != self._sent):
+            self._tried_at = now
+            self._sent = panel if self._live() and self._ctx.update_user_panel(panel_json=panel) else None
+        return pressed
+
+
 class Tracker:
     """A run's rows as it goes: the progress each says, and what the result reports.
     `instance_id`: the container the orchestrator selected when the goal came, kept for the
@@ -448,6 +524,7 @@ class Capability(CapabilityEngine):
         for name, default in PARAMS.items():
             self.declare_parameter(name, default)
         self._run = None  # the Run under way
+        self._cancelled_token = None  # the execution a CANCEL came for before its goal did (_on_control)
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -491,6 +568,41 @@ class Capability(CapabilityEngine):
         """allow_execute as it is now (a deployment may set it while the node runs)."""
         return bool(self._param("allow_execute"))
 
+    def _ui_live(self):
+        """Whether this execution may show its panel: the orchestrator pushed its token for it (standalone: never)
+        and the bridge's request_user_input is there. Asked before every send, of the base class's own state,
+        which has no call for it: as of feat/engine_update 8e7f0ab update_user_panel() logs a warning for every
+        send without a token, and a run whose first send finds the bridge's server not there never opens its
+        panel again (its ui_opening stays set)."""
+        return self._assigned_token != bytes(16) and self._ui_request_client.server_is_ready()
+
+    def _cancel_from_ui(self):
+        """The panel's Cancel is the orchestrator's: the base class's own Control.CANCEL, so the run ends the
+        one way a cancel ends it (its Ctrl+C, the result cancelled, no world-state write after it)."""
+        self.get_logger().warning("Cancel pressed on the UI: the action is cancelled")
+        CapabilityEngine._on_control(self, Control.Request(command=Control.Request.CANCEL), Control.Response())
+
+    def _on_control(self, request, response):
+        """The base class's, and one case it loses: a CANCEL that comes after the orchestrator has pushed its
+        token for an execution and before that execution's goal (it pushes the token to the engine first, then
+        to the bridge and the drivers, waiting 2 s for each that is not there, then activates and sends the
+        goal). The base class has no run to cancel then, answers "ok", and the action ran to its end. It is
+        kept for the execution that token is for, which ends cancelled before anything runs (execute)."""
+        with self._lifecycle:
+            idle = self._current is None
+        response = super()._on_control(request, response)
+        token = self._assigned_token
+        if idle and request.command == Control.Request.CANCEL and token != bytes(16):
+            self._cancelled_token = token
+            response.message = "ok (the action about to start is cancelled)"
+            self.get_logger().warning("cancelled before its goal came: the action about to start will not run")
+        return response
+
+    def _cancelled_early(self):
+        """Whether a CANCEL came for THIS execution before its goal did (_on_control); asked once, as it starts."""
+        token, self._cancelled_token = self._cancelled_token, None
+        return token is not None and token == self._assigned_token
+
     def availability(self, instance_id, world_state):
         """open_box for a container the world state does not already hold opened (its object
         record's `opened`, which a run writes as it lets the lid go on the table), while the
@@ -507,6 +619,8 @@ class Capability(CapabilityEngine):
         return [ActionAvailability(action_id=a.action_id, available=not why, reason=why) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
+        if self._cancelled_early():
+            raise Cancelled()  # nothing ran
         check_params(params)
         if self.mock:
             return self._mock(action_id, ctx)
@@ -521,6 +635,9 @@ class Capability(CapabilityEngine):
         t0 = time.monotonic()
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
+        panel = Panel(ctx, self._ui_live)  # on the UI from now until the action ends
+        panel.say(first, 0.0, "starting")
+        panel.tick()
         world = WorldWriter(self.get_logger())
         # the flight view (flight_view): the run's lines read as they are logged, one short line a step
         # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
@@ -529,7 +646,7 @@ class Capability(CapabilityEngine):
         self._run = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
         code = None
         try:
-            code = self._follow(self._run, log, track, ctx, world)
+            code = self._follow(self._run, log, track, ctx, world, panel)
         finally:
             run_, self._run = self._run, None
             if run_.proc.poll() is None:
@@ -540,11 +657,13 @@ class Capability(CapabilityEngine):
                     f"the run outlived its goal: its own stop (Ctrl+C), a kill after {CANCEL_ESCALATE_S:.0f} s"
                 )
                 run_.stop(CANCEL_ESCALATE_S)
-            self._progress(log, track, ctx)  # the last rows, written as it ended
-            if not ctx.cancelled():
+            self._progress(log, track, ctx, panel)  # the last rows, written as it ended
+            if not (ctx.cancelled() or panel.pressed):
                 self._sync_world(track, ctx, world)  # the last rows' word: a release, a put-back
-            view.finish(code, cancelled=ctx.cancelled(), timed_out=run_.timed_out, held=bool(track.held))
-        if ctx.cancelled():
+            view.finish(
+                code, cancelled=ctx.cancelled() or panel.pressed, timed_out=run_.timed_out, held=bool(track.held)
+            )
+        if ctx.cancelled() or panel.pressed:
             world.wait(WORLD_WAIT_S)  # those queued before the cancel
             raise Cancelled()
         result = {
@@ -586,17 +705,22 @@ class Capability(CapabilityEngine):
                 )
         return result
 
-    def _follow(self, run_, log, track, ctx, world):
-        """Progress from the run's rows until it ends; a cancel is its Ctrl+C. Its exit code. The
-        world-state writes the rows call for are `world`'s, never this loop's to wait on."""
+    def _follow(self, run_, log, track, ctx, world, panel):
+        """Progress from the run's rows until it ends, on `panel` too; a cancel (the orchestrator's, or the
+        panel's Cancel, which is made the orchestrator's) is its Ctrl+C. Its exit code. The world-state writes
+        the rows call for are `world`'s, never this loop's to wait on."""
         sent = escalated = None
         while run_.proc.poll() is None:
-            self._progress(log, track, ctx)
-            if not ctx.cancelled():
+            self._progress(log, track, ctx, panel)
+            if panel.tick():
+                self._cancel_from_ui()
+            cancelled = ctx.cancelled() or panel.pressed  # the press itself, whatever the base class made of it
+            if not cancelled:
                 self._sync_world(track, ctx, world)
             now = time.monotonic()
-            if ctx.cancelled() and sent is None:
+            if cancelled and sent is None:
                 self.get_logger().warning("cancelled: the run's own stop (Ctrl+C) sent")
+                panel.stopping = PANEL_CANCELLED
                 run_.interrupt()
                 sent = now
             elif sent is None and now - run_.started > RUN_BUDGET_S:
@@ -605,6 +729,7 @@ class Capability(CapabilityEngine):
                     "orchestrator's 120 s cancel"
                 )
                 run_.timed_out = True
+                panel.stopping = PANEL_TIMED_OUT
                 run_.interrupt()
                 sent = now
             elif sent is not None and escalated is None and now - sent > CANCEL_ESCALATE_S:
@@ -661,12 +786,14 @@ class Capability(CapabilityEngine):
         )
 
     @staticmethod
-    def _progress(log, track, ctx):
-        """The progress each new row of the run log says (a run cannot pause once started)."""
+    def _progress(log, track, ctx, panel):
+        """The progress each new row of the run log says (a run cannot pause once started), to the
+        orchestrator and on the run's panel."""
         for row in log.rows():
             said = track.add(row)
             if said is not None:
                 ctx.progress(*said, pausable=False)
+                panel.say(*said)
 
     def _argv(self, action_id, instance_id=""):
         argv = [executable(EXECUTABLES[action_id])]
@@ -697,23 +824,37 @@ class Capability(CapabilityEngine):
 
     def _mock(self, action_id, ctx):
         """A successful real run at the interface, nothing moved (review round 2): its phases in
-        its words, the gripper's `holding` from the grip to the release and the container `opened`
-        at the release, written as the real run writes them, and its result. Like the real run it
-        cannot pause; a cancel ends it."""
+        its words (each `mock_phase_s` long), the gripper's `holding` from the grip to the release and
+        the container `opened` at the release, written as the real run writes them, its panel on the UI
+        and its result. Like the real run it cannot pause; a cancel ends it."""
         track = Tracker(action_id, self.instance_id)
         world = WorldWriter(self.get_logger())
+        panel = Panel(ctx, self._ui_live)  # the real run's, Cancel included
+        phase_s = max(0.0, float(self._param("mock_phase_s")))
         t0 = time.monotonic()
-        for phase, pct, doing in MOCK_PHASES[action_id]:
-            if ctx.cancelled():
+
+        def cancel_point():
+            """A cancel (the orchestrator's, or the panel's Cancel) ends the mock here, as the real run."""
+            if panel.tick():
+                self._cancel_from_ui()
+            if ctx.cancelled() or panel.pressed:
                 world.wait(WORLD_WAIT_S)
                 raise Cancelled()
+
+        for phase, pct, doing in MOCK_PHASES[action_id]:
+            cancel_point()
             ctx.progress(phase, pct, doing, pausable=False)
+            panel.say(phase, pct, doing)
             if phase == "grip":
                 track.held = True
             elif phase == "release":
                 track.held, track.set_down, track.released = False, True, True
                 track.lid_spot = list(MOCK_LID_XYZ)
             self._sync_world(track, ctx, world)
+            until = time.monotonic() + phase_s  # the phase's length, a cancel read all through it
+            while time.monotonic() < until:
+                cancel_point()
+                time.sleep(POLL_S)
         world.wait(WORLD_WAIT_S)
         result = {
             "executed": True,
