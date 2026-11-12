@@ -94,7 +94,8 @@ def test_home_arm_on_a_tableless_world_cautions_first_and_plans_once(ctx, capsys
 
 def test_home_arm_on_a_tableless_world_refused_raises_without_a_second_world(ctx, capsys):
     """The guarded world would be the bare one there, so it is never asked. The plan itself is asked for again
-    since 2026-11-09 (core.home_any: HOME_TRIES times, then through each waypoint), always in the bare world."""
+    since 2026-11-09 (core.home_any: HOME_TRIES times, then through each waypoint, then the first of the joint
+    line's short legs for each count of them, 2026-11-12), always in the bare world."""
     import pytest
 
     from box_opening.primitives import core
@@ -105,7 +106,7 @@ def test_home_arm_on_a_tableless_world_refused_raises_without_a_second_world(ctx
     plans = _PlanCounter(c.client, capsys, succeed=False)
     with pytest.raises(RuntimeError, match="INVALID_START_STATE_WORLD_COLLISION"):
         home_arm.build_legs(c)
-    assert plans.n == core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    assert plans.n == core.HOME_TRIES + len(core.HOME_WAYPOINTS) + len(core.HOME_LINE_LEGS)
     assert c.worlds.pushes and all(kind == "bench" and kw.get("model") is None for kind, kw in c.worlds.pushes)
 
 
@@ -1174,7 +1175,7 @@ def test_a_home_the_bench_world_refuses_moves_nothing_and_names_the_recovery(ctx
         trajectory = None
 
     ctx.client.live = [v + 0.3 for v in HOME]
-    asked = core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    asked = core.HOME_TRIES + len(core.HOME_WAYPOINTS) + len(core.HOME_LINE_LEGS)
     ctx.client.plans = [Refused() for _ in range(asked)]
     assert not press_demo.home_first(ctx, make_runner(ctx.client, tmp_path), True, list(HOME))
     assert ctx.client.executed == [] and ctx.client.plans == []  # asked that many times, nothing flown

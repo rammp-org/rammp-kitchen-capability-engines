@@ -269,7 +269,7 @@ def test_home_arm_does_not_answer_a_refused_home_with_the_bare_world(ctx):
     with pytest.raises(RuntimeError, match=r"the plan ends 0\.4000 rad from its joint goal") as refused:
         home_arm.build_legs(ctx)
     assert "not re-planned in the bare world" in str(refused.value) and "--lift-first 0.08" in str(refused.value)
-    asked = core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    asked = core.HOME_TRIES + len(core.HOME_WAYPOINTS) + len(core.HOME_LINE_LEGS)
     guarded = [kw.get("model") is not None for kind, kw in ctx.worlds.pushes if kind == "bench"]
     assert guarded == [True] * asked  # the guarded world every time, the bare one never
     assert len(c.sent) == asked
@@ -288,7 +288,7 @@ def test_home_arm_with_no_table_known_stops_on_a_refused_home(ctx, capsys):
     with pytest.raises(RuntimeError, match=r"0\.4000 rad from its joint goal.*--lift-first 0\.08") as refused:
         home_arm.build_legs(ctx)
     assert "bare world" not in str(refused.value)  # it planned in nothing else
-    assert len(c.sent) == core.HOME_TRIES + len(core.HOME_WAYPOINTS)
+    assert len(c.sent) == core.HOME_TRIES + len(core.HOME_WAYPOINTS) + len(core.HOME_LINE_LEGS)
     assert all(kw.get("model") is None for kind, kw in ctx.worlds.pushes if kind == "bench")
     assert "[client] plan refused" in capsys.readouterr().out
     _homing(ctx, lambda kind, g: _joints_result(success=False, message=FAILED))
