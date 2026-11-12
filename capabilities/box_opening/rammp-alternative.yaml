@@ -1,0 +1,75 @@
+# This capability's contract, as code: sheppy's `alternative` schema plus
+# RAMMP's `tier`. It is transcribed into
+# rammp-deployments/december_2026/sheppy-manifest.yaml.
+#
+# Declare hardware here, never in a README step. Do not set RMW_IMPLEMENTATION
+# or CYCLONEDDS_URI; rammp-base owns them.
+id: box_opening_real
+tier: experimental
+kind: docker
+container:
+  # :dev is mutable and overwritten on every merge to dev. A demo profile needs
+  # a release tag or digest; `tier: demo-ready` is rejected without one.
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/box_opening:dev
+  network_mode: host
+  ipc: host
+  # The node's executable itself. sheppy appends `--ros-args --params-file` to
+  # the command, so it cannot be `ros2 launch`; and `ros2 run`, as the
+  # container's PID 1, passes no signal on to the node, so `docker stop` would
+  # kill a run without its own stop (a motion in flight left uncancelled).
+  command: ["/module_ws/install/box_opening/lib/box_opening/box_opening_node"]
+  volumes:
+    # where runs keep their logs, captures and videos (state_dir)
+    - /home/snorlax/.ros/box_opening:/state
+  # No GPU: nothing in it runs a model. The box comes from the scene segmenter
+  # (/perception/object_detections).
+# Defaults for every value a deployment may change per robot or from the sheppy
+# TUI; a profile can override only keys listed here.
+params:
+  # false: open_box is reported unavailable and nothing runs (there is no dry
+  # run). true only for attended runs, someone on the e-stop.
+  allow_execute: false
+  # the container's config, in the image's config/containers (or a path)
+  container: ankou_pink.yaml
+  # the robot's frame, cameras and fixed body, in the image's config (or a path)
+  world: world_flatbot.yaml
+  # where runs keep their logs, captures and videos (the volume above)
+  state_dir: /state
+  # a video of both cameras from the grip to the set-down, written after each
+  # run (the newest 20 kept): on for attended data collection only
+  video: false
+  # what the perception sees and decides, drawn for Foxglove
+  viz: false
+  # debug: each executed run also keeps what its cameras saw (~10 MB a run,
+  # the newest 20 kept), and its record's flight files and room maps
+  mission_frames: false
+  # every motion slowed to this fraction of its speed (0 < x <= 1)
+  speed_scale: 1.0
+publishes:
+  - /box_opening/status
+  # the run's gripper commands (runtime/client.py), to the arm driver
+  - /setpoint/gripper
+  # with viz: true only, what the run's perception sees and decides, for Foxglove
+  - /box_opening/viz/scene/annotated/compressed
+  - /box_opening/viz/wrist/annotated/compressed
+  - /box_opening/viz/markers
+  - /box_opening/viz/status
+subscribes:
+  - /tf
+  - /tf_static
+  - /joint_states
+  - /arm/robot_description
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/color/camera_info
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /scene_camera/depth/camera_info
+  - /perception/object_detections
+  # the arm driver's diagnostics: its link to the arm, its e-stop (readiness, a refused goal)
+  - /diagnostics
+  # the driver's estimate of the force on the tool, logged at the press's hold and the set-down
+  - /ee_state
+  # the driver's contact monitor's residual, logged per motion (with its contact_debug_topic on)
+  - /contact_monitor/residual
