@@ -4,7 +4,8 @@ line, and a timed trajectory from a path or from several plans. Pure numpy and r
 helpers: no ROS."""
 
 import numpy as np
-from rammp_arm import CONTINUOUS, JOINT_SPEED, _wrap, joint_trajectory
+import rammp_arm
+from rammp_arm import CONTINUOUS, _wrap, joint_trajectory
 
 # cuRobo bounds the continuous joints here, as plain revolute ones
 PLANNER_CONTINUOUS_LIMIT_RAD = 6.0
@@ -20,6 +21,21 @@ SWING_MARGIN_RAD = 0.35
 # further apart than this (any joint, not wrapped) is two plans that do not join
 JOIN_RAD = 1e-3
 WAYPOINTS = (0.5, 0.25, 0.75)  # fractions of the joint line toward HOME, tried in this order
+# A waypoint's plan may end this far (any joint) from the waypoint it was sent, the home planned
+# from where it really ends: cuRobo's FK-pose fallback lands on the same arm a little along its
+# self-motion (box_opening's planner rig, 2026-11-12: 0.08-0.32 rad off on joints 1, 5 and 7 from
+# a pose 25% into a recorded home, each refused and no waypoint left), while another arm at the
+# same tool pose ends 0.9-4.3 rad off and stays refused. The plan that ends at the home keeps
+# PLAN_END_RAD.
+WAYPOINT_END_RAD = 0.35
+# Where no single waypoint plans, the joint line in this many equal legs, fewest first. cuRobo
+# swings wide on the long legs of an arm whose elbow must straighten and fold the other way
+# (joint 4's sign against the home's, left so by a jog or a recovery) and follows the line on
+# short ones: on that rig, from the 12 such poses over a 29 in table that were refused or homed
+# only sometimes, of 24 direct plans 20 swung wide and the other 4 ended on another arm, and 29
+# of the 62 single-waypoint legs that planned swung (joint 1 0.43-2.12 rad out and back); in 4
+# legs 7 poses planned clean, in 6 legs one more.
+LINE_LEGS = (4, 6)
 # The plan-free steps (out of the padding, off a limit): the joint that moves most at most this
 # fast at the peak of a minimum-jerk profile (rammp_arm.joint_trajectory), never in less than
 # rammp_arm.MIN_DURATION_S
@@ -27,7 +43,8 @@ ESCAPE_SPEED_RAD_S = 0.15
 # A joint too near its limit: rammp-curobo refuses a start inside joint_limit_margin_rad (0.10 on
 # flatbot: "START_IN_LIMIT_MARGIN ... jog it away from the limit first"), and its finetune failed
 # from up to 0.154 rad of room (box_opening, 2026-10-23, HOME planned from 0.161). So a start with a
-# joint nearer than LIMIT_NEED_RAD takes a plan-free step along the joint line toward the home
+# joint nearer than LIMIT_NEED_RAD (asked for directly once where it stands outside the margin, and
+# given no good plan; node._route) takes a plan-free step along the joint line toward the home
 # first: the shortest that leaves every joint LIMIT_FIRST_RAD clear, then LIMIT_STRIDE_RAD longer
 # each time, up to LIMIT_MAX_STEP_RAD (the joint that moves most), the home planned from each in
 # turn.
@@ -95,7 +112,9 @@ def stepped(path, speed=ESCAPE_SPEED_RAD_S):
     P = np.asarray(path, float)
     if len(P) < 2:
         return []
-    out = joint_trajectory(P[0], list(P[1:]), speed_scale=speed / JOINT_SPEED)
+    # rammp_arm.JOINT_SPEED as it is now: arm.joint_speed sets it at startup, after this module is
+    # imported, and a copy taken then would scale the step's cap by the two speeds' ratio
+    out = joint_trajectory(P[0], list(P[1:]), speed_scale=speed / rammp_arm.JOINT_SPEED)
     if out is None:
         return []
     t, q, qd = out

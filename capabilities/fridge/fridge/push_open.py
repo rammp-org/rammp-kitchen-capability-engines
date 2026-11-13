@@ -37,6 +37,7 @@ from .motion import load_door, opened, shifted
 from .world import FridgeModel, hand_reach
 
 NEXT_STEP = ""  # what the person does next, said where the goal was sent (the node reads it): the wheelchair move
+NEXT_MOVE = 0.0  # ... and that move (m, + back), for the UI's prompt; 0: none asked for
 
 
 def hand_quat(df, deg, approach_deg, y_up):
@@ -270,8 +271,9 @@ class PushOpen:
     """What follows the pull: plans the back-off, wheelchair move and push from the hand on the handle, the gripper
     open (`plan`), and runs them (`execute`), re-planned from where the pull really ended."""
 
-    def __init__(self, chair_dir=F.CHAIR_BACK_DIR):
+    def __init__(self, chair_dir=F.CHAIR_BACK_DIR, base_moves=True):
         self.chair_dir = chair_dir
+        self.moves = F.CHAIR_MOVES_M if base_moves else (0.0,)  # base_moves false: the push from where the chair is
         self.chair_move = None
         self.motion = None  # back-off + push (no move), or the back-off alone (a move)
         self.push = None  # with a move: the push after it, as planned
@@ -288,7 +290,7 @@ class PushOpen:
         if off is None:
             return False, f"push-open: {why}"
         off_pose = (backs[-1].pos, backs[-1].quat)
-        for move in F.CHAIR_MOVES_M:
+        for move in self.moves:
             if move == 0:
                 moved, route = door, model.full(deg0)
             else:
@@ -304,7 +306,10 @@ class PushOpen:
             else:
                 self.motion, self.push = off, push
             return True, f"push-open OK, {_after(move)} ({self.describe()}); the push {self.finish}"
-        moves = ", ".join(f"{m * 100:+.0f}" for m in F.CHAIR_MOVES_M)
+        if len(self.moves) == 1:
+            return False, (f"push-open: no hand placement behind the door plans without a wheelchair move "
+                           f"(base_moves false; last: {why})")
+        moves = ", ".join(f"{m * 100:+.0f}" for m in self.moves)
         return False, f"push-open: no hand placement behind the door plans (wheelchair moves {moves} cm; last: {why})"
 
     def describe(self):
@@ -338,7 +343,7 @@ class PushOpen:
         again from where the arm is (else the plan checked before the swing, if the arm is where it starts), then off the
         bar, round the door and the push as ONE motion under joint impedance. With a wheelchair move: the back-off,
         then the move (driven, or asked for)."""
-        global NEXT_STEP
+        global NEXT_STEP, NEXT_MOVE
         say("\n===== off the handle, round the door, push further open =====")
         door = load_door()
         deg0 = float(door["door_open_deg"])
@@ -363,6 +368,7 @@ class PushOpen:
             save_door_geometry(push_after_chair_move=float(moved))
             return push_after_chair_move(ai, planner, True, self.chair_dir)
         save_door_geometry(push_after_chair_move=float(move))
+        NEXT_MOVE = float(move)
         NEXT_STEP = (
             f"Pull done and the hand is off the handle. {move_chair(move)}, then send the open with execute true and "
             "chair_moved true to push the door open."

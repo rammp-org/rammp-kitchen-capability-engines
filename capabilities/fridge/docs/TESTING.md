@@ -21,7 +21,8 @@ docker build --network host -f capabilities/fridge/Dockerfile -t ghcr.io/rammp-o
 uv run scripts/set_robot.py december_2026/config/robots/flatbot
 sheppy up flatbot --manifest december_2026/sheppy-manifest.yaml && sheppy status
 
-# T2, the fridge node (mount_tilt_deg 30 on flatbot, 0 on dojo; allow_execute:=false makes every goal a dry run)
+# T2, the fridge node (mount_tilt_deg 30 on flatbot, 0 on dojo; allow_execute:=false makes every goal a dry run).
+# On eno1, the sensor network the MIB (the base) is on; the default config picks enp3s0 and never sees the base.
 docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 \
   -e 'CYCLONEDDS_URI=<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>' \
   -v /tmp/fridge_data:/fridge_data -v curobo_kernel_cache:/planner_cache \
@@ -62,6 +63,38 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   do. The names come from the driver's source: if the camera's differ, set the `wrist_infra*_topic` parameters. After a
   run the console should say `M stereo pairs` with M close to N; 0 means nothing was recorded.
 
+## UI
+
+The fridge's buttons on the UI (`docs/interface.md`, "UI buttons"). Needs Unreal running and `~/ros2_ws` built with
+rammp-orchestrator (`feat/orchestrator`) and rammp-UI-bridge (`init`).
+
+```bash
+# U1-U3, each: Cyclone on eno1, as T2 (Fast DDS, or another interface, doesn't see the fridge node)
+source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>'
+ros2 run rammp_ui_bridge ui_bridge_node                    # U1
+ros2 run rammp_orchestrator orchestrator_node              # U2
+ros2 run rammp_orchestrator interactive_perception_node    # U3, then type: add fridge_1 fridge
+```
+
+T1 as in Set up; T2 as in Set up but `-p use_orchestrator:=true`. The buttons move the arm (`allow_execute:=true`);
+first try them with `-p mock:=true`: nothing moves and each ends "Mock: ... No arm motion."
+
+In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doing, then a panel with **Done**.
+
+- **Go to Fridge** → "The arm is in front of the fridge."
+- **Open Fridge Door** → "Fridge door opened." If the push needs it, first: "Move your wheelchair straight back ...
+  about N cm ..." Move it, press **Continue** (or **Stop**).
+- **Close Fridge Door** (grip the container first, as in Close step 1) → "Fridge door closed." It may first ask for a
+  wheelchair move, as the open does. Move the wheelchair forward again after.
+- **... (wheelchair drives)**: the same, but the base drives the move at 0.03 m/s (Arm + Drive Base, "Before").
+- A refusal: `Couldn't ... Press <button> to try again.` with that button and **Stop**. Any other failure: an error
+  panel with **Done**; after a failed open, if it says the hand may still be holding the handle, send `release_only`.
+
+No panels: T2 logs `standalone/no session token` (check `use_orchestrator:=true`) or
+`request_user_input server unavailable` (U1 down, or not on Cyclone).
+
 ## How to stop the robot
 
 | How                                      | Effect                                                                   |
@@ -94,14 +127,30 @@ docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ro
 Add `"drive_base": true, "base_speed": 0.03` to an executing goal and it makes the wheelchair move itself, straight,
 a fixed distance (at most 35 cm, ending within 1 cm), then carries on. No `chair_moved` goal. **Use 0.03 m/s while testing.**
 
-**Before:** clear 40 cm in front of and behind the base, and check that the MIB is talking (both should print):
+**Before:** clear 40 cm in front of and behind the base, and check that the MIB is talking and odometry is live:
 
 ```bash
 docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
-  -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>' \
+  -e CYCLONEDDS_URI='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>' \
   ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
-  bash -lc 'ros2 topic echo --once /rammp/mib/status && ros2 topic echo --once /base/odom'
+  bash -lc 'ros2 topic echo --once /rammp/mib/status rammp_base_interfaces/msg/MibStatus --field system_state; \
+    echo "live odom (5 s):"; timeout 5 ros2 topic echo /base/odom nav_msgs/msg/Odometry \
+    --qos-durability volatile --qos-reliability best_effort --field header.stamp.sec'
 ```
+
+- **Pass:** a `system_state` (1 = IDLE), then a steady stream of odom stamps (20 Hz) for 5 s.
+- **Status prints, odom prints nothing:** the MIB is up but the drive motor boards are not reporting to it. The MIB
+  publishes `/base/odom` only from fresh drive-wheel motor states (RAMMP-mib-fw `publish_odometry`), even at rest, so
+  `drive_base` refuses with `no /base/odom`. Fix it on the base (motor power, power-cycle the base, or the MIB panel
+  `tools/mib_panel` in RAMMP-mib-fw, which shows each motor online/offline and its faults), not in this code.
+- **Nothing prints, or `does not appear to be published yet`:** the command is not on `eno1`, the sensor network the
+  MIB is on (the default Cyclone config picks `enp3s0`, the arm's cable), or the MIB is off.
+
+Why this command: the message types are given because without them `echo` looks the topic up before the MIB has
+been discovered and gives up (`Could not determine the type`). The odom echo is `volatile` because `/base/odom` is
+transient-local: a plain `echo --once` gets the last saved message replayed and "passes" even when odometry stopped
+long ago. "Malformed packet received from vendor 13.37" lines come from a device on the sensor network and can be
+ignored here. T2 must run on `eno1` too (see Set up), or `drive_base` refuses with `no /base/odom`.
 
 ### Open
 
@@ -125,7 +174,7 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
   ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
   ros2 action send_goal --feedback /fridge/execute_action \
   rammp_orchestrator_interfaces/action/ExecuteAction \
-  '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"drive_base\": true, \"base_speed\": 0.03}"}'
+  '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"speed\": 0.7, \"drive_base\": true, \"base_speed\": 0.03}"}'
 ```
 
 T2 logs `drive_base: driving the wheelchair ...` and `drive_base: stopped ...`. The base stays where it drove: if it
@@ -178,6 +227,14 @@ Do this before relying on it.
    `checked by planning it: the open plans with ... -- move the wheelchair ...` (or that no such move helps:
    the refusal isn't about placement). Prefer that over the `placement:` lines, which come from a sim.
 
+   **Without any wheelchair move** add `\"base_moves\": false` to the params (e.g.
+   `"{\"execute\": false, \"base_moves\": false}"` for the dry run): the push must plan from where the chair
+   stands, or the open refuses before anything moves. The handle cells (x, y) (0.65, −0.15), (0.65, −0.10),
+   (0.65, −0.05), (0.70, −0.15), (0.75, −0.25) and (0.90, −0.10) planned in sim only with the move, so the
+   `placement:` advice leaves them out. Those cells are the **front** grasp's: the side grasp has no such list (its
+   sim mostly planned only with a move), so with `grasp:=side` the advice may name a spot whose open then refuses,
+   before anything moves.
+
 1. **Only if asked:** move the wheelchair as it says (without turning it), then
    push the door on to 90°, in T3:
 
@@ -218,7 +275,7 @@ run that plans OK also writes `door.json`, for testing the close without an exec
      ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
      ros2 action send_goal --feedback /fridge/execute_action \
      rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": false}"}'
+     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": false, \"speed\": 0.7}"}'
    ```
 
    It ends
@@ -235,7 +292,7 @@ run that plans OK also writes `door.json`, for testing the close without an exec
      ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
      ros2 action send_goal --feedback /fridge/execute_action \
      rammp_orchestrator_interfaces/action/ExecuteAction \
-     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"chair_moved\": true}"}'
+     '{engine_id: fridge, action_id: close, params_json: "{\"execute\": true, \"chair_moved\": true, \"speed\": 0.7}"}'
    ```
 
    It goes round the door's free edge, behind it,

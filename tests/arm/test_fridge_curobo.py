@@ -20,6 +20,7 @@ from fridge_fake import (  # noqa: F401 -- fridge: the fixture
     FakeCurobo,
     Plan,
     door_is_open,
+    door_where_it_stands,
     fridge,
 )
 from scipy.spatial.transform import Rotation as R
@@ -375,6 +376,24 @@ def _close_geometries(arm, planner, container=False):
             for yaw in F.CLOSE_YAWS_DEG]
 
 
+def test_without_base_moves_the_push_plans_no_wheelchair_move_and_the_open_refuses(fridge, monkeypatch):
+    arm, planner, _ = fridge
+    monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", 0.0)
+    # as above: the push plans only after a wheelchair move -- which base_moves false never plans
+    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(obstacles)
+    with pytest.raises(dc.Refused, match="base_moves false: no wheelchair move was planned"):
+        open_door.run(arm, planner, False, base_moves=False)
+    assert arm.sent == [] and push_open.NEXT_MOVE == 0.0
+    with pytest.raises(dc.Refused, match="base_moves false"):
+        open_door.run(arm, planner, True, chair_moved=True, base_moves=False)
+    # the placement advice leaves out the cells that need the move
+    monkeypatch.setattr(F, "PLACEMENT_CELLS", ((0.65, -0.10), (0.85, -0.10)))
+    monkeypatch.setattr(F, "CELLS_NEEDING_BASE_MOVE", ((0.65, -0.10),))
+    assert open_door._cells() == [(0.85, -0.10)]
+    open_door.BASE_MOVES = True
+    assert open_door._cells() == [(0.65, -0.10), (0.85, -0.10)]
+
+
 def test_the_push_starts_behind_the_open_door_and_meets_it_on_its_arc(fridge):
     """User, 11-09: any part of the hand (or container) may push, at any angle, anywhere on the door (further out for
     leverage); only reaching ~45 deg matters. The push starts round the hinge past the open door, clear of it, tried
@@ -451,13 +470,25 @@ def test_the_close_refuses_without_an_opened_door_or_a_planned_move(fridge):
 def test_the_close_asks_for_the_smallest_move_and_an_executed_close_uses_it(fridge):
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False, save_door=True)
-    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(obstacles)
+    # the door where it stands now: no plan; moved with the chair: plans -- during the move AND after it (11-12: a move
+    # is only offered if the after-move plan, the one an executed close makes, plans too)
+    first = {}
+
+    def unreachable(pos, quat, obstacles):
+        if not (isinstance(obstacles, list) and door_is_open(obstacles)):
+            return False
+        door = np.round(next(b for b in obstacles if b["name"] == "door")["position"], 4).tolist()
+        return first.setdefault("door", door) == door
+
+    arm.unreachable = unreachable
     assert close_door.run(arm, planner, False)  # dry: picks and saves the move
     move = close_door.LAST_CHAIR_BACK
     assert move == F.CLOSE_CHAIR_MOVES_M[1] and json.loads(dc.DOOR_FILE.read_text())["close_chair_back"] == move
     with pytest.raises(dc.Refused, match="WHEELCHAIR"):  # executed without the move made: asks for it
         close_door.run(arm, planner, True)
     assert arm.sent == []
+    assert close_door.run(arm, planner, False, chair_moved=True)  # a dry run with chair_moved plans what the execute will
+    assert close_door.LAST_CHAIR_BACK == move and arm.sent == []
     arm.unreachable = lambda *a: False
     assert close_door.run(arm, planner, True, chair_moved=True)  # made: closes
     assert len(arm.sent) == 1
@@ -699,8 +730,8 @@ def test_a_close_starting_inside_the_door_tries_the_moves_that_take_the_door_awa
 
     def door_in_the_way(pos, quat, start_joints, hold=0):
         world = arm.worlds[-1] if arm.worlds else []
-        # the door where it stands: the hand is within the planner's padding of it
-        if isinstance(world, list) and door_is_open(world):
+        # the door where it stands (not where a move takes it): the hand is within the planner's padding of it
+        if isinstance(world, list) and door_where_it_stands(world):
             return _blocked_by(["door (29 mm)"])
         return plan_to_pose(pos, quat, start_joints, hold)
 
@@ -722,7 +753,7 @@ def test_a_close_whose_start_is_blocked_by_unnamed_boxes_tries_the_other_moves(f
 
     def unexplained(pos, quat, start_joints, hold=0):
         world = arm.worlds[-1] if arm.worlds else []
-        if isinstance(world, list) and door_is_open(world):
+        if isinstance(world, list) and door_where_it_stands(world):  # the door where it stands, not once moved
             return Plan(
                 False,
                 "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides "

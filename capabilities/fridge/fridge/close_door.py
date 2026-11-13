@@ -62,6 +62,38 @@ def holding(settings):
     return bool(settings.get("container"))
 
 
+def _plan_after_move(planner, door, st, settings, shift, close_to_deg, chair_dir, quiet):
+    """The close once the chair has moved (`shift`; what an executed close plans), planned afresh up to
+    CLOSE_PLAN_ATTEMPTS times. cuRobo's routes are random and it doesn't see the held container, so the same push start
+    can carry the container through the door on one route and round it on the next (11-12: two identical dry runs, one
+    refused at -9 cm, one planned). Each attempt forgets the legs the last one cached, or it would get the same answer."""
+    why = ""
+    for k in range(F.CLOSE_PLAN_ATTEMPTS):
+        if k:
+            say(f"  the close didn't plan ({' '.join(str(why).split())[:140]}); planning it again "
+                f"({k + 1}/{F.CLOSE_PLAN_ATTEMPTS})")
+            planner._cache.clear()
+            planner._unreachable.clear()
+            planner.search()
+        motion, info = plan_close(planner, door, st, settings, shift, close_to_deg, move=0.0, chair_dir=chair_dir,
+                                  quiet=quiet)
+        if motion is not None:
+            return motion, info
+        why = info
+    return None, why
+
+
+def _say_tried():
+    """Every push start cuRobo planned in this close and how it ended, for the log (11-12: a refusal named only one,
+    so a dry run and an execute couldn't be compared)."""
+    if not TRIED:
+        return
+    say(f"  push starts planned ({len(TRIED)}; move 0 also = the after-move check):")
+    for move, radius, z, yaw, via, out in TRIED:
+        say(f"    move {float(move) * 100:+.0f} cm, {float(radius) * 100:.0f} cm from the hinge, z {float(z):.3f}, "
+            f"turned {float(yaw):+.0f} deg{', via the edge' if via else ''}: {' '.join(str(out).split())[:160]}")
+
+
 def gripper_holds(st):
     """True when the arm state `st`'s gripper is closed: the hand holds the container."""
     return float(st["gripper_pos"]) > F.CLOSE_HOLDING_GRIPPER
@@ -634,22 +666,26 @@ def run(
             + f"; gripper {float(st['gripper_pos']):.3f} (left as is)"
         )
         found = None
-        if chair_back is None and execute and chair_moved:  # the move the plan asked for was made
+        # the move the plan asked for was made (a dry run with chair_moved plans exactly what that execute will)
+        if chair_back is None and chair_moved:
             if door.get("close_chair_back") is None:
                 raise Refused("chair_moved, but no close has planned a wheelchair move: send a dry run first.")
             chair_back = float(door["close_chair_back"])
             say(f"the wheelchair was moved {how_moved(chair_back)}, as the last close plan asked")
         moves = F.CLOSE_CHAIR_MOVES_M if chair_back is None else (float(chair_back),)
         # with the chair already moved (chair_moved), the door is where the move put it: no move left to make
-        moved_already = execute and chair_moved
+        moved_already = bool(chair_moved)
         why = ""
         planner.search()
         for move in moves:
             shift = np.asarray(chair_back_dir, float) * move
             try:
-                motion, info = plan_close(planner, door, st, settings, shift, close_to_deg,
-                                          move=0.0 if moved_already else move, chair_dir=chair_back_dir,
-                                          quiet=chair_back is None)
+                if moved_already:
+                    motion, info = _plan_after_move(planner, door, st, settings, shift, close_to_deg, chair_back_dir,
+                                                    chair_back is None)
+                else:
+                    motion, info = plan_close(planner, door, st, settings, shift, close_to_deg, move=move,
+                                              chair_dir=chair_back_dir, quiet=chair_back is None)
             except pl.StartNotClear as e:
                 # the hand starts inside the door (or its handle) as planned with this move: the door moves with the
                 # wheelchair, so another move may clear it -- only the chair's own layers rule
@@ -658,6 +694,18 @@ def run(
                 if e.blocking() and not e.only_fridge():
                     raise
                 motion, info = None, str(e)
+            if motion is not None and move and not moved_already:
+                # 11-12: a dry run found 20 cm back with this move's plan (the arm held while the door sweeps past),
+                # then the execute (chair_moved: move 0, the door where the move put it, from the arm) refused twice
+                # from the identical pose -- two different searches. The executed close (chair_moved, or drive_base's
+                # re-plan after driving) makes the after-move plan, so a move is only offered if that plans too.
+                try:
+                    after, after_info = _plan_after_move(planner, door, st, settings, shift, close_to_deg,
+                                                         chair_back_dir, chair_back is None)
+                except pl.StartNotClear as e:
+                    after, after_info = None, str(e)
+                if after is None:
+                    motion, info = None, f"plans during the move, but not once the chair has moved: {after_info}"
             if motion is not None:
                 found = (motion, info)
                 chair_back = move
@@ -667,6 +715,7 @@ def run(
             if move == 0:
                 say(f"  without a wheelchair move: {why}")
         if found is None:
+            _say_tried()
             if len(moves) > 1:
                 lo, hi = min(moves), max(moves)
                 raise Refused(f"no wheelchair move from {-lo * 100:.0f} cm forward to {hi * 100:.0f} cm back lets the "
@@ -697,7 +746,8 @@ def run(
             shift = np.asarray(chair_back_dir, float) * moved
             say(f"the close planned again against the door shifted by the {moved * 100:.1f} cm the base moved")
             planner.search()  # a new search: the drive doesn't count against it
-            motion, info = plan_close(planner, door, ai.get_state(), settings, shift, close_to_deg)
+            motion, info = _plan_after_move(planner, door, ai.get_state(), settings, shift, close_to_deg,
+                                            chair_back_dir, False)
             if motion is None:
                 raise Refused(f"after the wheelchair move the close no longer plans ({info}) -- the arm holds.")
         planner.join(motion, info["model"].cabinet())

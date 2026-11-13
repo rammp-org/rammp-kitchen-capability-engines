@@ -43,7 +43,8 @@ MEASURED = {
 # --- the start pose (action go_to_start, sent before an open): the web app's Fridge pose, the start every fridge sim
 # plans from (fridge-grasp-sims: FRIDGE_START), clear of the planner's wheelchair and occupant layers. Joints J1..J7
 # (deg); the node's start_joints_deg parameter, per robot ---
-START_JOINTS_DEG = (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
+START_JOINTS_DEG = (103.04, -30.7, -169.63, -123.05, 101.64, 110.04, 2.5)  # 11-12: the start of the first open that executed through (run
+# 20261112_194816_open, flatbot); was the web app's Fridge pose (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
 START_REACHED_DEG = 2.0  # every joint already this close (self.arm's GO_TO_TRACK_DEG): nothing moves
 
 # --- grasp: the microwave's corrections on the Jetson rig, the values every fridge run so far used (10-22, 10-24: the
@@ -220,6 +221,8 @@ CLOSE_CHAIR_MOVES_M = tuple(
 CHAIR_BACK_DIR = (1.0, 0.0)  # ... which moves the recorded fridge this way in the arm's frame (arm-base x = the
 # chair's forward): the node's chair_back_dir parameter. The plan uses the door from the open, shifted by this
 CLOSE_TO_DEG = 45.0  # swing the door shut until it is open this far, then back out (no torque push)
+CLOSE_PLAN_ATTEMPTS = 3  # the after-move close is planned afresh up to this many times before it refuses: cuRobo's
+# routes are random and it doesn't see the held container (11-12: identical dry runs, one refused, one planned)
 CLOSE_SPEED = 0.7  # the close goal's default speed: slower, the swing doesn't carry the door shut from CLOSE_TO_DEG
 CLOSE_Z_MARGIN_M = 0.08  # without a push_z the close searches push heights over the whole door, this far in from its
 CLOSE_Z_STEP_M = 0.05  # top and bottom, every this far (nearest the hand first)
@@ -302,6 +305,12 @@ MOUNTS = {
             (0.95, -0.20), (0.95, -0.15), (0.95, -0.05), (0.95, 0.00), (1.00, -0.25), (1.00, -0.20),
             (1.00, -0.15), (1.00, -0.10), (1.00, -0.05), (1.05, -0.15), (1.05, -0.10),
         ),
+        # ... of those, the cells where the open plans only with the push's wheelchair move: an open goal with
+        # base_moves false (no wheelchair move planned) can't start there, and its placement advice leaves them out
+        cells_needing_base_move=(
+            (0.65, -0.15), (0.65, -0.10), (0.65, -0.05),  # the nearest row
+            (0.70, -0.15), (0.75, -0.25), (0.90, -0.10),
+        ),
         # the side grasp's (grasp: side): every handle x, y where the side grasp's open (60 deg pull, any tilt of
         # -40..40 in 10s, a wheelchair move of up to +-35 cm before the push if it needed one -- all but 2 of the 231
         # tilt / spot pairs that planned needed one, 15-35 cm back mostly) planned in sim, the handle 0.315 m above the
@@ -327,13 +336,20 @@ MOUNTS = {
 }
 PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  # configure sets them
 PLACEMENT_CELLS = MOUNTS[0].get("placement_cells")  # ... and this: None, the box above is the placement
+CELLS_NEEDING_BASE_MOVE = MOUNTS[0].get("cells_needing_base_move", ())  # ... and this
 PLACEMENT_YAW_DEG = (-10.0, 10.0)
+
+# The UI's panels (node.py's UI_ACTIONS): the goal keeps the arm, gripper, base and the UI while one waits, so both
+# waits are bounded. A notice (Done: done, or failed) waits this long before the goal ends anyway ...
+UI_NOTICE_TIMEOUT_S = 30.0
+# ... and a question (Continue after a wheelchair move, or try again) this long before the goal fails no_answer
+UI_PROMPT_TIMEOUT_S = 600.0
 
 
 def configure(data_dir, mount_tilt_deg=0, grasp="side"):
     """Point door_common's paths at `data_dir`, name the appliance and pick the mount's and the grasp's placement. No
     door-size defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
-    global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG, GRASP
+    global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, CELLS_NEEDING_BASE_MOVE, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG, GRASP
     if mount_tilt_deg not in MOUNTS:
         raise ValueError(f"mount_tilt_deg must be one of {sorted(MOUNTS)}, not {mount_tilt_deg!r}")
     if grasp not in GRASPS:
@@ -344,6 +360,10 @@ def configure(data_dir, mount_tilt_deg=0, grasp="side"):
     key = "side_" if grasp == "side" and "side_placement_x" in mount else ""
     PLACEMENT_X, PLACEMENT_Y = mount[f"{key}placement_x"], mount[f"{key}placement_y"]
     PLACEMENT_CELLS = mount.get(f"{key}placement_cells")
+    # the cells base_moves false leaves out of the advice: the front grasp's only. The side grasp has no such list (its
+    # sim mostly planned only with a wheelchair move), so with base_moves false its advice may name a cell whose open
+    # then refuses -- before any motion
+    CELLS_NEEDING_BASE_MOVE = mount.get(f"{key}cells_needing_base_move", ())
     PUSH_OPEN_DZ_M = MOUNTS[mount_tilt_deg]["push_open_dz_m"]
     GRASP_PITCHES_DEG = MOUNTS[mount_tilt_deg]["grasp_pitches_deg"]
     dc.configure_paths(data_dir)

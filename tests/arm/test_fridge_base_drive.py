@@ -11,7 +11,7 @@ from functools import partial
 import pytest
 from door_common import common as dc
 from fridge import base_drive, close_door, constants, open_door, push_open
-from fridge_fake import door_is_open, fridge  # noqa: F401 -- fridge: the fixture
+from fridge_fake import door_is_open, door_where_it_stands, fridge  # noqa: F401 -- fridge: the fixture
 
 from capability_engine import BaseError, StateTimeout
 from capability_engine.engine import Cancelled
@@ -290,6 +290,12 @@ def _needs_a_move(pos, quat, obstacles):
     return isinstance(obstacles, list) and door_is_open(obstacles)
 
 
+def _needs_a_close_move(pos, quat, obstacles):
+    """_needs_a_move for the close, which also plans against the door shifted by a move under the same box names (its
+    after-move check): blocked only by the door where it stands, by its position."""
+    return isinstance(obstacles, list) and door_where_it_stands(obstacles)
+
+
 def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(fridge, clock, monkeypatch):
     arm, planner, _ = fridge
     arm.unreachable = _needs_a_move
@@ -335,7 +341,7 @@ def test_an_open_whose_drive_stops_leaves_no_push_waiting(fridge, clock):
 def test_the_close_drives_the_base_then_closes(fridge, clock):
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False, save_door=True)
-    arm.unreachable = _needs_a_move
+    arm.unreachable = _needs_a_close_move
     base, move_base = _driver(clock, arm)
 
     def drive(move):  # once driven, the close plans against the door where it now is
@@ -356,7 +362,7 @@ def test_the_close_drives_the_base_then_closes(fridge, clock):
 def test_the_close_with_chair_moved_never_drives(fridge, clock):
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False, save_door=True)
-    arm.unreachable = _needs_a_move
+    arm.unreachable = _needs_a_close_move
     base, drive = _driver(clock, arm)
     assert close_door.run(arm, planner, False, drive_chair=drive)  # plans (and saves) the move
     arm.unreachable = lambda *a: False
