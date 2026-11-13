@@ -42,7 +42,6 @@ def _build_stripe_overlay_image() -> Image:
     msg.encoding = "rgb8"
     msg.is_bigendian = 0
     msg.step = _OVERLAY_WIDTH * 3
-    row_cache: dict[int, bytes] = {}
     rows = []
     for y in range(_OVERLAY_HEIGHT):
         row = bytearray(_OVERLAY_WIDTH * 3)
@@ -154,7 +153,9 @@ class Capability(CapabilityEngine):
                     }
                 )
                 published = ctx.publish_overlay_image(overlay_image)
-                self.get_logger().info(f"count_with_panel: publish_overlay_image returned {published}")
+                self.get_logger().info(
+                    f"count_with_panel: publish_overlay_image returned {published}"
+                )
                 # Poll for Stop throughout the interval, including on the last
                 # iteration, instead of only once beforehand and then sleeping
                 # through it uninterrupted -- otherwise a tap during any
@@ -170,7 +171,9 @@ class Capability(CapabilityEngine):
         finally:
             self.get_logger().info("count_with_panel: hiding overlay camera feed")
             hidden = ctx.set_overlay_visible(False)
-            self.get_logger().info(f"count_with_panel: set_overlay_visible(False) returned {hidden}")
+            self.get_logger().info(
+                f"count_with_panel: set_overlay_visible(False) returned {hidden}"
+            )
 
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
