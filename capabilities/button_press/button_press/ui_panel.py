@@ -11,6 +11,8 @@ nothing, and the run is the same as without it.
 
 import time
 
+from capability_ui import wrap  # lines Unreal can show (it doesn't wrap; one rich-text run a line)
+
 TITLE = "Microwave button press"
 STOP = "stop"
 # step (press_button's run.step names, and "done") -> what the user reads
@@ -46,7 +48,7 @@ class Panel:
             message += " -- dry run, the arm does not move"
         panel = {
             "title": TITLE,
-            "message": message,
+            "message": wrap(message),
             "progress": {"phase": step, "pct": 100.0 * float(fraction), "pausable": bool(pausable)},
         }
         if stop:

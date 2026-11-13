@@ -25,7 +25,11 @@ import pytest
 #     ghcr.io/rammp-org/rammp-kitchen-capability-engines/box_opening:dev \
 #     bash -c "pip install -q pytest && python3 -m pytest -q -p no:cacheprovider capabilities/box_opening/test"
 HERE = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(HERE), str(HERE.parents[1] / "capability_engine")]
+sys.path[:0] = [
+    str(HERE),
+    str(HERE.parents[1] / "capability_engine"),
+    str(HERE.parents[1] / "shared" / "capability_ui"),  # the run's UI panels (node.py)
+]
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint  # noqa: E402
 
 from box_opening.models.container import ContainerModel, ContainerPose  # noqa: E402

@@ -6,12 +6,13 @@
 
 ## What it does
 
-Presses one button on the microwave's control panel with the Kinova arm. Its one action,
-`press_button`, finds the microwave (scene camera first, then the wrist camera's dome detector),
+Presses one button on the microwave's control panel with the Kinova arm. Its action
+`press_button` finds the microwave (scene camera first, then the wrist camera's dome detector),
 stages in front of the panel with a cuRobo move, re-detects the button from about 25 cm, plans and
 gates every straight leg in a kinematic sim, then goes to a pre-press spot, presses by touch (the
 driver's `ee_twist` stream, stopped by the wrist torques), and returns to where the arm started.
-It is activated when the user selects a `microwave`. Without it, no kitchen task can start the
+The UI runs it through five one-button actions (below). It is activated when the user selects a
+`microwave`. Without it, no kitchen task can start the
 microwave.
 
 **The arm moves only with `allow_execute: true`.** Otherwise every action is a dry run: detect,
@@ -58,6 +59,7 @@ Served under `/button_press/`, types from `rammp_orchestrator_interfaces`:
 | Action         | Params                                                                                                                                                                              | Result payload                                            |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | `press_button` | `target` (`start_30s` default, `timer_clock`, `stop_eco`, `power_level`, `wgt_time_defrost`), `presses` (0–10, default 1; 0 = go to the spot and back), `no_return` (default false) | `{"dry_run", "pressed", "returned", "moved", "log_file"}` |
+| `press_start`, `press_power`, `press_timer_clock`, `press_defrost`, `press_stop_eco` | none from the UI (the count is asked on the panel); standalone, `presses` (default 1) | the same                                                  |
 
 A failed action's `error_code` is `<step>_failed`, the step being `preflight`, `detect`, `stage`,
 `redetect`, `plan`, `approach`, `press` or `return`; the node's log says why ("HOLDING HERE": the
@@ -71,9 +73,43 @@ cancel during those steps. Move the arm clear by hand before the next action.
 make action CAP=button_press ACTION=press_button PARAMS='{"target": "start_30s"}'
 ```
 
-### The user's panel
+`availability()` offers the UI only the five one-button actions; `press_button` stays callable
+directly (`make action`, a goal), unchanged.
 
-Run by the orchestrator, the action shows a panel on the UI (`ui_panel.py`, through the engine's
+### The UI's one-button actions
+
+Each presses one button, then returns the arm to where it started (`node.py` `UI_ACTIONS`):
+
+| Action              | `target`           | Panel name  |
+| ------------------- | ------------------ | ----------- |
+| `press_start`       | `start_30s`        | Start       |
+| `press_power`       | `power_level`      | Power       |
+| `press_timer_clock` | `timer_clock`      | Timer/Clock |
+| `press_defrost`     | `wgt_time_defrost` | Defrost     |
+| `press_stop_eco`    | `stop_eco`         | Stop/Eco    |
+
+Panels (`capability_ui.RunUI`, `shared/capability_ui`), all with **Stop**:
+
+1. With `allow_execute` false it shows "Press <name>: not started" with Done and fails
+   `execution_disabled` (recoverable). It never dry-runs from the UI.
+1. "How many presses of <name>?" with 1–5. Stop cancels the action, nothing moved. No answer in
+   10 minutes: a notice, then `no_answer` (recoverable). Standalone (no UI session) nothing is
+   asked: the goal's `presses`, 1 by default.
+1. The progress panel: each step in words and a bar. Its **Stop cancels the action as the
+   orchestrator's cancel does**: `self.arm` stops the motion in flight (not only between steps)
+   and the arm holds where it is. A "Stopped" notice follows with Done; stopped in `approach`,
+   `press` or `return` it adds that the fingertip may be at the panel.
+1. "Pressed <name> n times." with Done, or the error with Done.
+
+A failure before the fingertip reaches the panel that is `recoverable` (a refused check in
+`preflight` … `plan`) shows its reason with a "Press <name>" button to run the same press again
+(same count) and Stop. A failure in `approach`, `press` or `return`, a driver failure
+(`MotionFailed`, e.g. an e-stop), an `ArmError` or a bug is shown with Done only, never retried. Every
+final notice waits up to 60 s for Done before the action returns.
+
+### The user's panel (`press_button`)
+
+Run by the orchestrator, `press_button` shows a panel on the UI (`ui_panel.py`, through the engine's
 `ctx.update_user_panel` / `ctx.poll_ui_event`): the current step in words, a progress bar, a pause
 control on the pausable steps, and a **Stop** button. A dry run says so on the panel.
 

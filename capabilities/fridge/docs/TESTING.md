@@ -81,7 +81,9 @@ ros2 run rammp_orchestrator interactive_perception_node    # U3, then type: add 
 T1 as in Set up; T2 as in Set up but `-p use_orchestrator:=true`. The buttons move the arm (`allow_execute:=true`);
 first try them with `-p mock:=true`: nothing moves and each ends "Mock: ... No arm motion."
 
-In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doing, then a panel with **Done**.
+In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doing, with **Stop**, then a panel with
+**Done** (it waits at most 30 s; a question at most 600 s). **Stop** stops the arm (and base) where it is and shows
+"Stopped. ..."; after Stop during an open, if the hand is on the handle, send `release_only` before anything else.
 
 - **Go to Fridge** → "The arm is in front of the fridge."
 - **Open Fridge Door** → "Fridge door opened." If the push needs it, first: "Move your wheelchair straight back ...
@@ -115,12 +117,23 @@ NOT yet verified on the arm** -- test at rest first (`docker logs -f sheppy-arm`
 
 ```bash
 # stop (repeats at 10 Hz; Ctrl-C once the arm has halted)
-docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
+docker exec -it sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
   ros2 topic pub -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 1, source: operator, reason: stop}"'
 # release, only right before you continue (if it does not release: `sheppy restart arm`); then clear the faults (Set up, T3)
 docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
-  ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear, clear_target: operator}"'
+  ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear}"'
 ```
+
+Two things the arm driver does (its `docs/interface.md`, "The e-stop"; both bit on 11-12):
+
+- **Ctrl-C must reach the stop's publisher**: hence `docker exec -it`. Without `-t`, Ctrl-C ends only the docker
+  client; `ros2 topic pub` keeps running inside `sheppy-arm`, keeps the arm stopped, and re-stops it after every
+  release. Check with `docker exec sheppy-arm ps -eo pid,args | grep "topic pub"`; end one left over with
+  `docker exec sheppy-arm kill -INT <pid>`.
+- **The release is a plain `state: 0` from the same `source`, with no `clear_target`.** A message with
+  `clear_target` set is the MIB's clear handshake and never releases anything. The driver logs
+  `E-STOP engaged by 'operator'` on the stop and the release on a release; `/control_status` shows `estopped`.
+  After the release, `/clear_faults` before the next action, or its first motion stops short.
 
 ## Arm + Drive Base
 

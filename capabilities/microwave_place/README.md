@@ -205,27 +205,28 @@ view of the container and enough locally consistent depth samples inside its mas
 
 ## Actions
 
-The UI action `retrieve` is labelled **Retrieve Tupperware from Microwave**.
-One press runs the full existing take-out sequence, beginning with the configured
-HOME viewing pose, without intermediate confirmations or world-state dependencies.
-It requests execution automatically; the node must still have `allow_execute:=true`
-for an attended hardware run. `mock:=true` exercises the panel without arm motion.
+The UI is offered three one-press actions, each running a whole action with fixed params (details in
+[docs/interface.md](docs/interface.md), "Orchestrator interface"):
 
-If HOME planning, collision-world setup or endpoint verification fails, the panel
-shows the reason and offers **Retrieve Tupperware from Microwave** again. It waits
-for that press before starting a fresh recorded attempt; detection and grasp do not
-start until HOME succeeds. Later retrieval errors are displayed without restarting
-the grasp. Done dismisses the final success/error notice; orchestrator cancellation
-works while waiting. The existing `take_out` action remains available for direct
-execution and dry runs.
+- `retrieve` (on a microwave tap): `take_out`, executing;
+- `place_in_microwave` (on a microwave tap): `place`, executing;
+- `retrieve_from_fridge` (on a fridge tap): `take_out` with `"site": "fridge"` (the fridge's viewing pose,
+  approach world, grasp height and line-in length), executing. Refused unless
+  `fridge_accept_unmodeled_door:=true`: nothing it plans knows the fridge, its shelves or its open door.
+
+Each shows one progress panel with Stop (`capability_ui.RunUI`); Stop cancels the run and the motion in flight, and
+the "Stopped" notice says what the hand holds. A recoverable refusal before the arm started on the place or take-out
+proper offers the action again; a failure once it started (`STOPPED ...`) is shown with Done only. The node must
+still run with `allow_execute:=true` for a hardware run; `mock:=true` exercises the panels without arm motion.
+`place` and `take_out` remain available for direct execution and dry runs.
 
 This uses `ctx.update_user_panel()` / `ctx.poll_ui_event()` from the
 `feat/engine_update` counter example. Run with the orchestrator and UI bridge,
 which must grant the same execution token to the engine, arm and bridge. The UI
 interface package is pinned in the Dockerfile; native builds need
-`rammp_ui_bridge_interfaces` in their workspace. `ui_bridge_node_name` defaults
-to `ui_bridge_node`. Without a UI session, HOME failures return a recoverable
-`home_failed` result instead of waiting for a button event.
+`rammp_ui_bridge_interfaces` and `capability_ui` (`shared/capability_ui`) in their workspace.
+`ui_bridge_node_name` defaults to `ui_bridge_node`. Without a UI session nothing waits for a tap: a refusal is
+returned as the recoverable error it is.
 
 ```bash
 make action CAP=microwave_place ACTION=retrieve

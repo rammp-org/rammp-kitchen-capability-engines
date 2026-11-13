@@ -80,7 +80,8 @@ that margin or no way home is planned.
 
 A plan is asked for only while a whole `arm.plan_timeout_s` still fits in 60 s of
 planning, and a way home that would take the action past 100 s at `speed_scale`
-fails `too_slow`: well inside the orchestrator's 120 s timeout. Time the action
+fails `too_slow`: well inside the orchestrator's `execute_timeout_s` when that is set (it was a fixed 120 s; it is
+off by default since `rammp-orchestrator` `hotfix/execute-timeout-param`). Time the action
 spends paused is no part of the 60 s of planning; where a pause leaves the way
 home no room in the 100 s, the action fails `paused_too_long` before anything is
 sent (whatever cancels a long action counts its pauses too). A planner that does not answer (no action

@@ -16,10 +16,9 @@ arm, a short way back and then a 60° turn of the hand about the wrist, seen fro
 the fingertips off the lip), ending by the container; `reset` takes it back to the start (the UI's
 one tap runs it). `return_mode` blended makes the back-out and the way back to the start ONE blended
 cuRobo motion instead (not the default: on flatbot cuRobo rejected its own plan of the short retreat). Every run is recorded (a rosbag and a run.json). The spot is
-given in `arm_mount` (x, y, table height), or marked by touching it with the fingertips (`mark`).
-Finding a free spot from the cameras is not part of it (free-space segmentation belongs in
-rammp-perception, rammp-deployments#96). Without it, the container stays in the hand after the
-grasp. Ported from RAMMP-table, where `mark` → `place` put it on a marked sticky note on the
+given in `arm_mount` (x, y, table height), marked by touching it with the fingertips (`mark`), or
+tapped on the UI (`place_here`): the scene camera's view of the table gets a grid of free spots
+(below, "On the user's UI"). Without one of them, the container stays in the hand after the grasp. Ported from RAMMP-table, where `mark` → `place` put it on a marked sticky note on the
 flatbot (2026-10-26).
 
 ## Publishes
@@ -30,9 +29,15 @@ flatbot (2026-10-26).
 
 ## Subscribes
 
-| Topic | Type | Required | Meaning                                                            |
-| ----- | ---- | -------- | ------------------------------------------------------------------ |
-| —     | —    | —        | Only the arm driver's state, through `self.arm` (during an action) |
+Only during an action (the engine's action-scoped subscriptions), besides the arm driver's state through `self.arm`:
+
+| Topic                                | Type                                           | Required                 | Meaning                                                                                                         |
+| ------------------------------------ | ---------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `/scene_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | for `place_here`'s spots | `scene_depth_topic`: depth aligned to the colour image (the OAK's, `frame_id` the colour optical frame)         |
+| `/scene_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | for `place_here`'s spots | `scene_info_topic`: K of the colour image the UI shows; the spots' boxes are in its pixels                      |
+| `/perception/object_detections`      | `rammp_perception_interfaces/ObjectDetections` | no                       | `detections_topic`: the scene segmenter's `table` mask (else a plane fit to depth) and the other objects' masks |
+| `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`                           | for `place_here`'s spots | the scene camera's colour optical frame in `arm_mount`                                                          |
+| `/scene_camera/color/image_raw`      | `sensor_msgs/Image`                            | no                       | Only into the run's bag (`bag_camera_topics`), with the two above                                               |
 
 ## Orchestrator interface
 
@@ -48,13 +53,13 @@ Served under `/place_container/`, types from `rammp_orchestrator_interfaces`:
 Every action is a dry run (plan and check, nothing moves) unless the node runs with
 `allow_execute: true` and the goal sets `execute: true`.
 
-| Action       | Params                                                                                              | Result payload                                        |
-| ------------ | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `place_here` | — (the UI's one tap: for real, at the marked spot, back to the start)                               | `{"executed", "recording", "bag_path"}`               |
-| `place`      | `execute`; `x`, `y`, `table_z` (m, arm_mount; all or none = the marked spot); `allow_empty_gripper` | `{"executed", "plan"}` or `{"executed", "recording"}` |
-| `mark`       | —                                                                                                   | `{"spot": [x, y], "table_z"}`                         |
-| `retreat`    | `execute`                                                                                           | `{"executed", "to"}`                                  |
-| `reset`      | `execute`, `save` (save the current joints as the start), `empty` (no tilt check), `big_turn`       | `{"executed", "plan"}` or `{"saved"}`                 |
+| Action       | Params                                                                                                        | Result payload                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `place_here` | — (the UI's tap-to-place: pick a spot, then for real, back to the start); `x`, `y`, `table_z` skip the picker | `{"executed", "recording", "spot", "bag_path"}`       |
+| `place`      | `execute`; `x`, `y`, `table_z` (m, arm_mount; all or none = the marked spot); `allow_empty_gripper`           | `{"executed", "plan"}` or `{"executed", "recording"}` |
+| `mark`       | —                                                                                                             | `{"spot": [x, y], "table_z"}`                         |
+| `retreat`    | `execute`                                                                                                     | `{"executed", "to"}`                                  |
+| `reset`      | `execute`, `save` (save the current joints as the start), `empty` (no tilt check), `big_turn`                 | `{"executed", "plan"}` or `{"saved"}`                 |
 
 Progress phases of `place`: `carry` (`carry_targets` level, the default: however the start holds the
 container is the reference -- no squaring, no check of the start pose; straight to above the spot at
@@ -74,23 +79,60 @@ impedance, before it in position control.
 
 The UI offers this engine when the user taps a **table** (`perception_classes`), with one action:
 **Place the container here** (`place_here`; `availability()` hides the others, which with the UI's
-empty params would only dry-run). It places for real (the node must run with `allow_execute: true`)
-at the marked spot, and ends back at the start. A refusal before anything moved shows the reason and
-the same button to try again; a stop after the arm moved shows the reason with OK only. Modelled on
-microwave's UI flow (feature/14-microwave-close), which ran with the UI on 2026-11-12.
+empty params would only dry-run). It is tap-to-place, on the shared `capability_ui.RunUI` (Stop on
+every panel; Stop cancels the engine's own run, as the orchestrator's cancel does):
 
-Every action puts a panel on the UI bridge (`ctx.update_user_panel`, PR #42): a title ("Placing the
-container", ...), the phase in words (checking the plan, carrying it over, lowering it onto the
-table, letting go, backing the hand away and going back to the start) and a progress bar.
-`place_here` ends with "The container is on the table" and a Done button. A failure is shown with
-its full reason (what happened, where, what to do next) and an OK button. The action waits for the
-tap (at most `ui_error_wait_s`; the panel is pushed again only if the UI dropped it: re-sending an
-open one made it flash) before it ends, because the panel closes when the action ends. Standalone (no orchestrator, so no
-session token) there is no panel.
+1. **Spots.** The scene camera's newest depth frame (`spots.py`, `scene.py`): every pixel into
+   `arm_mount` (the colour optical frame's pose, from tf). The table is the scene segmenter's
+   `table` mask when the frame has one, else a RANSAC plane fit to the depth in a height band
+   (`table_z_range`) around the reach; not the tapped instance's id (on the robot that comes from a
+   hand-typed list). A grid every `spot_step` (9 cm), anchored at `arm_mount`'s origin, is kept where
+   the spot is within `reach` of the base axis, the table (as the camera sees it from above, 2 cm
+   cells, small depth gaps filled) is under the container's whole footprint (`BOWL_RADIUS + LIP_WIDTH`, 8.7 cm) plus `spot_edge_margin`, and nothing is within the footprint plus
+   `spot_clearance`: no depth 1.5-40 cm above the table, no mask of another detected object (a flat
+   plate only shows in its mask). The hand and the container it holds (around the tool frame) are not
+   obstacles.
+1. **Picker.** "Tap where to put the container, then press Place here.", the spots as tappable
+   `objects` (`source: "scene"`, each its grid cell's box in the colour image), buttons **Place
+   here**, **Use marked spot** (only with a `spot.json` that `place` would accept: saved after
+   `state_valid_after`, younger than `max_spot_age_min`), Stop. A tap highlights the spot
+   (`selected_instance_id`); Place here without a tap asks again. No spots: why (camera not ready, no
+   table, nothing free in reach, the camera disagrees with the arm, below), **Look again**, Use marked
+   spot.
+1. **Place.** At the tapped spot's x, y and `table_z` = a plane fitted to the table's depth within
+   10 cm of it, plus `table_z_bias` (1 cm). Erring high is safe: the approach ends `lower_from` above
+   that height, and the impedance descent goes on to 6 cm below where the container should meet it
+   and stops on contact; a table found several cm too high (the hand lags its command in impedance)
+   ends with "went down ... without stopping on anything", nothing let go (`lower.py`). A table
+   found too low is the dangerous way: it would be met during the fast approach or while contact is
+   still ignored. Then reset back to the start (`return_mode` legacy) as before. The panel shows each
+   phase with a progress bar and Stop.
+1. **End.** Done: "The container is on the table and the arm is back at its start." Stop: "Stopped.
+   The arm is holding still where it was." and where the container was left (still in the hand
+   before the gripper opened, on the table after). A refusal before anything moved goes back to the
+   picker with the reason; a failure after the arm moved ("STOPPED ...") is shown with Done and ends
+   the action. With `allow_execute` false: a refusal notice, nothing moves (mock excepted).
 
-In mock (`mock: true`), `place` and `place_here` walk through their phases on the panel, 1 s each,
-without hardware; `mock_fail` (a phase: `carry`, `lower`, `open` or `return`; a goal param, or the
-node parameter for a run started from the UI) ends it there with a refusal, to try the error panel.
+**The camera against the arm.** Every spot comes from the scene camera's mount on the chair (tf),
+so a calibration error moves the spot. Two checks refuse to offer spots: the table looks tilted by
+more than `max_table_tilt_deg` (a level table seen tilted means the mount's rotation is off), and,
+with a valid marked spot, the camera's table height there differs from the fingertips' by more than
+`table_check_tol`. On the recorded flatbot runs of 2026-11-12 (`~/.place_container/runs/place_*`,
+the mount then `arm_mount` -> `scene_camera` at `[0.305, -0.608, 0.400]`) the table looked 9.5-10.8° tilted
+and 9-10 cm above the marked table at the spot: the camera points about 10° further down than its tf
+says. Tap-to-place offers no spots there until the scene camera is calibrated (rammp-calibration);
+Use marked spot still works.
+
+Standalone (no orchestrator, so no session token) there is no panel: `place_here` places at the
+marked spot (mock: the first free spot), or at goal params `x`, `y`, `table_z`. The other actions
+show their phases and any error on the panel as before (`ui.py`): a failure with its full reason
+and an OK button, waited for (at most `ui_error_wait_s`) before the action ends.
+
+In mock (`mock: true`), the picker shows spots on a made-up table (`spots.synthetic_scene`: a level
+table, a cup and a microwave, seen from a camera by the chair), and `place` and `place_here` walk
+through their phases on the panel, 1 s each, without hardware; `mock_fail` (a phase: `carry`,
+`lower`, `open` or `return`; a goal param, or the node parameter for a run started from the UI) ends
+it there with a refusal, to try the error panel.
 
 ## Recorded runs
 
@@ -168,6 +210,17 @@ contact arming 2026-11-10).
 | `bag_frame_hz`           | `1.0`                                        | Scene camera frames per second in the bag                                                                                                                                            |
 | `bag_camera`             | `true`                                       | Record the scene camera (`bag_camera_topics`: colour, camera_info, depth) for context                                                                                                |
 | `mock_fail`              | `""`                                         | Mock only: place fails at this phase (`carry`, `lower`, `open`, `return`), to try the UI's error panel                                                                               |
+| `scene_depth_topic`      | `"/scene_camera/depth/image_rect_raw"`       | `place_here`: the scene camera's depth, aligned to colour                                                                                                                            |
+| `scene_info_topic`       | `"/scene_camera/color/camera_info"`          | `place_here`: the colour camera_info (the UI's scene pixels)                                                                                                                         |
+| `detections_topic`       | `"/perception/object_detections"`            | `place_here`: the scene segmenter (the table's mask, other objects); `""` = the plane fit to depth only                                                                              |
+| `scene_wait_s`           | `3.0`                                        | `place_here`: wait this long for the camera's depth, camera_info and tf (s)                                                                                                          |
+| `spot_step`              | `0.09`                                       | `place_here`: the offered spots this far apart (m)                                                                                                                                   |
+| `spot_edge_margin`       | `0.03`                                       | `place_here`: table seen this far past the container's footprint (m)                                                                                                                 |
+| `spot_clearance`         | `0.03`                                       | `place_here`: nothing on the table closer to the footprint than this (m)                                                                                                             |
+| `table_z_bias`           | `0.01`                                       | `place_here`: the table height from the camera is raised by this (m); the descent stops on contact, so high is safe                                                                  |
+| `max_table_tilt_deg`     | `3.0`                                        | `place_here`: a table that looks more tilted than this to the camera = its mount is off, no spots (deg)                                                                              |
+| `table_check_tol`        | `0.03`                                       | `place_here`: with a marked spot, the camera's table height there this far from the arm's = no spots (m)                                                                             |
+| `table_z_range`          | `[-0.10, 0.50]`                              | `place_here`: where a table may be (m, arm_mount z), for the plane fit without a table mask                                                                                          |
 | `ui_bridge_node_name`    | `"ui_bridge_node"`                           | The UI bridge node the panel talks to (declared by the engine)                                                                                                                       |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
@@ -233,7 +286,8 @@ engine id, so each capability sends its goals under its own name.
 
 ## Hardware
 
-The arm and gripper (through the arm driver). No devices or cameras of its own.
+The arm and gripper (through the arm driver). No devices of its own; `place_here` reads the scene
+camera (depth, camera_info) and the scene segmenter that the deployment runs.
 
 ## Alternatives
 
