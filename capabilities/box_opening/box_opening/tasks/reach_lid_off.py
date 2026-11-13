@@ -195,6 +195,12 @@ GRIP_BELOW_LID_M = 0.002
 # side. The open pads stand ~10 mm over the shut ones then (13.5 fully open):
 # they still come down above the lid.
 GRIP_SIDE_CLEAR_M = 0.010
+# ... and wider than that where the lid leaves room: the pads midway between the knob's edge and the
+# lid's (grip_open_cmd), 74.5 mm for the pink canister's 44 mm knob on its 105 mm lid — 15 mm clear
+# of the knob either side and 15 mm inside the lid's edge. Flatbot 2026-11-12 19:12:49: the press
+# opened the box, its aim 7.5 mm from the knob's centre (the look after it), and the fingers, open
+# to 64 mm, came down 8 mm clear of a knob the wrist measured 47-48 mm across — one of them at its
+# edge — and shut the box again (the owner watched it; the next look read the knob flush).
 # The 2F-85's aperture fully open (GRIPPER_CMD_OPEN, knuckle 0) and, as the
 # knuckle closes to GRIPPER_CMD_CLOSED, about linear on it: the 44 mm knob
 # closes it to 0.39-0.42 (the grip band's middle), the line's 0.39.
@@ -224,7 +230,32 @@ GRIP_TRIES = 2
 # fingertips before the way down ends, the spring on it, and they close round
 # the knob's base.
 GRIP_FROM_PRESS = True
-GRIP_RISE_M = 0.025  # over the popped knob (~7.5 mm proud) before the fingers spread
+# How far the hand rises off the hold before the fingers spread and it comes down again. It was 25 mm
+# ("over the popped knob (~7.5 mm proud)"), which left out what the button and the lid do when the
+# press lets them go: the button comes back up its stroke (KNOB_STROKE_M), the released lid rises on
+# its seal (9.4-9.6 mm on 2026-10-28, LID_POP_M up to 30) and the knob stands 7.8 mm over that — its
+# top ~25 mm over where the hold held the pads. Flatbot 2026-11-12 19:12:49 (the owner: "it just
+# didnt raise high enough before it came back down to grab it, reclosing the box"): told 25 mm, the
+# pads reached 22.9 and stood at 20 when the hand came down. Now the stroke, the most a released lid
+# rises and a knob's height over it; where that line does not fly, the same with the hand leaning
+# further back by its top (LIFT_LEAN_DEG), then GRIP_RISE_MIN_M each way.
+GRIP_RISE_M = KNOB_STROKE_M + LID_POP_M[1] + KNOB_STROKE_M
+GRIP_RISE_MIN_M = 0.035
+# ... and the hand comes down again only where the arm measured its pads this far over the hold at
+# the rise's top (PadsAbove.highest): the popped knob's top and a margin. Lower, the fingers may not
+# have left the knob, and the way down would press it shut: back to the look pose instead, the look
+# to judge it.
+GRIP_RISE_LEAST_M = 0.030
+# The way down is watched (press_contact.PressContact, armed once it has come down GRIP_TOUCH_ARM_M:
+# the pads lag a reference that starts from rest, and that reads as a rise). Where the open
+# fingertips meet something — the lid, standing higher released than the hold says, or a knob one of
+# them came down on — the reference stops there, nothing pressed on down, and the hand comes back up
+# touch_rise_m before the fingers close: their pads end GRIP_TOUCH_CLEAR_M over what they met, round
+# the knob's base on a lid, over the top of a knob (a close on air, the look to aim again, the box
+# still open). Nothing met, the way down ends where it always did.
+GRIP_TOUCH = True
+GRIP_TOUCH_ARM_M = 0.008
+GRIP_TOUCH_CLEAR_M = 0.0015
 # ... and the fingers open on the way up once the pads, as the arm measures
 # them, stand this far over where the hold held them: off the popped knob,
 # its stroke and a margin over it (press_contact.PadsAbove, Leg.send_when).
@@ -233,7 +264,10 @@ GRIP_RISE_M = 0.025  # over the popped knob (~7.5 mm proud) before the fingers s
 # fingers stop touching the lid"): 16:20's spread from shut to the knob's
 # width in the rise's first 0.35 s, the pads 6 mm over the hold sinking to
 # 1.5 as they spread, the hand rising only after
-GRIP_OPEN_ABOVE_HELD_M = KNOB_STROKE_M + 0.005
+# ... which was the stroke and 5 mm, 12.5 mm over the hold: still on a popped knob, which follows the
+# pads up to ~25 mm (GRIP_RISE_M's note). Now the stroke and the most a released lid rises; a hand
+# that does not get that high opens at the rise's top, as before.
+GRIP_OPEN_ABOVE_HELD_M = KNOB_STROKE_M + LID_POP_M[1]
 _MISSED = "the grip straight from the press missed"  # _grip_from_hold's: back at the look pose
 # The grip's close-up record (owner 2026-10-30, "a recorder first"): at each
 # close, once the arm stands still, the wrist's frame — the fingers open
@@ -368,13 +402,32 @@ def _lift_m(ctx, lift):
 
 
 def grip_open_cmd(model):
-    """The knuckle the fingers come down to the knob at: open to its width
-    (model.button_diameter_m) and GRIP_SIDE_CLEAR_M either side, on the
-    2F-85's about-linear aperture (GRIPPER_OPEN_WIDTH_M at GRIPPER_CMD_OPEN,
-    nothing at GRIPPER_CMD_CLOSED); never wider than fully open."""
-    width = float(model.button_diameter_m) + 2.0 * GRIP_SIDE_CLEAR_M
-    frac = min(max(width / GRIPPER_OPEN_WIDTH_M, 0.0), 1.0)
+    """The knuckle the fingers come down to the knob at: the pads midway
+    between the knob's edge (model.button_diameter_m) and the lid's
+    (model.lid_dims), never nearer the knob than GRIP_SIDE_CLEAR_M either
+    side, on the 2F-85's about-linear aperture (_width_cmd); never wider
+    than fully open."""
+    knob = float(model.button_diameter_m)
+    lid = float(min(model.lid_dims[0], model.lid_dims[1]))
+    return _width_cmd(max(knob + 2.0 * GRIP_SIDE_CLEAR_M, 0.5 * (knob + lid)))
+
+
+def _width_cmd(width):
+    """The knuckle that opens the 2F-85's pads `width` apart: about linear from GRIPPER_OPEN_WIDTH_M
+    at GRIPPER_CMD_OPEN to nothing at GRIPPER_CMD_CLOSED."""
+    frac = min(max(float(width) / GRIPPER_OPEN_WIDTH_M, 0.0), 1.0)
     return GRIPPER_CMD_OPEN + (GRIPPER_CMD_CLOSED - GRIPPER_CMD_OPEN) * (1.0 - frac)
+
+
+def touch_rise_m(model):
+    """How far the hand comes back up once its open fingertips have met the lid (GRIP_TOUCH), before
+    they close: closing brings the pads further out along the hand (fingers.pads_above_shut), from
+    where they stand open (grip_open_cmd) to where they stand on the knob's width, and they are to
+    end GRIP_TOUCH_CLEAR_M over the lid there, round the knob's base, not pressed into it."""
+    onto = fingers.pads_above_shut(grip_open_cmd(model)) - fingers.pads_above_shut(
+        _width_cmd(float(model.button_diameter_m))
+    )
+    return max(onto, 0.0) + GRIP_TOUCH_CLEAR_M
 
 
 def grip_lid_z(top_z, held_z=None):
@@ -1980,28 +2033,51 @@ def grip_from_hold_lines(ctx, way, q_held):
     (kinematics.EXIT_MAX_STEP_RAD: its steps past MAX_STEP_RAD fly slow,
     depth_press.exit_line), then down it to where the pads stand
     GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M over where the hold held them
-    (grip_lid_z), each as joint points — or (None, None, why)."""
+    (grip_lid_z), each as joint points — or (None, None, why): the first
+    refusal's. Where that rise or its way down does not fly, the same with
+    the hand leaning LIFT_LEAN_DEG further back by the top (and back to the
+    stroke's attitude on the way down), then GRIP_RISE_MIN_M each way."""
     from box_opening.runtime import approach
-    from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD
+    from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD, MAX_STEP_RAD, STEP_M
 
     chain = approach._chain()
     q_held = [float(v) for v in q_held]
     _R, t_held = chain.fk(q_held)
     _R, t_line = chain.fk([float(v) for v in way.stroke.q0])  # the stroke's line: the aimed knob
     quat = way.stroke.quat
-    top = [float(t_line[0]), float(t_line[1]), float(t_held[2]) + GRIP_RISE_M]
-    rise, why = chain.straight_line(q_held, top, quat, max_step_rad=EXIT_MAX_STEP_RAD)
-    if rise is not None:
-        why = dp.line_refusal(chain, rise)
-    if rise is None or why is not None:
-        return None, None, "the rise off the button (%s)" % why
-    bottom = [top[0], top[1], float(t_held[2]) + GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M]
-    down, why = chain.straight_line(rise[-1], bottom, quat)
-    if down is not None:
-        why = dp.line_refusal(chain, down)
-    if down is None or why is not None:
-        return None, None, "the way down to the knob (%s)" % why
-    return [[float(v) for v in p] for p in rise], [[float(v) for v in p] for p in down], None
+    d = math.hypot(float(t_line[0]), float(t_line[1]))
+    first = None
+    for up in (GRIP_RISE_M, GRIP_RISE_MIN_M):
+        top = [float(t_line[0]), float(t_line[1]), float(t_held[2]) + up]
+        bottom = [top[0], top[1], float(t_held[2]) + GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M]
+        for lean in (0.0, *LIFT_LEAN_DEG) if d > 1e-6 else (0.0,):
+            if not lean:
+                rise, why = chain.straight_line(q_held, top, quat, max_step_rad=EXIT_MAX_STEP_RAD)
+            else:  # the hand leaning further back toward the arm by the top, as the lift's (_lift_line)
+                axis = (float(t_line[1]) / d, -float(t_line[0]) / d, 0.0)
+                leaned = list(rp.rotate_about_world_axis(quat, axis, math.radians(lean)))
+                rise, why = chain.walk(q_held, top, leaned, step_m=STEP_M, max_step_rad=EXIT_MAX_STEP_RAD)
+            if rise is not None:
+                why = dp.line_refusal(chain, rise)
+            if rise is None or why is not None:
+                first = first or "the rise off the button (%s)" % why
+                continue
+            if not lean:
+                down, why = chain.straight_line(rise[-1], bottom, quat)
+            else:  # back to the stroke's attitude on the way down
+                down, why = chain.walk(rise[-1], bottom, quat, step_m=STEP_M, max_step_rad=MAX_STEP_RAD)
+            if down is not None:
+                why = dp.line_refusal(chain, down)
+            if down is None or why is not None:
+                first = first or "the way down to the knob (%s)" % why
+                continue
+            if first is not None:
+                log.info(
+                    "[press_demo] %s — the rise %.0f mm%s instead"
+                    % (first, 1000 * up, ", the hand leaning %.0f deg further back by its top" % lean if lean else "")
+                )
+            return [[float(v) for v in p] for p in rise], [[float(v) for v in p] for p in down], None
+    return None, None, first
 
 
 def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
@@ -2035,12 +2111,17 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         attempt=0,
         from_press=True,
     )
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_contact import PadsAbove, PressContact, pads_z
+
+    chain = approach._chain()
+    top_z, end_z = pads_z(chain, rise[-1]), pads_z(chain, down[-1])
     log.info(
-        "[press_demo] GRIP STRAIGHT FROM THE PRESS: up %.0f mm, the fingers opening to the knob's width once the "
-        "pads are %.1f mm over the hold, then down to the knob, the closed pads %.0f mm under the lid at %.3f (%.0f mm "
-        "over where the press held them)"
+        "[press_demo] GRIP STRAIGHT FROM THE PRESS: up %.0f mm, the fingers opening round the knob once the pads "
+        "are %.1f mm over the hold (else at the top), then down to the knob — to where the open fingertips meet the "
+        "lid, or the closed pads %.0f mm under the lid at %.3f (%.0f mm over where the press held them)"
         % (
-            1000 * GRIP_RISE_M,
+            1000 * (top_z - pads_z(chain, seen["held_joints"])),
             1000 * GRIP_OPEN_ABOVE_HELD_M,
             1000 * GRIP_BELOW_LID_M,
             lid_z,
@@ -2048,8 +2129,6 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         )
     )
     _video(ctx, "GRIP straight from the press: up, the fingers open, down to the knob")
-    from box_opening.runtime import approach
-    from box_opening.tasks.press_contact import PadsAbove
 
     opened = _gripper_leg(
         ctx,
@@ -2061,10 +2140,17 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         send_with_previous_motion=True,
     )
     # sent under the rise once the pads have left the knob, as the arm measures them; never so, at its top
-    off = PadsAbove(approach._chain(), ctx.client, held_z + GRIP_OPEN_ABOVE_HELD_M)
+    off = PadsAbove(chain, ctx.client, held_z + GRIP_OPEN_ABOVE_HELD_M)
     opened.send_when = off
-    up = dp.exit_line(ctx, "grip:rise", rise, quat, rp.free_line_speed(ctx), world)
+    # the rise ends at the hand's attitude at its top: the stroke's, or leaning further back (grip_from_hold_lines)
+    quat_top = [float(v) for v in dp.mat_to_quat_xyzw(np.asarray(chain.fk(rise[-1])[0], float))]
+    up = dp.exit_line(ctx, "grip:rise", rise, quat_top, rp.free_line_speed(ctx), world)
     lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
+    touch = None
+    if GRIP_TOUCH:
+        # stopped where the open fingertips meet the lid (or a knob), nothing pressed on down past it
+        touch = PressContact(chain, ctx.client, end_z, top_z - GRIP_TOUCH_ARM_M, 0.0, end_z, cut=True)
+        lower.stop_when = touch
     # the lookahead split over both (grip_ahead_rise, grip_ahead_down): the lift and the
     # first spot while the hand rises, the carry and home while it comes down
     res = runner.run(
@@ -2095,6 +2181,16 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             % (bad.detail or bad.outcome)
         )
         return _MISSED if _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True)) is None else 1
+    # the hand comes down only from where it cleared the knob, as the arm measured its pads at the top
+    q_top = [float(v) for v in ctx.client.joints()]
+    rose = max(pads_z(chain, q_top), off.highest if off.highest is not None else -math.inf) - held_z
+    if rose < GRIP_RISE_LEAST_M:
+        runner.note("reach_grip_refused", attempt=0, why="rose %.1f mm" % (1000 * rose), from_press=True)
+        log.info(
+            "[press_demo] the hand rose only %.0f mm off the hold, not the %.0f mm that clears a popped knob: not "
+            "coming down on it — back to the look pose to look at the knob" % (1000 * rose, 1000 * GRIP_RISE_LEAST_M)
+        )
+        return _MISSED if _way_back(ctx, cfg, runner, way, q_top, dp.DepthPress(free=True)) is None else 1
     res = runner.run([lower], execute=True, lookahead=None if first is None else (lambda _end: grip_ahead_down(first)))
     ahead = _lookahead(runner)
     if ahead is not None and isinstance(ahead[2], CarryAhead):
@@ -2107,6 +2203,8 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             rp.let_go(ctx)
             return 1
         return _MISSED if _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True)) is None else 1
+    if touch is not None and touch.contact is not None:
+        ahead = _grip_at_touch(ctx, runner, chain, touch, quat, held_z, world)
 
     def back_out(why, opened=True):
         log.info("[press_demo] the grip straight from the press: %s — back to the look pose to look at the knob" % why)
@@ -2133,6 +2231,48 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         )
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, 0, room, back_out, miss)
+
+
+def _grip_at_touch(ctx, runner, chain, touch, quat, held_z, world):
+    """The way down to the knob ended where the open fingertips met something (`touch`, the way down's
+    PressContact): the hand back up touch_rise_m from where it stands, for the fingers to close round
+    the knob's base and not into the lid — where that short line does not fly, they close where it
+    stands, said. Returns None: the lift planned ahead started from the way down's planned end, lower
+    than this, and is not flown; the close plans its own from where the hand is (_close_and_carry)."""
+    from box_opening.tasks.press_contact import pads_z
+
+    q = [float(v) for v in ctx.client.joints()]
+    up = touch_rise_m(ctx.model)
+    met = float(touch.contact[1])
+    runner.note(
+        "grip_touch",
+        met_z=round(met, 4),
+        over_held_mm=round(1000 * (met - held_z), 1),
+        how=touch.how,
+        pads_z=round(pads_z(chain, q), 4),
+        rise_mm=round(1000 * up, 1),
+    )
+    log.info(
+        "[press_demo] GRIP: the open fingertips met the lid with the pads at %.3f, %.0f mm over where the press held "
+        "them — up %.1f mm for the pads to close round the knob's base" % (met, 1000 * (met - held_z), 1000 * up)
+    )
+    _R, t = chain.fk(q)
+    pts, why = chain.straight_line(q, [float(t[0]), float(t[1]), float(t[2]) + up], quat)
+    if pts is not None:
+        why = dp.line_refusal(chain, pts)
+    if pts is None or why is not None:
+        log.info("[press_demo] GRIP: no way up off the touch (%s): the fingers close where the hand stands" % why)
+        return None
+    res = runner.run(
+        [dp.compliant_line(ctx, "grip:settle", [[float(v) for v in p] for p in pts], quat, dp.TOUCH_SPEED, world)],
+        execute=True,
+    )
+    if not all(r.ok for r in res):
+        log.info(
+            "[press_demo] GRIP: the way up off the touch did not fly (%s): the fingers close where the hand stands"
+            % (res[-1].detail or res[-1].outcome)
+        )
+    return None
 
 
 def _fingers_shut(ctx, cfg, runner):

@@ -2807,15 +2807,20 @@ def test_the_fingers_come_down_to_the_knob_opened_to_its_width_not_fully(ctx, mo
     code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
     assert code == 0
     m = ctx.model
-    width = m.button_diameter_m + 2 * rlo.GRIP_SIDE_CLEAR_M
-    assert width == pytest.approx(0.064)
+    # 2026-11-12 19:12:49: open to the knob and 10 mm either side (64 mm), a finger came down at the edge of
+    # a knob the press had aimed 7.5 mm off and the box was shut again. The pads now stand midway between
+    # the knob's edge and the lid's: 74.5 mm for the 44 mm knob on the 105 mm lid
+    width = 0.5 * (m.button_diameter_m + m.lid_dims[0])
+    assert width == pytest.approx(0.0745) and width > m.button_diameter_m + 2 * rlo.GRIP_SIDE_CLEAR_M
     assert rec.legs["grip:open"].gripper_cmd == pytest.approx(rlo.grip_open_cmd(m))
     assert GRIPPER_CMD_OPEN < rlo.grip_open_cmd(m) < GRIPPER_CMD_CLOSED
-    assert rlo.grip_open_cmd(m) == pytest.approx(GRIPPER_CMD_CLOSED * (1 - 0.064 / rlo.GRIPPER_OPEN_WIDTH_M))
-    # the fingertips' place across the knob: inside the lid's edge by more than the knob's aim can be off
+    assert rlo.grip_open_cmd(m) == pytest.approx(GRIPPER_CMD_CLOSED * (1 - width / rlo.GRIPPER_OPEN_WIDTH_M))
+    # the fingertips' place across the knob: as far inside the lid's edge as off the knob's, more than its aim was off
     lid_r = 0.5 * m.lid_dims[0]
-    assert lid_r - width / 2 >= 0.02
-    assert width / 2 - m.button_diameter_m / 2 >= 0.01
+    assert lid_r - width / 2 == pytest.approx(width / 2 - m.button_diameter_m / 2) and lid_r - width / 2 >= 0.015
+    # a lid no wider than its knob and the clearance: the knob's width and GRIP_SIDE_CLEAR_M either side, as before
+    small = SimpleNamespace(button_diameter_m=0.044, lid_dims=(0.050, 0.050, 0.02))
+    assert rlo.grip_open_cmd(small) == pytest.approx(GRIPPER_CMD_CLOSED * (1 - 0.064 / rlo.GRIPPER_OPEN_WIDTH_M))
     assert rec.legs["place:open"].gripper_cmd == GRIPPER_CMD_OPEN  # the lid let go fully at the table
 
 
@@ -2954,7 +2959,13 @@ def test_the_grip_straight_from_the_press_takes_the_lid_off_with_no_way_back_and
     assert opened.send_when.z == pytest.approx(held + rlo.GRIP_OPEN_ABOVE_HELD_M)
     # the fake client keeps no feedback: the gate never said so, and the open went out at the rise's top
     (open_row,) = (r for r in rows if r["leg"] == "grip_open")
-    assert open_row["under_rise"] is False and open_row["above_held_mm"] == pytest.approx(12.5)
+    assert open_row["under_rise"] is False and open_row["above_held_mm"] == pytest.approx(37.5)
+    # the way down is watched for where the open fingertips meet the lid, and stops there (past 0)
+    from box_opening.tasks.press_contact import PressContact
+
+    watch = rec.legs["grip:down"].stop_when
+    assert isinstance(watch, PressContact) and watch.cut is True and watch.past_m == 0.0 and watch.contact is None
+    assert not [r for r in rows if r["leg"] == "grip_touch"]  # nothing met: the way down ended where it always did
     (grip,) = (r for r in rows if r["leg"] == "reach_grip")
     assert (grip["attempt"], grip["from_press"]) == (0, True)
     assert grip["lid_z"] == pytest.approx(held + rlo.GRIP_LID_ABOVE_HELD_M)
@@ -2996,6 +3007,130 @@ def test_the_grip_from_the_press_is_up_and_down_the_strokes_line(ctx, monkeypatc
     assert bottom == pytest.approx([0.604, -0.203, 0.30 + rlo.GRIP_LID_ABOVE_HELD_M - rlo.GRIP_BELOW_LID_M])
     assert q_top == q_bottom == [0, 1, 0, 0] and rise[0] == [0.0] * 7 and down[0] == rise[-1]
     assert gates == [EXIT_MAX_STEP_RAD, None]  # None: the way down to the knob is asked under MAX_STEP_RAD
+
+
+def test_the_rise_off_the_hold_clears_a_popped_knob_on_a_risen_lid_and_leans_where_straight_does_not_fly(
+    ctx, monkeypatch
+):
+    """Flatbot 2026-11-12 19:12:49 (the owner: "it just didnt raise high enough before it came back down to
+    grab it, reclosing the box"): the rise was 25 mm, the pads got 22.9 mm up, and a popped knob's top stands
+    ~25 mm over the hold (the stroke, the released lid's rise, the knob over it). The rise is the stroke, the
+    most a released lid rises and a knob's height; where that line does not fly, the same with the hand
+    leaning further back by its top and back to the stroke's attitude on the way down, then
+    GRIP_RISE_MIN_M each way; where none flies, the first refusal."""
+    assert rlo.GRIP_RISE_M == pytest.approx(rlo.KNOB_STROKE_M + rlo.LID_POP_M[1] + rlo.KNOB_STROKE_M)
+    assert rlo.GRIP_RISE_M >= 0.040 > rlo.GRIP_RISE_MIN_M > rlo.GRIP_RISE_LEAST_M > 0.025
+    assert rlo.GRIP_OPEN_ABOVE_HELD_M > 0.025  # the fingers spread over the popped knob's top, not on it
+    lines, walks = [], []
+
+    class Chain:
+        def __init__(self, straight):
+            self.straight = straight
+
+        def fk(self, q):
+            return np.eye(3), np.array([0.6 + q[0], -0.2 + q[1], 0.30 + q[2]])
+
+        def straight_line(self, q0, xyz, quat, max_step_rad=None):
+            lines.append(round(xyz[2] - 0.30, 4))
+            if not self.straight(xyz[2] - 0.30):
+                return None, "the chair and user: arm_half_arm_1_link 0 mm into person/lap"
+            return [list(q0), [xyz[0] - 0.6, xyz[1] + 0.2, xyz[2] - 0.30] + [0.0] * 4], None
+
+        def walk(self, q0, xyz, quat, step_m=None, max_step_rad=None):
+            walks.append((round(xyz[2] - 0.30, 4), [round(v, 4) for v in quat]))
+            return [list(q0), [xyz[0] - 0.6, xyz[1] + 0.2, xyz[2] - 0.30] + [0.0] * 4], None
+
+    from box_opening.geometry import rotate_about_world_axis
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(dp, "line_refusal", lambda chain, pts: None)
+    way = SimpleNamespace(stroke=SimpleNamespace(q0=[0.0, 0.0, 0.05, 0, 0, 0, 0], quat=[0.0, 1.0, 0.0, 0.0]))
+    held = [0.0] * 7
+    low = rlo.GRIP_LID_ABOVE_HELD_M - rlo.GRIP_BELOW_LID_M
+    # straight up flies: the full rise, no lean asked
+    monkeypatch.setattr(approach, "_chain", lambda: Chain(lambda dz: True))
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, held)
+    assert why is None and lines == [pytest.approx(rlo.GRIP_RISE_M), pytest.approx(low)] and walks == []
+    # no straight line up: the full rise leaning the least, and back to the stroke's attitude coming down
+    lines.clear()
+    monkeypatch.setattr(approach, "_chain", lambda: Chain(lambda dz: False))
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, held)
+    leaned = rotate_about_world_axis(
+        way.stroke.quat,
+        (-0.2 / math.hypot(0.6, 0.2), -0.6 / math.hypot(0.6, 0.2), 0.0),
+        math.radians(rlo.LIFT_LEAN_DEG[0]),
+    )
+    assert why is None and lines == [pytest.approx(rlo.GRIP_RISE_M)]
+    assert walks == [
+        (pytest.approx(rlo.GRIP_RISE_M), [pytest.approx(v, abs=1e-4) for v in leaned]),
+        (pytest.approx(low), [0.0, 1.0, 0.0, 0.0]),
+    ]
+    assert rise[-1][2] == pytest.approx(rlo.GRIP_RISE_M) and down[0] == rise[-1] and down[-1][2] == pytest.approx(low)
+    # nothing flies: the first refusal, the full straight rise's
+    Chain.walk = lambda self, q0, xyz, quat, step_m=None, max_step_rad=None: (None, "IK did not converge")
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, held)
+    assert rise is None and down is None and why.startswith("the rise off the button (the chair and user")
+
+
+def test_open_fingertips_stand_above_shut_ones_by_the_2f85s_linkage_and_the_touch_rise_follows():
+    """fingers.pads_above_shut, from flatbot's URDF: 13.5 mm fully open, 2.3 mm on the 44 mm knob (0.41 rad),
+    nothing shut. touch_rise_m: once the open fingertips have met the lid the hand comes back up what closing
+    onto the knob brings the pads out, and GRIP_TOUCH_CLEAR_M, so they close round the knob's base."""
+    from box_opening.runtime import fingers
+
+    assert fingers.pads_above_shut(0.0) == pytest.approx(0.0135, abs=3e-4)
+    assert fingers.pads_above_shut(0.41) == pytest.approx(0.0023, abs=3e-4)
+    assert fingers.pads_above_shut(0.8) == 0.0 and fingers.pads_above_shut(1.5) == 0.0
+    model = ContainerModel.load(PINK)
+    open_h = fingers.pads_above_shut(rlo.grip_open_cmd(model))
+    knob_h = fingers.pads_above_shut(rlo._width_cmd(model.button_diameter_m))
+    assert 0.008 < open_h < 0.012 and 0.002 < knob_h < 0.004
+    assert rlo.touch_rise_m(model) == pytest.approx(open_h - knob_h + rlo.GRIP_TOUCH_CLEAR_M)
+
+
+def test_fingertips_that_meet_the_lid_on_the_way_down_stop_there_and_close_round_the_knobs_base(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The way down to the knob ends where the open fingertips meet something — a released lid stands
+    ~10 mm higher than the hold says, and pressed on down it shut the box again (2026-11-12 19:12:49). The
+    hand comes back up touch_rise_m (grip:settle) and the fingers close there; the lift planned ahead from
+    the way down's planned end, lower, is not flown: the close plans its own from where the hand stands,
+    the carry chosen after it."""
+    from box_opening.tasks import press_contact
+
+    class Met(press_contact.PressContact):
+        def __call__(self, progress):
+            if self.final:  # the set-down's own watch: as it is
+                return super().__call__(progress)
+            self.contact, self.how = (0.4, BUTTON[2] + 0.011, 0.004), "fast"  # the pads' height where they met
+            return False  # the fake client flies the leg to its end: the stop itself is the real client's
+
+    monkeypatch.setattr(press_contact, "PressContact", Met)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], from_press=True)
+    assert code == 0
+    i = rec.events.index("grip:down")
+    assert rec.events[i : i + 5] == ["grip:down", "grip:settle", "grip:close", "lid:lift", "lid:clear"]
+    runs = [names for names, _g in _executions(rec)]
+    assert ["grip:settle"] in runs and CLOSE in runs and CLOSE + CARRY not in runs  # the lift from where it stands
+    (met,) = (r for r in rows if r["leg"] == "grip_touch")
+    held = BUTTON[2] - 0.006
+    assert met["how"] == "fast" and met["over_held_mm"] == pytest.approx(1000 * (BUTTON[2] + 0.011 - held), abs=0.1)
+    assert met["rise_mm"] == pytest.approx(1000 * rlo.touch_rise_m(ctx.model), abs=0.1)
+    assert "the open fingertips met the lid" in capsys.readouterr().out
+
+
+def test_a_hand_that_did_not_rise_clear_of_the_knob_does_not_come_down_on_it(ctx, monkeypatch, tmp_path, capsys):
+    """The arm measured its pads less than GRIP_RISE_LEAST_M over the hold at the rise's top: the fingers may
+    not have left the popped knob, and the way down would press it shut. No way down: back to the look pose,
+    the look to judge the knob, the grip from there."""
+    monkeypatch.setattr(rlo, "GRIP_RISE_LEAST_M", 1.0)  # the fake arm never gets there
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], from_press=True)
+    (refused,) = (r for r in rows if r["leg"] == "reach_grip_refused" and r.get("from_press"))
+    assert refused["why"].startswith("rose ")
+    i = rec.events.index("grip:rise")
+    assert "grip:down" not in rec.events[i : i + 3]  # the rise, the open, and no way down after them
+    assert "not coming down on it" in capsys.readouterr().out
+    assert code == 0  # the look saw the knob up and the grip from the look pose took the lid off
 
 
 def test_a_grip_from_the_press_on_air_goes_back_to_the_look_pose_and_grips_from_there(ctx, monkeypatch, tmp_path):
