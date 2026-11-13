@@ -58,10 +58,10 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name                  | Default            | Meaning                                                                                                                           |
-| --------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator`    | `true`             | `false` runs standalone: no registration, drive it by CLI                                                                         |
-| `mock`                | `false`            | `true` skips hardware (the mock alternative sets it)                                                                              |
+| Name                  | Default            | Meaning                                                                                                                                                       |
+| --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`    | `true`             | `false` runs standalone: no registration, drive it by CLI                                                                                                     |
+| `mock`                | `false`            | `true` skips hardware (the mock alternative sets it)                                                                                                          |
 | `ui_bridge_node_name` | `"ui_bridge_node"` | Node name of the `rammp_ui_bridge` instance `ctx.update_user_panel()`/`ctx.poll_ui_event()`/`ctx.publish_overlay_image()`/`ctx.set_overlay_visible()` talk to |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes

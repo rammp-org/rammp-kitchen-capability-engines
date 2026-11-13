@@ -130,8 +130,7 @@ an `objects` entry's `"source": "overlay"` refers to.
 
 Takes a plain `bool`, not JSON — no overlay-pixel-frame interaction at all.
 Independent of `publish_overlay_image()`: it doesn't gate the frames
-themselves, it tells the bridge to call UE's own parameterless `Open Camera
-Feed`/`Close Camera Feed` Remote Control function, which shows/hides the
+themselves, it tells the bridge to call UE's own parameterless `Open Camera Feed`/`Close Camera Feed` Remote Control function, which shows/hides the
 overlay widget/material in-engine. The orchestrator already calls this with
 `visible=False` once this run's `execute_action` ends, so a capability only
 needs to call it itself to show/hide the overlay at some other specific

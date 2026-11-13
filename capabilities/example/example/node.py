@@ -175,7 +175,6 @@ class Capability(CapabilityEngine):
                 f"count_with_panel: set_overlay_visible(False) returned {hidden}"
             )
 
-
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
         """Sleeps `duration` seconds in short steps, honouring cancel and
         polling for the Stop button throughout -- not just once beforehand --
