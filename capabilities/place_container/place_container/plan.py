@@ -653,7 +653,7 @@ def reset_radii(model, q_now, moves, near):
     return radii
 
 
-def contact_zone_checks(model, descent, table_z, q_approach=None):
+def contact_zone_checks(model, descent, table_z, q_approach=None, q_retreat=None):
     """The joint moves of a place that don't go through cuRobo (self.arm.move_joints: the approach,
     the line down and the retreat), as (label, q_from, q_to) for a cuRobo plan_to_joints check of
     their ends against the chair's collision volumes: the approach from where it ends (the top of the
@@ -668,6 +668,9 @@ def contact_zone_checks(model, descent, table_z, q_approach=None):
     checks.append(("lower", qs[0], qs[-1]))  # to the bottom of the line down
     q_meet = hold_point(qs, zs, table_z + BOWL_DEPTH)
     q_meet = np.asarray(qs[-1] if q_meet is None else q_meet, dtype=float)
+    if q_retreat is not None:  # the caller's own back-out from there (the level place's scripted one)
+        checks.append(("retreat", q_meet, np.asarray(q_retreat, dtype=float)))
+        return checks
     try:
         retreat = plan_retreat(model, q_meet)
     except Refused:

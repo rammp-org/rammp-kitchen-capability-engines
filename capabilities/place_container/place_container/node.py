@@ -59,6 +59,10 @@ ARM_MOVED = 1794074180.0  # 2026-11-07T17:56:20Z
 # deg: after the carry, the planned line down is used if the arm is within this of its first joints
 # (lower() starts the line from the measured joints, so this much is a smooth start, not a jump)
 REPLAN_DEG = 1.0
+# the level place's scripted back-out, right after the gripper opens: this far back along the hand's
+# horizontal heading and this far up, one straight line (position control, retreat_speed peak)
+BACK_OUT_M = 0.08
+BACK_OUT_UP_M = 0.03
 
 # ROS parameter -> default: the flatbot's values (2026-10-26, unless noted).
 PARAMS = {
@@ -540,7 +544,25 @@ class Capability(CapabilityEngine):
             ctx.progress("open", 0.0)
             lower.let_go(self.arm, rec, log)
             drop = self.cfg["release_drop"]
-            if self.cfg["return_mode"] == "blended":
+            if up_tool is not None:  # the level place: no sink, no pause, the scripted back-out
+                ctx.progress("retreat", 0.0)
+                lower.exit_impedance(self.arm, log)
+                q = np.asarray(self.arm.raw_joints(), dtype=float)
+                back, _ = self._plan_back_out(model, q, table_z)
+                log(
+                    f"-> back-out: {BACK_OUT_M * 100:.0f} cm back, {BACK_OUT_UP_M * 100:.0f} cm up "
+                    f"(position control, {back[0][-1]:.1f} s)"
+                )
+                res = self.arm.execute_joint_trajectory(
+                    rammp_arm.JOINTS, list(zip(*back, strict=True)), path_tolerance=rammp_arm.PATH_TOL_RAD
+                )
+                if res.error_code != SUCCESSFUL:
+                    raise plan.Refused(
+                        "STOPPED in the back-out (the container is down, the gripper open): "
+                        + plan.explain_failure(f"back-out ended {res.error_code} {res.error_string}", ["retreat"])
+                    )
+                where = "Position control, the hand backed out by the container."
+            elif self.cfg["return_mode"] == "blended":
                 # the drop, the retreat (and swing) and the way back to the start: ONE blended motion
                 ctx.progress("return", 0.0)
                 moves = plan.return_moves(model, hold_q, q_now, drop=drop, log=log)
@@ -722,6 +744,31 @@ class Capability(CapabilityEngine):
                 + plan.explain_failure(self.arm.last_error, ["approach"], where)
             )
 
+    def _plan_back_out(self, model, q, table_z):
+        """The scripted back-out from joints q (the hand on the lip, the gripper open): the tool straight back
+        BACK_OUT_M along the hand's horizontal heading and BACK_OUT_UP_M up (one straight line), orientation
+        kept, searched and timed like the carry (retreat_speed peak) and every sample checked against the chair
+        and user boxes (the hand is empty: no container). ((t, q, qd), summary)."""
+        chair = self._chair(model)
+        chair.set_container(None)
+        try:
+            T = model.fk(q)
+            h = T[:3, 2].copy()
+            h[2] = 0.0
+            h /= np.linalg.norm(h)
+            p_to = T[:3, 3] - BACK_OUT_M * h + np.array([0.0, 0.0, BACK_OUT_UP_M])
+            knots = level_path.search_line(
+                model, chair, q, p_to, T[:3, :3], level_path.LINE_KNOT_M, "back-out", level_path.LINE_NULL_STEPS
+            )
+            scale = min(1.0, self.cfg["retreat_speed"] / rammp_arm.CART_SPEED)
+            samples, _ = level_path.timed(q, knots, model, scale)
+            summary = level_path.check_samples(
+                model, chair, samples, level_path.up_in_tool(T[:3, :3]), table_z, "back-out", scale, min_bottom=None
+            )
+        finally:
+            chair.set_container(None)
+        return samples, summary
+
     def _chair(self, model):
         """The chair and user boxes in the model's sim (level_path.Chair), made once per sim."""
         key = model.rb.physics_client_id
@@ -774,7 +821,12 @@ class Capability(CapabilityEngine):
         s_line = level_path.check_samples(
             model, chair, slow, up, table_z, "line down", speed, min_bottom=None, vertical=True
         )
-        self._check_contact_zone(model, descent, table_tool, log, q_approach=knots[-1] if approach else None)
+        q_meet = plan.hold_point(descent[1], descent[0], table_tool + plan.BOWL_DEPTH)
+        q_meet = np.asarray(descent[1][-1] if q_meet is None else q_meet, dtype=float)
+        back, s_back = self._plan_back_out(model, q_meet, table_z)
+        self._check_contact_zone(
+            model, descent, table_tool, log, q_approach=knots[-1] if approach else None, q_retreat=back[1][-1]
+        )
         top = model.fk(knots[-1])[:3, 3]
         log(
             f"carry: straight to above the spot at {height * 100:.0f} cm (tool {np.round(top, 3).tolist()}), "
@@ -800,6 +852,12 @@ class Capability(CapabilityEngine):
             f"the boxes (closest: {s_line['clear_link']} to {s_line['clear_box']}). "
             f"Planned in {time.monotonic() - t_plan:.0f} s. "
             "The table and what is on it are NOT modelled: keep the way to the spot clear"
+        )
+        log(
+            f"back-out: as soon as the gripper is open, {BACK_OUT_M * 100:.0f} cm back and "
+            f"{BACK_OUT_UP_M * 100:.0f} cm up along the hand, one straight line "
+            f"(position control, {back[0][-1]:.1f} s, no sink, no pause); >= {s_back['clear_m'] * 100:.1f} cm from the "
+            "boxes from where the container should touch the table (planned again from where it does)"
         )
         steps = [
             dict(name="carry", tool=np.round(top, 3).tolist(), above_table=round(float(top[2] - table_z), 3)),
@@ -914,14 +972,14 @@ class Capability(CapabilityEngine):
             log(f"cuRobo check: {w['name']} plans ({res.planning_time:.2f} s)")
             start = starts[k]
 
-    def _check_contact_zone(self, model, descent, table_z, log, q_approach=None):
+    def _check_contact_zone(self, model, descent, table_z, log, q_approach=None, q_retreat=None):
         """cuRobo plans (nothing moves) to the ends of the approach (from `q_approach`, if it runs on
         move_joints), the line down and the retreat, which run on move_joints and so are never checked
         against the chair's collision volumes otherwise."""
         if not self.cfg["curobo_check"]:
             log("curobo_check is off: the approach, the line down and the retreat are NOT checked against the chair")
             return
-        for label, q_from, q_to in plan.contact_zone_checks(model, descent, table_z, q_approach):
+        for label, q_from, q_to in plan.contact_zone_checks(model, descent, table_z, q_approach, q_retreat):
             try:
                 res = self.arm.plan_to_joints(q_to, q_from)
             except ArmError as e:
