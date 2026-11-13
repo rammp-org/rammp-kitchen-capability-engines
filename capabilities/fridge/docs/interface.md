@@ -128,32 +128,36 @@ Failures: `refused` (a check failed; the message says which and the arm holds), 
 
 The UI is offered only these (`availability`); `go_to_start` / `open` / `close` stay callable directly. One press runs
 the whole action (`UI_ACTIONS` in `node.py`), executing: `allow_execute` must be true on hardware (else a panel says
-it is off). Panels go through the UI bridge (`ctx.update_user_panel()`; JSON in `docs/UI_JSON_SCHEMA.md`).
+it is off). Panels go through the UI bridge (`ctx.update_user_panel()`; JSON in `docs/UI_JSON_SCHEMA.md`), made by
+the shared `capability_ui.RunUI`.
 
 | Action id             | Button                                | Runs                                               |
 | --------------------- | ------------------------------------- | -------------------------------------------------- |
 | `go_to_start_ui`      | Go to Fridge                          | `go_to_start` (to `start_joints_deg`), speed 0.7   |
-| `open_door_ui`        | Open Fridge Door                      | `open`, speed 0.2; a wheelchair move is asked for  |
-| `open_door_drive_ui`  | Open Fridge Door (wheelchair drives)  | `open`, speed 0.2, `drive_base` at 0.03 m/s        |
+| `open_door_ui`        | Open Fridge Door                      | `open`, speed 0.7; a wheelchair move is asked for  |
+| `open_door_drive_ui`  | Open Fridge Door (wheelchair drives)  | `open`, speed 0.7, `drive_base` at 0.03 m/s        |
 | `close_door_ui`       | Close Fridge Door                     | `close`, speed 0.7; a wheelchair move is asked for |
 | `close_door_drive_ui` | Close Fridge Door (wheelchair drives) | `close`, speed 0.7, `drive_base` at 0.03 m/s       |
 
 Panels, in order:
 
-- While it runs: what it is doing (no buttons).
+- While it runs: what it is doing, with **Stop**. Stop cancels the goal as the orchestrator's cancel does: the arm
+  (and a driving base) stops and holds, then "Stopped. The arm is holding still where it was." with **Done**; after
+  an open it adds that the hand may be on the handle (let go with `release_only`), after a drive that the wheelchair
+  has moved. The goal ends `Cancelled`.
 - A wheelchair move (the open's push, or the close's planned move; not on the driving buttons): "Move your wheelchair
   straight back, away from the fridge, about N cm, without turning it. Then press Continue ..." with **Continue**
   (runs the rest with `chair_moved`) and **Stop**.
 - A recoverable refusal (`refused`, the hand not on the handle): the reason and the same button to try again, and
   **Stop**.
-- The end: done ("Fridge door opened." ...; in mock "Mock: ... No arm motion.") or failed (error-styled, the reason
+- The end: done ("Fridge door opened." ...; in mock "Mock: ... No arm motion.") or failed ("Couldn't ...", the reason
   in plain words; after an open that stopped short or refused holding the handle, "The hand may still be holding the
   handle."), with
   **Done**. The full message stays in the log.
 
 Done waits at most `UI_NOTICE_TIMEOUT_S` (30 s) and a question `UI_PROMPT_TIMEOUT_S` (600 s; then `no_answer`):
-the goal keeps the arm, gripper and base meanwhile. **Stop** fails the goal `stopped_by_user`. A dropped question is
-sent again. With no UI session (no token) nothing is shown or waited for, and a move or retry ends the goal as the
+the goal keeps the arm, gripper and base meanwhile. **Stop** at a question cancels the goal (`Cancelled`), as Stop
+while moving does. A dropped panel is sent again. With no UI session (no token) nothing is shown or waited for, and a move or retry ends the goal as the
 direct action would.
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until

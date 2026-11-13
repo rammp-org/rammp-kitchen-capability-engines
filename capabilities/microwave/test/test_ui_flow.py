@@ -1,6 +1,12 @@
-"""Offline UI flow tests for the microwave's one-press open / close; production methods run without ROS or hardware."""
+"""Offline UI flow tests for the microwave's one-press open / close; production methods run without ROS or hardware.
+
+The node's methods are loaded through `ast` (no ROS imports) with the shared capability_ui.RunUI and a fake ctx that
+behaves as the engine's: one held UI event, a cancel flag that checkpoint() raises on, update_user_panel() False with
+no UI session. cancel_own_run is stubbed to set that flag, as the engine's own cancel does."""
 
 import ast
+import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -9,6 +15,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 NODE = ROOT / "capabilities/microwave/microwave/node.py"
+sys.path.insert(0, str(ROOT / "shared/capability_ui"))
+
+from capability_ui import panels  # noqa: E402
+from capability_ui.panels import DONE, NOTICE_TIMEOUT_S, PROMPT_TIMEOUT_S, STOP, STOPPED_MESSAGE, RunUI  # noqa: E402
 
 
 def load(path, names, methods=None, **scope):
@@ -24,54 +34,136 @@ def load(path, names, methods=None, **scope):
     return scope
 
 
-def engine_error():
+def engine_classes():
     tree = ast.parse((ROOT / "capability_engine/capability_engine/engine.py").read_text())
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "EngineError")
+    classes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in ("EngineError", "Cancelled")]
     scope = {}
-    exec(compile(ast.Module(body=[cls], type_ignores=[]), "engine.py", "exec"), scope)
-    return scope["EngineError"]
+    exec(compile(ast.Module(body=classes, type_ignores=[]), "engine.py", "exec"), scope)
+    return scope["EngineError"], scope["Cancelled"]
 
 
-EngineError = engine_error()
+EngineError, Cancelled = engine_classes()
+
+
+class FakeCtx:
+    """The engine's ctx as the UI sees it. `answers`: each panel with a button other than Stop takes the next one (a
+    button_id tapped at once; None: never tapped)."""
+
+    def __init__(self, answers=(), session=True):
+        self.answers, self.session = list(answers), session
+        self.sent = []
+        self._event = None
+        self._lock = threading.Lock()
+        self._cancelled = threading.Event()
+        self.checkpoint_calls = 0
+
+    def update_user_panel(self, panel_json=None, objects=None, selected_instance_id=None):
+        self.sent.append(panel_json)
+        if self.session and any(b["button_id"] != "stop" for b in panel_json["buttons"]):
+            answer = self.answers.pop(0) if self.answers else None
+            if answer:
+                self.tap(answer)
+        return self.session
+
+    def poll_ui_event(self):
+        with self._lock:
+            event, self._event = self._event, None
+            return event
+
+    def tap(self, button_id):
+        with self._lock:
+            self._event = {"type": "button", "button_id": button_id}
+
+    def cancel(self):
+        self._cancelled.set()
+
+    def cancelled(self):
+        return self._cancelled.is_set()
+
+    def checkpoint(self):
+        self.checkpoint_calls += 1
+        if self.cancelled():
+            raise Cancelled()
+
+
+class Clock:
+    """Virtual time for the waits; sleep() advances it."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+@pytest.fixture(autouse=True)
+def fast_watch(monkeypatch):
+    monkeypatch.setattr(panels, "POLL_S", 0.005)
 
 
 @pytest.fixture
-def flow(monkeypatch):
+def flow():
+    clock = Clock()
+
+    class UI(RunUI):  # RunUI on the virtual clock
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, clock=clock, sleep=clock.sleep, **kwargs)
+
     scope = load(
         NODE,
         {"UI_ACTIONS", "UI_TITLE", "UI_DONE"},
-        {"_ui_run", "_ui_panel", "_ui_notice", "_wait_for_button", "_panel_open"},
+        {"_ui_run", "_ui_stopped_note"},
         EngineError=EngineError,
-        time=time,
+        RunUI=UI,
+        cancel_own_run=lambda engine: engine.ctx.cancel(),
     )
     node = scope["Capability"]()
-    scope["real_panel_open"] = scope["Capability"].__dict__["_panel_open"]
-    scope["Capability"]._panel_open = staticmethod(lambda ctx: False)  # as if the bridge dropped it: re-send
     node.mock = False
     node.cfg = {"allow_execute": True}
     node.get_logger = Mock(return_value=Mock())
     node.execute = Mock(return_value={"executed": True})
-    ctx = Mock()
-    ctx.update_user_panel.return_value = True
-    ctx.poll_ui_event.return_value = {"type": "button", "button_id": "done"}
-    monkeypatch.setattr(time, "sleep", lambda _: None)
-    return node, ctx, scope
+    node.ctx = FakeCtx(["done"])
+    return node, node.ctx, scope, clock
 
 
-def panels(ctx):
-    return [c.kwargs["panel_json"] for c in ctx.update_user_panel.call_args_list]
+def wait_until(cond, timeout=2.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.005)
+    return False
+
+
+def until_stopped(ctx, holding=None, node=None):
+    """An execute() that moves until cancelled, as self.arm does (Stop is tapped once it runs)."""
+
+    def run(action_id, params, _ctx):
+        if node is not None:
+            node._holding_handle = holding
+        ctx.tap("stop")
+        assert wait_until(ctx.cancelled)
+        raise Cancelled()
+
+    return run
 
 
 def test_one_press_open_runs_the_open_executing(flow):
-    node, ctx, _ = flow
+    node, ctx, _, _ = flow
     assert node._ui_run("open_door_ui", ctx) == {"executed": True}
     node.execute.assert_called_once_with("open", {"execute": True, "push_open": True}, ctx)
-    assert panels(ctx)[0]["buttons"] == []
-    assert panels(ctx)[-1]["message"] == "Microwave door opened."
+    moving = ctx.sent[0]
+    assert moving["message"] == "Open Microwave Door: the arm is moving."
+    assert moving["buttons"] == [STOP]
+    assert ctx.sent[-1]["message"] == "Microwave door opened."
+    assert ctx.sent[-1]["buttons"] == [DONE]
 
 
 def test_one_press_close_uses_the_settings_that_closed_it(flow):
-    node, ctx, scope = flow
+    node, ctx, scope, _ = flow
     node._ui_run("close_door_ui", ctx)
     action, params, _ = node.execute.call_args.args
     assert action == "close"
@@ -79,97 +171,185 @@ def test_one_press_close_uses_the_settings_that_closed_it(flow):
     assert params["execute"] and params["face_door"] and params["route_over"]
 
 
+def test_stop_while_opening_with_the_hand_on_the_handle(flow):
+    node, ctx, _, _ = flow
+    node.execute.side_effect = until_stopped(ctx, holding=True, node=node)
+    with pytest.raises(Cancelled):
+        node._ui_run("open_door_ui", ctx)
+    stopped = ctx.sent[-1]
+    assert stopped["title"] == "Open microwave: stopped"
+    assert stopped["message"].startswith(STOPPED_MESSAGE)
+    assert "The hand is still on the handle: let go of it" in stopped["message"]
+    assert stopped["buttons"] == [DONE]
+    assert node.execute.call_count == 1
+
+
+def test_stop_before_the_grasp_says_nothing_about_the_handle(flow):
+    node, ctx, _, _ = flow
+    node.execute.side_effect = until_stopped(ctx, holding=False, node=node)
+    with pytest.raises(Cancelled):
+        node._ui_run("open_door_ui", ctx)
+    assert ctx.sent[-1]["message"] == STOPPED_MESSAGE
+
+
+def test_stop_when_holding_is_unknown_says_to_let_go_if_holding(flow):
+    node, ctx, _, _ = flow
+    node.execute.side_effect = until_stopped(ctx)  # never says (holding stays None)
+    with pytest.raises(Cancelled):
+        node._ui_run("open_door_ui", ctx)
+    assert ctx.sent[-1]["message"].endswith("If the hand is on the handle, let go of it before anything else.")
+
+
+def test_stop_during_the_close_has_no_handle_note(flow):
+    node, ctx, _, _ = flow
+    node.execute.side_effect = until_stopped(ctx)
+    with pytest.raises(Cancelled):
+        node._ui_run("close_door_ui", ctx)
+    assert ctx.sent[-1]["message"] == STOPPED_MESSAGE
+    assert ctx.sent[-1]["title"] == "Close microwave: stopped"
+
+
+def test_a_stop_that_ends_as_an_engine_error_is_not_retried_or_reported_twice(flow):
+    node, ctx, _, _ = flow
+
+    def run(action_id, params, _ctx):  # a legacy move returns False on a cancel: execute() raises "stopped"
+        node._holding_handle = False
+        ctx.tap("stop")
+        assert wait_until(ctx.cancelled)
+        raise EngineError("stopped", "the open stopped short -- the arm holds where it is", True)
+
+    node.execute.side_effect = run
+    with pytest.raises(EngineError, match="stopped short"):
+        node._ui_run("open_door_ui", ctx)
+    assert node.execute.call_count == 1
+    assert [p["title"] for p in ctx.sent] == ["Open microwave", "Open microwave: stopped"]
+
+
+def test_orchestrator_cancel_shows_no_stopped_notice(flow):
+    node, ctx, _, _ = flow
+
+    def run(action_id, params, _ctx):
+        ctx.cancel()
+        raise Cancelled()
+
+    node.execute.side_effect = run
+    with pytest.raises(Cancelled):
+        node._ui_run("open_door_ui", ctx)
+    assert [p["buttons"] for p in ctx.sent] == [[STOP]]
+
+
 def test_recoverable_refusal_waits_for_explicit_retry_then_runs_again(flow):
-    node, ctx, _ = flow
+    node, ctx, _, _ = flow
+    ctx.answers = ["retry", "done"]
     node.execute.side_effect = [EngineError("refused", "no grasp passes the checks", True), {"executed": True}]
-    ctx.poll_ui_event.side_effect = [
-        None,
-        {"type": "button", "button_id": "unrelated"},
-        {"type": "button", "button_id": "retry"},
-        {"type": "button", "button_id": "done"},
-    ]
     assert node._ui_run("open_door_ui", ctx)["executed"]
     assert node.execute.call_count == 2
-    retry = panels(ctx)[1]
-    assert "no grasp passes the checks" in retry["message"]
-    assert retry["buttons"] == [{"button_id": "retry", "label": "Open Microwave Door"}]
+    retry = ctx.sent[1]
+    assert retry["title"] == "Unable to open microwave"
+    assert retry["message"] == "no grasp passes the checks. Press Open Microwave Door to try again."
+    assert retry["buttons"] == [{"button_id": "retry", "label": "Open Microwave Door"}, STOP]
+    assert ctx.sent[-1]["message"] == "Microwave door opened."
+
+
+def test_stop_at_the_retry_question_cancels_and_does_not_move_again(flow):
+    node, ctx, _, _ = flow
+    ctx.answers = ["stop"]
+    node.execute.side_effect = EngineError("refused", "no plan", True)
+    with pytest.raises(Cancelled):
+        node._ui_run("open_door_ui", ctx)
+    assert node.execute.call_count == 1
+    assert ctx.cancelled()
+
+
+def test_no_answer_to_the_retry_returns_the_refusal(flow):
+    node, ctx, _, clock = flow
+    ctx.answers = [None]
+    error = EngineError("refused", "no plan", True)
+    node.execute.side_effect = error
+    with pytest.raises(EngineError) as raised:
+        node._ui_run("open_door_ui", ctx)
+    assert raised.value is error and raised.value.recoverable
+    assert PROMPT_TIMEOUT_S <= clock.t < PROMPT_TIMEOUT_S + 1.0
+    assert node.execute.call_count == 1
 
 
 def test_holding_the_handle_is_reported_and_never_retried(flow):
-    node, ctx, _ = flow
+    node, ctx, _, _ = flow
     node.execute.side_effect = EngineError("stopped", "the open stopped short -- still holding the handle", True)
     with pytest.raises(EngineError, match="holding the handle"):
         node._ui_run("open_door_ui", ctx)
     assert node.execute.call_count == 1
-    last = panels(ctx)[-1]
+    last = ctx.sent[-1]
+    assert last["title"] == "Open microwave: failed"
     assert "let go of it" in last["message"]
-    assert last["buttons"] == [{"button_id": "done", "label": "Done"}]
+    assert last["buttons"] == [DONE]
 
 
 def test_unrecoverable_failure_is_reported_without_retry(flow):
-    node, ctx, _ = flow
+    node, ctx, _, _ = flow
     node.execute.side_effect = EngineError("bad_params", "bad speed", False)
     with pytest.raises(EngineError, match="bad speed"):
         node._ui_run("close_door_ui", ctx)
     assert node.execute.call_count == 1
-    assert "bad speed" in panels(ctx)[-1]["message"]
+    assert "bad speed" in ctx.sent[-1]["message"]
 
 
 def test_cancel_while_waiting_to_retry_does_not_move_again(flow):
-    node, ctx, _ = flow
+    node, ctx, _, clock = flow
+    ctx.answers = [None]
     node.execute.side_effect = EngineError("refused", "no plan", True)
-    ctx.poll_ui_event.return_value = None
-    ctx.checkpoint.side_effect = [None, RuntimeError("cancelled")]
-    with pytest.raises(RuntimeError, match="cancelled"):
+    sleep = clock.sleep
+
+    def cancel_later(dt):  # the orchestrator cancels while the question is up
+        sleep(dt)
+        if clock.t > 5.0:
+            ctx.cancel()
+
+    clock.sleep = cancel_later
+    with pytest.raises(Cancelled):
         node._ui_run("open_door_ui", ctx)
     assert node.execute.call_count == 1
 
 
 def test_execution_disabled_never_moves(flow):
-    node, ctx, _ = flow
+    node, ctx, _, _ = flow
     node.cfg["allow_execute"] = False
-    with pytest.raises(EngineError, match="disabled"):
+    with pytest.raises(EngineError, match="disabled") as raised:
         node._ui_run("close_door_ui", ctx)
+    assert raised.value.recoverable and raised.value.error_code == "execution_disabled"
     node.execute.assert_not_called()
+    assert ctx.sent[-1]["title"] == "Close microwave: not started"
+    assert ctx.sent[-1]["buttons"] == [DONE]
 
 
 def test_no_ui_session_returns_the_recoverable_error(flow):
-    node, ctx, _ = flow
-    ctx.update_user_panel.return_value = False
+    node, ctx, _, _ = flow
+    ctx.session = False
     node.execute.side_effect = EngineError("refused", "no plan", True)
     with pytest.raises(EngineError) as error:
         node._ui_run("open_door_ui", ctx)
     assert error.value.recoverable
-    ctx.poll_ui_event.assert_not_called()
+    assert node.execute.call_count == 1
 
 
 def test_mock_says_nothing_moved(flow):
-    node, ctx, _ = flow
+    node, ctx, _, _ = flow
     node.mock = True
     node.execute.return_value = {"executed": False, "mock": True}
     node._ui_run("open_door_ui", ctx)
-    assert "No arm motion" in panels(ctx)[-1]["message"]
+    assert "No arm motion" in ctx.sent[-1]["message"]
 
 
-def test_open_panel_is_not_resent(flow, monkeypatch):
-    node, ctx, scope = flow
-    cap = scope["Capability"]
-    cap._panel_open = scope["real_panel_open"]  # the real check: the run's UI goal is open
-    ctx._run = type("Run", (), {"ui_goal_handle": object(), "ui_opening": False})()
-    clock = iter(range(0, 100, 2))
-    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
-    ctx.poll_ui_event.side_effect = [None, None, None, {"type": "button", "button_id": "done"}]
-    node._wait_for_button(ctx, "done", {"title": "t"})
-    ctx.update_user_panel.assert_not_called()
+def test_done_notice_is_bounded(flow):
+    node, ctx, _, clock = flow
+    ctx.answers = [None]  # Done never tapped
+    assert node._ui_run("open_door_ui", ctx) == {"executed": True}
+    assert NOTICE_TIMEOUT_S <= clock.t < NOTICE_TIMEOUT_S + 1.0
 
 
-def test_dropped_panel_is_resent(flow, monkeypatch):
-    node, ctx, scope = flow
-    cap = scope["Capability"]
-    cap._panel_open = scope["real_panel_open"]
-    ctx._run = type("Run", (), {"ui_goal_handle": None, "ui_opening": False})()
-    clock = iter(range(0, 100, 2))
-    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
-    ctx.poll_ui_event.side_effect = [None, None, {"type": "button", "button_id": "done"}]
-    node._wait_for_button(ctx, "done", {"title": "t"})
-    assert ctx.update_user_panel.call_count >= 1
+@pytest.fixture(autouse=True)
+def _no_ui_wrap(monkeypatch):
+    """Messages are compared whole here; capability_ui's own tests cover the UI's line wrapping."""
+    from capability_ui import panels as ui_panels
+
+    monkeypatch.setattr(ui_panels, "WRAP_CHARS", 10**6)

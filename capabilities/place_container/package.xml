@@ -8,6 +8,7 @@
   <license>Proprietary</license>
 
   <exec_depend>capability_engine</exec_depend>
+  <exec_depend>capability_ui</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
@@ -20,6 +21,8 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>rammp_arm_interfaces</exec_depend>
+  <exec_depend>rammp_perception_interfaces</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>

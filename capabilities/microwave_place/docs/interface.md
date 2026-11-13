@@ -58,20 +58,65 @@ update or restart the running planner.
 
 ## Orchestrator interface
 
-`retrieve` is the UI action **Retrieve Tupperware from Microwave**. It runs HOME
-then the entire take-out with no intermediate prompts and no world-state reads or
-writes. It requests execution; `allow_execute` must be true on hardware. HOME
-failures show their reason and restore the same button; retry waits for an explicit
-tap. Later failures show an error without retrying the grasp. Success/error notices
-remain until Done or cancellation. Each attempt uses the existing run recorder.
-The direct `take_out` dry-run/execute API is unchanged except that HOME refusals
-now have recoverable error code `home_failed`.
+The UI is offered three one-press actions (`availability()` returns only these; the orchestrator labels each
+button with its id, and sends no params). Each runs a whole action with fixed params under
+`capability_ui.RunUI` (`shared/capability_ui`):
 
-The engine uses the counter example's direct UI bridge API, including the
-orchestrator-pushed execution token. `ui_bridge_node_name` (default
-`ui_bridge_node`) selects `/ui_bridge_node/request_user_input` and its `/update`
-service. No UI session means no panel; HOME failure returns recoverably. JSON
-shapes are documented in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
+| Action id              | Offered on a tap of | Runs                                             |
+| ---------------------- | ------------------- | ------------------------------------------------ |
+| `retrieve`             | `microwave`         | `take_out` `{"execute": true}`                   |
+| `place_in_microwave`   | `microwave`         | `place` `{"execute": true}`                      |
+| `retrieve_from_fridge` | `fridge`            | `take_out` `{"execute": true, "site": "fridge"}` |
+
+The capability's `perception_classes` is `["microwave", "fridge"]` so a fridge tap activates it; each UI action's
+own `perception_classes` picks where it is offered. `place` and `take_out` stay callable directly (dry runs,
+CLI) but are not offered to the UI.
+
+Every UI action, in `execute()`:
+
+- `allow_execute` false (not mock): a "not started" notice with Done, then `execution_disabled` (recoverable).
+  Nothing moves.
+- `retrieve_from_fridge` with `fridge_accept_unmodeled_door` false (the default, not mock): a "not started"
+  notice explaining the collision gap below, then `fridge_door_unmodeled` (recoverable). Nothing moves.
+- While it runs: one progress panel with **Stop** (sent once; re-sent only if the bridge dropped it, so it no
+  longer flashes). Stop cancels the engine's own run, as the orchestrator's cancel does: `self.arm` stops the
+  motion in flight and the next `ctx.checkpoint()` raises `Cancelled`. A "Stopped" notice then says what the
+  hand was left holding (from the run's last progress phase, e.g. "The hand is holding the container in the
+  microwave.").
+- A recoverable refusal (`refused`, `home_failed`, `recording`) whose message does **not** start with
+  `STOPPED`: the reason, with the same action again (button `retry`, labelled Retrieve / Place) and Stop. A
+  tap re-runs it from the start (fresh run bag, detection and plan). These are checks that refused before the
+  arm started on the take-out or place proper (HOME may have moved).
+- A refusal starting `STOPPED` (anything once the arm has started on the place or the take-out proper: the
+  node prefixes any refusal from `run_place` / `run_take_out` that doesn't already), any other error, or an
+  exception (e-stop, control taken): a "failed" notice with the reason and what the hand holds, Done only,
+  never retried.
+- Success: a Done notice. Mock: "Mock: ... No arm motion."
+- Every final notice is waited on for at most 60 s before `execute()` returns or raises. An orchestrator
+  cancel shows nothing more (the orchestrator has taken the UI back). Without a UI session nothing waits: the
+  error is returned.
+
+The engine uses the direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_ui_event()`).
+`ui_bridge_node_name` (default `ui_bridge_node`) selects `/ui_bridge_node/request_user_input` and its `/update`
+service. JSON shapes are documented in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
+
+### Retrieve from the fridge: the collision gap
+
+`take_out` with `"site": "fridge"` is the microwave take-out with the fridge's settings:
+`fridge_take_home_joints` (viewing pose), `fridge_take_approach_world`, `fridge_grasp_up`, `fridge_reach_in`;
+its messages name the fridge. Its only collision-checked leg is cuRobo's approach, and its world
+(`/config/robot/curobo/world.yaml`: chair, user, floor) has **no fridge cabinet, shelves or open door**; the
+reach in, lift and back-out are not checked against anything. The fridge capability models the door
+(`fridge/world.py`, from the door file `door.json` its open saves in its own `data_dir`), but that is not
+available here: the door file lives in the fridge container's `/fridge_data` (not mounted in this one), its
+positions are in `arm_mount` as of the open and go stale if the wheelchair moves after it (the fridge's close
+corrects for that with logic of its own), and the model's code is in the fridge package, which this image
+doesn't have. Its cabinet box would also contain the container being grasped, so only the door slab and handle
+could be added. Until that is done and tried, an **executing** fridge take-out (UI or direct) is refused unless
+`fridge_accept_unmodeled_door:=true`, for attended runs only with a clear straight path. Dry runs are not gated.
+`fridge_take_home_joints` defaults to the fridge capability's start pose (`fridge/constants.py`
+`START_JOINTS_DEG`, in radians), the only recorded fridge-facing pose; it has not been tried as a take-out
+viewing pose.
 
 `arm.service_call_s` is 30 seconds in the microwave launch file and deployment
 fragments, allowing cuRobo's collision-world reload to finish on Snorlax. The
@@ -103,6 +148,10 @@ Served under `/microwave_place/`, types from `rammp_orchestrator_interfaces`:
 | `depth_topic`, `camera_info_topic`, `detections_topic`     | the scene camera's                            | Locate's topics (the 3D detections are not used)                                                                                    |
 | `take_approach_world`                                      | `/config/robot/curobo/world.yaml`             | take_out: world path inside the planner container; must confirm flatbot layers and floor                                            |
 | `take_approach_speed_scale`                                | `0.3`                                         | take_out: fraction of planned approach speed, finite and in (0, 1\]                                                                 |
+| `fridge_take_home_joints`                                  | the fridge start pose (rad)                   | take_out site fridge: the viewing pose, arm_joint_1..7 (rad). Default: fridge `START_JOINTS_DEG`; untried as a take-out pose        |
+| `fridge_take_approach_world`                               | `/config/robot/curobo/world.yaml`             | take_out site fridge: the approach world (planner path); same layer checks. The default has no fridge in it                         |
+| `fridge_grasp_up`, `fridge_reach_in`                       | `0.035`, `0.30`                               | take_out site fridge: `grasp_up` and `reach_in` (m); the microwave's values, untuned for the fridge                                 |
+| `fridge_accept_unmodeled_door`                             | `false`                                       | Lets an executing fridge take-out run although nothing it plans knows the fridge or its open door (attended runs only)              |
 | `wrist_topics`                                             | the wrist camera's colour, depth, camera_info | take_out: the camera the rim is found on                                                                                            |
 | `container_prompt`, `sam3_threshold`                       | the container with its blue sleeve; `0.5`     | take_out: SAM3's prompts and score threshold                                                                                        |
 | `rim_frames`, `rim_mask_iou`, `rim_timeout_s`              | `3`, `0.85`, `60.0`                           | take_out: historical parameter names; consecutive whole-container masks must overlap this much (IoU), at most this long (s)         |

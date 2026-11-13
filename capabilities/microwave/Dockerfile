@@ -60,6 +60,7 @@ RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/r
 # sources but not its cache, hence the update (as button_press does).
 COPY capability_engine/package.xml src/capability_engine/package.xml
 COPY shared/door_common/package.xml src/door_common/package.xml
+COPY shared/capability_ui/package.xml src/capability_ui/package.xml
 COPY capabilities/microwave/package.xml src/microwave/package.xml
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \
@@ -70,6 +71,7 @@ RUN . /opt/ros/humble/setup.sh \
 
 COPY capability_engine/ src/capability_engine/
 COPY shared/door_common/ src/door_common/
+COPY shared/capability_ui/ src/capability_ui/
 COPY capabilities/microwave/ src/microwave/
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \

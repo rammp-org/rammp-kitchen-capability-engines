@@ -46,6 +46,9 @@ ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc7
 RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
 
 COPY capability_engine/ src/capability_engine/
+# capability_ui: the UI actions' panels (RunUI: Stop on every panel, bounded waits), shared with the other capabilities
+COPY shared/capability_ui/package.xml src/capability_ui/package.xml
+COPY shared/capability_ui/ src/capability_ui/
 COPY capabilities/microwave_place/ src/microwave_place/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the

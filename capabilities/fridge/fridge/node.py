@@ -37,6 +37,7 @@ from functools import partial
 import numpy as np
 import rammp_arm
 from capability_engine import Action, BaseError, Cancelled, CapabilityEngine, EngineError, run
+from capability_ui import RunUI, cancel_own_run
 from door_common import common as dc
 from door_common import open_door as shared_open
 
@@ -129,15 +130,15 @@ PARAMS = {
 }
 
 # The UI's buttons (one press each, no settings): the action each runs, with what. Go to Fridge: the start pose
-# (start_joints_deg) at 0.7; the open at TESTING.md's 0.2; the close at its default 0.7 (slower, the swing doesn't
+# (start_joints_deg) at 0.7; the open at 0.7 (faster than TESTING.md's 0.2, 11-12); the close at its default 0.7 (slower, the swing doesn't
 # carry the door shut). A wheelchair move the open's push or the close
 # needs is asked for on the UI (Continue, then the rest with chair_moved), or, on the "wheelchair drives" buttons,
 # driven by the base (drive_base) within the goal.
 UI_DRIVE = {"drive_base": True, "base_speed": 0.03}
 UI_ACTIONS = {
     "go_to_start_ui": ("go_to_start", "Go to Fridge", {"execute": True, "speed": 0.7}),
-    "open_door_ui": ("open", "Open Fridge Door", {"execute": True, "speed": 0.2}),
-    "open_door_drive_ui": ("open", "Open Fridge Door (wheelchair drives)", {"execute": True, "speed": 0.2, **UI_DRIVE}),
+    "open_door_ui": ("open", "Open Fridge Door", {"execute": True, "speed": 0.7}),
+    "open_door_drive_ui": ("open", "Open Fridge Door (wheelchair drives)", {"execute": True, "speed": 0.7, **UI_DRIVE}),
     "close_door_ui": ("close", "Close Fridge Door", {"execute": True}),
     "close_door_drive_ui": ("close", "Close Fridge Door (wheelchair drives)", {"execute": True, **UI_DRIVE}),
 }
@@ -170,6 +171,8 @@ UI_ERRORS = {
 UI_ERROR_OTHER = "Something went wrong, so the fridge action stopped."  # a bug, or a new code
 # After an open that may have stopped with the hand on the handle (_ui_maybe_holding): said, and no retry
 UI_MAYBE_HOLDING = " The hand may still be holding the handle."
+# After Stop on the UI during an open (the Stopped notice): nothing tracks whether the hand is on the handle yet
+UI_STOPPED_OPEN = "If the hand is on the handle, let go of it before anything else (the open with release_only)."
 # After a goal that drove the wheelchair (drive_base): said, and no retry
 UI_DROVE = " The wheelchair has already moved: check where it is before trying again."
 BASE_CONTROL_STATUS_TOPIC = "/base/control_status"  # the MIB's rt/base/control_status (rammp-rtps control_message.hpp)
@@ -202,17 +205,6 @@ def _joint_gap_deg(q_a, q_b):
     d = np.asarray(q_a, float) - np.asarray(q_b, float)
     d[rammp_arm.CONTINUOUS] = (d[rammp_arm.CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
     return float(np.degrees(np.max(np.abs(d))))
-
-
-def _panel_open(ctx):
-    """Whether this goal's UI panel is still open, or its open is still in flight. The engine has no public call for
-    it (a bridge abort reaches poll_ui_event() as nothing at all), so this reads the run's own record, as the
-    microwave's _panel_open does; True when it can't tell, so the wait falls back to its timeout."""
-    run = getattr(ctx, "_run", None)
-    if run is None or not hasattr(run, "ui_goal_handle"):
-        return True
-    with run.ui_lock:
-        return run.ui_goal_handle is not None or run.ui_opening
 
 
 class Capability(CapabilityEngine):
@@ -358,57 +350,68 @@ class Capability(CapabilityEngine):
     # -- the UI's buttons (UI_ACTIONS): panels through ctx.update_user_panel(), docs/UI_JSON_SCHEMA.md -----------
 
     def _ui_run(self, ui_id, ctx):
-        """One UI press runs the whole action (UI_ACTIONS), with panels: what it is doing; a wheelchair move it needs
-        (Continue / Stop; the "wheelchair drives" buttons drive it instead); a recoverable refusal (its reason, the same
-        button to try again, Stop); and how it ended (Done). A failure that may have left the hand on the handle, or
-        any other, is shown with Done only and not retried. With no UI session (no token) nothing is shown or waited
-        for: a move or retry it would ask for ends the goal as the direct action would."""
+        """One UI press runs the whole action (UI_ACTIONS), with panels (capability_ui.RunUI): what it is doing, with
+        Stop (it cancels this run as the orchestrator's cancel does: the arm and base stop, then a "Stopped" notice);
+        a wheelchair move it needs (Continue / Stop; the "wheelchair drives" buttons drive it instead); a recoverable
+        refusal (its reason, the same button to try again, Stop); and how it ended (Done). A failure that may have left
+        the hand on the handle, or any other, is shown with Done only and not retried. Every wait is bounded (Done
+        UI_NOTICE_TIMEOUT_S, a question UI_PROMPT_TIMEOUT_S, then no_answer). With no UI session (no token) nothing is
+        shown or waited for: a move or retry it would ask for ends the goal as the direct action would."""
         action_id, label, ui_params = UI_ACTIONS[ui_id]
         params = dict(ui_params)
         title = UI_TITLE[action_id]
         log = self.get_logger()
+        # the clock is this module's `time`, so a test can run the waits on a fake one
+        ui = RunUI(ctx, title, cancel=lambda: cancel_own_run(self), logger=log, clock=time.monotonic, sleep=time.sleep)
         if not self.mock and not self.cfg["allow_execute"]:
             error = EngineError(
                 "execution_disabled", "allow_execute is false: the UI's buttons run only with it true", recoverable=True
             )
-            self._ui_failed(ctx, action_id, error)
+            self._ui_failed(ui, action_id, error)
             raise error
         while True:
             ctx.checkpoint()
-            self._ui_show(ctx, title, UI_MOVING[action_id])
+            self._drove = False  # as _execute sets it: a Stop before _execute runs mustn't read the last goal's
             try:
-                result = self._execute(action_id, dict(params), ctx)
+                result = ui.motion(
+                    UI_MOVING[action_id],
+                    lambda: self._execute(action_id, dict(params), ctx),
+                    stopped_note=lambda: self._ui_stopped_note(action_id),
+                )
             except Cancelled:
                 raise
             except EngineError as error:
+                if ui.user_stopped:  # stopped on the UI (a move that ended as a failure): the Stopped notice said so
+                    raise
                 move = self._ui_close_move(action_id, error, params)
                 if move:  # the close planned, with the wheelchair moved first
                     log.info(f"{ui_id}: the close asks for a wheelchair move of {move * 100:+.0f} cm (+ back)")
-                    if not self._ui_ask_move(ctx, action_id, move, "close the door"):
+                    if not self._ui_ask_move(ui, action_id, move, "close the door"):
                         raise  # no UI session: as the direct close, which says the move
                     params["chair_moved"] = True
                     continue
                 log.error(f"{ui_id}: {error}")
                 if self._ui_can_retry(action_id, error):
-                    if not self._ui_ask_retry(ctx, action_id, label, error):
+                    if not self._ui_ask_retry(ui, action_id, label):
                         raise
                     continue
-                self._ui_failed(ctx, action_id, error)
+                self._ui_failed(ui, action_id, error)
                 raise
             except Exception:  # a bug: shown, then failed as the engine reports it
-                self._ui_failed(ctx, action_id, None)
+                if not ui.user_stopped:
+                    self._ui_failed(ui, action_id, None)
                 raise
             move = push_open.NEXT_MOVE if action_id == "open" and result.get("executed") else 0.0
             if move and not params.get("chair_moved"):  # the pull is done; the push needs the wheelchair moved first
                 log.info(f"{ui_id}: the push-open asks for a wheelchair move of {move * 100:+.0f} cm (+ back)")
-                if not self._ui_ask_move(ctx, action_id, move, "push the door open"):
+                if not self._ui_ask_move(ui, action_id, move, "push the door open"):
                     return result  # no UI session: as the direct open, whose note says the move
                 params["chair_moved"] = True
                 continue
             # mock: nothing moved (go_to_start dry-runs there). On hardware a go_to_start already at the pose doesn't
             # execute, and is done all the same
             done = UI_NOT_MOVED[action_id] if self.mock else UI_DONE[action_id]
-            self._ui_notice(ctx, title, done)
+            ui.notice(done, timeout_s=constants.UI_NOTICE_TIMEOUT_S)
             return result
 
     @staticmethod
@@ -442,56 +445,16 @@ class Capability(CapabilityEngine):
             return True
         return error.error_code == "refused" and any(t in str(error) for t in ("on the handle", "holding the handle"))
 
-    @staticmethod
-    def _ui_panel(title, message, buttons=(), style=None):
-        """rammp-UI-bridge's InteractionPanel: `buttons` (button_id, label[, style])."""
-        panel = {
-            "title": title,
-            "message": message,
-            "buttons": [{"button_id": b[0], "label": b[1], "style": b[2] if len(b) > 2 else "normal"} for b in buttons],
-        }
-        if style:
-            panel["style"] = style
-        return panel
+    def _ui_stopped_note(self, action_id):
+        """What the Stopped notice adds: the hand may be on the handle (an open; the close pushes with the hand and
+        go_to_start never touches the door), and the wheelchair has moved (drive_base)."""
+        note = UI_STOPPED_OPEN if action_id == "open" else ""
+        if getattr(self, "_drove", False):
+            note += UI_DROVE
+        return note.strip()
 
-    def _ui_show(self, ctx, title, message):
-        """A panel with no buttons: what the action is doing."""
-        return ctx.update_user_panel(panel_json=self._ui_panel(title, message))
-
-    def _ui_wait(self, ctx, panel, timeout_s, resend):
-        """The button pressed on `panel` (already sent); None once `timeout_s` passes, on a cancel, or (not `resend`)
-        once the panel is gone (the bridge refused or dropped it). `resend`: a dropped panel is sent again, once a
-        second, not more (re-sending an open panel redraws it: the microwave's flashed, 11-12)."""
-        deadline = time.monotonic() + timeout_s
-        resend_at = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            if ctx.cancelled():
-                return None
-            event = ctx.poll_ui_event()
-            if event and event.get("type") == "button":
-                return event.get("button_id")
-            if not _panel_open(ctx):
-                if not resend:
-                    return None
-                if time.monotonic() >= resend_at:
-                    ctx.update_user_panel(panel_json=panel)
-                    resend_at = time.monotonic() + 1.0
-            time.sleep(0.1)
-        return None
-
-    def _ui_notice(self, ctx, title, message, style=None):
-        """A panel with Done, waited on for at most UI_NOTICE_TIMEOUT_S: the engine closes the panel once the goal
-        ends, and the goal keeps the arm, gripper and base until then. Ends early on a cancel or a dropped panel."""
-        if ctx.cancelled():
-            return
-        panel = self._ui_panel(title, message, [("done", "Done")], style)
-        if ctx.update_user_panel(panel_json=panel):
-            pressed = self._ui_wait(ctx, panel, constants.UI_NOTICE_TIMEOUT_S, resend=False)
-            self.get_logger().info(f"UI notice {title!r}: {f'{pressed} pressed' if pressed else 'ended without Done'}")
-
-    def _ui_failed(self, ctx, action_id, error):
-        """The failure on the UI (error-styled, Done). It never hides the failure it reports: anything it raises is
-        only logged."""
+    def _ui_failed(self, ui, action_id, error):
+        """The failure on the UI (Done). It never hides the failure it reports: anything it raises is only logged."""
         try:
             code = error.error_code if error is not None else None
             message = UI_ERRORS.get(code, UI_ERROR_OTHER)
@@ -499,41 +462,38 @@ class Capability(CapabilityEngine):
                 message += UI_MAYBE_HOLDING
             if getattr(self, "_drove", False) and code != "base_stopped":  # base_stopped says it already
                 message += UI_DROVE
-            self._ui_notice(ctx, f"Couldn't {UI_WHAT[action_id]}", message, style="error")
+            ui.error(message, title=f"Couldn't {UI_WHAT[action_id]}", timeout_s=constants.UI_NOTICE_TIMEOUT_S)
         except Exception as e:
             self.get_logger().warning(f"UI failure panel: couldn't show it: {e!r}")
 
-    def _ui_ask(self, ctx, panel, yes):
-        """Ask on the UI: True once `yes` is pressed; False if there is no UI session to ask on. Stop raises
-        EngineError stopped_by_user; a cancel raises Cancelled; no answer in UI_PROMPT_TIMEOUT_S raises no_answer."""
-        if not ctx.update_user_panel(panel_json=panel):
-            return False
-        pressed = self._ui_wait(ctx, panel, constants.UI_PROMPT_TIMEOUT_S, resend=True)
-        self.get_logger().info(f"UI prompt {panel['title']!r}: {pressed or 'no answer'}")
+    def _ui_answer(self, ui, what, pressed, yes):
+        """A question's answer: True once `yes` was pressed; False with no UI session to ask on. No answer in
+        UI_PROMPT_TIMEOUT_S raises no_answer. (Stop, or a cancel, has already raised Cancelled in ui.ask.)"""
+        self.get_logger().info(f"UI prompt {what!r}: {pressed or 'no answer'}")
         if pressed == yes:
             return True
-        if ctx.cancelled():
-            raise Cancelled()
-        if pressed is None:
-            raise EngineError("no_answer", f"no answer on the UI in {constants.UI_PROMPT_TIMEOUT_S:.0f} s", True)
-        raise EngineError("stopped_by_user", f"stopped on the UI ({pressed})", recoverable=True)
+        if not ui.connected:
+            return False
+        raise EngineError("no_answer", f"no answer on the UI in {constants.UI_PROMPT_TIMEOUT_S:.0f} s", True)
 
-    def _ui_ask_move(self, ctx, action_id, move, then):
-        """Ask for the wheelchair move `move` (m, + back), then Continue."""
+    def _ui_ask_move(self, ui, action_id, move, then):
+        """Ask for the wheelchair move `move` (m, + back), then Continue (or Stop)."""
         way = "back, away from the fridge" if move > 0 else "forward, toward the fridge"
         message = (
             f"Move your wheelchair straight {way}, about {abs(move) * 100:.0f} cm, without turning it. "
             f"Then press Continue to {then}."
         )
-        panel = self._ui_panel(UI_TITLE[action_id], message, [("continue", "Continue"), ("stop", "Stop", "warning")])
-        return self._ui_ask(ctx, panel, "continue")
+        buttons = [{"button_id": "continue", "label": "Continue"}]
+        pressed = ui.ask(message, buttons, timeout_s=constants.UI_PROMPT_TIMEOUT_S)
+        return self._ui_answer(ui, "wheelchair move", pressed, "continue")
 
-    def _ui_ask_retry(self, ctx, action_id, label, error):
-        """A recoverable refusal: its reason and the same button to try again."""
+    def _ui_ask_retry(self, ui, action_id, label):
+        """A recoverable refusal: what happened and the same button to try again (or Stop)."""
         message = f"{UI_ERRORS['refused']} Press {label} to try again."
-        buttons = [("retry", label), ("stop", "Stop", "warning")]
-        panel = self._ui_panel(f"Couldn't {UI_WHAT[action_id]}", message, buttons, "warning")
-        return self._ui_ask(ctx, panel, "retry")
+        buttons = [{"button_id": "retry", "label": label}]
+        title = f"Couldn't {UI_WHAT[action_id]}"
+        pressed = ui.ask(message, buttons, timeout_s=constants.UI_PROMPT_TIMEOUT_S, title=title, style="warning")
+        return self._ui_answer(ui, "try again", pressed, "retry")
 
     def _execute(self, action_id, params, ctx):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)

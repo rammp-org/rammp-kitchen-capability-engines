@@ -4,12 +4,28 @@ docs/UI_JSON_SCHEMA.md). Pure: no ROS, so it is tested on its own.
 Every phase the action reports with ctx.progress() is also put on the panel, in words, with a
 progress bar; every failure is put on it with an OK button before the action ends with the error
 (the panel closes when the action ends, so an error not shown before then is never seen).
+
+place_here (the UI's tap on a table) runs on capability_ui.RunUI instead: the spot picker, then the
+place under a progress panel with Stop, then Stopped / failed / Done notices. Its words are here too.
 """
 
+from capability_ui import wrap  # lines Unreal can show (it doesn't wrap; one rich-text run a line)
+
 OK = "ok"  # the error panel's button
-DONE = "done"  # the one-tap place's "placed" panel's button
-RETRY = "retry"  # the one-tap place's "try again" button, after a refusal before anything moved
-PLACE_HERE = "Place the container here"  # the one-tap action's label: on the UI's action list and the retry
+PLACE_HERE = "Place the container here"  # the one-tap action's label on the UI's action list
+
+# place_here's spot picker: its buttons (RunUI adds Stop)
+PLACE = {"button_id": "place", "label": "Place here"}
+MARKED = {"button_id": "marked", "label": "Use marked spot"}
+LOOK = {"button_id": "look", "label": "Look again"}
+PICK = "Tap where to put the container, then press Place here."
+TAP_FIRST = "Tap a spot on the table first. "
+MOVING = "Placing the container: the arm is moving. Press Stop to stop it."
+PLACED = "The container is on the table and the arm is back at its start."
+REFUSED_OFF = (
+    "Placing is switched off on this robot (allow_execute is false). Start place_container with "
+    "allow_execute:=true, with someone at the e-stop."
+)
 
 TITLES = {
     "place_here": "Placing the container",
@@ -54,7 +70,7 @@ def progress_panel(action_id, phase, message=""):
     """The panel while `action_id` is in `phase`: its title, the phase in words, a progress bar.
     A phase not in PHASES shows `message` (or its own name) and no bar."""
     text, pct = PHASES.get(phase, (message or phase, None))
-    panel = {"title": title(action_id), "message": text}
+    panel = {"title": title(action_id), "message": wrap(text)}
     if pct is not None:
         # no pause control: a pause in the middle of the lowering or the retreat is not offered
         panel["progress"] = {"phase": phase, "pct": float(pct), "pausable": False}
@@ -64,7 +80,7 @@ def progress_panel(action_id, phase, message=""):
 def done_panel(action_id, message):
     return {
         "title": title(action_id),
-        "message": message,
+        "message": wrap(message),
         "progress": {"phase": "done", "pct": 100.0, "pausable": False},
     }
 
@@ -74,29 +90,29 @@ def error_panel(action_id, message):
     where, what to do next) and an OK button."""
     return {
         "title": FAILED_TITLES.get(action_id, f"{title(action_id)}: failed"),
-        "message": message,
+        "message": wrap(message),
         "buttons": [{"button_id": OK, "label": "OK"}],
     }
 
 
-def placed_panel():
-    """The one-tap place's end: done, until the user taps Done."""
-    return {
-        "title": TITLES["place_here"],
-        "message": "The container is on the table and the arm is back at its start.",
-        "progress": {"phase": "done", "pct": 100.0, "pausable": False},
-        "buttons": [{"button_id": DONE, "label": "Done"}],
-    }
+def pick_message(n_spots, note=""):
+    """The picker's text: `note` (why it is asking again) first."""
+    return f"{note}{PICK} ({n_spots} free spots shown.)"
 
 
-def retry_panel(message):
-    """The one-tap place refused before anything moved: the reason (what to fix) and the same button
-    to try again, as microwave's UI flow does."""
-    return {
-        "title": "Unable to place the container",
-        "message": f"{message}. Press {PLACE_HERE} to try again.",
-        "buttons": [{"button_id": RETRY, "label": PLACE_HERE}],
-    }
+def no_spot_message(problem, marked, note=""):
+    """No spot to offer: why, and what the user can do."""
+    then = "Use the marked spot, or clear" if marked else "Clear"
+    return f"{note}No free spot to offer: {problem}. {then} a spot on the table and press Look again."
+
+
+def stopped_note(phase):
+    """What a Stop left behind, from the last phase the place reported."""
+    if phase in ("retreat", "return", "reset"):
+        return "The container is on the table; the gripper had let go of it."
+    if phase == "open":
+        return "The gripper was opening: the container may still be in the hand."
+    return "The container may still be in the hand."
 
 
 def is_button(event, button_id):

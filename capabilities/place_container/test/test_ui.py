@@ -1,5 +1,6 @@
 """What place_container puts on the user's UI panel (place_container.ui): pure, no ROS."""
 
+import pytest
 from place_container import ui
 
 
@@ -46,16 +47,31 @@ def test_the_panels_are_json_the_bridge_takes():
         json.dumps(panel)
 
 
-def test_the_one_tap_place_ends_with_a_done_button_and_mock_walks_the_real_phases():
-    panel = ui.placed_panel()
-    assert panel["buttons"] == [{"button_id": ui.DONE, "label": "Done"}]
-    assert panel["progress"]["pct"] == 100.0
-    assert ui.is_button({"type": "button", "button_id": ui.DONE}, ui.DONE)
+def test_mock_walks_the_real_phases():
     assert ui.progress_panel("place_here", "return")["message"].startswith("Backing the hand away")
     assert ui.MOCK_PHASES[-1] == "return" and ui.title("place_here") == ui.title("place")
 
 
-def test_a_refusal_before_anything_moved_offers_the_same_button_again():
-    panel = ui.retry_panel("the marked spot is 31 min old -- mark it again")
-    assert panel["buttons"] == [{"button_id": ui.RETRY, "label": ui.PLACE_HERE}]
-    assert panel["message"].startswith("the marked spot is 31 min old") and ui.PLACE_HERE in panel["message"]
+def test_the_picker_says_what_to_do_and_why_it_asks_again():
+    assert ui.pick_message(12).startswith(ui.PICK) and "12" in ui.pick_message(12)
+    assert ui.pick_message(3, ui.TAP_FIRST).startswith(ui.TAP_FIRST)
+    text = ui.no_spot_message("the table looks 10 degrees tilted", marked=True)
+    assert "10 degrees tilted" in text and "Use the marked spot" in text and "Look again" in text
+    assert "marked" not in ui.no_spot_message("x", marked=False)
+    assert {b["label"] for b in (ui.PLACE, ui.MARKED, ui.LOOK)} == {"Place here", "Use marked spot", "Look again"}
+
+
+def test_a_stop_says_where_the_container_was_left():
+    for phase in (None, "plan", "carry", "lower"):
+        assert "may still be in the hand" in ui.stopped_note(phase)
+    assert "may still be in the hand" in ui.stopped_note("open")
+    for phase in ("retreat", "return", "reset"):
+        assert "on the table" in ui.stopped_note(phase)
+
+
+@pytest.fixture(autouse=True)
+def _no_ui_wrap(monkeypatch):
+    """Messages are compared whole here; capability_uis own tests cover the UIs line wrapping."""
+    from capability_ui import panels as ui_panels
+
+    monkeypatch.setattr(ui_panels, "WRAP_CHARS", 10**6)
