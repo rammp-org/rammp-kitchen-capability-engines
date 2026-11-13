@@ -45,7 +45,7 @@ from pathlib import Path
 import numpy as np
 import rammp_arm
 from capability_engine import Action, ArmError, Cancelled, CapabilityEngine, EngineError, run
-from capability_engine.arm import HOLD_LEVEL, HOLD_NONE, JointTarget, PoseTarget
+from capability_engine.arm import HOLD_LEVEL, HOLD_NONE, SUCCESSFUL, JointTarget, PoseTarget
 from rammp_arm import _unwrap_from
 from scipy.spatial.transform import Rotation
 
@@ -108,11 +108,15 @@ PARAMS = {
     # "joints" = a go_to_joint_config to our checked joints first (if cuRobo swings the hand for the
     # pose, as it did 2026-10-08), then lift -> transit blended
     "adjust_mode": "pose",
-    # with blend: "joints" = the carrying motion goes through OUR planned joints (go_to_joint_configs,
-    # blended; plan_segment keeps each leg level, above the table and under 120 deg a joint), so the arm
-    # keeps the start's posture; "pose" = hand poses, cuRobo picks the joints -- on 2026-11-10 it chose
-    # another posture at the spot (J1 +101, J3 -147 deg from the start) and reset could not undo it
-    "carry_targets": "joints",
+    # with blend: "level" = the squaring turn on our checked joints (move_joints), then each leg to
+    # above the spot planned by cuRobo HOLDING THE CONTAINER LEVEL (plan_to_pose, HOLD_LEVEL), every
+    # sample of that plan checked (level, same posture as our joints there, no wide swing: plan.
+    # check_carry_plan) and exactly that trajectory executed (execute_joint_trajectory: what was
+    # checked is what runs; flatbot 2026-11-12, a joint-space carry tipped the container 70-90 deg);
+    # "joints" = through OUR planned joints (go_to_joint_configs, blended, cuRobo's path unchecked);
+    # "pose" = hand poses, cuRobo picks the joints -- on 2026-11-10 it chose another posture at the
+    # spot (J1 +101, J3 -147 deg from the start) and reset could not undo it
+    "carry_targets": "level",
     # the retreat's peak speed (m/s; was 0.03)
     "retreat_speed": 0.10,  # flatbot 2026-11-10 (was 0.06)
     # speed_scale of reset's joint moves with reset_mode legacy (move_joints; was ~0.5)
@@ -458,7 +462,8 @@ class Capability(CapabilityEngine):
         # With joint targets the approach (3b) runs on move_joints after the carrying motion, not
         # through cuRobo: it must be the straight line it was planned as.
         carry, approach = plan.split_carry(moves)
-        on_line = bool(approach) and self.cfg["blend"] and self.cfg["carry_targets"] == "joints"
+        level = self.cfg["blend"] and self.cfg["carry_targets"] == "level"
+        on_line = bool(approach) and self.cfg["blend"] and self.cfg["carry_targets"] in ("joints", "level")
         if on_line:
             problems = plan.check_approach(model, carry[-1][1], approach)
             if problems:
@@ -467,8 +472,16 @@ class Capability(CapabilityEngine):
         # retreat against the chair's volumes, on the planned line (the one from where the arm ends is
         # the same line down, a few mm apart at most).
         self._check_contact_zone(model, descent, table_z, log, q_approach=carry[-1][1] if on_line else None)
+        if level and info["reconfigure"]:
+            raise plan.Refused(
+                "the transit changes the arm's posture, which carry_targets level does not do (it keeps the "
+                "start's posture) -- start from a posture whose line down reaches the table"
+            )
         if not execute:
-            if self.cfg["blend"] and self.cfg["curobo_check"]:
+            if level:
+                q_adjust = _unwrap_from(self.arm.raw_joints(), [carry[0][1]])[0]
+                self._plan_level_carry(model, info, q_adjust, log)  # planned and checked, not run
+            elif self.cfg["blend"] and self.cfg["curobo_check"]:
                 if self.cfg["carry_targets"] == "joints":
                     self._check_carry_joints(carry if on_line else moves, log)
                 else:
@@ -480,7 +493,11 @@ class Capability(CapabilityEngine):
 
         self._ready()
         self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
-        if self.cfg["blend"] and self.cfg["carry_targets"] == "joints":
+        if level:
+            self._carry_level(model, carry, info, ctx, log)
+            if on_line:
+                self._approach(model, carry[-1][1], approach, log)
+        elif self.cfg["blend"] and self.cfg["carry_targets"] == "joints":
             self._carry_joints(model, carry if on_line else moves, table_z, ctx, log)
             if on_line:
                 self._approach(model, carry[-1][1], approach, log)
@@ -698,6 +715,68 @@ class Capability(CapabilityEngine):
                 "STOPPED above the spot, nothing let go: "
                 + plan.explain_failure(self.arm.last_error, ["approach"], where)
             )
+
+    def _plan_level_carry(self, model, info, q_from, log):
+        """carry_targets level: each leg after the squaring turn (lift, transit) planned by cuRobo from the
+        one before's end, the container held level (plan_to_pose, HOLD_LEVEL), and every sample checked
+        (plan.check_carry_plan). [(name, Plan)], nothing moved; Refused with the reason otherwise."""
+        legs, start = [], np.asarray(q_from, dtype=float)
+        for w in info["waypoints"][1:]:
+            if w["name"] == "approach":
+                break
+            try:
+                p = self.arm.plan_to_pose(w["pos"], w["quat"], start, hold=HOLD_LEVEL)
+            except ArmError as e:
+                raise plan.Refused(
+                    f"cuRobo plan of {w['name']}: " + plan.explain_failure(f"{type(e).__name__}: {e}", [w["name"]])
+                ) from e
+            if not p.success or len(p.q) == 0:
+                raise plan.Refused(
+                    f"cuRobo can't plan {w['name']} keeping the container level (nothing moved): "
+                    + plan.explain_failure(p.message, [w["name"]], {w["name"]: w["pos"]})
+                )
+            (q_goal,) = _unwrap_from(p.q[-1], [w["q"]])
+            problems, tilt = plan.check_carry_plan(model, p.q, q_goal)
+            if problems:
+                raise plan.Refused(f"{w['name']}: cuRobo's level plan " + "; ".join(problems) + " -- nothing moved")
+            log(
+                f"{w['name']}: cuRobo plans it holding the container level ({p.t[-1]:.1f} s at full speed, "
+                f"{len(p.q)} samples): container within {tilt:.1f} deg of level everywhere, ends on the planned "
+                "joints, no joint swings wide"
+            )
+            legs.append((w["name"], p))
+            start = p.q[-1]
+        return legs
+
+    def _carry_level(self, model, carry, info, ctx, log):
+        """carry_targets level, for real: the squaring turn on our checked joints (move_joints), then
+        each leg planned again from where the arm IS, checked (_plan_level_carry), and exactly that
+        trajectory run (execute_joint_trajectory, position control, go_to_speed_scale)."""
+        speed = self.cfg["go_to_speed_scale"]
+        ctx.progress("carry", 0.0)
+        adjust = [q for name, q in carry if name.startswith("adjust")]
+        if adjust:
+            scale = self.cfg["adjust_speed_scale"]
+            log(f"-> adjust: square the hand on the planned joints (move_joints, speed x{scale})")
+            if not self.arm.move_joints(adjust, speed_scale=scale):
+                raise plan.Refused("STOPPED: " + plan.explain_failure(self.arm.last_error, ["adjust"]))
+        for name, p in self._plan_level_carry(model, info, self.arm.raw_joints(), log):
+            off = np.degrees(np.max(np.abs(plan.wrap(np.asarray(p.q[0]) - self.arm.raw_joints()))))
+            if off > 1.0:
+                raise plan.Refused(f"STOPPED before {name}: the arm is {off:.1f} deg from where its plan starts")
+            log(f"-> {name}: the checked level plan, as planned (execute_joint_trajectory, speed x{speed})")
+            res = self.arm.execute_joint_trajectory(
+                rammp_arm.JOINTS,
+                list(zip(p.t, p.q, p.qd, strict=True)),
+                path_tolerance=rammp_arm.PATH_TOL_RAD,
+                speed_scale=speed,
+            )
+            if res.error_code != SUCCESSFUL:
+                where = {name: model.fk(p.q[-1])[:3, 3]}
+                raise plan.Refused(
+                    f"STOPPED in {name}: "
+                    + plan.explain_failure(f"{name} ended {res.error_code} {res.error_string}", [name], where)
+                )
 
     def _check_carry_joints(self, moves, log):
         """Dry run: cuRobo plans each joint leg of the carrying motion (nothing moves), from the
