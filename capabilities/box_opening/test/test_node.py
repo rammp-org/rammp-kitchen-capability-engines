@@ -603,6 +603,57 @@ def test_each_goal_reads_the_params_as_they_are_then(engine):
     assert engine._env()["BOX_OPENING_VIDEO"] == "1" and engine._env()["BOX_OPENING_MISSION_FRAMES"] == "1"
 
 
+def test_a_run_is_told_on_stdout_one_short_line_a_step_beside_its_full_lines(engine, monkeypatch, capsys):
+    """The flight view (flight_view.py; the owner 2026-11-12: "easier to read in flight terminal logs so I know
+    if and what things are working or not working"): the run's lines, logged as ever through the node's logger
+    (stderr), are read as they come and told on the node's stdout one short line a step, with the result — so
+    `docker logs -f sheppy-box_opening 2>/dev/null` is the flight view alone. A run that stops says where."""
+    p = "[press_demo] "
+    given(
+        monkeypatch,
+        FULL_RUN,
+        [
+            p + "WRIST SURVEY: box at [0.645, -0.156] yaw 0.0 deg from 2982 lid points (WRIST 0.60) — reaching out",
+            p + "REACH-OUT: hand tilted 30 deg; looking from 0.15 m back toward the arm",
+            p + "AIMED from the look pose: button at [0.663, -0.154, 0.310], 18 mm from the scene camera's",
+            p + "ONE MOTION from the look pose to below the button: reach:re-aim, reach:slide-in, depth:press",
+            p + "PRESSED with ~21 N, 2 N sideways",
+            p + "GRIP STRAIGHT FROM THE PRESS: up 45 mm, the fingers opening round the knob",
+            p + "LID GRIPPED — grip 0.492 vs band [0.3, 0.55]",
+            p + "RELEASE as the retreat starts (place:retreat), then HOME, slow, in MEDIUM impedance: home",
+            p + "DONE — box open, lid set down at [0.65, 0.05] (clear), arm home",
+        ],
+    )
+    said = []
+    monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: said.append(msg))
+    capsys.readouterr()
+    engine.instance_id = "food_container_1"
+    engine.execute("open_box", {}, FakeCtx())
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("BOX OPENING   ") and out[0].endswith("food_container_1")
+    steps = [line[3:12].strip() for line in out if line[:2].strip().isdigit()]
+    assert steps == ["FIND", "LOOK", "PRESS", "GRIP", "LIFT", "CARRY", "SET DOWN", "HOME"]
+    assert all(" ok" in line for line in out if line[:2].strip().isdigit())
+    assert out[-1].startswith("RESULT  DONE — box open, lid on the table, arm home")
+    assert p + "PRESSED with ~21 N, 2 N sideways" in said  # ... and every full line still logged, as it came
+    # a run that stops: the step it ended at, why, and where things were left
+    given(
+        monkeypatch,
+        say=[
+            p + "WRIST SURVEY: box at [0.792, -0.245] yaw 0.0 deg (WRIST 0.60) — reaching out",
+            p + "STOP: no press reaches the aimed button (the way down (walk in: 0 deg short)) — nothing was pressed "
+            "— returning home",
+        ],
+        code=1,
+    )
+    with pytest.raises(EngineError):
+        engine.execute("open_box", {}, FakeCtx())
+    out = capsys.readouterr().out.splitlines()
+    assert " 2 PRESS     FAIL  the box is out of the arm's reach (0.83 m out)" in out
+    assert out[-3].startswith("RESULT  FAILED at step 2 (PRESS)")
+    assert out[-1] == "        box: not pressed    lid: on the box    arm: home"
+
+
 def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):
     given(monkeypatch, say=["[ERROR] [1793385477.635189323] [box_opening_run]: no arm kinematics", "plain line"])
     said = []

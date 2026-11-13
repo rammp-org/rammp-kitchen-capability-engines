@@ -43,6 +43,7 @@ from rammp_orchestrator_interfaces.msg import ActionAvailability
 
 from . import LOGGER
 from .constants import state_dir
+from .flight_view import FlightView
 from .runtime.abort import EXIT_HALTED
 from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
@@ -519,7 +520,11 @@ class Capability(CapabilityEngine):
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
         world = WorldWriter(self.get_logger())
-        self._run = Run(self._argv(action_id, track.instance_id), env, LOGGER.log)
+        # the flight view (flight_view): the run's lines read as they are logged, one short line a step
+        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
+        view = FlightView()
+        view.start(action_id, track.instance_id)
+        self._run = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
         code = None
         try:
             code = self._follow(self._run, log, track, ctx, world)
@@ -536,6 +541,7 @@ class Capability(CapabilityEngine):
             self._progress(log, track, ctx)  # the last rows, written as it ended
             if not ctx.cancelled():
                 self._sync_world(track, ctx, world)  # the last rows' word: a release, a put-back
+            view.finish(code, cancelled=ctx.cancelled(), timed_out=run_.timed_out, held=bool(track.held))
         if ctx.cancelled():
             world.wait(WORLD_WAIT_S)  # those queued before the cancel
             raise Cancelled()

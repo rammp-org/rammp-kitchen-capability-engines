@@ -84,6 +84,41 @@ reported unavailable (with why), and a goal that comes anyway fails with
 `not_allowed` before anything runs. There is no dry run. The mock moves nothing
 and is always offered.
 
+### Watching a run fly
+
+The node writes a flight view of each run to its stdout: one short line a step as
+it starts and as it ends (`ok`, `FAIL`, or `??` where the run could not tell and
+went on), a `note` for what worked but looked off, a `next` for what follows a
+failure, and a result that says where the box, the lid and the arm were left.
+Everything else the node logs goes to stderr, so:
+
+```bash
+docker logs -f sheppy-box_opening 2>/dev/null   # the flight view alone
+docker logs -f sheppy-box_opening               # with every full line under its [INFO] prefix
+```
+
+```text
+BOX OPENING   20:53:57
+   find      ...   looking for the box
+ 1 FIND      ok    box 0.66 m out (wrist camera, 1 view)        18.0 s
+   look      ...   moving to look at the button
+ 2 LOOK      ok    button found, 43 mm across, 0.68 m out        3.0 s
+   press     ...   pressing the button
+ 3 PRESS     ok    21 N                                          4.0 s
+             note  lid touched 41 mm higher than the camera read it
+   grip      ...   rising 45 mm, opening the fingers, coming down round the knob
+ 4 GRIP      ok    knob held                                     8.0 s
+ 5 LIFT      ok
+ 6 CARRY     ok    lid to 20 cm from the box
+ 7 SET DOWN  ok    let go where the lid met the table
+   home      ...   letting go and going home
+ 8 HOME      ok                                                  5.0 s
+RESULT  DONE — box open, lid on the table, arm home           45 s
+```
+
+It is read off the run's own console lines (`box_opening/flight_view.py`) and
+changes nothing the run does.
+
 ## Publishes
 
 | Topic                 | Type                                   | Rate     | Meaning                                                                                                   |
