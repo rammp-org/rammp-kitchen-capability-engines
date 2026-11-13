@@ -12,9 +12,31 @@ from capability_engine.CapabilityEngine.
     make action CAP=example ACTION=count_with_panel PARAMS='{"to": 5}'
 """
 
+import os
 import time
 
+from sensor_msgs.msg import Image
+
 from capability_engine import Action, CapabilityEngine, EngineError, run
+
+_OVERLAY_WIDTH = 320
+_OVERLAY_HEIGHT = 240
+
+
+def _build_random_overlay_image() -> Image:
+    """One rgb8 frame of plain random noise -- a placeholder for a real
+    capability's own camera feed (see publish_overlay_image()'s docstring),
+    generated once and republished unchanged every tick below, purely to
+    prove a frame genuinely reaches UE (distinguishable on screen from the
+    static_overlay_node mock's own crosshair pattern)."""
+    msg = Image()
+    msg.height = _OVERLAY_HEIGHT
+    msg.width = _OVERLAY_WIDTH
+    msg.encoding = "rgb8"
+    msg.is_bigendian = 0
+    msg.step = _OVERLAY_WIDTH * 3
+    msg.data = os.urandom(_OVERLAY_WIDTH * _OVERLAY_HEIGHT * 3)
+    return msg
 
 
 class Capability(CapabilityEngine):
@@ -79,26 +101,28 @@ class Capability(CapabilityEngine):
         user. No session token (e.g. running standalone) makes every bridge
         call a harmless no-op, so this still behaves like plain `count`.
 
-        A capability with its own camera (e.g. a wrist cam) would also call
+        A capability with its own camera (e.g. a wrist cam) would call
         ctx.publish_overlay_image(image) here, once per tick, to show the
-        user a live view alongside the panel -- omitted since this example
-        has no camera to publish. ctx.set_overlay_visible() brackets the
-        whole run below regardless, to demonstrate the show/hide toggle
-        (UE's `Open Camera Feed`/`Close Camera Feed` Remote Control
-        functions) even without any frames actually flowing: shown right
-        before the loop starts, hidden in a `finally` so it's hidden on
-        every exit path -- normal completion, the user's Stop button, or
-        ctx.checkpoint() raising Cancelled -- not just the happy path. The
-        Orchestrator's own end-of-execution cleanup also unconditionally
-        hides the overlay (see OrchestratorNode's execution-finish
-        handling), so this is actually redundant by the time execute()
-        returns -- it's here to show *this engine's own* call, for a
-        capability that wants the feed hidden the instant its loop ends
-        rather than waiting on that later cleanup.
+        user a live view alongside the panel -- this example has no real
+        camera, so it republishes one static random-noise test frame
+        (_build_random_overlay_image(), built once at module scope) every
+        tick instead, purely to demonstrate a frame actually reaches UE.
+        ctx.set_overlay_visible() brackets the whole run below, to
+        demonstrate the show/hide toggle (UE's `Open Camera Feed`/`Close
+        Camera Feed` Remote Control functions): shown right before the loop
+        starts, hidden in a `finally` so it's hidden on every exit path --
+        normal completion, the user's Stop button, or ctx.checkpoint()
+        raising Cancelled -- not just the happy path. The Orchestrator's own
+        end-of-execution cleanup also unconditionally hides the overlay (see
+        OrchestratorNode's execution-finish handling), so this is actually
+        redundant by the time execute() returns -- it's here to show *this
+        engine's own* call, for a capability that wants the feed hidden the
+        instant its loop ends rather than waiting on that later cleanup.
         """
         self.get_logger().info("count_with_panel: showing overlay camera feed")
         shown = ctx.set_overlay_visible(True)
         self.get_logger().info(f"count_with_panel: set_overlay_visible(True) returned {shown}")
+        overlay_image = _build_random_overlay_image()
         try:
             for n in range(1, to + 1):
                 ctx.checkpoint()
@@ -111,6 +135,8 @@ class Capability(CapabilityEngine):
                         "buttons": [{"button_id": "stop", "label": "Stop"}],
                     }
                 )
+                published = ctx.publish_overlay_image(overlay_image)
+                self.get_logger().info(f"count_with_panel: publish_overlay_image returned {published}")
                 # Poll for Stop throughout the interval, including on the last
                 # iteration, instead of only once beforehand and then sleeping
                 # through it uninterrupted -- otherwise a tap during any
