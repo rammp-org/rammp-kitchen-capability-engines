@@ -462,8 +462,30 @@ class Capability(CapabilityEngine):
         # With joint targets the approach (3b) runs on move_joints after the carrying motion, not
         # through cuRobo: it must be the straight line it was planned as.
         carry, approach = plan.split_carry(moves)
-        level = self.cfg["blend"] and self.cfg["carry_targets"] == "level"
-        on_line = bool(approach) and self.cfg["blend"] and self.cfg["carry_targets"] in ("joints", "level")
+        if self.cfg["blend"] and self.cfg["carry_targets"] == "level":
+            if info["reconfigure"]:
+                raise plan.Refused(
+                    "the transit changes the arm's posture, which carry_targets level does not do (it keeps the "
+                    "start's posture) -- start from a posture whose line down reaches the table"
+                )
+            if not execute:
+                q_adjust = _unwrap_from(self.arm.raw_joints(), [carry[0][1]])[0]
+                legs = self._plan_level_carry(model, info, q_adjust, log)  # planned and checked, not run
+                q_top = legs[-1][1].q[-1] if legs else q_adjust
+                approach, _ = self._line_from(model, q_top, info, spot, table_z, log)
+                if approach:
+                    log(f"approach: {self._approach_text(model, q_top, approach)}")
+                log("DRY RUN -- all checks passed, nothing commanded")
+                return {"executed": False, "plan": steps}
+            self._ready()
+            self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
+            self._carry_level(model, carry, info, ctx, log)
+            q_top = np.asarray(self.arm.raw_joints(), dtype=float)  # where the checked level plan ended
+            approach, descent = self._line_from(model, q_top, info, spot, table_z, log)
+            if approach:
+                self._approach(model, q_top, approach, log)
+            return self._lower_and_let_go(model, spot, table_z, q_now, descent, info, ctx, log)
+        on_line = bool(approach) and self.cfg["blend"] and self.cfg["carry_targets"] == "joints"
         if on_line:
             problems = plan.check_approach(model, carry[-1][1], approach)
             if problems:
@@ -472,16 +494,8 @@ class Capability(CapabilityEngine):
         # retreat against the chair's volumes, on the planned line (the one from where the arm ends is
         # the same line down, a few mm apart at most).
         self._check_contact_zone(model, descent, table_z, log, q_approach=carry[-1][1] if on_line else None)
-        if level and info["reconfigure"]:
-            raise plan.Refused(
-                "the transit changes the arm's posture, which carry_targets level does not do (it keeps the "
-                "start's posture) -- start from a posture whose line down reaches the table"
-            )
         if not execute:
-            if level:
-                q_adjust = _unwrap_from(self.arm.raw_joints(), [carry[0][1]])[0]
-                self._plan_level_carry(model, info, q_adjust, log)  # planned and checked, not run
-            elif self.cfg["blend"] and self.cfg["curobo_check"]:
+            if self.cfg["blend"] and self.cfg["curobo_check"]:
                 if self.cfg["carry_targets"] == "joints":
                     self._check_carry_joints(carry if on_line else moves, log)
                 else:
@@ -493,11 +507,7 @@ class Capability(CapabilityEngine):
 
         self._ready()
         self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
-        if level:
-            self._carry_level(model, carry, info, ctx, log)
-            if on_line:
-                self._approach(model, carry[-1][1], approach, log)
-        elif self.cfg["blend"] and self.cfg["carry_targets"] == "joints":
+        if self.cfg["blend"] and self.cfg["carry_targets"] == "joints":
             self._carry_joints(model, carry if on_line else moves, table_z, ctx, log)
             if on_line:
                 self._approach(model, carry[-1][1], approach, log)
@@ -505,6 +515,12 @@ class Capability(CapabilityEngine):
             self._carry(info["waypoints"], table_z, ctx, log)
         else:
             self._carry_separately(model, moves, ctx, log)
+        return self._lower_and_let_go(model, spot, table_z, q_now, descent, info, ctx, log)
+
+    def _lower_and_let_go(self, model, spot, table_z, q_now, descent, info, ctx, log):
+        """After the carrying motion (and the approach): the container's level checked above the spot,
+        the line down (again from where the arm IS when it ended elsewhere), then lower.py's impedance
+        lowering, letting go and backing out (or the blended return)."""
         q_top = self._joints()
         tilt = model.tilt(q_top)
         if tilt > 1.0:
@@ -715,6 +731,25 @@ class Capability(CapabilityEngine):
                 "STOPPED above the spot, nothing let go: "
                 + plan.explain_failure(self.arm.last_error, ["approach"], where)
             )
+
+    def _line_from(self, model, q_top, info, spot, table_z, log):
+        """The straight line down from joints `q_top` (above the spot, where the level carry ends or
+        ended), split into the fast approach and the slow impedance line (split_approach); the approach
+        checked straight and level, and the ends of the approach, the line and the retreat against the
+        chair's volumes. (approach [(name, q)], descent (zs, qs)); Refused with the reason."""
+        descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
+        if not plan.reaches(descent, table_z):
+            raise plan.Refused(
+                f"above the spot: {plan.reach_refusal(descent, table_z, spot)} in the posture the "
+                "level carry ends in -- nothing let go"
+            )
+        approach, descent = plan.split_approach(descent, table_z, self.cfg["lower_from"])
+        if approach:
+            problems = plan.check_approach(model, q_top, approach)
+            if problems:
+                raise plan.Refused("the approach down to the slow line is not straight: " + "; ".join(problems))
+        self._check_contact_zone(model, descent, table_z, log, q_approach=q_top if approach else None)
+        return approach, descent
 
     def _plan_level_carry(self, model, info, q_from, log):
         """carry_targets level: each leg after the squaring turn (lift, transit) planned by cuRobo from the

@@ -463,7 +463,8 @@ def split_carry(moves):
 
 
 MAX_CARRY_TILT_DEG = 3.0  # the container's tilt anywhere on the carry's planned trajectory (cuRobo's level hold)
-MAX_CARRY_END_DEG = 2.0  # the carry's plan must end this close (every joint) to our joints there: the same posture
+MAX_CARRY_END_DEG = 30.0  # the carry's plan must end this close (every joint) to our joints there: the same
+# posture (a flip moves a joint 90-180 deg; cuRobo's end may differ by the arm's self-motion, 15 deg of J7 seen)
 MAX_CARRY_SWING_DEG = 30.0  # no joint may go further than this past the range between its two ends on the way
 MAX_SAMPLE_STEP_DEG = 90.0  # between two samples of a plan, no joint jumps this much (a 2*pi wrap read as a sweep)
 
