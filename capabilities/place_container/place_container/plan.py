@@ -462,6 +462,45 @@ def split_carry(moves):
     return moves[:k], moves[k:]
 
 
+MAX_CARRY_TILT_DEG = 3.0  # the container's tilt anywhere on the carry's planned trajectory (cuRobo's level hold)
+MAX_CARRY_END_DEG = 2.0  # the carry's plan must end this close (every joint) to our joints there: the same posture
+MAX_CARRY_SWING_DEG = 30.0  # no joint may go further than this past the range between its two ends on the way
+MAX_SAMPLE_STEP_DEG = 90.0  # between two samples of a plan, no joint jumps this much (a 2*pi wrap read as a sweep)
+
+
+def check_carry_plan(model, q, q_goal):
+    """Problems with a cuRobo trajectory `q` (N, 7) of the carrying motion before anything runs it: the
+    container must stay level at every sample (MAX_CARRY_TILT_DEG; the plan holds the tool's tilt), the
+    arm end on `q_goal` (the joints plan_place checked there, MAX_CARRY_END_DEG: the same posture, no
+    flip), no joint swing more than MAX_CARRY_SWING_DEG past the range between its ends, and no joint
+    jump between samples (MAX_SAMPLE_STEP_DEG). On flatbot 2026-11-12 a joint-space carry (no hold, not
+    previewed) took J1 +144 deg the wrong way, J4 from -121 to +28 deg and the container to 70-90 deg."""
+    q = np.asarray(q, dtype=float)
+    problems = []
+    tilts = [bowl_tilt_deg(model.fk(qi)[:3, :3], model.pitch) for qi in q]
+    k = int(np.argmax(tilts))
+    if tilts[k] > MAX_CARRY_TILT_DEG:
+        problems.append(
+            f"tilts the container {tilts[k]:.1f} deg at {k / max(len(q) - 1, 1) * 100:.0f}% of it "
+            f"(max {MAX_CARRY_TILT_DEG:g})"
+        )
+    off = np.degrees(np.abs(wrap(q[-1] - np.asarray(q_goal, dtype=float))))
+    if off.max() > MAX_CARRY_END_DEG:
+        j = int(np.argmax(off))
+        problems.append(f"ends in another arm posture: J{j + 1} {off[j]:.0f} deg from the planned joints")
+    lo, hi = np.minimum(q[0], q[-1]), np.maximum(q[0], q[-1])
+    past = np.degrees(np.maximum(lo - q.min(axis=0), q.max(axis=0) - hi))
+    if past.max() > MAX_CARRY_SWING_DEG:
+        j = int(np.argmax(past))
+        problems.append(f"swings J{j + 1} {past[j]:.0f} deg past the way between its ends")
+    if len(q) > 1:
+        step = np.degrees(np.abs(np.diff(q, axis=0))).max(axis=0)
+        if step.max() > MAX_SAMPLE_STEP_DEG:
+            j = int(np.argmax(step))
+            problems.append(f"jumps J{j + 1} {step[j]:.0f} deg between two samples")
+    return problems, float(max(tilts))
+
+
 def check_approach(model, q_top, approach):
     """Problems if the approach, joint-linear from q_top through its moves' joints as move_joints
     runs it, leaves the straight line down between any two of them or tilts the container."""
