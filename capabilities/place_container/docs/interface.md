@@ -56,14 +56,14 @@ Every action is a dry run (plan and check, nothing moves) unless the node runs w
 | `retreat`    | `execute`                                                                                           | `{"executed", "to"}`                                  |
 | `reset`      | `execute`, `save` (save the current joints as the start), `empty` (no tilt check), `big_turn`       | `{"executed", "plan"}` or `{"saved"}`                 |
 
-Progress phases of `place`: `carry` (the squaring turn on the planned joints, then lift and transit,
-each planned by cuRobo holding the container level, every sample of the plan checked level, in the
-same arm posture and without a wide joint swing, and exactly that trajectory executed, stopping above
-the spot (`carry_targets` level, the default; `joints`: one blended cuRobo motion through the planned
-joints, its path not checked), then the approach straight down to `lower_from` on
-`move_joints` in position mode through the planned line's joints, checked straight and level, its ends
-checked against the chair's volumes; with `blend` false or `adjust_mode` joints, `adjust`, `lift`,
-`transit` on their own), `lower`, `open`, `retreat`. `reset` with `big_turn` (empty hand only) lets a joint turn
+Progress phases of `place`: `carry` (`carry_targets` level, the default: however the start holds the
+container is the reference -- no squaring, no check of the start pose; straight to above the spot at
+the lowest height that plans, the container's bottom at least 10 cm over the table, the hand only
+turning about vertical, the arm's spare joint keeping the elbow clear of the chair and its user; every
+timed sample of the carry, the straight approach and the line down checked for the container's tilt
+from the start, clearance from the padded chair and user boxes, height, joint limits and jumps, and
+exactly those trajectories run; `joints`: one blended cuRobo motion through the planned joints, its
+path not checked), `lower`, `open`, `retreat`. `reset` with `big_turn` (empty hand only) lets a joint turn
 more than 120° on the way back, to recover from a different arm posture. A failed
 check ends the action with `refused` (recoverable) and the reason: what happened, where (m in
 `arm_mount`), what to do next, then the driver's or cuRobo's own words. An error of the arm driver

@@ -422,19 +422,3 @@ def test_the_way_back_is_one_motion_from_the_drop_to_the_start(model):
     assert len(radii) == len(moves) and radii[-1] == 0.0
     assert all(r == plan.RETURN_BLEND for r in radii[:k])  # tight by the container
 
-
-@needs_model
-def test_a_carry_plan_must_keep_the_container_level_and_the_posture(model):
-    q_start = holding_pose(model, SPOT)
-    moves, _, _ = plan.plan_place(model, q_start, SPOT, TABLE_Z, lower_from=0.06)
-    carry, _ = plan.split_carry(moves)
-    q_a, q_b = carry[0][1], carry[-1][1]  # squared at the start -> above the spot
-    straight = [q_a + s * (q_b - q_a) for s in np.linspace(0.0, 1.0, 30)]
-    problems, _ = plan.check_carry_plan(model, straight, q_b)
-    assert not any("posture" in p or "swings" in p or "jumps" in p for p in problems)
-    # the 2026-11-12 run: J1 the wrong way, J4 flipped, the container on its side
-    swing = np.radians([144.0, 0, 0, 149.0, 0, 0, 0])
-    wild = [q + swing * s for s, q in zip(np.linspace(0, 1, 30), straight, strict=True)]
-    problems, tilt = plan.check_carry_plan(model, wild, q_b)
-    assert tilt > plan.MAX_CARRY_TILT_DEG and any("tilts" in p for p in problems)
-    assert any("posture" in p for p in problems) and any("swings" in p for p in problems)
