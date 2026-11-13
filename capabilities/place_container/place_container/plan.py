@@ -433,15 +433,15 @@ def plan_place(
     return moves, descent, info
 
 
-APPROACH_EVERY = 0.04  # m, a joint waypoint this often on the approach, so it stays near the straight line
+APPROACH_EVERY = 0.04  # m, a joint waypoint this often on the approach (check_approach: each stays straight)
 
 
 def split_approach(descent, table_z, lower_from):
     """The line down (zs, qs) split where the tool is `lower_from` above where the container's bottom
-    meets the table: the part above becomes "approach" joint moves for the fast carrying motion
-    (position mode, cuRobo, a waypoint every APPROACH_EVERY so it stays near the line), the rest is
-    the slow impedance line, which then has only those last cm to cover before the touch. lower_from
-    0 (or a line that starts lower already): no approach, the whole line slow as before.
+    meets the table: the part above becomes "approach" joint moves, run fast in position mode right
+    after the carrying motion (move_joints through them, a waypoint every APPROACH_EVERY), the rest
+    is the slow impedance line, which then has only those last cm to cover before the touch.
+    lower_from 0 (or a line that starts lower already): no approach, the whole line slow as before.
     Returns (approach [(name, q)], descent (zs, qs))."""
     zs, qs = descent
     end = table_z + BOWL_DEPTH + lower_from
@@ -451,6 +451,31 @@ def split_approach(descent, table_z, lower_from):
     every = max(1, int(round(APPROACH_EVERY / PATH_STEP)))
     picks = list(range(every, k, every)) + [k]
     return [("approach'" if i != k else "approach", qs[i]) for i in picks], (zs[k:], qs[k:])
+
+
+def split_carry(moves):
+    """plan_place's moves as (the carrying moves up to above the spot, the approach's moves): the
+    first go to cuRobo as one blended go_to_joint_configs, the approach runs on move_joints after it.
+    cuRobo planned each 4 cm approach leg on its own and swung the hand out and back on every one: J1
+    15-18 deg out and back, the hand up to 14 cm up and 7 cm aside, ~1 Hz (flatbot 2026-11-12)."""
+    k = next((i for i, (name, _) in enumerate(moves) if name.startswith("approach")), len(moves))
+    return moves[:k], moves[k:]
+
+
+def check_approach(model, q_top, approach):
+    """Problems if the approach, joint-linear from q_top through its moves' joints as move_joints
+    runs it, leaves the straight line down between any two of them or tilts the container."""
+    problems, q_a = [], q_top
+    for name, q_b in approach:
+        problems += [f"{name}: {p}" for p in check_straight(model, q_a, q_b)]
+        q_a = q_b
+    return problems
+
+
+def approach_lengths(model, q_top, approach):
+    """move_joints' cart_lengths for the approach: the tool's travel to each of its joints."""
+    tools = [model.fk(q)[:3, 3] for q in [q_top, *(q for _, q in approach)]]
+    return [float(np.linalg.norm(b - a)) for a, b in zip(tools[:-1], tools[1:], strict=True)]
 
 
 def blend_radii(waypoints, table_z, near, far):
@@ -628,14 +653,17 @@ def reset_radii(model, q_now, moves, near):
     return radii
 
 
-def contact_zone_checks(model, descent, table_z):
-    """The joint moves of a place that don't go through cuRobo (self.arm.move_joints: the line down
-    and the retreat), as (label, q_from, q_to) for a cuRobo plan_to_joints check of their ends
-    against the chair's collision volumes: the top of the line to its bottom, and where the
-    container should meet the table to the end of the retreat from there. A retreat that can't be
-    planned from there is left out (the real one starts at the contact and is planned again)."""
+def contact_zone_checks(model, descent, table_z, q_approach=None):
+    """The joint moves of a place that don't go through cuRobo (self.arm.move_joints: the approach,
+    the line down and the retreat), as (label, q_from, q_to) for a cuRobo plan_to_joints check of
+    their ends against the chair's collision volumes: from above the spot (`q_approach`, where the
+    approach starts; None: no approach) to the top of the line down, the top of the line to its
+    bottom, and where the container should meet the table to the end of the retreat from there. A
+    retreat that can't be planned from there is left out (the real one starts at the contact and is
+    planned again)."""
     zs, qs = descent
-    checks = [("lower", qs[0], qs[-1])]  # to the bottom of the line down
+    checks = [] if q_approach is None else [("approach", q_approach, qs[0])]  # to where the slow line starts
+    checks.append(("lower", qs[0], qs[-1]))  # to the bottom of the line down
     q_meet = hold_point(qs, zs, table_z + BOWL_DEPTH)
     q_meet = np.asarray(qs[-1] if q_meet is None else q_meet, dtype=float)
     try:

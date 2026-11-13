@@ -56,9 +56,11 @@ Every action is a dry run (plan and check, nothing moves) unless the node runs w
 | `retreat`    | `execute`                                                                                           | `{"executed", "to"}`                                  |
 | `reset`      | `execute`, `save` (save the current joints as the start), `empty` (no tilt check), `big_turn`       | `{"executed", "plan"}` or `{"saved"}`                 |
 
-Progress phases of `place`: `carry` (adjust, lift, transit and the approach down in one blended motion
-through the planned joints; with `blend` false or `adjust_mode` joints, `adjust`, `lift`, `transit` on
-their own), `lower`, `open`, `retreat`. `reset` with `big_turn` (empty hand only) lets a joint turn
+Progress phases of `place`: `carry` (adjust, lift and transit in one blended cuRobo motion through the
+planned joints, stopping above the spot, then the approach straight down to `lower_from` on
+`move_joints` in position mode through the planned line's joints, checked straight and level, its ends
+checked against the chair's volumes; with `blend` false or `adjust_mode` joints, `adjust`, `lift`,
+`transit` on their own), `lower`, `open`, `retreat`. `reset` with `big_turn` (empty hand only) lets a joint turn
 more than 120° on the way back, to recover from a different arm posture. A failed
 check ends the action with `refused` (recoverable) and the reason: what happened, where (m in
 `arm_mount`), what to do next, then the driver's or cuRobo's own words. An error of the arm driver
