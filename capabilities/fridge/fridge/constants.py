@@ -267,6 +267,12 @@ MOUNTS = {
             (0.95, -0.20), (0.95, -0.15), (0.95, -0.05), (0.95, 0.00), (1.00, -0.25), (1.00, -0.20),
             (1.00, -0.15), (1.00, -0.10), (1.00, -0.05), (1.05, -0.15), (1.05, -0.10),
         ),
+        # ... of those, the cells where the open plans only with the push's wheelchair move: an open goal with
+        # base_moves false (no wheelchair move planned) can't start there, and its placement advice leaves them out
+        cells_needing_base_move=(
+            (0.65, -0.15), (0.65, -0.10), (0.65, -0.05),  # the nearest row
+            (0.70, -0.15), (0.75, -0.25), (0.90, -0.10),
+        ),
         push_open_dz_m=0.10,  # 10 cm ABOVE the handle
         grasp_pitches_deg=(25, 30, 40, -25, -30, -40),  # 25-40 either way (GRASP_PITCHES_DEG): nose-down first; 11-09:
         # 45 ran the wrist camera into the handle
@@ -274,6 +280,7 @@ MOUNTS = {
 }
 PLACEMENT_X, PLACEMENT_Y = MOUNTS[0]["placement_x"], MOUNTS[0]["placement_y"]  # configure sets them
 PLACEMENT_CELLS = MOUNTS[0].get("placement_cells")  # ... and this: None, the box above is the placement
+CELLS_NEEDING_BASE_MOVE = MOUNTS[0].get("cells_needing_base_move", ())  # ... and this
 PLACEMENT_YAW_DEG = (-10.0, 10.0)
 
 # The UI's panels (node.py's UI_ACTIONS): the goal keeps the arm, gripper, base and the UI while one waits, so both
@@ -286,11 +293,12 @@ UI_PROMPT_TIMEOUT_S = 600.0
 def configure(data_dir, mount_tilt_deg=0):
     """Point door_common's paths at `data_dir`, name the appliance and pick the mount's placement. No door-size
     defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
-    global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG
+    global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, CELLS_NEEDING_BASE_MOVE, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG
     if mount_tilt_deg not in MOUNTS:
         raise ValueError(f"mount_tilt_deg must be one of {sorted(MOUNTS)}, not {mount_tilt_deg!r}")
     PLACEMENT_X, PLACEMENT_Y = MOUNTS[mount_tilt_deg]["placement_x"], MOUNTS[mount_tilt_deg]["placement_y"]
     PLACEMENT_CELLS = MOUNTS[mount_tilt_deg].get("placement_cells")
+    CELLS_NEEDING_BASE_MOVE = MOUNTS[mount_tilt_deg].get("cells_needing_base_move", ())
     PUSH_OPEN_DZ_M = MOUNTS[mount_tilt_deg]["push_open_dz_m"]
     GRASP_PITCHES_DEG = MOUNTS[mount_tilt_deg]["grasp_pitches_deg"]
     dc.configure_paths(data_dir)

@@ -231,8 +231,9 @@ class PushOpen:
     """What follows the pull: plans the back-off, wheelchair move and push from the hand on the handle, the gripper
     open (`plan`), and runs them (`execute`), re-planned from where the pull really ended."""
 
-    def __init__(self, chair_dir=F.CHAIR_BACK_DIR):
+    def __init__(self, chair_dir=F.CHAIR_BACK_DIR, base_moves=True):
         self.chair_dir = chair_dir
+        self.moves = F.CHAIR_MOVES_M if base_moves else (0.0,)  # base_moves false: the push from where the chair is
         self.chair_move = None
         self.motion = None  # back-off + push (no move), or the back-off alone (a move)
         self.push = None  # with a move: the push after it, as planned
@@ -249,7 +250,7 @@ class PushOpen:
         if off is None:
             return False, f"push-open: {why}"
         off_pose = (back.pos, back.quat)
-        for move in F.CHAIR_MOVES_M:
+        for move in self.moves:
             if move == 0:
                 moved, route = door, model.full(deg0)
             else:
@@ -265,7 +266,10 @@ class PushOpen:
             else:
                 self.motion, self.push = off, push
             return True, f"push-open OK, {_after(move)} ({self.describe()}); the push {self.finish}"
-        moves = ", ".join(f"{m * 100:+.0f}" for m in F.CHAIR_MOVES_M)
+        if len(self.moves) == 1:
+            return False, (f"push-open: no hand placement behind the door plans without a wheelchair move "
+                           f"(base_moves false; last: {why})")
+        moves = ", ".join(f"{m * 100:+.0f}" for m in self.moves)
         return False, f"push-open: no hand placement behind the door plans (wheelchair moves {moves} cm; last: {why})"
 
     def describe(self):

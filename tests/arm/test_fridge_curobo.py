@@ -372,6 +372,24 @@ def _close_geometries(arm, planner, container=False):
             for yaw in F.CLOSE_YAWS_DEG]
 
 
+def test_without_base_moves_the_push_plans_no_wheelchair_move_and_the_open_refuses(fridge, monkeypatch):
+    arm, planner, _ = fridge
+    monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", 0.0)
+    # as above: the push plans only after a wheelchair move -- which base_moves false never plans
+    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(obstacles)
+    with pytest.raises(dc.Refused, match="base_moves false: no wheelchair move was planned"):
+        open_door.run(arm, planner, False, base_moves=False)
+    assert arm.sent == [] and push_open.NEXT_MOVE == 0.0
+    with pytest.raises(dc.Refused, match="base_moves false"):
+        open_door.run(arm, planner, True, chair_moved=True, base_moves=False)
+    # the placement advice leaves out the cells that need the move
+    monkeypatch.setattr(F, "PLACEMENT_CELLS", ((0.65, -0.10), (0.85, -0.10)))
+    monkeypatch.setattr(F, "CELLS_NEEDING_BASE_MOVE", ((0.65, -0.10),))
+    assert open_door._cells() == [(0.85, -0.10)]
+    open_door.BASE_MOVES = True
+    assert open_door._cells() == [(0.65, -0.10), (0.85, -0.10)]
+
+
 def test_the_push_starts_behind_the_open_door_and_meets_it_on_its_arc(fridge):
     """User, 11-09: any part of the hand (or container) may push, at any angle, anywhere on the door (further out for
     leverage); only reaching ~45 deg matters. The push starts round the hinge past the open door, clear of it, tried

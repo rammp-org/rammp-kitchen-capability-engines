@@ -243,6 +243,8 @@ class Capability(CapabilityEngine):
                     "release_only": {"type": "boolean", "default": False},
                     # the push-open asked for a wheelchair move after the pull and it was made: push the door on
                     "chair_moved": {"type": "boolean", "default": False},
+                    # false: plan the open with no wheelchair move (the push from where the chair is, or refuse)
+                    "base_moves": {"type": "boolean", "default": True},
                     # a dry run that plans OK also writes the door file as the planned open would leave it, so the
                     # close can be tested without an executed open (open the door to that angle by hand)
                     "save_door": {"type": "boolean", "default": False},
@@ -589,7 +591,8 @@ class Capability(CapabilityEngine):
         try:
             # before the arm moves, if this goal may drive the base: its odometry and the arm's e-stop status are there
             if action_id == "open":
-                may_drive = bool(params.get("push_open", True)) and not params.get("release_only")
+                may_drive = (bool(params.get("push_open", True)) and not params.get("release_only")
+                             and bool(params.get("base_moves", True)))
             else:
                 may_drive = params.get("chair_back") is None or float(params["chair_back"]) != 0
             if drive_base and may_drive:
@@ -610,6 +613,7 @@ class Capability(CapabilityEngine):
                     chair_moved=bool(params.get("chair_moved", False)),
                     chair_back_dir=self.cfg["chair_back_dir"],
                     drive_chair=drive_chair,
+                    base_moves=bool(params.get("base_moves", True)),
                 )
                 if ok and push_open.NEXT_STEP:  # the wheelchair move it asks for, where the goal was sent
                     ctx.progress(action_id, 100.0, push_open.NEXT_STEP)

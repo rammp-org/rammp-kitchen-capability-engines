@@ -86,7 +86,7 @@ In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doi
 - **Close Fridge Door** (grip the container first, as in Close step 1) → "Fridge door closed." It may first ask for a
   wheelchair move, as the open does. Move the wheelchair forward again after.
 - **... (wheelchair drives)**: the same, but the base drives the move at 0.03 m/s (Arm + Drive Base, "Before").
-- A refusal: "Couldn't ... Press <button> to try again." with that button and **Stop**. Any other failure: an error
+- A refusal: `Couldn't ... Press <button> to try again.` with that button and **Stop**. Any other failure: an error
   panel with **Done**; after a failed open, if it says the hand may still be holding the handle, send `release_only`.
 
 No panels: T2 logs `standalone/no session token` (check `use_orchestrator:=true`) or
@@ -220,6 +220,12 @@ Do this before relying on it.
    (dry run or not) then spends up to 90 s planning it again for wheelchair moves of 5 and 10 cm and ends
    `checked by planning it: the open plans with ... -- move the wheelchair ...` (or that no such move helps:
    the refusal isn't about placement). Prefer that over the `placement:` lines, which come from a sim.
+
+   **Without any wheelchair move** add `\"base_moves\": false` to the params (e.g.
+   `"{\"execute\": false, \"base_moves\": false}"` for the dry run): the push must plan from where the chair
+   stands, or the open refuses before anything moves. The handle cells (x, y) (0.65, −0.15), (0.65, −0.10),
+   (0.65, −0.05), (0.70, −0.15), (0.75, −0.25) and (0.90, −0.10) planned in sim only with the move, so the
+   `placement:` advice leaves them out.
 
 1. **Only if asked:** move the wheelchair as it says (without turning it), then
    push the door on to 90°, in T3:

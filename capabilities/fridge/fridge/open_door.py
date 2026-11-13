@@ -76,13 +76,25 @@ PLACEMENT_DEADBAND_M = 0.02  # ... and never asks for a move smaller than this a
 # "1 cm back", then "1 cm closer" advice of 11-09
 
 
+BASE_MOVES = True  # the running open's base_moves (run sets it): False leaves CELLS_NEEDING_BASE_MOVE out of the advice
+
+
+def _cells():
+    """constants.PLACEMENT_CELLS, less the cells that need the push's wheelchair move when the open may not plan one."""
+    cells = [tuple(c) for c in F.PLACEMENT_CELLS or ()]
+    if BASE_MOVES:
+        return cells
+    drop = {(round(cx, 2), round(cy, 2)) for cx, cy in F.CELLS_NEEDING_BASE_MOVE}
+    return [c for c in cells if (round(c[0], 2), round(c[1], 2)) not in drop]
+
+
 def _placement_move(x, y):
     """The smallest handle displacement (dx, dy) (m, arm_mount) that puts the handle (x, y) PLACEMENT_INSET_M inside a
     cell whose four neighbours planned too (constants.PLACEMENT_CELLS: well inside, not on the edge; all cells if none
     is), each axis under PLACEMENT_DEADBAND_M dropped. (0, 0): inside, or close enough that detection noise is larger.
     The nearest POINT of the region, not the nearest cell's centre: a handle already right along one axis gets no move
     along it, and two detections a centimetre apart get the same advice."""
-    cells = [tuple(c) for c in F.PLACEMENT_CELLS]
+    cells = _cells()
     half = PLACEMENT_CELL_M / 2
     if any(abs(x - cx) <= half and abs(y - cy) <= half for cx, cy in cells):
         return 0.0, 0.0
@@ -770,6 +782,7 @@ def run(
     chair_moved=False,
     chair_back_dir=F.CHAIR_BACK_DIR,
     drive_chair=None,
+    base_moves=True,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Exactly `swing_deg` (default PUSH_OPEN_PULL_DEG, or SWING_DEG without `push`), then what follows. `grasp_offset`:
@@ -780,15 +793,20 @@ def run(
     the back-off, asking for a wheelchair move (push_open.NEXT_STEP); `chair_moved` then does the rest: the push, from
     where the hand is (push_after_chair_move). `chair_back_dir`: which way moving the wheelchair back moves the fridge
     in the arm's frame. `drive_chair` (the goal's drive_base: base_drive.move_chair): the push-open's wheelchair move is
-    driven by the base within this goal, not asked for. Returns True when it finished (or the dry run passed); raises
-    Refused."""
+    driven by the base within this goal, not asked for. `base_moves` False: the open plans no wheelchair move at all
+    (the push from where the chair stands, or it refuses), and the placement advice leaves out the cells that need
+    one (constants CELLS_NEEDING_BASE_MOVE). Returns True when it finished (or the dry run passed); raises Refused."""
+    global BASE_MOVES
     P.NEXT_STEP, P.NEXT_MOVE = "", 0.0
+    BASE_MOVES = bool(base_moves)
 
     def task():
         global LAST_PLAN
         if release_only:
             return release_back_off(ai, planner, execute)
         if chair_moved:
+            if not BASE_MOVES:
+                raise Refused("chair_moved is the push after a wheelchair move, and base_moves false plans none.")
             if not push:
                 raise Refused("chair_moved is for the push-open's push, after the open asked for a wheelchair move.")
             return push_after_chair_move(ai, planner, execute, chair_back_dir)
@@ -805,7 +823,9 @@ def run(
             save_door_geometry(push_after_chair_move=None, close_chair_back=None)
         say("\n===== OPEN: detect, plan the whole open (cuRobo) =====")
         def make_after():
-            return PushOpen(chair_back_dir) if push else (ReleaseAround() if around else ReleaseBackOff())
+            if push:
+                return PushOpen(chair_back_dir, base_moves=BASE_MOVES)
+            return ReleaseAround() if around else ReleaseBackOff()
 
         after = make_after()
         LAST_PLAN = None
@@ -817,7 +837,9 @@ def run(
         except Infeasible as e:  # not plannable from here: where to put the wheelchair is the answer
             _, hint = placement_moves(h, n)
             found = search_placement(planner, geom, q0, swing, make_after, hint)
-            raise Refused(f"{e} -- refusing before any motion. {start}{placement_primary(h, n)}{found}") from e
+            nomove = (" (base_moves false: no wheelchair move was planned; from this placement the push needs one)"
+                      if push and not BASE_MOVES else "")
+            raise Refused(f"{e}{nomove} -- refusing before any motion. {start}{placement_primary(h, n)}{found}") from e
         except Refused as e:  # something else (the arm's start, the planner, ...): placement only as an aside
             raise Refused(f"{e} -- refusing before any motion. {start}{placement_secondary(h, n)}") from e
         plan.update(after=after, hinge_fields=geom["hinge_fields"], door_mid=geom["door_mid"])
