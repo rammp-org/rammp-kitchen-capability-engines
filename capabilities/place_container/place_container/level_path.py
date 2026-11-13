@@ -164,8 +164,9 @@ def turned_to(R0, heading):
     return (Rotation.from_rotvec([0.0, 0.0, yaw]) * Rotation.from_matrix(R0)).as_matrix()
 
 
-def null_direction(model, q, eps=1e-4):
-    """A unit joint direction that leaves the tool pose unchanged (the elbow's swing), at joints q."""
+def jacobian(model, q, eps=1e-4):
+    """The tool's 6x7 Jacobian at joints q (position; rotation as the world-frame rotation vector), by
+    finite differences of the model's FK."""
     T0 = model.fk(q)
     J = np.zeros((6, 7))
     for i in range(7):
@@ -174,9 +175,33 @@ def null_direction(model, q, eps=1e-4):
         T = model.fk(q + dq)
         J[:3, i] = (T[:3, 3] - T0[:3, 3]) / eps
         J[3:, i] = Rotation.from_matrix(T[:3, :3] @ T0[:3, :3].T).as_rotvec() / eps
+    return J
+
+
+def null_direction(J):
+    """A unit joint direction that leaves the tool pose unchanged (the elbow's swing), from the Jacobian J."""
     _, _, vt = np.linalg.svd(J)
-    n = vt[-1]
-    return n / np.linalg.norm(n)
+    return vt[-1] / np.linalg.norm(vt[-1])
+
+
+POS_TOL_M = 3e-4  # solve_near's pose tolerance: 0.3 mm ...
+ROT_TOL_RAD = np.radians(0.1)  # ... and 0.1 deg
+
+
+def solve_near(model, q, pos, R_goal, J_pinv, iters=8):
+    """Joints at the tool pose (pos, R_goal) near q: Newton steps on the pose error with J_pinv (the
+    pseudo-inverse of a Jacobian near q, refreshed halfway), the elbow left where q has it. None if it does
+    not converge to POS_TOL_M / ROT_TOL_RAD or leaves a joint limit. Continuous joints stay unwrapped."""
+    q = np.asarray(q, dtype=float).copy()
+    for i in range(iters):
+        T = model.fk(q)
+        e = np.concatenate([pos - T[:3, 3], Rotation.from_matrix(R_goal @ T[:3, :3].T).as_rotvec()])
+        if np.linalg.norm(e[:3]) < POS_TOL_M and np.linalg.norm(e[3:]) < ROT_TOL_RAD:
+            return None if model.limit_violations(wrap_continuous(q)) else q
+        if i == iters // 2:
+            J_pinv = np.linalg.pinv(jacobian(model, q))
+        q = q + J_pinv @ e
+    return None
 
 
 def knot_poses(p_from, R_from, p_to, R_to, step):
@@ -197,15 +222,16 @@ def search_line(model, chair, q_from, p_to, R_to, step, label, null_steps=NULL_S
     poses = knot_poses(T[:3, 3], T[:3, :3], p_to, R_to, step)
     for k, (pos, quat) in enumerate(poses):
         nxt = []
+        R_goal = Rotation.from_quat(quat).as_matrix()
         for cost, path, worst in beam:
             q_prev = path[-1]
-            n = null_direction(model, q_prev)
+            J = jacobian(model, q_prev)
+            n, J_pinv = null_direction(J), np.linalg.pinv(J)
             seen = []
             for a in null_steps:
-                q = model.ik(pos, quat, q_prev + a * n, restarts=0)
+                q = solve_near(model, q_prev + a * n, pos, R_goal, J_pinv)
                 if q is None:
                     continue
-                (q,) = rammp_arm._unwrap_from(q_prev, [q])
                 if np.max(np.abs(np.degrees(q - q_prev))) > MAX_KNOT_STEP_DEG:
                     continue
                 if any(np.max(np.abs(q - s)) < np.radians(0.5) for s in seen):
