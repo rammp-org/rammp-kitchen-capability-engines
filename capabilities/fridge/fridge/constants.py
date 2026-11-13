@@ -129,9 +129,14 @@ SWING_DEG = 90  # the full pull (push_open false) without a swing_deg. Exactly t
 # --- how the open moves (the side grasp's 11-06 hardware runs, side_run/; run_general.py): the swing held compliant, the
 # gripper closing as the pull starts, the swing stopping at its angle, then the gripper opening, everything after the
 # release one motion ---
-PULL_GAINS = {  # the driver's stiffest joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad, torque_limit <=
-    # the URDF's effort limits), critically damped: the swing and everything after the release run under it
-    "kq": (400.0,) * 7,
+PULL_GAINS = {  # joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad, torque_limit <= the URDF's effort
+    # limits), critically damped: the swing and everything after the release run under it. The shoulder and elbow
+    # (j1-j4) at the driver's stiffest, to carry the door; the wrist (j5-j7) at the driver's own stiff profile, 60. At
+    # 400 the wrist, the hand clamped on a handle that the door holds to its own arc, turned any mismatch between the
+    # planned arc and the door's into torque: 400 N m/rad x 0.9 deg = 6 N m, the driver's contact stop at its loose
+    # profile (j5-j7). 11-13: two of three pulls stopped -11 "unexpected contact" late in the swing, j6 ~6 N m off the
+    # pull that finished, j1-j4 well inside theirs. At 60 the same mismatch is ~0.9 N m.
+    "kq": (400.0, 400.0, 400.0, 400.0, 60.0, 60.0, 60.0),
     "zeta": 1.0,
     "torque_limit": (39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0),
 }

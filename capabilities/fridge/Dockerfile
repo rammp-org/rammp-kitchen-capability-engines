@@ -37,10 +37,18 @@ RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wi
 # rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
 # interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
 # geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
-# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
-# once the FROM moves to rammp-base 2.0.0.
+# Drop this once the FROM moves to rammp-base 2.0.0.
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
 RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
+
+# rammp_arm_interfaces from 788be6341a8c (the test image's pin): the base's predates the driver's
+# SetContactThresholds (/set_contact_thresholds), which the open and close use to loosen the
+# arm's contact stop while they pull and push the door. Checked 11-12 against the running
+# nightly arm driver: every msg/srv/action definition identical; the base's differs only by
+# lacking that service.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/788be6341a8c5fa26fcd0cb023d08005aacad0f1.tar.gz /tmp/arm_interfaces.tar.gz
+RUN tar -xzf /tmp/arm_interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_arm_interfaces' && rm /tmp/arm_interfaces.tar.gz
+
 
 # rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages behind ctx.update_user_panel /
 # poll_ui_event / publish_overlay_image) is not in the base either: build it from a pinned

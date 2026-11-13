@@ -31,6 +31,7 @@ detected it yet. The driver runs it (go_to_joint_config). The gripper is untouch
 plans only.
 """
 
+import contextlib
 import time
 from functools import partial
 
@@ -47,6 +48,15 @@ from .perception import WristCamera
 from .planning import Planner
 from .tee_logger import TeeLogger
 from .world import PlannerWorld, chair_stand_in
+
+# The arm driver's contact stop (kinova-gen3-ros2, docs/interface.md "Contact stops"): with contact_detection enforce
+# it halts a goal (-11, "unexpected contact") once a joint's external torque passes its profile's threshold. Pulling
+# the door against its seal and pushing it crossed the default profile (11-12: the swing stopped 3 cm short, the hand
+# on the handle). As the driver's docs ask of a client expecting contact, an executed open or close switches to the
+# loose profile and back to the default afterwards, whatever happens. Observe / off: the driver refuses the switch
+# or stops nothing; either way the action runs as before.
+CONTACT_THRESHOLDS_SERVICE = "/set_contact_thresholds"
+CONTACT_SERVICE_WAIT_S = 2.0
 
 COMMON = {
     "execute": {"type": "boolean", "default": False},
@@ -130,7 +140,8 @@ PARAMS = {
 }
 
 # The UI's buttons (one press each, no settings): the action each runs, with what. Go to Fridge: the start pose
-# (start_joints_deg) at 0.7; the open at 0.7 (faster than TESTING.md's 0.2, 11-12); the close at its default 0.7 (slower, the swing doesn't
+# (start_joints_deg) at 0.7; the open at 0.7 (faster than TESTING.md's 0.2, 11-12); the close at its
+# default 0.7 (slower, the swing doesn't
 # carry the door shut). A wheelchair move the open's push or the close
 # needs is asked for on the UI (Continue, then the rest with chair_moved), or, on the "wheelchair drives" buttons,
 # driven by the base (drive_base) within the goal.
@@ -495,6 +506,47 @@ class Capability(CapabilityEngine):
         pressed = ui.ask(message, buttons, timeout_s=constants.UI_PROMPT_TIMEOUT_S, title=title, style="warning")
         return self._ui_answer(ui, "try again", pressed, "retry")
 
+    def _set_contact_profile(self, name):
+        """The arm driver's contact thresholds to `name` ("loose" / "default"). (accepted, what the driver said)."""
+        try:
+            from rammp_arm_interfaces.srv import SetContactThresholds
+        except ImportError:
+            return False, "these interfaces have no SetContactThresholds (rammp_arm_interfaces too old)"
+        if getattr(self, "_contact_client", None) is None:
+            self._contact_client = self.create_client(SetContactThresholds, CONTACT_THRESHOLDS_SERVICE)
+        if not self._contact_client.wait_for_service(timeout_sec=CONTACT_SERVICE_WAIT_S):
+            return False, f"{CONTACT_THRESHOLDS_SERVICE} does not answer"
+        req = SetContactThresholds.Request()
+        req.profile = {"loose": SetContactThresholds.Request.PROFILE_LOOSE,
+                       "default": SetContactThresholds.Request.PROFILE_DEFAULT}[name]
+        token = getattr(getattr(self.arm, "_driver", None), "token", None)
+        if token is not None:
+            req.token = list(token)
+        future = self._contact_client.call_async(req)
+        deadline = time.monotonic() + CONTACT_SERVICE_WAIT_S
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not future.done():
+            return False, f"{CONTACT_THRESHOLDS_SERVICE} did not answer in {CONTACT_SERVICE_WAIT_S:.0f} s"
+        got = future.result()
+        return bool(got.accepted), (str(got.message or "") or f"thresholds now {list(got.thresholds)} N.m")
+
+    @contextlib.contextmanager
+    def _contact_expected(self, execute):
+        """An executed open / close: the driver's loose contact profile for its length, the default after."""
+        if not execute or self.mock:
+            yield
+            return
+        ok, said = self._set_contact_profile("loose")
+        self.get_logger().info(f"contact stop: loose profile {'on' if ok else 'NOT set'} ({said})")
+        try:
+            yield
+        finally:
+            if ok:
+                back, said = self._set_contact_profile("default")
+                log = self.get_logger().info if back else self.get_logger().error
+                log(f"contact stop: default profile {'back' if back else 'NOT restored'} ({said})")
+
     def _execute(self, action_id, params, ctx):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)
         speed = float(params.get("speed", constants.CLOSE_SPEED if action_id == "close" else 1.0))
@@ -553,6 +605,7 @@ class Capability(CapabilityEngine):
                 self._drove = True  # from its first command on, wherever it ends: the UI then never retries
                 return move_chair(move)
 
+        contact = contextlib.ExitStack()  # the loose contact profile while an executed open / close runs
         try:
             # before the arm moves, if this goal may drive the base: its odometry and the arm's e-stop status are there
             if action_id == "open":
@@ -562,6 +615,7 @@ class Capability(CapabilityEngine):
                 may_drive = params.get("chair_back") is None or float(params["chair_back"]) != 0
             if drive_base and may_drive:
                 base_drive.check(self.base, self.arm)
+            contact.enter_context(self._contact_expected(execute))
             if action_id == "open":
                 ok = open_door.run(
                     self.arm,
@@ -621,6 +675,7 @@ class Capability(CapabilityEngine):
                 recoverable=True,
             ) from e
         finally:
+            contact.close()  # the default contact profile back, also after a refusal, a failure or a cancel
             world.restore()  # the robot's own planner world back, also after a refusal or a cancel
             dc.set_output(None)
             dc.set_camera(None)

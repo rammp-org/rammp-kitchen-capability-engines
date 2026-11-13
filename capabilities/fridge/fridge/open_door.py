@@ -775,12 +775,19 @@ def execute_open(ai, planner, plan):
                                  start_pose=(real["pos"], real["quat"]))
         if sw is None:
             raise Refused(f"swing from the real grasp: {why} -- stopping, the hand on the handle (door closed).")
-    after = plan["after"]
-    deg_end = plan["swing_deg"]
-    ok, msg = after.plan(planner, opened(plan["door"], deg_end), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
-    say(f"after-swing re-check from the real grasp: {msg}")
-    if not ok:
-        raise Refused(f"{msg} from the real grasp -- stopping BEFORE the swing, the hand on the handle (door closed).")
+        # the swing changed, so what follows it is checked again from the new swing's end
+        after = plan["after"]
+        deg_end = plan["swing_deg"]
+        ok, msg = after.plan(planner, opened(plan["door"], deg_end), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
+        say(f"after-swing re-check from the real grasp: {msg}")
+        if not ok:
+            raise Refused(
+                f"{msg} from the real grasp -- stopping BEFORE the swing, the hand on the handle (door closed)."
+            )
+    else:
+        # the grasp is on the plan, so the swing is the planned one and what follows it was checked up front from the
+        # same swing end: checking it again would only repeat that (it held the arm still ~6 s at the handle, 11-12)
+        say(f"  the grasp is on the plan ({off:.1f} deg off): the swing and what follows it as planned up front")
     save_door_geometry(**plan["hinge_fields"])
     planner.join(sw, model.cabinet())
     events = [(0.0, partial(_close_gripper, ai))] if F.GRIP_DURING_SWING else []
