@@ -106,6 +106,7 @@ from box_opening.constants import (
     GRIPPER_CMD_CLOSED,
     GRIPPER_CMD_OPEN,
     PLANNER_LIMIT_MARGIN_RAD,
+    SANITY_MARGIN_RAD,
     TRANSIT_SPEED,
 )
 from box_opening.models.container import ContainerPose
@@ -122,7 +123,7 @@ from box_opening.primitives.core import (
 )
 from box_opening.runtime import abort, fingers
 from box_opening.runtime.driver import GripperWait
-from box_opening.runtime.guards import in_band
+from box_opening.runtime.guards import in_band, sanity_violations
 from box_opening.runtime.legs import merge_groups
 from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_press as rp
@@ -1308,6 +1309,10 @@ def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z):
     from box_opening.runtime import approach
 
     chain = approach._chain()
+    # the way in stands over the lid the grip goes down to: where the arm's touch put the lid higher than
+    # the cameras put the button (flatbot 2026-11-12 18:42: 44 mm, the wrist's depth reading far), the way
+    # in planned for the cameras' height ended 22 mm over the grip's end, too low to come down from
+    button = (float(button[0]), float(button[1]), max(float(button[2]), float(lid_z)))
     move, plan, why = rp.reach_from_here(ctx, cfg, button, tilt, need_stroke=False, q=q_from)
     if plan is None:
         return None, why
@@ -1694,6 +1699,20 @@ def plan_carry(ctx, cfg, q_from, drop):
         log.info("[press_demo] the planner refused the carry (%s): the arm's own walk instead" % rp._short(e))
     if carry.traj is not None and not walked:
         carry.traj = approach.on_branch_of(carry.traj, q_from)  # continues the clear, not a turn away
+        # the runner's sanity gate, here where another way can still be taken: it gates every leg of an
+        # execution before anything moves, so a carry that swings wide refused the close, the lift and the
+        # set-down merged with it (flatbot 2026-11-12 18:42: arm_joint_2 0.444 rad against 0.444 allowed; the
+        # run read the refusal as a grip that missed and never closed on a knob that was up). The arm's own
+        # walk there instead, as for a start the planner refuses; a spot neither reaches is passed over
+        bad = sanity_violations(carry.traj, SANITY_MARGIN_RAD)
+        if bad:
+            swung = "the planner's carry swings wide (%s)" % "; ".join(bad)
+            carry, why = walk_carry(ctx, chain, q_from, hover, quat, world)
+            if carry is None:
+                return None, "the carry (%s; walked: %s)" % (swung, why)
+            walked = True
+            log.info("[press_demo] %s: the arm's own walk instead" % swung)
+    if carry.traj is not None and not walked:
         carry.goal_joints = [float(v) for v in carry.traj.points[-1].positions]
         # the planner's world may be empty (worlds.PLANNER_WORLD): the carry is held out of the
         # chair and its user as the plan-free lines are (runtime/body), and a spot whose carry
@@ -2740,6 +2759,19 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
     # down: the close, then the lid lifted, carried and set down without a
     # stop. A close that fails stops before anything lifts
     one = placed is not None and placed.carry is not None
+    if one:
+        # the runner gates every leg before anything moves: a carry it would refuse is not flown merged with
+        # the close and the lift (nothing would close), the lift goes alone and the carry is chosen after it
+        gate = runner.refusal(placed.carry.legs)
+        if gate is not None:
+            log.info(
+                "[press_demo] the carry planned ahead would be refused (%s: %s): the lift alone, then the spot "
+                "look" % gate
+            )
+            one = False
+    gate = runner.refusal(lift.legs)
+    if gate is not None:
+        return back_out("the lid has no way off the box (%s: %s) — not gripping it" % gate, opened=False)
     carried = None
     ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
     if one:
@@ -2786,7 +2818,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         watch_setdown(ctx, flying, carry)  # where the lid meets the table, watched
         res = runner.run(flying, execute=True)
     else:
-        if placed is not None:
+        if placed is not None and placed.carry is None:
             log.info(
                 "[press_demo] no spot whose carry and home both plan was found while the hand came down (%s): "
                 "the lift alone, then the spot look" % ("; ".join(placed.refused) or "no spot the hand reaches")

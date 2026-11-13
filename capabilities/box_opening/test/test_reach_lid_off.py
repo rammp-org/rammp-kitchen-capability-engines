@@ -3440,6 +3440,69 @@ def test_a_carry_the_planner_refuses_inside_its_limit_margin_is_the_arms_own_wal
     assert carry is None and why == "the carry (MotionGenStatus.IK_FAIL)" and len(chain.walks) == 2
 
 
+def test_a_carry_the_planner_swings_wide_is_the_arms_own_walk_before_anything_is_merged_with_it(ctx, monkeypatch):
+    """Flatbot 2026-11-12 18:42: the planner's carry took arm_joint_2 0.444 rad against the 0.444 the
+    runner's sanity gate allows. The gate judges every leg of an execution before anything moves, so it
+    refused the close, the lift and the set-down merged with that carry, and the run read the refusal as
+    a grip that missed: the knob was up and no finger closed on it. The carry is judged by that gate
+    where it is planned: one that swings is the arm's own walk to the same hover (walk_carry), and a spot
+    neither reaches is refused there, for the next."""
+    import copy
+
+    from conftest import leg as make_leg
+
+    from box_opening.primitives.core import PlanState
+    from box_opening.runtime import approach
+    from box_opening.runtime.guards import sanity_violations
+
+    cfg = load_press_demo(PINK)
+    chain = _HandAt(0.45)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
+
+    def swings(ctx_, state, name, target, world, speed):
+        start = list(state.joints)
+        lg = make_leg(name, start=start, end=[v + 0.05 for v in start], speed=speed, world=world[0])
+        out = copy.deepcopy(lg.traj.points[0])
+        out.positions = [start[0], start[1] + 0.05 + rlo.SANITY_MARGIN_RAD + 0.01, *start[2:]]
+        lg.traj.points.insert(1, out)  # joint 2 out past the gate's allowance and back
+        lg.target = target
+        return lg, state
+
+    monkeypatch.setattr(rp, "_plan_motion", swings)
+    assert sanity_violations(
+        swings(ctx, PlanState(joints=[0.0] * 7, chain=0), "lid:carry", None, ("full",), 1.0)[0].traj, 0.35
+    )
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert why is None and [lg.name for lg in carry.legs] == ["lid:carry", "place:down", "place:touch"]
+    assert carry.legs[0].plan_free and len(chain.walks) == 1  # the walk, to the same hover
+    assert chain.walks[0]["xyz"] == rlo.setdown_poses(ctx, drop)[2]
+    assert not sanity_violations(carry.legs[0].traj, rlo.SANITY_MARGIN_RAD)
+    # no walk there either: the spot's carry is refused where it is planned, and says both
+    chain.walk = lambda q0, xyz, quat, **k: (None, "IK did not converge 40% of the way")
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert carry is None and "swings wide" in why and "walked: IK did not converge" in why
+
+
+def test_the_way_down_to_a_knob_is_planned_for_the_lid_as_touched_where_that_stands_higher(ctx, monkeypatch):
+    """Flatbot 2026-11-12 18:42: the arm's touch put the lid 44 mm over where the wrist camera put the
+    button. The grip's way in from the look pose, planned for the camera's height, ended with the pads 22
+    mm over the grip's end, too low to come down from ("the hand does not come down to the knob"). The
+    way in is planned for the higher of the two; a lid the touch puts at or under the cameras' button
+    changes nothing."""
+    cfg = load_press_demo(PINK)
+    asked = []
+
+    def reach(ctx_, cfg_, button, tilt, need_stroke=True, q=None):
+        asked.append(tuple(button))
+        return None, None, "stop here"
+
+    monkeypatch.setattr(rp, "reach_from_here", reach)
+    assert rlo.solve_grip_way(ctx, cfg, (0.5, -0.4, 0.313), 30.0, [0.0] * 7, 0.357) == (None, "stop here")
+    assert rlo.solve_grip_way(ctx, cfg, (0.5, -0.4, 0.313), 30.0, [0.0] * 7, 0.300) == (None, "stop here")
+    assert asked == [(0.5, -0.4, 0.357), (0.5, -0.4, 0.313)]
+
+
 def test_the_scene_cloud_is_moved_by_the_cameras_error_at_the_box_but_not_by_a_rough_fit(ctx):
     """_scene_cloud moves the scene camera's table points by where the arm found the box against
     where the scene put it: the camera's error. A ROUGH fix (a box the frame cut, scene_source.

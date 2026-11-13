@@ -761,6 +761,15 @@ class Runner:
                 return "no effort fields in /joint_states — guarded legs " "refuse to run (spec §6)"
         return None
 
+    def refusal(self, legs):
+        """(leg name, why) of the first of `legs` run() would refuse before anything moves, or None: its
+        own gate (_refusal), asked ahead by a caller that has another way to fly where one leg is refused."""
+        for leg in legs:
+            why = self._refusal(leg)
+            if why:
+                return leg.name, why
+        return None
+
     # -- run ----------------------------------------------------------------
     def run(self, legs, execute, lookahead=None):
         """Execute legs in merge groups.
