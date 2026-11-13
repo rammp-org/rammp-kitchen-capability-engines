@@ -394,8 +394,8 @@ def test_the_approach_is_a_straight_line_checked_at_its_ends(model):
     np.testing.assert_allclose(approach[-1][1], descent[1][0])  # the slow line starts where it ends
     checks = plan.contact_zone_checks(model, descent, TABLE_Z, q_top)
     assert [c[0] for c in checks] == ["approach", "lower", "retreat"]
-    np.testing.assert_allclose(checks[0][1], q_top)
-    np.testing.assert_allclose(checks[0][2], descent[1][0])
+    np.testing.assert_allclose(checks[0][1], descent[1][0])  # from the approach's end ...
+    np.testing.assert_allclose(checks[0][2], q_top)  # ... up to above the spot, the carry's goal
     # a joint path that bends off the line is refused
     bent = [(n, q + np.radians([10.0, 0, 0, 0, 0, 0, 0])) if n == "approach'" else (n, q) for n, q in approach]
     assert plan.check_approach(model, q_top, bent)
