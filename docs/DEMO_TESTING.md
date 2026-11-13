@@ -205,9 +205,11 @@ docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_U
   ros2 run place_container place_container_node --ros-args -p use_orchestrator:=false -p allow_execute:=true
 
 # N4 box_opening (no ros2 run: as PID 1 it would not pass Ctrl-C on to the run). Its state dir keeps the
-# finger calibration (gripper.json): keep the same host directory between sessions.
+# finger calibration (gripper.json): keep the same host directory between sessions. It holds every motion out of
+# the chair and the user in the robot's planner config (body_layers, /config/robot/curobo/planner.yaml): without
+# that mount every run stops before it moves ("not starting: body model: cannot read ...").
 docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_URI="$DDS" \
-  -v $HOME/.ros/box_opening:/state \
+  -v $HOME/.ros/box_opening:/state -v $DEPLOY/config/robots/current:/config/robot:ro \
   $KCE/box_opening:dev \
   /module_ws/install/box_opening/lib/box_opening/box_opening_node --ros-args \
   -p use_orchestrator:=false -p allow_execute:=true -p state_dir:=/state \
@@ -390,11 +392,13 @@ Keep `speed` ≥ 0.7 or the swing doesn't carry the door shut. With the base dri
 
 ### 4. Place tupperware on the table (`place_container`)
 
-With the x, y, table_z from `mark` (Before the run, step 2):
+The spot below is the one the last place runs used (marked and placed on 11-12 evening, the last succeeding at
+01:08 UTC 11-13; `~/.place_container/spot.json`). It is right only with the table and the wheelchair where they were
+then: otherwise `mark` a new one (Before the run, step 2) and put its x, y, table_z here.
 
 ```bash
-goal place_container place '{"execute": false, "x": X, "y": Y, "table_z": Z}'   # dry run: "all checks passed"
-goal place_container place '{"execute": true, "x": X, "y": Y, "table_z": Z}'    # ARM MOVES
+goal place_container place '{"execute": false, "x": 0.8695, "y": -0.0750, "table_z": 0.2030}'   # dry run: "all checks passed"
+goal place_container place '{"execute": true, "x": 0.8695, "y": -0.0750, "table_z": 0.2030}'    # ARM MOVES
 ```
 
 It carries the container over the spot, lowers it in impedance until the table stops it, opens the hand and goes

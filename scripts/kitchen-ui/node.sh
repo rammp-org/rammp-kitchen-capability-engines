@@ -44,9 +44,11 @@ case "$C" in
     run "$DDS" -v /tmp/place_container_data:/config/place_container "$IMG" \
       ros2 run place_container place_container_node --ros-args "${COMMON[@]}" ;;
   box_opening)
-    # no ros2 run: as PID 1 it would not pass Ctrl-C on to the run (N4); its state dir keeps the finger calibration
+    # no ros2 run: as PID 1 it would not pass Ctrl-C on to the run (N4); its state dir keeps the finger calibration.
+    # The robot's planner config for its chair/user model (body_layers): without it every run stops before it moves.
     mkdir -p "$HOME/.ros/box_opening"
-    run "$DDS" -v "$HOME/.ros/box_opening:/state" "$IMG" \
+    run "$DDS" -v "$HOME/.ros/box_opening:/state" \
+      -v "${DEPLOY:-$HOME/rammp-deployments/december_2026}/config/robots/current:/config/robot:ro" "$IMG" \
       /module_ws/install/box_opening/lib/box_opening/box_opening_node --ros-args "${COMMON[@]}" \
       -p state_dir:=/state -p container:=ankou_pink.yaml -p world:=world_flatbot.yaml ;;
   *) echo "kitchenui: unknown capability $C"; exit 2 ;;
