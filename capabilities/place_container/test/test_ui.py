@@ -1,6 +1,7 @@
 """What place_container puts on the user's UI panel (place_container.ui): pure, no ROS."""
 
 import pytest
+
 from place_container import ui
 
 
@@ -56,7 +57,7 @@ def test_the_picker_says_what_to_do_and_why_it_asks_again():
     assert ui.pick_message(12).startswith(ui.PICK) and "12" in ui.pick_message(12)
     assert ui.pick_message(3, ui.TAP_FIRST).startswith(ui.TAP_FIRST)
     text = ui.no_spot_message("the table looks 10 degrees tilted", marked=True)
-    assert "10 degrees tilted" in text and "Use the marked spot" in text and "Look again" in text
+    assert "10 degrees tilted" in text and "Use marked spot" in text and "ask the operator" in text
     assert "marked" not in ui.no_spot_message("x", marked=False)
     assert {b["label"] for b in (ui.PLACE, ui.MARKED, ui.LOOK)} == {"Place here", "Use marked spot", "Look again"}
 

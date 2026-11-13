@@ -205,14 +205,16 @@ view of the container and enough locally consistent depth samples inside its mas
 
 ## Actions
 
-The UI is offered three one-press actions, each running a whole action with fixed params (details in
+The UI is offered two one-press actions, each running a whole action with fixed params (details in
 [docs/interface.md](docs/interface.md), "Orchestrator interface"):
 
-- `retrieve` (on a microwave tap): `take_out`, executing;
-- `place_in_microwave` (on a microwave tap): `place`, executing;
-- `retrieve_from_fridge` (on a fridge tap): `take_out` with `"site": "fridge"` (the fridge's viewing pose,
-  approach world, grasp height and line-in length), executing. Refused unless
-  `fridge_accept_unmodeled_door:=true`: nothing it plans knows the fridge, its shelves or its open door.
+- `retrieve`, **Grab Tupperware** (on a tap of the tupperware, class `food_container` or `food container`):
+  `take_out` from `take_home_joints`, executing;
+- `place_in_microwave`, **Place Tupperware in Microwave** (on a microwave tap): `place`, executing.
+
+A fridge tap offers nothing from this capability. `take_out` with `"site": "fridge"` (the fridge's viewing pose,
+approach world, grasp height and line-in length) remains a direct goal, refused when executing unless
+`fridge_accept_unmodeled_door:=true`: nothing it plans knows the fridge, its shelves or its open door.
 
 Each shows one progress panel with Stop (`capability_ui.RunUI`); Stop cancels the run and the motion in flight, and
 the "Stopped" notice says what the hand holds. A recoverable refusal before the arm started on the place or take-out
@@ -233,14 +235,14 @@ make action CAP=microwave_place ACTION=retrieve
 ```
 
 For the four-terminal Unreal panel demo, keep the UI bridge and orchestrator
-commands. In interactive perception enter `add microwave_1 microwave`, and
+commands. In interactive perception enter `add food_container_1 food_container`, and
 replace the counter launch with:
 
 ```bash
 ros2 launch microwave_place microwave_place.launch.py mock:=true state_dir:="$HOME/.microwave_place"
 ```
 
-Select **microwave_1 → Retrieve Tupperware from Microwave** in Unreal. Mock mode
+Select **food_container_1 → Grab Tupperware** in Unreal. Mock mode
 shows completion without planning or moving the arm; it does not simulate HOME
 planning failure. Real retrieval requires the arm driver, cuRobo, wrist camera,
 TF and SAM3 stack in addition to these four demo terminals.

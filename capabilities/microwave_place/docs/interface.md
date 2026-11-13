@@ -58,33 +58,32 @@ update or restart the running planner.
 
 ## Orchestrator interface
 
-The UI is offered three one-press actions (`availability()` returns only these; the orchestrator labels each
-button with its id, and sends no params). Each runs a whole action with fixed params under
-`capability_ui.RunUI` (`shared/capability_ui`):
+The UI is offered two one-press actions (`availability()` returns only these; the orchestrator sends no
+params). Each runs a whole action with fixed params under `capability_ui.RunUI` (`shared/capability_ui`):
 
-| Action id              | Offered on a tap of | Runs                                             |
-| ---------------------- | ------------------- | ------------------------------------------------ |
-| `retrieve`             | `microwave`         | `take_out` `{"execute": true}`                   |
-| `place_in_microwave`   | `microwave`         | `place` `{"execute": true}`                      |
-| `retrieve_from_fridge` | `fridge`            | `take_out` `{"execute": true, "site": "fridge"}` |
+| Action id            | Button                          | Offered on a tap of                                 | Runs                           |
+| -------------------- | ------------------------------- | --------------------------------------------------- | ------------------------------ |
+| `retrieve`           | "Grab Tupperware"               | the tupperware: `food_container` / `food container` | `take_out` `{"execute": true}` |
+| `place_in_microwave` | "Place Tupperware in Microwave" | `microwave`                                         | `place` `{"execute": true}`    |
 
-The capability's `perception_classes` is `["microwave", "fridge"]` so a fridge tap activates it; each UI action's
-own `perception_classes` picks where it is offered. `place` and `take_out` stay callable directly (dry runs,
-CLI) but are not offered to the UI.
+The capability's `perception_classes` is `["microwave", "food_container", "food container"]` ("food container"
+is the scene segmenter's class; "food_container" the same without its space, for a selection typed by hand). Each
+UI action's own `perception_classes` picks where it is offered: a fridge tap offers nothing from this capability.
+The grab runs `take_out` from `take_home_joints`, wherever that viewing pose looks (the microwave by default).
+`place` and `take_out` (including `"site": "fridge"`) stay callable directly (dry runs, CLI) but are not offered
+to the UI.
 
 Every UI action, in `execute()`:
 
 - `allow_execute` false (not mock): a "not started" notice with Done, then `execution_disabled` (recoverable).
   Nothing moves.
-- `retrieve_from_fridge` with `fridge_accept_unmodeled_door` false (the default, not mock): a "not started"
-  notice explaining the collision gap below, then `fridge_door_unmodeled` (recoverable). Nothing moves.
 - While it runs: one progress panel with **Stop** (sent once; re-sent only if the bridge dropped it, so it no
   longer flashes). Stop cancels the engine's own run, as the orchestrator's cancel does: `self.arm` stops the
   motion in flight and the next `ctx.checkpoint()` raises `Cancelled`. A "Stopped" notice then says what the
   hand was left holding (from the run's last progress phase, e.g. "The hand is holding the container in the
   microwave.").
 - A recoverable refusal (`refused`, `home_failed`, `recording`) whose message does **not** start with
-  `STOPPED`: the reason, with the same action again (button `retry`, labelled Retrieve / Place) and Stop. A
+  `STOPPED`: the reason, with the same action again (button `retry`, labelled Grab Tupperware / Place) and Stop. A
   tap re-runs it from the start (fresh run bag, detection and plan). These are checks that refused before the
   arm started on the take-out or place proper (HOME may have moved).
 - A refusal starting `STOPPED` (anything once the arm has started on the place or the take-out proper: the
@@ -100,7 +99,7 @@ The engine uses the direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_
 `ui_bridge_node_name` (default `ui_bridge_node`) selects `/ui_bridge_node/request_user_input` and its `/update`
 service. JSON shapes are documented in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
 
-### Retrieve from the fridge: the collision gap
+### take_out from the fridge (direct goals): the collision gap
 
 `take_out` with `"site": "fridge"` is the microwave take-out with the fridge's settings:
 `fridge_take_home_joints` (viewing pose), `fridge_take_approach_world`, `fridge_grasp_up`, `fridge_reach_in`;

@@ -78,7 +78,7 @@ impedance, before it in position control.
 ## On the user's UI
 
 The UI offers this engine when the user taps a **table** (`perception_classes`), with one action:
-**Place the container here** (`place_here`; `availability()` hides the others, which with the UI's
+**Place Tupperware on Table** (`place_here`; `availability()` hides the others, which with the UI's
 empty params would only dry-run). It is tap-to-place, on the shared `capability_ui.RunUI` (Stop on
 every panel; Stop cancels the engine's own run, as the orchestrator's cancel does):
 

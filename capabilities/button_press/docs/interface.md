@@ -56,10 +56,10 @@ Served under `/button_press/`, types from `rammp_orchestrator_interfaces`:
 | `/button_press/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/button_press/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action         | Params                                                                                                                                                                              | Result payload                                            |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `press_button` | `target` (`start_30s` default, `timer_clock`, `stop_eco`, `power_level`, `wgt_time_defrost`), `presses` (0–10, default 1; 0 = go to the spot and back), `no_return` (default false) | `{"dry_run", "pressed", "returned", "moved", "log_file"}` |
-| `press_start`, `press_power`, `press_timer_clock`, `press_defrost`, `press_stop_eco` | none from the UI (the count is asked on the panel); standalone, `presses` (default 1) | the same                                                  |
+| Action                                                                               | Params                                                                                                                                                                              | Result payload                                            |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `press_button`                                                                       | `target` (`start_30s` default, `timer_clock`, `stop_eco`, `power_level`, `wgt_time_defrost`), `presses` (0–10, default 1; 0 = go to the spot and back), `no_return` (default false) | `{"dry_run", "pressed", "returned", "moved", "log_file"}` |
+| `press_start`, `press_power`, `press_timer_clock`, `press_defrost`, `press_stop_eco` | none from the UI (the count is asked on the panel); standalone, `presses` (default 1)                                                                                               | the same                                                  |
 
 A failed action's `error_code` is `<step>_failed`, the step being `preflight`, `detect`, `stage`,
 `redetect`, `plan`, `approach`, `press` or `return`; the node's log says why ("HOLDING HERE": the

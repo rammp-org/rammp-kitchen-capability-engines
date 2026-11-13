@@ -6,6 +6,7 @@ False with no UI session); cancel_own_run is stubbed to set that flag, as the en
 direct action) is scripted. The waits run on a fake clock (the node's `time`). Nothing reaches the arm or the base."""
 
 import ast
+import importlib.util
 import sys
 import threading
 import time
@@ -23,6 +24,17 @@ sys.path.insert(0, str(ROOT / "shared/capability_ui"))
 from capability_ui import panels  # noqa: E402
 from capability_ui.panels import DONE, STOP, STOPPED_MESSAGE, RunUI  # noqa: E402
 
+
+def _ui_text():
+    """fridge/ui_text.py on its own (it needs only capability_ui), as the node's `ui_text`."""
+    spec = importlib.util.spec_from_file_location("fridge_ui_text", ROOT / "capabilities/fridge/fridge/ui_text.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ui_text = _ui_text()
+
 UI_NAMES = {
     "UI_DRIVE",
     "UI_ACTIONS",
@@ -31,11 +43,6 @@ UI_NAMES = {
     "UI_DONE",
     "UI_NOT_MOVED",
     "UI_WHAT",
-    "UI_ERRORS",
-    "UI_ERROR_OTHER",
-    "UI_MAYBE_HOLDING",
-    "UI_STOPPED_OPEN",
-    "UI_DROVE",
 }
 UI_METHODS = {
     "_ui_run",
@@ -166,6 +173,7 @@ class Flow:
             constants=types.SimpleNamespace(UI_NOTICE_TIMEOUT_S=NOTICE_S, UI_PROMPT_TIMEOUT_S=PROMPT_S),
             push_open=self.push_open,
             close_door=self.close_door,
+            ui_text=ui_text,
         )
         self.scope = scope
         self.node = node = scope["Capability"]()
@@ -255,7 +263,7 @@ def test_stop_during_the_open_says_the_hand_may_be_on_the_handle():
     stopped = f.ctx.sent[-1]
     assert stopped["title"] == "Open fridge: stopped"
     assert stopped["message"].startswith(STOPPED_MESSAGE)
-    assert "If the hand is on the handle, let go of it" in stopped["message"]
+    assert "If the hand is still on the handle, open the gripper" in stopped["message"]
     assert stopped["buttons"] == [DONE]
     assert len(f.calls) == 1
 
@@ -370,9 +378,10 @@ def test_a_refusal_offers_the_same_button_again():
     assert f.press("open_door_ui") == OK
     retry = f.ctx.sent[1]
     assert retry["title"] == "Couldn't open the fridge"
-    assert retry["message"].endswith("Press Open Fridge Door to try again.")
+    assert retry["message"].startswith("The wrist camera couldn't find the fridge handle.")
+    assert retry["message"].endswith("then press Open Fridge Door to try again.")
     assert retry["buttons"] == [{"button_id": "retry", "label": "Open Fridge Door"}, STOP]
-    assert "NO DETECTION" not in retry["message"]  # the log has it, not the UI
+    assert "NO DETECTION" not in retry["message"]  # the log's words, said plainly
     assert len(f.calls) == 2
 
 
@@ -391,7 +400,8 @@ def test_a_failure_that_may_hold_the_handle_is_not_retried():
     assert raised.value is error and len(f.calls) == 1
     failed = f.ctx.sent[-1]
     assert failed["title"] == "Couldn't open the fridge" and failed["buttons"] == [DONE]
-    assert "stopped partway" in failed["message"] and "still be holding the handle" in failed["message"]
+    assert failed["message"].startswith("The arm stopped.")
+    assert "still be holding the handle" in failed["message"] and "Open the gripper" in failed["message"]
 
 
 def test_a_bug_shows_the_generic_failure_and_is_reraised():
@@ -400,7 +410,7 @@ def test_a_bug_shows_the_generic_failure_and_is_reraised():
     with pytest.raises(KeyError) as raised:
         f.press("close_door_ui")
     assert raised.value is bug
-    assert f.ctx.messages()[-1] == f.scope["UI_ERROR_OTHER"]
+    assert f.ctx.messages()[-1].startswith("Something unexpected went wrong in the fridge program")
 
 
 def test_execution_off_says_so_and_runs_nothing():
@@ -410,7 +420,7 @@ def test_execution_off_says_so_and_runs_nothing():
         f.press("open_door_ui")
     assert raised.value.error_code == "execution_disabled" and raised.value.recoverable and f.calls == []
     assert len(f.ctx.sent) == 1
-    assert "allow_execute is false" in f.ctx.sent[-1]["message"] and f.ctx.sent[-1]["buttons"] == [DONE]
+    assert "Arm motion is turned off" in f.ctx.sent[-1]["message"] and f.ctx.sent[-1]["buttons"] == [DONE]
     assert "holding the handle" not in f.ctx.sent[-1]["message"]  # nothing moved
 
 

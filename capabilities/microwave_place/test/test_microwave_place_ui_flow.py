@@ -1,8 +1,9 @@
-"""Offline tests of microwave_place's one-press UI actions (retrieve, place_in_microwave, retrieve_from_fridge) on
-capability_ui.RunUI: the node's own methods, loaded with `ast` (no ROS, no hardware), against a fake ctx that behaves as
-the engine's (one held UI event, cancel sets a flag checkpoint() raises on, update_user_panel False without a UI)."""
+"""Offline tests of microwave_place's one-press UI actions (retrieve, place_in_microwave) on capability_ui.RunUI:
+the node's own methods, loaded with `ast` (no ROS, no hardware), against a fake ctx that behaves as the engine's (one
+held UI event, cancel sets a flag checkpoint() raises on, update_user_panel False without a UI)."""
 
 import ast
+import importlib.util
 import sys
 import threading
 from contextlib import contextmanager
@@ -20,6 +21,18 @@ sys.path.insert(0, str(ROOT / "shared/capability_ui"))
 from capability_ui import panels  # noqa: E402
 from capability_ui.panels import RunUI  # noqa: E402
 
+_spec = importlib.util.spec_from_file_location(
+    "microwave_place_ui_text", ROOT / "capabilities/microwave_place/microwave_place/ui_text.py"
+)
+UI_TEXT = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(UI_TEXT)
+
+
+def unwrap(message):
+    """A panel's message as one line (capability_ui.wrap breaks it into rich-text runs)."""
+    return message.replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ")
+
+
 GLOBALS = {
     "EXECUTE",
     "PLACE",
@@ -27,6 +40,7 @@ GLOBALS = {
     "FRIDGE_TAKE",
     "SITES",
     "FRIDGE_DOOR_GAP",
+    "CONTAINER_CLASSES",
     "UI_ACTIONS",
     "UI_TITLE",
     "UI_MOVING",
@@ -95,6 +109,7 @@ def load(**extra):
         "cancel_own_run": lambda engine: engine.fake_ctx.cancel(),  # the engine's cancel: sets the run's flag
         "place_motion": SimpleNamespace(Refused=Refused),
         "ArmRefused": type("ArmRefused", (Exception,), {}),
+        "ui_text": UI_TEXT,
         **extra,
     }
     exec(compile(module, str(NODE), "exec"), scope)
@@ -186,9 +201,8 @@ def titles(ctx):
 # -- every UI action ----------------------------------------------------------------------------------------------
 
 RUNS = {
-    "retrieve": ("take_out", {"execute": True}, "Tupperware retrieved from the microwave."),
+    "retrieve": ("take_out", {"execute": True}, "Holding the tupperware."),
     "place_in_microwave": ("place", {"execute": True}, "Tupperware placed in the microwave."),
-    "retrieve_from_fridge": ("take_out", {"execute": True, "site": "fridge"}, "Tupperware retrieved from the fridge."),
 }
 
 
@@ -211,9 +225,9 @@ def test_one_press_runs_the_action_executing_then_done(scope, ui_id):
 @pytest.mark.parametrize(
     "ui_id, phase, holds",
     [
-        ("retrieve", "lift", "holding the container in the microwave"),
+        ("retrieve", "lift", "holding the tupperware where it stood"),
         ("retrieve", "reach", "nothing is held"),
-        ("retrieve_from_fridge", "retract", "part way out of the fridge"),
+        ("retrieve", "retract", "part way back from where it stood"),
         ("place_in_microwave", "approach", "holding the container"),
         ("place_in_microwave", "tilt", "gripper is open"),
     ],
@@ -240,7 +254,7 @@ def test_stop_during_motion_cancels_and_says_what_the_hand_holds(scope, ui_id, p
         ("retrieve", EngineError("home_failed", "take-out home failed: PLANNING_FAILED", True)),
         ("retrieve", EngineError("refused", "no container found in 60 s", True)),
         ("place_in_microwave", EngineError("refused", "no side shift and heading passes the checks", True)),
-        ("retrieve_from_fridge", EngineError("refused", "take-out approach: cuRobo refused: no plan", True)),
+        ("retrieve", EngineError("refused", "take-out approach: cuRobo refused: no plan", True)),
     ],
 )
 def test_refusal_before_motion_offers_the_action_again(scope, ui_id, error):
@@ -250,7 +264,10 @@ def test_refusal_before_motion_offers_the_action_again(scope, ui_id, error):
     assert node._ui_run(ui_id, ctx)["executed"]
     assert node.execute.call_count == 2
     retry = next(p for p in ctx.sent if any(b["button_id"] == "retry" for b in p["buttons"]))
-    assert str(error) in retry["message"]
+    shown = unwrap(retry["message"])
+    assert shown.startswith(UI_TEXT.reason(str(error), "any" if ui_id == "retrieve" else "microwave")[0])
+    assert "The arm is holding still." in shown and shown.endswith(f"Press {scope['UI_RETRY'][ui_id]} to try again.")
+    assert "curobo" not in shown.lower() and "planning_failed" not in shown.lower()
     assert retry["buttons"] == [
         {"button_id": "retry", "label": scope["UI_RETRY"][ui_id]},
         {"button_id": "stop", "label": "Stop"},
@@ -268,15 +285,31 @@ def test_stop_on_the_retry_question_ends_without_moving_again(scope):
 
 
 @pytest.mark.parametrize(
-    "ui_id, message",
+    "ui_id, message, says",
     [
-        ("place_in_microwave", "STOPPED in the oven, holding the container: the hand is 3.0 cm from the target"),
-        ("place_in_microwave", "STOPPED, nothing moved: the arm is e-stopped (x)"),
-        ("retrieve", "STOPPED in the oven: the gripper only closed to 0.400 -- not lifting"),
-        ("retrieve", "STOPPED during the take-out: pre-grasp is 2.0 cm / 1.0 deg off target -- not inserting"),
+        (
+            "place_in_microwave",
+            "STOPPED in the oven, holding the container: the hand is 3.0 cm / 2.0 deg from the target -- not lowering",
+            "The hand ended 3.0 cm / 2.0 degrees off its target, so it didn't lower the container.",
+        ),
+        (
+            "place_in_microwave",
+            "STOPPED, nothing moved: the arm is e-stopped (x)",
+            "The emergency stop is pressed, so the arm can't move.",
+        ),
+        (
+            "retrieve",
+            "STOPPED in the oven: the gripper only closed to 0.400 -- not lifting",
+            "The gripper closed less than expected (0.400): it may not have the container, so it didn't lift.",
+        ),
+        (
+            "retrieve",
+            "STOPPED during the take-out: pre-grasp is 2.0 cm / 1.0 deg off target -- not inserting",
+            "The arm couldn't line up in front of the container (2.0 cm / 1.0 degrees off).",
+        ),
     ],
 )
-def test_stopped_failure_is_reported_never_retried(scope, ui_id, message):
+def test_stopped_failure_is_reported_never_retried(scope, ui_id, message, says):
     ctx = FakeCtx(answers=["retry"])
     node = make(scope, ctx)
     node.execute.side_effect = EngineError("refused", message, True)
@@ -286,7 +319,8 @@ def test_stopped_failure_is_reported_never_retried(scope, ui_id, message):
     assert not any(any(b["button_id"] == "retry" for b in p["buttons"]) for p in ctx.sent)
     last = ctx.sent[-1]
     assert last["title"].endswith(": failed")
-    assert message in last["message"]
+    assert unwrap(last["message"]).startswith(says)
+    assert "STOPPED" not in last["message"]
     assert last["buttons"] == [{"button_id": "done", "label": "Done"}]
 
 
@@ -297,17 +331,28 @@ def test_unrecoverable_or_unexpected_errors_are_reported_without_retry(scope):
     with pytest.raises(RuntimeError):
         node._ui_run("retrieve", ctx)
     assert node.execute.call_count == 1
-    assert "e-stopped" in ctx.sent[-1]["message"] and ctx.sent[-1]["title"].endswith(": failed")
+    assert "emergency stop is pressed" in unwrap(ctx.sent[-1]["message"])
+    assert "Release the emergency stop" in unwrap(ctx.sent[-1]["message"])
+    assert ctx.sent[-1]["title"].endswith(": failed")
 
 
-def test_fridge_failure_names_the_fridge(scope):
+def test_fridge_take_out_messages_name_the_fridge(scope):
+    message = scope["_site_words"]("STOPPED in the oven, gripper open: 4.0 cm off the grasp", "fridge")
+    assert message == "STOPPED in the fridge, gripper open: 4.0 cm off the grasp"
+    assert scope["_site_words"]("STOPPED in the oven", "microwave") == "STOPPED in the oven"
+
+
+def test_the_grab_names_no_place(scope):
+    """The UI's one grab (site "any") runs wherever the tupperware is: its failure names neither oven nor fridge."""
     ctx = FakeCtx()
-    node = make(scope, ctx, fridge_accept_unmodeled_door=True)
+    node = make(scope, ctx)
     node.execute.side_effect = EngineError("refused", "STOPPED in the oven, gripper open: 4.0 cm off the grasp", True)
     with pytest.raises(EngineError):
-        node._ui_run("retrieve_from_fridge", ctx)
-    assert "STOPPED in the fridge, gripper open" in ctx.sent[-1]["message"]
-    assert "oven" not in ctx.sent[-1]["message"]
+        node._ui_run("retrieve", ctx)
+    shown = unwrap(ctx.sent[-1]["message"])
+    assert shown.startswith("The hand ended 4.0 cm from the grasp point, so the gripper didn't close.")
+    for place in ("oven", "microwave", "fridge", " any"):
+        assert place not in shown
 
 
 def test_orchestrator_cancel_takes_the_ui_back_without_notices(scope):
@@ -334,19 +379,17 @@ def test_execution_disabled_is_refused_before_anything(scope, ui_id):
     node.execute.assert_not_called()
     (notice,) = ctx.sent
     assert notice["title"].endswith(": not started")
-    assert "allow_execute:=true" in notice["message"]
+    assert "arm motion off" in unwrap(notice["message"]) and "allow_execute" not in notice["message"]
 
 
-def test_fridge_retrieve_refused_while_the_door_is_not_modelled(scope):
+def test_grab_runs_the_normal_take_out_without_the_fridge_gate(scope):
     ctx = FakeCtx()
-    node = make(scope, ctx)  # fridge_accept_unmodeled_door false (the default)
-    with pytest.raises(EngineError) as error:
-        node._ui_run("retrieve_from_fridge", ctx)
-    assert error.value.error_code == "fridge_door_unmodeled"
-    node.execute.assert_not_called()
-    (notice,) = ctx.sent
-    assert notice["title"] == "Retrieve from fridge: not started"
-    assert "open door" in notice["message"] and "fridge_accept_unmodeled_door" in notice["message"]
+    node = make(scope, ctx)  # fridge_accept_unmodeled_door false: not the grab's concern (no site)
+    node._ui_run("retrieve", ctx)
+    (called_action, called_params, _), _ = node.execute.call_args
+    assert (called_action, called_params) == ("take_out", {"execute": True})
+    assert titles(ctx) == ["Grab tupperware", "Grab tupperware"]
+    assert ctx.sent[0]["message"] == "Grabbing the tupperware: the arm is moving."
 
 
 def test_no_ui_session_returns_the_recoverable_error_without_waiting(scope):
@@ -366,7 +409,7 @@ def test_mock_says_nothing_moved(scope):
     node.mock = True
     node.cfg["allow_execute"] = False  # a mock never moves: not refused
     node.execute.return_value = {"executed": False, "mock": True}
-    node._ui_run("retrieve_from_fridge", ctx)
+    node._ui_run("retrieve", ctx)
     assert "No arm motion" in ctx.sent[-1]["message"]
 
 
@@ -376,9 +419,12 @@ def test_mock_says_nothing_moved(scope):
 @pytest.mark.parametrize(
     "tapped, offered",
     [
-        ("microwave", {"retrieve", "place_in_microwave"}),
-        ("fridge", {"retrieve_from_fridge"}),
-        (None, {"retrieve", "place_in_microwave", "retrieve_from_fridge"}),  # class unknown: every UI action
+        ("food_container", {"retrieve"}),
+        ("food container", {"retrieve"}),  # the scene segmenter's class, with its space
+        ("microwave", {"place_in_microwave"}),
+        ("fridge", set()),  # no fridge grab on the UI
+        ("table", set()),
+        (None, {"retrieve", "place_in_microwave"}),  # class unknown: every UI action
     ],
 )
 def test_availability_offers_only_the_ui_actions_on_their_class(scope, tapped, offered):
@@ -388,11 +434,15 @@ def test_availability_offers_only_the_ui_actions_on_their_class(scope, tapped, o
     assert got == offered
 
 
-def test_direct_actions_stay_declared_and_the_fridge_activates_the_engine(scope):
+def test_direct_actions_stay_declared_and_the_tupperware_activates_the_engine(scope):
     cap = scope["Capability"]
     ids = {a.action_id for a in cap.actions}
-    assert {"place", "take_out", "retrieve", "place_in_microwave", "retrieve_from_fridge"} <= ids
-    assert set(cap.perception_classes) == {"microwave", "fridge"}
+    assert ids == {"place", "take_out", "retrieve", "place_in_microwave"}
+    assert set(cap.perception_classes) == {"microwave", "food_container", "food container"}
+    labels = {a.action_id: a.label for a in cap.actions}
+    assert labels["retrieve"] == "Grab Tupperware"
+    assert labels["place_in_microwave"] == "Place Tupperware in Microwave"
+    assert scope["UI_RETRY"]["retrieve"] == "Grab Tupperware"
 
 
 # -- the node's motion boundary and the fridge settings ------------------------------------------------------------
@@ -481,3 +531,15 @@ def _no_ui_wrap(monkeypatch):
     from capability_ui import panels as ui_panels
 
     monkeypatch.setattr(ui_panels, "WRAP_CHARS", 10**6)
+
+
+def test_the_ui_grab_names_no_place(scope):
+    """Grab Tupperware is one action wherever the tupperware is: a stop or failure note says where the hand is
+    relative to the tupperware, never "in the microwave"."""
+    for phase in ("reach", "close", "lift", "retract"):
+        note = scope["_hand_note"]("take_out", phase, "any")
+        assert "microwave" not in note and "oven" not in note and "tupperware" in note
+    assert scope["_site_words"]("STOPPED in the oven: the gripper only closed to 0.400", "any") == (
+        "STOPPED at the tupperware: the gripper only closed to 0.400"
+    )
+    assert "fridge" in scope["_hand_note"]("take_out", "lift", "fridge")  # direct goals keep their place

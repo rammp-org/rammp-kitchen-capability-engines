@@ -296,18 +296,27 @@ def test_a_refusal_before_moving_goes_back_to_the_picker(make, mock_spots):
     node, ctx = make([[tap(ids[0]), press("place")], [tap(ids[1]), press("place")]], act=act)
     node._place_here({}, ctx)
     pickers = picker_panels(ctx)
-    assert len(pickers) == 2 and "Couldn't place it there: adjust: no arm pose" in pickers[1]["panel"]["message"]
+    assert len(pickers) == 2 and pickers[1]["panel"]["message"].startswith("Couldn't place it there: ")
+    assert "no arm pose" not in pickers[1]["panel"]["message"]  # plain words, not the log's
     assert node._act.call_count == 2
 
 
 def test_a_failure_after_the_arm_moved_is_shown_and_ends_it(make, mock_spots):
     ids, _ = mock_spots
-    error = EngineError("refused", "STOPPED: the hand stopped 4 cm above the table -- NOT letting go", True)
+    error = EngineError(
+        "refused",
+        "STOPPED: the hand stopped at tool z=0.312, 4 cm above where the bottom meets the table -- it hit something "
+        "else; NOT letting go (holding in impedance). Next: look at what is under the container; take it out of the "
+        "hand, then reset",
+        True,
+    )
     node, ctx = make([[tap(ids[0]), press("place")]], act=lambda *a: (_ for _ in ()).throw(error))
     with pytest.raises(EngineError, match="STOPPED"):
         node._place_here({}, ctx)
     last = ctx.panels()[-1]
-    assert last["title"].endswith("failed") and "NOT letting go" in last["message"]
+    text = last["message"].replace("</>\n<body-sm-light>", " ")
+    assert last["title"].endswith("failed") and "touched something 4 cm above the table" in text
+    assert "still in the hand" in text and "Take the container out of the hand" in text
     assert len(picker_panels(ctx)) == 1
 
 
@@ -358,7 +367,7 @@ def test_a_camera_that_isnt_ready_says_so(make):
     with pytest.raises(Cancelled):
         node._place_here({}, ctx)
     pickers = picker_panels(ctx)
-    assert len(pickers) == 2 and "isn't ready" in pickers[0]["panel"]["message"]
+    assert len(pickers) == 2 and "isn't sending images" in pickers[0]["panel"]["message"]
     assert grabbed.grab.call_count == 2  # Look again looked again
     node._act.assert_not_called()
 

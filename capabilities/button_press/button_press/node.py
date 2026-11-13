@@ -27,12 +27,16 @@ from button_press import Abort, MotionFailed, dome_pattern
 from button_press.kinematics import Kinematics
 from button_press.press_button import Args, Run, press_button
 from button_press.ui_panel import TEXT, Panel
+from button_press.ui_text import DISABLED, NO_ANSWER, bug_message, failure_message
 
 MAX_PRESSES = 10
 # The steps that take the fingertip to the panel. A failure in one may leave it there, and a retry
 # would press the button again, so it is never recoverable (the Result carries no message).
 AT_PANEL = ("approach", "press", "return")
-AT_PANEL_NOTE = "The fingertip may be at the panel: move the arm clear of the microwave before anything else runs."
+AT_PANEL_NOTE = (
+    "The fingertip may still be at the microwave's buttons. Move the arm clear of the microwave (teleop or Home) "
+    "before running anything else."
+)
 DEFAULTS = Args()
 # The UI's buttons (the orchestrator labels them with the raw id): id -> (dome_pattern target, name on the panel).
 # Each asks how many presses (1..UI_MAX_PRESSES), then presses and comes back.
@@ -233,7 +237,7 @@ class Capability(CapabilityEngine):
                 f"{title} is disabled: the button press moves the arm only with allow_execute:=true, with someone "
                 "at the e-stop. Nothing moved."
             )
-            ui.refuse(message)
+            ui.refuse(DISABLED)  # the panel's words; the goal's error keeps the log's
             raise EngineError("execution_disabled", message, recoverable=True)
         presses = self._ui_presses(ui, name, params)
         args = self._args({"target": target, "presses": presses})
@@ -262,18 +266,21 @@ class Capability(CapabilityEngine):
                 raise
             except EngineError as error:
                 self.get_logger().error(f"{ui_id}: {error.error_code} during {phase[0]}: {error}")
-                message = f"Couldn't press {name} ({TEXT.get(phase[0], phase[0]).lower()}): {error}."
+                # the panel's words (ui_text): what happened, the arm's state, what to do
+                message = failure_message(
+                    name, TEXT.get(phase[0], phase[0]), phase[0], str(error), motion_failed=not error.recoverable
+                )
                 if error.recoverable and phase[0] not in AT_PANEL:
                     # the same press again (same count), on its own button: "<title>" and Stop
-                    if ui.ask(f"{message} Try again?", [{"button_id": "retry", "label": title}]) == "retry":
+                    retry = [{"button_id": "retry", "label": title}]
+                    if ui.ask(f"{message} Tap {title} to try again.", retry) == "retry":
                         continue
                     raise
-                ui.error(f"{message} {AT_PANEL_NOTE}" if phase[0] in AT_PANEL else message)
+                ui.error(message)
                 raise
             except Exception as error:  # a bug: shown too, then as before
                 self.get_logger().error(f"{ui_id}: {type(error).__name__} during {phase[0]}: {error}")
-                note = f" {AT_PANEL_NOTE}" if phase[0] in AT_PANEL else ""
-                ui.error(f"Couldn't press {name}: {type(error).__name__}: {error}.{note}")
+                ui.error(bug_message(name, phase[0], error))
                 raise
             pressed = result.get("pressed", 0)
             ui.done(f"Pressed {name} {pressed} time{'' if pressed == 1 else 's'}.", mock=self.mock)
@@ -289,7 +296,7 @@ class Capability(CapabilityEngine):
         if ui.connected is False:
             return params.get("presses", 1)
         message = "No answer: nothing was pressed."
-        ui.notice(message)
+        ui.notice(NO_ANSWER)
         raise EngineError("no_answer", message, recoverable=True)
 
 
