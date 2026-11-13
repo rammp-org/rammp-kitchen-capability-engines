@@ -28,6 +28,7 @@ constants here with no default (None), set once at startup with `configure` (and
 """
 
 import json
+import os
 import re
 import sys
 import threading
@@ -963,10 +964,10 @@ def _yaw_about(center, xy, ang):
     return center[:2] + np.array([c * d[0] - s_ * d[1], s_ * d[0] + c * d[1]])
 
 
-def add_door_model(scene, rb, door, open_grasp_pos):
-    """Add the door slab (rotated to its current opening) and the appliance's fixed body to
-    the sim as collision-only boxes. Returns (bodies, info) -- bodies is [(id, name)]."""
-    c = rb.physics_client_id
+def door_model_boxes(door, open_grasp_pos):
+    """The door slab (rotated to its current opening) and the appliance's fixed body as boxes in the arm's frame
+    (arm_mount: the door file's), each (name, centre xyz, half extents, yaw about z), plus info -- what add_door_model
+    puts in the sim and door_in_curobo in cuRobo's world, so the two check the same door."""
     n = np.asarray(door["closed_normal"], float)
     n[2] = 0
     n /= np.linalg.norm(n)  # out of the door
@@ -987,29 +988,116 @@ def add_door_model(scene, rb, door, open_grasp_pos):
         dz = float(door["closed_handle"][2]) - DOOR_Z_HANDLE_Z if "closed_handle" in door else 0.0
         z_lo, z_hi = DOOR_Z[0] + dz, DOOR_Z[1] + dz
     zc, zh = (z_lo + z_hi) / 2, (z_hi - z_lo) / 2
-    base = np.asarray(scene.robot_base_pose.position)  # identity rotation
-    yaw_closed = np.arctan2(n[1], n[0])
-
-    def box(center_xy, half, yaw):
-        cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=half, physicsClientId=c)
-        return p.createMultiBody(
-            0,
-            cs,
-            basePosition=(base + [center_xy[0], center_xy[1], zc]).tolist(),
-            baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
-            physicsClientId=c,
-        )
-
+    yaw_closed = float(np.arctan2(n[1], n[0]))
     mid = (lo + hi) / 2
     door_c_closed = face + t[:2] * mid - n[:2] * door_t / 2
-    door_id = box(_yaw_about(hinge, door_c_closed, ang), [door_t / 2, (hi - lo) / 2, zh], yaw_closed + ang)
+    door_c = _yaw_about(hinge, door_c_closed, ang)
     body_c = face + t[:2] * mid - n[:2] * (door_t + body_depth / 2)
-    body_id = box(body_c, [body_depth / 2, (hi - lo) / 2, zh], yaw_closed)
+    boxes = [
+        ("door", (door_c[0], door_c[1], zc), (door_t / 2, (hi - lo) / 2, zh), yaw_closed + float(ang)),
+        (f"{APPLIANCE} body", (body_c[0], body_c[1], zc), (body_depth / 2, (hi - lo) / 2, zh), yaw_closed),
+    ]
     free_edge = _yaw_about(hinge, face + t[:2] * lo, ang)
-    return [(door_id, "door"), (body_id, f"{APPLIANCE} body")], {
-        "open_deg": float(np.degrees(ang)),
-        "free_edge": free_edge,
-    }
+    return boxes, {"open_deg": float(np.degrees(ang)), "free_edge": free_edge}
+
+
+def add_sim_box(scene, rb, centre, half, yaw):
+    """A collision-only box in the sim at `centre` (arm frame) turned `yaw` about z: its body id."""
+    c = rb.physics_client_id
+    base = np.asarray(scene.robot_base_pose.position)  # identity rotation
+    cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=list(half), physicsClientId=c)
+    return p.createMultiBody(
+        0,
+        cs,
+        basePosition=(base + np.asarray(centre, float)).tolist(),
+        baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
+        physicsClientId=c,
+    )
+
+
+def add_door_model(scene, rb, door, open_grasp_pos):
+    """Add the door slab (rotated to its current opening) and the appliance's fixed body to
+    the sim as collision-only boxes (door_model_boxes). Returns (bodies, info) -- bodies is [(id, name)]."""
+    boxes, info = door_model_boxes(door, open_grasp_pos)
+    return [(add_sim_box(scene, rb, centre, half, yaw), name) for name, centre, half, yaw in boxes], info
+
+
+# --- the door in cuRobo's world: cuRobo plans AROUND the door model, instead of the sim refusing its paths after ---
+# set_world takes a world YAML by path, read inside the planner's container. That container (sheppy's) mounts the host's
+# robot config, SHEPPY_ROBOT_CONFIG, as /config/robot: a capability run natively on the host (ros2 run / launch) writes
+# the world under it and the planner reads it there -- no mount of our own. Elsewhere (a container): set
+# RAMMP_DOOR_WORLD_DIR to a directory the planner sees as RAMMP_DOOR_WORLD_PLANNER_DIR.
+SHEPPY_ROBOT_CONFIG = Path(
+    os.environ.get("SHEPPY_ROBOT_CONFIG", "~/sheppy-local/december_2026/config/robots/current")
+).expanduser()
+DOOR_WORLD_DIR = Path(os.environ.get("RAMMP_DOOR_WORLD_DIR", SHEPPY_ROBOT_CONFIG / "curobo" / "door_world"))
+DOOR_WORLD_PLANNER_DIR = os.environ.get("RAMMP_DOOR_WORLD_PLANNER_DIR", "/config/robot/curobo/door_world")
+CUROBO_BOOT_WORLD = "world.yaml"  # planner.yaml's own world, next to its config: what set_world goes back to
+# a pushed world replaces world.yaml's floor, so the door world lists the planner's own floor layer (the chair and
+# user are planner.yaml's layers: in every world, pushed ones too)
+CUROBO_FLOOR_LAYER = "/config/robot/curobo/layer_mebot_floor.yaml"
+DOOR_WORLD_PAD_M = 0.015  # each door box this much bigger per side in cuRobo than in the sim (on top of the
+# planner's own world_padding): its plans must still pass the sim's MIN_CLEAR from the unpadded model after
+
+
+def door_world(boxes, pad=DOOR_WORLD_PAD_M):
+    """A cuRobo world (the dict a world YAML holds) of the planner's floor and `boxes` ((name, centre, half, yaw),
+    door_model_boxes' form, the arm's frame = arm_mount), each grown `pad` per side."""
+    obstacles = [
+        {
+            "name": "door_model_" + re.sub(r"\W+", "_", name).strip("_"),
+            "position": [round(float(v), 5) for v in centre],
+            "dims": [round(2 * (float(h) + pad), 5) for h in half],
+            "rpy_deg": [0.0, 0.0, round(float(np.degrees(yaw)), 3)],
+        }
+        for name, centre, half, yaw in boxes
+    ]
+    return {"base_frame": "arm_mount", "layers": [CUROBO_FLOOR_LAYER], "obstacles": obstacles}
+
+
+@contextmanager
+def door_in_curobo(ai, boxes, label):
+    """cuRobo's world with the door model in it (door_world(boxes)) for the `with` block, then the planner's boot world
+    again (CUROBO_BOOT_WORLD) -- also on an exception. Yields whether the door went in; when it didn't (says why),
+    cuRobo's world is as it was."""
+    if not hasattr(ai, "set_world"):
+        say(f"  {label}: no set_world on this arm interface -- the door can't go into cuRobo's world")
+        yield False
+        return
+    name = f"door_world_{os.getpid()}.yaml"
+    if not DOOR_WORLD_DIR.parent.is_dir():  # not where the planner looks: its set_world would find no file
+        say(
+            f"  {label}: no {DOOR_WORLD_DIR.parent} here (not on the host with sheppy's robot config?) -- set "
+            "SHEPPY_ROBOT_CONFIG, or RAMMP_DOOR_WORLD_DIR + RAMMP_DOOR_WORLD_PLANNER_DIR"
+        )
+        yield False
+        return
+    try:
+        DOOR_WORLD_DIR.mkdir(parents=True, exist_ok=True)
+        (DOOR_WORLD_DIR / name).write_text(yaml.safe_dump(door_world(boxes), sort_keys=False))
+    except OSError as e:
+        say(f"  {label}: can't write the door world in {DOOR_WORLD_DIR} ({e})")
+        yield False
+        return
+    ok, msg = ai.set_world(f"{DOOR_WORLD_PLANNER_DIR.rstrip('/')}/{name}")
+    if not ok:
+        say(f"  {label}: the planner refused the door world ({msg})")
+        (DOOR_WORLD_DIR / name).unlink(missing_ok=True)
+        yield False
+        return
+    say(f"  {label}: door in cuRobo's world ({', '.join(b[0] for b in boxes)}, +{DOOR_WORLD_PAD_M * 100:.1f} cm)")
+    try:
+        yield True
+    finally:
+        ok, msg = ai.set_world(CUROBO_BOOT_WORLD)
+        if ok:  # the file is there exactly while cuRobo has the door (collision_viz shows it then)
+            (DOOR_WORLD_DIR / name).unlink(missing_ok=True)
+        else:  # every later plan would dodge a door that has since moved: say so loudly
+            say(
+                f"  !! {label}: cuRobo's world NOT put back to {CUROBO_BOOT_WORLD} ({msg}) -- it still has the door "
+                "in it: `ros2 service call /rammp_curobo/set_world rammp_curobo_interfaces/srv/SetWorld "
+                f'"{{world: {CUROBO_BOOT_WORLD}}}"`'
+            )
 
 
 class DoorFrame:

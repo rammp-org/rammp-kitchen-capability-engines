@@ -72,7 +72,7 @@ settings, by default the plain close (hand empty, fingers pointing left):
 
 | Setting                           | Default                        | Meaning                                                                                          |
 | --------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `door_deg`                        | door file                      | How far the door is open now (deg)                                                               |
+| `door_deg`                        | 90                             | How far the door is open now (deg)                                                               |
 | `route_over`                      | `false`                        | Reach the swing start over the open door's top (keeps J4 off its limit)                          |
 | `over_above` / `over_past`        | `0.08` / `0.05`                | `route_over`: height above the door top / overshoot past the swing start (m)                     |
 | `side_past_hinge`                 | `0.08`                         | Swing start, sideways past the hinge (m)                                                         |

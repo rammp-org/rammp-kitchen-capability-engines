@@ -6,7 +6,8 @@ touched: the hand may be holding something (a container -- `hold_offset_x`, `kee
 
 1. Route to the swing start, `side_past_hinge` past the hinge and `push_radius` from it -- with
    `route_over`: up over the open door's top, left past the swing start, down, right + forward
-   (going left at hand height drives J4 into its limit).
+   (going left at hand height drives J4 into its limit). With `door_world`: no route of ours -- the
+   door model goes into cuRobo's world and cuRobo plans its own way there, around it.
 2. Swing about the hinge, hand orientation fixed, radius spiralling in to `push_radius_end`, until
    `push_stop_short` from the closed door in the model.
 3. The final push: one slow continuous move straight in, stopped by the joint-torque check once the
@@ -75,26 +76,21 @@ def _container_held(rb, diameter, clearance_m=0.0):
     return bid, ([0.0, 0.0, FINGERTIP_PAST_TOOL + r], [0.0, 0.0, 0.0, 1.0])
 
 
-def _handle_body(rb, df, deg, protrusion, length, width=0.05):
-    """A box standing in for the handle, which the saved door model leaves out: at u_handle along the
-    door, protruding `protrusion` (m) from the front face toward the arm, `length` tall, `width` along
-    the door, swung to opening `deg`. Returns (id, "handle") -- remove it with `drop`."""
-    c = rb.physics_client_id
+def _handle_box(df, deg, protrusion, length, width=0.05):
+    """The handle, which the saved door model leaves out, as a box (name, centre, half extents, yaw): at u_handle along
+    the door, protruding `protrusion` (m) from the front face toward the arm, `length` tall, `width` along the door,
+    swung to opening `deg`."""
     door_t = door_dims(df.door)[1]
     center = df.pos(df.u_handle, door_t / 2.0 + protrusion / 2.0, deg, float(df.g0[2]))
     n_deg = df._rot(deg) @ df.n
     yaw = float(np.arctan2(n_deg[1], n_deg[0]))
-    cs = p.createCollisionShape(
-        p.GEOM_BOX, halfExtents=[protrusion / 2.0, width / 2.0, length / 2.0], physicsClientId=c
-    )
-    bid = p.createMultiBody(
-        0,
-        cs,
-        basePosition=center.tolist(),
-        baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
-        physicsClientId=c,
-    )
-    return bid, "handle"
+    return "handle", tuple(center), (protrusion / 2.0, width / 2.0, length / 2.0), yaw
+
+
+def _handle_body(scene, rb, df, deg, protrusion, length, width=0.05):
+    """_handle_box in the sim. Returns (id, "handle") -- remove it with `drop`."""
+    name, center, half, yaw = _handle_box(df, deg, protrusion, length, width)
+    return dc.add_sim_box(scene, rb, center, half, yaw), name
 
 
 def _chain(scene, rb, points, q, bodies, label, min_clear=None, closed=False, held=None):
@@ -175,7 +171,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
 
     bodies = df.bodies(scene, rb, deg0)
     if args.handle_protrusion_m:
-        bodies = bodies + [_handle_body(rb, df, deg0, args.handle_protrusion_m, args.handle_length_m)]
+        bodies = bodies + [_handle_body(scene, rb, df, deg0, args.handle_protrusion_m, args.handle_length_m)]
     free = add_door_model(scene, rb, df.door, df.bodies_point(deg0))
     drop(rb, free[0])
     free_edge = np.r_[free[1]["free_edge"], z]
@@ -274,6 +270,10 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
                 ),
             ]
         route = None
+        if args.door_world:  # no route of ours: cuRobo's own, around the door in its world (push_close runs it)
+            routes = []
+            route, q = [], qs
+            say(" route: cuRobo's own, the door in its world (door_world) -- checked against the door model after")
         for name, pts in routes:
             say(f" route: {name}")
             route, q = _chain(scene, rb, pts, q0, bodies, "approach", held=held)
@@ -283,6 +283,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
         drop(rb, bodies)
     if route is None:
         return None
+    q_start = np.asarray(q, float)  # the swing start's joints: where the route ends (door_world: cuRobo's goal)
 
     # the swing: rotate the start point about the hinge, fixed orientation, until the hand is
     # `push_stop_short` from the CLOSED door (model), found step by step then bisected. The
@@ -291,7 +292,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
     # that angle stands in for the closed one: the hand reaching it = the door pushed to there.
     closed = df.bodies(scene, rb, stop_deg)
     if args.handle_protrusion_m:
-        closed = closed + [_handle_body(rb, df, stop_deg, args.handle_protrusion_m, args.handle_length_m)]
+        closed = closed + [_handle_body(scene, rb, df, stop_deg, args.handle_protrusion_m, args.handle_length_m)]
     stop = args.push_stop_short
     r0 = pos(a_side, b_start) - h
     # radius spirals in from push_radius to push_radius_end over the swing
@@ -403,7 +404,13 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
         say(f"  after backing out: {c[0] * 100:.1f} cm from door/body ({c[1]})")
     finally:
         drop(rb, closed)
-    return {"before": route, "sweep": (plan, poses), "push": push, "after": [("back out", back)]}
+    return {
+        "before": route,
+        "start": q_start,
+        "sweep": (plan, poses),
+        "push": push,
+        "after": [("back out", back)],
+    }
 
 
 def _shift_door(door, dxy):
@@ -505,9 +512,20 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
             say("the hand would tilt -- refusing, arm untouched.")
             return False
     curobo = args.curobo and all(hasattr(ai, a) for a in ("plan_to_joints", "execute_joint_trajectory", "raw_joints"))
+    if args.door_world and not curobo:
+        say("door_world needs cuRobo (curobo on, and an arm interface that plans) -- refusing, arm untouched.")
+        return False
     swing_curobo = False
+    to_start = None  # door_world: cuRobo's checked plan to the swing start, run as it is
     if curobo:  # previewed here (the dry run shows it), checked again from the real joints before each runs
-        if plan["before"]:
+        if args.door_world:
+            tilt = (max_tilt_deg, st["ee_pos"][3:7]) if max_tilt_deg is not None else None
+            to_start, why = _door_world_plan(ai, scene, rb, df, deg0, args, plan["start"], tilt)
+            say(f"cuRobo to the swing start, the door in its world: {why or 'planned, checked against the door model'}")
+            if why:
+                say("\nno way to the swing start -- refusing, arm untouched.")
+                return False
+        elif plan["before"]:
             route = [q for _, leg in plan["before"] for q in leg]
             why = _curobo_knots_problem(ai, scene, rb, df, deg0, args, ai.raw_joints(), route)
             say(f"cuRobo, the route stitched: {why or 'every leg checked against the door, the body and the handle'}")
@@ -535,7 +553,11 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
             return False
         swung = swung is True
     routed = True if swung else None
-    if not swung and curobo and plan["before"]:
+    if to_start is not None:  # planned from these joints a moment ago (the dry run's preview): run it as it is
+        if not _run_exact(ai, to_start, "to the swing start (cuRobo, around the door)"):
+            return False
+        routed = True
+    elif not swung and curobo and plan["before"]:
         routed = _curobo_route(ai, scene, rb, df, deg0, args, plan)  # stitched; else one cuRobo move
         if routed is None:
             routed = _curobo_leg(ai, scene, rb, df, deg0, args, plan["before"][-1][1][-1], "to the swing start")
@@ -578,8 +600,16 @@ def _door_bodies(scene, rb, df, deg, args):
     """The door at `deg`, the microwave body and (handle_protrusion_m) the handle bar, as _plan_close checks them."""
     bodies = df.bodies(scene, rb, deg)
     if args.handle_protrusion_m:
-        bodies = bodies + [_handle_body(rb, df, deg, args.handle_protrusion_m, args.handle_length_m)]
+        bodies = bodies + [_handle_body(scene, rb, df, deg, args.handle_protrusion_m, args.handle_length_m)]
     return bodies
+
+
+def _door_boxes(df, deg, args):
+    """_door_bodies as boxes (dc.door_model_boxes' form), for cuRobo's world (dc.door_in_curobo)."""
+    boxes = dc.door_model_boxes(df.door, df.bodies_point(deg))[0]
+    if args.handle_protrusion_m:
+        boxes = boxes + [_handle_box(df, deg, args.handle_protrusion_m, args.handle_length_m)]
+    return boxes
 
 
 CUROBO_TRIES = 3  # cuRobo's plans vary: each part of the close is asked this many times for one that passes
@@ -613,6 +643,22 @@ def _curobo_door_plan(ai, scene, rb, df, deg, args, start, goal, from_contact=Fa
         if not why:
             return pl, ""
     return None, why
+
+
+def _door_world_plan(ai, scene, rb, df, deg, args, goal, tilt=None):
+    """cuRobo's own plan from where the arm is to joints `goal` (the swing start) with the door at `deg`, the body and
+    the handle in ITS world (dc.door_in_curobo: it plans around them, not through), and why it can't be run as it is:
+    _curobo_door_plan's checks against the same, unpadded model in the sim, and with `tilt` (max deg, start quat) the
+    hand's tilt. The world is put back before this returns: the plan is run exactly, nothing re-plans it. (plan, why)"""
+    with dc.door_in_curobo(ai, _door_boxes(df, deg, args), "to the swing start") as inside:
+        if not inside:
+            return None, "the door couldn't be put in cuRobo's world"
+        pl, why = _curobo_door_plan(ai, scene, rb, df, deg, args, ai.raw_joints(), goal)
+    if not why and tilt is not None:
+        worst = _max_tilt_deg(scene, rb, np.asarray(pl.q, float), tilt[1])
+        if worst > tilt[0]:
+            why = f"cuRobo's path tilts the hand {worst:.1f} deg (limit {tilt[0]:.0f})"
+    return (None, why) if why else (pl, "")
 
 
 def _curobo_knots_problem(ai, scene, rb, df, deg, args, start, path):
@@ -766,7 +812,7 @@ def _run_sweep(ai, sweep, poses, smooth):
 # them as goal params. The 10-21 close that latched, holding a container: route_over, keep_orientation, door_deg 90,
 # hold_offset_x -0.152, push_radius 0.17, push_radius_end 0.15, over_above 0.18, push_z 0.22, push_contact_nm 6.
 CLOSE_DEFAULTS = {
-    "door_deg": None,  # current door opening (deg); None: the door file's last value
+    "door_deg": 90.0,  # current door opening (deg): the push-open always leaves it at 90
     "side_past_hinge": 0.08,  # swing start this far past the hinge, sideways (m)
     "push_radius": 0.28,  # swing start this far from the hinge (m)
     "push_radius_end": 0.26,  # the swing spirals in to this radius, clear of the handle (~33 cm out)
@@ -796,6 +842,10 @@ CLOSE_DEFAULTS = {
     "smooth": False,  # the swing as one blended Cartesian trajectory instead of the checked joints
     "close_gripper": False,  # close the gripper before anything moves (a narrower hand); off: left as is
     "curobo": True,  # route, swing and back-out through cuRobo, checked against the door model (push: not)
+    # no route of ours to the swing start: the door model (door, body, handle) put in cuRobo's world and cuRobo's own
+    # plan there, checked against the model in the sim too (route_over / the routes then unused). Writes the world where
+    # the planner reads it (common.DOOR_WORLD_DIR: on the host, under sheppy's robot config)
+    "door_world": False,
 }
 
 
