@@ -56,7 +56,10 @@ START_REACHED_DEG = 2.0  # every joint already this close (self.arm's GO_TO_TRAC
 # 0.8 cm behind the tool frame), not door_common's FINGERTIP_PAST_TOOL 6.2 cm; the detected bar front was right
 # to <0.5 cm (fingers teleoped onto it: /fridge_data/true_handle_20261109.json). A level grasp now puts the
 # fingertips 3 cm past the bar's front (tool = bar front - 1.3 cm). Backup constants.py.bak_20261109.
-GRIP_EXT = 0.053
+# 11-13: + 0.014 for the sensor puck (rammp-deployments af2396b, #149: flatbot's arm_tool_frame 0.120 -> 0.134 m
+# past the flange, the gripper 14 mm further out on the puck). 0.053 was right before that change; without the
+# 14 mm the grasp goes that much too deep on the handle.
+GRIP_EXT = 0.053 + 0.014
 VERTICAL_CORR = 0.0  # world z
 GRASP_X_ADJUST = 0.040  # along the approach axis
 GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose, to let its bar turn)
