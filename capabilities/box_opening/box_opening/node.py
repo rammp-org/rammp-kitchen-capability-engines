@@ -44,6 +44,7 @@ from collections import deque
 from pathlib import Path
 
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
+from capability_ui import wording
 from capability_ui.panels import NOTICE_TIMEOUT_S, RunUI, cancel_own_run
 from rammp_orchestrator_interfaces.msg import ActionAvailability
 
@@ -432,30 +433,92 @@ PANEL_TITLE = "Opening the container"
 PANEL_PCT = 100.0
 PANEL_CANCELLED = "Stopping: the arm stops where it is."
 PANEL_TIMED_OUT = "Taking too long: the arm stops where it is."
-# an error code -> what the final notice says (docs/interface.md's error table, in a person's words)
+# an error code -> what the final notice says first: what happened and where things are left (docs/interface.md's
+# error table, in a person's words). The notice then adds the run's own reason (run_reason), the lid, and NEXT_STEP.
 ERROR_TEXT = {
-    "bad_params": "The request came with settings open_box does not take. Nothing moved.",
-    "not_allowed": "The arm is not enabled for this on this robot (allow_execute is off). Nothing moved.",
+    "bad_params": "The request came with settings Open Container doesn't take. Nothing moved.",
+    "not_allowed": "Arm motion for opening containers is turned off on this robot. Nothing moved.",
     "timeout": f"It took longer than {RUN_BUDGET_S:.0f} s, so it was stopped. The arm stopped where it was.",
-    "not_ready": "The robot is not ready (a driver, the planner, a camera or TF is missing). Nothing moved.",
-    "not_found": "The camera could not find the container.",
-    "not_home": "The arm could not get to its start pose.",
-    "contact_early": "The fingers met something above the button. Nothing was pressed; the arm went home.",
-    "contact_late": "The fingers did not meet the lid where it was seen. The arm went home.",
-    "watch_failed": "The press's contact check failed, so the press stopped there. Someone must clear the arm.",
+    "not_ready": "The robot isn't ready: an arm driver, the planner, a camera or the robot's position data is "
+    "missing. Nothing moved.",
+    "not_found": "The cameras couldn't find the container.",
+    "not_home": "The arm couldn't get to its start pose.",
+    "contact_early": "The fingers touched something above the button. Nothing was pressed, and the arm went home.",
+    "contact_late": "The fingers didn't meet the lid where the camera saw it. The arm went home.",
+    "watch_failed": "The press's touch check failed, so the press stopped where it was.",
     "box_moved": "The press moved the container.",
-    "not_popped": "The button was pressed, but the lid did not come loose. The arm went home.",
-    "no_button": "The button could not be found. Nothing was pressed.",
-    "no_press": "No way to press the button was found. Nothing moved.",
-    "lid_put_back": "There was no clear spot for the lid: it is back on the container and the arm is home.",
-    "lid_dropped": "The lid slipped out of the fingers on the way home.",
-    "arm_holds": "A motion stopped part of the way: the arm holds there until someone clears it.",
-    "arm_halted": "The arm was halted (the e-stop, or control was taken). Nothing more was sent to it.",
-    "stopped": "The run was ended from outside.",
-    "failed": "Something went wrong. The node's log says what.",
+    "not_popped": "The button was pressed, but the lid didn't come loose. The arm went home.",
+    "no_button": "The container's button couldn't be found. Nothing was pressed.",
+    "no_press": "No way to reach and press the button was found. Nothing moved.",
+    "lid_put_back": "There was no clear spot on the table for the lid, so it is back on the container. The arm is "
+    "home.",
+    "lid_dropped": "The lid slipped out of the fingers on the way home. The arm is home.",
+    "arm_holds": "A motion stopped partway. The arm is holding where it stopped.",
+    "arm_halted": "The arm was halted (the emergency stop, or another program took control). Nothing more was sent "
+    "to it.",
+    "stopped": "The run was ended from outside before it finished.",
+    "failed": "Something went wrong in the run.",
 }
+# an error code -> what to do next (the lid in the fingers comes first: LID_NEXT_STEP)
+NEXT_STEP = {
+    "bad_params": "Use the Open Container button as it is, with no settings.",
+    "not_allowed": "Ask the operator to turn arm motion on for opening containers.",
+    "timeout": "Check where the arm and the container are, move the arm clear if needed, then try again.",
+    "not_ready": "Fix what the reason says is missing (or ask the operator to), then try again.",
+    "not_found": "Make sure the container is on the table where the scene camera sees it, with nothing on top of "
+    "it, then try again.",
+    "not_home": "Check that nothing is in the arm's way, move it home if needed, then try again.",
+    "contact_early": "Clear anything on or around the container, then try again.",
+    "contact_late": "Check that the container is where it was and standing flat, then try again.",
+    "watch_failed": "Someone has to move the arm clear and check the container before the next try.",
+    "box_moved": "Stand the container upright on the table, then try again.",
+    "not_popped": "Check the container's button and lid, then try again.",
+    "no_button": "Make sure the container's button is uncovered and the cameras can see it, then try again.",
+    "no_press": "Move the container closer to the arm, toward the middle of the table, then try again.",
+    "lid_put_back": "Clear some space on the table next to the container, then try again.",
+    "lid_dropped": "Pick the lid up and check the container before the next try.",
+    "arm_holds": "Someone has to move the arm clear and check the container before the next try.",
+    "arm_halted": "Release the emergency stop (or end the other program), check the arm and the container, then "
+    "try again.",
+    "stopped": "Check where the arm and the container are before trying again.",
+    "failed": "Check where the arm and the container are before trying again. The box_opening log has the details.",
+}
+LID_NEXT_STEP = "Someone has to take the lid out of the fingers before the next try."
 # refused before anything ran: "not started", not "failed"
 REFUSED_CODES = ("bad_params", "not_allowed")
+# codes whose words above already say all the run's own reason does (or whose reason is the node's own, not the
+# run's): no reason line
+NO_REASON_CODES = REFUSED_CODES + (
+    "timeout",
+    "not_popped",
+    "lid_put_back",
+    "lid_dropped",
+    "contact_early",
+    "contact_late",
+    "box_moved",
+)
+# the run's STOP line (str(error)): its marker, the node's own tails, and the run's jargon in a person's words
+_RUN_MARKER = re.compile(r"^\s*(?:\[[\w.]+\]\s*)*(?:STOP:|NO BOX:?|not starting:|FAIL\w*:?)\s*", re.IGNORECASE)
+_NODE_TAILS = re.compile(r"\s+--\s+(?:the arm holds where it stopped|the lid is still in the fingers).*$")
+_NOT_A_REASON = re.compile(r"Traceback|^exit -?\d+$|Error\b|Exception\b")
+RUN_WORDS = (
+    (r"is not a straight line the arm can fly", "can't be done as one straight move"),
+    (r"^no button from", "no button was seen from"),
+    (r"no reach-out press plans", "no reach-and-press move could be planned"),
+    (r"no reach-out press", "no reach-and-press move"),
+    (r"the reach-out's", "the reach's"),
+    (r"\bthe way in\b", "the move in to the button"),
+    (r"\bthe way up\b", "the move up"),
+    (r"\bthe way down\b", "the move down"),
+    (r"\bthe way back\b", "the move back"),
+    (r"\bthe way home\b", "the move home"),
+    (r"\bthe slide in\b", "the slide in"),
+    (r"\blook pose\b", "viewing position"),
+    (r"\bthe knob\b", "the button"),
+    (r"\bthe box\b", "the container"),
+    (r"\bthe scene camera's box\b", "the container the scene camera saw"),
+    (r"\bthe wrist\b(?! camera)", "the wrist camera"),
+)
 
 
 def sentence(text):
@@ -469,24 +532,59 @@ def lid_note(track):
     return {"is": "The lid is still in the fingers.", "may be": "The lid may still be in the fingers."}.get(where, "")
 
 
+def run_reason(error):
+    """The run's own reason for `error` (its last STOP line) in plain words, for the notice: the step that stopped,
+    and, where the run quotes the arm driver or the planner in brackets, what that means (capability_ui.wording).
+    "" where the code's words already say it all, or the run left no reason a person can use (a traceback)."""
+    if error.error_code in NO_REASON_CODES:
+        return ""
+    text = " ".join(str(error).split())
+    text = re.sub(r"^the run was ended by signal \d+:\s*", "", text)
+    if not _RUN_MARKER.match(text):  # not a line the run stops with (a progress line, a traceback): no reason
+        return ""
+    text = _NODE_TAILS.sub("", _RUN_MARKER.sub("", text))
+    if not text or _NOT_A_REASON.search(text):
+        return ""
+    # what stopped; the rest ("— the arm holds", "; nothing moved") is where things are, which the notice says
+    step = re.split(r"\s+[—]+\s+|\s+--\s+|;\s*nothing (?:moved|was pressed)", text, maxsplit=1)[0]
+    quoted = " ".join(re.findall(r"\(([^()]*)\)", step))
+    step = re.sub(r"\s*\([^()]*\)", "", step).strip(" ;:,")
+    for pattern, words in RUN_WORDS:
+        step = re.sub(pattern, words, step)
+    parts = [wording.clean(step)] if step else []
+    if quoted and any(re.search(p, quoted, re.IGNORECASE) for p, _, _ in wording.RULES):
+        parts.append(wording.explain(quoted)[0])
+    return " ".join(parts)
+
+
 def error_text(error, track):
-    text = ERROR_TEXT.get(error.error_code, ERROR_TEXT["failed"])
-    if error.error_code in ("lid_put_back", "lid_dropped"):  # the run itself says where the lid is
-        return text
-    return f"{text} {lid_note(track)}".strip()
+    """The failure notice: what happened and where things are (ERROR_TEXT), the run's own reason (run_reason), the
+    lid, then what to do (NEXT_STEP)."""
+    code = error.error_code if error.error_code in ERROR_TEXT else "failed"
+    lid = "" if code in ("lid_put_back", "lid_dropped") else lid_note(track)  # the run itself says where the lid is
+    reason = run_reason(error)
+    if reason:
+        reason = f"Reason: {reason[:1].lower()}{reason[1:]}"
+    next_step = LID_NEXT_STEP if lid else NEXT_STEP[code]
+    return wording.failure_text(ERROR_TEXT[code], " ".join(p for p in (reason, lid) if p), next_step)
 
 
 def stopped_text(track):
-    return f"Stopped. The arm is holding still where it was. {lid_note(track)}".strip()
+    lid = lid_note(track)
+    next_step = LID_NEXT_STEP if lid else "Check where the arm and the container are before trying again."
+    return f"Stopped. The arm is holding still where it was. {lid} {next_step}".replace("  ", " ").strip()
 
 
 def result_text(result):
     if result.get("lid_off"):
         text = "Lid off: it is on the table beside the container, and the arm is home."
         if result.get("world_state") == "not updated":
-            text += " The container could not be marked opened."
+            text += " The robot couldn't mark the container as opened, so Open Container may still be offered."
         return text
-    return "Finished, but the lid was not set down."
+    return (
+        "The run finished, but the lid wasn't set down on the table. Check the container and the lid before trying "
+        "again."
+    )
 
 
 class PanelCtx:

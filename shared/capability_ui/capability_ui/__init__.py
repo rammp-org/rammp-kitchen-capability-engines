@@ -12,6 +12,7 @@ from .panels import (
     panel_open,
     wrap,
 )
+from .wording import clean, describe, explain, failure_text, sentence
 
 __all__ = [
     "DONE",
@@ -21,6 +22,11 @@ __all__ = [
     "STOPPED_MESSAGE",
     "RunUI",
     "cancel_own_run",
+    "clean",
+    "describe",
+    "explain",
+    "failure_text",
+    "sentence",
     "panel_open",
     "WRAP_CHARS",
     "wrap",

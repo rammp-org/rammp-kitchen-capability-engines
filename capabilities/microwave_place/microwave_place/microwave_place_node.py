@@ -50,11 +50,11 @@ microwave; from the line in on nothing is collision-checked. Any check that fail
   take_out with `"site": "fridge"`: the same take-out with the fridge's settings (fridge_take_home_joints,
              fridge_take_approach_world, fridge_grasp_up, fridge_reach_in). Its approach world has no fridge, shelves
              or open door, so an executing fridge take-out is refused unless fridge_accept_unmodeled_door is true.
+             Direct goals only: the UI has no fridge grab.
 
 UI actions (one press each, fixed settings, panels with Stop on the UI bridge: capability_ui.RunUI):
-  retrieve              (microwave tap) take_out, executing
-  place_in_microwave    (microwave tap) place, executing
-  retrieve_from_fridge  (fridge tap)    take_out with site fridge, executing
+  retrieve              (tupperware tap: food_container) take_out, executing (take_home_joints' view)
+  place_in_microwave    (microwave tap)                  place, executing
 A recoverable refusal before the arm started (no "STOPPED" in front of it) offers the same action again; anything
 after the arm started is shown with Done only. Stop cancels the run (the motion in flight stops) and says what the
 hand was left holding.
@@ -74,7 +74,7 @@ from capability_engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.driver_state import Refused as ArmRefused
 from capability_ui import RunUI, cancel_own_run
 
-from . import microwave_detection, place_motion, rim_detection, take_out
+from . import microwave_detection, place_motion, rim_detection, take_out, ui_text
 
 # the fridge take-out's own settings: take_out's setting <- this node's parameter
 FRIDGE_TAKE = {
@@ -161,9 +161,9 @@ PARAMS = {
         -0.9451441529603253,
         -1.413206432450548,
     ],
-    # take_out with site "fridge" (retrieve_from_fridge): its viewing pose, arm_joint_1..7 in radians. Default: the
-    # fridge capability's start pose (fridge/constants.py START_JOINTS_DEG, its start_joints_deg, 11-12), the only
-    # recorded fridge-facing pose; NOT yet tried as a take-out viewing pose
+    # take_out with site "fridge" (direct goals only; no UI button): its viewing pose, arm_joint_1..7 in radians.
+    # Default: the fridge capability's start pose (fridge/constants.py START_JOINTS_DEG, its start_joints_deg,
+    # 11-12), the only recorded fridge-facing pose; NOT yet tried as a take-out viewing pose
     "fridge_take_home_joints": [
         1.7983872612549572,
         -0.5358160803622591,
@@ -228,48 +228,58 @@ TAKE_OUT = {
     },
 }
 
+# The tupperware's perception classes: "food container" is the scene segmenter's class; "food_container" the same
+# without its space, for a selection typed by hand (as box_opening's perception_classes)
+CONTAINER_CLASSES = ["food_container", "food container"]
+
 # The UI's buttons (the orchestrator labels them with the id): what each runs, with fixed params, and on which tapped
-# class it is offered.
+# class it is offered. The grab is offered on the tupperware itself and runs take_out from take_home_joints (wherever
+# that viewing pose looks); the fridge site stays a direct take_out goal, not a button.
 UI_ACTIONS = {
-    "retrieve": ("take_out", "Retrieve Tupperware from Microwave", {"execute": True}, ["microwave"]),
+    "retrieve": ("take_out", "Grab Tupperware", {"execute": True}, CONTAINER_CLASSES),
     "place_in_microwave": ("place", "Place Tupperware in Microwave", {"execute": True}, ["microwave"]),
-    "retrieve_from_fridge": (
-        "take_out",
-        "Retrieve Tupperware from Fridge",
-        {"execute": True, "site": "fridge"},
-        ["fridge"],
-    ),
 }
 UI_TITLE = {
-    "retrieve": "Retrieve from microwave",
+    "retrieve": "Grab tupperware",
     "place_in_microwave": "Place in microwave",
-    "retrieve_from_fridge": "Retrieve from fridge",
 }
 UI_MOVING = {
-    "retrieve": "Retrieving the tupperware from the microwave: the arm is moving.",
+    "retrieve": "Grabbing the tupperware: the arm is moving.",
     "place_in_microwave": "Placing the tupperware in the microwave: the arm is moving.",
-    "retrieve_from_fridge": "Retrieving the tupperware from the fridge: the arm is moving.",
 }
 UI_DONE = {
-    "retrieve": "Tupperware retrieved from the microwave.",
+    "retrieve": "Holding the tupperware.",
     "place_in_microwave": "Tupperware placed in the microwave.",
-    "retrieve_from_fridge": "Tupperware retrieved from the fridge.",
 }
-UI_RETRY = {"retrieve": "Retrieve", "place_in_microwave": "Place", "retrieve_from_fridge": "Retrieve"}
+UI_RETRY = {"retrieve": "Grab Tupperware", "place_in_microwave": "Place"}
 # error codes a UI action offers again (when not "STOPPED ..."): checks that refused before the arm started
 UI_RETRYABLE = ("refused", "home_failed", "recording")
 
 
 def _site_words(text, site):
-    """take_out's messages name the oven; on the fridge they name the fridge."""
-    if site != "fridge":
-        return text
-    return text.replace("microwave", "fridge").replace("the oven", "the fridge").replace("oven", "fridge")
+    """take_out's messages name the oven; on the fridge they name the fridge; for the UI's one grab (site "any",
+    wherever the tupperware is) they name no place."""
+    if site == "fridge":
+        return text.replace("microwave", "fridge").replace("the oven", "the fridge").replace("oven", "fridge")
+    if site == "any":
+        for place in ("in the oven", "in the microwave"):
+            text = text.replace(place, "at the tupperware")
+        for place in ("the oven", "the microwave"):
+            text = text.replace(place, "the tupperware's spot")
+    return text
 
 
 def _hand_note(action_id, phase, site="microwave"):
     """What the hand holds after a stop or failure in `phase` (the last ctx.progress phase of the run)."""
     where = "fridge" if site == "fridge" else "microwave"
+    if action_id == "take_out" and site == "any":  # the UI's one grab: wherever the tupperware is
+        notes = {
+            "reach": "The open hand is at the tupperware; nothing is held.",
+            "close": "The gripper was closing on the tupperware: it may be holding it.",
+            "lift": "The hand is holding the tupperware where it stood.",
+            "retract": "The hand is holding the tupperware, part way back from where it stood.",
+        }
+        return notes.get(phase, "Nothing has been grasped.")
     if action_id == "take_out":
         notes = {
             "reach": f"The open hand is in the {where}; nothing is held.",
@@ -325,8 +335,8 @@ def _json_default(o):
 
 class Capability(CapabilityEngine):
     display_name = "Place in microwave"
-    # fridge: a fridge tap offers retrieve_from_fridge (each UI action's own perception_classes)
-    perception_classes = ["microwave", "fridge"]
+    # a microwave tap offers place_in_microwave, a tupperware tap retrieve (each UI action's own perception_classes)
+    perception_classes = ["microwave", *CONTAINER_CLASSES]
     required_resources = ["arm", "gripper"]
     actions = [
         Action("place", "Place the held container in the open microwave", params_schema=PLACE),
@@ -406,16 +416,17 @@ class Capability(CapabilityEngine):
         arm started is shown with Done only, never retried. Every final notice is shown and waited on (bounded) before
         this returns or raises."""
         action_id, _, params, _ = UI_ACTIONS[ui_id]
-        site = params.get("site", "microwave")
+        # the UI's grab is one action wherever the tupperware is: its notes name no place ("any"); place names the oven
+        site = params.get("site", "any" if action_id == "take_out" else "microwave")
         title = UI_TITLE[ui_id]
         ui = RunUI(ctx, title, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
         if not self.mock and not self.cfg["allow_execute"]:
             message = f"{title} is disabled: launch with allow_execute:=true for an attended run."
-            ui.refuse(message)
+            ui.refuse(ui_text.disabled(title))
             raise EngineError("execution_disabled", message, recoverable=True)
         if site == "fridge" and not self.mock and not self.cfg["fridge_accept_unmodeled_door"]:
             message = f"{title} is disabled: {FRIDGE_DOOR_GAP}."
-            ui.refuse(message)
+            ui.refuse(ui_text.fridge_unmodeled(title))
             raise EngineError("fridge_door_unmodeled", message, recoverable=True)
         while True:
             ctx.checkpoint()
@@ -431,23 +442,24 @@ class Capability(CapabilityEngine):
                 if ui.user_stopped or ctx.cancelled():
                     raise  # Stop showed its own notice; an orchestrator cancel has taken the UI back
                 message = _site_words(str(error), site)
+                hand = _hand_note(action_id, run_ctx.phase, site)
                 if error.recoverable and error.error_code in UI_RETRYABLE and not message.startswith("STOPPED"):
-                    if ui.retry(f"{message}.", UI_RETRY[ui_id], title=f"{title}: not done"):
+                    if ui.retry(ui_text.retry(str(error), site), UI_RETRY[ui_id], title=f"{title}: not done"):
                         continue
                     raise  # no UI session, no answer in time
-                ui.error(f"{title} failed: {message}. {_hand_note(action_id, run_ctx.phase, site)}")
+                ui.error(ui_text.failure(str(error), site, hand))
                 raise
             except Exception as error:  # Cancelled, an arm error (e-stop, control taken), a bug
                 self.get_logger().error(f"{ui_id}: {error!r}")
                 if not (ui.user_stopped or ctx.cancelled()):
-                    ui.error(f"{title} failed: {error!r}. {_hand_note(action_id, run_ctx.phase, site)}")
+                    ui.error(ui_text.unexpected(error, _hand_note(action_id, run_ctx.phase, site)))
                 raise
             ui.done(UI_DONE[ui_id], mock=bool(result.get("mock")))
             return result
 
     def availability(self, instance_id, world_state):
         """The UI is offered only the one-press actions (UI_ACTIONS), each on its own tapped class (a microwave:
-        retrieve, place_in_microwave; a fridge: retrieve_from_fridge). `place` / `take_out` stay callable directly
+        place_in_microwave; the tupperware, food_container: retrieve). `place` / `take_out` stay callable directly
         (their params need setting: from the UI they would only dry-run)."""
         return [a for a in super().availability(instance_id, world_state) if a.action_id in UI_ACTIONS]
 

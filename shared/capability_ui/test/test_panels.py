@@ -182,7 +182,8 @@ def test_retry():
     ui, ctx, clock = make()
     clock.script = [(0.5, lambda: ctx.tap("retry"))]
     assert ui.retry("Couldn't see the handle.", "Open Door") is True
-    assert ctx.panels()[-1]["message"].replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ") == "Couldn't see the handle. Press Open Door to try again."
+    message = ctx.panels()[-1]["message"].replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ")
+    assert message == "Couldn't see the handle. Press Open Door to try again."
 
 
 def test_object_taps_go_to_on_tap_and_do_not_end_the_question():

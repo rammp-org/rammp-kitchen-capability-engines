@@ -178,7 +178,13 @@ def test_stop_is_the_base_classs_cancel_the_runs_own_ctrl_c_and_says_stopped(eng
     assert stopping and all(p["buttons"] == [] for p in stopping)
     notice = ctx.panels[-1]
     assert notice["title"] == f"{node.PANEL_TITLE}: stopped" and ctx.buttons(notice) == ["done"]
-    assert notice["message"] == "Stopped. The arm is holding still where it was."  # no grip yet: no lid
+    assert (
+        notice["message"]
+        == (  # no grip yet: no lid
+            "Stopped. The arm is holding still where it was. "
+            "Check where the arm and the container are before trying again."
+        )
+    )
     assert ctx.objects == {} and ctx.world == []
 
 
@@ -197,7 +203,7 @@ def test_stopped_with_the_lid_says_it_may_still_be_in_the_fingers(engine, monkey
     ctx = ctx_for(engine, stop_at=stop_at)
     with pytest.raises(Cancelled):
         engine.execute("open_box", {}, ctx)
-    assert ctx.panels[-1]["message"].endswith(said)
+    assert ctx.panels[-1]["message"].endswith(f"{said} {node.LID_NEXT_STEP}")
 
 
 def test_an_orchestrator_cancel_shows_no_notice(engine, monkeypatch):
@@ -231,7 +237,8 @@ def test_an_error_shows_its_code_in_a_persons_words_with_done(engine, monkeypatc
     assert raised.value.error_code == error_code
     notice = ctx.panels[-1]
     assert notice["title"] == f"{node.PANEL_TITLE}: failed" and ctx.buttons(notice) == ["done"]
-    assert notice["message"] == node.ERROR_TEXT[error_code]
+    assert notice["message"].startswith(node.ERROR_TEXT[error_code])
+    assert notice["message"].endswith(node.NEXT_STEP[error_code])
 
 
 def test_every_error_code_in_the_interface_has_words():
@@ -240,7 +247,7 @@ def test_every_error_code_in_the_interface_has_words():
     doc = (Path(node.__file__).resolve().parents[1] / "docs" / "interface.md").read_text()
     table = doc.split("| Code ", 1)[1].split("\n\n", 1)[0]
     codes = [row.split("`")[1] for row in table.splitlines()[2:]]
-    assert codes and sorted(codes) == sorted(node.ERROR_TEXT)
+    assert codes and sorted(codes) == sorted(node.ERROR_TEXT) == sorted(node.NEXT_STEP)
 
 
 def test_a_refusal_before_anything_ran_says_not_started(ros, tmp_path, monkeypatch):
@@ -252,11 +259,12 @@ def test_a_refusal_before_anything_ran_says_not_started(ros, tmp_path, monkeypat
         with pytest.raises(EngineError, match="allow_execute"):
             cap.execute("open_box", {}, ctx)
         assert len(ctx.panels) == 1 and ctx.panels[0]["title"] == f"{node.PANEL_TITLE}: not started"
-        assert ctx.panels[0]["message"] == node.ERROR_TEXT["not_allowed"]
+        assert ctx.panels[0]["message"] == f"{node.ERROR_TEXT['not_allowed']} {node.NEXT_STEP['not_allowed']}"
+        assert "allow_execute" not in ctx.panels[0]["message"]  # no parameter names on the panel
         ctx = UICtx()
         with pytest.raises(EngineError, match="no params"):
             cap.execute("open_box", {"x": 1}, ctx)
-        assert ctx.panels[-1]["message"] == node.ERROR_TEXT["bad_params"]
+        assert ctx.panels[-1]["message"] == f"{node.ERROR_TEXT['bad_params']} {node.NEXT_STEP['bad_params']}"
     finally:
         cap._assigned_token = bytes(16)
         cap.destroy_node()
@@ -275,7 +283,7 @@ def test_the_budget_stop_says_so_then_timeout_and_the_notice_is_not_in_the_budge
         engine.execute("open_box", {}, ctx)
     assert raised.value.error_code == "timeout" and sent == [signal.SIGINT]
     assert any(p["message"] == node.PANEL_TIMED_OUT and p["buttons"] == [] for p in ctx.panels)
-    assert ctx.panels[-1]["message"] == node.ERROR_TEXT["timeout"]
+    assert ctx.panels[-1]["message"] == f"{node.ERROR_TEXT['timeout']} {node.NEXT_STEP['timeout']}"
     # a full run inside its budget, Done tapped only well after the budget: still the lid off
     monkeypatch.delenv("WAIT")
     shutil.rmtree(tmp_path / "runs")  # the stand-in writes the same run log name: a new one
@@ -342,3 +350,78 @@ def test_the_class_has_a_name_without_a_space_for_a_list_typed_by_hand(engine):
     assert classes == ["food container", "food_container"]
     typed = "add food_container_1 food_container".split()
     assert typed[2] in classes and len(typed) == 3
+
+
+# -- the failure notice's words: what happened, the run's own reason, the lid, what to do --------------------------
+
+
+class Lid:
+    def __init__(self, where=""):
+        self.where = where
+
+    def lid_in_fingers(self):
+        return self.where
+
+
+def notice_for(code, lines, lid=""):
+    return node.error_text(node.error_for("open_box", code, lines), Lid(lid))
+
+
+def test_a_stop_says_the_step_that_stopped_and_what_the_driver_meant_in_plain_words():
+    text = notice_for(
+        1, ["[press_demo] STOP: the way in stopped during approach (-11 halted: unexpected contact) " "— the arm holds"]
+    )
+    assert text.startswith(node.ERROR_TEXT["arm_holds"])
+    assert "Reason: the move in to the button stopped during approach." in text
+    assert "unexpected push or pull" in text
+    assert text.endswith(node.NEXT_STEP["arm_holds"])
+    for jargon in ("-11", "halted", "[press_demo]", "STOP:", "—"):
+        assert jargon not in text
+
+
+def test_a_planner_refusal_quoted_by_the_run_is_said_without_its_status():
+    text = notice_for(
+        1,
+        [
+            "[press_demo] STOP: no reach-out press plans for the scene camera's box (plan_to_pose: "
+            "MotionGenStatus.IK_FAIL: no collision-free joint solution AT the goal); nothing moved"
+        ],
+    )
+    assert "no reach-and-press move could be planned for the container the scene camera saw." in text
+    assert "can't reach the position it needs" in text
+    assert "MotionGenStatus" not in text and "nothing moved;" not in text
+    assert text.endswith(node.NEXT_STEP["no_press"])
+
+
+def test_the_run_saying_why_it_did_not_start_is_on_the_notice():
+    text = notice_for(
+        1, ["[lid_room_view] not starting: the scene camera is not calibrated " "(scripts/calibrate_scene_camera.py)"]
+    )
+    assert "Reason: the scene camera is not calibrated." in text and "scripts/" not in text
+
+
+def test_the_lid_in_the_fingers_comes_first_in_what_to_do():
+    text = notice_for(
+        1, ["[press_demo] STOP: the way up is not a straight line the arm can fly (x) — the arm holds"], lid="is"
+    )
+    assert "The lid is still in the fingers." in text and text.endswith(node.LID_NEXT_STEP)
+    assert "can't be done as one straight move" in text
+
+
+def test_a_last_line_that_is_not_a_stop_is_no_reason():
+    # killed mid-run: its last line is progress, not why it ended
+    text = notice_for(-9, ["[press_demo] grip closed"], lid="may be")
+    assert "Reason" not in text and "grip closed" not in text
+    assert notice_for(1, ["Traceback (most recent call last):"]) == (
+        f"{node.ERROR_TEXT['failed']} {node.NEXT_STEP['failed']}"
+    )
+
+
+def test_codes_whose_words_say_it_all_add_no_reason():
+    text = notice_for(1, ["[press_demo] STOP: pressed, but the knob did not pop"])
+    assert text == f"{node.ERROR_TEXT['not_popped']} {node.NEXT_STEP['not_popped']}"
+
+
+def test_stopped_says_what_to_do():
+    assert node.stopped_text(Lid("is")).endswith(node.LID_NEXT_STEP)
+    assert node.stopped_text(Lid()).endswith("Check where the arm and the container are before trying again.")

@@ -5,6 +5,7 @@ behaves as the engine's: one held UI event, a cancel flag that checkpoint() rais
 no UI session. cancel_own_run is stubbed to set that flag, as the engine's own cancel does."""
 
 import ast
+import importlib.util
 import sys
 import threading
 import time
@@ -43,6 +44,19 @@ def engine_classes():
 
 
 EngineError, Cancelled = engine_classes()
+
+
+def load_ui_text():
+    """The node's panel wording (microwave/ui_text.py): no ROS, only capability_ui."""
+    spec = importlib.util.spec_from_file_location(
+        "microwave_ui_text", ROOT / "capabilities/microwave/microwave/ui_text.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+UI_TEXT = load_ui_text()
 
 
 class FakeCtx:
@@ -117,6 +131,8 @@ def flow():
         {"UI_ACTIONS", "UI_TITLE", "UI_DONE"},
         {"_ui_run", "_ui_stopped_note"},
         EngineError=EngineError,
+        Cancelled=Cancelled,
+        ui_text=UI_TEXT,
         RunUI=UI,
         cancel_own_run=lambda engine: engine.ctx.cancel(),
     )
@@ -246,7 +262,9 @@ def test_recoverable_refusal_waits_for_explicit_retry_then_runs_again(flow):
     assert node.execute.call_count == 2
     retry = ctx.sent[1]
     assert retry["title"] == "Unable to open microwave"
-    assert retry["message"] == "no grasp passes the checks. Press Open Microwave Door to try again."
+    assert retry["message"] == (
+        "No grasp passes the checks. The arm is holding still. Press Open Microwave Door to try again."
+    )
     assert retry["buttons"] == [{"button_id": "retry", "label": "Open Microwave Door"}, STOP]
     assert ctx.sent[-1]["message"] == "Microwave door opened."
 
@@ -281,7 +299,8 @@ def test_holding_the_handle_is_reported_and_never_retried(flow):
     assert node.execute.call_count == 1
     last = ctx.sent[-1]
     assert last["title"] == "Open microwave: failed"
-    assert "let go of it" in last["message"]
+    assert "still holding the handle" in last["message"] and "open the gripper" in last["message"]
+    assert "stopped before the door was open" in last["message"]
     assert last["buttons"] == [DONE]
 
 
@@ -291,7 +310,7 @@ def test_unrecoverable_failure_is_reported_without_retry(flow):
     with pytest.raises(EngineError, match="bad speed"):
         node._ui_run("close_door_ui", ctx)
     assert node.execute.call_count == 1
-    assert "bad speed" in ctx.sent[-1]["message"]
+    assert "Bad speed." in ctx.sent[-1]["message"]
 
 
 def test_cancel_while_waiting_to_retry_does_not_move_again(flow):
@@ -319,6 +338,7 @@ def test_execution_disabled_never_moves(flow):
     assert raised.value.recoverable and raised.value.error_code == "execution_disabled"
     node.execute.assert_not_called()
     assert ctx.sent[-1]["title"] == "Close microwave: not started"
+    assert "arm motion off" in ctx.sent[-1]["message"] and "allow_execute" not in ctx.sent[-1]["message"]
     assert ctx.sent[-1]["buttons"] == [DONE]
 
 
@@ -353,3 +373,64 @@ def _no_ui_wrap(monkeypatch):
     from capability_ui import panels as ui_panels
 
     monkeypatch.setattr(ui_panels, "WRAP_CHARS", 10**6)
+
+
+def test_a_refusal_shows_its_reason_and_what_to_do(flow):
+    node, ctx, _, _ = flow
+    ctx.answers = [None]
+    node.execute.side_effect = EngineError(
+        "refused", "NO DETECTION (1) after 3 retries -- the arm holds where it is", True
+    )
+    with pytest.raises(EngineError):
+        node._ui_run("open_door_ui", ctx)
+    message = ctx.sent[1]["message"].replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ")
+    assert message == (
+        "The wrist camera couldn't see the microwave handle (3 tries). The arm is holding still. Make sure the handle "
+        "is in view of the wrist camera and nothing covers it. Press Open Microwave Door to try again."
+    )
+
+
+def test_a_close_that_ended_false_names_what_its_run_said(flow):
+    node, ctx, _, _ = flow
+    ctx.answers = [None]
+
+    def run(action_id, params, _ctx):
+        node._said.append("need /data/microwave/door.json -- refusing.")
+        raise EngineError("stopped", "the close stopped short -- the arm holds where it is", True)
+
+    node.execute.side_effect = run
+    with pytest.raises(EngineError):
+        node._ui_run("close_door_ui", ctx)
+    message = ctx.sent[1]["message"].replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ")
+    assert "no record of the microwave door being opened" in message
+    assert "Open the door with Open Microwave Door first" in message
+
+
+def test_the_arms_own_error_is_named_only_if_this_run_set_it(flow):
+    node, ctx, _, _ = flow
+    node.arm = Mock(last_error="  RammpArm: go_to: arm is E-STOPPED -- clear it first -- nothing sent.")
+    ctx.answers = [None]
+
+    def run(action_id, params, _ctx):
+        node.arm.last_error = "swing: STOPPED (-11 halted: unexpected contact)"
+        raise EngineError("stopped", "the open stopped short -- the arm holds where it is", True)
+
+    node.execute.side_effect = run
+    with pytest.raises(EngineError):
+        node._ui_run("open_door_ui", ctx)
+    message = ctx.sent[1]["message"].replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ")
+    assert "unexpected push or pull" in message and "emergency stop" not in message
+
+
+def test_an_arm_error_that_isnt_an_engine_error_is_shown_then_raised(flow):
+    node, ctx, _, _ = flow
+
+    class EStopped(Exception):
+        pass
+
+    node.execute.side_effect = EStopped("arm is E-STOPPED -- clear it first")
+    with pytest.raises(EStopped):
+        node._ui_run("close_door_ui", ctx)
+    last = ctx.sent[-1]
+    assert last["title"] == "Close microwave: failed" and last["buttons"] == [DONE]
+    assert "Release the emergency stop" in last["message"].replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ")

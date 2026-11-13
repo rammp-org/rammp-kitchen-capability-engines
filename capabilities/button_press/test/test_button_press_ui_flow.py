@@ -41,6 +41,9 @@ NAMES = ast.literal_eval(
 _spec = importlib.util.spec_from_file_location("bp_ui_panel", PKG / "ui_panel.py")
 ui_panel = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ui_panel)
+_spec = importlib.util.spec_from_file_location("bp_ui_text", PKG / "ui_text.py")
+ui_text = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ui_text)
 
 
 class Cancelled(Exception):
@@ -89,6 +92,10 @@ def load():
         "EngineError": EngineError,
         "RunUI": RunUI,
         "TEXT": ui_panel.TEXT,
+        "DISABLED": ui_text.DISABLED,
+        "NO_ANSWER": ui_text.NO_ANSWER,
+        "failure_message": ui_text.failure_message,
+        "bug_message": ui_text.bug_message,
         "dome_pattern": SimpleNamespace(NAMES=NAMES),
         "DEFAULTS": SimpleNamespace(target="start_30s"),
         # the engine's own cancel (Control.CANCEL on itself): here, the fake ctx's
@@ -273,7 +280,9 @@ def test_a_refused_check_before_the_panel_offers_the_same_press_again():
     assert node.execute("press_timer_clock", {}, ctx)["pressed"] == 2
     assert [a.presses for a in node._press.calls] == [2, 2]  # the count is asked once
     retry = next(p for p in ctx.sent if any(b["button_id"] == "retry" for b in p["buttons"]))
-    assert "nothing in 7 frames" in retry["message"] and retry["message"].endswith("Try again?")
+    assert retry["message"].startswith("Couldn't press Timer/Clock while finding the button.")
+    assert "couldn't find the microwave's buttons (7 frames tried)" in retry["message"]
+    assert retry["message"].endswith("Tap Press Timer/Clock to try again.")
     assert retry["buttons"] == [{"button_id": "retry", "label": "Press Timer/Clock"}, panels.STOP]
     assert ctx.sent[-1]["message"] == "Pressed Timer/Clock 2 times."
 
@@ -297,7 +306,7 @@ def test_a_failure_at_the_panel_is_shown_and_never_retried(phase):
     assert len(node._press.calls) == 1
     last = ctx.sent[-1]
     assert last["title"] == "Press Defrost: failed" and last["buttons"] == [panels.DONE]
-    assert AT_PANEL_NOTE in last["message"]
+    assert ui_text.AT_PANEL_STATE in last["message"] and last["message"].endswith(ui_text.AT_PANEL_TODO)
     assert not any(b["button_id"] == "retry" for p in ctx.sent for b in p["buttons"])
 
 
@@ -307,26 +316,33 @@ def test_a_recoverable_error_raised_at_the_panel_is_still_not_retried():
     )
     with pytest.raises(EngineError):
         node.execute("press_start", {}, ctx)
-    assert len(node._press.calls) == 1 and AT_PANEL_NOTE in ctx.sent[-1]["message"]
+    assert len(node._press.calls) == 1 and ui_text.AT_PANEL_TODO in ctx.sent[-1]["message"]
 
 
 def test_a_driver_failure_before_the_panel_is_shown_and_not_retried():
     node, ctx = make(
         replies=["presses_1", "done"],
         steps=("preflight", "stage"),
-        outcomes=(failure("stage", MotionFailed("trajectory ended HALTED -- HOLDING HERE")), OK),
+        outcomes=(
+            failure("stage", MotionFailed("stage: trajectory ended HALTED halted: emergency stop -- HOLDING HERE")),
+            OK,
+        ),
     )
     with pytest.raises(EngineError):
         node.execute("press_start", {}, ctx)
     assert len(node._press.calls) == 1
-    assert "HALTED" in ctx.sent[-1]["message"] and AT_PANEL_NOTE not in ctx.sent[-1]["message"]
+    message = ctx.sent[-1]["message"]
+    assert "emergency stop is pressed" in message and ui_text.HOLDING_STATE in message
+    assert "HALTED" not in message and ui_text.AT_PANEL_STATE not in message
 
 
 def test_a_bug_is_shown_too():
     node, ctx = make(replies=["presses_1", "done"], steps=("preflight",), outcomes=(ValueError("boom"),))
     with pytest.raises(ValueError):
         node.execute("press_start", {}, ctx)
-    assert "boom" in ctx.sent[-1]["message"] and ctx.sent[-1]["title"] == "Press Start: failed"
+    message = ctx.sent[-1]["message"]
+    assert "something unexpected went wrong" in message and "(details: Boom)" in message
+    assert "ValueError" not in message and ctx.sent[-1]["title"] == "Press Start: failed"
 
 
 @pytest.mark.parametrize(
@@ -352,7 +368,8 @@ def test_execution_disabled_refuses_on_the_panel_and_never_runs():
     assert error.value.error_code == "execution_disabled"
     assert node._press.calls == []
     (refusal,) = ctx.sent  # no count asked
-    assert refusal["title"] == "Press Start: not started" and "allow_execute" in refusal["message"]
+    assert refusal["title"] == "Press Start: not started" and refusal["message"] == ui_text.DISABLED
+    assert "allow_execute" in str(error.value)  # the goal's own error keeps the log's words
     assert refusal["buttons"] == [panels.DONE]
 
 
@@ -378,3 +395,94 @@ def _no_ui_wrap(monkeypatch):
     from capability_ui import panels as ui_panels
 
     monkeypatch.setattr(ui_panels, "WRAP_CHARS", 10**6)
+
+
+# -- the panel's words for the run's own failures (ui_text) --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, says, todo",
+    [
+        (
+            "preflight failed -- nothing commanded: gripper must be CLOSED (this presses with the closed fingertips)",
+            "The gripper is open",
+            "Close the gripper",
+        ),
+        (
+            "preflight failed -- nothing commanded: no camera_info; no wrist colour image -- is the wrist camera up?",
+            "wrist camera isn't sending images",
+            "wrist camera is running",
+        ),
+        (
+            "dome detector: nothing in 12 frames (TOO CLOSE: pitch 31 mm) -- move the camera back",
+            "too close to the microwave",
+            "Move the wheelchair back",
+        ),
+        (
+            "dome detector: nothing in 12 frames (TOO FAR: pitch 9 mm) -- move the camera closer",
+            "too far from the microwave",
+            "a little closer",
+        ),
+        (
+            "dome detector: only 2/9 frames agree on the start_30s pixel (need 4; within 6 px; pixels [[1, 2]])",
+            "only 2 of 9 agreed",
+            "Keep the wheelchair and the microwave still",
+        ),
+        (
+            "scene camera: found the microwave in 1/8 frames (need 3): no front",
+            "only 1 of 8 frames",
+            "scene camera's view",
+        ),
+        (
+            "approach: wrist would turn 75 deg to the pre-press spot (> 60) -- start facing the panel",
+            "turn the wrist 75 degrees, more than the 60 allowed",
+            "faces the microwave squarely",
+        ),
+        (
+            "stage: collision check -- forearm_link vs microwave 1.2 cm (need >= 3.0) -- arm not commanded",
+            "within 1.2 cm of something (it needs 3.0 cm)",
+            "further from the microwave",
+        ),
+        ("plan: the arm moved 2.4 deg since this leg was planned -- nothing sent", "moved 2.4 degrees", "Make sure"),
+        (
+            "stage: go_to_ee_pose failed: plan_to_pose: MotionGenStatus.IK_FAIL: no collision-free joint solution",
+            "can't reach the position",
+            None,
+        ),
+    ],
+)
+def test_the_runs_failures_in_plain_words_with_a_next_step(raw, says, todo):
+    reason, next_step = ui_text.reason_and_todo(raw)
+    assert says in reason
+    assert (todo is None and next_step is None) or todo in next_step
+    for log_only in ("MotionGenStatus", "camera_info", "HOLDING", "TOO CLOSE", "start_30s", "forearm_link"):
+        assert log_only not in reason
+
+
+def test_a_message_no_rule_knows_is_shown_cleaned_not_replaced():
+    reason, todo = ui_text.reason_and_todo("press: no touch within 12 mm -- session closed, HOLDING HERE")
+    assert reason == "No touch within 12 mm." and todo is None
+
+
+@pytest.mark.parametrize(
+    "phase, motion_failed, state",
+    [
+        ("preflight", False, "The arm hasn't moved."),
+        ("detect", False, "The arm hasn't moved."),
+        ("preflight", True, "The arm is holding still where it stopped."),
+        ("redetect", False, "The arm is holding still where it stopped."),
+        ("press", False, "The fingertip may still be at the microwave's buttons"),
+    ],
+)
+def test_the_state_follows_the_step(phase, motion_failed, state):
+    assert ui_text.state(phase, motion_failed).startswith(state)
+
+
+def test_a_failure_message_names_the_button_and_the_step():
+    text = ui_text.failure_message(
+        "Start", "Looking for the microwave", "detect", "scene camera: no frames in 5 s -- is sheppy `scene_camera` up?"
+    )
+    assert text == (
+        "Couldn't press Start while looking for the microwave. The scene camera sent no images in 5 seconds. "
+        "The arm hasn't moved. Check that the scene camera is running, then try again."
+    )

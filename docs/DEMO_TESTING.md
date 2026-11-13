@@ -4,6 +4,68 @@ How to start every capability on `integration/dec-demo` and run the demo's ten s
 time, without the orchestrator or the UI, then ("With the UI") from the touchscreen. Each capability's own docs have the detail (options, failure codes, what
 each check means); this page is the order, the commands and the hand-offs between steps.
 
+## Quick start: the whole demo from the touchscreen
+
+Run on **snorlax** (the touchscreen is its own screen):
+
+```bash
+/home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh      # bring it all up
+/home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/down.sh    # bring it all down
+```
+
+`~/rammp-wt/kce-ui-check` is a worktree on `integration/dec-demo`: `git -C ~/rammp-wt/kce-ui-check pull` updates
+it (then rebuild the images, below, after code changes). In any other checkout the scripts are
+`scripts/kitchen-ui/up.sh` and `down.sh` under its root.
+
+`up.sh` starts the touchscreen app and every capability, and puts `fridge_1`, `microwave_1`, `table_1` and
+`tupperware_1` on the screen: tap one for its buttons. Nothing moves until a button is pressed.
+
+**Before `up.sh`:**
+
+1. Sheppy is up: `cd ~/rammp-deployments && sheppy up flatbot --manifest december_2026/sheppy-manifest.yaml`.
+   `up.sh` and `down.sh` never start or stop it.
+1. The arm isn't e-stopped (`/control_status`'s `estopped`). If it is: [How to stop the robot](#how-to-stop-the-robot)
+   has the release, then `/clear_faults`.
+
+**One capability at a time:** name it in `KUI_CAPS`. The UI comes up the same, with only that capability's
+buttons; the other objects stay off the screen.
+
+```bash
+KUI_CAPS=microwave_place /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh
+KUI_CAPS="fridge microwave" /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh    # or a few
+```
+
+| `KUI_CAPS`        | Tap            | Buttons                                                                    |
+| ----------------- | -------------- | -------------------------------------------------------------------------- |
+| `fridge`          | `fridge_1`     | Go to Fridge, Open Fridge Door, Close Fridge Door (+ "wheelchair drives")  |
+| `microwave`       | `microwave_1`  | Open Microwave Door, Close Microwave Door                                  |
+| `microwave_place` | `tupperware_1` | Grab Tupperware                                                            |
+|                   | `microwave_1`  | Place Tupperware in Microwave                                              |
+| `place_container` | `table_1`      | Place Tupperware on Table                                                  |
+| `box_opening`     | `tupperware_1` | Open Container                                                             |
+| `button_press`    | `microwave_1`  | Press Start, Press Power, Press Timer/Clock, Press Defrost, Press Stop/Eco |
+
+Only ever one node per capability: don't also start that capability standalone (N1-N6) while it runs here, or both
+take every goal and both move the arm. `down.sh` stops it all.
+
+**If the UI misbehaves** (flickers, taps do nothing): run `up.sh` again. It restarts everything it started, in the
+right order (about a minute). If an action was moving the arm, the arm now holds where it stopped: look at the hand
+(on the handle? holding the container?) before pressing anything. A button that still refuses after a restart is
+the arm (e-stopped) or sheppy, not the UI.
+
+Options: `FRIDGE_GRASP=side scripts/kitchen-ui/up.sh` (the fridge's side grasp; front is the default),
+`ALLOW_EXECUTE=false ...` (every button refuses to move the arm), `MOCK=true ...` (every capability's mock).
+One node alone, without the UI stack: `scripts/kitchen-ui/node.sh <capability>`. Watch the nodes:
+`tmux attach -t kitchenui`. By design, tap-to-place offers no spots until the scene camera is calibrated ("Use marked spot" works).
+
+**Set up once** (snorlax has all of it): the images, built from this branch,
+`for c in fridge microwave microwave_place button_press place_container box_opening; do docker build --network host -f capabilities/$c/Dockerfile -t $KCE/$c:ui-4d916ca . || break; done`
+(another tag: `KUI_TAG=...`); `~/ros2_ws` with rammp-UI-bridge and rammp-orchestrator; rammp-orchestrator
+`hotfix/execute-timeout-param` built in `~/orch_hotfix_ws` (no 120 s limit, readable button labels); the Unreal app
+and its Vulkan loader (`scripts/kitchen-ui/unreal.sh`). How the UI works and why order matters: "With the UI", below.
+
+## The steps
+
 | #   | Step                             | Capability        | Action(s)                        | Hand at the start          | Ends with                                      |
 | --- | -------------------------------- | ----------------- | -------------------------------- | -------------------------- | ---------------------------------------------- |
 | 1   | Open fridge                      | `fridge`          | `go_to_start`, `open`            | empty                      | door at 90°, hand off the door                 |
@@ -35,30 +97,22 @@ All on the robot's computer, from this repo's root unless it says otherwise:
 ## ROS environment
 
 Nothing needs sourcing on the host. Every `ros2` command below runs inside one of this repo's images, whose
-entrypoint sources `/opt/ros/humble` and the image's workspaces. Paste this block into **every** terminal (or save
-it as `~/kitchen_env.sh` and `source ~/kitchen_env.sh`):
+entrypoint sources `/opt/ros/humble` and the image's workspaces. In **every** terminal:
 
 ```bash
-export ROS_DOMAIN_ID=0
-export KCE=ghcr.io/rammp-org/rammp-kitchen-capability-engines
-# Cyclone, as the images ship it, without the 10-participants-per-host cap (the Makefile's DDS_ENV)
-export DDS='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>'
-# The fridge node only: Cyclone on eno1, the sensor network the MIB (the base) is on, for /base/odom
-export DDS_ENO1='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>'
-# rammp-deployments' december_2026 directory on this computer (home_arm mounts its robot config)
-export DEPLOY=~/rammp-deployments/december_2026
-
-# goal <capability> <action> ['<params json>']: one ExecuteAction goal, feedback printed, as the orchestrator sends it
-goal() {
-  local cap=$1 action=$2 params=${3:-}
-  [ -n "$params" ] || params='{}'
-  docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_URI="$DDS" "$KCE/$cap:dev" \
-    ros2 action send_goal --feedback "/$cap/execute_action" rammp_orchestrator_interfaces/action/ExecuteAction \
-    "{engine_id: $cap, action_id: $action, params_json: '$params'}"
-}
-# ros <command ...>: any other ros2 command, in the fridge image (it has the arm, base, cuRobo and orchestrator messages)
-ros() { docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_URI="$DDS" "$KCE/fridge:dev" "$@"; }
+source /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen_env.sh     # or scripts/kitchen_env.sh in any checkout
 ```
+
+It sets `ROS_DOMAIN_ID=0`, `$KCE` (the images), `$DDS` and `$DDS_ENO1` (Cyclone, all interfaces / eno1 for the
+fridge) and `$DEPLOY` (rammp-deployments' `december_2026`), and defines:
+
+| Command                            | Does                                                                                   |
+| ---------------------------------- | -------------------------------------------------------------------------------------- |
+| `goal <cap> <action> ['<params>']` | one ExecuteAction goal, feedback printed, as the orchestrator sends it                 |
+| `ros <command ...>`                | any other `ros2` command, in the fridge image                                          |
+| `estop`                            | the software e-stop: the arm holds where it is; Ctrl-C ends it once the arm has halted |
+| `estop_release`                    | release it (and end any stop left running in `sheppy-arm`); then `clear_faults`        |
+| `clear_faults`                     | the arm's latched faults and contact stops                                             |
 
 `goal` takes the params as plain JSON in single quotes, so no `\"` escaping:
 `goal fridge open '{"execute": true, "speed": 0.2}'` sends the same goal as the fridge doc's long form.
@@ -134,14 +188,15 @@ docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_U
   -p planner_world_dir:=/planner_cache/rammp_planner_worlds \
   -p planner_world_dir_in_planner:=/root/.cache/rammp_planner_worlds
 
-# N2 microwave_place (both grabs and the microwave place). take_home_joints is the pose take_out looks from:
-# set it per grab (step 2, step 7), which means restarting this node. Its parameters are read at startup.
+# N2 microwave_place (the grab and the microwave place). As written it grabs from its default viewing pose, the
+# microwave's (11-11). For another (step 2's fridge, step 7's table), add to the last line its seven arm joints in
+# RADIANS, as decimals (0.0, not 0), e.g.  -p "take_home_joints:=[1.7984, -0.5358, -2.9606, -2.1476, 1.774, 1.9206, 0.0436]"
+# (Before the run, step 1, says how to read them). Parameters are read at startup: a new pose = restart this node.
 docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_URI="$DDS" \
   -v /tmp/microwave_place_data:/config/microwave_place -v curobo_kernel_cache:/root/.cache \
   $KCE/microwave_place:dev \
   ros2 run microwave_place microwave_place_node --ros-args -p use_orchestrator:=false -p allow_execute:=true \
-  -p worlds_dir:=/root/.cache/rammp_planner_worlds -p arm.service_call_s:=30.0 \
-  -p "take_home_joints:=[J1, J2, J3, J4, J5, J6, J7]"
+  -p worlds_dir:=/root/.cache/rammp_planner_worlds -p arm.service_call_s:=30.0
 
 # N3 place_container
 docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_URI="$DDS" \
@@ -221,6 +276,8 @@ Two things the arm driver does (its `docs/interface.md`, "The e-stop"; both bit 
   `E-STOP engaged by 'operator'` on the stop and the release on a release; `/control_status` shows `estopped`.
   After the release, `/clear_faults` before the next action, or its first motion stops short.
 
+With `scripts/kitchen_env.sh` sourced, the same are `estop`, `estop_release` and `clear_faults`.
+
 The fridge doc has the e-stop's other caveats (the new `EStop` message, test it at rest first).
 
 ## Utilities (T3)
@@ -237,7 +294,15 @@ ros ros2 service call /rammp_curobo/set_world rammp_curobo_interfaces/srv/SetWor
 # home_arm: plan the way home (nothing sent), then go (ARM MOVES)
 goal home_arm go_home '{"dry_run": true}'
 goal home_arm go_home
+
+# open the gripper (GRIPPER MOVES; the arm doesn't): e.g. to let go of a handle or the container
+gripper_open          # gripper_close: close it
 ```
+
+`gripper_open` (from `scripts/kitchen_env.sh`) streams `/setpoint/gripper` from the arm's container for 2 s, as the
+capabilities' `self.arm.gripper()` does; the 2F-85 holds the last command after. Without the helper:
+`docker exec -it sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 topic pub -r 50 -t 100 /setpoint/gripper rammp_arm_interfaces/msg/GripperSetpoint "{position: 0.0, speed: 0.5, force: 0.5}"'`.
+Not yet run on the arm (11-12): watch the first one.
 
 A capability's `control` service pauses (`0`), resumes (`1`) or cancels (`2`) its running action, e.g.
 `ros ros2 service call /microwave/control rammp_orchestrator_interfaces/srv/Control '{command: 2}'`.
@@ -293,7 +358,8 @@ Or let the base make the move itself: add `"drive_base": true, "base_speed": 0.0
 
 ### 2. Grab tupperware from the fridge (`microwave_place`, `take_out`)
 
-Restart N2 with the **fridge** viewing pose: `-p "take_home_joints:=[...]"` (Before the run, step 1).
+Restart N2 with the **fridge** viewing pose: `-p "take_home_joints:=[...]"`, its seven arm joints in radians as
+decimals (Before the run, step 1).
 
 ```bash
 goal microwave_place take_out '{"execute": true}'             # ARM MOVES: to the viewing pose first
@@ -448,31 +514,31 @@ things in, with **Done**. Final messages wait at most 60 s for Done; questions (
 Tap an object, then one of its buttons. The buttons show each action's label (rammp-orchestrator
 `hotfix/execute-timeout-param`; the old build shows the raw action id, e.g. `open_door_ui`):
 
-| Tap         | Buttons                                                                                              | Capability        | Demo step |
-| ----------- | ---------------------------------------------------------------------------------------------------- | ----------------- | --------- |
-| `fridge`    | Go to Fridge, Open Fridge Door, Close Fridge Door, and each door's "(wheelchair drives)"              | `fridge`          | 1, 3      |
-| `fridge`    | Retrieve Tupperware from Fridge (refused until `fridge_accept_unmodeled_door:=true`: the open door isn't in its collision world) | `microwave_place` | 2         |
-| `table`     | Place the container here (tap a spot, then Place here; or Use marked spot)                           | `place_container` | 4         |
-| `food_container` | Open Container                                                                                  | `box_opening`     | 5         |
-| `microwave` | Open Microwave Door, Close Microwave Door                                                            | `microwave`       | 6, 9      |
-| `microwave` | Retrieve Tupperware from Microwave, Place Tupperware in Microwave                                     | `microwave_place` | 7, 8      |
-| `microwave` | Press Start, Press Power, Press Timer/Clock, Press Defrost, Press Stop/Eco (then: how many presses)   | `button_press`    | 10        |
+| Tap          | Buttons                                                                                             | Capability        | Demo step |
+| ------------ | --------------------------------------------------------------------------------------------------- | ----------------- | --------- |
+| `fridge`     | Go to Fridge, Open Fridge Door, Close Fridge Door, and each door's "(wheelchair drives)"            | `fridge`          | 1, 3      |
+| `tupperware` | Grab Tupperware                                                                                     | `microwave_place` | 2, 7      |
+| `tupperware` | Open Container                                                                                      | `box_opening`     | 5         |
+| `table`      | Place Tupperware on Table (tap a spot, then Place here; or Use marked spot)                         | `place_container` | 4         |
+| `microwave`  | Place Tupperware in Microwave                                                                       | `microwave_place` | 8         |
+| `microwave`  | Open Microwave Door, Close Microwave Door                                                           | `microwave`       | 6, 9      |
+| `microwave`  | Press Start, Press Power, Press Timer/Clock, Press Defrost, Press Stop/Eco (then: how many presses) | `button_press`    | 10        |
+
+`tupperware` is the object `tupperware_1`, class `food_container` (the scene segmenter's "food container"). Grab
+Tupperware is the one grab, wherever the tupperware is: it looks from microwave_place's `take_home_joints`.
 
 Panel text: the UI doesn't wrap text, and shows a message as one rich-text run (`<body-sm-light>...</>`) that a
 plain line break breaks (the tags then show on screen). The capabilities (`shared/capability_ui`'s `wrap`) and the
 orchestrator break messages into lines of at most 40 characters, each its own run.
 
-### On snorlax: one script
+### Starting it
 
-`~/rammp-wt/fridgeui0-up.sh [front|side]` (re)starts the whole stack below in tmux session `fridgeui0`, in the
-order the Unreal app needs, with the fridge node on the real arm (`allow_execute:=true`) and its handle grasp
-`front` (default) or `side`. Nothing moves until a button is pressed. Its pieces, each runnable on its own:
-`~/rammp-wt/ue-run.sh` (Unreal), `~/rammp-wt/fridge-ui-run.sh [front|side]` (the fridge node; also
-`~/rammp-wt/fridge-front`, `~/rammp-wt/fridge-side`).
+`scripts/kitchen-ui/up.sh` (Quick start, at the top) starts all of the below in order. By hand, the commands are
+these, U1-U4 and then each capability node (`scripts/kitchen-ui/node.sh <capability>` has their settings).
 
 **Order matters to the Unreal app.** Start it first; objects pushed before it is up never appear. On 11-12,
 restarting the orchestrator under a running Unreal left Unreal taking no taps at all (its log showed no `UI event`
-for any tap; the bridge saw none): restart Unreal too (or rerun the script), then `remove`/`add` the object in U3.
+for any tap; the bridge saw none): restart Unreal too (or rerun `up.sh`), then `remove`/`add` the object in U3.
 A capability node can be restarted alone: it registers again, and the UI keeps working.
 
 ### The orchestrator: no 120 s limit

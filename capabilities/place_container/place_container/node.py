@@ -324,10 +324,10 @@ class Capability(CapabilityEngine):
             except Cancelled:
                 raise
             except EngineError as e:
-                self._show_error(ctx, action_id, str(e))
+                self._show_error(ctx, action_id, ui.failure_message(action_id, str(e)))
                 raise
-            except Exception as e:  # a bug: still say so on the UI, then let the engine report it
-                self._show_error(ctx, action_id, f"Unexpected error ({type(e).__name__}): {e}")
+            except Exception:  # a bug: still say so on the UI, then let the engine report it
+                self._show_error(ctx, action_id, ui.bug_message(action_id))
                 raise
         if bag is not None:
             self.get_logger().info(f"run recorded: {bag.run_dir} (bag + run.json)")
@@ -346,7 +346,7 @@ class Capability(CapabilityEngine):
         run_ui = RunUI(pctx, ui.title("place_here"), cancel=lambda: cancel_own_run(self), logger=self.get_logger())
         pctx.ui_run = run_ui
         if not self.mock and not self.cfg["allow_execute"]:
-            run_ui.refuse(ui.REFUSED_OFF)
+            run_ui.refuse(ui.REFUSED_OFF_UI)
             raise EngineError("refused", ui.REFUSED_OFF, recoverable=True)
         given = {k: params[k] for k in ("x", "y", "table_z") if k in params}
         note = ""
@@ -367,13 +367,13 @@ class Capability(CapabilityEngine):
                 if e.recoverable and "STOPPED" not in str(e) and not given and run_ui.connected:
                     # refused before anything moved: back to the picker, with the reason
                     self.get_logger().warning(f"place_here: {e} -- back to the spot picker")
-                    note = f"Couldn't place it there: {e}. "
+                    note = ui.retry_note(str(e))
                     continue
-                run_ui.error(f"Couldn't place the container: {e}")
+                run_ui.error(ui.failure_message("place_here", str(e)))
                 raise
-            except Exception as e:  # a bug: still say so on the UI, then let the engine report it
+            except Exception:  # a bug: still say so on the UI, then let the engine report it
                 if not run_ui.user_stopped:
-                    run_ui.error(f"Unexpected error ({type(e).__name__}): {e}")
+                    run_ui.error(ui.bug_message("place_here"))
                 raise
         run_ui.done(ui.PLACED, mock=self.mock)
         return result
@@ -447,7 +447,7 @@ class Capability(CapabilityEngine):
                         f"{table_z:.3f} (incl. +{self.cfg['table_z_bias']:.3f} bias), from the {search.source}"
                     )
                     return dict(x=spot["x"], y=spot["y"], table_z=table_z)
-                note = f"Can't measure the table there ({why}). Tap another spot. "
+                note = ui.table_note(why)
 
     def _find_spots(self, pctx, marked):
         """(spots.Search, spots.Scene) of the scene camera's newest frame (mock: a made-up table). A Search

@@ -42,7 +42,7 @@ from capability_ui import RunUI, cancel_own_run
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import base_drive, close_door, constants, motion, open_door, push_open
+from . import base_drive, close_door, constants, motion, open_door, push_open, ui_text
 from .kinematics import Chain
 from .perception import WristCamera
 from .planning import Planner
@@ -169,23 +169,9 @@ UI_NOT_MOVED = {
     "open": "Mock: fridge door opened. No arm motion.",
     "close": "Mock: fridge door closed. No arm motion.",
 }
-# A failed goal on the UI, per error code: what the user reads (the full message stays in the log)
 UI_WHAT = {"open": "open the fridge", "close": "close the fridge", "go_to_start": "move to the fridge"}
-UI_ERRORS = {
-    "refused": "A safety check didn't pass, so the arm stopped. It is holding still.",
-    "stopped": "The arm stopped partway. It is holding still.",
-    "base_stopped": "The wheelchair stopped partway and the arm is holding still. Check where the wheelchair is before "
-    "trying again.",
-    "bad_params": "The request had settings the fridge can't use. Nothing moved.",
-    "execution_disabled": "Arm motion is turned off on this robot (allow_execute is false).",
-}
-UI_ERROR_OTHER = "Something went wrong, so the fridge action stopped."  # a bug, or a new code
-# After an open that may have stopped with the hand on the handle (_ui_maybe_holding): said, and no retry
-UI_MAYBE_HOLDING = " The hand may still be holding the handle."
-# After Stop on the UI during an open (the Stopped notice): nothing tracks whether the hand is on the handle yet
-UI_STOPPED_OPEN = "If the hand is on the handle, let go of it before anything else (the open with release_only)."
-# After a goal that drove the wheelchair (drive_base): said, and no retry
-UI_DROVE = " The wheelchair has already moved: check where it is before trying again."
+# A failed goal on the UI: its own reason in plain words, what state it leaves things in and what to do (ui_text; the
+# full message stays in the log)
 BASE_CONTROL_STATUS_TOPIC = "/base/control_status"  # the MIB's rt/base/control_status (rammp-rtps control_message.hpp)
 
 
@@ -403,7 +389,7 @@ class Capability(CapabilityEngine):
                     continue
                 log.error(f"{ui_id}: {error}")
                 if self._ui_can_retry(action_id, error):
-                    if not self._ui_ask_retry(ui, action_id, label):
+                    if not self._ui_ask_retry(ui, action_id, label, error):
                         raise
                     continue
                 self._ui_failed(ui, action_id, error)
@@ -459,20 +445,22 @@ class Capability(CapabilityEngine):
     def _ui_stopped_note(self, action_id):
         """What the Stopped notice adds: the hand may be on the handle (an open; the close pushes with the hand and
         go_to_start never touches the door), and the wheelchair has moved (drive_base)."""
-        note = UI_STOPPED_OPEN if action_id == "open" else ""
+        note = ui_text.STOPPED_OPEN if action_id == "open" else ""
         if getattr(self, "_drove", False):
-            note += UI_DROVE
+            note += f" {ui_text.DROVE} {ui_text.DROVE_TODO}"
         return note.strip()
 
     def _ui_failed(self, ui, action_id, error):
-        """The failure on the UI (Done). It never hides the failure it reports: anything it raises is only logged."""
+        """The failure on the UI (Done): its reason in plain words, the state it leaves things in, what to do
+        (ui_text, from the error's own message). It never hides the failure it reports: anything it raises is only
+        logged."""
         try:
-            code = error.error_code if error is not None else None
-            message = UI_ERRORS.get(code, UI_ERROR_OTHER)
-            if self._ui_maybe_holding(action_id, error):
-                message += UI_MAYBE_HOLDING
-            if getattr(self, "_drove", False) and code != "base_stopped":  # base_stopped says it already
-                message += UI_DROVE
+            message = ui_text.failure(
+                action_id,
+                error,
+                maybe_holding=self._ui_maybe_holding(action_id, error),
+                drove=bool(getattr(self, "_drove", False)),
+            )
             ui.error(message, title=f"Couldn't {UI_WHAT[action_id]}", timeout_s=constants.UI_NOTICE_TIMEOUT_S)
         except Exception as e:
             self.get_logger().warning(f"UI failure panel: couldn't show it: {e!r}")
@@ -498,9 +486,10 @@ class Capability(CapabilityEngine):
         pressed = ui.ask(message, buttons, timeout_s=constants.UI_PROMPT_TIMEOUT_S)
         return self._ui_answer(ui, "wheelchair move", pressed, "continue")
 
-    def _ui_ask_retry(self, ui, action_id, label):
-        """A recoverable refusal: what happened and the same button to try again (or Stop)."""
-        message = f"{UI_ERRORS['refused']} Press {label} to try again."
+    def _ui_ask_retry(self, ui, action_id, label, error):
+        """A recoverable refusal: what happened and what to change (ui_text), and the same button to try again (or
+        Stop)."""
+        message = ui_text.retry_prompt(action_id, error, label)
         buttons = [{"button_id": "retry", "label": label}]
         title = f"Couldn't {UI_WHAT[action_id]}"
         pressed = ui.ask(message, buttons, timeout_s=constants.UI_PROMPT_TIMEOUT_S, title=title, style="warning")
