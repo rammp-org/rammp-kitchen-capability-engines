@@ -12,9 +12,11 @@
 The reference capability. It offers two actions: `count`, which counts up to
 `to` with progress feedback and honours pause and cancel, and
 `count_with_panel`, the same but also driving a live progress panel (with a
-Stop button) directly on the UI bridge. It is activated when the user selects
-a `counter`. Replace this paragraph with what your capability does and what
-would break without it.
+Stop button) directly on the UI bridge, and showing/hiding its overlay
+camera feed (`ctx.set_overlay_visible()`) for the duration of the run —
+shown before the loop starts, hidden in a `finally` on every exit path. It
+is activated when the user selects a `counter`. Replace this paragraph with
+what your capability does and what would break without it.
 
 ## Publishes
 

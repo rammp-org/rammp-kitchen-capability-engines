@@ -82,31 +82,47 @@ class Capability(CapabilityEngine):
         A capability with its own camera (e.g. a wrist cam) would also call
         ctx.publish_overlay_image(image) here, once per tick, to show the
         user a live view alongside the panel -- omitted since this example
-        has no camera to publish.
+        has no camera to publish. ctx.set_overlay_visible() brackets the
+        whole run below regardless, to demonstrate the show/hide toggle
+        (UE's `Open Camera Feed`/`Close Camera Feed` Remote Control
+        functions) even without any frames actually flowing: shown right
+        before the loop starts, hidden in a `finally` so it's hidden on
+        every exit path -- normal completion, the user's Stop button, or
+        ctx.checkpoint() raising Cancelled -- not just the happy path. The
+        Orchestrator's own end-of-execution cleanup also unconditionally
+        hides the overlay (see OrchestratorNode's execution-finish
+        handling), so this is actually redundant by the time execute()
+        returns -- it's here to show *this engine's own* call, for a
+        capability that wants the feed hidden the instant its loop ends
+        rather than waiting on that later cleanup.
         """
-        for n in range(1, to + 1):
-            ctx.checkpoint()
-            pct = 100.0 * n / to
-            ctx.update_user_panel(
-                panel_json={
-                    "title": "Counting",
-                    "message": f"{n}/{to}",
-                    "progress": {"phase": "counting", "pct": pct, "pausable": False},
-                    "buttons": [{"button_id": "stop", "label": "Stop"}],
-                }
-            )
-            # Poll for Stop throughout the interval, including on the last
-            # iteration, instead of only once beforehand and then sleeping
-            # through it uninterrupted -- otherwise a tap during any
-            # interval is never consumed and the action reports normal
-            # success.
-            event = self._wait_for_stop(interval, ctx)
-            if event is not None:
-                self.get_logger().info(f"count_with_panel: user pressed Stop at {n}/{to}")
-                return {"counted_to": n, "stopped_by_user": True}
-            ctx.progress("counting", pct, f"{n}/{to}")
+        ctx.set_overlay_visible(True)
+        try:
+            for n in range(1, to + 1):
+                ctx.checkpoint()
+                pct = 100.0 * n / to
+                ctx.update_user_panel(
+                    panel_json={
+                        "title": "Counting",
+                        "message": f"{n}/{to}",
+                        "progress": {"phase": "counting", "pct": pct, "pausable": False},
+                        "buttons": [{"button_id": "stop", "label": "Stop"}],
+                    }
+                )
+                # Poll for Stop throughout the interval, including on the last
+                # iteration, instead of only once beforehand and then sleeping
+                # through it uninterrupted -- otherwise a tap during any
+                # interval is never consumed and the action reports normal
+                # success.
+                event = self._wait_for_stop(interval, ctx)
+                if event is not None:
+                    self.get_logger().info(f"count_with_panel: user pressed Stop at {n}/{to}")
+                    return {"counted_to": n, "stopped_by_user": True}
+                ctx.progress("counting", pct, f"{n}/{to}")
 
-        return {"counted_to": to}
+            return {"counted_to": to}
+        finally:
+            ctx.set_overlay_visible(False)
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
         """Sleeps `duration` seconds in short steps, honouring cancel and
