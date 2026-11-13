@@ -5,10 +5,12 @@ CI starts capabilities in mock mode only, so nothing else runs this planning cod
 real recorded door file (10-24).
 """
 
+import json
+
 import numpy as np
 import pytest
+from door_common import close_door, open_door
 from door_common import common as dc
-from door_common import open_door
 from microwave import open_door as microwave_open
 
 from capability_engine import sim
@@ -36,6 +38,17 @@ def _detection(door):
         "hinge_seen": np.array(door["hinge"]),
         "door_z": np.array(door["door_z"]),
     }
+
+
+class _Hand:
+    """A resting arm at joints `q`, for a dry run: nothing here can move."""
+
+    def __init__(self, scene, rb, q):
+        pos, quat = sim.tool_pose(scene, rb, q)
+        self.state = {"position": list(q), "ee_pos": [*pos, *quat], "gripper_pos": 0.0}
+
+    def get_state(self):
+        return self.state
 
 
 @pytest.fixture
@@ -157,6 +170,14 @@ def test_curobo_path_refuses_a_detour(curobo_paths):
 
 def test_curobo_path_is_not_checked_without_a_planner(curobo_paths):
     assert open_door._check_curobo_path(object(), np.zeros(7), PATH, "the swing") is None
+
+
+def test_microwave_close_plans(door_sim, tmp_path):
+    scene, rb = door_sim
+    dc.DOOR_FILE.write_text(json.dumps({**MICROWAVE_DOOR, "door_open_deg": 90.0}))
+    hand = _Hand(scene, rb, dc.load_park())
+    args = close_door.close_args(False, route_over=True, keep_orientation=True)
+    assert close_door.push_close(hand, args)
 
 
 def test_keep_out_is_off_until_enabled_and_refuses_when_enabled(door_sim):

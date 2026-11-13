@@ -1,9 +1,11 @@
-"""The microwave capability: open the microwave door with the arm.
+"""The microwave capability: open and close the microwave door with the arm.
 
 Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, swing the door
 open, let go and push it further open (the user's 10-07 push-open demo, replayed relative to the
-door), then park. Every leg is planned and sim-gated before it moves; any failed check stops the
-run with the arm holding where it is (EngineError "refused").
+door). Action `close` (close_door.run): push the door shut with the side of the hand -- no grasp,
+the gripper untouched (it may hold a container) -- against the door the open saved. Every leg is
+planned and sim-gated before it moves; any failed check stops the run with the arm holding where
+it is (EngineError "refused").
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets
 `execute`. Otherwise the goal is a dry run (detect, plan and gate every leg; nothing moves) and the
@@ -11,18 +13,35 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
 
     ros2 launch microwave microwave.launch.py use_orchestrator:=false
     make action CAP=microwave ACTION=open PARAMS='{"execute": false}'
+    make action CAP=microwave ACTION=close PARAMS='{"execute": false, "route_over": true}'
 """
 
 import time
 
 import rammp_arm
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
+from door_common import close_door
 from door_common import common as dc
 from door_common import open_door as shared_open
 
 from . import open_door, recording
 from .perception import WristCamera
 from .tee_logger import TeeLogger
+
+COMMON = {
+    "execute": {"type": "boolean", "default": False},
+    "speed": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1.0},
+}
+
+
+def _schema(default):
+    """JSON Schema type of a close setting from its default (None: a number or unset)."""
+    if isinstance(default, bool):
+        return {"type": "boolean", "default": default}
+    if default is None:
+        return {"type": ["number", "null"], "default": None}
+    return {"type": "number", "default": default}
+
 
 # ROS parameter -> default. Topics and paths are per robot (the fragment's params:).
 PARAMS = {
@@ -72,12 +91,29 @@ PARAMS = {
 }
 
 
-# The UI action (one press, no settings): what it runs.
+# The UI actions (one press each, no settings): what they run. The close's settings are the ones that closed the
+# door on 11-12 (hand pointing forward, over the door's top, swing high and spiralling in clear of the handle).
 UI_ACTIONS = {
-    "open_door_ui": ("open", "Open Microwave Door", {"execute": True}),
+    # the push-open on explicitly: off by default on this branch (d7b1b43), and without it the open ends holding the
+    # handle, so the close couldn't follow
+    "open_door_ui": ("open", "Open Microwave Door", {"execute": True, "push_open": True}),
+    "close_door_ui": (
+        "close",
+        "Close Microwave Door",
+        {
+            "execute": True,
+            "face_door": True,
+            "route_over": True,
+            "over_above": 0.10,
+            "side_past_hinge": 0.12,
+            "push_radius": 0.31,
+            "push_radius_end": 0.25,
+            "push_z": 0.46,
+        },
+    ),
 }
-UI_TITLE = {"open": "Open microwave"}
-UI_DONE = {"open": "Microwave door opened."}
+UI_TITLE = {"open": "Open microwave", "close": "Close microwave"}
+UI_DONE = {"open": "Microwave door opened.", "close": "Microwave door closed."}
 
 
 class Capability(CapabilityEngine):
@@ -91,16 +127,29 @@ class Capability(CapabilityEngine):
             params_schema={
                 "type": "object",
                 "properties": {
-                    "execute": {"type": "boolean", "default": False},
+                    **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 45, "maximum": 75},
-                    "push_open": {"type": "boolean", "default": True},
-                    "speed": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1.0},
+                    # off until the scene camera is in the checks: 11-10 the push-open's 'up and back' hit it
+                    "push_open": {"type": "boolean", "default": False},
                     # stop at the view pose (the open always goes there first, to detect the handle from it)
                     "view_only": {"type": "boolean", "default": False},
                 },
             },
         ),
-        # the UI's button: one press runs the whole open (UI_ACTIONS), panels on the UI bridge
+        Action(
+            "close",
+            "Close the door",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    **COMMON,
+                    # first to the open's view pose, so the close always plans from the same place (11-12)
+                    "from_view_pose": {"type": "boolean", "default": True},
+                    **{k: _schema(v) for k, v in close_door.CLOSE_DEFAULTS.items()},
+                },
+            },
+        ),
+        # the UI's buttons: one press runs the whole open / close (UI_ACTIONS), panels on the UI bridge
         *(Action(ui_id, label) for ui_id, (_, label, _) in UI_ACTIONS.items()),
     ]
 
@@ -152,7 +201,7 @@ class Capability(CapabilityEngine):
         )
 
     def _ui_run(self, ui_id, ctx):
-        """One UI press runs the whole open (UI_ACTIONS) with no intermediate prompts. A recoverable failure
+        """One UI press runs the whole open or close (UI_ACTIONS) with no intermediate prompts. A recoverable failure
         before the hand is on the handle (a check refused, nothing past it moved) shows its reason and offers the
         same button again, waiting for an explicit tap; one with the hand still on the handle, or any other, is shown
         with Done only and not retried. Success / error notices remain until Done or cancellation."""
@@ -223,8 +272,8 @@ class Capability(CapabilityEngine):
             time.sleep(0.1)
 
     def availability(self, instance_id, world_state):
-        """The UI is offered only the one-press actions (UI_ACTIONS); `open` stays callable directly (its params
-        need setting: from the UI it would only dry-run)."""
+        """The UI is offered only the one-press actions (UI_ACTIONS); `open` / `close` stay callable directly (their
+        params need setting: from the UI they would only dry-run)."""
         return [a for a in super().availability(instance_id, world_state) if a.action_id in UI_ACTIONS]
 
     def execute(self, action_id, params, ctx):
@@ -236,7 +285,7 @@ class Capability(CapabilityEngine):
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
-            ctx.progress("open", 100.0, "mock: nothing detected or moved")
+            ctx.progress(action_id, 100.0, "mock: nothing detected or moved")
             return {"executed": False, "mock": True}
 
         ctx.checkpoint()
@@ -276,18 +325,26 @@ class Capability(CapabilityEngine):
             holding = now
             ctx.progress(action_id, 50.0, "holding the handle" if now else "let go of the handle", pausable=not now)
 
-        held = " -- still holding the handle"
+        held = " -- still holding the handle" if action_id == "open" else ""
         try:
-            ok = open_door.run(
-                self.arm,
-                execute,
-                swing_deg=params.get("swing_deg"),
-                push=bool(params.get("push_open", True)),
-                speed=speed,
-                log_args=log_args,
-                view_only=bool(params.get("view_only", False)),
-                on_hold=on_hold,
-            )
+            if action_id == "open":
+                ok = open_door.run(
+                    self.arm,
+                    execute,
+                    swing_deg=params.get("swing_deg"),
+                    push=bool(params.get("push_open", False)),
+                    speed=speed,
+                    log_args=log_args,
+                    view_only=bool(params.get("view_only", False)),
+                    on_hold=on_hold,
+                )
+            else:
+                settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
+                stop = open_door.close_view_step(self.arm, execute) if bool(params.get("from_view_pose", True)) else ""
+                if stop:  # a dry run away from the view pose: nothing planned or commanded
+                    ok, note = True, stop
+                else:
+                    ok = close_door.run(self.arm, execute, speed=speed, log_args=log_args, **settings)
         except dc.Refused as e:
             raise EngineError(
                 "refused", f"{e} -- the arm holds where it is{held if holding else ''}", recoverable=True
@@ -309,7 +366,7 @@ class Capability(CapabilityEngine):
                 recoverable=True,
             )
         if execute:
-            ctx.update_object(self.instance_id, opened=True)
+            ctx.update_object(self.instance_id, opened=action_id == "open")
         return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR), "holding_handle": holding}
 
 
