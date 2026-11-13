@@ -96,7 +96,9 @@ class Capability(CapabilityEngine):
         capability that wants the feed hidden the instant its loop ends
         rather than waiting on that later cleanup.
         """
-        ctx.set_overlay_visible(True)
+        self.get_logger().info("count_with_panel: showing overlay camera feed")
+        shown = ctx.set_overlay_visible(True)
+        self.get_logger().info(f"count_with_panel: set_overlay_visible(True) returned {shown}")
         try:
             for n in range(1, to + 1):
                 ctx.checkpoint()
@@ -122,7 +124,10 @@ class Capability(CapabilityEngine):
 
             return {"counted_to": to}
         finally:
-            ctx.set_overlay_visible(False)
+            self.get_logger().info("count_with_panel: hiding overlay camera feed")
+            hidden = ctx.set_overlay_visible(False)
+            self.get_logger().info(f"count_with_panel: set_overlay_visible(False) returned {hidden}")
+
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
         """Sleeps `duration` seconds in short steps, honouring cancel and

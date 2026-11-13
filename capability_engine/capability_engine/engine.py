@@ -778,24 +778,30 @@ class CapabilityEngine(Node):
         if not self._ui_set_overlay_visible_client.service_is_ready():
             self.get_logger().warning("ui_bridge_node's ~/engine_overlay/set_visible unavailable")
             return False
+        self.get_logger().info(
+            f"set_overlay_visible({visible}): dispatching to ui_bridge_node "
+            f"(token {token.hex()[:8]}...)"
+        )
         future = self._ui_set_overlay_visible_client.call_async(
             SetEngineOverlayVisible.Request(token=list(token), visible=visible)
         )
-        future.add_done_callback(lambda f: self._ui_on_set_overlay_visible_response(f))
+        future.add_done_callback(lambda f: self._ui_on_set_overlay_visible_response(f, visible))
         return True
 
-    def _ui_on_set_overlay_visible_response(self, future) -> None:
+    def _ui_on_set_overlay_visible_response(self, future, visible: bool) -> None:
         """Done-callback for the fire-and-forget call `_ui_set_overlay_visible`
-        dispatches -- just logs a refusal/failure, nothing to retry or
-        reconcile (unlike _ui_on_update_response, there's no run state tied
-        to this one-shot call)."""
+        dispatches -- logs the outcome either way (accepted or refused),
+        nothing to retry or reconcile (unlike _ui_on_update_response,
+        there's no run state tied to this one-shot call)."""
         try:
             response = future.result()
         except Exception as error:
-            self.get_logger().warning(f"set_overlay_visible call failed: {error!r}")
+            self.get_logger().warning(f"set_overlay_visible({visible}) call failed: {error!r}")
             return
-        if not response.accepted:
-            self.get_logger().warning(f"set_overlay_visible refused: {response.message}")
+        if response.accepted:
+            self.get_logger().info(f"set_overlay_visible({visible}) accepted by ui_bridge_node")
+        else:
+            self.get_logger().warning(f"set_overlay_visible({visible}) refused: {response.message}")
 
     def _ui_close(self, run: "_Run") -> None:
         """Called once execute() ends: cancels any still-open panel goal rather
