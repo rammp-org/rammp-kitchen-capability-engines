@@ -49,7 +49,7 @@ from capability_engine.arm import HOLD_LEVEL, HOLD_NONE, SUCCESSFUL, JointTarget
 from rammp_arm import _unwrap_from
 from scipy.spatial.transform import Rotation
 
-from . import lower, plan, ui
+from . import level_path, lower, plan, ui
 
 # The arm moved 8 in (0.2032 m) forward on the flatbot's chair (rammp-deployments #156, merged
 # 2026-11-07 17:56 UTC). Everything here is in arm_mount, which moved with the arm: the arm's own
@@ -108,14 +108,14 @@ PARAMS = {
     # "joints" = a go_to_joint_config to our checked joints first (if cuRobo swings the hand for the
     # pose, as it did 2026-10-08), then lift -> transit blended
     "adjust_mode": "pose",
-    # with blend: "level" = the squaring turn on our checked joints (move_joints), then each leg to
-    # above the spot planned by cuRobo HOLDING THE CONTAINER LEVEL (plan_to_pose, HOLD_LEVEL), every
-    # sample of that plan checked (level, same posture as our joints there, no wide swing: plan.
-    # check_carry_plan) and exactly that trajectory executed (execute_joint_trajectory: what was
-    # checked is what runs; flatbot 2026-11-12, a joint-space carry tipped the container 70-90 deg);
-    # "joints" = through OUR planned joints (go_to_joint_configs, blended, cuRobo's path unchecked);
-    # "pose" = hand poses, cuRobo picks the joints -- on 2026-11-10 it chose another posture at the
-    # spot (J1 +101, J3 -147 deg from the start) and reset could not undo it
+    # with blend: "level" = level_path.py: however the start holds the container is the reference; the
+    # carry goes straight to above the spot (the lowest height that plans, the container's bottom >= 10 cm
+    # over the table), the hand only turning about vertical, the elbow kept clear of the chair and user by
+    # the arm's spare joint, every timed sample checked (tilt, clearance, height, limits) and exactly that
+    # trajectory run; then straight down (flatbot 2026-11-12: a joint-space carry from a home-based start
+    # flipped the arm and tipped the container 70-90 deg); "joints" = through OUR planned joints
+    # (go_to_joint_configs, blended, cuRobo's path unchecked); "pose" = hand poses, cuRobo picks the joints
+    # -- on 2026-11-10 it chose another posture at the spot (J1 +101, J3 -147 deg from the start)
     "carry_targets": "level",
     # the retreat's peak speed (m/s; was 0.03)
     "retreat_speed": 0.10,  # flatbot 2026-11-10 (was 0.06)
@@ -438,6 +438,8 @@ class Capability(CapabilityEngine):
                 f"NOTE: the spot is {r:.2f} m from the arm's base axis, outside the reach param {lo:.2f}-{hi:.2f} m "
                 "(measured without the chair volumes); the plan decides"
             )
+        if self.cfg["blend"] and self.cfg["carry_targets"] == "level":
+            return self._place_level(model, spot, table_z, q_now, execute, ctx, log)
         moves, descent, info = plan.plan_place(
             model,
             q_now,
@@ -462,29 +464,6 @@ class Capability(CapabilityEngine):
         # With joint targets the approach (3b) runs on move_joints after the carrying motion, not
         # through cuRobo: it must be the straight line it was planned as.
         carry, approach = plan.split_carry(moves)
-        if self.cfg["blend"] and self.cfg["carry_targets"] == "level":
-            if info["reconfigure"]:
-                raise plan.Refused(
-                    "the transit changes the arm's posture, which carry_targets level does not do (it keeps the "
-                    "start's posture) -- start from a posture whose line down reaches the table"
-                )
-            if not execute:
-                q_adjust = _unwrap_from(self.arm.raw_joints(), [carry[0][1]])[0]
-                legs = self._plan_level_carry(model, info, q_adjust, log)  # planned and checked, not run
-                q_top = legs[-1][1].q[-1] if legs else q_adjust
-                approach, _ = self._line_from(model, q_top, info, spot, table_z, log)
-                if approach:
-                    log(f"approach: {self._approach_text(model, q_top, approach)}")
-                log("DRY RUN -- all checks passed, nothing commanded")
-                return {"executed": False, "plan": steps}
-            self._ready()
-            self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
-            self._carry_level(model, carry, info, ctx, log)
-            q_top = np.asarray(self.arm.raw_joints(), dtype=float)  # where the checked level plan ended
-            approach, descent = self._line_from(model, q_top, info, spot, table_z, log)
-            if approach:
-                self._approach(model, q_top, approach, log)
-            return self._lower_and_let_go(model, spot, table_z, q_now, descent, info, ctx, log)
         on_line = bool(approach) and self.cfg["blend"] and self.cfg["carry_targets"] == "joints"
         if on_line:
             problems = plan.check_approach(model, carry[-1][1], approach)
@@ -517,16 +496,22 @@ class Capability(CapabilityEngine):
             self._carry_separately(model, moves, ctx, log)
         return self._lower_and_let_go(model, spot, table_z, q_now, descent, info, ctx, log)
 
-    def _lower_and_let_go(self, model, spot, table_z, q_now, descent, info, ctx, log):
+    def _lower_and_let_go(self, model, spot, table_z, q_now, descent, info, ctx, log, up_tool=None):
         """After the carrying motion (and the approach): the container's level checked above the spot,
         the line down (again from where the arm IS when it ended elsewhere), then lower.py's impedance
         lowering, letting go and backing out (or the blended return)."""
         q_top = self._joints()
-        tilt = model.tilt(q_top)
-        if tilt > 1.0:
+        if up_tool is not None:  # the level place: off how the START held it
+            tilt = level_path.tilt_from(model.fk(q_top)[:3, :3], up_tool)
+            if tilt > level_path.MAX_TILT_DEG:
+                raise plan.Refused(
+                    f"STOPPED above the spot: the container is {tilt:.1f} deg from how the start held it "
+                    f"(max {level_path.MAX_TILT_DEG:g}) -- nothing let go"
+                )
+        elif model.tilt(q_top) > 1.0:
             raise plan.Refused(
-                f"STOPPED above the spot: the container is {tilt:.1f} deg off level after the carrying motion "
-                "(max 1.0); "
+                f"STOPPED above the spot: the container is {model.tilt(q_top):.1f} deg off level after the carrying "
+                "motion (max 1.0); "
                 "nothing let go. Next: reset, then run again with adjust_mode:=joints or blend:=false"
             )
         # The arm ended on the planned joints (a joint-target carry does): the planned line down starts
@@ -534,6 +519,11 @@ class Capability(CapabilityEngine):
         # (pose targets: cuRobo chose the joints) the line again, from where the arm IS, or a line planned
         # from other joints would start with a jump between the two postures.
         off_deg = float(np.max(np.abs(plan.wrap_deg(q_top - np.asarray(descent[1][0])))))
+        if off_deg > REPLAN_DEG and up_tool is not None:  # the level line was searched clear: not replanned blind
+            raise plan.Refused(
+                f"STOPPED above the spot: the arm ended {off_deg:.1f} deg from the planned line's start -- "
+                "nothing let go"
+            )
         if off_deg > REPLAN_DEG:
             log(f"the arm ended {off_deg:.1f} deg from the planned joints: the line down planned again from there")
             descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
@@ -732,86 +722,125 @@ class Capability(CapabilityEngine):
                 + plan.explain_failure(self.arm.last_error, ["approach"], where)
             )
 
-    def _line_from(self, model, q_top, info, spot, table_z, log):
-        """The straight line down from joints `q_top` (above the spot, where the level carry ends or
-        ended), split into the fast approach and the slow impedance line (split_approach); the approach
-        checked straight and level, and the ends of the approach, the line and the retreat against the
-        chair's volumes. (approach [(name, q)], descent (zs, qs)); Refused with the reason."""
-        descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
-        if not plan.reaches(descent, table_z):
-            raise plan.Refused(
-                f"above the spot: {plan.reach_refusal(descent, table_z, spot)} in the posture the "
-                "level carry ends in -- nothing let go"
-            )
-        approach, descent = plan.split_approach(descent, table_z, self.cfg["lower_from"])
-        if approach:
-            problems = plan.check_approach(model, q_top, approach)
-            if problems:
-                raise plan.Refused("the approach down to the slow line is not straight: " + "; ".join(problems))
-        self._check_contact_zone(model, descent, table_z, log, q_approach=q_top if approach else None)
-        return approach, descent
+    def _chair(self, model):
+        """The chair and user boxes in the model's sim (level_path.Chair), made once per sim."""
+        key = model.rb.physics_client_id
+        if getattr(self, "_chair_cache", None) is None or self._chair_cache[0] != key:
+            self._chair_cache = (key, level_path.Chair(model))
+        return self._chair_cache[1]
 
-    def _plan_level_carry(self, model, info, q_from, log):
-        """carry_targets level: each leg after the squaring turn (lift, transit) planned by cuRobo from the
-        one before's end, the container held level (plan_to_pose, HOLD_LEVEL), and every sample checked
-        (plan.check_carry_plan). [(name, Plan)], nothing moved; Refused with the reason otherwise."""
-        legs, start = [], np.asarray(q_from, dtype=float)
-        for w in info["waypoints"][1:]:
-            if w["name"] == "approach":
-                break
-            try:
-                p = self.arm.plan_to_pose(w["pos"], w["quat"], start, hold=HOLD_LEVEL)
-            except ArmError as e:
-                raise plan.Refused(
-                    f"cuRobo plan of {w['name']}: " + plan.explain_failure(f"{type(e).__name__}: {e}", [w["name"]])
-                ) from e
-            if not p.success or len(p.q) == 0:
-                raise plan.Refused(
-                    f"cuRobo can't plan {w['name']} keeping the container level (nothing moved): "
-                    + plan.explain_failure(p.message, [w["name"]], {w["name"]: w["pos"]})
-                )
-            (q_goal,) = _unwrap_from(p.q[-1], [w["q"]])
-            problems, tilt = plan.check_carry_plan(model, p.q, q_goal)
-            if problems:
-                raise plan.Refused(f"{w['name']}: cuRobo's level plan " + "; ".join(problems) + " -- nothing moved")
-            log(
-                f"{w['name']}: cuRobo plans it holding the container level ({p.t[-1]:.1f} s at full speed, "
-                f"{len(p.q)} samples): container within {tilt:.1f} deg of level everywhere, ends on the planned "
-                "joints, no joint swings wide"
-            )
-            legs.append((w["name"], p))
-            start = p.q[-1]
-        return legs
-
-    def _carry_level(self, model, carry, info, ctx, log):
-        """carry_targets level, for real: the squaring turn on our checked joints (move_joints), then
-        each leg planned again from where the arm IS, checked (_plan_level_carry), and exactly that
-        trajectory run (execute_joint_trajectory, position control, go_to_speed_scale)."""
+    def _place_level(self, model, spot, table_z, q_now, execute, ctx, log):
+        """carry_targets level (level_path.py): the start, however it holds the container, is the reference.
+        The carry goes straight to above the spot (the lowest height whose path plans, the container's bottom
+        >= 10 cm over the table), the hand only turning about vertical, the elbow kept clear of the chair and
+        its user; then straight down, fast to lower_from and slow in impedance until it feels the table.
+        Every timed sample of the carry, the approach and the line down is checked before anything moves,
+        and exactly those trajectories run."""
+        chair = self._chair(model)
+        q0 = np.asarray(self.arm.raw_joints(), dtype=float)  # as the driver reports them: the plan starts here
+        T0 = model.fk(q0)
+        up = level_path.up_in_tool(T0[:3, :3])
+        chair.set_container(up)  # the held container is checked against the chair and user too
+        heading = plan.approach_direction(spot)
         speed = self.cfg["go_to_speed_scale"]
+        t_plan = time.monotonic()
+        height, knots = level_path.carry(model, chair, q0, spot, table_z, heading)
+        (t, q, qd), _ = level_path.timed(q0, knots, model, speed)
+        s_carry = level_path.check_samples(model, chair, (t, q, qd), up, table_z, "carry", speed)
+        # The lip is at the fingertips, below the tool frame by the hand's pitch: the tool-frame heights the
+        # line down and the lowering use (table_z + BOWL_DEPTH where the bottom meets the table) move up by it
+        table_tool = table_z + level_path.tip_drop(model, knots[-1])
+        floor_z = table_tool + max(plan.BOWL_DEPTH - plan.PRESS_BELOW, plan.MIN_TOOL_HEIGHT)
+        line = level_path.descent_line(model, chair, knots[-1], floor_z)
+        if not plan.reaches(line, table_tool):
+            raise plan.Refused(plan.reach_refusal(line, table_tool, spot) + " -- nothing moved")
+        approach, descent = plan.split_approach(line, table_tool, self.cfg["lower_from"])
+        if approach:  # through every point of the searched line, not only split_approach's 4 cm waypoints
+            k = len(line[0]) - len(descent[0])
+            approach = [("approach'", qq) for qq in line[1][1:k]] + [("approach", line[1][k])]
+            appr = level_path.timed(knots[-1], [qq for _, qq in approach], model, speed)[0]
+            s_appr = level_path.check_samples(
+                model,
+                chair,
+                appr,
+                up,
+                table_z,
+                "approach",
+                speed,
+                min_bottom=None,
+                vertical=True,
+            )
+        slow = (None, descent[1], np.zeros_like(descent[1]))  # the lowering is slow (lower_speed): no speed check
+        s_line = level_path.check_samples(
+            model, chair, slow, up, table_z, "line down", speed, min_bottom=None, vertical=True
+        )
+        self._check_contact_zone(model, descent, table_tool, log, q_approach=knots[-1] if approach else None)
+        top = model.fk(knots[-1])[:3, 3]
+        log(
+            f"carry: straight to above the spot at {height * 100:.0f} cm (tool {np.round(top, 3).tolist()}), "
+            f"{len(knots)} knots, {t[-1]:.1f} s at speed x{speed}: container within {s_carry['tilt_deg']:.1f} deg of "
+            f"how the start holds it, arm >= {s_carry['clear_m'] * 100:.1f} cm from the padded chair/user boxes "
+            f"(closest: {s_carry['clear_link']} to {s_carry['clear_box']}), container bottom >= "
+            f"{s_carry['bottom_m'] * 100:.0f} cm over the table"
+        )
+        log(
+            "carry joints (deg): "
+            + " ".join(f"J{j + 1} {np.degrees(q[:, j]).min():.0f}..{np.degrees(q[:, j]).max():.0f}" for j in range(7))
+        )
+        if approach:
+            log(
+                f"approach: straight down {(line[0][0] - descent[0][0]) * 100:.0f} cm in {appr[0][-1]:.1f} s "
+                f"(position control, every 2 mm point of the line); tilt {s_appr['tilt_deg']:.1f} deg, "
+                f">= {s_appr['clear_m'] * 100:.1f} cm from the boxes"
+            )
+        zs = descent[0]
+        log(
+            f"lower: from z={zs[0]:.3f} down to at most {zs[-1]:.3f} ({(zs[0] - zs[-1]) * 100:.0f} cm) in impedance "
+            f"until it feels the table; tilt {s_line['tilt_deg']:.1f} deg, >= {s_line['clear_m'] * 100:.1f} cm from "
+            f"the boxes (closest: {s_line['clear_link']} to {s_line['clear_box']}). "
+            f"Planned in {time.monotonic() - t_plan:.0f} s. "
+            "The table and what is on it are NOT modelled: keep the way to the spot clear"
+        )
+        steps = [
+            dict(name="carry", tool=np.round(top, 3).tolist(), above_table=round(float(top[2] - table_z), 3)),
+            dict(name="lower", from_z=round(float(zs[0]), 3), to_z=round(float(zs[-1]), 3)),
+        ]
+        if not execute:
+            log("DRY RUN -- all checks passed, nothing commanded")
+            return {"executed": False, "plan": steps}
+
+        self._ready()
+        off = float(np.degrees(np.max(np.abs(plan.wrap(np.asarray(self.arm.raw_joints()) - q0)))))
+        if off > 0.5:
+            raise plan.Refused(
+                f"the arm moved {off:.1f} deg while the place was planned -- nothing moved; run it again"
+            )
+        self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
         ctx.progress("carry", 0.0)
-        adjust = [q for name, q in carry if name.startswith("adjust")]
-        if adjust:
-            scale = self.cfg["adjust_speed_scale"]
-            log(f"-> adjust: square the hand on the planned joints (move_joints, speed x{scale})")
-            if not self.arm.move_joints(adjust, speed_scale=scale):
-                raise plan.Refused("STOPPED: " + plan.explain_failure(self.arm.last_error, ["adjust"]))
-        for name, p in self._plan_level_carry(model, info, self.arm.raw_joints(), log):
-            off = np.degrees(np.max(np.abs(plan.wrap(np.asarray(p.q[0]) - self.arm.raw_joints()))))
+        log(f"-> carry: the checked trajectory as planned (execute_joint_trajectory, {t[-1]:.1f} s)")
+        res = self.arm.execute_joint_trajectory(
+            rammp_arm.JOINTS, list(zip(t, q, qd, strict=True)), path_tolerance=rammp_arm.PATH_TOL_RAD
+        )
+        if res.error_code != SUCCESSFUL:
+            raise plan.Refused(
+                "STOPPED in the carry, nothing let go: "
+                + plan.explain_failure(f"carry ended {res.error_code} {res.error_string}", ["carry"], {"carry": top})
+            )
+        if approach:  # exactly the checked samples, from where the carry ended
+            off = float(np.degrees(np.max(np.abs(plan.wrap(np.asarray(self.arm.raw_joints()) - appr[1][0])))))
             if off > 1.0:
-                raise plan.Refused(f"STOPPED before {name}: the arm is {off:.1f} deg from where its plan starts")
-            log(f"-> {name}: the checked level plan, as planned (execute_joint_trajectory, speed x{speed})")
+                raise plan.Refused(f"STOPPED above the spot: the arm is {off:.1f} deg from the approach's start")
+            log(f"-> approach: the checked straight line down ({appr[0][-1]:.1f} s)")
             res = self.arm.execute_joint_trajectory(
-                rammp_arm.JOINTS,
-                list(zip(p.t, p.q, p.qd, strict=True)),
-                path_tolerance=rammp_arm.PATH_TOL_RAD,
-                speed_scale=speed,
+                rammp_arm.JOINTS, list(zip(*appr, strict=True)), path_tolerance=rammp_arm.PATH_TOL_RAD
             )
             if res.error_code != SUCCESSFUL:
-                where = {name: model.fk(p.q[-1])[:3, 3]}
                 raise plan.Refused(
-                    f"STOPPED in {name}: "
-                    + plan.explain_failure(f"{name} ended {res.error_code} {res.error_string}", [name], where)
+                    "STOPPED in the approach, nothing let go: "
+                    + plan.explain_failure(f"approach ended {res.error_code} {res.error_string}", ["approach"])
                 )
+        info = {"floor_z": floor_z}
+        return self._lower_and_let_go(model, spot, table_tool, q_now, descent, info, ctx, log, up_tool=up)
 
     def _check_carry_joints(self, moves, log):
         """Dry run: cuRobo plans each joint leg of the carrying motion (nothing moves), from the
