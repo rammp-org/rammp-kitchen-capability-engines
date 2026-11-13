@@ -394,17 +394,18 @@ def after_release(after, planner, ai, door):
     the arm is now; if that fails, the plan `after` checked before the swing, when the arm is where it starts. Returns
     what it did, in words; raises Refused (the gripper open, the arm holding)."""
     st = ai.get_state()
-    planner.search()  # a new search: the swing's time doesn't count against it
     checked = dict(after.__dict__)
-    ok, msg = after.plan(planner, door, st["position"], (st["ee_pos"][:3], st["ee_pos"][3:7]), from_arm=True)
-    if ok:
-        return f"from where the release ended: {msg}"
     first = checked.get("motion")
+    # the plan checked before the swing, if the arm is where it starts (as close as any planned motion must be): no new
+    # search, so no stop of its length between the pull and the push (a search from here held the arm ~23 s, 11-12)
     if first is not None:
         off = float(np.degrees(np.max(np.abs(pl._short_delta(first.q0, st["position"])))))
         if off <= pl.START_TOL_DEG:
-            after.__dict__.update(checked)
-            return f"the plan checked before the swing (planned again from here: {msg})"
+            return f"the plan checked before the swing (the arm {off:.1f} deg from its start)"
+    planner.search()  # a new search: the swing's time doesn't count against it
+    ok, msg = after.plan(planner, door, st["position"], (st["ee_pos"][:3], st["ee_pos"][3:7]), from_arm=True)
+    if ok:
+        return f"from where the release ended: {msg}"
     raise Refused(f"{msg} -- the hand is off the handle (gripper open), the arm holds where it is")
 
 
