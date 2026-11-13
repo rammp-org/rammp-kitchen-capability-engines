@@ -4,3 +4,6 @@ __pycache__/
 
 # Agent development docs (design specs, implementation plans): kept locally, not in the repo.
 docs/superpowers/
+
+# box_opening's recorded test fixtures: kept outside the repo (capabilities/box_opening/test/conftest.py)
+capabilities/box_opening/test/data/

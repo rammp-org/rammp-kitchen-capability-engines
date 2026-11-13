@@ -1,0 +1,13 @@
+# Every repo rule, at 120 columns: box opening's log lines and refusals carry the
+# measurements behind each decision. Two exceptions, each for a reason:
+# - UP031 (printf-style formatting): kept as written. "%d" % 3.7 is "3" where
+#   "{:d}".format(3.7) raises, and these lines are logged while the arm moves.
+# - T20 in test/: the tests print what they measured.
+extend = "../../ruff.toml"
+line-length = 120
+
+[lint]
+ignore = ["UP031"]
+
+[lint.extend-per-file-ignores]
+"test/*" = ["T20"]
