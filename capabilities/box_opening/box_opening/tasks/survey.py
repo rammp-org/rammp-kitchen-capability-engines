@@ -1428,7 +1428,7 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
         frames.append(frame)
         out.clouds.append(_cloud(frame))
         t_find = time.monotonic()
-        find = wf.find_container(frames, model, check_buttons=not front, reachable=_within_reach(model))
+        find = wf.find_container(frames, model, check_buttons=not front, reachable=_within_reach(model), seen_at=hint)
         folder = save_frame(watcher, snap, pose, frame, find.why)
         runner.note(
             "wrist_survey",

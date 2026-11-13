@@ -607,7 +607,27 @@ def _xy(p):
     return "[%.3f, %.3f]" % (p.xy[0], p.xy[1])
 
 
-def find_container(frames, model, check_buttons=True, reachable=None):
+# Two places pass and another camera's detector has the container at one of them (`seen_at`): that one is
+# taken where it stands within this many lid widths of the detector's place and every other place at
+# least a lid's width further from it. Flatbot 2026-11-12 18:41, a table with tape rolls, a bowl and a
+# bottle on it: the wrist's geometry passed 2-8 lid-sized tops in each of its 4 views ("refusing to
+# guess", four times), the box among them at [0.755, -0.219], 33 mm from where the scene camera's
+# segmenter had it and the next place 0.37 m from it; the run then went by the scene camera's own
+# place for it, 87 mm high, and no reach planned. The same afternoon the two cameras put one box 99 mm
+# apart (18:42).
+NEAR_LIDS = 1.5
+
+
+def _nearest_alone(live, seen_at, d_lid):
+    """The one of the places `live` another detector's (x, y) `seen_at` names (NEAR_LIDS), or None."""
+    by = sorted(live, key=lambda q: math.hypot(q.xy[0] - seen_at[0], q.xy[1] - seen_at[1]))
+    d = [math.hypot(q.xy[0] - seen_at[0], q.xy[1] - seen_at[1]) for q in by[:2]]
+    if d[0] <= NEAR_LIDS * d_lid and (len(d) < 2 or d[1] >= d[0] + d_lid):
+        return by[0]
+    return None
+
+
+def find_container(frames, model, check_buttons=True, reachable=None, seen_at=None):
     """The container in wrist frames (WristFrame, one or more), as a WristFind: its `fix` a
     scene_source.SceneFix with source "wrist" — or None, and `why`, when no counter shows,
     nothing on it is the container, the one lid-sized top shows no button where the view
@@ -615,7 +635,9 @@ def find_container(frames, model, check_buttons=True, reachable=None):
     places pass (it refuses to guess). `check_buttons` False: geometry alone (no circle
     detector), a top no button was asked of a fix at 0.6-0.7. `reachable` (a lid top's (x, y, z) -> bool; None: every
     place counts): a place it calls out of reach is no candidate beside one it does not, and where
-    none is within reach there is no fix (it says so)."""
+    none is within reach there is no fix (it says so). `seen_at` ((x, y) where another camera's detector has
+    the container, or None): of several places that pass, the one it names alone (_nearest_alone) is
+    taken, placed by the wrist's own points."""
     import time
 
     from box_opening.models.container import ContainerPose
@@ -681,12 +703,15 @@ def find_container(frames, model, check_buttons=True, reachable=None):
         live = near
     if len(live) > 1:
         boxed = [q for q in live if any(p.boxed for p in q.patches)]
-        if len(boxed) != 1:
+        named = _nearest_alone(live, seen_at, d_lid) if seen_at is not None and len(boxed) != 1 else None
+        if len(boxed) != 1 and named is None:
             return refuse(
                 "two places pass as this container, %s and %s (button %s, %s): refusing to guess"
                 % (_xy(live[0]), _xy(live[1]), live[0].button, live[1].button)
             )
-        live = boxed  # the wrist camera's detector boxed one of them alone: semantics break the tie
+        # the wrist camera's detector boxed one of them alone, or another camera's names one alone:
+        # semantics break the tie
+        live = boxed if len(boxed) == 1 else [named]
     q = live[0]
     if check_buttons and q.button != "seen":
         # geometry alone: a closed tin of the lid's size passes every gate the button does not

@@ -671,7 +671,7 @@ def test_the_front_band_stands_past_the_users_knees_and_says_where(tmp_path):
 
 
 def test_the_front_look_goes_by_the_lids_geometry_and_never_looks_again_from_above(monkeypatch):
-    asked = []
+    asked, seen = [], []
     s_views = [_view("survey:angle-far")]
     monkeypatch.setattr(
         sv, "angled_views", lambda *a, **k: (s_views, None, {"checks": 0.0, "sees": 0.5, "choose_s": 0.1})
@@ -685,8 +685,9 @@ def test_the_front_look_goes_by_the_lids_geometry_and_never_looks_again_from_abo
     monkeypatch.setattr(sv, "save_frame", lambda *a, **k: None)
     monkeypatch.setattr(sv, "look_again_view", lambda *a, **k: pytest.fail("a look again from above"))
 
-    def find(frames, model, check_buttons=True, reachable=None):
+    def find(frames, model, check_buttons=True, reachable=None, seen_at=None):
         asked.append(check_buttons)
+        seen.append(seen_at)
         return _unchecked()
 
     monkeypatch.setattr(wf, "find_container", find)
@@ -695,6 +696,12 @@ def test_the_front_look_goes_by_the_lids_geometry_and_never_looks_again_from_abo
     s = sv.run_survey(None, ctx, runner, SimpleNamespace(grab=None), True, rest=list(HOME), front=True)
     assert asked == [False] and s.fix is None and "no view could check" in s.why
     assert [f["stage"] for k, f in runner.notes if k == "wrist_survey"] == ["views", "survey:angle-far"]
+    # where the scene camera has the box (the hint), the finder is told: of several places, that one
+    assert seen == [None]
+    sv.run_survey(
+        None, ctx, _Runner(), SimpleNamespace(grab=None), True, rest=list(HOME), front=True, hint=(0.79, -0.21)
+    )
+    assert seen == [None, (0.79, -0.21)]
 
 
 def test_the_hand_keeps_its_floor_from_the_user_at_every_front_view_and_on_its_way(tmp_path, monkeypatch):

@@ -228,6 +228,27 @@ def test_a_place_the_arm_cannot_reach_is_no_rival_of_one_it_can(pink):
     assert "two places pass" in wf.find_container([f], pink, reachable=lambda top: True).why
 
 
+def test_another_cameras_detector_names_one_of_two_places_and_the_wrist_places_it(pink):
+    """Flatbot 2026-11-12 18:41: tape rolls, a bowl and a bottle on the table passed as lid-sized tops
+    beside the box in all 4 of the wrist's views ("refusing to guess"), the box 33 mm from where the
+    scene camera's segmenter had it and the next place 0.37 m from it. The place the other detector
+    names alone is taken, placed by the wrist's own points; one that names neither, or stands between
+    two, breaks no tie."""
+    things = canister(0.30, 0.30) + canister(0.52, 0.30)
+    f = render((0.41, 0.30, COUNTER_Z + LID_H + 0.40), (0.41 + 1e-4, 0.30, COUNTER_Z), things)
+    assert "two places pass" in wf.find_container([f], pink).why
+    found = wf.find_container([f], pink, seen_at=(0.55, 0.33))  # 42 mm from one, 0.25 m from the other
+    assert found.fix is not None, found.why
+    assert found.fix.top_xyz[0] == pytest.approx(0.52, abs=0.005) and len(found.places) == 2  # the wrist's own place
+    found = wf.find_container([f], pink, seen_at=(0.27, 0.30))
+    assert found.fix is not None and found.fix.top_xyz[0] == pytest.approx(0.30, abs=0.005)
+    assert "two places pass" in wf.find_container([f], pink, seen_at=(0.41, 0.30)).why  # between the two
+    assert "two places pass" in wf.find_container([f], pink, seen_at=(0.52, 0.60)).why  # on neither
+    # one place alone is the container wherever the other detector has it
+    alone = render((0.30, 0.30, COUNTER_Z + LID_H + 0.40), (0.30 + 1e-4, 0.30, COUNTER_Z), canister(0.30, 0.30))
+    assert wf.find_container([alone], pink, seen_at=(0.80, 0.80)).fix is not None
+
+
 def test_a_detector_box_on_one_of_two_breaks_the_tie(pink):
     things = canister(0.30, 0.30) + canister(0.52, 0.30)
     f = render((0.41, 0.30, COUNTER_Z + LID_H + 0.40), (0.41 + 1e-4, 0.30, COUNTER_Z), things)
