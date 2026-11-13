@@ -50,14 +50,18 @@ class Arm:
     """plan_to_joints answers from `answers` (callables of (goal, start) -> plan, in order, the last
     repeating); execute_joint_trajectory records what is sent with its speed_scale and answers
     `codes` in order, a completed goal leaving the arm at its last point. joint_states reads
-    `readings` in order (the last repeating)."""
+    `readings` in order (the last repeating). not_ready answers `refusal` (None: commandable)."""
 
     def __init__(
         self, joints=START, answers=(lambda g, s: _plan(g, s),), codes=(0,), readings=None
     ):
         self.readings = [np.asarray(q, float) for q in (readings or [joints])]
         self.answers, self.codes = list(answers), list(codes)
-        self.planned, self.sent, self.speeds = [], [], []
+        self.planned, self.sent, self.speeds, self.path_tols = [], [], [], []
+        self.refusal = None
+
+    def not_ready(self):
+        return self.refusal
 
     def joint_states(self):
         q = self.readings.pop(0) if len(self.readings) > 1 else self.readings[0]
@@ -68,9 +72,10 @@ class Arm:
         answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
         return answer(np.asarray(goal, float), np.asarray(start, float))
 
-    def execute_joint_trajectory(self, names, points, speed_scale=1.0):
+    def execute_joint_trajectory(self, names, points, speed_scale=1.0, path_tolerance=None):
         self.sent.append(list(points))
         self.speeds.append(speed_scale)
+        self.path_tols.append(path_tolerance)
         code = self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
         if code == 0:
             self.readings = [np.asarray(points[-1][1], float)]
@@ -134,17 +139,32 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
         "plan_tries": 3,
         "tool_link": "arm_tool_frame",
         "speed_scale": 0.3,
+        "plan_free_steps": True,  # the deployment's opt-in (off by default: see the tests of it)
     }
     values.update(params)
     eng = SimpleNamespace(
         arm=arm,
         mock=False,
+        orchestrated=False,  # standalone, as the fragments and the launch file run it
+        actions=Capability.actions,
         get_parameter=lambda name: SimpleNamespace(value=values[name]),
         get_logger=lambda: SimpleNamespace(info=lambda *a: None, warning=lambda *a: None),
         _kinematics=lambda: (chain or Chain(), model, no_model),
         _judge=Capability._judge,
     )
-    for name in ("_joints", "_route", "_plan_home", "_off_the_limit", "_plan", "_fly"):
+    for name in (
+        "_joints",
+        "_commandable",
+        "_route",
+        "_plan_home",
+        "_to_waypoint",
+        "_off_the_limit",
+        "_plan",
+        "_pause_point",
+        "_last_pause",
+        "_fits",
+        "_fly",
+    ):
         setattr(eng, name, functools.partial(getattr(Capability, name), eng))
     return eng
 
@@ -152,6 +172,7 @@ def _engine(arm, model=None, chain=None, no_model="", **params):
 @pytest.fixture(autouse=True)
 def _plan_timeout(monkeypatch):
     monkeypatch.setattr(node, "_plan_timeout_s", lambda: 30.0)
+    monkeypatch.setattr(node, "_settle_s", lambda: 0.0)  # no waiting for the stand-in's joints
 
 
 def _go(eng, **params):
@@ -252,7 +273,54 @@ def test_where_nothing_plans_it_fails_before_anything_moves():
         _go(_engine(arm, Model()))
     assert e.value.error_code == "no_way_home" and "jog the arm clear by hand" in str(e.value)
     assert arm.sent == []
-    assert len(arm.planned) == 6  # 3 direct, then each waypoint's first leg
+    # 3 direct, each waypoint's first leg, then the first leg of the line in 4 and in 6
+    assert len(arm.planned) == 8
+    assert "nor along it in 4/6 legs" in str(e.value)
+
+
+def test_a_waypoints_plan_may_end_near_it_and_one_that_ends_on_another_arm_may_not():
+    # box_opening's planner rig, 2026-11-12: cuRobo's FK-pose fallback ended 0.08-0.32 rad from the
+    # waypoint (the same arm along its self-motion) and was refused; another arm ends 0.9-4.3 off
+    off = np.r_[0.2, 0, 0, 0, -0.2, 0, 0.2]
+
+    def answer(goal, start):
+        if _direct(goal, start):
+            return _plan(goal, start, ok=False)
+        if np.allclose(start, START):  # a waypoint's plan
+            half = np.allclose(goal, (START + node.homing.on_branch(HOME, START)) / 2)
+            return _plan(goal, start, end=goal + (4.5 * off if half else off))
+        return _plan(goal, start)
+
+    arm = Arm(answers=[answer])
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == "through a waypoint 25% of the way"  # the 50% one ended on another arm
+    w = arm.planned[4][0]
+    assert np.allclose(arm.planned[5][1], w + off)  # home planned from where the plan ended
+    assert np.allclose(arm.planned[5][0], node.homing.on_branch(HOME, w + off))
+
+
+def _long_legs_swing(longest):
+    """Plans every leg, but one whose largest joint moves more than `longest` rad swings joint 1."""
+
+    def answer(goal, start):
+        far = float(np.abs(np.asarray(goal, float) - np.asarray(start, float)).max())
+        return _swinging(goal, start) if far > longest else _plan(goal, start)
+
+    return answer
+
+
+@pytest.mark.parametrize("share, n", [(0.30, 4), (0.20, 6)])
+def test_where_no_single_waypoint_plans_home_goes_along_the_joint_line_in_short_legs(share, n):
+    # an arm whose elbow must straighten and fold the other way: cuRobo swings wide on long legs
+    span = float(np.abs(node.homing.on_branch(HOME, START) - START).max())
+    arm = Arm(answers=[_long_legs_swing(share * span)])
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == f"in {n} legs along the joint line (no single waypoint planned)"
+    legs = arm.planned[-n:]
+    assert np.allclose(legs[0][1], START) and np.allclose(legs[-1][0], HOME)
+    for (goal, _start), (_goal, start) in zip(legs, legs[1:], strict=False):
+        assert np.allclose(goal, start)  # each leg from where the one before ended
+    assert len(arm.sent) == 1 and len(arm.sent[0]) == n + 1  # one goal through every waypoint
 
 
 def _refuses_start(at, message="MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION"):
@@ -332,10 +400,454 @@ def test_bad_params_are_refused():
     with pytest.raises(EngineError) as e:
         _go(_engine(Arm(), Model(), home_joints=[0.0] * 6))
     assert e.value.error_code == "bad_config"
-    for bad in (0.0, 1.5):
+    # under 0.01 too: the driver rejects a goal sent at less (its kMinSpeedScale)
+    for bad in (0.0, 0.005, 1.5, float("nan")):
+        arm = Arm()
         with pytest.raises(EngineError) as e:
-            _go(_engine(Arm(), Model(), speed_scale=bad))
-        assert e.value.error_code == "bad_config"
+            _go(_engine(arm, Model(), speed_scale=bad))
+        assert e.value.error_code == "bad_config" and arm.planned == [] and arm.sent == []
+
+    def brief(goal, start):
+        plan = _plan(goal, start)
+        plan.t = np.array([0.0, 0.5])  # 50 s at the floor: inside the action's time
+        return plan
+
+    out = _go(_engine(Arm(answers=[brief]), Model(), speed_scale=0.01), dry_run=True)
+    assert out["speed_scale"] == 0.01  # the floor itself is the driver's to take
+
+
+def test_under_an_orchestrator_go_home_is_refused_and_activate_says_it_is_unavailable():
+    """With no perception class the orchestrator never dispatches go_home, so a goal an orchestrated
+    engine gets was sent to it directly, outside the orchestrator's arm lock (REVIEW_RULES,
+    Arbitration): nothing is planned or sent, on the mock and for a dry run too, and activate
+    reports the action unavailable (O1: an action reported available must be runnable)."""
+    for mock, params in ((False, {}), (False, {"dry_run": True}), (True, {})):
+        arm = Arm()
+        eng = _engine(arm, Model())
+        eng.orchestrated, eng.mock = True, mock
+        with pytest.raises(EngineError) as e:
+            _go(eng, **params)
+        assert e.value.error_code == "standalone_only" and not e.value.recoverable
+        assert "use_orchestrator:=false" in str(e.value) and arm.planned == [] and arm.sent == []
+    (offered,) = Capability.availability(eng, "", {})
+    assert offered.action_id == "go_home" and not offered.available
+    assert offered.reason == node.STANDALONE_ONLY
+    (offered,) = Capability.availability(_engine(Arm(), Model()), "", {})  # standalone
+    assert offered.available and offered.reason == ""
+
+
+def test_with_plan_free_steps_off_a_start_the_planner_refuses_is_not_stepped_out_of():
+    """The plan-free steps are checked against the chair, seat and user boxes, the tool's height
+    and the joint limits, not against the arm itself or the rest of the scene (REVIEW_RULES,
+    General correctness: an ask). They fly only where the deployment says so; off, the default,
+    nothing but the planner's own plans moves the arm."""
+    path = np.array([START, START + 0.05])
+    arm = Arm(answers=[_refuses_start(START)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(inside=0.012, escape=path), plan_free_steps=False))
+    assert e.value.error_code == "start_in_padding" and "plan_free_steps" in str(e.value)
+    assert "12 mm inside the padding" in str(e.value) and "INVALID_START" in str(e.value)
+    assert len(arm.planned) == 1 and arm.sent == []
+    # ... and a start in the engine's padding that the planner takes goes home as ever
+    arm = Arm()
+    out = _go(_engine(arm, Model(inside=0.012, escape=path), plan_free_steps=False))
+    assert out["planned"] == "directly" and not out["stepped_out"] and len(arm.sent) == 1
+    # a start it refuses for a joint's limit margin (said before it looks at any box) is named so
+    arm = Arm(answers=[_refuses_start(START, "START_IN_LIMIT_MARGIN: joint_6 0.05 rad from it")])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(inside=0.012, escape=path), plan_free_steps=False))
+    assert e.value.error_code == "near_limit" and "plan_free_steps" in str(e.value)
+    assert "START_IN_LIMIT_MARGIN" in str(e.value) and len(arm.planned) == 1 and arm.sent == []
+
+
+def test_with_plan_free_steps_off_a_start_near_a_joint_limit_is_planned_from_as_any_other():
+    near = START.copy()
+    near[5] = 2.09 - 0.15  # joint 6, 0.15 rad from its limit: outside the planner's 0.10 margin
+    arm = Arm(joints=near)
+    out = _go(_engine(arm, Model(), plan_free_steps=False))
+    assert out["planned"] == "directly" and not out["stepped_out"]
+    assert len(arm.sent) == 1 and np.allclose(arm.planned[0][1], near)  # planned from the start
+    # in the padding too, where the planner is asked first: its plan is taken, no step first
+    arm = Arm(joints=near)
+    model = Model()
+    model.depth = lambda Q: np.full(len(np.atleast_2d(Q)), 0.012)
+    out = _go(_engine(arm, model, plan_free_steps=False))
+    assert out["planned"] == "directly" and len(arm.planned) == 1 and len(arm.sent) == 1
+    # ... and where the planner refuses it (inside its margin), near_limit says the steps are off
+    near[5] = 2.09 - 0.094
+    refuses = "START_IN_LIMIT_MARGIN: joint_6 is 0.094 rad from its limit"
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False, message=refuses)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(), plan_free_steps=False))
+    assert e.value.error_code == "near_limit" and "plan_free_steps" in str(e.value)
+    assert "joint 6 is 0.094 rad from its limit" in str(e.value) and arm.sent == []
+    # a planner that does not answer stays what it is
+    down = "plan_to_joints: no /rammp_curobo/plan_to_joints action server (the cuRobo planner)"
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False, message=down)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model(), plan_free_steps=False))
+    assert e.value.error_code == "planner_unavailable"
+
+
+def test_the_fragments_and_the_launch_file_run_the_engine_standalone():
+    """The mode go_home runs in is the one a deployment gets: the real fragment's params (a profile
+    can override only what is listed there), the mock's command and the launch file's default."""
+    import yaml
+
+    here = home_arm_testlib.HERE.parent
+    real = yaml.safe_load((here / "rammp-alternative.yaml").read_text())
+    assert real["params"]["use_orchestrator"] is False
+    assert real["params"]["plan_free_steps"] is False  # a deployment's to turn on
+    mock = yaml.safe_load((here / "rammp-alternative.mock.yaml").read_text())
+    assert "use_orchestrator:=false" in mock["container"]["command"]
+    launch = (here / "launch" / "home_arm.launch.py").read_text()
+    assert '("use_orchestrator", "false")' in launch
+
+
+def test_params_that_are_no_json_object_are_bad_params_not_an_exception():
+    """The base class hands execute() whatever JSON the goal carried (REVIEW_RULES O4)."""
+    for bad in (None, [], ["dry_run"], 3, True):
+        with pytest.raises(EngineError) as e:
+            Capability.execute(_engine(Arm(), Model()), "go_home", bad, Ctx())
+        assert e.value.error_code == "bad_params" and e.value.recoverable
+
+
+def test_an_arm_whose_state_does_not_come_fails_by_name_before_anything_is_planned():
+    """self.arm's own errors are not EngineErrors: left alone, the action would fail as a bare
+    "exception" (REVIEW_RULES U4)."""
+    from capability_engine import StateTimeout
+
+    arm = Arm()
+
+    def no_state():
+        raise StateTimeout("no /joint_states, /ee_state or /gripper_state")
+
+    arm.joint_states = no_state
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "arm_state" and e.value.recoverable
+    assert "no /joint_states" in str(e.value) and arm.planned == [] and arm.sent == []
+
+
+@pytest.mark.parametrize("error", ["Refused", "EStopped", "ControlTaken"])
+def test_a_goal_the_arm_refuses_fails_the_action_as_motion_failed_and_is_not_sent_again(error):
+    """A rejected goal, an e-stop or control taken raises from self.arm (REVIEW_RULES C5, U4): the
+    action fails by name, and nothing is sent after it."""
+    from capability_engine import driver_state
+
+    arm = Arm()
+    tried = []
+
+    def refuse(names, points, speed_scale=1.0, path_tolerance=None):
+        tried.append(len(points))
+        raise getattr(driver_state, error)("execute_joint_trajectory: goal REJECTED")
+
+    arm.execute_joint_trajectory = refuse
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "motion_failed" and not e.value.recoverable
+    assert "REJECTED" in str(e.value) and len(tried) == 1
+
+
+def test_the_mock_plans_nothing_and_a_dry_run_of_it_sends_nothing():
+    sent = []
+    arm = SimpleNamespace(go_to_joint_config=lambda q, label: sent.append(label) or True)
+    eng = _engine(arm, Model())
+    eng.mock = True
+    dry = _go(eng, dry_run=True)
+    assert (dry["home"], dry["moved"], dry["mock"], dry["dry_run"]) == (False, False, True, True)
+    assert sent == []
+    out = _go(eng)
+    assert (out["home"], out["moved"], out["mock"]) == (True, False, True) and sent == [
+        "home (mock)"
+    ]
+    # the real path's payload, key for key: what is built on the mock runs on the robot
+    real = _go(_engine(Arm(), Model()))
+    assert set(real) <= set(out) and set(_go(_engine(Arm(), Model()), dry_run=True)) <= set(dry)
+
+
+def test_a_planner_that_does_not_answer_is_said_so_and_not_asked_through_every_waypoint():
+    """self.arm turns "no action server", "no answer" and "no result in time" into a failed plan
+    whose message begins with the call's name: that is no word on the way home (REVIEW_RULES U4)."""
+    down = "plan_to_joints: no /rammp_curobo/plan_to_joints action server (the cuRobo planner)"
+    arm = Arm(answers=[lambda g, s: _plan(g, s, ok=False, message=down)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and e.value.recoverable
+    assert "no /rammp_curobo/plan_to_joints action server" in str(e.value)
+    assert len(arm.planned) == 1 and arm.sent == []
+    # ... off a joint limit too, where a failed home is otherwise answered with a longer step
+    near = HOME.copy()
+    near[1] = LIMITS[1][0] + 0.05
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False, message=down)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and len(arm.planned) == 1
+
+
+def test_a_planner_busy_with_anothers_plan_is_unavailable_not_no_way_home():
+    """rammp-curobo plans one goal at a time and turns any other away unplanned ("planner busy —
+    one plan at a time", success false). That is no word on the way home either: left as a failed
+    plan it was asked again through every waypoint and ended no_way_home, not recoverable, "jog the
+    arm clear by hand" (REVIEW_RULES U4)."""
+    busy = "planner busy — one plan at a time"
+    arm = Arm(answers=[lambda g, s: _plan(g, s, ok=False, message=busy)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and e.value.recoverable
+    assert busy in str(e.value) and len(arm.planned) == 1 and arm.sent == []
+    # ... and at a later plan too: the first failed on its own, the waypoint's met a busy planner
+    arm = Arm(
+        answers=[lambda g, s: _plan(g, s, ok=False)] * 3
+        + [lambda g, s: _plan(g, s, ok=False, message=busy)]
+    )
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "planner_unavailable" and len(arm.planned) == 4 and arm.sent == []
+
+
+def test_a_plan_the_arm_cannot_use_is_plan_unusable_not_a_planner_that_did_not_answer():
+    """self.arm hands back a plan that is not positions and velocities of the arm's seven joints
+    as a failed plan whose message begins with the call's name too. The planner did answer, and
+    asking again gets the same: not planner_unavailable, recoverable (REVIEW_RULES U4)."""
+    unusable = (
+        "plan_to_joints: the plan is not positions and velocities of arm_joint_1..7 or "
+        "joint_1..7 at every point (its joints: ['shoulder_pan'])"
+    )
+    arm = Arm(answers=[lambda g, s: _plan(g, s, ok=False, message=unusable)])
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "plan_unusable" and not e.value.recoverable
+    assert "shoulder_pan" in str(e.value) and len(arm.planned) == 1 and arm.sent == []
+
+
+def test_an_arm_that_must_not_be_commanded_is_said_so_before_anything_is_planned():
+    """An e-stopped arm (or one the driver's arbitration keeps from this engine) was read and
+    planned for, up to a minute, and failed motion_failed only at the send (REVIEW_RULES U4). The
+    driver's word is asked for first; a dry run, which sends nothing, plans regardless."""
+    arm = Arm()
+    arm.refusal = "arm is E-STOPPED -- clear it first"
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "arm_not_ready" and e.value.recoverable
+    assert "E-STOPPED" in str(e.value) and arm.planned == [] and arm.sent == []
+    out = _go(_engine(arm, Model()), dry_run=True)
+    assert out["dry_run"] and len(arm.planned) == 1 and arm.sent == []
+    arm = Arm(joints=HOME)  # already home: nothing to command, nothing to refuse
+    arm.refusal = "arm is E-STOPPED -- clear it first"
+    assert _go(_engine(arm, Model()))["home"]
+
+    from capability_engine import StateTimeout
+
+    def no_state():
+        raise StateTimeout("no /joint_states, /ee_state or /gripper_state")
+
+    arm = Arm()
+    arm.not_ready = no_state  # self.arm waits for the driver's state before it reads the status
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "arm_state" and e.value.recoverable and arm.planned == []
+
+
+def test_a_pause_is_no_part_of_the_planning_or_the_action_budget(monkeypatch):
+    """ctx.checkpoint() blocks while the action is paused, and the planning step is pausable: the
+    time it took is given back, so a long pause does not end as no_way_home or too_slow."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+
+    class Paused(Ctx):
+        each = 20.0
+
+        def checkpoint(self):
+            now[0] += self.each  # paused this long at every checkpoint
+
+    # 60 s of pauses before the first plan: on the wall clock no whole plan_timeout would fit the
+    # 60 s of planning any more. The pause is not planning, and the home is planned and flown.
+    arm = Arm()
+    out = Capability.execute(_engine(arm, Model()), "go_home", {}, Paused())
+    assert out["home"] and out["moved"] and len(arm.sent) == 1
+
+
+def test_a_pause_that_leaves_no_time_for_the_way_home_sends_nothing_and_says_so(monkeypatch):
+    """Whatever cancels a long action counts its pauses (the orchestrator's execute_timeout): a way
+    home that no longer fits is refused before anything is sent, not cancelled half way."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+
+    class Paused(Ctx):
+        def checkpoint(self):
+            now[0] += 500.0
+
+    arm = Arm()
+    with pytest.raises(EngineError) as e:
+        Capability.execute(_engine(arm, Model()), "go_home", {}, Paused())
+    assert e.value.error_code == "paused_too_long" and e.value.recoverable and arm.sent == []
+
+
+def test_inside_the_engines_padding_a_plan_that_fails_past_its_start_is_asked_again_not_stepped():
+    """Only a start the planner refuses is stepped out of: a plan that failed for another reason,
+    swung or ended elsewhere is a planner that takes this start."""
+    path = np.array([START, START + 0.05])
+    for first in (
+        lambda g, s: _plan(g, s, ok=False),  # FINETUNE_TRAJOPT_FAIL: the planner took the start
+        lambda g, s: _swinging(g, s),
+        lambda g, s: _plan(g, s, end=g + 0.4),
+    ):
+        arm = Arm(answers=[first, lambda g, s: _plan(g, s)])
+        out = _go(_engine(arm, Model(inside=0.012, escape=path)))
+        assert not out["stepped_out"] and len(arm.sent) == 1
+        assert all(np.allclose(s, START) for _g, s in arm.planned[:2])
+    # ... and a start it refuses for its limit margin is stepped out of, as one in collision is
+    arm = Arm(answers=[_refuses_start(START, "START_IN_LIMIT_MARGIN: jog it away from the limit")])
+    assert _go(_engine(arm, Model(inside=0.012, escape=path)))["stepped_out"]
+
+
+def test_every_goal_is_sent_under_the_drivers_divergence_guard(monkeypatch):
+    """A goal that names no path_tolerance runs with the driver's guard off (its executor checks a
+    joint only where the tolerance is > 0): a blocked arm would be driven on to the end of its
+    clock. Both the plan-free step and the way home carry arm.path_tol_rad, as it is set."""
+    import rammp_arm
+
+    monkeypatch.setattr(rammp_arm, "PATH_TOL_RAD", 0.11)  # as arm.path_tol_rad sets it at startup
+    path = np.array([START, START + 0.05])
+    arm = Arm(answers=[_refuses_start(START)])
+    out = _go(_engine(arm, Model(inside=0.012, escape=path)))
+    assert out["stepped_out"] and len(arm.sent) == 2 and arm.path_tols == [0.11, 0.11]
+
+
+def test_home_is_said_only_of_an_arm_that_is_read_there():
+    """The driver ends a goal when its clock runs out, wherever the arm is."""
+    arm = Arm()
+    short = HOME + np.array([0.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    def held_back(names, points, speed_scale=1.0, path_tolerance=None):
+        arm.sent.append(list(points))
+        arm.readings = [short]  # SUCCESSFUL, the arm 0.2 rad short on joint 2
+        return SimpleNamespace(error_code=0, error_string="")
+
+    arm.execute_joint_trajectory = held_back
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "motion_failed" and "0.200 rad (joint 2) from the home" in str(
+        e.value
+    )
+    assert len(arm.sent) == 1
+    out = _go(_engine(Arm(), Model()))  # ... and an arm that got there says how near
+    assert out["home"] and out["off_rad"] == 0.0
+
+
+def test_joints_that_cannot_be_read_after_a_goal_flew_fail_as_motion_failed_not_arm_state():
+    """arm_state says nothing was planned or sent. After a goal flew that is not so: the arm moved
+    and where it stopped is not known (REVIEW_RULES U4)."""
+    from capability_engine import StateTimeout
+
+    arm = Arm()
+    fly = arm.execute_joint_trajectory
+
+    def fly_then_lose_state(names, points, speed_scale=1.0, path_tolerance=None):
+        res = fly(names, points, speed_scale=speed_scale, path_tolerance=path_tolerance)
+
+        def stale():
+            raise StateTimeout("/joint_states is stale: last message 0.80 s ago")
+
+        arm.joint_states = stale
+        return res
+
+    arm.execute_joint_trajectory = fly_then_lose_state
+    with pytest.raises(EngineError) as e:
+        _go(_engine(arm, Model()))
+    assert e.value.error_code == "motion_failed" and not e.value.recoverable
+    assert "the way home was flown" in str(e.value) and len(arm.sent) == 1
+
+
+def test_off_a_limit_with_layers_that_cannot_be_read_nothing_is_stepped_unchecked():
+    """The plan-free step off a joint limit is held out of the chair and user by the body model.
+    Where body_layers names one that cannot be read, the step is refused; where the deployment
+    says there is none (body_layers empty), it flies on the tool's height alone."""
+    near = HOME.copy()
+    near[1] = LIMITS[1][0] + 0.05
+    arm = Arm(joints=near)
+    with pytest.raises(EngineError) as e:
+        _go(
+            _engine(arm, None, no_model="body model: cannot read /config/robot/curobo/planner.yaml")
+        )
+    assert e.value.error_code == "body_model" and "cannot be checked against the chair" in str(
+        e.value
+    )
+    assert arm.planned == [] and arm.sent == []
+    arm = Arm(joints=near)
+    out = _go(_engine(arm, None, no_model=node.NO_LAYERS))
+    assert out["home"] and len(arm.sent) == 2  # the step off the limit, then the way home
+
+
+def test_a_pause_asked_for_before_the_arm_is_sent_anything_is_taken_there_and_the_arm_read_again(
+    monkeypatch,
+):
+    """self.arm's own checkpoint would block on a pause inside the send, the plans already judged
+    and the arm last read before it. The pause is taken at the last pausable moment instead: an
+    arm moved meanwhile is sent nothing, and one that stood still goes home."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+
+    def paused_last(arm, moved_to=None):
+        class Last(Ctx):
+            def checkpoint(self):
+                if self.reports and self.reports[-1][2] is False:  # after the first unpausable step
+                    now[0] += 5.0
+                    if moved_to is not None:
+                        arm.readings = [np.asarray(moved_to, float)]
+
+        return Last()
+
+    arm = Arm()
+    with pytest.raises(EngineError) as e:
+        Capability.execute(_engine(arm, Model()), "go_home", {}, paused_last(arm, START + 0.1))
+    assert e.value.error_code == "arm_moving" and e.value.recoverable and arm.sent == []
+    assert "while the action was paused" in str(e.value)
+    arm = Arm()
+    out = Capability.execute(_engine(arm, Model()), "go_home", {}, paused_last(arm))
+    assert out["home"] and len(arm.sent) == 1
+
+
+def test_a_pause_asked_for_while_the_step_clear_flies_is_taken_before_the_way_home_is_sent(
+    monkeypatch,
+):
+    """The base class takes a PAUSE during a step reported not pausable, and self.arm's own
+    checkpoint would block on it inside the next send, the arm last read before the pause
+    (REVIEW_RULES, Cancel and pause). It is taken at the step's end instead: an arm moved meanwhile
+    is not sent the way home, nor one paused too long for it; one that stood still goes home."""
+    now = [0.0]
+    monkeypatch.setattr(node.time, "monotonic", lambda: now[0])
+    end = START + np.array([0.0, 0.1, 0.0, 0.05, 0.0, 0.0, 0.0])
+    path = np.array([START, end])
+
+    def run(moved_to=None, paused_s=5.0):
+        arm = Arm(answers=[_refuses_start(START)])
+
+        class AfterTheStep(Ctx):
+            def checkpoint(self):
+                if len(arm.sent) == 1:  # the step has flown, the way home is not sent yet
+                    now[0] += paused_s
+                    if moved_to is not None:
+                        arm.readings = [np.asarray(moved_to, float)]
+
+        eng = _engine(arm, Model(inside=0.012, escape=path))
+        return arm, lambda: Capability.execute(eng, "go_home", {}, AfterTheStep())
+
+    arm, go = run(moved_to=end + 0.1)
+    with pytest.raises(EngineError) as e:
+        go()
+    assert e.value.error_code == "arm_moving" and e.value.recoverable
+    assert "after the plan-free step clear" in str(e.value) and "nothing sent" not in str(e.value)
+    assert len(arm.sent) == 1  # the step alone: the way home was planned from its end
+    arm, go = run(paused_s=500.0)
+    with pytest.raises(EngineError) as e:
+        go()
+    assert e.value.error_code == "paused_too_long" and e.value.recoverable
+    assert "the way home was not sent" in str(e.value) and len(arm.sent) == 1
+    arm, go = run()
+    out = go()
+    assert out["home"] and out["stepped_out"] and len(arm.sent) == 2
 
 
 def test_an_arm_moved_while_planned_for_is_planned_for_again_from_where_it_stands():
@@ -362,6 +874,23 @@ def test_a_joint_too_near_its_limit_steps_off_it_along_the_joint_line_and_home_p
     step_end = arm.planned[0][1]
     assert 2.09 - step_end[5] >= node.homing.LIMIT_FIRST_RAD - 1e-9  # clear of the margin
     assert len(arm.sent) == 2 and np.allclose(arm.sent[0][-1][1], step_end)
+
+
+def test_near_a_limit_but_outside_the_planners_margin_its_own_plan_is_taken_before_any_step():
+    """The planner refuses a start inside its 0.10 rad margin and often, not always, fails just
+    outside it: where it gives a good plan from where the arm stands, that is flown and no
+    plan-free step is; where it does not, the step off the limit as before."""
+    near = START.copy()
+    near[5] = 2.09 - 0.15  # joint 6: nearer than 0.18, outside the planner's 0.10
+    arm = Arm(joints=near)
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == "directly" and not out["stepped_out"] and len(arm.sent) == 1
+    assert len(arm.planned) == 1 and np.allclose(arm.planned[0][1], near)
+    arm = Arm(joints=near, answers=[lambda g, s: _plan(g, s, ok=False), lambda g, s: _plan(g, s)])
+    out = _go(_engine(arm, Model()))
+    assert out["planned"] == "from the end of the step off the limit" and out["stepped_out"]
+    assert np.allclose(arm.planned[0][1], near) and not np.allclose(arm.planned[1][1], near)
+    assert len(arm.sent) == 2
 
 
 def test_off_a_limit_home_is_asked_for_again_before_a_longer_step():
