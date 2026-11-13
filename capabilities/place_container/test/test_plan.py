@@ -433,7 +433,8 @@ def test_a_carry_plan_must_keep_the_container_level_and_the_posture(model):
     problems, _ = plan.check_carry_plan(model, straight, q_b)
     assert not any("posture" in p or "swings" in p or "jumps" in p for p in problems)
     # the 2026-11-12 run: J1 the wrong way, J4 flipped, the container on its side
-    wild = [q + np.radians([144.0, 0, 0, 149.0, 0, 0, 0]) * s for s, q in zip(np.linspace(0, 1, 30), straight)]
+    swing = np.radians([144.0, 0, 0, 149.0, 0, 0, 0])
+    wild = [q + swing * s for s, q in zip(np.linspace(0, 1, 30), straight, strict=True)]
     problems, tilt = plan.check_carry_plan(model, wild, q_b)
     assert tilt > plan.MAX_CARRY_TILT_DEG and any("tilts" in p for p in problems)
     assert any("posture" in p for p in problems) and any("swings" in p for p in problems)
