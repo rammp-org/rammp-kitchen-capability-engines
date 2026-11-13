@@ -110,3 +110,17 @@ def pads_above_shut(knuckle_rad):
 
     th = min(max(float(knuckle_rad), 0.0), KNUCKLE_SHUT_RAD)
     return along(KNUCKLE_SHUT_RAD) - along(th)
+
+
+# The 2F-85's pads are 22 mm wide across the hand, the way it leans in a reach-out (the fingers side
+# by side across the line to the box). A hand leaning back toward the arm holds their ends on a
+# slant: the corner nearest the arm hangs this much under their middle, and is what meets a lid first.
+PAD_WIDTH_M = 0.022
+
+
+def pad_corner_below_m(lean_deg):
+    """How far under the pads' middle (the reference the arm's heights go by) their lowest corner
+    hangs with the hand leaning `lean_deg` back toward the arm (m)."""
+    import math
+
+    return 0.5 * PAD_WIDTH_M * math.sin(math.radians(max(float(lean_deg), 0.0)))

@@ -3072,6 +3072,85 @@ def test_the_rise_off_the_hold_clears_a_popped_knob_on_a_risen_lid_and_leans_whe
     assert rise is None and down is None and why.startswith("the rise off the button (the chair and user")
 
 
+def test_a_leaning_grip_comes_down_further_out_so_the_pads_low_half_takes_the_knob(ctx, monkeypatch):
+    """A hand leaning back toward the arm holds its pads' ends on a slant (fingers.pad_corner_below_m): with
+    their middle over the knob the corner nearest the arm meets the lid first and the pads take the knob's
+    side that much higher — 2.8 mm at 15 deg, 4.6 at 25, 5.5 at 30, of a knob 7.8 mm proud. grip_shift_m puts
+    the pads' middle that far out past the knob's centre that their ends over it stand no more than
+    GRIP_PAD_OVER_M over the corner, and never nearer their edge than GRIP_PAD_EDGE_M; a hand nearly
+    straight down is not shifted. The grip straight from the press ends its way down there, on the stroke's
+    line where that does not fly; the grip from the look pose comes down to a point that far further out."""
+    from box_opening.runtime import approach, fingers
+
+    half = 0.5 * fingers.PAD_WIDTH_M
+    assert fingers.pad_corner_below_m(15.0) == pytest.approx(0.0028, abs=1e-4)
+    assert (
+        fingers.pad_corner_below_m(30.0) == pytest.approx(0.0055, abs=1e-4) and fingers.pad_corner_below_m(0.0) == 0.0
+    )
+    model = ContainerModel.load(PINK)
+    at = (0.6, -0.2)
+
+    def shift(lean):
+        return rlo.grip_shift_m(rp.reach_quat(model, at, lean))
+
+    assert shift(0.0) == 0.0 and shift(10.0) == 0.0
+    assert shift(15.0) == pytest.approx(half - rlo.GRIP_PAD_OVER_M / math.sin(math.radians(15.0)), abs=2e-4)
+    assert 0.003 < shift(15.0) < shift(20.0) < shift(25.0) < shift(30.0) <= half - rlo.GRIP_PAD_EDGE_M
+    assert shift(60.0) == pytest.approx(half - rlo.GRIP_PAD_EDGE_M)
+    # the grip straight from the press: the way down ends that far out from the arm, past the stroke's line
+    lines = []
+
+    class Chain:
+        refuse_out = False
+
+        def fk(self, q):
+            return np.eye(3), np.array([at[0] + q[0], at[1] + q[1], 0.30 + q[2]])
+
+        def straight_line(self, q0, xyz, quat, max_step_rad=None):
+            lines.append([round(float(v), 5) for v in xyz])
+            if self.refuse_out and math.hypot(xyz[0], xyz[1]) > math.hypot(*at) + 1e-4:
+                return None, "IK did not converge 80% of the way"
+            return [list(q0), [xyz[0] - at[0], xyz[1] - at[1], xyz[2] - 0.30] + [0.0] * 4], None
+
+        def walk(self, q0, xyz, quat, step_m=None, max_step_rad=None):
+            return None, "no walk"
+
+    chain = Chain()
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    monkeypatch.setattr(dp, "line_refusal", lambda chain_, pts: None)
+    quat = rp.reach_quat(model, at, 25.0)
+    way = SimpleNamespace(stroke=SimpleNamespace(q0=[0.0, 0.0, 0.05, 0, 0, 0, 0], quat=quat))
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, [0.0] * 7)
+    out = rlo.grip_shift_m(quat)
+    d = math.hypot(*at)
+    assert why is None and lines[0][:2] == pytest.approx(list(at))  # the rise: straight up the stroke's line
+    assert lines[1][:2] == pytest.approx([at[0] * (1 + out / d), at[1] * (1 + out / d)], abs=1e-5)
+    assert math.hypot(lines[1][0] - at[0], lines[1][1] - at[1]) == pytest.approx(out, abs=1e-5)
+    # where no way down ends out there, the stroke's own line, as a hand straight down comes down
+    lines.clear()
+    chain.refuse_out = True
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, [0.0] * 7)
+    assert why is None and lines[-1][:2] == pytest.approx(list(at)) and len(lines) > 2
+    # the grip from the look pose: solved for the knob, then for the point further out, which is the one flown
+    asked = []
+    leaning = SimpleNamespace(pts=[[0.0] * 7], quat=quat, walked=True, slide=None, short_deg=25.0)
+    monkeypatch.setattr(
+        rp,
+        "reach_from_here",
+        lambda ctx_, cfg_, button, tilt, need_stroke=True, q=None: (
+            asked.append(tuple(button)),
+            ([], SimpleNamespace(slide_pts=[[0.0] * 7], start_xyz=[0, 0, 0], quat=quat), None),
+        )[1],
+    )
+    monkeypatch.setattr(rp, "walk_or_turn", lambda *a, **k: (leaning, None))
+    monkeypatch.setattr(rlo, "grip_descent", lambda *a, **k: (SimpleNamespace(legs=[]), None))
+    cfg = load_press_demo(PINK)
+    got, why = rlo.solve_grip_way(ctx, cfg, (at[0], at[1], 0.36), 30, [0.0] * 7, 0.36)
+    assert why is None and len(asked) == 2 and asked[0] == pytest.approx((at[0], at[1], 0.36))
+    assert asked[1] == pytest.approx((at[0] * (1 + out / d), at[1] * (1 + out / d), 0.36), abs=1e-6)
+    assert got.plan.slide_pts == [[0.0] * 7]
+
+
 def test_open_fingertips_stand_above_shut_ones_by_the_2f85s_linkage_and_the_touch_rise_follows():
     """fingers.pads_above_shut, from flatbot's URDF: 13.5 mm fully open, 2.3 mm on the 44 mm knob (0.41 rad),
     nothing shut. touch_rise_m: once the open fingertips have met the lid the hand comes back up what closing

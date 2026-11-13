@@ -2260,6 +2260,15 @@ def test_on_flatbot_the_proven_way_in_is_one_the_runner_flies(ctx, monkeypatch, 
     assert [(lg.name, runner._refusal(lg)) for lg in legs] == [(lg.name, None) for lg in legs]
 
 
+def _leans_to_15(monkeypatch):
+    """The compliant press's leans as they were until 2026-11-12, none past 15 deg: the boxes these
+    tests replay were out of its reach then, and are what the ways round that (the shifted look, the
+    turn lower down) were built on; leaning up to 30 deg it presses most of them where they stand."""
+    from box_opening.tasks import depth_press as dp
+
+    monkeypatch.setattr(dp, "COMPLIANT_TURN_SHORT_DEG", tuple(v for v in dp.COMPLIANT_TURN_SHORT_DEG if v <= 15.0))
+
+
 @pytest.mark.parametrize(
     "scene, aimed, near, leans",
     [
@@ -2281,6 +2290,7 @@ def test_on_flatbot_a_scene_button_out_of_reach_by_a_little_still_flies_the_look
     reached as it stands (test_on_flatbot_1623s_scene_button_is_proven_turning_short_after_the_slide)."""
     from box_opening.tasks import depth_press as dp
 
+    _leans_to_15(monkeypatch)  # the compliant press's leans of that day: with today's the first is reached as it stands
     if leans == "guarded":
         # and the turn only at the slide's end, as it was then: lower down
         # (TURN_LOW_ABOVE_M) both scene buttons are reached as they stand
@@ -2312,6 +2322,7 @@ def test_on_flatbot_a_turn_the_slides_end_cannot_reach_is_turned_lower_down(ctx,
     bent as before. Where the slide's own end turns, nothing changes."""
     from box_opening.runtime.runner import Runner
 
+    _leans_to_15(monkeypatch)  # as it was that day: past 15 deg the slide's own end turns here (18 deg short)
     chain, cfg, home = _on_flatbot(ctx, monkeypatch)
     plan, why = reach_press.plan_reach(ctx, cfg, SCENE_142835, home, depth=True)
     assert why is None and plan.tilt_deg == 30 and not plan.down.walked and plan.down.short_deg == 15.0
@@ -2321,6 +2332,7 @@ def test_on_flatbot_a_turn_the_slides_end_cannot_reach_is_turned_lower_down(ctx,
     way, why, kind = reach_press.solve_way_in(ctx, cfg, AIMED_142835, 30, q_look)
     assert way is None and kind == "down" and "15 deg short: IK did not converge 100% of the way" in why, why
     monkeypatch.undo()
+    _leans_to_15(monkeypatch)
     chain, cfg, home = _on_flatbot(ctx, monkeypatch)
     way, why, kind = reach_press.solve_way_in(ctx, cfg, AIMED_142835, 30, q_look)
     assert way is not None, (why, kind)
@@ -2384,6 +2396,7 @@ def test_on_flatbot_the_look_is_planned_once_its_press_is_proven_and_as_it_alway
     ]
     asked.clear()
     looks = []
+    _leans_to_15(monkeypatch)  # as it was that day: leaning further, 14:28:12's button is pressed where it stands
     plan, why = reach_press.plan_reach(ctx, cfg, SCENE_142812, home, depth=True, looks=looks)
     assert plan is None and asked == [] and "30 deg: the slide in (" in why
     assert all("%d deg: the way down (" % t in why for t in (35, 40, 45))
@@ -2900,6 +2913,33 @@ def test_a_lid_past_every_look_poses_reach_is_out_of_reach_and_the_box_before_it
     assert not reach_press.out_of_reach(model, (0.60, 0.10, 0.32))
     for far in ((1.095, -0.535, 0.33), (1.011, -0.541, 0.33), (1.145, -0.396, 0.33), (1.183, -0.418, 0.33)):
         assert reach_press.out_of_reach(model, far), far
+    # 2026-11-12 20:15:04 and 20:19:41: things by the microwave 1.03-1.08 m out, their look's wrist inside
+    # LOOK_PAST_REACH_M's allowance at the 45 deg tilt, were taken for the box and no press planned. A lid the
+    # arm could look at is out of reach too where the hand that presses it, at its greatest lean, stands
+    # too near the arm's bound (PRESS_PAST_REACH_M)
+    for far in ((1.075, -0.426, 0.291), (1.032, -0.397, 0.306), (1.059, -0.432, 0.474), (0.95, -0.25, 0.357)):
+        assert reach_press.out_of_reach(model, far), far
+    # ... and that day's boxes, 0.79-0.86 m out, are not: each is pressed, leaning up to 30 deg
+    for box in ((0.750, -0.247, 0.319), (0.769, -0.248, 0.315), (0.820, -0.254, 0.316), (0.819, -0.236, 0.296)):
+        assert not reach_press.out_of_reach(model, box), box
     # no kinematics, or geometry that cannot be worked out: nothing is ruled out
     monkeypatch.setattr(approach, "chain_ready", lambda: (False, "no URDF"))
     assert not reach_press.out_of_reach(model, (1.183, -0.418, 0.33))
+
+
+def test_on_flatbot_a_box_past_the_15_deg_turns_reach_is_pressed_leaning_further(ctx, monkeypatch):
+    """Flatbot 2026-11-12 19:12:26: the aimed button 0.86 m out on a 29 in table, and "no press reaches the
+    aimed button": no hand within 15 deg of straight down gets there. Leaning further, up to the look pose's
+    own 30 deg, it is pressed where it stands — the smallest lean that flies, past 15 — its stroke bent as
+    any; with the leans of that day there is still none."""
+    from box_opening.tasks import depth_press as dp
+
+    button = (0.820, -0.254, 0.316)
+    _chain, cfg, home = _on_flatbot(ctx, monkeypatch)
+    plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True)
+    assert why is None, why
+    assert 15.0 < plan.down.short_deg <= 30.0 and not plan.down.walked and plan.stroke.legs
+    assert dp._lean_deg(plan.stroke.quat) == pytest.approx(plan.down.short_deg, abs=0.2)
+    _leans_to_15(monkeypatch)
+    plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True)
+    assert plan is None and "the way down (" in why

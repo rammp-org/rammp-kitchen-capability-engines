@@ -61,6 +61,7 @@ from box_opening.constants import (
 )
 from box_opening.models.container import ContainerPose
 from box_opening.primitives.core import CONTACT_SHIFT_PAD_M, _full_world, _push_guard_and_verify
+from box_opening.runtime import fingers
 from box_opening.runtime.guards import GuardSpec, sanity_violations
 from box_opening.runtime.kinematics import MAX_STEP_RAD, around_body, mat_to_quat_xyzw
 from box_opening.tasks import reach_press as rp
@@ -88,7 +89,18 @@ TURN_SHORT_DEG = (0.0, 2.0, 5.0)
 # lean. The guarded press (_press_down) keeps TURN_SHORT_DEG: its close-up
 # look and DEPTH assume the lens points down, and 5 deg already costs
 # ~14 mm (_off_in_world).
-COMPLIANT_TURN_SHORT_DEG = (0.0, 2.0, 5.0, 8.0, 10.0, 12.0, 15.0)
+#
+# Past 15 deg (2026-11-12): flatbot's boxes that day stood 0.79-0.86 m out on a 29 in table, the lid
+# 0.36 over the arm's mount, and every one past 0.80 m stopped "no press reaches the aimed button"
+# (19:12:26 at 0.86, 20:15:41 at 0.85, 20:18:31 at 0.81). Replayed on flatbot's URDF with the chair
+# and its user (the same solver, way_down, from those runs' look poses): the least lean that flies
+# is 8-12 deg at 0.78 m, 15 at 0.80, 18-20 at 0.82, 22 at 0.84, 25 at 0.86, 28 at 0.88, and none
+# past 0.88-0.90 m at any lean up to 30; at each the rise off the hold and the lift fly too. The
+# look pose's own tilt is 30 (reach_press.REACH_TILTS_DEG's first), so a hand 30 short does not
+# turn at all. What the lean costs is the grip's: the pads' ends slant with the hand
+# (fingers.pad_corner_below_m: 4.6 mm at 25 deg), so the contact band and the grip's place across
+# the knob allow for it (watch_press, reach_lid_off.grip_shift_m). Not flown past 15.
+COMPLIANT_TURN_SHORT_DEG = (0.0, 2.0, 5.0, 8.0, 10.0, 12.0, 15.0, 18.0, 20.0, 22.0, 25.0, 28.0, 30.0)
 # An in-place turn (turn_down_path) whose joint arc — the sum of its steps'
 # lengths in joint space — is longer than this is refused, and the next lean
 # tried. Flatbot's URDF, boxes 0.64-0.82 m out under a lid at 0.3125: every
@@ -1341,6 +1353,9 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         return None
     slow_z = float(top_z) + TOUCH_SLOW_M
     start_z = float(np.asarray(stroke.pad0, float)[2]) if stroke.pad0 is not None else slow_z
+    # a leaning hand's pads meet the top corner first, their middle (what the watch measures) that much
+    # above it: the band above the top is as much wider, so the same top is judged the same at any lean
+    corner = fingers.pad_corner_below_m(_lean_deg(stroke.quat)) if stroke.quat is not None else 0.0
     contact = PressContact(
         approach._chain(),
         ctx.client,
@@ -1351,7 +1366,7 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         cut=cut,
         final=True,
         slow_z=slow_z,
-        early_m=CONTACT_EARLY_M,
+        early_m=CONTACT_EARLY_M + corner,
         late_m=CONTACT_LATE_M,
         abort_on_failure=True,
     )

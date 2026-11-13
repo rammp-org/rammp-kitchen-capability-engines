@@ -419,6 +419,26 @@ def _width_cmd(width):
     return GRIPPER_CMD_OPEN + (GRIPPER_CMD_CLOSED - GRIPPER_CMD_OPEN) * (1.0 - frac)
 
 
+# A leaning hand's pads slant (fingers.pad_corner_below_m): with their middle over the knob's centre,
+# the corner nearest the arm comes down on the lid first and the pads meet the knob's side that much
+# higher — 2.8 mm at 15 deg, the most flown until 2026-11-12; 4.6 at 25, 5.5 at 30, of a knob 7.8 mm
+# proud. So a leaning grip comes down this far further out from the arm (grip_shift_m): the knob under
+# the pads' low half, their ends there no more than GRIP_PAD_OVER_M over the corner, and never nearer
+# their edge than GRIP_PAD_EDGE_M.
+GRIP_PAD_OVER_M = 0.002
+GRIP_PAD_EDGE_M = 0.003
+
+
+def grip_shift_m(quat):
+    """How far out from the arm, past the knob's centre, the grip puts the pads' middle with the
+    hand at `quat` (GRIP_PAD_OVER_M's note): nothing for a hand nearly straight down."""
+    lean = math.radians(dp._lean_deg(quat))
+    half = 0.5 * fingers.PAD_WIDTH_M
+    if math.sin(lean) * half <= GRIP_PAD_OVER_M:
+        return 0.0
+    return max(0.0, min(half - GRIP_PAD_OVER_M / math.sin(lean), half - GRIP_PAD_EDGE_M))
+
+
 def touch_rise_m(model):
     """How far the hand comes back up once its open fingertips have met the lid (GRIP_TOUCH), before
     they close: closing brings the pads further out along the hand (fingers.pads_above_shut), from
@@ -1351,14 +1371,15 @@ def grip_descent(chain, cfg, q0, quat, lid_z):
     ), None
 
 
-def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z):
+def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z, shifted=False):
     """The way from joints `q_from` (the look pose) down to the knob of the
     `button` the press was aimed at, at `tilt`: the press's way in
     (reach_press.reach_from_here's move to the look pose and slide, then
     walk_or_turn) with the grip's stroke (grip_descent onto the lid at
     `lid_z`) where the press's was — every line one the runner flies
     (depth_press.line_refusal). Returns (reach_press.WayIn, None) or (None,
-    why)."""
+    why). A hand that turns down leaning comes down grip_shift_m further out
+    from the arm than `button` (`shifted`: this call is that one)."""
     from box_opening.runtime import approach
 
     chain = approach._chain()
@@ -1385,7 +1406,17 @@ def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z):
         why = dp.line_refusal(chain, line)
         if why is not None:
             return None, "%s: %s" % (name, why)
-    return rp.WayIn(move, plan, down, None if down.walked else plan.slide_pts, grip), None
+    way = rp.WayIn(move, plan, down, None if down.walked else plan.slide_pts, grip)
+    out = 0.0 if shifted else grip_shift_m(down.quat)
+    d = math.hypot(button[0], button[1])
+    if out > 0.0 and d > 1e-6:
+        # a leaning hand grips with the knob under its pads' low half (grip_shift_m): the same way in to a
+        # point that far further out, where it flies and turns down as far; else this one, on the knob's centre
+        further = (button[0] * (1.0 + out / d), button[1] * (1.0 + out / d), button[2])
+        again, _why = solve_grip_way(ctx, cfg, further, tilt, q_from, lid_z, shifted=True)
+        if again is not None and abs(dp._lean_deg(again.down.quat) - dp._lean_deg(down.quat)) < 0.5:
+            return again, None
+    return way, None
 
 
 def _grip_backwards(ctx, way, world):
@@ -2036,7 +2067,9 @@ def grip_from_hold_lines(ctx, way, q_held):
     (grip_lid_z), each as joint points — or (None, None, why): the first
     refusal's. Where that rise or its way down does not fly, the same with
     the hand leaning LIFT_LEAN_DEG further back by the top (and back to the
-    stroke's attitude on the way down), then GRIP_RISE_MIN_M each way."""
+    stroke's attitude on the way down), then GRIP_RISE_MIN_M each way. A
+    leaning hand's way down ends grip_shift_m further out from the arm than
+    the stroke's line; where none of those flies, on the line itself."""
     from box_opening.runtime import approach
     from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD, MAX_STEP_RAD, STEP_M
 
@@ -2047,9 +2080,15 @@ def grip_from_hold_lines(ctx, way, q_held):
     quat = way.stroke.quat
     d = math.hypot(float(t_line[0]), float(t_line[1]))
     first = None
-    for up in (GRIP_RISE_M, GRIP_RISE_MIN_M):
+    # a leaning hand grips with the knob under its pads' low half: the way down ends that far out (grip_shift_m)
+    shift = grip_shift_m(quat) if d > 1e-6 else 0.0
+    for up, out in [(up, o) for o in dict.fromkeys((shift, 0.0)) for up in (GRIP_RISE_M, GRIP_RISE_MIN_M)]:
         top = [float(t_line[0]), float(t_line[1]), float(t_held[2]) + up]
-        bottom = [top[0], top[1], float(t_held[2]) + GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M]
+        bottom = [
+            top[0] + (out * float(t_line[0]) / d if out else 0.0),
+            top[1] + (out * float(t_line[1]) / d if out else 0.0),
+            float(t_held[2]) + GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M,
+        ]
         for lean in (0.0, *LIFT_LEAN_DEG) if d > 1e-6 else (0.0,):
             if not lean:
                 rise, why = chain.straight_line(q_held, top, quat, max_step_rad=EXIT_MAX_STEP_RAD)

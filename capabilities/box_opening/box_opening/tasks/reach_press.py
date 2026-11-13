@@ -464,26 +464,48 @@ def way_down(ctx, cfg, q_look, slide_pts, start_xyz, quat, top_z):
 LOOK_PAST_REACH_M = 0.04
 
 
+# ... and a lid the arm could look at is still out of reach where no press comes down on it: the hand
+# turned down as far short of straight down as the compliant press turns at most
+# (depth_press.COMPLIANT_TURN_SHORT_DEG's last), its pads on the lid's top, the wrist nearer than this to
+# the bound of everything the arm reaches (past_reach_m at or above it; the arm runs out before its
+# bound). Flatbot 2026-11-12: lid-sized things 1.03-1.08 m out by the microwave were taken for the box by
+# the wrist (20:15:04) and by both cameras (20:19:41) — their look's wrist 33-50 mm "past reach" at the 45
+# deg tilt, inside LOOK_PAST_REACH_M's allowance — and each run stopped at "no reach-out press plans" with
+# the real box nearer and unlooked for. The same replay as the lean's (flatbot's URDF with the chair and
+# its user, lids at 0.316 and 0.357, three bearings): every lid a press reached had this at -27 mm or
+# under (0.92 m out at most), every one none reached at -24 or over.
+PRESS_PAST_REACH_M = -0.025
+
+
 def out_of_reach(model, top_xyz, travel_m=0.015, tilts=None):
-    """Whether a lid whose top stands at `top_xyz` is where no reach-out could even look at it: at every tilt the
-    press is tried at (REACH_TILTS_DEG) the look pose's wrist stands more than LOOK_PAST_REACH_M past everything
+    """Whether a lid whose top stands at `top_xyz` is where no reach-out presses it. At every tilt the press
+    is tried at (REACH_TILTS_DEG) the look pose's wrist stands more than LOOK_PAST_REACH_M past everything
     the arm reaches (kinematics.ArmChain.past_reach_m), which is what find_reach refuses a tilt for before any
-    planner is asked. The arm's own bound, read off its URDF: what it says is out of reach no joint values
-    reach. False where no arm chain is known or the geometry cannot be worked out (nothing is ruled out on no
-    kinematics)."""
+    planner is asked: the arm's own bound, read off its URDF, and what it says is out of reach no joint values
+    reach. Or the hand that presses it stands too near that bound at its greatest lean (PRESS_PAST_REACH_M:
+    measured on flatbot's arm, no proof). False where no arm chain is known or the geometry cannot be worked
+    out (nothing is ruled out on no kinematics)."""
     from box_opening.runtime import approach
 
     try:
         if not approach.chain_ready()[0]:
             return False
         chain = approach._chain()
+        top = [float(v) for v in top_xyz]
+        looks = False
         for tilt in REACH_TILTS_DEG if tilts is None else tilts:
-            quat, _start, _bottom, look = reach_geometry(model, [float(v) for v in top_xyz], tilt, travel_m)
+            quat, _start, _bottom, look = reach_geometry(model, top, tilt, travel_m)
             if chain.past_reach_m(look, quat) <= LOOK_PAST_REACH_M:
-                return False
+                looks = True
+                break
+        if not looks:
+            return True
+        from box_opening.tasks import depth_press as dp  # imports this module: not at the top
+
+        quat, tool = dp.turn_target(model, top, max(dp.COMPLIANT_TURN_SHORT_DEG))
+        return bool(chain.past_reach_m([float(v) for v in tool], quat) > PRESS_PAST_REACH_M)
     except Exception:  # noqa: BLE001 - a kinematics problem must never rule a place out
         return False
-    return True
 
 
 # A planned look that ends further than this from the joints its press was
