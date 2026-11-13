@@ -12,7 +12,6 @@ from capability_engine.CapabilityEngine.
     make action CAP=example ACTION=count_with_panel PARAMS='{"to": 5}'
 """
 
-import os
 import time
 
 from sensor_msgs.msg import Image
@@ -23,19 +22,38 @@ _OVERLAY_WIDTH = 320
 _OVERLAY_HEIGHT = 240
 
 
-def _build_random_overlay_image() -> Image:
-    """One rgb8 frame of plain random noise -- a placeholder for a real
+_STRIPE_BG = (20, 20, 20)
+_STRIPE_FG = (0, 160, 255)
+_STRIPE_WIDTH = 24
+
+
+def _build_stripe_overlay_image() -> Image:
+    """One rgb8 frame of diagonal stripes -- a placeholder for a real
     capability's own camera feed (see publish_overlay_image()'s docstring),
-    generated once and republished unchanged every tick below, purely to
-    prove a frame genuinely reaches UE (distinguishable on screen from the
-    static_overlay_node mock's own crosshair pattern)."""
+    generated once and republished unchanged every tick below. A fixed,
+    recognizable pattern (same convention as static_overlay_node's own
+    crosshair) makes it obvious on screen that a genuine frame reached UE,
+    without the visual noise (and incompressibility) of random static --
+    and the diagonal stripes are easily told apart from that mock's
+    crosshair."""
     msg = Image()
     msg.height = _OVERLAY_HEIGHT
     msg.width = _OVERLAY_WIDTH
     msg.encoding = "rgb8"
     msg.is_bigendian = 0
     msg.step = _OVERLAY_WIDTH * 3
-    msg.data = os.urandom(_OVERLAY_WIDTH * _OVERLAY_HEIGHT * 3)
+    row_cache: dict[int, bytes] = {}
+    rows = []
+    for y in range(_OVERLAY_HEIGHT):
+        row = bytearray(_OVERLAY_WIDTH * 3)
+        for x in range(_OVERLAY_WIDTH):
+            is_fg = ((x + y) // _STRIPE_WIDTH) % 2 == 0
+            r, g, b = _STRIPE_FG if is_fg else _STRIPE_BG
+            row[x * 3 + 0] = r
+            row[x * 3 + 1] = g
+            row[x * 3 + 2] = b
+        rows.append(bytes(row))
+    msg.data = b"".join(rows)
     return msg
 
 
@@ -104,8 +122,8 @@ class Capability(CapabilityEngine):
         A capability with its own camera (e.g. a wrist cam) would call
         ctx.publish_overlay_image(image) here, once per tick, to show the
         user a live view alongside the panel -- this example has no real
-        camera, so it republishes one static random-noise test frame
-        (_build_random_overlay_image(), built once at module scope) every
+        camera, so it republishes one static diagonal-stripe test frame
+        (_build_stripe_overlay_image(), built once per call) every
         tick instead, purely to demonstrate a frame actually reaches UE.
         ctx.set_overlay_visible() brackets the whole run below, to
         demonstrate the show/hide toggle (UE's `Open Camera Feed`/`Close
@@ -122,7 +140,7 @@ class Capability(CapabilityEngine):
         self.get_logger().info("count_with_panel: showing overlay camera feed")
         shown = ctx.set_overlay_visible(True)
         self.get_logger().info(f"count_with_panel: set_overlay_visible(True) returned {shown}")
-        overlay_image = _build_random_overlay_image()
+        overlay_image = _build_stripe_overlay_image()
         try:
             for n in range(1, to + 1):
                 ctx.checkpoint()
