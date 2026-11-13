@@ -541,7 +541,7 @@ def test_the_way_off_the_frame_is_said_in_the_planning_frame():
     assert frame_edges([10, 10, 600, 380], (640, 400)) == ()
     flatbot = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])  # columns: image +u, +v, view
     why = off_frame_why(0.45, ("right",), flatbot)
-    assert "toward arm_mount +y" in why and "move the box toward -y" in why
+    assert "toward arm_mount +y" in why and "in view -y of here" in why and "move the box" not in why
 
 
 def test_the_recorded_flatbot_frame_still_finds_its_canister_inside_the_frame():
@@ -1143,7 +1143,8 @@ def test_a_lids_circle_that_something_taller_stands_inside_is_refused(monkeypatc
     ref = np.asarray(z["ref_xyz"], float)
     cands = segmenter_candidates(objs, ("food container",), (640, 400))
     got = ss.scene_fix_from_boxes(cands, pts, uv, tz, model, src="segmenter", rivals=True, **kw)
-    assert got.pose is None and "where the lid's circle is" in got.tried[-1], got.tried
+    assert got.pose is None and any("where the lid's circle is" in t for t in got.tried), got.tried
+    assert not got.rough and "roughly too" in got.tried[-1]  # nor is it placed roughly (SCENE_ROUGH)
     monkeypatch.setattr(ss, "PARTIAL_OVER_PAD_M", -1.0)  # no circle holds anything: the check is off
     slid = ss.scene_fix_from_boxes(cands, pts, uv, tz, model, src="segmenter", rivals=True, **kw)
     assert slid.pose is not None and np.linalg.norm(np.subtract(slid.top, ref)) > 0.04  # measured 55.8 mm
@@ -1334,7 +1335,8 @@ def _band(holder):
 
 def _locator(monkeypatch, world, outcomes, seg=True, instance_id=None):
     """A SceneLocator on the world's stubs, its gate a stand-in: outcomes[box] is a top (the box passes), a dict
-    {top, partial} (it passes, finished from part of it) or a reason (it is refused)."""
+    {top, partial} (it passes, finished from part of it), a dict {rough} (it is refused, and placed roughly from
+    the part in view: SceneBoxFix.rough) or a reason (it is refused)."""
     from box_opening.models.container import ContainerPose
     from box_opening.perception import scene_source as ss
 
@@ -1357,15 +1359,18 @@ def _locator(monkeypatch, world, outcomes, seg=True, instance_id=None):
 
     def gate(cands, pts, uv, table_z, model, src="segmenter", rivals=False, **kw):
         gated.append((round(world.t, 3), src, len(cands)))
-        tried, passing = [], []
+        tried, passing, rough = [], [], ()
         for c in cands:
             o = key[ss.box_key(c[1])]
             if isinstance(o, str):
                 tried.append("%s (%s %.2f)" % (o, src, c[0]))
+            elif isinstance(o, dict) and "rough" in o:  # refused, but placed roughly (SCENE_ROUGH)
+                tried.append("the lid's arc in view fits two places (%s %.2f)" % (src, c[0]))
+                rough = rough or (float(c[0]), c[1], ("left",), tuple(o["rough"]), 30, 0.19)
             else:
                 passing.append((c, o if isinstance(o, dict) else {"top": o}))
         if not passing:
-            return ss.SceneBoxFix(None, None, 0, None, tuple(tried))
+            return ss.SceneBoxFix(None, None, 0, None, tuple(tried), rough=rough)
         c, o = passing[0]
         top = tuple(o["top"])
         riv = tuple(
@@ -1752,3 +1757,281 @@ def test_a_look_reads_the_table_off_its_frames_once(monkeypatch):
     monkeypatch.setattr(ss, "table_from_scene_points", table)
     assert loc.locate(2.0) is None
     assert len(reads) == 2  # the first message's no plane, the second's kept for the rest
+
+
+def _read_along_its_ray(p, dz, cam=SIDE_CAM):
+    """`p` moved along the camera's ray through it until it stands `dz` higher: the same pixel, another depth."""
+    k = (p[:, 2] + dz - cam[2]) / (p[:, 2] - cam[2])
+    return np.asarray(cam, float) + (p - np.asarray(cam, float)) * k[:, None]
+
+
+def test_a_table_read_above_the_boxs_foot_is_not_the_table():
+    """Flatbot 2026-11-11: the scene OAK's stereo had nothing to match on a
+    plain white table and the ring around the canister read 33-43 mm high —
+    its top 52-63 mm "under lid height", refused wherever it stood. The
+    detector's box ends where the thing meets the table: the ray through
+    its bottom edge, at the thing's front, is the table."""
+    from box_opening.perception.scene_source import FOOT_TABLE_SLACK_M, box_from_side_points, foot_table
+
+    model = ContainerModel.load(PINK)
+    pts, uv, canister, _tall = _side_scene(np.random.default_rng(4))
+    cap = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + model.dims[2] - 0.025]))
+    whole = _pixel_box(_project(canister), pad=(2, 0))
+    assert foot_table(pts, uv, whole, SIDE_CAM) == pytest.approx(SIDE_TABLE, abs=0.008)
+    # a good table: the foot changes nothing, to the last digit
+    plain = box_from_side_points(pts, uv, cap, None, model, SIDE_CAM)
+    assert box_from_side_points(pts, uv, cap, None, model, SIDE_CAM, foot_box=whole)[3] == plain[3]
+    # the table (not the canister) read 55 mm high, pixel for pixel: the top then stands under the lid band
+    # (LID_BELOW_M, 45 mm since 2026-11-12; flatbot's stood 52-63 mm under lid height)
+    bad = pts.copy()
+    # (the table behind the canister, which this scene does not hide, left where it is)
+    seen = ~((uv[:, 0] >= whole[0]) & (uv[:, 0] <= whole[2]) & (uv[:, 1] >= whole[1]) & (uv[:, 1] <= whole[3]))
+    flat = seen & (np.abs(pts[:, 2] - SIDE_TABLE) < 0.015)
+    bad[flat] = _read_along_its_ray(pts[flat], 0.055)
+    pose, why, _n, tz = box_from_side_points(bad, uv, cap, None, model, SIDE_CAM)
+    assert pose is None and "from lid height" in why and tz == pytest.approx(SIDE_TABLE + 0.055, abs=0.006)
+    pose, top, _n, tz = box_from_side_points(bad, uv, cap, None, model, SIDE_CAM, foot_box=whole)
+    assert pose is not None, top
+    assert tz == pytest.approx(SIDE_TABLE, abs=0.008) and pose.xyz[2] == tz
+    assert np.hypot(pose.xyz[0] - 0.70, pose.xyz[1] + 0.55) < 0.012
+    # a box that stops short of the table reads its foot high: it never raises the table
+    short = (whole[0], whole[1], whole[2], whole[3] - 25)
+    assert foot_table(pts, uv, short, SIDE_CAM) > SIDE_TABLE + FOOT_TABLE_SLACK_M
+    assert box_from_side_points(pts, uv, cap, None, model, SIDE_CAM, foot_box=short)[3] == plain[3]
+    # a surveyed table is left alone, and a box the frame cuts at its bottom has no foot
+    assert box_from_side_points(bad, uv, cap, SIDE_TABLE + 0.055, model, SIDE_CAM, foot_box=whole)[0] is None
+    assert np.isnan(foot_table(pts, uv, (whole[0], whole[1], whole[2], 399.0), SIDE_CAM, image_wh=(640, 400)))
+
+
+def test_the_canister_on_the_plain_white_table_is_found_where_it_stands():
+    """Flatbot 2026-11-11 18:07: the frame the run kept when it refused the
+    box ("its fixes did not agree", its top 43-63 mm under lid height in
+    the run before). The ring reads the table at 0.283; the holder box's
+    foot is at 0.250, and the lid in the band above it 120 mm over that."""
+    from box_opening.perception.scene_source import scene_fix_from_boxes
+    from box_opening.perception.segmenter_source import segmenter_candidates
+
+    model = ContainerModel.load(PINK)
+    pts, uv, _tz, kw, objs, _z = _upright_at("scene_plain_table_flatbot_20261111_180747.npz")
+    cands = segmenter_candidates(objs, ("food container",), (640, 400))
+    assert cands[0].kind == "band"  # 3.6 px inside the frame's left edge: not cut
+    got = scene_fix_from_boxes(cands, pts, uv, None, model, src="segmenter", rivals=True, **kw)
+    assert got.pose is not None, got.tried
+    assert got.table_z == pytest.approx(0.250, abs=0.005)
+    assert got.top[2] - got.table_z == pytest.approx(model.dims[2], abs=0.010)
+    # where this frame puts it under that day's TF: a regression pin, not a tape truth
+    assert got.top[0] == pytest.approx(0.788, abs=0.01) and got.top[1] == pytest.approx(-0.237, abs=0.01)
+    # without the foot, the ring's table refuses it as the run did
+    bare = [(c.score, c.box) for c in cands]
+    old = scene_fix_from_boxes(bare, pts, uv, None, model, src="segmenter", **kw)
+    assert old.pose is None or old.table_z > 0.27
+
+
+# -- a box the frame cuts at its side, placed roughly (scene_source.SCENE_ROUGH) -----------------
+
+
+def test_a_cut_lid_the_partial_lift_refuses_is_placed_roughly_near_where_it_is():
+    """Owner 2026-11-04: a box at the scene frame's edge gives a rough position, and the wrist's aim
+    from the look pose places it (that aim takes a prior up to button_aim.PRIOR_MAX_M off). The
+    10-27 16:24 canister, its frame's left edge moved in until 40 % and 25 % of its holder is in view:
+    the partial lift refuses both (two places / too few lid points), and the rough fit, the lid's
+    circle tangent to its uncut side with its centre toward the cut, puts it 10-20 mm from the
+    reference (detbench, 128 cut lids: median 7 mm, the worst 43). SCENE_ROUGH off: refused."""
+    from box_opening.perception import scene_source as ss
+    from box_opening.perception.segmenter_source import segmenter_candidates
+
+    model = ContainerModel.load(PINK)
+    for lo in (220, 235):
+        pts, uv, tz, kw, objs, z = _upright_at(F_162417, lo=lo)
+        ref = np.asarray(z["ref_xyz"], float)
+        cands = segmenter_candidates(objs, ("food container",), kw["image_wh"])
+        got = ss.scene_fix_from_boxes(cands, pts, uv, tz, model, src="segmenter", rivals=True, **kw)
+        assert got.pose is None and got.rough, (lo, got.tried)
+        _score, _box, edges, top, n, _tz = got.rough
+        assert edges == ("left",) and n >= ss.ROUGH_MIN_POINTS
+        assert np.hypot(top[0] - ref[0], top[1] - ref[1]) < 0.03, (lo, top, ref)
+        assert abs(top[2] - ref[2]) < 0.01
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ss, "SCENE_ROUGH", False)
+        got = ss.scene_fix_from_boxes(cands, pts, uv, tz, model, src="segmenter", rivals=True, **kw)
+        assert got.pose is None and not got.rough
+
+
+def test_the_rough_circle_lies_toward_the_cut_not_at_the_lids_mirror():
+    """P4 (10-23 17:27): the half-off lid's arc fits the lid and its mirror across its own
+    silhouette ray, ~100 mm apart. The rough fit knows which side of that ray the centre is on
+    (toward the cut), so it has one place, near the reference (bench: 27 mm)."""
+    from box_opening.perception import scene_source as ss
+    from box_opening.perception.segmenter_source import segmenter_candidates
+
+    model = ContainerModel.load(PINK)
+    pts, uv, tz, kw, objs, z = _upright_at(F_172707)
+    ref = np.asarray(z["ref_xyz"], float)
+    (c,) = segmenter_candidates(objs, ("food container",), (640, 400))
+    top, why, _n, _tz = ss.rough_from_cut_box(pts, uv, c[1], ("left",), None, model, kw["cam_xyz"], kw["cam_R"])
+    assert top is not None, why
+    assert np.hypot(top[0] - ref[0], top[1] - ref[1]) < 0.04  # the mirror is 75-107 mm off
+
+
+def test_the_rough_fit_answers_only_a_round_box_cut_at_one_side():
+    from dataclasses import replace
+
+    from box_opening.perception import scene_source as ss
+
+    pts, uv, box, model = _cut_side_scene(np.random.default_rng(6), cut_u=326)  # a sliver: the partial lift refuses
+    kw = dict(cam_xyz=SIDE_CAM, image_wh=(326, 400))
+    got = ss.scene_fix_from_boxes([(0.45, box)], pts, uv, None, model, cam_R=SIDE_R, **kw)
+    assert got.pose is None and got.rough, got.tried
+    assert np.hypot(got.rough[3][0] - 0.70, got.rough[3][1] + 0.55) < 0.03
+    square = ss.scene_fix_from_boxes([(0.45, box)], pts, uv, None, replace(model, round=False), cam_R=SIDE_R, **kw)
+    assert square.pose is None and not square.rough  # no circle to place it by
+    hung = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])  # cut at its top: the lid may be out of view
+    tall = ss.scene_fix_from_boxes([(0.45, box)], pts, uv, None, model, cam_R=hung, **kw)
+    assert tall.pose is None and not tall.rough
+    top, why, _n, _tz = ss.rough_from_cut_box(pts, uv, box, ("top",), None, model, SIDE_CAM, SIDE_R)
+    assert top is None and "not at one side" in why
+    top, why, _n, _tz = ss.rough_from_cut_box(pts, uv, [0, 0, 2, 2], ("left",), None, model, SIDE_CAM, SIDE_R)
+    assert top is None and "depth points inside the box" in why
+
+
+def test_a_look_that_only_places_the_box_roughly_answers_after_rough_after_s(monkeypatch):
+    """No candidate passes; every frame's best one, cut at the frame's side, is placed roughly, 6 mm
+    apart from frame to frame. The look gives the careful gate ROUGH_AFTER_S, then answers with the
+    rough fix, said as such (SceneFix.rough, its partial), rather than NO BOX at 15 s."""
+    from box_opening.perception import scene_source as ss
+
+    msgs = [
+        (t, [("food container", 0.6, _holder(1.0 if i % 2 else 0.0))]) for i, t in enumerate(np.arange(0.3, 16.0, 0.2))
+    ]
+    world = _World(seg_msgs=msgs)
+    a = (SEG_TOP[0], SEG_TOP[1], SEG_TOP[2])
+    b = (SEG_TOP[0] + 0.006, SEG_TOP[1], SEG_TOP[2])
+    loc, gated = _locator(monkeypatch, world, {_band(_holder()): {"rough": a}, _band(_holder(1.0)): {"rough": b}})
+    fix = loc.locate(15.0)
+    assert fix is not None and fix.rough, loc.last_why
+    assert fix.top_xyz == pytest.approx((SEG_TOP[0] + 0.003, SEG_TOP[1], SEG_TOP[2]))
+    assert "placed roughly" in fix.partial and fix.n_sightings == 2
+    assert ss.ROUGH_AFTER_S <= world.t < ss.ROUGH_AFTER_S + 0.5
+
+
+def test_a_box_that_passes_the_careful_way_wins_over_a_rough_one(monkeypatch):
+    msgs = [(t, [("food container", 0.6, _holder(1.0 if t > 2.0 else 0.0))]) for t in np.arange(0.3, 16.0, 0.2)]
+    world = _World(seg_msgs=msgs)
+    loc, _gated = _locator(monkeypatch, world, {_band(_holder()): {"rough": SEG_TOP}, _band(_holder(1.0)): SEG_TOP})
+    fix = loc.locate(15.0)
+    assert fix is not None and not fix.rough and world.t < 3.0
+
+
+def test_rough_sightings_that_disagree_answer_nothing(monkeypatch):
+    msgs = [
+        (t, [("food container", 0.6, _holder(1.0 if i % 2 else 0.0))]) for i, t in enumerate(np.arange(0.3, 6.0, 0.2))
+    ]
+    world = _World(seg_msgs=msgs)
+    far = (SEG_TOP[0] + 0.05, SEG_TOP[1], SEG_TOP[2])
+    loc, _gated = _locator(
+        monkeypatch, world, {_band(_holder()): {"rough": SEG_TOP}, _band(_holder(1.0)): {"rough": far}}
+    )
+    assert loc.locate(6.0) is None
+
+
+def _bottom_cut(pts, uv, kw, objs, out_frac):
+    """The same frame with its bottom edge moved up until `out_frac` of the best box's height is out of view: the
+    cloud's rows below it dropped, the boxes ended at it, the image that much shorter."""
+    best = max(objs, key=lambda o: o[1])[2]
+    new_h = int(best[3] - out_frac * (best[3] - best[1]))
+    keep = uv[:, 1] < new_h
+    cut = [(c, s, (b[0], b[1], b[2], min(b[3], float(new_h)))) for c, s, b in objs if b[1] < new_h - 1.0]
+    return pts[keep], uv[keep], dict(kw, image_wh=(kw["image_wh"][0], new_h)), cut
+
+
+def test_a_box_in_the_frames_corner_is_placed_roughly_from_its_lids_side():
+    """Flatbot 2026-11-10 17:43: the canister in the scene frame's bottom-left corner, NO BOX. A box the frame cuts
+    at one side AND at its foot has its lid cut at that side alone: the careful gate still refuses it at the frame's
+    edge, and the rough fit places it from the lid's side in view, over the table read around it (the foot that is
+    out of view measures none). The 10-27 16:24 canister with its frame's left and bottom edges moved in. Cut deep
+    enough that no table shows around it, it is placed nowhere: no table, no lid height to judge it by."""
+    from box_opening.perception import scene_source as ss
+    from box_opening.perception.segmenter_source import segmenter_candidates
+
+    model = ContainerModel.load(PINK)
+    for lo in (220, 235):
+        pts, uv, tz, kw, objs, z = _upright_at(F_162417, lo=lo)
+        pts, uv, kw, objs = _bottom_cut(pts, uv, kw, objs, 0.1)
+        ref = np.asarray(z["ref_xyz"], float)
+        cands = segmenter_candidates(objs, ("food container",), kw["image_wh"])
+        got = ss.scene_fix_from_boxes(cands, pts, uv, tz, model, src="segmenter", rivals=True, **kw)
+        assert got.pose is None and got.rough, (lo, got.tried)
+        assert any("runs off the frame at its left and bottom edge" in t for t in got.tried)
+        _score, _box, edges, top, n, _tz = got.rough
+        assert edges == ("left", "bottom") and n >= ss.ROUGH_MIN_POINTS
+        assert np.hypot(top[0] - ref[0], top[1] - ref[1]) < 0.04, (lo, top, ref)
+        assert abs(top[2] - ref[2]) < 0.01
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ss, "SCENE_ROUGH", False)
+        got = ss.scene_fix_from_boxes(cands, pts, uv, tz, model, src="segmenter", rivals=True, **kw)
+        assert got.pose is None and not got.rough
+    pts, uv, tz, kw, objs, z = _upright_at(F_162417, lo=220)
+    pts, uv, kw, objs = _bottom_cut(pts, uv, kw, objs, 0.5)
+    cands = segmenter_candidates(objs, ("food container",), kw["image_wh"])
+    got = ss.scene_fix_from_boxes(cands, pts, uv, tz, model, src="segmenter", rivals=True, **kw)
+    assert got.pose is None and not got.rough and "roughly too: no table around it" in got.tried[-1]
+
+
+def test_only_a_box_cut_at_one_side_and_its_foot_is_a_corner_cut():
+    from box_opening.perception import scene_source as ss
+
+    R = SIDE_R  # an upright camera: the image's bottom edge lies down
+    assert ss.side_and_foot_cut(("left", "bottom"), R) == "left"
+    assert ss.side_and_foot_cut(("right", "bottom"), R) == "right"
+    assert ss.side_and_foot_cut(("left",), R) is None  # a side alone is the partial lift's (side_cut)
+    assert ss.side_and_foot_cut(("bottom",), R) is None  # its lid is whole: nothing a circle's side would place
+    assert ss.side_and_foot_cut(("left", "top"), R) is None  # the lid itself may be out of view
+    assert ss.side_and_foot_cut(("left", "right", "bottom"), R) is None  # no uncut side to stand the circle against
+    hung = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])  # the image's left edge lies down
+    assert ss.side_and_foot_cut(("left", "bottom"), hung) is None
+
+
+def test_the_lids_height_is_the_runs_own_measurement_the_models_only_its_loose_bound():
+    """Flatbot: ankou_pink.yaml says the lid stands 121 mm over the table; the scene camera read it 88-112 mm on
+    the recorded frames of 10-22..11-04 and 94-99 mm on the four full runs of 11-02/11-03. The fix carries what
+    it measured (its top, the table it was read on, SceneFix.height_m); dims.z only bounds what may be this
+    container's lid, LID_BAND_M over it and LID_BELOW_M under."""
+    from box_opening.perception import scene_source as ss
+
+    model = ContainerModel.load(PINK)
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2], SIDE_TABLE, model) is None
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] + ss.LID_BAND_M - 0.001, SIDE_TABLE, model) is None
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] - ss.LID_BELOW_M + 0.001, SIDE_TABLE, model) is None
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] + ss.LID_BAND_M + 0.004, SIDE_TABLE, model) == pytest.approx(
+        ss.LID_BAND_M + 0.004
+    )
+    assert ss.lid_band_off(SIDE_TABLE + model.dims[2] - ss.LID_BELOW_M - 0.004, SIDE_TABLE, model) == pytest.approx(
+        -ss.LID_BELOW_M - 0.004
+    )
+    # a canister 22 mm shorter than the yaml's, as flatbot's measures: found, and at the height it stands at
+    short = float(model.dims[2]) - 0.022
+    pts, uv, canister, _tall = _side_scene(np.random.default_rng(4), height=short)
+    bbox = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + short - 0.025]))
+    pose, top, _n, table_z = ss.box_from_side_points(pts, uv, bbox, None, model, SIDE_CAM)
+    assert pose is not None, top
+    assert top[2] - table_z == pytest.approx(short, abs=0.006)  # the measurement, not table + dims.z
+    fix = ss.SceneFix(pose=pose, top_xyz=top, n_points=1, score=0.5, table_z_scene=table_z)
+    assert fix.height_m == pytest.approx(short, abs=0.006)
+    # one that stands under the band is not this container's lid (the holder's brim, a lower bowl)
+    low = float(model.dims[2]) - ss.LID_BELOW_M - 0.012
+    pts, uv, canister, _tall = _side_scene(np.random.default_rng(4), height=low)
+    bbox = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + low - 0.025]))
+    pose, why, _n, _tz = ss.box_from_side_points(pts, uv, bbox, None, model, SIDE_CAM)
+    assert pose is None and "from lid height" in why and "its top is -" in why
+
+
+def test_a_rival_out_of_the_arms_reach_does_not_make_a_container_within_it_ambiguous():
+    from box_opening.perception.scene_source import within_reach_rivals
+
+    top, far, near = (0.83, -0.15, 0.33), (1.18, -0.42, 0.33), (0.60, 0.10, 0.33)
+    reach = lambda p: p[0] < 1.0  # noqa: E731
+    assert within_reach_rivals(top, (far,), reach) == ()
+    assert within_reach_rivals(top, (far, near), reach) == (near,)
+    assert within_reach_rivals(top, (far,), None) == (far,)  # no word on reach: every rival counts
+    assert within_reach_rivals(far, (top,), reach) == (top,)  # the top itself out of reach: nothing is settled by reach
+    assert within_reach_rivals(top, (), reach) == ()

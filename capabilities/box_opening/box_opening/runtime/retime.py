@@ -453,15 +453,21 @@ def _fold_mask(seg, folds, m):
     return fold
 
 
-def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None, step_caps=None):  # noqa: B008 - frozen dataclass
+def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None, step_caps=None, speed_cap=None):  # noqa: B008 - frozen dataclass
     """Chained unguarded legs -> ONE re-timed JointTrajectory + a report.
 
     speeds: each leg's cruise fraction (its Leg.speed); folds (None: none):
     whether each leg's junction with the one before it is a fold (its
     Leg.fold), taken as params.fold_deg and fold_chord say; step_caps, Returns
-    where given, each leg's Leg.step_cap (capped_steps).
+    where given, each leg's Leg.step_cap (capped_steps). speed_cap (None:
+    none): a callable of the joined path's positions (n, 7) giving each
+    sample's path-speed cap (rad/s, inf: none; or None) — the speed near the
+    user (runtime/body Body.near_user_caps), lowered on top of the others as
+    step_caps' are, never scaled by a cruise fraction.
     (trajectory, info) with info = {duration_s, junction_speeds (rad/s at
-    each chained junction), stops (junctions taken at rest), n_points}.
+    each chained junction), stops (junctions taken at rest), n_points,
+    capped_samples (how many samples speed_cap held below the arm's own
+    limit)}.
     """
     folds = None if params.fold_deg is None or not folds or not any(folds) else [bool(f) for f in folds]
     chords = None if folds is None else [params.fold_chord if f else None for f in folds]
@@ -471,6 +477,13 @@ def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None, step_ca
     cruise = cruise_per_sample(seg, speeds, params.junction_cruise)
     fold = None if folds is None else _fold_mask(seg, folds, params.fold_samples)
     steps = capped_steps(positions, seg, step_caps)
+    capped = 0
+    if speed_cap is not None:
+        near = speed_cap(positions)
+        if near is not None:
+            near = np.asarray(near, dtype=float)
+            capped = int((near < velocity_caps(positions, vmax, params.vmax_margin)[0]).sum())
+            steps = near if steps is None else np.minimum(steps, near)
     v, ds = speed_profile(positions, cruise, vmax, params, fold=fold, steps=steps)
     cap, _ = joint_caps(positions, vmax, params, steps)
     t = times_from_profile(v, ds, params, cap)
@@ -481,6 +494,7 @@ def retime_group(trajs, speeds, vmax, params=RetimeParams(), folds=None, step_ca
         "junction_speeds": jspeeds,
         "stops": int(sum(1 for s in jspeeds if s < params.v_floor * 2)),
         "n_points": int(len(positions)),
+        "capped_samples": capped,
         # where each input leg begins as a TIME fraction of the result. A
         # guarded descent merged behind its approach arms its torque guard
         # here, so it watches its own regime and not the approach's

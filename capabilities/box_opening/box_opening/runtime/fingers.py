@@ -85,3 +85,42 @@ def scaled_band(band, closed=None):
     closed = learned_closed() if closed is None else closed
     f = min(1.0, closed / NOMINAL_CLOSED)
     return (float(band[0]) * f, min(float(band[1]), closed - AIR_MARGIN))
+
+
+# The 2F-85's fingertip on its knuckle, from flatbot's URDF (the Robotiq description's links): the
+# knuckle joint turns the finger link and, fixed on it, the fingertip's joint, which a mimic joint
+# keeps upright. In the knuckle's own frame the fingertip joint stands at the two links' offsets
+# summed, (x across the hand, z along it); turned by the knuckle angle, its z is how far along the
+# hand the pads stand. Shut (0.8 rad) they stand furthest out: 13.5 mm further than fully open, 2.3
+# mm further than on the 44 mm knob (0.41 rad), as the grips of 2026-10-29 found them.
+_TIP_ON_KNUCKLE_XZ = (0.03152616 + 0.00563134, -0.00376347 + 0.04718515)
+KNUCKLE_SHUT_RAD = 0.8
+
+
+def pads_above_shut(knuckle_rad):
+    """How far back along the hand (m) the pads stand with the knuckle at `knuckle_rad` (0 open ..
+    0.8 shut) from where they stand shut: the height an open hand's fingertips are above its shut
+    ones, the hand pointing down."""
+    import math
+
+    x, z = _TIP_ON_KNUCKLE_XZ
+
+    def along(th):
+        return x * math.sin(th) + z * math.cos(th)
+
+    th = min(max(float(knuckle_rad), 0.0), KNUCKLE_SHUT_RAD)
+    return along(KNUCKLE_SHUT_RAD) - along(th)
+
+
+# The 2F-85's pads are 22 mm wide across the hand, the way it leans in a reach-out (the fingers side
+# by side across the line to the box). A hand leaning back toward the arm holds their ends on a
+# slant: the corner nearest the arm hangs this much under their middle, and is what meets a lid first.
+PAD_WIDTH_M = 0.022
+
+
+def pad_corner_below_m(lean_deg):
+    """How far under the pads' middle (the reference the arm's heights go by) their lowest corner
+    hangs with the hand leaning `lean_deg` back toward the arm (m)."""
+    import math
+
+    return 0.5 * PAD_WIDTH_M * math.sin(math.radians(max(float(lean_deg), 0.0)))

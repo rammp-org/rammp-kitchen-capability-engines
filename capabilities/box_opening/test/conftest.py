@@ -39,6 +39,8 @@ from box_opening.runtime.runner import Runner  # noqa: E402
 
 # no test run records the lid-off's video of the cameras (perception/camera_video) unless it asks
 os.environ.setdefault("BOX_OPENING_VIDEO", "0")
+# nor holds its lines out of a chair (runtime/body) unless it asks: the bench has none
+os.environ.setdefault("BOX_OPENING_BODY_LAYERS", "")
 
 # The recorded fixtures (camera frames, flatbot's arm URDF and joint states, grip close-ups) are
 # kept out of this repo: no data files in git. Point BOX_OPENING_TEST_DATA at a copy, or put one
@@ -57,6 +59,25 @@ def fixture_path(name):
 def flatbot_urdf():
     """flatbot's arm URDF (2026-10-21, with arm_mount), as a str path. Skips the test without it."""
     return str(fixture_path("arm_flatbot_20261021.urdf"))
+
+
+# flatbot's HOME from 2026-10-21 until 2026-11-09, when the arm moved 8 in forward on the chair and
+# constants.HOME became a temporary one clear of the armrest. Every recorded flatbot run these tests
+# replay started here, and the poses many of them are built on were chosen near it: those tests pin it
+# (pytestmark = pytest.mark.usefixtures("home_20261021")) rather than follow constants.HOME.
+HOME_20261021 = [0.067, -1.897, -3.137, -2.269, -0.211, -0.683, 1.725]
+
+
+@pytest.fixture
+def home_20261021():
+    """constants.HOME set to the 2026-10-21 HOME for the test, and put back after. Every module that
+    imported HOME holds the same list (nothing copies it at import), so it is changed in place."""
+    from box_opening import constants
+
+    saved = list(constants.HOME)
+    constants.HOME[:] = HOME_20261021
+    yield constants.HOME
+    constants.HOME[:] = saved
 
 
 CFG = "capabilities/box_opening/config/containers/oxo_pop.yaml"

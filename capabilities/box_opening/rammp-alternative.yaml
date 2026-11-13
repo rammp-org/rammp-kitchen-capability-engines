@@ -21,6 +21,11 @@ container:
   volumes:
     # where runs keep their logs, captures and videos (state_dir)
     - /home/snorlax/.ros/box_opening:/state
+    # the active robot's config, read-only, as the planner (and arm_state_publisher) mount it: the
+    # planner config whose chair and user layers and arm spheres every plan-free line is held out of
+    # (body_layers below, runtime/body). Without it the node's runs stop before they move ("not
+    # starting: body model: cannot read /config/robot/curobo/planner.yaml ... Nothing moved.")
+    - ./config/robots/current:/config/robot:ro
   # No GPU: nothing in it runs a model. The box comes from the scene segmenter
   # (/perception/object_detections).
 # Defaults for every value a deployment may change per robot or from the sheppy
@@ -45,6 +50,29 @@ params:
   mission_frames: false
   # every motion slowed to this fraction of its speed (0 < x <= 1)
   speed_scale: 1.0
+  # the cuRobo planner config whose layers (the chair and its user) and robot spheres every
+  # plan-free line and planner goal is held out of (the volume above); unreadable, a run stops
+  # before it moves; a run also refuses a planner not started on this same config with world "".
+  # "" turns the check off (a bench with no chair)
+  body_layers: /config/robot/curobo/planner.yaml
+  # where the scene camera finds no container, look for it with the wrist camera from one or two
+  # poses over the arm's side (a chair parked side-on to a counter the scene camera cannot see);
+  # false: such a run stops with not_found before anything moves. Never for the orchestrator's
+  # selection, which is the scene camera's (docs/interface.md)
+  wrist_survey: false
+  # the wrist camera finds the container: the wrist turns where the arm rests so its camera sees
+  # the table in front of the arm (up to four views of the wrist's three joints, first where the
+  # scene camera has the box; a lid a view cuts is looked at again), and what it finds there is the
+  # box; the scene camera's box only where the wrist finds none. Never for the orchestrator's selection
+  wrist_first: false
+  # the run's measured table handed to the planner while a way HOME is planned, and at no other time
+  # (docs/interface.md, "The planner's world"). `planner_worlds_as` is the folder the PLANNER's container
+  # mounts read-only for it, as that container names it, e.g. /box_opening for a planner volume
+  #   - <state_dir on the host>/planner_worlds:/box_opening:ro
+  # "" (the default): box opening sends the planner no world. `planner_worlds_dir` is the same folder as
+  # this node writes it; "" = planner_worlds under state_dir
+  planner_worlds_as: ""
+  planner_worlds_dir: ""
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

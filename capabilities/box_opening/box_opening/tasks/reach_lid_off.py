@@ -101,9 +101,17 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from box_opening import LOGGER as log
-from box_opening.constants import DRIFT_REPLAN_RAD, GRIPPER_CMD_CLOSED, GRIPPER_CMD_OPEN, TRANSIT_SPEED
+from box_opening.constants import (
+    DRIFT_REPLAN_RAD,
+    GRIPPER_CMD_CLOSED,
+    GRIPPER_CMD_OPEN,
+    PLANNER_LIMIT_MARGIN_RAD,
+    SANITY_MARGIN_RAD,
+    TRANSIT_SPEED,
+)
 from box_opening.models.container import ContainerPose
 from box_opening.perception import clear_table
+from box_opening.primitives import core
 from box_opening.primitives.core import (
     CONTACT_SHIFT_PAD_M,
     Place,
@@ -115,7 +123,7 @@ from box_opening.primitives.core import (
 )
 from box_opening.runtime import abort, fingers
 from box_opening.runtime.driver import GripperWait
-from box_opening.runtime.guards import in_band
+from box_opening.runtime.guards import in_band, sanity_violations
 from box_opening.runtime.legs import merge_groups
 from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_press as rp
@@ -187,6 +195,12 @@ GRIP_BELOW_LID_M = 0.002
 # side. The open pads stand ~10 mm over the shut ones then (13.5 fully open):
 # they still come down above the lid.
 GRIP_SIDE_CLEAR_M = 0.010
+# ... and wider than that where the lid leaves room: the pads midway between the knob's edge and the
+# lid's (grip_open_cmd), 74.5 mm for the pink canister's 44 mm knob on its 105 mm lid — 15 mm clear
+# of the knob either side and 15 mm inside the lid's edge. Flatbot 2026-11-12 19:12:49: the press
+# opened the box, its aim 7.5 mm from the knob's centre (the look after it), and the fingers, open
+# to 64 mm, came down 8 mm clear of a knob the wrist measured 47-48 mm across — one of them at its
+# edge — and shut the box again (the owner watched it; the next look read the knob flush).
 # The 2F-85's aperture fully open (GRIPPER_CMD_OPEN, knuckle 0) and, as the
 # knuckle closes to GRIPPER_CMD_CLOSED, about linear on it: the 44 mm knob
 # closes it to 0.39-0.42 (the grip band's middle), the line's 0.39.
@@ -216,7 +230,32 @@ GRIP_TRIES = 2
 # fingertips before the way down ends, the spring on it, and they close round
 # the knob's base.
 GRIP_FROM_PRESS = True
-GRIP_RISE_M = 0.025  # over the popped knob (~7.5 mm proud) before the fingers spread
+# How far the hand rises off the hold before the fingers spread and it comes down again. It was 25 mm
+# ("over the popped knob (~7.5 mm proud)"), which left out what the button and the lid do when the
+# press lets them go: the button comes back up its stroke (KNOB_STROKE_M), the released lid rises on
+# its seal (9.4-9.6 mm on 2026-10-28, LID_POP_M up to 30) and the knob stands 7.8 mm over that — its
+# top ~25 mm over where the hold held the pads. Flatbot 2026-11-12 19:12:49 (the owner: "it just
+# didnt raise high enough before it came back down to grab it, reclosing the box"): told 25 mm, the
+# pads reached 22.9 and stood at 20 when the hand came down. Now the stroke, the most a released lid
+# rises and a knob's height over it; where that line does not fly, the same with the hand leaning
+# further back by its top (LIFT_LEAN_DEG), then GRIP_RISE_MIN_M each way.
+GRIP_RISE_M = KNOB_STROKE_M + LID_POP_M[1] + KNOB_STROKE_M
+GRIP_RISE_MIN_M = 0.035
+# ... and the hand comes down again only where the arm measured its pads this far over the hold at
+# the rise's top (PadsAbove.highest): the popped knob's top and a margin. Lower, the fingers may not
+# have left the knob, and the way down would press it shut: back to the look pose instead, the look
+# to judge it.
+GRIP_RISE_LEAST_M = 0.030
+# The way down is watched (press_contact.PressContact, armed once it has come down GRIP_TOUCH_ARM_M:
+# the pads lag a reference that starts from rest, and that reads as a rise). Where the open
+# fingertips meet something — the lid, standing higher released than the hold says, or a knob one of
+# them came down on — the reference stops there, nothing pressed on down, and the hand comes back up
+# touch_rise_m before the fingers close: their pads end GRIP_TOUCH_CLEAR_M over what they met, round
+# the knob's base on a lid, over the top of a knob (a close on air, the look to aim again, the box
+# still open). Nothing met, the way down ends where it always did.
+GRIP_TOUCH = True
+GRIP_TOUCH_ARM_M = 0.008
+GRIP_TOUCH_CLEAR_M = 0.0015
 # ... and the fingers open on the way up once the pads, as the arm measures
 # them, stand this far over where the hold held them: off the popped knob,
 # its stroke and a margin over it (press_contact.PadsAbove, Leg.send_when).
@@ -225,7 +264,10 @@ GRIP_RISE_M = 0.025  # over the popped knob (~7.5 mm proud) before the fingers s
 # fingers stop touching the lid"): 16:20's spread from shut to the knob's
 # width in the rise's first 0.35 s, the pads 6 mm over the hold sinking to
 # 1.5 as they spread, the hand rising only after
-GRIP_OPEN_ABOVE_HELD_M = KNOB_STROKE_M + 0.005
+# ... which was the stroke and 5 mm, 12.5 mm over the hold: still on a popped knob, which follows the
+# pads up to ~25 mm (GRIP_RISE_M's note). Now the stroke and the most a released lid rises; a hand
+# that does not get that high opens at the rise's top, as before.
+GRIP_OPEN_ABOVE_HELD_M = KNOB_STROKE_M + LID_POP_M[1]
 _MISSED = "the grip straight from the press missed"  # _grip_from_hold's: back at the look pose
 # The grip's close-up record (owner 2026-10-30, "a recorder first"): at each
 # close, once the arm stands still, the wrist's frame — the fingers open
@@ -264,6 +306,34 @@ REGRIP_AIM_HITS = 3
 # rest of the way out is up and back toward the arm (reach_press
 # .clear_targets), as the way home's clear goes.
 LIFT_OFF_CLEAR_M = 0.015
+# ... and where that lift, or every clear from its top, does not fly, this
+# much past it (plan_lift): 35 mm for the pink canister's 25 mm cap. On the
+# chair study's 0.86 / 0.91 m side counters (study/fixes/highcounter, 11-06)
+# the 40 mm lift stopped at joint_6's limit 24-40 mm up (median 30) in 67 of
+# 225 rows; at 35 mm in 51, the lid coming off in 143 rows against 127 at 40
+# mm (with the clear to the carry's floor on the cameras' top, the leaning
+# set-down and the walk carry), at every contact height in 10 cells against
+# 0; that floor over the lid's top as gripped (lift_clear_targets), 113, 9 of
+# them at 35 mm. The cap's skirt then clears the rim by 9.5 mm at the lift's
+# top (14.5 at 40 mm) and its lowest point stays 9.4 mm or more over the
+# canister on the way (14.4). 30 mm (0.005) got 158 rows, the skirt 4.4 mm
+# over the rim: not until the cap's skirt is measured at 22 mm or less
+# (lid_dims.z is an estimate).
+LIFT_OFF_MIN_CLEAR_M = 0.010
+# ... and where no lift straight up flies at the hand's own lean, the hand
+# leans this much further back toward the arm as it rises (plan_lift), the
+# least of these that flies. Flatbot 2026-11-12 18:12: the box 0.71 m out on
+# a 29 in table, the knob held with the hand leaning 30 deg and the elbow 0.5
+# rad from straight — the arm at its reach, so the lift ran out 20-28 mm up
+# whatever the elbow's swing (every self-motion of that grip, offline), and
+# the run backed out of an open box ("the lid has no way off the box"). The
+# wrist rides 0.29 m up the hand's axis: each degree the hand leans back
+# lowers it 2.5-3.5 mm there and brings it in, and from that grip and 18:11's
+# (45 deg, 30 mm of lift) the full lift flies leaning 5 deg more. The lid
+# turns with the hand about the knob, its edge nearest the arm that much
+# lower: a lean is flown only where that edge still ends over the rim
+# (_lean_keeps_clear), 4 mm of the 15 at 5 deg for the pink canister's lid.
+LIFT_LEAN_DEG = (5.0, 10.0)
 # The set-down: at setdown_speed or faster (PLACE_TOUCH_SPEED below) to
 # SETDOWN_SLOW_M above where the plan has the lid meet the table — the scene
 # camera's table, the model's lid hanging from the grip (setdown_poses) —
@@ -289,21 +359,95 @@ SETDOWN_RELEASE_M = 0.010
 # down "too hard" (2026-10-29 14:45): the faster touch met the table at twice
 # the speed, the damper (zeta 1.0) pushing on while the reference ran on.
 PLACE_TOUCH_SPEED = dp.TOUCH_SPEED
+# Past every spot straight down (spot_candidates' second pass: none
+# reached, or the carries to those refused), the hand sets the lid down
+# leaning this far back toward the arm, facing
+# the spot (reach_press.reach_quat; the round lid's yaw is free), the lid
+# where the grip took it (setdown_poses). On the 0.86 / 0.91 m side counters
+# of the chair study (study/fixes/highcounter, 11-06) no straight-down hand
+# reaches its carry height (0.514 m, 0.564 on 0.91 m) over spots 10-112 mm
+# inside the arm's reach: joint_6's range is what fails, in 39 of the 225
+# press-planned rows outright and in every row once the clear goes no
+# higher than the carry's floor (lift_clear_targets). Leaning 10 / 20 / 30
+# deg the lid came off in 77 / 100 / 98 rows (30 deg no more, and it put
+# the lid below the rim over the canister in 6); the lean matched to the
+# grip's own, the lid level, in 98. At 20 deg the lid lands tilted 8 deg
+# median, 20 at most, the edge nearest the arm first: let go 10 mm above
+# that touch (SETDOWN_RELEASE_M), its far edge falls 15-36 mm and it settles
+# flat — as today's straight-down set-down after a grip leaning 0-15 deg
+# lands it 0-15 deg tilted. A bench run whose hand reaches a spot straight
+# down never leans.
+SETDOWN_LEAN_DEG = 20.0
 
 
-def lift_off_m(model):
-    """How far the knob is lifted straight up: the cap off the rim."""
-    return float(model.lid_dims[2]) + LIFT_OFF_CLEAR_M
+@dataclass(frozen=True)
+class LeanSpot(ContainerPose):
+    """A spot for the lid that the hand reaches only leaning `lean_deg`
+    back toward the arm (spot_candidates' second pass): setdown_poses sets
+    the lid down there leaning; `yaw` is the spot's own, unused there."""
+
+    lean_deg: float = SETDOWN_LEAN_DEG
+
+
+def lift_off_m(model, clear_m=None):
+    """How far the knob is lifted straight up: the cap off the rim,
+    LIFT_OFF_CLEAR_M (else `clear_m`) past it."""
+    return float(model.lid_dims[2]) + (LIFT_OFF_CLEAR_M if clear_m is None else float(clear_m))
+
+
+def _lift_m(ctx, lift):
+    """How far straight up LiftOff `lift` takes the lid (its lift_m; lift_off_m where it says none)."""
+    up = getattr(lift, "lift_m", None)
+    return lift_off_m(ctx.model) if up is None else float(up)
 
 
 def grip_open_cmd(model):
-    """The knuckle the fingers come down to the knob at: open to its width
-    (model.button_diameter_m) and GRIP_SIDE_CLEAR_M either side, on the
-    2F-85's about-linear aperture (GRIPPER_OPEN_WIDTH_M at GRIPPER_CMD_OPEN,
-    nothing at GRIPPER_CMD_CLOSED); never wider than fully open."""
-    width = float(model.button_diameter_m) + 2.0 * GRIP_SIDE_CLEAR_M
-    frac = min(max(width / GRIPPER_OPEN_WIDTH_M, 0.0), 1.0)
+    """The knuckle the fingers come down to the knob at: the pads midway
+    between the knob's edge (model.button_diameter_m) and the lid's
+    (model.lid_dims), never nearer the knob than GRIP_SIDE_CLEAR_M either
+    side, on the 2F-85's about-linear aperture (_width_cmd); never wider
+    than fully open."""
+    knob = float(model.button_diameter_m)
+    lid = float(min(model.lid_dims[0], model.lid_dims[1]))
+    return _width_cmd(max(knob + 2.0 * GRIP_SIDE_CLEAR_M, 0.5 * (knob + lid)))
+
+
+def _width_cmd(width):
+    """The knuckle that opens the 2F-85's pads `width` apart: about linear from GRIPPER_OPEN_WIDTH_M
+    at GRIPPER_CMD_OPEN to nothing at GRIPPER_CMD_CLOSED."""
+    frac = min(max(float(width) / GRIPPER_OPEN_WIDTH_M, 0.0), 1.0)
     return GRIPPER_CMD_OPEN + (GRIPPER_CMD_CLOSED - GRIPPER_CMD_OPEN) * (1.0 - frac)
+
+
+# A leaning hand's pads slant (fingers.pad_corner_below_m): with their middle over the knob's centre,
+# the corner nearest the arm comes down on the lid first and the pads meet the knob's side that much
+# higher — 2.8 mm at 15 deg, the most flown until 2026-11-12; 4.6 at 25, 5.5 at 30, of a knob 7.8 mm
+# proud. So a leaning grip comes down this far further out from the arm (grip_shift_m): the knob under
+# the pads' low half, their ends there no more than GRIP_PAD_OVER_M over the corner, and never nearer
+# their edge than GRIP_PAD_EDGE_M.
+GRIP_PAD_OVER_M = 0.002
+GRIP_PAD_EDGE_M = 0.003
+
+
+def grip_shift_m(quat):
+    """How far out from the arm, past the knob's centre, the grip puts the pads' middle with the
+    hand at `quat` (GRIP_PAD_OVER_M's note): nothing for a hand nearly straight down."""
+    lean = math.radians(dp._lean_deg(quat))
+    half = 0.5 * fingers.PAD_WIDTH_M
+    if math.sin(lean) * half <= GRIP_PAD_OVER_M:
+        return 0.0
+    return max(0.0, min(half - GRIP_PAD_OVER_M / math.sin(lean), half - GRIP_PAD_EDGE_M))
+
+
+def touch_rise_m(model):
+    """How far the hand comes back up once its open fingertips have met the lid (GRIP_TOUCH), before
+    they close: closing brings the pads further out along the hand (fingers.pads_above_shut), from
+    where they stand open (grip_open_cmd) to where they stand on the knob's width, and they are to
+    end GRIP_TOUCH_CLEAR_M over the lid there, round the knob's base, not pressed into it."""
+    onto = fingers.pads_above_shut(grip_open_cmd(model)) - fingers.pads_above_shut(
+        _width_cmd(float(model.button_diameter_m))
+    )
+    return max(onto, 0.0) + GRIP_TOUCH_CLEAR_M
 
 
 def grip_lid_z(top_z, held_z=None):
@@ -316,15 +460,18 @@ def grip_lid_z(top_z, held_z=None):
     return float(held_z) + GRIP_LID_ABOVE_HELD_M
 
 
-def setdown_poses(ctx, drop):
+def setdown_poses(ctx, drop, held=None):
     """(attitude, tool where the lid meets the table, the carry's hover)
     for the spot `drop`: the hand straight down, turned by the spot's yaw
     (press_demo.place_quat, the attitude clear_lid_drops judged the room
     for); the lid hangs where the grip took it, GRIP_BELOW_LID_M under the
     pads' reference; the hover above it as Place.hover_for has it, high
-    enough for the lid to clear the box."""
+    enough for the lid to clear the box. A LeanSpot: the hand leaning
+    (_lean_setdown_poses), the lid as gripped by the hand at joints `held`."""
     from box_opening.tasks.press_demo import place_quat
 
+    if float(getattr(drop, "lean_deg", 0.0) or 0.0) != 0.0:
+        return _lean_setdown_poses(ctx, drop, held)
     quat = list(place_quat(ctx.model, drop))
     contact = [
         float(drop.xyz[0]),
@@ -334,23 +481,65 @@ def setdown_poses(ctx, drop):
     return quat, contact, [float(v) for v in Place.hover_for(ctx, contact)]
 
 
+def _lean_setdown_poses(ctx, drop, held):
+    """setdown_poses for a LeanSpot: the hand leaning drop.lean_deg back
+    toward the arm, facing the spot (reach_press.reach_quat). The lid as
+    the grip took it, the hand at the joints `held` — where the carry
+    starts: from the close on the lift and the clear hold the grip's
+    attitude — level there, its top GRIP_BELOW_LID_M over the pads'
+    reference (depth_press.DOWN_CONTACT_TOOL), held so in the hand: at the
+    lean its bottom's centre over the spot, its lowest point on the table
+    where the tool meets it; the hover over that as Place.hover_for has it,
+    its carry floor (the lid's underside CARRY_CLEAR_M over the box) taken
+    under the lid's lowest point. Straight down, held straight down, this
+    is setdown_poses' own."""
+    from box_opening.perception.d405 import quat_to_mat
+    from box_opening.runtime import approach
+
+    if held is None:
+        raise ValueError("a leaning set-down needs the joints the hand holds the lid at")
+    m = ctx.model
+    Rg, _t = approach._chain().fk([float(v) for v in held])
+    Rg = np.asarray(Rg, float)
+    up = np.array([0.0, 0.0, 1.0])
+    top = np.asarray(dp.DOWN_CONTACT_TOOL, float) + Rg.T @ (GRIP_BELOW_LID_M * up)  # in the tool frame
+    normal = Rg.T @ up
+    quat = [float(v) for v in rp.reach_quat(m, drop.xyz[:2], float(drop.lean_deg))]
+    R = np.asarray(quat_to_mat(*quat), float)
+    n = R @ normal
+    bottom = R @ top - float(m.lid_dims[2]) * n  # the lid's bottom centre, from the tool
+    lid_r = 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1]))
+    low = float(bottom[2]) - lid_r * math.sqrt(max(0.0, 1.0 - float(n[2]) ** 2))  # its lowest point, from the tool
+    contact = [float(drop.xyz[0]) - float(bottom[0]), float(drop.xyz[1]) - float(bottom[1]), float(drop.xyz[2]) - low]
+    floor = float(ctx.cpose.xyz[2]) + float(m.dims[2]) + core.CARRY_CLEAR_M + GRIP_BELOW_LID_M - low
+    hover = [contact[0], contact[1], max(contact[2] + float(m.hover_standoff) + float(m.lid_dims[2]), floor)]
+    return quat, contact, hover
+
+
 def _abort_check(ctx):
     """runtime.abort.check on this run's client: LookaheadAborted where a Ctrl+C has come."""
     abort.check(getattr(ctx, "client", None))
 
 
 def drop_reachable(ctx, drop, q_start, seeds=()):
-    """Why the hand does not set the lid down at `drop`, or None: no
-    straight-down hand at the carry's hover (the arm's own IK, from
-    `q_start`, else from `seeds`), or no straight line down from it to the
-    set-down's end."""
+    """Why the hand does not set the lid down at `drop`, or None: no hand
+    at the carry's hover at the set-down's attitude (straight down; for a
+    LeanSpot leaning, the lid as gripped at `q_start`: setdown_poses) — the
+    arm's own IK, from `q_start`, else from `seeds` — or no straight line
+    down from it to the set-down's end."""
     from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
 
     chain = approach._chain()
-    quat, contact, hover = setdown_poses(ctx, drop)
+    quat, contact, hover = setdown_poses(ctx, drop, held=q_start)
     q = chain.nearest_solution(list(q_start), hover, quat, seeds=tuple(seeds))
     if q is None:
-        return "no straight-down hand reaches its carry height %.3f" % hover[2]
+        lean = float(getattr(drop, "lean_deg", 0.0) or 0.0)
+        hand = "straight-down hand" if lean == 0.0 else "hand leaning %.0f deg" % lean
+        return "no %s reaches its carry height %.3f" % (hand, hover[2])
+    why = kin.body_refusal(chain, [q], start_exempt=False)  # the carry's end: the planner's world may be empty
+    if why is not None:
+        return "the hand at its carry height is in the way (%s)" % why
     pts, why = chain.straight_line(q, [contact[0], contact[1], contact[2] + SETDOWN_RELEASE_M], quat)
     if pts is None:
         return "the set-down is not a straight line the arm can fly (%s)" % why
@@ -589,6 +778,34 @@ def spot_map(ctx, wrist, q, scene_fix, scene_q, table_z, lens_in_hand=None):
     return tmap
 
 
+def counter_map(ctx, watcher, scene_fix, scene_q, table_z, aim=False):
+    """The table map the counter's edges are read from before the lid is off
+    (press_demo.keep_out_counter): the scene camera's cloud as spot_map takes
+    it (moved by its error at the box, the arm when it looked left out) and,
+    `aim`, the wrist's frame at the look pose (aim_cloud): parked side-on to
+    a cabinet, the scene camera may not see the counter at all. A cloud that
+    cannot be read is left out (said), the other still maps; None where
+    neither shows a table, or where the map cannot be made (said: no map is
+    no news of the counter, never the run's end)."""
+    reads = [("the scene camera's cloud", lambda: _scene_cloud(ctx, scene_fix, scene_q, table_z))]
+    if aim:
+        reads.append(("the wrist's frame at the look", lambda: aim_cloud(ctx, watcher, table_z)[0]))
+    clouds = []
+    for name, read in reads:
+        try:
+            got = read()
+        except Exception as e:  # noqa: BLE001 - a cloud for the counter's edges only
+            log.info("[press_demo] the counter's edges: %s could not be read (%s) — left out" % (name, e))
+            continue
+        if got is not None:
+            clouds.append(got)
+    try:
+        return clear_table.table_map(clouds, ctx.cpose.xyz[:2]) if clouds else None
+    except Exception as e:  # noqa: BLE001 - a map for the counter's edges only
+        log.info("[press_demo] no map of the counter for its edges: its clouds could not be mapped (%s)" % e)
+        return None
+
+
 def _scene_cloud(ctx, scene_fix, scene_q, table_z):
     """spot_map's scene camera cloud: (its table points moved by its error
     at the box, the arm when it looked left out; the table they were
@@ -600,11 +817,16 @@ def _scene_cloud(ctx, scene_fix, scene_q, table_z):
     pts = getattr(scene_fix, "table_points", None)
     if pts is None or not len(pts):
         return None
-    pts = np.asarray(pts, float) + [
-        float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]),
-        float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]),
-        0.0,
-    ]
+    pts = np.asarray(pts, float)
+    if not getattr(scene_fix, "rough", False):
+        # the scene camera's error at the box, taken out of all of it. A ROUGH fix (a box the frame
+        # cut, scene_source.SCENE_ROUGH) is off by its own fit, not by the camera's error: the cloud
+        # is kept as it was measured
+        pts = pts + [
+            float(ctx.cpose.xyz[0]) - float(scene_fix.pose.xyz[0]),
+            float(ctx.cpose.xyz[1]) - float(scene_fix.pose.xyz[1]),
+            0.0,
+        ]
     chain = approach._chain()
     if scene_q is not None and hasattr(chain, "points"):
         pts = _off_line(pts, chain.points(list(scene_q)), clear_table.ARM_CLEAR_M)
@@ -752,7 +974,11 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
     points round the box (_nearest_points). In every tier a spot inside the
     no-land radius round the box (box_clearance) is passed over, never
     counted as a try. A generator: only as many as are asked for are
-    checked. `cache`: the room judged on `tmap` before (room_ahead's,
+    checked. Past every tier, the same tiers once more as LeanSpots, the
+    hand leaning SETDOWN_LEAN_DEG (setdown_poses): a lid goes down leaning
+    only once every spot straight down is past (none reached, or the
+    carries the caller tried to those refused; its CARRY_TRIES counts both
+    passes). `cache`: the room judged on `tmap` before (room_ahead's,
     clear_table.clear_spots')."""
     from box_opening.tasks import press_demo as pd
 
@@ -832,34 +1058,55 @@ def spot_candidates(ctx, tmap, table_z, q, seeds=(), reach=None, cache=None):
             ],
         )
     )
-    for tier, cands in tiers:
-        n = 0
-        for d, says in cands:
-            if n >= TIER_TRIES[tier]:
-                break
-            if not fresh(d):
-                continue
-            if box_clearance(ctx, d) < 0.0:
-                tried.append(d)  # inside the no-land radius: the lid would come down on the box's rim
-                continue
-            n += 1
-            tried.append(d)
-            _abort_check(ctx)  # each reach check is an IK walk: a Ctrl+C goes out between two
-            why = (reach or drop_reachable)(ctx, d, q, seeds)
-            if why is None:
-                yield d, tier, says
+    # every tier straight down first, as the bench's runs chose; only past
+    # them all, the same again with the hand leaning (SETDOWN_LEAN_DEG)
+    for lean in (0.0, SETDOWN_LEAN_DEG):
+        tried.clear()
+        for tier, cands in tiers:
+            n = 0
+            for d, says in cands:
+                if n >= TIER_TRIES[tier]:
+                    break
+                if not fresh(d):
+                    continue
+                if box_clearance(ctx, d) < 0.0:
+                    tried.append(d)  # inside the no-land radius: the lid would come down on the box's rim
+                    continue
+                n += 1
+                tried.append(d)
+                if lean:
+                    d = LeanSpot(xyz=d.xyz, yaw=d.yaw, lean_deg=lean)
+                    says = "%s; past every spot straight down: the hand leaning %.0f deg" % (says, lean)
+                _abort_check(ctx)  # each reach check is an IK walk: a Ctrl+C goes out between two
+                why = (reach or drop_reachable)(ctx, d, q, seeds)
+                if why is None:
+                    yield d, tier, says
+
+
+def _spot_lean(d):
+    """How far the hand leans setting the lid down at spot `d` (deg; 0: straight down)."""
+    return round(float(getattr(d, "lean_deg", 0.0) or 0.0), 3)
 
 
 def _spot_key(d):
-    """A spot's identity for _Reach: where, to 0.1 mm, and the hand's turn."""
-    return (round(float(d.xyz[0]), 4), round(float(d.xyz[1]), 4), round(float(d.yaw) % (2 * math.pi), 3))
+    """A spot's identity for _Reach: where, to 0.1 mm, the hand's turn and its lean."""
+    return (
+        round(float(d.xyz[0]), 4),
+        round(float(d.xyz[1]), 4),
+        round(float(d.yaw) % (2 * math.pi), 3),
+        _spot_lean(d),
+    )
 
 
 def _same_spot(a, b):
     """Whether spots `a` and `b` are the one spot for a carry planned to
-    either: AHEAD_SAME_SPOT_M apart at most, the hand turned the same."""
+    either: AHEAD_SAME_SPOT_M apart at most, the hand turned and leaning the same."""
     turn = abs(math.remainder(float(a.yaw) - float(b.yaw), 2 * math.pi))
-    return math.hypot(a.xyz[0] - b.xyz[0], a.xyz[1] - b.xyz[1]) <= AHEAD_SAME_SPOT_M and turn < 1e-3
+    return (
+        math.hypot(a.xyz[0] - b.xyz[0], a.xyz[1] - b.xyz[1]) <= AHEAD_SAME_SPOT_M
+        and turn < 1e-3
+        and _spot_lean(a) == _spot_lean(b)
+    )
 
 
 class _Reach:
@@ -1018,11 +1265,10 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
         log.info(
             "[press_demo] AFTER PRESS %d: the wrist does not find the button from the look pose (%s)" % (press, status)
         )
-        return KnobLook(
-            False,
-            status=status,
-            stop="the wrist does not find the box after the press (%s) — the knob is " "not judged" % status,
-        )
+        # Not a stop (2026-11-12, flatbot, twice: the button popped and the finder, which looks for a flat disc at
+        # the lid's height, lost it once it stood up, its depth scattered 59 mm; both runs ended here with the box
+        # open). Where it was pressed is known, and the fingers tell a knob from air: the run goes on to the grip.
+        return KnobLook(False, status=status)
     got, up, measured = last
     shift = rp.judge_box_moved(button, got[0])
     lid_after = rp._lid_z(measured[2], up)
@@ -1038,8 +1284,8 @@ def knob_look(node, ctx, runner, watcher, button, yaw, lid_before, press):
         # (press_demo.refuse_open_box), and to it this one is shut
         look.stop = (
             "the lid rose %+.0f mm (released) but its knob is not up (%.1f mm above the lid) — the fingers "
-            "have nothing to hold, so the lid is not taken off; the box is left open: lift the lid off by "
-            "hand, or shut it, before the next run (which would take it for shut and press it)" % (1000 * dz, best)
+            "have nothing to hold, so the lid is not taken off; the box is left open, and the next run "
+            "would take it for shut and press it (its aim judges a box by its knob alone)" % (1000 * dz, best)
         )
     runner.note(
         "reach_knob",
@@ -1125,17 +1371,22 @@ def grip_descent(chain, cfg, q0, quat, lid_z):
     ), None
 
 
-def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z):
+def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z, shifted=False):
     """The way from joints `q_from` (the look pose) down to the knob of the
     `button` the press was aimed at, at `tilt`: the press's way in
     (reach_press.reach_from_here's move to the look pose and slide, then
     walk_or_turn) with the grip's stroke (grip_descent onto the lid at
     `lid_z`) where the press's was — every line one the runner flies
     (depth_press.line_refusal). Returns (reach_press.WayIn, None) or (None,
-    why)."""
+    why). A hand that turns down leaning comes down grip_shift_m further out
+    from the arm than `button` (`shifted`: this call is that one)."""
     from box_opening.runtime import approach
 
     chain = approach._chain()
+    # the way in stands over the lid the grip goes down to: where the arm's touch put the lid higher than
+    # the cameras put the button (flatbot 2026-11-12 18:42: 44 mm, the wrist's depth reading far), the way
+    # in planned for the cameras' height ended 22 mm over the grip's end, too low to come down from
+    button = (float(button[0]), float(button[1]), max(float(button[2]), float(lid_z)))
     move, plan, why = rp.reach_from_here(ctx, cfg, button, tilt, need_stroke=False, q=q_from)
     if plan is None:
         return None, why
@@ -1155,7 +1406,17 @@ def solve_grip_way(ctx, cfg, button, tilt, q_from, lid_z):
         why = dp.line_refusal(chain, line)
         if why is not None:
             return None, "%s: %s" % (name, why)
-    return rp.WayIn(move, plan, down, None if down.walked else plan.slide_pts, grip), None
+    way = rp.WayIn(move, plan, down, None if down.walked else plan.slide_pts, grip)
+    out = 0.0 if shifted else grip_shift_m(down.quat)
+    d = math.hypot(button[0], button[1])
+    if out > 0.0 and d > 1e-6:
+        # a leaning hand grips with the knob under its pads' low half (grip_shift_m): the same way in to a
+        # point that far further out, where it flies and turns down as far; else this one, on the knob's centre
+        further = (button[0] * (1.0 + out / d), button[1] * (1.0 + out / d), button[2])
+        again, _why = solve_grip_way(ctx, cfg, further, tilt, q_from, lid_z, shifted=True)
+        if again is not None and abs(dp._lean_deg(again.down.quat) - dp._lean_deg(down.quat)) < 0.5:
+            return again, None
+    return way, None
 
 
 def _grip_backwards(ctx, way, world):
@@ -1186,17 +1447,74 @@ class LiftOff:
     q_grip: list = None  # the joints the knob was held at, the lid on the box
     q_top: list = None  # ... and at the top of the lift, straight above
     quat: list = None  # the hand's attitude all the way
+    lift_m: float = None  # how far straight up the lift goes (lift_off_m's, or its shorter fallback's)
 
 
-def _clear_after_lift(ctx, chain, q, quat):
-    """The clear from the lifted lid at joints `q`: to the first of
-    reach_press.clear_targets whose straight line flies and leaves every
-    joint room for the planner to start from (reach_press._near_a_limit),
-    else the first that flies, as plan_way_out picks. Returns (points, how
-    far back, None) or (None, 0, why)."""
-    R, t = chain.fk(q)
+def lift_clear_targets(ctx, R, t, top_z=None):
+    """Where the clear after the lift goes where reach_press.clear_targets'
+    does not do (_clear_after_lift), in the order they are tried: as high as
+    the carry's floor (Place.hover_for's: the held lid's underside
+    CARRY_CLEAR_M over the box's top — the cameras', or the lid's top as the
+    grip took it, `top_z` (_gripped_lid_top), where that stands higher),
+    never lower than the hand, and back toward the arm along the box's
+    bearing CLEAR_BACK_M, then
+    REACH_PULLBACK_M, as clear_targets'. Theirs is HOME_CLEAR_M +
+    CLEAR_EXTRA_M over the box's padded cuboid (worlds.planned_top_z) and
+    what the hand's lean hangs the planner's gripper spheres lower: set for
+    a planner world holding the padded box, where flatbot's is empty
+    (world_empty.yaml). Over the pink canister this one stands 76 mm over
+    the box's top. On the 0.86 / 0.91 m side counters of the chair study
+    (study/fixes/highcounter, 11-06) the clear up to theirs met joint_6's
+    limit in all 80 rows whose lift flew and no clear did (the 150 mm one
+    entering seat/armrest_arm_1 in 28); and where one did fly it ended with
+    joint_6 0.026-0.108 rad from its limit, inside the planner's margin in
+    the 10 rows whose carry it refused there. Up to the carry's floor
+    instead joint_6 keeps ~0.2 rad: the carry and home plan from it. The
+    cameras' top alone put it too low where the lid stands higher than they
+    say: in the study's rows whose press met it 45 mm over their top, the
+    carry from a clear that stood at the lift's top took the lid's lowest
+    point 0.5-5.0 mm over the canister's rim; over the lid's top as gripped,
+    7.4 mm at least (today's clear's least)."""
+    m = ctx.model
+    top = float(ctx.cpose.xyz[2]) + float(m.dims[2])
+    if top_z is not None:
+        top = max(top, float(top_z))
+    floor = tcp_z(top + float(m.lid_dims[2]) + core.CARRY_CLEAR_M)
+    z = max(float(t[2]), floor)
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    d = math.hypot(bx, by)
+    return [[float(t[0]) - b * bx / d, float(t[1]) - b * by / d, z] for b in (rp.CLEAR_BACK_M, rp.REACH_PULLBACK_M)]
+
+
+def _gripped_lid_top(chain, q_grip):
+    """The lid's top as the grip took it, the knob held at joints `q_grip`:
+    GRIP_BELOW_LID_M over the closed pads' reference (grip_descent's end,
+    press_contact.pads_z) — the lid's height the grip went by (grip_lid_z:
+    the arm's own touch where the press held, else the press's top)."""
+    from box_opening.tasks.press_contact import pads_z
+
+    return pads_z(chain, q_grip) + GRIP_BELOW_LID_M
+
+
+def _least_room(chain, q):
+    """The least room any joint of joints `q` has to its URDF limit (rad);
+    inf for a chain that names none."""
+    rooms = [
+        min(float(v) - lo, hi - float(v))
+        for v, (lo, hi) in zip(q, getattr(chain, "limits", ()) or (), strict=False)
+        if lo is not None and hi is not None
+    ]
+    return min(rooms) if rooms else math.inf
+
+
+def _first_clear(ctx, chain, q, quat, targets):
+    """The clear from joints `q` to the first of `targets` whose straight
+    line flies and leaves every joint room for the planner to start from
+    (reach_press._near_a_limit), else the first that flies, as plan_way_out
+    picks: (points, how far back, None) or (None, 0, why)."""
+    _R, t = chain.fk(q)
     chosen, whys = None, []
-    for target in rp.clear_targets(ctx, np.asarray(R, float), t):
+    for target in targets:
         back = math.hypot(target[0] - float(t[0]), target[1] - float(t[1]))
         pts, why = chain.straight_line(q, target, quat)
         if pts is not None:
@@ -1212,39 +1530,124 @@ def _clear_after_lift(ctx, chain, q, quat):
         chosen = chosen or (pts, back)
     if chosen is not None:
         return chosen[0], chosen[1], None
-    return None, 0.0, "no way up and back from the lifted lid flies (%s)" % "; ".join(whys)
+    return None, 0.0, "; ".join(whys)
+
+
+def _clear_after_lift(ctx, chain, q, quat, top_z=None):
+    """The clear from the lifted lid at joints `q`: up and back toward the
+    arm to reach_press.clear_targets' (_first_clear), as the way home's
+    clear goes — unless none of their lines flies, or the one that does
+    ends inside the planner's limit margin (PLANNER_LIMIT_MARGIN_RAD: the
+    carry from there is refused START_IN_LIMIT_MARGIN, and no lid comes
+    off), where the clear up to the carry's floor (lift_clear_targets, over
+    the box's top or `top_z`, the lid's as gripped, the higher) is flown
+    that leaves more room. Where the lid comes off today, as on every lower
+    table recorded, nothing changes. Returns (points, how far back, None) or
+    (None, 0, why)."""
+    R, t = chain.fk(q)
+    R = np.asarray(R, float)
+    pts, back, why = _first_clear(ctx, chain, q, quat, rp.clear_targets(ctx, R, t))
+    if pts is not None and _least_room(chain, pts[-1]) >= PLANNER_LIMIT_MARGIN_RAD:
+        return pts, back, None
+    low, low_back, low_why = _first_clear(ctx, chain, q, quat, lift_clear_targets(ctx, R, t, top_z))
+    if low is not None and (pts is None or _least_room(chain, low[-1]) > _least_room(chain, pts[-1])):
+        return low, low_back, None
+    if pts is not None:
+        return pts, back, None
+    return None, 0.0, "no way up and back from the lifted lid flies (%s; up to the carry's floor: %s)" % (why, low_why)
+
+
+def _lean_keeps_clear(model, lean_deg, clear_m):
+    """Whether the lid, turned `lean_deg` about the knob with the hand, still
+    ends the lift with its lowest edge over the rim: that edge hangs the
+    lid's radius times the lean's sine lower, of the `clear_m` the lift goes
+    past the cap."""
+    lid_r = 0.5 * max(float(model.lid_dims[0]), float(model.lid_dims[1]))
+    return lid_r * math.sin(math.radians(lean_deg)) < float(clear_m)
+
+
+def _lift_line(chain, q_grip, t, up, quat, lean_deg):
+    """The lift's joint waypoints from the knob held at `q_grip` (the tool
+    at `t`) to `up` straight above it: the hand at `quat` all the way, or,
+    `lean_deg` not 0, leaning that much further back toward the arm by the
+    top (reach_press.reach_quat's axis; kinematics.walk, in the straight
+    line's own steps). Returns (points, the hand's attitude at the top,
+    None) or (None, None, why): the solver's, or the runner's gate's
+    (dp.line_refusal)."""
+    from box_opening.runtime import kinematics
+
+    top = [float(t[0]), float(t[1]), float(t[2]) + up]
+    d = math.hypot(float(t[0]), float(t[1]))
+    if not lean_deg or d < 1e-6:
+        end, (pts, why) = quat, chain.straight_line(q_grip, top, quat)
+    else:
+        axis = (float(t[1]) / d, -float(t[0]) / d, 0.0)
+        end = list(rp.rotate_about_world_axis(quat, axis, math.radians(lean_deg)))
+        pts, why = chain.walk(q_grip, top, end, step_m=kinematics.STEP_M, max_step_rad=kinematics.MAX_STEP_RAD)
+    if pts is not None:
+        why = dp.line_refusal(chain, pts)
+    if pts is None or why is not None:
+        return None, None, why
+    return [[float(v) for v in p] for p in pts], [float(v) for v in end], None
 
 
 def plan_lift(ctx, cfg, q_grip, quat):
     """The lid's way off the box from the knob held at joints `q_grip`, the
     hand at `quat` (LiftOff): straight up lift_off_m, then the clear
-    (_clear_after_lift). The grip's lookahead, while the hand comes down to
-    the knob. Returns (LiftOff, None) or (None, why)."""
+    (_clear_after_lift) — where either does not fly, the same from the
+    shorter lift LIFT_OFF_MIN_CLEAR_M past the cap; and where neither does
+    with the hand as it holds the knob, the same two with the hand leaning
+    further back as it rises (LIFT_LEAN_DEG, the least that flies; the
+    clear and all after it at that attitude, LiftOff.quat). The grip's
+    lookahead, while the hand comes down to the knob. Returns (LiftOff,
+    None) or (None, why): the full lift's, the hand as it holds the knob."""
     from box_opening.runtime import approach
 
     chain = approach._chain()
     world = _full_world(ctx)
     q_grip = [float(v) for v in q_grip]
     _R, t = chain.fk(q_grip)
-    lift, why = chain.straight_line(q_grip, [float(t[0]), float(t[1]), float(t[2]) + lift_off_m(ctx.model)], quat)
-    if lift is not None:
-        why = dp.line_refusal(chain, lift)
-    if lift is None or why is not None:
-        return None, "the lift off the canister is not a straight line the arm can fly (%s)" % why
-    lift = [[float(v) for v in p] for p in lift]
-    clear, back, why = _clear_after_lift(ctx, chain, lift[-1], quat)
-    if clear is None:
-        return None, why
-    return LiftOff(
-        [
-            dp.compliant_line(ctx, "lid:lift", lift, quat, cfg.lift_speed, world),
-            dp.compliant_line(ctx, "lid:clear", clear, quat, rp.free_line_speed(ctx), world),
-        ],
-        back,
-        q_grip=q_grip,
-        q_top=lift[-1],
-        quat=[float(v) for v in quat],
-    ), None
+    top_z = _gripped_lid_top(chain, q_grip)  # the clear's floor never under the lid's top as gripped
+    first = None
+    for lean in (0.0, *LIFT_LEAN_DEG):
+        tried = None
+        for clear_m in (LIFT_OFF_CLEAR_M, LIFT_OFF_MIN_CLEAR_M):
+            up = lift_off_m(ctx.model, clear_m)
+            if tried is not None and up >= tried - 1e-9:
+                break  # no shorter than the one that did not fly
+            if lean and not _lean_keeps_clear(ctx.model, lean, clear_m):
+                continue  # the lid's low edge would end at the rim or under it
+            tried = up
+            lift, top_quat, why = _lift_line(chain, q_grip, t, up, quat, lean)
+            if lift is None:
+                first = first or (up, "the lift off the canister is not a straight line the arm can fly (%s)" % why)
+                continue
+            clear, back, why = _clear_after_lift(ctx, chain, lift[-1], top_quat, top_z)
+            if clear is None:
+                first = first or (up, why)
+                continue
+            if first is not None:
+                log.info(
+                    "[press_demo] %.0f mm up: %s — the lift %.0f mm%s instead"
+                    % (
+                        1000 * first[0],
+                        first[1],
+                        1000 * up,
+                        ", the hand leaning %.0f deg further back by its top" % lean if lean else "",
+                    )
+                )
+            return LiftOff(
+                [
+                    dp.compliant_line(ctx, "lid:lift", lift, top_quat, cfg.lift_speed, world),
+                    dp.compliant_line(ctx, "lid:clear", clear, top_quat, rp.free_line_speed(ctx), world),
+                ],
+                back,
+                q_grip=q_grip,
+                q_top=lift[-1],
+                quat=top_quat,
+                lift_m=up,
+            ), None
+    return None, first[1]
 
 
 @dataclass
@@ -1307,27 +1710,100 @@ def watch_setdown(ctx, legs, carry):
     return carry.contact
 
 
+# The carry the planner refuses for where it starts or ends, inside its limit
+# margin (PLANNER_LIMIT_MARGIN_RAD), flies as the arm's own walk instead
+# (walk_carry): to the same hover at the same attitude, every step solved
+# from the last, CARRY_WALK_STEP_M / CARRY_WALK_STEP_RAD apart, no joint
+# jumping more than kinematics.MAX_STEP_RAD between two — held out of the
+# chair and its user by the walk itself (runtime/body), in the runner's
+# trajectory gate (depth_press.line_refusal), at the free-air lines' speed.
+# The chair study's 0.86 / 0.91 m side counters (study/fixes/highcounter,
+# 11-06): with the clear to the carry's floor and the leaning set-down, the
+# planner refused the carry there in 58 of the 158 rows whose lid came up,
+# the joint_6 0.026-0.085 rad from its limit; walked, the lid came off in
+# all 158 (100 without), its way never nearer joint_6's limit than 0.021
+# rad (the walk's own bound: kinematics.LIMIT_MARGIN_RAD). Like every
+# plan-free line it is also held out of the cabinet below the counter's
+# edges this run's maps showed (press_demo.keep_out_counter's boxes are in
+# the walk's own body check); the study's numbers were measured without them.
+CARRY_WALK_ON = ("START_IN_LIMIT_MARGIN", "GOAL_IN_LIMIT_MARGIN")
+CARRY_WALK_STEP_M = 0.01
+CARRY_WALK_STEP_RAD = math.radians(2.0)
+
+
+def walk_carry(ctx, chain, q_from, hover, quat, world):
+    """The carry from joints `q_from` to the tool at `hover`, `quat`, as the
+    arm's own walk (CARRY_WALK_ON's), a 'lid:carry' compliant line at
+    reach_press.free_line_speed: (Leg, None) or (None, why)."""
+    from box_opening.runtime import kinematics as kin
+
+    pts, why = chain.walk(
+        q_from,
+        hover,
+        quat,
+        step_m=CARRY_WALK_STEP_M,
+        step_rad=CARRY_WALK_STEP_RAD,
+        max_step_rad=kin.MAX_STEP_RAD,
+    )
+    if pts is None:
+        return None, why
+    pts = [[float(v) for v in p] for p in pts]
+    why = dp.line_refusal(chain, pts)
+    if why is not None:
+        return None, why
+    return dp.compliant_line(ctx, "lid:carry", pts, quat, rp.free_line_speed(ctx), world), None
+
+
 def plan_carry(ctx, cfg, q_from, drop):
     """The carry from joints `q_from` (where the spot look stands) to the
     spot `drop` (planned in the planner's own world, worlds.PLANNER_WORLD:
-    it is told nothing of the box or the table) — then the set-down's straight lines
-    from its end and the retreat's back up. Returns (Carry, None) or (None,
-    why)."""
+    it is told nothing of the box or the table; where it refuses the start
+    or the goal for its limit margin, the arm's own walk: walk_carry) —
+    then the set-down's straight lines from its end and the retreat's back
+    up. Returns (Carry, None) or (None, why)."""
     from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
 
     chain = approach._chain()
     world = _full_world(ctx)
     q_from = [float(v) for v in q_from]
-    quat, contact, hover = setdown_poses(ctx, drop)
+    quat, contact, hover = setdown_poses(ctx, drop, held=q_from)
+    walked = False
     try:
         carry, _st = rp._plan_motion(
             ctx, PlanState(joints=q_from, chain=0), "lid:carry", ("pose", hover, quat), world, TRANSIT_SPEED
         )
     except RuntimeError as e:
-        return None, "the carry (%s)" % rp._short(e)
-    if carry.traj is not None:
+        if not any(code in str(e) for code in CARRY_WALK_ON):
+            return None, "the carry (%s)" % rp._short(e)
+        carry, why = walk_carry(ctx, chain, q_from, hover, quat, world)
+        if carry is None:
+            return None, "the carry (%s; walked: %s)" % (rp._short(e), why)
+        walked = True
+        log.info("[press_demo] the planner refused the carry (%s): the arm's own walk instead" % rp._short(e))
+    if carry.traj is not None and not walked:
         carry.traj = approach.on_branch_of(carry.traj, q_from)  # continues the clear, not a turn away
+        # the runner's sanity gate, here where another way can still be taken: it gates every leg of an
+        # execution before anything moves, so a carry that swings wide refused the close, the lift and the
+        # set-down merged with it (flatbot 2026-11-12 18:42: arm_joint_2 0.444 rad against 0.444 allowed; the
+        # run read the refusal as a grip that missed and never closed on a knob that was up). The arm's own
+        # walk there instead, as for a start the planner refuses; a spot neither reaches is passed over
+        bad = sanity_violations(carry.traj, SANITY_MARGIN_RAD)
+        if bad:
+            swung = "the planner's carry swings wide (%s)" % "; ".join(bad)
+            carry, why = walk_carry(ctx, chain, q_from, hover, quat, world)
+            if carry is None:
+                return None, "the carry (%s; walked: %s)" % (swung, why)
+            walked = True
+            log.info("[press_demo] %s: the arm's own walk instead" % swung)
+    if carry.traj is not None and not walked:
         carry.goal_joints = [float(v) for v in carry.traj.points[-1].positions]
+        # the planner's world may be empty (worlds.PLANNER_WORLD): the carry is held out of the
+        # chair and its user as the plan-free lines are (runtime/body), and a spot whose carry
+        # enters them is passed over for the next
+        why = kin.body_refusal(chain, [list(p.positions) for p in carry.traj.points])
+        if why is not None:
+            return None, "the carry (%s)" % why
     carry.gains = dp.COMPLIANT_GAINS
     lines = []
     q = carry.goal_joints
@@ -1351,6 +1827,33 @@ def plan_carry(ctx, cfg, q_from, drop):
         dp.compliant_line(ctx, "place:touch", lines[1], quat, PLACE_TOUCH_SPEED, world),
     ]
     return Carry(legs, lines[2], quat, drop, over_m=-SETDOWN_RELEASE_M, k_z=k_z), None
+
+
+def carry_refusal(carry):
+    """Why `carry` (plan_carry's) would go into the body check's boxes as they stand now — the chair
+    and its user, and the cabinet below every counter edge a map of this run showed
+    (press_demo.keep_out_counter) — or None: its planned leg's goal, strictly, and its path, its
+    set-down's lines and its retreat, each as plan_carry checked them when it was made. The carry
+    carry_ahead planned while the lift flew was held out of the boxes in force then; the lid's own
+    map, read after the lift, may show an edge they did not (choose_and_carry)."""
+    from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
+
+    chain = approach._chain()
+    for leg in carry.legs:
+        traj = getattr(leg, "traj", None)
+        if traj is None or not traj.points:
+            continue
+        pts = [[float(v) for v in p.positions] for p in traj.points]
+        target = getattr(leg, "target", None)
+        planned = target is not None and not getattr(leg, "plan_free", False)  # a plan-free line has no goal sent
+        why = approach.goal_refusal(target, pts[0], pts[-1]) if planned else None
+        if why is None:
+            why = kin.body_refusal(chain, pts)
+        if why is not None:
+            return "%s (%s)" % (leg.name, why)
+    why = kin.body_refusal(chain, carry.retreat) if carry.retreat else None
+    return None if why is None else "place:retreat (%s)" % why
 
 
 def plan_home_after(ctx, cfg, carry):
@@ -1561,28 +2064,59 @@ def grip_from_hold_lines(ctx, way, q_held):
     (kinematics.EXIT_MAX_STEP_RAD: its steps past MAX_STEP_RAD fly slow,
     depth_press.exit_line), then down it to where the pads stand
     GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M over where the hold held them
-    (grip_lid_z), each as joint points — or (None, None, why)."""
+    (grip_lid_z), each as joint points — or (None, None, why): the first
+    refusal's. Where that rise or its way down does not fly, the same with
+    the hand leaning LIFT_LEAN_DEG further back by the top (and back to the
+    stroke's attitude on the way down), then GRIP_RISE_MIN_M each way. A
+    leaning hand's way down ends grip_shift_m further out from the arm than
+    the stroke's line; where none of those flies, on the line itself."""
     from box_opening.runtime import approach
-    from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD
+    from box_opening.runtime.kinematics import EXIT_MAX_STEP_RAD, MAX_STEP_RAD, STEP_M
 
     chain = approach._chain()
     q_held = [float(v) for v in q_held]
     _R, t_held = chain.fk(q_held)
     _R, t_line = chain.fk([float(v) for v in way.stroke.q0])  # the stroke's line: the aimed knob
     quat = way.stroke.quat
-    top = [float(t_line[0]), float(t_line[1]), float(t_held[2]) + GRIP_RISE_M]
-    rise, why = chain.straight_line(q_held, top, quat, max_step_rad=EXIT_MAX_STEP_RAD)
-    if rise is not None:
-        why = dp.line_refusal(chain, rise)
-    if rise is None or why is not None:
-        return None, None, "the rise off the button (%s)" % why
-    bottom = [top[0], top[1], float(t_held[2]) + GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M]
-    down, why = chain.straight_line(rise[-1], bottom, quat)
-    if down is not None:
-        why = dp.line_refusal(chain, down)
-    if down is None or why is not None:
-        return None, None, "the way down to the knob (%s)" % why
-    return [[float(v) for v in p] for p in rise], [[float(v) for v in p] for p in down], None
+    d = math.hypot(float(t_line[0]), float(t_line[1]))
+    first = None
+    # a leaning hand grips with the knob under its pads' low half: the way down ends that far out (grip_shift_m)
+    shift = grip_shift_m(quat) if d > 1e-6 else 0.0
+    for up, out in [(up, o) for o in dict.fromkeys((shift, 0.0)) for up in (GRIP_RISE_M, GRIP_RISE_MIN_M)]:
+        top = [float(t_line[0]), float(t_line[1]), float(t_held[2]) + up]
+        bottom = [
+            top[0] + (out * float(t_line[0]) / d if out else 0.0),
+            top[1] + (out * float(t_line[1]) / d if out else 0.0),
+            float(t_held[2]) + GRIP_LID_ABOVE_HELD_M - GRIP_BELOW_LID_M,
+        ]
+        for lean in (0.0, *LIFT_LEAN_DEG) if d > 1e-6 else (0.0,):
+            if not lean:
+                rise, why = chain.straight_line(q_held, top, quat, max_step_rad=EXIT_MAX_STEP_RAD)
+            else:  # the hand leaning further back toward the arm by the top, as the lift's (_lift_line)
+                axis = (float(t_line[1]) / d, -float(t_line[0]) / d, 0.0)
+                leaned = list(rp.rotate_about_world_axis(quat, axis, math.radians(lean)))
+                rise, why = chain.walk(q_held, top, leaned, step_m=STEP_M, max_step_rad=EXIT_MAX_STEP_RAD)
+            if rise is not None:
+                why = dp.line_refusal(chain, rise)
+            if rise is None or why is not None:
+                first = first or "the rise off the button (%s)" % why
+                continue
+            if not lean:
+                down, why = chain.straight_line(rise[-1], bottom, quat)
+            else:  # back to the stroke's attitude on the way down
+                down, why = chain.walk(rise[-1], bottom, quat, step_m=STEP_M, max_step_rad=MAX_STEP_RAD)
+            if down is not None:
+                why = dp.line_refusal(chain, down)
+            if down is None or why is not None:
+                first = first or "the way down to the knob (%s)" % why
+                continue
+            if first is not None:
+                log.info(
+                    "[press_demo] %s — the rise %.0f mm%s instead"
+                    % (first, 1000 * up, ", the hand leaning %.0f deg further back by its top" % lean if lean else "")
+                )
+            return [[float(v) for v in p] for p in rise], [[float(v) for v in p] for p in down], None
+    return None, None, first
 
 
 def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
@@ -1616,12 +2150,17 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         attempt=0,
         from_press=True,
     )
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_contact import PadsAbove, PressContact, pads_z
+
+    chain = approach._chain()
+    top_z, end_z = pads_z(chain, rise[-1]), pads_z(chain, down[-1])
     log.info(
-        "[press_demo] GRIP STRAIGHT FROM THE PRESS: up %.0f mm, the fingers opening to the knob's width once the "
-        "pads are %.1f mm over the hold, then down to the knob, the closed pads %.0f mm under the lid at %.3f (%.0f mm "
-        "over where the press held them)"
+        "[press_demo] GRIP STRAIGHT FROM THE PRESS: up %.0f mm, the fingers opening round the knob once the pads "
+        "are %.1f mm over the hold (else at the top), then down to the knob — to where the open fingertips meet the "
+        "lid, or the closed pads %.0f mm under the lid at %.3f (%.0f mm over where the press held them)"
         % (
-            1000 * GRIP_RISE_M,
+            1000 * (top_z - pads_z(chain, seen["held_joints"])),
             1000 * GRIP_OPEN_ABOVE_HELD_M,
             1000 * GRIP_BELOW_LID_M,
             lid_z,
@@ -1629,8 +2168,6 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         )
     )
     _video(ctx, "GRIP straight from the press: up, the fingers open, down to the knob")
-    from box_opening.runtime import approach
-    from box_opening.tasks.press_contact import PadsAbove
 
     opened = _gripper_leg(
         ctx,
@@ -1642,10 +2179,17 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         send_with_previous_motion=True,
     )
     # sent under the rise once the pads have left the knob, as the arm measures them; never so, at its top
-    off = PadsAbove(approach._chain(), ctx.client, held_z + GRIP_OPEN_ABOVE_HELD_M)
+    off = PadsAbove(chain, ctx.client, held_z + GRIP_OPEN_ABOVE_HELD_M)
     opened.send_when = off
-    up = dp.exit_line(ctx, "grip:rise", rise, quat, rp.free_line_speed(ctx), world)
+    # the rise ends at the hand's attitude at its top: the stroke's, or leaning further back (grip_from_hold_lines)
+    quat_top = [float(v) for v in dp.mat_to_quat_xyzw(np.asarray(chain.fk(rise[-1])[0], float))]
+    up = dp.exit_line(ctx, "grip:rise", rise, quat_top, rp.free_line_speed(ctx), world)
     lower = dp.compliant_line(ctx, "grip:down", down, quat, dp.TOUCH_SPEED, world)
+    touch = None
+    if GRIP_TOUCH:
+        # stopped where the open fingertips meet the lid (or a knob), nothing pressed on down past it
+        touch = PressContact(chain, ctx.client, end_z, top_z - GRIP_TOUCH_ARM_M, 0.0, end_z, cut=True)
+        lower.stop_when = touch
     # the lookahead split over both (grip_ahead_rise, grip_ahead_down): the lift and the
     # first spot while the hand rises, the carry and home while it comes down
     res = runner.run(
@@ -1676,6 +2220,16 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             % (bad.detail or bad.outcome)
         )
         return _MISSED if _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True)) is None else 1
+    # the hand comes down only from where it cleared the knob, as the arm measured its pads at the top
+    q_top = [float(v) for v in ctx.client.joints()]
+    rose = max(pads_z(chain, q_top), off.highest if off.highest is not None else -math.inf) - held_z
+    if rose < GRIP_RISE_LEAST_M:
+        runner.note("reach_grip_refused", attempt=0, why="rose %.1f mm" % (1000 * rose), from_press=True)
+        log.info(
+            "[press_demo] the hand rose only %.0f mm off the hold, not the %.0f mm that clears a popped knob: not "
+            "coming down on it — back to the look pose to look at the knob" % (1000 * rose, 1000 * GRIP_RISE_LEAST_M)
+        )
+        return _MISSED if _way_back(ctx, cfg, runner, way, q_top, dp.DepthPress(free=True)) is None else 1
     res = runner.run([lower], execute=True, lookahead=None if first is None else (lambda _end: grip_ahead_down(first)))
     ahead = _lookahead(runner)
     if ahead is not None and isinstance(ahead[2], CarryAhead):
@@ -1688,6 +2242,8 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
             rp.let_go(ctx)
             return 1
         return _MISSED if _way_back(ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True)) is None else 1
+    if touch is not None and touch.contact is not None:
+        ahead = _grip_at_touch(ctx, runner, chain, touch, quat, held_z, world)
 
     def back_out(why, opened=True):
         log.info("[press_demo] the grip straight from the press: %s — back to the look pose to look at the knob" % why)
@@ -1714,6 +2270,48 @@ def _grip_from_hold(ctx, cfg, runner, eyes, way, seen, room):
         )
 
     return _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, 0, room, back_out, miss)
+
+
+def _grip_at_touch(ctx, runner, chain, touch, quat, held_z, world):
+    """The way down to the knob ended where the open fingertips met something (`touch`, the way down's
+    PressContact): the hand back up touch_rise_m from where it stands, for the fingers to close round
+    the knob's base and not into the lid — where that short line does not fly, they close where it
+    stands, said. Returns None: the lift planned ahead started from the way down's planned end, lower
+    than this, and is not flown; the close plans its own from where the hand is (_close_and_carry)."""
+    from box_opening.tasks.press_contact import pads_z
+
+    q = [float(v) for v in ctx.client.joints()]
+    up = touch_rise_m(ctx.model)
+    met = float(touch.contact[1])
+    runner.note(
+        "grip_touch",
+        met_z=round(met, 4),
+        over_held_mm=round(1000 * (met - held_z), 1),
+        how=touch.how,
+        pads_z=round(pads_z(chain, q), 4),
+        rise_mm=round(1000 * up, 1),
+    )
+    log.info(
+        "[press_demo] GRIP: the open fingertips met the lid with the pads at %.3f, %.0f mm over where the press held "
+        "them — up %.1f mm for the pads to close round the knob's base" % (met, 1000 * (met - held_z), 1000 * up)
+    )
+    _R, t = chain.fk(q)
+    pts, why = chain.straight_line(q, [float(t[0]), float(t[1]), float(t[2]) + up], quat)
+    if pts is not None:
+        why = dp.line_refusal(chain, pts)
+    if pts is None or why is not None:
+        log.info("[press_demo] GRIP: no way up off the touch (%s): the fingers close where the hand stands" % why)
+        return None
+    res = runner.run(
+        [dp.compliant_line(ctx, "grip:settle", [[float(v) for v in p] for p in pts], quat, dp.TOUCH_SPEED, world)],
+        execute=True,
+    )
+    if not all(r.ok for r in res):
+        log.info(
+            "[press_demo] GRIP: the way up off the touch did not fly (%s): the fingers close where the hand stands"
+            % (res[-1].detail or res[-1].outcome)
+        )
+    return None
 
 
 def _fingers_shut(ctx, cfg, runner):
@@ -1799,6 +2397,13 @@ def run_full(ctx, cfg, runner, eyes, way, legs, button, yaw, lid_before):
             _note_frames(ctx, popped=bool(knob.popped) if knob.found else None)
             if knob.stop is not None:
                 return end(_stop_home(ctx, cfg, runner, knob.stop))
+            if not knob.found:
+                log.info(
+                    "[press_demo] the knob is not judged after press %d (the wrist does not find the button): going "
+                    "on to the grip where the press was aimed — the fingers close on a knob that is up, or on air"
+                    % press
+                )
+                break
             if knob.popped:
                 break
             if knob.up_mm is None:
@@ -2333,6 +2938,19 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
     # down: the close, then the lid lifted, carried and set down without a
     # stop. A close that fails stops before anything lifts
     one = placed is not None and placed.carry is not None
+    if one:
+        # the runner gates every leg before anything moves: a carry it would refuse is not flown merged with
+        # the close and the lift (nothing would close), the lift goes alone and the carry is chosen after it
+        gate = runner.refusal(placed.carry.legs)
+        if gate is not None:
+            log.info(
+                "[press_demo] the carry planned ahead would be refused (%s: %s): the lift alone, then the spot "
+                "look" % gate
+            )
+            one = False
+    gate = runner.refusal(lift.legs)
+    if gate is not None:
+        return back_out("the lid has no way off the box (%s: %s) — not gripping it" % gate, opened=False)
     carried = None
     ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
     if one:
@@ -2364,7 +2982,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
             "[%.2f, %.2f] and down onto the table, %s"
             % (
                 ", ".join(lg.name for lg in flying[1:]),
-                1000 * lift_off_m(ctx.model),
+                1000 * _lift_m(ctx, lift),
                 1000 * lift.back_m,
                 drop.xyz[0],
                 drop.xyz[1],
@@ -2379,7 +2997,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         watch_setdown(ctx, flying, carry)  # where the lid meets the table, watched
         res = runner.run(flying, execute=True)
     else:
-        if placed is not None:
+        if placed is not None and placed.carry is None:
             log.info(
                 "[press_demo] no spot whose carry and home both plan was found while the hand came down (%s): "
                 "the lift alone, then the spot look" % ("; ".join(placed.refused) or "no spot the hand reaches")
@@ -2387,12 +3005,12 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         flying = [close, *lift.legs]
         log.info(
             "[press_demo] CLOSE, then ONE MOTION: %s — %.0f mm straight up, then %.0f mm back toward the arm"
-            % (", ".join(lg.name for lg in lift.legs), 1000 * lift_off_m(ctx.model), 1000 * lift.back_m)
+            % (", ".join(lg.name for lg in lift.legs), 1000 * _lift_m(ctx, lift), 1000 * lift.back_m)
         )
         # while the lift and the clear fly, the carry to the scene camera's
         # best spot from where the clear ends (carry_ahead): flown after the
         # lift where the spot chosen there is the same
-        _video(ctx, "CLOSE on the knob, then LIFT %.0f mm and CLEAR the box" % (1000 * lift_off_m(ctx.model)))
+        _video(ctx, "CLOSE on the knob, then LIFT %.0f mm and CLEAR the box" % (1000 * _lift_m(ctx, lift)))
         res = runner.run(flying, execute=True, lookahead=lambda end: carry_ahead(ctx, cfg, eyes, end, room=room))
         carried = _lookahead(runner)
     grip = [r for r in res if r.leg_name in ("grip:open", "grip:close")]
@@ -2525,6 +3143,8 @@ class CarrySearch:
         room_wait_s = None if self.room is None else time.monotonic() - t_room
         table_z = _table_z(watcher, scene_fix, ctx.cpose)
         tmap = judged.tmap if judged is not None else spot_map(ctx, None, self.q, scene_fix, scene_q, table_z)
+        # the counter's edges this map shows, kept out of the carry and the set-down planned from it
+        pd.keep_out_counter(ctx, tmap, table_z, "the lid's spot map", key="spot")
         rest = list(pd.rest_joints(self.cfg))
         self._reach = _Reach()
         self.ahead = CarryAhead(
@@ -2758,16 +3378,19 @@ def grip_ahead_down(first):
     return lift, None, search.finish()
 
 
-def _ahead_note(ahead, off, flew, chosen, reach):
+def _ahead_note(ahead, off, flew, chosen, reach, stale=None):
     """lid_spot's 'ahead': whether the carry carry_ahead planned flew, why
     not, how far the arm stood from where it was planned from (`off`, rad)
     and the time it saved at rest — its plan where it flew, and the reach
-    verdicts taken from it (`reach`, _Reach). None without one."""
+    verdicts taken from it (`reach`, _Reach); `stale`, why the lid's own map
+    refused it (carry_refusal). None without one."""
     if ahead is None:
         return None
     why = None
     if not flew:
-        if ahead.carry is None:
+        if stale is not None:
+            why = "the lid's own map keeps it out: %s" % stale
+        elif ahead.carry is None:
             why = "none planned (%s)" % ("; ".join(ahead.refused) or "no spot the hand reaches")
         elif off > DRIFT_REPLAN_RAD:
             why = "the arm stands %.3f rad from where it was planned from (gate %.2f)" % (off, DRIFT_REPLAN_RAD)
@@ -2775,11 +3398,12 @@ def _ahead_note(ahead, off, flew, chosen, reach):
             why = "no carry plans here"
         else:
             d = chosen[0]
-            why = "the spot chosen with the lid lifted is %.0f mm from it%s" % (
+            why = "the spot chosen with the lid lifted is %.0f mm from it%s%s" % (
                 1000 * math.hypot(d.xyz[0] - ahead.drop.xyz[0], d.xyz[1] - ahead.drop.xyz[1]),
                 ""
                 if abs(math.remainder(float(d.yaw) - float(ahead.drop.yaw), 2 * math.pi)) < 1e-3
                 else ", the hand turned otherwise",
+                "" if _spot_lean(d) == _spot_lean(ahead.drop) else ", the hand leaning otherwise",
             )
     return dict(
         flown=flew,
@@ -2832,6 +3456,8 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         table_z,
         getattr(getattr(watcher, "grab", None), "wrist_lens_in_hand_m", None),
     )
+    # the counter's edges the lifted lid's map shows (the wrist's frame in it), kept out of the carry
+    pd.keep_out_counter(ctx, tmap, table_z, "the lid's spot map, the lid lifted", runner, key="spot")
     t_map = time.monotonic()
     # the reach of a spot judged from where the clear was to end is the
     # reach from here where the arm stands as near as the runner flies a
@@ -2841,13 +3467,16 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
     near = off is not None and off <= DRIFT_REPLAN_RAD
     reach = _Reach(ahead.known if near else None)
     rest = list(pd.rest_joints(cfg))
-    carry, refused, chosen, carry_s, flew = None, [], None, 0.0, False
+    carry, refused, chosen, carry_s, flew, stale = None, [], None, 0.0, False, None
     for drop, tier, says in spot_candidates(ctx, tmap, table_z, q, seeds=(look_joints(rest), rest), reach=reach):
         if len(refused) >= CARRY_TRIES:
             break
-        if near and ahead.carry is not None and _same_spot(drop, ahead.drop):
-            carry, chosen, flew = ahead.carry, (ahead.drop, tier, says), True
-            break
+        if near and ahead.carry is not None and stale is None and _same_spot(drop, ahead.drop):
+            # planned before the lid's own map: held out of what that map shows too, or planned again
+            stale = carry_refusal(ahead.carry)
+            if stale is None:
+                carry, chosen, flew = ahead.carry, (ahead.drop, tier, says), True
+                break
         t = time.monotonic()
         carry, why = plan_carry(ctx, cfg, q, drop)
         carry_s += time.monotonic() - t
@@ -2856,7 +3485,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
             break
         refused.append("[%.2f, %.2f]: %s" % (drop.xyz[0], drop.xyz[1], why))
     t_end = time.monotonic()
-    note = _ahead_note(ahead, off, flew, chosen, reach)
+    note = _ahead_note(ahead, off, flew, chosen, reach, stale)
     runner.note(
         "lid_spot",
         xyz=None if chosen is None else [round(v, 4) for v in chosen[0].xyz],
@@ -3032,7 +3661,7 @@ def put_lid_back(ctx, cfg, runner, why):
     ctx.lid_lifted = None  # the lid is on the box again, out of the fingers
     runner.note("lid_put_back", ok=True, why=why)
     rise, refusal = chain.straight_line(
-        [float(v) for v in ctx.client.joints()], [grip_xyz[0], grip_xyz[1], grip_xyz[2] + lift_off_m(ctx.model)], quat
+        [float(v) for v in ctx.client.joints()], [grip_xyz[0], grip_xyz[1], grip_xyz[2] + _lift_m(ctx, lifted)], quat
     )
     if rise is not None:
         refusal = dp.line_refusal(chain, rise)

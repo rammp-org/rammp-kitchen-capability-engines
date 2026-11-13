@@ -55,9 +55,15 @@ def viz_enabled(env=None):
     return _env_on(VIZ_ENV, env)
 
 
-# Gen3 home joints in controller order (flatbot, new_adapter_plate_v3, 2026-10-21).
-# joint_3 sits AT -pi (every comparison uses ang_diff; -pi and +pi are equivalent).
-HOME = [0.067, -1.897, -3.137, -2.269, -0.211, -0.683, 1.725]
+# Gen3 home joints in controller order. TEMPORARY HOME (owner, 2026-11-09): flatbot's arm now sits 8 in
+# (0.2032 m) further forward on the chair, and the old HOME (2026-10-21: [0.067, -1.897, -3.137, -2.269,
+# -0.211, -0.683, 1.725]) and the pose the arm was left in both stand inside the measured arm-side
+# armrest box (rammp-deployments #151, its boxes moved back 0.2032 m). This one holds the hand where
+# that pose had it (x 0.330, y 0.077, z 0.560 in arm_mount) with the elbow swung 1.4 rad out along the
+# arm's self-motion, away from the chair: every planner sphere 11 mm outside the padded chair and user
+# boxes; the arm's meshes 49 mm from the armrest and 42 mm from the user. joint_3 is written in
+# (-pi, pi], as the arm reports it (every comparison uses ang_diff).
+HOME = [0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]
 JOINTS = ["joint_%d" % i for i in range(1, 8)]
 
 NODE_NAMESPACE = "/rammp_curobo"  # the planner container's actions and service

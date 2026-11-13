@@ -12,13 +12,16 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import test_reach_press as trp
-from conftest import fixture_path
+from conftest import fixture_path, flatbot_urdf
 
 from box_opening.constants import GAINS_MEDIUM, HOME_SPEED
 from box_opening.models.container import ContainerModel, ContainerPose, load_press_demo
 from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_lid_off as rlo
 from box_opening.tasks import reach_press as rp
+
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
 
 PINK = trp.PINK
 BUTTON = trp.BUTTON  # (0.66, -0.57, 0.40): the fake fk's box
@@ -565,8 +568,8 @@ def test_a_lid_that_rose_with_its_knob_flush_is_neither_gripped_nor_pressed_agai
     assert "knob %.1f mm above the lid, and its LID ROSE %+.0f mm — the box is open" % (knob_mm, 1000 * dz) in out
     assert (
         "STOP: the lid rose %+.0f mm (released) but its knob is not up (%.1f mm above the lid) — the fingers have "
-        "nothing to hold, so the lid is not taken off; the box is left open: lift the lid off by hand, or shut it, "
-        "before the next run (which would take it for shut and press it) — returning home" % (1000 * dz, knob_mm)
+        "nothing to hold, so the lid is not taken off; the box is left open, and the next run would take it for "
+        "shut and press it (its aim judges a box by its knob alone) — returning home" % (1000 * dz, knob_mm)
     ) in out
     assert "pressing once more" not in out and "GRIP" not in out
 
@@ -1166,11 +1169,18 @@ def test_a_box_the_press_moved_is_not_gripped(ctx, monkeypatch, tmp_path, capsys
     assert "STOP: the press MOVED the box 20 mm" in capsys.readouterr().out
 
 
-def test_a_box_the_wrist_no_longer_finds_after_the_press_is_not_pressed_again(ctx, monkeypatch, tmp_path, capsys):
+def test_a_button_the_wrist_no_longer_finds_after_the_press_is_gripped_for_not_pressed_again(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """2026-11-12, flatbot, twice: the button popped, the finder (a flat disc at the lid's height) lost it once it
+    stood up, and both runs stopped there with the box open. Where it was pressed is known and the fingers tell a
+    knob from air: the run goes on to the grip, and never presses a knob it could not judge."""
     code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), None, None])
-    assert code == 1 and rec.events[-3:] == ["aim:reach-after", "aim:reach-after", "home"]
     assert rec.events.count("depth:press") == 1
-    assert "the knob is not judged" in capsys.readouterr().out
+    after = rec.events[rec.events.index("aim:reach-after") :]
+    assert after[:2] == ["aim:reach-after", "aim:reach-after"] and "grip:close" in after, rec.events
+    assert code == 0 and rec.events[-1] == "home"
+    assert "the knob is not judged after press 1" in capsys.readouterr().out
 
 
 def test_an_open_box_has_its_lid_taken_off_unpressed(ctx, monkeypatch, tmp_path, capsys):
@@ -1317,11 +1327,11 @@ def _home_plans(monkeypatch, refuse=()):
     "aims, presses, grip_way",
     [
         ([(BUTTON, 0.4), (MOVED, 9.0)], 1, True),
-        ([(BUTTON, 0.4), None, None], 1, True),
         (NOT_UP_TWICE, 2, True),
         ([(BUTTON, 0.4), (UP, 9.0)], 1, False),
     ],
-    ids=["the box moved", "the box not found", "not up after the second press", "no way down to the knob"],
+    # (a button not found after the press is no stop since 2026-11-12: the run goes on to the grip)
+    ids=["the box moved", "not up after the second press", "no way down to the knob"],
 )
 def test_a_stop_at_the_look_pose_flies_the_home_planned_while_the_way_back_flew(
     ctx, monkeypatch, tmp_path, aims, presses, grip_way
@@ -2269,6 +2279,37 @@ def test_the_lid_s_spot_is_mapped_and_its_carry_planned_from_where_the_arm_stood
     assert seen == [("spot_map", stood), ("spot_candidates", stood), ("plan_carry", stood)]
 
 
+def test_the_carry_planned_while_the_lift_flew_is_planned_again_where_the_lids_own_map_keeps_it_out(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The carry carry_ahead planned while the lift flew was held out of the boxes in force then; the
+    lid's own map, read after the lift (press_demo.keep_out_counter), may show a counter edge the
+    scene camera's did not. Where that carry would now go into its keep-out (carry_refusal) it is
+    not flown, even to the same spot: the carry is planned again here, against the boxes in force
+    now, and the record says why."""
+    from box_opening.runtime.runner import Runner
+
+    drop = ContainerPose(xyz=(0.45, -0.25, -0.027), yaw=0.0)
+    seen, notes = [], []
+    monkeypatch.setattr(rlo, "spot_look", lambda node, watcher, runner_: None)
+    monkeypatch.setattr(rlo, "spot_map", lambda *a, **k: None)
+    monkeypatch.setattr(rlo, "spot_candidates", lambda *a, **k: iter([(drop, "clear", "clear")]))
+    stale = "place:touch (the cabinet: arm_robotiq_85_base_link 9 mm into cabinet/edge0)"
+    monkeypatch.setattr(rlo, "carry_refusal", lambda carry: (seen.append(("checked", carry)), stale)[1])
+    monkeypatch.setattr(rlo, "plan_carry", lambda ctx_, cfg_, q, d: (seen.append(("plan_carry", d)), (None, "no"))[1])
+    ahead = rlo.CarryAhead([float(v) for v in ctx.client.joints()], drop=drop, tier="clear", carry="planned ahead")
+    runner = Runner(ctx.client, log_dir=tmp_path)
+    monkeypatch.setattr(runner, "note", lambda kind, **kw: notes.append((kind, kw)))
+    eyes = (None, SimpleNamespace(table_z=-0.027), None, None)
+    assert rlo.choose_and_carry(ctx, load_press_demo(PINK), runner, eyes, ahead=ahead) == 1
+    assert seen == [("checked", "planned ahead"), ("plan_carry", drop)]  # the same spot, planned again
+    (spot,) = (kw for kind, kw in notes if kind == "lid_spot")
+    assert spot["ahead"]["flown"] is False and spot["ahead"]["why"] == "the lid's own map keeps it out: " + stale
+    assert "the carry planned while the lift flew is not flown: the lid's own map keeps it out" in (
+        capsys.readouterr().out
+    )
+
+
 # ---- the carry planned while the lift flies ------------------------------------
 
 
@@ -2578,7 +2619,7 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     q_look = lift.legs[-1].goal_joints
     # where the lid goes, from the spot look: the first the hand reaches from there
     drop, tier, _says = next(rlo.spot_candidates(ctx, None, LID - 0.10, q_look, seeds=(home,)))
-    assert tier == "beside the box"
+    assert tier == "beside the box" and type(drop) is ContainerPose  # straight down: no lean was judged
     carry, why = rlo.plan_carry(ctx, cfg, q_look, drop)
     assert carry is not None, why
     # the way down to SETDOWN_SLOW_M over where the plan has the lid meet the table, the touch on down to
@@ -2611,6 +2652,7 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     _R, t_grip = chain.fk(legs[-1].goal_joints)
     _R, t_lift = chain.fk(lift_leg.goal_joints)
     assert t_lift[2] - t_grip[2] == pytest.approx(rlo.lift_off_m(ctx.model), abs=1e-4)
+    assert lift.lift_m == pytest.approx(rlo.lift_off_m(ctx.model))  # the full lift, never the shorter one
     assert t_lift[:2] == pytest.approx(t_grip[:2], abs=1e-4)
     _R, t_clear = chain.fk(clear.goal_joints)
     from box_opening.worlds import planned_top_z
@@ -2765,15 +2807,20 @@ def test_the_fingers_come_down_to_the_knob_opened_to_its_width_not_fully(ctx, mo
     code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
     assert code == 0
     m = ctx.model
-    width = m.button_diameter_m + 2 * rlo.GRIP_SIDE_CLEAR_M
-    assert width == pytest.approx(0.064)
+    # 2026-11-12 19:12:49: open to the knob and 10 mm either side (64 mm), a finger came down at the edge of
+    # a knob the press had aimed 7.5 mm off and the box was shut again. The pads now stand midway between
+    # the knob's edge and the lid's: 74.5 mm for the 44 mm knob on the 105 mm lid
+    width = 0.5 * (m.button_diameter_m + m.lid_dims[0])
+    assert width == pytest.approx(0.0745) and width > m.button_diameter_m + 2 * rlo.GRIP_SIDE_CLEAR_M
     assert rec.legs["grip:open"].gripper_cmd == pytest.approx(rlo.grip_open_cmd(m))
     assert GRIPPER_CMD_OPEN < rlo.grip_open_cmd(m) < GRIPPER_CMD_CLOSED
-    assert rlo.grip_open_cmd(m) == pytest.approx(GRIPPER_CMD_CLOSED * (1 - 0.064 / rlo.GRIPPER_OPEN_WIDTH_M))
-    # the fingertips' place across the knob: inside the lid's edge by more than the knob's aim can be off
+    assert rlo.grip_open_cmd(m) == pytest.approx(GRIPPER_CMD_CLOSED * (1 - width / rlo.GRIPPER_OPEN_WIDTH_M))
+    # the fingertips' place across the knob: as far inside the lid's edge as off the knob's, more than its aim was off
     lid_r = 0.5 * m.lid_dims[0]
-    assert lid_r - width / 2 >= 0.02
-    assert width / 2 - m.button_diameter_m / 2 >= 0.01
+    assert lid_r - width / 2 == pytest.approx(width / 2 - m.button_diameter_m / 2) and lid_r - width / 2 >= 0.015
+    # a lid no wider than its knob and the clearance: the knob's width and GRIP_SIDE_CLEAR_M either side, as before
+    small = SimpleNamespace(button_diameter_m=0.044, lid_dims=(0.050, 0.050, 0.02))
+    assert rlo.grip_open_cmd(small) == pytest.approx(GRIPPER_CMD_CLOSED * (1 - 0.064 / rlo.GRIPPER_OPEN_WIDTH_M))
     assert rec.legs["place:open"].gripper_cmd == GRIPPER_CMD_OPEN  # the lid let go fully at the table
 
 
@@ -2912,7 +2959,13 @@ def test_the_grip_straight_from_the_press_takes_the_lid_off_with_no_way_back_and
     assert opened.send_when.z == pytest.approx(held + rlo.GRIP_OPEN_ABOVE_HELD_M)
     # the fake client keeps no feedback: the gate never said so, and the open went out at the rise's top
     (open_row,) = (r for r in rows if r["leg"] == "grip_open")
-    assert open_row["under_rise"] is False and open_row["above_held_mm"] == pytest.approx(12.5)
+    assert open_row["under_rise"] is False and open_row["above_held_mm"] == pytest.approx(37.5)
+    # the way down is watched for where the open fingertips meet the lid, and stops there (past 0)
+    from box_opening.tasks.press_contact import PressContact
+
+    watch = rec.legs["grip:down"].stop_when
+    assert isinstance(watch, PressContact) and watch.cut is True and watch.past_m == 0.0 and watch.contact is None
+    assert not [r for r in rows if r["leg"] == "grip_touch"]  # nothing met: the way down ended where it always did
     (grip,) = (r for r in rows if r["leg"] == "reach_grip")
     assert (grip["attempt"], grip["from_press"]) == (0, True)
     assert grip["lid_z"] == pytest.approx(held + rlo.GRIP_LID_ABOVE_HELD_M)
@@ -2954,6 +3007,209 @@ def test_the_grip_from_the_press_is_up_and_down_the_strokes_line(ctx, monkeypatc
     assert bottom == pytest.approx([0.604, -0.203, 0.30 + rlo.GRIP_LID_ABOVE_HELD_M - rlo.GRIP_BELOW_LID_M])
     assert q_top == q_bottom == [0, 1, 0, 0] and rise[0] == [0.0] * 7 and down[0] == rise[-1]
     assert gates == [EXIT_MAX_STEP_RAD, None]  # None: the way down to the knob is asked under MAX_STEP_RAD
+
+
+def test_the_rise_off_the_hold_clears_a_popped_knob_on_a_risen_lid_and_leans_where_straight_does_not_fly(
+    ctx, monkeypatch
+):
+    """Flatbot 2026-11-12 19:12:49 (the owner: "it just didnt raise high enough before it came back down to
+    grab it, reclosing the box"): the rise was 25 mm, the pads got 22.9 mm up, and a popped knob's top stands
+    ~25 mm over the hold (the stroke, the released lid's rise, the knob over it). The rise is the stroke, the
+    most a released lid rises and a knob's height; where that line does not fly, the same with the hand
+    leaning further back by its top and back to the stroke's attitude on the way down, then
+    GRIP_RISE_MIN_M each way; where none flies, the first refusal."""
+    assert rlo.GRIP_RISE_M == pytest.approx(rlo.KNOB_STROKE_M + rlo.LID_POP_M[1] + rlo.KNOB_STROKE_M)
+    assert rlo.GRIP_RISE_M >= 0.040 > rlo.GRIP_RISE_MIN_M > rlo.GRIP_RISE_LEAST_M > 0.025
+    assert rlo.GRIP_OPEN_ABOVE_HELD_M > 0.025  # the fingers spread over the popped knob's top, not on it
+    lines, walks = [], []
+
+    class Chain:
+        def __init__(self, straight):
+            self.straight = straight
+
+        def fk(self, q):
+            return np.eye(3), np.array([0.6 + q[0], -0.2 + q[1], 0.30 + q[2]])
+
+        def straight_line(self, q0, xyz, quat, max_step_rad=None):
+            lines.append(round(xyz[2] - 0.30, 4))
+            if not self.straight(xyz[2] - 0.30):
+                return None, "the chair and user: arm_half_arm_1_link 0 mm into person/lap"
+            return [list(q0), [xyz[0] - 0.6, xyz[1] + 0.2, xyz[2] - 0.30] + [0.0] * 4], None
+
+        def walk(self, q0, xyz, quat, step_m=None, max_step_rad=None):
+            walks.append((round(xyz[2] - 0.30, 4), [round(v, 4) for v in quat]))
+            return [list(q0), [xyz[0] - 0.6, xyz[1] + 0.2, xyz[2] - 0.30] + [0.0] * 4], None
+
+    from box_opening.geometry import rotate_about_world_axis
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(dp, "line_refusal", lambda chain, pts: None)
+    way = SimpleNamespace(stroke=SimpleNamespace(q0=[0.0, 0.0, 0.05, 0, 0, 0, 0], quat=[0.0, 1.0, 0.0, 0.0]))
+    held = [0.0] * 7
+    low = rlo.GRIP_LID_ABOVE_HELD_M - rlo.GRIP_BELOW_LID_M
+    # straight up flies: the full rise, no lean asked
+    monkeypatch.setattr(approach, "_chain", lambda: Chain(lambda dz: True))
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, held)
+    assert why is None and lines == [pytest.approx(rlo.GRIP_RISE_M), pytest.approx(low)] and walks == []
+    # no straight line up: the full rise leaning the least, and back to the stroke's attitude coming down
+    lines.clear()
+    monkeypatch.setattr(approach, "_chain", lambda: Chain(lambda dz: False))
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, held)
+    leaned = rotate_about_world_axis(
+        way.stroke.quat,
+        (-0.2 / math.hypot(0.6, 0.2), -0.6 / math.hypot(0.6, 0.2), 0.0),
+        math.radians(rlo.LIFT_LEAN_DEG[0]),
+    )
+    assert why is None and lines == [pytest.approx(rlo.GRIP_RISE_M)]
+    assert walks == [
+        (pytest.approx(rlo.GRIP_RISE_M), [pytest.approx(v, abs=1e-4) for v in leaned]),
+        (pytest.approx(low), [0.0, 1.0, 0.0, 0.0]),
+    ]
+    assert rise[-1][2] == pytest.approx(rlo.GRIP_RISE_M) and down[0] == rise[-1] and down[-1][2] == pytest.approx(low)
+    # nothing flies: the first refusal, the full straight rise's
+    Chain.walk = lambda self, q0, xyz, quat, step_m=None, max_step_rad=None: (None, "IK did not converge")
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, held)
+    assert rise is None and down is None and why.startswith("the rise off the button (the chair and user")
+
+
+def test_a_leaning_grip_comes_down_further_out_so_the_pads_low_half_takes_the_knob(ctx, monkeypatch):
+    """A hand leaning back toward the arm holds its pads' ends on a slant (fingers.pad_corner_below_m): with
+    their middle over the knob the corner nearest the arm meets the lid first and the pads take the knob's
+    side that much higher — 2.8 mm at 15 deg, 4.6 at 25, 5.5 at 30, of a knob 7.8 mm proud. grip_shift_m puts
+    the pads' middle that far out past the knob's centre that their ends over it stand no more than
+    GRIP_PAD_OVER_M over the corner, and never nearer their edge than GRIP_PAD_EDGE_M; a hand nearly
+    straight down is not shifted. The grip straight from the press ends its way down there, on the stroke's
+    line where that does not fly; the grip from the look pose comes down to a point that far further out."""
+    from box_opening.runtime import approach, fingers
+
+    half = 0.5 * fingers.PAD_WIDTH_M
+    assert fingers.pad_corner_below_m(15.0) == pytest.approx(0.0028, abs=1e-4)
+    assert (
+        fingers.pad_corner_below_m(30.0) == pytest.approx(0.0055, abs=1e-4) and fingers.pad_corner_below_m(0.0) == 0.0
+    )
+    model = ContainerModel.load(PINK)
+    at = (0.6, -0.2)
+
+    def shift(lean):
+        return rlo.grip_shift_m(rp.reach_quat(model, at, lean))
+
+    assert shift(0.0) == 0.0 and shift(10.0) == 0.0
+    assert shift(15.0) == pytest.approx(half - rlo.GRIP_PAD_OVER_M / math.sin(math.radians(15.0)), abs=2e-4)
+    assert 0.003 < shift(15.0) < shift(20.0) < shift(25.0) < shift(30.0) <= half - rlo.GRIP_PAD_EDGE_M
+    assert shift(60.0) == pytest.approx(half - rlo.GRIP_PAD_EDGE_M)
+    # the grip straight from the press: the way down ends that far out from the arm, past the stroke's line
+    lines = []
+
+    class Chain:
+        refuse_out = False
+
+        def fk(self, q):
+            return np.eye(3), np.array([at[0] + q[0], at[1] + q[1], 0.30 + q[2]])
+
+        def straight_line(self, q0, xyz, quat, max_step_rad=None):
+            lines.append([round(float(v), 5) for v in xyz])
+            if self.refuse_out and math.hypot(xyz[0], xyz[1]) > math.hypot(*at) + 1e-4:
+                return None, "IK did not converge 80% of the way"
+            return [list(q0), [xyz[0] - at[0], xyz[1] - at[1], xyz[2] - 0.30] + [0.0] * 4], None
+
+        def walk(self, q0, xyz, quat, step_m=None, max_step_rad=None):
+            return None, "no walk"
+
+    chain = Chain()
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    monkeypatch.setattr(dp, "line_refusal", lambda chain_, pts: None)
+    quat = rp.reach_quat(model, at, 25.0)
+    way = SimpleNamespace(stroke=SimpleNamespace(q0=[0.0, 0.0, 0.05, 0, 0, 0, 0], quat=quat))
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, [0.0] * 7)
+    out = rlo.grip_shift_m(quat)
+    d = math.hypot(*at)
+    assert why is None and lines[0][:2] == pytest.approx(list(at))  # the rise: straight up the stroke's line
+    assert lines[1][:2] == pytest.approx([at[0] * (1 + out / d), at[1] * (1 + out / d)], abs=1e-5)
+    assert math.hypot(lines[1][0] - at[0], lines[1][1] - at[1]) == pytest.approx(out, abs=1e-5)
+    # where no way down ends out there, the stroke's own line, as a hand straight down comes down
+    lines.clear()
+    chain.refuse_out = True
+    rise, down, why = rlo.grip_from_hold_lines(ctx, way, [0.0] * 7)
+    assert why is None and lines[-1][:2] == pytest.approx(list(at)) and len(lines) > 2
+    # the grip from the look pose: solved for the knob, then for the point further out, which is the one flown
+    asked = []
+    leaning = SimpleNamespace(pts=[[0.0] * 7], quat=quat, walked=True, slide=None, short_deg=25.0)
+    monkeypatch.setattr(
+        rp,
+        "reach_from_here",
+        lambda ctx_, cfg_, button, tilt, need_stroke=True, q=None: (
+            asked.append(tuple(button)),
+            ([], SimpleNamespace(slide_pts=[[0.0] * 7], start_xyz=[0, 0, 0], quat=quat), None),
+        )[1],
+    )
+    monkeypatch.setattr(rp, "walk_or_turn", lambda *a, **k: (leaning, None))
+    monkeypatch.setattr(rlo, "grip_descent", lambda *a, **k: (SimpleNamespace(legs=[]), None))
+    cfg = load_press_demo(PINK)
+    got, why = rlo.solve_grip_way(ctx, cfg, (at[0], at[1], 0.36), 30, [0.0] * 7, 0.36)
+    assert why is None and len(asked) == 2 and asked[0] == pytest.approx((at[0], at[1], 0.36))
+    assert asked[1] == pytest.approx((at[0] * (1 + out / d), at[1] * (1 + out / d), 0.36), abs=1e-6)
+    assert got.plan.slide_pts == [[0.0] * 7]
+
+
+def test_open_fingertips_stand_above_shut_ones_by_the_2f85s_linkage_and_the_touch_rise_follows():
+    """fingers.pads_above_shut, from flatbot's URDF: 13.5 mm fully open, 2.3 mm on the 44 mm knob (0.41 rad),
+    nothing shut. touch_rise_m: once the open fingertips have met the lid the hand comes back up what closing
+    onto the knob brings the pads out, and GRIP_TOUCH_CLEAR_M, so they close round the knob's base."""
+    from box_opening.runtime import fingers
+
+    assert fingers.pads_above_shut(0.0) == pytest.approx(0.0135, abs=3e-4)
+    assert fingers.pads_above_shut(0.41) == pytest.approx(0.0023, abs=3e-4)
+    assert fingers.pads_above_shut(0.8) == 0.0 and fingers.pads_above_shut(1.5) == 0.0
+    model = ContainerModel.load(PINK)
+    open_h = fingers.pads_above_shut(rlo.grip_open_cmd(model))
+    knob_h = fingers.pads_above_shut(rlo._width_cmd(model.button_diameter_m))
+    assert 0.008 < open_h < 0.012 and 0.002 < knob_h < 0.004
+    assert rlo.touch_rise_m(model) == pytest.approx(open_h - knob_h + rlo.GRIP_TOUCH_CLEAR_M)
+
+
+def test_fingertips_that_meet_the_lid_on_the_way_down_stop_there_and_close_round_the_knobs_base(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The way down to the knob ends where the open fingertips meet something — a released lid stands
+    ~10 mm higher than the hold says, and pressed on down it shut the box again (2026-11-12 19:12:49). The
+    hand comes back up touch_rise_m (grip:settle) and the fingers close there; the lift planned ahead from
+    the way down's planned end, lower, is not flown: the close plans its own from where the hand stands,
+    the carry chosen after it."""
+    from box_opening.tasks import press_contact
+
+    class Met(press_contact.PressContact):
+        def __call__(self, progress):
+            if self.final:  # the set-down's own watch: as it is
+                return super().__call__(progress)
+            self.contact, self.how = (0.4, BUTTON[2] + 0.011, 0.004), "fast"  # the pads' height where they met
+            return False  # the fake client flies the leg to its end: the stop itself is the real client's
+
+    monkeypatch.setattr(press_contact, "PressContact", Met)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], from_press=True)
+    assert code == 0
+    i = rec.events.index("grip:down")
+    assert rec.events[i : i + 5] == ["grip:down", "grip:settle", "grip:close", "lid:lift", "lid:clear"]
+    runs = [names for names, _g in _executions(rec)]
+    assert ["grip:settle"] in runs and CLOSE in runs and CLOSE + CARRY not in runs  # the lift from where it stands
+    (met,) = (r for r in rows if r["leg"] == "grip_touch")
+    held = BUTTON[2] - 0.006
+    assert met["how"] == "fast" and met["over_held_mm"] == pytest.approx(1000 * (BUTTON[2] + 0.011 - held), abs=0.1)
+    assert met["rise_mm"] == pytest.approx(1000 * rlo.touch_rise_m(ctx.model), abs=0.1)
+    assert "the open fingertips met the lid" in capsys.readouterr().out
+
+
+def test_a_hand_that_did_not_rise_clear_of_the_knob_does_not_come_down_on_it(ctx, monkeypatch, tmp_path, capsys):
+    """The arm measured its pads less than GRIP_RISE_LEAST_M over the hold at the rise's top: the fingers may
+    not have left the popped knob, and the way down would press it shut. No way down: back to the look pose,
+    the look to judge the knob, the grip from there."""
+    monkeypatch.setattr(rlo, "GRIP_RISE_LEAST_M", 1.0)  # the fake arm never gets there
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], from_press=True)
+    (refused,) = (r for r in rows if r["leg"] == "reach_grip_refused" and r.get("from_press"))
+    assert refused["why"].startswith("rose ")
+    i = rec.events.index("grip:rise")
+    assert "grip:down" not in rec.events[i : i + 3]  # the rise, the open, and no way down after them
+    assert "not coming down on it" in capsys.readouterr().out
+    assert code == 0  # the look saw the knob up and the grip from the look pose took the lid off
 
 
 def test_a_grip_from_the_press_on_air_goes_back_to_the_look_pose_and_grips_from_there(ctx, monkeypatch, tmp_path):
@@ -3118,3 +3374,360 @@ def test_with_the_grip_from_the_press_the_video_records_from_the_press_on(ctx, m
     steps = [t.split(" ")[0].rstrip(":") for t in v.said if not t.startswith("overlay")]
     assert steps == ["GRIP", "CLOSE", "RELEASE"] and "straight from the press" in v.said[0]
     assert v.finished[0] == "the end: the lid set down, the arm home"
+
+
+# ---- a high counter (the chair study's 0.86 / 0.91 m side cabinets) ----------------------
+
+
+class _HandAt(_Chain):
+    """The fake chain with the hand standing at height `z` (fk), at `R` (the
+    fake's own where none is said), and a walk that flies (straight to its
+    end, its asks kept)."""
+
+    def __init__(self, z, refuse=(), unreachable=(), R=None):
+        super().__init__(refuse, unreachable)
+        self.z = z
+        if R is not None:
+            self.R = R
+        self.walks = []
+
+    def fk(self, q):
+        return np.array(self.R, float), np.array([0.5, -0.4, self.z])
+
+    def walk(self, q0, xyz, quat, step_m=None, step_rad=None, max_step_rad=None):
+        self.walks.append(dict(xyz=list(xyz), step_m=step_m, step_rad=step_rad, max_step_rad=max_step_rad))
+        return [list(q0), [v + 0.01 for v in q0]], None
+
+
+def _carry_floor(ctx):
+    from box_opening.primitives.core import CARRY_CLEAR_M, tcp_z
+
+    m = ctx.model
+    return tcp_z(ctx.cpose.xyz[2] + m.dims[2] + m.lid_dims[2] + CARRY_CLEAR_M)
+
+
+def _grip_z(ctx, above=0.0):
+    """The straight-down hand's height (trp.STRAIGHT_DOWN) with the closed pads GRIP_BELOW_LID_M
+    under a lid whose top stands `above` over the cameras' top: the knob as the grip holds it."""
+    m = ctx.model
+    return ctx.cpose.xyz[2] + m.dims[2] + above - rlo.GRIP_BELOW_LID_M + dp.DOWN_CONTACT_TOOL[2]
+
+
+def test_the_clear_after_the_lift_goes_only_as_high_as_the_carrys_floor_where_todays_does_not_fly(ctx, monkeypatch):
+    """The chair study's 0.86 / 0.91 m side counters (study/fixes/highcounter): the clear up to
+    clear_targets' height met joint_6's limit in every row whose lift flew and no clear did. There
+    the clear goes up to the carry's floor (the held lid's underside CARRY_CLEAR_M over the box,
+    lift_clear_targets), back toward the arm as far as clear_targets' first; where clear_targets'
+    flies, as on every bench run, it is the one flown, nothing else asked. The box's top under that
+    floor is the lid's as the grip took it where that stands higher than the cameras': the study's
+    rows that met the lid 45 mm over their top carried it 0.5-5.0 mm over the rim from the clear
+    the cameras' top alone put at the lift's top."""
+    from box_opening.runtime import approach
+    from box_opening.worlds import planned_top_z
+
+    floor = _carry_floor(ctx)
+    want = planned_top_z(ctx.model, ctx.cpose) + rp.HOME_CLEAR_M + rp.CLEAR_EXTRA_M  # the fake hand: no lean
+    assert want > floor + 0.005
+    cfg = load_press_demo(PINK)
+    grip = _grip_z(ctx)  # the knob held where the cameras put the lid's top
+    assert grip < floor - 0.05
+    # the bench: clear_targets' first flies — the lift, then that one line, as before
+    chain = _HandAt(grip, R=trp.STRAIGHT_DOWN)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and [lg.name for lg in lift.legs] == ["lid:lift", "lid:clear"]
+    assert [xyz[2] for xyz, _q in chain.lines] == pytest.approx([grip + rlo.lift_off_m(ctx.model), want])
+    assert lift.back_m == pytest.approx(rp.CLEAR_BACK_M) and lift.lift_m == pytest.approx(rlo.lift_off_m(ctx.model))
+    # a high counter: no line up to clear_targets' flies (joint_6), the one up to the carry's floor does
+    lifted = (0.5, -0.4)
+    over = [lambda xyz, q: xyz[2] > floor + 1e-6 and tuple(xyz[:2]) != lifted]
+    chain = _HandAt(grip, R=trp.STRAIGHT_DOWN, refuse=over)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and lift.back_m == pytest.approx(rp.CLEAR_BACK_M)
+    assert [round(xyz[2], 6) for xyz, _q in chain.lines[1:]] == [round(want, 6)] * 2 + [round(floor, 6)]
+    # the lid gripped 45 mm over the cameras' top (the study's highest contact): the floor stands
+    # over the lid's top as gripped, never the cameras' alone
+    todays = [lambda xyz, q: abs(xyz[2] - want) < 1e-6 and tuple(xyz[:2]) != lifted]
+    chain = _HandAt(_grip_z(ctx, 0.045), R=trp.STRAIGHT_DOWN, refuse=todays)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and lift.back_m == pytest.approx(rp.CLEAR_BACK_M)
+    assert [round(xyz[2], 6) for xyz, _q in chain.lines[1:]] == [round(want, 6)] * 2 + [round(floor + 0.045, 6)]
+    # and where neither flies, both are said
+    chain = _HandAt(grip, R=trp.STRAIGHT_DOWN, refuse=[lambda xyz, q: tuple(xyz[:2]) != lifted])
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert lift is None and "no way up and back" in why and "up to the carry's floor: 50 mm back" in why
+
+
+def test_a_lift_that_does_not_fly_its_full_height_flies_the_shorter_one_and_says_how_far(ctx, monkeypatch):
+    """The chair study's high counters: the 40 mm lift met joint_6's limit 24-40 mm up in 67 of 225
+    rows; where it does not fly, the lift goes LIFT_OFF_MIN_CLEAR_M past the cap (35 mm for the
+    pink canister's 25 mm cap), and the LiftOff says how far (lift_m: the put-back's rise off the
+    knob goes as far). Where neither flies, the full lift's refusal is the one said."""
+    from box_opening.runtime import approach
+
+    cfg = load_press_demo(PINK)
+    full, short = rlo.lift_off_m(ctx.model), rlo.lift_off_m(ctx.model, rlo.LIFT_OFF_MIN_CLEAR_M)
+    assert full > short and full - short == pytest.approx(rlo.LIFT_OFF_CLEAR_M - rlo.LIFT_OFF_MIN_CLEAR_M)
+    lifted = (0.5, -0.4)
+    chain = _HandAt(0.45, refuse=[lambda xyz, q: tuple(xyz[:2]) == lifted and xyz[2] > 0.45 + short + 1e-6])
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert why is None and lift.lift_m == pytest.approx(short) and rlo._lift_m(ctx, lift) == pytest.approx(short)
+    assert [xyz[2] for xyz, _q in chain.lines[:2]] == pytest.approx([0.45 + full, 0.45 + short])
+    chain = _HandAt(0.45, refuse=[lambda xyz, q: tuple(xyz[:2]) == lifted])
+    chain.walk = lambda q0, xyz, quat, **k: (None, "IK did not converge")  # nor leaning further back
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, [0, 0, 0, 1])
+    assert lift is None and why.startswith("the lift off the canister is not a straight line")
+    assert rlo._lift_m(ctx, rlo.LiftOff([])) == pytest.approx(full)  # a LiftOff that says none: the full lift
+
+
+def test_a_lift_no_straight_line_flies_goes_up_with_the_hand_leaning_further_back(ctx, monkeypatch):
+    """Flatbot 2026-11-12 18:12: the knob held at the arm's reach (the box 0.71 m out, the hand
+    leaning 30 deg), the lift ran out 20-28 mm up at that lean and the run backed out of an open
+    box. There the lift goes the same height with the hand leaning LIFT_LEAN_DEG further back
+    toward the arm by its top — the least lean first, the full lift before the shorter — and the
+    clear and all after it hold that attitude (LiftOff.quat). A lift that flies straight asks no
+    lean; a lean that would end the lid's low edge at the rim is not flown."""
+    from box_opening.geometry import rotate_about_world_axis
+    from box_opening.runtime import approach, kinematics
+
+    cfg = load_press_demo(PINK)
+    full = rlo.lift_off_m(ctx.model)
+    lifted = (0.5, -0.4)
+    quat = [0.0, 0.0, 0.0, 1.0]
+    chain = _HandAt(0.45)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, quat)
+    assert why is None and chain.walks == [] and lift.quat == quat  # straight up flies: no lean asked
+    # no line straight up at the hand's own attitude: the walk, leaning the least, to the full height
+    asked = []
+    chain = _HandAt(0.45, refuse=[lambda xyz, q: tuple(xyz[:2]) == lifted and tuple(q) == tuple(quat)])
+    walk = chain.walk
+    chain.walk = lambda q0, xyz, q, **k: (asked.append(list(q)), walk(q0, xyz, q, **k))[1]
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    lift, why = rlo.plan_lift(ctx, cfg, [0.0] * 7, quat)
+    d = math.hypot(*lifted)
+    leaned = list(
+        rotate_about_world_axis(quat, (lifted[1] / d, -lifted[0] / d, 0.0), math.radians(rlo.LIFT_LEAN_DEG[0]))
+    )
+    assert why is None and lift.lift_m == pytest.approx(full) and lift.quat == pytest.approx(leaned)
+    assert asked == [pytest.approx(leaned)]
+    assert chain.walks == [
+        dict(
+            xyz=[0.5, -0.4, pytest.approx(0.45 + full)],
+            step_m=kinematics.STEP_M,
+            step_rad=None,
+            max_step_rad=kinematics.MAX_STEP_RAD,
+        )
+    ]
+    assert [leg.name for leg in lift.legs] == ["lid:lift", "lid:clear"]
+    assert all(leg.target[2] == pytest.approx(leaned) for leg in lift.legs)  # the clear at the lift's top attitude
+    # the lid's low edge: its radius times the lean's sine, of the clearance past the cap
+    lid_r = 0.5 * max(ctx.model.lid_dims[0], ctx.model.lid_dims[1])
+    assert rlo._lean_keeps_clear(ctx.model, rlo.LIFT_LEAN_DEG[0], rlo.LIFT_OFF_CLEAR_M)
+    assert not rlo._lean_keeps_clear(
+        ctx.model, math.degrees(math.asin(rlo.LIFT_OFF_MIN_CLEAR_M / lid_r)) + 0.1, rlo.LIFT_OFF_MIN_CLEAR_M
+    )
+
+
+def test_where_no_hand_reaches_a_spot_straight_down_the_same_spots_follow_leaning(ctx):
+    """Every tier straight down first, as the bench's runs chose (a straight-down spot reached is
+    offered before any lean is judged); only past them all the same spots again as LeanSpots, the
+    hand leaning SETDOWN_LEAN_DEG — the chair study's high counters, where no straight-down hand
+    reaches its carry height over any spot."""
+    asked = []
+
+    def nothing_straight_down(ctx_, d, q, seeds=()):
+        asked.append(d)
+        return "no straight-down hand reaches its carry height 0.514" if rlo._spot_lean(d) == 0.0 else None
+
+    gen = rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=nothing_straight_down)
+    drop, tier, says = next(gen)
+    assert isinstance(drop, rlo.LeanSpot) and drop.lean_deg == rlo.SETDOWN_LEAN_DEG and "leaning 20 deg" in says
+    straight = [d for d in asked if rlo._spot_lean(d) == 0.0]
+    assert straight and asked[: len(straight)] == straight and asked[len(straight)] is drop
+    assert drop.xyz == straight[0].xyz and drop.yaw == straight[0].yaw and tier in ("beside the box", "nearest")
+    assert not rlo._same_spot(drop, straight[0]) and rlo._spot_key(drop) != rlo._spot_key(straight[0])
+    # a carry planned ahead to the spot straight down, the one chosen there leaning: the note says why
+    ahead = rlo.CarryAhead([0.0] * 7, drop=straight[0], carry=object())
+    note = rlo._ahead_note(ahead, 0.0, False, (drop, tier, says), rlo._Reach())
+    assert note["why"] == "the spot chosen with the lid lifted is 0 mm from it, the hand leaning otherwise"
+    # one straight-down spot reached, the third: it is offered, before any lean is judged
+    asked.clear()
+
+    def third_only(ctx_, d, q, seeds=()):
+        asked.append(d)
+        return None if len(asked) == 3 else "no straight-down hand reaches its carry height 0.514"
+
+    drop, _tier, _says = next(rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=third_only))
+    assert type(drop) is ContainerPose and len(asked) == 3 and all(rlo._spot_lean(d) == 0.0 for d in asked)
+
+
+def test_a_leaning_set_down_lands_the_lid_as_gripped_its_centre_over_the_spot_its_lowest_point_on_the_table(
+    ctx, monkeypatch
+):
+    """Flatbot's URDF, the pink canister's lid gripped straight down: setdown_poses for a LeanSpot
+    leans the hand SETDOWN_LEAN_DEG back toward the arm, facing the spot; the lid, level as the
+    grip took it, has its bottom's centre over the spot and its lowest point on the table where the
+    tool meets it, the hover over that at least Place.hover_for's, the carry floor under the lid's
+    lowest point. Straight down (lean 0) it is setdown_poses' own straight-down answer."""
+    from box_opening.constants import HOME
+    from box_opening.perception.d405 import quat_to_mat
+    from box_opening.primitives.look import look_joints
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    ctx.model = ContainerModel.load(PINK)
+    m = ctx.model
+    box = FLATBOT_BOXES[0]
+    ctx.cpose = rp.cpose_for_button((box[0], box[1], LID), 0.0, m.button_offset)
+    grip_quat = rp.reach_quat(m, box, 0.0)  # straight down, facing the box
+    pads = np.array([box[0], box[1], LID - rlo.GRIP_BELOW_LID_M])
+    tool = pads - rp._rot(grip_quat) @ np.asarray(dp.DOWN_CONTACT_TOOL)
+    q_grip = chain.nearest_solution(list(HOME), tool, grip_quat, seeds=(look_joints(HOME),))
+    assert q_grip is not None
+    spot = (box[0] - 0.05, box[1] - 0.20, LID - 0.121)
+    lean = rlo.LeanSpot(xyz=spot, yaw=0.3)
+    quat, contact, hover = rlo.setdown_poses(ctx, lean, held=q_grip)
+    R = np.asarray(quat_to_mat(*quat), float)
+    assert math.degrees(rp.hand_lean(R)) == pytest.approx(rlo.SETDOWN_LEAN_DEG, abs=1e-6)
+    assert quat == pytest.approx(rp.reach_quat(m, spot[:2], rlo.SETDOWN_LEAN_DEG))
+    # the lid in the tool frame as gripped: level, its top GRIP_BELOW_LID_M over the pads
+    Rg = np.asarray(chain.fk(q_grip)[0], float)
+    top = np.asarray(dp.DOWN_CONTACT_TOOL) + Rg.T @ np.array([0.0, 0.0, rlo.GRIP_BELOW_LID_M])
+    n = R @ (Rg.T @ np.array([0.0, 0.0, 1.0]))
+    bottom = np.asarray(contact) + R @ top - m.lid_dims[2] * n
+    assert bottom[:2] == pytest.approx(spot[:2], abs=1e-9)
+    tilt = math.acos(float(n[2]))
+    assert math.degrees(tilt) == pytest.approx(rlo.SETDOWN_LEAN_DEG, abs=0.5)  # a level grip: tilted by the lean
+    assert bottom[2] - 0.5 * m.lid_dims[0] * math.sin(tilt) == pytest.approx(spot[2], abs=1e-9)  # lowest point
+    assert hover[:2] == pytest.approx(contact[:2]) and hover[2] >= contact[2] + m.hover_standoff + m.lid_dims[2] - 1e-9
+    # leaning 0, held straight down: the straight-down set-down's own contact and hover
+    flat = rlo.LeanSpot(xyz=spot, yaw=0.0, lean_deg=0.0)
+    assert rlo.setdown_poses(ctx, flat, held=q_grip) == rlo.setdown_poses(ctx, ContainerPose(xyz=spot, yaw=0.0))
+    _q, c0, h0 = rlo._lean_setdown_poses(ctx, flat, q_grip)
+    _q, c1, h1 = rlo.setdown_poses(ctx, ContainerPose(xyz=spot, yaw=0.0))
+    assert c0 == pytest.approx(c1, abs=1e-5) and h0 == pytest.approx(h1, abs=1e-5)  # the IK's grip to 1e-4 rad
+    with pytest.raises(ValueError):
+        rlo.setdown_poses(ctx, lean)  # leaning, the lid's grip is needed
+
+
+def test_a_carry_the_planner_refuses_inside_its_limit_margin_is_the_arms_own_walk(ctx, monkeypatch):
+    """The chair study's high counters: the planner refused the carry START_IN_LIMIT_MARGIN or
+    GOAL_IN_LIMIT_MARGIN in 58 of the rows whose lid came up (joint_6 0.026-0.085 rad from its
+    limit where the clear ends). There the carry flies as the arm's own walk to the same hover
+    (walk_carry: CARRY_WALK_STEP_M, CARRY_WALK_STEP_RAD, kinematics.MAX_STEP_RAD), a plan-free
+    'lid:carry' at the free-air lines' speed, the set-down's lines after it as ever; any other
+    refusal is the carry's refusal, as before."""
+    from box_opening.runtime import approach
+    from box_opening.runtime import kinematics as kin
+
+    cfg = load_press_demo(PINK)
+    chain = _HandAt(0.45)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
+    why_planner = ["START_IN_LIMIT_MARGIN: start: arm_joint_6 is 0.043 rad from its position limit"]
+
+    def refuses(ctx_, state, name, target, world, speed):
+        raise RuntimeError("planning failed for %s: %s" % (name, why_planner[0]))
+
+    monkeypatch.setattr(rp, "_plan_motion", refuses)
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert why is None and [lg.name for lg in carry.legs] == ["lid:carry", "place:down", "place:touch"]
+    walk = carry.legs[0]
+    assert walk.plan_free and walk.speed == pytest.approx(rp.free_line_speed(ctx)) and walk.gains == dp.COMPLIANT_GAINS
+    _quat, _contact, hover = rlo.setdown_poses(ctx, drop)
+    assert chain.walks == [
+        dict(xyz=hover, step_m=rlo.CARRY_WALK_STEP_M, step_rad=rlo.CARRY_WALK_STEP_RAD, max_step_rad=kin.MAX_STEP_RAD)
+    ]
+    why_planner[0] = "GOAL_IN_LIMIT_MARGIN: goal: arm_joint_6 is 0.020 rad from its position limit"
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert why is None and carry.legs[0].plan_free and len(chain.walks) == 2
+    why_planner[0] = "MotionGenStatus.IK_FAIL"
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert carry is None and why == "the carry (MotionGenStatus.IK_FAIL)" and len(chain.walks) == 2
+
+
+def test_a_carry_the_planner_swings_wide_is_the_arms_own_walk_before_anything_is_merged_with_it(ctx, monkeypatch):
+    """Flatbot 2026-11-12 18:42: the planner's carry took arm_joint_2 0.444 rad against the 0.444 the
+    runner's sanity gate allows. The gate judges every leg of an execution before anything moves, so it
+    refused the close, the lift and the set-down merged with that carry, and the run read the refusal as
+    a grip that missed: the knob was up and no finger closed on it. The carry is judged by that gate
+    where it is planned: one that swings is the arm's own walk to the same hover (walk_carry), and a spot
+    neither reaches is refused there, for the next."""
+    import copy
+
+    from conftest import leg as make_leg
+
+    from box_opening.primitives.core import PlanState
+    from box_opening.runtime import approach
+    from box_opening.runtime.guards import sanity_violations
+
+    cfg = load_press_demo(PINK)
+    chain = _HandAt(0.45)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
+
+    def swings(ctx_, state, name, target, world, speed):
+        start = list(state.joints)
+        lg = make_leg(name, start=start, end=[v + 0.05 for v in start], speed=speed, world=world[0])
+        out = copy.deepcopy(lg.traj.points[0])
+        out.positions = [start[0], start[1] + 0.05 + rlo.SANITY_MARGIN_RAD + 0.01, *start[2:]]
+        lg.traj.points.insert(1, out)  # joint 2 out past the gate's allowance and back
+        lg.target = target
+        return lg, state
+
+    monkeypatch.setattr(rp, "_plan_motion", swings)
+    assert sanity_violations(
+        swings(ctx, PlanState(joints=[0.0] * 7, chain=0), "lid:carry", None, ("full",), 1.0)[0].traj, 0.35
+    )
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert why is None and [lg.name for lg in carry.legs] == ["lid:carry", "place:down", "place:touch"]
+    assert carry.legs[0].plan_free and len(chain.walks) == 1  # the walk, to the same hover
+    assert chain.walks[0]["xyz"] == rlo.setdown_poses(ctx, drop)[2]
+    assert not sanity_violations(carry.legs[0].traj, rlo.SANITY_MARGIN_RAD)
+    # no walk there either: the spot's carry is refused where it is planned, and says both
+    chain.walk = lambda q0, xyz, quat, **k: (None, "IK did not converge 40% of the way")
+    carry, why = rlo.plan_carry(ctx, cfg, [0.0] * 7, drop)
+    assert carry is None and "swings wide" in why and "walked: IK did not converge" in why
+
+
+def test_the_way_down_to_a_knob_is_planned_for_the_lid_as_touched_where_that_stands_higher(ctx, monkeypatch):
+    """Flatbot 2026-11-12 18:42: the arm's touch put the lid 44 mm over where the wrist camera put the
+    button. The grip's way in from the look pose, planned for the camera's height, ended with the pads 22
+    mm over the grip's end, too low to come down from ("the hand does not come down to the knob"). The
+    way in is planned for the higher of the two; a lid the touch puts at or under the cameras' button
+    changes nothing."""
+    cfg = load_press_demo(PINK)
+    asked = []
+
+    def reach(ctx_, cfg_, button, tilt, need_stroke=True, q=None):
+        asked.append(tuple(button))
+        return None, None, "stop here"
+
+    monkeypatch.setattr(rp, "reach_from_here", reach)
+    assert rlo.solve_grip_way(ctx, cfg, (0.5, -0.4, 0.313), 30.0, [0.0] * 7, 0.357) == (None, "stop here")
+    assert rlo.solve_grip_way(ctx, cfg, (0.5, -0.4, 0.313), 30.0, [0.0] * 7, 0.300) == (None, "stop here")
+    assert asked == [(0.5, -0.4, 0.357), (0.5, -0.4, 0.313)]
+
+
+def test_the_scene_cloud_is_moved_by_the_cameras_error_at_the_box_but_not_by_a_rough_fit(ctx):
+    """_scene_cloud moves the scene camera's table points by where the arm found the box against
+    where the scene put it: the camera's error. A ROUGH fix (a box the frame cut, scene_source.
+    SCENE_ROUGH) is off by its own fit, which is not the camera's: its cloud is kept as measured."""
+    from box_opening.models.container import ContainerPose
+
+    table = np.array([[0.40, -0.30, TABLE_Z], [0.45, -0.35, TABLE_Z]])
+    off = ContainerPose(xyz=(ctx.cpose.xyz[0] - 0.03, ctx.cpose.xyz[1], ctx.cpose.xyz[2]), yaw=ctx.cpose.yaw)
+    careful = SimpleNamespace(pose=off, table_points=table, table_z_scene=TABLE_Z)
+    pts, tz = rlo._scene_cloud(ctx, careful, None, TABLE_Z)
+    assert tz == TABLE_Z and pts[:, 0] == pytest.approx(table[:, 0] + 0.03)
+    rough = SimpleNamespace(pose=off, table_points=table, table_z_scene=TABLE_Z, rough=True)
+    pts, _tz = rlo._scene_cloud(ctx, rough, None, TABLE_Z)
+    assert pts == pytest.approx(table)

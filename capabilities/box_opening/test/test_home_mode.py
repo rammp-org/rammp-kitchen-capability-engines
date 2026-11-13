@@ -111,3 +111,18 @@ def test_every_home_a_run_plans_is_slow_under_medium(ctx, monkeypatch):
     for leg in (exit_home, run_home):
         assert leg.name == "home" and leg.goal_joints == pytest.approx(HOME)
         assert (leg.speed, leg.compliant, leg.gains) == (HOME_SPEED, True, GAINS_MEDIUM)
+
+
+def test_home_is_written_as_the_arm_reports_it_and_well_inside_the_joint_limits():
+    """The temporary HOME (2026-11-09): its continuous joints in (-pi, pi], where the arm reports them, so no
+    branch is needed to compare a live reading with it; its revolute joints 0.3 rad or more inside flatbot's
+    URDF limits (joint_2 2.24, joint_4 2.57, joint_6 2.09)."""
+    import math
+
+    from box_opening.constants import HOME
+
+    assert len(HOME) == 7
+    for i in (0, 2, 4, 6):
+        assert -math.pi < HOME[i] <= math.pi
+    for i, limit in ((1, 2.24), (3, 2.57), (5, 2.09)):
+        assert abs(HOME[i]) <= limit - 0.3

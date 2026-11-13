@@ -13,6 +13,9 @@ from box_opening.perception.d405 import quat_to_mat
 from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_press as rp
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
 BUTTON = (0.495, -0.16, 0.24)
 
@@ -1194,6 +1197,25 @@ def test_a_box_only_the_scene_camera_finds_after_the_press_goes_home_around_it(c
     assert from_container(home["cpose"], ctx.model.button_offset) == pytest.approx([0.71, -0.57, 0.40])
 
 
+def test_after_a_rough_first_fix_the_scenes_second_look_judges_no_move(ctx, tmp_path):
+    """A box the scene frame cut, placed roughly (scene_source.SCENE_ROUGH): its first fix is tens of mm
+    off on its own, so the scene's look after the press, 50 mm from it, is no moved box, and the box
+    is left where the arm found it."""
+    from conftest import runner as make_runner
+
+    top = (0.66, -0.57, 0.40)
+    first = SimpleNamespace(top_xyz=top, rough=True)
+    again = SimpleNamespace(top_xyz=(top[0] + 0.05, top[1], top[2]))
+    locator = SimpleNamespace(locate=lambda s: again)
+    before = ctx.cpose
+    rec = make_runner(ctx.client, tmp_path)
+    lost = dp.DepthPress(free=False, contact=True, lost=True)
+    res = dp.after_scene_check(ctx, rec, lost, first, locator)
+    assert res.free and res.moved is False and ctx.cpose == before
+    careful = dp.after_scene_check(ctx, rec, lost, SimpleNamespace(top_xyz=top), locator)
+    assert careful.moved is True and ctx.cpose.xyz[0] == pytest.approx(before.xyz[0] + 0.05)
+
+
 def test_a_box_the_depth_press_moved_is_a_stop_before_the_arm_goes_home(ctx, monkeypatch, tmp_path, capsys):
     def moved(ctx_):
         return dp.DepthPress(free=True, contact=True, felt=True, popped=True, moved=True)
@@ -1732,6 +1754,30 @@ def test_a_compliant_presss_record_says_what_the_shadow_beside_its_watch_made_of
     }
     assert shadow["met"] and shadow["how"] == "fast" and shadow["verdict"] is None
     assert shadow["z"] == pytest.approx(meet, abs=0.002) and shadow["after_real_ms"] is not None
+
+
+def test_a_leaning_presss_contact_band_is_wider_by_what_its_pads_corner_hangs_under_their_middle(ctx, monkeypatch):
+    """The watch measures the pads' middle; a leaning hand's pads meet the top corner first, their middle
+    fingers.pad_corner_below_m above it (4.6 mm at 25 deg). The band above the cameras' top a contact may
+    come in (CONTACT_EARLY_M) is that much wider, so the same top is judged the same at any lean:
+    2026-11-12's presses met the lid 40-44 mm over the wrist's top at 8-15 deg, a millimetre inside it."""
+    from box_opening.models.container import ContainerModel
+    from box_opening.runtime import approach, fingers
+    from box_opening.tasks import press_contact as pc
+
+    monkeypatch.setattr(approach, "_chain", lambda: object())
+    model = ContainerModel.load(PINK)
+
+    def band(lean):
+        stroke = SimpleNamespace(pad0=[0.8, -0.25, 0.40], end_z=0.28, quat=rp.reach_quat(model, (0.8, -0.25), lean))
+        lead = SimpleNamespace(stop_when=None)
+        watch = dp.watch_press(ctx, [lead], stroke, 0.316)
+        assert lead.stop_when is watch and watch.late_m == pc.CONTACT_LATE_M
+        return watch.early_m
+
+    assert band(0.0) == pytest.approx(pc.CONTACT_EARLY_M)
+    assert band(15.0) == pytest.approx(pc.CONTACT_EARLY_M + fingers.pad_corner_below_m(15.0), abs=1e-4)
+    assert band(25.0) == pytest.approx(pc.CONTACT_EARLY_M + 0.0046, abs=2e-4) and band(30.0) > band(25.0)
 
 
 def test_a_compliant_press_that_meets_the_box_below_its_top_flies_its_stroke_as_planned(ctx, monkeypatch, tmp_path):
@@ -2803,7 +2849,9 @@ def test_the_guarded_press_turns_no_further_than_5_deg_short(ctx, monkeypatch, t
     assert leans == list(dp.COMPLIANT_TURN_SHORT_DEG) and events == [] and result.free
     # smallest lean first, the guarded ones first of all: what they reach keeps its lean
     every = dp.COMPLIANT_TURN_SHORT_DEG
-    assert every[:3] == dp.TURN_SHORT_DEG and list(every) == sorted(every) and every[-1] == 15.0
+    assert every[:3] == dp.TURN_SHORT_DEG and list(every) == sorted(every)
+    # up to the look pose's own tilt (2026-11-12: boxes 0.81-0.86 m out met no press at 15 deg), no further
+    assert every[-1] == 30.0 == min(rp.REACH_TILTS_DEG) and 15.0 in every
 
 
 def test_the_walk_in_tries_only_the_guarded_leans_in_a_compliant_run_too(ctx, monkeypatch, tmp_path):

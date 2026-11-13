@@ -543,8 +543,42 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     assert argv[argv.index("--container") + 1].endswith("config/containers/ankou_pink.yaml")
     assert argv[argv.index("--bench-world") + 1].endswith("config/world_flatbot.yaml")
     assert argv[-1] == "--execute" and "--instance-id" not in argv  # standalone: no selection
+    # the chair and user the run's plan-free lines are held out of: the planner's own files
+    assert argv[argv.index("--body-layers") + 1] == "/config/robot/curobo/planner.yaml"
+    engine.set_parameters([Parameter("body_layers", value="")])
+    assert real("open_box")[real("open_box").index("--body-layers") + 1] == ""  # off: the bench
+    engine.set_parameters([Parameter("body_layers", value="/config/robot/curobo/planner.yaml")])
     argv = real("open_box", "food_container_2")  # the selection as the goal came (execute)
     assert argv[argv.index("--instance-id") + 1] == "food_container_2"
+
+
+def test_the_wrist_survey_param_asks_the_run_to_survey_and_its_looks_are_the_locate_phase(engine):
+    """Off by default (the fragment declares it so): a run whose scene camera finds no box stops with NO BOX, as
+    the owner had it. On (a chair parked side-on to a counter), the run surveys with the wrist camera
+    (tasks/survey), and its looks report the locate phase."""
+    import yaml
+
+    real = node.Capability._argv.__get__(engine)
+    assert "--wrist-survey" not in real("open_box") and node.PARAMS["wrist_survey"] is False
+    engine.set_parameters([Parameter("wrist_survey", value=True)])
+    assert "--wrist-survey" in real("open_box") and "--wrist-survey" in real("open_box", "food_container_2")
+    engine.set_parameters([Parameter("wrist_survey", value=False)])
+    fragment = yaml.safe_load(open(FRAGMENT_MOCK.with_name("rammp-alternative.yaml")))["params"]
+    assert fragment["wrist_survey"] is False and set(node.PARAMS) <= set(fragment)
+    # the wrist camera first (a table faced from the front): off by default, its own flag
+    assert "--wrist-first" not in real("open_box") and node.PARAMS["wrist_first"] is False
+    engine.set_parameters([Parameter("wrist_first", value=True)])
+    assert "--wrist-first" in real("open_box")
+    engine.set_parameters([Parameter("wrist_first", value=False)])
+    assert fragment["wrist_first"] is False
+    track = node.Tracker("open_box")
+    said = track.add({"leg": "survey:look-1", "kind": "motion", "ok": True, "outcome": "arrived"})
+    assert said == ("locate", 0.03, "looking for the container with the wrist camera")
+    assert track.add({"leg": "scene_fix", "kind": "note", "origin_xyz": [0.45, 0.4, 0.24], "source": "wrist"}) == (
+        "locate",
+        0.05,
+        "found the container at [0.45, 0.40]",
+    )
 
 
 def test_each_goal_reads_the_params_as_they_are_then(engine):
@@ -567,6 +601,57 @@ def test_each_goal_reads_the_params_as_they_are_then(engine):
         argv[argv.index("--speed-scale") + 1] == "0.5" and argv[argv.index("--container") + 1] == "/configs/other.yaml"
     )
     assert engine._env()["BOX_OPENING_VIDEO"] == "1" and engine._env()["BOX_OPENING_MISSION_FRAMES"] == "1"
+
+
+def test_a_run_is_told_on_stdout_one_short_line_a_step_beside_its_full_lines(engine, monkeypatch, capsys):
+    """The flight view (flight_view.py; the owner 2026-11-12: "easier to read in flight terminal logs so I know
+    if and what things are working or not working"): the run's lines, logged as ever through the node's logger
+    (stderr), are read as they come and told on the node's stdout one short line a step, with the result — so
+    `docker logs -f sheppy-box_opening 2>/dev/null` is the flight view alone. A run that stops says where."""
+    p = "[press_demo] "
+    given(
+        monkeypatch,
+        FULL_RUN,
+        [
+            p + "WRIST SURVEY: box at [0.645, -0.156] yaw 0.0 deg from 2982 lid points (WRIST 0.60) — reaching out",
+            p + "REACH-OUT: hand tilted 30 deg; looking from 0.15 m back toward the arm",
+            p + "AIMED from the look pose: button at [0.663, -0.154, 0.310], 18 mm from the scene camera's",
+            p + "ONE MOTION from the look pose to below the button: reach:re-aim, reach:slide-in, depth:press",
+            p + "PRESSED with ~21 N, 2 N sideways",
+            p + "GRIP STRAIGHT FROM THE PRESS: up 45 mm, the fingers opening round the knob",
+            p + "LID GRIPPED — grip 0.492 vs band [0.3, 0.55]",
+            p + "RELEASE as the retreat starts (place:retreat), then HOME, slow, in MEDIUM impedance: home",
+            p + "DONE — box open, lid set down at [0.65, 0.05] (clear), arm home",
+        ],
+    )
+    said = []
+    monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: said.append(msg))
+    capsys.readouterr()
+    engine.instance_id = "food_container_1"
+    engine.execute("open_box", {}, FakeCtx())
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("BOX OPENING   ") and out[0].endswith("food_container_1")
+    steps = [line[3:12].strip() for line in out if line[:2].strip().isdigit()]
+    assert steps == ["FIND", "LOOK", "PRESS", "GRIP", "LIFT", "CARRY", "SET DOWN", "HOME"]
+    assert all(" ok" in line for line in out if line[:2].strip().isdigit())
+    assert out[-1].startswith("RESULT  DONE — box open, lid on the table, arm home")
+    assert p + "PRESSED with ~21 N, 2 N sideways" in said  # ... and every full line still logged, as it came
+    # a run that stops: the step it ended at, why, and where things were left
+    given(
+        monkeypatch,
+        say=[
+            p + "WRIST SURVEY: box at [0.792, -0.245] yaw 0.0 deg (WRIST 0.60) — reaching out",
+            p + "STOP: no press reaches the aimed button (the way down (walk in: 0 deg short)) — nothing was pressed "
+            "— returning home",
+        ],
+        code=1,
+    )
+    with pytest.raises(EngineError):
+        engine.execute("open_box", {}, FakeCtx())
+    out = capsys.readouterr().out.splitlines()
+    assert " 2 PRESS     FAIL  the box is out of the arm's reach (0.83 m out)" in out
+    assert out[-3].startswith("RESULT  FAILED at step 2 (PRESS)")
+    assert out[-1] == "        box: not pressed    lid: on the box    arm: home"
 
 
 def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):

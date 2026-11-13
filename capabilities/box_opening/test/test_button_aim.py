@@ -807,17 +807,28 @@ def test_a_circle_on_the_lids_far_rim_is_not_the_button(pink, inc):
     nearer the camera, so the circle straddles the lid's FAR rim. From 29-39
     deg the box hides the table just past that rim, so every sample whose
     own xy is in the annulus is lid and that ring read 100% lid; the rays
-    through the annulus' far part went past the lid to the table."""
+    through the annulus' far part went past the lid to the table.
+
+    The colour here is a lid's with the circle at its middle, which no frame with this depth would show, so
+    the lid is said not to be round: the depth alone judges (LID_MIDDLE_*; a circle the colour shows across a
+    rim is test_the_colours_word_does_not_pass_a_circle_across_the_lids_rim)."""
+    import dataclasses
+
     color, depth, cam, rot, b = reach_out_frame(pink, inc)
+    by_depth = dataclasses.replace(pink, round=False)
     toward = (cam[:2] - b[:2]) / np.hypot(*(cam[:2] - b[:2]))
     for off, refused in ((0.038, True), (0.032, True), (0.0, False)):
         lid = tuple(b[:2] + off * toward)
         _, moved = render(cam, rot, [(lid, b[2], 0.0)], b[2] - BOX_H)
-        s, why = find_button(color, moved, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=tuple(b[:2]))
+        s, why = find_button(color, moved, OAK_K, rot, cam, FLAT_TABLE_Z, by_depth, prior_xy=tuple(b[:2]))
         if refused:
             assert s is None and "corner" in why, (off, why)
         else:
             assert why is None and np.hypot(s.xyz[0] - b[0], s.xyz[1] - b[1]) < 0.002
+    # with most of the ring's rays past the lid the colour's word is not enough either
+    _, moved = render(cam, rot, [(tuple(b[:2] + 0.038 * toward), b[2], 0.0)], b[2] - BOX_H)
+    s, why = find_button(color, moved, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=tuple(b[:2]))
+    assert s is None and "corner" in why, why
 
 
 @pytest.mark.parametrize("inc", [29, 39])
@@ -1952,3 +1963,321 @@ def test_a_button_with_no_depth_at_its_very_centre_is_read_off_its_disc(pink):
     s2, why2 = find_button(color, holed, OAK_K, ROT_DOWN, cam, FLAT_TABLE_Z, pink)
     assert why2 is None, why2
     assert np.hypot(s2.xyz[0] - s.xyz[0], s2.xyz[1] - s.xyz[1]) < 0.002
+
+
+def test_a_flat_disc_with_streaks_across_it_is_flat_and_one_half_over_an_edge_is_not():
+    from box_opening.perception.button_aim import DISC_STD_MAX_M, disc_spread
+
+    rng = np.random.default_rng(1)
+    flat = 0.295 + rng.normal(0, 0.001, 1000)
+    assert disc_spread(flat)[0]
+    streaked = flat.copy()
+    streaked[:160] += 0.047  # 16 % of it read 47 mm high: the 11-11 look's disc
+    ok, spread, share = disc_spread(streaked)
+    assert ok and spread < 0.002 and share == pytest.approx(0.84, abs=0.01) and np.std(streaked) > DISC_STD_MAX_M
+    streaked[160:310] += 0.047  # 31 %, the 19:29 look's: still most of it
+    assert disc_spread(streaked)[0]
+    streaked[310:450] += 0.047  # 45 %: no longer
+    assert not disc_spread(streaked)[0]
+    edge = np.r_[flat[:500], flat[500:] - 0.03]  # half on the lid, half on what is 30 mm under it
+    assert not disc_spread(edge)[0]
+    rough = 0.295 + rng.normal(0, 0.010, 1000)  # no flat top at all
+    assert not disc_spread(rough)[0]
+    assert not disc_spread([])[0]
+
+
+def test_the_button_on_the_white_table_is_found_through_the_streaks_in_its_depth():
+    """Flatbot 2026-11-11 19:13: the wrist's look found the box and the reach-out's look stood over it, the lid and
+    its button plain in the colour image; "disc not flat in base z (std 30.3 mm)" on 51 of 51 frames, and the run
+    went home. The disc's cells: 84 % within 6 mm of their median, the rest a streak 47 mm high."""
+    from conftest import fixture_path
+
+    from box_opening.models.container import ContainerModel
+    from box_opening.perception.button_aim import find_button
+
+    d = np.load(fixture_path("wrist_reach_look_flatbot_20261111_1913.npz"))
+    model = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
+    s, why = find_button(
+        d["color"],
+        d["depth"].astype(np.float32),
+        d["k"],
+        d["rot_cam"],
+        d["trans_cam"],
+        0.186,  # the table and the lid as the wrist's look had them, and its box as the prior
+        model,
+        dist=d["dist"],
+        lid_z=0.277,
+        prior_xy=(0.685, -0.260),
+        prior_max_m=0.15,
+    )
+    assert s is not None, why
+    assert s.xyz[0] == pytest.approx(0.732, abs=0.005) and s.xyz[1] == pytest.approx(-0.287, abs=0.005)
+    assert s.xyz[2] == pytest.approx(0.294, abs=0.004)
+
+
+def test_the_button_is_found_through_streaks_over_a_third_of_it():
+    """Flatbot 2026-11-11 19:29, the box 11 cm from where it stood at 19:13: 69 % of the disc at its height."""
+    from box_opening.models.container import ContainerModel
+    from box_opening.perception.button_aim import find_button
+
+    d = np.load(fixture_path("wrist_reach_look_flatbot_20261111_1929.npz"))
+    model = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
+    s, why = find_button(
+        d["color"], d["depth"].astype(np.float32), d["k"], d["rot_cam"], d["trans_cam"], 0.187, model,
+        dist=d["dist"], lid_z=0.279, prior_xy=(0.624, -0.208), prior_max_m=0.15,
+    )  # fmt: skip
+    assert s is not None, why
+    assert s.xyz[0] == pytest.approx(0.622, abs=0.005) and s.xyz[1] == pytest.approx(-0.202, abs=0.005)
+
+
+# --- the colour's word that a circle is at a round lid's middle (LID_MIDDLE_*) ---
+
+
+def _rectified_at(m, color, depth, cam, rot, b):
+    """(s, c0, grey, lifted, g) of a frame rectified on the lid's plane about the button b, as the aim does."""
+    from box_opening.perception import button_aim as ba
+
+    g, why = ba._lid_plane(tuple(b[:2]), b[2], OAK_K, rot, cam, None, depth.shape[:2])
+    assert g is not None, why
+    got, why = ba._rectified(color, depth, OAK_K, rot, cam, None, g, m.button_diameter_m / 2.0)
+    assert got is not None, why
+    return (*got, g)
+
+
+def _ring_reads_the_table(depth, cam, rot, b, table_z, one_in):
+    """`depth` with the lid ring around the button b reading the table on one band of rows in `one_in`: the
+    wrist's depth through a glossy lid (flatbot 2026-11-11 19:29: a sixth of the ring's cells)."""
+    p = _hits(depth, cam, rot)
+    vv = np.mgrid[0 : depth.shape[0], 0 : depth.shape[1]][0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rho = np.hypot(p[..., 0] - b[0], p[..., 1] - b[1])
+        ring = (rho > 1.05 * BUTTON_R) & (rho < 1.65 * BUTTON_R) & (np.abs(p[..., 2] - b[2]) < 0.005)
+        down = (table_z - cam[2]) / ((p[..., 2] - cam[2]) / depth)  # the same ray, down to the table
+    out = depth.copy()
+    m = ring & ((vv // 2) % one_in == 0)
+    out[m] = down[m]
+    return out
+
+
+@pytest.mark.parametrize("inc", [29, 39])
+def test_a_round_lids_circles_have_the_buttons_centre_and_no_other(pink, inc):
+    """The lid's rim is a circle about its button: Hough finds it in the rectified image, its centre the
+    button's to LID_MIDDLE_AT_M, and no circle of a lid's kind is centred 10 mm or more from the button — not
+    beside it on the lid, not on the bare table."""
+    from box_opening.perception.button_aim import LID_MIDDLE_AT_M, at_lid_middle, lid_circles
+
+    color, depth, cam, rot, b = reach_out_frame(pink, inc)
+    s, c0, gray, _lifted, _g = _rectified_at(pink, color, depth, cam, rot, b)
+    ratio = pink.lid_dims[0] / pink.button_diameter_m
+    rims = lid_circles(gray, ratio)
+    assert len(rims) >= 1
+    off = np.hypot(rims[:, 0] - c0, rims[:, 1] - c0) / s
+    assert off.min() < 0.002 and off.max() < LID_MIDDLE_AT_M + 0.002  # every one of them the lid's own
+    assert np.all(np.abs(rims[:, 2] / s - LID_R) < 0.006)
+    assert at_lid_middle(rims, c0, c0, s)
+    for mm in (10, 20, 30, 60, 110):
+        for a in np.radians((0, 90, 180, 270)):
+            assert not at_lid_middle(rims, c0 + mm / 1000 * s * np.cos(a), c0 + mm / 1000 * s * np.sin(a), s), (mm, a)
+    assert not at_lid_middle(lid_circles(gray, 0.5), c0, c0, s)  # no lid wider than the ring: no circle to seek
+    assert not at_lid_middle(np.zeros((0, 3)), c0, c0, s)
+
+
+@pytest.mark.parametrize("inc", [29, 39])
+def test_a_ring_reading_the_table_on_a_third_of_it_is_the_lid_where_the_colour_shows_the_lids_middle(pink, inc):
+    """On a glossy lid over a plain table the wrist's depth reads the table through parts of the lid (flatbot
+    2026-11-11 19:29: 84-89 % of the ring's rays met the lid, 80 % asked). With a third of the ring so, the
+    depth alone refuses the circle as one across the lid's rim; the colour shows the lid's rim about it, and it
+    is the button, where it is, flush. Half the ring so is refused whatever the colour says, and so is a third
+    on a lid that is not round, or whose button is not at its middle: the colour has no word on those."""
+    import dataclasses
+
+    color, depth, cam, rot, b = reach_out_frame(pink, inc)
+    prior = tuple(b[:2])
+    third = _ring_reads_the_table(depth, cam, rot, b, b[2] - BOX_H, 3)
+    s, why = find_button(color, third, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=prior)
+    assert s is not None and s.lid_middle, why
+    assert np.hypot(s.xyz[0] - b[0], s.xyz[1] - b[1]) < 0.002 and abs(s.xyz[2] - b[2]) < 0.003
+    assert abs(s.above_lid_m) < 0.003 and s.lid_z_m == pytest.approx(b[2], abs=0.003)
+    s0, why0 = find_button(color, depth, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=prior)
+    assert s0 is not None and not s0.lid_middle, why0  # sound depth: the colour is not asked
+    assert np.hypot(s.xyz[0] - s0.xyz[0], s.xyz[1] - s0.xyz[1]) < 0.001
+    half = _ring_reads_the_table(depth, cam, rot, b, b[2] - BOX_H, 2)
+    s, why = find_button(color, half, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=prior)
+    assert s is None and "of its rays meet it" in why, why
+    for other in (
+        dataclasses.replace(pink, round=False),
+        dataclasses.replace(pink, button_offset=(0.01, 0.0, pink.button_offset[2])),
+    ):
+        s, why = find_button(color, third, OAK_K, rot, cam, FLAT_TABLE_Z, other, prior_xy=prior)
+        assert s is None and "of its rays meet it" in why, why
+
+
+def test_the_colours_word_does_not_pass_a_circle_across_the_lids_rim(pink):
+    """What ANNULUS_MIN_FRAC is for: a button-sized circle 35 mm from the lid's middle has its ring across the
+    rim — to a side, where the table shows beside the lid, and on the far side, where the box hides the table and
+    only the ring's rays tell. No circle of the lid's kind has its centre there, so the ring is held to the
+    depth's own share and refused as before; the same circle on the button passes without the colour being
+    asked."""
+    from box_opening.perception import button_aim as ba
+
+    color, depth, cam, rot, b = reach_out_frame(pink, 39)
+    s, c0, gray, lifted, g = _rectified_at(pink, color, depth, cam, rot, b)
+    rb = pink.button_diameter_m / 2.0
+    rims = ba.lid_circles(gray, pink.lid_dims[0] / pink.button_diameter_m)
+    asked = []
+
+    def colour(cu, cv):
+        def middle():
+            asked.append(ba.at_lid_middle(rims, cu, cv, s))
+            return asked[-1]
+
+        return middle
+
+    hit, why = ba._oblique_circle(lifted, c0, c0, ba.OBLIQUE_BUTTON_PX, s, c0, g, b[2], cam, rb, None, colour(c0, c0))
+    assert hit is not None and not hit[5] and not asked, why
+    away = (b[:2] - cam[:2]) / np.hypot(*(b[:2] - cam[:2]))
+    for d in ((-away[1], away[0]), (away[1], -away[0]), away):  # to either side of the view, and beyond the button
+        cu, cv = c0 + 0.035 * s * d[0], c0 + 0.035 * s * d[1]
+        del asked[:]
+        hit, why = ba._oblique_circle(
+            lifted, cu, cv, ba.OBLIQUE_BUTTON_PX, s, c0, g, b[2], cam, rb, None, colour(cu, cv)
+        )
+        assert hit is None and "ring around it is not one lid" in why, (d, why)
+        assert asked == [False], d
+
+
+@pytest.mark.parametrize(
+    "inc,keep,high,why_not",
+    [
+        (39, 5, 3, "a height not settled"),  # depth on a fifth of the disc's rows, 16 mm high on a third of the rest
+        (29, 5, 2, "a knob read proud"),  # ... on half of the rest: most of the disc's depth, a knob 14 mm up
+    ],
+)
+def test_the_colours_word_is_taken_only_for_a_flush_button_at_a_settled_height(pink, inc, keep, high, why_not):
+    """The colour says where the lid's middle is, not how high its button stands: where it stands in for the
+    ring's depth, the disc's depth is still what places the circle along its ray. With the disc's own depth on
+    one row in five and wrong depth, 16 mm high, on more rows than that, the circle is placed by the wrong
+    depth — 9 mm off, the height it was placed at 13-16 mm from the one then measured there — or read as a knob
+    14 mm proud, 7 mm off. Neither is taken on the colour's word: the ring's own refusal stands."""
+    color, depth, cam, rot, b = reach_out_frame(pink, inc)
+    p = _hits(depth, cam, rot)
+    vv = np.mgrid[0 : depth.shape[0], 0 : depth.shape[1]][0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rho = np.hypot(p[..., 0] - b[0], p[..., 1] - b[1])
+        lid = np.abs(p[..., 2] - b[2]) < 0.005
+        per_m = (p[..., 2] - cam[2]) / depth  # base z per metre of depth along each ray
+    rough = _ring_reads_the_table(depth, cam, rot, b, b[2] - BOX_H, 3)
+    disc = (rho < BUTTON_R - 0.002) & lid
+    rough[disc & (vv % keep != 0)] = 0.0
+    wrong = disc & ((vv + 1) % high == 0) & (vv % keep != 0)
+    rough[wrong] = (depth + 0.016 / per_m)[wrong]
+    s, why = find_button(color, rough, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=tuple(b[:2]))
+    assert s is None and "ring around it is not one lid" in why, (why_not, s, why)
+
+
+def _white_table_look(name, table_z, lid_z, prior_xy, model, depth=None):
+    d = np.load(fixture_path(name))
+    return d, find_button(
+        d["color"], d["depth"].astype(np.float32) if depth is None else depth, d["k"], d["rot_cam"], d["trans_cam"],
+        table_z, model, dist=d["dist"], lid_z=lid_z, prior_xy=prior_xy, prior_max_m=0.15,
+    )  # fmt: skip
+
+
+def _lid_rows_read_the_table(d, button_xy, lid_z, table_z, one_in):
+    """A saved frame's depth with the lid ring about `button_xy` (24-40 mm out) reading `table_z` on one band
+    of three rows in `one_in`."""
+    k, rot, cam = d["k"], d["rot_cam"], d["trans_cam"]
+    depth = d["depth"].astype(np.float32)
+    vv, uu = np.mgrid[0 : depth.shape[0], 0 : depth.shape[1]]
+    ray = np.stack([(uu - k[0, 2]) / k[0, 0], (vv - k[1, 2]) / k[1, 1], np.ones(depth.shape)], -1) @ rot.T
+    lam = (lid_z - cam[2]) / ray[..., 2]
+    rho = np.hypot(cam[0] + lam * ray[..., 0] - button_xy[0], cam[1] + lam * ray[..., 1] - button_xy[1])
+    m = (rho > 0.024) & (rho < 0.040) & ((vv // 3) % one_in == 0)
+    depth[m] = ((table_z - cam[2]) / ray[..., 2])[m]
+    return depth
+
+
+def test_the_1110_look_on_the_white_table_finds_its_button():
+    """Flatbot 2026-11-10 17:45, the one frame its look saved (study/demo/calib: "0 of 10 find the button", every
+    prior and both wrist mounts, "disc not flat in base z (std 11-18 mm)"; 49 of 49 frames live). With the wrist's
+    own table and lid as the prior the button is where the colour image's seam puts it, flush: the depth's own
+    shares hold on this frame (94 % of the disc at its height, 97 % of the ring), and the colour is not asked."""
+    from box_opening.models.container import ContainerModel
+
+    model = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
+    d, (s, why) = _white_table_look("wrist_reach_look_flatbot_20261110_1745.npz", 0.200, 0.292, (0.718, -0.359), model)
+    assert s is not None and not s.lid_middle, why
+    assert s.xyz[0] == pytest.approx(0.709, abs=0.004) and s.xyz[1] == pytest.approx(-0.346, abs=0.004)
+    assert s.xyz[2] == pytest.approx(0.291, abs=0.004) and abs(s.above_lid_m) < 0.003
+
+
+@pytest.mark.parametrize(
+    "name,table_z,lid_z,prior,button",
+    [
+        ("wrist_reach_look_flatbot_20261110_1745.npz", 0.200, 0.292, (0.718, -0.359), (0.709, -0.346, 0.2919)),
+        ("wrist_reach_look_flatbot_20261111_1913.npz", 0.186, 0.277, (0.685, -0.260), (0.732, -0.287, 0.2933)),
+    ],
+)
+def test_a_white_table_look_with_a_third_of_its_ring_reading_the_table_still_finds_the_button(
+    name, table_z, lid_z, prior, button
+):
+    """The 11-10 and 11-11 19:13 looks, whose rings read sound as saved, with the fault the 19:29 look's ring
+    showed (cells reading the table through the lid) on one band of rows in three: the depth alone refuses them
+    (a lid said not to be round has no more to go by); the colour shows the lid's rim about the circle and the
+    button is found where it was, within 2 mm."""
+    import dataclasses
+
+    from box_opening.models.container import ContainerModel
+
+    model = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
+    d, (s0, why0) = _white_table_look(name, table_z, lid_z, prior, model)
+    assert s0 is not None and not s0.lid_middle, why0
+    wrist_table = table_z + (s0.table_offset_raw_m if np.isfinite(s0.table_offset_raw_m) else 0.0)
+    rough = _lid_rows_read_the_table(d, button[:2], button[2], wrist_table, 3)
+    _, (s, why) = _white_table_look(name, table_z, lid_z, prior, dataclasses.replace(model, round=False), rough)
+    assert s is None and "ring around it is not one lid" in why, why
+    _, (s, why) = _white_table_look(name, table_z, lid_z, prior, model, rough)
+    assert s is not None and s.lid_middle, why
+    assert np.hypot(s.xyz[0] - s0.xyz[0], s.xyz[1] - s0.xyz[1]) < 0.002 and abs(s.xyz[2] - s0.xyz[2]) < 0.002
+    assert abs(s.above_lid_m - s0.above_lid_m) < 0.002
+
+
+def test_the_1059_aim_whose_ring_read_78_percent_lid_is_the_button_by_the_colour():
+    """Flatbot 2026-10-30 10:59:01, the reach-out's aim: the live aim, over its fused frames, pressed at
+    [0.6164, -0.1194]. The one frame it saved reads 78 % of the ring at the lid's height, 80 % asked: "ring around
+    it is not one lid — a corner?" by the depth alone. The edges trace the lid's rim about that circle, and it is
+    the button, 3 mm from where the live aim put it."""
+    import dataclasses
+
+    from box_opening.models.container import ContainerModel
+
+    d = np.load(fixture_path("wrist_reach_aim_flatbot_20261030_1059.npz"))
+    model = ContainerModel.load("capabilities/box_opening/config/containers/ankou_pink.yaml")
+    args = (d["color"], d["depth"].astype(np.float32), d["k"], d["rot_cam"], d["trans_cam"], float(d["table_z"]))
+    kw = dict(dist=d["dist"], lid_z=float(d["lid_z"]), prior_xy=tuple(float(v) for v in d["prior_xy"]))
+    s, why = find_button(*args, dataclasses.replace(model, round=False), **kw)
+    assert s is None and "ring around it is not one lid (78% at its height)" in why, why
+    s, why = find_button(*args, model, **kw)
+    assert s is not None and s.lid_middle, why
+    live = d["live_press_xyz"]
+    assert np.hypot(s.xyz[0] - live[0], s.xyz[1] - live[1]) < 0.005 and abs(s.xyz[2] - live[2]) < 0.006
+    assert abs(s.above_lid_m) < 0.003  # shut, as the live aim read it (0.5 mm)
+
+
+def test_the_aimer_counts_the_hits_taken_on_the_colours_word(aimer_env, monkeypatch):
+    from box_opening.perception import button_aim
+    from box_opening.perception.button_aim import ButtonSighting
+
+    g, model, _poses, _calls, _found = aimer_env
+    script = [True, False, True]
+
+    def scripted(*a, **kw):
+        return ButtonSighting(
+            xyz=(0.5, -0.16, 0.29), uv=(320.0, 200.0), r_px=30.0, range_m=0.3, diameter_m=0.044, above_lid_m=0.001,
+            oblique=True, lid_middle=script.pop(0),
+        ), None  # fmt: skip
+
+    monkeypatch.setattr(button_aim, "find_button", scripted)
+    aimer = button_aim.ButtonAimer(g, model, FLAT_TABLE_Z, min_hits=2)
+    _paired_frames(aimer, g, 3)
+    assert aimer.hits == 3 and aimer.by_lid_middle == 2

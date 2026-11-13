@@ -14,6 +14,9 @@ import pytest
 from box_opening.constants import HOME
 from box_opening.runtime.branches import on_branch, planner_branch
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 HOME_AS_REPORTED = [
     0.0671,
     -1.8969,

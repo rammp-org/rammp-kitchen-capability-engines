@@ -14,14 +14,18 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import HOME_20261021 as HOME  # the HOME these recorded runs started from; LINE below is built on it
 from conftest import FakeClient, flatbot_urdf
+from trajectory_msgs.msg import JointTrajectoryPoint
 
-from box_opening.constants import HOME
 from box_opening.primitives import core
 from box_opening.primitives.core import ClearMarginFree, PlanState
 from box_opening.runtime import approach
 from box_opening.runtime.kinematics import ArmChain
 from box_opening.tasks import cli_common, home_arm
+
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
 
 PKG = Path(__file__).resolve().parents[1]
 FLATBOT_WORLD = str(PKG / "config" / "world_flatbot.yaml")
@@ -196,8 +200,14 @@ def test_without_the_arm_description_the_planner_has_the_last_word(monkeypatch):
 
 
 def test_no_step_up_to_the_cap_that_plans_is_refused(monkeypatch):
+    # where no clear-margin step plans, the soft step clear is tried too (2026-11-10), and HOME asked for from its
+    # end: refused there too, the refusal names both
     ctx = _flatbot_ctx(monkeypatch, STUCK, client=NeverPlans())
-    with pytest.raises(RuntimeError, match="no plan-free step toward HOME of up to 0.35 rad per joint"):
+    with pytest.raises(
+        RuntimeError,
+        match="did not plan from the end of the soft step clear .taken because no plan-free step toward HOME of up "
+        "to 0.35 rad per joint",
+    ):
         home_arm.build_legs(ctx)
     largest = max(np.max(np.abs(np.array(q) - STUCK)) for q in ctx.client.joint_starts)
     assert largest <= core.CLEAR_MARGIN_MAX_STEP_RAD + 1e-9
@@ -296,3 +306,54 @@ def test_the_weight_coming_back_onto_the_joints_is_not_a_strike(monkeypatch):
 def test_a_push_once_the_step_is_under_way_still_trips(monkeypatch):
     trips = _step_replay(monkeypatch, push_from=0.5, push_nm=5.0)
     assert trips["step"] == pytest.approx(0.5, abs=0.011)
+
+
+def test_off_a_limit_no_longer_step_is_tried_once_the_steps_have_taken_too_long_to_plan(monkeypatch):
+    # 2026-11-11, the rig: one pose took 30 s to refuse, each step off the limit planning HOME and three waypoints
+    from types import SimpleNamespace
+
+    from conftest import traj
+
+    asked = []
+
+    def plan_to(at, name, q):
+        asked.append(name)
+        return SimpleNamespace(name=name, goal_joints=list(q), traj=traj(list(at.joints), list(q)))
+
+    monkeypatch.setattr(core, "HOME_LIMIT_S", -1.0)
+    ctx = _flatbot_ctx(monkeypatch, STUCK)
+    said = []
+    legs = core.home_any(ctx, PlanState(joints=list(STUCK), chain=0), list(HOME), plan_to, say=said.append)
+    # no step off the limit was planned from: the soft step clear instead (off the limits too), and HOME from its end
+    assert [leg.name for leg in legs] == ["escape-body", "home"]
+    assert asked == ["home"]
+    assert any("the steps had taken -1 s to plan and no longer one was tried" in s for s in said)
+
+
+def test_off_a_limit_a_plan_home_that_swings_wide_goes_through_a_waypoint_from_the_steps_end(monkeypatch):
+    # flatbot 2026-11-10: after a 4% clear-margin step every plan HOME swung joint_1 0.9 rad out and back, and the
+    # runner's sanity gate refused it at execution; now it is refused at planning, and HOME goes through the
+    # joint line's waypoint from the shortest step's end
+    from types import SimpleNamespace
+
+    from conftest import traj
+
+    asked = []
+
+    def plan_to(at, name, q):
+        asked.append((name, round(_along(at.joints), 3)))
+        t = traj(list(at.joints), list(q))
+        if name == "home" and _along(at.joints) < 0.45:  # HOME from the steps swings wide
+            mid = JointTrajectoryPoint()
+            mid.positions = [(a + b) / 2 for a, b in zip(at.joints, q, strict=True)]
+            mid.positions[0] = float(at.joints[0]) + 0.9
+            t.points.insert(1, mid)
+        return SimpleNamespace(name=name, goal_joints=list(q), traj=t)
+
+    ctx = _flatbot_ctx(monkeypatch, STUCK)
+    said = []
+    legs = core.home_any(ctx, PlanState(joints=list(STUCK), chain=0), list(HOME), plan_to, say=said.append)
+    assert [leg.name for leg in legs] == ["clear-margin", "home-waypoint", "home"]
+    assert asked[0] == ("home", pytest.approx(0.288, abs=1e-3))  # the shortest step, its direct plan swings
+    assert asked[1][0] == "home-waypoint" and asked[1][1] == pytest.approx(0.288, abs=1e-3)
+    assert any("through a waypoint 50%" in s and "swung wide" in s for s in said)

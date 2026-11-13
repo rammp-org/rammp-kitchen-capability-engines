@@ -61,8 +61,9 @@ from box_opening.constants import (
 )
 from box_opening.models.container import ContainerPose
 from box_opening.primitives.core import CONTACT_SHIFT_PAD_M, _full_world, _push_guard_and_verify
+from box_opening.runtime import fingers
 from box_opening.runtime.guards import GuardSpec, sanity_violations
-from box_opening.runtime.kinematics import MAX_STEP_RAD, mat_to_quat_xyzw
+from box_opening.runtime.kinematics import MAX_STEP_RAD, around_body, mat_to_quat_xyzw
 from box_opening.tasks import reach_press as rp
 
 DOWN_CONTACT_TOOL = (0.0, 0.0, TCP_OFFSET_M)  # the closed pads straight down, in tool_frame (the straight-down press's)
@@ -88,7 +89,18 @@ TURN_SHORT_DEG = (0.0, 2.0, 5.0)
 # lean. The guarded press (_press_down) keeps TURN_SHORT_DEG: its close-up
 # look and DEPTH assume the lens points down, and 5 deg already costs
 # ~14 mm (_off_in_world).
-COMPLIANT_TURN_SHORT_DEG = (0.0, 2.0, 5.0, 8.0, 10.0, 12.0, 15.0)
+#
+# Past 15 deg (2026-11-12): flatbot's boxes that day stood 0.79-0.86 m out on a 29 in table, the lid
+# 0.36 over the arm's mount, and every one past 0.80 m stopped "no press reaches the aimed button"
+# (19:12:26 at 0.86, 20:15:41 at 0.85, 20:18:31 at 0.81). Replayed on flatbot's URDF with the chair
+# and its user (the same solver, way_down, from those runs' look poses): the least lean that flies
+# is 8-12 deg at 0.78 m, 15 at 0.80, 18-20 at 0.82, 22 at 0.84, 25 at 0.86, 28 at 0.88, and none
+# past 0.88-0.90 m at any lean up to 30; at each the rise off the hold and the lift fly too. The
+# look pose's own tilt is 30 (reach_press.REACH_TILTS_DEG's first), so a hand 30 short does not
+# turn at all. What the lean costs is the grip's: the pads' ends slant with the hand
+# (fingers.pad_corner_below_m: 4.6 mm at 25 deg), so the contact band and the grip's place across
+# the knob allow for it (watch_press, reach_lid_off.grip_shift_m). Not flown past 15.
+COMPLIANT_TURN_SHORT_DEG = (0.0, 2.0, 5.0, 8.0, 10.0, 12.0, 15.0, 18.0, 20.0, 22.0, 25.0, 28.0, 30.0)
 # An in-place turn (turn_down_path) whose joint arc — the sum of its steps'
 # lengths in joint space — is longer than this is refused, and the next lean
 # tried. Flatbot's URDF, boxes 0.64-0.82 m out under a lid at 0.3125: every
@@ -684,18 +696,34 @@ def line_refusal(chain, pts):
     return "trajectory sanity gate: " + "; ".join(bad) if bad else None
 
 
-def turn_walk(chain, model, q, tip, shorts=TURN_SHORT_DEG, max_arc_rad=None):
+def _around(around_body):
+    """The keyword turn_walk and the paths that call it hand on: none where
+    nothing asks the re-plan round the body (the plain line, as always)."""
+    return {} if around_body is None else {"around_body": around_body}
+
+
+def turn_walk(chain, model, q, tip, shorts=TURN_SHORT_DEG, max_arc_rad=None, around_body=None):
     """The walk from joints `q` to the straight-down hand with its pads at
     `tip` (turn_target), each step solved from the last at TURN_STEP_M and
     TURN_STEP_RAD, no joint jumping more than TURN_MAX_JUMP_RAD between two
     — nor, with `max_arc_rad`, the whole walk longer than that in joint
     space (joint_arc) — and one the runner flies (line_refusal): `shorts`
-    tried in order. Returns (points, quat, short, None) or (None, None,
-    None, why)."""
+    tried in order. `around_body` (kinematics.around_body's): a walk the
+    chair's body model refuses is re-planned round it, the elbow swung out
+    of the way, before the next lean is tried. Returns (points, quat,
+    short, None) or (None, None, None, why)."""
     whys = []
     for short in shorts:
         quat, goal = turn_target(model, tip, short)
-        pts, why = chain.walk(q, goal, quat, step_m=TURN_STEP_M, step_rad=TURN_STEP_RAD, max_step_rad=TURN_MAX_JUMP_RAD)
+        pts, why = chain.walk(
+            q,
+            goal,
+            quat,
+            step_m=TURN_STEP_M,
+            step_rad=TURN_STEP_RAD,
+            max_step_rad=TURN_MAX_JUMP_RAD,
+            **_around(around_body),
+        )
         arc = None if pts is None or max_arc_rad is None else joint_arc(pts)
         if arc is not None and arc > max_arc_rad:
             pts, why = None, "a turn of %.2f rad of joint arc" % arc
@@ -707,7 +735,7 @@ def turn_walk(chain, model, q, tip, shorts=TURN_SHORT_DEG, max_arc_rad=None):
     return None, None, None, "; ".join(whys)
 
 
-def walk_down_path(chain, model, q, start_xyz, quat):
+def walk_down_path(chain, model, q, start_xyz, quat, around_body=None):
     """walk_in_down's path from joints `q` (turn_walk's return): to the
     straight-down hand whose pads stand where the hand at `quat` puts its
     fingertip (rp.CONTACT_TOOL) at the slide's end `start_xyz`. Only
@@ -715,22 +743,24 @@ def walk_down_path(chain, model, q, start_xyz, quat):
     (2026-10-27) the walks 10-15 deg short "fly" only by swinging joint_1
     1.6-1.9 rad, the elbow travelling 247-312 mm, and the 10 deg one is
     near-singular — its worst step 0.138 rad of TURN_MAX_JUMP_RAD's 0.15.
-    Such a box slides in and turns in place (COMPLIANT_TURN_SHORT_DEG)."""
+    Such a box slides in and turns in place (COMPLIANT_TURN_SHORT_DEG).
+    `around_body`: turn_walk's."""
     tip = np.asarray(start_xyz, float) + rp._rot(quat) @ np.asarray(rp.CONTACT_TOOL)
-    return turn_walk(chain, model, q, tip, TURN_SHORT_DEG)
+    return turn_walk(chain, model, q, tip, TURN_SHORT_DEG, **_around(around_body))
 
 
-def turn_down_path(chain, model, q, contact_tool, shorts=TURN_SHORT_DEG):
+def turn_down_path(chain, model, q, contact_tool, shorts=TURN_SHORT_DEG, around_body=None):
     """turn_down's path from joints `q`, about the fingertip (`contact_tool`,
     in tool_frame) where fk puts it: ([], the hand's quat, 0.0, None) when
     it is within 1 deg of straight down already, else turn_walk's return,
-    no turn longer than TURN_MAX_ARC_RAD of joint arc."""
+    no turn longer than TURN_MAX_ARC_RAD of joint arc. `around_body`:
+    turn_walk's."""
     R, t = chain.fk(q)
     R = np.asarray(R, float)
     if math.degrees(math.acos(float(np.clip(-R[2, 2], -1.0, 1.0)))) < 1.0:
         return [], mat_to_quat_xyzw(R), 0.0, None  # straight down already
     tip = np.asarray(t, float) + R @ np.asarray(contact_tool, float)
-    return turn_walk(chain, model, q, tip, shorts, max_arc_rad=TURN_MAX_ARC_RAD)
+    return turn_walk(chain, model, q, tip, shorts, max_arc_rad=TURN_MAX_ARC_RAD, **_around(around_body))
 
 
 def turn_down(ctx, runner, contact_tool, ref, q=None, shorts=TURN_SHORT_DEG):
@@ -743,7 +773,10 @@ def turn_down(ctx, runner, contact_tool, ref, q=None, shorts=TURN_SHORT_DEG):
     from box_opening.runtime import approach
 
     q = ctx.client.joints() if q is None else q
-    pts, quat, short, why = turn_down_path(approach._chain(), ctx.model, q, contact_tool, shorts)
+    chain = approach._chain()
+    pts, quat, short, why = turn_down_path(
+        chain, ctx.model, q, contact_tool, shorts, **around_body(chain, rp.way_in_guard(ctx, chain))
+    )
     if pts is None:
         return None, False, "no straight-down hand reaches here (%s)" % why
     if not pts:
@@ -774,7 +807,10 @@ def walk_in_down(ctx, start_xyz, quat, q=None):
     from box_opening.runtime import approach
 
     q = ctx.client.joints() if q is None else q
-    pts, down, short, why = walk_down_path(approach._chain(), ctx.model, q, start_xyz, quat)
+    chain = approach._chain()
+    pts, down, short, why = walk_down_path(
+        chain, ctx.model, q, start_xyz, quat, **around_body(chain, rp.way_in_guard(ctx, chain))
+    )
     if pts is None:
         return None, None, why
     if short:
@@ -1317,6 +1353,9 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         return None
     slow_z = float(top_z) + TOUCH_SLOW_M
     start_z = float(np.asarray(stroke.pad0, float)[2]) if stroke.pad0 is not None else slow_z
+    # a leaning hand's pads meet the top corner first, their middle (what the watch measures) that much
+    # above it: the band above the top is as much wider, so the same top is judged the same at any lean
+    corner = fingers.pad_corner_below_m(_lean_deg(stroke.quat)) if stroke.quat is not None else 0.0
     contact = PressContact(
         approach._chain(),
         ctx.client,
@@ -1327,7 +1366,7 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         cut=cut,
         final=True,
         slow_z=slow_z,
-        early_m=CONTACT_EARLY_M,
+        early_m=CONTACT_EARLY_M + corner,
         late_m=CONTACT_LATE_M,
         abort_on_failure=True,
     )
@@ -1932,6 +1971,12 @@ def after_scene_check(ctx, runner, result, scene_fix, locator):
         return result
     d = np.asarray(again.top_xyz, float) - np.asarray(scene_fix.top_xyz, float)
     moved = math.hypot(d[0], d[1]) > rp.SCENE_MOVED_M or abs(d[2]) > rp.SCENE_MOVED_M
+    if getattr(scene_fix, "rough", False):
+        # a rough first fix (a box the frame cut, scene_source.SCENE_ROUGH) is tens of mm off on its
+        # own: the scene's two looks say nothing of a move. The box was found: that is all it says
+        runner.note("depth_after_scene", found=True, scene_rough=True)
+        log.info("[press_demo] AFTER: the scene camera finds the box again (its first fix was rough: no move judged)")
+        return dataclasses.replace(result, free=True, moved=False)
     runner.note(
         "depth_after_scene",
         found=True,

@@ -258,6 +258,9 @@ def test_the_scene_fix_row_keeps_the_looks_seconds_and_the_segmenters_verdict(mo
     run_main(monkeypatch, tmp_path, ["--execute", "--press-only"], _at_staging(), client=client)
     (row,) = (r for r in rows_of(tmp_path) if r["leg"] == "scene_fix")
     assert row["timing"] == {"streams_s": 0.1} and row["segmenter"] == {"state": "live", "frames": 3}
+    # ... and the box's height as this run measured it: the fix's top over the table it was read on
+    assert row["box_height_mm"] == pytest.approx(1000.0 * (row["top_xyz"][2] - row["table_z_scene"]), abs=0.11)
+    assert row["rough"] is False
 
 
 class _Hears(FakeClient):

@@ -39,6 +39,7 @@ from box_opening.constants import (
 )
 from box_opening.geometry import ang_diff
 from box_opening.runtime.abort import ArmHalted
+from box_opening.runtime.approach import goal_refusal
 from box_opening.runtime.driver import contact_profile_for
 from box_opening.runtime.guards import (
     ARM_AFTER_CAP,
@@ -486,7 +487,7 @@ def _path_speed_peak(traj):
     return best
 
 
-def line_profile(leg, params, time_scale=1.0):
+def line_profile(leg, params, time_scale=1.0, speed_cap=None):
     """The free-air line `leg` as a re-timed profile, or None to fly it as
     before (dilated by its speed).
 
@@ -500,7 +501,10 @@ def line_profile(leg, params, time_scale=1.0):
     compliant run's, Runner.retime_params) the profile flies even where it
     takes the longer: the dilated line eases at 6 x speed**2 and knows no
     ceiling — at 0.55 a 0.6 rad joint_6 line would run that joint at 0.61
-    rad/s, and above 0.5 its ease is harsher than the compliant one."""
+    rad/s, and above 0.5 its ease is harsher than the compliant one. Where
+    `speed_cap` (the speed near the user, retime_group's) slows any of it,
+    the profile flies too, however long it takes: a dilated line knows no
+    such cap."""
     from box_opening.runtime.driver import dilate
 
     s = float(leg.speed)
@@ -509,10 +513,12 @@ def line_profile(leg, params, time_scale=1.0):
     p = replace(params, accel=params.accel * s, decel=params.decel * s, time_scale=float(time_scale))
     cruise = s
     for _ in range(6):
-        traj, _info = retime_group([leg.traj], [cruise], JOINT_VMAX, p)
+        traj, info = retime_group(
+            [leg.traj], [cruise], JOINT_VMAX, p, **({} if speed_cap is None else {"speed_cap": speed_cap})
+        )
         peak = _path_speed_peak(traj)
         if peak <= v_max * (1.0 + 1e-6):
-            if p.qd_ceiling is not None:
+            if p.qd_ceiling is not None or info.get("capped_samples"):
                 return traj
             return traj if secs(traj.points[-1].time_from_start) < secs(ref.points[-1].time_from_start) else None
         cruise *= 0.98 * v_max / peak
@@ -556,6 +562,9 @@ class Runner:
         # mission may replace it with the container's motion: block. Every
         # re-timing reads it through retime_params (a compliant run's own)
         self.retime = RetimeParams()
+        # every motion this runner re-times slowed near the user, where a body model says where
+        # the user is (near_user_cap: None with no body model, the bench's and the tests')
+        self.slow_near_user = True
         self.last_retime = None  # report of the most recent re-timed group
         # whole-run slow mode (--speed-scale): dilates every motion, guarded
         # strokes included — a first attempt at a new placement runs at a
@@ -572,6 +581,28 @@ class Runner:
         # the newest flight file's write, on a thread of its own (_keep_flight):
         # joined before the next goal goes out, so no write ever runs under a motion
         self._flight_write = None
+
+    def near_user_cap(self):
+        """retime_group's speed_cap for every motion this runner re-times: the speed near the user
+        of the body model attached to the chain (runtime/body Body.near_user_caps, robot-body
+        config), or None (no body model, or slow_near_user off). Read at every call, as the body
+        is attached after the runner is made. A guarded stroke flown on its own keeps its
+        dilated or warped timing, tuned to its contact (a guarded run's only: a compliant run's
+        every leg is re-timed here)."""
+        if not self.slow_near_user:
+            return None
+        from box_opening.runtime.approach import body_check
+
+        check = body_check()
+        if check is None or check.model.near_user is None:
+            return None
+        return check.near_user_caps
+
+    def _near_user_kw(self):
+        """retime_group's and line_profile's keyword for near_user_cap: none at all where there is
+        no cap, so a re-timing with no body model is called exactly as before."""
+        cap = self.near_user_cap()
+        return {} if cap is None else {"speed_cap": cap}
 
     def retime_params(self, leg=None):
         """What this runner re-times a motion with: every group it profiles
@@ -634,6 +665,7 @@ class Runner:
                         replace(self.retime_params(group[0]), time_scale=self.time_scale),
                         folds=[g.fold for g in group],
                         step_caps=_step_caps(group),
+                        **self._near_user_kw(),
                     )
                     per = info["duration_s"] / len(group)
                     for g in group:
@@ -648,7 +680,7 @@ class Runner:
                 flies = "%.2f" % flown[id(leg)]
             else:
                 line = (
-                    line_profile(leg, self.retime_params(leg), self.time_scale)
+                    line_profile(leg, self.retime_params(leg), self.time_scale, **self._near_user_kw())
                     if leg.kind is Kind.MOTION and leg.traj is not None and _free_air_line(leg)
                     else None
                 )
@@ -727,6 +759,15 @@ class Runner:
                     return "trajectory sanity gate: " + "; ".join(bad)
             if leg.guard is not None and not self.client.efforts_present():
                 return "no effort fields in /joint_states — guarded legs " "refuse to run (spec §6)"
+        return None
+
+    def refusal(self, legs):
+        """(leg name, why) of the first of `legs` run() would refuse before anything moves, or None: its
+        own gate (_refusal), asked ahead by a caller that has another way to fly where one leg is refused."""
+        for leg in legs:
+            why = self._refusal(leg)
+            if why:
+                return leg.name, why
         return None
 
     # -- run ----------------------------------------------------------------
@@ -1145,6 +1186,7 @@ class Runner:
             [RECOIL_SPEED],
             JOINT_VMAX,
             replace(self.retime_params(), time_scale=self.time_scale),
+            **self._near_user_kw(),
         )
         reflex = Leg(
             name="recoil",
@@ -1271,6 +1313,11 @@ class Runner:
                 log.info("REFUSED replan of %s — set_world failed: %s" % (leg.name, msg))
                 return None, next_chain
             kind, *rest = leg.target
+            inside = goal_refusal(leg.target, live)
+            if inside is not None:
+                # never sent: the planner may plan in an empty world (approach.goal_refusal)
+                log.info("REFUSED replan of %s — its goal puts the arm inside %s" % (leg.name, inside))
+                return None, next_chain
             n_refused = len(getattr(self.client, "refusals", ()))
             n_busy = getattr(self.client, "busy_retries", 0)
             t_plan = time.monotonic()
@@ -1280,6 +1327,10 @@ class Runner:
             else:
                 plan = self.client.plan_to_joints(rest[0], live)
             plan_s = time.monotonic() - t_plan
+            # a way HOME is re-planned with the run's table in the planner's world (worlds.py): its own back
+            back = getattr(self.client, "planner_own_world", None)
+            if back is not None:
+                back()
             # the run record keeps what was planned at flight: the plan this
             # leg now flies, or the one that failed, in a note of its own —
             # the failure's row shows the leg's old plan, or none (lazy)
@@ -1292,6 +1343,10 @@ class Runner:
             )
             if plan is None or not plan.success:
                 self.note("replan_failed", name=leg.name, plan=record)
+                return None, next_chain
+            inside = goal_refusal(leg.target, live, list(plan.trajectory.points[-1].positions))
+            if inside is not None:
+                log.info("REFUSED replan of %s — its plan ends with the arm inside %s" % (leg.name, inside))
                 return None, next_chain
             # replanned trajectories pass the SAME sanity gate as pre-built
             # ones — a wandering replan executed ungated defeats spec §6
@@ -1367,6 +1422,7 @@ class Runner:
                 params,
                 folds=[g.fold for g in group],
                 step_caps=_step_caps(group),
+                **self._near_user_kw(),
             )
             exec_speed = 1.0
             hold = float(getattr(group[0], "start_hold_s", 0.0) or 0.0)
@@ -1398,7 +1454,11 @@ class Runner:
         else:
             traj = group[0].traj
             exec_speed = lead.speed * self.time_scale
-            flown = line_profile(lead, self.retime_params(), self.time_scale) if _free_air_line(lead) else None
+            flown = (
+                line_profile(lead, self.retime_params(), self.time_scale, **self._near_user_kw())
+                if _free_air_line(lead)
+                else None
+            )
             if flown is not None:
                 traj, exec_speed = flown, 1.0
             elif guard_spec is not None and lead.warp is None and lead.guard_from is not None:

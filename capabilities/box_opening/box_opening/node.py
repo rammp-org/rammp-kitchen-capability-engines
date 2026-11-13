@@ -50,7 +50,9 @@ from rammp_orchestrator_interfaces.msg import ActionAvailability
 
 from . import LOGGER
 from .constants import state_dir
+from .flight_view import FlightView
 from .runtime.abort import EXIT_HALTED
+from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
 # ROS parameter -> default. Container and world name files in the image's config/ (or are
 # absolute paths); the robot's per-run environment comes from its cameras, never from here.
@@ -67,6 +69,27 @@ PARAMS = {
     # run record's flight files and room maps
     "mission_frames": False,
     "speed_scale": 1.0,
+    # the cuRobo planner config whose layers (the chair and its user) and robot spheres every
+    # plan-free line is held out of (runtime/body); unreadable, the run stops before it moves;
+    # "" turns the check off (the bench). BOX_OPENING_BODY_LAYERS in the node's environment overrides
+    "body_layers": "/config/robot/curobo/planner.yaml",
+    # where the scene camera finds no container, look for it with the wrist camera from one or two
+    # poses over the arm's side (a chair parked side-on to a counter: tasks/survey); off, such a
+    # run stops with NO BOX before anything moves, as the owner had it (2026-10-22). Never with the
+    # orchestrator's selection: that is the scene camera's detection
+    "wrist_survey": False,
+    # the wrist camera finds the container: the wrist turns where the arm rests so its camera sees
+    # the table in front (up to four views, first where the scene camera has the box; a lid a view
+    # cuts is looked at again), and what it finds there is the box; the scene camera's only where
+    # the wrist finds none (a table faced from the front: the scene camera sees no lid whole where
+    # the arm presses, tasks/survey). Never with the orchestrator's selection
+    "wrist_first": False,
+    # the folder box opening hands the planner worlds from (worlds.PlannerTable): the run's measured table,
+    # while a way HOME is planned. `planner_worlds_as` is that folder as the PLANNER's container mounts it
+    # (read-only); "" (the default) and box opening sends the planner no world. `planner_worlds_dir` is the
+    # same folder as this node writes it; "" = planner_worlds under state_dir
+    "planner_worlds_as": "",
+    "planner_worlds_dir": "",
 }
 NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
 
@@ -106,6 +129,7 @@ TAIL_LINES = 40
 # the user) (REVIEW_RULES U2: progress runs from 0 to 1, its message a person's words, not a leg's
 # name); rows are written as their legs end. First match wins.
 LEG_PHASES = (
+    ("survey:", "locate", 0.03, "looking for the container with the wrist camera"),
     ("reach:look", "look", 0.1, "looking for the button"),
     ("press:close", "look", 0.12, "reaching for the button"),
     ("reach:", "press", 0.2, "reaching for the button"),
@@ -764,7 +788,11 @@ class Capability(CapabilityEngine):
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
         world = WorldWriter(self.get_logger())
-        self._run = Run(self._argv(action_id, track.instance_id), env, LOGGER.log)
+        # the flight view (flight_view): the run's lines read as they are logged, one short line a step
+        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
+        view = FlightView()
+        view.start(action_id, track.instance_id)
+        self._run = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
         code = None
         try:
             code = self._follow(self._run, log, track, ctx, world)
@@ -781,6 +809,7 @@ class Capability(CapabilityEngine):
             self._progress(log, track, ctx)  # the last rows, written as it ended
             if not ctx.cancelled():
                 self._sync_world(track, ctx, world)  # the last rows' word: a release, a put-back
+            view.finish(code, cancelled=ctx.cancelled(), timed_out=run_.timed_out, held=bool(track.held))
         if ctx.cancelled():
             world.wait(WORLD_WAIT_S)  # those queued before the cancel
             raise Cancelled()
@@ -914,8 +943,14 @@ class Capability(CapabilityEngine):
         argv += ["--container", config_path(self._param("container"), "containers")]
         argv += ["--bench-world", config_path(self._param("world"))]
         argv += ["--speed-scale", str(float(self._param("speed_scale")))]
+        layers = self._param("body_layers")  # only an explicit "" turns the check off; unset is the default
+        argv += ["--body-layers", PARAMS["body_layers"] if layers is None else str(layers)]
         if instance_id:  # the container the orchestrator selected; standalone: any of its class
             argv += ["--instance-id", instance_id]
+        if self._param("wrist_survey"):  # the run surveys only without a selection (tasks/survey)
+            argv += ["--wrist-survey"]
+        if self._param("wrist_first"):
+            argv += ["--wrist-first"]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
 
     def _env(self):
@@ -925,6 +960,9 @@ class Capability(CapabilityEngine):
         env["BOX_OPENING_MISSION_FRAMES"] = "1" if self._param("mission_frames") else "0"
         if self._param("state_dir"):
             env["BOX_OPENING_STATE"] = self._param("state_dir")
+        for name, var in (("planner_worlds_as", PLANNER_WORLDS_AS_ENV), ("planner_worlds_dir", PLANNER_WORLDS_DIR_ENV)):
+            if self._param(name):  # unset: whatever the node's own environment says, as BOX_OPENING_BODY_LAYERS
+                env[var] = str(self._param(name))
         return env
 
     def _mock(self, action_id, ctx):

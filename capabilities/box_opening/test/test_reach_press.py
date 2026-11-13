@@ -13,6 +13,9 @@ from box_opening.models.container import ContainerModel, load_press_demo
 from box_opening.perception.d405 import quat_to_mat
 from box_opening.tasks import reach_press
 
+# The 2026-10-21 HOME (conftest.HOME_20261021): this file's recorded runs and poses were built on it.
+pytestmark = pytest.mark.usefixtures("home_20261021")
+
 PINK = "capabilities/box_opening/config/containers/ankou_pink.yaml"
 BOX = (0.675, -0.578)  # where the scene camera put it, 2026-10-22
 
@@ -648,6 +651,7 @@ def _flow(
     chain=None,
     home_turns=0,
     closing=None,
+    rough=False,
 ):
     """Run run_reach_press with the arm, the cameras and the planner faked
     (`run_args`: press_demo's args, a guarded TF press by default; `chain`,
@@ -751,7 +755,9 @@ def _flow(
         ("arrived", {"message": "ok", "progress": 1.0}),  # slide in
         touch or ("touch", {"message": "torque guard trip", "progress": 0.8, "torque_peak": 3.1}),
     ]
-    fix = SimpleNamespace(pose=ContainerPose(xyz=(BUTTON[0], BUTTON[1], BUTTON[2] - 0.121), yaw=0.0), top_xyz=BUTTON)
+    fix = SimpleNamespace(
+        pose=ContainerPose(xyz=(BUTTON[0], BUTTON[1], BUTTON[2] - 0.121), yaw=0.0), top_xyz=BUTTON, rough=rough
+    )
     moved_pose = ContainerPose(xyz=(BUTTON[0] + 0.05, BUTTON[1], BUTTON[2] - 0.121), yaw=0.0)
     seen = {
         "same": fix,
@@ -1100,24 +1106,29 @@ def test_a_home_planned_ahead_flies_as_planned_only_from_where_it_starts(ctx, tm
     DRIFT_REPLAN_RAD of where they start — joint_3 a whole turn round is
     where it starts, the short way round — they fly as planned and the
     planner is not asked; beyond it, home is planned from where the arm
-    stands, as with none. Either way in the run log."""
+    stands, as with none. Either way in the run log. The turn is on the
+    plan's side, where the robot has it: the planner plans on HOME's branch
+    (branches.planner_branch) and the driver reports the joint within pi."""
     import json
 
     from conftest import leg as make_leg
     from conftest import runner as make_runner
 
+    from box_opening.runtime.branches import planner_branch
     from box_opening.tasks import press_demo
 
     cfg = load_press_demo(PINK)
     ctx.press_cfg = cfg
     rest = list(press_demo.rest_joints(cfg))
     look = [0.3, -0.9, 0.4, -1.9, 0.2, -1.0, 1.5]
-    ahead = [make_leg("home", start=look, end=rest, speed=1.0)]
-    here = [v + (off if j == 1 else 2.0 * math.pi if j == 2 else 0.0) for j, v in enumerate(look)]
+    planned_from = planner_branch(look)
+    assert abs(planned_from[2] - look[2]) == pytest.approx(2.0 * math.pi)  # joint_3 a whole turn from the reading
+    ahead = [make_leg("home", start=planned_from, end=rest, speed=1.0)]
+    here = [v + (off if j == 1 else 0.0) for j, v in enumerate(look)]
     ctx.client.live = list(here)
     assert reach_press._go_home(ctx, cfg, make_runner(ctx.client, tmp_path), "STOP: test", ahead=ahead) is True
     if flown:
-        assert ctx.client.joint_starts == [] and ctx.client.exec_starts == [pytest.approx(look)]
+        assert ctx.client.joint_starts == [] and ctx.client.exec_starts == [pytest.approx(planned_from)]
     else:
         assert ctx.client.joint_starts == [pytest.approx(here)] and ctx.client.exec_starts == [pytest.approx(here)]
         assert "home is planned again from here" in capsys.readouterr().out
@@ -1155,6 +1166,19 @@ def test_a_moved_box_stops_the_run_and_home_is_planned_around_where_it_now_is(ct
 def test_a_box_the_scene_camera_saw_move_stops_the_run_even_when_the_wrist_sees_it_in_place(ctx, monkeypatch, tmp_path):
     code, rec, _c, _h = _flow(ctx, monkeypatch, tmp_path, scene_after="moved")
     assert code == 1 and rec.events[-1] == "home"
+
+
+def test_a_rough_first_fix_is_no_measure_of_a_moved_box(ctx, monkeypatch, tmp_path):
+    """A box the scene frame cut, placed roughly (scene_source.SCENE_ROUGH): its first fix is tens
+    of mm off on its own, so the scene's look after the press, 50 mm from it, judges no move. The
+    wrist's re-aim, which found it in place, does."""
+    import json
+
+    code, rec, _c, _h = _flow(ctx, monkeypatch, tmp_path, scene_after="moved", rough=True)
+    assert code == 0 and rec.events[-1] == "home"
+    after = [json.loads(ln) for p in tmp_path.rglob("*.jsonl") for ln in p.read_text().splitlines()]
+    after = [r for r in after if r.get("leg") == "reach_after"]
+    assert after and after[-1]["scene_rough"] is True and after[-1]["scene_moved_mm"] is None
 
 
 def test_home_is_planned_around_the_scene_cameras_box_when_the_wrist_cannot_find_it(ctx, monkeypatch, tmp_path):
@@ -1294,6 +1318,42 @@ def test_the_reach_out_preview_moves_nothing(ctx, monkeypatch, tmp_path, capsys,
     out = capsys.readouterr().out
     assert "gravity alone moves joint_4 0.00 Nm along the slide" in out
     assert ("COMPLIANT: every move" in out) is soft and "enters its joint impedance" not in out
+
+
+@pytest.mark.parametrize("source, seen_by", [("segmenter", "the scene camera"), ("wrist", "the wrist survey")])
+def test_the_counter_kept_out_before_the_proof_is_named_for_the_camera_whose_fix_mapped_it(
+    ctx, monkeypatch, tmp_path, source, seen_by
+):
+    """The cabinet's keep-out before the proof (press_demo.keep_out_counter) is read off the fix's own
+    points: the scene camera's, or where the scene camera saw no box and the wrist survey found it
+    (tasks/survey, a fix with source "wrist") the survey's frames, and the log and its counter_edges
+    note say which."""
+    from box_opening.models.container import ContainerPose
+    from box_opening.runtime.runner import Runner
+    from box_opening.tasks import press_demo
+    from box_opening.tasks import reach_lid_off as rlo
+
+    class Kept(Exception):
+        pass
+
+    named = []
+
+    def keep_out(ctx, tmap, table_z, src, runner=None, key=None):
+        named.append((src, key))
+        raise Kept  # nothing past the first keep-out is under test
+
+    cfg = load_press_demo(PINK)
+    ctx.model = ContainerModel.load(PINK)
+    monkeypatch.setattr(reach_press, "oblique_aim_available", lambda: True)
+    monkeypatch.setattr(rlo, "_table_z", lambda watcher, fix, cpose: BUTTON[2] - 0.121)
+    monkeypatch.setattr(rlo, "counter_map", lambda *a, **k: None)
+    monkeypatch.setattr(press_demo, "keep_out_counter", keep_out)
+    pose = ContainerPose(xyz=(BUTTON[0], BUTTON[1], BUTTON[2] - 0.121), yaw=0.0)
+    fix = SimpleNamespace(pose=pose, top_xyz=BUTTON, source=source)
+    args = SimpleNamespace(execute=False, press_only=True, compliant=True, depth_press=True)
+    with pytest.raises(Kept):
+        reach_press.run_reach_press(None, ctx, cfg, Runner(ctx.client, log_dir=tmp_path), None, args, fix, None)
+    assert named == [(seen_by, "look")] and not ctx.client.executed
 
 
 def test_a_compliant_run_says_which_gains_every_move_flies(ctx, monkeypatch, capsys):
@@ -2200,6 +2260,15 @@ def test_on_flatbot_the_proven_way_in_is_one_the_runner_flies(ctx, monkeypatch, 
     assert [(lg.name, runner._refusal(lg)) for lg in legs] == [(lg.name, None) for lg in legs]
 
 
+def _leans_to_15(monkeypatch):
+    """The compliant press's leans as they were until 2026-11-12, none past 15 deg: the boxes these
+    tests replay were out of its reach then, and are what the ways round that (the shifted look, the
+    turn lower down) were built on; leaning up to 30 deg it presses most of them where they stand."""
+    from box_opening.tasks import depth_press as dp
+
+    monkeypatch.setattr(dp, "COMPLIANT_TURN_SHORT_DEG", tuple(v for v in dp.COMPLIANT_TURN_SHORT_DEG if v <= 15.0))
+
+
 @pytest.mark.parametrize(
     "scene, aimed, near, leans",
     [
@@ -2221,6 +2290,7 @@ def test_on_flatbot_a_scene_button_out_of_reach_by_a_little_still_flies_the_look
     reached as it stands (test_on_flatbot_1623s_scene_button_is_proven_turning_short_after_the_slide)."""
     from box_opening.tasks import depth_press as dp
 
+    _leans_to_15(monkeypatch)  # the compliant press's leans of that day: with today's the first is reached as it stands
     if leans == "guarded":
         # and the turn only at the slide's end, as it was then: lower down
         # (TURN_LOW_ABOVE_M) both scene buttons are reached as they stand
@@ -2252,6 +2322,7 @@ def test_on_flatbot_a_turn_the_slides_end_cannot_reach_is_turned_lower_down(ctx,
     bent as before. Where the slide's own end turns, nothing changes."""
     from box_opening.runtime.runner import Runner
 
+    _leans_to_15(monkeypatch)  # as it was that day: past 15 deg the slide's own end turns here (18 deg short)
     chain, cfg, home = _on_flatbot(ctx, monkeypatch)
     plan, why = reach_press.plan_reach(ctx, cfg, SCENE_142835, home, depth=True)
     assert why is None and plan.tilt_deg == 30 and not plan.down.walked and plan.down.short_deg == 15.0
@@ -2261,6 +2332,7 @@ def test_on_flatbot_a_turn_the_slides_end_cannot_reach_is_turned_lower_down(ctx,
     way, why, kind = reach_press.solve_way_in(ctx, cfg, AIMED_142835, 30, q_look)
     assert way is None and kind == "down" and "15 deg short: IK did not converge 100% of the way" in why, why
     monkeypatch.undo()
+    _leans_to_15(monkeypatch)
     chain, cfg, home = _on_flatbot(ctx, monkeypatch)
     way, why, kind = reach_press.solve_way_in(ctx, cfg, AIMED_142835, 30, q_look)
     assert way is not None, (why, kind)
@@ -2324,6 +2396,7 @@ def test_on_flatbot_the_look_is_planned_once_its_press_is_proven_and_as_it_alway
     ]
     asked.clear()
     looks = []
+    _leans_to_15(monkeypatch)  # as it was that day: leaning further, 14:28:12's button is pressed where it stands
     plan, why = reach_press.plan_reach(ctx, cfg, SCENE_142812, home, depth=True, looks=looks)
     assert plan is None and asked == [] and "30 deg: the slide in (" in why
     assert all("%d deg: the way down (" % t in why for t in (35, 40, 45))
@@ -2822,3 +2895,51 @@ def test_a_rise_off_the_stroke_flies_under_the_exits_gate_its_big_step_slow(ctx,
     monkeypatch.setattr(dp, "rise_back_up", lambda chain, stroke_, q: [list(HELD_1102), list(STROKE_Q0_1102)])
     up, on_stroke, why = reach_press._rise_legs(ctx, stroke, HELD_1102, world)
     assert why is None and on_stroke and up[0].step_cap is None
+
+
+def test_a_lid_past_every_look_poses_reach_is_out_of_reach_and_the_box_before_it_is_not(monkeypatch):
+    """reach_press.out_of_reach: the run's own bound on what it could look at for a press (every tilt's look pose
+    past the arm's reach), which the finders use so that what the arm cannot reach is no rival container. Flatbot,
+    2026-11-12: the box at [0.81, -0.155], a bowl and tape rolls at 1.0-1.2 m behind it."""
+    from box_opening.models.container import ContainerModel
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(path=flatbot_urdf(), root="arm_mount")
+    monkeypatch.setattr(approach, "chain_ready", lambda: (True, ""))
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    model = ContainerModel.load(PINK)
+    assert not reach_press.out_of_reach(model, (0.81, -0.155, 0.33))
+    assert not reach_press.out_of_reach(model, (0.60, 0.10, 0.32))
+    for far in ((1.095, -0.535, 0.33), (1.011, -0.541, 0.33), (1.145, -0.396, 0.33), (1.183, -0.418, 0.33)):
+        assert reach_press.out_of_reach(model, far), far
+    # 2026-11-12 20:15:04 and 20:19:41: things by the microwave 1.03-1.08 m out, their look's wrist inside
+    # LOOK_PAST_REACH_M's allowance at the 45 deg tilt, were taken for the box and no press planned. A lid the
+    # arm could look at is out of reach too where the hand that presses it, at its greatest lean, stands
+    # too near the arm's bound (PRESS_PAST_REACH_M)
+    for far in ((1.075, -0.426, 0.291), (1.032, -0.397, 0.306), (1.059, -0.432, 0.474), (0.95, -0.25, 0.357)):
+        assert reach_press.out_of_reach(model, far), far
+    # ... and that day's boxes, 0.79-0.86 m out, are not: each is pressed, leaning up to 30 deg
+    for box in ((0.750, -0.247, 0.319), (0.769, -0.248, 0.315), (0.820, -0.254, 0.316), (0.819, -0.236, 0.296)):
+        assert not reach_press.out_of_reach(model, box), box
+    # no kinematics, or geometry that cannot be worked out: nothing is ruled out
+    monkeypatch.setattr(approach, "chain_ready", lambda: (False, "no URDF"))
+    assert not reach_press.out_of_reach(model, (1.183, -0.418, 0.33))
+
+
+def test_on_flatbot_a_box_past_the_15_deg_turns_reach_is_pressed_leaning_further(ctx, monkeypatch):
+    """Flatbot 2026-11-12 19:12:26: the aimed button 0.86 m out on a 29 in table, and "no press reaches the
+    aimed button": no hand within 15 deg of straight down gets there. Leaning further, up to the look pose's
+    own 30 deg, it is pressed where it stands — the smallest lean that flies, past 15 — its stroke bent as
+    any; with the leans of that day there is still none."""
+    from box_opening.tasks import depth_press as dp
+
+    button = (0.820, -0.254, 0.316)
+    _chain, cfg, home = _on_flatbot(ctx, monkeypatch)
+    plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True)
+    assert why is None, why
+    assert 15.0 < plan.down.short_deg <= 30.0 and not plan.down.walked and plan.stroke.legs
+    assert dp._lean_deg(plan.stroke.quat) == pytest.approx(plan.down.short_deg, abs=0.2)
+    _leans_to_15(monkeypatch)
+    plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True)
+    assert plan is None and "the way down (" in why

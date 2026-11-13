@@ -30,7 +30,7 @@ import numpy as np
 from box_opening.geometry import ang_diff, yaw_about_world_z
 from box_opening.perception.d405 import quat_to_mat
 from box_opening.perception.planes import fit_plane
-from box_opening.worlds import SEEN_PREFIX
+from box_opening.worlds import PLANNER_PADDING_M, SEEN_PREFIX
 
 CELL_M = 0.02
 MAP_R_M = 0.6  # the map holds what the scene camera sees this far around the box
@@ -825,3 +825,253 @@ def obstacle_boxes(tmap, table_z, box_xy, box_half, arm_points=None, keep_clear=
         tallest_m=round(max((r[4] for r in rects), default=0.0), 3),
     )
     return boxes, note
+
+
+# The counter's EDGES, for box_opening's own body check (runtime/body Body.with_obstacles, through
+# runtime/approach.set_obstacles): the planner plans in no world at all (worlds.py), and box_opening's
+# plan-free lines were held out of the chair and its user only. Nothing knew about the cabinet: the
+# chair study (2026-11-06, side counter 0.91 m, gap 0.02, box at (0.50, 0.236)) drove the upper arm
+# 10.8 mm into the counter's edge on the way in, 583 N. A kitchen cabinet the seated user cannot go
+# under is solid from its counter top to the floor, so where the map sees its top meet what lies past
+# it (TableMap.off: points well below the top plane, the floor or the cabinet's face), that edge and
+# the solid behind it are keep-out. Only an edge the cameras saw this run, only as far along it as
+# they saw it: where the map shows none, nothing is kept out (and the run says so).
+EDGE_MIN_CELLS = 5  # an edge is a run of at least this many boundary cells (10 cm): speckle is not one
+EDGE_LINE_TOL_M = 0.75 * CELL_M  # ... each within this of its line (a cell's boundaries meet on one)
+EDGE_GAP_CELLS = 2  # ... and no gap along it wider than this many cells (a broken run is two)
+EDGE_ANGLES = 180  # directions tried for an edge's line, over half a turn (1 deg apart)
+# ... on at most this many lines: a counter's corner shows two, a sink in it four more (a cap of 3
+# let a sink's rims, longer than the part of a side edge seen, crowd that edge out)
+MAX_EDGES = 6
+# An edge has the counter behind it and none past it. Flatbot's bench maps (2026-11-03 15:53,
+# 15:54, 16:32) hold lines of past-the-edge cells INSIDE the table, the table going on 2-4 cm past
+# them (a gap between its boards, or the floor through it): a groove, not an edge, either side of it.
+# So the counter must be seen at least EDGE_MIN_DEPTH_M behind the line, and no more than
+# EDGE_BEYOND_FRAC of the cells EDGE_BEYOND_M past it may be counter.
+EDGE_MIN_DEPTH_M = 3 * CELL_M
+# Past the edge a camera over the counter sees nothing at first (the counter hides the floor below
+# its edge), then the floor or the user's lap: the wrist at the chair study's side look (11-06, eye
+# 0.36 m over the 0.91 m counter) saw the floor 8-13 cells past the counter's last. What lies past at
+# most this far beyond unseen cells is past the edge too; nothing seen past it is no edge (the view's
+# own end, or the far side of a thing that stands).
+EDGE_SHADOW_M = 0.30
+EDGE_BEYOND_M = 3 * CELL_M
+EDGE_BEYOND_FRAC = 0.25
+# The keep-out, per edge, in the map's frame (the base frame: arm_mount on flatbot):
+#  - "the edge": where the edge may be — from half a cell inside the boundary (the last counter
+#    cell's outer side) to a whole cell past it: a camera that sees the cabinet's face puts its points
+#    in the first cell past the edge, so that cell can read past-the-edge with most of it counter (the
+#    chair study's side scenes: the boundary 4-19 mm inside the face) — from the counter's top down
+#    COUNTER_SOLID_M, padded as the planner pads a world (Body.with_obstacles: 0.02 per side), so the
+#    arm keeps the planner's margin off the face, and above the top along the edge;
+#  - "the counter": the solid behind it, as deep as the map saw the counter there, its padded top
+#    COUNTER_TOP_CLEAR_M from the counter's top: no part of the arm goes down into the counter. The
+#    hand comes down onto it, though: the robot file's 2F-85 spheres (locked open, 32 mm past the
+#    real 131 mm tips) stand ~1 mm over the table, buffered, where the set-down's plan ends (the tips
+#    33 mm up), and flatbot's 2026-11-03 16:32 set-down flight went 1 mm into a top padded to 5 mm
+#    over it. So the padded top stands 5 mm UNDER the counter's top; the set-down's own guard feels
+#    the table.
+COUNTER_SOLID_M = 1.2  # to the floor: a counter stands at most ~1 m tall, and nothing reaches under the floor
+COUNTER_TOP_CLEAR_M = -0.005
+COUNTER_MAX_DEPTH_M = 0.8  # the solid behind an edge reaches back at most this far (the map's own reach)
+
+
+@dataclass(frozen=True)
+class Edge:
+    """A counter edge the map saw (counter_edges), in the map's frame (xy)."""
+
+    point: tuple  # the middle of the part seen, on the edge's line
+    along: tuple  # unit vector along the edge
+    out: tuple  # unit vector away from the counter: toward what lies past its edge
+    length_m: float  # how much of the edge the map saw, end to end (whole cells)
+    depth_m: float  # how far behind the edge the map saw the counter, along the part seen
+    cells: int  # the boundary cells it was fitted to
+
+    def summary(self):
+        return {
+            "point": [round(float(v), 3) for v in self.point],
+            "out": [round(float(v), 3) for v in self.out],
+            "length_m": round(float(self.length_m), 3),
+            "depth_m": round(float(self.depth_m), 3),
+            "cells": int(self.cells),
+        }
+
+
+def _shifted(a, di, dj):
+    """`a` moved so out[i, j] = a[i + di, j + dj] (False past its edge)."""
+    out = np.zeros_like(a)
+    nx, ny = a.shape
+    if abs(di) >= nx or abs(dj) >= ny:
+        return out
+    out[max(0, -di) : nx - max(0, di), max(0, -dj) : ny - max(0, dj)] = a[
+        max(0, di) : nx - max(0, -di), max(0, dj) : ny - max(0, -dj)
+    ]
+    return out
+
+
+def _boundary(tmap, shadow_cells=None):
+    """(midpoints (m, 2), outward steps (m, 2)): where, along a row or a column, a cell of counter
+    (seen and not past the edge: the table and what stands on it) is followed by cells past its edge
+    (TableMap.off) — next to it, or past at most `shadow_cells` (EDGE_SHADOW_M) the camera could not
+    see: a camera over the counter sees its top up to the edge, then the floor (or what stands lower
+    beyond it, the user's lap) only past the counter's shadow. Each as the counter cell's outer side
+    and the unit step out of it."""
+    shadow = int(round(EDGE_SHADOW_M / tmap.cell)) if shadow_cells is None else int(shadow_cells)
+    counter = tmap.seen & ~tmap.off
+    off, unseen = tmap.off, ~tmap.seen
+    X, Y = tmap.centres()
+    mids, outs = [], []
+    for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        going = counter.copy()  # counter cells whose every cell past them so far is unseen
+        found = np.zeros_like(counter)
+        for k in range(1, shadow + 2):
+            found |= going & _shifted(off, k * di, k * dj)
+            going &= _shifted(unseen, k * di, k * dj)
+            if not going.any():
+                break
+        i, j = np.nonzero(found)
+        mids.append(np.stack([X[i, j] + 0.5 * di * tmap.cell, Y[i, j] + 0.5 * dj * tmap.cell], -1))
+        outs.append(np.tile([float(di), float(dj)], (len(i), 1)))
+    return np.concatenate(mids), np.concatenate(outs)
+
+
+def _runs(s, gap_m):
+    """The runs of the values `s` with no gap wider than `gap_m` between neighbours, each as indices
+    into `s` in order along it."""
+    order = np.argsort(s)
+    return np.split(order, np.flatnonzero(np.diff(s[order]) > gap_m) + 1)
+
+
+def _densest_band(P, normals):
+    """Of every direction `normals` (A, 2), the band of offsets along it two EDGE_LINE_TOL_M bins
+    wide holding the most of points `P` (m, 2): (how many, the direction's index, its first bin, each
+    point's bin along every direction (m, A)). Every bin is counted, the last on its own too; ties go
+    to the first direction, then the lowest band."""
+    q = np.floor((P @ normals.T) / EDGE_LINE_TOL_M).astype(np.int64)
+    q0 = q.min(axis=0)
+    width = int((q - q0).max()) + 2  # an empty bin past the last: the band (last, last + 1) is counted
+    A = len(normals)
+    counts = np.bincount((q - q0 + np.arange(A) * width).ravel(), minlength=A * width).reshape(A, width)
+    pair = counts[:, :-1] + counts[:, 1:]
+    a, k = np.unravel_index(int(np.argmax(pair)), pair.shape)
+    return int(pair[a, k]), int(a), int(q0[a] + k), q
+
+
+def _edge(mids, run, t, n, counter, X, Y, cell):
+    """The Edge of boundary points `mids[run]` on the line along `t` (`n` out of the counter), or None
+    where it is a groove in the counter or a sliver of it: the counter seen less than
+    EDGE_MIN_DEPTH_M behind it, or more than EDGE_BEYOND_FRAC of the cells EDGE_BEYOND_M past it
+    counter."""
+    c = mids[run].mean(axis=0)
+    s = (mids[run] - c) @ t
+    s0, s1 = float(s.min()) - 0.5 * cell, float(s.max()) + 0.5 * cell
+    mid = c + 0.5 * (s0 + s1) * t
+    # how far back the counter was seen along the part seen, and how much of it lies past
+    rel = np.stack([X.ravel() - mid[0], Y.ravel() - mid[1]], -1)
+    span = np.abs(rel @ t) <= 0.5 * (s1 - s0)
+    back = -(rel @ n)
+    behind = span & counter.ravel() & (back > 0.0)
+    depth = float(back[behind].max()) + 0.5 * cell if behind.any() else 0.0
+    past = span & (back < 0.0) & (back >= -EDGE_BEYOND_M)
+    if depth < EDGE_MIN_DEPTH_M or counter.ravel()[past].sum() > EDGE_BEYOND_FRAC * max(1, past.sum()):
+        return None
+    return Edge(
+        point=(float(mid[0]), float(mid[1])),
+        along=(float(t[0]), float(t[1])),
+        out=(float(n[0]), float(n[1])),
+        length_m=s1 - s0,
+        depth_m=min(depth, COUNTER_MAX_DEPTH_M),
+        cells=len(run),
+    )
+
+
+def counter_edges(tmap, min_cells=EDGE_MIN_CELLS, max_edges=MAX_EDGES):
+    """The counter's edges `tmap` shows, longest first: straight runs of at least `min_cells`
+    boundary cells where its counter ends and what lies past its edge begins, next to it or past its
+    shadow (_boundary), on at most `max_edges` lines, each fitted to its own (every direction
+    EDGE_ANGLES apart, the band EDGE_LINE_TOL_M either side holding the most boundary points
+    (_densest_band), refined by least squares). Every run along a line with no gap wider than
+    EDGE_GAP_CELLS is an edge of its own (where something hid the floor past part of it, the part
+    either side), with the counter seen EDGE_MIN_DEPTH_M behind it and none past it (EDGE_BEYOND_M,
+    EDGE_BEYOND_FRAC). Each only as long as the part the cameras saw. [] when it shows none: a map
+    that saw no edge keeps nothing out."""
+    if tmap is None:
+        return []
+    mids, outs = _boundary(tmap)
+    counter = tmap.seen & ~tmap.off
+    X, Y = tmap.centres()
+    left = np.ones(len(mids), bool)
+    th = np.arange(EDGE_ANGLES) * math.pi / EDGE_ANGLES
+    normals = np.stack([np.cos(th), np.sin(th)], -1)  # (A, 2): each direction's line normal
+    edges, lines = [], 0
+    while left.sum() >= min_cells and lines < max_edges:
+        P, steps = mids[left], outs[left]
+        most, a, k, q = _densest_band(P, normals)
+        if most < min_cells:
+            break
+        n = normals[a]
+        band = (q[:, a] == k) | (q[:, a] == k + 1)
+        # the side the counter is on: what lies past the edge is where the steps lead
+        sign = 1.0 if float((steps[band] @ n).sum()) >= 0.0 else -1.0
+        on = band & ((steps @ n) * sign > 0.0)
+        idx = np.flatnonzero(left)[on]
+        if len(idx) < min_cells:
+            left[np.flatnonzero(left)[band]] = False
+            continue
+        # least squares through them, then every unbroken run along it
+        c = mids[idx].mean(axis=0)
+        _u, _s, vt = np.linalg.svd(mids[idx] - c)
+        t = vt[0] / np.linalg.norm(vt[0])
+        n = np.array([-t[1], t[0]])
+        n = n if float(n @ (sign * normals[a])) > 0.0 else -n
+        left[idx] = False  # this line's points are spent, its runs' and the strays'
+        found = [
+            _edge(mids, idx[run], t, n, counter, X, Y, tmap.cell)
+            for run in _runs((mids[idx] - c) @ t, (EDGE_GAP_CELLS + 1) * tmap.cell)
+            if len(run) >= min_cells
+        ]
+        found = [e for e in found if e is not None]
+        edges += found
+        lines += bool(found)
+    return sorted(edges, key=lambda e: -e.length_m)
+
+
+def counter_keep_out(edges, table_z, cell=CELL_M, pad_m=PLANNER_PADDING_M):
+    """The keep-out boxes of `edges` (counter_edges) for runtime/body Body.with_obstacles: per edge
+    "cabinet/edge<k>" (where the edge may be, from the counter's top at `table_z` down
+    COUNTER_SOLID_M) and "cabinet/counter<k>" (the solid behind it, its top lowered so that, padded
+    `pad_m` as with_obstacles pads it, it stands COUNTER_TOP_CLEAR_M from the counter's top: 5 mm
+    under it), each a dict (name, centre, half, rotation: columns along, out, up)."""
+    boxes = []
+    top = float(table_z)
+    for k, e in enumerate(edges):
+        t, n = np.array(e.along, float), np.array(e.out, float)
+        if t[0] * n[1] - t[1] * n[0] < 0.0:  # a right-handed box frame: along x out = up
+            t = -t
+        R = np.array([[t[0], n[0], 0.0], [t[1], n[1], 0.0], [0.0, 0.0, 1.0]])
+        p = np.array(e.point, float)
+        half_t = 0.5 * float(e.length_m)
+        bottom = top - COUNTER_SOLID_M
+        f = p + n * (0.25 * float(cell))  # the middle of [-0.5, +1.0] cell about the boundary, outward
+        boxes.append(
+            {
+                "name": "cabinet/edge%d" % k,
+                "centre": [float(f[0]), float(f[1]), 0.5 * (top + bottom)],
+                "half": [half_t, 0.75 * float(cell), 0.5 * (top - bottom)],
+                "rotation": R.tolist(),
+            }
+        )
+        depth = max(float(e.depth_m) - 0.5 * float(cell), 0.0)
+        if depth <= 0.0:
+            continue
+        under_top = top + COUNTER_TOP_CLEAR_M - float(pad_m)
+        c = p - n * (0.5 * float(cell) + 0.5 * depth)
+        boxes.append(
+            {
+                "name": "cabinet/counter%d" % k,
+                "centre": [float(c[0]), float(c[1]), 0.5 * (under_top + bottom)],
+                "half": [half_t, 0.5 * depth, 0.5 * (under_top - bottom)],
+                "rotation": R.tolist(),
+            }
+        )
+    return boxes
