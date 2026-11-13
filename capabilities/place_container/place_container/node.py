@@ -107,7 +107,7 @@ PARAMS = {
     # (2026-10-29): the hand's speed where the table should be (m/s)
     "lower_speed": 0.02,
     # speed_scale of the carrying moves (go_to_ee_pose; was 0.2)
-    "go_to_speed_scale": 0.6,  # flatbot 2026-11-10 (was 0.4)
+    "go_to_speed_scale": 0.8,  # 80% (flatbot 2026-11-12, the level place; was 0.6, 0.4 on 2026-11-10)
     # speed_scale of the squaring turn with blend false (move_joints; was 0.5)
     "adjust_speed_scale": 1.0,
     # adjust -> lift -> transit as ONE go_to_ee_poses motion (cuRobo, blended at the waypoints, all at
@@ -127,7 +127,7 @@ PARAMS = {
     # -- on 2026-11-10 it chose another posture at the spot (J1 +101, J3 -147 deg from the start)
     "carry_targets": "level",
     # the retreat's peak speed (m/s; was 0.03)
-    "retreat_speed": 0.10,  # flatbot 2026-11-10 (was 0.06)
+    "retreat_speed": 0.128,  # 80% of arm.cart_speed (flatbot 2026-11-12; was 0.10, 0.06 on 2026-11-10)
     # speed_scale of reset's joint moves with reset_mode legacy (move_joints; was ~0.5)
     "reset_speed_scale": 1.0,
     # reset: "curobo" = one go_to_joint_configs motion (up, then the start), planned around the chair's
