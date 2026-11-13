@@ -97,10 +97,14 @@ Each runs the whole `open` or `close` from one press, with no params and no inte
 `execute` and `push_open` (explicitly: off by default on this branch; ending at the view pose); `close` with `execute` and the settings that closed the door
 on 11-12 (`face_door`, `route_over`, `over_above` 0.10, `side_past_hinge` 0.12, `push_radius` 0.31 to 0.25,
 `push_z` 0.46; the node's `UI_ACTIONS`), starting from the view pose. It requests execution;
-`allow_execute` must be true on hardware. A recoverable failure before the hand is on the handle (a check refused,
-nothing past it moved) shows its reason and restores the same button; retry waits for an explicit tap. A failure with
-the hand still on the handle, or an unrecoverable one, is shown with Done only and not retried. Success/error notices
-remain until Done or cancellation; a panel is re-sent only if the bridge dropped it. The UI is offered only the UI
+`allow_execute` must be true on hardware. Panels come from the shared `capability_ui.RunUI`. While the arm moves the
+panel has **Stop**: it cancels the run as the orchestrator's cancel does (the motion stops, the arm holds), then a
+"Stopped" notice with **Done** says whether the hand may be on the handle (during an open after the grasp: it is; let
+go of it before anything else). A recoverable failure before the hand is on the handle (a check refused, nothing past
+it moved) shows its reason with the same button and **Stop**; retry waits for an explicit tap. A failure with the hand
+still on the handle, or an unrecoverable one, is shown with Done only and not retried. Every wait is bounded: Done at
+most `NOTICE_TIMEOUT_S` (60 s; the result stands either way), a retry question at most `PROMPT_TIMEOUT_S` (600 s; then
+the refusal is returned as it is). A panel is re-sent only if the bridge dropped it. The UI is offered only the UI
 actions (`availability`); the direct `open` / `close` dry-run/execute API is unchanged.
 
 The engine uses the counter example's direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_ui_event()`,

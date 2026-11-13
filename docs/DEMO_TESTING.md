@@ -1,7 +1,7 @@
-# December demo — running the kitchen sequence (no UI)
+# December demo — running the kitchen sequence
 
 How to start every capability on `integration/dec-demo` and run the demo's ten steps on flatbot, one goal at a
-time, without the orchestrator or the UI. Each capability's own docs have the detail (options, failure codes, what
+time, without the orchestrator or the UI, then ("With the UI") from the touchscreen. Each capability's own docs have the detail (options, failure codes, what
 each check means); this page is the order, the commands and the hand-offs between steps.
 
 | #   | Step                             | Capability        | Action(s)                        | Hand at the start          | Ends with                                      |
@@ -124,12 +124,13 @@ The planner reads the worlds the fridge, microwave_place and button_press push f
 it already mounts at `/root/.cache`, so those nodes mount it too.
 
 ```bash
-# N1 fridge (mount_tilt_deg 30 on flatbot; grasp side is the default, front the straight-in grasp)
+# N1 fridge (mount_tilt_deg 30 on flatbot; grasp front: the straight-in grasp, the one the demo uses and that opened
+# the door from the UI on 11-12. The node defaults to side; -p grasp:=side for that one)
 docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 -e CYCLONEDDS_URI="$DDS_ENO1" \
   -v /tmp/fridge_data:/fridge_data -v curobo_kernel_cache:/planner_cache \
   $KCE/fridge:dev \
   ros2 run fridge fridge_node --ros-args -p use_orchestrator:=false -p allow_execute:=true \
-  -p mount_tilt_deg:=30 -p grasp:=side \
+  -p mount_tilt_deg:=30 -p grasp:=front \
   -p planner_world_dir:=/planner_cache/rammp_planner_worlds \
   -p planner_world_dir_in_planner:=/root/.cache/rammp_planner_worlds
 
@@ -202,14 +203,25 @@ Where these differ from the capabilities' own fragments, and why:
 
 ```bash
 # T4 stop (repeats at 10 Hz; Ctrl-C once the arm has halted)
-docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
+docker exec -it sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
   ros2 topic pub -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 1, source: operator, reason: stop}"'
 # release, only right before you continue (if it does not release: `sheppy restart arm`); then clear the faults
 docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
-  ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear, clear_target: operator}"'
+  ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear}"'
 ```
 
-The fridge doc has the e-stop's caveats (the new `EStop` message, test it at rest first).
+Two things the arm driver does (its `docs/interface.md`, "The e-stop"; both bit on 11-12):
+
+- **Ctrl-C must reach the stop's publisher**: hence `docker exec -it`. Without `-t`, Ctrl-C ends only the docker
+  client; `ros2 topic pub` keeps running inside `sheppy-arm`, keeps the arm stopped, and re-stops it after every
+  release. Check with `docker exec sheppy-arm ps -eo pid,args | grep "topic pub"`; end one left over with
+  `docker exec sheppy-arm kill -INT <pid>`.
+- **The release is a plain `state: 0` from the same `source`, with no `clear_target`.** A message with
+  `clear_target` set is the MIB's clear handshake and never releases anything. The driver logs
+  `E-STOP engaged by 'operator'` on the stop and the release on a release; `/control_status` shows `estopped`.
+  After the release, `/clear_faults` before the next action, or its first motion stops short.
+
+The fridge doc has the e-stop's other caveats (the new `EStop` message, test it at rest first).
 
 ## Utilities (T3)
 
@@ -260,8 +272,9 @@ goal fridge go_to_start '{"execute": false}'                  # plan the start p
 goal fridge go_to_start '{"execute": true, "speed": 0.2}'     # ARM MOVES
 ```
 
-Place the wheelchair so the camera looks square-on at the closed door, ~50–60 cm from it (side grasp: aim for the
-logged `handle (mean)` x 0.70–0.85, y −0.40 to −0.20).
+Place the wheelchair so the camera looks square-on at the closed door, ~50–60 cm from it. Aim for the logged
+`handle (mean)` in the placement the open checks against: front grasp x 0.65–1.05, y −0.30 to 0.00 (the 11-12 open
+from the UI: 0.769, −0.111); side grasp x 0.70–0.85, y −0.40 to −0.20.
 
 ```bash
 goal fridge open '{"execute": false}'                         # dry run: plans the whole open
@@ -425,6 +438,70 @@ It closes the hand, stages in front of the panel, re-detects the buttons from ~2
 the button (≤3 cm), backs off 15 cm and returns to its start. Other targets: `power_level`, `wgt_time_defrost`,
 `timer_clock`, `stop_eco`. **Not yet run on the arm as an engine** (its README).
 
+## With the UI
+
+The same steps from the touchscreen: each capability offers one-press buttons when its object is tapped, and shows
+its own panels while it runs (each capability's `docs/interface.md`, "UI"). Every panel has **Stop**: it cancels the
+action exactly as the orchestrator's cancel does (the arm stops where it is and holds), then says what state it left
+things in, with **Done**. Final messages wait at most 60 s for Done; questions (e.g. a wheelchair move) at most 10 min.
+
+Tap an object, then one of its buttons. The buttons show each action's label (rammp-orchestrator
+`hotfix/execute-timeout-param`; the old build shows the raw action id, e.g. `open_door_ui`):
+
+| Tap         | Buttons                                                                                              | Capability        | Demo step |
+| ----------- | ---------------------------------------------------------------------------------------------------- | ----------------- | --------- |
+| `fridge`    | Go to Fridge, Open Fridge Door, Close Fridge Door, and each door's "(wheelchair drives)"              | `fridge`          | 1, 3      |
+| `fridge`    | Retrieve Tupperware from Fridge (refused until `fridge_accept_unmodeled_door:=true`: the open door isn't in its collision world) | `microwave_place` | 2         |
+| `table`     | Place the container here (tap a spot, then Place here; or Use marked spot)                           | `place_container` | 4         |
+| `food_container` | Open Container                                                                                  | `box_opening`     | 5         |
+| `microwave` | Open Microwave Door, Close Microwave Door                                                            | `microwave`       | 6, 9      |
+| `microwave` | Retrieve Tupperware from Microwave, Place Tupperware in Microwave                                     | `microwave_place` | 7, 8      |
+| `microwave` | Press Start, Press Power, Press Timer/Clock, Press Defrost, Press Stop/Eco (then: how many presses)   | `button_press`    | 10        |
+
+Panel text: the UI doesn't wrap text, and shows a message as one rich-text run (`<body-sm-light>...</>`) that a
+plain line break breaks (the tags then show on screen). The capabilities (`shared/capability_ui`'s `wrap`) and the
+orchestrator break messages into lines of at most 40 characters, each its own run.
+
+### On snorlax: one script
+
+`~/rammp-wt/fridgeui0-up.sh [front|side]` (re)starts the whole stack below in tmux session `fridgeui0`, in the
+order the Unreal app needs, with the fridge node on the real arm (`allow_execute:=true`) and its handle grasp
+`front` (default) or `side`. Nothing moves until a button is pressed. Its pieces, each runnable on its own:
+`~/rammp-wt/ue-run.sh` (Unreal), `~/rammp-wt/fridge-ui-run.sh [front|side]` (the fridge node; also
+`~/rammp-wt/fridge-front`, `~/rammp-wt/fridge-side`).
+
+**Order matters to the Unreal app.** Start it first; objects pushed before it is up never appear. On 11-12,
+restarting the orchestrator under a running Unreal left Unreal taking no taps at all (its log showed no `UI event`
+for any tap; the bridge saw none): restart Unreal too (or rerun the script), then `remove`/`add` the object in U3.
+A capability node can be restarted alone: it registers again, and the UI keeps working.
+
+### The orchestrator: no 120 s limit
+
+`rammp-orchestrator` `feat/orchestrator` cancels every engine action 120 s after it starts, counting planning, motion
+and any question or Done the capability shows: a fridge open with a wheelchair move, or a Done tapped late, ends as
+`execute_timeout` with the arm stopped wherever it was. Branch `hotfix/execute-timeout-param` makes the limit a
+parameter, `execute_timeout_s`, **off by default** (`<= 0` = no limit; `120.0` restores the old behaviour). On snorlax
+it is built, alone, in `~/orch_hotfix_ws` (on top of `~/ros2_ws`, which is unchanged); start the orchestrator from it:
+
+```bash
+# U1-U4, each (Cyclone on eno1 if the fridge node runs on eno1, as in the fridge doc's UI section)
+source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 run rammp_ui_bridge ui_bridge_node                                                        # U1
+source ~/orch_hotfix_ws/install/setup.bash && ros2 run rammp_orchestrator orchestrator_node \
+  --ros-args -p object_detections_topic:=/ui/object_detections                                 # U2
+ros2 run rammp_orchestrator interactive_perception_node \
+  --ros-args -r /perception/object_detections:=/ui/object_detections                           # U3
+~/RammpUI-detection-markers-LinuxArm64/RammpUI-Arm64.sh                                       # U4, the Unreal app
+```
+
+`ros2 param get /rammp_orchestrator execute_timeout_s` says `0.0` when U2 runs the hot fix; on the old build the
+parameter doesn't exist. U3's objects are typed by hand (`add <id> <class>`), so a class can't contain a space:
+use `food_container`, not "food container".
+
+Each capability node starts as in N1-N7 but with `-p use_orchestrator:=true` (`allow_execute:=true` for buttons that
+move the arm; with it false they refuse with a message). Try the buttons first with `-p mock:=true`: nothing moves.
+
 ## Runs and logs
 
 | Capability      | On the host                                                                    |
@@ -448,4 +525,5 @@ Most runs carry a rosbag. `/tmp` is cleared on reboot: copy the session off afte
 - **Planner worlds**: microwave_place's `worlds_dir` mount above is untried; microwave_place's place doesn't put the
   planner's world back (step 8 does it by hand).
 - **button_press** has not run on the arm as an engine; **home_arm** is experimental (standalone only).
-- None of this runs from the UI yet; each capability's UI flow is in its own docs.
+- The UI flows are tested offline only (fake UI context, and the real orchestrator + bridge with mock engines);
+  not yet on the arm from the touchscreen.

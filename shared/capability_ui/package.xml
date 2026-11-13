@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>capability_ui</name>
+  <version>0.1.0</version>
+  <description>UI panels shared by capabilities: Stop on every panel, questions, retry and final notices with bounded waits</description>
+  <maintainer email="cailynclaires@gmail.com">Cailyn Smith</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>capability_engine</exec_depend>
+  <exec_depend>rammp_orchestrator_interfaces</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

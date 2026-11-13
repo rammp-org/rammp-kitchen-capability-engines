@@ -127,6 +127,27 @@ params:
     - /scene_camera/depth/image_rect_raw
   # Mock only: place fails at this phase (carry, lower, open, return), to try the UI's error panel.
   mock_fail: ""
+  # place_here's tap-to-place (place_container/spots.py): the scene camera's depth (aligned to colour), its
+  # camera_info, and the scene segmenter's detections (the table's mask; "" = a plane fit to the depth only).
+  scene_depth_topic: /scene_camera/depth/image_rect_raw
+  scene_info_topic: /scene_camera/color/camera_info
+  detections_topic: /perception/object_detections
+  # Wait this long (s) for the scene camera's depth, camera_info and tf.
+  scene_wait_s: 3.0
+  # The offered spots: this far apart (m); the table must reach this far past the container's footprint (m);
+  # nothing on the table closer to the footprint than this (m).
+  spot_step: 0.09
+  spot_edge_margin: 0.03
+  spot_clearance: 0.03
+  # The table's height at the chosen spot (a plane fitted to the depth around it) is raised by this (m): the
+  # descent stops on contact, so erring high is safe.
+  table_z_bias: 0.01
+  # A table more tilted than this (deg) to the scene camera: the camera's mount is off, no spots offered.
+  max_table_tilt_deg: 3.0
+  # With a marked spot: the camera's table height there more than this (m) from the arm's mark = no spots.
+  table_check_tol: 0.03
+  # Where a table may be (m, arm_mount z), for the plane fit without the segmenter's table mask.
+  table_z_range: [-0.10, 0.50]
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -183,4 +204,12 @@ params:
   # deployment with a differently named bridge overrides this.
   "ui_bridge_node_name": "ui_bridge_node"
 publishes: [/place_container/status]
-subscribes: []
+subscribes:
+  # place_here's tap-to-place (during that action only): the scene camera's depth and camera_info, the scene
+  # segmenter's detections (the table's mask), tf (arm_mount <- the camera); and the run bag's camera topics
+  - /tf
+  - /tf_static
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /perception/object_detections

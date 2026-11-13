@@ -18,6 +18,11 @@ the perception already running on the robot: only the object the orchestrator se
 instance_id, passed to the run as --instance-id), and a lid box stacked on it. No detector
 runs in this node.
 
+Started by the orchestrator with the UI (its token for the execution in hand), the run shows
+panels (capability_ui.RunUI; the design is Chris's demo/ui panel): what it is doing with a bar
+and one button, Stop, which is the orchestrator's cancel (the run's own Ctrl+C), then one final
+notice with Done: the lid off, the error, or Stopped. Standalone nothing is shown.
+
 SAFETY: the arm moves only on a node with allow_execute:=true, set for an attended run (someone
 at the e-stop). With it false, open_box is reported unavailable and a goal that comes anyway is
 refused before anything runs. The mock moves nothing and is always available.
@@ -39,6 +44,7 @@ from collections import deque
 from pathlib import Path
 
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
+from capability_ui.panels import NOTICE_TIMEOUT_S, RunUI, cancel_own_run
 from rammp_orchestrator_interfaces.msg import ActionAvailability
 
 from . import LOGGER
@@ -82,12 +88,14 @@ POLL_S = 0.05
 CANCEL_ESCALATE_S = 15.0
 CANCEL_KILL_S = 10.0
 SHUTDOWN_WAIT_S = 3.0  # on SIGTERM: the run's own stop first, inside docker stop's grace period
-# REVIEW_RULES O3: the orchestrator cancels any action still running after 120 s (fixed in
-# rammp-orchestrator; an engine cannot ask for more), releases the arm and hibernates the engine.
-# A run still going at this budget is stopped its own way (one Ctrl+C) and fails with `timeout`,
-# so the end is the run's: its stop's worst (a second Ctrl+C after CANCEL_ESCALATE_S, a kill
-# CANCEL_KILL_S after that) and the last world-state writes (WORLD_WAIT_S) still end inside the
-# 120 s. The longest of 48 logged missions took 45 s, plus ~5 s to start.
+# REVIEW_RULES O3: the orchestrator may cancel an action that runs too long (its
+# execute_timeout_s; 0, its default, is no limit), release the arm and hibernate the engine. Box
+# opening keeps its own budget whatever that is: a run still going at RUN_BUDGET_S is stopped its
+# own way (one Ctrl+C) and fails with `timeout`, so the end is the run's: its stop's worst (a
+# second Ctrl+C after CANCEL_ESCALATE_S, a kill CANCEL_KILL_S after that) and the last world-state
+# writes (WORLD_WAIT_S) still end inside 120 s, the orchestrator limit this was sized against.
+# The UI's final notice (at most NOTICE_TIMEOUT_S) comes after the run has ended: it is not in the
+# budget. The longest of 48 logged missions took 45 s, plus ~5 s to start.
 ORCHESTRATOR_TIMEOUT_S = 120.0
 WORLD_WAIT_S = 3.0
 RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORLD_WAIT_S - 2.0  # 90 s
@@ -309,6 +317,7 @@ class Tracker:
         self.released = False
         self.held = False  # the lid in the fingers: from the grip that held it to its release or put-back
         self.held_said = False  # ... as the world state was last told (Capability._sync_held)
+        self.let_go = False  # the lid let go of since a grip: released on the table, or put back
         self.opened = None  # the object record's `opened`: None not asked, then the orchestrator's answer
 
     def add(self, row):
@@ -325,6 +334,7 @@ class Tracker:
             self.released = True
         if leg in ("place:open", "lid:release") and ok:
             self.held = False
+            self.let_go = True
         for start, phase, pct, doing in LEG_PHASES:
             if leg.startswith(start):
                 self.pct = max(self.pct, pct)
@@ -344,6 +354,7 @@ class Tracker:
             self.set_down = True
         if leg == "lid_put_back" and row.get("ok"):
             self.held = False
+            self.let_go = True
             return "release", self.pct, "put the lid back on the container"
         if leg == "reach_grip_result":
             self.held = self.held or bool(row.get("ok"))
@@ -358,6 +369,15 @@ class Tracker:
 
     def lid_off(self, code):
         return self.action_id == "open_box" and code == 0 and self.lid_down()
+
+    def lid_in_fingers(self):
+        """For the UI: "is" where the rows say the lid is held, "may be" where a grip closed and
+        nothing since let it go (the grip's own check not in yet), else "" (none closed)."""
+        if self.held:
+            return "is"
+        if self.grips and not self.let_go:
+            return "may be"
+        return ""
 
 
 # The run's last STOP line -> (error code, recoverable), first match wins (REVIEW_RULES U4).
@@ -405,14 +425,123 @@ def error_for(action_id, code, lines):
     return EngineError("failed", why, recoverable=False)
 
 
+# The run's panels on the UI (capability_ui.RunUI), after Chris's demo/ui Panel: the title, the
+# phase's message with a bar on the UI's 0-100 (docs/UI_JSON_SCHEMA.md; ctx.progress keeps
+# REVIEW_RULES U2's 0-1), and Stop; once the run is being stopped, no button. Then one notice.
+PANEL_TITLE = "Opening the container"
+PANEL_PCT = 100.0
+PANEL_CANCELLED = "Stopping: the arm stops where it is."
+PANEL_TIMED_OUT = "Taking too long: the arm stops where it is."
+# an error code -> what the final notice says (docs/interface.md's error table, in a person's words)
+ERROR_TEXT = {
+    "bad_params": "The request came with settings open_box does not take. Nothing moved.",
+    "not_allowed": "The arm is not enabled for this on this robot (allow_execute is off). Nothing moved.",
+    "timeout": f"It took longer than {RUN_BUDGET_S:.0f} s, so it was stopped. The arm stopped where it was.",
+    "not_ready": "The robot is not ready (a driver, the planner, a camera or TF is missing). Nothing moved.",
+    "not_found": "The camera could not find the container.",
+    "not_home": "The arm could not get to its start pose.",
+    "contact_early": "The fingers met something above the button. Nothing was pressed; the arm went home.",
+    "contact_late": "The fingers did not meet the lid where it was seen. The arm went home.",
+    "watch_failed": "The press's contact check failed, so the press stopped there. Someone must clear the arm.",
+    "box_moved": "The press moved the container.",
+    "not_popped": "The button was pressed, but the lid did not come loose. The arm went home.",
+    "no_button": "The button could not be found. Nothing was pressed.",
+    "no_press": "No way to press the button was found. Nothing moved.",
+    "lid_put_back": "There was no clear spot for the lid: it is back on the container and the arm is home.",
+    "lid_dropped": "The lid slipped out of the fingers on the way home.",
+    "arm_holds": "A motion stopped part of the way: the arm holds there until someone clears it.",
+    "arm_halted": "The arm was halted (the e-stop, or control was taken). Nothing more was sent to it.",
+    "stopped": "The run was ended from outside.",
+    "failed": "Something went wrong. The node's log says what.",
+}
+# refused before anything ran: "not started", not "failed"
+REFUSED_CODES = ("bad_params", "not_allowed")
+
+
+def sentence(text):
+    """A progress message as the panel shows it: capitalised."""
+    return text[:1].upper() + text[1:]
+
+
+def lid_note(track):
+    """What the notice adds about the lid, from the run's rows (Tracker.lid_in_fingers)."""
+    where = track.lid_in_fingers() if track is not None else ""
+    return {"is": "The lid is still in the fingers.", "may be": "The lid may still be in the fingers."}.get(where, "")
+
+
+def error_text(error, track):
+    text = ERROR_TEXT.get(error.error_code, ERROR_TEXT["failed"])
+    if error.error_code in ("lid_put_back", "lid_dropped"):  # the run itself says where the lid is
+        return text
+    return f"{text} {lid_note(track)}".strip()
+
+
+def stopped_text(track):
+    return f"Stopped. The arm is holding still where it was. {lid_note(track)}".strip()
+
+
+def result_text(result):
+    if result.get("lid_off"):
+        text = "Lid off: it is on the table beside the container, and the arm is home."
+        if result.get("world_state") == "not updated":
+            text += " The container could not be marked opened."
+        return text
+    return "Finished, but the lid was not set down."
+
+
+class PanelCtx:
+    """`ctx` for a run shown on the UI: everything is the engine's ctx, and every progress it
+    reports is also put on the panel (`ui.moving`: the message, the bar, Stop). Once `stopping()`
+    says the run is being stopped, the panel says that, with no button: there is nothing more to
+    ask of the run. A panel is sent only where it changed (an unchanged one re-sent redraws)."""
+
+    def __init__(self, ctx, ui):
+        self._ctx = ctx
+        self.ui = ui
+        self.stopping_text = ""
+        self._shown = None  # (phase, pct, message) last shown
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+    def progress(self, phase, pct, message="", pausable=True):
+        self._ctx.progress(phase, pct, message, pausable=pausable)
+        self._show(phase, pct, message)
+
+    def _bar(self, phase, pct):
+        return {"phase": phase, "pct": round(PANEL_PCT * float(pct), 1), "pausable": False}
+
+    def _show(self, phase, pct, message):
+        said = (str(phase), float(pct), str(message))
+        if said == self._shown:
+            return
+        self._shown = said
+        if self.stopping_text:
+            self.ui.send(self.stopping_text, (), self._bar(phase, pct))
+        else:
+            self.ui.moving(sentence(said[2]), self._bar(phase, pct)["pct"], said[0])
+
+    def stopping(self, text):
+        """The run is being stopped (a cancel, Stop, its budget): said once, no button."""
+        if self.stopping_text:
+            return
+        self.stopping_text = text
+        phase, pct, _ = self._shown or ("", 0.0, "")
+        self.ui.send(text, (), self._bar(phase, pct))
+
+
 class Capability(CapabilityEngine):
     display_name = "Open the container"
-    perception_classes = ["food container"]
+    # "food container" is the class the scene segmenter publishes. "food_container" is the same class without
+    # its space, for a selection typed by hand (Chris, demo/ui c184e67): the orchestrator's
+    # interactive_perception_node (the UI's object list on snorlax) reads `add <instance_id> <perception_class>`
+    # split on spaces, so the first cannot be typed
+    perception_classes = ["food container", "food_container"]
     required_resources = ["arm", "gripper"]
     actions = [
         Action(
             "open_box",
-            "Open the container",
+            "Open Container",
             params_schema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
     ]
@@ -422,6 +551,7 @@ class Capability(CapabilityEngine):
         for name, default in PARAMS.items():
             self.declare_parameter(name, default)
         self._run = None  # the Run under way
+        self._track = None  # its Tracker (the UI's notice reads where the lid is)
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -480,7 +610,47 @@ class Capability(CapabilityEngine):
             why = "" if self.mock or self._allowed() else NOT_ALLOWED
         return [ActionAvailability(action_id=a.action_id, available=not why, reason=why) for a in self.actions]
 
+    def _run_ui(self, ctx):
+        """This execution's panels, or None standalone (no token from the orchestrator: nothing is
+        sent, and a run is exactly as it was). Stop is the orchestrator's cancel (cancel_own_run)."""
+        if getattr(self, "_assigned_token", bytes(16)) == bytes(16):
+            return None
+        return RunUI(ctx, PANEL_TITLE, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+
     def execute(self, action_id, params, ctx):
+        """open_box, with its panels on the UI where there is one (_run_ui). The final notice is
+        shown after the run has ended and its result is decided (at most NOTICE_TIMEOUT_S): it
+        never changes the result, and it is outside the run's RUN_BUDGET_S."""
+        ui = self._run_ui(ctx)
+        if ui is None:
+            return self._execute(action_id, params, ctx)
+        self._track = None
+        try:
+            result = self._execute(action_id, params, PanelCtx(ctx, ui))
+        except Cancelled:
+            ui.quiet()
+            if ui.user_stopped:  # Stop only: after its own cancel the orchestrator has the UI back
+                ui.notice(stopped_text(self._track), title=f"{PANEL_TITLE}: stopped", timeout_s=NOTICE_TIMEOUT_S)
+            raise
+        except EngineError as error:
+            ui.quiet()
+            if error.error_code in REFUSED_CODES:
+                ui.refuse(error_text(error, None))
+            elif ui.user_stopped:
+                ui.notice(stopped_text(self._track), title=f"{PANEL_TITLE}: stopped", timeout_s=NOTICE_TIMEOUT_S)
+            else:
+                ui.error(error_text(error, self._track))
+            raise
+        except Exception:
+            ui.quiet()
+            ui.error(ERROR_TEXT["failed"])
+            raise
+        finally:
+            ui.quiet()
+        ui.done(result_text(result), mock=bool(result.get("mock")))
+        return result
+
+    def _execute(self, action_id, params, ctx):
         check_params(params)
         if self.mock:
             return self._mock(action_id, ctx)
@@ -491,7 +661,7 @@ class Capability(CapabilityEngine):
         runs = state_dir(env) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
         # the selection as the goal came: read once, used for every write and the run's argv
-        track = Tracker(action_id, self.instance_id)
+        track = self._track = Tracker(action_id, self.instance_id)
         t0 = time.monotonic()
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
@@ -566,14 +736,18 @@ class Capability(CapabilityEngine):
             now = time.monotonic()
             if ctx.cancelled() and sent is None:
                 self.get_logger().warning("cancelled: the run's own stop (Ctrl+C) sent")
+                if isinstance(ctx, PanelCtx):
+                    ctx.stopping(PANEL_CANCELLED)
                 run_.interrupt()
                 sent = now
             elif sent is None and now - run_.started > RUN_BUDGET_S:
                 self.get_logger().error(
-                    f"the run is still going after {RUN_BUDGET_S:.0f} s: its own stop (Ctrl+C), before the "
-                    "orchestrator's 120 s cancel"
+                    f"the run is still going after {RUN_BUDGET_S:.0f} s: its own stop (Ctrl+C), its budget "
+                    "whatever the orchestrator's limit"
                 )
                 run_.timed_out = True
+                if isinstance(ctx, PanelCtx):
+                    ctx.stopping(PANEL_TIMED_OUT)
                 run_.interrupt()
                 sent = now
             elif sent is not None and escalated is None and now - sent > CANCEL_ESCALATE_S:
@@ -660,7 +834,7 @@ class Capability(CapabilityEngine):
         its words, the gripper's `holding` from the grip to the release and the container `opened`
         at the release, written as the real run writes them, and its result. Like the real run it
         cannot pause; a cancel ends it."""
-        track = Tracker(action_id, self.instance_id)
+        track = self._track = Tracker(action_id, self.instance_id)
         world = WorldWriter(self.get_logger())
         t0 = time.monotonic()
         for phase, pct, doing in MOCK_PHASES[action_id]:

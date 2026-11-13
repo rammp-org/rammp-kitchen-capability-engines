@@ -40,6 +40,8 @@ ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc7
 RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
 
 COPY capability_engine/ src/capability_engine/
+# The UI panels (Stop, questions, notices) the UI actions show: shared with the other capabilities.
+COPY shared/capability_ui/ src/capability_ui/
 COPY capabilities/button_press/ src/button_press/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the

@@ -118,7 +118,11 @@ Served under `/box_opening/`, types from `rammp_orchestrator_interfaces`:
 | `/box_opening/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/box_opening/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-It is activated when the user selects a `food container`. `open_box` is offered
+It is activated when the user selects a `food container` (the scene
+segmenter's class), or a `food_container`: the same class without its space,
+for an object list typed by hand (the orchestrator's
+`interactive_perception_node` reads `add <instance_id> <perception_class>` split
+on spaces). `open_box` is offered
 where `allow_execute` is on, until the world state holds the container `opened`,
 and only while the world state's gripper holds nothing (`gripper.holding`, which
 a run stopped with the lid in the fingers leaves set).
@@ -159,30 +163,77 @@ recoverable also sets the world state's `system_status.arm` to
 no object or action flow until the arm's domain is normal again. With the lid
 still in the fingers, no code is recoverable.
 
-| Code            | Recoverable | Meaning                                                                                                                                                                                                                                 |
-| --------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bad_params`    | no          | The goal had params; `open_box` takes none. Nothing ran                                                                                                                                                                                 |
-| `not_allowed`   | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                                                                                        |
-| `timeout`       | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers |
-| `not_ready`     | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                                                                                  |
-| `not_found`     | yes         | The scene camera found no container                                                                                                                                                                                                     |
-| `not_home`      | yes         | The arm could not get to its start pose                                                                                                                                                                                                 |
-| `contact_early` | yes         | The press met something more than 45 mm above the button's top as the cameras saw it: stopped there, nothing pressed, the arm went home                                                                                                 |
-| `contact_late`  | yes         | The press met nothing down to 25 mm below that top, or at all: the box is not where it was seen; the arm went home                                                                                                                      |
-| `watch_failed`  | no          | The press's contact watch failed: the press stopped there                                                                                                                                                                               |
-| `box_moved`     | yes         | The press moved the container                                                                                                                                                                                                           |
-| `not_popped`    | yes         | Pressed, but the knob did not come up (or the stroke pressed nothing); the arm went home                                                                                                                                                |
-| `no_button`     | yes         | The look found no button; nothing was pressed                                                                                                                                                                                           |
-| `no_press`      | yes         | No press plans to the button; nothing was pressed or moved                                                                                                                                                                              |
-| `lid_put_back`  | yes         | No carry for the lid: it is back on the box and the arm home                                                                                                                                                                            |
-| `lid_dropped`   | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                     |
-| `arm_holds`     | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                     |
-| `arm_halted`    | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                             |
-| `stopped`       | no          | The run was ended from outside                                                                                                                                                                                                          |
-| `failed`        | no          | Anything else, a traceback included; the message is the run's last STOP line (or line). Nothing says where the arm is                                                                                                                   |
+| Code            | Recoverable | Meaning                                                                                                                                                                                                                                                                                                             |
+| --------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bad_params`    | no          | The goal had params; `open_box` takes none. Nothing ran                                                                                                                                                                                                                                                             |
+| `not_allowed`   | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                                                                                                                                                                    |
+| `timeout`       | yes         | The run was still going after 90 s, box opening's own budget, and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) ends within 120 s. The orchestrator's own limit (`execute_timeout_s`) is configurable and off by default. Not recoverable with the lid still in the fingers |
+| `not_ready`     | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                                                                                                                                                              |
+| `not_found`     | yes         | The scene camera found no container                                                                                                                                                                                                                                                                                 |
+| `not_home`      | yes         | The arm could not get to its start pose                                                                                                                                                                                                                                                                             |
+| `contact_early` | yes         | The press met something more than 45 mm above the button's top as the cameras saw it: stopped there, nothing pressed, the arm went home                                                                                                                                                                             |
+| `contact_late`  | yes         | The press met nothing down to 25 mm below that top, or at all: the box is not where it was seen; the arm went home                                                                                                                                                                                                  |
+| `watch_failed`  | no          | The press's contact watch failed: the press stopped there                                                                                                                                                                                                                                                           |
+| `box_moved`     | yes         | The press moved the container                                                                                                                                                                                                                                                                                       |
+| `not_popped`    | yes         | Pressed, but the knob did not come up (or the stroke pressed nothing); the arm went home                                                                                                                                                                                                                            |
+| `no_button`     | yes         | The look found no button; nothing was pressed                                                                                                                                                                                                                                                                       |
+| `no_press`      | yes         | No press plans to the button; nothing was pressed or moved                                                                                                                                                                                                                                                          |
+| `lid_put_back`  | yes         | No carry for the lid: it is back on the box and the arm home                                                                                                                                                                                                                                                        |
+| `lid_dropped`   | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                                                                                                 |
+| `arm_holds`     | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                                                                                                 |
+| `arm_halted`    | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                                                                                                         |
+| `stopped`       | no          | The run was ended from outside                                                                                                                                                                                                                                                                                      |
+| `failed`        | no          | Anything else, a traceback included; the message is the run's last STOP line (or line). Nothing says where the arm is                                                                                                                                                                                               |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
+
+## The UI
+
+Started by the orchestrator with the UI (the token it pushes for the execution
+in hand), `open_box` shows its own panels through the base class's
+`ctx.update_user_panel()`, using `capability_ui.RunUI`. The design is Chris's
+(`demo/ui`): one panel for as long as the run goes, its one button the
+orchestrator's cancel.
+
+While the run goes:
+
+```json
+{
+  "title": "Opening the container",
+  "message": "Pressing the button",
+  "progress": {"phase": "press", "pct": 35.0, "pausable": false},
+  "buttons": [{"button_id": "stop", "label": "Stop"}]
+}
+```
+
+`message` is the progress message of the phase the run is in, `pct` the same
+fraction on the UI bar's scale, 0 to 100 (`docs/UI_JSON_SCHEMA.md`; the
+progress the orchestrator gets stays 0 to 1). A panel is sent as the phase
+changes, never re-sent unchanged; one the bridge dropped is re-sent at most
+once a second. The one button is **Stop**, and it is the orchestrator's cancel:
+the base class's own `CANCEL`, so the run gets its Ctrl+C (the motion in flight
+is cancelled first and the arm holds where it is), the action ends cancelled,
+and nothing is written to the world state after it. There is no Pause: a run
+cannot pause. Once the run is being stopped (Stop, the orchestrator's cancel,
+or the 90 s budget) the panel says so (`Stopping: the arm stops where it is.`)
+and has no button.
+
+Once the run has ended, one notice with **Done**:
+
+| How it ended                  | Title                            | Message                                                                                                                    |
+| ----------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| The lid off                   | `Opening the container`          | `Lid off: it is on the table beside the container, and the arm is home.` (the mock: `Mock: ... No arm motion.`)            |
+| Stop                          | `Opening the container: stopped` | `Stopped. The arm is holding still where it was.`, and `The lid is (may be) still in the fingers.` where a grip had closed |
+| An error code (table above)   | `Opening the container: failed`  | The code in a person's words (`node.ERROR_TEXT`), and the lid's note as above                                              |
+| `bad_params`, `not_allowed`   | `... : not started`              | What was refused; nothing moved                                                                                            |
+| The orchestrator's own cancel | none                             | The orchestrator has the UI back                                                                                           |
+
+The notice is shown after the run has ended and its result is decided, and
+waits for Done at most 60 s (`capability_ui`'s `NOTICE_TIMEOUT_S`): not
+tapping it never changes the result, and it is not part of the run's 90 s
+budget (`RUN_BUDGET_S`, timed on the run alone). Standalone (no token) nothing
+is sent, and a run is as it was without the UI.
 
 ## Parameters
 

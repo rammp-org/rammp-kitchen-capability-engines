@@ -61,7 +61,7 @@ lint:
 #   make test-arm ARM_CMD='python3 /repo/scripts/compare_models.py'
 ARM_CMD ?= python3 -m pytest -q -p no:cacheprovider $(or $(ARGS),$(ARM_TEST_DIRS))
 ARM_TEST_IMAGE = rammp-arm-test:dev
-ARM_TEST_DIRS = $(wildcard capability_engine/test tests/arm capabilities/*/test)
+ARM_TEST_DIRS = $(wildcard capability_engine/test tests/arm capabilities/*/test shared/*/test)
 test-arm:
 	docker build -f docker/test.Dockerfile -t $(ARM_TEST_IMAGE) docker
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
