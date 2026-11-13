@@ -12,9 +12,12 @@ Actions:
              1. adjust: square the hand in place to the nearest hold (level, pointing `pitch_deg` down);
              2. lift to SAFE_HEIGHT above the table, if lower; 3. transit to above the spot; 3b. the
              approach straight down to `lower_from` above where the container meets the table
-             -- 1-3b are ONE go_to_joint_configs motion through our planned joints (cuRobo, around the
-             chair's collision volumes, blended at the waypoints; `carry_targets` pose: go_to_ee_poses;
-             `blend` false: separate moves as before);
+             -- 1-3 are ONE go_to_joint_configs motion through our planned joints (cuRobo, around the
+             chair's collision volumes, blended at the waypoints), stopping above the spot; 3b runs
+             right after on move_joints in position mode, through the planned straight line's joints
+             (cuRobo planned each 4 cm of it on its own and swung the hand out and back on every one,
+             plan.split_carry); `carry_targets` pose: go_to_ee_poses for 1-3b; `blend` false: separate
+             moves as before;
              4. the rest of the straight line down in the driver's IMPEDANCE mode
              until contact, then hold `hold_press` below it (lower.py); 5. open, drop `release_drop`;
              6. back out: straight back, or a short way back and then a turn of the hand that swings
@@ -452,23 +455,35 @@ class Capability(CapabilityEngine):
             f"adjust turns the hand {info['adjust_deg']:.1f} deg. cuRobo avoids the chair's collision volumes; the "
             "table and what is on it are NOT in its world -- keep the way to the spot clear"
         )
-        # Before anything moves (no pause at the top): the ends of the line down and the retreat
-        # against the chair's volumes, on the planned line (the one from where the arm ends is the same
-        # line down, a few mm apart at most).
-        self._check_contact_zone(model, descent, table_z, log)
+        # With joint targets the approach (3b) runs on move_joints after the carrying motion, not
+        # through cuRobo: it must be the straight line it was planned as.
+        carry, approach = plan.split_carry(moves)
+        on_line = bool(approach) and self.cfg["blend"] and self.cfg["carry_targets"] == "joints"
+        if on_line:
+            problems = plan.check_approach(model, carry[-1][1], approach)
+            if problems:
+                raise plan.Refused("the approach down to the slow line is not straight: " + "; ".join(problems))
+        # Before anything moves (no pause at the top): the ends of the approach, the line down and the
+        # retreat against the chair's volumes, on the planned line (the one from where the arm ends is
+        # the same line down, a few mm apart at most).
+        self._check_contact_zone(model, descent, table_z, log, q_approach=carry[-1][1] if on_line else None)
         if not execute:
             if self.cfg["blend"] and self.cfg["curobo_check"]:
                 if self.cfg["carry_targets"] == "joints":
-                    self._check_carry_joints(moves, log)
+                    self._check_carry_joints(carry if on_line else moves, log)
                 else:
                     self._check_carry(info["waypoints"], log)
+            if on_line:
+                log(f"approach: {self._approach_text(model, carry[-1][1], approach)}")
             log("DRY RUN -- all checks passed, nothing commanded")
             return {"executed": False, "plan": steps}
 
         self._ready()
         self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
         if self.cfg["blend"] and self.cfg["carry_targets"] == "joints":
-            self._carry_joints(model, moves, table_z, ctx, log)
+            self._carry_joints(model, carry if on_line else moves, table_z, ctx, log)
+            if on_line:
+                self._approach(model, carry[-1][1], approach, log)
         elif self.cfg["blend"]:
             self._carry(info["waypoints"], table_z, ctx, log)
         else:
@@ -659,6 +674,31 @@ class Capability(CapabilityEngine):
         if not self.arm.go_to_joint_configs(targets, label):
             raise plan.Refused("STOPPED: " + plan.explain_failure(self.arm.last_error, names, where))
 
+    def _approach_text(self, model, q_top, approach):
+        lengths = plan.approach_lengths(model, q_top, approach)
+        z_top, z_end = model.fk(q_top)[2, 3], model.fk(approach[-1][1])[2, 3]
+        return (
+            f"straight down {sum(lengths) * 100:.0f} cm (z {z_top:.3f} -> {z_end:.3f}) through {len(approach)} "
+            f"joint waypoint(s), move_joints in position mode, speed x{self.cfg['go_to_speed_scale']}"
+        )
+
+    def _approach(self, model, q_top, approach, log):
+        """3b: from above the spot straight down to where the slow line starts, on move_joints through
+        the planned line's joints (check_approach checked it straight and level), position mode, timed
+        in metres of tool travel. Not a cuRobo leg: cuRobo doesn't keep a path straight (split_carry);
+        its ends were checked against the chair's volumes (contact_zone_checks)."""
+        lengths = plan.approach_lengths(model, q_top, approach)
+        log(f"-> approach: {self._approach_text(model, q_top, approach)}")
+        ok = self.arm.move_joints(
+            [q for _, q in approach], cart_lengths=lengths, speed_scale=self.cfg["go_to_speed_scale"]
+        )
+        if not ok:
+            where = {"approach": model.fk(approach[-1][1])[:3, 3]}
+            raise plan.Refused(
+                "STOPPED above the spot, nothing let go: "
+                + plan.explain_failure(self.arm.last_error, ["approach"], where)
+            )
+
     def _check_carry_joints(self, moves, log):
         """Dry run: cuRobo plans each joint leg of the carrying motion (nothing moves), from the
         measured joints and then each planned one."""
@@ -731,13 +771,14 @@ class Capability(CapabilityEngine):
             log(f"cuRobo check: {w['name']} plans ({res.planning_time:.2f} s)")
             start = starts[k]
 
-    def _check_contact_zone(self, model, descent, table_z, log):
-        """cuRobo plans (nothing moves) to the ends of the line down and the retreat, which run on
-        move_joints and so are never checked against the chair's collision volumes otherwise."""
+    def _check_contact_zone(self, model, descent, table_z, log, q_approach=None):
+        """cuRobo plans (nothing moves) to the ends of the approach (from `q_approach`, if it runs on
+        move_joints), the line down and the retreat, which run on move_joints and so are never checked
+        against the chair's collision volumes otherwise."""
         if not self.cfg["curobo_check"]:
-            log("curobo_check is off: the line down and the retreat are NOT checked against the chair")
+            log("curobo_check is off: the approach, the line down and the retreat are NOT checked against the chair")
             return
-        for label, q_from, q_to in plan.contact_zone_checks(model, descent, table_z):
+        for label, q_from, q_to in plan.contact_zone_checks(model, descent, table_z, q_approach):
             try:
                 res = self.arm.plan_to_joints(q_to, q_from)
             except ArmError as e:

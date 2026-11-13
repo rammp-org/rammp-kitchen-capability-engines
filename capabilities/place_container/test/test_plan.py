@@ -370,6 +370,37 @@ def test_the_contact_moves_are_checked_at_their_ends(model):
     assert meet == pytest.approx(TABLE_Z + plan.BOWL_DEPTH, abs=plan.PATH_STEP)
 
 
+def test_the_carry_stops_where_the_approach_starts():
+    q = [np.full(7, float(k)) for k in range(6)]
+    moves = [("adjust", q[0]), ("transit", q[1]), ("approach'", q[2]), ("approach'", q[3]), ("approach", q[4])]
+    carry, approach = plan.split_carry(moves)
+    assert [n for n, _ in carry] == ["adjust", "transit"]
+    assert [n for n, _ in approach] == ["approach'", "approach'", "approach"]
+    carry, approach = plan.split_carry(moves[:2])  # lower_from 0: no approach
+    assert [n for n, _ in carry] == ["adjust", "transit"] and approach == []
+
+
+@needs_model
+def test_the_approach_is_a_straight_line_checked_at_its_ends(model):
+    q_start = holding_pose(model, SPOT)
+    moves, descent, _ = plan.plan_place(model, q_start, SPOT, TABLE_Z, lower_from=0.06)
+    carry, approach = plan.split_carry(moves)
+    assert carry[-1][0] == "transit" and approach and approach[-1][0] == "approach"
+    q_top = carry[-1][1]
+    assert plan.check_approach(model, q_top, approach) == []  # joint-linear between its joints: straight, level
+    lengths = plan.approach_lengths(model, q_top, approach)
+    drop = model.fk(q_top)[2, 3] - model.fk(approach[-1][1])[2, 3]
+    assert sum(lengths) == pytest.approx(drop, abs=plan.IK_TOL)  # straight down: travel = drop
+    np.testing.assert_allclose(approach[-1][1], descent[1][0])  # the slow line starts where it ends
+    checks = plan.contact_zone_checks(model, descent, TABLE_Z, q_top)
+    assert [c[0] for c in checks] == ["approach", "lower", "retreat"]
+    np.testing.assert_allclose(checks[0][1], q_top)
+    np.testing.assert_allclose(checks[0][2], descent[1][0])
+    # a joint path that bends off the line is refused
+    bent = [(n, q + np.radians([10.0, 0, 0, 0, 0, 0, 0])) if n == "approach'" else (n, q) for n, q in approach]
+    assert plan.check_approach(model, q_top, bent)
+
+
 @needs_model
 def test_the_way_back_is_one_motion_from_the_drop_to_the_start(model):
     q_start = holding_pose(model, SPOT)
