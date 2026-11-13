@@ -656,13 +656,15 @@ def reset_radii(model, q_now, moves, near):
 def contact_zone_checks(model, descent, table_z, q_approach=None):
     """The joint moves of a place that don't go through cuRobo (self.arm.move_joints: the approach,
     the line down and the retreat), as (label, q_from, q_to) for a cuRobo plan_to_joints check of
-    their ends against the chair's collision volumes: from above the spot (`q_approach`, where the
-    approach starts; None: no approach) to the top of the line down, the top of the line to its
-    bottom, and where the container should meet the table to the end of the retreat from there. A
-    retreat that can't be planned from there is left out (the real one starts at the contact and is
-    planned again)."""
+    their ends against the chair's collision volumes: the approach from where it ends (the top of the
+    line down) back up to above the spot (`q_approach`, where it starts; None: no approach) -- above
+    the spot is the carrying motion's goal, and cuRobo takes a goal in its padding that it refuses as
+    a start (flatbot 2026-11-12: 1-3 mm into the 2 cm round the user's lap), so it is checked as the
+    goal there too -- the top of the line to its bottom, and where the container should meet the
+    table to the end of the retreat from there. A retreat that can't be planned from there is left
+    out (the real one starts at the contact and is planned again)."""
     zs, qs = descent
-    checks = [] if q_approach is None else [("approach", q_approach, qs[0])]  # to where the slow line starts
+    checks = [] if q_approach is None else [("approach", qs[0], q_approach)]  # its end back up to its start
     checks.append(("lower", qs[0], qs[-1]))  # to the bottom of the line down
     q_meet = hold_point(qs, zs, table_z + BOWL_DEPTH)
     q_meet = np.asarray(qs[-1] if q_meet is None else q_meet, dtype=float)
