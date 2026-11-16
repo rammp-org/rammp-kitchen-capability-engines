@@ -188,3 +188,13 @@ def test_the_mock_box_walks_its_path_at_one_speed_and_stops_at_its_end():
     assert MockApproach(pace_s=0.0).at(0.0) == (0.70, 0.0)
     zone = line_up.mock_zone()
     assert zone.done() and zone.inside((0.70, 0.0)) and not zone.inside((1.00, 0.35))
+
+
+def test_the_deployments_bound_holds_the_mock_box_to_it_too():
+    """line_up_far_m: what works further out than it is not in the boundary, so the user is brought nearer."""
+    near = MockApproach(pace_s=0.0, path=((0.75, 0.0),), far_m=0.70)
+    fix, reach = near.look(0.0)
+    # within 0.70 m the middle row works out to 0.70 itself; its last cell that is inside is the one at 0.65
+    assert fix.xy == (0.75, 0.0) and not reach.inside and reach.to_zone == pytest.approx((-0.10, 0.0))
+    _fix, reach = MockApproach(pace_s=0.0, path=((0.75, 0.0),)).look(0.0)
+    assert reach.inside

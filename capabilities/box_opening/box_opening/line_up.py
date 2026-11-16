@@ -120,12 +120,13 @@ def mock_zone():
 
 class MockApproach:
     """A box that comes along MOCK_PATH in `pace_s` seconds from the first look and then stands still (0:
-    in place at once), seen every tick, judged by mock_zone; the run "plans" wherever it is inside."""
+    in place at once), seen every tick, judged by mock_zone no further out than `far_m` (the node's
+    line_up_far_m; None: no bound); the run "plans" wherever it is inside."""
 
-    def __init__(self, pace_s=0.0, path=MOCK_PATH):
+    def __init__(self, pace_s=0.0, path=MOCK_PATH, far_m=None):
         self._pace_s = max(0.0, float(pace_s))
         self._path = [tuple(float(v) for v in p) for p in path]
-        self._zone = mock_zone()
+        self._zone = mock_zone().within(far_m=far_m)  # the deployment's bound, as a real line-up takes it
         self._t0 = None
 
     def at(self, t):

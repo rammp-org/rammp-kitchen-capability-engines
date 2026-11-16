@@ -1064,6 +1064,27 @@ def test_a_user_not_in_place_in_time_is_told_to_press_open_again_and_nothing_run
         LOGGER.handlers[:] = handlers
 
 
+def test_the_far_bound_is_the_deployments_and_none_by_default(ros, monkeypatch):
+    handlers = list(LOGGER.handlers)
+    cap = _mock_lining_up(monkeypatch)
+    try:
+        assert node.PARAMS["line_up_far_m"] == 0.0 and cap._far_m() is None  # as far as the proof plans
+        cap.set_parameters([Parameter("line_up_far_m", value=0.6)])
+        assert cap._far_m() == 0.6
+        # the mock's box stops 0.70 m out: with the bound at 0.60 it is never asked of, only brought closer
+        monkeypatch.setattr(node, "LINE_UP_S", 1.5)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+        ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up"
+        said = [m for _p, _pct, m, _pausable in ctx.said]
+        assert said[0].startswith("Move closer") and "Ready. Open the container?" not in said
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
 def test_with_no_ui_there_is_no_one_to_ask_and_the_run_starts_as_always(ros, monkeypatch):
     handlers = list(LOGGER.handlers)
     cap = _mock_lining_up(monkeypatch, ui=False)

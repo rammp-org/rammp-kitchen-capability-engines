@@ -94,6 +94,9 @@ params:
   # is where the arm opens it, then asks, and the arm moves only on its Open. false (the default): open_box
   # starts its run at once. As of this build only the mock lines up; a real run says so and starts as always
   line_up: false
+  # how far from the arm's base (m) the line-up trusts that boundary: a container further out is told to
+  # come closer. 0 (the default): as far as the run's own proof plans a press. A robot's profile sets it
+  line_up_far_m: 0.0
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

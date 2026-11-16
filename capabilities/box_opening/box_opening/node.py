@@ -100,6 +100,11 @@ PARAMS = {
     # the container is where the arm opens it, then asks, and the arm moves only on its Open. Off (the
     # default) open_box starts its run at once, as it always has; so does an execution with no UI (standalone)
     "line_up": False,
+    # how far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come
+    # closer, though the run's proof plans a press for it there. 0 (the default): as far as the proof plans.
+    # A deployment's own: on flatbot the proof plans presses to about 0.90 m, and the arm has opened boxes
+    # at 0.63 and 0.68 m (2026-11-12)
+    "line_up_far_m": 0.0,
     # the mock only: how long each of its phases lasts (s). 0, the default, and its run is over at once, as it
     # always was; a second or two and the UI can be rehearsed on it (the panel, its bar, Cancel) with no arm
     "mock_phase_s": 0.0,
@@ -645,6 +650,11 @@ class Capability(CapabilityEngine):
         token, self._cancelled_token = self._cancelled_token, None
         return token is not None and token == self._assigned_token
 
+    def _far_m(self):
+        """line_up_far_m as it is now, None where it sets no bound (0 or less)."""
+        far = float(self._param("line_up_far_m") or 0.0)
+        return far if far > 0.0 else None
+
     def _line_up(self, ctx, source):
         """The line-up before a run (the `line_up` param; line_up.LineUp): the panel tells the user which way
         to move and asks, and this returns only on its Open, with the seconds it took. Cancel on it is the
@@ -912,7 +922,7 @@ class Capability(CapabilityEngine):
         phase_s = max(0.0, float(self._param("mock_phase_s")))
         t0 = time.monotonic()
         # the real run's line-up, of a box that comes into reach over a few of the mock's phases
-        self._line_up(ctx, line_up.MockApproach(pace_s=MOCK_APPROACH_PHASES * phase_s))
+        self._line_up(ctx, line_up.MockApproach(pace_s=MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m()))
         world = WorldWriter(self.get_logger())
         panel = Panel(ctx, self._ui_live)  # the real run's, Cancel included
 
