@@ -4,16 +4,15 @@ A capability subclasses `CapabilityEngine`, declares its actions, and writes
 `execute()`. This class implements the rest of the RAMMP orchestrator's engine
 contract (rammp_orchestrator_interfaces) once, for every capability:
 
-- serves /<id>/activate, /<id>/execute_action, /<id>/control, /<id>/hibernate,
-  /<id>/acquire_control, /<id>/release_control
+- serves /<id>/activate, /<id>/execute_action, /<id>/control, /<id>/hibernate
 - registers with /rammp_orchestrator/register_engine, retrying until the
   orchestrator appears, and never exiting because it is absent
 - publishes /<id>/status (JSON in std_msgs/String) at 1 Hz and on every change
 - accepts cancel from Control.CANCEL and from an action cancel alike
-- holds the per-execution control token the orchestrator pushes via
-  /<id>/acquire_control right before dispatching execute_action, and passes
-  it on to self.arm so its commands carry the same token as the arm driver's
-  own grant for that execution
+- holds the per-execution control token the orchestrator embeds directly in
+  each execute_action goal's own token field, and passes it on to self.arm so
+  its commands carry the same token as the arm driver's own grant for that
+  execution
 - gives each action ROS entities that live only while it runs (self.arm's, and the
   capability's own through create_action_subscription() and friends)
 - on SIGTERM or SIGINT, cancels the running action, lets it end, then exits
@@ -32,7 +31,6 @@ it with `ros2 action send_goal /<id>/execute_action ...` (see `make action`).
 
 import json
 import os
-import secrets
 import signal
 import threading
 import time
@@ -40,7 +38,6 @@ from dataclasses import dataclass, field
 
 import rammp_arm
 import rclpy
-from rammp_common_interfaces.srv import AcquireControl, ReleaseControl
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import (
     ActionAvailability,
@@ -317,32 +314,18 @@ class CapabilityEngine(Node):
         self._registering = False
         self._register_sent = 0.0  # time.monotonic() the pending RegisterEngine call was sent
         self.instance_id = ""
-        # Per-execution control token: the orchestrator pushes one shared
-        # session token here (and to the arm driver's own ~/acquire_control)
-        # right before dispatching this engine's execute_action goal, rather
-        # than this engine having to pull one reactively (see
-        # RemoteEngineAdapter.push_execution_token() in orchestrator_node.py
-        # and _on_acquire_control below). bytes(16) (all-zero) means "nobody
-        # holds it".
+        # Per-execution control token: the orchestrator embeds one shared
+        # session token directly in this engine's execute_action goal (and
+        # separately pushes the same token to the arm driver's own
+        # ~/acquire_control), rather than this engine having to pull one
+        # reactively -- read off the goal in _on_execute below.
+        # bytes(16) (all-zero) means "nobody holds it".
         self._assigned_token: bytes = bytes(16)
-        self._control_generation = 0
 
         self.create_service(Activate, "~/activate", self._on_activate, callback_group=self._group)
         self.create_service(Control, "~/control", self._on_control, callback_group=self._group)
         self.create_service(
             Hibernate, "~/hibernate", self._on_hibernate, callback_group=self._group
-        )
-        self.create_service(
-            AcquireControl,
-            "~/acquire_control",
-            self._on_acquire_control,
-            callback_group=self._group,
-        )
-        self.create_service(
-            ReleaseControl,
-            "~/release_control",
-            self._on_release_control,
-            callback_group=self._group,
         )
         ActionServer(
             self,
@@ -837,44 +820,6 @@ class CapabilityEngine(Node):
             self.get_logger().error(f"hibernate raised: {error!r}")
         return response
 
-    def _on_acquire_control(self, request, response):
-        """Grants this engine's own per-execution control token -- see the
-        ``__init__`` comment above ``self._assigned_token``. Always SEIZES
-        (same contract as every other ``AcquireControl`` server in this
-        project), since by design only the orchestrator ever calls this,
-        right before dispatching an ``ExecuteAction`` goal to this same
-        engine -- there is no legitimate concurrent holder to protect
-        against. A supplied ``request.token`` (non-zero) is used verbatim as
-        the shared session key instead of minting a fresh one, so this
-        engine's commands carry the same token as the arm driver's own
-        grant for the same execution."""
-        if bytes(request.token) == bytes(16):
-            token = secrets.token_bytes(16)
-        else:
-            token = bytes(request.token)
-        self._assigned_token = token
-        self._control_generation += 1
-        response.accepted = True
-        response.token = list(token)
-        response.generation = self._control_generation
-        response.message = f"granted to '{request.owner_id}'"
-        self.get_logger().info(
-            f"acquire_control: '{request.owner_id}' assigned token "
-            f"{token.hex()[:8]}... (generation {self._control_generation})"
-        )
-        return response
-
-    def _on_release_control(self, request, response):
-        if bytes(request.token) == self._assigned_token and self._assigned_token != bytes(16):
-            self._assigned_token = bytes(16)
-            response.released = True
-            response.message = ""
-            self.get_logger().info("release_control: token released")
-        else:
-            response.released = False
-            response.message = "token mismatch or already released"
-        return response
-
     def _on_control(self, request, response):
         with self._lifecycle:
             run = self._current  # pause and cancel belong to the goal running, if any
@@ -942,9 +887,11 @@ class CapabilityEngine(Node):
             self._publish_status()
             ctx = Context(self, goal_handle, run)
             try:
-                # Use whatever token the orchestrator pushed via ~/acquire_control
-                # right before this goal was dispatched (bytes(16)/all-zero means
-                # "nobody holds it", e.g. running standalone with no orchestrator).
+                # Use the token the orchestrator embedded directly in this
+                # goal (bytes(16)/all-zero means "nobody holds it", e.g.
+                # running standalone with no orchestrator).
+                if bytes(goal.token) != bytes(16):
+                    self._assigned_token = bytes(goal.token)
                 token = self._assigned_token if self._assigned_token != bytes(16) else None
                 self.arm.begin_action(ctx, token=token)
                 params = json.loads(goal.params_json or "{}")
