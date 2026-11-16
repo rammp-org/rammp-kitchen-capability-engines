@@ -4,24 +4,24 @@ A capability subclasses `CapabilityEngine`, declares its actions, and writes
 `execute()`. This class implements the rest of the RAMMP orchestrator's engine
 contract (rammp_orchestrator_interfaces) once, for every capability:
 
-- serves /<id>/activate, /<id>/execute_action, /<id>/control, /<id>/hibernate,
-  /<id>/acquire_control, /<id>/release_control
+- serves /<id>/activate, /<id>/execute_action, /<id>/control, /<id>/hibernate
 - registers with /rammp_orchestrator/register_engine, retrying until the
   orchestrator appears, and never exiting because it is absent
 - publishes /<id>/status (JSON in std_msgs/String) at 1 Hz and on every change
 - accepts cancel from Control.CANCEL and from an action cancel alike
-- holds the per-execution control token the orchestrator pushes via
-  /<id>/acquire_control right before dispatching execute_action, and passes
-  it on to self.arm so its commands carry the same token as the arm driver's
-  own grant for that execution (self.base still sends none)
-- gives each action ROS entities that live only while it runs (self.arm's, self.base's, and
-  the capability's own through create_action_subscription() and friends)
+- holds the per-execution control token the orchestrator embeds directly in
+  each execute_action goal's own token field, and passes it on to self.arm so
+  its commands carry the same token as the arm driver's own grant for that
+  execution
+- gives each action ROS entities that live only while it runs (self.arm's, and the
+  capability's own through create_action_subscription() and friends)
 - on SIGTERM or SIGINT, cancels the running action, lets it end, then exits
 - lets execute() talk to the UI bridge directly (rammp_ui_bridge_interfaces),
   bypassing the orchestrator, via ctx.update_user_panel()/ctx.poll_ui_event()
   (a live, engine-owned panel -- progress bar, buttons, tappable objects --
-  independent of ctx.progress()'s orchestrator-only feedback) and
-  ctx.publish_overlay_image() (this capability's own camera view), all using
+  independent of ctx.progress()'s orchestrator-only feedback),
+  ctx.publish_overlay_image() (this capability's own camera view), and
+  ctx.set_overlay_visible() (show/hide that camera view in UE), all using
   the same per-execution token as self.arm, never acquiring one of its own
 
 The same node runs standalone with `-p use_orchestrator:=false`: it skips
@@ -31,7 +31,6 @@ it with `ros2 action send_goal /<id>/execute_action ...` (see `make action`).
 
 import json
 import os
-import secrets
 import signal
 import threading
 import time
@@ -39,7 +38,6 @@ from dataclasses import dataclass, field
 
 import rammp_arm
 import rclpy
-from rammp_common_interfaces.srv import AcquireControl, ReleaseControl
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import (
     ActionAvailability,
@@ -59,7 +57,7 @@ from rammp_orchestrator_interfaces.srv import (
 )
 from rammp_ui_bridge_interfaces.action import RequestUserInput
 from rammp_ui_bridge_interfaces.msg import EngineOverlayImage
-from rammp_ui_bridge_interfaces.srv import UpdateUserInputPanel
+from rammp_ui_bridge_interfaces.srv import SetEngineOverlayVisible, UpdateUserInputPanel
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -72,14 +70,13 @@ from capability_engine import sim
 from capability_engine.action_scope import ENDED_MESSAGE, ActionScope, ScopeClosed
 from capability_engine.arm import ArmInterface, wait_until
 from capability_engine.arm_params import PARAMS
-from capability_engine.base import BaseInterface
 
 ORCHESTRATOR = "/rammp_orchestrator"
 ARM_PARAMS_FIXED_MESSAGE = "arm.* parameters are read at startup; restart to change"
 REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
-STOP_MARGIN_S = 1.0  # on a stop, past self.arm's and self.base's worst settle: the action's code
+STOP_MARGIN_S = 1.0  # on a stop, past self.arm's worst settle: for the action's own code
 START_WAIT_S = 1.0  # an accepted goal not handed to execute within this was lost by rclpy
 SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them
 
@@ -96,11 +93,10 @@ class Action:
 
 
 def stop_wait_s() -> float:
-    """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's and
-    self.base's worst settle (ArmInterface.worst_settle_s(), 7.8 s by default, and
-    BaseInterface.worst_settle_s(), 0.1 s) plus STOP_MARGIN_S. docker stop's grace (10 s) must
-    cover it."""
-    return ArmInterface.worst_settle_s() + BaseInterface.worst_settle_s() + STOP_MARGIN_S
+    """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's worst settle
+    (ArmInterface.worst_settle_s(), 7.8 s by default) plus STOP_MARGIN_S. docker stop's grace
+    (10 s) must cover it."""
+    return ArmInterface.worst_settle_s() + STOP_MARGIN_S
 
 
 class Cancelled(Exception):
@@ -226,6 +222,20 @@ class Context:
         if this run holds no session token."""
         return self._engine._ui_publish_overlay(image)
 
+    def set_overlay_visible(self, visible: bool) -> bool:
+        """Show/hide this capability's overlay camera feed in UE, via
+        SetEngineOverlayVisible -- a UE-side Remote Control toggle (`Open
+        Camera Feed`/`Close Camera Feed`), not a gate on
+        publish_overlay_image() above: keep publishing frames regardless, so
+        the feed is already live the moment you show it again.
+
+        Non-blocking: dispatches the call and returns immediately, not
+        waiting for the bridge to respond; a refusal (e.g. a stale token) is
+        only logged, not retried, since there's no run state to reconcile
+        here. Returns False (no-op, logged) if this run holds no session
+        token, or the bridge's service isn't immediately ready."""
+        return self._engine._ui_set_overlay_visible(visible)
+
     def checkpoint(self):
         """Call between steps: blocks while paused, raises Cancelled if cancelled."""
         while self._run.paused.is_set() and not self.cancelled():
@@ -293,7 +303,6 @@ class CapabilityEngine(Node):
         self._declare_arm_params(engine_id)
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self.arm = ArmInterface(self, self._group, mock=self.mock)
-        self.base = BaseInterface(self, self._group, mock=self.mock)
         # make_sim() loads the driver's model (in mock mode, arm.mock_urdf's)
         sim.set_model_provider(self.arm.robot_description)
         # The lifecycle: idle (no _current), running one goal from its acceptance until its
@@ -305,32 +314,18 @@ class CapabilityEngine(Node):
         self._registering = False
         self._register_sent = 0.0  # time.monotonic() the pending RegisterEngine call was sent
         self.instance_id = ""
-        # Per-execution control token: the orchestrator pushes one shared
-        # session token here (and to the arm driver's own ~/acquire_control)
-        # right before dispatching this engine's execute_action goal, rather
-        # than this engine having to pull one reactively (see
-        # RemoteEngineAdapter.push_execution_token() in orchestrator_node.py
-        # and _on_acquire_control below). bytes(16) (all-zero) means "nobody
-        # holds it".
+        # Per-execution control token: the orchestrator embeds one shared
+        # session token directly in this engine's execute_action goal (and
+        # separately pushes the same token to the arm driver's own
+        # ~/acquire_control), rather than this engine having to pull one
+        # reactively -- read off the goal in _on_execute below.
+        # bytes(16) (all-zero) means "nobody holds it".
         self._assigned_token: bytes = bytes(16)
-        self._control_generation = 0
 
         self.create_service(Activate, "~/activate", self._on_activate, callback_group=self._group)
         self.create_service(Control, "~/control", self._on_control, callback_group=self._group)
         self.create_service(
             Hibernate, "~/hibernate", self._on_hibernate, callback_group=self._group
-        )
-        self.create_service(
-            AcquireControl,
-            "~/acquire_control",
-            self._on_acquire_control,
-            callback_group=self._group,
-        )
-        self.create_service(
-            ReleaseControl,
-            "~/release_control",
-            self._on_release_control,
-            callback_group=self._group,
         )
         ActionServer(
             self,
@@ -366,6 +361,11 @@ class CapabilityEngine(Node):
         self._ui_update_client = self.create_client(
             UpdateUserInputPanel, f"{ui_ns}/request_user_input/update", callback_group=self._group
         )
+        self._ui_set_overlay_visible_client = self.create_client(
+            SetEngineOverlayVisible,
+            f"{ui_ns}/engine_overlay/set_visible",
+            callback_group=self._group,
+        )
         # One shared topic, not per-engine -- see EngineOverlayImage.msg's own
         # doc comment; the bridge tells engines apart by the token on each frame.
         self._ui_overlay_pub = self.create_publisher(
@@ -384,8 +384,33 @@ class CapabilityEngine(Node):
     # -- what a capability implements ---------------------------------------
 
     def availability(self, instance_id: str, world_state: dict) -> list[ActionAvailability]:
-        """Which actions can run on this object now. Default: all of them."""
-        return [ActionAvailability(action_id=a.action_id, available=True) for a in self.actions]
+        """Which actions can run on this object now. Default: every action
+        whose own `perception_classes` applies to this instance's class (or
+        declares none, i.e. applies to every class), all reported
+        available. Mirrors `MockEngine.activate()`'s reference semantics
+        (`rammp-orchestrator`'s `mocks/mock_engine.py`): an action whose
+        `perception_classes` doesn't include this instance's class is
+        omitted entirely (not just marked unavailable), since it doesn't
+        apply to this object at all, not merely blocked right now -- e.g. a
+        fridge-only action on a selected microwave instance. The instance's
+        class is looked up from `world_state["objects"][instance_id]
+        ["perception_class"]`; unknown (not yet reported by Perception, or
+        no such key) falls back to offering every action, same as
+        `MockEngine`. Object-state-dependent gating (e.g. "open" unavailable
+        once already open) is not implemented here -- override this method
+        to add it, using `world_state` the same way."""
+        instance = world_state.get("objects", {}).get(instance_id, {})
+        instance_class = instance.get("perception_class")
+        availability = []
+        for a in self.actions:
+            if (
+                a.perception_classes
+                and instance_class is not None
+                and (instance_class not in a.perception_classes)
+            ):
+                continue
+            availability.append(ActionAvailability(action_id=a.action_id, available=True))
+        return availability
 
     def execute(self, action_id: str, params: dict, ctx: Context) -> dict:
         """Run one action. Return the result payload; raise EngineError to fail.
@@ -544,8 +569,6 @@ class CapabilityEngine(Node):
             request_payload["selected_instance_id"] = selected_instance_id
 
         with run.ui_lock:
-            if run.ui_closed:
-                return False
             # Merge into the run's full desired state regardless of which
             # branch below actually fires -- a later reopen (after a refusal,
             # or because a goal-open was already in flight) must still carry
@@ -630,14 +653,9 @@ class CapabilityEngine(Node):
 
     def _ui_open_goal(self, run: "_Run", token: bytes) -> bool:
         if not self._ui_request_client.server_is_ready():
-            with run.ui_lock:
-                run.ui_opening = False
             self.get_logger().warning("ui_bridge_node's ~/request_user_input server unavailable")
             return False
         with run.ui_lock:
-            if run.ui_closed:
-                run.ui_opening = False
-                return False
             # The run's full merged desired state, not just whichever call
             # triggered this (re)open -- so a replacement goal always carries
             # forward previously-set panel/objects/selection content.
@@ -684,18 +702,6 @@ class CapabilityEngine(Node):
         goal_handle.get_result_async().add_done_callback(
             lambda result_future: self._ui_on_result(run, goal_handle, result_future)
         )
-        # Updates can arrive while acceptance is in flight. Flush the merged state.
-        with run.ui_lock:
-            payload = dict(run.ui_desired_state)
-        if self._ui_update_client.service_is_ready():
-            future = self._ui_update_client.call_async(
-                UpdateUserInputPanel.Request(
-                    token=list(self._assigned_token), request_json=json.dumps(payload)
-                )
-            )
-            future.add_done_callback(
-                lambda f: self._ui_on_update_response(run, self._assigned_token, goal_handle, f)
-            )
 
     def _ui_on_feedback(self, run: "_Run", feedback_msg) -> None:
         try:
@@ -747,6 +753,39 @@ class CapabilityEngine(Node):
         self._ui_overlay_pub.publish(EngineOverlayImage(image=image, token=list(token)))
         return True
 
+    def _ui_set_overlay_visible(self, visible: bool) -> bool:
+        token = self._assigned_token
+        if token == bytes(16):
+            self.get_logger().warning("standalone/no session token: skipping set_overlay_visible")
+            return False
+        if not self._ui_set_overlay_visible_client.service_is_ready():
+            self.get_logger().warning("ui_bridge_node's ~/engine_overlay/set_visible unavailable")
+            return False
+        self.get_logger().info(
+            f"set_overlay_visible({visible}): dispatching to ui_bridge_node "
+            f"(token {token.hex()[:8]}...)"
+        )
+        future = self._ui_set_overlay_visible_client.call_async(
+            SetEngineOverlayVisible.Request(token=list(token), visible=visible)
+        )
+        future.add_done_callback(lambda f: self._ui_on_set_overlay_visible_response(f, visible))
+        return True
+
+    def _ui_on_set_overlay_visible_response(self, future, visible: bool) -> None:
+        """Done-callback for the fire-and-forget call `_ui_set_overlay_visible`
+        dispatches -- logs the outcome either way (accepted or refused),
+        nothing to retry or reconcile (unlike _ui_on_update_response,
+        there's no run state tied to this one-shot call)."""
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warning(f"set_overlay_visible({visible}) call failed: {error!r}")
+            return
+        if response.accepted:
+            self.get_logger().info(f"set_overlay_visible({visible}) accepted by ui_bridge_node")
+        else:
+            self.get_logger().warning(f"set_overlay_visible({visible}) refused: {response.message}")
+
     def _ui_close(self, run: "_Run") -> None:
         """Called once execute() ends: cancels any still-open panel goal rather
         than leaving it dangling against a token this engine no longer holds.
@@ -779,44 +818,6 @@ class CapabilityEngine(Node):
             response.success = True
         except Exception as error:  # a bug in hibernate() must not kill the node
             self.get_logger().error(f"hibernate raised: {error!r}")
-        return response
-
-    def _on_acquire_control(self, request, response):
-        """Grants this engine's own per-execution control token -- see the
-        ``__init__`` comment above ``self._assigned_token``. Always SEIZES
-        (same contract as every other ``AcquireControl`` server in this
-        project), since by design only the orchestrator ever calls this,
-        right before dispatching an ``ExecuteAction`` goal to this same
-        engine -- there is no legitimate concurrent holder to protect
-        against. A supplied ``request.token`` (non-zero) is used verbatim as
-        the shared session key instead of minting a fresh one, so this
-        engine's commands carry the same token as the arm driver's own
-        grant for the same execution."""
-        if bytes(request.token) == bytes(16):
-            token = secrets.token_bytes(16)
-        else:
-            token = bytes(request.token)
-        self._assigned_token = token
-        self._control_generation += 1
-        response.accepted = True
-        response.token = list(token)
-        response.generation = self._control_generation
-        response.message = f"granted to '{request.owner_id}'"
-        self.get_logger().info(
-            f"acquire_control: '{request.owner_id}' assigned token "
-            f"{token.hex()[:8]}... (generation {self._control_generation})"
-        )
-        return response
-
-    def _on_release_control(self, request, response):
-        if bytes(request.token) == self._assigned_token and self._assigned_token != bytes(16):
-            self._assigned_token = bytes(16)
-            response.released = True
-            response.message = ""
-            self.get_logger().info("release_control: token released")
-        else:
-            response.released = False
-            response.message = "token mismatch or already released"
         return response
 
     def _on_control(self, request, response):
@@ -886,13 +887,13 @@ class CapabilityEngine(Node):
             self._publish_status()
             ctx = Context(self, goal_handle, run)
             try:
-                # Use whatever token the orchestrator pushed via ~/acquire_control
-                # right before this goal was dispatched (bytes(16)/all-zero means
-                # "nobody holds it", e.g. running standalone with no orchestrator).
+                # Use the token the orchestrator embedded directly in this
+                # goal (bytes(16)/all-zero means "nobody holds it", e.g.
+                # running standalone with no orchestrator).
+                if bytes(goal.token) != bytes(16):
+                    self._assigned_token = bytes(goal.token)
                 token = self._assigned_token if self._assigned_token != bytes(16) else None
                 self.arm.begin_action(ctx, token=token)
-                # self.base's TwistSetpoints still carry no token (base.py).
-                self.base.begin_action(ctx)
                 params = json.loads(goal.params_json or "{}")
                 payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS
@@ -911,13 +912,9 @@ class CapabilityEngine(Node):
             finally:
                 try:
                     try:
-                        # The base first: the arm's settle can take seconds, the base's does not.
-                        self.base.end_action()  # stops the base if this action drove it
+                        self.arm.end_action()  # settles its goals and stream, closes its scope
                     finally:
-                        try:
-                            self.arm.end_action()  # settles its goals and stream, closes its scope
-                        finally:
-                            run.scope.close()  # destroys the capability's entities of this action
+                        run.scope.close()  # destroys the capability's entities of this action
                 except Exception as error:  # the run must still end and report its result
                     result.status = Result.STATUS_FAILED
                     result.error_code = "exception"

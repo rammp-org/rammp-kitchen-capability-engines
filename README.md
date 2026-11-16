@@ -146,11 +146,9 @@ ros2 topic echo /example/status
 ```
 
 Standalone, the orchestrator calls a capability makes (`ctx.request_intent`,
-`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. For direct
-UI panels, the orchestrator pushes a shared execution token to the engine's
-`/<engine_id>/acquire_control` server and grants it to the arm and UI bridge.
-The engine passes that token to `self.arm`; it never acquires control itself.
-Without a token, UI calls are logged no-ops.
+`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. Arm control
+arbitration (`AcquireControl`) is not wired in yet: the orchestrator does not
+call it today.
 
 To run it on the robot, transcribe the capability's two fragments into
 [`rammp-deployments`](https://github.com/rammp-org/rammp-deployments)'s
@@ -229,7 +227,6 @@ What the engine gives you:
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `__init__(engine_id, **node_kwargs)`                         | Call it as `super().__init__("<engine_id>")`. The ROS node's name is the engine id                                  |
 | `self.arm`                                                   | The arm (see [below](#selfarm-arminterface))                                                                        |
-| `self.base`                                                  | The drive base (see [below](#selfbase-baseinterface))                                                               |
 | `self.mock`                                                  | True when the `mock` parameter is set, meaning there is no hardware                                                 |
 | `self.instance_id`                                           | The object the engine was activated on                                                                              |
 | `create_action_subscription(msg_type, topic, callback, qos)` | Like `Node.create_subscription`, but the subscription exists only until the action ends. Call it inside `execute()` |
@@ -257,14 +254,24 @@ the orchestrator:
 
 ### UI (`ctx`)
 
-The direct UI bridge support is ported from `feat/engine_update`, as used by
-its counter-panel example. `ctx.update_user_panel(panel_json=...)` opens or
-refreshes the engine's panel without blocking. `ctx.poll_ui_event()` consumes
-the latest button/object event; a button ends the panel goal, so the next panel
-update opens a new one. `ctx.publish_overlay_image(image)` publishes the
-capability's camera view. These calls are independent of `ctx.progress()`,
-which reports only to the orchestrator. Panel goals are closed when the action
-ends. See [UI JSON schema](docs/UI_JSON_SCHEMA.md) for payloads and event shapes.
+`ctx` also talks directly to the UI bridge (`rammp_ui_bridge`), independent of
+the orchestrator and of `progress()` above (which only reports to the
+orchestrator and is never shown to the user). Call any of these, all of them,
+or none, as the capability needs:
+
+| Method                                                                                | What it does                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update_user_panel(panel_json=None, objects=None, selected_instance_id=None) -> bool` | Pushes panel content to the UI. Non-blocking: opens a `RequestUserInput` goal lazily on first call (or again once the previous one has ended), or refreshes the open one. Each argument left `None` means "leave unchanged"; at least one of `panel_json`/`objects` is required the first time it's called in a run                                                                                               |
+| `poll_ui_event() -> dict \| None`                                                     | Non-blocking: returns (and consumes) the most recent event since the last call -- `{"type": "button", "button_id": ...}` or `{"type": "object_tapped", "instance_id": ...}` -- or `None` if nothing new. A button event ends the panel's goal; the next `update_user_panel()` call transparently opens a fresh one                                                                                                |
+| `publish_overlay_image(image) -> bool`                                                | Publishes one frame (a `sensor_msgs/Image`, e.g. from a wrist camera) of this capability's own camera to the UI bridge's shared overlay topic, stamped with this run's session token                                                                                                                                                                                                                              |
+| `set_overlay_visible(visible: bool) -> bool`                                          | Shows/hides this capability's overlay camera view in UE -- independent of `publish_overlay_image()`: frames keep flowing either way; this calls UE's parameterless `Open Camera Feed`/`Close Camera Feed` Remote Control function via the bridge. The orchestrator already hides it automatically once this run's `execute_action` ends, so call this yourself only to show/hide it at some other specific moment |
+
+All four return `False` (a no-op, logged) if this run holds no session token
+(e.g. standalone with no orchestrator) or the bridge is unreachable/rejects the
+request.
+
+See [`docs/UI_JSON_SCHEMA.md`](docs/UI_JSON_SCHEMA.md) for the full
+`panel_json`/`objects`/`poll_ui_event()` JSON shapes.
 
 ### `self.arm` (`ArmInterface`)
 
@@ -375,48 +382,11 @@ Other modules:
 The arm's tunable values (speeds, tolerances, timeouts) are `arm.*` ROS
 parameters.
 
-### `self.base` (`BaseInterface`)
-
-You drive the base with velocity commands and read its odometry. It drives
-on your velocities only in the AUTONOMOUS mode (the engine drives) or
-the SHARED mode (the engine and the joystick drive together), so ask for one
-first. Use `self.base` only inside `execute()`, and add `"base"` to
-`required_resources`. Anywhere else, a call raises `BaseError`.
-
-```python
-self.base.request_mode("autonomous", profile="low")  # or "shared"; "manual" to hand back
-while not arrived(self.base.odometry()):
-    self.base.send_twist(0.2, 0.0)  # 0.2 m/s forward
-    time.sleep(0.05)
-self.base.stop()
-```
-
-| Method                                        | What it does                                                                                                                                                                                                                                                                                                              |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `request_mode(mode, profile=None)`            | Asks the MIB for `"autonomous"`, `"shared"` or `"manual"` (the joystick drives: hands the chair back) and returns once its status shows it. `profile` is `"low"`, `"normal"` or `"high"`; `None` keeps the one in force. Some switches go through IDLE. `BaseError` if it is e-stopped, faulted or does not answer in 3 s |
-| `send_twist(linear_x, angular_z, linear_y=0)` | Sends one velocity in `base_link`: forward m/s, counter-clockwise rad/s seen from above, left m/s (a differential drive ignores it). Resend it at a steady rate while you drive. Never blocks                                                                                                                             |
-| `stop()`                                      | Sends a zero velocity. It works after a cancel too                                                                                                                                                                                                                                                                        |
-| `odometry()`                                  | The latest `nav_msgs/Odometry`: pose in `odom`, twist in `base_link`. `BaseError` if none comes or it is older than 0.5 s                                                                                                                                                                                                 |
-
-It publishes `rammp_base_interfaces/TwistSetpoint` on `/base/setpoint/twist`
-and `DriveCommand` on `/rammp/drive_command`, and reads `/base/odom` and
-`MibStatus` on `/rammp/mib/status`. A joystick touch ends AUTONOMOUS: after
-that, `send_twist()` raises `BaseError`, and nothing asks for the mode again.
-That is the user's decision; ask again only for a new reason of your own.
-`send_twist()` raises `Cancelled` once the action is cancelled. When the action
-ends, however it ends, the engine sends the base a zero velocity if the action
-sent it anything. If the action switched the MIB into autonomous or shared and
-it is still there, the engine then asks for IDLE; manual is left alone. A
-paused action sends nothing, so call `stop()` before `ctx.checkpoint()`, or the
-base may drive on at the last velocity. In mock mode nothing is sent,
-`request_mode()` returns at once, and `odometry()` integrates the velocities
-you sent, starting at the origin.
-
 ### Exceptions
 
 | Exception      | Raised when                                                                                                    |
 | -------------- | -------------------------------------------------------------------------------------------------------------- |
-| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()`, arm motions and `send_twist()` raise it             |
+| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()` and every arm motion raise it                        |
 | `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails |
 | `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                            |
 | `ControlTaken` | Another program took control of the arm in the middle of your action                                           |
@@ -424,7 +394,6 @@ you sent, starting at the origin.
 | `StreamClosed` | The driver closed your stream                                                                                  |
 | `ModeConflict` | You started a stream or a trajectory while another one was running                                             |
 | `StateTimeout` | A state read got no recent message                                                                             |
-| `BaseError`    | You called `self.base` outside `execute()`, or its odometry is missing or stale                                |
 
 ### Terms
 
@@ -450,7 +419,6 @@ you sent, starting at the origin.
 
 ```
 capability_engine/               shared ament_python package: the orchestrator engine contract
-shared/door_common/              shared ament_python package: door code shared by capabilities, not a capability
 capabilities/<name>/             one ament_python package per capability (`make new CAP=<name>`)
   package.xml, setup.py, setup.cfg
   <name>/node.py                the capability: a CapabilityEngine subclass
