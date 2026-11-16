@@ -37,8 +37,18 @@ Two teleop modes, one servo:
            starts. No fridge after all goes back to searching.
 
 The joystick only moves the camera: no buttons are read. Teleop ends on max_teleop_s (the action
-succeeds), on the orchestrator's cancel (Cancelled: the block exits and the stream closes), or on
-an arm error.
+succeeds), on the orchestrator's cancel (Cancelled: the block exits and the stream closes), on
+an arm error, or on a tap on a food container (food_pick.py; `pick` and pick_enabled):
+
+  pick     while the arm is still, SAM3 finds food containers in the wrist camera and the UI shows
+           them as tappable boxes over the wrist camera's view. A tap ends teleop (the stream
+           closes, the arm holds), and food_pick.FoodPicker takes that container out of the fridge
+           and backs out with it: the action then succeeds, holding it. A pick refused before
+           anything moved goes back to teleop, in the same mode, without homing again.
+  handoff  a `pick` goal sent while this action teleops (node.Capability._on_goal): teleop ends
+           (the stream closes, the arm holds), the container the pick goal names (its
+           `instance_id`, from ~/sam3_overlay) is looked up while this action's detections still
+           exist, and this action succeeds with ended "handed_off"; the pick goal then runs.
 
 Homing uses only a fridge TF stamped follow_settle_s after the arm last moved (measured from
 /ee_state's twist, and the end of every stream): an estimate from a moving camera is not a goal.
@@ -68,6 +78,7 @@ from tf2_ros import TransformException
 
 from . import geometry as geo
 from . import plane_follow as pf
+from .food_pick import FoodPicker, FoodTargets, PickRefused
 from .scene_homing import SceneFridge
 
 CONTROLLER = "ee_twist"
@@ -157,13 +168,23 @@ def search_frame(R_SE: np.ndarray, p_SE: np.ndarray, optical_E, up_S) -> np.ndar
 class PeerSession:
     """The state of one `peer` action. Make it inside execute() (its entities are the action's)."""
 
-    def __init__(self, engine, ctx, cfg, *, execute: bool, speed: float):
+    def __init__(self, engine, ctx, cfg, *, execute: bool, speed: float, pick: bool = True,
+                 handoff=None):
         self._node = engine
         self._arm = engine.arm
         self._ctx = ctx
         self._log = engine.get_logger()
+        self._cfg = cfg
         self.execute = execute
         self.speed = speed
+        self.pick = pick and bool(cfg["pick_enabled"])
+        # set by a `pick` goal arriving while this teleops (node.Capability._on_goal); then
+        # self.handoff_request is the instance id it names ("" = none)
+        self._handoff = handoff
+        self.handoff_request = ""
+        self.handoff_target = None  # (instance id, container dict or None, why) at handoff
+        self.in_teleop = False  # True while the teleop loop runs (a handoff ends it cleanly)
+        self.picking = False  # True while a tap's pick plans or runs (a pick goal is refused)
 
         c = cfg
         self.rate_hz = float(c["rate_hz"])
@@ -247,6 +268,9 @@ class PeerSession:
         self._was_engaged = False
         self._target_G = None  # servo target of E in the plane frame
         self._ff_prev = None  # (p_SW, R_SW) target on the previous tick, for feedforward
+        self._food = None  # FoodTargets: the tap (None: tap-to-pick is off)
+        self._picker = None  # FoodPicker
+        self._tapped = None  # the container the last tap chose
 
         # --- this action's ROS entities (the engine destroys them when it ends) --------------
         self._tf = engine.create_action_tf_buffer()
@@ -273,6 +297,7 @@ class PeerSession:
         `max_teleop_s`. With no fridge TF to home on, search (with `teleop` and
         search_when_no_fridge) until one appears, then home on it by itself."""
         self._wait_arm_tf()
+        self._open_pick()
         scene_homed = self.scene_homing and self._scene_home()
         homes, searches, teleop_s, deadline = 0, 0, 0.0, None
         while True:
@@ -296,6 +321,11 @@ class PeerSession:
                     f"detector another view"
                 )
             else:
+                if self._handoff is not None and self._handoff.is_set():
+                    # a pick goal arrived as a search found the fridge: no homing, hand off here
+                    self._take_handoff()
+                    return {"ended": "handed_off", "scene_homed": scene_homed, "homes": homes,
+                            "searches": searches, "teleop_s": round(teleop_s, 1)}
                 self._home(found)
                 homes += 1
                 if not teleop:
@@ -306,11 +336,24 @@ class PeerSession:
                 deadline = time.monotonic() + float(max_teleop_s)
             started = time.monotonic()
             why = self._teleop(mode, deadline)
+            while why == "pick":  # a tap: the stream has closed, the arm holds
+                self._moved_ns = self._now_ns()
+                teleop_s += time.monotonic() - started
+                picked = self._pick_tapped()
+                if picked is not None:
+                    return {"ended": "picked", "scene_homed": scene_homed, "homes": homes,
+                            "searches": searches, "teleop_s": round(teleop_s, 1),
+                            "pick": picked}
+                started = time.monotonic()  # refused, nothing moved: teleop again, same mode
+                why = self._teleop(mode, deadline, resume=True)
             # The stream has closed: the arm comes to rest now. No fridge TF from before is a goal.
             self._moved_ns = self._now_ns()
             teleop_s += time.monotonic() - started
+            if why == "handoff":
+                self._take_handoff()
             if why != "found":  # only a search ends with "found": home on it
-                return {"ended": why, "scene_homed": scene_homed, "homes": homes,
+                ended = "handed_off" if why == "handoff" else why
+                return {"ended": ended, "scene_homed": scene_homed, "homes": homes,
                         "searches": searches, "teleop_s": round(teleop_s, 1)}
 
     def _wait_arm_tf(self) -> None:
@@ -338,6 +381,60 @@ class PeerSession:
             f"{self.driver_ee_frame}; the tool frame is {np.linalg.norm(self._T_EG[:3, 3]):.3f} m "
             f"from {self.ee_link}; follow_mode = {self.follow_mode}"
         )
+
+    # ------------------------------------------------------------------ tap-to-pick
+
+    def _open_pick(self) -> None:
+        """The wrist camera, SAM3 and the UI for tap-to-pick; off (warned) when SAM3 is not up."""
+        if not self.pick:
+            return
+        try:
+            self._picker = FoodPicker(self._node, self._ctx, self._cfg, execute=self.execute,
+                                      speed=self.speed)
+        except PickRefused as exc:
+            self._log.warning(f"tap-to-pick is off for this action: {exc}")
+            return
+        self._food = FoodTargets(self._node, self._ctx, self._picker.camera, self._cfg,
+                                 self._settled, self._now_ns)
+
+    def _take_handoff(self) -> None:
+        """A `pick` goal is waiting: look up the container it names while this action's
+        detections still exist (its mask is valid from this very pose: the arm now holds)."""
+        iid = self.handoff_request
+        if not iid:
+            self.handoff_target = ("", None, "")
+        elif self._food is None:
+            self.handoff_target = (iid, None, "tap-to-pick was off in peer (pick_enabled, SAM3)")
+        else:
+            target, why = self._food.lookup(iid)
+            self.handoff_target = (iid, target, why)
+        self._log.info(f"handing off to the pick goal ({iid or 'best container'})")
+        if self._food is not None:
+            self._food.say("Handing off to the pick action.", objects=[])
+
+    def _pick_tapped(self):
+        """Pick the tapped container: the pick's result, or None when it was refused before
+        anything moved (teleop resumes). Raises EngineError once the pick has moved and failed."""
+        target, self._tapped = self._tapped, None
+        food = self._food
+        food.say("Picking up the container...", objects=[])
+        self.picking = True
+        try:
+            try:
+                plan = self._picker.plan(target)
+            except PickRefused as exc:
+                self._log.warning(f"pick refused, nothing moved: {exc}. Back to teleop")
+                food.say(f"Could not pick that up ({exc}). Move the stick, hold still, tap again.")
+                return None
+            if not self.execute:
+                self._log.info("dry run: the pick is planned, nothing moved")
+                food.say("Dry run: the pick is planned, nothing moved.")
+                return {"executed": False, "plan": plan["summary"]}
+            out = self._picker.run(plan)
+            food.say("Holding the container outside the fridge.")
+            return out
+        finally:
+            self.picking = False
 
     # ------------------------------------------------------------------ homing
 
@@ -688,13 +785,16 @@ class PeerSession:
 
     # ------------------------------------------------------------------ teleop
 
-    def _teleop(self, mode: str, deadline) -> str:
-        """Servo in `mode` (WALL or SEARCH) until a search finds the fridge ("found") or
-        `deadline` ("max_teleop_s"). A cancel raises Cancelled out of it."""
+    def _teleop(self, mode: str, deadline, resume: bool = False) -> str:
+        """Servo in `mode` (WALL or SEARCH) until a search finds the fridge ("found"), `deadline`
+        ("max_teleop_s") or a tap on a food container ("pick"; the container in self._tapped). A
+        cancel raises Cancelled out of it. `resume`: after a refused pick, keep following the plane
+        followed until then (WALL)."""
         self._mode = mode
         if mode == WALL:
-            self._latch = self._pending_latch  # the plane homing just used
-            self._start_follower()
+            if not (resume and self._follower is not None):
+                self._latch = self._pending_latch  # the plane homing just used
+                self._start_follower()
         else:
             self._latch = self._follower = None
             self._search = None  # fixed on the first tick, from where the arm is
@@ -707,6 +807,8 @@ class PeerSession:
         if mode == WALL:
             phase = "teleop"
             message = "teleop: move the stick to move the camera, let go to hold"
+            if self._food is not None:
+                message += "; hold still and tap a food container to pick it up"
         else:
             phase = "searching"
             message = (
@@ -719,10 +821,14 @@ class PeerSession:
         # so. A dry run sends nothing and pauses at its checkpoint.
         self._ctx.progress(phase, 50.0 if mode == WALL else 0.0, message,
                            pausable=not self.execute)
-        if not self.execute:
-            return self._loop(None, deadline)
-        with self._arm.stream(CONTROLLER, timeout_s=self.stream_timeout_s) as s:
-            return self._loop(s.send, deadline)
+        self.in_teleop = True
+        try:
+            if not self.execute:
+                return self._loop(None, deadline)
+            with self._arm.stream(CONTROLLER, timeout_s=self.stream_timeout_s) as s:
+                return self._loop(s.send, deadline)
+        finally:
+            self.in_teleop = False
 
     def _loop(self, send, deadline) -> str:
         period = 1.0 / self.rate_hz
@@ -735,10 +841,18 @@ class PeerSession:
             if deadline is not None and now > deadline:
                 self._log.info("teleop: max_teleop_s reached")
                 return "max_teleop_s"
+            if self._handoff is not None and self._handoff.is_set():
+                self._log.info("teleop: a pick goal arrived, ending teleop")
+                return "handoff"  # leaving the stream's block holds the arm
             if self._mode == SEARCH and now >= self._next_check:
                 self._next_check = now + SEARCH_CHECK_S
                 if self._search_check():
                     return "found"
+            if self._food is not None:
+                tapped = self._food.tick()
+                if tapped is not None:
+                    self._tapped = tapped
+                    return "pick"  # leaving the stream's block holds the arm
             v, w = self._command(dt, self._engaged(fresh))
             if send is not None:
                 send([*v, *w])  # raises Cancelled once cancelled; the block's exit closes

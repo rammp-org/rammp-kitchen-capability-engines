@@ -11,6 +11,18 @@ No fridge TF to home on (and `search_when_no_fridge`): the same servo runs in a 
 stick moving the camera a little (orientation held) so the detector gets another view. Once a
 fridge TF is measured with the arm still (the stick let go), it homes by itself.
 
+Tap-to-pick (food_pick.py; the goal's `pick` and pick_enabled): while the arm is still, the wrist
+camera's food containers are tappable on the UI; a tap ends teleop, the container is taken out
+(microwave_place's take-out, from this pose) and the arm backs out of the fridge holding it.
+
+Without the UI: ~/ui_panel mirrors (JSON, latched) what the UI is sent, ~/simulate_tap takes what
+it sends back (the bridge's object_tapped JSON, an instance id, or "" for the best container).
+
+Action `pick`: the same pick from wherever the arm is, of the best-scoring container in view, or
+of `instance_id` (an id from ~/sam3_overlay). Sent WHILE `peer` teleops, it ends peer first
+(handoff.py): peer leaves teleop with the arm holding and succeeds with ended "handed_off", then
+the pick runs. No UI or orchestrator needed: two `ros2 action send_goal`s.
+
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`.
 Otherwise the goal is a dry run: the standoff is planned (nothing moves) and teleop publishes what
 it would stream on ~/commanded_twist. There is no deadman and this node never publishes /estop:
@@ -19,10 +31,18 @@ someone stands at the e-stop whenever allow_execute is on.
     ros2 launch fridge_peering_mode fridge_peering_mode.launch.py use_orchestrator:=false \
         allow_execute:=true
     make action CAP=fridge_peering_mode ACTION=peer PARAMS='{"execute": false}'
+    ros2 topic echo --qos-durability transient_local /fridge_peering_mode/ui_panel
+    ros2 topic pub --once /fridge_peering_mode/simulate_tap std_msgs/msg/String '{data: food_3_0}'
+    make action CAP=fridge_peering_mode ACTION=pick PARAMS='{"execute": false}'
+    # while that peer runs, from another terminal: end it and pick food_3_0 (dry; add execute)
+    make action CAP=fridge_peering_mode ACTION=pick PARAMS='{"instance_id": "food_3_0"}'
     ros2 service call /fridge_peering_mode/control rammp_orchestrator_interfaces/srv/Control \
         '{command: 2}'  # cancel: ends teleop
 """
 
+import threading
+
+import rammp_arm
 from capability_engine import (
     Action,
     ArmError,
@@ -35,7 +55,10 @@ from capability_engine import (
 )
 from capability_engine.driver_state import Refused
 
+from . import food_pick
 from . import geometry as geo
+from .handoff import hand_off
+from .food_pick import FoodPicker, PickRefused
 from .streaming import PeerSession, facing, follow_params
 
 ENGINE_ID = "fridge_peering_mode"  # = the package, its image and /<id>/... (make action CAP=)
@@ -172,6 +195,60 @@ PARAMS = {
     "joy_timeout_s": 0.25,
     "fridge_tf_timeout_s": 1.0,
     "ee_state_timeout_s": 0.2,
+    # tap-to-pick (food_pick.py). While the arm is still, SAM3 (pick_prompt, pick_sam3_threshold)
+    # runs on the wrist camera every pick_detect_period_s; its containers are tappable on the UI
+    # over the wrist colour stream (ui_overlay_hz; 0: not published). false: peer never picks
+    "pick_enabled": True,
+    "wrist_topics": [
+        "/wrist_camera/color/image_raw",
+        "/wrist_camera/depth/image_rect_raw",
+        "/wrist_camera/color/camera_info",
+    ],
+    "pick_prompt": "food container",
+    "pick_sam3_threshold": 0.5,
+    "pick_detect_period_s": 1.0,
+    "ui_overlay_hz": 10.0,
+    # the pick's detection: pick_frames consecutive masks agreeing (IoU >= pick_mask_iou) within
+    # pick_timeout_s; the tapped container is the mask overlapping the tapped one by >=
+    # pick_select_iou. The grasp point: "top" = the near face's top edge (pick_top_percentile of
+    # its heights, the face pick_face_band_m deep), "nearest" = the microwave's nearest depths
+    "pick_frames": 3,
+    "pick_mask_iou": 0.85,
+    "pick_timeout_s": 20.0,
+    "pick_select_iou": 0.3,
+    "pick_point": "top",
+    "pick_face_band_m": 0.02,
+    "pick_top_percentile": 95.0,
+    # the grasp (microwave_place take_out's, tuned 2026-11-03 on the tupperware): the tool frame
+    # pick_grasp_depth (m) past the point along the heading and pick_grasp_up above it; pre-grasp
+    # pick_reach_in back along the heading (the straight line in). CHECK on the fridge: the
+    # microwave's point was the rim seen from above
+    "pick_grasp_depth": 0.0,
+    "pick_grasp_up": 0.035,
+    "pick_reach_in": 0.30,
+    "pick_grip_open": 0.0,
+    # cuRobo plans the approach in pick_world (resolved in the planner's container; must hold
+    # flatbot's platform, seat, person and floor layers; "" = whatever is loaded) at
+    # pick_speed_scale x the goal's speed; the tool must stay within pick_approach_corridor_m of
+    # the straight line to pre-grasp (the fridge is not in that world)
+    "pick_world": "/config/robot/curobo/world.yaml",
+    "pick_speed_scale": float(rammp_arm.GO_TO_SPEED_SCALE),
+    "pick_approach_corridor_m": 0.10,
+    # the line in at pick_line_speed (m/s peak), its last pick_impedance_in_m in joint impedance at
+    # pick_impedance_speed (held pick_settle_s first); close; lift pick_lift_m; back to pre-grasp
+    "pick_line_speed": 0.16,
+    "pick_impedance_in_m": 0.10,
+    "pick_impedance_speed": 0.08,
+    "pick_settle_s": 0.2,
+    "pick_impedance_kq": [400.0, 400.0, 400.0, 400.0, 200.0, 200.0, 200.0],
+    "pick_impedance_zeta": 0.7,
+    "pick_impedance_torque_limit": [float(v) for v in rammp_arm.IMPEDANCE["torque_limit"]],
+    "pick_lift_m": 0.03,
+    # leaving: straight and level pick_leave_back_m (m) further back, then (pick_leave_to_joints)
+    # cuRobo to pick_leave_joints (rad, J1..J7; the container's tilt is not held on that move)
+    "pick_leave_back_m": 0.20,
+    "pick_leave_to_joints": False,
+    "pick_leave_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57],
 }
 
 
@@ -226,6 +303,7 @@ def _problems(cfg) -> list[str]:
     if cfg["follow_mode"] not in FOLLOW_MODES:
         out.append(f"follow_mode must be one of {FOLLOW_MODES}, got {cfg['follow_mode']!r}")
     out += [f"follow_*: {p}" for p in follow_params(cfg).problems()]
+    out += food_pick.check_params(cfg)
     try:
         facing(cfg)
         geo.axis_vector(cfg["up_axis"])
@@ -248,10 +326,15 @@ def _error_code(exc: ArmError) -> str:
     return next((code for cls, code in _ARM_ERROR_CODES if isinstance(exc, cls)), "arm_error")
 
 
+_EXECUTE = {"type": "boolean", "default": False}
+# scales arm.go_to_speed_scale for the moves to the standoff, and pick_speed_scale for the pick's
+_SPEED = {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1.0}
+
+
 class Capability(CapabilityEngine):
     display_name = "Look inside the fridge"
     perception_classes = ["fridge"]
-    required_resources = ["arm"]  # the gripper is never commanded
+    required_resources = ["arm", "gripper"]  # the gripper: picking up food
     actions = [
         Action(
             "peer",
@@ -259,14 +342,8 @@ class Capability(CapabilityEngine):
             params_schema={
                 "type": "object",
                 "properties": {
-                    "execute": {"type": "boolean", "default": False},
-                    # scales arm.go_to_speed_scale for the move to the standoff
-                    "speed": {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "maximum": 1,
-                        "default": 1.0,
-                    },
+                    "execute": _EXECUTE,
+                    "speed": _SPEED,
                     # false: stop at the standoff (and fail with no_fridge instead of searching)
                     "teleop": {"type": "boolean", "default": True},
                     # end teleop (successfully) after this long in total; null: only on a cancel
@@ -275,9 +352,25 @@ class Capability(CapabilityEngine):
                         "exclusiveMinimum": 0,
                         "default": None,
                     },
+                    # tap a food container on the UI to pick it up (and pick_enabled)
+                    "pick": {"type": "boolean", "default": True},
                 },
             },
-        )
+        ),
+        Action(
+            "pick",
+            "Take the food container in view out of the fridge",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "execute": _EXECUTE,
+                    "speed": _SPEED,
+                    # a container id from ~/sam3_overlay (only when sent while peer teleops: it
+                    # is looked up in peer's detections); "" = the best-scoring in view
+                    "instance_id": {"type": "string", "default": ""},
+                },
+            },
+        ),
     ]
 
     def __init__(self):
@@ -288,6 +381,20 @@ class Capability(CapabilityEngine):
         bad = _problems(self.cfg)
         if bad:
             raise ValueError("fridge_peering_mode parameters: " + "; ".join(bad))
+        from rclpy.qos import DurabilityPolicy, QoSProfile
+        from sensor_msgs.msg import Image
+
+        # SAM3 debug images (microwave_place's WristCamera publishes on engine.sam3_overlay, and so
+        # do the tappable boxes, with their instance ids): advertised while idle, the last latched
+        self.sam3_overlay = self.create_publisher(
+            Image,
+            f"/{ENGINE_ID}/sam3_overlay",
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        # a pick goal ending a running peer (handoff.py)
+        self._handoff = threading.Event()
+        self._session = None  # the running peer's PeerSession
+        self._handoff_target = None  # (instance id, container or None, why) peer left for pick
         moves = self.cfg["allow_execute"]
         self.get_logger().info(
             f"allow_execute={moves}: "
@@ -311,15 +418,66 @@ class Capability(CapabilityEngine):
 
         ctx.checkpoint()
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
-        # Its joystick subscription, tf buffer and debug publishers are this action's.
-        session = PeerSession(self, ctx, self.cfg, execute=execute, speed=speed)
         try:
-            out = session.run(teleop=bool(params.get("teleop", True)), max_teleop_s=max_teleop_s)
+            if action_id == "pick":
+                out = self._pick(ctx, execute, speed, params)
+            else:
+                self._handoff.clear()
+                self._handoff_target = None
+                # Its joystick subscription, tf buffer and debug publishers are this action's.
+                session = PeerSession(self, ctx, self.cfg, execute=execute, speed=speed,
+                                      pick=bool(params.get("pick", True)),
+                                      handoff=self._handoff)
+                self._session = session
+                try:
+                    out = session.run(teleop=bool(params.get("teleop", True)),
+                                      max_teleop_s=max_teleop_s)
+                finally:
+                    self._session = None
+                    if session.handoff_target is not None:
+                        self._handoff_target = session.handoff_target
         except ArmError as e:  # Cancelled is not one: it propagates, as the engine expects
             raise EngineError(
                 _error_code(e), f"{e} -- the arm holds where it is", recoverable=True
             ) from e
         return {"executed": execute, "note": note, **out}
+
+    def _on_goal(self, goal):
+        """A pick goal while peer runs: end peer first (handoff.py), then the engine's own
+        acceptance (only when idle)."""
+        if goal.action_id == "pick":
+            hand_off(self._lifecycle, lambda: self._current, self._session, goal.params_json,
+                     self._handoff, self.get_logger())
+        return super()._on_goal(goal)
+
+    def _pick(self, ctx, execute: bool, speed: float, params: dict) -> dict:
+        """The `pick` action, from here: `instance_id` (looked up by the peer this goal ended),
+        else the best-scoring container the wrist camera sees."""
+        handoff, self._handoff_target = self._handoff_target, None
+        self._handoff.clear()
+        iid = str(params.get("instance_id") or "").strip()
+        target = None
+        if iid:
+            if handoff is None or handoff[0] != iid:
+                raise EngineError(
+                    "pick_refused",
+                    f"instance_id {iid!r}: send the pick while peer is teleoperating, with an id "
+                    f"from ~/sam3_overlay -- nothing moved",
+                    recoverable=True,
+                )
+            target = handoff[1]
+            if target is None:
+                raise EngineError("pick_refused", f"instance_id {iid!r}: {handoff[2]} -- nothing "
+                                  f"moved", recoverable=True)
+        try:
+            picker = FoodPicker(self, ctx, self.cfg, execute=execute, speed=speed)
+            plan = picker.plan(target)
+        except PickRefused as e:
+            raise EngineError("pick_refused", f"{e} -- nothing moved", recoverable=True) from e
+        if not execute:
+            self.get_logger().info("dry run: the pick is planned, nothing moved")
+            return {"plan": plan["summary"]}
+        return picker.run(plan)
 
 
 def main():
