@@ -159,6 +159,10 @@ spins can crash the node, and the engine does it in the safe order. Plain
 each step short: on a cancel or a stop (`docker stop`), `self.arm` cancels its
 motion at once, but your own code ends only at its next checkpoint, and a stop
 waits at most a few seconds for it.
+The base is different: it keeps the last velocity you sent until
+`execute()` returns and the engine sends it a zero velocity, so a loop that
+drives the base must check for cancel on every pass (`send_twist()` raises
+`Cancelled`) and never sleep long between sends.
 
 **No `print`.** Ruff forbids it. When you migrate a student script, turn each
 `print(msg)` into `self.get_logger().info(msg)` (`warn`/`error` where it was a
