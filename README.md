@@ -340,21 +340,23 @@ list_controllers() -> list[Controller]
 set_gains(gains) -> (accepted, message)
 plan_to_pose(pos, quat, start_joints, hold=HOLD_NONE) -> Plan
 plan_to_joints(q_goal, start_joints) -> Plan
-set_world(world) -> (success, message)
+blend(legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None) -> Plan
+set_world(world, *, even_if_cancelled=False) -> (success, message)
 ```
 
-| Name                                                   | What it does                                                                                                                                          |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `joint_states()`, `ee_state()`, `gripper_state()`      | The latest message from that topic, as a dataclass. `age_s` says how old it is. Raises `StateTimeout` if none arrives or it is too old                |
-| `control_status()`, `stream_status()`, `diagnostics()` | The same, for `/control_status`, `/stream_status` and `/diagnostics`                                                                                  |
-| `not_ready()`                                          | Why the arm must not be commanded right now (for example, it is e-stopped), or None if it can be                                                      |
-| `robot_description()`                                  | The driver's URDF                                                                                                                                     |
-| `execute_joint_trajectory`                             | The driver's trajectory action, with all its options. `points` is a list of `(t, positions, velocities)`, sent exactly as you give it                 |
-| `stream`                                               | Opens a streaming session. Call `s.send(setpoint)` at least every `timeout_s`. When the `with` block ends, the arm holds still and the session closes |
-| `list_controllers()`                                   | The driver's streaming controllers, and whether each can be opened now                                                                                |
-| `set_gains`                                            | Sets the session's default impedance gains                                                                                                            |
-| `plan_to_pose`, `plan_to_joints`                       | Asks cuRobo for a plan without moving the arm                                                                                                         |
-| `set_world`                                            | Replaces cuRobo's collision world with one of the packaged worlds                                                                                     |
+| Name                                                   | What it does                                                                                                                                                                          |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `joint_states()`, `ee_state()`, `gripper_state()`      | The latest message from that topic, as a dataclass. `age_s` says how old it is. Raises `StateTimeout` if none arrives or it is too old                                                |
+| `control_status()`, `stream_status()`, `diagnostics()` | The same, for `/control_status`, `/stream_status` and `/diagnostics`                                                                                                                  |
+| `not_ready()`                                          | Why the arm must not be commanded right now (for example, it is e-stopped), or None if it can be                                                                                      |
+| `robot_description()`                                  | The driver's URDF                                                                                                                                                                     |
+| `execute_joint_trajectory`                             | The driver's trajectory action, with all its options. `points` is a list of `(t, positions, velocities)`, sent exactly as you give it                                                 |
+| `stream`                                               | Opens a streaming session. Call `s.send(setpoint)` at least every `timeout_s`. When the `with` block ends, the arm holds still and the session closes                                 |
+| `list_controllers()`                                   | The driver's streaming controllers, and whether each can be opened now                                                                                                                |
+| `set_gains`                                            | Sets the session's default impedance gains                                                                                                                                            |
+| `plan_to_pose`, `plan_to_joints`                       | Asks cuRobo for a plan without moving the arm                                                                                                                                         |
+| `blend`                                                | cuRobo's one trajectory through several planned legs, still moving through each junction whose `blend_radius` > 0. Plans only; the Plan's `corner_m` says how close each corner comes |
+| `set_world`                                            | Replaces cuRobo's collision world with a packaged world or a world YAML. `even_if_cancelled`: still waits for the answer once cancelled, to put a world back as the action ends       |
 
 The constants and dataclasses are in `capability_engine.arm`:
 
