@@ -615,7 +615,8 @@ class Runner:
         COMPLIANT_JUNCTION_SPEED, and a junction a leg marks as a fold
         (Leg.fold) flows up to COMPLIANT_FOLD_DEG, thinned to
         COMPLIANT_FOLD_CHORD: what the arm follows in the driver's joint
-        impedance (constants). The flag is read at every call, never kept:
+        impedance (constants); a `leg` with an ease of its own (Leg.ease: a
+        look) keeps that, whatever the mode. The flag is read at every call, never kept:
         press_demo builds the runner before run_reach_press sets it.
         Positions are never touched. A stroke
         flown on its own under a contact guard keeps its dilated or warped
@@ -625,16 +626,21 @@ class Runner:
         (Leg.compliant: a home, core.as_home) is re-timed in that mode."""
         own = None if leg is None else getattr(leg, "compliant", None)
         if not (getattr(self.client, "compliant", False) if own is None else own):
-            return self.retime
-        return replace(
-            self.retime,
-            accel=COMPLIANT_ACCEL,
-            decel=COMPLIANT_DECEL,
-            qd_ceiling=COMPLIANT_QD_CEILING,
-            junction_cruise=COMPLIANT_JUNCTION_SPEED,
-            fold_deg=COMPLIANT_FOLD_DEG,
-            fold_chord=COMPLIANT_FOLD_CHORD,
-        )
+            params = self.retime
+        else:
+            params = replace(
+                self.retime,
+                accel=COMPLIANT_ACCEL,
+                decel=COMPLIANT_DECEL,
+                qd_ceiling=COMPLIANT_QD_CEILING,
+                junction_cruise=COMPLIANT_JUNCTION_SPEED,
+                fold_deg=COMPLIANT_FOLD_DEG,
+                fold_chord=COMPLIANT_FOLD_CHORD,
+            )
+        ease = None if leg is None else getattr(leg, "ease", None)
+        if ease is not None:  # a leg that eases out of rest and into it its own way (Leg.ease: a look)
+            params = replace(params, accel=float(ease[0]), decel=float(ease[1]))
+        return params
 
     # -- preview -----------------------------------------------------------
     def preview(self, legs):
@@ -1414,7 +1420,7 @@ class Runner:
             # A guarded TAIL rides the same profile: the approach and the
             # descent it leads into are one motion with no stop between
             # them, and the descent keeps its own (slow) cruise fraction.
-            params = replace(self.retime_params(), time_scale=self.time_scale)
+            params = replace(self.retime_params(lead), time_scale=self.time_scale)
             traj, self.last_retime = retime_group(
                 [g.traj for g in group],
                 [g.speed for g in group],
@@ -1455,7 +1461,7 @@ class Runner:
             traj = group[0].traj
             exec_speed = lead.speed * self.time_scale
             flown = (
-                line_profile(lead, self.retime_params(), self.time_scale, **self._near_user_kw())
+                line_profile(lead, self.retime_params(lead), self.time_scale, **self._near_user_kw())
                 if _free_air_line(lead)
                 else None
             )

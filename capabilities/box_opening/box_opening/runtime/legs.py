@@ -163,6 +163,10 @@ class Leg:
     # (constants.GAINS_*), a constants.CustomGains its own kq/zeta/torque
     # limits. A position run never sends one.
     gains: object = None
+    # MOTION legs: (accel, decel), rad/s^2 along the path, this leg eases out of rest and into it with,
+    # in place of the runner's own (Runner.retime_params): a look, gentler than any transit
+    # (primitives.core.as_look). None: the runner's
+    ease: tuple = None
     # MOTION legs flown in a control mode of their own, whatever the client's
     # (PlannerClient.compliant): True the driver's joint impedance under
     # `gains`, False its POSITION control, None the client's own. A home

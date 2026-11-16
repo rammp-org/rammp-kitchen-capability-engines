@@ -392,3 +392,16 @@ COMPLIANT_RUN_GAINS = GAINS_RIGID
 # HOME_SPEED is a cruise fraction, as TRANSIT_SPEED (runtime/legs.Leg.speed).
 HOME_SPEED = 0.4
 HOME_GAINS = GAINS_MEDIUM
+# A look turns the hand where the user sits, to SEE and not to arrive, and it must read as gentle
+# (owner 2026-11-16, of the wrist look: "we need to make the arm look more docile here because it looks
+# snappy and scary"). Until then a view flew as a transit: full cruise (the wrist joints at their 0.45 and
+# 0.9 rad/s ceilings) out of rest at COMPLIANT_ACCEL, under RIGID. A look (primitives.core.as_look) cruises
+# at LOOK_SPEED of each joint's limit (no joint over 0.31 rad/s, the wrist's 0.27), eases out of rest at
+# LOOK_ACCEL and into it at LOOK_DECEL, and flies under MEDIUM as every home does, giving way where it
+# meets something. Re-timed offline, as flown before and as a look: the three wrist joints turned 0.6 rad,
+# 1.74 s at 0.45 rad/s and 3.0 rad/s^2 against 2.90 s at 0.27 and 0.8; the hand's own turn of 1.0 rad,
+# 1.58 s at 0.90 rad/s and 5.1 rad/s^2 against 4.06 s at 0.27 and 1.4. Not yet flown.
+LOOK_SPEED = 0.25
+LOOK_ACCEL = 0.8
+LOOK_DECEL = 0.6
+LOOK_GAINS = GAINS_MEDIUM

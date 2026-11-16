@@ -436,14 +436,19 @@ kinematics, the chair model and the camera's own view, for any table height of
 0.15-0.35 m in `arm_mount`: up to four, the one that shows the most of where the
 arm presses first, and before them one aimed where the scene camera has the
 container, if it has it at all (a fix placed roughly from a box its frame cut
-included). Each view is a planned move of the wrist (about a second), a still
-frame and the finder; the run goes on at the first that shows the lid whole. A
+included). Each view is a planned move of the wrist, a still frame and the
+finder; the run goes on at the first that shows the lid whole. The move is flown
+as a look (`LOOK_SPEED`, `LOOK_ACCEL`, `LOOK_DECEL`, `LOOK_GAINS` in
+`constants.py`): a quarter of each joint's speed limit, easing out of rest at
+0.8 rad/s² and into it at 0.6, in the driver's joint impedance under MEDIUM, so
+the hand turns slowly where the user sits (a 0.6 rad turn of the three wrist
+joints takes 2.9 s where it took 1.7 s as a transit; not yet flown). A
 lid a view cuts is looked at again with the wrist turned to it (at most twice a
 run) and is the container only where that look shows it whole. What the wrist
 finds is taken over the scene camera's; where it finds none the scene camera's
 fix is used, and with neither the run stops with `not_found`, saying what each
-camera said. It adds about 1.5 s where the first view shows the container and
-up to about 10 s where none does; its frames are kept as captures
+camera said. It adds about 3 s where the first view shows the container and
+up to about 15 s where none does (estimates from the look's re-timing); its frames are kept as captures
 (`captures/wrist-survey-*`). Only with the body model on.
 
 With the orchestrator's selection the wrist looks too, and what it finds is the
