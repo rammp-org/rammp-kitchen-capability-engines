@@ -20,8 +20,9 @@ contract (rammp_orchestrator_interfaces) once, for every capability:
 - lets execute() talk to the UI bridge directly (rammp_ui_bridge_interfaces),
   bypassing the orchestrator, via ctx.update_user_panel()/ctx.poll_ui_event()
   (a live, engine-owned panel -- progress bar, buttons, tappable objects --
-  independent of ctx.progress()'s orchestrator-only feedback) and
-  ctx.publish_overlay_image() (this capability's own camera view), all using
+  independent of ctx.progress()'s orchestrator-only feedback),
+  ctx.publish_overlay_image() (this capability's own camera view), and
+  ctx.set_overlay_visible() (show/hide that camera view in UE), all using
   the same per-execution token as self.arm, never acquiring one of its own
 
 The same node runs standalone with `-p use_orchestrator:=false`: it skips
@@ -59,7 +60,7 @@ from rammp_orchestrator_interfaces.srv import (
 )
 from rammp_ui_bridge_interfaces.action import RequestUserInput
 from rammp_ui_bridge_interfaces.msg import EngineOverlayImage
-from rammp_ui_bridge_interfaces.srv import UpdateUserInputPanel
+from rammp_ui_bridge_interfaces.srv import SetEngineOverlayVisible, UpdateUserInputPanel
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -226,6 +227,20 @@ class Context:
         if this run holds no session token."""
         return self._engine._ui_publish_overlay(image)
 
+    def set_overlay_visible(self, visible: bool) -> bool:
+        """Show/hide this capability's overlay camera feed in UE, via
+        SetEngineOverlayVisible -- a UE-side Remote Control toggle (`Open
+        Camera Feed`/`Close Camera Feed`), not a gate on
+        publish_overlay_image() above: keep publishing frames regardless, so
+        the feed is already live the moment you show it again.
+
+        Non-blocking: dispatches the call and returns immediately, not
+        waiting for the bridge to respond; a refusal (e.g. a stale token) is
+        only logged, not retried, since there's no run state to reconcile
+        here. Returns False (no-op, logged) if this run holds no session
+        token, or the bridge's service isn't immediately ready."""
+        return self._engine._ui_set_overlay_visible(visible)
+
     def checkpoint(self):
         """Call between steps: blocks while paused, raises Cancelled if cancelled."""
         while self._run.paused.is_set() and not self.cancelled():
@@ -305,15 +320,13 @@ class CapabilityEngine(Node):
         self._registering = False
         self._register_sent = 0.0  # time.monotonic() the pending RegisterEngine call was sent
         self.instance_id = ""
-        # Per-execution control token: the orchestrator pushes one shared
-        # session token here (and to the arm driver's own ~/acquire_control)
-        # right before dispatching this engine's execute_action goal, rather
-        # than this engine having to pull one reactively (see
-        # RemoteEngineAdapter.push_execution_token() in orchestrator_node.py
-        # and _on_acquire_control below). bytes(16) (all-zero) means "nobody
-        # holds it".
+        # Per-execution control token: the orchestrator embeds one shared
+        # session token directly in this engine's execute_action goal (and
+        # separately pushes the same token to the arm driver's own
+        # ~/acquire_control), rather than this engine having to pull one
+        # reactively -- read off the goal in _on_execute below.
+        # bytes(16) (all-zero) means "nobody holds it".
         self._assigned_token: bytes = bytes(16)
-        self._control_generation = 0
 
         self.create_service(Activate, "~/activate", self._on_activate, callback_group=self._group)
         self.create_service(Control, "~/control", self._on_control, callback_group=self._group)
@@ -365,6 +378,11 @@ class CapabilityEngine(Node):
         )
         self._ui_update_client = self.create_client(
             UpdateUserInputPanel, f"{ui_ns}/request_user_input/update", callback_group=self._group
+        )
+        self._ui_set_overlay_visible_client = self.create_client(
+            SetEngineOverlayVisible,
+            f"{ui_ns}/engine_overlay/set_visible",
+            callback_group=self._group,
         )
         # One shared topic, not per-engine -- see EngineOverlayImage.msg's own
         # doc comment; the bridge tells engines apart by the token on each frame.
@@ -772,6 +790,39 @@ class CapabilityEngine(Node):
         self._ui_overlay_pub.publish(EngineOverlayImage(image=image, token=list(token)))
         return True
 
+    def _ui_set_overlay_visible(self, visible: bool) -> bool:
+        token = self._assigned_token
+        if token == bytes(16):
+            self.get_logger().warning("standalone/no session token: skipping set_overlay_visible")
+            return False
+        if not self._ui_set_overlay_visible_client.service_is_ready():
+            self.get_logger().warning("ui_bridge_node's ~/engine_overlay/set_visible unavailable")
+            return False
+        self.get_logger().info(
+            f"set_overlay_visible({visible}): dispatching to ui_bridge_node "
+            f"(token {token.hex()[:8]}...)"
+        )
+        future = self._ui_set_overlay_visible_client.call_async(
+            SetEngineOverlayVisible.Request(token=list(token), visible=visible)
+        )
+        future.add_done_callback(lambda f: self._ui_on_set_overlay_visible_response(f, visible))
+        return True
+
+    def _ui_on_set_overlay_visible_response(self, future, visible: bool) -> None:
+        """Done-callback for the fire-and-forget call `_ui_set_overlay_visible`
+        dispatches -- logs the outcome either way (accepted or refused),
+        nothing to retry or reconcile (unlike _ui_on_update_response,
+        there's no run state tied to this one-shot call)."""
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warning(f"set_overlay_visible({visible}) call failed: {error!r}")
+            return
+        if response.accepted:
+            self.get_logger().info(f"set_overlay_visible({visible}) accepted by ui_bridge_node")
+        else:
+            self.get_logger().warning(f"set_overlay_visible({visible}) refused: {response.message}")
+
     def _ui_close(self, run: "_Run") -> None:
         """Called once execute() ends: cancels any still-open panel goal rather
         than leaving it dangling against a token this engine no longer holds.
@@ -911,9 +962,11 @@ class CapabilityEngine(Node):
             self._publish_status()
             ctx = Context(self, goal_handle, run)
             try:
-                # Use whatever token the orchestrator pushed via ~/acquire_control
-                # right before this goal was dispatched (bytes(16)/all-zero means
-                # "nobody holds it", e.g. running standalone with no orchestrator).
+                # Use the token the orchestrator embedded directly in this
+                # goal (bytes(16)/all-zero means "nobody holds it", e.g.
+                # running standalone with no orchestrator).
+                if bytes(goal.token) != bytes(16):
+                    self._assigned_token = bytes(goal.token)
                 token = self._assigned_token if self._assigned_token != bytes(16) else None
                 self.arm.begin_action(ctx, token=token)
                 self.base.begin_action(ctx)
