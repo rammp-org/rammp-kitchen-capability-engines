@@ -340,8 +340,8 @@ What follows the container while the panel is up depends on `wrist_first`:
   at once with `--line-up`, so that one process alone ever commands the arm. If
   the arm stands at rest it closes the fingers, as every run does at its start,
   and turns the wrist to the front view that shows the most of where the arm
-  presses: the three wrist joints, once, flown as a look (slow, eased, under
-  MEDIUM), the arm above them standing. From there it judges every wrist frame
+  presses: the three wrist joints, once, flown as a look (slow and eased),
+  the arm above them standing. From there it judges every wrist frame
   as it comes, the user driving the chair the while, and the scene camera's
   sightings with them. On **Open** the node tells it to go and the same process
   runs on from that view. An arm that is not at rest is not moved before
@@ -459,11 +459,10 @@ arm presses first, and before them one aimed where the scene camera has the
 container, if it has it at all (a fix placed roughly from a box its frame cut
 included). Each view is a planned move of the wrist, a still frame and the
 finder; the run goes on at the first that shows the lid whole. The move is flown
-as a look (`LOOK_SPEED`, `LOOK_ACCEL`, `LOOK_DECEL`, `LOOK_GAINS` in
-`constants.py`): a quarter of each joint's speed limit, easing out of rest at
-0.8 rad/s² and into it at 0.6, in the driver's joint impedance under MEDIUM, so
-the hand turns slowly where the user sits (a 0.6 rad turn of the three wrist
-joints takes 2.9 s where it took 1.7 s as a transit; not yet flown). A
+as a look (`LOOK_SPEED`, `LOOK_ACCEL`, `LOOK_DECEL` in `constants.py`): a quarter of each joint's speed limit, easing out of rest at
+0.8 rad/s² and into it at 0.6, under the run's own gains (slow, not loose), so the hand turns slowly
+where the user sits (a 0.6 rad turn of the three wrist joints takes 2.9 s where
+it took 1.7 s as a transit; not yet flown). A
 lid a view cuts is looked at again with the wrist turned to it (at most twice a
 run) and is the container only where that look shows it whole. What the wrist
 finds is taken over the scene camera's; where it finds none the scene camera's

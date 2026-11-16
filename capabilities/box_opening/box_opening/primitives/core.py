@@ -22,7 +22,6 @@ from box_opening.constants import (
     IMPEDANCE_NAMES,
     LOOK_ACCEL,
     LOOK_DECEL,
-    LOOK_GAINS,
     LOOK_SPEED,
     PLANNER_LIMIT_MARGIN_RAD,
     SANITY_MARGIN_RAD,
@@ -296,12 +295,11 @@ def as_home(leg):
 
 
 def as_look(leg):
-    """`leg`, planned to a view, flown as a look flies (constants.LOOK_SPEED, LOOK_ACCEL, LOOK_DECEL,
-    LOOK_GAINS): slow, easing gently out of rest and into it, in the driver's joint impedance under
-    MEDIUM whatever the run's own mode. It turns the hand where the user sits, to see and not to arrive.
+    """`leg`, planned to a view, flown as a look flies (constants.LOOK_SPEED, LOOK_ACCEL, LOOK_DECEL):
+    slow, easing gently out of rest and into it, in the run's own control mode and under its own gains
+    (gentle is slow, not loose). It turns the hand where the user sits, to see and not to arrive.
     Returns it."""
-    leg.speed, leg.compliant, leg.gains = LOOK_SPEED, True, LOOK_GAINS
-    leg.ease = (LOOK_ACCEL, LOOK_DECEL)
+    leg.speed, leg.ease = LOOK_SPEED, (LOOK_ACCEL, LOOK_DECEL)
     return leg
 
 

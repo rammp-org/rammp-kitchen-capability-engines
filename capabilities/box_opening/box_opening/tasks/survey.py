@@ -1291,8 +1291,9 @@ def save_frame(watcher, snap, cam, frame, caption):
 def fly_view(ctx, runner, view, band, execute):
     """`view` planned as the reach-out's look is (the joint goal, the full world), its way there held
     to the counter band (Band.path_refusal), and flown as a look flies (core.as_look: slow, easing
-    gently out of rest and into it, under MEDIUM; the owner, 2026-11-16: "we need to make the arm look
-    more docile here because it looks snappy and scary"): ("flown" | "refused" | "stopped", why)."""
+    gently out of rest and into it, under the run's own gains; the owner, 2026-11-16: "we need to make
+    the arm look more docile here because it looks snappy and scary"): ("flown" | "refused" |
+    "stopped", why)."""
     from box_opening.constants import LOOK_SPEED
     from box_opening.primitives.core import PlanRefused, PlanState, _full_world, _plan_motion, as_look
 
