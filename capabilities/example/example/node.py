@@ -14,7 +14,46 @@ from capability_engine.CapabilityEngine.
 
 import time
 
+from sensor_msgs.msg import Image
+
 from capability_engine import Action, CapabilityEngine, EngineError, run
+
+_OVERLAY_WIDTH = 320
+_OVERLAY_HEIGHT = 240
+
+
+_STRIPE_BG = (20, 20, 20)
+_STRIPE_FG = (0, 160, 255)
+_STRIPE_WIDTH = 24
+
+
+def _build_stripe_overlay_image() -> Image:
+    """One rgb8 frame of diagonal stripes -- a placeholder for a real
+    capability's own camera feed (see publish_overlay_image()'s docstring),
+    generated once and republished unchanged every tick below. A fixed,
+    recognizable pattern (same convention as static_overlay_node's own
+    crosshair) makes it obvious on screen that a genuine frame reached UE,
+    without the visual noise (and incompressibility) of random static --
+    and the diagonal stripes are easily told apart from that mock's
+    crosshair."""
+    msg = Image()
+    msg.height = _OVERLAY_HEIGHT
+    msg.width = _OVERLAY_WIDTH
+    msg.encoding = "rgb8"
+    msg.is_bigendian = 0
+    msg.step = _OVERLAY_WIDTH * 3
+    rows = []
+    for y in range(_OVERLAY_HEIGHT):
+        row = bytearray(_OVERLAY_WIDTH * 3)
+        for x in range(_OVERLAY_WIDTH):
+            is_fg = ((x + y) // _STRIPE_WIDTH) % 2 == 0
+            r, g, b = _STRIPE_FG if is_fg else _STRIPE_BG
+            row[x * 3 + 0] = r
+            row[x * 3 + 1] = g
+            row[x * 3 + 2] = b
+        rows.append(bytes(row))
+    msg.data = b"".join(rows)
+    return msg
 
 
 class Capability(CapabilityEngine):
@@ -79,34 +118,62 @@ class Capability(CapabilityEngine):
         user. No session token (e.g. running standalone) makes every bridge
         call a harmless no-op, so this still behaves like plain `count`.
 
-        A capability with its own camera (e.g. a wrist cam) would also call
+        A capability with its own camera (e.g. a wrist cam) would call
         ctx.publish_overlay_image(image) here, once per tick, to show the
-        user a live view alongside the panel -- omitted since this example
-        has no camera to publish.
+        user a live view alongside the panel -- this example has no real
+        camera, so it republishes one static diagonal-stripe test frame
+        (_build_stripe_overlay_image(), built once per call) every
+        tick instead, purely to demonstrate a frame actually reaches UE.
+        ctx.set_overlay_visible() brackets the whole run below, to
+        demonstrate the show/hide toggle (UE's `Open Camera Feed`/`Close
+        Camera Feed` Remote Control functions): shown right before the loop
+        starts, hidden in a `finally` so it's hidden on every exit path --
+        normal completion, the user's Stop button, or ctx.checkpoint()
+        raising Cancelled -- not just the happy path. The Orchestrator's own
+        end-of-execution cleanup also unconditionally hides the overlay (see
+        OrchestratorNode's execution-finish handling), so this is actually
+        redundant by the time execute() returns -- it's here to show *this
+        engine's own* call, for a capability that wants the feed hidden the
+        instant its loop ends rather than waiting on that later cleanup.
         """
-        for n in range(1, to + 1):
-            ctx.checkpoint()
-            pct = 100.0 * n / to
-            ctx.update_user_panel(
-                panel_json={
-                    "title": "Counting",
-                    "message": f"{n}/{to}",
-                    "progress": {"phase": "counting", "pct": pct, "pausable": False},
-                    "buttons": [{"button_id": "stop", "label": "Stop"}],
-                }
-            )
-            # Poll for Stop throughout the interval, including on the last
-            # iteration, instead of only once beforehand and then sleeping
-            # through it uninterrupted -- otherwise a tap during any
-            # interval is never consumed and the action reports normal
-            # success.
-            event = self._wait_for_stop(interval, ctx)
-            if event is not None:
-                self.get_logger().info(f"count_with_panel: user pressed Stop at {n}/{to}")
-                return {"counted_to": n, "stopped_by_user": True}
-            ctx.progress("counting", pct, f"{n}/{to}")
+        self.get_logger().info("count_with_panel: showing overlay camera feed")
+        shown = ctx.set_overlay_visible(True)
+        self.get_logger().info(f"count_with_panel: set_overlay_visible(True) returned {shown}")
+        overlay_image = _build_stripe_overlay_image()
+        try:
+            for n in range(1, to + 1):
+                ctx.checkpoint()
+                pct = 100.0 * n / to
+                ctx.update_user_panel(
+                    panel_json={
+                        "title": "Counting",
+                        "message": f"{n}/{to}",
+                        "progress": {"phase": "counting", "pct": pct, "pausable": False},
+                        "buttons": [{"button_id": "stop", "label": "Stop"}],
+                    }
+                )
+                published = ctx.publish_overlay_image(overlay_image)
+                self.get_logger().info(
+                    f"count_with_panel: publish_overlay_image returned {published}"
+                )
+                # Poll for Stop throughout the interval, including on the last
+                # iteration, instead of only once beforehand and then sleeping
+                # through it uninterrupted -- otherwise a tap during any
+                # interval is never consumed and the action reports normal
+                # success.
+                event = self._wait_for_stop(interval, ctx)
+                if event is not None:
+                    self.get_logger().info(f"count_with_panel: user pressed Stop at {n}/{to}")
+                    return {"counted_to": n, "stopped_by_user": True}
+                ctx.progress("counting", pct, f"{n}/{to}")
 
-        return {"counted_to": to}
+            return {"counted_to": to}
+        finally:
+            self.get_logger().info("count_with_panel: hiding overlay camera feed")
+            hidden = ctx.set_overlay_visible(False)
+            self.get_logger().info(
+                f"count_with_panel: set_overlay_visible(False) returned {hidden}"
+            )
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
         """Sleeps `duration` seconds in short steps, honouring cancel and

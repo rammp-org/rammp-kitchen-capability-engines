@@ -12,8 +12,13 @@
 The reference capability. It offers two actions: `count`, which counts up to
 `to` with progress feedback and honours pause and cancel, and
 `count_with_panel`, the same but also driving a live progress panel (with a
-Stop button) directly on the UI bridge. It is activated when the user selects
-a `counter`. Replace this paragraph with what your capability does and what
+Stop button) directly on the UI bridge, and showing/hiding its overlay
+camera feed (`ctx.set_overlay_visible()`) for the duration of the run —
+shown before the loop starts, hidden in a `finally` on every exit path.
+While shown, it also republishes one static diagonal-stripe test frame
+(`ctx.publish_overlay_image()`) every tick as a placeholder for a real
+capability's own camera. It is activated when the user selects a
+`counter`. Replace this paragraph with what your capability does and what
 would break without it.
 
 ## Publishes
@@ -53,11 +58,11 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name                  | Default            | Meaning                                                                                                                           |
-| --------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator`    | `true`             | `false` runs standalone: no registration, drive it by CLI                                                                         |
-| `mock`                | `false`            | `true` skips hardware (the mock alternative sets it)                                                                              |
-| `ui_bridge_node_name` | `"ui_bridge_node"` | Node name of the `rammp_ui_bridge` instance `ctx.update_user_panel()`/`ctx.poll_ui_event()`/`ctx.publish_overlay_image()` talk to |
+| Name                  | Default            | Meaning                                                                                                                                                       |
+| --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`    | `true`             | `false` runs standalone: no registration, drive it by CLI                                                                                                     |
+| `mock`                | `false`            | `true` skips hardware (the mock alternative sets it)                                                                                                          |
+| `ui_bridge_node_name` | `"ui_bridge_node"` | Node name of the `rammp_ui_bridge` instance `ctx.update_user_panel()`/`ctx.poll_ui_event()`/`ctx.publish_overlay_image()`/`ctx.set_overlay_visible()` talk to |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the
