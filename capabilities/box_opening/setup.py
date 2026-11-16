@@ -31,6 +31,8 @@ setup(
             # a wrist detection set from live frames, and a Foxglove view of where the lid would go
             "record_detection_set = box_opening.tasks.record_detection_set:main",
             "lid_room_view = box_opening.tasks.lid_room_view:main",
+            # the line-up's boundary: where a press plans, asked away from the arm (moves nothing)
+            "reach_probe = box_opening.tasks.reach_probe:main",
         ]
     },
 )
