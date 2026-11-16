@@ -46,7 +46,7 @@ from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, 
 from rammp_orchestrator_interfaces.msg import ActionAvailability
 from rammp_orchestrator_interfaces.srv import Control
 
-from . import LOGGER
+from . import LOGGER, line_up
 from .constants import state_dir
 from .flight_view import FlightView
 from .runtime.abort import EXIT_HALTED
@@ -96,6 +96,10 @@ PARAMS = {
     # same folder as this node writes it; "" = planner_worlds under state_dir
     "planner_worlds_as": "",
     "planner_worlds_dir": "",
+    # the line-up before a run, on the UI (line_up, guide): the panel tells the user which way to move until
+    # the container is where the arm opens it, then asks, and the arm moves only on its Open. Off (the
+    # default) open_box starts its run at once, as it always has; so does an execution with no UI (standalone)
+    "line_up": False,
     # the mock only: how long each of its phases lasts (s). 0, the default, and its run is over at once, as it
     # always was; a second or two and the UI can be rehearsed on it (the panel, its bar, Cancel) with no arm
     "mock_phase_s": 0.0,
@@ -130,6 +134,12 @@ SHUTDOWN_WAIT_S = 3.0  # on SIGTERM: the run's own stop first, inside docker sto
 ORCHESTRATOR_TIMEOUT_S = 120.0
 WORLD_WAIT_S = 3.0
 RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORLD_WAIT_S - 2.0  # 90 s
+# The line-up's share of those 120 s (LINE_UP_S): what the run's budget leaves once the longest run logged
+# has its time (45 s of 48 missions, plus ~5 s to start), so a run started on the line-up's last second
+# still ends before its own stop. A user not in place by then is told to press open again
+RUN_LONGEST_S = 50.0
+LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 40 s
+NOT_LINED_UP = "the container was not where the arm opens it within %.0f s: nothing moved (press open again in place)"
 TAIL_LINES = 40
 
 # a leg's row -> (phase, the fraction of the run done it ends, what the run is doing then, for
@@ -166,6 +176,7 @@ MOCK_PHASES = {
         ("home", 1.0, "going home"),
     ),
 }
+MOCK_APPROACH_PHASES = 6  # the mock's line-up: its box comes into reach over this many mock_phase_s
 # where the mock says it set the lid down (arm_mount, m): a stand-in, the mock sees nothing.
 # flatbot's 2026-10-30 13:28 run set it down here, beside the box
 MOCK_LID_XYZ = [0.597, -0.071, 0.209]
@@ -634,6 +645,39 @@ class Capability(CapabilityEngine):
         token, self._cancelled_token = self._cancelled_token, None
         return token is not None and token == self._assigned_token
 
+    def _line_up(self, ctx, source):
+        """The line-up before a run (the `line_up` param; line_up.LineUp): the panel tells the user which way
+        to move and asks, and this returns only on its Open, with the seconds it took. Cancel on it is the
+        orchestrator's cancel (Cancelled); out of time, EngineError("not_lined_up"), recoverable: nothing
+        moved. 0.0 at once, and the run starts as it always has, where the param is off, where this
+        execution has no UI to ask on (standalone), or where there is no `source` to see the box by."""
+        if not self._param("line_up"):
+            return 0.0
+        if not self._ui_live():
+            self.get_logger().info("line_up: no UI for this execution, so no one to ask: the run starts as always")
+            return 0.0
+        if source is None:
+            self.get_logger().warning(
+                "line_up is on, but this build cannot yet follow the container as the chair moves (only the "
+                "mock lines up): the run starts as always"
+            )
+            return 0.0
+        t0 = time.monotonic()
+
+        def said(say):
+            ctx.progress(line_up.PHASE, 0.0, say.message, pausable=False)
+            self.get_logger().info(f"line-up: {say.message}")
+
+        lining = line_up.LineUp(ctx, self._ui_live, source, LINE_UP_S, on_say=said)
+        outcome = lining.run()
+        if outcome == line_up.CANCELLED:
+            if lining.cancel_pressed:
+                self._cancel_from_ui()
+            raise Cancelled()
+        if outcome == line_up.TIMED_OUT:
+            raise EngineError("not_lined_up", NOT_LINED_UP % LINE_UP_S, recoverable=True)
+        return time.monotonic() - t0
+
     def availability(self, instance_id, world_state):
         """open_box for a container the world state does not already hold opened (its object
         record's `opened`, which a run writes as it lets the lid go on the table), while the
@@ -658,6 +702,7 @@ class Capability(CapabilityEngine):
         if not self._allowed():
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
         ctx.checkpoint()  # cancelled before it started: nothing runs
+        lined_up_s = self._line_up(ctx, None)  # nothing has moved, and nothing runs but on its Open
         env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
         runs = state_dir(env) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
@@ -677,7 +722,7 @@ class Capability(CapabilityEngine):
         self._run = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
         code = None
         try:
-            code = self._follow(self._run, log, track, ctx, world, panel)
+            code = self._follow(self._run, log, track, ctx, world, panel, RUN_BUDGET_S - lined_up_s)
         finally:
             run_, self._run = self._run, None
             if run_.proc.poll() is None:
@@ -711,7 +756,7 @@ class Capability(CapabilityEngine):
         if run_.timed_out:
             error = EngineError(
                 "timeout",
-                f"the run took longer than {RUN_BUDGET_S:.0f} s and was stopped its own way (Ctrl+C)",
+                f"the run took longer than {RUN_BUDGET_S - lined_up_s:.0f} s and was stopped its own way (Ctrl+C)",
                 recoverable=True,
             )
         elif code != 0:
@@ -736,10 +781,11 @@ class Capability(CapabilityEngine):
                 )
         return result
 
-    def _follow(self, run_, log, track, ctx, world, panel):
+    def _follow(self, run_, log, track, ctx, world, panel, budget_s=RUN_BUDGET_S):
         """Progress from the run's rows until it ends, on `panel` too; a cancel (the orchestrator's, or the
         panel's Cancel, which is made the orchestrator's) is its Ctrl+C. Its exit code. The world-state writes
-        the rows call for are `world`'s, never this loop's to wait on."""
+        the rows call for are `world`'s, never this loop's to wait on. `budget_s`: the run's own time, what a
+        line-up before it left of RUN_BUDGET_S."""
         sent = escalated = None
         while run_.proc.poll() is None:
             self._progress(log, track, ctx, panel)
@@ -754,9 +800,9 @@ class Capability(CapabilityEngine):
                 panel.stopping = PANEL_CANCELLED
                 run_.interrupt()
                 sent = now
-            elif sent is None and now - run_.started > RUN_BUDGET_S:
+            elif sent is None and now - run_.started > budget_s:
                 self.get_logger().error(
-                    f"the run is still going after {RUN_BUDGET_S:.0f} s: its own stop (Ctrl+C), before the "
+                    f"the run is still going after {budget_s:.0f} s: its own stop (Ctrl+C), before the "
                     "orchestrator's 120 s cancel"
                 )
                 run_.timed_out = True
@@ -863,10 +909,12 @@ class Capability(CapabilityEngine):
         the container `opened` at the release, written as the real run writes them, its panel on the UI
         and its result. Like the real run it cannot pause; a cancel ends it."""
         track = Tracker(action_id, self.instance_id)
-        world = WorldWriter(self.get_logger())
-        panel = Panel(ctx, self._ui_live)  # the real run's, Cancel included
         phase_s = max(0.0, float(self._param("mock_phase_s")))
         t0 = time.monotonic()
+        # the real run's line-up, of a box that comes into reach over a few of the mock's phases
+        self._line_up(ctx, line_up.MockApproach(pace_s=MOCK_APPROACH_PHASES * phase_s))
+        world = WorldWriter(self.get_logger())
+        panel = Panel(ctx, self._ui_live)  # the real run's, Cancel included
 
         def cancel_point():
             """A cancel (the orchestrator's, or the panel's Cancel) ends the mock here, as the real run."""

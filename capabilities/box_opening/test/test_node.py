@@ -984,6 +984,129 @@ def test_the_paced_mock_rehearses_the_ui_its_panel_and_cancel(ros, monkeypatch):
         LOGGER.handlers[:] = handlers
 
 
+def _mock_lining_up(monkeypatch, ui=True, **params):
+    overrides = dict({"mock": True, "use_orchestrator": False, "line_up": True}, **params)
+    cap = node.Capability(parameter_overrides=[Parameter(k, value=v) for k, v in overrides.items()])
+    monkeypatch.setattr(cap, "_ui_live", lambda: ui)
+    cap.instance_id = "c1"
+    return cap
+
+
+def test_the_mock_lines_up_first_and_runs_only_on_open(ros, monkeypatch):
+    """line_up: before anything "moves" the panel tells the user which way to move, asks once the box is in
+    reach and still, and the run starts on its Open. The mock's box comes in over 6 of its phases."""
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = _mock_lining_up(monkeypatch, mock_phase_s=0.2)  # a 1.2 s approach, then a second watched still
+    try:
+        ctx = FakeCtx()
+        threading.Timer(3.2, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+        t0 = time.monotonic()
+        out = cap.execute("open_box", {}, ctx)
+        assert 3.2 <= time.monotonic() - t0 < 3.2 + 7 * 0.2 + 2.0
+        assert out["lid_off"] and ctx.objects == {"c1": {"opened": True}}
+        lining = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+        assert lining[0].startswith("Move closer") and any(m.startswith("Move left") for m in lining)
+        assert lining[-3:] == ["Hold still, checking", "Ready. Open the container?", "Opening the container"]
+        phases = [p for p, *_ in ctx.said]
+        assert phases[len(lining) :] == [p for p, *_ in node.MOCK_PHASES["open_box"]]  # the run, after its Open
+        assert all(pct == 0.0 and not pausable for p, pct, _m, pausable in ctx.said if p == "line_up")
+        asked = [p for p in ctx.panels if p["message"] == "Ready. Open the container?"]
+        assert asked and [b["button_id"] for b in asked[0]["buttons"]] == ["open", "cancel"]
+        first_run_panel = next(i for i, p in enumerate(ctx.panels) if p["progress"]["phase"] == "locate")
+        assert all(
+            p["progress"]["phase"] not in ("looking", "move", "hold", "ready") for p in ctx.panels[first_run_panel:]
+        )
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_cancel_while_lining_up_is_the_orchestrators_cancel_and_nothing_runs(ros, monkeypatch):
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = _mock_lining_up(monkeypatch, mock_phase_s=1.0)
+    try:
+        base = []
+        monkeypatch.setattr(cap, "_cancel_from_ui", lambda: base.append(1))
+        ctx = FakeCtx()
+        threading.Timer(0.6, ctx.events.append, args=(CANCEL_PRESS,)).start()
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
+        assert base == [1] and {p for p, *_ in ctx.said} == {"line_up"}
+        assert ctx.objects == {} and ctx.world == []
+        ctx = FakeCtx()  # the orchestrator's own cancel, mid line-up: the same end, and no press to pass on
+        threading.Timer(0.6, setattr, args=(ctx, "cancel", True)).start()
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
+        assert base == [1] and ctx.world == []
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_a_user_not_in_place_in_time_is_told_to_press_open_again_and_nothing_runs(ros, monkeypatch):
+    handlers = list(LOGGER.handlers)
+    cap = _mock_lining_up(monkeypatch, mock_phase_s=5.0)  # a 30 s approach: not in place in time
+    try:
+        monkeypatch.setattr(node, "LINE_UP_S", 0.6)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+        ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up" and e.value.recoverable and "nothing moved" in str(e.value)
+        assert ctx.panels[-1]["message"] == "Press open again when you are in place"
+        assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.objects == {} and ctx.world == []
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_with_no_ui_there_is_no_one_to_ask_and_the_run_starts_as_always(ros, monkeypatch):
+    handlers = list(LOGGER.handlers)
+    cap = _mock_lining_up(monkeypatch, ui=False)
+    try:
+        ctx = FakeCtx()
+        out = cap.execute("open_box", {}, ctx)
+        assert out["lid_off"] and [p for p, *_ in ctx.said] == [p for p, *_ in node.MOCK_PHASES["open_box"]]
+        assert ctx.panels == []
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_the_real_run_does_not_line_up_yet_and_says_so(engine, monkeypatch):
+    """Until the engine can follow the container as the chair moves, line_up on a real node changes nothing
+    of a run but a warning."""
+    given(monkeypatch, FULL_RUN)
+    engine.set_parameters([Parameter("line_up", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    warned = []
+    monkeypatch.setattr(LOGGER, "warning", lambda m, *a: warned.append(str(m)), raising=False)
+    logger = engine.get_logger()
+    monkeypatch.setattr(engine, "get_logger", lambda: logger)
+    real_warning = logger.warning
+    monkeypatch.setattr(type(logger), "warning", lambda self, m, **k: (warned.append(str(m)), real_warning(m, **k))[1])
+    ctx = FakeCtx()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and "line_up" not in {p for p, *_ in ctx.said}
+    assert any("cannot yet follow the container" in m for m in warned)
+
+
+def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):
+    """The orchestrator's 120 s cover the line-up and the run: a run started late is stopped its own way
+    that much sooner, and the longest run logged still fits after the longest line-up."""
+    assert node.LINE_UP_S + node.RUN_LONGEST_S <= node.RUN_BUDGET_S
+    given(monkeypatch, FULL_RUN[:3], wait=True)
+    monkeypatch.setattr(engine, "_line_up", lambda ctx, source: node.RUN_BUDGET_S - 0.5)
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "timeout" and time.monotonic() - t0 < 5.0
+
+
 def test_the_run_log_is_read_as_it_grows_a_row_at_a_time(tmp_path):
     runs = tmp_path / "runs"
     runs.mkdir()

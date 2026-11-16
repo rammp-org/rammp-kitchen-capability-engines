@@ -295,6 +295,43 @@ nothing is sent. How a run ended is not shown on a panel of its own: the
 orchestrator's panel returns as the action ends, and the result is in the
 action's result and the node's log.
 
+#### Lining up first
+
+With `line_up: true`, and only for an execution that has the UI, `open_box`
+first shows the same panel with an instruction in place of the run's phase, in
+a loop of the base class's example's shape (`ctx.update_user_panel`,
+`ctx.poll_ui_event`): where the container stands against the arm's reach, as
+what the user does about it.
+
+| Panel message                            | Buttons      | When                                                               |
+| ---------------------------------------- | ------------ | ------------------------------------------------------------------ |
+| `Looking for the container`              | Cancel       | No container seen in the last 1.5 s                                |
+| `Move closer, about 15 cm`               | Cancel       | Outside the boundary: closer, back, left or right, the larger miss |
+| `Hold still, checking`                   | Cancel       | Inside, not yet still for 1 s, or not yet judged                   |
+| `Ready. Open the container?`             | Open, Cancel | Inside, still, and the run plans for it there                      |
+| `Press open again when you are in place` | none         | 40 s passed: shown 3 s, then the action fails `not_lined_up`       |
+
+`progress.phase` is `looking`, `move`, `hold`, `ready`, `go` or `timed_out`,
+and `pct` how near the container is to the boundary (100 inside). The
+orchestrator's progress reports phase `line_up` at 0 with the same message.
+The arm moves only on **Open**, and only where it is pressed on a `Ready`
+panel whose container was seen within the last second; then the run starts
+and the panel is the run's. **Cancel** is the orchestrator's cancel, as on the
+run's panel. Nothing moves and no world state is written while lining up.
+
+The 40 s are what the orchestrator's 120 s leave: the run's 90 s budget less
+the longest run logged (50 s with its start), so a run started on the last
+second still ends its own way. A run's own budget is shortened by what its
+line-up took. `not_lined_up` is recoverable.
+
+The boundary is not typed in. It is a grid of places where the run's own proof
+plans a press (`reach_zone`, filled by `reach_probe` from the robot's URDF and
+chair model, for the lid height the cameras read) and is kept under
+`state_dir`'s `reach_zone`. **As of this build only the mock lines up** (a box
+that comes into reach over six `mock_phase_s`, for rehearsing the UI): the
+engine cannot yet follow the container as the chair moves, and a real run with
+`line_up: true` logs that and starts as always.
+
 A `CANCEL` on `/box_opening/control` that comes after the orchestrator has
 pushed the token and before its goal has no run to cancel in the base class. It
 is kept for that execution, which then ends cancelled before anything runs.
@@ -311,6 +348,7 @@ passes them as a params file.
 | `mock`                | `false`                | `true` skips hardware (the mock alternative sets it)                                                                                                                                  |
 | `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                                    |
 | `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel)                |
+| `line_up`             | `false`                | Line up on the UI before a run: the panel says which way to move, asks, and the arm moves only on **Open** (see "Lining up first"). As of this build only the mock lines up           |
 | `allow_execute`       | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                                                                                                          |
 | `container`           | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path                                                                                                                 |
 | `world`               | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`                                                                                                           |
