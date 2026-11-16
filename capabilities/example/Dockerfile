@@ -26,8 +26,9 @@ WORKDIR /module_ws
 RUN pip install --no-cache-dir pybullet==3.2.7
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
-# build it from a pinned RAMMP-CuRobo commit alongside the packages below.
-ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
+# build it from a pinned RAMMP-CuRobo commit (v2.0.1: self.arm.blend needs its Blend
+# action) alongside the packages below.
+ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 # rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages, see
