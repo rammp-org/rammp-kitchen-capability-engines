@@ -7,7 +7,7 @@
 FROM ros:humble-ros-base
 
 # Pins. Interfaces and curobo are full SHAs; kinova_gen3_description is dev.
-ARG INTERFACES_REF=c43c3548e8ea78510a6cbbea1821ddef20929839
+ARG INTERFACES_REF=ebaacf7ed71d81b40aea9541bb1cb104ce5fce7b
 ARG UI_BRIDGE_INTERFACES_REF=7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73
 ARG CUROBO_REF=fd8b89cb18fd854f3add36ab9b1b72933dbabf76
 ARG KINOVA_REF=2546edbab9cda031cdfe82b33289f05e01341f88
