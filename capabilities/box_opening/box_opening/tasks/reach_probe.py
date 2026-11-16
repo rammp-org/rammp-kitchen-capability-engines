@@ -3,6 +3,7 @@ line-up's boundary (reach_zone.Zone) and behind "the run plans for the box where
 
     reach_probe --urdf <arm URDF> --lid-z 0.315                      the boundary for a lid at that height
     reach_probe --urdf <arm URDF> --at 0.65 -0.10 0.315              one place: does a press plan there
+    reach_probe --urdf <arm URDF> --serve                            for the engine's line-up, while it runs
 
 Nothing here talks to the arm, the planner or the cameras, and nothing moves. press_plans() asks what a
 run asks before it moves (tasks/reach_press._reach_press, the proof before the look): out_of_reach, then
@@ -25,6 +26,7 @@ import json
 import logging
 import math
 import os
+import select
 import sys
 import time
 from pathlib import Path
@@ -39,9 +41,7 @@ log = logging.getLogger(__name__)
 NAMES = ["joint_%d" % i for i in range(1, 8)]
 GLOBAL_SEEDS = 8  # the stand-in's IK for a pose the arm's own finds none for: from this many postures
 LINE_STEP_RAD = 0.02
-# a lid's height is read to the centimetre at best (the wrist camera read the lid 40-44 mm under the arm's
-# touch on 2026-11-12): one grid serves every lid within half this of the height it was asked at
-LID_Z_BUCKET_M = 0.02
+LID_Z_BUCKET_M, lid_bucket = reach_zone.LID_Z_BUCKET_M, reach_zone.lid_bucket
 
 
 class _Plan:
@@ -219,8 +219,10 @@ def press_plans(ctx, cfg, top_xyz, table_z=None, q_from=None):
 # ---------------------------------------------------------------------------------------- the boundary
 def zone_key(urdf, container):
     """What a grid is asked of, as one word: the arm's URDF, the chair model in force, the container's
-    config, HOME, and the source of everything the proof runs. Any of them changed, the grid is asked
-    again."""
+    config, HOME, and the source of everything the proof runs (the run's own modules, and this one's proof
+    and stand-ins). Any of them changed, the grid is asked again."""
+    import inspect
+
     from box_opening.runtime import approach, body, kinematics
     from box_opening.tasks import depth_press, reach_press
 
@@ -235,8 +237,10 @@ def zone_key(urdf, container):
         h.update(np.round(np.asarray(model.lo, float), 4).tobytes())
         h.update(np.round(np.asarray(model.hi, float), 4).tobytes())
     h.update(repr([round(float(v), 4) for v in HOME]).encode())
-    for module in (reach_press, depth_press, kinematics, body, approach, sys.modules[__name__]):
+    for module in (reach_press, depth_press, kinematics, body, approach):
         h.update(Path(module.__file__).read_bytes())
+    for part in (press_plans, DryClient, DryStore, _joint_line, reach_span):
+        h.update(inspect.getsource(part).encode())
     return h.hexdigest()[:16]
 
 
@@ -258,11 +262,6 @@ def reach_span(model, lid_z):
         r += step
     r = round(r, 4)
     return (0.0, r), (-r, r)
-
-
-def lid_bucket(lid_z):
-    """The height a grid for a lid at `lid_z` is asked at: the nearest LID_Z_BUCKET_M."""
-    return round(round(float(lid_z) / LID_Z_BUCKET_M) * LID_Z_BUCKET_M, 4)
 
 
 def zone_path(key, lid_z, where=None):
@@ -307,6 +306,115 @@ def fill(zone, ctx, cfg, table_z=None, focus=None, budget_s=None, n=None, clock=
     return asked
 
 
+# ------------------------------------------------------------------------------- for the engine's line-up
+# --serve: the engine (line_up.BoxSource) writes a JSON line on stdin each time it sees the box,
+#     {"box": [x, y, z], "table_z": z or null, "prove": bool}
+# and reads the lines on stdout that begin with MARK (every other line there is the proof's own log):
+#     @@ {"zone": {...}}                                       the boundary for that lid's height, as it fills
+#     @@ {"proof": {"xyz": [...], "ok": bool, "why": "...", "tilt_deg": n, "s": seconds}}
+# With "prove" the box's own place is proven first (the user is being asked to hold still for it); otherwise
+# the boundary is filled, the cells nearest the box first. The newest box is the only one worked on.
+MARK = "@@ "
+PROOF_NEAR_M = 0.015  # a box this near the place last proven is that place (guide.STEADY_M)
+ZONE_SAY_S = 0.5  # a boundary that is filling is said no oftener than this
+SAVE_EVERY = 20  # ... and kept on disk every this many cells, and as the server ends
+IDLE_S = 0.2  # with nothing to ask, how long stdin is waited on
+
+
+class Server:
+    """One line-up's worth of proofs: hear() each line the engine writes, step() one proof at a time."""
+
+    def __init__(self, ctx, cfg, key, zone_dir=None, say=None, clock=time.monotonic):
+        self.ctx, self.cfg, self.key, self.zone_dir = ctx, cfg, key, zone_dir
+        self._say = say if say is not None else (lambda msg: _say(MARK + json.dumps(msg)))
+        self._clock = clock
+        self.box = self.table_z = None
+        self.prove = False
+        self.quit = False
+        self.zone = None
+        self.proven = None  # (xyz, table_z) of the place last proven
+        self._dirty = self._unsaved = 0
+        self._said_at = None
+
+    def hear(self, msg):
+        if msg.get("quit"):
+            self.quit = True
+        if msg.get("box") is not None:
+            self.box = tuple(float(v) for v in msg["box"])
+            self.table_z = None if msg.get("table_z") is None else float(msg["table_z"])
+            self.prove = bool(msg.get("prove"))
+
+    def _zone_for(self, lid_z):
+        if self.zone is None or self.zone.lid_z != lid_bucket(lid_z):
+            self.close()
+            self.zone = load_zone(self.key, lid_z, self.ctx.model, self.zone_dir)
+            self._tell_zone()  # what is kept for this height, at once
+        return self.zone
+
+    def _tell_zone(self):
+        self._say({"zone": self.zone.to_dict()})
+        self._dirty, self._said_at = 0, self._clock()
+
+    def _is_proven(self):
+        if self.proven is None:
+            return False
+        (x, y, z), table_z = self.proven
+        near = math.hypot(self.box[0] - x, self.box[1] - y) <= PROOF_NEAR_M and abs(self.box[2] - z) <= PROOF_NEAR_M
+        return near and table_z == self.table_z
+
+    def step(self):
+        """One proof: the box's own place where it is asked for and not yet proven, else the boundary's next
+        cell. False where there was nothing to ask."""
+        if self.box is None:
+            return False
+        zone = self._zone_for(self.box[2])
+        if self.prove and not self._is_proven():
+            t0 = self._clock()
+            ok, why, tilt = press_plans(self.ctx, self.cfg, self.box, table_z=self.table_z)
+            self.proven = (self.box, self.table_z)
+            took = round(self._clock() - t0, 2)
+            self._say({"proof": {"xyz": list(self.box), "ok": ok, "why": why[:300], "tilt_deg": tilt, "s": took}})
+            return True
+        # a cell is asked with the box on its own foot (table_z None): one grid for every table at this lid height
+        asked = fill(zone, self.ctx, self.cfg, focus=self.box[:2], n=1)
+        self._dirty += asked
+        self._unsaved += asked
+        if self._unsaved >= SAVE_EVERY:
+            save_zone(zone, self.zone_dir)
+            self._unsaved = 0
+        if self._dirty and self._clock() - self._said_at >= ZONE_SAY_S:
+            self._tell_zone()
+        return bool(asked)
+
+    def close(self):
+        """What was asked is kept, and said."""
+        if self.zone is not None and self._unsaved:
+            save_zone(self.zone, self.zone_dir)
+            self._unsaved = 0
+        if self.zone is not None and self._dirty:
+            self._tell_zone()
+
+
+def serve(server, fd=0):
+    """Until the engine says quit or closes the pipe: its lines heard between proofs, never during one."""
+    buf = b""
+    while not server.quit:
+        busy = server.step()
+        ready, _, _ = select.select([fd], [], [], 0.0 if busy else IDLE_S)
+        if not ready:
+            continue
+        data = os.read(fd, 65536)
+        if not data:
+            break  # the engine is gone
+        *lines, buf = (buf + data).split(b"\n")
+        for line in lines:
+            try:
+                server.hear(json.loads(line))
+            except (ValueError, TypeError, AttributeError):
+                log.warning("reach_probe: not a line of the engine's: %r" % line[:120])
+    server.close()
+
+
 def _say(line, to=None):
     """A line of the command's own answer: its stdout is what a caller reads."""
     to = sys.stdout if to is None else to
@@ -328,10 +436,14 @@ def main(argv=None):
     ap.add_argument("--focus", type=float, nargs=2, metavar=("X", "Y"), help="ask the cells nearest here first")
     ap.add_argument("--zone-dir", default=None, help="where grids are kept (default: the state dir's reach_zone)")
     ap.add_argument("--budget-s", type=float, default=None, help="stop asking after this long")
+    ap.add_argument("--serve", action="store_true", help="for the engine's line-up: boxes on stdin, answers on stdout")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     container = args.container or cli_common.default_container_yaml()
     ctx, cfg = setup(args.urdf, args.root, args.body_layers, container)
+    if args.serve:
+        serve(Server(ctx, cfg, zone_key(args.urdf, container), args.zone_dir))
+        return 0
     if args.at is not None:
         t0 = time.monotonic()
         ok, why, tilt = press_plans(ctx, cfg, args.at, table_z=args.table_z)
@@ -339,7 +451,7 @@ def main(argv=None):
         _say(json.dumps({"at": list(args.at), "ok": ok, "why": why, "tilt_deg": tilt, "s": took}))
         return 0 if ok else 1
     if args.lid_z is None:
-        ap.error("one of --lid-z and --at is needed")
+        ap.error("one of --lid-z, --at and --serve is needed")
     key = zone_key(args.urdf, container)
     zone = load_zone(key, args.lid_z, ctx.model, args.zone_dir)
     t0 = time.monotonic()

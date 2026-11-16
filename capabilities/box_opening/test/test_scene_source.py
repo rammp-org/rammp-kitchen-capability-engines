@@ -1410,6 +1410,41 @@ def test_the_segmenters_frames_fix_the_box(monkeypatch):
     assert loc.last_boxes["segmenter"] == [["food container", 0.88, *_holder(1.0)]]
 
 
+def test_each_messages_sighting_is_told_as_it_is_made_whether_or_not_any_two_agree(monkeypatch):
+    """on_sighting (the line-up's watch): a box that moves 5 cm between the segmenter's messages, as when the
+    chair is driven, never commits a fix, and is told of in every message, with how old what it shows is."""
+    boxes = [_holder(float(i)) for i in range(6)]
+    tops = [(SEG_TOP[0] - 0.05 * i, SEG_TOP[1], SEG_TOP[2]) for i in range(6)]
+    world = _World(seg_msgs=[(0.3 + 0.2 * i, [("food container", 0.88, b)]) for i, b in enumerate(boxes)])
+    loc, _gated = _locator(monkeypatch, world, {_band(b): t for b, t in zip(boxes, tops, strict=True)})
+    told = []
+    loc.on_sighting = lambda sighting, age_s: told.append((sighting, age_s))
+    assert loc.locate(2.0) is None and "did not agree" in loc.last_why
+    assert [s.top for s, _age in told] == [pytest.approx(t) for t in tops]
+    # each message's frame was taken 75 ms before it came (to the stub clock's 20 ms steps)
+    assert all(s.lift == "side" and 0.05 <= age <= 0.10 for s, age in told)
+    # a listener that raises costs the look nothing: two that agree still commit
+    world = _World(seg_msgs=_every(0.3, 3.0, [("food container", 0.88, _holder())]))
+    loc, _gated = _locator(monkeypatch, world, {_band(_holder()): SEG_TOP})
+    loc.on_sighting = lambda sighting, age_s: 1 / 0
+    assert loc.locate(5.0) is not None
+    # and with none, as in every run, nothing is told
+    world = _World(seg_msgs=_every(0.3, 3.0, [("food container", 0.88, _holder())]))
+    loc, _gated = _locator(monkeypatch, world, {_band(_holder()): SEG_TOP})
+    assert not hasattr(loc, "on_sighting") and loc.locate(5.0) is not None
+
+
+def test_a_box_the_frame_cuts_is_told_of_roughly(monkeypatch):
+    """A rough sighting (the lid's arc in view, placed roughly) is told as one, lift "rough": enough to say
+    which way to move, never to ask on."""
+    world = _World(seg_msgs=_every(0.3, 1.5, [("food container", 0.88, _holder())]))
+    loc, _gated = _locator(monkeypatch, world, {_band(_holder()): {"rough": SEG_TOP}})
+    told = []
+    loc.on_sighting = lambda sighting, age_s: told.append(sighting)
+    loc.locate(1.0)
+    assert told and all(s.lift == "rough" and s.top == pytest.approx(SEG_TOP) for s in told)
+
+
 def test_the_look_end_to_end_through_the_real_gate_on_the_frame_the_owl_missed():
     """locate() on the 10-27 16:24 frame (the one the old scene OWL missed)
     with nothing stubbed between the segmenter's message and the SceneFix:

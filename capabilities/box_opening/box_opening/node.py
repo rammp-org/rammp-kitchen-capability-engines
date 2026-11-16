@@ -98,7 +98,9 @@ PARAMS = {
     "planner_worlds_dir": "",
     # the line-up before a run, on the UI (line_up, guide): the panel tells the user which way to move until
     # the container is where the arm opens it, then asks, and the arm moves only on its Open. Off (the
-    # default) open_box starts its run at once, as it always has; so does an execution with no UI (standalone)
+    # default) open_box starts its run at once, as it always has; so does an execution with no UI (standalone).
+    # It follows the container by the SCENE camera alone, which on flatbot does not see a lid whole in front
+    # of the arm: on, a container it cannot see is never asked of, and open_box ends not_lined_up
     "line_up": False,
     # how far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come
     # closer, though the run's proof plans a press for it there. 0 (the default): as far as the proof plans.
@@ -655,22 +657,37 @@ class Capability(CapabilityEngine):
         far = float(self._param("line_up_far_m") or 0.0)
         return far if far > 0.0 else None
 
-    def _line_up(self, ctx, source):
+    def _box_source(self, env, instance_id):
+        """A real run's line-up source (line_up.BoxSource): box_watch follows the container, reach_probe judges
+        where it stands, both children of this node for as long as the panel is up. Neither can move the arm."""
+        container = config_path(self._param("container"), "containers")
+        watch = [executable("box_watch"), "--container", container, "--bench-world", config_path(self._param("world"))]
+        if instance_id:
+            watch += ["--instance-id", instance_id]
+        layers = self._param("body_layers")
+        layers = PARAMS["body_layers"] if layers is None else str(layers)
+
+        def probe(urdf, root):
+            argv = [executable("reach_probe"), "--serve", "--urdf", urdf, "--container", container]
+            return argv + ["--root", root or "arm_mount", "--body-layers", layers]
+
+        return line_up.BoxSource(
+            watch, probe, env, far_m=self._far_m(), log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}")
+        )
+
+    def _line_up(self, ctx, make_source):
         """The line-up before a run (the `line_up` param; line_up.LineUp): the panel tells the user which way
         to move and asks, and this returns only on its Open, with the seconds it took. Cancel on it is the
         orchestrator's cancel (Cancelled); out of time, EngineError("not_lined_up"), recoverable: nothing
-        moved. 0.0 at once, and the run starts as it always has, where the param is off, where this
-        execution has no UI to ask on (standalone), or where there is no `source` to see the box by."""
+        moved. A source that cannot start is EngineError("line_up_unavailable"): with the line-up asked for,
+        no run starts without its Open. 0.0 at once, and the run starts as it always has, where the param is
+        off or this execution has no UI to ask on (standalone). `make_source()`: what sees the box and judges
+        its place (BoxSource; the mock's MockApproach), made only where it is used, and closed before this
+        returns: no run starts while it lives."""
         if not self._param("line_up"):
             return 0.0
         if not self._ui_live():
             self.get_logger().info("line_up: no UI for this execution, so no one to ask: the run starts as always")
-            return 0.0
-        if source is None:
-            self.get_logger().warning(
-                "line_up is on, but this build cannot yet follow the container as the chair moves (only the "
-                "mock lines up): the run starts as always"
-            )
             return 0.0
         t0 = time.monotonic()
 
@@ -678,14 +695,28 @@ class Capability(CapabilityEngine):
             ctx.progress(line_up.PHASE, 0.0, say.message, pausable=False)
             self.get_logger().info(f"line-up: {say.message}")
 
-        lining = line_up.LineUp(ctx, self._ui_live, source, LINE_UP_S, on_say=said)
-        outcome = lining.run()
+        try:
+            source = make_source()
+        except OSError as e:
+            raise EngineError(
+                "line_up_unavailable", f"the line-up could not start ({e}): nothing moved", recoverable=False
+            ) from e
+        try:
+            lining = line_up.LineUp(ctx, self._ui_live, source, LINE_UP_S, on_say=said)
+            outcome = lining.run()
+        finally:
+            close = getattr(source, "close", None)
+            if close is not None:
+                close()
         if outcome == line_up.CANCELLED:
             if lining.cancel_pressed:
                 self._cancel_from_ui()
             raise Cancelled()
         if outcome == line_up.TIMED_OUT:
-            raise EngineError("not_lined_up", NOT_LINED_UP % LINE_UP_S, recoverable=True)
+            why = getattr(source, "why_none", "")
+            raise EngineError(
+                "not_lined_up", NOT_LINED_UP % LINE_UP_S + (f" -- {why}" if why else ""), recoverable=True
+            )
         return time.monotonic() - t0
 
     def availability(self, instance_id, world_state):
@@ -712,12 +743,14 @@ class Capability(CapabilityEngine):
         if not self._allowed():
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
         ctx.checkpoint()  # cancelled before it started: nothing runs
-        lined_up_s = self._line_up(ctx, None)  # nothing has moved, and nothing runs but on its Open
         env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
+        # the selection as the goal came: read once, used for the line-up, every write and the run's argv
+        instance_id = self.instance_id
+        # nothing has moved, and nothing runs but on the line-up's Open
+        lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
         runs = state_dir(env) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
-        # the selection as the goal came: read once, used for every write and the run's argv
-        track = Tracker(action_id, self.instance_id)
+        track = Tracker(action_id, instance_id)
         t0 = time.monotonic()
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
@@ -922,7 +955,7 @@ class Capability(CapabilityEngine):
         phase_s = max(0.0, float(self._param("mock_phase_s")))
         t0 = time.monotonic()
         # the real run's line-up, of a box that comes into reach over a few of the mock's phases
-        self._line_up(ctx, line_up.MockApproach(pace_s=MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m()))
+        self._line_up(ctx, lambda: line_up.MockApproach(MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m()))
         world = WorldWriter(self.get_logger())
         panel = Panel(ctx, self._ui_live)  # the real run's, Cancel included
 

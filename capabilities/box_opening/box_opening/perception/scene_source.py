@@ -1357,8 +1357,27 @@ class SceneLocator:
         # checked once per locate, before any fix is trusted
         self.tag_px = tag_px
         self.moved_note = None  # "tag not in view" and the like, for the log
+        # on_sighting(Sighting, age_s): told each message's sighting as locate() makes it, a rough one too
+        # (lift "rough"), before any vote: the line-up follows the box by them while the chair moves, when
+        # no two agree (tasks/box_watch). None, as in every run: nothing is told
+        self.on_sighting = None
         if self.seg is not None and not self.seg.available:
             log.info("[scene] the scene segmenter cannot be read (%s): no look can find the box" % self.seg.why)
+
+    def _tell(self, sighting, m_seg, seg_args):
+        """`sighting` to on_sighting, with how old what it shows is (s): how far its message's frame is behind
+        the grabber's newest (else the time since the message came). Nothing it raises is the look's to stop for."""
+        told = getattr(self, "on_sighting", None)
+        if told is None:
+            return
+        try:
+            if seg_args[3] is not None and m_seg.stamp_ns is not None:
+                age = max(0.0, (seg_args[3] - m_seg.stamp_ns) / 1e9)  # its frame against the camera's newest
+            else:
+                age = self._clock() - float(m_seg.recv_s)  # no stamps to compare: since it came
+            told(sighting, age)
+        except Exception as e:  # noqa: BLE001 - a listener's problem is not the look's
+            log.info("[scene] on_sighting raised %s: %s (the look goes on)" % (type(e).__name__, e))
 
     def base_to_link(self):
         """T(base <- the camera's link): the calibration's, or TF's."""
@@ -1621,6 +1640,7 @@ class SceneLocator:
                             T_base_color,
                         )
                     )
+                    self._tell(rough[-1][0], m_seg, seg_args)
                     if (
                         clock() - t0 >= ROUGH_AFTER_S
                         and not sightings
@@ -1654,6 +1674,7 @@ class SceneLocator:
                 )
             )
             look["sightings"] = len(sightings)
+            self._tell(sightings[-1], m_seg, seg_args)
             top, _why = commit_fix(sightings)
             if top is not None:
                 found = (top, sightings[-VOTE_N:], pts_base, uv, got, T_base_color)

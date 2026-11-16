@@ -1098,22 +1098,114 @@ def test_with_no_ui_there_is_no_one_to_ask_and_the_run_starts_as_always(ros, mon
         LOGGER.handlers[:] = handlers
 
 
-def test_the_real_run_does_not_line_up_yet_and_says_so(engine, monkeypatch):
-    """Until the engine can follow the container as the chair moves, line_up on a real node changes nothing
-    of a run but a warning."""
+class InPlace:
+    """A real run's line-up source, stood in for: the box seen where it works, proven; closed as it ends."""
+
+    def __init__(self):
+        self.closed_at = None
+
+    def look(self, now):
+        from box_opening import guide
+
+        return guide.Fix(now, (0.65, 0.0), "scene"), guide.Reach(True, None, True)
+
+    def close(self):
+        self.closed_at = time.monotonic()
+
+
+def test_a_real_run_lines_up_first_and_starts_only_on_open_its_source_closed(engine, monkeypatch):
+    """line_up on a real node: the run's command line starts after Open, never before, and what followed the
+    box is closed first. The selection is the one the goal came with."""
+    import threading
+
     given(monkeypatch, FULL_RUN)
     engine.set_parameters([Parameter("line_up", value=True)])
     monkeypatch.setattr(engine, "_ui_live", lambda: True)
-    warned = []
-    monkeypatch.setattr(LOGGER, "warning", lambda m, *a: warned.append(str(m)), raising=False)
-    logger = engine.get_logger()
-    monkeypatch.setattr(engine, "get_logger", lambda: logger)
-    real_warning = logger.warning
-    monkeypatch.setattr(type(logger), "warning", lambda self, m, **k: (warned.append(str(m)), real_warning(m, **k))[1])
+    source, made, started = InPlace(), [], []
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id: (made.append(instance_id), source)[1])
+    real_argv = engine._argv
+    monkeypatch.setattr(engine, "_argv", lambda *a: (started.append((time.monotonic(), a)), real_argv(*a))[1])
+    engine.instance_id = "food_container_1"
     ctx = FakeCtx()
+    t0 = time.monotonic()
+    threading.Timer(2.0, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    threading.Timer(1.0, setattr, args=(engine, "instance_id", "")).start()  # a hibernate mid line-up
     out = engine.execute("open_box", {}, ctx)
-    assert out["lid_off"] and "line_up" not in {p for p, *_ in ctx.said}
-    assert any("cannot yet follow the container" in m for m in warned)
+    assert out["lid_off"] and made == ["food_container_1"]
+    ((run_at, args),) = started
+    assert run_at - t0 >= 2.0 and source.closed_at is not None and source.closed_at <= run_at
+    assert args == ("open_box", "food_container_1")  # the selection as the goal came, not as it is now
+    phases = [p for p, *_ in ctx.said]
+    assert phases[0] == "line_up" and "line_up" not in phases[phases.index("locate") :]
+    assert ctx.objects == {"food_container_1": {"opened": True}}
+
+
+def test_a_real_run_cancelled_or_out_of_time_while_lining_up_never_starts(engine, monkeypatch):
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    engine.set_parameters([Parameter("line_up", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    source, started = InPlace(), []
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id: source)
+    monkeypatch.setattr(engine, "_argv", lambda *a: started.append(a) or [])
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda: None)
+    ctx = FakeCtx()
+    threading.Timer(0.5, ctx.events.append, args=(CANCEL_PRESS,)).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert started == [] and source.closed_at is not None and ctx.world == []
+    # out of time, with the watch's last word on why it saw no box in the error
+    monkeypatch.setattr(node, "LINE_UP_S", 0.4)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    source.why_none = "scene segmenter: saw no food container in 5 frames"
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable and started == []
+    assert "saw no food container" in str(e.value)
+
+
+def test_a_line_up_that_cannot_start_starts_no_run(engine, monkeypatch):
+    """line_up asked for and its source not there (its command line missing): no run without its Open."""
+    given(monkeypatch, FULL_RUN)
+    engine.set_parameters([Parameter("line_up", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "executable", lambda name: "/nonexistent/" + name)
+    started = []
+    monkeypatch.setattr(engine, "_argv", lambda *a: started.append(a) or [])
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "line_up_unavailable" and not e.value.recoverable and started == []
+    assert "nothing moved" in str(e.value)
+
+
+def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(engine, monkeypatch):
+    monkeypatch.setattr(node, "executable", lambda name: "/lib/" + name)
+    made = []
+
+    class Source:
+        def __init__(self, watch, probe, env, far_m=None, log=None):
+            made.append((watch, probe, env, far_m))
+
+    monkeypatch.setattr(node.line_up, "BoxSource", Source)
+    engine.set_parameters([Parameter("line_up_far_m", value=0.8), Parameter("body_layers", value="/cfg/planner.yaml")])
+    env = engine._env()
+    engine._box_source(env, "food_container_2")
+    ((watch, probe, env_, far_m),) = made
+    assert watch[0] == "/lib/box_watch" and watch[-2:] == ["--instance-id", "food_container_2"]
+    assert watch[1:5] == [
+        "--container",
+        node.config_path("ankou_pink.yaml", "containers"),
+        "--bench-world",
+        node.config_path("world_flatbot.yaml"),
+    ]
+    pink = node.config_path("ankou_pink.yaml", "containers")
+    argv = probe("/state/arm.urdf", "arm_mount")
+    assert argv[:6] == ["/lib/reach_probe", "--serve", "--urdf", "/state/arm.urdf", "--container", pink]
+    assert argv[6:] == ["--root", "arm_mount", "--body-layers", "/cfg/planner.yaml"]
+    assert env_ is env and far_m == 0.8
+    engine._box_source(env, "")
+    assert "--instance-id" not in made[-1][0]
 
 
 def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):

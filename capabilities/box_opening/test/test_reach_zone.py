@@ -155,6 +155,20 @@ def test_off_the_lattice_only_the_cells_beside_one_that_works_are_asked():
     assert not z.done()
 
 
+def test_a_working_cells_surroundings_are_asked_before_the_lattice_goes_on():
+    """inside() needs a cell's neighbours: they are asked as soon as it works, so a box in place is judged
+    after nine proofs and not after the whole lattice."""
+    z = _zone()
+    own = z.index((0.62, 0.07))
+    z.set(*own, True)  # the box's own cell, asked first, works
+    order = z.order(focus=(0.62, 0.07))
+    assert sorted(order[:8]) == sorted((own[0] + di, own[1] + dj) for di in (-1, 0, 1) for dj in (-1, 0, 1) if di or dj)
+    assert all(i % 2 == 0 and j % 2 == 0 for i, j in order[8:])  # then the lattice, outward from the box
+    for i, j in order[:8]:
+        z.set(i, j, True)
+    assert z.inside(z.centre(*own)) and z.reach(z.centre(*own)).inside
+
+
 def test_fill_finds_the_boundary_without_asking_every_cell(monkeypatch):
     from box_opening.tasks import reach_probe
 
@@ -189,6 +203,119 @@ def test_fill_stops_at_its_budget(monkeypatch):
     ticks = iter(range(100))  # a clock that reads 0, 1, 2, ...: one tick as it starts, one before each cell
     z = Zone.blank((0.0, 0.5), (-0.5, 0.5), lid_z=0.30)
     assert reach_probe.fill(z, None, None, budget_s=3, clock=lambda: next(ticks)) == 2
+
+
+# -- for the engine's line-up: the probe's serve mode ------------------------------------------
+@pytest.fixture
+def served(monkeypatch, tmp_path):
+    """reach_probe.Server on a stand-in proof (works within 18 cm of (0.65, 0)) and a small blank grid; its
+    clock ticks 0.3 s a proof. Returns (server, what it said, the places it proved)."""
+    from box_opening.tasks import reach_probe
+
+    said, proved, now = [], [], [0.0]
+
+    def proof(_ctx, _cfg, top, table_z=None):
+        proved.append((tuple(round(float(v), 3) for v in top), table_z))
+        now[0] += 0.3
+        return math.hypot(top[0] - 0.65, top[1]) < 0.18, "no" * 400, 15
+
+    monkeypatch.setattr(reach_probe, "press_plans", proof)
+    monkeypatch.setattr(reach_probe, "reach_span", lambda model, lid_z: ((0.0, 0.95), (-0.5, 0.5)))
+    server = reach_probe.Server(None, None, "k", zone_dir=tmp_path, say=said.append, clock=lambda: now[0])
+    server.ctx = type("C", (), {"model": None})()
+    return server, said, proved
+
+
+def test_the_server_waits_for_a_box_then_says_the_boundary_kept_for_its_height(served, tmp_path):
+    from box_opening.tasks import reach_probe
+
+    server, said, proved = served
+    assert server.step() is False and said == [] and proved == []  # no box yet: nothing to ask
+    kept = _zone(_band, x=(0.0, 0.95))
+    kept.lid_z = 0.32
+    reach_probe.save_zone(kept, tmp_path)
+    server.hear({"box": [0.9, 0.3, 0.315], "table_z": 0.22, "prove": False})
+    server.step()
+    assert list(said[0]) == ["zone"] and Zone.from_dict(said[0]["zone"]).counts() == kept.counts()
+    assert proved == []  # everything worth asking was asked on an earlier day
+
+
+def test_the_server_fills_the_boundary_from_the_box_outward_and_says_it_as_it_goes(served, tmp_path):
+    from box_opening.tasks import reach_probe
+
+    server, said, proved = served
+    server.hear({"box": [0.62, 0.07, 0.315], "table_z": 0.22, "prove": False})
+    assert server.step() is True
+    assert Zone.from_dict(said[0]["zone"]).counts()["unasked"] == 20 * 21  # the blank grid, said at once
+    assert proved == [((0.60, 0.05, 0.32), None)]  # the box's own cell, at its centre and the grid's height
+    for _ in range(40):
+        server.step()
+    zones = [Zone.from_dict(m["zone"]) for m in said if "zone" in m]
+    assert len(zones) >= 10 and zones[-1].counts()["works"] > zones[1].counts()["works"]
+    assert len(zones) <= 1 + 41 * 0.3 / reach_probe.ZONE_SAY_S + 1  # no oftener than its period
+    assert all(table_z is None for _top, table_z in proved)  # a cell is asked on the box's own foot
+    assert Zone.from_json(reach_probe.zone_path("k", 0.315, tmp_path).read_text()).counts()["unasked"] < 20 * 21
+    while server.step():
+        pass
+    assert server.zone.done() and server.step() is False
+    server.close()
+    assert Zone.from_json(reach_probe.zone_path("k", 0.315, tmp_path).read_text()).counts() == server.zone.counts()
+    assert Zone.from_dict(said[-1]["zone"]).counts() == server.zone.counts()
+
+
+def test_the_boxs_own_place_is_proven_first_where_it_is_asked_for_and_once(served):
+    server, said, proved = served
+    server.hear({"box": [0.652, 0.013, 0.3149], "table_z": 0.2159, "prove": True})
+    server.step()
+    assert proved == [((0.652, 0.013, 0.315), 0.2159)]  # the box where it stands, on the table as measured
+    (proof,) = (m["proof"] for m in said if "proof" in m)
+    assert proof["ok"] is True and proof["xyz"] == [0.652, 0.013, 0.3149] and proof["tilt_deg"] == 15
+    assert len(proof["why"]) == 300 and proof["s"] == pytest.approx(0.3)
+    server.step()
+    assert proved[1][1] is None  # proven: the next proof is a cell of the boundary
+    server.hear({"box": [0.66, 0.02, 0.3149], "table_z": 0.2159, "prove": True})  # 11 mm on: the same place
+    server.step()
+    assert sum(1 for m in said if "proof" in m) == 1
+    server.hear({"box": [0.70, 0.02, 0.3149], "table_z": 0.2159, "prove": True})  # the chair moved: proven again
+    server.step()
+    assert [m["proof"]["xyz"][0] for m in said if "proof" in m] == [0.652, 0.70]
+    server.hear({"box": [0.70, 0.02, 0.3149], "table_z": 0.2159, "prove": False})
+    n = len(proved)
+    server.step()
+    assert len(proved) == n + 1 and proved[-1][1] is None  # not asked for: the boundary goes on filling
+
+
+def test_a_lid_at_another_height_gets_its_own_boundary(served, tmp_path):
+    from box_opening.tasks import reach_probe
+
+    server, said, _proved = served
+    server.hear({"box": [0.65, 0.0, 0.315]})
+    for _ in range(3):
+        server.step()
+    server.hear({"box": [0.65, 0.0, 0.36]})
+    server.step()
+    assert server.zone.lid_z == 0.36
+    assert reach_probe.zone_path("k", 0.315, tmp_path).exists()  # the first is kept as the second is begun
+    heights = [m["zone"]["lid_z"] for m in said if "zone" in m]
+    assert heights[0] == 0.32 and heights[-1] == 0.36 and heights == sorted(heights)
+
+
+def test_the_served_loop_hears_the_engines_lines_and_ends_when_it_says_or_goes(served):
+    import os
+
+    from box_opening.tasks import reach_probe
+
+    server, said, _proved = served
+    r, w = os.pipe()
+    os.write(w, b'{"box": [0.65, 0.0, 0.315], "prove": true}\nnot a line of the engine\'s\n{"quit": true}\n')
+    reach_probe.serve(server, r)
+    assert server.quit and [m["proof"]["ok"] for m in said if "proof" in m] == []  # quit heard before any proof
+    server.quit = False
+    os.write(w, b'{"box": [0.65, 0.0, 0.315], "prove": true}\n')
+    os.close(w)  # the engine is gone: the pipe's end is its last word
+    reach_probe.serve(server, r)
+    os.close(r)
+    assert [m["proof"]["ok"] for m in said if "proof" in m] == [True]
 
 
 # -- kept on disk --------------------------------------------------------------------------

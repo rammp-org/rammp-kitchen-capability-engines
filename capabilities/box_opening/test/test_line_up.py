@@ -3,7 +3,8 @@
 import pytest
 
 from box_opening import guide, line_up
-from box_opening.line_up import CANCELLED, GO, TIMED_OUT, LineUp, MockApproach
+from box_opening.line_up import CANCELLED, GO, TIMED_OUT, BoxSource, LineUp, MockApproach
+from box_opening.reach_zone import Zone
 
 OPEN_PRESS = {"type": "button", "button_id": "open"}
 CANCEL_PRESS = {"type": "button", "button_id": "cancel"}
@@ -198,3 +199,219 @@ def test_the_deployments_bound_holds_the_mock_box_to_it_too():
     assert fix.xy == (0.75, 0.0) and not reach.inside and reach.to_zone == pytest.approx((-0.10, 0.0))
     _fix, reach = MockApproach(pace_s=0.0, path=((0.75, 0.0),)).look(0.0)
     assert reach.inside
+
+
+# -- a real run's source: the watch and the probe as children ------------------------------------------
+class FakeChild:
+    """line_up.Child without a process: what it "says" is queued by the test, what it is sent is kept."""
+
+    made = []
+
+    def __init__(self, argv, env, log=None, clock=None):
+        self.argv, self.env, self.sent, self.stopped, self._got = list(argv), env, [], False, []
+        FakeChild.made.append(self)
+
+    def says(self, t, msg):
+        self._got.append((t, msg))
+
+    def messages(self):
+        got, self._got = self._got, []
+        return got
+
+    def send(self, msg):
+        self.sent.append(msg)
+
+    def stop(self, wait_s=None):
+        self.stopped = True
+
+
+def _band_zone(lid_z=0.32):
+    """Works 0.50 to 0.80 m out and 0.20 m to either side, for a lid at `lid_z`."""
+    zone = Zone.blank((0.0, 1.0), (-0.5, 0.5), lid_z=lid_z, key="k")
+    for i in range(zone.cells.shape[0]):
+        for j in range(zone.cells.shape[1]):
+            x, y = zone.centre(i, j)
+            zone.set(i, j, 0.475 < x < 0.825 and abs(y) < 0.225)
+    return zone
+
+
+def _source(far_m=None):
+    FakeChild.made = []
+    source = BoxSource(
+        ["box_watch"], lambda urdf, root: ["reach_probe", urdf, root], {"E": "1"}, far_m=far_m, spawn=FakeChild
+    )
+    source.watch.says(0.0, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    assert source.look(0.0) == (None, None)
+    return source, source.watch, source.probe
+
+
+def _fix(xyz, age_s=0.1, rough=False, table_z=0.22):
+    return {"fix": {"xyz": list(xyz), "table_z": table_z, "age_s": age_s, "rough": rough, "score": 0.9}}
+
+
+def test_the_probe_starts_once_the_watch_has_said_which_robot_this_is():
+    FakeChild.made = []
+    source = BoxSource(["box_watch", "--x"], lambda urdf, root: ["reach_probe", urdf, root], {}, spawn=FakeChild)
+    assert source.probe is None and [c.argv for c in FakeChild.made] == [["box_watch", "--x"]]
+    assert source.look(0.0) == (None, None)  # nothing said yet: looking
+    source.watch.says(0.5, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    source.look(0.6)
+    assert source.probe.argv == ["reach_probe", "/state/arm.urdf", "arm_mount"]
+    said = []
+    blind = BoxSource(["box_watch"], lambda urdf, root: ["reach_probe"], {}, log=said.append, spawn=FakeChild)
+    blind.watch.says(0.5, {"robot": {"urdf": None, "root": "arm_mount"}})
+    blind.look(0.6)
+    assert blind.probe is None and "URDF was not heard" in said[0]  # no kinematics: no boundary, and it says so
+
+
+def test_a_sighting_is_a_fix_as_old_as_it_says_and_goes_to_the_probe():
+    source, watch, probe = _source()
+    watch.says(10.0, _fix((0.95, 0.10, 0.315), age_s=0.2))
+    fix, reach = source.look(10.05)
+    assert fix == guide.Fix(pytest.approx(9.8), (0.95, 0.10), "scene") and reach is None  # no boundary yet
+    assert probe.sent == [{"box": [0.95, 0.10, 0.315], "table_z": 0.22, "prove": False}]
+    assert source.look(10.1) == (None, None) and len(probe.sent) == 1  # nothing new: nothing sent again
+    watch.says(10.2, {"none": "scene segmenter: saw no food container in 5 frames"})
+    source.look(10.25)
+    assert source.why_none.startswith("scene segmenter")
+
+
+def test_the_boundary_judges_the_box_and_its_own_place_is_proven_where_it_is_inside():
+    source, watch, probe = _source()
+    probe.says(1.0, {"zone": _band_zone().to_dict()})
+    watch.says(1.0, _fix((0.95, 0.0, 0.315)))
+    _fix_, reach = source.look(1.1)
+    assert not reach.inside and reach.to_zone == pytest.approx((-0.20, 0.0)) and probe.sent[-1]["prove"] is False
+    watch.says(2.0, _fix((0.65, 0.0, 0.315)))
+    _fix_, reach = source.look(2.1)
+    assert reach.inside and reach.planned is None and probe.sent[-1]["prove"] is True  # inside: prove it there
+    probe.says(2.6, {"proof": {"xyz": [0.65, 0.0, 0.315], "ok": True, "why": "", "tilt_deg": 15, "s": 0.5}})
+    watch.says(2.7, _fix((0.652, 0.001, 0.316)))
+    _fix_, reach = source.look(2.8)
+    assert reach.inside and reach.planned is True and probe.sent[-1]["prove"] is False  # proven: not asked again
+    watch.says(3.0, _fix((0.70, 0.0, 0.315)))  # the chair moved 5 cm: that proof is not for here
+    _fix_, reach = source.look(3.1)
+    assert reach.inside and reach.planned is None and probe.sent[-1]["prove"] is True
+
+
+def test_a_rough_sighting_says_which_way_to_move_and_is_never_asked_on():
+    source, watch, probe = _source()
+    probe.says(1.0, {"zone": _band_zone().to_dict()})
+    watch.says(1.0, _fix((0.95, 0.0, 0.315), rough=True))
+    _fix_, reach = source.look(1.1)
+    assert not reach.inside and reach.to_zone == pytest.approx((-0.20, 0.0))
+    probe.says(1.5, {"proof": {"xyz": [0.65, 0.0, 0.315], "ok": True, "why": "", "tilt_deg": 15, "s": 0.5}})
+    watch.says(2.0, _fix((0.65, 0.0, 0.315), rough=True))
+    fix, reach = source.look(2.1)
+    assert fix is not None and reach is None and probe.sent[-1]["prove"] is False  # in place, roughly: checking
+
+
+def test_a_place_the_grid_has_working_and_the_proof_refuses_is_led_away_from():
+    source, watch, probe = _source()
+    zone = _band_zone()
+    probe.says(1.0, {"zone": zone.to_dict()})
+    watch.says(1.0, _fix((0.51, 0.0, 0.315)))
+    _fix_, reach = source.look(1.1)
+    assert reach.inside and probe.sent[-1]["prove"] is True
+    probe.says(1.6, {"proof": {"xyz": [0.51, 0.0, 0.315], "ok": False, "why": "the knees", "tilt_deg": None, "s": 1}})
+    watch.says(1.7, _fix((0.51, 0.0, 0.315)))
+    _fix_, reach = source.look(1.8)
+    # the cell at 0.50 no longer works here: the nearest place still inside is a cell on, beside it
+    assert not reach.inside and reach.planned is False
+    assert reach.to_zone[0] == pytest.approx(0.04) and abs(reach.to_zone[1]) == pytest.approx(0.05)
+    assert source._zone.inside((0.51 + reach.to_zone[0], reach.to_zone[1]))
+    probe.says(2.0, {"zone": zone.to_dict()})  # the probe's grid, said again as it fills: still refused here
+    watch.says(2.1, _fix((0.51, 0.0, 0.315)))
+    _fix_, reach = source.look(2.2)
+    assert not reach.inside and reach.to_zone is not None
+
+
+def test_the_deployments_bound_and_the_lids_height_decide_which_boundary_speaks():
+    source, watch, probe = _source(far_m=0.70)
+    probe.says(1.0, {"zone": _band_zone().to_dict()})
+    watch.says(1.0, _fix((0.78, 0.0, 0.315)))
+    _fix_, reach = source.look(1.1)
+    assert not reach.inside and reach.to_zone[0] < 0  # the proof plans there; the deployment does not trust it
+    watch.says(2.0, _fix((0.65, 0.0, 0.36)))  # another table: this grid was asked for a lid at 0.32
+    _fix_, reach = source.look(2.1)
+    assert reach is None and probe.sent[-1] == {"box": [0.65, 0.0, 0.36], "table_z": 0.22, "prove": False}
+    probe.says(2.5, {"zone": _band_zone(lid_z=0.36).to_dict()})
+    watch.says(2.6, _fix((0.65, 0.0, 0.36)))
+    _fix_, reach = source.look(2.7)
+    assert reach.inside
+
+
+def test_closing_ends_both_children():
+    source, watch, probe = _source()
+    source.close()
+    assert watch.stopped and probe.stopped
+    FakeChild.made = []
+    alone = BoxSource(["box_watch"], lambda urdf, root: [], {}, spawn=FakeChild)
+    alone.close()  # the probe never started
+    assert alone.watch.stopped
+
+
+def test_a_line_up_on_a_real_source_from_too_far_to_open():
+    """The loop on a BoxSource whose children are scripted: the box comes from 0.95 m to 0.65 m and stands;
+    the boundary is there from the start, the proof comes once it is asked for."""
+    source, watch, probe = _source()
+    clock = Clock()
+    ctx = Ctx(clock, presses=[(9.0, OPEN_PRESS)])
+    probe.says(clock.t, {"zone": _band_zone().to_dict()})
+
+    class Scripted:
+        """Feeds the children's lines as time passes: a sighting every 0.2 s, the proof 0.6 s after it is asked."""
+
+        def __init__(self):
+            self.next_fix, self.proof_at = clock.t, None
+
+        def look(self, now):
+            t = now - ctx.t0
+            if now >= self.next_fix:
+                x = max(0.65, 0.95 - 0.1 * t)
+                watch.says(now, _fix((x, 0.0, 0.315), age_s=0.1))
+                self.next_fix = now + 0.2
+            if self.proof_at is None and probe.sent and probe.sent[-1]["prove"] and probe.sent[-1]["box"][0] == 0.65:
+                self.proof_at = now + 0.6
+            if self.proof_at is not None and now >= self.proof_at:
+                probe.says(now, {"proof": {"xyz": [0.65, 0.0, 0.315], "ok": True, "why": "", "tilt_deg": 15, "s": 0.6}})
+                self.proof_at = float("inf")
+            return source.look(now)
+
+    lining = LineUp(ctx, lambda: True, Scripted(), 40.0, clock=clock, sleep=clock.sleep)
+    assert lining.run() == GO
+    words = ctx.messages()
+    assert words[0] == "Move closer, about 20 cm" and "Hold still, checking" in words
+    assert words[-2:] == ["Ready. Open the container?", "Opening the container"]
+    ready_at = next(t for t, p in ctx.panels if p["message"] == "Ready. Open the container?")
+    assert 3.0 + 0.6 <= ready_at <= 3.0 + 0.6 + guide.STEADY_S + 0.5  # in place at 3 s, proven, watched still
+
+
+def test_a_child_is_a_process_whose_marked_lines_are_its_messages(tmp_path):
+    import sys
+    import time
+
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import json, sys\n"
+        "print('a line of its own log', flush=True)\n"
+        "print('@@ ' + json.dumps({'robot': {'urdf': None}}), flush=True)\n"
+        "print('@@ not json', flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    print('@@ ' + json.dumps({'heard': json.loads(line)}), flush=True)\n"
+    )
+    logged = []
+    child = line_up.Child([sys.executable, str(script)], None, log=logged.append)
+    try:
+        child.send({"box": [1, 2, 3]})
+        got, t0 = [], time.monotonic()
+        while len(got) < 2 and time.monotonic() - t0 < 10.0:
+            got += child.messages()
+            time.sleep(0.02)
+        assert [m for _t, m in got] == [{"robot": {"urdf": None}}, {"heard": {"box": [1, 2, 3]}}]
+        assert all(t0 <= t <= time.monotonic() for t, _m in got)
+        assert logged == ["a line of its own log"] and child.alive()
+    finally:
+        child.stop()
+    assert not child.alive()
+    child.send({"box": [0, 0, 0]})  # to a child that has ended: nothing, and no error

@@ -15,9 +15,18 @@ on GO alone.
 
 MockApproach is the mock's source: a box that comes into reach as a user driving up to a table brings it,
 so the UI's side of a line-up can be rehearsed with no arm and no camera.
+
+BoxSource is a real run's: two child processes for as long as the panel is up, neither of which can move
+the arm. tasks/box_watch follows the container (the scene camera's sightings, as a run's own look gates
+them), and tasks/reach_probe says what the boundary makes of where it stands (the run's own proof, on the
+robot's URDF and chair model). Their lines are read on threads of their own, so a tick never waits on
+either.
 """
 
+import json
 import math
+import subprocess
+import threading
 import time
 
 from box_opening import guide
@@ -146,3 +155,156 @@ class MockApproach:
         self._t0 = now if self._t0 is None else self._t0
         xy = self.at(now - self._t0)
         return guide.Fix(now, xy, "mock"), self._zone.reach(xy, planned=True)
+
+
+# ------------------------------------------------------------------------------------- a real run's source
+MARK = "@@ "  # a child's line that is for the engine (tasks/box_watch, tasks/reach_probe); the rest is its log
+PROOF_NEAR_M = guide.STEADY_M  # a proof speaks for a box this near the place it was made for
+STOP_WAIT_S = 2.0  # a child asked to end is killed after this long
+
+
+class Child:
+    """A child process whose marked stdout lines are messages: (when it was read, the message), oldest first.
+    `log(text)` gets every other line it prints. It is ended by terminate(), then a kill."""
+
+    def __init__(self, argv, env, log=None, clock=time.monotonic):
+        self._log, self._clock = log, clock
+        self._lock = threading.Lock()
+        self._got = []
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            start_new_session=True,  # a Ctrl+C at the node's terminal is the node's to pass on
+        )
+        threading.Thread(target=self._read, name="line-up-child", daemon=True).start()
+
+    def _read(self):
+        for line in self.proc.stdout:
+            line = line.rstrip("\n")
+            if line.startswith(MARK):
+                try:
+                    msg = json.loads(line[len(MARK) :])
+                except ValueError:
+                    continue
+                with self._lock:
+                    self._got.append((self._clock(), msg))
+            elif self._log is not None:
+                self._log(line)
+
+    def messages(self):
+        with self._lock:
+            got, self._got = self._got, []
+        return got
+
+    def send(self, msg):
+        try:
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError):  # it has ended: its absence is seen in what it no longer says
+            pass
+
+    def alive(self):
+        return self.proc.poll() is None
+
+    def stop(self, wait_s=STOP_WAIT_S):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(wait_s)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+
+
+class BoxSource:
+    """The box as box_watch sees it, judged by the boundary reach_probe fills. `watch_argv`: box_watch's
+    command line. `probe_argv(urdf, root)`: reach_probe's, once the watch has said which robot this is.
+    `far_m`: the deployment's bound on the boundary (None: none). close() ends both children; nothing else
+    does, and a run must not start while they live."""
+
+    def __init__(self, watch_argv, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child):
+        self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
+        self._log, self._clock, self._spawn = log, clock, spawn
+        self.watch = spawn(watch_argv, env, log, clock)
+        self.probe = None
+        self._fix = None  # the newest sighting: (Fix, lid z, table z, rough)
+        self._zone = None
+        self._proof = None  # the newest proof: ((x, y, z), ok)
+        self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
+        self.why_none = ""  # the watch's last word on why it sees no box
+
+    def _hear(self):
+        """What the children have said since the last tick. True where there is a new sighting."""
+        new = False
+        for t, msg in self.watch.messages():
+            if "robot" in msg and self.probe is None:
+                robot = msg["robot"]
+                if robot.get("urdf"):
+                    self.probe = self._spawn(self._probe_argv(robot["urdf"], robot.get("root")), self._env, self._log)
+                elif self._log is not None:
+                    self._log("line-up: the robot's URDF was not heard: no boundary can be worked out")
+            elif "fix" in msg:
+                f = msg["fix"]
+                xyz = [float(v) for v in f["xyz"]]
+                fix = guide.Fix(t - float(f.get("age_s") or 0.0), (xyz[0], xyz[1]), "scene")
+                self._fix = (fix, xyz[2], f.get("table_z"), bool(f.get("rough")))
+                new = True
+            elif "none" in msg:
+                self.why_none = str(msg["none"])
+        if self.probe is not None:
+            for _t, msg in self.probe.messages():
+                if "zone" in msg:
+                    self._zone = Zone.from_dict(msg["zone"]).within(far_m=self._far_m)
+                    self._refute()
+                elif "proof" in msg:
+                    p = msg["proof"]
+                    self._proof = (tuple(float(v) for v in p["xyz"]), bool(p["ok"]))
+                    zone = self._zone
+                    if not p["ok"] and zone is not None and zone.serves(p["xyz"][2]) and zone.index(p["xyz"]):
+                        # the grid has this cell working and the run's proof for the box itself does not plan
+                        # there: for this line-up the cell does not work, and the user is shown the way to one
+                        # that does (a cell is asked at its centre and its bucket's height, the box where it is)
+                        self._refuted.add((zone.lid_z, *zone.index(p["xyz"])))
+                        self._refute()
+        return new
+
+    def _refute(self):
+        if self._zone is not None:
+            for lid_z, i, j in self._refuted:
+                if lid_z == self._zone.lid_z:
+                    self._zone.set(i, j, False)
+
+    def _planned(self, xy, z):
+        """The proof's word for a box at `xy`, lid top `z`: True, False, or None where none was made there."""
+        if self._proof is None:
+            return None
+        (px, py, pz), ok = self._proof
+        near = math.hypot(px - xy[0], py - xy[1]) <= PROOF_NEAR_M and abs(pz - z) <= PROOF_NEAR_M
+        return ok if near else None
+
+    def look(self, now):
+        new = self._hear()
+        if self._fix is None:
+            return None, None
+        fix, z, table_z, rough = self._fix
+        reach = None
+        if self._zone is not None and self._zone.serves(z):
+            reach = self._zone.reach(fix.xy, None if rough else self._planned(fix.xy, z))
+            if rough and reach is not None and reach.inside:
+                reach = None  # a rough sighting says which way to move, and is never asked on
+        if new and self.probe is not None:
+            # the place is proven only where the boundary has it inside and no proof speaks for it yet
+            prove = reach is not None and reach.inside and reach.planned is None
+            self.probe.send({"box": [fix.xy[0], fix.xy[1], z], "table_z": table_z, "prove": prove})
+        return (fix if new else None), reach
+
+    def close(self):
+        for child in (self.watch, self.probe):
+            if child is not None:
+                child.stop()

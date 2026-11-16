@@ -33,6 +33,8 @@ setup(
             "lid_room_view = box_opening.tasks.lid_room_view:main",
             # the line-up's boundary: where a press plans, asked away from the arm (moves nothing)
             "reach_probe = box_opening.tasks.reach_probe:main",
+            # the line-up's eyes: the scene camera's sightings of the container, a line each (moves nothing)
+            "box_watch = box_opening.tasks.box_watch:main",
         ]
     },
 )

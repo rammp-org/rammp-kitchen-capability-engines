@@ -12,9 +12,9 @@ lid's height is the cameras' that run. What this module adds is only how the gri
     inside(xy)    the box's cell works, and nothing that does not work is nearer than MARGIN_M: the
                   cameras place a box to a few centimetres, and a box on the boundary is not in it
     to_zone(xy)   from the box to the nearest place that is inside, for guide.instruction's words
-    order(focus)  which cells to ask next: the box's own, a coarse lattice outward from it, then only
-                  the cells along the boundary found (a proof takes about a second on the robot's
-                  computer; the whole grid would take a quarter of an hour, the boundary a few minutes)
+    order(focus)  which cells to ask next: the box's own, the surroundings of every cell found to
+                  work, and a coarse lattice outward from the box to find them (a proof takes about a
+                  second on the robot's computer; the whole grid would take a quarter of an hour)
 
 Unasked cells are not inside. A grid part way through says None of a place it cannot yet judge (reach):
 the panel says it is checking, never that the arm cannot.
@@ -40,8 +40,16 @@ WORKS, FAILS, UNASKED = 1, 0, -1
 STEP_M = 0.05  # a cell's side
 MARGIN_M = 0.03  # inside: nothing that does not work is nearer than this
 COARSE = 2  # the lattice asked first: every COARSE-th cell each way
+# a lid's height is read to the centimetre at best (the wrist camera read the lid 40-44 mm under the arm's
+# touch on 2026-11-12): one grid serves every lid within half this of the height it was asked at
+LID_Z_BUCKET_M = 0.02
 _CHARS = {WORKS: "#", FAILS: ".", UNASKED: "?"}
 _STATES = {c: s for s, c in _CHARS.items()}
+
+
+def lid_bucket(lid_z):
+    """The height a grid for a lid at `lid_z` is asked at: the nearest LID_Z_BUCKET_M."""
+    return round(round(float(lid_z) / LID_Z_BUCKET_M) * LID_Z_BUCKET_M, 4)
 
 
 @dataclass
@@ -67,17 +75,21 @@ class Zone:
         cells = np.full((max(nx, 1), max(ny, 1)), UNASKED, np.int8)
         return cls(float(x_span[0]), float(y_span[0]), float(step), cells, lid_z, key)
 
-    def to_json(self):
+    def to_dict(self):
         rows = ["".join(_CHARS[int(v)] for v in row) for row in self.cells]
-        return json.dumps(
-            {"x0": self.x0, "y0": self.y0, "step": self.step, "lid_z": self.lid_z, "key": self.key, "rows": rows}
-        )
+        return {"x0": self.x0, "y0": self.y0, "step": self.step, "lid_z": self.lid_z, "key": self.key, "rows": rows}
+
+    @classmethod
+    def from_dict(cls, d):
+        cells = np.array([[_STATES[c] for c in row] for row in d["rows"]], np.int8)
+        return cls(float(d["x0"]), float(d["y0"]), float(d["step"]), cells, d.get("lid_z"), d.get("key", ""))
+
+    def to_json(self):
+        return json.dumps(self.to_dict())
 
     @classmethod
     def from_json(cls, text):
-        d = json.loads(text)
-        cells = np.array([[_STATES[c] for c in row] for row in d["rows"]], np.int8)
-        return cls(float(d["x0"]), float(d["y0"]), float(d["step"]), cells, d.get("lid_z"), d.get("key", ""))
+        return cls.from_dict(json.loads(text))
 
     # -- cells ---------------------------------------------------------------------
     def centre(self, i, j):
@@ -94,6 +106,10 @@ class Zone:
         """WORKS, FAILS or UNASKED for the cell that holds `xy`; outside the grid nothing works."""
         ij = self.index(xy)
         return FAILS if ij is None else int(self.cells[ij])
+
+    def serves(self, lid_z):
+        """Whether this grid is the one for a lid at `lid_z`: asked at that height's bucket."""
+        return self.lid_z is not None and abs(float(self.lid_z) - lid_bucket(lid_z)) < 1e-6
 
     def set(self, i, j, works):
         self.cells[i, j] = WORKS if works else FAILS
@@ -199,7 +215,10 @@ class Zone:
 
     def order(self, focus=None):
         """The unasked cells worth asking, in the order to ask them: the cell that holds `focus` (the box),
-        then the coarse lattice, then the cells beside one that works; each nearest `focus` first. A cell
+        then the cells beside one that works, then the coarse lattice; each nearest `focus` first. So a box
+        that stands where the arm opens it has its own surroundings asked at once (inside needs them), and
+        from a box that does not, the lattice is asked outward until a cell works, and then that cell's
+        surroundings: the nearest place inside is known a dozen proofs after the first that works. A cell
         off the lattice with no working neighbour is never asked: it stays unasked, and so not inside."""
         fx, fy = (self.x0, self.y0) if focus is None else (float(focus[0]), float(focus[1]))
         own = None if focus is None else self.index(focus)
@@ -209,9 +228,9 @@ class Zone:
             i, j = int(i), int(j)
             if own == (i, j):
                 tier = 0
-            elif i % COARSE == 0 and j % COARSE == 0:
-                tier = 1
             elif beside[i, j]:
+                tier = 1
+            elif i % COARSE == 0 and j % COARSE == 0:
                 tier = 2
             else:
                 continue
