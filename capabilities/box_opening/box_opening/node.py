@@ -47,7 +47,7 @@ from rammp_orchestrator_interfaces.msg import ActionAvailability
 from rammp_orchestrator_interfaces.srv import Control
 
 from . import LOGGER, line_up
-from .constants import state_dir
+from .constants import AIR_CONTROL_ENV, state_dir
 from .flight_view import FlightView
 from .runtime.abort import EXIT_HALTED, EXIT_NOT_LINED_UP
 from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
@@ -90,6 +90,13 @@ PARAMS = {
     # such a run ends NO BOX without turning the wrist. On, the arm opens whichever single container stands in
     # front of it under the selected id: the owner's to turn on (press_demo.wrist_look)
     "wrist_alone": False,
+    # how the arm flies the free air before the press (constants.AIR_CONTROL_ENV): "impedance" (the default),
+    # every leg in the driver's joint impedance, one motion to under the button, as flown on 2026-11-12;
+    # "position", the look and the way in's free-air lines in position control and slower, the arm then
+    # standing about a second while the springs come in, and the press on them as ever (owner 2026-11-16:
+    # the arm "a little floppy" on its way to the button). In position it follows its path closely and does
+    # not give way to what it meets in the air. Not flown
+    "air_control": "impedance",
     # the folder box opening hands the planner worlds from (worlds.PlannerTable): the run's measured table,
     # while a way HOME is planned. `planner_worlds_as` is that folder as the PLANNER's container mounts it
     # (read-only); "" (the default) and box opening sends the planner no world. `planner_worlds_dir` is the
@@ -1031,6 +1038,7 @@ class Capability(CapabilityEngine):
         env["BOX_OPENING_MISSION_FRAMES"] = "1" if self._param("mission_frames") else "0"
         if self._param("state_dir"):
             env["BOX_OPENING_STATE"] = self._param("state_dir")
+        env[AIR_CONTROL_ENV] = str(self._param("air_control") or "impedance")
         for name, var in (("planner_worlds_as", PLANNER_WORLDS_AS_ENV), ("planner_worlds_dir", PLANNER_WORLDS_DIR_ENV)):
             if self._param(name):  # unset: whatever the node's own environment says, as BOX_OPENING_BODY_LAYERS
                 env[var] = str(self._param(name))

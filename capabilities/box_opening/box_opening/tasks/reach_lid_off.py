@@ -1946,8 +1946,8 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     viz_hook("press", way.stroke, top_z, cfg)  # the stroke, drawn off this thread (perception/viz)
     # where the pads meet the box ends every press's stroke past it (review round 2: the second
     # too), and a contact well off the cameras' top refuses it (dp.watch_press)
-    contact = dp.watch_press(ctx, legs, way.stroke, top_z)
-    res = runner.run(legs, execute=True)
+    # (its free air in position control, rp.air_position: two executions, and `names` the last's)
+    res, contact, names = rp.fly_way_in(ctx, runner, legs, way.stroke, top_z)
     last = res[-1]
     flown = all(r.ok for r in res)
     retimed = rp._note_flight(runner, "reach_way_in_flight", names, last) if last.flown_traj is not None else {}
@@ -2797,7 +2797,7 @@ def take_lid_off(ctx, cfg, runner, eyes, button, tilt, lid_z, how, yaw=None, att
             "the hand does not come down to the %sknob (%s) — the lid is not taken "
             "off" % ("re-aimed " if attempt > 1 else "", why),
         )
-    legs = rp.way_in_legs(ctx, cfg, way)
+    legs = rp.way_in_legs(ctx, cfg, way, air=False)  # one motion on the spring, however the press's way in flies
     names = [lg.name for lg in legs]
     runner.note(
         "reach_grip",

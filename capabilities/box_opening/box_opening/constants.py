@@ -392,6 +392,32 @@ COMPLIANT_RUN_GAINS = GAINS_RIGID
 # HOME_SPEED is a cruise fraction, as TRANSIT_SPEED (runtime/legs.Leg.speed).
 HOME_SPEED = 0.4
 HOME_GAINS = GAINS_MEDIUM
+# The free air before the press in POSITION control, the springs only for the press (owner 2026-11-16,
+# of the arm on its way to the button, "a little floppy": "do 1 and 3", slow the free-air part and fly it
+# in position). On the two runs that opened the box (2026-11-12 20:52, 20:53; their flight files, the tool
+# by FK against its reference) the look and the way in, in the joint impedance under RIGID, flew 7-10 mm
+# behind their reference (20-28 at most), hung 4-8 mm under their path and ended the look 8-10 mm off;
+# the one leg those runs flew in position, the wrist look's turn, hung 2 mm and ended 0.3 mm off.
+# With BOX_OPENING_AIR_CONTROL=position (the node's air_control; unset or "impedance": as flown on
+# 2026-11-12, every leg in the joint impedance, one motion from the look pose to under the button):
+#   - the look (reach:look) flies in position at AIR_LOOK_SPEED of each joint's limit, where it had
+#     TRANSIT_SPEED; the way in's free-air lines (re-aim, slide-in, turn) in position at AIR_LINE_SPEED,
+#     where they had COMPLIANT_FREE_LINE_SPEED (0.3 is FREE_LINE_SPEED, the position runs' own); both
+#     ease out of rest at AIR_ACCEL and into it at AIR_DECEL, where a position leg has 6 and 3;
+#   - the arm then stands at the stroke's start, the driver is put in its joint impedance there
+#     (client.prime_compliant) and AIR_SWITCH_S waited: its switch (mode_settle_s 0.25 s) and the fade-in
+#     of its spring (gain_ramp_s 0.5 s). A stroke begun on a spring still fading in would fly behind its
+#     reference, which is what the press's contact watch reads as a box met early;
+#   - the stroke (depth:approach, depth:press) and everything after it fly as they did.
+# It costs the one motion its flow (owner 2026-10-28's goal): a stop of about a second before the stroke.
+# And in position the arm does not give way to what it meets in the air as the spring does: these legs
+# carry no guard (a position run's guarded lines flew at CONTACT_SPEED). Not flown.
+AIR_CONTROL_ENV = "BOX_OPENING_AIR_CONTROL"
+AIR_LOOK_SPEED = 0.5
+AIR_LINE_SPEED = 0.3
+AIR_ACCEL = 2.0
+AIR_DECEL = 1.5
+AIR_SWITCH_S = 0.8
 # A look turns the hand where the user sits, to SEE and not to arrive, and it must read as gentle
 # (owner 2026-11-16, of the wrist look: "we need to make the arm look more docile here because it looks
 # snappy and scary"). Until then a view flew as a transit: full cruise (the wrist joints at their 0.45 and

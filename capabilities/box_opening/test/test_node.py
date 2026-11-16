@@ -1366,6 +1366,14 @@ def test_without_the_wrist_look_the_scene_watch_lines_up_and_the_run_starts_afte
     assert "--line-up" not in engine._argv("open_box", "c1")
 
 
+def test_how_the_free_air_flies_is_the_deployments_and_as_flown_by_default(engine):
+    from box_opening.constants import AIR_CONTROL_ENV
+
+    assert node.PARAMS["air_control"] == "impedance" and engine._env()[AIR_CONTROL_ENV] == "impedance"
+    engine.set_parameters([Parameter("air_control", value="position")])
+    assert engine._env()[AIR_CONTROL_ENV] == "position"
+
+
 def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):
     """The orchestrator's 120 s cover the line-up and the run: a run started late is stopped its own way
     that much sooner, and the longest run logged still fits after the longest line-up."""

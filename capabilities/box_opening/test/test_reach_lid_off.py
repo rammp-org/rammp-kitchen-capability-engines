@@ -438,6 +438,77 @@ def test_a_knob_up_after_the_press_is_gripped_lifted_carried_set_down_and_the_ar
     assert ctx.client.lets_go == []  # nothing stopped: nothing let go
 
 
+def test_with_the_free_air_in_position_the_arm_stands_while_the_springs_come_in_and_the_press_is_as_ever(
+    ctx, monkeypatch, tmp_path
+):
+    """BOX_OPENING_AIR_CONTROL=position (owner 2026-11-16, the arm "a little floppy" on its way to the button:
+    "do 1 and 3"): the look and the way in's free-air lines fly in position control, slower and eased; the
+    arm then stands at the stroke's start, the driver is put in its joint impedance there and its spring
+    waited in; and the stroke, the hold and everything after fly on the spring exactly as they did."""
+    from box_opening.constants import AIR_ACCEL, AIR_DECEL, AIR_LINE_SPEED, AIR_LOOK_SPEED, AIR_SWITCH_S
+
+    monkeypatch.setenv("BOX_OPENING_AIR_CONTROL", "position")
+    waits = []
+    monkeypatch.setattr(rp.time, "sleep", lambda s: waits.append(s))
+    modes = []
+    real_execute = ctx.client.execute
+    monkeypatch.setattr(
+        ctx.client, "execute", lambda *a, **k: (modes.append(ctx.client.compliant), real_execute(*a, **k))[1]
+    )
+    ways, real_fly = [], rp.fly_way_in
+
+    def fly(ctx_, runner, legs, stroke, top_z, lookahead=None):
+        ways.append({lg.name: lg for lg in legs})  # the press's own legs (the grip's way down has their names too)
+        return real_fly(ctx_, runner, legs, stroke, top_z, lookahead)
+
+    monkeypatch.setattr(rp, "fly_way_in", fly)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0
+    runs = _executions(rec)
+    air, stroke = WAY_IN[:-1], WAY_IN[-1:]
+    (way_in,) = ways
+    # the run as it was, but for the way in: two executions where it was one
+    assert [names for names, _g in runs] == [["reach:look"], air, stroke, BACK, GRIP, CLOSE + CARRY, RELEASED, HOMED]
+    assert rec.events[: 2 + len(WAY_IN)] == ["reach:look", "aim:reach-aim", *WAY_IN]
+    # in position: the look, and the free air of the way in. On the spring: the stroke and all after it
+    assert modes[:3] == [False, False, True] and all(modes[3:])
+    assert runs[1][1] == [None] and runs[2][1] == [dp.COMPLIANT_GAINS]
+    for names, gains in runs[3:-1]:
+        assert gains == [dp.COMPLIANT_GAINS], names
+    look = rec.legs["reach:look"]
+    assert (look.speed, look.compliant, look.gains, look.ease) == (AIR_LOOK_SPEED, False, None, (AIR_ACCEL, AIR_DECEL))
+    for name in air:
+        leg = way_in[name]
+        assert (leg.compliant, leg.gains, leg.ease) == (False, None, (AIR_ACCEL, AIR_DECEL)), name
+        assert leg.speed == AIR_LINE_SPEED and not leg.fold and leg.guard is None
+    press = way_in["depth:press"]
+    assert (press.compliant, press.gains, press.ease) == (None, dp.COMPLIANT_GAINS, None)
+    # the grip's way down to the knob stays one motion on the spring (its lines have the same names)
+    assert all(rec.legs[name].compliant is None and rec.legs[name].gains == dp.COMPLIANT_GAINS for name in air)
+    # between them: stood still, the driver's impedance entered where the arm stands, its fade-in waited
+    legs = [r["leg"] for r in rows]
+    (switch,) = (r for r in rows if r["leg"] == "air_switch")
+    assert switch["primed"] is True and switch["wait_s"] == AIR_SWITCH_S and waits.count(AIR_SWITCH_S) == 1
+    assert legs.index("depth:turn") < legs.index("air_switch") < legs.index("depth:press")
+    assert ctx.client.primes == [None]  # that one hold, of the joints it reads then; none at the run's start
+    # the press is watched as an execution of its own, and its flight is the stroke's
+    (flight,) = (r for r in rows if r["leg"] == "reach_way_in_flight")
+    assert flight["legs"] == stroke
+
+
+def test_in_position_a_free_air_part_that_stops_brings_no_spring_and_no_stroke(ctx, monkeypatch, tmp_path):
+    monkeypatch.setenv("BOX_OPENING_AIR_CONTROL", "position")
+    monkeypatch.setattr(rp.time, "sleep", lambda s: None)
+    # the second goal sent is the way in's free air: it stops part way
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], ends={2: ("failed", {"error": "the driver stopped it"})}
+    )
+    assert code == 1
+    assert [names for names, _g in _executions(rec)][:2] == [["reach:look"], WAY_IN[:-1]]
+    assert "depth:press" not in rec.events and not [r for r in rows if r["leg"] == "air_switch"]
+    assert ctx.client.primes == []
+
+
 def test_where_nothing_was_planned_ahead_the_lift_flies_alone_and_the_spot_is_looked_at_after_it(
     ctx, monkeypatch, tmp_path, capsys
 ):

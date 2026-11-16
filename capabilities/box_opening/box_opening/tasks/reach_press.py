@@ -77,6 +77,7 @@ one farthest from the chair and the user first (_rank_clear).
 
 import dataclasses
 import math
+import os
 import time
 from dataclasses import dataclass
 
@@ -84,6 +85,12 @@ import numpy as np
 
 from box_opening import LOGGER as log
 from box_opening.constants import (
+    AIR_ACCEL,
+    AIR_CONTROL_ENV,
+    AIR_DECEL,
+    AIR_LINE_SPEED,
+    AIR_LOOK_SPEED,
+    AIR_SWITCH_S,
     COMPLIANT_ACCEL,
     COMPLIANT_DECEL,
     COMPLIANT_FOLD_CHORD,
@@ -526,6 +533,23 @@ def _joint_gap(q_end, q):
     return max(abs(a - float(b)) for a, b in zip(on_branch(q_end, q), q, strict=False))
 
 
+def air_position(env=None):
+    """Whether the free air before the press flies in position control (constants.AIR_CONTROL_ENV:
+    "position"), the springs only for the press. Unset, or anything else: every leg in the run's own mode,
+    as flown on 2026-11-12. Read at each call: a run's environment is its own."""
+    return str((os.environ if env is None else env).get(AIR_CONTROL_ENV, "")).strip().lower() == "position"
+
+
+def as_air(leg, speed):
+    """`leg`, free air before the press, flown in position control (air_position): at `speed` of each
+    joint's limit at most, easing out of rest at AIR_ACCEL and into it at AIR_DECEL, under no impedance
+    gains (legs.can_merge keeps it out of the stroke's execution: one goal flies one mode). Returns it."""
+    leg.compliant, leg.gains = False, None
+    leg.speed = min(float(getattr(leg, "speed", speed)), float(speed))
+    leg.ease = (AIR_ACCEL, AIR_DECEL)
+    return leg
+
+
 def _plan_look(ctx, q_from, look_xyz, quat):
     """The look leg from joints `q_from`, planned as it always has been —
     the pose goal, full world, TRANSIT_SPEED — which the client plans to its
@@ -542,7 +566,7 @@ def _plan_look(ctx, q_from, look_xyz, quat):
         )
     except RuntimeError as e:
         return None, _short(e)
-    return leg, None
+    return (as_air(leg, AIR_LOOK_SPEED) if air_position() else leg), None
 
 
 def _proven(ctx, cfg, chain, tilt, button, geometry, q_look, depth):
@@ -1075,7 +1099,7 @@ def _plan_look_to(ctx, q_from, q_look):
         )
     except RuntimeError as e:
         return None, _short(e)
-    return leg, None
+    return (as_air(leg, AIR_LOOK_SPEED) if air_position() else leg), None
 
 
 def plan_reach(ctx, cfg, button, q_from, tilts=REACH_TILTS_DEG, depth=False, looks=None, shortest_walk=False):
@@ -1439,7 +1463,7 @@ def line_leg(ctx, name, pts, quat, speed, guard, world, verify=None, chain=0):
     )
 
 
-def way_in_legs(ctx, cfg, way):
+def way_in_legs(ctx, cfg, way, air=None):
     """The compliant depth press's way in (`way`, solve_way_in's) as the
     legs of ONE execution, in this order, the empty ones left out:
     'reach:re-aim' (way.move, turning to the plan's attitude on the way);
@@ -1456,7 +1480,11 @@ def way_in_legs(ctx, cfg, way):
     joints fold back while the hand still turns: that leg is marked a fold
     (Leg.fold), which the re-timer flows through (COMPLIANT_FOLD_DEG). `cfg`
     is the press config the stroke was solved with (its press_speed is in
-    way.stroke)."""
+    way.stroke). `air`: whether its free-air lines fly in position control
+    (as_air), the stroke alone on its spring: None, as the run is set
+    (air_position: the press's way in); False for a way whose flight stays
+    one motion in the impedance whatever the run's setting (the grip's way
+    down to the knob, reach_lid_off.take_lid_off)."""
     from box_opening.tasks import depth_press as dp
 
     # Their world is a label: a plan-free line is never planned, re-planned
@@ -1479,7 +1507,58 @@ def way_in_legs(ctx, cfg, way):
     ]
     for leg in legs[1:]:
         leg.fold = leg.name == "depth:approach"
+    if air_position() if air is None else air:
+        # the free air in position control, the stroke on its spring as ever: two executions, the arm at
+        # rest between them while the driver changes mode (fly_way_in), so no fold flows into the stroke
+        stroke = {name for name, _pts, _speed in way.stroke.legs}
+        for leg in legs:
+            if leg.name not in stroke:
+                as_air(leg, AIR_LINE_SPEED)
+            leg.fold = False
     return legs
+
+
+def way_in_parts(legs):
+    """The way in's legs (way_in_legs) as the executions they fly in: [all of them], or, their free air
+    in position control (air_position), [the free air, the stroke]. None where they merge any other way."""
+    groups = merge_groups(legs)
+    if len(groups) == 1:
+        return groups
+    if (
+        len(groups) == 2
+        and all(g.compliant is False for g in groups[0])
+        and all(g.compliant is None for g in groups[1])
+    ):
+        return groups
+    return None
+
+
+def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
+    """The way in flown: (results, the press's contact watch or None, the names of the legs of the
+    execution the last result is of).
+
+    One execution, as way_in_legs builds it in the joint impedance: watched from its lead (dp.watch_press)
+    and flown, `lookahead` hosted in it. Its free air in position (air_position): that part first, then,
+    where it arrived, the arm stood still, the driver put in its joint impedance there
+    (client.prime_compliant) and AIR_SWITCH_S waited, and the stroke flown and watched as an execution of
+    its own. A free-air part that did not arrive is where it ends: no springs, no stroke, no watch."""
+    from box_opening.tasks import depth_press as dp
+
+    kw = {} if lookahead is None else {"lookahead": lookahead}
+    parts = way_in_parts(legs) or [list(legs)]
+    if len(parts) == 1:
+        contact = dp.watch_press(ctx, legs, stroke, top_z)
+        return runner.run(legs, execute=True, **kw), contact, [lg.name for lg in legs]
+    air, press = parts
+    res = runner.run(air, execute=True)
+    if any(not r.ok for r in res):
+        return res, None, [lg.name for lg in air]
+    runner.wait_still("the stroke's start, before its spring")
+    primed = bool(ctx.client.prime_compliant())
+    runner.note("air_switch", primed=primed, wait_s=AIR_SWITCH_S, at=[round(float(v), 4) for v in ctx.client.joints()])
+    time.sleep(AIR_SWITCH_S)
+    contact = dp.watch_press(ctx, press, stroke, top_z)
+    return res + runner.run(press, execute=True, **kw), contact, [lg.name for lg in press]
 
 
 def _wrist_gravity():
@@ -2390,7 +2469,7 @@ def _not_one_execution(ctx, legs):
     leg, each is solved again from where the arm stands."""
     if not legs:
         return "no line to fly"
-    if len(merge_groups(legs)) != 1:
+    if way_in_parts(legs) is None:
         return "; ".join(
             "%s does not continue %s as one goal" % (b.name, a.name)
             for a, b in zip(legs, legs[1:], strict=False)
@@ -2467,13 +2546,19 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
     # while the way in flies, so it is padded before it flies
     pad = ctx.contact_pad
     ctx.contact_pad = CONTACT_SHIFT_PAD_M
-    contact = dp.watch_press(ctx, legs, way.stroke, top_z)  # where the pads meet the box ends the stroke past it
+    contact = None
     try:
         # The way home from the stroke's start, where the rise back up ends.
         # The end the lookahead is handed, the stroke's bottom inside the
-        # padded box, is no start for it, and is left unused
-        res = runner.run(
-            legs, execute=True, lookahead=lambda _end: plan_way_out(ctx, cfg, way.stroke.q0, way.stroke.quat)
+        # padded box, is no start for it, and is left unused. Where the pads
+        # meet the box ends the stroke past it (the contact watch)
+        res, contact, names = fly_way_in(
+            ctx,
+            runner,
+            legs,
+            way.stroke,
+            top_z,
+            lookahead=lambda _end: plan_way_out(ctx, cfg, way.stroke.q0, way.stroke.quat),
         )
         ahead = runner.lookahead_result  # every run() resets it
         last = res[-1]
@@ -2846,7 +2931,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         ctx.lid_video = camera_video.CameraVideo(
             [("wrist", getattr(watcher, "grab", None)), ("scene", getattr(locator, "grab", None))], CAPTURES_DIR
         )
-    if args.execute and soft:
+    if args.execute and soft and not air_position():  # (a look in position: the springs come in at the stroke)
         prime = getattr(ctx.client, "prime_compliant", None)
         if prime is not None and prime(q0):
             log.info("[press_demo] the driver enters its joint impedance now, while the reach is planned")

@@ -83,6 +83,12 @@ params:
   # this node writes it; "" = planner_worlds under state_dir
   planner_worlds_as: ""
   planner_worlds_dir: ""
+  # how the arm flies the free air before the press: "impedance" (the default: every leg in the driver's
+  # joint impedance, one motion to under the button, as flown 2026-11-12) or "position" (the look and the
+  # way in's free-air lines in position control and slower, about a second's stand while the springs come
+  # in, then the press on them as ever: the arm follows its path closely, and does not give way to what it
+  # meets in the air). "position" is not flown yet
+  air_control: impedance
   # the UI bridge's node: the base class's panel calls (ctx.update_user_panel) go to its
   # request_user_input, with the token the orchestrator pushes for each execution
   ui_bridge_node_name: ui_bridge_node

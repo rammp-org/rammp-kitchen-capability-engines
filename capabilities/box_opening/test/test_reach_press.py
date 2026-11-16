@@ -2943,3 +2943,41 @@ def test_on_flatbot_a_box_past_the_15_deg_turns_reach_is_pressed_leaning_further
     _leans_to_15(monkeypatch)
     plan, why = reach_press.plan_reach(ctx, cfg, button, home, depth=True)
     assert plan is None and "the way down (" in why
+
+
+# -- the free air before the press in position control (BOX_OPENING_AIR_CONTROL=position) ---------------
+def test_the_free_air_flies_in_position_only_where_the_run_is_set_so():
+    assert (
+        reach_press.air_position({}) is False
+        and reach_press.air_position({"BOX_OPENING_AIR_CONTROL": "impedance"}) is False
+    )
+    assert reach_press.air_position({"BOX_OPENING_AIR_CONTROL": " Position "}) is True
+    assert reach_press.air_position({"BOX_OPENING_AIR_CONTROL": "yes"}) is False  # nothing but the word turns it on
+
+
+def test_an_air_leg_is_in_position_no_faster_than_asked_and_eased():
+    from conftest import leg as make_leg
+
+    from box_opening.constants import AIR_ACCEL, AIR_DECEL
+
+    fast = reach_press.as_air(make_leg("reach:look", speed=1.0), 0.5)
+    assert (fast.compliant, fast.gains, fast.speed, fast.ease) == (False, None, 0.5, (AIR_ACCEL, AIR_DECEL))
+    assert reach_press.as_air(make_leg("reach:re-aim", speed=0.2), 0.3).speed == 0.2  # never sped up
+
+
+def test_the_way_ins_executions_are_one_or_the_free_air_and_the_stroke():
+    from conftest import Q0, Q1
+    from conftest import leg as make_leg
+
+    def line(name, start, end, air):
+        leg = make_leg(name, start=start, end=end, speed=0.3)
+        leg.gains = "RIGID"
+        return reach_press.as_air(leg, 0.3) if air else leg
+
+    mid = [(a + b) / 2 for a, b in zip(Q0, Q1, strict=True)]
+    one = [line("reach:slide-in", Q0, mid, False), line("depth:press", mid, Q1, False)]
+    assert reach_press.way_in_parts(one) == [one]
+    two = [line("reach:slide-in", Q0, mid, True), line("depth:press", mid, Q1, False)]
+    assert reach_press.way_in_parts(two) == [two[:1], two[1:]]
+    wrong = [line("reach:slide-in", Q0, mid, False), line("depth:press", mid, Q1, True)]  # the stroke in position
+    assert reach_press.way_in_parts(wrong) is None
