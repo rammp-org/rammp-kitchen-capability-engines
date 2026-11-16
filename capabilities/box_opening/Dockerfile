@@ -27,6 +27,12 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/525b7527df7ac75b5446f0a9367e651a0ecdb303.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
+# rammp_ui_bridge_interfaces as the base class now speaks it (SetEngineOverlayVisible, for
+# ctx.set_overlay_visible(); the example's pin): the base carries 1.2.0, which has no such service,
+# so the pinned one is built here and overlays it.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
+RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
+
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/box_opening/ src/box_opening/
 
