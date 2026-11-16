@@ -8,10 +8,10 @@ where the box was last seen and what the boundary says of that place, is a `sour
     source.look(now) -> (Fix or None, Reach or None)     the newest sighting (None: nothing new since the
                                                          last tick) and the boundary's word on the box
 
-It ends one of three ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
+It ends one of four ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
 panel's Cancel, or the orchestrator's), TIMED_OUT (the time for lining up ran out: the panel says to press
-open again, and holds that for LINGER_S). Nothing here moves the arm or starts a run: the caller does,
-on GO alone.
+open again, and holds that for LINGER_S), GONE (what watched the box has ended: `source.gone()`). Nothing
+here moves the arm or starts a run: the caller does, on GO alone.
 
 MockApproach is the mock's source: a box that comes into reach as a user driving up to a table brings it,
 so the UI's side of a line-up can be rehearsed with no arm and no camera.
@@ -32,7 +32,7 @@ import time
 from box_opening import guide
 from box_opening.reach_zone import Zone
 
-GO, CANCELLED, TIMED_OUT = "go", "cancelled", "timed_out"
+GO, CANCELLED, TIMED_OUT, GONE = "go", "cancelled", "timed_out", "gone"
 
 POLL_S = 0.05
 # a panel that changed is sent at once where its words or buttons did, and no oftener than this where only its
@@ -81,10 +81,13 @@ class LineUp:
     def run(self):
         """Until the user says yes, cancels, or the time runs out: GO, CANCELLED or TIMED_OUT."""
         timed_out_at = None
+        gone = getattr(self._source, "gone", None)
         while True:
             now = self._clock()
             if self._ctx.cancelled():
                 return CANCELLED
+            if gone is not None and gone():
+                return GONE
             event = self._ctx.poll_ui_event()
             if event is not None and event.get("type") == "button":
                 # any press ends the bridge's goal, and its panel with it: the next send opens it again
@@ -223,15 +226,17 @@ class Child:
 
 
 class BoxSource:
-    """The box as box_watch sees it, judged by the boundary reach_probe fills. `watch_argv`: box_watch's
-    command line. `probe_argv(urdf, root)`: reach_probe's, once the watch has said which robot this is.
-    `far_m`: the deployment's bound on the boundary (None: none). close() ends both children; nothing else
-    does, and a run must not start while they live."""
+    """The box as its watch sees it, judged by the boundary reach_probe fills. `watch`: box_watch's command
+    line, run as a child of this source's own; or a process already running that says the same lines (the
+    run itself, with --line-up: node.Run), which is its owner's to end. `probe_argv(urdf, root)`:
+    reach_probe's, once the watch has said which robot this is. `far_m`: the deployment's bound on the
+    boundary (None: none). close() ends the children that are this source's own."""
 
-    def __init__(self, watch_argv, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child):
+    def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
         self._log, self._clock, self._spawn = log, clock, spawn
-        self.watch = spawn(watch_argv, env, log, clock)
+        self._owns_watch = isinstance(watch, list | tuple)
+        self.watch = spawn(watch, env, log, clock) if self._owns_watch else watch
         self.probe = None
         self._fix = None  # the newest sighting: (Fix, lid z, table z, rough)
         self._zone = None
@@ -248,7 +253,7 @@ class BoxSource:
                 if robot.get("urdf"):
                     self.probe = self._spawn(self._probe_argv(robot["urdf"], robot.get("root")), self._env, self._log)
                 elif self._log is not None:
-                    self._log("line-up: the robot's URDF was not heard: no boundary can be worked out")
+                    self._log("the robot's URDF was not heard: no boundary can be worked out")
             elif "fix" in msg:
                 f = msg["fix"]
                 xyz = [float(v) for v in f["xyz"]]
@@ -304,7 +309,11 @@ class BoxSource:
             self.probe.send({"box": [fix.xy[0], fix.xy[1], z], "table_z": table_z, "prove": prove})
         return (fix if new else None), reach
 
+    def gone(self):
+        """The watch has ended: nothing sees the box any more."""
+        return not self.watch.alive()
+
     def close(self):
-        for child in (self.watch, self.probe):
+        for child in (self.watch, self.probe) if self._owns_watch else (self.probe,):
             if child is not None:
                 child.stop()

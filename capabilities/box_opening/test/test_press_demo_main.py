@@ -330,6 +330,52 @@ def test_every_other_run_still_starts_at_its_exact_rest_pose(monkeypatch, tmp_pa
         assert [k.get("tol") for k in HOME_FIRSTS] == [press_demo.AT_REST_RAD], argv
 
 
+def _lining_up(monkeypatch, answer):
+    """press_demo.line_up_watch stood in for: it answers (went, wrist_turned); returns its calls."""
+    from box_opening.tasks import press_demo
+
+    calls = []
+
+    def watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol):
+        calls.append((bool(args.wrist_first), rest_tol, len(HOME_FIRSTS), len(LOCATES)))
+        return answer
+
+    monkeypatch.setattr(press_demo, "line_up_watch", watch)
+    return calls
+
+
+def test_a_line_up_comes_before_anything_of_the_run_and_a_stop_ends_it_there(monkeypatch, tmp_path):
+    """--line-up: the watch runs before the home, the fingers and the first look; ended without a go, the run
+    exits EXIT_NOT_LINED_UP with nothing homed, looked for or pressed."""
+    from box_opening.constants import REST_TOL_RAD
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+
+    HOME_FIRSTS.clear(), REACH_OUTS.clear(), LOCATES.clear()
+    calls = _lining_up(monkeypatch, (False, False))
+    code, client, _rows = run_main(monkeypatch, tmp_path, ["--execute", "--line-up", "--wrist-first"], _refused)
+    assert code == EXIT_NOT_LINED_UP == 5
+    assert calls == [(True, REST_TOL_RAD, 0, 0)]  # asked before any home or look
+    assert HOME_FIRSTS == [] and REACH_OUTS == [] and LOCATES == [] and client.gripper_sent == []
+
+
+def test_after_a_go_the_run_goes_on_and_homes_first_unless_its_wrist_looked(monkeypatch, tmp_path):
+    """A go from a line-up that turned the wrist: the arm stood at rest before it looked, and the run's own
+    look goes on from that view, so no home first. From one that turned nothing, the run starts as always."""
+    for i, (turned, homes) in enumerate(((True, 0), (False, 1))):
+        HOME_FIRSTS.clear(), REACH_OUTS.clear()
+        calls = _lining_up(monkeypatch, (True, turned))
+        code, _c, _rows = run_main(monkeypatch, tmp_path / str(i), ["--execute", "--line-up"], _refused)
+        assert code == 1 and len(calls) == 1 and len(REACH_OUTS) == 1  # the run went on to its reach-out
+        assert len(HOME_FIRSTS) == homes, turned
+
+
+def test_a_run_without_line_up_never_waits_on_anyone(monkeypatch, tmp_path):
+    HOME_FIRSTS.clear(), REACH_OUTS.clear()
+    calls = _lining_up(monkeypatch, (False, False))
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute"], _refused)
+    assert code == 1 and calls == [] and len(HOME_FIRSTS) == 1 and len(REACH_OUTS) == 1
+
+
 def test_the_flags_of_the_one_run(monkeypatch, tmp_path, capsys):
     """2026-10-28, the staging mode scrapped: --depth-press is accepted,
     hidden and without effect (older command lines, sheppy's tasks);

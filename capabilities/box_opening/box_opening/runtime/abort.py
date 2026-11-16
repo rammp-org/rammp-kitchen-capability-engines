@@ -45,6 +45,8 @@ class ArmHalted(BaseException):
 
 # press_demo's exit code for a run ended by ArmHalted (the node: arm_halted, not recoverable)
 EXIT_HALTED = 4
+# a line-up (press_demo --line-up) that ended without its go: nothing was pressed, the wrist back at rest
+EXIT_NOT_LINED_UP = 5
 
 
 def check(client):

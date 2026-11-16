@@ -101,7 +101,7 @@ from box_opening.primitives.core import (
 )
 from box_opening.primitives.look import look_joints, sweep_targets
 from box_opening.runtime import driver, fingers
-from box_opening.runtime.abort import EXIT_HALTED, ArmHalted
+from box_opening.runtime.abort import EXIT_HALTED, EXIT_NOT_LINED_UP, ArmHalted
 from box_opening.runtime.runner import Runner
 from box_opening.tasks import cli_common
 from box_opening.worlds import WorldStore
@@ -1365,6 +1365,148 @@ def detect_only_report(node, watcher, ctx, cfg, runner, execute):
 AT_REST_RAD = 0.01
 
 
+# --line-up: the run's own process is the line-up's eyes, so one process alone ever commands the arm.
+# Its lines for the engine begin with LINE_UP_MARK (tasks/box_watch's lines; every other line is the run's
+# log), and the engine answers on stdin with one JSON line.
+LINE_UP_MARK = "@@ "
+LINE_UP_LOOK_S = 0.3  # the scene camera's own look, each time round (its sightings said as they are made)
+
+
+class LineUpEar:
+    """What the engine says on stdin while the user lines up, heard on a thread of its own: `go`, or `stop`
+    (said, or the pipe closed: an engine that is gone has not said go)."""
+
+    def __init__(self, stream=None):
+        import threading
+
+        self.go = self.stop = False
+        self._stream = sys.stdin if stream is None else stream
+        threading.Thread(target=self._listen, name="line-up-ear", daemon=True).start()
+
+    def _listen(self):
+        import json
+
+        try:
+            for line in self._stream:
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("go") is True:
+                    self.go = True
+                    return
+                if isinstance(msg, dict) and msg.get("stop"):
+                    break
+        except (OSError, ValueError):
+            pass
+        self.stop = True
+
+    def heard(self):
+        return self.go or self.stop
+
+
+def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None):
+    """--line-up: say where the container is until the engine answers, (went, wrist_turned).
+
+    The scene camera's sightings are said as they are made, as tasks/box_watch says them
+    (SceneLocator.on_sighting). With --wrist-first, --execute and the arm at rest (within `rest_tol`: the
+    wrist's turn is the only motion a line-up makes of its own, and an arm that stands elsewhere is not
+    brought home before the go), the fingers close as at every run's start and the wrist turns to look
+    (survey.watch_front, flown as a look), its frames' fixes said too. On a go the run goes on from there,
+    the wrist where it looked. On a stop the wrist is turned back to rest, as gently, and nothing was
+    pressed. A turn stopped part way: the arm holds, and the line-up ends (went False)."""
+    import json
+
+    from box_opening.tasks import box_watch
+    from box_opening.tasks import survey as sv
+
+    out = sys.stdout if out is None else out
+
+    def say(msg):
+        out.write(LINE_UP_MARK + json.dumps(msg) + "\n")
+        out.flush()
+
+    ear = LineUpEar() if ear is None else ear
+    rest = rest_joints(cfg)
+    # which robot this is, for the engine's reach_probe: the URDF this run's own kinematics were read from
+    urdf = cli_common.arm_urdf_file()
+    say({"robot": {"urdf": str(urdf) if urdf.is_file() else None, "root": ctx.worlds.base_frame}})
+
+    def scene_look():
+        if locator is not None and locator.locate(LINE_UP_LOOK_S) is None and locator.last_why:
+            return str(locator.last_why)
+        return None
+
+    if locator is not None:
+
+        def told(sighting, age_s):
+            line = box_watch.fix_line(sighting, age_s)
+            if line is not None:
+                say(line)
+
+        locator.on_sighting = told
+    at_rest = rest_distance(ctx.client.joints(), rest) <= rest_tol
+    wrist = bool(getattr(args, "wrist_first", False)) and bool(args.execute) and at_rest
+    turned = False
+    try:
+        if wrist:
+            _ok, finger_pos, _s = ctx.client.gripper_cmd(None)  # a query: nothing moves
+            if not fingers.already_closed(finger_pos) and not runner.start_gripper(
+                "press:close", GRIPPER_CMD_CLOSED, args.execute
+            ):
+                wrist = False
+                log.info("[press_demo] LINE-UP: the fingers did not close: the wrist does not look")
+        if wrist:
+            log.info("[press_demo] LINE-UP: the wrist turns to look at the table in front; the arm above it stands")
+            state, why = sv.watch_front(
+                node,
+                ctx,
+                runner,
+                watcher,
+                args.execute,
+                say,
+                ear.heard,
+                rest=rest,
+                camera_cfg_name=ctx.worlds.wrist_camera_config,
+                also=scene_look,
+            )
+            turned = state == "watched"
+            if state == "stopped":
+                log.info("[press_demo] STOP: the line-up's wrist turn: %s — the arm holds; nothing was pressed" % why)
+                return False, False
+            if state != "watched":
+                log.info("[press_demo] LINE-UP: the wrist does not look (%s): the scene camera alone" % why)
+                say({"none": "wrist camera: %s" % str(why)[:260]})
+        elif getattr(args, "wrist_first", False) and args.execute:
+            log.info("[press_demo] LINE-UP: the arm is not at rest: the wrist does not look before the go")
+        last_none = 0.0
+        while not ear.heard():  # the scene camera alone
+            why = scene_look()
+            if why is not None and time.monotonic() - last_none >= sv.LINE_UP_NONE_S:
+                last_none = time.monotonic()
+                say({"none": why[:300]})
+            if locator is None:
+                time.sleep(LINE_UP_LOOK_S)
+    finally:
+        if locator is not None:
+            locator.on_sighting = None
+    if ear.go:
+        log.info("[press_demo] LINE-UP: go — the run starts")
+        runner.note("line_up", stage="go", wrist=turned)
+        return True, turned
+    runner.note("line_up", stage="stop", wrist=turned)
+    if turned:
+        state, why = sv.rest_wrist(ctx, runner, args.execute, rest=rest)
+        if state != "flown":
+            log.info("[press_demo] STOP: the line-up ended and the wrist did not turn back (%s) — the arm holds" % why)
+            return False, False
+    log.info(
+        "[press_demo] LINE-UP: ended without a go; nothing was pressed%s"
+        % (", the wrist back at rest" if turned else "")
+    )
+    return False, False
+
+
 def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
     """The mission's first motion: the arm to its exact rest pose (`rest`,
     HOME) unless it already stands within `tol` of it, so every run starts
@@ -1882,6 +2024,15 @@ def main():
         "engine passes the orchestrator's selection). Without it, any box of the container's classes",
     )
     ap.add_argument(
+        "--line-up",
+        action="store_true",
+        help="for the engine's line-up (line_up.BoxSource): before the run, say where the container is as the "
+        'user drives up, a line each on stdout, and wait for a line on stdin: {"go": true} and the run goes '
+        'on, {"stop": true} (or the pipe closed) and it ends with nothing pressed. With --wrist-first and the '
+        "arm at rest the wrist turns to look, gently, and turns back on a stop; else only the scene camera looks "
+        "and nothing moves before the go",
+    )
+    ap.add_argument(
         "--wrist-first",
         action="store_true",
         help="the wrist camera finds the container: before anything else the wrist turns where the arm rests so "
@@ -2049,7 +2200,15 @@ def main():
         # guarded reach-out reads an at-rest reference at the rest pose and
         # checks gravity against it.
         start_tol = REST_TOL_RAD if (args.compliant and not args.wrist_detect) else AT_REST_RAD
-        if not home_first(ctx, runner, args.execute, rest_joints(cfg), tol=start_tol):
+        wrist_turned = False
+        if getattr(args, "line_up", False):
+            # THE LINE-UP (--line-up; owner 2026-11-16): the user is told which way to drive until the
+            # container is where the arm opens it, and nothing of the run starts but on their Open
+            went, wrist_turned = line_up_watch(node, ctx, cfg, runner, watcher, args, locator, start_tol)
+            if not went:
+                sys.exit(EXIT_NOT_LINED_UP)
+        # (a line-up that turned the wrist started from rest, and the run's own look goes on from its view)
+        if not wrist_turned and not home_first(ctx, runner, args.execute, rest_joints(cfg), tol=start_tol):
             sys.exit(3)
         if args.wrist_detect:
             # the calibration observation parks at the look pose and stays

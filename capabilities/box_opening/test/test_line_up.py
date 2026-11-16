@@ -224,6 +224,9 @@ class FakeChild:
     def stop(self, wait_s=None):
         self.stopped = True
 
+    def alive(self):
+        return not self.stopped
+
 
 def _band_zone(lid_z=0.32):
     """Works 0.50 to 0.80 m out and 0.20 m to either side, for a lid at `lid_z`."""
@@ -415,3 +418,28 @@ def test_a_child_is_a_process_whose_marked_lines_are_its_messages(tmp_path):
         child.stop()
     assert not child.alive()
     child.send({"box": [0, 0, 0]})  # to a child that has ended: nothing, and no error
+
+
+def test_a_watch_that_is_the_run_itself_is_not_this_sources_to_end():
+    """The wrist look: the run, started with --line-up, says the watch's lines. close() ends the probe alone."""
+    FakeChild.made = []
+    run = FakeChild(["press_demo", "--line-up"], {})
+    source = BoxSource(run, lambda urdf, root: ["reach_probe", urdf], {}, spawn=FakeChild)
+    assert source.watch is run and len(FakeChild.made) == 1  # nothing spawned for the watch
+    run.says(0.0, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    run.says(0.1, {"fix": {"xyz": [0.65, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}})
+    fix, _reach = source.look(0.2)
+    assert fix.xy == (0.65, 0.0) and source.probe.argv == ["reach_probe", "/state/arm.urdf"]
+    source.close()
+    assert source.probe.stopped and not run.stopped
+
+
+def test_a_line_up_ends_at_once_where_its_watch_has_gone():
+    FakeChild.made = []
+    source = BoxSource(["box_watch"], lambda urdf, root: [], {}, spawn=FakeChild)
+    assert not source.gone()
+    clock = Clock()
+    ctx = Ctx(clock)
+    lining = LineUp(ctx, lambda: True, source, 40.0, clock=clock, sleep=clock.sleep)
+    source.watch.stopped = True  # it ended (not ready, its camera gone)
+    assert lining.run() == line_up.GONE and clock.t - ctx.t0 < 0.1

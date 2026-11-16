@@ -334,23 +334,44 @@ some 4 s and one too far out is shown the way about as soon (flatbot's
 computer, 2026-11-16), and the whole grid, some 500 proofs, takes 8 minutes
 across the line-ups that follow. `reach_probe --urdf <the arm's URDF> --lid-z <height>` fills one ahead of time.
 
-While the panel is up the node runs two children, and ends both before the run
-starts. `box_watch` follows the container: the scene camera and the scene
-segmenter as the run's own look reads them, each message's sighting as it is
-made. `reach_probe --serve` judges where it stands: the grid, and the run's
-proof for the box itself once it is inside. Neither holds a client for the arm
-or the gripper, and nothing moves before **Open**.
+What follows the container while the panel is up depends on `wrist_first`:
 
-**What it cannot see it never asks of.** The line-up follows the container by
-the scene camera alone, and nothing turns the wrist to look. On flatbot the
-scene camera does not see a lid whole in front of the arm (the reach map of
-2026-11-11), so there the panel stays on `Looking for the container` and the
-action ends `not_lined_up`, with the watch's reason in the message; a
-container the frame cuts is placed roughly, enough to say which way to move and
-never to ask on. With `line_up` off, `open_box` runs as it always has. The mock
-lines up on a box that comes into reach over six `mock_phase_s`, for rehearsing
-the UI. A line-up that cannot start its children fails `line_up_unavailable`:
-no run starts without its **Open**.
+- **`wrist_first` on (the wrist looks):** the run's own command line is started
+  at once with `--line-up`, so that one process alone ever commands the arm. If
+  the arm stands at rest it closes the fingers, as every run does at its start,
+  and turns the wrist to the front view that shows the most of where the arm
+  presses: the three wrist joints, once, flown as a look (slow, eased, under
+  MEDIUM), the arm above them standing. From there it judges every wrist frame
+  as it comes, the user driving the chair the while, and the scene camera's
+  sightings with them. On **Open** the node tells it to go and the same process
+  runs on from that view. An arm that is not at rest is not moved before
+  **Open**: only the scene camera looks, and the run homes first as always.
+- **`wrist_first` off:** `box_watch` follows the container by the scene camera
+  alone and holds no client for the arm or the gripper; nothing moves before
+  **Open**, and the run starts after it.
+
+Either way `reach_probe --serve` judges where the container stands (the grid,
+and the run's proof for the box itself once it is inside), and can move nothing.
+
+How a line-up that turned the wrist ends without **Open**: out of time, the run
+is told so, turns the wrist back to rest as gently and ends, nothing pressed.
+**Cancel** (the panel's or the orchestrator's) is the run's Ctrl+C as every
+cancel is: a turn in flight stops and the arm holds where it is, the wrist where
+it looked; the next run's start brings it to rest.
+
+**What it cannot see it never asks of.** Without the wrist the scene camera
+alone follows the container, and on flatbot that camera does not see a lid whole
+in front of the arm (the reach map of 2026-11-11): the panel stays on
+`Looking for the container` and the action ends `not_lined_up`, with the watch's
+reason in the message. A container a camera's frame cuts is placed roughly,
+enough to say which way to move and never to ask on. With `line_up` off,
+`open_box` runs as it always has. The mock lines up on a box that comes into
+reach over six `mock_phase_s`, for rehearsing the UI. A line-up whose watch
+cannot start, or ends of itself, fails (`line_up_unavailable`, or what the run
+said: `not_ready` and the like): no run goes on without its **Open**.
+
+Not yet run on the robot: the wrist's watch has been run only against stubs, and
+whether its finder holds the container while the chair moves is unmeasured.
 
 A `CANCEL` on `/box_opening/control` that comes after the orchestrator has
 pushed the token and before its goal has no run to cancel in the base class. It
@@ -362,28 +383,28 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name                  | Default                | Meaning                                                                                                                                                                                                                                      |
-| --------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `use_orchestrator`    | `true`                 | `false` runs standalone: no registration, drive it by CLI                                                                                                                                                                                    |
-| `mock`                | `false`                | `true` skips hardware (the mock alternative sets it)                                                                                                                                                                                         |
-| `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                                                                                           |
-| `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel)                                                                       |
-| `line_up`             | `false`                | Line up on the UI before a run: the panel says which way to move, asks, and the arm moves only on **Open** (see "Lining up first"). It follows the container by the scene camera alone: a container that camera cannot see is never asked of |
-| `line_up_far_m`       | `0.0`                  | How far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come closer. `0`: as far as the run's proof plans a press (on flatbot about 0.90 m; flown at 0.63 and 0.68 m)                            |
-| `allow_execute`       | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                                                                                                                                                                 |
-| `container`           | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path                                                                                                                                                                        |
-| `world`               | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`                                                                                                                                                                  |
-| `state_dir`           | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening`                                                                                                                                                                 |
-| `video`               | `false`                | Record both cameras from the grip to the set-down (the newest 20 kept); on for attended data collection                                                                                                                                      |
-| `viz`                 | `false`                | Draw what the perception sees and decides for Foxglove                                                                                                                                                                                       |
-| `mission_frames`      | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps                                                                                                                    |
-| `speed_scale`         | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                                                                                                                                             |
-| `body_layers`         | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)                                                                                                                             |
-| `planner_worlds_as`   | `""`                   | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world")                                                                                             |
-| `planner_worlds_dir`  | `""`                   | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                                                                                                                                            |
-| `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                                                                                            |
-| `wrist_first`         | `false`                | Facing a table: the wrist camera finds the container in front of the arm, the wrist turned where the arm rests (see below)                                                                                                                   |
-| `wrist_alone`         | `false`                | With `wrist_first`: a selection the scene camera's detections do not hold (a list typed by hand) is looked for by the wrist alone, taken only where it sees one container (see below)                                                        |
+| Name                  | Default                | Meaning                                                                                                                                                                                                                                                          |
+| --------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`    | `true`                 | `false` runs standalone: no registration, drive it by CLI                                                                                                                                                                                                        |
+| `mock`                | `false`                | `true` skips hardware (the mock alternative sets it)                                                                                                                                                                                                             |
+| `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                                                                                                               |
+| `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel)                                                                                           |
+| `line_up`             | `false`                | Line up on the UI before a run: the panel says which way to move, asks, and the run goes on only on **Open** (see "Lining up first"). With `wrist_first` the wrist turns to look while the user lines up; without it only the scene camera follows the container |
+| `line_up_far_m`       | `0.0`                  | How far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come closer. `0`: as far as the run's proof plans a press (on flatbot about 0.90 m; flown at 0.63 and 0.68 m)                                                |
+| `allow_execute`       | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                                                                                                                                                                                     |
+| `container`           | `"ankou_pink.yaml"`    | The container's config, in the image's `config/containers`, or a path                                                                                                                                                                                            |
+| `world`               | `"world_flatbot.yaml"` | The robot's planning frame, cameras and fixed body, in the image's `config`                                                                                                                                                                                      |
+| `state_dir`           | `""`                   | Where runs keep their logs, captures and videos; `""` = `~/.ros/box_opening`                                                                                                                                                                                     |
+| `video`               | `false`                | Record both cameras from the grip to the set-down (the newest 20 kept); on for attended data collection                                                                                                                                                          |
+| `viz`                 | `false`                | Draw what the perception sees and decides for Foxglove                                                                                                                                                                                                           |
+| `mission_frames`      | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps                                                                                                                                        |
+| `speed_scale`         | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                                                                                                                                                                 |
+| `body_layers`         | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)                                                                                                                                                 |
+| `planner_worlds_as`   | `""`                   | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world")                                                                                                                 |
+| `planner_worlds_dir`  | `""`                   | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                                                                                                                                                                |
+| `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                                                                                                                |
+| `wrist_first`         | `false`                | Facing a table: the wrist camera finds the container in front of the arm, the wrist turned where the arm rests (see below)                                                                                                                                       |
+| `wrist_alone`         | `false`                | With `wrist_first`: a selection the scene camera's detections do not hold (a list typed by hand) is looked for by the wrist alone, taken only where it sees one container (see below)                                                                            |
 
 ### The planner's world
 

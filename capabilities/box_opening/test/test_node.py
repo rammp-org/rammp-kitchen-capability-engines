@@ -43,6 +43,35 @@ FULL_RUN = [
 FAKE_RUN = """
 import json, os, sys, time
 from pathlib import Path
+if "--line-up" in sys.argv:
+    # press_demo --line-up: says where the box is (LINE_UP: "in place" | "far" | "dies") until a line on
+    # stdin: go and the run goes on, stop (or the pipe closed) and it ends 5, nothing pressed
+    import select
+    mode = os.environ.get("LINE_UP", "in place")
+    if mode == "dies":
+        sys.stdout.write("[press_demo] not starting: the arm driver is not up\\n")
+        sys.stdout.flush()
+        sys.exit(1)
+    sys.stdout.write('@@ {"robot": {"urdf": null, "root": "arm_mount"}}\\n')
+    sys.stdout.write("[press_demo] LINE-UP: the wrist turns to look at the table in front\\n")
+    heard = None
+    try:
+        while heard is None:
+            x = 0.65 if mode == "in place" else 1.2
+            fix = {"xyz": [x, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}
+            sys.stdout.write("@@ " + json.dumps({"fix": fix}) + "\\n")
+            sys.stdout.flush()
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                line = sys.stdin.readline()
+                heard = json.loads(line) if line.strip() else {"stop": True}
+    except KeyboardInterrupt:
+        sys.stdout.write("[press_demo] stopped by Ctrl+C\\n")
+        sys.exit(130)
+    if not heard.get("go"):
+        sys.stdout.write("[press_demo] LINE-UP: ended without a go; nothing was pressed, the wrist back at rest\\n")
+        sys.stdout.flush()
+        sys.exit(5)
+    sys.stdout.write("[press_demo] LINE-UP: go\\n")
 runs = Path(os.environ["BOX_OPENING_STATE"]) / "runs"
 runs.mkdir(parents=True, exist_ok=True)
 with open(runs / "run-20261030-140000.jsonl", "a") as f:
@@ -1206,6 +1235,135 @@ def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(
     assert env_ is env and far_m == 0.8
     engine._box_source(env, "")
     assert "--instance-id" not in made[-1][0]
+
+
+# -- the line-up with the wrist look: the run's own process watches, and goes on at Open ---------------
+class Proven:
+    """reach_probe, stood in for: whatever the box, its place is inside the boundary and proven."""
+
+    def __init__(self, source):
+        from box_opening import guide
+
+        self._look, self._guide = source.look, guide
+        source.look = self.look
+
+    def look(self, now):
+        fix, _reach = self._look(now)
+        return fix, self._guide.Reach(True, None, True)
+
+
+def _wrist_lining_up(engine, monkeypatch, proven=True):
+    """`engine` with line_up and wrist_first on and a UI; its line-up's source the real BoxSource on the run
+    (FAKE_RUN --line-up), reach_probe never started. Returns the runs' argv, as they start."""
+    engine.set_parameters([Parameter("line_up", value=True), Parameter("wrist_first", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    real_source, started = engine._box_source, []
+
+    def source(env, instance_id, watch=None):
+        made = real_source(env, instance_id, watch=watch)
+        started.append(watch)
+        return (Proven(made), made)[1] if proven else made
+
+    monkeypatch.setattr(engine, "_box_source", source)
+    return started
+
+
+def test_with_the_wrist_look_the_run_itself_lines_up_and_goes_on_at_open(engine, monkeypatch):
+    """line_up with wrist_first: ONE process, the run's, started with --line-up. It says where the box is;
+    the panel asks; on Open it is told to go and the same process runs on to the end."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    started = _wrist_lining_up(engine, monkeypatch)
+    runs, real_run = [], node.Run
+
+    class Recorded(real_run):
+        def __init__(self, argv, env, log, talk=False):
+            runs.append(self)
+            self.argv = list(argv)
+            super().__init__(argv, env, log, talk=talk)
+
+    monkeypatch.setattr(node, "Run", Recorded)
+    engine.instance_id = "food_container_1"
+    ctx = FakeCtx()
+    threading.Timer(2.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and ctx.objects == {"food_container_1": {"opened": True}}
+    (watch,) = started
+    assert isinstance(watch, node.Run)  # the line-up's eyes were the run itself: no second process for the arm
+    said = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+    assert said[-2:] == ["Ready. Open the container?", "Opening the container"]
+    (run,) = runs  # one process from the line-up to the way home
+    assert "--line-up" in run.argv and "--wrist-first" in run.argv and watch is run
+    assert any("LINE-UP: go" in ln for ln in run.lines)
+    assert not any(ln.startswith("@@") for ln in run.lines)  # its lines for the line-up are not its log's
+    phases = [p for p, *_ in ctx.said]
+    assert phases.index("locate") > phases.index("line_up") and phases[-1] == "home"
+
+
+def test_out_of_time_the_run_is_told_so_turns_back_and_ends_and_nothing_was_pressed(engine, monkeypatch):
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable and time.monotonic() - t0 < 8.0
+    assert sent == []  # told on its stdin, and it ended of its own accord: no Ctrl+C
+    assert engine._run is None and ctx.objects == {} and ctx.world == []
+    assert {p for p, *_ in ctx.said} == {"line_up"}
+
+
+def test_a_cancel_while_the_wrist_looks_is_the_runs_own_ctrl_c(engine, monkeypatch):
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    _wrist_lining_up(engine, monkeypatch)
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda: None)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    threading.Timer(1.0, ctx.events.append, args=(CANCEL_PRESS,)).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert sent == [signal.SIGINT] and engine._run is None and ctx.world == []
+
+
+def test_a_run_that_ends_of_itself_while_lining_up_fails_with_what_it_said(engine, monkeypatch):
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "dies")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    ctx = FakeCtx()
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_ready" and "the arm driver is not up" in str(e.value)
+    assert time.monotonic() - t0 < 5.0  # seen at once, not after the line-up's 40 s
+
+
+def test_without_the_wrist_look_the_scene_watch_lines_up_and_the_run_starts_after(engine, monkeypatch):
+    """line_up with wrist_first off: box_watch (the scene camera alone) is the watch, a child of the line-up's
+    own, and the run's command line has no --line-up."""
+    engine.set_parameters([Parameter("line_up", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "executable", lambda name: "/lib/" + name)
+    made = []
+
+    class Source:
+        def __init__(self, watch, probe, env, far_m=None, log=None):
+            made.append(watch)
+
+    monkeypatch.setattr(node.line_up, "BoxSource", Source)
+    engine._box_source(engine._env(), "c1")
+    assert made[0][0] == "/lib/box_watch"
+    assert "--line-up" not in engine._argv("open_box", "c1")
 
 
 def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):

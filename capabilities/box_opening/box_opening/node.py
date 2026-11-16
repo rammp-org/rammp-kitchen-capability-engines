@@ -49,7 +49,7 @@ from rammp_orchestrator_interfaces.srv import Control
 from . import LOGGER, line_up
 from .constants import state_dir
 from .flight_view import FlightView
-from .runtime.abort import EXIT_HALTED
+from .runtime.abort import EXIT_HALTED, EXIT_NOT_LINED_UP
 from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
 # ROS parameter -> default. Container and world name files in the image's config/ (or are
@@ -99,8 +99,9 @@ PARAMS = {
     # the line-up before a run, on the UI (line_up, guide): the panel tells the user which way to move until
     # the container is where the arm opens it, then asks, and the arm moves only on its Open. Off (the
     # default) open_box starts its run at once, as it always has; so does an execution with no UI (standalone).
-    # It follows the container by the SCENE camera alone, which on flatbot does not see a lid whole in front
-    # of the arm: on, a container it cannot see is never asked of, and open_box ends not_lined_up
+    # With wrist_first the wrist turns to look while the user lines up (the run itself, --line-up: gently,
+    # and only where the arm stands at rest). Without it the SCENE camera alone follows the container, which
+    # on flatbot does not see a lid whole in front of the arm: one it cannot see is never asked of
     "line_up": False,
     # how far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come
     # closer, though the run's proof plans a press for it there. 0 (the default): as far as the proof plans.
@@ -146,6 +147,7 @@ RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORL
 # still ends before its own stop. A user not in place by then is told to press open again
 RUN_LONGEST_S = 50.0
 LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 40 s
+LINE_UP_END_S = 12.0  # a run told its line-up is over turns its wrist back and ends within this, or is stopped
 NOT_LINED_UP = "the container was not where the arm opens it within %.0f s: nothing moved (press open again in place)"
 TAIL_LINES = 40
 
@@ -221,17 +223,21 @@ class Run:
     """One command line's run as a child process: its console lines logged (`log(level, text)`)
     and kept (the last TAIL_LINES), the video it announced, its exit code."""
 
-    def __init__(self, argv, env, log):
+    def __init__(self, argv, env, log, talk=False):
         self.lines = deque(maxlen=TAIL_LINES)
         self.video = None
         self.started = time.monotonic()
         self.timed_out = False  # stopped by the node at RUN_BUDGET_S
         self._log = log
+        # `talk` (a run that lines up first, --line-up): its lines that begin with line_up.MARK are messages
+        # for the line-up, kept apart from its log (messages()), and it is answered on its stdin (send())
+        self._got, self._lock = [], threading.Lock()
         # its own session: a Ctrl+C at this node's terminal reaches it once, from here. Its
         # lines are decoded whatever they hold: a reader that died would leave the run
         # blocked on a full pipe, mid-motion.
         self.proc = subprocess.Popen(
             argv,
+            stdin=subprocess.PIPE if talk else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
@@ -246,6 +252,14 @@ class Run:
     def _read(self):
         for line in self.proc.stdout:
             line = line.rstrip("\n")
+            if line.startswith(line_up.MARK):  # for the line-up, not the log: five a second while it watches
+                try:
+                    msg = json.loads(line[len(line_up.MARK) :])
+                except ValueError:
+                    continue
+                with self._lock:
+                    self._got.append((time.monotonic(), msg))
+                continue
             ros = ROS_LINE.match(line)
             level, text = (LEVELS[ros.group(1)], f"[{ros.group(2)}] {ros.group(3)}") if ros else (logging.INFO, line)
             self.lines.append(text)
@@ -253,6 +267,23 @@ class Run:
             if m:
                 self.video = m.group(1)
             self._log(level, text)
+
+    def messages(self):
+        """The line-up's lines it has said since the last call: (when read, message), oldest first."""
+        with self._lock:
+            got, self._got = self._got, []
+        return got
+
+    def send(self, msg):
+        """A line on its stdin (a run started with `talk`): the line-up's go, or stop."""
+        try:
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError, AttributeError):  # it has ended, or was never to be talked to
+            pass
+
+    def alive(self):
+        return self.proc.poll() is None
 
     def interrupt(self):
         """Ctrl+C, to the run alone (not to the ffmpeg its video may be encoding with)."""
@@ -542,6 +573,8 @@ def error_for(action_id, code, lines):
         return EngineError("not_found", why, recoverable=True)
     if code == 3:
         return EngineError("not_home", why, recoverable=True)
+    if code == EXIT_NOT_LINED_UP:  # its line-up ended with no go (the engine's own stop is said by the engine)
+        return EngineError("not_lined_up", why, recoverable=True)
     if code is not None and code < 0:  # killed: whatever it said last, it did not end its own way
         return EngineError("stopped", f"the run was ended by signal {-code}: {why}", recoverable=False)
     if said:
@@ -657,13 +690,54 @@ class Capability(CapabilityEngine):
         far = float(self._param("line_up_far_m") or 0.0)
         return far if far > 0.0 else None
 
-    def _box_source(self, env, instance_id):
-        """A real run's line-up source (line_up.BoxSource): box_watch follows the container, reach_probe judges
-        where it stands, both children of this node for as long as the panel is up. Neither can move the arm."""
+    def _lines_up(self):
+        """Whether this execution lines up first: the param is on and there is a UI to ask on."""
+        return bool(self._param("line_up")) and self._ui_live()
+
+    def _lined_up_run(self, ctx, env, action_id, instance_id, view):
+        """The run started with --line-up and taken through its line-up: the Run, told to go on its Open.
+        Until then it only watches (the wrist turned to look, gently, where the arm stands at rest). A
+        line-up that ends any other way ends the run before this raises: a cancel is its Ctrl+C, as every
+        cancel is (the arm stops where it is); out of time it is told so, turns its wrist back to rest and
+        ends (LINE_UP_END_S, then its stop). A run that ended of itself while lining up (not ready, its
+        wrist's turn stopped) raises what it said."""
+        run_ = Run(self._argv(action_id, instance_id) + ["--line-up"], env, view.relay(LOGGER.log), talk=True)
+        self._run = run_  # a shutdown stops it (_on_shutdown)
+        try:
+            self._line_up(ctx, lambda: self._box_source(env, instance_id, watch=run_))
+        except BaseException as e:
+            self._run = None
+            cancelled = isinstance(e, Cancelled)
+            if cancelled:
+                self.get_logger().warning("cancelled while lining up: the run's own stop (Ctrl+C) sent")
+                run_.stop(CANCEL_ESCALATE_S)
+            else:
+                run_.send({"stop": True})
+                try:
+                    run_.proc.wait(LINE_UP_END_S)
+                except subprocess.TimeoutExpired:
+                    self.get_logger().error(f"the run did not end its line-up in {LINE_UP_END_S:.0f} s: its stop")
+                    run_.stop(CANCEL_ESCALATE_S)
+            code = run_.finish()
+            view.finish(code, cancelled=cancelled, timed_out=False, held=False)
+            if isinstance(e, EngineError) and e.error_code == "line_up_unavailable" and code != EXIT_NOT_LINED_UP:
+                raise error_for(action_id, code, run_.lines) from e  # it ended of itself: what it said
+            raise
+        run_.send({"go": True})
+        self.get_logger().info("line-up: Open pressed: the run goes on")
+        return run_
+
+    def _box_source(self, env, instance_id, watch=None):
+        """A real run's line-up source (line_up.BoxSource): a watch follows the container and reach_probe judges
+        where it stands, for as long as the panel is up. `watch`: the run itself, started with --line-up (its
+        wrist looks; _lined_up_run); None, and box_watch is run for it, which reads the scene camera alone and
+        holds no client for the arm. reach_probe never can move it."""
         container = config_path(self._param("container"), "containers")
-        watch = [executable("box_watch"), "--container", container, "--bench-world", config_path(self._param("world"))]
-        if instance_id:
-            watch += ["--instance-id", instance_id]
+        if watch is None:
+            watch = [executable("box_watch"), "--container", container]
+            watch += ["--bench-world", config_path(self._param("world"))]
+            if instance_id:
+                watch += ["--instance-id", instance_id]
         layers = self._param("body_layers")
         layers = PARAMS["body_layers"] if layers is None else str(layers)
 
@@ -712,6 +786,12 @@ class Capability(CapabilityEngine):
             if lining.cancel_pressed:
                 self._cancel_from_ui()
             raise Cancelled()
+        if outcome == line_up.GONE:
+            raise EngineError(
+                "line_up_unavailable",
+                "what watched the container ended while lining up: nothing ran",
+                recoverable=False,
+            )
         if outcome == line_up.TIMED_OUT:
             why = getattr(source, "why_none", "")
             raise EngineError(
@@ -746,23 +826,33 @@ class Capability(CapabilityEngine):
         env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
         # the selection as the goal came: read once, used for the line-up, every write and the run's argv
         instance_id = self.instance_id
-        # nothing has moved, and nothing runs but on the line-up's Open
-        lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
         runs = state_dir(env) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
         track = Tracker(action_id, instance_id)
         t0 = time.monotonic()
+        # the flight view (flight_view): the run's lines read as they are logged, one short line a step
+        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
+        view = FlightView()
+        lined_up_s, run_ = 0.0, None
+        if self._lines_up() and self._param("wrist_first"):
+            # the wrist looks while the user lines up (owner 2026-11-16: "keep the wrist look"): the run's own
+            # process is the line-up's eyes, started now and held at its line-up until the Open, so that one
+            # process alone ever commands the arm. Its budget runs from here, the line-up inside it
+            view.start(action_id, instance_id)
+            run_ = self._lined_up_run(ctx, env, action_id, instance_id, view)
+        else:
+            # nothing moves, and nothing runs but on the line-up's Open
+            lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
         panel = Panel(ctx, self._ui_live)  # on the UI from now until the action ends
         panel.say(first, 0.0, "starting")
         panel.tick()
         world = WorldWriter(self.get_logger())
-        # the flight view (flight_view): the run's lines read as they are logged, one short line a step
-        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
-        view = FlightView()
-        view.start(action_id, track.instance_id)
-        self._run = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
+        if run_ is None:
+            view.start(action_id, track.instance_id)
+            run_ = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
+        self._run = run_
         code = None
         try:
             code = self._follow(self._run, log, track, ctx, world, panel, RUN_BUDGET_S - lined_up_s)

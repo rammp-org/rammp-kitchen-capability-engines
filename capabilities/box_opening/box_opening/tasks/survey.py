@@ -1509,6 +1509,104 @@ def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=N
     return _done(out, find, t0)
 
 
+# --- the line-up: the front view held, every frame judged as it comes ---------------------------
+LINE_UP_FRAME_S = 1.0  # a wrist frame is waited for this long, then the watch says it has none
+LINE_UP_NONE_S = 1.0  # "no container" is said no oftener than this
+LINE_UP_VIEW = "line-up:view"
+LINE_UP_REST = "line-up:rest"
+
+
+def _fix_line(fix, age_s):
+    """A fix as the engine's line-up reads it (tasks/box_watch's line): the lid's top, the table it was read
+    on, how old the frame is, and `rough` for a lid the view cut (enough to say which way to move, never to
+    ask on)."""
+    table_z = float(fix.table_z_scene)
+    return {
+        "fix": {
+            "xyz": [round(float(v), 4) for v in fix.top_xyz],
+            "table_z": round(table_z, 4) if math.isfinite(table_z) else None,
+            "age_s": round(max(0.0, float(age_s)), 3),
+            "rough": bool(getattr(fix, "partial", "") or getattr(fix, "rough", False)),
+            "by": "wrist",
+        }
+    }
+
+
+def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camera_cfg_name=None, hint=None, also=None):
+    """The line-up's eyes, with the wrist (owner 2026-11-16: "keep the wrist look"): the wrist turned, as a
+    look flies, to the front view that shows the most of where the arm presses (angled_views' first; the
+    one at `hint`, where the scene camera has the box, before it), and from there every wrist frame judged
+    as it comes until `stop()`, the user driving the chair the while. Each frame is judged alone (the box
+    moves between them), and with no test of reach: a box the arm cannot reach is the one the user is told
+    to bring nearer. `say(line)`: a fix for each frame that shows the container (_fix_line), "none" and why
+    at most every LINE_UP_NONE_S where one does not. `also()`: called on a frame that shows none (the scene
+    camera's own look, which may see what the wrist does not).
+
+    Only the three wrist joints move, once, and the arm then stands until the caller moves it on (the run)
+    or back (rest_wrist). ("watched", None) at `stop()`; ("none" | "refused" | "stopped", why) where the
+    wrist was not turned at all, or its turn stopped part way (the arm holds there)."""
+    from box_opening.constants import HOME
+    from box_opening.perception import wrist_finder as wf
+    from box_opening.runtime import approach
+
+    check = approach.body_check()
+    if check is None:
+        return "none", "the wrist look keeps its poses clear of the chair by the body model, and it is off"
+    rest = list(HOME) if rest is None else list(rest)
+    chain, cam, model = approach._chain(), camera_of(watcher, camera_cfg_name), ctx.model
+    views, why, stats = angled_views(chain, check, ctx.client.joints(), cam, model, rest=rest, hint=hint)
+    runner.note("line_up", stage="views", views=[_view_row(v) for v in views[:1]], why=why, **stats)
+    if not views:
+        return "none", why
+    view = replace(views[0], name=LINE_UP_VIEW)
+    state, why = fly_view(ctx, runner, view, FrontBand(check, rest), execute)
+    if state != "flown":
+        runner.note("line_up", stage=view.name, flown=False, why=why)
+        return state, why
+    if not execute:
+        return "none", "a preview ends at the line-up's view: its frames need --execute"
+    runner.wait_still(view.name)
+    n = found = 0
+    said_none = None
+    while not stop():
+        frame, snap, _pose, why = grab_frame(node, watcher, None, view.name, n=1, timeout_s=LINE_UP_FRAME_S)
+        fix = None
+        if frame is not None:
+            n += 1
+            find = wf.find_container([frame], model, check_buttons=False)
+            fix, why = find.fix, find.why
+        if fix is not None:
+            found += 1
+            age = 0.0
+            if node is not None and getattr(snap, "color_stamp", None) is not None:
+                stamp = snap.color_stamp
+                age = (node.get_clock().now().nanoseconds - (int(stamp.sec) * 10**9 + int(stamp.nanosec))) / 1e9
+            say(_fix_line(fix, age))
+            continue
+        if also is not None:
+            also()
+        now = time.monotonic()
+        if said_none is None or now - said_none >= LINE_UP_NONE_S:
+            said_none = now
+            say({"none": "wrist camera: %s" % str(why)[:260]})
+    runner.note("line_up", stage="watched", frames=n, found=found)
+    return "watched", None
+
+
+def rest_wrist(ctx, runner, execute, rest=None):
+    """The wrist back where the arm rests after a line-up that ended without its Open, as a look flies:
+    ("flown" | "refused" | "stopped", why). Only the joints the view turned move."""
+    from types import SimpleNamespace
+
+    from box_opening.constants import HOME
+    from box_opening.runtime import approach
+
+    rest = list(HOME) if rest is None else list(rest)
+    check = approach.body_check()
+    band = FrontBand(check, rest) if check is not None else SimpleNamespace(path_refusal=lambda traj: None)
+    return fly_view(ctx, runner, SimpleNamespace(name=LINE_UP_REST, joints=rest, what="back to rest"), band, execute)
+
+
 def _near(xyz, places, d_lid):
     """Is (x, y) of `xyz` within half a lid of one of `places` [(x, y), ...]?"""
     return any(math.hypot(xyz[0] - x, xyz[1] - y) < 0.5 * d_lid for x, y in places)
