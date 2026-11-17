@@ -102,6 +102,27 @@ def test_ready_survives_a_flicker_and_is_withdrawn_when_the_box_really_leaves_or
     assert said[-1][1].message == "The arm cannot open it from here"
 
 
+def test_ready_survives_a_tick_the_boundary_cannot_judge_as_it_survives_one_that_says_no():
+    """A tick with no Reach at all (one frame whose lid height falls in another boundary's bucket, a lid a
+    view cut) is a flicker like any other: the question and its Open stay for LEAVE_S, a press in that time
+    is still the user's yes, and only LEAVE_S of it is "Hold still, checking"."""
+    guide = g.Guide()
+    _drive(guide, [((0.69, 0.0), IN)] * 8)  # 0 .. 1.4 s
+    assert guide.state == g.READY
+    say = guide.update(1.6, g.Fix(1.6, (0.69, 0.0)), None)
+    assert say.state == g.READY and guide.state == g.READY and g.OPEN in dict(say.buttons)
+    say = guide.update(1.8, g.Fix(1.8, (0.69, 0.0)), IN)
+    assert say.state == g.READY
+    said = _drive(guide, [((0.69, 0.0), None)] * 5, t0=2.0)  # not judged from 2.0 s on
+    assert [s.state for _t, s in said[:3]] == [g.READY] * 3  # 2.0, 2.2, 2.4: within LEAVE_S of the first
+    assert said[-1][1].state == g.HOLD and said[-1][1].message == "Hold still, checking"
+    assert g.OPEN not in dict(said[-1][1].buttons) and guide.press(g.OPEN, 2.85) is False
+    said = _drive(guide, [((0.69, 0.0), IN)] * 2, t0=3.0)  # judged again, and it never moved: asked again
+    assert said[-1][1].state == g.READY
+    guide.update(3.4, g.Fix(3.4, (0.69, 0.0)), None)
+    assert guide.press(g.OPEN, 3.45) is True and guide.state == g.GO  # Open in the flicker: taken
+
+
 def test_an_instruction_stands_long_enough_to_read_and_the_line_up_has_its_time():
     """Another instruction replaces one only after MIN_SAY_S; a change of state is said at once. `budget_s`
     over, the line-up ends and says how to go on: nothing flies on a press after that."""

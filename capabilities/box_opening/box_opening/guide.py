@@ -39,7 +39,7 @@ LOST_S = 1.5  # no box seen for this long: looking again
 FRESH_S = 1.0  # Open counts only on a box seen this recently
 STEADY_S = 1.0  # the box has stood still this long ...
 STEADY_M = 0.015  # ... within this much: the chair is not moving
-LEAVE_S = 0.5  # READY is left once the box has been outside, or moving, this long
+LEAVE_S = 0.5  # READY is left once the box has been outside, moving, or not judged, this long
 MIN_SAY_S = 0.7  # an instruction stands at least this long before another replaces it
 AXIS_SWITCH_M = 0.03  # the other axis is named only where its miss is this much the larger
 ROUND_M = 0.05  # distances are said to the nearest 5 cm ...
@@ -129,7 +129,7 @@ class Guide:
     _axis: str = None
     _said: Say = None
     _said_at: float = None
-    _bad_since: float = None  # in READY: since when the box has been outside or moving
+    _bad_since: float = None  # in READY: since when the box has been outside, moving, or not judged
 
     # -- the box's own motion ------------------------------------------------------
     def _see(self, fix):
@@ -187,16 +187,17 @@ class Guide:
         if seen is None or now - seen.t > LOST_S:
             self._bad_since = None
             return self._answer(now, Say(LOOKING, "Looking for the container", cancel), at_once=True)
-        if reach is None:
-            return self._answer(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=self.state != READY)
-        good = bool(reach.inside) and reach.planned is True and self.steady(now)
+        good = reach is not None and bool(reach.inside) and reach.planned is True and self.steady(now)
         if self.state == READY and not good:
-            # a jitter of the box or of the boundary is not yet a reason to take the question away
+            # a jitter of the box or of the boundary is not yet a reason to take the question away; nor is a
+            # tick the boundary cannot judge at all (no Reach: one frame's lid height in another grid's bucket)
             self._bad_since = now if self._bad_since is None else self._bad_since
             if now - self._bad_since < LEAVE_S:
                 return self._said
         else:
             self._bad_since = None
+        if reach is None:
+            return self._answer(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=self.state != READY)
         if good:
             ready = Say(READY, "Ready. Open the container?", ((OPEN, "Open"),) + cancel, 100.0)
             return self._answer(now, ready, at_once=True)
