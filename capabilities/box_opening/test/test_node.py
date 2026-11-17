@@ -899,7 +899,8 @@ def test_a_run_is_told_on_stdout_one_short_line_a_step_beside_its_full_lines(eng
     steps = [line[3:12].strip() for line in out if line[:2].strip().isdigit()]
     assert steps == ["FIND", "LOOK", "PRESS", "GRIP", "LIFT", "CARRY", "SET DOWN", "HOME"]
     assert all(" ok" in line for line in out if line[:2].strip().isdigit())
-    assert out[-1].startswith("RESULT  DONE — box open, lid on the table, arm home")
+    assert out[-2].startswith("RESULT  DONE — box open, lid on the table, arm home")
+    assert out[-1].startswith("        full lines: runs/console-")  # where the full lines are kept
     assert p + "PRESSED with ~21 N, 2 N sideways" in said  # ... and every full line still logged, as it came
     # a run that stops: the step it ended at, why, and where things were left
     given(
@@ -915,8 +916,39 @@ def test_a_run_is_told_on_stdout_one_short_line_a_step_beside_its_full_lines(eng
         engine.execute("open_box", {}, FakeCtx())
     out = capsys.readouterr().out.splitlines()
     assert " 2 PRESS     FAIL  the box is out of the arm's reach (0.83 m out)" in out
-    assert out[-3].startswith("RESULT  FAILED at step 2 (PRESS)")
-    assert out[-1] == "        box: not pressed    lid: on the box    arm: home"
+    assert out[-4].startswith("RESULT  FAILED at step 2 (PRESS)")
+    assert out[-2] == "        box: not pressed    lid: on the box    arm: home"
+
+
+def test_a_goals_full_lines_are_kept_in_a_file_of_its_own_and_the_console_is_the_flight_views(
+    engine, monkeypatch, tmp_path, capfd
+):
+    """Owner 2026-11-17, after three runs watched through `sheppy logs` (stdout and stderr as one): "i changed
+    the way my box opening terminal outputs, no? why is it still the old outputs?" A run's full lines go to
+    runs/console-<stamp>.log, an error to the console too; the result names the file; and the node's lines are
+    the console's again once the goal has ended. With full_console on they are on the console as before."""
+    p = "[press_demo] "
+    given(monkeypatch, FULL_RUN, [p + "PRESSED with ~21 N, 2 N sideways", p + "DONE — box open, arm home"])
+    capfd.readouterr()
+    engine.execute("open_box", {}, FakeCtx())
+    seen = capfd.readouterr()
+    assert "PRESSED with ~21 N" not in seen.out + seen.err  # not on the console, in either stream
+    last = seen.out.splitlines()[-1]
+    assert last.startswith("        full lines: runs/console-") and last.endswith(".log")
+    kept = (tmp_path / last.split(": ")[1]).read_text()
+    assert p + "PRESSED with ~21 N, 2 N sideways" in kept and " INFO " in kept
+    LOGGER.info("a line of the node's own, between goals")  # the console's again
+    assert "between goals" in capfd.readouterr().err and "between goals" not in kept
+    # an error is said on the console as well as kept
+    given(monkeypatch, say=["[ERROR] [1793385477.635189323] [box_opening_run]: no arm kinematics"])
+    engine.execute("open_box", {}, FakeCtx())
+    assert "no arm kinematics" in capfd.readouterr().err
+    # full_console: as before
+    engine.set_parameters([Parameter("full_console", value=True)])
+    given(monkeypatch, FULL_RUN, [p + "PRESSED with ~21 N, 2 N sideways", p + "DONE — box open, arm home"])
+    engine.execute("open_box", {}, FakeCtx())
+    seen = capfd.readouterr()
+    assert "PRESSED with ~21 N" in seen.err and "full lines:" not in seen.out
 
 
 def test_the_runs_own_ros_log_lines_keep_their_level(engine, monkeypatch):

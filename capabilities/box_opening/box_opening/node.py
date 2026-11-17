@@ -90,6 +90,9 @@ PARAMS = {
     # such a run ends NO BOX without turning the wrist. On, the arm opens whichever single container stands in
     # front of it under the selected id: the owner's to turn on (press_demo.wrist_look)
     "wrist_alone": False,
+    # a run's full lines ("[press_demo] ...") on this node's console too, between the flight view's, as before
+    # 2026-11-17. Off (the default): they are kept in runs/console-<stamp>.log, and the console is the flight view
+    "full_console": False,
     # how the arm flies the free air before the press (constants.AIR_CONTROL_ENV): "impedance" (the default),
     # every leg in the driver's joint impedance, one motion to under the button, as flown on 2026-11-12;
     # "position", the look and the way in's free-air lines in position control and slower, the arm then
@@ -1024,6 +1027,24 @@ class Capability(CapabilityEngine):
         return [ActionAvailability(action_id=a.action_id, available=not why, reason=why) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
+        try:
+            return self._execute(action_id, params, ctx)
+        finally:
+            lines = getattr(self, "lines", None)
+            if lines is not None:
+                lines.to_console()  # the goal's file closed: this node's lines are the console's again
+
+    def _lines_to_file(self, runs):
+        """This goal's full lines go to runs/console-<stamp>.log from here until it ends (NodeLogHandler); the
+        file's place as the flight view says it, or None where they stay on the console (full_console on, a
+        test's engine with no node log, a file that cannot be opened)."""
+        lines = getattr(self, "lines", None)
+        if lines is None or self._param("full_console"):
+            return None
+        name = time.strftime("console-%Y%m%d-%H%M%S.log", time.gmtime())
+        return "runs/%s" % name if lines.to_file(Path(runs) / name) else None
+
+    def _execute(self, action_id, params, ctx):
         if self._cancelled_early():
             raise Cancelled()  # nothing ran
         check_params(params)
@@ -1060,6 +1081,7 @@ class Capability(CapabilityEngine):
         # the flight view (flight_view): the run's lines read as they are logged, one short line a step
         # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
         view = FlightView()
+        view.log = self._lines_to_file(runs)
         lined_up_s, run_ = 0.0, None
         if lines_up and self._param("wrist_first"):
             # the wrist looks while the user lines up (owner 2026-11-16: "keep the wrist look"): the run's own
@@ -1340,15 +1362,52 @@ class Capability(CapabilityEngine):
 
 
 class NodeLogHandler(logging.Handler):
-    """Every box_opening log record as a line of the node's log, at its own level."""
+    """Every box_opening log record as a line of the node's log, at its own level; while a goal's file is open
+    (to_file), in that file instead, an error in both.
+
+    Owner 2026-11-17, after three runs watched through `sheppy logs`: "i changed the way my box opening terminal
+    outputs, no? why is it still the old outputs?" The flight view was there, on stdout, with every full line
+    of the run between its lines on stderr: sheppy shows both streams as one. So a run's full lines are kept
+    in a file beside its run log, and the console is the flight view's (and this node's own few lines)."""
 
     def __init__(self, node):
         super().__init__()
         self.node = node
+        self._file = None
+
+    def to_file(self, path):
+        """The lines from now on go to `path` (appended); False where it cannot be opened: the console as before."""
+        self.to_console()
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self._file = open(path, "a", encoding="utf-8", errors="replace")  # noqa: SIM115 -- closed by to_console
+        except OSError:
+            self._file = None
+        return self._file is not None
+
+    def to_console(self):
+        """The lines go to the node's log again."""
+        f, self._file = self._file, None
+        if f is not None:
+            try:
+                f.close()
+            except OSError:
+                pass
 
     def emit(self, record):
         logger = self.node.get_logger()
         msg = record.getMessage()
+        f = self._file
+        if f is not None:
+            try:
+                now = time.time()
+                stamp = time.strftime("%H:%M:%S", time.gmtime(now)) + ".%03d" % (1000 * (now % 1))
+                f.write("%s %-7s %s\n" % (stamp, record.levelname, msg))
+                f.flush()
+                if record.levelno < logging.ERROR:
+                    return
+            except (OSError, ValueError):  # a file that fails is not the run's problem: the console
+                pass
         if record.levelno >= logging.ERROR:
             logger.error(msg)
         elif record.levelno >= logging.WARNING:
@@ -1360,7 +1419,8 @@ class NodeLogHandler(logging.Handler):
 def use_node_logger(node):
     """The box_opening logger writes to `node`'s log instead of the console."""
     LOGGER.handlers.clear()
-    LOGGER.addHandler(NodeLogHandler(node))
+    node.lines = NodeLogHandler(node)  # a goal's full lines go to its file through it (Capability._lines_to_file)
+    LOGGER.addHandler(node.lines)
 
 
 def main():

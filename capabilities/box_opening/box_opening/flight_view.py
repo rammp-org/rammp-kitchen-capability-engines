@@ -28,9 +28,11 @@ A step's lower-case line is written as it starts, its numbered line as it ends: 
 `next` what the run does after a failure. The result says where the box, the lid and the arm were
 left.
 
-The engine writes it to its stdout; everything else it logs goes to stderr (rclpy's console), so
-`docker logs -f sheppy-box_opening 2>/dev/null` shows the flight view alone and `docker logs -f
-sheppy-box_opening` both, the full lines under their "[INFO] [...]" prefix.
+The engine writes it to its stdout. The run's full lines are kept in a file of their own beside the run
+log (runs/console-<stamp>.log in box opening's state folder: node.NodeLogHandler), which the result's last
+line names, so the console (`sheppy logs box_opening`, which shows stdout and stderr as one) is the flight
+view and the node's own few lines. With the node's `full_console` on they are on the console too, between
+the flight view's lines under their "[INFO] [...]" prefix, as before 2026-11-17.
 
 It only reads. Nothing a run does depends on it, and nothing it meets may stop the reader that
 feeds it (node.Run._read: a reader that died leaves the run blocked on a full pipe, mid-motion):
@@ -154,6 +156,7 @@ class FlightView:
         self.spot_mm = None
         self.one_motion = False
         self.lid = "on the box"
+        self.log = None  # where the run's full lines are kept (the node's, node.Capability._lines_to_file)
         self.arm = None  # "home" | "holding where it stopped"
         self.going_home = False
 
@@ -478,6 +481,7 @@ class FlightView:
             self.lid = "in the hand"
         if code == 0 and self.done and not cancelled:
             self._say(("RESULT  DONE — box open, lid on the table, arm home").ljust(WIDTH - 8) + " " + took)
+            self._where()
             return
         failed = self.failed or self.last_fail
         word = "CANCELLED" if cancelled else "FAILED"
@@ -495,6 +499,12 @@ class FlightView:
             box = "pressed %d time%s, not confirmed open" % (self.presses, "" if self.presses == 1 else "s")
         arm = self.arm or ("not confirmed home" if not self.going_home else "home")
         self._say("        box: %s    lid: %s    arm: %s" % (box, self.lid, arm))
+        self._where()
+
+    def _where(self):
+        """Where the run's full lines were kept (`log`: a place in box opening's state folder), where they were."""
+        if self.log:
+            self._say("        full lines: %s" % self.log)
 
     def relay(self, log):
         """`log(level, text)` wrapped: each line logged as before, then read here."""

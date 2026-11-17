@@ -75,6 +75,9 @@ params:
   # ends not_found without turning the wrist. A selection the scene camera does hold is tied to it
   # either way (docs/interface.md)
   wrist_alone: false
+  # a run's full lines on the node's console too, between the flight view's (off: kept in
+  # runs/console-<stamp>.log of the state folder, and the console is the flight view)
+  full_console: false
   # the run's measured table handed to the planner while a way HOME is planned, and at no other time
   # (docs/interface.md, "The planner's world"). `planner_worlds_as` is the folder the PLANNER's container
   # mounts read-only for it, as that container names it, e.g. /box_opening for a planner volume
