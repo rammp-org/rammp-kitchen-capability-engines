@@ -717,10 +717,13 @@ ESCAPE_GAINS = GAINS_SOFT
 # user, joint_2 0.17 and joint_4 0.10 rad from their limits. The walk's own step pushes those two off their limits,
 # which drove the forearm deeper, and every halving of it was refused: "jog the arm clear by hand". Owner: "i dont
 # want to physically need to move the arm. make it figure itself out on its own". So where the walk's own step is
-# refused, the other ways from where the arm stands are tried before any refusal: the padding's way alone, each
-# joint alone either way, and ESCAPE_TRIES fixed directions (seeded, the same every run), each held to the walk's
-# rules and to the start box by box (Body.first_hit's start rule), none past ESCAPE_MAX_RAD a joint; the one that
-# leaves least missing is taken. Wherever the walk's own step goes, it is taken as before.
+# refused, the other ways from where the arm stands are tried before it ends short of its margins or refuses: the
+# padding's way alone, each joint alone either way, and ESCAPE_TRIES fixed directions (seeded, the same every run),
+# each held to the walk's rules and to the start box by box (Body.first_hit's start rule), none past ESCAPE_MAX_RAD a
+# joint; the one that leaves least missing is taken. Wherever the walk's own step goes, it is taken as before. Its
+# end short of the joint room (ESCAPE_OUT_M above) stays the last resort: on the robot that pose's walk ended out of
+# the padding with joint_2 0.172 rad from its limit, under the planner's CLEAR_MARGIN_ROOM_RAD, and the clear-margin
+# line toward HOME from there met the armrest's padding: refused again.
 ESCAPE_TRIES = 48
 ESCAPE_SEED = 20261117
 _ESCAPE_DIRS = {}
@@ -913,24 +916,24 @@ class EscapeBodyFree:
             if tool_z(q) - z0 <= -ESCAPE_DROP_M + 0.001 and way @ zg < 0.0 and zg @ zg > 0.0:
                 way = way - (way @ zg) / (zg @ zg) * zg  # at the floor of the drop: nothing downward
             got = stepped(way, m, d)
+            if got is None:  # the walk's own step refused: another way, before ending short or refusing
+                got = sideways(ways, m, d)
+                around += got is not None
             if got is None:
                 rooms = [min(q[j] - a, b - q[j]) for j, a, b in limited]
                 if d <= -ESCAPE_OUT_M and min(rooms, default=np.inf) >= CLEAR_MARGIN_FIRST_RAD:
                     break  # out of the padding, off the limits, short of the margins: HOME is asked for from here
-                got = sideways(ways, m, d)
-                if got is None:
-                    raise RuntimeError(
-                        "%s refused: every way clear goes deeper into the padding, lowers the tool more than %.0f mm "
-                        "or meets a joint limit, the walk's own way and %d others tried (short: %s) — jog the arm "
-                        "clear by hand"
-                        % (
-                            self.name,
-                            1000 * ESCAPE_DROP_M,
-                            len(ways) + 2 * n + ESCAPE_TRIES,
-                            _short_of(vp, vt, vl, limited),
-                        )
+                raise RuntimeError(
+                    "%s refused: every way clear goes deeper into the padding, lowers the tool more than %.0f mm "
+                    "or meets a joint limit, the walk's own way and %d others tried (short: %s) — jog the arm "
+                    "clear by hand"
+                    % (
+                        self.name,
+                        1000 * ESCAPE_DROP_M,
+                        len(ways) + 2 * n + ESCAPE_TRIES,
+                        _short_of(vp, vt, vl, limited),
                     )
-                around += 1
+                )
             q, d = got
             pts.append(q.copy())
         else:

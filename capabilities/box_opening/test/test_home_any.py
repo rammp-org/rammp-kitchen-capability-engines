@@ -722,9 +722,13 @@ def test_a_start_whose_own_walk_is_refused_beside_the_user_steps_out_another_way
     assert legs[0].speed == core.ESCAPE_SPEED
     again, _s, _i = core.EscapeBodyFree().plan(ctx, core.PlanState(joints=q, chain=0))
     assert np.array_equal(np.array([p.positions for p in again[0].traj.points]), pts)  # the same way every time
+    # off the joint limits as far as the planner needs, not ended short of them: on the robot the walk that ended
+    # with joint_2 0.172 rad from its limit was refused again by the clear-margin line toward HOME
+    rooms = [min(pts[-1][j] - a, b - pts[-1][j]) for j, (a, b) in enumerate(chain.limits) if a is not None]
+    assert min(rooms) >= core.ESCAPE_ROOM_RAD
     said = []
     home = core.home_any(ctx, core.PlanState(joints=q, chain=0), HOME, Planner(), say=said.append)
-    assert home[0].name == "escape-body" and home[-1].name == "home"
+    assert [leg.name for leg in home] == ["escape-body", "home"]  # HOME planned straight from where it ends
     assert np.allclose(home[0].goal_joints, pts[-1])
 
 
