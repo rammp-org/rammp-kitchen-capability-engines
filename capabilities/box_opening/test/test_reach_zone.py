@@ -884,3 +884,97 @@ def test_the_key_follows_the_container_and_the_chair_model(flatbot, tmp_path):
     other = tmp_path / "other.yaml"
     other.write_text(open(CFG).read() + "\n# another container\n")
     assert reach_probe.zone_key(flatbot_urdf(), str(other)) != key
+
+
+# the modules a proof runs that the key did not follow until 2026-11-16 (the review's zone-key-holes)
+PROOF_SOURCE = [
+    "constants",
+    "runtime.branches",
+    "runtime.client",
+    "runtime.retime",
+    "runtime.guards",
+    "primitives.core",
+    "primitives.look",
+    "models.container",
+]
+
+
+@pytest.mark.parametrize("name", PROOF_SOURCE + ["tasks.reach_press", "tasks.depth_press", "runtime.kinematics"])
+def test_the_key_follows_the_source_of_what_the_proof_runs(name, flatbot, tmp_path, monkeypatch):
+    """A grid asked under other code is not read back as current: a cell that fails is never asked again."""
+    import importlib
+
+    from box_opening.tasks import reach_probe
+
+    key = reach_probe.zone_key(flatbot_urdf(), CFG)
+    module = importlib.import_module("box_opening." + name)
+    changed = tmp_path / "changed.py"
+    changed.write_text(open(module.__file__).read() + "\n# a change\n")
+    monkeypatch.setattr(module, "__file__", str(changed))
+    assert reach_probe.zone_key(flatbot_urdf(), CFG) != key
+    monkeypatch.undo()
+    assert reach_probe.zone_key(flatbot_urdf(), CFG) == key
+
+
+def test_the_key_follows_the_arms_spheres_and_the_hands_in_the_chair_model(flatbot, tmp_path, monkeypatch):
+    """The chair model holds the arm's spheres out of its boxes: the planner's robot file's, and the hand's
+    from box_opening's own robot-body config. The key followed the boxes alone."""
+    from box_opening.runtime import approach, body
+    from box_opening.tasks import reach_probe
+
+    hand = tmp_path / "robot_body.yaml"
+    hand.write_text("hand_spheres: {}\n")
+
+    def model(radius=0.05, centre_z=0.10, link="forearm_link", hand_source=str(hand)):
+        return body.BodyModel(
+            source="planner.yaml",
+            base_link="arm_mount",
+            names=["chair/seat"],
+            lo=np.array([[-0.3, 0.2, -0.5]]),
+            hi=np.array([[0.3, 0.6, -0.1]]),
+            spheres={link: (np.array([[0.0, 0.0, centre_z]]), np.array([radius]))},
+            padding_m=0.01,
+            buffer_m=0.004,
+            hand=[],
+            hand_source=hand_source,
+        )
+
+    def key_with(**changed):
+        monkeypatch.setattr(approach, "body_model", lambda: model(**changed))
+        return reach_probe.zone_key(flatbot_urdf(), CFG)
+
+    key = key_with()
+    assert key == key_with()
+    keys = {key, key_with(radius=0.06), key_with(centre_z=0.12), key_with(link="bracelet_link")}
+    keys.add(key_with(hand_source=None))  # the planner's spheres alone
+    hand.write_text("hand_spheres: {}\nnear_user: {}\n")
+    keys.add(key_with())
+    assert len(keys) == 6
+
+
+def test_the_key_of_a_grid_asked_on_a_table_is_not_the_served_grids(flatbot):
+    """The served grid's cells are asked with the box on its own foot. An offline fill with --table-z asks
+    them on that table: another grid, under another key."""
+    from box_opening.tasks import reach_probe
+
+    key = reach_probe.zone_key(flatbot_urdf(), CFG)
+    assert reach_probe.zone_key(flatbot_urdf(), CFG, table_z=None) == key
+    on_table = reach_probe.zone_key(flatbot_urdf(), CFG, table_z=0.216)
+    assert on_table != key and len(on_table) == 16
+    assert on_table == reach_probe.zone_key(flatbot_urdf(), CFG, table_z=0.216)
+    assert on_table != reach_probe.zone_key(flatbot_urdf(), CFG, table_z=0.25)
+
+
+def test_a_fill_asked_on_a_table_is_not_the_grid_the_line_up_reads(main_on_stand_ins, tmp_path, monkeypatch):
+    """... so a line-up never reads a grid asked on some table back as its own."""
+    from box_opening.tasks import reach_probe
+
+    run, served = main_on_stand_ins
+    monkeypatch.setattr(
+        reach_probe, "zone_key", lambda _urdf, _container, table_z=None: "k" if table_z is None else "k%g" % table_z
+    )
+    assert run("--lid-z", "0.315", "--table-z", "0.216") == 0
+    assert [p.name for p in tmp_path.iterdir()] == ["zone_k0.216_z+0320.json"]
+    assert run("--serve") == 0 and served[-1].key == "k"
+    assert run("--lid-z", "0.315") == 0  # no table named: the grid the line-up reads
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["zone_k0.216_z+0320.json", "zone_k_z+0320.json"]

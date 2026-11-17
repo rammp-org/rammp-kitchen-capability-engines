@@ -23,6 +23,8 @@ A proof takes about a second on the robot's computer (0.8 s where it refuses, 2 
 reach simulations of 2026-11-11, 1363 places), so the boundary is filled a cell at a time, the box's own
 place first (Zone.order), and kept on disk for the next run at the same height (zone_path): what a grid
 was asked of is its key (zone_key), and a changed arm mount, chair model, container or proof asks again.
+The grid a line-up reads is asked with the box on its own foot; an offline fill with --table-z is kept
+under a key of its own.
 """
 
 import argparse
@@ -223,13 +225,21 @@ def press_plans(ctx, cfg, top_xyz, table_z=None, q_from=None):
 
 
 # ---------------------------------------------------------------------------------------- the boundary
-def zone_key(urdf, container):
-    """What a grid is asked of, as one word: the arm's URDF, the chair model in force, the container's
+def zone_key(urdf, container, table_z=None):
+    """What a grid is asked of, as one word: the arm's URDF, the chair model in force (its boxes, the arm's
+    spheres it holds out of them, and the robot-body config the hand's spheres come from), the container's
     config, HOME, and the source of everything the proof runs (the run's own modules, and this one's proof
-    and stand-ins). Any of them changed, the grid is asked again."""
+    and stand-ins). Any of them changed, the grid is asked again: a kept cell that fails is never asked a
+    second time, so a grid read back under other code would steer the user away from a place that works.
+    `table_z`: the table an offline fill asks its cells on (--table-z). None is the served grid, every
+    cell asked with the box on its own foot; a fill on a table is another grid under another key, and a
+    line-up never reads it back as its own."""
     import inspect
 
-    from box_opening.runtime import approach, body, kinematics
+    from box_opening import constants
+    from box_opening.models import container as container_model
+    from box_opening.primitives import core, look
+    from box_opening.runtime import approach, body, branches, client, guards, kinematics, retime
     from box_opening.tasks import depth_press, reach_press
 
     h = hashlib.sha256()
@@ -242,11 +252,23 @@ def zone_key(urdf, container):
         h.update(repr((model.names, model.padding_m, model.buffer_m)).encode())
         h.update(np.round(np.asarray(model.lo, float), 4).tobytes())
         h.update(np.round(np.asarray(model.hi, float), 4).tobytes())
+        for link in sorted(model.spheres):  # the planner's robot file's, per link
+            centres, radii = model.spheres[link]
+            h.update(str(link).encode())
+            h.update(np.round(np.asarray(centres, float), 4).tobytes())
+            h.update(np.round(np.asarray(radii, float), 4).tobytes())
+        # the hand's spheres are read from box_opening's own robot-body config (None: the model has none)
+        h.update(b"no hand" if model.hand_source is None else Path(model.hand_source).read_bytes())
     h.update(repr([round(float(v), 4) for v in HOME]).encode())
     for module in (reach_press, depth_press, kinematics, body, approach):
         h.update(Path(module.__file__).read_bytes())
     for part in (press_plans, DryClient, DryStore, _joint_line, reach_span):
         h.update(inspect.getsource(part).encode())
+    # what those call, and the constants they read (the planner's limit margin, the joints' speed limits)
+    for module in (constants, branches, client, retime, guards, core, look, container_model):
+        h.update(Path(module.__file__).read_bytes())
+    if table_z is not None:
+        h.update(("table %.4f" % float(table_z)).encode())
     return h.hexdigest()[:16]
 
 
@@ -526,7 +548,12 @@ def main(argv=None):
     ap.add_argument("--body-layers", default=None, help="the planner config with the chair and user; '' off")
     ap.add_argument("--container", default=None, help="the container's config")
     ap.add_argument("--lid-z", type=float, help="fill the boundary for a lid's top at this height (m)")
-    ap.add_argument("--table-z", type=float, default=None, help="the table's top (m); default: the box's foot")
+    ap.add_argument(
+        "--table-z",
+        type=float,
+        default=None,
+        help="the table's top (m); default: the box's foot. With --lid-z: a grid of its own, not the line-up's",
+    )
     ap.add_argument("--at", type=float, nargs=3, metavar=("X", "Y", "Z"), help="prove one place and stop")
     ap.add_argument("--focus", type=float, nargs=2, metavar=("X", "Y"), help="ask the cells nearest here first")
     ap.add_argument("--zone-dir", default=None, help="where grids are kept (default: the state dir's reach_zone)")
@@ -558,7 +585,7 @@ def main(argv=None):
         return 0 if ok else 1
     if args.lid_z is None:
         ap.error("one of --lid-z, --at and --serve is needed")
-    key = zone_key(args.urdf, container)
+    key = zone_key(args.urdf, container, table_z=args.table_z)
     zone = load_zone(key, args.lid_z, ctx.model, args.zone_dir)
     t0 = time.monotonic()
     while not zone.done(far_m) and (args.budget_s is None or time.monotonic() - t0 < args.budget_s):
