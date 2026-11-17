@@ -144,6 +144,68 @@ def test_insertion_bottom_clearance_is_only_the_modeled_box_estimate():
     assert place_motion.insertion_bottom_clearance([0.0, 0.0, 0.3], 0.2) == pytest.approx(0.1 - place_motion.BOX_BELOW)
 
 
+def test_approach_stop_indices_are_exactly_the_two_segment_joins():
+    shift = [np.zeros(7), np.ones(7)]
+    transit = np.array([np.ones(7), np.full(7, 2.0), np.full(7, 3.0)])
+    line = [transit[-1], np.full(7, 4.0)]
+
+    knots = place_motion.approach_knots(shift, transit, line)
+
+    assert place_motion.approach_stop_indices(shift, transit, line) == (1, 3)
+    assert knots[0] == pytest.approx(shift[-1])
+    assert knots[2] == pytest.approx(transit[-1])
+
+
+def test_approach_trajectory_stops_at_both_segment_joins_without_blending():
+    directions = (
+        np.array([1.0, 0.0]),
+        np.array([1.0, 0.0]),
+        np.array([np.cos(np.deg2rad(72.7)), np.sin(np.deg2rad(72.7))]),
+        np.array([0.0, 1.0]),
+        np.array([np.cos(np.deg2rad(150.4)), np.sin(np.deg2rad(150.4))]),
+    )
+    path_2d = np.vstack(([0.0, 0.0], np.cumsum(directions, axis=0)))
+    path = np.pad(path_2d, ((0, 0), (0, 5)))
+    stops = (2, 4)
+
+    _, global_positions, global_velocities = rammp_arm.joint_trajectory(path[0], path[1:], speed_scale=0.5)
+    for stop in stops:
+        index = int(np.argmin(np.linalg.norm(global_positions - path[stop], axis=1)))
+        assert np.linalg.norm(global_velocities[index + 1] - global_velocities[index - 1]) > 0.1
+
+    times, positions, velocities = rammp_arm.joint_trajectory(path[0], path[1:], speed_scale=0.5, stop_at=stops)
+
+    accelerations = np.gradient(velocities, times, axis=0)
+    for stop in stops:
+        index = int(np.argmin(np.linalg.norm(positions - path[stop], axis=1)))
+        assert positions[index] == pytest.approx(path[stop])
+        assert velocities[index] == pytest.approx(np.zeros(7), abs=1e-12)
+        assert accelerations[index] == pytest.approx(np.zeros(7), abs=0.1)
+
+    assert positions[-1] == pytest.approx(path[-1])
+    assert velocities[-1] == pytest.approx(np.zeros(7), abs=1e-12)
+
+    for q in positions:
+        distances = []
+        for start, end in zip(path[:-1], path[1:], strict=True):
+            delta = end - start
+            fraction = np.clip((q - start) @ delta / (delta @ delta), 0.0, 1.0)
+            distances.append(np.linalg.norm(q - (start + fraction * delta)))
+        assert min(distances) < 1e-10
+
+
+def test_joint_trajectory_rejects_non_interior_or_unsorted_stops():
+    with pytest.raises(ValueError, match="interior knots"):
+        rammp_arm.joint_trajectory(np.zeros(7), [np.ones(7), np.full(7, 2.0)], stop_at=(2,))
+
+    with pytest.raises(ValueError, match="unique, increasing"):
+        rammp_arm.joint_trajectory(
+            np.zeros(7),
+            [np.ones(7), np.full(7, 2.0), np.full(7, 3.0)],
+            stop_at=(2, 1),
+        )
+
+
 def test_flange_pose_must_match_driver_model_before_motion():
     measured = FlangeState()
     position_error, orientation_error = place_motion.check_flange_model(Model(), [0.0] * 7, measured)

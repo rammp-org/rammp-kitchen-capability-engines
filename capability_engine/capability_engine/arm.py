@@ -760,15 +760,20 @@ class ArmInterface:
         raise TypeError(f"RammpArm: unsupported command {type(cmd).__name__}")
 
     @_rammp
-    def move_joints(self, knots, cart_lengths=None, speed_scale=1.0, impedance=None, monitor=None):
+    def move_joints(
+        self, knots, cart_lengths=None, speed_scale=1.0, impedance=None, monitor=None, stop_at=()
+    ):
         """Through joint `knots` (wrapped or not) from the measured joints. `cart_lengths`: the
         Cartesian distance of each segment -- given, the path is timed in metres at CART_SPEED,
         otherwise in joint-space radians at JOINT_SPEED. `impedance`: a dict like IMPEDANCE -> run
         compliant (joint impedance) instead of stiff position control. `monitor`: polled at ~100 Hz
         while the trajectory runs; when it returns True the goal is cancelled (the driver stops the
-        arm and holds), `monitor_stopped` is set and the call returns True."""
+        arm and holds), `monitor_stopped` is set and the call returns True. `stop_at`: 1-based knot
+        indices where the path must come to a stop before continuing."""
         self._checkpoint()
-        samples = rammp_arm.joint_trajectory(self.raw_joints(), knots, cart_lengths, speed_scale)
+        samples = rammp_arm.joint_trajectory(
+            self.raw_joints(), knots, cart_lengths, speed_scale, stop_at
+        )
         if samples is None:
             return True
         t, q, qd = samples

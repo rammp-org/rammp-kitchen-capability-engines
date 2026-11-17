@@ -141,8 +141,10 @@ it is not a full-assembly or glass-contact clearance check.
 
 1. **Execute** (only with `execute`): the arm must be ready to command (`not_ready()`) and within 1 deg
    of the plan's start. The side shift, cuRobo's transit and the line in run as planned and checked in
-   **one** position-control motion (`approach_knots`), with no stop or check between them. It is timed
-   by `pose_lengths`: each segment counts as the tool's travel, the hand's turn x `ROT_LENGTH`, or the
+   one position-control trajectory (`approach_knots`). It comes to a full stop at the two existing
+   joins (side shift/transit and transit/line-in); each leg is timed independently with minimum-jerk
+   motion. No corners are blended and the checked joint-space path is unchanged. Within each leg,
+   `pose_lengths` counts each segment as the tool's travel, the hand's turn x `ROT_LENGTH`, or the
    largest joint change x `ROT_LENGTH` (0.25 m per rad), whichever is longest, so at the default
    `insert_speed` peak nothing turns faster than about 37 deg/s. Only its end is checked: within 1 cm /
    2 deg of the target. The line down is the checked one when the arm is within `REUSE_TOL_DEG` (0.3
@@ -326,7 +328,7 @@ All are ROS parameters, with their defaults in `rammp-alternative.yaml`:
 | `clear_min`                                                | 0.01                                        | m, every arm and gripper link from the microwave box (side shift, transit)                                   |
 | `tilt_max_deg`                                             | 2.0                                         | the hand's tilt vs the start (side shift, transit, line in, line down)                                       |
 | `worlds_dir`                                               | /home/snorlax/.ros/rammp_box_opening/worlds | cuRobo's world files; same path in the planner's container                                                   |
-| `insert_speed`                                             | 0.16                                        | m/s, the peak speed of the approach (side shift + transit + line in, one motion) and the back-out            |
+| `insert_speed`                                             | 0.16                                        | m/s, the peak speed of each approach leg (stops at both joins) and the back-out                              |
 | `lower_speed`                                              | 0.12                                        | m/s, the lowering where the glass should be (contact tuned at it)                                            |
 | `vz_stop`, `hold_press`, `settle_s`, `early_stop`          | -0.01, 0.003, 0.2, 0.03                     | the lowering's contact test and hold                                                                         |
 | `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`          | joint impedance for the lowering, the gripper opening and the release tilt                                   |

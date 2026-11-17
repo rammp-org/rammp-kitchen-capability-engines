@@ -1203,8 +1203,13 @@ def summarize(model, q0, loc, oven, world, world_info, boxes, cand, plan, res, a
     c = cfg
     Qs, ts, line = np.asarray(plan.q, dtype=float), np.asarray(plan.t, dtype=float), res["line"]
     knots = approach_knots(cand["shift"], Qs, line)
+    stop_at = approach_stop_indices(cand["shift"], Qs, line)
     samples = rammp_arm.joint_trajectory(
-        q0, knots, pose_lengths(model, [q0, *knots]), c["insert_speed"] / rammp_arm.CART_SPEED
+        q0,
+        knots,
+        pose_lengths(model, [q0, *knots]),
+        c["insert_speed"] / rammp_arm.CART_SPEED,
+        stop_at,
     )
     zs = res["descent"][0]
     summary = dict(
@@ -1296,6 +1301,13 @@ def approach_knots(shift, Qs, line):
     return knots
 
 
+def approach_stop_indices(shift, Qs, line):
+    """Return interior knot indices at the side-shift/transit and transit/insert joins."""
+    knot_count = len(shift) - 1 + len(Qs) - 1 + len(line) - 1
+    boundaries = (len(shift) - 1, len(shift) + len(Qs) - 2)
+    return tuple(index for index in boundaries if 0 < index < knot_count)
+
+
 def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res):
     """Execute only with validated full-assembly collision geometry.
 
@@ -1313,18 +1325,24 @@ def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res
     if off > START_TOL_DEG:
         raise Refused(f"the arm is {off:.1f} deg from where the plan starts (max {START_TOL_DEG:g}): re-plan")
 
-    # the side shift, cuRobo's transit and the line in, as planned and checked, in ONE motion (no stop between)
+    # Keep the checked path exactly; stop at the two existing segment joins instead of blending their corners.
     line = [np.asarray(q, dtype=float) for q in res["line"]]
     knots = approach_knots(cand["shift"], Qs, line)
+    stop_at = approach_stop_indices(cand["shift"], Qs, line)
     lengths = pose_lengths(model, [q_now, *knots])
     ctx.progress("approach", 0.0)
     log(
-        f"-> approach in one motion: side shift {cand['shift_cm']:+.0f} cm, transit, line in "
+        f"-> approach with stops at segment joins: side shift {cand['shift_cm']:+.0f} cm, transit, line in "
         f"{sum(path_lengths(model, line)) * 100:.0f} cm; {sum(lengths) * 100:.0f} cm of tool path at "
         f"{c['insert_speed'] * 100:.0f} cm/s peak (position control)"
     )
     try:
-        ok = arm.move_joints(knots, cart_lengths=lengths, speed_scale=c["insert_speed"] / rammp_arm.CART_SPEED)
+        ok = arm.move_joints(
+            knots,
+            cart_lengths=lengths,
+            speed_scale=c["insert_speed"] / rammp_arm.CART_SPEED,
+            stop_at=stop_at,
+        )
     except EStopped as e:
         raise Refused(f"STOPPED, nothing moved: the arm is e-stopped ({e})") from e
     except ArmRefused as e:
