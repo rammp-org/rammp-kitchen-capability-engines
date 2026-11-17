@@ -229,6 +229,7 @@ What the engine gives you:
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `__init__(engine_id, **node_kwargs)`                         | Call it as `super().__init__("<engine_id>")`. The ROS node's name is the engine id                                  |
 | `self.arm`                                                   | The arm (see [below](#selfarm-arminterface))                                                                        |
+| `self.base`                                                  | The drive base (see [below](#selfbase-baseinterface))                                                               |
 | `self.mock`                                                  | True when the `mock` parameter is set, meaning there is no hardware                                                 |
 | `self.instance_id`                                           | The object the engine was activated on                                                                              |
 | `create_action_subscription(msg_type, topic, callback, qos)` | Like `Node.create_subscription`, but the subscription exists only until the action ends. Call it inside `execute()` |
@@ -253,6 +254,27 @@ the orchestrator:
 | `request_intent(intent_type, params=None) -> Result` | Asks the orchestrator to hand an intent (such as `MOVE_BASE`) to another engine, and waits for its result |
 | `write_world_state(**updates) -> bool`               | Updates the world state. The keys are `gripper`, `doors`, `objects`, `arm` and `base_pose`                |
 | `update_object(instance_id, **fields) -> bool`       | Updates one object's fields in the world state                                                            |
+
+### UI (`ctx`)
+
+`ctx` also talks directly to the UI bridge (`rammp_ui_bridge`), independent of
+the orchestrator and of `progress()` above (which only reports to the
+orchestrator and is never shown to the user). Call any of these, all of them,
+or none, as the capability needs:
+
+| Method                                                                                | What it does                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update_user_panel(panel_json=None, objects=None, selected_instance_id=None) -> bool` | Pushes panel content to the UI. Non-blocking: opens a `RequestUserInput` goal lazily on first call (or again once the previous one has ended), or refreshes the open one. Each argument left `None` means "leave unchanged"; at least one of `panel_json`/`objects` is required the first time it's called in a run                                                                                               |
+| `poll_ui_event() -> dict \| None`                                                     | Non-blocking: returns (and consumes) the most recent event since the last call -- `{"type": "button", "button_id": ...}` or `{"type": "object_tapped", "instance_id": ...}` -- or `None` if nothing new. A button event ends the panel's goal; the next `update_user_panel()` call transparently opens a fresh one                                                                                                |
+| `publish_overlay_image(image) -> bool`                                                | Publishes one frame (a `sensor_msgs/Image`, e.g. from a wrist camera) of this capability's own camera to the UI bridge's shared overlay topic, stamped with this run's session token                                                                                                                                                                                                                              |
+| `set_overlay_visible(visible: bool) -> bool`                                          | Shows/hides this capability's overlay camera view in UE -- independent of `publish_overlay_image()`: frames keep flowing either way; this calls UE's parameterless `Open Camera Feed`/`Close Camera Feed` Remote Control function via the bridge. The orchestrator already hides it automatically once this run's `execute_action` ends, so call this yourself only to show/hide it at some other specific moment |
+
+All four return `False` (a no-op, logged) if this run holds no session token
+(e.g. standalone with no orchestrator) or the bridge is unreachable/rejects the
+request.
+
+See [`docs/UI_JSON_SCHEMA.md`](docs/UI_JSON_SCHEMA.md) for the full
+`panel_json`/`objects`/`poll_ui_event()` JSON shapes.
 
 ### `self.arm` (`ArmInterface`)
 
@@ -321,21 +343,23 @@ list_controllers() -> list[Controller]
 set_gains(gains) -> (accepted, message)
 plan_to_pose(pos, quat, start_joints, hold=HOLD_NONE) -> Plan
 plan_to_joints(q_goal, start_joints) -> Plan
-set_world(world) -> (success, message)
+blend(legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None) -> Plan
+set_world(world, *, even_if_cancelled=False) -> (success, message)
 ```
 
-| Name                                                   | What it does                                                                                                                                          |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `joint_states()`, `ee_state()`, `gripper_state()`      | The latest message from that topic, as a dataclass. `age_s` says how old it is. Raises `StateTimeout` if none arrives or it is too old                |
-| `control_status()`, `stream_status()`, `diagnostics()` | The same, for `/control_status`, `/stream_status` and `/diagnostics`                                                                                  |
-| `not_ready()`                                          | Why the arm must not be commanded right now (for example, it is e-stopped), or None if it can be                                                      |
-| `robot_description()`                                  | The driver's URDF                                                                                                                                     |
-| `execute_joint_trajectory`                             | The driver's trajectory action, with all its options. `points` is a list of `(t, positions, velocities)`, sent exactly as you give it                 |
-| `stream`                                               | Opens a streaming session. Call `s.send(setpoint)` at least every `timeout_s`. When the `with` block ends, the arm holds still and the session closes |
-| `list_controllers()`                                   | The driver's streaming controllers, and whether each can be opened now                                                                                |
-| `set_gains`                                            | Sets the session's default impedance gains                                                                                                            |
-| `plan_to_pose`, `plan_to_joints`                       | Asks cuRobo for a plan without moving the arm                                                                                                         |
-| `set_world`                                            | Replaces cuRobo's collision world with one of the packaged worlds                                                                                     |
+| Name                                                   | What it does                                                                                                                                                                          |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `joint_states()`, `ee_state()`, `gripper_state()`      | The latest message from that topic, as a dataclass. `age_s` says how old it is. Raises `StateTimeout` if none arrives or it is too old                                                |
+| `control_status()`, `stream_status()`, `diagnostics()` | The same, for `/control_status`, `/stream_status` and `/diagnostics`                                                                                                                  |
+| `not_ready()`                                          | Why the arm must not be commanded right now (for example, it is e-stopped), or None if it can be                                                                                      |
+| `robot_description()`                                  | The driver's URDF                                                                                                                                                                     |
+| `execute_joint_trajectory`                             | The driver's trajectory action, with all its options. `points` is a list of `(t, positions, velocities)`, sent exactly as you give it                                                 |
+| `stream`                                               | Opens a streaming session. Call `s.send(setpoint)` at least every `timeout_s`. When the `with` block ends, the arm holds still and the session closes                                 |
+| `list_controllers()`                                   | The driver's streaming controllers, and whether each can be opened now                                                                                                                |
+| `set_gains`                                            | Sets the session's default impedance gains                                                                                                                                            |
+| `plan_to_pose`, `plan_to_joints`                       | Asks cuRobo for a plan without moving the arm                                                                                                                                         |
+| `blend`                                                | cuRobo's one trajectory through several planned legs, still moving through each junction whose `blend_radius` > 0. Plans only; the Plan's `corner_m` says how close each corner comes |
+| `set_world`                                            | Replaces cuRobo's collision world with a packaged world or a world YAML. `even_if_cancelled`: still waits for the answer once cancelled, to put a world back as the action ends       |
 
 The constants and dataclasses are in `capability_engine.arm`:
 
@@ -363,18 +387,59 @@ Other modules:
 The arm's tunable values (speeds, tolerances, timeouts) are `arm.*` ROS
 parameters.
 
+### `self.base` (`BaseInterface`)
+
+You drive the base with velocity commands and read its odometry. It drives
+on your velocities only in the AUTONOMOUS mode (the engine drives) or
+the SHARED mode (the engine and the joystick drive together), so ask for one
+first. Add `"base"` to `required_resources`: the orchestrator grants an
+engine control only of what it declares, and the base rejects commands from
+anyone else. Without it, every `self.base` call raises `BaseError` and nothing
+is sent to the base or read from it. Use `self.base` only inside `execute()`;
+anywhere else, a call raises `BaseError`.
+
+```python
+self.base.request_mode("autonomous", profile="low")  # or "shared"; "manual" to hand back
+while not arrived(self.base.odometry()):
+    self.base.send_twist(0.2, 0.0)  # 0.2 m/s forward
+    time.sleep(0.05)
+self.base.stop()
+```
+
+| Method                                        | What it does                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `request_mode(mode, profile=None)`            | Asks the MIB for `"autonomous"`, `"shared"` or `"manual"` (the joystick drives: hands the chair back) and returns once its status shows it. `profile` is `"low"`, `"normal"` or `"high"`; `None` keeps the one in force. Some switches go through IDLE. `BaseError` if it is e-stopped, faulted or does not answer in 3 s |
+| `send_twist(linear_x, angular_z, linear_y=0)` | Sends one velocity in `base_link`: forward m/s, counter-clockwise rad/s seen from above, left m/s (a differential drive ignores it). Resend it at a steady rate while you drive. Never blocks                                                                                                                             |
+| `stop()`                                      | Sends a zero velocity. It works after a cancel too                                                                                                                                                                                                                                                                        |
+| `odometry()`                                  | The latest `nav_msgs/Odometry`: pose in `odom`, twist in `base_link`. `BaseError` if none comes or it is older than 0.5 s                                                                                                                                                                                                 |
+
+It publishes `rammp_base_interfaces/TwistSetpoint` on `/base/setpoint/twist`
+and `DriveCommand` on `/rammp/drive_command`, and reads `/base/odom` and
+`MibStatus` on `/rammp/mib/status`. A joystick touch ends AUTONOMOUS: after
+that, `send_twist()` raises `BaseError`, and nothing asks for the mode again.
+That is the user's decision; ask again only for a new reason of your own.
+`send_twist()` raises `Cancelled` once the action is cancelled. When the action
+ends, however it ends, the engine sends the base a zero velocity if the action
+sent it anything. If the action switched the MIB into autonomous or shared and
+it is still there, the engine then asks for IDLE; manual is left alone. A
+paused action sends nothing, so call `stop()` before `ctx.checkpoint()`, or the
+base may drive on at the last velocity. In mock mode nothing is sent,
+`request_mode()` returns at once, and `odometry()` integrates the velocities
+you sent, starting at the origin.
+
 ### Exceptions
 
-| Exception      | Raised when                                                                                                    |
-| -------------- | -------------------------------------------------------------------------------------------------------------- |
-| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()` and every arm motion raise it                        |
-| `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails |
-| `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                            |
-| `ControlTaken` | Another program took control of the arm in the middle of your action                                           |
-| `EStopped`     | You called a driver method while the arm is e-stopped                                                          |
-| `StreamClosed` | The driver closed your stream                                                                                  |
-| `ModeConflict` | You started a stream or a trajectory while another one was running                                             |
-| `StateTimeout` | A state read got no recent message                                                                             |
+| Exception      | Raised when                                                                                                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()`, arm motions and `send_twist()` raise it                                                                                         |
+| `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails                                                                             |
+| `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                                                                                                        |
+| `ControlTaken` | Another program took control of the arm in the middle of your action                                                                                                                       |
+| `EStopped`     | You called a driver method while the arm is e-stopped                                                                                                                                      |
+| `StreamClosed` | The driver closed your stream                                                                                                                                                              |
+| `ModeConflict` | You started a stream or a trajectory while another one was running                                                                                                                         |
+| `StateTimeout` | A state read got no recent message                                                                                                                                                         |
+| `BaseError`    | `"base"` is not in `required_resources`, `self.base` is called outside `execute()`, its odometry or MIB status is missing or stale, the MIB refused or did not enter the mode, or left it. |
 
 ### Terms
 

@@ -1,14 +1,15 @@
-# Test image for self.arm: x86 ROS 2 Humble with the arm/common/curobo/orchestrator
-# interfaces, the pure-Python deps, and the robot fixtures. It is NOT a production
-# image (those are arm64, FROM rammp-base); it only has to speak the same messages.
-# The repo is mounted at /repo at run time, so editing Python never needs a rebuild:
+# Test image for self.arm: x86 ROS 2 Humble with the arm/base/common/curobo/orchestrator/
+# ui_bridge interfaces, the pure-Python deps, and the robot fixtures. It is NOT a
+# production image (those are arm64, FROM rammp-base); it only has to speak the same
+# messages. The repo is mounted at /repo at run time, so editing Python never needs a
+# rebuild:
 #   make test-arm [ARGS=...]
 FROM ros:humble-ros-base
 
 # Pins. Interfaces and curobo are full SHAs; kinova_gen3_description is dev.
-# INTERFACES_REF is v2.0.0's commit, the contract rammp-base:2.0.0-jp6 carries.
-ARG INTERFACES_REF=c2e3c0d5b7530a17ce77f911a0806932c73b3344
-ARG CUROBO_REF=fd8b89cb18fd854f3add36ab9b1b72933dbabf76
+ARG INTERFACES_REF=ebaacf7ed71d81b40aea9541bb1cb104ce5fce7b
+ARG UI_BRIDGE_INTERFACES_REF=7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73
+ARG CUROBO_REF=10ad896883158247039a8bd850bcabcab016a50d
 ARG KINOVA_REF=2546edbab9cda031cdfe82b33289f05e01341f88
 ARG DEPLOYMENTS_REF=9e0cd960fd7e1876a8a592b8fdb33a27da82a734
 # feeding-deployment microwave-wip: the students' Cornell arm model.
@@ -36,13 +37,15 @@ RUN printf '%s\n' '#!/bin/sh' 'set -e' \
 WORKDIR /ws
 RUN mkdir src \
     && fetch-commit rammp-org/rammp-interfaces-ros2 ${INTERFACES_REF} /tmp/interfaces \
-    && cp -r /tmp/interfaces/rammp_arm_interfaces /tmp/interfaces/rammp_common_interfaces \
-        /tmp/interfaces/rammp_orchestrator_interfaces src/ \
+    && cp -r /tmp/interfaces/rammp_arm_interfaces /tmp/interfaces/rammp_base_interfaces \
+        /tmp/interfaces/rammp_common_interfaces /tmp/interfaces/rammp_orchestrator_interfaces src/ \
+    && fetch-commit rammp-org/rammp-interfaces-ros2 ${UI_BRIDGE_INTERFACES_REF} /tmp/ui_bridge \
+    && cp -r /tmp/ui_bridge/rammp_ui_bridge_interfaces src/ \
     && fetch-commit rammp-org/RAMMP-CuRobo ${CUROBO_REF} /tmp/curobo \
     && cp -r /tmp/curobo/rammp_curobo_interfaces src/ \
     && fetch-commit rammp-org/kinova-gen3-ros2 ${KINOVA_REF} /tmp/kinova \
     && cp -r /tmp/kinova/kinova_gen3_description src/ \
-    && rm -rf /tmp/interfaces /tmp/curobo /tmp/kinova
+    && rm -rf /tmp/interfaces /tmp/ui_bridge /tmp/curobo /tmp/kinova
 
 RUN . /opt/ros/humble/setup.sh && colcon build --event-handlers console_direct-
 
