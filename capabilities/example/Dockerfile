@@ -36,6 +36,15 @@ RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wi
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
 
+# self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
+# rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
+# interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
+# geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
+# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
+# once the FROM moves to rammp-base 2.0.0.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
+RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
+
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/example/ src/example/
 

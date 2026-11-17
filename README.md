@@ -227,6 +227,7 @@ What the engine gives you:
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `__init__(engine_id, **node_kwargs)`                         | Call it as `super().__init__("<engine_id>")`. The ROS node's name is the engine id                                  |
 | `self.arm`                                                   | The arm (see [below](#selfarm-arminterface))                                                                        |
+| `self.base`                                                  | The drive base (see [below](#selfbase-baseinterface))                                                               |
 | `self.mock`                                                  | True when the `mock` parameter is set, meaning there is no hardware                                                 |
 | `self.instance_id`                                           | The object the engine was activated on                                                                              |
 | `create_action_subscription(msg_type, topic, callback, qos)` | Like `Node.create_subscription`, but the subscription exists only until the action ends. Call it inside `execute()` |
@@ -382,18 +383,59 @@ Other modules:
 The arm's tunable values (speeds, tolerances, timeouts) are `arm.*` ROS
 parameters.
 
+### `self.base` (`BaseInterface`)
+
+You drive the base with velocity commands and read its odometry. It drives
+on your velocities only in the AUTONOMOUS mode (the engine drives) or
+the SHARED mode (the engine and the joystick drive together), so ask for one
+first. Add `"base"` to `required_resources`: the orchestrator grants an
+engine control only of what it declares, and the base rejects commands from
+anyone else. Without it, every `self.base` call raises `BaseError` and nothing
+is sent to the base or read from it. Use `self.base` only inside `execute()`;
+anywhere else, a call raises `BaseError`.
+
+```python
+self.base.request_mode("autonomous", profile="low")  # or "shared"; "manual" to hand back
+while not arrived(self.base.odometry()):
+    self.base.send_twist(0.2, 0.0)  # 0.2 m/s forward
+    time.sleep(0.05)
+self.base.stop()
+```
+
+| Method                                        | What it does                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `request_mode(mode, profile=None)`            | Asks the MIB for `"autonomous"`, `"shared"` or `"manual"` (the joystick drives: hands the chair back) and returns once its status shows it. `profile` is `"low"`, `"normal"` or `"high"`; `None` keeps the one in force. Some switches go through IDLE. `BaseError` if it is e-stopped, faulted or does not answer in 3 s |
+| `send_twist(linear_x, angular_z, linear_y=0)` | Sends one velocity in `base_link`: forward m/s, counter-clockwise rad/s seen from above, left m/s (a differential drive ignores it). Resend it at a steady rate while you drive. Never blocks                                                                                                                             |
+| `stop()`                                      | Sends a zero velocity. It works after a cancel too                                                                                                                                                                                                                                                                        |
+| `odometry()`                                  | The latest `nav_msgs/Odometry`: pose in `odom`, twist in `base_link`. `BaseError` if none comes or it is older than 0.5 s                                                                                                                                                                                                 |
+
+It publishes `rammp_base_interfaces/TwistSetpoint` on `/base/setpoint/twist`
+and `DriveCommand` on `/rammp/drive_command`, and reads `/base/odom` and
+`MibStatus` on `/rammp/mib/status`. A joystick touch ends AUTONOMOUS: after
+that, `send_twist()` raises `BaseError`, and nothing asks for the mode again.
+That is the user's decision; ask again only for a new reason of your own.
+`send_twist()` raises `Cancelled` once the action is cancelled. When the action
+ends, however it ends, the engine sends the base a zero velocity if the action
+sent it anything. If the action switched the MIB into autonomous or shared and
+it is still there, the engine then asks for IDLE; manual is left alone. A
+paused action sends nothing, so call `stop()` before `ctx.checkpoint()`, or the
+base may drive on at the last velocity. In mock mode nothing is sent,
+`request_mode()` returns at once, and `odometry()` integrates the velocities
+you sent, starting at the origin.
+
 ### Exceptions
 
-| Exception      | Raised when                                                                                                    |
-| -------------- | -------------------------------------------------------------------------------------------------------------- |
-| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()` and every arm motion raise it                        |
-| `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails |
-| `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                            |
-| `ControlTaken` | Another program took control of the arm in the middle of your action                                           |
-| `EStopped`     | You called a driver method while the arm is e-stopped                                                          |
-| `StreamClosed` | The driver closed your stream                                                                                  |
-| `ModeConflict` | You started a stream or a trajectory while another one was running                                             |
-| `StateTimeout` | A state read got no recent message                                                                             |
+| Exception      | Raised when                                                                                                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Cancelled`    | The orchestrator cancelled the action. `ctx.checkpoint()`, arm motions and `send_twist()` raise it                                                                                         |
+| `ArmError`     | The parent class of the arm errors below. Also raised when the driver refuses a driver-method call or it fails                                                                             |
+| `NotInAction`  | You called the arm outside `execute()`, or called `send()` outside its `with` block                                                                                                        |
+| `ControlTaken` | Another program took control of the arm in the middle of your action                                                                                                                       |
+| `EStopped`     | You called a driver method while the arm is e-stopped                                                                                                                                      |
+| `StreamClosed` | The driver closed your stream                                                                                                                                                              |
+| `ModeConflict` | You started a stream or a trajectory while another one was running                                                                                                                         |
+| `StateTimeout` | A state read got no recent message                                                                                                                                                         |
+| `BaseError`    | `"base"` is not in `required_resources`, `self.base` is called outside `execute()`, its odometry or MIB status is missing or stale, the MIB refused or did not enter the mode, or left it. |
 
 ### Terms
 
