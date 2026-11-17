@@ -408,6 +408,7 @@ def test_a_view_the_runner_refuses_before_it_moves_is_not_flown_one_that_fails_i
     monkeypatch.setattr(core, "_plan_motion", lambda *a, **k: (leg, None))
     monkeypatch.setattr(core, "_full_world", lambda ctx: ("full", "world_empty.yaml"))
     ctx = SimpleNamespace(client=FakeClient())
+    ctx.client.live = list(HOME)  # the arm at rest, the view a turn away from it
     band = SimpleNamespace(path_refusal=lambda traj: None)
     for outcome, state in (("refused", "refused"), ("failed", "stopped")):
         runner = SimpleNamespace(run=lambda legs, execute, o=outcome: [LegResult("survey:look-1", o, False, "why")])
@@ -430,6 +431,7 @@ def test_a_view_whose_plan_the_client_refuses_is_asked_for_again(monkeypatch):
     leg = SimpleNamespace(traj=SimpleNamespace(points=[SimpleNamespace(positions=list(HOME))] * 2))
     monkeypatch.setattr(core, "_full_world", lambda ctx: ("full", "world_empty.yaml"))
     ctx = SimpleNamespace(client=FakeClient())
+    ctx.client.live = list(HOME)  # the arm at rest, the view a turn away from it
     band = SimpleNamespace(path_refusal=lambda traj: None)
     runner = SimpleNamespace(run=lambda legs, execute: [LegResult("survey:angle-1", "arrived", True)])
     asked = []
@@ -452,6 +454,36 @@ def test_a_view_whose_plan_the_client_refuses_is_asked_for_again(monkeypatch):
     asked.clear()
     monkeypatch.setattr(core, "_plan_motion", plan(9, RuntimeError))
     assert sv.fly_view(ctx, runner, _view("survey:angle-1"), band, True)[0] == "refused" and len(asked) == 1
+
+
+def test_a_view_the_arm_already_stands_at_is_flown_without_a_plan(monkeypatch):
+    """After a line-up's Open the run's first view is the pose the wrist already holds (the same candidates from
+    the same rest pose, and no home in between). A plan from a pose to itself has no length, and the driver's
+    gate refuses one: the run would end "stopped part way" with nothing wrong. Within the tolerance a plan's own
+    end is held to (PlannerClient.PLAN_END_RAD) the view is flown already, and the planner is not asked."""
+    from box_opening.primitives import core
+    from box_opening.runtime.client import PlannerClient
+    from box_opening.runtime.runner import LegResult
+
+    asked, ran = [], []
+    leg = SimpleNamespace(traj=SimpleNamespace(points=[SimpleNamespace(positions=list(HOME))] * 2))
+    monkeypatch.setattr(core, "_plan_motion", lambda *a, **k: asked.append(a[2]) or (leg, None))
+    monkeypatch.setattr(core, "_full_world", lambda ctx: ("full", "world_empty.yaml"))
+    ctx = SimpleNamespace(client=FakeClient())
+    band = SimpleNamespace(path_refusal=lambda traj: None)
+    runner = SimpleNamespace(
+        run=lambda legs, execute: ran.append(legs) or [LegResult("survey:angle-1", "arrived", True)]
+    )
+    view = _view("survey:angle-1")
+    tol = PlannerClient.PLAN_END_RAD
+    ctx.client.live = [q + 0.8 * tol * (-1) ** j for j, q in enumerate(view.joints)]
+    ctx.client.live[6] += 2 * np.pi  # the same pose a whole turn round
+    assert sv.fly_view(ctx, runner, view, band, True) == ("flown", None) and asked == [] and ran == []
+    ctx.client.live = list(view.joints)
+    ctx.client.live[5] += 1.5 * tol  # one joint further off than that: planned and flown, as ever
+    assert (
+        sv.fly_view(ctx, runner, view, band, True) == ("flown", None) and asked == ["survey:angle-1"] and len(ran) == 1
+    )
 
 
 def test_without_the_body_model_there_is_no_survey(monkeypatch):

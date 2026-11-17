@@ -1293,11 +1293,21 @@ def fly_view(ctx, runner, view, band, execute):
     to the counter band (Band.path_refusal), and flown as a look flies (core.as_look: slow, easing
     gently out of rest and into it, under the run's own gains; the owner, 2026-11-16: "we need to make
     the arm look more docile here because it looks snappy and scary"): ("flown" | "refused" |
-    "stopped", why)."""
+    "stopped", why). A view the arm already stands at is flown already: nothing is planned or sent."""
     from box_opening.constants import LOOK_SPEED
+    from box_opening.geometry import ang_diff
     from box_opening.primitives.core import PlanRefused, PlanState, _full_world, _plan_motion, as_look
+    from box_opening.runtime.client import PlannerClient
 
     q0 = ctx.client.joints()
+    # Already there: after a line-up's Open the run's first view is the pose the wrist holds (the same
+    # candidates from the same rest pose, no home in between). A plan from a pose to itself has no length,
+    # and the driver's gate refuses one ("non-monotonic time_from_start"), which read here as a look stopped
+    # part way and ended the run. As near as a plan's own end is held to its goal (PLAN_END_RAD) is there.
+    off = max(abs(ang_diff(a, b)) for a, b in zip(q0, view.joints, strict=False))
+    if off <= PlannerClient.PLAN_END_RAD:
+        log.info("[press_demo] %s: the arm already stands there (%.4f rad off): nothing to fly" % (view.name, off))
+        return "flown", None
     leg = None
     for _ask in range(SURVEY_PLAN_TRIES):
         try:
