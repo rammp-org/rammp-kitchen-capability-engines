@@ -101,7 +101,7 @@ from box_opening.primitives.core import (
 )
 from box_opening.primitives.look import look_joints, sweep_targets
 from box_opening.runtime import driver, fingers
-from box_opening.runtime.abort import EXIT_HALTED, EXIT_NOT_LINED_UP, ArmHalted
+from box_opening.runtime.abort import EXIT_HALTED, EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP, ArmHalted
 from box_opening.runtime.runner import Runner
 from box_opening.tasks import cli_common
 from box_opening.worlds import WorldStore
@@ -1432,8 +1432,9 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     frames' fixes said too. The wrist's turn is the only motion a line-up makes of its own: an arm that
     stands anywhere else is not brought home before the go, nothing turns, and the engine is told so
     (LINE_UP_NOT_AT_REST). On a go the run goes on from there, the wrist where it looked. On a stop the
-    wrist is turned back to rest, as gently, and nothing was pressed. A turn stopped part way: the arm
-    holds, and the line-up ends (went False)."""
+    wrist is turned back to rest, as gently, and nothing was pressed (went False: main's EXIT_NOT_LINED_UP).
+    A turn stopped part way, out or back: the arm holds where it stopped, the wrist turned, and the run ends
+    here with the exit that says so (EXIT_LINE_UP_HOLDS), as a wrist look stopped part way ends a run."""
     import json
 
     from box_opening.tasks import box_watch
@@ -1493,7 +1494,7 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             turned = state == "watched"
             if state == "stopped":
                 log.info("[press_demo] STOP: the line-up's wrist turn: %s — the arm holds; nothing was pressed" % why)
-                return False, False
+                sys.exit(EXIT_LINE_UP_HOLDS)
             if state != "watched":
                 log.info("[press_demo] LINE-UP: the wrist does not look (%s): the scene camera alone" % why)
                 say({"none": "wrist camera: %s" % str(why)[:260]})
@@ -1522,7 +1523,7 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
         state, why = sv.rest_wrist(ctx, runner, args.execute, rest=rest)
         if state != "flown":
             log.info("[press_demo] STOP: the line-up ended and the wrist did not turn back (%s) — the arm holds" % why)
-            return False, False
+            sys.exit(EXIT_LINE_UP_HOLDS)
     log.info(
         "[press_demo] LINE-UP: ended without a go; nothing was pressed%s"
         % (", the wrist back at rest" if turned else "")
@@ -2227,6 +2228,7 @@ def main():
         if getattr(args, "line_up", False):
             # THE LINE-UP (--line-up; owner 2026-11-16): the user is told which way to drive until the
             # container is where the arm opens it, and nothing of the run starts but on their Open
+            # (a wrist turn of its own that stopped part way ends the run in there: EXIT_LINE_UP_HOLDS)
             went, wrist_turned = line_up_watch(node, ctx, cfg, runner, watcher, args, locator, start_tol)
             if not went:
                 sys.exit(EXIT_NOT_LINED_UP)

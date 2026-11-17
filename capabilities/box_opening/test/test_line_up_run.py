@@ -349,9 +349,25 @@ def test_without_wrist_first_or_execute_only_the_scene_camera_looks(lined):
 
 
 def test_a_wrist_turn_stopped_part_way_ends_the_line_up_the_arm_holding(lined):
+    """The arm holds where the turn stopped, the wrist part turned: that is not "nothing moved, press open again"
+    (EXIT_NOT_LINED_UP, the wrist back at rest), and the run's process ends with the exit that says so."""
+    from box_opening.runtime.abort import EXIT_LINE_UP_HOLDS
+
     lined.watch = ("stopped", "the planner refused")
-    (went, turned), _lines, _runner = _line_up(lined, Ear(5, go=True))
-    assert (went, turned) == (False, False) and lined.rested == []  # no further motion
+    scene = Scene()
+    with pytest.raises(SystemExit) as e:
+        _line_up(lined, Ear(5, go=True), locator=scene)
+    assert e.value.code == EXIT_LINE_UP_HOLDS == 6
+    assert lined.rested == [] and scene.on_sighting is None  # no further motion; unhooked as it ends
+
+
+def test_a_wrist_that_does_not_turn_back_after_a_stop_ends_the_line_up_the_arm_holding(lined, monkeypatch):
+    from box_opening.runtime.abort import EXIT_LINE_UP_HOLDS
+
+    monkeypatch.setattr(sv, "rest_wrist", lambda ctx, runner, execute, rest=None: ("stopped", "failed (why)"))
+    with pytest.raises(SystemExit) as e:
+        _line_up(lined, Ear(2, go=False))
+    assert e.value.code == EXIT_LINE_UP_HOLDS
 
 
 def test_a_wrist_that_cannot_look_leaves_the_scene_camera_and_says_why(lined):

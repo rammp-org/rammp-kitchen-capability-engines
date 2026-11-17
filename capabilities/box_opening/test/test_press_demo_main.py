@@ -358,6 +358,23 @@ def test_a_line_up_comes_before_anything_of_the_run_and_a_stop_ends_it_there(mon
     assert HOME_FIRSTS == [] and REACH_OUTS == [] and LOCATES == [] and client.gripper_sent == []
 
 
+def test_a_line_up_whose_wrist_turn_left_the_arm_holding_ends_the_run_with_its_own_exit(monkeypatch, tmp_path):
+    """The line-up's wrist turn stopped part way, or the wrist did not turn back after a stop: line_up_watch
+    ends the run EXIT_LINE_UP_HOLDS, and main lets that out as it is (the engine reads it: the arm holds, not
+    "nothing moved"), with nothing homed, looked for or pressed after it."""
+    from box_opening.runtime.abort import EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
+    from box_opening.tasks import press_demo
+
+    def holds(*a):
+        sys.exit(EXIT_LINE_UP_HOLDS)
+
+    HOME_FIRSTS.clear(), REACH_OUTS.clear(), LOCATES.clear()
+    monkeypatch.setattr(press_demo, "line_up_watch", holds)
+    code, client, _rows = run_main(monkeypatch, tmp_path, ["--execute", "--line-up", "--wrist-first"], _refused)
+    assert code == EXIT_LINE_UP_HOLDS == 6 != EXIT_NOT_LINED_UP
+    assert HOME_FIRSTS == [] and REACH_OUTS == [] and LOCATES == [] and client.gripper_sent == []
+
+
 def test_after_a_go_the_run_goes_on_and_homes_first_unless_its_wrist_looked(monkeypatch, tmp_path):
     """A go from a line-up that turned the wrist: the arm stood at rest before it looked, and the run's own
     look goes on from that view, so no home first. From one that turned nothing, the run starts as always."""
