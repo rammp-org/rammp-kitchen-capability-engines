@@ -301,6 +301,35 @@ def test_an_arm_that_is_not_at_rest_is_not_moved_before_the_go(lined):
     assert (went, turned) == (True, False) and lined.watched == [] and runner.gripper == []
     assert lines[1] == {"fix": {"xyz": [0.9, 0.0, 0.315], "table_z": 0.216, "age_s": 0.1, "rough": False, "score": 0.9}}
     assert {"none": "scene segmenter: saw none"} in lines and scene.on_sighting is None  # unhooked as it ends
+    # ... and the engine is told why the wrist does not look, as the last word on why there is no container
+    nones = [ln for ln in lines if "none" in ln]
+    assert nones[-1] == {"none": "the arm is not at its rest pose: home it, then press open again"}
+
+
+def test_a_wrist_left_turned_looks_on_from_where_it_stands(lined):
+    """After a Cancel while lining up, or a run that refused after Ready, the arm stands at rest but for its
+    wrist, turned where it looked. The line-up never homes before the go, so as first written every later
+    line-up lost its wrist look (the scene camera alone, which does not see a lid whole in front of the arm)
+    until someone homed the arm another way. The wrist's own turn is what stands off rest: it looks on from
+    there, goes on from there at the go, and turns back to rest at a stop."""
+    turned_at = [v + (0.4 if j in sv.FRONT_JOINTS else 0.03) for j, v in enumerate(HOME)]
+    lined.ctx.client.live = list(turned_at)
+    (went, turned), lines, _runner = _line_up(lined, Ear(3, go=True))
+    assert (went, turned) == (True, True) and lined.watched == [list(HOME)] and lined.rested == []
+    assert [ln["fix"]["by"] for ln in lines[1:]] == ["wrist"] * 3 and not any("none" in ln for ln in lines)
+    lined.watched.clear()
+    (went, turned), _lines, _runner = _line_up(lined, Ear(2, go=False))
+    assert (went, turned) == (False, False) and lined.watched == [list(HOME)] and lined.rested == [list(HOME)]
+
+
+@pytest.mark.parametrize("joint, off", [(5, sv.FRONT_MAX_RAD + 0.1), (1, 0.1), (3, -0.1)])
+def test_an_arm_off_rest_by_more_than_its_wrists_own_turn_is_not_looked_from(lined, joint, off):
+    """A wrist joint further from rest than the front look ever turns it, or any joint the look does not turn off
+    rest: not a line-up's leftover. Nothing turns, and the engine is told to have the arm homed."""
+    lined.ctx.client.live = [v + (off if j == joint else 0.0) for j, v in enumerate(HOME)]
+    (went, turned), lines, runner = _line_up(lined, Ear(3, go=False), locator=Scene())
+    assert (went, turned) == (False, False) and lined.watched == [] and lined.rested == [] and runner.gripper == []
+    assert lines[-1] == {"none": "the arm is not at its rest pose: home it, then press open again"}
 
 
 def test_without_wrist_first_or_execute_only_the_scene_camera_looks(lined):

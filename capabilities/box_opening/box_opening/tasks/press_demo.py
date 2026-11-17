@@ -1370,6 +1370,9 @@ AT_REST_RAD = 0.01
 # log), and the engine answers on stdin with one JSON line.
 LINE_UP_MARK = "@@ "
 LINE_UP_LOOK_S = 0.3  # the scene camera's own look, each time round (its sightings said as they are made)
+# what the engine is told where the arm stands off rest by more than its wrist's own turn: nothing of a line-up
+# homes it (the wrist's turn is the one motion made before the go), so the panel's end reason has to name it
+LINE_UP_NOT_AT_REST = "the arm is not at its rest pose: home it, then press open again"
 
 
 class LineUpEar:
@@ -1405,16 +1408,32 @@ class LineUpEar:
         return self.go or self.stop
 
 
+def wrist_looks_from(live, rest, rest_tol):
+    """Whether the line-up's wrist look starts from the joints `live`: every joint within `rest_tol` of the
+    rest pose `rest`, but for the three the front look turns (survey.FRONT_JOINTS), which may stand as far
+    from rest as that look ever turns them (survey.FRONT_MAX_RAD, and `rest_tol`). That is the arm as a
+    line-up's own turn leaves it: after a Cancel while the wrist watched, or a run that refused after
+    Ready, the wrist stands turned, and no line-up homes the arm before its go."""
+    from box_opening.tasks import survey as sv
+
+    return all(
+        abs(ang_diff(a, b)) <= (sv.FRONT_MAX_RAD + rest_tol if j in sv.FRONT_JOINTS else rest_tol)
+        for j, (a, b) in enumerate(zip(live, rest, strict=False))
+    )
+
+
 def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None):
     """--line-up: say where the container is until the engine answers, (went, wrist_turned).
 
     The scene camera's sightings are said as they are made, as tasks/box_watch says them
-    (SceneLocator.on_sighting). With --wrist-first, --execute and the arm at rest (within `rest_tol`: the
-    wrist's turn is the only motion a line-up makes of its own, and an arm that stands elsewhere is not
-    brought home before the go), the fingers close as at every run's start and the wrist turns to look
-    (survey.watch_front, flown as a look), its frames' fixes said too. On a go the run goes on from there,
-    the wrist where it looked. On a stop the wrist is turned back to rest, as gently, and nothing was
-    pressed. A turn stopped part way: the arm holds, and the line-up ends (went False)."""
+    (SceneLocator.on_sighting). With --wrist-first, --execute and the arm at rest (within `rest_tol`) or at
+    rest but for a wrist an earlier line-up left turned (wrist_looks_from), the fingers close as at every
+    run's start and the wrist turns to look from where it stands (survey.watch_front, flown as a look), its
+    frames' fixes said too. The wrist's turn is the only motion a line-up makes of its own: an arm that
+    stands anywhere else is not brought home before the go, nothing turns, and the engine is told so
+    (LINE_UP_NOT_AT_REST). On a go the run goes on from there, the wrist where it looked. On a stop the
+    wrist is turned back to rest, as gently, and nothing was pressed. A turn stopped part way: the arm
+    holds, and the line-up ends (went False)."""
     import json
 
     from box_opening.tasks import box_watch
@@ -1445,8 +1464,9 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 say(line)
 
         locator.on_sighting = told
-    at_rest = rest_distance(ctx.client.joints(), rest) <= rest_tol
-    wrist = bool(getattr(args, "wrist_first", False)) and bool(args.execute) and at_rest
+    asked = bool(getattr(args, "wrist_first", False)) and bool(args.execute)
+    wrist = asked and wrist_looks_from(ctx.client.joints(), rest, rest_tol)
+    not_at_rest = asked and not wrist
     turned = False
     try:
         if wrist:
@@ -1477,14 +1497,17 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             if state != "watched":
                 log.info("[press_demo] LINE-UP: the wrist does not look (%s): the scene camera alone" % why)
                 say({"none": "wrist camera: %s" % str(why)[:260]})
-        elif getattr(args, "wrist_first", False) and args.execute:
+        elif not_at_rest:
             log.info("[press_demo] LINE-UP: the arm is not at rest: the wrist does not look before the go")
         last_none = 0.0
         while not ear.heard():  # the scene camera alone
             why = scene_look()
-            if why is not None and time.monotonic() - last_none >= sv.LINE_UP_NONE_S:
+            if (why is not None or not_at_rest) and time.monotonic() - last_none >= sv.LINE_UP_NONE_S:
                 last_none = time.monotonic()
-                say({"none": why[:300]})
+                if why is not None:
+                    say({"none": why[:300]})
+                if not_at_rest:  # said last: the engine's end reason is the last word it heard
+                    say({"none": LINE_UP_NOT_AT_REST})
             if locator is None:
                 time.sleep(LINE_UP_LOOK_S)
     finally:
@@ -2207,7 +2230,8 @@ def main():
             went, wrist_turned = line_up_watch(node, ctx, cfg, runner, watcher, args, locator, start_tol)
             if not went:
                 sys.exit(EXIT_NOT_LINED_UP)
-        # (a line-up that turned the wrist started from rest, and the run's own look goes on from its view)
+        # (a line-up that turned the wrist started from rest, or from rest but for its wrist, and the run's own
+        # look goes on from its view)
         if not wrist_turned and not home_first(ctx, runner, args.execute, rest_joints(cfg), tol=start_tol):
             sys.exit(3)
         if args.wrist_detect:
