@@ -401,11 +401,13 @@ def main_on_stand_ins(monkeypatch, tmp_path):
     (run, served): run(*more) is main's exit code for --urdf, --container, --zone-dir and `more`; `served`
     holds the Server of each --serve, which is not looped."""
     import os
+    import signal
 
     from box_opening.tasks import reach_probe
 
     served = []
     monkeypatch.setattr(os, "nice", lambda _by: 0)
+    monkeypatch.setattr(signal, "signal", lambda _signum, _handler: None)  # the test process keeps its own SIGTERM
     monkeypatch.setattr(reach_probe, "setup", lambda *_a: (type("C", (), {"model": None})(), None))
     monkeypatch.setattr(reach_probe, "zone_key", lambda *_a, **_k: "k")
     monkeypatch.setattr(reach_probe, "reach_span", lambda model, lid_z: ((0.0, 0.95), (-0.5, 0.5)))
@@ -437,6 +439,140 @@ def test_far_m_on_the_command_line_bounds_the_served_probe_and_the_offline_fill(
     whole = Zone.from_json(reach_probe.zone_path("k", 0.315, tmp_path).read_text())
     assert whole.done() and whole.state((0.75, 0.0)) == WORKS
     assert sorted(p.name for p in tmp_path.iterdir()) == ["zone_k_z+0320.json"]
+
+
+# -- however the probe is ended, what it asked is kept -----------------------------------------
+def _asked(zone):
+    return zone.cells.size - zone.counts()["unasked"]
+
+
+def test_quit_keeps_the_cells_asked_since_the_last_save(served, tmp_path, monkeypatch):
+    """The engine's {"quit": true}, heard after the proof in flight: fewer cells than a periodic save needs."""
+    import os
+
+    from box_opening.tasks import reach_probe
+
+    server, _said, proved = served
+    r, w = os.pipe()
+    stand_in = reach_probe.press_plans
+
+    def proof(*a, **k):
+        if len(proved) == 2:
+            os.write(w, b'{"quit": true}\n')  # said while the third proof is in flight
+        return stand_in(*a, **k)
+
+    monkeypatch.setattr(reach_probe, "press_plans", proof)
+    os.write(w, b'{"box": [0.65, 0.0, 0.315]}\n')
+    reach_probe.serve(server, r)
+    os.close(r)
+    os.close(w)
+    assert len(proved) == 3 < reach_probe.SAVE_EVERY
+    kept = Zone.from_json(reach_probe.zone_path("k", 0.315, tmp_path).read_text())
+    assert _asked(kept) == 3 and (kept.cells == server.zone.cells).all()
+
+
+def test_a_terminate_keeps_the_cells_asked_since_the_last_save(served, tmp_path, monkeypatch):
+    """The engine ends its children with SIGTERM and kills them 2 s later; a proof may take that long. The
+    probe ends at the signal, inside the proof in flight, and keeps the grid on its way out."""
+    import os
+    import signal
+
+    from box_opening.tasks import reach_probe
+
+    server, said, proved = served
+    stand_in = reach_probe.press_plans
+
+    def proof(*a, **k):
+        if len(proved) == 3:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return stand_in(*a, **k)
+
+    monkeypatch.setattr(reach_probe, "press_plans", proof)
+    r, w = os.pipe()
+    os.write(w, b'{"box": [0.65, 0.0, 0.315]}\n')
+    before = signal.getsignal(signal.SIGTERM)
+    assert hasattr(reach_probe, "end_on_terminate")  # without it the signal would end the test run itself
+    try:
+        reach_probe.end_on_terminate(server)
+        with pytest.raises(SystemExit) as end:
+            reach_probe.serve(server, r)
+        os.kill(os.getpid(), signal.SIGTERM)  # a second one, the probe already ending: nothing more
+    finally:
+        signal.signal(signal.SIGTERM, before)
+        os.close(r)
+        os.close(w)
+    assert end.value.code == 0 and server.quit
+    kept = Zone.from_json(reach_probe.zone_path("k", 0.315, tmp_path).read_text())
+    assert _asked(kept) in (3, 4) and _asked(kept) < reach_probe.SAVE_EVERY  # the proof in flight may be lost
+    assert (kept.cells == server.zone.cells).all()
+    assert Zone.from_dict(said[-1]["zone"]).counts() == kept.counts()  # and said, as at any end
+
+
+def test_the_served_probe_is_started_to_end_on_a_terminate(main_on_stand_ins, monkeypatch):
+    import signal
+
+    run, served = main_on_stand_ins
+    set_ = []
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: set_.append((signum, handler)))
+    assert run("--serve") == 0
+    ((signum, handler),) = set_
+    assert signum == signal.SIGTERM and not served[0].quit
+    with pytest.raises(SystemExit):
+        handler(signal.SIGTERM, None)
+    assert served[0].quit
+    handler(signal.SIGTERM, None)  # already ending: the save under way is not cut short
+
+
+def test_the_engines_own_way_of_ending_a_real_probe_keeps_its_grid(tmp_path):
+    """End to end on flatbot's arm: reach_probe --serve as the engine's child (line_up.Child), a box said,
+    and once a few cells are asked the engine's stop(), a terminate with a proof in flight. The probe ends by
+    itself (exit 0, not the kill 2 s later) and the grid it leaves holds every cell it said it had asked."""
+    import sys
+    import time
+
+    from box_opening import line_up
+    from box_opening.tasks import reach_probe
+
+    argv = [sys.executable, "-m", "box_opening.tasks.reach_probe", "--serve", "--urdf", flatbot_urdf()]
+    argv += ["--body-layers", "", "--container", str(CFG), "--zone-dir", str(tmp_path), "--far-m", "0.8"]
+    logged = []
+    child = line_up.Child(argv, None, log=logged.append)
+    try:
+        child.send({"box": [0.65, -0.10, 0.315], "table_z": 0.216, "prove": False})
+        zones, t0 = [], time.monotonic()
+        while (not zones or _asked(zones[-1]) < 2) and child.alive() and time.monotonic() - t0 < 120.0:
+            zones += [Zone.from_dict(m["zone"]) for _t, m in child.messages() if "zone" in m]
+            time.sleep(0.05)
+        assert zones and 2 <= _asked(zones[-1]) < reach_probe.SAVE_EVERY, logged[-5:]
+        assert list(tmp_path.iterdir()) == []  # nothing kept yet: fewer cells than a periodic save
+    finally:
+        child.stop()
+    assert child.proc.returncode == 0, logged[-5:]
+    (path,) = tmp_path.iterdir()
+    kept = Zone.from_json(path.read_text())
+    assert kept.key == zones[-1].key and kept.lid_z == 0.32 and _asked(kept) >= _asked(zones[-1])
+    assert ((kept.cells == zones[-1].cells) | (zones[-1].cells == UNASKED)).all()
+
+
+def test_a_grid_that_cannot_be_kept_is_still_served(served, monkeypatch):
+    """A folder that is not the probe's to write (or a full disk) costs the next line-up its proofs, not
+    this one its answers: the probe says so in its log and goes on."""
+    from box_opening.tasks import reach_probe
+
+    def refused(_zone, _where=None):
+        raise PermissionError("not this user's folder")
+
+    warned = []
+    monkeypatch.setattr(reach_probe, "save_zone", refused)
+    monkeypatch.setattr(reach_probe.log, "warning", warned.append)
+    server, said, proved = served
+    server.hear({"box": [0.65, 0.0, 0.315]})
+    for _ in range(reach_probe.SAVE_EVERY + 5):
+        assert server.step() is True
+    server.close()
+    assert len(proved) == reach_probe.SAVE_EVERY + 5
+    assert len(warned) == 2 and all("not kept" in w and "not this user's folder" in w for w in warned)
+    assert _asked(Zone.from_dict(said[-1]["zone"])) == len(proved)
 
 
 def test_the_probe_lowers_its_own_priority_before_it_works_and_works_on_where_it_may_not(monkeypatch, capsys):
@@ -481,6 +617,77 @@ def test_a_grid_is_kept_and_read_back_only_for_what_it_was_asked_of(tmp_path):
     path = reach_probe.save_zone(z, tmp_path)
     assert path == reach_probe.zone_path("k", 0.309, tmp_path) and path.name == "zone_k_z+0300.json"
     assert (reach_probe.load_zone("k", 0.305, None, tmp_path).cells == z.cells).all()
+
+
+def test_a_save_writes_beside_the_grid_under_the_savers_own_name_and_moves_it_in_whole(tmp_path, monkeypatch):
+    """Never a half-written grid under the grid's name, and two probes on one grid (the engine's and an
+    offline fill) never the same temporary file: the second to move it in would find it gone."""
+    import os
+
+    from box_opening.tasks import reach_probe
+
+    z = _zone(_band)
+    path = reach_probe.save_zone(z, tmp_path)
+    moved, move = [], os.replace
+    monkeypatch.setattr(os, "replace", lambda src, dst: moved.append((str(src), str(dst))))
+    monkeypatch.setattr(os, "getpid", lambda: 111)
+    z.set(0, 0, True)
+    reach_probe.save_zone(z, tmp_path)
+    # the move not made (the probe was killed here): the grid's own file is the whole earlier one
+    assert Zone.from_json(path.read_text()).state((0.0, -0.5)) == FAILS
+    monkeypatch.setattr(os, "getpid", lambda: 222)
+    reach_probe.save_zone(z, tmp_path)
+    (first, to), (second, _to) = moved
+    assert to == str(path) and first != second and {os.path.dirname(first), os.path.dirname(second)} == {str(tmp_path)}
+    move(first, path)
+    move(second, path)  # each its own file: neither finds it gone
+    assert Zone.from_json(path.read_text()).state((0.0, -0.5)) == WORKS
+    assert [p.name for p in tmp_path.iterdir()] == [path.name]
+
+
+def _kept_text(**changed):
+    """The text of a kept grid (the band's, lid 0.30, key "k") with these fields of it changed."""
+    import json
+
+    d = _zone(_band).to_dict()
+    d.update(changed)
+    return json.dumps(d)
+
+
+NOT_A_GRID = {
+    "empty": "",
+    "cut short": _kept_text()[:200],
+    "a list": "[]",
+    "null": "null",
+    "a number": "7",
+    "no x0": _kept_text(x0=None),
+    "x0 not a number": _kept_text(x0="NaN"),
+    "no step": _kept_text(step=0.0),
+    "no height": _kept_text(lid_z=None),
+    "another height's grid": _kept_text(lid_z=0.36),
+    "no rows": _kept_text(rows=[]),
+    "empty rows": _kept_text(rows=["", ""]),
+    "ragged rows": _kept_text(rows=["##", "#"]),
+    "a cell that is no state": _kept_text(rows=["#x"]),
+    "rows a number": _kept_text(rows=7),
+    "another key's grid": _kept_text(key="another robot"),
+    "not text": "\x00\x00\x00",
+}
+
+
+@pytest.mark.parametrize("text", list(NOT_A_GRID.values()), ids=list(NOT_A_GRID))
+def test_a_kept_file_that_is_not_a_whole_grid_is_no_grid_kept(text, tmp_path, monkeypatch):
+    from box_opening.tasks import reach_probe
+
+    monkeypatch.setattr(reach_probe, "reach_span", lambda model, lid_z: ((0.0, 0.95), (-0.5, 0.5)))
+    path = reach_probe.zone_path("k", 0.30, tmp_path)
+    path.write_text(text)
+    zone = reach_probe.load_zone("k", 0.30, None, tmp_path)
+    assert zone.cells.shape == (20, 21) and (zone.cells == UNASKED).all() and zone.lid_z == 0.30 and zone.key == "k"
+    assert reach_probe.save_zone(zone, tmp_path) == path  # and it is written over
+    assert (reach_probe.load_zone("k", 0.30, None, tmp_path).cells == zone.cells).all()
+    path.write_text(_kept_text())
+    assert reach_probe.load_zone("k", 0.30, None, tmp_path).counts()["works"] > 0  # a whole one is read
 
 
 def test_the_picture_reads_as_the_user_sees_the_table():

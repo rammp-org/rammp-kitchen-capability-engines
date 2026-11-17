@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import select
+import signal
 import sys
 import time
 from pathlib import Path
@@ -271,22 +272,31 @@ def zone_path(key, lid_z, where=None):
 
 
 def load_zone(key, lid_z, model, where=None):
-    """The grid kept for `key` at this lid height, or a blank one over reach_span."""
+    """The grid kept for `key` at this lid height, or a blank one over reach_span. A file that is not a
+    whole grid of this key and height (cut short, not a grid's text at all, another height's under this
+    name) is no grid kept: its cells are asked again and it is written over, and the probe does not end
+    on it."""
     path = zone_path(key, lid_z, where)
     try:
         zone = reach_zone.Zone.from_json(path.read_text())
-        if zone.key == key:
+        whole = zone.cells.ndim == 2 and zone.cells.size > 0 and zone.step > 0
+        whole = whole and all(math.isfinite(v) for v in (zone.x0, zone.y0, zone.step))
+        if whole and zone.key == key and abs(float(zone.lid_z) - lid_bucket(lid_z)) < 1e-6:
             return zone
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
     xs, ys = reach_span(model, lid_bucket(lid_z))
     return reach_zone.Zone.blank(xs, ys, lid_z=lid_bucket(lid_z), key=key)
 
 
 def save_zone(zone, where=None):
+    """Keep `zone` on disk: written whole beside its place, then moved into it, so the grid's own name
+    never holds a half-written file (a probe ended as it writes leaves the earlier grid). The file written
+    first carries this process's number: two probes may keep the same grid at once (the engine's and an
+    offline fill), and under one shared name the second to move it in would find it gone."""
     path = zone_path(zone.key, zone.lid_z, where)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
     tmp.write_text(zone.to_json())
     os.replace(tmp, path)
     return path
@@ -316,6 +326,8 @@ def fill(zone, ctx, cfg, table_z=None, focus=None, budget_s=None, n=None, clock=
 #     @@ {"proof": {"xyz": [...], "ok": bool, "why": "...", "tilt_deg": n, "s": seconds}}
 # With "prove" the box's own place is proven first (the user is being asked to hold still for it); otherwise
 # the boundary is filled, the cells nearest the box first. The newest box is the only one worked on.
+# The engine ends it with {"quit": true} (heard after the proof in flight), by closing the pipe, or with a
+# terminate (at once): each way the grid is kept first.
 MARK = "@@ "
 PROOF_NEAR_M = 0.015  # a box this near the place last proven is that place (guide.STEADY_M)
 ZONE_SAY_S = 0.5  # a boundary that is filling is said no oftener than this
@@ -384,39 +396,68 @@ class Server:
         self._dirty += asked
         self._unsaved += asked
         if self._unsaved >= SAVE_EVERY:
-            save_zone(zone, self.zone_dir)
-            self._unsaved = 0
+            self._keep()
         if self._dirty and self._clock() - self._said_at >= ZONE_SAY_S:
             self._tell_zone()
         return bool(asked)
 
+    def _keep(self):
+        """The grid onto the disk. Where it cannot be written (a folder that is not this user's, a full
+        disk) that is said in the log and the grid goes on being served: a boundary that is not kept costs
+        the next line-up its proofs, a probe that ends here costs this one its answers."""
+        try:
+            save_zone(self.zone, self.zone_dir)
+        except OSError as e:
+            log.warning("reach_probe: the boundary is not kept (%s)" % e)
+        self._unsaved = 0
+
     def close(self):
         """What was asked is kept, and said."""
         if self.zone is not None and self._unsaved:
-            save_zone(self.zone, self.zone_dir)
-            self._unsaved = 0
+            self._keep()
         if self.zone is not None and self._dirty:
             self._tell_zone()
 
 
 def serve(server, fd=0):
-    """Until the engine says quit or closes the pipe: its lines heard between proofs, never during one."""
+    """Until the engine says quit or closes the pipe: its lines heard between proofs, never during one.
+    However the loop ends, what was asked is kept on the way out (Server.close): on quit and on the pipe's
+    end, and where it is cut inside a proof, by the engine's terminate (end_on_terminate) or by an error."""
     buf = b""
-    while not server.quit:
-        busy = server.step()
-        ready, _, _ = select.select([fd], [], [], 0.0 if busy else IDLE_S)
-        if not ready:
-            continue
-        data = os.read(fd, 65536)
-        if not data:
-            break  # the engine is gone
-        *lines, buf = (buf + data).split(b"\n")
-        for line in lines:
-            try:
-                server.hear(json.loads(line))
-            except (ValueError, TypeError, AttributeError):
-                log.warning("reach_probe: not a line of the engine's: %r" % line[:120])
-    server.close()
+    try:
+        while not server.quit:
+            busy = server.step()
+            ready, _, _ = select.select([fd], [], [], 0.0 if busy else IDLE_S)
+            if not ready:
+                continue
+            data = os.read(fd, 65536)
+            if not data:
+                break  # the engine is gone
+            *lines, buf = (buf + data).split(b"\n")
+            for line in lines:
+                try:
+                    server.hear(json.loads(line))
+                except (ValueError, TypeError, AttributeError):
+                    log.warning("reach_probe: not a line of the engine's: %r" % line[:120])
+    finally:
+        server.close()
+
+
+def end_on_terminate(server):
+    """SIGTERM ends serve(server) at once, with exit code 0, wherever it stands. The engine ends its children
+    with a terminate and kills them 2 s later (line_up.Child.stop), and a proof in flight can take that
+    long: waiting for it to hear quit would lose every cell asked since the last save. The handler does not
+    save by itself: it may have cut a save in two. It leaves by SystemExit, and serve() keeps the grid as
+    it unwinds. A second terminate, or one that comes when quit was already heard, changes nothing: the
+    probe is on its way out, and the save it is making is not cut short."""
+
+    def ended(_signum, _frame):
+        if server.quit:
+            return
+        server.quit = True
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, ended)
 
 
 def _say(line, to=None):
@@ -473,7 +514,9 @@ def main(argv=None):
     far_m = args.far_m if args.far_m > 0 else None
     ctx, cfg = setup(args.urdf, args.root, args.body_layers, container)
     if args.serve:
-        serve(Server(ctx, cfg, zone_key(args.urdf, container), args.zone_dir, far_m=far_m))
+        server = Server(ctx, cfg, zone_key(args.urdf, container), args.zone_dir, far_m=far_m)
+        end_on_terminate(server)
+        serve(server)
         return 0
     if args.at is not None:
         t0 = time.monotonic()
