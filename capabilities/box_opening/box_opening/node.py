@@ -122,6 +122,9 @@ PARAMS = {
     "mock_phase_s": 0.0,
 }
 NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
+# what `air_control` may be. The run reads anything but "position" as impedance (tasks/reach_press), so a
+# misspelt value would fly as impedance without a word: the node refuses it instead (Capability._air_control)
+AIR_CONTROLS = ("impedance", "position")
 
 
 def check_params(params):
@@ -715,15 +718,28 @@ class Capability(CapabilityEngine):
         far = float(self._param("line_up_far_m") or 0.0)
         return far if far > 0.0 else None
 
-    def _lines_up(self):
-        """Whether this execution lines up first: the `line_up` param as its goal comes. Asked ONCE, by
-        execute(), and handed down from there, so that nothing later takes another view of it (a UI that
-        dropped a moment on, a param set meanwhile). With line_up on the arm never flies without the user's
-        Open: a goal that has no UI to ask on (no token, or the bridge not there) is refused here,
-        EngineError("line_up_unavailable"), before anything is started."""
+    def _air_control(self):
+        """air_control as it is now: "impedance" (unset too, as flown) or "position". Any other value is
+        refused, EngineError("bad_config"), before anything runs: whoever set it meant one of the two."""
+        value = str(self._param("air_control") or "impedance")
+        if value not in AIR_CONTROLS:
+            raise EngineError(
+                "bad_config",
+                f'air_control is {value!r}: it must be "impedance" or "position". Nothing ran',
+                recoverable=False,
+            )
+        return value
+
+    def _lines_up(self, ui):
+        """Whether this execution lines up first: the `line_up` param as its goal comes, and `ui`, whether
+        the goal has a live UI (_ui_live). Both asked ONCE, by execute(), and handed down from there, so that
+        nothing later takes another view of them (a UI that dropped a moment on, a param set meanwhile). With
+        line_up on the arm never flies without the user's Open: a goal that has no UI to ask on (no token,
+        or the bridge not there) is refused here, EngineError("line_up_unavailable"), before anything is
+        started."""
         if not self._param("line_up"):
             return False
-        if not self._ui_live():
+        if not ui:
             raise EngineError("line_up_unavailable", LINE_UP_NO_UI, recoverable=True)
         return True
 
@@ -922,11 +938,26 @@ class Capability(CapabilityEngine):
         if self._cancelled_early():
             raise Cancelled()  # nothing ran
         check_params(params)
+        ui = self._ui_live()  # asked once for this goal: what the log says is what is decided on
+        # the settings that decide how this goal flies, as they are now: a `ros2 param set` lives only in the
+        # running node and a restart puts the deployment's values back, so every goal's are in the log
+        self.get_logger().info(
+            "open_box goal: line_up=%s ui=%s line_up_far_m=%s air_control=%s wrist_first=%s wrist_alone=%s"
+            % (
+                str(bool(self._param("line_up"))).lower(),
+                "live" if ui else "none",
+                float(self._param("line_up_far_m") or 0.0),
+                self._param("air_control") or "impedance",
+                str(bool(self._param("wrist_first"))).lower(),
+                str(bool(self._param("wrist_alone"))).lower(),
+            )
+        )
+        self._air_control()  # a value it cannot be: refused here, before anything runs
         if not self.mock and not self._allowed():  # the mock moves nothing: it is always allowed
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
         # whether this goal lines up first, decided once and before anything is started: with line_up on and
         # no UI to ask on it is refused here (the mock's too), never run without its Open
-        lines_up = self._lines_up()
+        lines_up = self._lines_up(ui)
         if self.mock:
             return self._mock(action_id, ctx, lines_up)
         ctx.checkpoint()  # cancelled before it started: nothing runs
@@ -1151,7 +1182,7 @@ class Capability(CapabilityEngine):
         env["BOX_OPENING_MISSION_FRAMES"] = "1" if self._param("mission_frames") else "0"
         if self._param("state_dir"):
             env["BOX_OPENING_STATE"] = self._param("state_dir")
-        env[AIR_CONTROL_ENV] = str(self._param("air_control") or "impedance")
+        env[AIR_CONTROL_ENV] = self._air_control()
         for name, var in (("planner_worlds_as", PLANNER_WORLDS_AS_ENV), ("planner_worlds_dir", PLANNER_WORLDS_DIR_ENV)):
             if self._param(name):  # unset: whatever the node's own environment says, as BOX_OPENING_BODY_LAYERS
                 env[var] = str(self._param(name))

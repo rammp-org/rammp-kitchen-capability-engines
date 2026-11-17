@@ -1687,6 +1687,70 @@ def test_how_the_free_air_flies_is_the_deployments_and_as_flown_by_default(engin
     assert engine._env()[AIR_CONTROL_ENV] == "position"
 
 
+class Lines:
+    """The node's logger, stood in for: every line it is given, whatever its level."""
+
+    def __init__(self):
+        self.said = []
+
+    def _say(self, msg, **_kw):
+        self.said.append(msg)
+
+    debug = info = warning = error = fatal = _say
+
+
+def test_every_goal_says_which_settings_it_flies_on(engine, monkeypatch):
+    """A `ros2 param set` lives only in the running node, and a restart puts the deployment's values back:
+    the node's log says, at the start of every goal, which of the settings that decide how the arm flies
+    were in force for it."""
+    given(monkeypatch, FULL_RUN)
+    log = Lines()
+    monkeypatch.setattr(engine, "get_logger", lambda: log)
+    engine.execute("open_box", {}, FakeCtx())
+    (line,) = (ln for ln in log.said if ln.startswith("open_box goal:"))
+    for setting in ("line_up=false", "ui=none", "line_up_far_m=0.0", "air_control=impedance"):
+        assert setting in line
+    assert "wrist_first=false" in line and "wrist_alone=false" in line
+    log.said.clear()
+    engine.set_parameters(
+        [
+            Parameter("line_up", value=True),
+            Parameter("line_up_far_m", value=0.8),
+            Parameter("air_control", value="position"),
+            Parameter("wrist_first", value=True),
+        ]
+    )
+    with pytest.raises(EngineError):  # line_up on and no UI here: refused, and its line is still said
+        engine.execute("open_box", {}, FakeCtx())
+    (line,) = (ln for ln in log.said if ln.startswith("open_box goal:"))
+    for setting in ("line_up=true", "ui=none", "line_up_far_m=0.8", "air_control=position", "wrist_first=true"):
+        assert setting in line
+    log.said.clear()
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(engine, "_lined_up_run", lambda *a: (_ for _ in ()).throw(Cancelled()))
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, FakeCtx())
+    assert "ui=live" in next(ln for ln in log.said if ln.startswith("open_box goal:"))
+
+
+def test_an_air_control_that_is_neither_impedance_nor_position_is_refused_before_anything_runs(engine, monkeypatch):
+    """A misspelt value would fly as impedance without a word (the run reads anything but "position" so),
+    while whoever set it believes the other."""
+    given(monkeypatch, FULL_RUN)
+    lines = []
+    monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: lines.append(msg))
+    engine.set_parameters([Parameter("air_control", value="postion")])
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "bad_config" and not e.value.recoverable
+    assert "'postion'" in str(e.value) and "impedance" in str(e.value) and "position" in str(e.value)
+    assert ctx.said == [] and not any(ln.startswith("ARGV ") for ln in lines)  # no run was started
+    for value in ("position", "impedance", ""):  # unset is impedance, as flown
+        engine.set_parameters([Parameter("air_control", value=value)])
+        assert engine.execute("open_box", {}, FakeCtx())["executed"]
+
+
 def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):
     """The orchestrator's 120 s cover the line-up and the run: a run started late is stopped its own way
     that much sooner, and the longest run logged still fits after the longest line-up."""
