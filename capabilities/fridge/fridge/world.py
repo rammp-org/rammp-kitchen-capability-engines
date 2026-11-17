@@ -71,8 +71,11 @@ class FridgeModel:
         df = self.df
         _, _, _, body_depth = door_dims(self.door)
         lo, hi = _door_z(self.door)
-        return [self._box("body", df.length / 2, -df.t / 2 - body_depth / 2, 0.0, (lo + hi) / 2, df.length,
-                          body_depth, hi - lo)]
+        return [
+            self._box(
+                "body", df.length / 2, -df.t / 2 - body_depth / 2, 0.0, (lo + hi) / 2, df.length, body_depth, hi - lo
+            )
+        ]
 
     def slab(self, deg, tag="door", window=None, v=None):
         """The door slab open `deg`. `window` (u0, u1, z0, z1): leave this part of it out, through its thickness --
@@ -106,15 +109,29 @@ class FridgeModel:
         df = self.df
         front = df.t / 2
         window = (u - toward_hinge, u + toward_edge, z - half_z, z + half_z)
-        return (self.body() + self.slab(deg, "door_panel", v=(front - panel, front))
-                + self.slab(deg, "door_inner", window=window, v=(-front, front - panel)) + self.handle(deg))
+        return (
+            self.body()
+            + self.slab(deg, "door_panel", v=(front - panel, front))
+            + self.slab(deg, "door_inner", window=window, v=(-front, front - panel))
+            + self.handle(deg)
+        )
 
     def handle(self, deg, tag="handle"):
         """The handle bar open `deg`."""
         df = self.df
         z = float(self.door.get("handle_mid_z", self.door["closed_handle"][2]))
-        return [self._box(tag, df.u_handle, df.t / 2 + HANDLE_PROTRUSION_M / 2, deg, z, HANDLE_WIDTH_M,
-                          HANDLE_PROTRUSION_M, self.handle_length + HANDLE_MOUNTS_M)]
+        return [
+            self._box(
+                tag,
+                df.u_handle,
+                df.t / 2 + HANDLE_PROTRUSION_M / 2,
+                deg,
+                z,
+                HANDLE_WIDTH_M,
+                HANDLE_PROTRUSION_M,
+                self.handle_length + HANDLE_MOUNTS_M,
+            )
+        ]
 
     # -- the worlds the motions plan in --
 

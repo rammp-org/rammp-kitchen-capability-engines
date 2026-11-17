@@ -200,9 +200,7 @@ def measure_bar_front_normal(depth_mm, K, base_T_cam, handle_mask, edge_trim_px=
     if off > MAX_OFF_CAMERA_DEG:
         problems.append(f"the normal faces {off:.0f} deg away from the camera (max {MAX_OFF_CAMERA_DEG:.0f})")
     if problems:
-        raise DoorNormalError(
-            f"door normal from the bar's front (yaw {res.yaw_deg:+.1f} deg): " + "; ".join(problems)
-        )
+        raise DoorNormalError(f"door normal from the bar's front (yaw {res.yaw_deg:+.1f} deg): " + "; ".join(problems))
     return res
 
 
@@ -311,8 +309,12 @@ def _footprint(P, R, t, model):
     lo, hi = model[4], model[5]
     m = FOOTPRINT_MARGIN_M
     return (
-        (M[:, 0] > lo[0] - m) & (M[:, 0] < hi[0] + m) & (M[:, 1] > lo[1] - m) & (M[:, 1] < hi[1] + m)
-        & (M[:, 2] > lo[2] - FOOTPRINT_FRONT_M) & (M[:, 2] < hi[2] + FOOTPRINT_BEHIND_M)
+        (M[:, 0] > lo[0] - m)
+        & (M[:, 0] < hi[0] + m)
+        & (M[:, 1] > lo[1] - m)
+        & (M[:, 1] < hi[1] + m)
+        & (M[:, 2] > lo[2] - FOOTPRINT_FRONT_M)
+        & (M[:, 2] < hi[2] + FOOTPRINT_BEHIND_M)
     )
 
 
@@ -432,7 +434,8 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
         )
     if res.inlier_fraction < FIT_MIN_INLIER_FRACTION:
         problems.append(
-            f"only {res.inlier_fraction * 100:.0f}% of the footprint's points within {FIT_INLIER_M * noise * 1000:.1f} mm of "
+            f"only {res.inlier_fraction * 100:.0f}% of the footprint's points "
+            f"within {FIT_INLIER_M * noise * 1000:.1f} mm of "
             f"the model (needs {FIT_MIN_INLIER_FRACTION * 100:.0f}%)"
         )
     if res.rms_m > FIT_MAX_RMS_M * noise:

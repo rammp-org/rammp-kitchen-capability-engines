@@ -1,4 +1,5 @@
-"""The fridge's detection: the handle from SAM 3's masks and the depth, the door from it, the run's logs and bag.
+"""The fridge's detection: the handle from SAM 3's masks and the depth, the door from it, the run's
+logs and bag.
 
 The planning is tests/arm/test_fridge_curobo.py's.
 """
@@ -552,8 +553,9 @@ def test_door_normal_from_handle_merges_the_bar_and_plate_and_misses_without_dep
 
 
 def test_door_normal_picks_how_each_look_measures_the_door(perception, tmp_path):
-    """The node's door_normal: the handle model's fit (the default, the side grasp's), the bar and its plate, a plane, or
-    square; how far two looks' doors may differ goes with it. The detector's own two flags stay exclusive."""
+    """The node's door_normal: the handle model's fit (the default, the side grasp's), the bar and
+    its plate, a plane, or square; how far two looks' doors may differ goes with it. The detector's
+    own two flags stay exclusive."""
     _, fp = perception
     with pytest.raises(ValueError, match="pick one"):
         fp.HandleDetector(door_square_to_arm=True, door_normal_from_handle=True)
@@ -662,9 +664,10 @@ def test_the_run_bag_without_stereo_reports_no_pairs(tmp_path):
 
 
 def _render_handle(yaw_deg, at, K, T, shape=(400, 640), samples=60000):
-    """A depth image (mm) of the printed handle's model (its STL) seen by the camera (K, T: camera -> arm), the door
-    yawed `yaw_deg` (door_normal's convention), the bar's front centre at `at` (arm frame); and the handle's mask. A
-    z-buffer of the model's surface samples, each splatted over 2 x 2 pixels."""
+    """A depth image (mm) of the printed handle's model (its STL) seen by the camera (K, T: camera
+    -> arm), the door yawed `yaw_deg` (door_normal's convention), the bar's front centre at `at`
+    (arm frame); and the handle's mask. A z-buffer of the model's surface samples, each splatted
+    over 2 x 2 pixels."""
     from fridge import door_normal as dn
 
     pts, _, front, _, _, _ = dn.load_handle_model(n=samples, seed=1)
@@ -687,8 +690,8 @@ def _render_handle(yaw_deg, at, K, T, shape=(400, 640), samples=60000):
 
 @pytest.mark.parametrize("yaw", [0.0, 8.0, -15.0])
 def test_the_handle_models_fit_finds_the_doors_yaw(yaw):
-    """The side grasp's door direction (door_normal: the STL registered to the mask's depth) recovers a door's yaw
-    from one look, as on 11-06's scene frames (+-1 deg there)."""
+    """The side grasp's door direction (door_normal: the STL registered to the mask's depth)
+    recovers a door's yaw from one look, as on 11-06's scene frames (+-1 deg there)."""
     from fridge import door_normal as dn
 
     K = np.array([[600.0, 0.0, 320.0], [0.0, 600.0, 200.0], [0.0, 0.0, 1.0]])

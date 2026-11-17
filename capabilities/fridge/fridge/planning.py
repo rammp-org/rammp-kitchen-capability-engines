@@ -70,7 +70,11 @@ class OverBudget(Refused):
     """The search has used up its planning time (Planner's budget_s)."""
 
 
-GOAL_FAILURES = ("IK_FAIL", "INVALID_GOAL", "solution AT the goal")  # cuRobo statuses that mean the goal pose itself can't be reached: no
+GOAL_FAILURES = (
+    "IK_FAIL",
+    "INVALID_GOAL",
+    "solution AT the goal",
+)  # cuRobo statuses that mean the goal pose itself can't be reached: no
 # route to it (a via point) can help
 
 
@@ -163,8 +167,19 @@ class Planner:
         sp = None if start_pose is None else (r(start_pose[0]), r(start_pose[1]))
         thr = None if goal.through is None else tuple((r(p), r(q)) for p, q in goal.through)
         caps = None if goal.caps is None else r(goal.caps)
-        return (r(goal.pos), r(goal.quat), goal.hold, goal.path, None if goal.joints is None else r(goal.joints),
-                None if goal.hinge is None else r(goal.hinge), r(q_start), sp, world, thr, caps)
+        return (
+            r(goal.pos),
+            r(goal.quat),
+            goal.hold,
+            goal.path,
+            None if goal.joints is None else r(goal.joints),
+            None if goal.hinge is None else r(goal.hinge),
+            r(q_start),
+            sp,
+            world,
+            thr,
+            caps,
+        )
 
     # -- planning ---------------------------------------------------------------------------------------------------
 
@@ -237,7 +252,8 @@ class Planner:
         if not plan.success:
             if from_arm and "START_STATE" in str(plan.message):
                 raise StartNotClear(
-                    f"the arm's start pose is not clear in cuRobo's world with {goal.world_label or 'the fridge'} in it: "
+                    "the arm's start pose is not clear in cuRobo's world with "
+                    f"{goal.world_label or 'the fridge'} in it: "
                     f"{' '.join(str(plan.message).split())} -- no plan can start from it. Move the arm out first (e.g. "
                     "the go_to_start action: the web app's Fridge pose)"
                 )
@@ -274,8 +290,13 @@ class Planner:
         # the search can still try another placement, not when the motion is joined
         self.world.push(goal.world, goal.world_label or goal.label)
         t0 = time.monotonic()
-        res = self.arm.blend([plan], [], speed_scale=[1.0], hold=[goal.hold],
-                             hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None])
+        res = self.arm.blend(
+            [plan],
+            [],
+            speed_scale=[1.0],
+            hold=[goal.hold],
+            hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+        )
         self.plan_s += time.monotonic() - t0
         if not res.success:
             return None, f"{goal.label}: cuRobo rejects it ({_short(res.message)})"
@@ -300,8 +321,13 @@ class Planner:
             t, qq, qd = timed(before, qs[start : end + 1])
             self.world.push(world, label)
             t0 = time.monotonic()
-            res = self.arm.blend([LocalPlan(True, "local IK", t, qq, qd)], [], speed_scale=[1.0], hold=[goal.hold],
-                                 hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None])
+            res = self.arm.blend(
+                [LocalPlan(True, "local IK", t, qq, qd)],
+                [],
+                speed_scale=[1.0],
+                hold=[goal.hold],
+                hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+            )
             self.plan_s += time.monotonic() - t0
             if not res.success:
                 return f"against {label}, cuRobo rejects it ({_short(res.message)})"
@@ -332,9 +358,17 @@ class Planner:
         # the goal's speed) against its own LOCAL_JOINT_SPEED timing; cuRobo's: free / contact fractions of its own
         local = rammp_arm.JOINT_SPEED * rammp_arm.contact_speed_scale() / LOCAL_JOINT_SPEED
         scales = [
-            max(0.01, min(1.0, g.speed if g.speed is not None
-                          else local if g.path != "free"
-                          else free * (CONTACT_SPEED if g.contact else 1.0)))
+            max(
+                0.01,
+                min(
+                    1.0,
+                    g.speed
+                    if g.speed is not None
+                    else local
+                    if g.path != "free"
+                    else free * (CONTACT_SPEED if g.contact else 1.0),
+                ),
+            )
             for g in motion.goals
         ]
         holds = [g.hold for g in motion.goals]
@@ -357,13 +391,18 @@ class Planner:
             if plan.success:
                 motion.joined = plan
                 if attempt is bumped:
-                    motion.notes.append(f"stops after a cut corner made {BLEND_MIN_M * 1000:.0f} mm corners (blend "
-                                        "refused the stops)")
+                    motion.notes.append(
+                        f"stops after a cut corner made {BLEND_MIN_M * 1000:.0f} mm corners (blend "
+                        "refused the stops)"
+                    )
                 elif not any(attempt) and any(radii):
                     motion.notes.append("corners not cut (blend refused them): stops at every goal")
                 return motion
-            what = "with true stops" if attempt is radii and any(radii) else (
-                "with stops made small corners" if attempt is bumped else "without cut corners")
+            what = (
+                "with true stops"
+                if attempt is radii and any(radii)
+                else ("with stops made small corners" if attempt is bumped else "without cut corners")
+            )
             say(f"  blend {what} failed: {_short(plan.message)}")
         raise Refused(f"cuRobo could not join the {len(motion.legs)} planned legs into one trajectory")
 
@@ -387,12 +426,18 @@ class Planner:
         off = np.degrees(np.max(np.abs(_short_delta(motion.q0, q_now))))
         if off > START_TOL_DEG:
             raise Refused(f"{label}: the arm is {off:.1f} deg from where it was planned from -- not sent")
-        say(f"{label}: {len(motion.goals)} leg(s), {float(plan.t[-1]):.1f} s, one trajectory"
-            + (" under joint impedance" if impedance else "") + " ...")
+        say(
+            f"{label}: {len(motion.goals)} leg(s), {float(plan.t[-1]):.1f} s, one trajectory"
+            + (" under joint impedance" if impedance else "")
+            + " ..."
+        )
         kw = dict(path_tolerance=rammp_arm.PATH_TOL_RAD)
         if impedance:
-            kw = dict(path_tolerance=impedance["path_tol"], control_mode=IMPEDANCE,
-                      gains={k: impedance[k] for k in ("kq", "zeta", "torque_limit")})
+            kw = dict(
+                path_tolerance=impedance["path_tol"],
+                control_mode=IMPEDANCE,
+                gains={k: impedance[k] for k in ("kq", "zeta", "torque_limit")},
+            )
         thread = _timed_events(events, self.say_error) if events else None
         res = None
         try:
@@ -420,9 +465,11 @@ class Planner:
         say(f"  {what} failed while the arm moved: {e!r}")
 
     def summary(self):
-        return (f"{self.plans} cuRobo plans + {self.local} legs along the door ({self.cached} repeats skipped), "
-                f"{self.plan_s:.1f} s planning, "
-                f"{self.world.pushes} world pushes, {time.monotonic() - self.t0:.1f} s in all")
+        return (
+            f"{self.plans} cuRobo plans + {self.local} legs along the door ({self.cached} repeats skipped), "
+            f"{self.plan_s:.1f} s planning, "
+            f"{self.world.pushes} world pushes, {time.monotonic() - self.t0:.1f} s in all"
+        )
 
 
 @dataclass
@@ -593,13 +640,24 @@ def through(poses, label, world, caps=None, blend=0.0, hold=HOLD_NONE, world_lab
     along an arc), each with its speed cap (`caps`, a fraction of LOCAL_JOINT_SPEED): no junction, no stop. Checked
     against `world` whole, and the way to each pose against `segment_worlds` [(label, obstacles)] too, if given."""
     pos, quat = poses[-1]
-    return Goal(pos, quat, label, world, hold=hold, blend=blend, contact=True, path="through",
-                through=[(np.asarray(p, float), np.asarray(q, float)) for p, q in poses],
-                caps=None if caps is None else list(caps), world_label=world_label,
-                segment_worlds=None if segment_worlds is None else list(segment_worlds))
+    return Goal(
+        pos,
+        quat,
+        label,
+        world,
+        hold=hold,
+        blend=blend,
+        contact=True,
+        path="through",
+        through=[(np.asarray(p, float), np.asarray(q, float)) for p, q in poses],
+        caps=None if caps is None else list(caps),
+        world_label=world_label,
+        segment_worlds=None if segment_worlds is None else list(segment_worlds),
+    )
 
 
 def arc(pos, quat, label, world, hinge, blend=0.01, hold=HOLD_NONE, world_label=""):
     """A leg along an arc about the hinge (the swing, the pushes): a contact leg."""
-    return Goal(pos, quat, label, world, hold=hold, blend=blend, contact=True, path="arc", hinge=hinge,
-                world_label=world_label)
+    return Goal(
+        pos, quat, label, world, hold=hold, blend=blend, contact=True, path="arc", hinge=hinge, world_label=world_label
+    )

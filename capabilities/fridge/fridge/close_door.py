@@ -1,7 +1,8 @@
 """Close the fridge: push the open door most of the way shut with the hand, which may hold a container -- no grasp.
 
 The motion -- holding the container, every leg holds the hand's tilt (HOLD_LEVEL: it never tips it; turning about
-vertical is free); with an empty hand the route may tilt it (cuRobo found no level route to most push starts, 11-10 sim):
+vertical is free); with an empty hand the route may tilt it (cuRobo found no level route to most push starts, 11-10
+sim):
 1. To a push start (a free leg, cuRobo's route): behind the door -- round the hinge past the open door (where the door
    file says it is: the push-open leaves it at PUSH_OPEN_TO_DEG), clear of it there by CLOSE_START_GAP_M -- at a
    distance from the hinge out near the free edge (CLOSE_RADII_FROM_EDGE_M, furthest first: leverage), at a height
@@ -66,17 +67,21 @@ def _plan_after_move(planner, door, st, settings, shift, close_to_deg, chair_dir
     """The close once the chair has moved (`shift`; what an executed close plans), planned afresh up to
     CLOSE_PLAN_ATTEMPTS times. cuRobo's routes are random and it doesn't see the held container, so the same push start
     can carry the container through the door on one route and round it on the next (11-12: two identical dry runs, one
-    refused at -9 cm, one planned). Each attempt forgets the legs the last one cached, or it would get the same answer."""
+    refused at -9 cm, one planned). Each attempt forgets the legs the last one cached, or it would get the same
+    answer."""
     why = ""
     for k in range(F.CLOSE_PLAN_ATTEMPTS):
         if k:
-            say(f"  the close didn't plan ({' '.join(str(why).split())[:140]}); planning it again "
-                f"({k + 1}/{F.CLOSE_PLAN_ATTEMPTS})")
+            say(
+                f"  the close didn't plan ({' '.join(str(why).split())[:140]}); planning it again "
+                f"({k + 1}/{F.CLOSE_PLAN_ATTEMPTS})"
+            )
             planner._cache.clear()
             planner._unreachable.clear()
             planner.search()
-        motion, info = plan_close(planner, door, st, settings, shift, close_to_deg, move=0.0, chair_dir=chair_dir,
-                                  quiet=quiet)
+        motion, info = plan_close(
+            planner, door, st, settings, shift, close_to_deg, move=0.0, chair_dir=chair_dir, quiet=quiet
+        )
         if motion is not None:
             return motion, info
         why = info
@@ -90,8 +95,10 @@ def _say_tried():
         return
     say(f"  push starts planned ({len(TRIED)}; move 0 also = the after-move check):")
     for move, radius, z, yaw, via, out in TRIED:
-        say(f"    move {float(move) * 100:+.0f} cm, {float(radius) * 100:.0f} cm from the hinge, z {float(z):.3f}, "
-            f"turned {float(yaw):+.0f} deg{', via the edge' if via else ''}: {' '.join(str(out).split())[:160]}")
+        say(
+            f"    move {float(move) * 100:+.0f} cm, {float(radius) * 100:.0f} cm from the hinge, z {float(z):.3f}, "
+            f"turned {float(yaw):+.0f} deg{', via the edge' if via else ''}: {' '.join(str(out).split())[:160]}"
+        )
 
 
 def gripper_holds(st):
@@ -119,7 +126,6 @@ def _box_gaps(points, box):
     q = np.abs(local) - np.asarray(box["dims"], float) / 2
     gap = np.linalg.norm(np.maximum(q, 0.0), axis=-1) + np.minimum(q.max(axis=-1), 0.0)
     return gap.min(axis=-1)
-
 
 
 def _box_corners_at(box, z):
@@ -252,8 +258,8 @@ class CloseGeometry:
         """The push's points [(deg turned round the hinge, pos)] from the start (`radius`, `deg0`) toward shut until the
         hand or the container touches the door at stop_deg (its handle included); None if it never would. The push
         spirals in from `radius` to CLOSE_PUSH_END_RADIUS_M (if further out) as it turns: out at the edge while the
-        door is wide open (leverage), nearer the hinge -- and the arm -- by the end (a whole ~100 deg at the edge ran the
-        arm into its joint limits, 11-10 sim); anywhere on the door keeps it pushed."""
+        door is wide open (leverage), nearer the hinge -- and the arm -- by the end (a whole ~100 deg at the edge ran
+        the arm into its joint limits, 11-10 sim); anywhere on the door keeps it pushed."""
         p0 = self.at(radius, deg0)
         v0 = p0 - self.h
         r0 = float(np.linalg.norm(v0[:2]))
@@ -304,19 +310,32 @@ class CloseGeometry:
     def push(self, radius):
         """(start deg, sweep) for a push at `radius` (push_start, sweep), or (None, why). Computed once per close and
         relative to the hinge (GEOMETRY_CACHE): a wheelchair move shifts the door and the hand's start together."""
-        key = (round(radius, 4), round(self.z - float(self.model.door["door_z"][0]), 4), tuple(np.round(self.quat, 6)), self.container,
-               round(self.deg0, 3), round(self.stop_deg, 3), self.df.sign,
-               tuple(np.round(self.df.n, 6)))
+        key = (
+            round(radius, 4),
+            round(self.z - float(self.model.door["door_z"][0]), 4),
+            tuple(np.round(self.quat, 6)),
+            self.container,
+            round(self.deg0, 3),
+            round(self.stop_deg, 3),
+            self.df.sign,
+            tuple(np.round(self.df.n, 6)),
+        )
         hit = GEOMETRY_CACHE.get(key)
         if hit is None:
             deg0 = self.push_start(radius)
             if deg0 is None:
-                hit = (None, f"at {radius * 100:.0f} cm from the hinge no push start clears the door (open "
-                             f"{self.deg0:.0f} deg) by {F.CLOSE_START_GAP_M * 100:.0f} cm")
+                hit = (
+                    None,
+                    f"at {radius * 100:.0f} cm from the hinge no push start clears the door (open "
+                    f"{self.deg0:.0f} deg) by {F.CLOSE_START_GAP_M * 100:.0f} cm",
+                )
             else:
                 sweep = self.sweep(radius, deg0)
-                hit = ((deg0, [(d, p - self.h) for d, p in sweep]) if sweep is not None
-                       else (None, f"at {radius * 100:.0f} cm from the hinge the push would miss the door"))
+                hit = (
+                    (deg0, [(d, p - self.h) for d, p in sweep])
+                    if sweep is not None
+                    else (None, f"at {radius * 100:.0f} cm from the hinge the push would miss the door")
+                )
             GEOMETRY_CACHE[key] = hit
         if hit[0] is None:
             return hit
@@ -339,20 +358,45 @@ class CloseGeometry:
             a_now = float((np.asarray(p_now) - self.h) @ self.side)
             a0 = float((start - self.h) @ self.side)
             goals += [
-                pl.free(self.h + self.side * a_now + self.fwd * b_safe, q, "back in front of the free edge",
-                        route_world, blend=0.05, hold=lvl, world_label="the open door"),
-                pl.free(self.h + self.side * a0 + self.fwd * b_safe, q, "sideways past the hinge", route_world,
-                        blend=0.05, hold=lvl, world_label="the open door"),
+                pl.free(
+                    self.h + self.side * a_now + self.fwd * b_safe,
+                    q,
+                    "back in front of the free edge",
+                    route_world,
+                    blend=0.05,
+                    hold=lvl,
+                    world_label="the open door",
+                ),
+                pl.free(
+                    self.h + self.side * a0 + self.fwd * b_safe,
+                    q,
+                    "sideways past the hinge",
+                    route_world,
+                    blend=0.05,
+                    hold=lvl,
+                    world_label="the open door",
+                ),
             ]
         if q_reach is not None:  # the arm configuration the search found clear there: cuRobo plans to those joints
-            goals.append(pl.to_joints(q_reach, start, q, "to the push start", route_world, blend=0.02,
-                                      world_label="the open door"))
+            goals.append(
+                pl.to_joints(
+                    q_reach, start, q, "to the push start", route_world, blend=0.02, world_label="the open door"
+                )
+            )
         else:
-            goals.append(pl.free(start, q, "to the push start", route_world, blend=0.02, hold=lvl,
-                                 world_label="the open door"))
+            goals.append(
+                pl.free(start, q, "to the push start", route_world, blend=0.02, hold=lvl, world_label="the open door")
+            )
         # the push: ONE leg (no stop) through its points round the hinge, the hand as it is
-        goals.append(pl.through([(p, q) for _, p in sweep], f"push {sweep[-1][0]:.0f} deg round the hinge",
-                                self.model.cabinet(), hold=lvl, world_label="the cabinet (pushing)"))
+        goals.append(
+            pl.through(
+                [(p, q) for _, p in sweep],
+                f"push {sweep[-1][0]:.0f} deg round the hinge",
+                self.model.cabinet(),
+                hold=lvl,
+                world_label="the cabinet (pushing)",
+            )
+        )
         return goals, dict(radius=radius, start_deg=deg0, d_end=sweep[-1][0], end=end, start=start)
 
     def retreat_goals(self, end):
@@ -361,9 +405,17 @@ class CloseGeometry:
         out = []
         for dist in F.CLOSE_RETREAT_M:
             if dist <= self.s["retreat_dist"] + 1e-9:
-                out.append(pl.line(end - self.fwd * dist, self.quat, f"back out {dist * 100:.0f} cm", world,
-                                   contact=False, hold=pl.HOLD_LEVEL if self.container else pl.HOLD_NONE,
-                                   world_label="the door, further shut"))
+                out.append(
+                    pl.line(
+                        end - self.fwd * dist,
+                        self.quat,
+                        f"back out {dist * 100:.0f} cm",
+                        world,
+                        contact=False,
+                        hold=pl.HOLD_LEVEL if self.container else pl.HOLD_NONE,
+                        world_label="the door, further shut",
+                    )
+                )
         return out
 
 
@@ -488,8 +540,8 @@ _SEEDS = {}
 
 
 def _ik_seeds(fk):
-    """CLOSE_IK_SEEDS fixed configurations spread over the arm's joint range: where its own IK starts from when the close
-    checks a push start is reachable at all."""
+    """CLOSE_IK_SEEDS fixed configurations spread over the arm's joint range: where its own IK starts from when the
+    close checks a push start is reachable at all."""
     if fk not in _SEEDS:
         rng = np.random.default_rng(0)
         lo = np.where(fk.limited, fk.lower, -np.pi)
@@ -547,13 +599,16 @@ def plan_close(planner, door, st, settings, shift, close_to_deg, move=0.0, chair
             raise Refused(f"push_z {settings['push_z']:.3f} is not within the door ({lo:.3f}-{hi:.3f}).")
         heights = [float(settings["push_z"])]
     else:  # the whole door, nearest the hand first
-        heights = [float(z) for z in sorted(np.arange(lo, hi + 1e-9, F.CLOSE_Z_STEP_M), key=lambda z: abs(z - p_now[2]))]
+        heights = [
+            float(z) for z in sorted(np.arange(lo, hi + 1e-9, F.CLOSE_Z_STEP_M), key=lambda z: abs(z - p_now[2]))
+        ]
     geos = {}
     turns = [(yaw, pitch) for pitch in ((0,) if container else F.CLOSE_PITCHES_DEG) for yaw in F.CLOSE_YAWS_DEG]
     for z in heights:
         for yaw, pitch in turns:
-            geos[(z, yaw, pitch)] = CloseGeometry(planned, deg0, hand_turned(quat, yaw, pitch), z, settings,
-                                                  close_to_deg, container)
+            geos[(z, yaw, pitch)] = CloseGeometry(
+                planned, deg0, hand_turned(quat, yaw, pitch), z, settings, close_to_deg, container
+            )
             geos[(z, yaw, pitch)].pitch = pitch
     cands, why = search_starts(planner, geos, heights, turns, st, fridge_boxes, p_now, route_world)
     if not cands:
@@ -578,8 +633,10 @@ def plan_close(planner, door, st, settings, shift, close_to_deg, move=0.0, chair
             if container:  # cuRobo doesn't see the container: its route there, checked here
                 gap = container_route_gap(planner.fk, motion, fridge_boxes, len(goals) - 1)
                 if gap < F.CONTAINER_CLEARANCE_M:
-                    why = (f"{radius * 100:.0f} cm from the hinge, z {z:.3f}, hand turned {yaw:+.0f} deg: the container "
-                           f"would pass {gap * 100:.1f} cm from the door or cabinet on the way to the push")
+                    why = (
+                        f"{radius * 100:.0f} cm from the hinge, z {z:.3f}, hand turned {yaw:+.0f} deg: the container "
+                        f"would pass {gap * 100:.1f} cm from the door or cabinet on the way to the push"
+                    )
                     TRIED.append((move, radius, z, yaw, via, why))
                     continue
             back = None
@@ -595,7 +652,8 @@ def plan_close(planner, door, st, settings, shift, close_to_deg, move=0.0, chair
             info.update(z=z, via=via, deg0=deg0, model=model, yaw=yaw, pitch=getattr(geo, "pitch", 0))
             if not quiet:
                 say(
-                    f"  push {radius * 100:.0f} cm from the hinge at z {z:.3f}, starting at {info['start_deg']:.0f} deg "
+                    f"  push {radius * 100:.0f} cm from the hinge at z {z:.3f}, "
+                    f"starting at {info['start_deg']:.0f} deg "
                     f"round it (the door open {deg0:.0f}), the hand turned {yaw:+.0f} deg, tipped "
                     f"{getattr(geo, 'pitch', 0):.0f} deg down; {info['d_end']:.0f} deg round to the door at "
                     f"{close_to_deg:.0f} deg"
@@ -648,8 +706,10 @@ def run(
     LAST_MOVE_WHY.clear()
     TRIED.clear()
     GEOMETRY_CACHE.clear()
-    settings = {**{k: v for k, v in GOAL_SETTINGS.items() if k not in ("chair_back", "close_to_deg", "chair_moved")},
-                **{k: v for k, v in settings.items() if v is not None or k in ("door_deg", "push_z")}}
+    settings = {
+        **{k: v for k, v in GOAL_SETTINGS.items() if k not in ("chair_back", "close_to_deg", "chair_moved")},
+        **{k: v for k, v in settings.items() if v is not None or k in ("door_deg", "push_z")},
+    }
 
     def task():
         global LAST_CHAIR_BACK, LAST_INFO
@@ -681,11 +741,21 @@ def run(
             shift = np.asarray(chair_back_dir, float) * move
             try:
                 if moved_already:
-                    motion, info = _plan_after_move(planner, door, st, settings, shift, close_to_deg, chair_back_dir,
-                                                    chair_back is None)
+                    motion, info = _plan_after_move(
+                        planner, door, st, settings, shift, close_to_deg, chair_back_dir, chair_back is None
+                    )
                 else:
-                    motion, info = plan_close(planner, door, st, settings, shift, close_to_deg, move=move,
-                                              chair_dir=chair_back_dir, quiet=chair_back is None)
+                    motion, info = plan_close(
+                        planner,
+                        door,
+                        st,
+                        settings,
+                        shift,
+                        close_to_deg,
+                        move=move,
+                        chair_dir=chair_back_dir,
+                        quiet=chair_back is None,
+                    )
             except pl.StartNotClear as e:
                 # the hand starts inside the door (or its handle) as planned with this move: the door moves with the
                 # wheelchair, so another move may clear it -- only the chair's own layers rule
@@ -700,8 +770,9 @@ def run(
                 # from the identical pose -- two different searches. The executed close (chair_moved, or drive_base's
                 # re-plan after driving) makes the after-move plan, so a move is only offered if that plans too.
                 try:
-                    after, after_info = _plan_after_move(planner, door, st, settings, shift, close_to_deg,
-                                                         chair_back_dir, chair_back is None)
+                    after, after_info = _plan_after_move(
+                        planner, door, st, settings, shift, close_to_deg, chair_back_dir, chair_back is None
+                    )
                 except pl.StartNotClear as e:
                     after, after_info = None, str(e)
                 if after is None:
@@ -718,8 +789,10 @@ def run(
             _say_tried()
             if len(moves) > 1:
                 lo, hi = min(moves), max(moves)
-                raise Refused(f"no wheelchair move from {-lo * 100:.0f} cm forward to {hi * 100:.0f} cm back lets the "
-                              f"close plan (last: {why}) -- refusing.")
+                raise Refused(
+                    f"no wheelchair move from {-lo * 100:.0f} cm forward to {hi * 100:.0f} cm back lets the "
+                    f"close plan (last: {why}) -- refusing."
+                )
             raise Refused(f"the close doesn't plan with the wheelchair moved {how_moved(chair_back)}: {why}")
         if len(moves) > 1:
             say(f"wheelchair move for the close: {how_moved(chair_back)} (the smallest that plans)")
@@ -729,9 +802,14 @@ def run(
         LAST_INFO = {k: info.get(k) for k in ("radius", "z", "yaw", "pitch", "start_deg", "d_end")}
         say(f"  planning: {planner.summary()}")
         if not execute:
-            say("(plan only: planned as if the wheelchair has already moved"
-                + (f"; with execute true and drive_base the base drives it {how_moved(chair_back)} first)"
-                   if drive_chair is not None and chair_back else ")"))
+            say(
+                "(plan only: planned as if the wheelchair has already moved"
+                + (
+                    f"; with execute true and drive_base the base drives it {how_moved(chair_back)} first)"
+                    if drive_chair is not None and chair_back
+                    else ")"
+                )
+            )
             return True
         driven = False
         if chair_back and not chair_moved:
@@ -746,8 +824,9 @@ def run(
             shift = np.asarray(chair_back_dir, float) * moved
             say(f"the close planned again against the door shifted by the {moved * 100:.1f} cm the base moved")
             planner.search()  # a new search: the drive doesn't count against it
-            motion, info = _plan_after_move(planner, door, ai.get_state(), settings, shift, close_to_deg,
-                                            chair_back_dir, False)
+            motion, info = _plan_after_move(
+                planner, door, ai.get_state(), settings, shift, close_to_deg, chair_back_dir, False
+            )
             if motion is None:
                 raise Refused(f"after the wheelchair move the close no longer plans ({info}) -- the arm holds.")
         planner.join(motion, info["model"].cabinet())
@@ -769,4 +848,3 @@ def run(
     ok = logged_run("close", ai, log_args or {}, speed, task)
     say(f"\nCLOSE {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")
     return ok
-
