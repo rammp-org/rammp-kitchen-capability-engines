@@ -27,7 +27,7 @@ from capability_engine import sim
 from capability_engine.arm import HOLD_LEVEL, IMPEDANCE, LATEST_WINS, POSITION, SUCCESSFUL
 from capability_engine.driver_state import EStopped
 from capability_engine.driver_state import Refused as ArmRefused
-from rammp_arm import CONTINUOUS, JOINTS, TOOL_Z, _unwrap_from
+from rammp_arm import CONTINUOUS, JOINTS, _unwrap_from
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
@@ -92,6 +92,28 @@ def wrap_deg(rad):
 CONTAINER_REACH = CONTAINER_RADIUS + GRASP_SETBACK + GRASP_DEPTH * np.cos(np.radians(GRASP_PITCH_DEG))  # m, level
 
 
+def _flange_link_index(p, rb):
+    """Resolve the flange link from the driver's fixed arm_tool_frame joint."""
+    joints = [
+        p.getJointInfo(rb.robot_id, i, physicsClientId=rb.physics_client_id)
+        for i in range(p.getNumJoints(rb.robot_id, physicsClientId=rb.physics_client_id))
+    ]
+    matches = [info for info in joints if info[12].decode() == "arm_tool_frame"]
+    if len(matches) != 1:
+        raise Refused("driver URDF must contain exactly one arm_tool_frame link")
+    tool_joint = matches[0]
+    if tool_joint[1].decode() != "arm_tool_frame_joint" or tool_joint[2] != p.JOINT_FIXED:
+        raise Refused("driver URDF arm_tool_frame must be attached by fixed arm_tool_frame_joint")
+    parent_index = int(tool_joint[16])
+    if parent_index < 0:
+        parent_name = p.getBodyInfo(rb.robot_id, physicsClientId=rb.physics_client_id)[0].decode()
+    else:
+        parent_name = p.getJointInfo(rb.robot_id, parent_index, physicsClientId=rb.physics_client_id)[12].decode()
+    if parent_name != "arm_end_effector_link":
+        raise Refused("driver URDF arm_tool_frame_joint parent must be arm_end_effector_link, " f"not {parent_name!r}")
+    return parent_index
+
+
 def container_in_hand(R):
     """The held container with the hand at orientation R (arm_mount): (its box's centre from the tool frame, its
     up axis, its level heading), all in arm_mount. The container is level (up = world up, 10 cm tall), its
@@ -126,7 +148,10 @@ class Model:
         import pybullet as p
 
         self.scene, self.rb = sim.make_sim()
+        if not sim.uses_model_provider():
+            raise Refused("FK model was not loaded from the active arm driver's robot description")
         self.flange_to_tip = float(flange_to_tip)
+        self._flange_link_id = _flange_link_index(p, self.rb)
         info = [p.getJointInfo(self.rb.robot_id, j, physicsClientId=self.rb.physics_client_id) for j in sim.ARM]
         # (lower, upper) in rad; continuous joints come back as lower > upper
         self.limits = [(float(i[8]), float(i[9])) for i in info]
@@ -156,12 +181,17 @@ class Model:
         return self._R_base_inv @ lin, self._R_base_inv @ ang
 
     def fk(self, q, link="tool"):
-        pos, quat = sim.tool_pose(self.scene, self.rb, q)
+        if link == "tool":
+            pos, quat = sim.tool_pose(self.scene, self.rb, q)
+        elif link in ("flange", "tip"):
+            pos, quat = sim.link_pose(self.scene, self.rb, q, self._flange_link_id)
+            if link == "tip":
+                pos = pos + self.flange_to_tip * Rotation.from_quat(quat).apply([0.0, 0.0, 1.0])
+        else:
+            raise ValueError(f"unknown FK link {link!r}")
         T = np.eye(4)
         T[:3, :3] = Rotation.from_quat(quat).as_matrix()
         T[:3, 3] = pos
-        offset = {"tool": 0.0, "flange": -TOOL_Z, "tip": self.flange_to_tip - TOOL_Z}[link]
-        T[:3, 3] += offset * T[:3, 2]
         return T
 
     def limit_violations(self, q):
@@ -628,6 +658,7 @@ TRANSIT_STEP_DEG = 1.0  # the check interpolates cuRobo's transit to at most thi
 LINE_STEP_DEG = 0.5  # ... and the straight lines (in, down, out) to this
 END_TOL, END_TOL_DEG = 0.01, 2.0  # m, deg: the line in ends this close to the target, pointing along the heading
 MODEL_POSE_TOL, MODEL_POSE_TOL_DEG = 0.005, 1.0  # measured flange vs driver-URDF FK before planning/execution
+MODEL_STATE_SKEW_NS = 10_000_000  # joint and flange poses must be stamped within 10 ms
 DESCENT_BELOW_MEET = 0.01  # m, the line down must reach this far below where the box's bottom meets the glass
 # The world: the microwave as one box, from the depth points of SAM3's "microwave" mask.
 MICROWAVE_PCT = (2, 98)  # the microwave's box: these percentiles of its depth points, in oven coordinates
@@ -975,13 +1006,22 @@ def end_pose_error(model, q, target, heading):
     return off, turn
 
 
-def check_flange_model(model, q, measured):
-    """Refuse if the driver's measured flange pose disagrees with the driver-URDF FK at joints q."""
+def check_flange_model(model, joint_state, measured):
+    """Refuse if synchronized driver joints and flange disagree with FK from the active driver URDF."""
+    joint_stamp_ns, ee_stamp_ns = joint_state.stamp_ns, measured.stamp_ns
+    if joint_stamp_ns <= 0 or ee_stamp_ns <= 0:
+        raise Refused("joint / flange state has no valid ROS timestamp; model geometry is unverified")
+    skew_ns = abs(joint_stamp_ns - ee_stamp_ns)
+    if skew_ns > MODEL_STATE_SKEW_NS:
+        raise Refused(
+            f"joint / flange state timestamps differ by {skew_ns / 1e6:.1f} ms "
+            f"(limit {MODEL_STATE_SKEW_NS / 1e6:.0f} ms); model geometry is unverified"
+        )
     if measured.frame_id != rammp_arm.FRAME:
         raise Refused(
             f"the measured flange is in {measured.frame_id!r}, not {rammp_arm.FRAME!r}; model geometry is unverified"
         )
-    expected = model.fk(q, link="flange")
+    expected = model.fk(joint_state.position, link="flange")
     position_error = float(np.linalg.norm(np.asarray(measured.position, dtype=float) - expected[:3, 3]))
     orientation_error = float(
         np.degrees(
@@ -1319,8 +1359,9 @@ def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res
     R0 = model.fk(q0)[:3, :3]
     Qs = np.asarray(plan.q, dtype=float)
     ready(arm)
-    q_now = np.asarray(arm.raw_joints(), dtype=float)
-    check_flange_model(model, q_now, arm.ee_state())
+    joint_state = arm.joint_states()
+    q_now = np.asarray(joint_state.position, dtype=float)
+    check_flange_model(model, joint_state, arm.ee_state())
     off = float(np.max(np.abs(wrap_deg(q_now - q0))))
     if off > START_TOL_DEG:
         raise Refused(f"the arm is {off:.1f} deg from where the plan starts (max {START_TOL_DEG:g}): re-plan")

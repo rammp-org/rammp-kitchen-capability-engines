@@ -18,6 +18,11 @@ class FlangeState:
     frame_id = rammp_arm.FRAME
     position = np.zeros(3)
     orientation = np.array([0.0, 0.0, 0.0, 1.0])
+    stamp_ns = 1_000_000_000
+
+
+def joint_state(stamp_ns=1_000_000_000):
+    return SimpleNamespace(position=np.zeros(7), stamp_ns=stamp_ns)
 
 
 def test_place_refuses_without_full_assembly_collision_geometry():
@@ -206,12 +211,104 @@ def test_joint_trajectory_rejects_non_interior_or_unsorted_stops():
         )
 
 
-def test_flange_pose_must_match_driver_model_before_motion():
+@pytest.mark.parametrize("tool_z", [0.120, 0.134])
+def test_flange_fk_uses_active_urdf_parent_link_not_tool_z(tmp_path, monkeypatch, tool_z):
+    import pybullet as p
+
+    urdf = f"""<robot name="test_arm">
+      <link name="arm_mount"/>
+      <link name="arm_end_effector_link"/>
+      <joint name="arm_end_effector_fixed" type="fixed">
+        <parent link="arm_mount"/><child link="arm_end_effector_link"/>
+      </joint>
+      <link name="arm_tool_frame"/>
+      <joint name="arm_tool_frame_joint" type="fixed">
+        <origin xyz="0 0 {tool_z}" rpy="0 0 0"/>
+        <parent link="arm_end_effector_link"/><child link="arm_tool_frame"/>
+      </joint>
+    </robot>"""
+    path = tmp_path / "driver.urdf"
+    path.write_text(urdf)
+    client = p.connect(p.DIRECT)
+    robot = p.loadURDF(str(path), useFixedBase=True, physicsClientId=client)
+    model = place_motion.Model.__new__(place_motion.Model)
+    model.scene = place_motion.sim.Scene(place_motion.sim.Pose((0, 0, 0), (0, 0, 0, 1)))
+    model.rb = place_motion.sim.SimRobot(robot, 1, client)
+    model._flange_link_id = place_motion._flange_link_index(p, model.rb)
+    model.flange_to_tip = place_motion.FLANGE_TO_TIP
+    monkeypatch.setattr(place_motion.sim, "ARM", [])
+
+    try:
+        assert model.fk([], link="tool")[2, 3] == pytest.approx(tool_z)
+        assert model.fk([], link="flange")[2, 3] == pytest.approx(0.0)
+        assert model.fk([], link="tip")[2, 3] == pytest.approx(place_motion.FLANGE_TO_TIP)
+    finally:
+        p.disconnect(physicsClientId=client)
+
+
+class DriverDescriptionBullet:
+    JOINT_FIXED = 4
+
+    def __init__(self, parent=b"arm_end_effector_link", fixed=True):
+        tool_joint = [0] * 17
+        tool_joint[1] = b"arm_tool_frame_joint"
+        tool_joint[2] = self.JOINT_FIXED if fixed else 0
+        tool_joint[12] = b"arm_tool_frame"
+        tool_joint[16] = 0
+        flange_joint = [0] * 17
+        flange_joint[12] = parent
+        self.joints = [flange_joint, tool_joint]
+
+    def getNumJoints(self, *_args, **_kwargs):
+        return len(self.joints)
+
+    def getJointInfo(self, _robot_id, index, **_kwargs):
+        return self.joints[index]
+
+    def getBodyInfo(self, *_args, **_kwargs):
+        return (b"robot_root", b"robot")
+
+
+def test_flange_link_resolves_from_confirmed_driver_description():
+    bullet = DriverDescriptionBullet()
+    robot = SimpleNamespace(robot_id=1, physics_client_id=0)
+    assert place_motion._flange_link_index(bullet, robot) == 0
+
+
+@pytest.mark.parametrize(
+    ("bullet", "message"),
+    [
+        (DriverDescriptionBullet(parent=b"wrong_link"), "parent must be arm_end_effector_link"),
+        (DriverDescriptionBullet(fixed=False), "must be attached by fixed"),
+    ],
+)
+def test_flange_link_refuses_incorrect_driver_frame_definition(bullet, message):
+    with pytest.raises(place_motion.Refused, match=message):
+        place_motion._flange_link_index(bullet, SimpleNamespace(robot_id=1, physics_client_id=0))
+
+
+def test_flange_pose_must_match_synchronized_driver_state():
     measured = FlangeState()
-    position_error, orientation_error = place_motion.check_flange_model(Model(), [0.0] * 7, measured)
+    position_error, orientation_error = place_motion.check_flange_model(Model(), joint_state(), measured)
     assert position_error == pytest.approx(0.0)
     assert orientation_error == pytest.approx(0.0)
 
     measured.position = np.array([0.01, 0.0, 0.0])
     with pytest.raises(place_motion.Refused, match="URDF FK mismatch"):
-        place_motion.check_flange_model(Model(), [0.0] * 7, measured)
+        place_motion.check_flange_model(Model(), joint_state(), measured)
+
+
+def test_flange_check_fails_closed_for_unsynchronized_or_missing_timestamps():
+    measured = FlangeState()
+    with pytest.raises(place_motion.Refused, match="timestamps differ"):
+        place_motion.check_flange_model(Model(), joint_state(measured.stamp_ns + 10_000_001), measured)
+
+    with pytest.raises(place_motion.Refused, match="no valid ROS timestamp"):
+        place_motion.check_flange_model(Model(), joint_state(0), measured)
+
+
+def test_flange_check_fails_closed_for_wrong_ee_frame():
+    measured = FlangeState()
+    measured.frame_id = "arm_base_link"
+    with pytest.raises(place_motion.Refused, match="not 'arm_mount'"):
+        place_motion.check_flange_model(Model(), joint_state(), measured)

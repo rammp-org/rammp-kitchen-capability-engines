@@ -489,8 +489,9 @@ class Capability(CapabilityEngine):
 
     def _place(self, model, execute, ctx, log):
         c = self.cfg
-        q0 = np.asarray(self.arm.raw_joints(), dtype=float)
-        place_motion.check_flange_model(model, q0, self.arm.ee_state())
+        joint_state = self.arm.joint_states()
+        q0 = np.asarray(joint_state.position, dtype=float)
+        place_motion.check_flange_model(model, joint_state, self.arm.ee_state())
         oven, loc, boxes, world, world_info, stamp = self._oven_world(ctx, log)
         checker = place_motion.Checker(model, boxes)
         try:

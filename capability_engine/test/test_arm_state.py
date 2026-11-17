@@ -88,7 +88,10 @@ def test_state_reads_are_dataclasses_with_age(arm_env):
         value = read()
         assert dataclasses.is_dataclass(value), read.__name__
         assert value.age_s >= 0.0, read.__name__
-    assert arm.ee_state().frame_id == "arm_mount"
+    joints, flange = arm.joint_states(), arm.ee_state()
+    assert joints.stamp_ns > 0
+    assert flange.stamp_ns > 0
+    assert flange.frame_id == "arm_mount"
     assert arm.stream_status().open is False
     np.testing.assert_allclose(arm.raw_joints(), [0.1, 0.2, 3.3, -1.0, 0.0, 0.5, -3.2])
 

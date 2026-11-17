@@ -86,6 +86,8 @@ tilt it has at the start until the release.
 **Safety hold (2026-11-17):** non-mock `place` execution requests currently refuse. Dry runs remain
 available for perception, IK planning and trajectory generation, and report kinematic feasibility
 separately from collision safety (`insertion_collision_status: UNVALIDATED`); they never command motion.
+Before planning, the driver's flange pose is compared with FK from the same active driver URDF, and
+the joint and flange messages must have valid timestamps within 10 ms.
 The only available microwave collision model is a depth-derived outer box used for the side shift and
 cuRobo transit; it does not establish insertion clearance for the held container, all gripper links, the
 wrist camera, the opening rim, open door, turntable glass, side walls, ceiling or back wall. The
