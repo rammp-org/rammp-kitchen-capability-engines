@@ -10,12 +10,13 @@
 # torch/torchvision from your requirements (the base ships the Jetson wheels).
 # arm64 only.
 #
-# 2.1.0-jp6 carries rammp-interfaces-ros2 v2.0.0 (arm, base, common,
-# orchestrator, perception, peripheral, ui_bridge). Its arm messages are the
-# arm driver's (v2.0.0 only added SetContactThresholds and CONTACT_STOP to the
-# 73e7ed1716bf the nightly driver builds on), so self.arm speaks them exactly.
+# 2.2.0-jp6 carries rammp-interfaces-ros2 v2.1.0, all seven packages (arm, base,
+# common, orchestrator, perception, peripheral, ui_bridge), with the ExecuteAction
+# token and SetEngineOverlayVisible capability_engine uses. Its arm messages are the
+# arm driver's (since 73e7ed1716bf, the nightly driver's, only SetContactThresholds
+# and CONTACT_STOP were added), so self.arm speaks them exactly.
 # rammp_curobo_interfaces it does not carry.
-FROM ghcr.io/rammp-org/rammp-base:2.1.0-jp6
+FROM ghcr.io/rammp-org/rammp-base:2.2.0-jp6
 
 WORKDIR /module_ws
 
@@ -31,13 +32,6 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 # action) alongside the packages below.
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
-
-# rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages, see
-# CapabilityEngine's Context.update_user_panel/poll_ui_event/publish_overlay_image):
-# the base's v2.0.0 copy predates SetEngineOverlayVisible, so build it from a pinned
-# rammp-interfaces-ros2 commit; this overlay shadows the base's.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
-RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
 
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/example/ src/example/
