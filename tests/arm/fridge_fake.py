@@ -1,11 +1,14 @@
-"""A CPU stand-in for self.arm's cuRobo planner and driver, for the fridge's planning tests (no GPU in this image).
+"""A CPU stand-in for self.arm's cuRobo planner and driver, for the fridge's planning tests (no GPU
+in this image).
 
-FakeCurobo answers the calls the fridge's planning makes, on the flatbot model these tests run on: plan_to_pose solves
-the goal with the node's own local IK (kinematics.Chain) and goes there in a straight joint-space line; blend joins the
-legs end to end; set_world records the world it is given; execute_joint_trajectory jumps to the trajectory's end;
-gripper records its call. It checks NO collisions -- that is cuRobo's, checked in data/curobo_sim's GPU harness: these
-tests cover the control flow, the worlds pushed, the trajectories sent and the files written. `unreachable(pos, quat,
-world)` lets a test say which goals cuRobo finds no arm configuration for. Nothing here can reach a real arm.
+FakeCurobo answers the calls the fridge's planning makes, on the flatbot model these tests run on:
+plan_to_pose solves the goal with the node's own local IK (kinematics.Chain) and goes there in a
+straight joint-space line; blend joins the legs end to end; set_world records the world it is given;
+execute_joint_trajectory jumps to the trajectory's end; gripper records its call. It checks NO
+collisions -- that is cuRobo's, checked in data/curobo_sim's GPU harness: these tests cover the
+control flow, the worlds pushed, the trajectories sent and the files written. `unreachable(pos,
+quat, world)` lets a test say which goals cuRobo finds no arm configuration for. Nothing here can
+reach a real arm.
 """
 
 import json
@@ -47,8 +50,9 @@ class Plan:
 
 
 def door_is_open(obstacles):
-    """True when `obstacles` (a pushed world) holds a door slab turned off the cabinet (open), wherever it is: also
-    one shifted by a planned wheelchair move (door_where_it_stands tells them apart)."""
+    """True when `obstacles` (a pushed world) holds a door slab turned off the cabinet (open),
+    wherever it is: also one shifted by a planned wheelchair move (door_where_it_stands tells them
+    apart)."""
     by = {b["name"]: b for b in obstacles}
     if "door" not in by or "body" not in by:
         return False
@@ -56,9 +60,10 @@ def door_is_open(obstacles):
 
 
 def door_where_it_stands(obstacles):
-    """True when `obstacles` holds the open door where the door file puts it: not shifted by a wheelchair move. The
-    close plans against the door shifted by a move under the same box names (the after-move check, 11-12), so a fake
-    cuRobo that means "the door where it stands now is in the way" must check where the door is, not its name."""
+    """True when `obstacles` holds the open door where the door file puts it: not shifted by a
+    wheelchair move. The close plans against the door shifted by a move under the same box names
+    (the after-move check, 11-12), so a fake cuRobo that means "the door where it stands now is in
+    the way" must check where the door is, not its name."""
     if not door_is_open(obstacles) or not dc.DOOR_FILE.exists():
         return False
     door = json.loads(dc.DOOR_FILE.read_text())
@@ -114,8 +119,9 @@ class FakeCurobo:
             )
         if self.unreachable(np.asarray(pos, float), np.asarray(quat, float), obstacles):
             return Plan(False, IK_FAIL)
-        if hold:  # as cuRobo keeps a hold (HOLD_LEVEL: the tilt) all the way: along a straight tool path, the hand
-            # turning only from the start's orientation to the goal's (about vertical, for a level hold)
+        if hold:  # as cuRobo keeps a hold (HOLD_LEVEL: the tilt) all the way: along a straight
+            # tool path, the hand turning only from the start's orientation to the goal's (about
+            # vertical, for a level hold)
             p0, q0 = self.fk.pose(start_joints)
             path, _ = planning.path_poses(planning.Goal(pos, quat, "", [], path="line"), p0, q0)
             qs, q = [], np.asarray(start_joints, float)
@@ -130,8 +136,9 @@ class FakeCurobo:
         return Plan(False, IK_FAIL) if q is None else self._to(start_joints, q)
 
     def plan_to_joints(self, q_goal, start_joints):
-        # cuRobo checks a joint goal's start and the goal itself in its world as it does a pose goal's: the same hooks
-        # (a test's unreachable / start_blocked, or its own plan_to_pose standing in for cuRobo) apply
+        # cuRobo checks a joint goal's start and the goal itself in its world as it does a pose
+        # goal's: the same hooks (a test's unreachable / start_blocked, or its own plan_to_pose
+        # standing in for cuRobo) apply
         pos, quat = self.fk.pose(np.asarray(q_goal, float))
         if "plan_to_pose" in self.__dict__:  # a test's stand-in
             res = self.plan_to_pose(pos, quat, start_joints)
@@ -183,7 +190,8 @@ class FakeCurobo:
 
 
 def _events_now(events, on_error):
-    """planning._timed_events for the tests: every event at once, in order (the fake arm takes no time)."""
+    """planning._timed_events for the tests: every event at once, in order (the fake arm takes no
+    time)."""
     for _, fn in sorted(events, key=lambda e: e[0]):
         fn()
     return types.SimpleNamespace(join=lambda timeout=None: None, cancel=lambda: None)

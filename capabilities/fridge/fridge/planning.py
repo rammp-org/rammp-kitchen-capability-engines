@@ -252,7 +252,8 @@ class Planner:
         if not plan.success:
             if from_arm and "START_STATE" in str(plan.message):
                 raise StartNotClear(
-                    f"the arm's start pose is not clear in cuRobo's world with {goal.world_label or 'the fridge'} in it: "
+                    "the arm's start pose is not clear in cuRobo's world with "
+                    f"{goal.world_label or 'the fridge'} in it: "
                     f"{' '.join(str(plan.message).split())} -- no plan can start from it. Move the arm out first (e.g. "
                     "the go_to_start action: the web app's Fridge pose)"
                 )

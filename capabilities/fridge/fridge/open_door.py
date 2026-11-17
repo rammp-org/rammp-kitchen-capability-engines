@@ -14,8 +14,8 @@ GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs onl
   full pull's way round the door, the placement advice and the close are the front grasp's code;
 - if no grasp gives a whole open, each is tried again from other arm configurations (side_configs, SIDE_CONFIGS).
 
-1. Detect: door_common's detection (two agreeing looks), with this fridge's values (`configure`): the handle from SAM 3's
-   mask on the detection camera, the door's direction from the printed handle's model fit to the mask's depth
+1. Detect: door_common's detection (two agreeing looks), with this fridge's values (`configure`): the handle from
+   SAM 3's mask on the detection camera, the door's direction from the printed handle's model fit to the mask's depth
    (`door_normal: handle_model`, door_normal.py, the side grasp's method). The hinge is measured from the handle
    (hinge_along_door_m, ...). The grasp is at the middle of the bar, or `grasp_offset_m` above it (below if
    negative), within the measured bar (`set_grasp_offset`).
@@ -32,7 +32,8 @@ GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs onl
      the handle first.
 3. Execute, each motion one trajectory: the approach; the swing under the driver's stiffest joint impedance, the
    gripper closing as it starts; at the swing's end, the arm stopped and the door with it, the gripper opens (its
-   reported position must say open); what follows, planned again from where that leaves the arm, as one more trajectory under impedance.
+   reported position must say open); what follows, planned again from where that leaves the arm, as one more trajectory
+   under impedance.
 
 Refusals raise door_common.common.Refused: the arm holds where it is.
 """
@@ -460,9 +461,9 @@ def hand_world(model, deg):
 def swing_goals(model, cand, swing, lag=0.0):
     """Holding the handle: ONE leg round the hinge with the door to exactly `swing` deg, the hand turning with it,
     ending at rest there (the gripper opens only after: user, 11-09). Points every SWING_POINT_DEG along the arc (local
-    IK through them). The side grasp: the hand turns about the bar `lag` deg less than the door (side_grasp.swing_poses),
-    and each step is checked against the door where it is then, too (side_grasp.swing_worlds: its arm runs alongside
-    the door). Returns [goal]."""
+    IK through them). The side grasp: the hand turns about the bar `lag` deg less than the door
+    (side_grasp.swing_poses), and each step is checked against the door where it is then, too (side_grasp.swing_worlds:
+    its arm runs alongside the door). Returns [goal]."""
     df = model.df
     n = max(2, int(np.ceil(swing / SWING_POINT_DEG)))
     degs = [swing * k / n for k in range(1, n + 1)]

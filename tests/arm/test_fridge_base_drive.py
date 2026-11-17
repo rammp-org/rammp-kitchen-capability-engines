@@ -1,6 +1,7 @@
 """fridge.base_drive: the fixed-distance wheelchair move, and the open and close driving the base
-(`drive_base`) on the fake planner (fridge_fake.py). A fake base and a fake clock stand in for self.base and time;
-one test drives the engine's BaseInterface in mock mode. Nothing here can reach a real base or arm."""
+(`drive_base`) on the fake planner (fridge_fake.py). A fake base and a fake clock stand in for
+self.base and time; one test drives the engine's BaseInterface in mock mode. Nothing here can reach
+a real base or arm."""
 
 import json
 import math
@@ -290,13 +291,15 @@ def _driver(clock, arm, fail_at_s=None):
 
 
 def _needs_a_move(pos, quat, obstacles):
-    """cuRobo reaches nothing near the open door where it stands: only once the wheelchair has moved."""
+    """cuRobo reaches nothing near the open door where it stands: only once the wheelchair has
+    moved."""
     return isinstance(obstacles, list) and door_is_open(obstacles)
 
 
 def _needs_a_close_move(pos, quat, obstacles):
-    """_needs_a_move for the close, which also plans against the door shifted by a move under the same box names (its
-    after-move check): blocked only by the door where it stands, by its position."""
+    """_needs_a_move for the close, which also plans against the door shifted by a move under the
+    same box names (its after-move check): blocked only by the door where it stands, by its
+    position."""
     return isinstance(obstacles, list) and door_where_it_stands(obstacles)
 
 

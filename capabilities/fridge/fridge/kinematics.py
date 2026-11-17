@@ -203,7 +203,8 @@ class Chain:
             if it == iters:
                 return (
                     None,
-                    f"local IK did not converge ({np.linalg.norm(e[:3]) * 1000:.1f} mm, {np.degrees(np.linalg.norm(e[3:])):.1f} deg off)",
+                    f"local IK did not converge ({np.linalg.norm(e[:3]) * 1000:.1f} mm, "
+                    f"{np.degrees(np.linalg.norm(e[3:])):.1f} deg off)",
                 )
             J = self.jacobian(q)
             Jp = J.T @ np.linalg.inv(J @ J.T + IK_DAMP**2 * np.eye(6))

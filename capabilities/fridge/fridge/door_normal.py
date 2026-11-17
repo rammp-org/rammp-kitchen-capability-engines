@@ -434,7 +434,8 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
         )
     if res.inlier_fraction < FIT_MIN_INLIER_FRACTION:
         problems.append(
-            f"only {res.inlier_fraction * 100:.0f}% of the footprint's points within {FIT_INLIER_M * noise * 1000:.1f} mm of "
+            f"only {res.inlier_fraction * 100:.0f}% of the footprint's points "
+            f"within {FIT_INLIER_M * noise * 1000:.1f} mm of "
             f"the model (needs {FIT_MIN_INLIER_FRACTION * 100:.0f}%)"
         )
     if res.rms_m > FIT_MAX_RMS_M * noise:

@@ -1,6 +1,6 @@
 """The push-open, the open's default: after the PUSH_OPEN_PULL_DEG pull, stopped there, and the release (the gripper
-opened with the hand still), off the handle, round the door's free edge, and the door pushed on to PUSH_OPEN_TO_DEG with the
-side of the hand -- one trajectory under joint impedance, the wheelchair moved first if the push needs it.
+opened with the hand still), off the handle, round the door's free edge, and the door pushed on to PUSH_OPEN_TO_DEG with
+the side of the hand -- one trajectory under joint impedance, the wheelchair moved first if the push needs it.
 
 The motion (planning.py), planned with the open before anything moves and again from where the release leaves the arm:
 1. Straight back off the handle BACK_OFF_M (local IK; the door with a window round the hand in cuRobo's check).
@@ -248,10 +248,10 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
 
 def push_caps(degs):
     """The push leg's speed caps (fractions of planning.LOCAL_JOINT_SPEED) at the door angles `degs`: 1 until the last
-    PUSH_EASE_DEG, then at most PUSH_END_JOINT_SPEED rad/s at the speed the run's contact legs get (planning.Planner.join
-    scales a local leg by rammp_arm's joint and contact speeds, which the goal's `speed` has scaled already: this is
-    planned inside the run). The leg ends at rest either way; this makes how slowly it gets there the same at any
-    speed."""
+    PUSH_EASE_DEG, then at most PUSH_END_JOINT_SPEED rad/s at the speed the run's contact legs get
+    (planning.Planner.join scales a local leg by rammp_arm's joint and contact speeds, which the goal's `speed` has
+    scaled already: this is planned inside the run). The leg ends at rest either way; this makes how slowly it gets
+    there the same at any speed."""
     import rammp_arm
 
     scale = rammp_arm.JOINT_SPEED * rammp_arm.contact_speed_scale() / pl.LOCAL_JOINT_SPEED
@@ -394,7 +394,10 @@ class PushOpen:
         global NEXT_STEP
         move = self.chair_move or 0.0
         if not move:
-            NEXT_STEP = "Plan OK: after the pull it lets go, backs off the handle and pushes the door open (no wheelchair move)."
+            NEXT_STEP = (
+                "Plan OK: after the pull it lets go, backs off the handle and pushes the door open "
+                "(no wheelchair move)."
+            )
         elif drive_chair is not None:
             NEXT_STEP = (
                 f"Plan OK: after the pull it lets go, backs off the handle, DRIVES THE BASE {_how(move)} "
@@ -410,8 +413,8 @@ class PushOpen:
 
     def execute(self, ai, planner, drive_chair=None):
         """After the swing (stopped at its angle) and the release (the gripper opened with the hand still): planned
-        again from where the arm is (else the plan checked before the swing, if the arm is where it starts), then off the
-        bar, round the door and the push as ONE motion under joint impedance. With a wheelchair move: the back-off,
+        again from where the arm is (else the plan checked before the swing, if the arm is where it starts), then off
+        the bar, round the door and the push as ONE motion under joint impedance. With a wheelchair move: the back-off,
         then the move (driven, or asked for)."""
         global NEXT_STEP, NEXT_MOVE
         say("\n===== off the handle, round the door, push further open =====")

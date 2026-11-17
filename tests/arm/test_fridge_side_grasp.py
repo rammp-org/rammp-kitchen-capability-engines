@@ -131,7 +131,8 @@ def test_the_swing_carries_the_bar_round_and_checks_the_arm_against_the_door(sid
         turn = np.degrees((R.from_quat(quat) * R.from_quat(cand["quat"]).inv()).magnitude())
         assert turn == pytest.approx(d - 20.0 * d / 60.0, abs=1e-6)  # 20 deg behind at the end
     # each stretch of the swing against the door where it was when the stretch started: never ahead
-    # of the hand, at most SIDE_SWING_CHECK_DEG behind it; one world (one load, one check) per stretch
+    # of the hand, at most SIDE_SWING_CHECK_DEG behind it; one world (one load, one check) per
+    # stretch
     behind = []
     for (label, _), d in zip(goal.segment_worlds, degs, strict=True):
         at = float(label.split("the door at ")[1].split(" deg")[0])

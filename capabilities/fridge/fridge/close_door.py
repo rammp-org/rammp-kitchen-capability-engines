@@ -1,7 +1,8 @@
 """Close the fridge: push the open door most of the way shut with the hand, which may hold a container -- no grasp.
 
 The motion -- holding the container, every leg holds the hand's tilt (HOLD_LEVEL: it never tips it; turning about
-vertical is free); with an empty hand the route may tilt it (cuRobo found no level route to most push starts, 11-10 sim):
+vertical is free); with an empty hand the route may tilt it (cuRobo found no level route to most push starts, 11-10
+sim):
 1. To a push start (a free leg, cuRobo's route): behind the door -- round the hinge past the open door (where the door
    file says it is: the push-open leaves it at PUSH_OPEN_TO_DEG), clear of it there by CLOSE_START_GAP_M -- at a
    distance from the hinge out near the free edge (CLOSE_RADII_FROM_EDGE_M, furthest first: leverage), at a height
@@ -66,7 +67,8 @@ def _plan_after_move(planner, door, st, settings, shift, close_to_deg, chair_dir
     """The close once the chair has moved (`shift`; what an executed close plans), planned afresh up to
     CLOSE_PLAN_ATTEMPTS times. cuRobo's routes are random and it doesn't see the held container, so the same push start
     can carry the container through the door on one route and round it on the next (11-12: two identical dry runs, one
-    refused at -9 cm, one planned). Each attempt forgets the legs the last one cached, or it would get the same answer."""
+    refused at -9 cm, one planned). Each attempt forgets the legs the last one cached, or it would get the same
+    answer."""
     why = ""
     for k in range(F.CLOSE_PLAN_ATTEMPTS):
         if k:
@@ -256,8 +258,8 @@ class CloseGeometry:
         """The push's points [(deg turned round the hinge, pos)] from the start (`radius`, `deg0`) toward shut until the
         hand or the container touches the door at stop_deg (its handle included); None if it never would. The push
         spirals in from `radius` to CLOSE_PUSH_END_RADIUS_M (if further out) as it turns: out at the edge while the
-        door is wide open (leverage), nearer the hinge -- and the arm -- by the end (a whole ~100 deg at the edge ran the
-        arm into its joint limits, 11-10 sim); anywhere on the door keeps it pushed."""
+        door is wide open (leverage), nearer the hinge -- and the arm -- by the end (a whole ~100 deg at the edge ran
+        the arm into its joint limits, 11-10 sim); anywhere on the door keeps it pushed."""
         p0 = self.at(radius, deg0)
         v0 = p0 - self.h
         r0 = float(np.linalg.norm(v0[:2]))
@@ -538,8 +540,8 @@ _SEEDS = {}
 
 
 def _ik_seeds(fk):
-    """CLOSE_IK_SEEDS fixed configurations spread over the arm's joint range: where its own IK starts from when the close
-    checks a push start is reachable at all."""
+    """CLOSE_IK_SEEDS fixed configurations spread over the arm's joint range: where its own IK starts from when the
+    close checks a push start is reachable at all."""
     if fk not in _SEEDS:
         rng = np.random.default_rng(0)
         lo = np.where(fk.limited, fk.lower, -np.pi)
@@ -650,7 +652,8 @@ def plan_close(planner, door, st, settings, shift, close_to_deg, move=0.0, chair
             info.update(z=z, via=via, deg0=deg0, model=model, yaw=yaw, pitch=getattr(geo, "pitch", 0))
             if not quiet:
                 say(
-                    f"  push {radius * 100:.0f} cm from the hinge at z {z:.3f}, starting at {info['start_deg']:.0f} deg "
+                    f"  push {radius * 100:.0f} cm from the hinge at z {z:.3f}, "
+                    f"starting at {info['start_deg']:.0f} deg "
                     f"round it (the door open {deg0:.0f}), the hand turned {yaw:+.0f} deg, tipped "
                     f"{getattr(geo, 'pitch', 0):.0f} deg down; {info['d_end']:.0f} deg round to the door at "
                     f"{close_to_deg:.0f} deg"
