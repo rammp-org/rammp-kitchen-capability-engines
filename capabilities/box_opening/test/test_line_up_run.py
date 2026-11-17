@@ -603,6 +603,248 @@ def test_with_a_selection_a_wrist_fix_the_run_would_not_take_is_not_said_either(
     assert len([ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]) == 3
 
 
+# -- in the middle of a run: no press plans from where the chair stands (--guide) -----------------------
+class Pipe:
+    """The engine's end of the run's stdin: lines as they are written, the pipe open until close()."""
+
+    def __init__(self):
+        import queue
+
+        self._q = queue.Queue()
+
+    def say(self, msg):
+        self._q.put(json.dumps(msg) + "\n")
+
+    def close(self):
+        self._q.put(None)
+
+    def __iter__(self):
+        while True:
+            line = self._q.get()
+            if line is None:
+                return
+            yield line
+
+
+def _until(what, s=2.0):
+    t0 = time.monotonic()
+    while not what() and time.monotonic() - t0 < s:
+        time.sleep(0.005)
+    return what()
+
+
+def test_one_ear_hears_every_line_up_of_a_run_a_go_each_round():
+    """A run may be lined up before its first move and again wherever no press plans: one listener for the
+    run's life. As first written it ended at its first go, so a second line-up heard nothing and watched
+    for ever. again() opens the next round with the go that let the run on forgotten."""
+    pipe = Pipe()
+    ear = press_demo.LineUpEar(pipe)
+    assert not ear.heard()
+    pipe.say({"go": True})
+    assert _until(ear.heard) and ear.go and not ear.stop
+    ear.again()  # the run flew on, found no press, and asks to be guided
+    assert not ear.heard() and not ear.go
+    pipe.say({"go": True})
+    assert _until(ear.heard) and ear.go
+    ear.again()
+    pipe.say({"stop": True})
+    assert _until(ear.heard) and ear.stop and not ear.go
+    # an engine that is gone has not said go: the pipe closed after a go is the NEXT round's stop
+    pipe = Pipe()
+    ear = press_demo.LineUpEar(pipe)
+    pipe.say({"go": True})
+    assert _until(ear.heard) and ear.go
+    pipe.close()
+    time.sleep(0.05)
+    assert ear.go and not ear.stop  # the run it let go flies on, as it did
+    ear.again()
+    assert ear.heard() and ear.stop and not ear.go
+
+
+def _guiding(w, ear, place=(0.712, -0.331, 0.2945), why="no reach-out press plans (30 deg: the slide in)", **kw):
+    """press_demo.guide_chair on `lined`'s arm: ((turned, held) or the exit code, its lines, the runner)."""
+    out, runner = io.StringIO(), Runner()
+    args = Namespace(wrist_first=kw.pop("wrist_first", True), execute=True, instance_id=None, wrist_alone=False)
+    watcher = SimpleNamespace(table_z=0.2064, roi=(1, 2, 3, 4))
+    w.watcher = watcher
+    try:
+        got = press_demo.guide_chair(
+            None, w.ctx, w.cfg, runner, watcher, args, kw.pop("locator", None), 0.05, place, why, 1, ear, out=out
+        )
+    except SystemExit as e:
+        got = e.code
+    lines = [json.loads(ln[3:]) for ln in out.getvalue().splitlines() if ln.startswith("@@ ")]
+    return got, lines, runner
+
+
+@pytest.fixture
+def guided(lined, monkeypatch):
+    """`lined`, as a run stands where it found no press: the wrist where its own look left it, the scene as
+    its cameras measured it from there (the table, the counter's edges kept out, the box's pose)."""
+    from box_opening.runtime import approach
+
+    lined.ctx.client.live = [v + (0.4 if j in sv.FRONT_JOINTS else 0.02) for j, v in enumerate(HOME)]
+    lined.ctx.cpose, lined.ctx.counter_boxes = object(), {"look": [object()]}
+    lined.ctx.survey_clouds, lined.ctx.wrist_far, lined.ctx.home_ahead = [object()], [(1.0, 0.0, 0.3)], [object()]
+    lined.ctx.worlds.table_top_z, lined.ctx.worlds.table_extent = 0.2064, (0.53, 1.16, -0.83, -0.02)
+    lined.obstacles = []
+    monkeypatch.setattr(approach, "set_obstacles", lambda boxes: lined.obstacles.append(list(boxes)))
+    lined.homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: lined.homes.append(why) or True)
+    return lined
+
+
+class Round(Ear):
+    """An Ear that is asked for the next round first, as guide_chair asks it."""
+
+    def __init__(self, n, go):
+        super().__init__(n, go)
+        self.rounds = 0
+
+    def again(self):
+        self.rounds += 1
+        self.go = self.stop = False
+        self.asks = 0
+
+
+def test_a_run_with_no_press_from_where_the_chair_stands_asks_to_be_guided_and_watches_until_the_go(guided):
+    """Run 2 of 2026-11-17 ended here. Now: the engine is asked first, with where the box stood and why no
+    press planned there; then the run watches exactly as a line-up's watch does (the wrist's fixes said), and
+    at the go it goes on from where the wrist stands. Nothing but the wrist moved."""
+    ear = Round(3, go=True)
+    got, lines, runner = _guiding(guided, ear)
+    assert got == (True, True) and ear.rounds == 1  # (wrist_turned, wrist_held): the look after it is short
+    assert lines[0] == {
+        "guide": {"n": 1, "box": [0.712, -0.331, 0.2945], "why": "no reach-out press plans (30 deg: the slide in)"}
+    }
+    assert lines[1] == {"robot": {"urdf": str(guided.urdf), "root": "arm_mount"}}
+    assert [ln["fix"]["by"] for ln in lines[2:]] == ["wrist"] * 3
+    assert guided.watched == [list(HOME)] and guided.rested == [] and guided.homes == [] and runner.gripper == []
+    assert ("guide", {"n": 1, "box": [0.712, -0.331, 0.2945], "why": lines[0]["guide"]["why"]}) in runner.notes
+
+
+def test_what_the_cameras_measured_before_the_chair_moves_is_forgotten(guided):
+    """The owner's rule: the table's height and extent, what stands on it, only from the cameras, each time.
+    The run measured them from where the chair stood. After the move they are true of nowhere: the table's
+    extent is in the arm's frame, and the counter's edges the arm is held out of would stand in the air."""
+    _guiding(guided, Round(2, go=True))
+    ctx = guided.ctx
+    assert ctx.cpose is None and ctx.counter_boxes is None and ctx.survey_clouds is None
+    assert ctx.wrist_far is None and ctx.home_ahead is None
+    assert guided.obstacles == [[]]  # the body check's run-time boxes cleared
+    assert ctx.worlds.table_top_z is None and ctx.worlds.table_extent is None
+    assert guided.watcher.table_z is None and guided.watcher.roi is None
+
+
+def test_a_table_the_run_measured_is_no_table_once_the_chair_moves_on_a_world_that_names_none():
+    """flatbot's world file names no table: the run adopts the one its first fix measured
+    (press_demo.adopt_scene_table), which adopts nothing while a table is known. Forgotten, the look after
+    the move adopts its own; left in place, that look kept the height and extent measured from where the
+    chair had stood."""
+    from box_opening.worlds import WorldStore
+
+    worlds = WorldStore("capabilities/box_opening/config/world_flatbot.yaml")
+    assert worlds.table_top_z is None
+    ctx = SimpleNamespace(mission_frames=None)
+    watcher = SimpleNamespace(table_z=None, roi=None)
+    fix = SimpleNamespace(table_z_scene=0.2064, table_extent=(0.53, 1.16, -0.83, -0.02))
+    press_demo.adopt_scene_table(ctx, worlds, watcher, fix)
+    assert worlds.table_top_z == 0.2064 and worlds.table_extent == (0.53, 1.16, -0.83, -0.02)
+    moved = SimpleNamespace(table_z_scene=0.2110, table_extent=(0.40, 1.02, -0.70, 0.10))
+    press_demo.adopt_scene_table(ctx, worlds, watcher, moved)
+    assert worlds.table_top_z == 0.2064  # (kept: this is why it must be forgotten)
+    from box_opening.runtime import approach
+
+    real, approach.set_obstacles = approach.set_obstacles, lambda boxes: None
+    try:
+        press_demo.forget_scene(ctx, worlds, watcher)
+    finally:
+        approach.set_obstacles = real
+    assert worlds.table_top_z is None and worlds.table_extent is None and watcher.table_z is None
+    press_demo.adopt_scene_table(ctx, worlds, watcher, moved)
+    assert worlds.table_top_z == 0.2110 and worlds.table_extent == (0.40, 1.02, -0.70, 0.10)
+    assert watcher.table_z == 0.2110
+
+
+def test_a_stop_while_it_is_guided_turns_the_wrist_back_and_ends_the_run_nothing_pressed(guided):
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+
+    got, _lines, runner = _guiding(guided, Round(2, go=False))
+    assert got == EXIT_NOT_LINED_UP == 5 and guided.rested == [list(HOME)]
+    assert runner.notes[-1] == ("line_up", {"stage": "stop", "wrist": True})
+
+
+def test_an_engine_with_no_time_to_guide_still_has_the_wrist_the_look_turned_put_back(guided):
+    """The stop comes before the watch's own turn (the orchestrator's 120 s left no time): the watch turns
+    nothing, and the wrist the run's own look left turned is turned back to rest all the same. Without it the
+    run ended as run 2 did: the arm where the look left it."""
+    from box_opening.runtime.abort import EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
+
+    guided.watch = ("none", "stopped before the turn")
+    got, _lines, _runner = _guiding(guided, Round(0, go=False))
+    assert got == EXIT_NOT_LINED_UP and guided.rested == [list(HOME)]
+    # ... and one that does not turn back is the arm holding, as after any line-up
+    import box_opening.tasks.survey as survey
+
+    real = survey.rest_wrist
+    survey.rest_wrist = lambda ctx, runner, execute, rest=None: ("stopped", "aborted")
+    try:
+        got, _lines, _runner = _guiding(guided, Round(0, go=False))
+    finally:
+        survey.rest_wrist = real
+    assert got == EXIT_LINE_UP_HOLDS
+    # a line-up BEFORE the run never did this, and does not now: its arm is as it found it
+    guided.rested.clear()
+    (went, turned), _lines, _runner = _line_up(guided, Ear(0, go=False))
+    assert (went, turned) == (False, False) and guided.rested == []
+
+
+def test_an_arm_the_look_left_away_from_rest_goes_home_before_the_chair_is_told_to_move(guided):
+    """The side survey's pose, or anywhere a look left the arm: the chair is moved only with the arm at
+    rest, its wrist alone turned. It homes first, and only then asks to be guided; a home that fails ends
+    the run, the arm holding, and the engine is never asked."""
+    away = [v + 0.5 for v in HOME]
+    guided.ctx.client.live = list(away)
+
+    def home(ctx, runner, execute, why):
+        guided.homes.append(why)
+        ctx.client.live = list(HOME)
+        return True
+
+    press_demo_try_home = press_demo.try_home
+    press_demo.try_home = home
+    try:
+        got, lines, _runner = _guiding(guided, Round(2, go=True))
+    finally:
+        press_demo.try_home = press_demo_try_home
+    assert got == (True, True) and len(guided.homes) == 1 and "guide" in lines[0]
+    guided.ctx.client.live = list(away)
+    watched = len(guided.watched)
+    press_demo.try_home = lambda ctx, runner, execute, why: False
+    try:
+        got, lines, _runner = _guiding(guided, Round(2, go=True))
+    finally:
+        press_demo.try_home = press_demo_try_home
+    assert got == 1 and lines == [] and len(guided.watched) == watched  # never asked, never watched from there
+
+
+def test_the_tops_the_wrist_sees_out_of_reach_are_the_ones_the_chair_is_moved_for(monkeypatch):
+    """far_tops: lid-sized tops in the wrist's frames that ALL stand out of the arm's reach (the finder then
+    has no fix, and the run said NO BOX). With one within reach, or none seen, or a container found, there
+    is nothing to move the chair for on this account."""
+    top = lambda x, y, button="unchecked": SimpleNamespace(xy=(x, y), top_z=0.30, button=button)  # noqa: E731
+    monkeypatch.setattr(sv, "_within_reach", lambda model: lambda t: math.hypot(t[0], t[1]) < 0.9)
+    find = SimpleNamespace(fix=None, places=(top(1.10, 0.2), top(1.00, -0.1)))
+    assert press_demo.far_tops(find, object()) == [(1.0, -0.1, 0.30), (1.10, 0.2, 0.30)]  # the nearest first
+    assert press_demo.far_tops(SimpleNamespace(fix=None, places=(top(1.10, 0.2), top(0.70, 0.0))), object()) == []
+    assert press_demo.far_tops(SimpleNamespace(fix=None, places=()), object()) == []
+    assert press_demo.far_tops(SimpleNamespace(fix=object(), places=(top(1.10, 0.2),)), object()) == []
+    assert press_demo.far_tops(SimpleNamespace(fix=None, places=(top(1.10, 0.2, button="none"),)), object()) == []
+    assert press_demo.far_tops(None, object()) == []
+    # a find it cannot read (a place with no height) is no reason to guide, and never the look's end
+    assert press_demo.far_tops(SimpleNamespace(fix=None, places=(SimpleNamespace(xy=(1.1, 0.2)),)), object()) == []
+
+
 def test_the_ear_hears_go_or_stop_and_a_closed_pipe_is_a_stop():
     for text, go, stop in (
         ('{"go": true}\n', True, False),

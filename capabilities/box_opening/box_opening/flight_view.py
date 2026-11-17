@@ -39,9 +39,18 @@ line names, so the console (`sheppy logs box_opening`, which shows stdout and st
 view and the node's own few lines. With the node's `full_console` on they are on the console too, between
 the flight view's lines under their "[INFO] [...]" prefix, as before 2026-11-17.
 
+A line-up (the chair guided to where the arm opens the box, before a run or in the middle of one that
+found no press from where the chair stands) is a step of its own, said by the engine (guide_start,
+guide_say, guide_end): each thing the person is told as it changes, the question, and how it ended.
+
+       line up   ...   the arm rests and the wrist looks: move the chair as told
+                 say   Move closer, about 15 cm
+                 ask   Ready. Open the container?   y / n
+     3 LINE UP   ok    yes                                                  23.0 s
+
 It only reads. Nothing a run does depends on it, and nothing it meets may stop the reader that
 feeds it (node.Run._read: a reader that died leaves the run blocked on a full pipe, mid-motion):
-feed() and finish() never raise, and a line it does not know is passed over.
+feed(), finish() and the guide's three never raise, and a line it does not know is passed over.
 """
 
 import math
@@ -97,6 +106,10 @@ REFUSED = re.compile(r"^REFUSED: (\S+) — ")
 DONE = re.compile(r"^DONE — ")
 NO_BOX = re.compile(r"^NO BOX\b")
 STOP = re.compile(r"^STOP: (.*)$")
+# no press plans from where the chair stands and the engine guides the chair (tasks/reach_press.no_way_in,
+# press_demo's wrist look): not the run's end, so no STOP
+NO_WAY_IN = re.compile(r"^NO WAY IN: (.*)$")
+FAR_BOX = re.compile(r"^OUT OF REACH: (.*)$")
 RUNNER_STOP = re.compile(r"^STOP: leg \S+ -> ")  # the runner's own word on one leg: the task's line says what it means
 
 # a leg named in a STOP ("... stopped during lid:carry (...)") -> the step it is
@@ -116,11 +129,67 @@ LEG_STEPS = (
 DURING = re.compile(r"(?:stopped during|in) ([a-z]+:[a-z-]+|home)\b")
 
 
+# "30 deg: <why that tilt's press does not plan>", as plan_reach joins them (tasks/reach_press)
+TILT = re.compile(r"(\d+) deg: ")
+INTO = re.compile(r"into (\w+)/")
+# the part of the way in a refusal names, innermost first -> the words for it
+WAY_PARTS = (
+    ("the press stroke", "the press stroke"),
+    ("the slide in", "the slide in"),
+    ("the look pose", "the look pose"),
+    ("the way down", "the way down"),
+)
+
+
+def _reason(text):
+    """Why one tilt's press does not plan, in a few plain words: the part of the way in it names and what
+    refused it there (the run's own gates: runner's sanity gate, runtime/body, kinematics' lines)."""
+    part = next((words for key, words in WAY_PARTS if key in text), "the way in")
+    if "past the arm's reach" in text:
+        return "out of the arm's reach"
+    if "sanity gate" in text or "excursion" in text:
+        return "%s swings the arm wide" % part
+    into = INTO.search(text)
+    if into or "the chair and user" in text:
+        who = "the chair or the user" if not into else "the user" if into.group(1) == "person" else "the chair"
+        return "%s would pass too close to %s" % (part, who)
+    if "cabinet" in text or "counter" in text or "the table" in text:
+        return "%s would meet the table" % part
+    if "LIMIT_MARGIN" in text or "joint limit" in text:
+        return "%s runs a joint to its limit" % part
+    if "singularity" in text or "joint jump" in text:
+        return "%s is not a line the arm can follow" % part
+    if "IK" in text or "did not converge" in text:
+        return "%s leaves what the arm reaches" % part
+    return "%s does not plan" % part
+
+
+def no_press_reason(stop, out_m=None):
+    """Why no press plans, from the run's own line: each tilt's real reason, the tilts that share one
+    said together. Flatbot 2026-11-17 16:43: the line read "the box is out of the arm's reach (0.79 m
+    out)" for a box well within it, where the slide in swung the arm wide at 30 and 35 deg and the press
+    stroke crossed the user's padding at 40 and 45: the person was told the one thing that was not so.
+    Only a box whose every tilt's look stands past the arm's reach is said to be out of it."""
+    far = "" if out_m is None else " (%.2f m out)" % out_m
+    parts = TILT.split(stop)
+    if len(parts) >= 3:
+        tilts = [(parts[i], _reason(parts[i + 1])) for i in range(1, len(parts) - 1, 2)]
+    else:
+        tilts = [(None, _reason(stop))]
+    kinds = list(dict.fromkeys(why for _tilt, why in tilts))
+    if kinds == ["out of the arm's reach"]:
+        return "the box is out of the arm's reach%s" % far
+    said = []
+    for why in kinds:
+        at = [tilt for tilt, w in tilts if w == why and tilt is not None]
+        said.append(why + (" (%s deg)" % ", ".join(at) if at else ""))
+    return "no press plans from here%s: %s" % (far, "; ".join(said))
+
+
 def _plain(stop, out_m):
     """A STOP's reason in a few plain words; `out_m` how far out the box is, where known."""
-    far = "" if out_m is None else " (%.2f m out)" % out_m
     if "no reach-out press" in stop or "no press reaches" in stop:
-        return "the box is out of the arm's reach%s" % far
+        return no_press_reason(stop, out_m)
     if "does not come down to the knob" in stop:
         return "the hand cannot come down to the knob from here"
     if "the knob did not pop" in stop:
@@ -169,6 +238,9 @@ class FlightView:
         self.log = None  # where the run's full lines are kept (the node's, node.Capability._lines_to_file)
         self.arm = None  # "home" | "holding where it stopped"
         self.going_home = False
+        self.finished = False  # the result is written: a second finish() writes nothing
+        self.lined_up = 0  # line-ups that ended with the person's yes
+        self._how_said = False  # how to answer the question was said (once a run)
 
     @staticmethod
     def _stdout(line):
@@ -211,13 +283,67 @@ class FlightView:
         self._say("%13s%-5s %s" % ("", kind, text))
 
     # -- the run's lines -------------------------------------------------------------
-    def start(self, what="open_box", instance=None):
+    def start(self, what="open_box", instance=None, find=True):
+        """The run's first line. `find` False: a line-up comes before anything looks for the box
+        (guide_start), and the find starts at its yes."""
         with self._lock:
             try:
                 self.t0 = self._clock()
                 of = "" if not instance else "   %s" % instance
                 self._say("BOX OPENING   %s%s" % (time.strftime("%H:%M:%S"), of))
-                self._begin("FIND", "looking for the box")
+                if find:
+                    self._begin("FIND", "looking for the box")
+            except Exception:  # noqa: BLE001
+                pass
+
+    # -- the line-up (the engine's: node.Capability._line_up) ---------------------------
+    def guide_start(self, doing="move the chair as told; the arm rests and the wrist looks"):
+        """A line-up begins: a step of its own, whatever was in flight ended."""
+        with self._lock:
+            try:
+                self._begin("LINE UP", doing)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def guide_say(self, message, ask=None, how=None):
+        """What the person is told now: one line each time it changes (the engine holds a distance that
+        only shrinks to one line a second: line_up.LineUp's say_min_s). `ask`: this is the question, and
+        how it is answered here (" y / n" on the console; None: an instruction). `how`: said once a
+        run under the first question, where the answer is given."""
+        with self._lock:
+            try:
+                if ask is None:
+                    self._note(message, "say")
+                    return
+                self._note("%s   %s" % (message, ask), "ask")
+                if how and not self._how_said:
+                    self._how_said = True
+                    self._note(how, "how")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def guide_end(self, ok, text="", arm=None, again=False, find=True):
+        """The line-up ended: with the person's yes (`ok`: the run goes on, and with `find` looks for
+        the box, `again` where it had found it before), or any other way (`text` says which, and it is
+        the run's end: the result names it). `arm`: where the arm was left, for the result."""
+        with self._lock:
+            try:
+                if ok:
+                    self.lined_up += 1
+                    self.views = 0  # the find that follows counts its own
+                    self.going_home = False  # (a home before the line-up is not the way home of what follows)
+                    # ... nor is the press that had no way in the failure of a run that goes on from here
+                    self.last_fail = None
+                    self._end("ok", text, name="LINE UP")
+                    if find:
+                        self._begin("FIND", "looking for the box again" if again else "looking for the box")
+                    return
+                if self.cur is not None and self.cur[0] != "LINE UP":
+                    self._end("ok")
+                self._end("FAIL", text, name="LINE UP")
+                self.failed = self.last_fail
+                if arm:
+                    self.arm = arm
             except Exception:  # noqa: BLE001
                 pass
 
@@ -432,6 +558,10 @@ class FlightView:
             return
         if RUNNER_STOP.match(s):
             return
+        m = NO_WAY_IN.match(s) or FAR_BOX.match(s)
+        if m:
+            self._no_way_in(m.group(1), far=s.startswith("OUT OF REACH"))
+            return
         m = STOP.match(s)
         if m:
             self._stop(m.group(1))
@@ -454,6 +584,20 @@ class FlightView:
         self.slipped, self.setdown_met, self.lid = True, False, LID_SLIPPED
         self._end("ok")
         self._fail("the lid slipped out of the fingers on the way", "CARRY", final=True)
+
+    def _no_way_in(self, why, far=False):
+        """No press plans from where the chair stands, and the run does not end on it: the step it found
+        that at fails with the real reason, and what follows is the chair's move (the engine's line-up)."""
+        if self.cur is not None and self.cur[0] in ("FIND", "LOOK") and not far:
+            self._end("ok")  # the look itself ended well: it is the press that has no way in
+        if far:
+            self._fail("what the wrist camera sees is out of the arm's reach", "FIND")
+        else:
+            self._fail(no_press_reason(why, self.out_m), "PRESS")
+        self._note("the chair is to move: the run does not end here", "next")
+        if "returning home" in why:
+            self.going_home = True
+            self._begin("HOME", "going home")
 
     def _fail(self, why, name, final=False):
         """A step fails; `final`: nothing follows it but the way home."""
@@ -519,7 +663,9 @@ class FlightView:
         """The run ended with exit code `code`: the step in flight closed, and the result. Never raises."""
         with self._lock:
             try:
-                self._finish(code, cancelled, timed_out, held)
+                if not self.finished:  # (a line-up that ended the run has written its result already)
+                    self.finished = True
+                    self._finish(code, cancelled, timed_out, held)
             except Exception:  # noqa: BLE001
                 pass
 

@@ -22,6 +22,15 @@ Started from the UI (the orchestrator's token for the execution in hand), the ru
 for as long as it goes: what it is doing, a bar, and one button, Cancel, which is the
 orchestrator's cancel (Panel). No Pause: a run cannot pause.
 
+A box the arm cannot press from where the chair stands does not end the run (owner 2026-11-17: "it
+should NOT just fail EVER"): the run asks to be guided, the arm at rest and its wrist turned to look,
+and the user is told which way and how far to move the chair until the box is where the arm opens it,
+asked, and the run goes on at their yes (Capability._follow, _run_lines_up). With `line_up` on the same
+line-up comes before the run's first move. It is said and asked on the UI's panel where the goal has
+one; where it has none (a goal sent by hand), on this node's console through the flight view, and
+answered y or n on ~/answer (Asking; tasks/open_box_terminal sends the goal, shows the lines and sends
+the answer typed).
+
 SAFETY: the arm moves only on a node with allow_execute:=true, set for an attended run (someone
 at the e-stop). With it false, open_box is reported unavailable and a goal that comes anyway is
 refused before anything runs. The mock moves nothing and is always available.
@@ -43,12 +52,13 @@ from collections import deque
 from pathlib import Path
 
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
+from capability_engine.action_scope import ScopeClosed
 from rammp_orchestrator_interfaces.msg import ActionAvailability
 from rammp_orchestrator_interfaces.srv import Control
 
-from . import LOGGER, line_up
+from . import LOGGER, guide, line_up
 from .constants import AIR_CONTROL_ENV, state_dir
-from .flight_view import FlightView
+from .flight_view import FlightView, no_press_reason
 from .runtime.abort import EXIT_HALTED, EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
 from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
@@ -106,11 +116,13 @@ PARAMS = {
     # same folder as this node writes it; "" = planner_worlds under state_dir
     "planner_worlds_as": "",
     "planner_worlds_dir": "",
-    # the line-up before a run, on the UI (line_up, guide): the panel tells the user which way to move until
-    # the container is where the arm opens it, then asks, and the arm moves only on its Open. Off (the
-    # default) open_box starts its run at once, as it always has. On, the arm never flies without that Open:
-    # a goal with no UI to ask on (standalone, a goal sent to the node directly, the UI bridge not there) is
-    # refused before anything starts (line_up_unavailable; execute).
+    # the line-up before a run (line_up, guide): the user is told which way to move until the container is
+    # where the arm opens it, then asked, and the arm moves only on their yes. On: every run lines up before
+    # its first move. Off (the default): open_box starts its run at once, as it always has, and lines up
+    # only where it must: where the run finds no press from where the chair stands (run 2 of 2026-11-17
+    # ended there; the owner: "it should NOT just fail EVER"). Either way the arm never flies on from a
+    # line-up without that yes: Open on the UI's panel, or, for a goal with no UI (sent by hand, or the UI
+    # bridge not there), y on ~/answer to the question on this node's console (Asking).
     # With wrist_first the wrist turns to look while the user lines up (the run itself, --line-up: gently,
     # and only where the arm stands at rest). Without it the SCENE camera alone follows the container, which
     # on flatbot does not see a lid whole in front of the arm: one it cannot see is never asked of
@@ -167,6 +179,33 @@ RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORL
 # missions with its start, before any of this) left such a run nothing: 55 until a lined-up run is timed
 RUN_LONGEST_S = 55.0
 LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 35 s
+# A line-up in the MIDDLE of a run (no press plans from where the chair stands: Capability._follow) has what
+# is left of those same 35 s, counted from the goal's start: the run that goes on at its yes finds the box
+# again and flies as a lined-up run does (RUN_LONGEST_S), and must still end before its own stop at
+# RUN_BUDGET_S. Run 2 of 2026-11-17 said "no press plans" 16 s after its goal (1.5 s to start, the wrist's
+# look 4.2 s, the proof of four tilts 7.7 s): about 19 s are left, of which the wrist's turn and the first
+# word of the boundary take 3-7. With less than this left nothing is guided: the run ends at once,
+# not_lined_up and recoverable, saying why no press planned, and the next open_box lines up FIRST
+# (LINE_UP_FIRST_S), with the whole 35 s
+GUIDE_MIN_S = 8.0
+# After an open_box that ended not_lined_up from a line-up in the middle of its run, the next one within
+# this long lines up before its first move, whatever `line_up` says: "press open again" then goes on from
+# the line-up, not from another look and another proof (16 s of the 35 on run 2's numbers). Once: a line-up
+# that then never sees the container (the scene camera alone, which may not see what the run's own look
+# found) does not ask for another
+LINE_UP_FIRST_S = 300.0
+# A goal that came WITHOUT the orchestrator's token (sent by hand: `ros2 action send_goal`, the terminal
+# program) has no orchestrator to cancel it at 120 s, and the owner's word for it is "don't end, just tell
+# you how far to move until it's close enough then asking if ready y/n" (2026-11-17). Each of its line-ups
+# waits for the person this long, the arm at rest with its wrist turned the while, and then ends as a
+# timed one does (the wrist back to rest, not_lined_up, recoverable). Ten minutes: long enough to bring a
+# chair round a table, short enough that a goal nobody is answering does not hold the arm's wrist turned
+# and the node busy for the afternoon. The time a person takes is no part of such a run's own budget: it
+# has RUN_BUDGET_S from its last go (Capability._follow), so no wait can cut a motion short
+CONSOLE_LINE_UP_S = 600.0
+# an instruction whose distance alone changed is said no oftener than this (line_up.LineUp's say_min_s): on
+# the console, in the orchestrator's progress and in the node's log. The UI's panel is sent as it always was
+SAY_MIN_S = 1.0
 # A run told its line-up is over turns its wrist back and ends within this, or is stopped. A stop that comes
 # while the wrist is still turning OUT (a reach_probe that ended as the line-up began) has the whole turn out,
 # its settle, the turn back (a look each, about 3-4 s) and the run's own end (its threads, its log, its
@@ -179,6 +218,21 @@ LINE_UP_END_S = 25.0
 NOT_LINED_UP = (
     "the container was not where the arm opens it within %.0f s: nothing was pressed (press open again in place)"
 )
+# ... of a line-up in the middle of a run that was not given at all: what the orchestrator's 120 s left it
+NO_TIME_TO_GUIDE = (
+    "%s, and this run had no time left to guide the chair (%.0f s of the %.0f s a line-up has were left, under "
+    "%.0f): nothing was pressed. Press open again: it lines up first"
+)
+# the y or n of a person with no panel to press on: std_msgs/String, heard only while an action runs
+ANSWER_TOPIC = "~/answer"
+CONSOLE_ASK = "y / n"  # after the question on the console
+UI_ASK = "(Open on the UI)"  # ... where it is the panel that is asked on
+CONSOLE_HOW = "answer in open_box_terminal, or publish y or n on /box_opening/answer (std_msgs/String)"
+CONSOLE_AGAIN = "Out of time. Start open_box again when you are in place"
+# what the flight view's line-up step says it is: before the run's first move, and in the middle of it
+LINE_UP_DOING = "lining the chair up with the box: move it as told"
+GUIDE_DOING = "the arm rests and the wrist looks: move the chair as told"
+GUIDE_SAYS = ". Move the chair as told"  # after why no press plans, in the progress of a run that is guided
 # what is said of an arm that holds where it stopped (error_for's arm_holds)
 ARM_HOLDS = "the arm holds where it stopped: clear it, attended, before the next run"
 LINE_UP_LATE = (
@@ -195,10 +249,6 @@ LINE_UP_NO_LOOK = "LINE-UP: the wrist does not look"
 # starts within this long of it does not run. Longer would cancel a deliberate press that follows a stale
 # cancel; that press is then made again, which is the cheap mistake of the two
 CANCEL_EARLY_S = 3.0
-LINE_UP_NO_UI = (
-    "line_up is on and this goal has no UI to ask on (it came without the orchestrator's token, or the UI "
-    "bridge is not there): nothing moved. Set line_up false to run without lining up"
-)
 TAIL_LINES = 40
 
 # a leg's row -> (phase, the fraction of the run done it ends, what the run is doing then, for
@@ -279,9 +329,11 @@ class Run:
         self.started = time.monotonic()
         self.timed_out = False  # stopped by the node at RUN_BUDGET_S
         self._log = log
-        # `talk` (a run that lines up first, --line-up): its lines that begin with line_up.MARK are messages
-        # for the line-up, kept apart from its log (messages()), and it is answered on its stdin (send())
+        # `talk` (a run that may be lined up: --line-up before it starts, --guide in the middle of it): its
+        # lines that begin with line_up.MARK are messages for the line-up, kept apart from its log
+        # (messages()), and it is answered on its stdin (send())
         self._got, self._lock = [], threading.Lock()
+        self._guide = None  # its request to be guided ({"guide": {...}}), until it is taken (take_guide)
         # its own session: a Ctrl+C at this node's terminal reaches it once, from here. Its
         # lines are decoded whatever they hold: a reader that died would leave the run
         # blocked on a full pipe, mid-motion.
@@ -308,7 +360,14 @@ class Run:
                 except ValueError:
                     continue
                 with self._lock:
-                    self._got.append((time.monotonic(), msg))
+                    if isinstance(msg, dict) and "guide" in msg:
+                        # no press plans from where the chair stands (press_demo.guide_chair): a new line-up
+                        # begins with this line, and what it said of an earlier one (the fixes of the frames
+                        # between that one's yes and its go) is no word on where the box is now
+                        self._guide = msg["guide"] if isinstance(msg["guide"], dict) else {}
+                        self._got = []
+                    else:
+                        self._got.append((time.monotonic(), msg))
                 continue
             ros = ROS_LINE.match(line)
             level, text = (LEVELS[ros.group(1)], f"[{ros.group(2)}] {ros.group(3)}") if ros else (logging.INFO, line)
@@ -323,6 +382,13 @@ class Run:
         with self._lock:
             got, self._got = self._got, []
         return got
+
+    def take_guide(self):
+        """Its request to be guided, the once: {"n", "box": where the box stood, "why": why no press plans
+        there}; None where it has made none since the last one taken."""
+        with self._lock:
+            asked, self._guide = self._guide, None
+        return asked
 
     def send(self, msg):
         """A line on its stdin (a run started with `talk`): the line-up's go, or stop."""
@@ -479,6 +545,11 @@ class Panel:
         """What the run does now: the progress it just reported."""
         self._said = (str(phase), float(pct), str(message))
 
+    def again(self):
+        """The next tick sends the panel whatever was sent last: a line-up in the middle of the run had the
+        screen meanwhile, and its last panel is what the bridge shows."""
+        self._sent = self._tried_at = None
+
     def panel(self):
         phase, pct, message = self._said
         text = self.stopping or (message[:1].upper() + message[1:])
@@ -509,6 +580,31 @@ class Panel:
         return pressed
 
 
+class Asking:
+    """How one goal's line-ups are said and asked, and how long each may take: decided ONCE, as the goal
+    comes (execute), so that nothing later takes another view of it.
+
+    `ui`: the goal has the UI (Capability._ui_live): the panel says and asks, Open is the yes. Without it
+    the flight view says each line on this node's console and the question is answered y or n on ~/answer
+    (the answers are read either way: a y is Open's press, an n is Cancel's).
+    `timed`: the goal came with the orchestrator's token, so the orchestrator cancels it at 120 s and its
+    line-ups must end LINE_UP_S after the goal began, whichever of them it is. Without the token nothing
+    cancels it, and each line-up waits CONSOLE_LINE_UP_S for the person.
+    `view`: the goal's flight view (None: nothing is written). `find`: whether a find follows a yes on it
+    (the mock's does not: it has no flight view of its run). `carried`: this goal lines up first because
+    the one before it ended in the middle of a line-up (Capability._lines_up)."""
+
+    def __init__(self, ui, timed, started, view=None, find=True, carried=False):
+        self.ui, self.timed, self.started, self.view, self.find = bool(ui), bool(timed), started, view, find
+        self.carried = bool(carried)
+
+    def left_s(self, now=None):
+        """How long a line-up that begins now may take."""
+        if not self.timed:
+            return CONSOLE_LINE_UP_S
+        return LINE_UP_S - ((time.monotonic() if now is None else now) - self.started)
+
+
 class Tracker:
     """A run's rows as it goes: the progress each says, and what the result reports.
     `instance_id`: the container the orchestrator selected when the goal came, kept for the
@@ -520,6 +616,10 @@ class Tracker:
         self.pct = 0.0
         self.looking = False  # said once, as the run's log appears: it is up and looking for the container
         self.past_start = False  # a row past the run's start was read: a home row from here on is the way home
+        # the run found no press from where the chair stands and is to be guided (its reach_refused row says
+        # so): a home row from here to its request (its "guide" row) is the arm going to rest for the chair's
+        # move, not the way home, and no more of the run is done by it
+        self.to_rest = False
         self.presses = 0
         self.grips = 0
         self.lid_spot = None
@@ -534,6 +634,11 @@ class Tracker:
         leg, kind = str(row.get("leg", "")), row.get("kind")
         if kind == "note":
             self.past_start = self.past_start or leg in PAST_START
+            if leg == "reach_refused" and row.get("guided"):
+                self.to_rest = True
+                return "locate", self.pct, "no way in from here: the chair is to move"
+            if leg == "guide":
+                self.to_rest = False
             return self._note(leg, row)
         ok = bool(row.get("ok"))
         if leg == "depth:press" and ok:
@@ -550,6 +655,10 @@ class Tracker:
                     # the run's first motion, to its start pose (press_demo.home_first): not the way home, and
                     # no part of the run done (flatbot 2026-11-11 18:06 began so, and reported 100 % at once)
                     phase, pct, doing = "locate", self.pct, "going to the start pose"
+                elif phase == "home" and self.to_rest:
+                    # the arm goes to rest before the chair is guided (reach_press.no_way_in, press_demo.
+                    # guide_chair): the run goes on from the find after it, and its bar must still have room
+                    phase, pct, doing = "locate", self.pct, "going to rest: the chair is to move"
                 else:
                     self.past_start = True
                 self.pct = max(self.pct, pct)
@@ -617,9 +726,17 @@ STOP_CODES = (
 )
 
 
+# the run's lines that say no press plans from where the chair stands and that the engine is asked to guide
+# (reach_press.no_way_in, press_demo's wrist look): never a run's last word (error_for)
+NOT_AN_END = ("NO WAY IN:", "OUT OF REACH:")
+
+
 def error_for(action_id, code, lines):
-    """The EngineError a run that ended with `code` reports, from what it said last."""
+    """The EngineError a run that ended with `code` reports, from what it said last. Not from a line that
+    said the chair was to be guided (NOT_AN_END): the run went on from it, and its reasons (a planner's
+    "IK_FAIL", a camera's "NO BOX") are not how the run ended."""
     said = [ln for ln in lines if "STOP" in ln or "not starting" in ln or "FAIL" in ln or "NO BOX" in ln]
+    said = [ln for ln in said if not any(mark in ln for mark in NOT_AN_END)]
     why = (said or list(lines) or [f"exit {code}"])[-1]
     if code == EXIT_HALTED:
         # the e-stop, or control lost: the run sent nothing after it (REVIEW_RULES C5)
@@ -665,6 +782,8 @@ class Capability(CapabilityEngine):
         self._run = None  # the Run under way
         self._cancelled_token = None  # the execution a CANCEL came for before its goal did (_on_control)
         self._cancelled_at = None  # ... and when it came (the clock's), where it came with no token to keep it by
+        self._answers = line_up.Answers()  # the y or n heard on ~/answer while an action runs (_hear_answers)
+        self._line_up_first = None  # when an open_box ended not_lined_up in the middle of its run (_lines_up)
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -716,11 +835,54 @@ class Capability(CapabilityEngine):
         panel again (its ui_opening stays set)."""
         return self._assigned_token != bytes(16) and self._ui_request_client.server_is_ready()
 
-    def _cancel_from_ui(self):
+    def _cancel_from_ui(self, by="Cancel pressed on the UI"):
         """The panel's Cancel is the orchestrator's: the base class's own Control.CANCEL, so the run ends the
-        one way a cancel ends it (its Ctrl+C, the result cancelled, no world-state write after it)."""
-        self.get_logger().warning("Cancel pressed on the UI: the action is cancelled")
+        one way a cancel ends it (its Ctrl+C, the result cancelled, no world-state write after it). `by`:
+        who cancelled, for the log (the person's n on ~/answer is the same cancel)."""
+        self.get_logger().warning(f"{by}: the action is cancelled")
         CapabilityEngine._on_control(self, Control.Request(command=Control.Request.CANCEL), Control.Response())
+
+    def _timed(self, ui=False):
+        """Whether this goal is the orchestrator's: it came with its token (`ui`: it has the UI, which is
+        shown by that token), so the orchestrator cancels it at ORCHESTRATOR_TIMEOUT_S and everything it
+        waits for must fit inside that. A goal with no token (sent by hand) has nothing to cancel it, and
+        waits for the person (CONSOLE_LINE_UP_S)."""
+        return bool(ui) or self._assigned_token != bytes(16)
+
+    def _hear_answers(self):
+        """From here to this action's end the person's y or n is heard on ~/answer (std_msgs/String): the
+        answer to a line-up's question where the goal has no panel to press on, an n the cancel at any
+        moment. The subscription is the action's own (REVIEW_RULES: nothing is subscribed while idle), and
+        an answer said before it began, to another action, is not kept."""
+        self._answers.clear()
+        try:
+            from std_msgs.msg import String
+
+            self.create_action_subscription(String, ANSWER_TOPIC, self._on_answer, 10)
+        except ScopeClosed:
+            pass  # no goal is running (a test drives execute() itself): answers are put straight in
+
+    def _on_answer(self, msg):
+        """A message on ~/answer. Never blocks, raises or ends the action (it runs on the action's gate)."""
+        word = self._answers.put(getattr(msg, "data", ""))
+        if word is None:
+            self.get_logger().warning("an answer that is neither y nor n is no answer: %r" % str(msg.data)[:40])
+        else:
+            self.get_logger().info(f"answer heard: {word}")
+
+    def _said_no(self, panel=None):
+        """Whether the person's n came (read where no line-up is asking: while the run flies, while a wrist
+        turns back): the cancel, as Cancel on the panel is, which `panel` then says. A y heard here answers
+        nothing: no question is up."""
+        while True:
+            answer = self._answers.poll()
+            if answer is None:
+                return False
+            if answer == line_up.NO:
+                if panel is not None and not panel.pressed:
+                    panel.pressed, panel.stopping = True, PANEL_CANCELLED
+                self._cancel_from_ui("n answered")
+                return True
 
     def _on_control(self, request, response):
         """The base class's, and one case it loses: a CANCEL that comes after the orchestrator has pushed its
@@ -771,31 +933,50 @@ class Capability(CapabilityEngine):
             )
         return value
 
-    def _lines_up(self, ui):
-        """Whether this execution lines up first: the `line_up` param as its goal comes, and `ui`, whether
-        the goal has a live UI (_ui_live). Both asked ONCE, by execute(), and handed down from there, so that
-        nothing later takes another view of them (a UI that dropped a moment on, a param set meanwhile). With
-        line_up on the arm never flies without the user's Open: a goal that has no UI to ask on (no token,
-        or the bridge not there) is refused here, EngineError("line_up_unavailable"), before anything is
-        started."""
-        if not self._param("line_up"):
-            return False
-        if not ui:
-            raise EngineError("line_up_unavailable", LINE_UP_NO_UI, recoverable=True)
-        return True
+    def _lines_up(self):
+        """(whether this execution lines up before its first move, whether that is carried over): the
+        `line_up` param as its goal comes; or, carried, the open_box before it ended not_lined_up from a
+        line-up in the middle of its run no longer than LINE_UP_FIRST_S ago, so that "press open again" goes
+        on from the line-up and not from another look and proof. Asked ONCE, by execute(), and handed down
+        from there. A goal with no UI lines up too (owner 2026-11-17): on the console (Asking). Until then
+        it was refused, line_up_unavailable."""
+        first, self._line_up_first = self._line_up_first, None
+        carried = first is not None and time.monotonic() - first <= LINE_UP_FIRST_S
+        if carried and not self._param("line_up"):
+            self.get_logger().info(
+                "the open_box before this one ended in the middle of a line-up: this one lines up first"
+            )
+        return bool(self._param("line_up")) or carried, carried
 
-    def _lined_up_run(self, ctx, env, action_id, instance_id, view):
-        """The run started with --line-up and taken through its line-up: the Run, told to go on its Open.
-        Until then it only watches (the wrist turned to look, gently, where the arm stands at rest). A
-        line-up that ends any other way ends the run before this raises: a cancel is its Ctrl+C, as every
+    def _lined_up_run(self, ctx, env, action_id, instance_id, ask):
+        """The run started with --line-up and taken through its line-up (_run_lines_up): the Run, told to
+        go on the user's yes. Until then it only watches (the wrist turned to look, gently, where the arm
+        stands at rest)."""
+        argv = self._argv(action_id, instance_id) + ["--line-up", "--guide"]
+        run_ = Run(argv, env, ask.view.relay(LOGGER.log), talk=True)
+        self._run = run_  # a shutdown stops it (_on_shutdown)
+        self._run_lines_up(ctx, env, run_, action_id, instance_id, ask)
+        return run_
+
+    def _run_lines_up(self, ctx, env, run_, action_id, instance_id, ask, asked=None):
+        """`run_`, which watches the container, taken through one line-up; returns once it is told to go,
+        on the user's yes alone. Before its first move (--line-up), or in the middle of it (`asked`: its
+        request to be guided, where no press plans from where the chair stands: press_demo.guide_chair).
+
+        A line-up that ends any other way ends the run before this raises: a cancel is its Ctrl+C, as every
         cancel is (the arm stops where it is); out of time it is told so, turns its wrist back to rest and
         ends, a cancel read all through that turn (_turned_back). Only a run that then ended "nothing
         pressed, the wrist back at rest" (EXIT_NOT_LINED_UP) leaves the line-up's own end as the error. One
         that ended any other way (not ready, its wrist's turn stopped part way: EXIT_LINE_UP_HOLDS, the
         e-stop) raises what it said, and one that had to be stopped is the arm holding (LINE_UP_LATE); where
-        that is not recoverable the world state is told the arm is in error, as a run's own stop tells it."""
-        run_ = Run(self._argv(action_id, instance_id) + ["--line-up"], env, view.relay(LOGGER.log), talk=True)
-        self._run = run_  # a shutdown stops it (_on_shutdown)
+        that is not recoverable the world state is told the arm is in error, as a run's own stop tells it.
+        The flight view's result is written here, with where the arm was left.
+
+        In the middle of a run under the orchestrator's 120 s the line-up has only what the goal's first
+        LINE_UP_S leave (Asking.left_s). With less than GUIDE_MIN_S of them nothing is guided: the run is
+        told to stop at once and the action ends not_lined_up, recoverable, saying why no press planned,
+        and the next open_box lines up first (_lines_up)."""
+        view = ask.view
         stopped = []  # a cancel's Ctrl+C was sent
 
         def stop_first():
@@ -807,17 +988,30 @@ class Capability(CapabilityEngine):
             stopped.append(True)
 
         made = []  # the line-up's source, once made: it knows whether the run's wrist turned (its "view")
+        # where the run has just found no press: that place does not work for this line-up (BoxSource)
+        refused = [asked["box"]] if asked is not None and asked.get("box") else []
 
         def source():
-            made.append(self._box_source(env, instance_id, watch=run_))
+            made.append(self._box_source(env, instance_id, watch=run_, refused=refused))
             return made[-1]
 
         try:
-            self._line_up(ctx, source, on_cancel=stop_first)
+            left = ask.left_s()
+            if asked is not None and ask.timed and left < GUIDE_MIN_S:
+                why = no_press_reason(str(asked.get("why") or "no press plans from where the chair stands"))
+                self._line_up_first = time.monotonic()  # the next open_box lines up first, with its whole time
+                if view is not None:
+                    view.guide_end(False, "no time left to guide the chair (%.0f s): open again" % max(0.0, left))
+                raise EngineError(
+                    "not_lined_up",
+                    NO_TIME_TO_GUIDE % (why, max(0.0, left), LINE_UP_S, ORCHESTRATOR_TIMEOUT_S),
+                    recoverable=True,
+                )
+            self._line_up(ctx, source, ask, on_cancel=stop_first, asked=asked)
             if self._cancelled_before_go(ctx):
                 raise Cancelled()  # ended as any cancel of the line-up is, below: the run is never told to go
         except BaseException as e:
-            cancelled, late = isinstance(e, Cancelled), False
+            cancelled, late, turned = isinstance(e, Cancelled), False, False
             try:
                 if cancelled:
                     if not stopped:
@@ -833,7 +1027,9 @@ class Capability(CapabilityEngine):
                         turned = bool(made and getattr(made[-1], "viewed", False)) or (
                             any(LINE_UP_TURNS in ln for ln in said) and not any(LINE_UP_NO_LOOK in ln for ln in said)
                         )
-                        cancelled, late = self._turned_back(ctx, run_, turned)
+                        # (in the middle of a run the wrist its own look turned is turned back too)
+                        turned = turned or (asked is not None and bool(self._param("wrist_first")))
+                        cancelled, late = self._turned_back(ctx, run_, turned, ask)
                     except BaseException:
                         # the engine failed while the wrist turned back (the panel, the progress): the run's
                         # own stop before anything else, or it would go on turning with nothing following it
@@ -846,7 +1042,15 @@ class Capability(CapabilityEngine):
                     late, code = False, EXIT_NOT_LINED_UP
             finally:
                 self._run = None  # only now: until it has ended, a shutdown must still be able to stop it
-            view.finish(code, cancelled=cancelled, timed_out=False, held=False)
+            if view is not None:
+                # where the arm was left, for the result: every end of a line-up says it
+                if cancelled:
+                    view.arm = "stopped where it was (a wrist that looked stands turned)"
+                elif late or code == EXIT_LINE_UP_HOLDS:
+                    view.arm = "holding where it stopped"
+                elif code == EXIT_NOT_LINED_UP:
+                    view.arm = "at rest, the wrist turned back" if turned else "at rest"
+                view.finish(code, cancelled=cancelled, timed_out=False, held=False)
             if cancelled and not isinstance(e, Cancelled):
                 raise Cancelled() from e  # cancelled while its wrist turned back
             if cancelled or (code == EXIT_NOT_LINED_UP and not late):
@@ -860,11 +1064,10 @@ class Capability(CapabilityEngine):
                 self._report_arm_error(error, ctx, world)
                 world.wait(WORLD_WAIT_S)
             raise error from e
-        # _line_up returns on the user's Open alone (line_up.GO): every other end of a line-up raised above.
+        # _line_up returns on the user's yes alone (line_up.GO): every other end of a line-up raised above.
         # The go is this function's last act: nothing after it can raise with the run flying and unfollowed
-        self.get_logger().info("line-up: Open pressed: the run goes on")
+        self.get_logger().info("line-up: the user's yes: the run goes on")
         run_.send({"go": True})
-        return run_
 
     def _cancelled_before_go(self, ctx):
         """Whether a cancel came between the line-up's Open and the run's go. The line-up's source is closed
@@ -877,9 +1080,11 @@ class Capability(CapabilityEngine):
         if event is not None and event.get("type") == "button" and event.get("button_id") == PANEL_CANCEL:
             self._cancel_from_ui()
             return True
+        if self._said_no():  # the person's n, where there is no panel
+            return True
         return bool(ctx.cancelled())
 
-    def _turned_back(self, ctx, run_, turned=True):
+    def _turned_back(self, ctx, run_, turned=True, ask=None):
         """A run told its line-up is over ({"stop": true}), followed until it has ended. Where its wrist
         turned (`turned`: it said its view) it turns it
         back to rest, beside the user: a motion as any other, so a cancel is read all through it (every
@@ -887,7 +1092,8 @@ class Capability(CapabilityEngine):
         cancel as the run's own panel's is. A cancel is the run's Ctrl+C (the arm stops where it is). A run
         still going LINE_UP_END_S after it was told is stopped that way too, and killed if it has not ended
         CANCEL_ESCALATE_S after that. Returns (cancelled, late): a cancel came; it had to be stopped, so its
-        wrist may stand part-turned."""
+        wrist may stand part-turned. `ask`: the goal's Asking, whose flight view says the turn too; the
+        person's n is the cancel here as the panel's is."""
         says = PANEL_TURNING_BACK if turned else PANEL_LINE_UP_OVER  # never "turning back" of a wrist that did not turn
         panel = Panel(ctx, self._ui_live)
         panel.say(line_up.PHASE, 0.0, says)
@@ -895,9 +1101,12 @@ class Capability(CapabilityEngine):
         cancelled, late, sent = False, False, None
         if run_.alive():  # one that ended of itself already has nothing to turn back
             ctx.progress(line_up.PHASE, 0.0, says, pausable=False)
+            if turned and ask is not None and ask.view is not None:
+                ask.view.guide_say(says)
         while run_.proc.poll() is None:
             if panel.tick():
                 self._cancel_from_ui()
+            self._said_no(panel)
             now = time.monotonic()
             if sent is None and (ctx.cancelled() or panel.pressed):
                 self.get_logger().warning("cancelled while the wrist turned back: the run's own stop (Ctrl+C) sent")
@@ -915,11 +1124,12 @@ class Capability(CapabilityEngine):
             time.sleep(line_up.POLL_S)
         return cancelled, late
 
-    def _box_source(self, env, instance_id, watch=None):
+    def _box_source(self, env, instance_id, watch=None, refused=()):
         """A real run's line-up source (line_up.BoxSource): a watch follows the container and reach_probe judges
         where it stands, for as long as the panel is up. `watch`: the run itself, started with --line-up (its
         wrist looks; _lined_up_run); None, and box_watch is run for it, which reads the scene camera alone and
-        holds no client for the arm. reach_probe never can move it."""
+        holds no client for the arm. reach_probe never can move it. `refused`: places where the run itself has
+        just found no press (a line-up in the middle of it), which do not work for this line-up."""
         container = config_path(self._param("container"), "containers")
         if watch is None:
             watch = [executable("box_watch"), "--container", container]
@@ -938,43 +1148,89 @@ class Capability(CapabilityEngine):
             return argv + (["--far-m", str(far)] if far is not None else [])
 
         return line_up.BoxSource(
-            watch, probe, env, far_m=far, log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}")
+            watch,
+            probe,
+            env,
+            far_m=far,
+            log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}"),
+            refused=refused,
         )
 
-    def _line_up(self, ctx, make_source, on_cancel=None):
-        """The line-up before a run (line_up.LineUp), for an execution that lines up (_lines_up, decided by
-        execute(): neither the param nor the UI is asked after again here): the panel tells the user which
-        way to move and asks, and this returns only on its Open (line_up.GO), with the seconds it took.
+    def _line_up(self, ctx, make_source, ask, on_cancel=None, asked=None):
+        """One line-up (line_up.LineUp): the user is told which way to move and asked, and this returns only
+        on their yes (line_up.GO), with the seconds it took. `ask` (Asking, decided by execute(): neither the
+        param nor the UI is asked after again here): where it is said and asked, and how long it may take.
+        With the UI, on its panel, and the yes is Open. Without it, on this node's console through the flight
+        view, one line each time what it says changes, and the yes is a y on ~/answer; an n there is Cancel's
+        press, with or without the UI. `asked`: the run's own request, where this is a line-up in the middle
+        of it (None: before its first move).
+
         Cancel on it is the orchestrator's cancel (Cancelled); out of time, EngineError("not_lined_up"),
-        recoverable, with the watch's newest word on why it saw no container where that is why (why_none):
-        nothing was pressed. A UI that goes while lining up shows no panel and takes no press, so it ends
-        that way too. A source that cannot start, or cannot go on (its reach_probe not there to start, or
-        ended: BoxSource.gone), is EngineError("line_up_unavailable"), at once and with why: with the line-up
-        asked for, no run starts without its Open. `make_source()`: what sees the box and judges its place
-        (BoxSource; the mock's MockApproach), made only where it is used, and closed before this returns: no
-        run starts while it lives. `on_cancel()`: called as the line-up ends cancelled, before the source is
-        closed (closing can take line_up.PROBE_QUIT_S): what a cancel must not keep waiting."""
+        recoverable, with the newest instruction the user was given and the watch's newest word on why it
+        saw no container where that is why (why_none): nothing was pressed. A UI that goes while lining up
+        shows no panel and takes no press, so it ends that way too. A source that cannot start, or cannot go
+        on (its reach_probe not there to start, or ended: BoxSource.gone), is
+        EngineError("line_up_unavailable"), at once and with why: no run goes on without its yes.
+        `make_source()`: what sees the box and judges its place (BoxSource; the mock's MockApproach), made
+        only where it is used, and closed before this returns: no run starts while it lives. `on_cancel()`:
+        called as the line-up ends cancelled, before the source is closed (closing can take
+        line_up.PROBE_QUIT_S): what a cancel must not keep waiting."""
         t0 = time.monotonic()
+        budget_s = ask.left_s(t0)
+        view = ask.view
 
         def said(say):
             ctx.progress(line_up.PHASE, 0.0, say.message, pausable=False)
             self.get_logger().info(f"line-up: {say.message}")
+            if view is not None and say.state != guide.GO:
+                asks = say.state == guide.READY
+                view.guide_say(
+                    say.message,
+                    ask=(UI_ASK if ask.ui else CONSOLE_ASK) if asks else None,
+                    how=None if ask.ui else CONSOLE_HOW,
+                )
 
+        def unasked():
+            # typed ahead, or as the box rolled out of place: never a yes (guide.Guide.press), and said, so
+            # that the person does not wait on an answer that was not taken
+            self.get_logger().warning("a y came with nothing asked (or asked of a box no longer seen): not a yes")
+            if view is not None:
+                view.guide_say("that y was not to a question: answer once it asks")
+
+        def ended(text):
+            """The flight view's word on a line-up that ends without its yes: the run's end."""
+            if view is not None:
+                view.guide_end(False, text)
+
+        if view is not None:
+            view.guide_start(GUIDE_DOING if asked is not None else LINE_UP_DOING)
         try:
             source = make_source()
         except OSError as e:
+            ended("could not start (%s)" % e)
             raise EngineError(
                 "line_up_unavailable", f"the line-up could not start ({e}): nothing moved", recoverable=False
             ) from e
         went = False
         try:
-            lining = line_up.LineUp(ctx, self._ui_live, source, LINE_UP_S, on_say=said)
+            lining = line_up.LineUp(
+                ctx,
+                self._ui_live,
+                source,
+                budget_s,
+                on_say=said,
+                answers=self._answers,
+                say_min_s=SAY_MIN_S,
+                again=None if ask.ui else CONSOLE_AGAIN,
+                on_unasked=unasked,
+            )
             outcome = lining.run()
             went = outcome == line_up.GO
             if outcome == line_up.CANCELLED and on_cancel is not None:
                 on_cancel()
         except OSError as e:
             # with the wrist look the probe is started inside the loop, once the run has said which robot this is
+            ended("could not go on (%s)" % e)
             raise EngineError(
                 "line_up_unavailable", f"the line-up could not go on ({e}): nothing was pressed", recoverable=False
             ) from e
@@ -985,11 +1241,15 @@ class Capability(CapabilityEngine):
             elif close is not None:
                 close()
         if outcome == line_up.CANCELLED:
-            if lining.cancel_pressed:
+            ended("cancelled: n" if lining.said_no else "cancelled")
+            if lining.said_no:
+                self._cancel_from_ui("n answered")
+            elif lining.cancel_pressed:
                 self._cancel_from_ui()
             raise Cancelled()
         if outcome == line_up.GONE:
             why = getattr(source, "why_gone", "")  # the probe, where it was the probe that ended
+            ended("what watched the box, or judged its place, ended")
             raise EngineError(
                 "line_up_unavailable",
                 f"the line-up could not go on: {why}: nothing was pressed"
@@ -999,16 +1259,28 @@ class Capability(CapabilityEngine):
             )
         if outcome == line_up.TIMED_OUT:
             why = getattr(source, "why_none", "")
-            raise EngineError(
-                "not_lined_up", NOT_LINED_UP % LINE_UP_S + (f" -- {why}" if why else ""), recoverable=True
-            )
+            told = lining.guide.instruction  # the newest "Move ...", where one was given
+            if (asked is not None or getattr(ask, "carried", False)) and lining.guide.saw_box:
+                # "press open again" goes on from the line-up, with its whole time (_lines_up)
+                self._line_up_first = time.monotonic()
+            ended("not in place within %.0f s%s" % (budget_s, f" (last told: {told})" if told else ""))
+            message = NOT_LINED_UP % budget_s + (f" -- last told: {told}" if told else "")
+            if asked is not None:
+                message += " -- no press planned from where the chair stood: " + no_press_reason(
+                    str(asked.get("why") or "no reason given")
+                )
+            raise EngineError("not_lined_up", message + (f" -- {why}" if why else ""), recoverable=True)
         if outcome == line_up.UNABLE:
             # what no waiting and no driving the chair cures (the arm not at its rest pose: a line-up moves
             # nothing but the wrist of an arm at rest). Said on the panel, and ended at once: the user is not
             # left "Looking for the container" for the whole line-up, to be told to press open again
+            ended(str(source.unable))
             raise EngineError("not_home", f"{source.unable}: nothing moved", recoverable=True)
-        if outcome != line_up.GO:  # nothing but the user's Open lets a run start
+        if outcome != line_up.GO:  # nothing but the user's yes lets a run start
+            ended(f"ended {outcome!r}")
             raise EngineError("line_up_unavailable", f"the line-up ended {outcome!r}: nothing ran", recoverable=False)
+        if view is not None:
+            view.guide_end(True, "yes" if lining.said_yes else "Open pressed", again=asked is not None, find=ask.find)
         return time.monotonic() - t0
 
     def availability(self, instance_id, world_state):
@@ -1049,13 +1321,16 @@ class Capability(CapabilityEngine):
             raise Cancelled()  # nothing ran
         check_params(params)
         ui = self._ui_live()  # asked once for this goal: what the log says is what is decided on
+        timed = self._timed(ui)  # ... and whether the orchestrator's 120 s bound it (its token came with it)
         # the settings that decide how this goal flies, as they are now: a `ros2 param set` lives only in the
         # running node and a restart puts the deployment's values back, so every goal's are in the log
         self.get_logger().info(
-            "open_box goal: line_up=%s ui=%s line_up_far_m=%s air_control=%s wrist_first=%s wrist_alone=%s"
+            "open_box goal: line_up=%s ui=%s orchestrated=%s line_up_far_m=%s air_control=%s wrist_first=%s "
+            "wrist_alone=%s"
             % (
                 str(bool(self._param("line_up"))).lower(),
                 "live" if ui else "none",
+                str(timed).lower(),
                 float(self._param("line_up_far_m") or 0.0),
                 self._param("air_control") or "impedance",
                 str(bool(self._param("wrist_first"))).lower(),
@@ -1065,11 +1340,15 @@ class Capability(CapabilityEngine):
         self._air_control()  # a value it cannot be: refused here, before anything runs
         if not self.mock and not self._allowed():  # the mock moves nothing: it is always allowed
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
-        # whether this goal lines up first, decided once and before anything is started: with line_up on and
-        # no UI to ask on it is refused here (the mock's too), never run without its Open
-        lines_up = self._lines_up(ui)
+        # whether this goal lines up before its first move, decided once and before anything is started; where
+        # it is asked (the UI's panel, or with no UI this node's console and ~/answer) and how long a line-up
+        # may take (the orchestrator's goal: what its 120 s leave; one sent by hand: CONSOLE_LINE_UP_S)
+        lines_up, carried = self._lines_up()
+        t0 = time.monotonic()
+        ask = Asking(ui, timed, t0, carried=carried)
+        self._hear_answers()  # the person's y or n, from here to the action's end
         if self.mock:
-            return self._mock(action_id, ctx, lines_up)
+            return self._mock(action_id, ctx, lines_up, ask)
         ctx.checkpoint()  # cancelled before it started: nothing runs
         env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
         # the selection as the goal came: read once, used for the line-up, every write and the run's argv
@@ -1077,23 +1356,31 @@ class Capability(CapabilityEngine):
         runs = state_dir(env) / "runs"
         log = RunLog(runs, RunLog.existing(runs))
         track = Tracker(action_id, instance_id)
-        t0 = time.monotonic()
         # the flight view (flight_view): the run's lines read as they are logged, one short line a step
-        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
-        view = FlightView()
+        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader. A line-up's
+        # lines are the engine's own on it (Asking.view)
+        view = ask.view = FlightView()
         view.log = self._lines_to_file(runs)
-        lined_up_s, run_ = 0.0, None
+        lined_up_s, run_, went_at = 0.0, None, None
+        if lines_up:
+            view.start(action_id, instance_id, find=False)  # the find comes after the line-up's yes
         if lines_up and self._param("wrist_first"):
             # the wrist looks while the user lines up (owner 2026-11-16: "keep the wrist look"): the run's own
-            # process is the line-up's eyes, started now and held at its line-up until the Open, so that one
-            # process alone ever commands the arm. Its budget runs from here, the line-up inside it
-            view.start(action_id, instance_id)
-            run_ = self._lined_up_run(ctx, env, action_id, instance_id, view)
+            # process is the line-up's eyes, started now and held at its line-up until the yes, so that one
+            # process alone ever commands the arm. Its budget runs from here, the line-up inside it (for a
+            # goal sent by hand, from its go: went_at)
+            run_ = self._lined_up_run(ctx, env, action_id, instance_id, ask)
+            went_at = time.monotonic()
         elif lines_up:
-            # nothing moves, and nothing runs but on the line-up's Open
-            lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
-            if self._cancelled_before_go(ctx):
-                raise Cancelled()  # nothing ran
+            # nothing moves, and nothing runs but on the line-up's yes
+            try:
+                lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id), ask)
+                if self._cancelled_before_go(ctx):
+                    raise Cancelled()  # nothing ran
+            except BaseException as e:
+                view.arm = "at rest (nothing moved)"
+                view.finish(None, cancelled=isinstance(e, Cancelled), timed_out=False, held=False)
+                raise
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         try:
             ctx.progress(first, 0.0, "starting", pausable=False)
@@ -1114,14 +1401,22 @@ class Capability(CapabilityEngine):
                 self.get_logger().error("the run was stopped (Ctrl+C): the engine failed before it could follow it")
             raise
         if run_ is None:
-            view.start(action_id, track.instance_id)
-            run_ = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
+            if not lines_up:
+                view.start(action_id, track.instance_id)
+            # --guide: where it finds no press from where the chair stands it asks to be guided and waits on
+            # its stdin, as a run that lines up first does (_follow)
+            run_ = Run(self._argv(action_id, track.instance_id) + ["--guide"], env, view.relay(LOGGER.log), talk=True)
         self._run = run_
+        # The run's own time. Under the orchestrator's 120 s: RUN_BUDGET_S from the goal's start, the line-up
+        # inside it. A goal sent by hand has no such bound, and the time its person took is none of the run's:
+        # RUN_BUDGET_S from the line-up's go, so that a slow line-up never cuts the run it lets go
+        budget_s = RUN_BUDGET_S - lined_up_s if timed else RUN_BUDGET_S
+        since = run_.started if (timed or went_at is None) else went_at
         code = None
         try:
-            code = self._follow(self._run, log, track, ctx, world, panel, RUN_BUDGET_S - lined_up_s)
+            code = self._follow(run_, log, track, ctx, world, panel, budget_s, since=since, guide=(ask, env, action_id))
         finally:
-            run_, self._run = self._run, None
+            self._run = None
             if run_.proc.poll() is None:
                 # _follow raised with the run still going: nothing else would stop it, and it
                 # would go on moving the arm after its goal ended. Its own stop first (Ctrl+C:
@@ -1136,6 +1431,10 @@ class Capability(CapabilityEngine):
             view.finish(
                 code, cancelled=ctx.cancelled() or panel.pressed, timed_out=run_.timed_out, held=bool(track.held)
             )
+            if code is None:
+                # following it raised (a line-up in the run's middle that ended it; a failure of the engine's):
+                # what was queued for the world state is written, and its writer's thread ends with the goal
+                world.wait(WORLD_WAIT_S)
         if ctx.cancelled() or panel.pressed:
             world.wait(WORLD_WAIT_S)  # those queued before the cancel
             raise Cancelled()
@@ -1153,7 +1452,7 @@ class Capability(CapabilityEngine):
         if run_.timed_out:
             error = EngineError(
                 "timeout",
-                f"the run took longer than {RUN_BUDGET_S - lined_up_s:.0f} s and was stopped its own way (Ctrl+C)",
+                f"the run took longer than {budget_s:.0f} s and was stopped its own way (Ctrl+C)",
                 recoverable=True,
             )
         elif code != 0:
@@ -1178,26 +1477,52 @@ class Capability(CapabilityEngine):
                 )
         return result
 
-    def _follow(self, run_, log, track, ctx, world, panel, budget_s=RUN_BUDGET_S):
-        """Progress from the run's rows until it ends, on `panel` too; a cancel (the orchestrator's, or the
-        panel's Cancel, which is made the orchestrator's) is its Ctrl+C. Its exit code. The world-state writes
-        the rows call for are `world`'s, never this loop's to wait on. `budget_s`: the run's own time, what a
-        line-up before it left of RUN_BUDGET_S."""
+    def _follow(self, run_, log, track, ctx, world, panel, budget_s=RUN_BUDGET_S, since=None, guide=None):
+        """Progress from the run's rows until it ends, on `panel` too; a cancel (the orchestrator's, the
+        panel's Cancel, which is made the orchestrator's, or the person's n on ~/answer) is its Ctrl+C. Its
+        exit code. The world-state writes the rows call for are `world`'s, never this loop's to wait on.
+        `budget_s`: the run's own time, counted from `since` (None: from its start): what a line-up before
+        it left of RUN_BUDGET_S.
+
+        `guide` ((Asking, the run's env, its action)): where the run asks to be guided (no press plans from
+        where the chair stands: press_demo.guide_chair, run 2 of 2026-11-17), it is taken through a line-up
+        in the middle of itself (_run_lines_up) and followed on from its go. A line-up that ends any other
+        way has ended the run, safely, before it raises out of here. Under the orchestrator's 120 s the
+        run's budget is not moved by it (the line-up is given only where a long run still fits after it:
+        Asking.left_s); for a goal sent by hand the budget starts again at the go, RUN_BUDGET_S whole: the
+        time a person takes to move a chair is none of the run's, and no budget may cut a motion short."""
         sent = escalated = None
+        since = run_.started if since is None else since
         while run_.proc.poll() is None:
             self._progress(log, track, ctx, panel)
             if panel.tick():
                 self._cancel_from_ui()
+            self._said_no(panel)
             cancelled = ctx.cancelled() or panel.pressed  # the press itself, whatever the base class made of it
             if not cancelled:
                 self._sync_world(track, ctx, world)
+            asked = run_.take_guide() if guide is not None else None
+            if asked is not None and sent is None and not cancelled:
+                ask, env, action_id = guide
+                why = no_press_reason(str(asked.get("why") or "no reason given"))
+                self.get_logger().warning(
+                    "no press plans from where the chair stands (%s): the run is not ended, the chair is guided" % why
+                )
+                # why, to whoever follows the action's progress: a person at the terminal program has no
+                # console to read it on (the flight view says it from the run's own line)
+                ctx.progress(line_up.PHASE, 0.0, why[:1].upper() + why[1:] + GUIDE_SAYS, pausable=False)
+                self._run_lines_up(ctx, env, run_, action_id, track.instance_id, ask, asked=asked)
+                panel.again()  # the line-up had the screen: the run's panel is sent again at once
+                if not ask.timed:
+                    since, budget_s = time.monotonic(), RUN_BUDGET_S
+                continue
             now = time.monotonic()
             if cancelled and sent is None:
                 self.get_logger().warning("cancelled: the run's own stop (Ctrl+C) sent")
                 panel.stopping = PANEL_CANCELLED
                 run_.interrupt()
                 sent = now
-            elif sent is None and now - run_.started > budget_s:
+            elif sent is None and now - since > budget_s:
                 self.get_logger().error(
                     f"the run is still going after {budget_s:.0f} s: its own stop (Ctrl+C), before the "
                     "orchestrator's 120 s cancel"
@@ -1301,25 +1626,40 @@ class Capability(CapabilityEngine):
                 env[var] = str(self._param(name))
         return env
 
-    def _mock(self, action_id, ctx, lines_up=False):
+    def _mock(self, action_id, ctx, lines_up=False, ask=None):
         """A successful real run at the interface, nothing moved (review round 2): its phases in
         its words (each `mock_phase_s` long), the gripper's `holding` from the grip to the release and
         the container `opened` at the release, written as the real run writes them, its panel on the UI
         and its result. Like the real run it cannot pause; a cancel ends it. `lines_up`: execute()'s
-        decision for this goal (_lines_up), as the real run takes it."""
+        decision for this goal (_lines_up), as the real run takes it; `ask`: where its line-up is said and
+        asked (Asking): with no UI on this node's console and ~/answer, as the real run's is, so that the
+        console's side and the terminal program can be rehearsed on the mock too."""
         track = Tracker(action_id, self.instance_id)
         phase_s = max(0.0, float(self._param("mock_phase_s")))
         t0 = time.monotonic()
+        ask = Asking(self._ui_live(), self._timed(self._ui_live()), t0) if ask is None else ask
         if lines_up:
-            # the real run's line-up, of a box that comes into reach over a few of the mock's phases
-            self._line_up(ctx, lambda: line_up.MockApproach(MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m()))
+            # the real run's line-up, of a box that comes into reach over a few of the mock's phases. Its lines
+            # are the flight view's (the mock's run itself has none)
+            ask.view, ask.find = FlightView(), False
+            ask.view.start(action_id, track.instance_id, find=False)
+            try:
+                self._line_up(
+                    ctx, lambda: line_up.MockApproach(MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m()), ask
+                )
+            except BaseException as e:
+                ask.view.arm = "the mock moves nothing"
+                ask.view.finish(None, cancelled=isinstance(e, Cancelled), timed_out=False, held=False)
+                raise
         world = WorldWriter(self.get_logger())
         panel = Panel(ctx, self._ui_live)  # the real run's, Cancel included
 
         def cancel_point():
-            """A cancel (the orchestrator's, or the panel's Cancel) ends the mock here, as the real run."""
+            """A cancel (the orchestrator's, the panel's Cancel, or the person's n) ends the mock here, as
+            the real run."""
             if panel.tick():
                 self._cancel_from_ui()
+            self._said_no(panel)
             if ctx.cancelled() or panel.pressed:
                 world.wait(WORLD_WAIT_S)
                 raise Cancelled()

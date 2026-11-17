@@ -1394,12 +1394,18 @@ LINE_UP_HELD_S = guide.LOST_S
 
 class LineUpEar:
     """What the engine says on stdin while the user lines up, heard on a thread of its own: `go`, or `stop`
-    (said, or the pipe closed: an engine that is gone has not said go)."""
+    (said, or the pipe closed: an engine that is gone has not said go).
+
+    One ear serves the whole run: a run may be lined up more than once (before its first move with
+    --line-up, and again wherever no press plans from where the chair stands, --guide), and each round is
+    answered by one line. again() opens the next round: the go that let the run on is forgotten, and an
+    engine that has gone since (the pipe closed after its go) is a stop from the start."""
 
     def __init__(self, stream=None):
         import threading
 
         self.go = self.stop = False
+        self._closed = False  # the pipe ended: nothing more will ever be heard
         self._stream = sys.stdin if stream is None else stream
         threading.Thread(target=self._listen, name="line-up-ear", daemon=True).start()
 
@@ -1414,12 +1420,17 @@ class LineUpEar:
                     continue
                 if isinstance(msg, dict) and msg.get("go") is True:
                     self.go = True
-                    return
-                if isinstance(msg, dict) and msg.get("stop"):
-                    break
+                elif isinstance(msg, dict) and msg.get("stop"):
+                    self.stop = True
         except (OSError, ValueError):
             pass
-        self.stop = True
+        self._closed = True
+        if not self.go:  # (after a go the run flies on, as it did: the pipe's end is the next round's stop)
+            self.stop = True
+
+    def again(self):
+        """The next round: neither a go nor a stop heard yet, unless the engine is gone."""
+        self.go, self.stop = False, self._closed
 
     def heard(self):
         return self.go or self.stop
@@ -1439,9 +1450,12 @@ def wrist_looks_from(live, rest, rest_tol):
     )
 
 
-def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None):
+def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None, rest_any=False):
     """--line-up: say where the container is until the engine answers, (went, wrist_turned, wrist_held:
     the wrist's own watch held the container as the go came, its last fix no older than LINE_UP_HELD_S).
+    `rest_any` (a line-up in the middle of a run, guide_chair): a wrist that stands turned as the watch
+    ends without a go is turned back to rest whoever turned it: this watch, or the run's own look before
+    it, where the watch's own turn never began (a stop heard at once: the engine had no time to guide).
 
     The scene camera's sightings are said as they are made, as tasks/box_watch says them
     (SceneLocator.on_sighting). With --wrist-first, --execute and the arm at rest (within `rest_tol`) or at
@@ -1588,16 +1602,108 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
         runner.note("line_up", stage="go", wrist=turned, held=held)
         return True, turned, held
     runner.note("line_up", stage="stop", wrist=turned)
-    if turned:
+    back = turned
+    if not turned and rest_any and args.execute:
+        live = ctx.client.joints()
+        back = rest_distance(live, rest) > rest_tol and wrist_looks_from(live, rest, rest_tol)
+    if back:
         state, why = sv.rest_wrist(ctx, runner, args.execute, rest=rest)
         if state != "flown":
             log.info("[press_demo] STOP: the line-up ended and the wrist did not turn back (%s) — the arm holds" % why)
             sys.exit(EXIT_LINE_UP_HOLDS)
     log.info(
-        "[press_demo] LINE-UP: ended without a go; nothing was pressed%s"
-        % (", the wrist back at rest" if turned else "")
+        "[press_demo] LINE-UP: ended without a go; nothing was pressed%s" % (", the wrist back at rest" if back else "")
     )
     return False, False, False
+
+
+def far_tops(find, model):
+    """The lid-sized tops a wrist look found that all stand out of the arm's reach: [(x, y, top z)], the
+    nearest the arm first; [] where it found a container, found none, or has one within reach (which
+    the finder then takes or refuses for its own reasons). The finder's own test of each place
+    (survey._within_reach: reach_press.out_of_reach, the arm's kinematic bound), asked again of what
+    it kept: a container the wrist can see and the arm cannot reach is one the chair is moved for
+    (--guide), not a NO BOX."""
+    from box_opening.tasks import survey as sv
+
+    if find is None or getattr(find, "fix", None) is not None:
+        return []
+    try:
+        tops = [
+            (float(q.xy[0]), float(q.xy[1]), float(q.top_z))
+            for q in getattr(find, "places", ()) or ()
+            if getattr(q, "button", None) != "none"
+        ]
+        within = sv._within_reach(model)
+        if not tops or any(within(top) for top in tops):
+            return []
+        return sorted(tops, key=lambda top: math.hypot(top[0], top[1]))
+    except Exception:  # noqa: BLE001 - what it cannot read of a find is no reason to guide, and never the look's end
+        return []
+
+
+def forget_scene(ctx, worlds, watcher):
+    """The chair is about to be moved: what this run's cameras measured of the scene was measured from
+    where the chair stood, and is true of nowhere else. The table's height and extent (adopt_scene_table),
+    the counter's edges the arm is held out of (keep_out_counter: the body check's run-time boxes), the
+    box's pose and the wrist look's points are forgotten, so that the look after the move measures them
+    again as a run's first look does (the owner's rule: the environment only from the cameras, each time)."""
+    from box_opening.runtime import approach
+
+    ctx.cpose = None
+    ctx.counter_boxes = None
+    approach.set_obstacles([])
+    ctx.survey_clouds = None
+    ctx.wrist_far = None
+    ctx.home_ahead = None
+    worlds.table_top_z = None  # the world file's own again, where it names a table; else none until measured
+    worlds.table_extent = None
+    watcher.table_z = worlds.table_top_z
+    watcher.roi = None
+
+
+def guide_chair(node, ctx, cfg, runner, watcher, args, locator, rest_tol, place, why, n, ear, out=None):
+    """--guide, where the run found no press from where the chair stands (reach_press.NO_WAY_IN, or a
+    container the wrist sees out of the arm's reach): the run does not end. Flatbot 2026-11-17 16:43
+    ended "FAILED ... arm: where the look left it"; the owner: "it should NOT just fail EVER ... don't
+    end, just tell you how far to move until it's close enough then asking if ready y/n".
+
+    The arm is brought to rest first where the run's look left it anywhere else (the side survey's pose):
+    the chair is told to move only with the arm at rest, its wrist alone turned. Then the engine is asked
+    to guide ({"guide": {"box", "why", "n"}}: where the box stood and why no press plans there, which the
+    engine holds against that place), what the cameras measured from here is forgotten (forget_scene), and
+    the run watches as a line-up's watch does (line_up_watch: the wrist turned to look, every frame's fix
+    said) until the engine answers. On its go the run looks for the box again from where the wrist stands:
+    (wrist_turned, wrist_held), as line_up_watch gives them. On a stop, or an engine that is gone, the
+    wrist is turned back to rest and the run ends EXIT_NOT_LINED_UP, nothing pressed; a turn that stopped
+    part way ends it EXIT_LINE_UP_HOLDS (line_up_watch)."""
+    import json
+
+    out = sys.stdout if out is None else out
+    rest = rest_joints(cfg)
+    if not wrist_looks_from(ctx.client.joints(), rest, rest_tol):
+        if not try_home(ctx, runner, args.execute, "NO WAY IN: the arm goes to rest before the chair is moved"):
+            log.info(
+                "[press_demo] STOP: no press plans from where the chair stands, and the arm did not get home for "
+                "the chair to be moved — the arm holds; nothing was pressed"
+            )
+            sys.exit(1)
+    forget_scene(ctx, ctx.worlds, watcher)
+    ear.again()
+    box = None if place is None else [round(float(v), 4) for v in place[:3]]
+    runner.note("guide", n=n, box=box, why=str(why)[:300])
+    log.info(
+        "[press_demo] GUIDE %d: the arm rests and the wrist looks while the chair is moved; the run goes on at "
+        "the user's yes" % n
+    )
+    out.write(LINE_UP_MARK + json.dumps({"guide": {"n": n, "box": box, "why": str(why)[:300]}}) + "\n")
+    out.flush()
+    went, turned, held = line_up_watch(
+        node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=ear, out=out, rest_any=True
+    )
+    if not went:
+        sys.exit(EXIT_NOT_LINED_UP)
+    return turned, held
 
 
 def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
@@ -1915,6 +2021,8 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
     if survey.preview:
         log.info("[press_demo] preview ends at the wrist look's pose: its frames, the aim and the press need --execute")
         sys.exit(0)
+    # lid-sized tops it saw that all stand out of the arm's reach: with --guide the chair is moved for them
+    ctx.wrist_far = far_tops(survey.find, getattr(ctx, "model", None))
     if survey.fix is not None and tie is not None:
         at = survey.fix.top_xyz
         why, how = tie_refusal(tie, survey.find, at)
@@ -2165,6 +2273,15 @@ def main():
         "and nothing moves before the go",
     )
     ap.add_argument(
+        "--guide",
+        action="store_true",
+        help="for the engine (node.Capability._follow): where no press plans from where the chair stands, or the "
+        "wrist sees the container out of the arm's reach, the run does not end. It brings the arm to rest, says "
+        '{"guide": ...} on stdout, watches as --line-up does while the engine tells the user how to move the '
+        'chair, and on {"go": true} on stdin looks for the box again and goes on; {"stop": true} (or the pipe '
+        "closed) and it turns the wrist back and ends with nothing pressed. Only with --execute",
+    )
+    ap.add_argument(
         "--wrist-first",
         action="store_true",
         help="the wrist camera finds the container: before anything else the wrist turns where the arm rests so "
@@ -2192,6 +2309,7 @@ def main():
     # is the run (owner 2026-10-28), whatever the command line said
     args.depth_press = True
     args.compliant = COMPLIANT_DEFAULT and not args.guarded
+    args.guide = bool(args.guide and args.execute)  # a preview moves nothing and is guided nowhere
     cfg_path = args.container or cli_common.default_container_yaml()
     bench = args.bench_world or cli_common.default_bench_yaml()
     model = ContainerModel.load(cfg_path)
@@ -2333,11 +2451,16 @@ def main():
         # checks gravity against it.
         start_tol = REST_TOL_RAD if (args.compliant and not args.wrist_detect) else AT_REST_RAD
         wrist_turned = wrist_held = False
+        # the engine's answers on stdin, heard for the whole run: its go or stop to the line-up before the
+        # run (--line-up), and to each one in the middle of it (--guide)
+        ear = LineUpEar() if (getattr(args, "line_up", False) or args.guide) else None
         if getattr(args, "line_up", False):
             # THE LINE-UP (--line-up; owner 2026-11-16): the user is told which way to drive until the
             # container is where the arm opens it, and nothing of the run starts but on their Open
             # (a wrist turn of its own that stopped part way ends the run in there: EXIT_LINE_UP_HOLDS)
-            went, wrist_turned, wrist_held = line_up_watch(node, ctx, cfg, runner, watcher, args, locator, start_tol)
+            went, wrist_turned, wrist_held = line_up_watch(
+                node, ctx, cfg, runner, watcher, args, locator, start_tol, ear=ear
+            )
             if not went:
                 sys.exit(EXIT_NOT_LINED_UP)
         # (a line-up that turned the wrist started from rest, or from rest but for its wrist, and the run's own
@@ -2390,37 +2513,151 @@ def main():
         # owner 2026-11-04): never pressed on as it stands, it says only
         # where the wrist looks, and the wrist's aim from there places the
         # button (SceneFix.rough).
-        t_scene = time.monotonic()
-        scene_fix = locator.locate(SCENE_LINED_UP_LOCATE_S if wrist_held else SCENE_FIRST_LOCATE_S)
-        viz_hook("scene", locator, scene_fix)  # what it judged, drawn off this thread (perception/viz)
-        if ctx.mission_frames is not None:
-            ctx.mission_frames.scene(
-                scene_frame(locator.grab, locator.base_to_link()),
-                fix_xyz=None if scene_fix is None else scene_fix.top_xyz,
-                score=None if scene_fix is None else scene_fix.score,
-                why=locator.last_why if scene_fix is None else None,
-                source=None if scene_fix is None else getattr(scene_fix, "source", "segmenter"),
-                boxes=getattr(locator, "last_boxes", None),
+        # FIND THE BOX AND PRESS IT, and again from the find wherever no press plans from where the chair
+        # stands (--guide; owner 2026-11-17: "it should NOT just fail EVER"): the engine has the user move
+        # the chair (guide_chair), and everything the cameras measured before the move is measured again
+        guided = 0  # line-ups in the middle of this run
+        while True:
+            t_scene = time.monotonic()
+            scene_fix = locator.locate(SCENE_LINED_UP_LOCATE_S if wrist_held else SCENE_FIRST_LOCATE_S)
+            viz_hook("scene", locator, scene_fix)  # what it judged, drawn off this thread (perception/viz)
+            if ctx.mission_frames is not None:
+                ctx.mission_frames.scene(
+                    scene_frame(locator.grab, locator.base_to_link()),
+                    fix_xyz=None if scene_fix is None else scene_fix.top_xyz,
+                    score=None if scene_fix is None else scene_fix.score,
+                    why=locator.last_why if scene_fix is None else None,
+                    source=None if scene_fix is None else getattr(scene_fix, "source", "segmenter"),
+                    boxes=getattr(locator, "last_boxes", None),
+                )
+            if locator.moved_note and scene_fix is not None:
+                log.info("[press_demo] scene camera: %s" % locator.moved_note)  # e.g. the tag was not in view
+            # the scene camera that checks the box again after the press: none for the wrist's box,
+            # which it never saw (a box it found elsewhere would be taken for this one moved)
+            reach_locator = locator
+            wrist_said, scene_said = [], None
+            ctx.wrist_far = None  # (wrist_first says what it saw out of the arm's reach)
+            if getattr(args, "wrist_first", False):
+                # THE WRIST CAMERA FINDS THE BOX (--wrist-first; owner, 2026-11-11: "having the wrist
+                # cam just find the box ... the arm would just need to angle itself so it can see the
+                # scene"): facing a table, the arm presses in front of itself, where the scene camera
+                # sees no lid whole and puts what it sees 7-9 cm out (tasks/survey's front note). The
+                # scene camera's box is kept for where the wrist finds none. With the orchestrator's
+                # selection too (--instance-id, 2026-11-12): the wrist's box is taken where it is tied
+                # to the selected container as the scene camera has it (wrist_look, SelectionTie).
+                scene_fix, reach_locator, scene_said = wrist_look(
+                    node, ctx, cfg, runner, watcher, args, locator, scene_fix, wrist_said
+                )
+            far = (getattr(ctx, "wrist_far", None) or []) if args.guide else []
+            if scene_fix is None and far:
+                # THE WRIST SEES IT, OUT OF THE ARM'S REACH (--guide): no NO BOX and no end. The chair is
+                # moved for it, as for a box no press plans to (guide_chair), and the run looks again
+                why = "the wrist camera sees a lid-sized top at [%.2f, %.2f], out of the arm's reach%s" % (
+                    far[0][0],
+                    far[0][1],
+                    "" if not scene_said else " (scene camera: %s)" % scene_said,
+                )
+                log.info("[press_demo] OUT OF REACH: %s; nothing was pressed" % why)
+                runner.note("reach_refused", why=why, guided=True, **locator.look_record())
+                guided += 1
+                wrist_turned, wrist_held = guide_chair(
+                    node, ctx, cfg, runner, watcher, args, locator, start_tol, far[0], why, guided, ear
+                )
+                continue
+            if scene_fix is None:
+                scene_fix = wrist_survey_or_exit(
+                    node,
+                    ctx,
+                    cfg,
+                    runner,
+                    watcher,
+                    args,
+                    locator,
+                    wrist_look="; ".join(wrist_said),
+                    scene_said=scene_said,
+                )
+                reach_locator = None
+            if not scene_by_tf and reach_locator is not None:
+                trusted, distrust = scene_trust(
+                    residuals_path_for(args.scene_calib), args.scene_calib or scene_calib_path()
+                )
+                if not trusted:
+                    log.info(
+                        "[press_demo] scene camera: %s — reaching out to its box anyway; the wrist's aim from the "
+                        "look pose decides" % distrust
+                    )
+            sp = scene_fix.pose
+            adopt_scene_table(ctx, worlds, watcher, scene_fix)
+            surveyed = watcher.table_z
+            log.info(
+                "[press_demo] %s: box at [%.3f, %.3f] yaw %.1f deg from %d lid points%s "
+                "(%s; the %s reads the table at %.3f%s, surveyed %s; %.1f s to locate "
+                "[%s], %.1f s since start) — reaching out"
+                % (
+                    "SCENE" if reach_locator is not None else "WRIST SURVEY",
+                    sp.xyz[0],
+                    sp.xyz[1],
+                    math.degrees(sp.yaw),
+                    scene_fix.n_points,
+                    (
+                        " (%s from its lid's side in view — ROUGH: the wrist's aim from the look pose places it)"
+                        % scene_fix.partial
+                        if getattr(scene_fix, "rough", False)
+                        else " (%s, finished from its lid's arc in view)" % scene_fix.partial
+                    )
+                    if getattr(scene_fix, "partial", "")
+                    else "",
+                    scene_source_label(scene_fix),
+                    "scene" if reach_locator is not None else "wrist camera",
+                    scene_fix.table_z_scene,
+                    table_seen_over(scene_fix.table_extent),
+                    ("%.3f" % surveyed) if surveyed is not None else "n/a",
+                    time.monotonic() - t_scene,
+                    " ".join("%s %.2f" % (k[:-2], v) for k, v in locator.last_timing.items()),
+                    time.monotonic() - t_main,
+                )
             )
-        if locator.moved_note and scene_fix is not None:
-            log.info("[press_demo] scene camera: %s" % locator.moved_note)  # e.g. the tag was not in view
-        # the scene camera that checks the box again after the press: none for the wrist's box,
-        # which it never saw (a box it found elsewhere would be taken for this one moved)
-        reach_locator = locator
-        wrist_said, scene_said = [], None
-        if getattr(args, "wrist_first", False):
-            # THE WRIST CAMERA FINDS THE BOX (--wrist-first; owner, 2026-11-11: "having the wrist
-            # cam just find the box ... the arm would just need to angle itself so it can see the
-            # scene"): facing a table, the arm presses in front of itself, where the scene camera
-            # sees no lid whole and puts what it sees 7-9 cm out (tasks/survey's front note). The
-            # scene camera's box is kept for where the wrist finds none. With the orchestrator's
-            # selection too (--instance-id, 2026-11-12): the wrist's box is taken where it is tied
-            # to the selected container as the scene camera has it (wrist_look, SelectionTie).
-            scene_fix, reach_locator, scene_said = wrist_look(
-                node, ctx, cfg, runner, watcher, args, locator, scene_fix, wrist_said
+            runner.note(
+                "scene_fix",
+                origin_xyz=[round(float(v), 4) for v in sp.xyz],
+                yaw_deg=round(math.degrees(sp.yaw), 2),
+                top_xyz=[round(float(v), 4) for v in scene_fix.top_xyz],
+                n_points=scene_fix.n_points,
+                owl_score=round(scene_fix.score, 3),  # the detector's score (the run log's field name since 2026-09)
+                source=getattr(scene_fix, "source", "segmenter"),
+                n_sightings=int(getattr(scene_fix, "n_sightings", 1)),
+                rough=bool(getattr(scene_fix, "rough", False)),
+                # the box's height as this run measured it: the lid's top over the table it was read on (the model's
+                # dims.z only bounds it, scene_source.lid_band_off)
+                box_height_mm=None
+                if scene_fix.table_z_scene != scene_fix.table_z_scene
+                else round(1000.0 * (float(scene_fix.top_xyz[2]) - float(scene_fix.table_z_scene)), 1),
+                table_z_scene=None
+                if scene_fix.table_z_scene != scene_fix.table_z_scene
+                else round(scene_fix.table_z_scene, 4),
+                **locator.look_record(),  # timing, segmenter: the look's seconds and what the segmenter gave it
             )
-        if scene_fix is None:
-            scene_fix = wrist_survey_or_exit(
+            # EVERY box the scene camera fixes is pressed by the reach-out: the
+            # tilted look, the wrist's aim, the hand turned down onto the button,
+            # and — the full run — the lid off and set down (tasks/reach_press,
+            # tasks/reach_lid_off). Owner 2026-10-28: "make the arm always go to
+            # that 45 degree looking pose even if it's close enough to go
+            # straight up and down. completely scrap the home -> straight
+            # vertical if close enough mode".
+            from box_opening.tasks.reach_press import NO_WAY_IN, run_reach_press
+
+            ctx.cpose = scene_fix.pose  # the box every world and plan from here is built around
+            watcher.roi = None  # the scene bbox never applied to the wrist frame
+            code = run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, reach_locator)
+            if code != NO_WAY_IN:
+                sys.exit(code)
+            if not args.guide:  # (the reach-out answers NO_WAY_IN only to a guided run: a failure, as it was)
+                sys.exit(1)
+            # NO PRESS PLANS FROM WHERE THE CHAIR STANDS (reach_press.no_way_in, only with --guide): nothing
+            # was pressed, and the arm rests but for a wrist the look turned. The chair is moved, and the
+            # run goes round again from the find
+            guided += 1
+            wrist_turned, wrist_held = guide_chair(
                 node,
                 ctx,
                 cfg,
@@ -2428,82 +2665,12 @@ def main():
                 watcher,
                 args,
                 locator,
-                wrist_look="; ".join(wrist_said),
-                scene_said=scene_said,
+                start_tol,
+                scene_fix.top_xyz,
+                getattr(ctx, "no_way_in", "") or "no press plans from where the chair stands",
+                guided,
+                ear,
             )
-            reach_locator = None
-        if not scene_by_tf and reach_locator is not None:
-            trusted, distrust = scene_trust(
-                residuals_path_for(args.scene_calib), args.scene_calib or scene_calib_path()
-            )
-            if not trusted:
-                log.info(
-                    "[press_demo] scene camera: %s — reaching out to its box anyway; the wrist's aim from the "
-                    "look pose decides" % distrust
-                )
-        sp = scene_fix.pose
-        adopt_scene_table(ctx, worlds, watcher, scene_fix)
-        surveyed = watcher.table_z
-        log.info(
-            "[press_demo] %s: box at [%.3f, %.3f] yaw %.1f deg from %d lid points%s "
-            "(%s; the %s reads the table at %.3f%s, surveyed %s; %.1f s to locate "
-            "[%s], %.1f s since start) — reaching out"
-            % (
-                "SCENE" if reach_locator is not None else "WRIST SURVEY",
-                sp.xyz[0],
-                sp.xyz[1],
-                math.degrees(sp.yaw),
-                scene_fix.n_points,
-                (
-                    " (%s from its lid's side in view — ROUGH: the wrist's aim from the look pose places it)"
-                    % scene_fix.partial
-                    if getattr(scene_fix, "rough", False)
-                    else " (%s, finished from its lid's arc in view)" % scene_fix.partial
-                )
-                if getattr(scene_fix, "partial", "")
-                else "",
-                scene_source_label(scene_fix),
-                "scene" if reach_locator is not None else "wrist camera",
-                scene_fix.table_z_scene,
-                table_seen_over(scene_fix.table_extent),
-                ("%.3f" % surveyed) if surveyed is not None else "n/a",
-                time.monotonic() - t_scene,
-                " ".join("%s %.2f" % (k[:-2], v) for k, v in locator.last_timing.items()),
-                time.monotonic() - t_main,
-            )
-        )
-        runner.note(
-            "scene_fix",
-            origin_xyz=[round(float(v), 4) for v in sp.xyz],
-            yaw_deg=round(math.degrees(sp.yaw), 2),
-            top_xyz=[round(float(v), 4) for v in scene_fix.top_xyz],
-            n_points=scene_fix.n_points,
-            owl_score=round(scene_fix.score, 3),  # the detector's score (the run log's field name since 2026-09)
-            source=getattr(scene_fix, "source", "segmenter"),
-            n_sightings=int(getattr(scene_fix, "n_sightings", 1)),
-            rough=bool(getattr(scene_fix, "rough", False)),
-            # the box's height as this run measured it: the lid's top over the table it was read on (the model's
-            # dims.z only bounds it, scene_source.lid_band_off)
-            box_height_mm=None
-            if scene_fix.table_z_scene != scene_fix.table_z_scene
-            else round(1000.0 * (float(scene_fix.top_xyz[2]) - float(scene_fix.table_z_scene)), 1),
-            table_z_scene=None
-            if scene_fix.table_z_scene != scene_fix.table_z_scene
-            else round(scene_fix.table_z_scene, 4),
-            **locator.look_record(),  # timing, segmenter: the look's seconds and what the segmenter gave it
-        )
-        # EVERY box the scene camera fixes is pressed by the reach-out: the
-        # tilted look, the wrist's aim, the hand turned down onto the button,
-        # and — the full run — the lid off and set down (tasks/reach_press,
-        # tasks/reach_lid_off). Owner 2026-10-28: "make the arm always go to
-        # that 45 degree looking pose even if it's close enough to go
-        # straight up and down. completely scrap the home -> straight
-        # vertical if close enough mode".
-        from box_opening.tasks.reach_press import run_reach_press
-
-        ctx.cpose = scene_fix.pose  # the box every world and plan from here is built around
-        watcher.roi = None  # the scene bbox never applied to the wrist frame
-        sys.exit(run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, reach_locator))
     except KeyboardInterrupt:
         sys.exit(130)  # the abort path already reported what was confirmed
     except ArmHalted as e:

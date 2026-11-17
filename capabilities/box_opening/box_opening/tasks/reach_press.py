@@ -130,6 +130,11 @@ from box_opening.runtime.legs import Kind, Leg, can_merge, merge_groups
 from box_opening.runtime.retime import RetimeParams, positions_to_traj, retime_group
 
 REACH_TILTS_DEG = (30, 35, 40, 45)
+# run_reach_press's answer where no press plans from where the chair stands, nothing was pressed, and the
+# arm rests (or rests but for the wrist the run's own look turned): not the run's end where the engine can
+# guide the user's chair (press_demo --guide; no_way_in). press_demo then has the user move the chair,
+# finds the box again and comes back here; it never leaves the process as an exit code
+NO_WAY_IN = 7
 # How far the rest of the gripper stands above the flush lid when the
 # fingertip touches the button's centre, by tilt (URDF collision meshes with
 # the measured 131 mm fingers; 30 and 45 computed, 35 and 40 interpolated).
@@ -483,6 +488,38 @@ LOOK_PAST_REACH_M = 0.04
 # its user, lids at 0.316 and 0.357, three bearings): every lid a press reached had this at -27 mm or
 # under (0.92 m out at most), every one none reached at -24 or over.
 PRESS_PAST_REACH_M = -0.025
+
+
+def no_way_in(ctx, cfg, runner, args, why, home=False):
+    """No press plans from where the chair stands (`why`, with each tilt's reason): what the run says and
+    answers. Flatbot 2026-11-17 16:43: a box 0.79 m out, the slide in swinging the arm wide at two tilts
+    and the stroke crossing the user's padding at the two others, and the run "just ended" with the arm
+    where its look had left it. The owner: "it should NOT just fail EVER".
+
+    With the engine's guidance (`args.guide`: press_demo --guide) it is no STOP: the line says NO WAY IN,
+    the row says the run was guided, and the answer is NO_WAY_IN, on which press_demo has the user move
+    the chair and looks again. `home`: the arm stands at the look pose (the aimed button's press did not
+    plan): it goes home first, as it always has there, and only an arm that got home is guided from; one
+    that did not holds, which is the STOP it was. Without the guidance (a run by hand) everything is as
+    it was: the STOP line, the row, exit 1."""
+    guided = bool(getattr(args, "guide", False))
+    word = "NO WAY IN" if guided else "STOP"
+    ctx.no_way_in = why  # press_demo hands the engine the reason with its request to guide
+    if not home:
+        log.info("[press_demo] %s: %s; nothing moved" % (word, why))
+        runner.note("reach_refused", why=why, **({"guided": True} if guided else {}))
+        return NO_WAY_IN if guided else 1
+    if guided:
+        # noted BEFORE the home: the engine reads a run's rows as they are written, and the home that follows
+        # is the arm going to rest for the chair's move, not the run's way home (node.Tracker)
+        runner.note("reach_refused", why=why, guided=True)
+    homed = _go_home(ctx, cfg, runner, "%s: %s — nothing was pressed" % (word, why))
+    if not guided:
+        return 1
+    if homed:
+        return NO_WAY_IN
+    log.info("[press_demo] STOP: %s, and the arm did not get home — the arm holds; nothing was pressed" % why[:200])
+    return 1
 
 
 def out_of_reach(model, top_xyz, travel_m=0.015, tilts=None):
@@ -3043,9 +3080,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
                 "nor with the button %.0f mm nearer the arm or to either side (%s; %s)"
                 % (1000 * PROOF_SHIFT_M, why, why_near)
             )
-            log.info("[press_demo] STOP: %s; nothing moved" % stop)
-            runner.note("reach_refused", why=stop)
-            return 1
+            return no_way_in(ctx, cfg, runner, args, stop)
         proven = "shifted"
         log.info(
             "[press_demo] REACH-OUT: the press does not reach the scene camera's button itself (%s), but at %d deg "
@@ -3053,9 +3088,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
             "button decides" % (why, plan.tilt_deg, 1000 * PROOF_SHIFT_M, near)
         )
     if plan is None:
-        log.info("[press_demo] STOP: no reach-out press plans for the scene camera's box (%s); nothing moved" % why)
-        runner.note("reach_refused", why="no reach-out press plans for the scene camera's box (%s)" % why)
-        return 1
+        return no_way_in(ctx, cfg, runner, args, "no reach-out press plans for the scene camera's box (%s)" % why)
     runner.note(
         "reach_plan",
         tilt_deg=plan.tilt_deg,
@@ -3303,8 +3336,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         if way is None:
             # from the look pose, in free air: nothing slid into the box's
             # padded volume, so no clear and no back-off before home
-            _go_home(ctx, cfg, runner, "STOP: no press reaches the aimed button (%s) — nothing was pressed" % why_way)
-            return 1
+            return no_way_in(ctx, cfg, runner, args, "no press reaches the aimed button (%s)" % why_way, home=True)
         move, plan2 = way.move, way.plan
         runner.note(
             "reach_way_in",

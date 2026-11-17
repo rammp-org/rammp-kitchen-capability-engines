@@ -26,6 +26,10 @@ AXIS_SWITCH_M larger, and READY is left only once the box has been out, or movin
 
 Open is taken only from READY and only on a box seen within FRESH_S: a press on anything older is not
 a yes to what is there now.
+
+A goal with no UI is guided by the same Guide (owner 2026-11-17: "don't end, just tell you how far to
+move until it's close enough then asking if ready y/n"): its lines are said on the node's console and
+its question (ASK) is answered y or n (line_up.Answers), a y taken exactly as Open is.
 """
 
 import math
@@ -40,6 +44,9 @@ OPEN, CANCEL = "open", "cancel"  # the panel's button ids
 ARM_NOT_AT_REST = "the arm is not at its rest pose: home it, then press open again"
 UNABLE = "unable"  # the panel's state where the line-up cannot go on and says why: no button
 TITLE = "Opening the container"
+ASK = "Ready. Open the container?"  # the question: Open on the panel, y on the console (the terminal reads it too)
+# what a line-up out of its time says last. The UI's words; a goal with no UI is given its own (Guide.again)
+AGAIN = "Press open again when you are in place"
 
 LOST_S = 1.5  # no box seen for this long: looking again
 FRESH_S = 1.0  # Open counts only on a box seen this recently
@@ -130,9 +137,13 @@ def words(word, metres):
 @dataclass
 class Guide:
     """One line-up: update() every tick, press() for a button, until `state` is GO, TIMED_OUT or the
-    caller's cancel. `budget_s`: how long the user has to line up (None: no limit)."""
+    caller's cancel. `budget_s`: how long the user has to line up (None: no limit). `again`: what it says
+    last where that time runs out. `instruction`: the newest "Move ..." it said (None: none yet), which the
+    engine's error carries where the line-up ends without its yes."""
 
     budget_s: float = None
+    again: str = AGAIN
+    instruction: str = None
     state: str = LOOKING
     started: float = None
     _track: list = field(default_factory=list)  # (t, x, y) of the fixes of the last STEADY_S
@@ -143,6 +154,11 @@ class Guide:
     _bad_since: float = None  # in READY: since when the box has been outside, moving, or not judged
 
     # -- the box's own motion ------------------------------------------------------
+    @property
+    def saw_box(self):
+        """Whether any sighting of the box came while it guided (it may have lost it since)."""
+        return self._last_fix is not None
+
     def _see(self, fix):
         if fix is None or (self._last_fix is not None and fix.t <= self._last_fix.t):
             return
@@ -192,7 +208,7 @@ class Guide:
             return self._said
         self._see(fix)
         if self.budget_s is not None and now - self.started > self.budget_s:
-            return self._answer(now, Say(TIMED_OUT, "Press open again when you are in place"), at_once=True)
+            return self._answer(now, Say(TIMED_OUT, self.again), at_once=True)
         cancel = ((CANCEL, "Cancel"),)
         seen = self._last_fix
         if seen is None or now - seen.t > LOST_S:
@@ -210,7 +226,7 @@ class Guide:
         if reach is None:
             return self._answer(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=self.state != READY)
         if good:
-            ready = Say(READY, "Ready. Open the container?", ((OPEN, "Open"),) + cancel, 100.0)
+            ready = Say(READY, ASK, ((OPEN, "Open"),) + cancel, 100.0)
             return self._answer(now, ready, at_once=True)
         if reach.inside and reach.planned is not False:
             return self._answer(now, Say(HOLD, "Hold still, checking", cancel, 100.0), at_once=True)
@@ -218,7 +234,9 @@ class Guide:
             return self._answer(now, Say(MOVE, "The arm cannot open it from here", cancel, 0.0), at_once=True)
         word, metres, self._axis = instruction(reach.to_zone, self._axis)
         pct = 100.0 * max(0.0, 1.0 - math.hypot(*reach.to_zone) / FAR_M)
-        return self._answer(now, Say(MOVE, words(word, metres), cancel, pct, (word, metres)))
+        said = self._answer(now, Say(MOVE, words(word, metres), cancel, pct, (word, metres)))
+        self.instruction = said.message
+        return said
 
     def press(self, button_id, now):
         """A button: Open flies only from READY on a box seen within FRESH_S; Cancel is the caller's.

@@ -99,10 +99,13 @@ params:
   # is over at once. A second or two and the UI can be rehearsed on it with no arm: the run's
   # panel, its bar, Cancel
   mock_phase_s: 0.0
-  # the line-up before a run, on the UI: the panel tells the user which way to move until the container
-  # is where the arm opens it, then asks, and the arm moves only on its Open. false (the default): open_box
-  # starts its run at once. With it on the arm NEVER flies without that Open: a goal with no UI to ask on
-  # (sent by hand, or the UI bridge not there) is refused, line_up_unavailable. With wrist_first the wrist
+  # the line-up before a run: the user is told which way to move until the container is where the arm
+  # opens it, then asked, and the arm moves only on their yes. true: every run lines up before its first
+  # move. false (the default): open_box starts its run at once, and lines up only where it finds no press
+  # from where the chair stands (it does not end there: docs/interface.md, "Lining up in the middle of a
+  # run"). Either way the arm NEVER flies on from a line-up without that yes: Open on the UI's panel, or,
+  # for a goal with no UI (sent by hand, or the UI bridge not there), y on /box_opening/answer to the
+  # question on the node's console (`open_box_terminal` asks and sends it). With wrist_first the wrist
   # turns to look while the user lines up (gently, and only where the arm stands at rest, or at rest but
   # for a wrist an earlier line-up left turned); without it the scene camera alone follows the container,
   # and one it cannot see is never asked of (open_box ends not_lined_up)
@@ -138,3 +141,6 @@ subscribes:
   - /ee_state
   # the driver's contact monitor's residual, logged per motion (with its contact_debug_topic on)
   - /contact_monitor/residual
+  # the person's y or n for a goal with no UI to press on (std_msgs/String): y answers a line-up's
+  # question, n cancels the action. The node's own subscription, held only while an action runs
+  - /box_opening/answer

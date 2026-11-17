@@ -35,6 +35,9 @@ setup(
             "reach_probe = box_opening.tasks.reach_probe:main",
             # the line-up's eyes: the scene camera's sightings of the container, a line each (moves nothing)
             "box_watch = box_opening.tasks.box_watch:main",
+            # open_box from a terminal, for a goal with no UI: sends the goal, shows what the node says (a
+            # line-up's instructions and its question) and sends the y or n typed (moves nothing itself)
+            "open_box_terminal = box_opening.tasks.open_box_terminal:main",
         ]
     },
 )

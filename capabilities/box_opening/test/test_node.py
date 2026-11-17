@@ -43,14 +43,16 @@ FULL_RUN = [
 FAKE_RUN = """
 import json, os, sys, time
 from pathlib import Path
-if "--line-up" in sys.argv:
-    # press_demo --line-up: says where the box is (LINE_UP: "in place" | "far" | "unseen", its frames show no
-    # container | "dies" | "holds", its wrist's turn to the view stopped part way: 6) until a line on stdin:
-    # go and the run goes on, stop (or the pipe closed) and it ends 5, nothing pressed, once its wrist is
-    # back at rest (TURN_BACK_S: how long that turn takes; a Ctrl+C stops it there, 130. TURN_BACK: "holds",
-    # that turn stopped part way: 6; "halted", the e-stop came during it: 4)
-    import select
-    mode = os.environ.get("LINE_UP", "in place")
+import select
+
+
+def lines_up(mode):
+    # press_demo's line-up watch (--line-up before the run; --guide in the middle of it): says where the box
+    # is (`mode`: "in place" | "far" | "unseen", its frames show no container | "dies" | "holds", its
+    # wrist's turn to the view stopped part way: 6) until a line on stdin: go and the run goes on, stop (or
+    # the pipe closed) and it ends 5, nothing pressed, once its wrist is back at rest (TURN_BACK_S: how long
+    # that turn takes; a Ctrl+C stops it there, 130. TURN_BACK: "holds", that turn stopped part way: 6;
+    # "halted", the e-stop came during it: 4)
     if mode == "dies":
         sys.stdout.write("[press_demo] not starting: the arm driver is not up\\n")
         sys.stdout.flush()
@@ -114,6 +116,34 @@ if "--line-up" in sys.argv:
             sys.exit(130)
         sys.exit(5)
     sys.stdout.write("[press_demo] LINE-UP: go\\n")
+
+
+if "--line-up" in sys.argv:
+    lines_up(os.environ.get("LINE_UP", "in place"))
+# press_demo --guide, where no press plans from where the chair stands (GUIDE: how many times it finds none
+# before one plans; GUIDE_AFTER_S: how long its look and proof took before each): it says so (no STOP),
+# asks the engine to guide, and watches as a line-up does (GUIDE_BOX: where its frames show the box) until
+# the engine's go, from which it "finds the box again"; a stop, and it ends 5 as a line-up does
+WHY = (
+    "no reach-out press plans for the scene camera's box (30 deg: the way down (the slide in: trajectory sanity "
+    "gate: arm_joint_1 excursion 2.012 rad > |d| + margin 1.632); 40 deg: the way down (the press stroke is not a "
+    "straight line the arm can fly (the chair and user: arm_half_arm_1_link 0 mm into person/lap (padded 20 mm + 5 "
+    "mm), 46% of the way)))"
+)
+for n in range(int(os.environ.get("GUIDE", "0"))):
+    if "--guide" not in sys.argv:  # a run by hand stops there, as it always has
+        sys.stdout.write("[press_demo] STOP: " + WHY + "; nothing moved\\n")
+        sys.stdout.flush()
+        sys.exit(1)
+    try:
+        time.sleep(float(os.environ.get("GUIDE_AFTER_S", "0")))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    sys.stdout.write("[press_demo] WRIST SURVEY: box at [0.712, -0.331] yaw 0.0 deg (WRIST 0.60) — reaching out\\n")
+    sys.stdout.write("[press_demo] NO WAY IN: " + WHY + "; nothing moved\\n")
+    sys.stdout.write("@@ " + json.dumps({"guide": {"n": n + 1, "box": [0.712, -0.331, 0.2945], "why": WHY}}) + "\\n")
+    sys.stdout.flush()
+    lines_up(os.environ.get("GUIDE_BOX", "in place"))
 runs = Path(os.environ["BOX_OPENING_STATE"]) / "runs"
 runs.mkdir(parents=True, exist_ok=True)
 with open(runs / "run-20261030-140000.jsonl", "a") as f:
@@ -125,7 +155,7 @@ sys.stdout.write("ARGV " + " ".join(sys.argv[1:]) + "\\n")
 sys.stdout.flush()
 if os.environ.get("WAIT"):
     try:
-        time.sleep(30)
+        time.sleep(float(os.environ.get("WAIT_S", "30")))
     except KeyboardInterrupt:
         sys.stdout.write("[press_demo] stopped by Ctrl+C\\n")
         sys.exit(130)
@@ -190,6 +220,14 @@ def ros():
     rclpy.init()
     yield
     rclpy.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def no_ten_minute_waits(monkeypatch):
+    """A goal sent by hand waits ten minutes for its person (node.CONSOLE_LINE_UP_S). No test does: a
+    line-up that nobody answers ends in seconds here, and the tests that are about that time set their own."""
+    assert node.CONSOLE_LINE_UP_S == 600.0  # the limit as it is flown: stated in docs/interface.md
+    monkeypatch.setattr(node, "CONSOLE_LINE_UP_S", 20.0)
 
 
 @pytest.fixture
@@ -789,7 +827,8 @@ def test_nothing_runs_unless_the_node_allows_it_and_it_is_not_offered(engine, mo
     assert a.available and a.reason == ""
     engine.execute("open_box", {}, FakeCtx())
     argv = next(ln for ln in lines if ln.startswith("ARGV ")).split()
-    assert argv[-1] == "--execute"
+    # ... and --guide after it: where it finds no press from where the chair stands it asks, and does not end
+    assert argv[-2:] == ["--execute", "--guide"]
 
 
 def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
@@ -917,7 +956,7 @@ def test_a_run_is_told_on_stdout_one_short_line_a_step_beside_its_full_lines(eng
     with pytest.raises(EngineError):
         engine.execute("open_box", {}, FakeCtx())
     out = capsys.readouterr().out.splitlines()
-    assert " 2 PRESS     FAIL  the box is out of the arm's reach (0.83 m out)" in out
+    assert " 2 PRESS     FAIL  no press plans from here (0.83 m out): the way down does not plan" in out
     assert out[-4].startswith("RESULT  FAILED at step 2 (PRESS)")
     assert out[-2] == "        box: not pressed    lid: on the box    arm: home"
 
@@ -1216,22 +1255,82 @@ def test_the_far_bound_is_the_deployments_and_none_by_default(ros, monkeypatch):
         LOGGER.handlers[:] = handlers
 
 
-def test_with_line_up_on_a_goal_with_no_ui_is_refused_the_mocks_too(ros, monkeypatch):
-    """line_up on: nothing "moves" without the user's Open, so a goal with no UI to ask on is refused, not
-    run. Off, the mock runs with no UI as it always has."""
+def test_with_no_ui_the_mock_lines_up_on_the_console_and_runs_only_on_a_y(ros, monkeypatch, capsys):
+    """A. The owner, 2026-11-17, of a goal with no UI: "don't end, just tell you how far to move until it's
+    close enough then asking if ready y/n." Until then such a goal was refused (line_up_unavailable). The same
+    line-up, with no panel: each thing it says is one line of the flight view on the node's console, the
+    question is asked there as y / n, and the run starts on a y heard on ~/answer. Nothing "moves" before it."""
+    import threading
+
     handlers = list(LOGGER.handlers)
-    cap = _mock_lining_up(monkeypatch, ui=False)
+    cap = _mock_lining_up(monkeypatch, ui=False, mock_phase_s=0.2)  # a 1.2 s approach, then a second watched still
     try:
+        ctx = FakeCtx()
+        capsys.readouterr()
+        threading.Timer(0.4, cap._answers.put, args=("y",)).start()  # typed ahead: no yes
+        threading.Timer(3.2, cap._answers.put, args=("y",)).start()
+        t0 = time.monotonic()
+        out = cap.execute("open_box", {}, ctx)
+        assert 3.2 <= time.monotonic() - t0 < 3.2 + 7 * 0.2 + 2.0
+        assert out["lid_off"] and ctx.objects == {"c1": {"opened": True}}
+        assert ctx.panels == []  # no UI: nothing was sent to one
+        lining = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+        assert lining[0].startswith("Move closer") and any(m.startswith("Move left") for m in lining)
+        assert lining[-3:] == ["Hold still, checking", "Ready. Open the container?", "Opening the container"]
+        phases = [p for p, *_ in ctx.said]
+        assert phases[len(lining) :] == [p for p, *_ in node.MOCK_PHASES["open_box"]]  # the run, after its y
+        view = capsys.readouterr().out.splitlines()
+        assert view[0].startswith("BOX OPENING   ") and view[1].startswith("   line up   ...   lining the chair up")
+        said = [ln[19:] for ln in view if ln.startswith("             say   ")]
+        assert said[0].startswith("Move closer") and "that y was not to a question: answer once it asks" in said
+        assert [m for m in said if m.startswith(("Move", "Hold"))] == lining[:-2]  # each line the panel would show
+        asked = [ln for ln in view if ln.startswith("             ask   ")]
+        assert asked == ["             ask   Ready. Open the container?   y / n"]
+        assert view[view.index(asked[0]) + 1] == "             how   " + node.CONSOLE_HOW  # how to answer, once
+        assert any(ln.startswith(" 1 LINE UP   ok    yes") for ln in view)
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_with_no_ui_an_n_is_cancel_and_nobody_answering_ends_it_recoverable_and_nothing_runs(ros, monkeypatch, capsys):
+    """Nothing moves without the person's yes. An n is the cancel at any moment. And a goal nobody answers
+    does not wait for ever: after node.CONSOLE_LINE_UP_S (ten minutes as flown; 1.2 s here) it ends
+    not_lined_up, recoverable, saying what was still to do."""
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = _mock_lining_up(monkeypatch, ui=False, mock_phase_s=1.0)  # a 6 s approach
+    try:
+        base = []
+        monkeypatch.setattr(cap, "_cancel_from_ui", lambda by="": base.append(by))
+        ctx = FakeCtx()
+        threading.Timer(0.6, cap._answers.put, args=("n",)).start()
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
+        assert base == ["n answered"] and {p for p, *_ in ctx.said} == {"line_up"}
+        assert ctx.objects == {} and ctx.world == []
+        view = capsys.readouterr().out
+        assert " 1 LINE UP   FAIL  cancelled: n" in view
+        # nobody answers
+        monkeypatch.setattr(node, "CONSOLE_LINE_UP_S", 1.2)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
         ctx = FakeCtx()
         with pytest.raises(EngineError) as e:
             cap.execute("open_box", {}, ctx)
-        assert e.value.error_code == "line_up_unavailable" and e.value.recoverable
-        assert "line_up is on" in str(e.value) and "nothing moved" in str(e.value) and "line_up false" in str(e.value)
-        assert ctx.said == [] and ctx.panels == [] and ctx.world == [] and ctx.objects == {}
+        assert e.value.error_code == "not_lined_up" and e.value.recoverable
+        assert "within 1 s" in str(e.value) and "last told: Move closer" in str(e.value)
+        assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.objects == {} and ctx.world == []
+        view = capsys.readouterr().out
+        assert (
+            "say   " + node.CONSOLE_AGAIN in view and "LINE UP   FAIL  not in place within 1 s (last told: Move" in view
+        )
+        # line_up off: the mock runs with no UI as it always has, and writes no line-up
         cap.set_parameters([Parameter("line_up", value=False)])
+        ctx = FakeCtx()
         out = cap.execute("open_box", {}, ctx)
         assert out["lid_off"] and [p for p, *_ in ctx.said] == [p for p, *_ in node.MOCK_PHASES["open_box"]]
-        assert ctx.panels == []
+        assert ctx.panels == [] and capsys.readouterr().out == ""
     finally:
         cap.destroy_node()
         LOGGER.handlers[:] = handlers
@@ -1239,26 +1338,49 @@ def test_with_line_up_on_a_goal_with_no_ui_is_refused_the_mocks_too(ros, monkeyp
 
 @pytest.mark.parametrize("wrist_first", [False, True])
 @pytest.mark.parametrize("token", [bytes(16), bytes(range(1, 17))], ids=["no token", "no bridge"])
-def test_with_line_up_on_the_arm_never_flies_for_a_goal_with_no_ui(engine, monkeypatch, wrist_first, token):
-    """The rule, on the real node: line_up on and no UI to ask on (a goal that came with no token: standalone,
-    or sent to the node directly; or one with a token while the UI bridge is not there) starts no child at
-    all. It is refused, recoverable, and says how to run without lining up."""
+def test_with_line_up_on_the_arm_never_flies_for_a_goal_nobody_says_yes_to(engine, monkeypatch, wrist_first, token):
+    """The rule, on the real node: with line_up on the arm never flies without the person's yes. A goal with
+    no UI (it came with no token: sent by hand; or with one while the UI bridge is not there) is asked on
+    the console, and where no y comes the run is never told to go: with the wrist look it is told to stop
+    (its wrist back to rest), without it no run is started at all. It ends not_lined_up, recoverable. A goal
+    with the orchestrator's token has what its 120 s leave, as a goal on the UI; one without waits
+    CONSOLE_LINE_UP_S."""
     given(monkeypatch, FULL_RUN)
     engine.set_parameters([Parameter("line_up", value=True), Parameter("wrist_first", value=wrist_first)])
-    started, sources = [], []
-    real_run = node.Run
-    monkeypatch.setattr(node, "Run", lambda *a, **k: (started.append(a), real_run(*a, **k))[1])
-    monkeypatch.setattr(engine, "_box_source", lambda *a, **k: sources.append(a))
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id, watch=None, refused=(): InPlace())
+    monkeypatch.setattr(node, "CONSOLE_LINE_UP_S", 1.5 if token == bytes(16) else 99.0)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.5 if token != bytes(16) else 99.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    runs, told, real_run = [], [], node.Run
+
+    class Recorded(real_run):
+        def __init__(self, argv, env, log, talk=False):
+            runs.append(self)
+            super().__init__(argv, env, log, talk=talk)
+
+        def send(self, msg):
+            told.append(msg)
+            super().send(msg)
+
+    monkeypatch.setattr(node, "Run", Recorded)
     engine._assigned_token = token  # no bridge runs here: its request_user_input is not there either way
     try:
         ctx = FakeCtx()
+        t0 = time.monotonic()
         with pytest.raises(EngineError) as e:
             engine.execute("open_box", {}, ctx)
     finally:
         engine._assigned_token = bytes(16)
-    assert e.value.error_code == "line_up_unavailable" and e.value.recoverable
-    assert "no UI" in str(e.value) and "nothing moved" in str(e.value)
-    assert started == [] and sources == [] and ctx.said == [] and ctx.world == []
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable and time.monotonic() - t0 < 8.0
+    assert "nothing was pressed" in str(e.value)
+    asked = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+    assert "Ready. Open the container?" in asked and "Opening the container" not in asked  # asked, never answered
+    assert ctx.panels == [] and ctx.world == [] and ctx.objects == {}
+    if wrist_first:
+        (run,) = runs
+        assert told == [{"stop": True}] and not any("LINE-UP: go" in ln for ln in run.lines)
+    else:
+        assert runs == [] and told == []
 
 
 def test_a_ui_that_goes_while_lining_up_is_no_open_and_the_run_is_never_told_to_go(engine, monkeypatch):
@@ -1429,7 +1551,7 @@ def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(
     made = []
 
     class Source:
-        def __init__(self, watch, probe, env, far_m=None, log=None):
+        def __init__(self, watch, probe, env, far_m=None, log=None, refused=()):
             made.append((watch, probe, env, far_m))
 
     monkeypatch.setattr(node.line_up, "BoxSource", Source)
@@ -1479,8 +1601,8 @@ def _wrist_lining_up(engine, monkeypatch, proven=True):
     monkeypatch.setattr(engine, "_ui_live", lambda: True)
     real_source, started = engine._box_source, []
 
-    def source(env, instance_id, watch=None):
-        made = real_source(env, instance_id, watch=watch)
+    def source(env, instance_id, watch=None, refused=()):
+        made = real_source(env, instance_id, watch=watch, refused=refused)
         started.append(watch)
         return (Proven(made), made)[1] if proven else made
 
@@ -1904,7 +2026,7 @@ def test_without_the_wrist_look_the_scene_watch_lines_up_and_the_run_starts_afte
     made = []
 
     class Source:
-        def __init__(self, watch, probe, env, far_m=None, log=None):
+        def __init__(self, watch, probe, env, far_m=None, log=None, refused=()):
             made.append(watch)
 
     monkeypatch.setattr(node.line_up, "BoxSource", Source)
@@ -1954,17 +2076,21 @@ def test_every_goal_says_which_settings_it_flies_on(engine, monkeypatch):
             Parameter("wrist_first", value=True),
         ]
     )
-    with pytest.raises(EngineError):  # line_up on and no UI here: refused, and its line is still said
+    monkeypatch.setattr(node, "CONSOLE_LINE_UP_S", 0.5)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.1)
+    with pytest.raises(EngineError):  # line_up on and nobody to say yes here: not lined up, and its line is said
         engine.execute("open_box", {}, FakeCtx())
     (line,) = (ln for ln in log.said if ln.startswith("open_box goal:"))
     for setting in ("line_up=true", "ui=none", "line_up_far_m=0.8", "air_control=position", "wrist_first=true"):
         assert setting in line
+    assert "orchestrated=false" in line  # no token came with it: sent by hand, nothing cancels it at 120 s
     log.said.clear()
     monkeypatch.setattr(engine, "_ui_live", lambda: True)
     monkeypatch.setattr(engine, "_lined_up_run", lambda *a: (_ for _ in ()).throw(Cancelled()))
     with pytest.raises(Cancelled):
         engine.execute("open_box", {}, FakeCtx())
-    assert "ui=live" in next(ln for ln in log.said if ln.startswith("open_box goal:"))
+    line = next(ln for ln in log.said if ln.startswith("open_box goal:"))
+    assert "ui=live" in line and "orchestrated=true" in line
 
 
 def test_an_air_control_that_is_neither_impedance_nor_position_is_refused_before_anything_runs(engine, monkeypatch):
@@ -1992,11 +2118,437 @@ def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):
     given(monkeypatch, FULL_RUN[:3], wait=True)
     engine.set_parameters([Parameter("line_up", value=True)])
     monkeypatch.setattr(engine, "_ui_live", lambda: True)
-    monkeypatch.setattr(engine, "_line_up", lambda ctx, source: node.RUN_BUDGET_S - 0.5)
+    monkeypatch.setattr(engine, "_line_up", lambda ctx, source, ask: node.RUN_BUDGET_S - 0.5)
     t0 = time.monotonic()
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, FakeCtx())
     assert e.value.error_code == "timeout" and time.monotonic() - t0 < 5.0
+
+
+# -- no press from where the chair stands: the run is guided, never just ended (2026-11-17, run 2) -----------
+REASON = (
+    "no press plans from here (0.79 m out): the slide in swings the arm wide (30 deg); the press stroke would "
+    "pass too close to the user (40 deg)"
+)
+
+
+def _forget_run_logs(tmp_path):
+    """FAKE_RUN writes every run's rows to one file name, and the engine follows the log a run CREATES: a
+    test of a second goal on one engine starts it with no log there."""
+    for f in (tmp_path / "runs").glob("run-*.jsonl"):
+        f.unlink()
+
+
+def _guided(engine, monkeypatch, proven=True):
+    """`engine` whose runs may be guided in the middle (FAKE_RUN's GUIDE): the line-up's source the real
+    BoxSource on the run, its place proven (reach_probe never started). Returns (what each source was made
+    with, every line the run was sent, the runs as they started)."""
+    real_source, made, told, runs, real_run = engine._box_source, [], [], [], node.Run
+
+    def source(env, instance_id, watch=None, refused=()):
+        got = real_source(env, instance_id, watch=watch, refused=refused)
+        made.append({"watch": watch, "refused": [list(r) for r in refused]})
+        return (Proven(got), got)[1] if proven else got
+
+    class Recorded(real_run):
+        def __init__(self, argv, env, log, talk=False):
+            runs.append(self)
+            self.argv, self.talk = list(argv), talk
+            super().__init__(argv, env, log, talk=talk)
+
+        def send(self, msg):
+            told.append(msg)
+            super().send(msg)
+
+    monkeypatch.setattr(engine, "_box_source", source)
+    monkeypatch.setattr(node, "Run", Recorded)
+    return made, told, runs
+
+
+def test_a_box_no_press_plans_for_does_not_end_the_run_the_chair_is_guided_on_the_console(engine, monkeypatch, capsys):
+    """B, as the owner flew it on 2026-11-17 (line_up off, no UI, run 2): "the arm didn't do the fix where it
+    says to move the arm/chair closer, it should NOT just fail EVER." The run found no press from where the
+    chair stood and ended FAILED, "the box is out of the arm's reach (0.79 m out)". Now the SAME process asks
+    to be guided, the console says the real reason and then each thing to do, asks y / n, and at the y the
+    run is told to go, finds the box again and opens it. One process commands the arm throughout."""
+    import threading
+
+    given(
+        monkeypatch,
+        FULL_RUN,
+        [
+            # (the run that goes on is a run as any: "lid on the table" is said of a set-down it felt)
+            "[press_demo] SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it",
+            "[press_demo] DONE — box open, lid on the table at [0.60, -0.07] (clear), let go where the arm felt "
+            "it, arm home",
+        ],
+    )
+    monkeypatch.setenv("GUIDE", "1")
+    made, told, runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    capsys.readouterr()
+    threading.Timer(2.5, engine._answers.put, args=("y",)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and out["presses"] == 1
+    (run,) = runs  # one process, from the first look to the way home
+    assert run.argv[-2:] == ["--execute", "--guide"] and "--line-up" not in run.argv and run.talk
+    assert told == [{"go": True}]
+    # the run's own word on the place it refused goes to what judges the line-up
+    assert made == [{"watch": run, "refused": [[0.712, -0.331, 0.2945]]}]
+    said = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+    # why, first, for whoever follows the action's progress (the terminal has no console to read it on)
+    assert said[0] == "No press plans from here: the slide in swings the arm wide (30 deg); the press stroke " \
+        "would pass too close to the user (40 deg). Move the chair as told"  # fmt: skip
+    assert said[-2:] == ["Ready. Open the container?", "Opening the container"]
+    phases = [p for p, *_ in ctx.said]
+    assert phases[-1] == "home" and "line_up" not in phases[phases.index("look") :]  # the run, after its yes
+    assert ctx.panels == []
+    view = capsys.readouterr().out.splitlines()
+    assert " 2 PRESS     FAIL  " + REASON in view  # E: why, not "out of the arm's reach"
+    assert "             next  the chair is to move: the run does not end here" in view
+    assert "   line up   ...   " + node.GUIDE_DOING in view
+    assert "             ask   Ready. Open the container?   y / n" in view
+    assert any(ln.startswith(" 3 LINE UP   ok    yes") for ln in view)
+    assert "   find      ...   looking for the box again" in view
+    assert any(ln.startswith("RESULT  DONE — box open, lid on the table, arm home") for ln in view)
+    assert not any("out of the arm's reach" in ln for ln in view)
+
+
+def test_a_run_by_hand_at_the_same_place_would_have_stopped_there(engine, monkeypatch):
+    """What the guidance replaces (and FAKE_RUN's own check): the same run without --guide ends at its STOP,
+    as run 2 did, with the code it had then."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    real_run = node.Run
+    monkeypatch.setattr(node, "Run", lambda argv, env, log, talk=False: real_run(argv[:-1], env, log, talk=talk))
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "no_press" and "no reach-out press plans" in str(e.value)
+
+
+def test_with_the_ui_the_guidance_in_the_middle_of_a_run_is_on_its_panel_and_open_is_the_yes(
+    engine, monkeypatch, capsys
+):
+    """line_up off means "guide only when needed": with the UI live the same guidance is the panel's, with
+    Open and Cancel, and the run's own panel has the screen again once it goes on."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    _made, told, runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    capsys.readouterr()
+    threading.Timer(0.3, engine._answers.put, args=("y",)).start()  # (a y is read on the UI's goal too: not asked yet)
+    threading.Timer(2.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and told == [{"go": True}] and len(runs) == 1
+    asked = [i for i, p in enumerate(ctx.panels) if p["message"] == "Ready. Open the container?"]
+    assert asked and [b["button_id"] for b in ctx.panels[asked[0]]["buttons"]] == ["open", "cancel"]
+    after = ctx.panels[asked[-1] + 1 :]
+    assert after[0]["message"] == "Opening the container"
+    run_phases = {ph for ph, *_ in node.MOCK_PHASES["open_box"]}  # the run's own panel again, Cancel alone on it
+    assert after[-1]["progress"]["phase"] in run_phases
+    assert after[-1]["buttons"] == [{"button_id": "cancel", "label": "Cancel"}]
+    view = capsys.readouterr().out
+    assert "             ask   Ready. Open the container?   (Open on the UI)" in view
+    assert "LINE UP   ok    Open pressed" in view and node.CONSOLE_HOW not in view
+
+
+def test_under_the_orchestrators_120_s_a_guidance_that_does_not_fit_ends_recoverable_and_the_next_goal_lines_up_first(
+    engine, monkeypatch, capsys, tmp_path
+):
+    """C. The orchestrator cancels any action at 120 s, and a run that goes on after a line-up needs its 55 s:
+    a line-up may end no later than LINE_UP_S after the goal began, wherever in the run it comes. Where the
+    look and the proof have left less than GUIDE_MIN_S of that, nothing is guided: the run is told to stop
+    (its wrist back to rest), the action ends not_lined_up, recoverable, saying why no press planned, and
+    "press open again" goes on from there: the next open_box lines up FIRST, with its whole time, though
+    `line_up` is off. The one after that is as the deployment has it."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_AFTER_S", "1.0")  # its look and proof
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "LINE_UP_S", 5.0)  # of which 4 are left: under GUIDE_MIN_S
+    assert node.GUIDE_MIN_S == 8.0 and node.LINE_UP_S + node.RUN_LONGEST_S <= node.RUN_BUDGET_S
+    _made, told, runs = _guided(engine, monkeypatch)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    capsys.readouterr()
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable and time.monotonic() - t0 < 4.0
+    assert "no time left to guide the chair" in str(e.value) and "the slide in swings the arm wide" in str(e.value)
+    assert "Press open again: it lines up first" in str(e.value) and "nothing was pressed" in str(e.value)
+    assert told == [{"stop": True}] and sent == [] and engine._run is None  # told, and ended of itself: no Ctrl+C
+    assert runs[0].proc.returncode == 5  # press_demo's EXIT_NOT_LINED_UP: the wrist back at rest
+    assert ctx.world == [] and ctx.objects == {}
+    view = capsys.readouterr().out
+    assert "LINE UP   FAIL  no time left to guide the chair" in view
+    assert "        box: not pressed    lid: on the box    arm: at rest" in view
+    # press open again: this goal lines up first, though line_up is off, and goes on at Open
+    monkeypatch.delenv("GUIDE")
+    engine.set_parameters([Parameter("wrist_first", value=True)])
+    monkeypatch.setattr(node, "LINE_UP_S", 35.0)
+    ctx = FakeCtx()
+    threading.Timer(2.0, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and "--line-up" in runs[1].argv and [p for p, *_ in ctx.said][0] == "line_up"
+    # ... once: the goal after it starts its run at once
+    _forget_run_logs(tmp_path)
+    ctx = FakeCtx()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and "--line-up" not in runs[2].argv and "line_up" not in [p for p, *_ in ctx.said]
+
+
+def test_a_guidance_that_runs_out_of_time_says_what_was_still_to_do_and_turns_the_wrist_back(
+    engine, monkeypatch, capsys
+):
+    """The user did not get the box into reach in what the 120 s left: not_lined_up, recoverable, with the
+    instruction they were last given and why no press had planned, the wrist turned back to rest by the run
+    itself (told on its stdin: no Ctrl+C), and the next open_box lines up first."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_BOX", "far")  # 1.2 m out, and it stays there
+    engine.set_parameters([Parameter("line_up_far_m", value=0.8), Parameter("wrist_first", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "LINE_UP_S", 2.5)
+    monkeypatch.setattr(node, "GUIDE_MIN_S", 0.5)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    _made, told, _runs = _guided(engine, monkeypatch, proven=False)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    capsys.readouterr()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable
+    assert "last told: Move closer, about 40 cm" in str(e.value)
+    assert "no press planned from where the chair stood: no press plans from here: the slide in swings" in str(e.value)
+    assert told == [{"stop": True}] and sent == [] and engine._run is None
+    assert engine._line_up_first is not None  # the next open_box lines up first
+    assert ctx.panels[-1]["message"] in ("The wrist is turning back to rest", "Press open again when you are in place")
+    view = capsys.readouterr().out
+    assert "             say   Move closer, about 40 cm" in view
+    assert "             say   The wrist is turning back to rest" in view
+    assert "        box: not pressed    lid: on the box    arm: at rest, the wrist turned back" in view
+
+
+def test_a_goal_sent_by_hand_waits_for_its_person_and_the_wait_is_no_part_of_the_runs_budget(
+    engine, monkeypatch, tmp_path
+):
+    """C, with no orchestrator: nothing cancels such a goal at 120 s, and the owner's word is "don't end". A
+    line-up may then take far longer than a run's own budget (ten minutes, node.CONSOLE_LINE_UP_S), and no
+    budget may cut a run part way through a motion: the run's 90 s (3 s here) start again at each go. As
+    first drafted the run that was let go after a 4 s line-up was stopped at once, 4 s being more than 3."""
+    import threading
+
+    monkeypatch.setattr(node, "RUN_BUDGET_S", 3.0)
+    monkeypatch.setenv("WAIT_S", "1.0")  # a second of "flight" after the go
+
+    def check(expect_line_up, **env):
+        _forget_run_logs(tmp_path)
+        given(monkeypatch, FULL_RUN, wait=True)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        ctx = FakeCtx()
+        threading.Timer(4.0, engine._answers.put, args=("y",)).start()
+        t0 = time.monotonic()
+        out = engine.execute("open_box", {}, ctx)
+        assert out["lid_off"] and time.monotonic() - t0 >= 4.0
+        assert ("line_up" in [p for p, *_ in ctx.said]) is expect_line_up
+
+    _guided(engine, monkeypatch)
+    check(True, GUIDE="1")  # guided in the middle of the run
+    monkeypatch.delenv("GUIDE")
+    engine.set_parameters([Parameter("line_up", value=True), Parameter("wrist_first", value=True)])
+    check(True)  # lined up before it, the run itself watching
+    engine.set_parameters([Parameter("wrist_first", value=False)])
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id, watch=None, refused=(): InPlace())
+    check(True)  # ... and with the scene camera's watch, the run started after
+    # under the orchestrator's 120 s the budget is the goal's, the line-up inside it, as it was
+    _forget_run_logs(tmp_path)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    given(monkeypatch, FULL_RUN[:3], wait=True)
+    monkeypatch.setenv("WAIT_S", "30")
+    monkeypatch.setattr(node, "LINE_UP_S", 2.9)
+    ctx = FakeCtx()
+    threading.Timer(1.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "timeout" and time.monotonic() - t0 < 3.0 + 3.0
+
+
+@pytest.mark.parametrize("by", ["the orchestrator", "n", "the panel"])
+def test_a_cancel_while_the_chair_is_guided_is_the_runs_own_ctrl_c(engine, monkeypatch, by, capsys):
+    """D. A cancel is read at every moment of the guidance and stops it: the orchestrator's, the person's n,
+    Cancel on the panel. It is the run's Ctrl+C as every cancel is (a wrist turn in flight stops, the arm
+    holds where it is), sent before the line-up's source is closed, and the run is never told to go."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_BOX", "far")
+    monkeypatch.setattr(engine, "_ui_live", lambda: by == "the panel")
+    _made, told, runs = _guided(engine, monkeypatch, proven=False)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    base = []
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda by_="the panel": base.append(by_))
+    ctx = FakeCtx()
+    capsys.readouterr()
+    if by == "the orchestrator":
+        threading.Timer(1.5, setattr, args=(ctx, "cancel", True)).start()
+    elif by == "n":
+        threading.Timer(1.5, engine._answers.put, args=("n",)).start()
+    else:
+        threading.Timer(1.5, ctx.events.append, args=(CANCEL_PRESS,)).start()
+    t0 = time.monotonic()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert time.monotonic() - t0 < 6.0 and sent == [signal.SIGINT] and told == [] and engine._run is None
+    assert runs[0].proc.returncode in (130, -signal.SIGINT)
+    assert base == {"the orchestrator": [], "n": ["n answered"], "the panel": ["the panel"]}[by]
+    assert ctx.world == [] and ctx.objects == {}
+    view = capsys.readouterr().out
+    assert "RESULT  CANCELLED at step 3 (LINE UP)" in view
+    assert "arm: stopped where it was (a wrist that looked stands turned)" in view
+
+
+def test_an_n_while_the_run_flies_is_the_cancel_too_and_a_y_then_answers_nothing(engine, monkeypatch):
+    """~/answer is heard for the whole action: an n at any moment is the person's cancel (the run's own
+    Ctrl+C); a y where nothing is asked is nothing at all."""
+    import threading
+
+    given(monkeypatch, FULL_RUN[:3], wait=True)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    threading.Timer(0.8, engine._answers.put, args=("y",)).start()
+    threading.Timer(1.6, engine._answers.put, args=("n",)).start()
+    t0 = time.monotonic()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert 1.6 <= time.monotonic() - t0 < 6.0 and sent == [signal.SIGINT]
+
+
+def test_what_judges_the_place_dying_while_the_chair_is_guided_ends_it_safely_and_says_so(
+    engine, monkeypatch, tmp_path
+):
+    """D, "the helper process dying": reach_probe ends in the middle of a guidance. The line-up ends at once
+    with what it said, the run is told to stop and turns its wrist back (never a go, never a Ctrl+C), and
+    the error says which helper it was."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("URDF", "/state/arm.urdf")
+    _made, told, runs = _guided(engine, monkeypatch, proven=False)
+    (tmp_path / "reach_probe").write_text("#!/bin/sh\nsleep 1\necho 'MemoryError: the grid' >&2\nexit 1\n")
+    (tmp_path / "reach_probe").chmod(0o755)
+    monkeypatch.setattr(node, "executable", lambda name: str(tmp_path / name))  # press_demo: the fixture's stand-in
+    ctx = FakeCtx()
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "line_up_unavailable" and time.monotonic() - t0 < 8.0
+    assert "reach_probe" in str(e.value) and "MemoryError: the grid" in str(e.value)
+    assert told == [{"stop": True}] and engine._run is None and runs[0].proc.returncode == 5
+
+
+def test_a_run_that_dies_while_the_chair_is_guided_fails_with_what_it_said(engine, monkeypatch):
+    """... and the run itself (the watch) ending under the guidance: nothing is left to tell to go or stop,
+    and the action fails with the run's own last word."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_BOX", "holds")  # its wrist's turn to the view stopped part way: exit 6
+    _made, told, _runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_holds" and not e.value.recoverable and "the arm holds" in str(e.value)
+    assert {"go": True} not in told and engine._run is None
+
+
+def test_a_run_may_be_guided_more_than_once_each_time_on_the_persons_yes(engine, monkeypatch):
+    """The place the person lined up on may still plan no press (the run has the planner and the table's
+    edges; what judged the line-up had neither): the run asks again, and goes on only on another yes."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "2")
+    made, told, runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    for at in (2.5, 5.5):
+        threading.Timer(at, engine._answers.put, args=("y",)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and told == [{"go": True}, {"go": True}] and len(runs) == 1 and len(made) == 2
+    said = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+    assert said.count("Opening the container") == 2
+
+
+def test_a_home_before_the_chair_is_guided_is_not_the_way_home_and_the_bar_keeps_its_room():
+    """After the look and the aim the arm goes home before the chair is guided (reach_press.no_way_in), and
+    the run then goes on from the find. Read as the way home, that home reported the run 100 % done and
+    "going home", and everything after it (the press, the lid) at 100 %. The run says it is to be guided
+    BEFORE it homes; from that row to its request the home is the arm going to rest."""
+    track = node.Tracker("open_box")
+    home = {"leg": "home", "kind": "motion", "ok": True}
+    said = [
+        track.add(row)
+        for row in (
+            FULL_RUN[0],  # found
+            FULL_RUN[1],  # reach:look
+            {"leg": "reach_refused", "kind": "note", "why": "no press reaches the aimed button (x)", "guided": True},
+            home,
+            {"leg": "guide", "kind": "note", "n": 1},
+            FULL_RUN[0],  # found again, after the yes
+            FULL_RUN[1],
+            *FULL_RUN[2:-1],
+            home,
+        )
+    ]
+    assert said[2] == ("locate", 0.1, "no way in from here: the chair is to move")
+    assert said[3] == ("locate", 0.1, "going to rest: the chair is to move")
+    pcts = [pct for _phase, pct, _m in filter(None, said)]
+    assert pcts == sorted(pcts) and pcts[-2] < 1.0 and said[-1] == ("home", 1.0, "going home")
+    # a run that is NOT guided: its reach_refused row is no such word, and its home is the way home
+    track = node.Tracker("open_box")
+    for row in (FULL_RUN[0], {"leg": "reach_refused", "kind": "note", "why": "NO BOX"}):
+        track.add(row)
+    assert track.add(home) == ("home", 1.0, "going home")
+
+
+def test_the_answer_is_heard_on_the_nodes_own_topic_only_while_an_action_runs(engine):
+    """~/answer (std_msgs/String): the subscription is the action's own (nothing is subscribed while the
+    node is idle), what it hears is kept as y or n, and anything else is no answer."""
+    from types import SimpleNamespace
+
+    from capability_engine.action_scope import ActionScope
+    from std_msgs.msg import String
+
+    engine._hear_answers()  # no action runs: nothing to subscribe on (and nothing raised)
+    scope = ActionScope(engine, engine._group)
+    engine._current = SimpleNamespace(scope=scope)
+    try:
+        engine._answers.put("y")  # said to an action before this one
+        engine._hear_answers()
+        assert engine._answers.poll() is None
+        ((_destroy, heard),) = scope._entities  # the action's own subscription, destroyed as it ends
+        assert heard.topic_name == "/box_opening/answer" and heard.msg_type is String
+        for data in ("y", " N\n", "maybe", ""):
+            engine._on_answer(String(data=data))
+        assert [engine._answers.poll() for _ in range(3)] == ["y", "n", None]
+    finally:
+        engine._current = None
+        scope.close()
+    assert scope._entities == []
 
 
 def test_the_run_log_is_read_as_it_grows_a_row_at_a_time(tmp_path):

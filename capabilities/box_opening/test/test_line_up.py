@@ -180,6 +180,152 @@ def test_a_press_takes_the_bridges_panel_down_and_the_next_tick_sends_it_again()
     assert any(2.5 <= t <= 2.6 for t in times)  # off the 1 s refresh: sent again because of the press
 
 
+# -- a goal with no UI: the same line-up, said on the console and answered y or n ------------------
+class Typed(line_up.Answers):
+    """Answers that come as the clock passes: (seconds in, what was typed)."""
+
+    def __init__(self, clock, typed):
+        super().__init__()
+        self._clock, self._t0, self._typed = clock, clock.t, sorted(typed)
+
+    def poll(self):
+        while self._typed and self._clock.t - self._t0 >= self._typed[0][0]:
+            self.put(self._typed.pop(0)[1])
+        return super().poll()
+
+
+def answered(source, typed=(), budget_s=40.0, say_min_s=0.0, **kw):
+    """A line-up with no UI (no panel goes out), its answers `typed`: (outcome, what it said, the LineUp,
+    how often a y came with nothing asked)."""
+    clock = Clock()
+    ctx = Ctx(clock)
+    said, unasked = [], []
+    lining = LineUp(
+        ctx,
+        lambda: False,
+        source,
+        budget_s,
+        on_say=lambda say: said.append((round(clock.t - ctx.t0, 2), say.message)),
+        clock=clock,
+        sleep=clock.sleep,
+        answers=Typed(clock, typed),
+        say_min_s=say_min_s,
+        on_unasked=lambda: unasked.append(round(clock.t - ctx.t0, 2)),
+        **kw,
+    )
+    outcome = lining.run()
+    assert ctx.panels == []  # nothing went to a UI that is not there
+    return outcome, said, lining, unasked
+
+
+def test_what_is_typed_is_an_answer_only_where_it_is_y_or_n():
+    assert [line_up.read_answer(t) for t in ("y", " Y\n", "yes", "YES ")] == ["y"] * 4
+    assert [line_up.read_answer(t) for t in ("n", "N", " no\n")] == ["n"] * 3
+    assert [line_up.read_answer(t) for t in ("", "ok", "yy", "go", None, 1)] == [None] * 6  # never a yes
+    answers = line_up.Answers()
+    assert answers.put("maybe") is None and answers.poll() is None
+    assert (answers.put("y"), answers.put("no")) == ("y", "n") and (answers.poll(), answers.poll()) == ("y", "n")
+    answers.put("y")
+    answers.clear()  # an answer is to the action that is running, never to the next
+    assert answers.poll() is None
+
+
+def test_with_no_ui_the_same_line_up_is_said_and_a_y_to_the_question_lets_the_run_go():
+    """Owner 2026-11-17: "don't end, just tell you how far to move until it's close enough then asking if
+    ready y/n." The mock's approach with no UI: every instruction the panel would show is said, then the
+    question, and a y typed while it stands is Open's press."""
+    outcome, said, lining, unasked = answered(MockApproach(pace_s=12.0), typed=[(20.0, "y")])
+    assert outcome == GO and lining.said_yes and not lining.cancel_pressed and unasked == []
+    words = [m for _t, m in said]
+    assert words[0] == "Move closer, about 25 cm" and any(w.startswith("Move left") for w in words)
+    assert words[-3:] == ["Hold still, checking", "Ready. Open the container?", "Opening the container"]
+    assert said[-1][0] == pytest.approx(20.0, abs=0.06)
+    # the same approach on the UI: the same words, and Open (no answer) is no said_yes
+    outcome, ctx, ui_said, lining = lined_up(MockApproach(pace_s=12.0), presses=[(20.0, OPEN_PRESS)])
+    assert outcome == GO and not lining.said_yes and [s.message for s in ui_said] == words
+
+
+def test_a_y_typed_before_the_question_is_no_yes_and_is_said_to_be_none():
+    """Nothing moves without the person's yes AFTER the guidance: a y typed ahead, while the box is still on
+    its way in, starts nothing, and the person is told it was not taken."""
+    outcome, said, _lining, unasked = answered(
+        MockApproach(pace_s=12.0), typed=[(3.0, "y"), (5.0, "yes")], budget_s=30.0
+    )
+    assert outcome == TIMED_OUT and unasked == pytest.approx([3.0, 5.0], abs=0.06)
+    assert "Opening the container" not in [m for _t, m in said]
+
+    # ... nor is a y to a box that was Ready and has since gone from view (Guide.press: seen within FRESH_S)
+    class Gone:
+        def look(self, now):
+            return (guide.Fix(now, (0.65, 0.0)) if now < 104.0 else None), guide.Reach(True, None, True)
+
+    outcome, said, _lining, unasked = answered(Gone(), typed=[(6.0, "y")], budget_s=10.0)
+    assert outcome == TIMED_OUT and unasked == pytest.approx([6.0], abs=0.06)
+    assert "Ready. Open the container?" in [m for t, m in said if t < 4.0]  # it had been asked, and was gone
+
+
+def test_an_n_is_cancel_at_every_moment_of_the_line_up():
+    for at in (0.5, 6.0, 16.0):  # as it moves in, as it is told to hold still, while the question stands
+        outcome, said, lining, _unasked = answered(MockApproach(pace_s=12.0), typed=[(at, "n")])
+        assert outcome == CANCELLED and lining.cancel_pressed and lining.said_no, at
+        assert all(t <= at + 0.06 for t, _m in said)
+    # ... and while it says what no waiting cures (the arm not at its rest pose)
+    stuck = Still((0.65, 0.0), None)
+    stuck.unable = guide.ARM_NOT_AT_REST
+    outcome, _said, lining, _unasked = answered(stuck, typed=[(1.0, "n")])
+    assert outcome == CANCELLED and lining.said_no
+    # an n on the UI's line-up is the same cancel
+    clock = Clock()
+    lining = LineUp(
+        Ctx(clock), lambda: True, MockApproach(pace_s=12.0), 40.0, clock=clock, sleep=clock.sleep,
+        answers=Typed(clock, [(2.0, "n")]),
+    )  # fmt: skip
+    assert lining.run() == CANCELLED and lining.said_no
+
+
+def test_out_of_time_with_no_ui_it_says_the_words_it_was_given():
+    outcome, said, lining, _unasked = answered(
+        Still((1.2, 0.0), guide.Reach(False, (-0.4, 0.0))), budget_s=10.0, again="Out of time. Start it again"
+    )
+    assert outcome == TIMED_OUT and [m for _t, m in said] == ["Move closer, about 40 cm", "Out of time. Start it again"]
+    assert lining.guide.instruction == "Move closer, about 40 cm" and lining.guide.saw_box
+
+
+def test_a_distance_that_only_shrinks_is_said_once_a_second_and_everything_else_at_once():
+    """The console is read by a person driving a chair: "one short line each time what it says changes,
+    never five a second". A box driven in changes the distance every few ticks. With say_min_s the same
+    instruction's new distance waits out the second (the newest is the one said), and a new direction, hold
+    still and the question are said the tick they come."""
+    fast = dict(pace_s=3.0)  # 0.65 m in 3 s: a new 5 cm every quarter second
+    _outcome, every, _lining, _unasked = answered(MockApproach(**fast), typed=[(8.0, "y")])
+    outcome, said, _lining, _unasked = answered(MockApproach(**fast), typed=[(8.0, "y")], say_min_s=1.0)
+    assert outcome == GO
+    moves = [(t, m) for t, m in said if m.startswith("Move")]
+    all_moves = [(t, m) for t, m in every if m.startswith("Move")]
+    assert len(all_moves) >= 6 and len(moves) < len(all_moves)
+    kind = lambda m: m.split(",")[0].replace(" a little", "")  # noqa: E731
+    for (t0, m0), (t1, m1) in zip(moves, moves[1:], strict=False):
+        assert kind(m0) != kind(m1) or t1 - t0 >= 1.0 - 1e-6, (t0, m0, t1, m1)
+    # never five a second, and nothing but distances was held: the other words come when they did without it
+    assert all(sum(1 for t, _m in said if t0 <= t < t0 + 1.0) < 5 for t0, _m in said)
+    others = lambda lines: [(t, m) for t, m in lines if not m.startswith("Move")]  # noqa: E731
+    assert others(said) == others(every)
+    first_of = lambda lines, word: next(t for t, m in lines if m.startswith(word))  # noqa: E731
+    assert first_of(said, "Move left") == first_of(every, "Move left")  # a new direction is said at once
+    # a chair that stops is still told the newest distance, once the second has passed
+    still = Still((0.9, 0.0), guide.Reach(False, (-0.2, 0.0)))
+    looks = iter([(-0.4, 0.0), (-0.3, 0.0)])
+
+    def look(now, _look=still.look):
+        fix, _reach = _look(now)
+        return fix, guide.Reach(False, next(looks, (-0.2, 0.0)))
+
+    still.look = look
+    _outcome, said, _lining, _unasked = answered(still, budget_s=3.0, say_min_s=1.0)
+    assert [m for _t, m in said][:2] == ["Move closer, about 40 cm", "Move closer, about 20 cm"]
+    assert said[1][0] == pytest.approx(1.0, abs=0.06)
+
+
 # -- the mock's box --------------------------------------------------------------------------------
 def test_the_mock_box_walks_its_path_at_one_speed_and_stops_at_its_end():
     box = MockApproach(pace_s=10.0)
@@ -340,6 +486,58 @@ def test_the_boundary_judges_the_box_and_its_own_place_is_proven_where_it_is_ins
     watch.says(3.0, _fix((0.70, 0.0, 0.315)))  # the chair moved 5 cm: that proof is not for here
     _fix_, reach = source.look(3.1)
     assert reach.inside and reach.planned is None and probe.sent[-1]["prove"] is True
+
+
+def test_a_place_the_run_itself_refused_does_not_work_for_its_line_up_whatever_the_probe_proves():
+    """A line-up in the middle of a run (run 2 of 2026-11-17: the box 0.79 m out, well inside the grid, and
+    no press planned). The box still stands where the run found no press as the line-up begins. The grid
+    has that cell working and the probe (no planner, no table's edges) may prove it: the user was then
+    asked "Ready?" on the very place the run had just refused, said yes, and the run refused it again.
+    The run's word is the last: that place is not inside and is planned False, the way out of it is said,
+    and a place a chair's move away is judged as ever."""
+    FakeChild.made = []
+    source = BoxSource(
+        ["box_watch"],
+        lambda urdf, root: ["reach_probe", urdf, root],
+        {},
+        spawn=FakeChild,
+        refused=[[0.712, -0.10, 0.315]],
+    )
+    watch = source.watch
+    watch.says(0.0, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    source.look(0.0)
+    probe = source.probe
+    watch.says(1.0, _fix((0.712, -0.10, 0.315)))
+    _f, reach = source.look(1.05)
+    assert reach is None  # no grid yet: checking, not "ready"
+    probe.says(1.1, {"zone": _band_zone().to_dict()})
+    probe.says(1.2, {"proof": {"xyz": [0.712, -0.10, 0.315], "ok": True, "why": "", "tilt_deg": 30, "s": 0.5}})
+    watch.says(1.3, _fix((0.713, -0.101, 0.316)))
+    _f, reach = source.look(1.35)
+    assert not reach.inside and reach.planned is False and reach.to_zone is not None
+    assert probe.sent[-1]["prove"] is False  # nothing is spent proving what the run refused
+    say = guide.Guide().update(1.35, guide.Fix(1.3, (0.713, -0.101)), reach)
+    assert say.state == guide.MOVE and say.message.startswith("Move ")
+    # the same grid without the run's word: inside, and proven
+    plain, w2, p2 = _source()
+    p2.says(1.1, {"zone": _band_zone().to_dict()})
+    p2.says(1.2, {"proof": {"xyz": [0.712, -0.10, 0.315], "ok": True, "why": "", "tilt_deg": 30, "s": 0.5}})
+    w2.says(1.3, _fix((0.713, -0.101, 0.316)))
+    _f, reach = plain.look(1.35)
+    assert reach.inside and reach.planned is True
+    # the chair moved: 10 cm nearer is another place, judged by the grid and its own proof
+    watch.says(3.0, _fix((0.60, -0.10, 0.315)))
+    _f, reach = source.look(3.05)
+    assert reach.inside and reach.planned is None and probe.sent[-1]["prove"] is True
+    probe.says(3.5, {"proof": {"xyz": [0.60, -0.10, 0.315], "ok": True, "why": "", "tilt_deg": 30, "s": 0.5}})
+    watch.says(3.6, _fix((0.60, -0.10, 0.315)))
+    _f, reach = source.look(3.65)
+    assert reach.inside and reach.planned is True
+    # a grid that comes again (the probe says it as it fills) keeps the place refused
+    probe.says(4.0, {"zone": _band_zone().to_dict()})
+    watch.says(4.1, _fix((0.712, -0.10, 0.315)))
+    _f, reach = source.look(4.15)
+    assert not reach.inside and reach.planned is False
 
 
 def test_a_rough_sighting_says_which_way_to_move_and_is_never_asked_on():

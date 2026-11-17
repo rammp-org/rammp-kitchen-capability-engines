@@ -6,7 +6,7 @@ the owner asked for it — the two runs that took the lid off (20:53) and the on
 
 import pytest
 
-from box_opening.flight_view import FlightView
+from box_opening.flight_view import FlightView, no_press_reason
 
 P = "[press_demo] "
 
@@ -196,9 +196,10 @@ def test_a_grip_that_misses_a_second_press_and_a_knob_out_of_reach_each_say_so_a
     ]
 
 
-def test_a_box_no_press_reaches_fails_the_press_with_how_far_out_it_is():
+def test_a_box_no_press_reaches_fails_the_press_with_why_and_how_far_out_it_is():
     """19:12:26, the button 0.86 m out; 20:15:04, a thing by the microwave taken for the box 1.16 m out
-    and nothing sent home; 18:41, three views of clutter and the scene camera's box."""
+    and nothing sent home; 18:41, three views of clutter and the scene camera's box. Only the second is
+    "out of the arm's reach" (its look's wrist stands past it): the others say what refused the way in."""
     out = _view(
         FOUND[:1]
         + [
@@ -219,11 +220,11 @@ def test_a_box_no_press_reaches_fails_the_press_with_how_far_out_it_is():
     )
     assert out[3:] == [
         " 2 LOOK      ok    button found, 45 mm across, 0.86 m out      3.0 s",
-        " 3 PRESS     FAIL  the box is out of the arm's reach (0.86 m out)",
+        " 3 PRESS     FAIL  no press plans from here (0.86 m out): the way down is not a line the arm can follow",
         "   home      ...   going home",
         " 4 HOME      ok                                                5.0 s",
         "RESULT  FAILED at step 3 (PRESS)                              15 s",
-        "        why: the box is out of the arm's reach (0.86 m out)",
+        "        why: no press plans from here (0.86 m out): the way down is not a line the arm can follow",
         "        box: not pressed    lid: on the box    arm: home",
     ]
     out = _view(
@@ -278,6 +279,198 @@ def test_a_box_no_press_reaches_fails_the_press_with_how_far_out_it_is():
         "             note  wrist camera found no box; using the scene camera's",
         " 1 FIND      ok    box 0.82 m out (scene camera, 3 views)     10.0 s",
     ]
+
+
+# flatbot 2026-11-17 16:43:13 (run 2), the run's own lines
+RUN2_FOUND = (
+    P + "WRIST SURVEY: box at [0.712, -0.331] yaw 0.0 deg from 1978 lid points (WRIST 0.60, 1 sighting (wrist); "
+    "the wrist camera reads the table at 0.206 seen over x 0.53..1.16, y -0.83..-0.02) — reaching out"
+)
+RUN2_WHY = (
+    "no reach-out press plans for the scene camera's box (30 deg: the way down (the slide in: trajectory sanity "
+    "gate: arm_joint_1 excursion 2.012 rad > |Δ| + margin 1.632; arm_joint_3 excursion 1.525 rad > |Δ| + margin "
+    "1.120); 35 deg: the way down (the slide in: trajectory sanity gate: arm_joint_1 excursion 2.188 rad > |Δ| + "
+    "margin 2.049; arm_joint_3 excursion 1.668 rad > |Δ| + margin 1.567); 40 deg: the way down (the press stroke "
+    "is not a straight line the arm can fly (the chair and user: arm_half_arm_1_link 0 mm into person/lap (padded "
+    "20 mm + 5 mm), 46% of the way)); 45 deg: the way down (the press stroke is not a straight line the arm can "
+    "fly (the chair and user: arm_half_arm_1_link 0 mm into person/lap (padded 20 mm + 5 mm), 92% of the way)))"
+)
+RUN2_REASON = (
+    "no press plans from here (0.79 m out): the slide in swings the arm wide (30, 35 deg); the press stroke "
+    "would pass too close to the user (40, 45 deg)"
+)
+
+
+def test_a_press_that_does_not_plan_says_the_real_reason_not_that_the_box_is_out_of_reach():
+    """Run 2 of 2026-11-17: the box 0.79 m out, well within the arm's reach. The slide in swung the arm wide
+    at 30 and 35 deg (the sanity gate) and the press stroke crossed the user's padding at 40 and 45. The
+    console said "the box is out of the arm's reach (0.79 m out)": the one thing that was not so."""
+    out = _view(FOUND[:1] + [(8, RUN2_FOUND), (16, P + "STOP: " + RUN2_WHY + "; nothing moved")], 1)
+    assert out[1:] == [
+        " 1 FIND      ok    box 0.79 m out (wrist camera)               8.0 s",
+        " 2 PRESS     FAIL  " + RUN2_REASON,
+        "RESULT  FAILED at step 2 (PRESS)                              21 s",
+        "        why: " + RUN2_REASON,
+        "        box: not pressed    lid: on the box    arm: where the look left it (not sent home)",
+    ]
+    # each part of the way in, and what refused it there, in the run's own words for them
+    for why, said in (
+        ("30 deg: the look pose (its wrist 22 mm past the arm's reach)", "the box is out of the arm's reach"),
+        (
+            "30 deg: the look pose (its wrist 60 mm past the arm's reach); 35 deg: the way down (the slide in: a "
+            "joint limit 40% of the way)",
+            "no press plans from here: out of the arm's reach (30 deg); the slide in runs a joint to its limit (35 "
+            "deg)",
+        ),
+        ("30 deg: the slide in (IK did not converge 52% of the way)", "the slide in leaves what the arm reaches"),
+        ("45 deg: the look pose (START_IN_LIMIT_MARGIN (joint_4))", "the look pose runs a joint to its limit"),
+        (
+            "40 deg: the way down (walk in: the chair and user: arm_forearm_link 3 mm into seat/armrest_arm)",
+            "the way down would pass too close to the chair (40 deg)",
+        ),
+        (
+            "30 deg: the slide in (the cabinet/edge0: arm_bracelet_link 4 mm into it)",
+            "the slide in would meet the table",
+        ),
+        ("30 deg: the way down (walk in)", "the way down does not plan (30 deg)"),
+    ):
+        assert said in no_press_reason("no reach-out press plans for the scene camera's box (%s)" % why), why
+    assert no_press_reason("no press reaches the aimed button (x)", 0.8).startswith("no press plans from here (0.80 m")
+
+
+def test_a_run_that_finds_no_press_from_where_the_chair_stands_is_guided_and_goes_on():
+    """The run does not end on it (owner 2026-11-17: "it should NOT just fail EVER"): the press's failure
+    says why, the line-up is a step of its own with each thing the person is told and the question, and
+    at their yes the run looks for the box again and reads on as any run."""
+    out, now = [], [0.0]
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    for t, text in ((0, FOUND[0][1]), (8, RUN2_FOUND), (16, P + "NO WAY IN: " + RUN2_WHY + "; nothing moved")):
+        now[0] = float(t)
+        view.feed(text)
+    view.guide_start("the arm rests and the wrist looks: move the chair as told")
+    how = "answer in open_box_terminal, or publish y or n on /box_opening/answer (std_msgs/String)"
+    for t, say, ask in (
+        (17, "Looking for the container", None),
+        (20, "Move closer, about 15 cm", None),
+        (24, "Hold still, checking", None),
+        (26, "Ready. Open the container?", "y / n"),
+        (27, "Hold still, checking", None),
+        (29, "Ready. Open the container?", "y / n"),
+    ):
+        now[0] = float(t)
+        view.guide_say(say, ask=ask, how=how)
+    now[0] = 31.0
+    view.guide_end(True, "yes", again=True)
+    now[0] = 36.0
+    view.feed(
+        P + "WRIST SURVEY survey:angle-1 (the wrist turned to look at [0.60, 0.00]): the container at [0.640, "
+        "-0.200], its top 89 mm above the counter, in 1 of 1 frame; button unchecked"
+    )
+    view.feed(P + "WRIST SURVEY: box at [0.640, -0.200] yaw 0.0 deg from 2000 lid points (WRIST 0.60) — reaching out")
+    now[0] = 60.0
+    # (the run that goes on is a run as any: "lid on the table" is said of a set-down it felt meet the table)
+    view.feed(P + "SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it; the touch stopped there")
+    view.feed(P + "DONE — box open, lid on the table at [0.65, 0.05] (clear), let go where the arm felt it, arm home")
+    view.finish(0)
+    assert out[1:] == [
+        "   find      ...   looking for the box",
+        " 1 FIND      ok    box 0.79 m out (wrist camera)               8.0 s",
+        " 2 PRESS     FAIL  " + RUN2_REASON,
+        "             next  the chair is to move: the run does not end here",
+        "   line up   ...   the arm rests and the wrist looks: move the chair as told",
+        "             say   Looking for the container",
+        "             say   Move closer, about 15 cm",
+        "             say   Hold still, checking",
+        "             ask   Ready. Open the container?   y / n",
+        "             how   " + how,  # once
+        "             say   Hold still, checking",
+        "             ask   Ready. Open the container?   y / n",
+        " 3 LINE UP   ok    yes                                        15.0 s",
+        "   find      ...   looking for the box again",
+        " 4 FIND      ok    box 0.67 m out (wrist camera, 1 view)       5.0 s",
+        " 5 HOME      ok",
+        "RESULT  DONE — box open, lid on the table, arm home           60 s",
+    ]
+
+
+def test_a_line_up_that_ends_without_its_yes_is_the_runs_end_and_says_where_the_arm_was_left():
+    """Every way the guidance can end says what happened: out of time (with what was still to do), a
+    cancel, a wrist the look saw out of reach; and the result is written once, by whoever ends the run."""
+    out, now = [], [0.0]
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start(find=False)  # line_up on: the line-up comes before anything looks for the box
+    view.guide_start("lining the chair up with the box: move it as told")
+    view.guide_say("Move closer, about 15 cm")
+    now[0] = 35.0
+    view.guide_say("Press open again when you are in place")
+    view.guide_end(False, "not in place within 35 s (last told: Move closer, about 15 cm)")
+    view.guide_say("The wrist is turning back to rest")
+    view.arm = "at rest, the wrist turned back"
+    now[0] = 41.0
+    view.finish(5)
+    view.finish(None, cancelled=True)  # the engine's own end of the goal, after the line-up wrote the result
+    assert out[1:] == [
+        "   line up   ...   lining the chair up with the box: move it as told",
+        "             say   Move closer, about 15 cm",
+        "             say   Press open again when you are in place",
+        " 1 LINE UP   FAIL  not in place within 35 s (last told: Move closer, about 15 cm)  35.0 s",
+        "             say   The wrist is turning back to rest",
+        "RESULT  FAILED at step 1 (LINE UP)                            41 s",
+        "        why: not in place within 35 s (last told: Move closer, about 15 cm)",
+        "        box: not pressed    lid: on the box    arm: at rest, the wrist turned back",
+    ]
+    # an n (the cancel) in the middle of a run's line-up, the arm having gone home from its look first
+    out.clear()
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    view.feed(P + "WRIST SURVEY: box at [0.80, -0.25] yaw 0.0 deg (WRIST 0.60) — reaching out")
+    view.feed(P + "REACH-OUT: hand tilted 30 deg; looking from 0.15 m back toward the arm")
+    view.feed(P + "AIMED from the look pose: button at [0.820, -0.254, 0.316], 29 mm from the scene camera's")
+    view.feed(
+        P + "NO WAY IN: no press reaches the aimed button (the way down (walk in: 0 deg short: a joint jump of 0.21 "
+        "rad 52% of the way)) — nothing was pressed — returning home"
+    )
+    view.guide_start()
+    view.guide_end(False, "cancelled: n")
+    view.arm = "stopped where it was (a wrist that looked stands turned)"
+    view.finish(130, cancelled=True)
+    assert out[4:] == [
+        " 2 LOOK      ok    button found, 0.86 m out                    0.0 s",
+        " 3 PRESS     FAIL  no press plans from here (0.86 m out): the way down is not a line the arm can follow",
+        "             next  the chair is to move: the run does not end here",
+        "   home      ...   going home",
+        " 4 HOME      ok                                                0.0 s",
+        "   line up   ...   move the chair as told; the arm rests and the wrist looks",
+        " 5 LINE UP   FAIL  cancelled: n                                0.0 s",
+        "RESULT  CANCELLED at step 5 (LINE UP)                          0 s",
+        "        why: cancelled: n",
+        "        box: not pressed    lid: on the box    arm: stopped where it was (a wrist that looked stands turned)",
+    ]
+    # the wrist sees a lid-sized top out of the arm's reach and the scene camera has none: the find fails,
+    # with why, and the chair is moved (no NO BOX, no end)
+    out.clear()
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    view.feed(
+        P + "OUT OF REACH: the wrist camera sees a lid-sized top at [1.02, -0.20], out of the arm's reach; "
+        "nothing was pressed"
+    )
+    assert out[2:] == [
+        " 1 FIND      FAIL  what the wrist camera sees is out of the arm's reach   0.0 s",
+        "             next  the chair is to move: the run does not end here",
+    ]
+
+    # the guide's three never raise either (a console that fails is not the run's problem)
+    def broken(line):
+        raise OSError("the console is gone")
+
+    view = FlightView(write=broken)
+    view.guide_start()
+    view.guide_say("Move closer, about 15 cm")
+    view.guide_say("Ready. Open the container?", ask="y / n", how="x")
+    view.guide_end(True, "yes")
+    view.guide_end(False, "cancelled")
 
 
 def test_a_refused_move_and_a_stop_with_the_lid_in_the_hand_say_where_things_were_left():

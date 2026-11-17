@@ -145,3 +145,24 @@ def test_steady_needs_the_box_seen_all_through_the_last_second(gap_s, steady):
     guide = g.Guide()
     _drive(guide, [((0.69, 0.0), IN)] * 8)  # 0 .. 1.4 s
     assert guide.steady(1.4 + gap_s) is steady
+
+
+def test_out_of_time_it_says_its_own_words_and_keeps_the_newest_instruction_it_gave():
+    """A goal with no UI is not told to "press open again": the engine hands the guide its last words
+    (`again`). And the newest "Move ..." is kept (`instruction`): the engine's error carries it where the
+    line-up ends without its yes, so the person knows what was still to do."""
+    guide = g.Guide(budget_s=2.0, again="Out of time. Start open_box again when you are in place")
+    assert guide.instruction is None and not guide.saw_box
+    _drive(guide, [((0.95, 0.0), g.Reach(False, (-0.25, 0.0)))] * 3)
+    assert guide.instruction == "Move closer, about 25 cm" and guide.saw_box
+    _drive(guide, [((0.80, 0.0), g.Reach(False, (-0.10, 0.0)))] * 6, t0=0.6)  # (the first held MIN_SAY_S)
+    assert guide.instruction == "Move closer, about 10 cm"
+    said = _drive(guide, [((0.80, 0.0), g.Reach(False, (-0.10, 0.0)))], t0=2.5)
+    assert said[-1][1].state == g.TIMED_OUT and said[-1][1].buttons == ()
+    assert said[-1][1].message == "Out of time. Start open_box again when you are in place"
+    assert guide.instruction == "Move closer, about 10 cm"  # what was still to do
+    # the panel's own words where none are given, as they were
+    late = g.Guide(budget_s=1.0)
+    said = _drive(late, [(None, None)] * 2, t0=0.0, dt=1.5)
+    assert said[-1][1].message == g.AGAIN == "Press open again when you are in place" and not late.saw_box
+    assert g.ASK == "Ready. Open the container?"

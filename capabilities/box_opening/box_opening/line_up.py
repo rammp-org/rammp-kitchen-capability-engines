@@ -15,6 +15,12 @@ open again, and holds that for LINGER_S), GONE (what watched the box, or what ju
 rest pose; the panel says so for LINGER_S). Nothing here moves the arm or starts a run: the caller does,
 on GO alone.
 
+A goal with no UI lines up the same way (owner 2026-11-17, of a goal sent by hand: "don't end, just tell
+you how far to move until it's close enough then asking if ready y/n"): no panel goes out (`live()` is
+False), what the panel would say is the caller's to say on its console (`on_say`), and the question is
+answered through `answers` (Answers: what the node heard on its answer topic). A y is Open's press, taken
+only where Open would be (a fresh "Ready"); an n is Cancel's, read at every tick as Cancel is.
+
 MockApproach is the mock's source: a box that comes into reach as a user driving up to a table brings it,
 so the UI's side of a line-up can be rehearsed with no arm and no camera.
 
@@ -46,30 +52,120 @@ SEND_MIN_S = 0.2
 REFRESH_S = 1.0
 LINGER_S = 3.0  # "Press open again when you are in place" stays up this long before the action ends
 PHASE = "line_up"  # the phase the orchestrator's progress names while the user lines up
+YES, NO = "y", "n"  # the answers to the question where there is no panel to press on (Answers)
+
+
+def read_answer(text):
+    """An answer as it was typed or published: YES for y / yes, NO for n / no (any case, spaces round it);
+    None for anything else, which is no answer at all (never a yes)."""
+    word = str(text if text is not None else "").strip().lower()
+    return YES if word in ("y", "yes") else NO if word in ("n", "no") else None
+
+
+class Answers:
+    """The answers a person gives where there is no panel: put() by whatever hears them (the node's answer
+    topic, on the executor's thread), poll() by the loop that asks (the oldest not yet read). They are
+    kept only between clear() and the action's end: an answer is to the action that is running, never
+    to the next."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._got = deque()
+
+    def put(self, text):
+        """`text` as an answer (read_answer): kept where it is one, and returned; None where it is not."""
+        word = read_answer(text)
+        if word is not None:
+            with self._lock:
+                self._got.append(word)
+        return word
+
+    def poll(self):
+        with self._lock:
+            return self._got.popleft() if self._got else None
+
+    def clear(self):
+        with self._lock:
+            self._got.clear()
 
 
 class LineUp:
     """One line-up. `live()`: whether this execution has the UI (node.Capability._ui_live). `on_say(say)`:
-    called where what the panel says changes (the node's progress and log)."""
+    called where what the panel says changes (the node's progress, its log and its console). `say_min_s`:
+    an instruction that only changes its distance ("Move closer, about 25 cm" after "about 30 cm") is
+    handed to `on_say` no oftener than this; the newest is said once that long has passed, and anything
+    else (another direction, hold still, the question) at once. A chair driven in changes the distance
+    several times a second, and a console of five lines a second is not read (0: every change, as the
+    panel has it). `answers`: an Answers, for the y or n of a person with no panel (None: the panel
+    alone). `again`: what it says last where the time runs out (None: the panel's words).
+    `on_unasked()`: called for a y that came with nothing asked, which is no yes."""
 
-    def __init__(self, ctx, live, source, budget_s, on_say=None, clock=time.monotonic, sleep=time.sleep):
+    def __init__(
+        self,
+        ctx,
+        live,
+        source,
+        budget_s,
+        on_say=None,
+        clock=time.monotonic,
+        sleep=time.sleep,
+        answers=None,
+        say_min_s=0.0,
+        again=None,
+        on_unasked=None,
+    ):
         self._ctx = ctx
         self._live = live
         self._source = source
         self._clock = clock
         self._sleep = sleep
         self._on_say = on_say
-        self.guide = guide.Guide(budget_s=budget_s)
+        self._answers = answers
+        self._say_min_s = float(say_min_s)
+        self._on_unasked = on_unasked
+        self.guide = guide.Guide(budget_s=budget_s, again=again or guide.AGAIN)
         self.cancel_pressed = False  # the panel's own Cancel ended it (the caller makes it the orchestrator's)
+        self.said_no = False  # ... and it was the person's n, not a press on the panel
+        self.said_yes = False  # it ended GO on the person's y (False: on Open, or not GO)
         self._sent = None  # the panel as last sent, None where the last send did not go out
         self._tried_at = None
         self._told = None  # (state, message) as last handed to on_say
+        self._told_at = None
+        self._told_hint = None  # ... and the word of its instruction ("closer"), where it was one
+
+    def _press(self):
+        """The newest press as (button id, whether it was an answer): the panel's Open or Cancel, or the
+        person's y (Open's) or n (Cancel's) where there are answers to read. (None, False): none."""
+        event = self._ctx.poll_ui_event()
+        if event is not None and event.get("type") == "button":
+            # any press ends the bridge's goal, and its panel with it: the next send opens it again
+            self._sent = self._tried_at = None
+            return event.get("button_id"), False
+        answer = self._answers.poll() if self._answers is not None else None
+        if answer == NO:
+            self.said_no = True
+            return guide.CANCEL, True
+        if answer == YES:
+            return guide.OPEN, True
+        return None, False
 
     def _show(self, say, now):
         if (say.state, say.message) != self._told:
-            self._told = (say.state, say.message)
-            if self._on_say is not None:
-                self._on_say(say)
+            # only the distance of the same kind of instruction changed, and the last was said a moment ago:
+            # held, and said on a later tick where it still stands (this is called every tick with the newest)
+            quick = (
+                self._say_min_s > 0.0
+                and self._told is not None
+                and say.state == self._told[0] == guide.MOVE
+                and say.hint is not None
+                and self._told_hint == say.hint[0]
+                and now - self._told_at < self._say_min_s
+            )
+            if not quick:
+                self._told, self._told_at = (say.state, say.message), now
+                self._told_hint = None if say.hint is None else say.hint[0]
+                if self._on_say is not None:
+                    self._on_say(say)
         panel = say.panel()
         if self._tried_at is None or now - self._tried_at >= REFRESH_S:
             due = True
@@ -100,24 +196,22 @@ class LineUp:
                 self._show(guide.unable(why), now)
                 if now - unable_at >= LINGER_S:
                     return UNABLE
-                event = self._ctx.poll_ui_event()
-                if event is not None and event.get("type") == "button":
-                    self._sent = self._tried_at = None  # a press took the bridge's panel down: sent again
-                    if event.get("button_id") == guide.CANCEL:  # pressed on the panel before this one
-                        self.cancel_pressed = True
-                        return CANCELLED
-                self._sleep(POLL_S)
-                continue
-            event = self._ctx.poll_ui_event()
-            if event is not None and event.get("type") == "button":
-                # any press ends the bridge's goal, and its panel with it: the next send opens it again
-                self._sent = self._tried_at = None
-                if event.get("button_id") == guide.CANCEL:
+                if self._press()[0] == guide.CANCEL:  # pressed on the panel before this one, or an n
                     self.cancel_pressed = True
                     return CANCELLED
-                if timed_out_at is None and self.guide.press(event.get("button_id"), now):
+                self._sleep(POLL_S)
+                continue
+            pressed, answered = self._press()
+            if pressed == guide.CANCEL:
+                self.cancel_pressed = True
+                return CANCELLED
+            if pressed is not None:
+                if timed_out_at is None and self.guide.press(pressed, now):
+                    self.said_yes = answered
                     self._show(self.guide.update(now, None, None), now)  # "Opening the container"
                     return GO
+                if answered and self._on_unasked is not None:
+                    self._on_unasked()  # a y with nothing asked (or asked of a box no longer seen): no yes
             fix, reach = (None, None) if timed_out_at is not None else self._source.look(now)
             say = self.guide.update(now, fix, reach)
             self._show(say, now)
@@ -284,12 +378,18 @@ class BoxSource:
     run itself, with --line-up: node.Run), which is its owner's to end. Such a run says the wrist camera's
     fixes ("by": "wrist") and, between them, the scene camera's: the wrist's are kept to while one is fresh
     (guide.LOST_S). `probe_argv(urdf, root)`: reach_probe's, once the watch has said which robot this is
-    (run with PROBE_ENV). `far_m`: the deployment's bound on the boundary (None: none). close() ends the
+    (run with PROBE_ENV). `far_m`: the deployment's bound on the boundary (None: none). `refused`: places
+    ((x, y, lid z), the arm's frame) where the run itself has just found no press (a line-up in the middle
+    of a run, whose box still stands there as it begins): their cells do not work for this line-up
+    whatever the probe's proof says of them, as a cell its own proof refuses does not. The run has the
+    planner and the table's edges and the probe has neither, and where the two disagree the run's word is
+    the last: without this the user would be asked "Ready?" on the very place the run refused. close() ends the
     children that are this source's own, the probe by its own quit so that it keeps its grid; it can take
     PROBE_QUIT_S, so what must not wait is done before it."""
 
-    def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child):
+    def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child, refused=()):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
+        self._refused_at = [tuple(float(v) for v in xyz[:3]) for xyz in refused or () if len(xyz) >= 3]
         self._log, self._clock, self._spawn = log, clock, spawn
         self._owns_watch = isinstance(watch, list | tuple)
         self.watch = spawn(watch, env, log, clock) if self._owns_watch else watch
@@ -354,6 +454,9 @@ class BoxSource:
             for _t, msg in self.probe.messages():
                 if "zone" in msg:
                     self._zone = Zone.from_dict(msg["zone"]).within(far_m=self._far_m)
+                    for xyz in self._refused_at:  # where the run found no press: its cell in this grid
+                        if self._zone.serves(xyz[2]) and self._zone.index(xyz):
+                            self._refuted.add((self._zone.lid_z, *self._zone.index(xyz)))
                     self._refute()
                 elif "proof" in msg:
                     p = msg["proof"]
@@ -384,7 +487,11 @@ class BoxSource:
                     self._zone.set(i, j, False)
 
     def _planned(self, xy, z):
-        """The proof's word for a box at `xy`, lid top `z`: True, False, or None where none was made there."""
+        """The proof's word for a box at `xy`, lid top `z`: True, False, or None where none was made there.
+        False, whatever the proof, within PROOF_NEAR_M of a place the run itself refused (`refused`)."""
+        for rx, ry, rz in self._refused_at:
+            if math.hypot(rx - xy[0], ry - xy[1]) <= PROOF_NEAR_M and abs(rz - z) <= PROOF_NEAR_M:
+                return False
         if self._proof is None:
             return None
         (px, py, pz), ok = self._proof

@@ -40,3 +40,6 @@ subscribes:
   - /ee_state
   # the driver's contact monitor's residual, logged per motion (with its contact_debug_topic on)
   - /contact_monitor/residual
+  # the person's y or n for a goal with no UI to press on (std_msgs/String): y answers a line-up's
+  # question, n cancels the action. The node's own subscription, held only while an action runs
+  - /box_opening/answer

@@ -170,6 +170,8 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
         ctx.cpose = scene_fix.pose
         REACH_OUTS.append(scene_fix)
         got = approach(ctx)
+        if getattr(got, "code", None) is not None:  # the reach-out's own answer, where the test scripts it
+            return got.code
         return 1 if getattr(got, "failed", False) else 0
 
     monkeypatch.setattr(reach_press, "run_reach_press", fake_reach_out)
@@ -336,7 +338,7 @@ def _lining_up(monkeypatch, answer):
 
     calls = []
 
-    def watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol):
+    def watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None, rest_any=False):
         calls.append((bool(args.wrist_first), rest_tol, len(HOME_FIRSTS), len(LOCATES)))
         return answer
 
@@ -365,7 +367,7 @@ def test_a_line_up_whose_wrist_turn_left_the_arm_holding_ends_the_run_with_its_o
     from box_opening.runtime.abort import EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
     from box_opening.tasks import press_demo
 
-    def holds(*a):
+    def holds(*a, **k):
         sys.exit(EXIT_LINE_UP_HOLDS)
 
     HOME_FIRSTS.clear(), REACH_OUTS.clear(), LOCATES.clear()
@@ -406,6 +408,204 @@ def test_after_a_go_from_a_line_up_whose_wrist_looked_the_first_scene_look_is_sh
             assert LOCATES[0] == press_demo.SCENE_LINED_UP_LOCATE_S
         else:
             assert LOCATES[0] == press_demo.SCENE_FIRST_LOCATE_S == 15.0, (answer, argv)
+
+
+def _answers(codes):
+    """The reach-out's answers in turn (reach_press.run_reach_press's: NO_WAY_IN, 0, 1), and what the run knew
+    of the scene each time it was asked."""
+    from types import SimpleNamespace
+
+    seen = []
+
+    def approach(ctx):
+        seen.append((ctx.worlds.table_top_z, ctx.cpose is not None))
+        return SimpleNamespace(code=codes.pop(0))
+
+    return approach, seen
+
+
+def _guided_by(monkeypatch, answer=(True, True)):
+    """press_demo.guide_chair stood in for: it answers (wrist_turned, wrist_held), or exits with a code;
+    returns its calls."""
+    from box_opening.tasks import press_demo
+
+    calls = []
+
+    def guide(node, ctx, cfg, runner, watcher, args, locator, rest_tol, place, why, n, ear, out=None):
+        calls.append({"place": tuple(place), "why": why, "n": n, "ear": ear, "homes": len(HOME_FIRSTS)})
+        if isinstance(answer, int):
+            sys.exit(answer)
+        return answer
+
+    monkeypatch.setattr(press_demo, "guide_chair", guide)
+    return calls
+
+
+def test_a_box_no_press_plans_for_does_not_end_a_guided_run_it_looks_again_after_the_chair_moved(monkeypatch, tmp_path):
+    """Run 2 of 2026-11-17 ended at "no reach-out press plans". With --guide (the engine's runs) the reach-out
+    answers NO_WAY_IN instead: the chair is guided (guide_chair), and the run goes round again from the find,
+    which is short where the wrist held the box as the go came. It does not home again (the arm rests but
+    for its wrist), and the second answer is the run's."""
+    from box_opening.tasks import press_demo
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    LOCATES.clear(), HOME_FIRSTS.clear(), REACH_OUTS.clear()
+    approach, _seen = _answers([NO_WAY_IN, NO_WAY_IN, 0])
+    calls = _guided_by(monkeypatch)
+    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute", "--guide"], approach)
+    assert code == 0 and len(REACH_OUTS) == 3 and len(HOME_FIRSTS) == 1
+    assert [c["n"] for c in calls] == [1, 2] and all(c["ear"] is not None for c in calls)
+    assert calls[0]["place"] == tuple(REACH_OUTS[0].top_xyz)  # where the box stood: the engine holds it refused
+    assert LOCATES == [press_demo.SCENE_FIRST_LOCATE_S, press_demo.SCENE_LINED_UP_LOCATE_S, 2.0]
+    assert len([r for r in rows if r["leg"] == "scene_fix"]) == 3  # found again each time, from the cameras
+
+
+def test_a_guided_run_whose_wrist_did_not_hold_the_box_looks_for_it_the_long_way(monkeypatch, tmp_path):
+    from box_opening.tasks import press_demo
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    LOCATES.clear(), HOME_FIRSTS.clear(), REACH_OUTS.clear()
+    approach, _seen = _answers([NO_WAY_IN, 1])
+    _guided_by(monkeypatch, (False, False))  # the scene camera alone watched (no wrist look)
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute", "--guide"], approach)
+    assert code == 1 and LOCATES == [press_demo.SCENE_FIRST_LOCATE_S] * 2
+
+
+def test_a_guided_run_that_is_told_to_stop_ends_not_lined_up_with_nothing_pressed(monkeypatch, tmp_path):
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    REACH_OUTS.clear()
+    approach, _seen = _answers([NO_WAY_IN, 0])
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute", "--guide"], approach)
+    assert code == EXIT_NOT_LINED_UP and len(calls) == 1 and len(REACH_OUTS) == 1  # never pressed on
+
+
+def test_the_chairs_move_forgets_what_the_cameras_measured_and_the_next_look_measures_it_again(monkeypatch, tmp_path):
+    """The real guide_chair around a watch that answers go: the engine is asked on stdout before the watch
+    says anything, and what the run measured of the scene is forgotten before the chair moves: the box's
+    pose, the table's extent, the counter's edges kept out. (This bench world names its own table, which is
+    what the run falls back to; a world with none, as flatbot's, has none again until the next look
+    measures it: test_line_up_run.)"""
+    from box_opening.constants import HOME
+    from box_opening.runtime import approach as approach_mod
+    from box_opening.tasks import press_demo
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    REACH_OUTS.clear()
+    approach, seen = _answers([NO_WAY_IN, 0])
+    client = FakeClient()
+    client.live = list(HOME)  # at rest (run_main's home_first is a stand-in)
+    watched, cleared, forgot = [], [], []
+
+    def watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None, rest_any=False):
+        watched.append((rest_any, ear is not None))
+        forgot.append((ctx.worlds.table_top_z, ctx.worlds.table_extent, ctx.cpose, watcher.table_z))
+        return True, True, True
+
+    monkeypatch.setattr(press_demo, "line_up_watch", watch)
+    monkeypatch.setattr(approach_mod, "set_obstacles", lambda boxes: cleared.append(list(boxes)))
+    printed = []
+    real_write = sys.stdout.write
+    monkeypatch.setattr(sys.stdout, "write", lambda text: (printed.append(text), real_write(text))[1])
+    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute", "--guide"], approach, client=client)
+    assert code == 0 and watched == [(True, True)] and cleared == [[]]
+    asked = [json.loads(t[3:]) for t in printed if t.startswith("@@ ")]
+    assert len(asked) == 1 and asked[0]["guide"]["n"] == 1
+    assert asked[0]["guide"]["box"] == [round(float(v), 4) for v in REACH_OUTS[0].top_xyz]
+    bench_table = -0.057 + 0.03  # world_bench.yaml's own
+    # as the watch began: nothing of the scene before the move
+    assert forgot == [(pytest.approx(bench_table), None, None, pytest.approx(bench_table))]
+    assert seen[0][1] and seen[1] == seen[0]  # ... and the box placed again for the second reach-out
+    (note,) = (r for r in rows if r["leg"] == "guide")
+    assert note["n"] == 1 and note["box"] == asked[0]["guide"]["box"]
+
+
+def _wrist_sees(monkeypatch, far):
+    """press_demo.wrist_look stood in for: the wrist finds no container, and says which lid-sized tops it saw
+    out of the arm's reach (as wrist_first does: ctx.wrist_far)."""
+    from box_opening.tasks import press_demo
+
+    def look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
+        ctx.wrist_far = list(far)
+        said.append("wrist camera: the lid-sized top at [1.020, -0.200] stands out of the arm's reach")
+        return None, None, None
+
+    monkeypatch.setattr(press_demo, "wrist_look", look)
+
+
+def test_a_container_the_wrist_sees_out_of_the_arms_reach_is_no_no_box_for_a_guided_run(monkeypatch, tmp_path, capsys):
+    """The scene camera has none and the wrist sees a lid-sized top it calls out of the arm's reach: the run
+    said NO BOX, went home and ended (not_found). Guided, the chair is moved for it: no NO BOX, no home, and
+    the engine is asked with where that top stands. By hand, and where the wrist saw nothing, it is the NO
+    BOX it was."""
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+    from box_opening.tasks import press_demo
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    far = [(1.02, -0.20, 0.30), (1.15, 0.10, 0.30)]
+    _wrist_sees(monkeypatch, far)
+    REACH_OUTS.clear()
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    argv = ["--execute", "--guide", "--wrist-first"]
+    code, _c, rows = run_main(monkeypatch, tmp_path / "guided", argv, _refused, found=False)
+    assert code == EXIT_NOT_LINED_UP and homes == [] and not REACH_OUTS
+    assert [c["place"] for c in calls] == [far[0]] and calls[0]["n"] == 1  # the nearest the arm
+    (refused,) = (r for r in rows if r["leg"] == "reach_refused")
+    assert refused["guided"] is True and "out of the arm's reach" in refused["why"] and "NO BOX" not in refused["why"]
+    out = capsys.readouterr().out
+    assert "OUT OF REACH: the wrist camera sees a lid-sized top at [1.02, -0.20]" in out and "NO BOX" not in out
+    # by hand (no --guide): NO BOX and home, as it was
+    calls.clear()
+    code, _c, rows = run_main(monkeypatch, tmp_path / "by hand", ["--execute", "--wrist-first"], _refused, found=False)
+    assert code == 2 and calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX")
+    # guided, and the wrist saw nothing lid-sized at all: nothing says a box is there to move the chair for
+    homes.clear()
+    _wrist_sees(monkeypatch, [])
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "nothing", argv, _refused, found=False)
+    assert code == 2 and calls == [] and len(homes) == 1
+
+
+def test_the_wrist_look_says_which_tops_it_saw_out_of_the_arms_reach(monkeypatch):
+    """wrist_first keeps the finder's answer where it found no container: the lid-sized tops that all stand
+    out of the arm's reach (far_tops), for main's guidance; none where it found the container."""
+    import math
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from box_opening.tasks import press_demo
+    from box_opening.tasks import survey as sv
+
+    top = lambda x, y: SimpleNamespace(xy=(x, y), top_z=0.30, button="unchecked")  # noqa: E731
+    monkeypatch.setattr(sv, "_within_reach", lambda model: lambda t: math.hypot(t[0], t[1]) < 0.9)
+    notes = []
+    runner = SimpleNamespace(note=lambda leg, **f: notes.append((leg, f)))
+    ctx = SimpleNamespace(model=object(), worlds=SimpleNamespace(wrist_camera_config=None), wrist_far=None)
+    cfg = SimpleNamespace(park_tool_down=False)
+    why = "wrist camera: the lid-sized top at [1.020, -0.200] stands out of the arm's reach"
+    survey = sv.Survey(fix=None, why=why, find=SimpleNamespace(fix=None, places=(top(1.02, -0.20),)))
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
+    said = []
+    got = press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None, said=said)
+    assert got is None and ctx.wrist_far == [(1.02, -0.20, 0.30)] and said == [why]
+    survey = sv.Survey(fix=None, why="wrist camera: no counter", find=SimpleNamespace(fix=None, places=()))
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
+    assert press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None) is None
+    assert ctx.wrist_far == []
+
+
+def test_a_run_by_hand_is_never_guided(monkeypatch, tmp_path):
+    """Without --guide nothing is asked of an engine that is not there: a preview (no --execute) neither."""
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    for i, argv in enumerate((["--execute"], ["--guide"])):
+        REACH_OUTS.clear()
+        approach, _seen = _answers([NO_WAY_IN])
+        calls = _guided_by(monkeypatch)
+        code, _c, _rows = run_main(monkeypatch, tmp_path / str(i), argv, approach)
+        assert code == 1 and calls == [] and len(REACH_OUTS) == 1, argv
 
 
 def test_a_run_without_line_up_never_waits_on_anyone(monkeypatch, tmp_path):
