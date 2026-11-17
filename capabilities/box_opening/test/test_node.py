@@ -1120,17 +1120,80 @@ def test_the_far_bound_is_the_deployments_and_none_by_default(ros, monkeypatch):
         LOGGER.handlers[:] = handlers
 
 
-def test_with_no_ui_there_is_no_one_to_ask_and_the_run_starts_as_always(ros, monkeypatch):
+def test_with_line_up_on_a_goal_with_no_ui_is_refused_the_mocks_too(ros, monkeypatch):
+    """line_up on: nothing "moves" without the user's Open, so a goal with no UI to ask on is refused, not
+    run. Off, the mock runs with no UI as it always has."""
     handlers = list(LOGGER.handlers)
     cap = _mock_lining_up(monkeypatch, ui=False)
     try:
         ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "line_up_unavailable" and e.value.recoverable
+        assert "line_up is on" in str(e.value) and "nothing moved" in str(e.value) and "line_up false" in str(e.value)
+        assert ctx.said == [] and ctx.panels == [] and ctx.world == [] and ctx.objects == {}
+        cap.set_parameters([Parameter("line_up", value=False)])
         out = cap.execute("open_box", {}, ctx)
         assert out["lid_off"] and [p for p, *_ in ctx.said] == [p for p, *_ in node.MOCK_PHASES["open_box"]]
         assert ctx.panels == []
     finally:
         cap.destroy_node()
         LOGGER.handlers[:] = handlers
+
+
+@pytest.mark.parametrize("wrist_first", [False, True])
+@pytest.mark.parametrize("token", [bytes(16), bytes(range(1, 17))], ids=["no token", "no bridge"])
+def test_with_line_up_on_the_arm_never_flies_for_a_goal_with_no_ui(engine, monkeypatch, wrist_first, token):
+    """The rule, on the real node: line_up on and no UI to ask on (a goal that came with no token: standalone,
+    or sent to the node directly; or one with a token while the UI bridge is not there) starts no child at
+    all. It is refused, recoverable, and says how to run without lining up."""
+    given(monkeypatch, FULL_RUN)
+    engine.set_parameters([Parameter("line_up", value=True), Parameter("wrist_first", value=wrist_first)])
+    started, sources = [], []
+    real_run = node.Run
+    monkeypatch.setattr(node, "Run", lambda *a, **k: (started.append(a), real_run(*a, **k))[1])
+    monkeypatch.setattr(engine, "_box_source", lambda *a, **k: sources.append(a))
+    engine._assigned_token = token  # no bridge runs here: its request_user_input is not there either way
+    try:
+        ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            engine.execute("open_box", {}, ctx)
+    finally:
+        engine._assigned_token = bytes(16)
+    assert e.value.error_code == "line_up_unavailable" and e.value.recoverable
+    assert "no UI" in str(e.value) and "nothing moved" in str(e.value)
+    assert started == [] and sources == [] and ctx.said == [] and ctx.world == []
+
+
+def test_a_ui_that_goes_while_lining_up_is_no_open_and_the_run_is_never_told_to_go(engine, monkeypatch):
+    """The UI is asked after once, as the goal comes. One that is gone a moment later (the bridge dropped)
+    shows no panel and takes no press: the line-up runs out its time, and the run, started for its wrist
+    look, is told to stop. It never goes without an Open."""
+    given(monkeypatch, FULL_RUN)
+    _wrist_lining_up(engine, monkeypatch)
+    reads = []
+    monkeypatch.setattr(engine, "_ui_live", lambda: (reads.append(1), len(reads) == 1)[1])
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    runs, told, real_run = [], [], node.Run
+
+    class Recorded(real_run):
+        def __init__(self, argv, env, log, talk=False):
+            runs.append(self)
+            super().__init__(argv, env, log, talk=talk)
+
+        def send(self, msg):
+            told.append(msg)
+            super().send(msg)
+
+    monkeypatch.setattr(node, "Run", Recorded)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up"
+    (run,) = runs
+    assert told == [{"stop": True}] and not any("LINE-UP: go" in ln for ln in run.lines)
+    assert ctx.panels == [] and ctx.objects == {}
 
 
 class InPlace:
@@ -1458,6 +1521,8 @@ def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):
     that much sooner, and the longest run logged still fits after the longest line-up."""
     assert node.LINE_UP_S + node.RUN_LONGEST_S <= node.RUN_BUDGET_S
     given(monkeypatch, FULL_RUN[:3], wait=True)
+    engine.set_parameters([Parameter("line_up", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
     monkeypatch.setattr(engine, "_line_up", lambda ctx, source: node.RUN_BUDGET_S - 0.5)
     t0 = time.monotonic()
     with pytest.raises(EngineError) as e:

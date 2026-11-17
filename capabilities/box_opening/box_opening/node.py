@@ -105,7 +105,9 @@ PARAMS = {
     "planner_worlds_dir": "",
     # the line-up before a run, on the UI (line_up, guide): the panel tells the user which way to move until
     # the container is where the arm opens it, then asks, and the arm moves only on its Open. Off (the
-    # default) open_box starts its run at once, as it always has; so does an execution with no UI (standalone).
+    # default) open_box starts its run at once, as it always has. On, the arm never flies without that Open:
+    # a goal with no UI to ask on (standalone, a goal sent to the node directly, the UI bridge not there) is
+    # refused before anything starts (line_up_unavailable; execute).
     # With wrist_first the wrist turns to look while the user lines up (the run itself, --line-up: gently,
     # and only where the arm stands at rest). Without it the SCENE camera alone follows the container, which
     # on flatbot does not see a lid whole in front of the arm: one it cannot see is never asked of
@@ -156,6 +158,10 @@ RUN_LONGEST_S = 50.0
 LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 40 s
 LINE_UP_END_S = 12.0  # a run told its line-up is over turns its wrist back and ends within this, or is stopped
 NOT_LINED_UP = "the container was not where the arm opens it within %.0f s: nothing moved (press open again in place)"
+LINE_UP_NO_UI = (
+    "line_up is on and this goal has no UI to ask on (it came without the orchestrator's token, or the UI "
+    "bridge is not there): nothing moved. Set line_up false to run without lining up"
+)
 TAIL_LINES = 40
 
 # a leg's row -> (phase, the fraction of the run done it ends, what the run is doing then, for
@@ -700,8 +706,16 @@ class Capability(CapabilityEngine):
         return far if far > 0.0 else None
 
     def _lines_up(self):
-        """Whether this execution lines up first: the param is on and there is a UI to ask on."""
-        return bool(self._param("line_up")) and self._ui_live()
+        """Whether this execution lines up first: the `line_up` param as its goal comes. Asked ONCE, by
+        execute(), and handed down from there, so that nothing later takes another view of it (a UI that
+        dropped a moment on, a param set meanwhile). With line_up on the arm never flies without the user's
+        Open: a goal that has no UI to ask on (no token, or the bridge not there) is refused here,
+        EngineError("line_up_unavailable"), before anything is started."""
+        if not self._param("line_up"):
+            return False
+        if not self._ui_live():
+            raise EngineError("line_up_unavailable", LINE_UP_NO_UI, recoverable=True)
+        return True
 
     def _lined_up_run(self, ctx, env, action_id, instance_id, view):
         """The run started with --line-up and taken through its line-up: the Run, told to go on its Open.
@@ -732,6 +746,7 @@ class Capability(CapabilityEngine):
             if isinstance(e, EngineError) and e.error_code == "line_up_unavailable" and code != EXIT_NOT_LINED_UP:
                 raise error_for(action_id, code, run_.lines) from e  # it ended of itself: what it said
             raise
+        # _line_up returns on the user's Open alone (line_up.GO): every other end of a line-up raised above
         run_.send({"go": True})
         self.get_logger().info("line-up: Open pressed: the run goes on")
         return run_
@@ -792,19 +807,15 @@ class Capability(CapabilityEngine):
         )
 
     def _line_up(self, ctx, make_source):
-        """The line-up before a run (the `line_up` param; line_up.LineUp): the panel tells the user which way
-        to move and asks, and this returns only on its Open, with the seconds it took. Cancel on it is the
-        orchestrator's cancel (Cancelled); out of time, EngineError("not_lined_up"), recoverable: nothing
-        moved. A source that cannot start is EngineError("line_up_unavailable"): with the line-up asked for,
-        no run starts without its Open. 0.0 at once, and the run starts as it always has, where the param is
-        off or this execution has no UI to ask on (standalone). `make_source()`: what sees the box and judges
-        its place (BoxSource; the mock's MockApproach), made only where it is used, and closed before this
-        returns: no run starts while it lives."""
-        if not self._param("line_up"):
-            return 0.0
-        if not self._ui_live():
-            self.get_logger().info("line_up: no UI for this execution, so no one to ask: the run starts as always")
-            return 0.0
+        """The line-up before a run (line_up.LineUp), for an execution that lines up (_lines_up, decided by
+        execute(): neither the param nor the UI is asked after again here): the panel tells the user which
+        way to move and asks, and this returns only on its Open (line_up.GO), with the seconds it took.
+        Cancel on it is the orchestrator's cancel (Cancelled); out of time, EngineError("not_lined_up"),
+        recoverable: nothing moved. A UI that goes while lining up shows no panel and takes no press, so it
+        ends that way too. A source that cannot start is EngineError("line_up_unavailable"): with the line-up
+        asked for, no run starts without its Open. `make_source()`: what sees the box and judges its place
+        (BoxSource; the mock's MockApproach), made only where it is used, and closed before this returns: no
+        run starts while it lives."""
         t0 = time.monotonic()
 
         def said(say):
@@ -839,6 +850,8 @@ class Capability(CapabilityEngine):
             raise EngineError(
                 "not_lined_up", NOT_LINED_UP % LINE_UP_S + (f" -- {why}" if why else ""), recoverable=True
             )
+        if outcome != line_up.GO:  # nothing but the user's Open lets a run start
+            raise EngineError("line_up_unavailable", f"the line-up ended {outcome!r}: nothing ran", recoverable=False)
         return time.monotonic() - t0
 
     def availability(self, instance_id, world_state):
@@ -860,10 +873,13 @@ class Capability(CapabilityEngine):
         if self._cancelled_early():
             raise Cancelled()  # nothing ran
         check_params(params)
-        if self.mock:
-            return self._mock(action_id, ctx)
-        if not self._allowed():
+        if not self.mock and not self._allowed():  # the mock moves nothing: it is always allowed
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
+        # whether this goal lines up first, decided once and before anything is started: with line_up on and
+        # no UI to ask on it is refused here (the mock's too), never run without its Open
+        lines_up = self._lines_up()
+        if self.mock:
+            return self._mock(action_id, ctx, lines_up)
         ctx.checkpoint()  # cancelled before it started: nothing runs
         env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
         # the selection as the goal came: read once, used for the line-up, every write and the run's argv
@@ -876,13 +892,13 @@ class Capability(CapabilityEngine):
         # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
         view = FlightView()
         lined_up_s, run_ = 0.0, None
-        if self._lines_up() and self._param("wrist_first"):
+        if lines_up and self._param("wrist_first"):
             # the wrist looks while the user lines up (owner 2026-11-16: "keep the wrist look"): the run's own
             # process is the line-up's eyes, started now and held at its line-up until the Open, so that one
             # process alone ever commands the arm. Its budget runs from here, the line-up inside it
             view.start(action_id, instance_id)
             run_ = self._lined_up_run(ctx, env, action_id, instance_id, view)
-        else:
+        elif lines_up:
             # nothing moves, and nothing runs but on the line-up's Open
             lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
@@ -1092,16 +1108,18 @@ class Capability(CapabilityEngine):
                 env[var] = str(self._param(name))
         return env
 
-    def _mock(self, action_id, ctx):
+    def _mock(self, action_id, ctx, lines_up=False):
         """A successful real run at the interface, nothing moved (review round 2): its phases in
         its words (each `mock_phase_s` long), the gripper's `holding` from the grip to the release and
         the container `opened` at the release, written as the real run writes them, its panel on the UI
-        and its result. Like the real run it cannot pause; a cancel ends it."""
+        and its result. Like the real run it cannot pause; a cancel ends it. `lines_up`: execute()'s
+        decision for this goal (_lines_up), as the real run takes it."""
         track = Tracker(action_id, self.instance_id)
         phase_s = max(0.0, float(self._param("mock_phase_s")))
         t0 = time.monotonic()
-        # the real run's line-up, of a box that comes into reach over a few of the mock's phases
-        self._line_up(ctx, lambda: line_up.MockApproach(MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m()))
+        if lines_up:
+            # the real run's line-up, of a box that comes into reach over a few of the mock's phases
+            self._line_up(ctx, lambda: line_up.MockApproach(MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m()))
         world = WorldWriter(self.get_logger())
         panel = Panel(ctx, self._ui_live)  # the real run's, Cancel included
 
