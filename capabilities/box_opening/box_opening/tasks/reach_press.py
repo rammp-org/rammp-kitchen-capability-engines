@@ -1541,7 +1541,9 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     and flown, `lookahead` hosted in it. Its free air in position (air_position): that part first, then,
     where it arrived, the arm stood still, the driver put in its joint impedance there
     (client.prime_compliant) and AIR_SWITCH_S waited, and the stroke flown and watched as an execution of
-    its own. A free-air part that did not arrive is where it ends: no springs, no stroke, no watch."""
+    its own. A free-air part that did not arrive is where it ends: no springs, no stroke, no watch.
+    `lookahead` is hosted by the one execution only, never by a stroke flown on its own: the runner's
+    lookahead_result is then None, and the caller plans after the hold (_fly_way_in)."""
     from box_opening.tasks import depth_press as dp
 
     kw = {} if lookahead is None else {"lookahead": lookahead}
@@ -1558,7 +1560,12 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     runner.note("air_switch", primed=primed, wait_s=AIR_SWITCH_S, at=[round(float(v), 4) for v in ctx.client.joints()])
     time.sleep(AIR_SWITCH_S)
     contact = dp.watch_press(ctx, press, stroke, top_z)
-    return res + runner.run(press, execute=True, **kw), contact, [lg.name for lg in press]
+    # No lookahead on this execution. The client runs what a goal hosts once the goal is accepted and only
+    # then starts to poll its stop_when (client.execute): the press's contact watch would not see the pads
+    # come down for as long as the planning took, and a planner call that outlasted the stroke would leave
+    # it never polled at all, "none seen". As one execution the same planning runs at the re-aim's start,
+    # seconds before the descent; here the execution is the descent
+    return res + runner.run(press, execute=True), contact, [lg.name for lg in press]
 
 
 def _wrist_gravity():
@@ -2519,7 +2526,9 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
     way_in_legs') from the aimed look pose to the stroke's end below the
     button's bottom: ONE runner.run, re-timed into one execution, nothing
     read between its legs — the way home planned while it flies, from the
-    stroke's start (plan_way_out, the runner's lookahead). Then the hold on
+    stroke's start (plan_way_out, the runner's lookahead); with its free
+    air in position (fly_way_in: two executions) the stroke's own execution
+    hosts no planning, and the way home is planned after the hold. Then the hold on
     the button whose top is at `top_z` (depth_press.compliant_hold) and the
     way home from it (_way_home): the rise back up the stroke, the clear
     and home, one execution where they meet. A way in that did not start
@@ -2561,6 +2570,11 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
             lookahead=lambda _end: plan_way_out(ctx, cfg, way.stroke.q0, way.stroke.quat),
         )
         ahead = runner.lookahead_result  # every run() resets it
+        if ahead is None and len(way_in_parts(legs) or ()) == 2:
+            # its free air in position: the stroke flew as an execution of its own, which hosts no planning
+            # (fly_way_in), so no plan failed. The way home is planned after the hold (_way_home: the rise,
+            # then home from over the box)
+            ahead = (None, "the stroke flew on its own, after the free air in position, and hosts no planning")
         last = res[-1]
         flown = all(r.ok for r in res)
         # The runner's report of the group it re-timed (last_retime) is this

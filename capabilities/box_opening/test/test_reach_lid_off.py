@@ -509,6 +509,55 @@ def test_in_position_a_free_air_part_that_stops_brings_no_spring_and_no_stroke(c
     assert ctx.client.primes == []
 
 
+def _hosting(ctx, monkeypatch):
+    """Whether each execution the fake client is sent hosts planning (execute's while_running), in order."""
+    hosted = []
+    real_execute = ctx.client.execute
+
+    def execute(traj, speed, guard=None, while_running=None, stop_when=None, gains=None):
+        hosted.append(while_running is not None)
+        return real_execute(traj, speed, guard=guard, while_running=while_running, stop_when=stop_when, gains=gains)
+
+    monkeypatch.setattr(ctx.client, "execute", execute)
+    return hosted
+
+
+@pytest.mark.parametrize("air", ["impedance", "position"])
+def test_a_stroke_flown_on_its_own_hosts_no_planning_and_the_way_home_is_planned_after_the_hold(
+    ctx, monkeypatch, tmp_path, capsys, air
+):
+    """--press-only plans its way home while the way in flies (reach_press._fly_way_in: the runner's
+    lookahead), and the client runs what an execution hosts before it first polls that execution's
+    stop_when. As one motion (flown 2026-11-12) that is at the re-aim's start, seconds before the stroke.
+    With the free air in position the stroke is an execution of its own, and the planning hosted there
+    left the press's contact watch unpolled for as long as the planner took, the pads on their way down to
+    the lid (review 2026-11-16). There the stroke hosts nothing: the way home is planned after the hold —
+    up off the button, then home from over the box."""
+    monkeypatch.setenv("BOX_OPENING_AIR_CONTROL", air)
+    monkeypatch.setattr(rp.time, "sleep", lambda s: None)
+    hosted = _hosting(ctx, monkeypatch)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4)], press_only=True)
+    assert code == 0
+    # each execution with the legs of the runner.run that sent it
+    flown = [names for names, gains in _executions(rec) for _goal in gains]
+    assert len(flown) == len(hosted)
+    held = rec.events.index("hold")
+    (home_planned,) = (at for name, at in rec.plans if name == "home")
+    (way_out,) = (r for r in rows if r["leg"] == "reach_way_out")
+    if air == "impedance":
+        # as flown: the one motion hosts it, and the way home is in hand at the hold
+        assert [names for names, h in zip(flown, hosted, strict=True) if h] == [WAY_IN]
+        assert home_planned <= held and way_out["planned"] is True
+        return
+    assert flown[:3] == [["reach:look"], WAY_IN[:-1], WAY_IN[-1:]]
+    assert not any(hosted)  # the stroke's execution least of all: its watch is polled from its first sample
+    assert home_planned > held and way_out["planned"] is False
+    assert rec.events[held:] == ["hold", "depth:rise", "depth:clear", "home"]
+    out = capsys.readouterr().out
+    assert "no way home was planned while the way in flew (the stroke flew on its own" in out
+    assert "the lookahead plan failed" not in out  # none was asked for: nothing failed
+
+
 def test_where_nothing_was_planned_ahead_the_lift_flies_alone_and_the_spot_is_looked_at_after_it(
     ctx, monkeypatch, tmp_path, capsys
 ):
