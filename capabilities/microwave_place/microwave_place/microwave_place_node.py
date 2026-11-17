@@ -129,7 +129,7 @@ PARAMS = {
     "microwave_prompt": "microwave",
     # the tool this far (m) over the turntable glass at the end of the line in (the box's bottom
     # place_motion.BOX_ABOVE lower), then lowered from there
-    "above": 0.055,
+    "above": 0.075,
     # the container's spot this far (m) back from the turntable's middle toward the opening, along the oven's axis
     "closer": 0.02,
     # the hand's heading off the oven's axis (deg, + = left), tried in this order; the first that passes wins
@@ -372,6 +372,10 @@ class Capability(CapabilityEngine):
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
         )
+        self.get_logger().info(
+            f"record_bag={self.cfg['record_bag']}: state_dir={self.state_dir}, "
+            f"camera <= {self.cfg['bag_frame_hz']:g} Hz, arm state <= {self.cfg['bag_state_hz']:g} Hz"
+        )
 
     def execute(self, action_id, params, ctx):
         if action_id in UI_ACTIONS:
@@ -498,6 +502,7 @@ class Capability(CapabilityEngine):
             log(
                 f"plan: side shift {cand['shift_cm']:+.0f} cm, heading {cand['offset_deg']:+.0f} deg, clearance "
                 + ", ".join(f"{k} {v[0]:.1f} cm" for k, v in summary["clearance_cm"].items())
+                + f", container bottom {summary['insertion_bottom_clearance_cm']:+.1f} cm over glass at line-in"
                 + f", tilt {summary['max_tilt_deg']:.1f} deg, approach (shift + transit + line in "
                 f"{cand['insert_m'] * 100:.0f} cm) in {summary['duration_s']['approach']:.1f} s -> {path}"
             )

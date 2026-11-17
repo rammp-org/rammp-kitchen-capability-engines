@@ -633,6 +633,11 @@ class StageFailed(Refused):
         self.stage, self.reason = stage, reason
 
 
+def insertion_bottom_clearance(target, floor_z):
+    """Vertical clearance (m) from the modeled container bottom to the glass during line-in."""
+    return float(np.asarray(target, dtype=float)[2] - BOX_BELOW - floor_z)
+
+
 def _stage(stage, fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
@@ -1159,6 +1164,7 @@ def summarize(model, q0, loc, oven, world, world_info, boxes, cand, plan, res, a
         target=np.round(cand["target"], 3).tolist(),
         pre_insert=np.round(cand["pre"], 3).tolist(),
         insert_cm=cm(cand["insert_m"]),
+        insertion_bottom_clearance_cm=cm(insertion_bottom_clearance(cand["target"], oven.floor_z)),
         clearance_cm={k: [cm(d), w] for k, (d, w) in res["clearance"].items()},
         max_tilt_deg=round(res["tilt"], 2),
         end_off_cm=cm(res["end"][0]),

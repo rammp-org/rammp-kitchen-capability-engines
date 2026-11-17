@@ -70,8 +70,9 @@ params:
   agree_deg: 2.0
   # SAM3's prompt for the whole oven (its outside, for the obstacles)
   microwave_prompt: microwave
-  # the tool this far (m) over the turntable glass at the end of the line in, then lowered from there
-  above: 0.055
+  # the tool this far (m) over the turntable glass at the end of the line in, then lowered from there.
+  # The modelled container bottom is 0.05 m below the tool, leaving 0.025 m over the glass during insertion.
+  above: 0.075
   # the container's spot this far (m) back from the turntable's middle toward the opening, along the oven's axis
   closer: 0.02
   # the hand's heading off the oven's axis (deg, + = left), tried in this order; the first that passes wins
