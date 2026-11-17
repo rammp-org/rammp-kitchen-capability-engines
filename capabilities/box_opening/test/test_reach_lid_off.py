@@ -4974,3 +4974,73 @@ def test_the_spot_chosen_after_the_lift_is_set_down_by_the_table_moved_to_where_
     # planned while the lift flew, or at the spot look
     planned = [at for name, at in rec.plans if name == "lid:carry"]
     assert planned == [rec.events.index("spot-look") + (0 if ahead else 1)]
+
+
+# ---- the 19 set-downs flown onto the table, through the watch (review 2026-11-17) -------------------------
+
+
+def _older(name, past=None):
+    """One of the 19 set-downs flown onto the table before the watch (setdown_flown.SETDOWNS_OLDER) fed to
+    the set-down's watch as the client fed it — the plan where setdown_table_z has it, the touch ending
+    `past` under it (None: SETDOWN_PAST_M) —: each kept sample down to where the reference stands at that
+    end, or to the flight's own end where that is higher. Returns (the watch, where the reference's pads
+    stood over the plan as it stopped the descent, or None)."""
+    top, past = 0.25, rlo.SETDOWN_PAST_M if past is None else past
+    rows = [(0.02 + t, ref, pads) for t, ref, pads in flown.older_samples(name)]
+    total = rows[-1][0]
+    traj = SimpleNamespace(
+        points=[
+            SimpleNamespace(
+                positions=[top + ref + dp.DOWN_CONTACT_TOOL[2]] + [0.0] * 6,
+                time_from_start=SimpleNamespace(sec=int(t), nanosec=int(round((t - int(t)) * 1e9))),
+            )
+            for t, ref, _pads in rows
+        ]
+    )
+    info = {"sent_at": 0.0, "sent_traj": traj, "feedback_q": []}
+    det = rlo.SetdownContact(_Z(), SimpleNamespace(last_execution=info), top, top + rlo.SETDOWN_WATCH_M, top - past)
+    for t, ref, pads in rows:
+        if det.armed_t is not None and ref < -past:
+            break
+        info["feedback_q"].append((t, t / total, [top + pads + dp.DOWN_CONTACT_TOOL[2]] + [0.0] * 6, None))
+        if det(t / total):
+            return det, ref
+    return det, None
+
+
+def test_the_set_downs_flown_onto_the_table_are_felt_as_the_table_before_the_touch_ends_at_todays_pace():
+    """The 19 set-downs flown onto the table before the watch (2026-10-29 to 11-04), replayed through it
+    with the plan where setdown_table_z has it and the touch ending SETDOWN_PAST_M (8 mm) under that.
+
+    None reads as something holding the lid up, and none as a rise above the band: a real table is the
+    table, -0.4..+26 mm over the plan. Of the 18 that kept the lid, the 12 flown at today's touch pace
+    (53-61 mm/s) are all felt, the reference still 4 mm or more from the touch's end (the least: 10-29
+    12:04, a lid that settled slowly, felt 3.4 mm under the plan). Of the 6 flown with the touch at twice
+    that (104-125 mm/s, #89: the owner found it "too hard"), five are felt, 2.0-6.4 mm under the plan;
+    10-29 14:45 is not — its lid met the table 2 mm over the plan with the pads 6 mm behind the reference
+    and settled as the hand came on, the rise seen only 14 mm under the plan. Review 2026-11-17: that one
+    would have been carried back to the box. The touch is not made deeper for it (SETDOWN_PAST_M's
+    note); this pins what 8 mm does and does not feel. The one whose lid had slipped out on the way
+    (10-30 13:28) is not felt at all."""
+    older = flown.SETDOWNS_OLDER
+    felt = {}
+    for name in older:
+        det, at = _older(name)
+        rec = det.record()
+        assert rec["verdict"] in (None, "never") and rec["early"] == [], name  # never "held", never "early"
+        assert det.credible() == (at is not None)
+        felt[name] = (at, rec.get("above_top_mm"))
+    kept = [name for name in sorted(older) if older[name]["kept"]]
+    today = [name for name in kept if older[name]["touch"] < 70]
+    faster = [name for name in kept if older[name]["touch"] > 100]
+    assert (len(older), len(kept), len(today), len(faster)) == (19, 18, 12, 6)
+    assert all(felt[name][0] is not None for name in today)
+    assert min(felt[name][0] for name in today) > -(rlo.SETDOWN_PAST_M - 0.004)
+    assert [name for name in faster if felt[name][0] is None] == ["20261029-144545"]
+    assert all(-0.0065 < felt[name][0] < -0.0015 for name in faster if felt[name][0] is not None)
+    assert all(-1.0 < above < 27.0 for at, above in felt.values() if at is not None)  # where each met the table
+    assert felt["20261030-132845"][0] is None and not older["20261030-132845"]["kept"]
+    # 14:45's is felt only by a touch that goes 14 mm under the plan
+    assert _older("20261029-144545", past=0.012)[1] is None
+    det, at = _older("20261029-144545", past=0.016)
+    assert det.credible() and at == pytest.approx(-0.014, abs=0.001)

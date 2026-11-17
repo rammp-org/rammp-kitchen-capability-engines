@@ -360,8 +360,27 @@ LIFT_LEAN_DEG = (5.0, 10.0)
 # dropped the lid off the table"), so the reference must go on past where
 # the table is for the arm to feel it: the watch needs 3-5 mm of the
 # reference past the touch (press_contact's rises). 8 mm under the plan: the
-# 19 set-downs flown to their plan's end (10-29 to 11-04) met the table
-# -0.4..+26 mm from where setdown_table_z has it, never lower.
+# 19 set-downs flown to their plan's end (10-29 to 11-04) first met the table
+# -0.4..+26 mm from where setdown_table_z has it, never lower. That is the
+# first touch, not what the watch needs (review 2026-11-17): the pads lag the
+# reference, and a lid that lands on its rim settles as the hand comes on, so
+# the rise is seen 4-10 mm of the reference after it — more where the lid
+# settles slowly. Those flights replayed through the watch with the touch
+# ending here (test_reach_lid_off, setdown_flown.SETDOWNS_OLDER): of the 18
+# that kept the lid, the 12 flown at today's touch pace (53-61 mm/s) are all
+# felt, the reference +14.7..-3.4 mm from the plan (the least 4.6 mm before
+# this end: 10-29 12:04, its gap rising 0.26 mm a mm of descent, met 16 mm
+# over the plan); of the 6 flown with the touch at twice that (104-125 mm/s,
+# #89) five are felt at -2.0..-6.4 mm and one, 10-29 14:45 — met 2 mm over
+# the plan with the pads 6 mm behind the reference, the gap rising 0.27 mm a
+# mm — only at -14.0 mm: past this end, it would have gone back on the box.
+# Not made deeper for it. At today's pace nothing on record needs it; a rise
+# that slow met that near the plan would want some 18 mm (the slow rule's 5
+# mm of it), and a touch that deep presses a table it does not feel twice as
+# hard and takes the counter's keep-out down with it (clear_table
+# .COUNTER_TOP_CLEAR_M stands 25 mm under the counter for THIS end, the
+# hand's spheres 17 mm under its top). A lid such a touch does not feel goes
+# back on the box; it is not dropped.
 SETDOWN_SLOW_M = 0.08
 SETDOWN_PAST_M = 0.008
 # What the watch takes for the lid meeting the table (SetdownContact):
