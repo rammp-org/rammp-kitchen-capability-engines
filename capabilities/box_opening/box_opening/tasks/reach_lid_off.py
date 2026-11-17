@@ -76,7 +76,10 @@ after the press as before (reach_press._fly_way_in).
   PLACE   the fingers open only where the set-down's watch felt the lid
           meet the table, at about the height the run has for it
           (SetdownContact): then as the retreat back up to the carry's
-          height starts; then home, planned ahead, slow and in the driver's
+          height starts; then home — planned with the carry while the hand
+          came down to the knob, or while the retreat flies where the spot
+          was chosen after the lift, never while the set-down flies (its
+          watch is polled from its first sample) — slow and in the driver's
           MEDIUM joint impedance, as every home flies (core.plan_home). No
           such contact by the touch's end: the lid is not let go; back up
           with it, back over the box and onto it (carry_back).
