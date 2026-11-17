@@ -146,11 +146,9 @@ ros2 topic echo /example/status
 ```
 
 Standalone, the orchestrator calls a capability makes (`ctx.request_intent`,
-`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. For direct
-UI panels, the orchestrator pushes a shared execution token to the engine's
-`/<engine_id>/acquire_control` server and grants it to the arm and UI bridge.
-The engine passes that token to `self.arm`; it never acquires control itself.
-Without a token, UI calls are logged no-ops.
+`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. Arm control
+arbitration (`AcquireControl`) is not wired in yet: the orchestrator does not
+call it today.
 
 To run it on the robot, transcribe the capability's two fragments into
 [`rammp-deployments`](https://github.com/rammp-org/rammp-deployments)'s
@@ -256,14 +254,24 @@ the orchestrator:
 
 ### UI (`ctx`)
 
-The direct UI bridge support is ported from `feat/engine_update`, as used by
-its counter-panel example. `ctx.update_user_panel(panel_json=...)` opens or
-refreshes the engine's panel without blocking. `ctx.poll_ui_event()` consumes
-the latest button/object event; a button ends the panel goal, so the next panel
-update opens a new one. `ctx.publish_overlay_image(image)` publishes the
-capability's camera view. These calls are independent of `ctx.progress()`,
-which reports only to the orchestrator. Panel goals are closed when the action
-ends. See [UI JSON schema](docs/UI_JSON_SCHEMA.md) for payloads and event shapes.
+`ctx` also talks directly to the UI bridge (`rammp_ui_bridge`), independent of
+the orchestrator and of `progress()` above (which only reports to the
+orchestrator and is never shown to the user). Call any of these, all of them,
+or none, as the capability needs:
+
+| Method                                                                                | What it does                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update_user_panel(panel_json=None, objects=None, selected_instance_id=None) -> bool` | Pushes panel content to the UI. Non-blocking: opens a `RequestUserInput` goal lazily on first call (or again once the previous one has ended), or refreshes the open one. Each argument left `None` means "leave unchanged"; at least one of `panel_json`/`objects` is required the first time it's called in a run                                                                                               |
+| `poll_ui_event() -> dict \| None`                                                     | Non-blocking: returns (and consumes) the most recent event since the last call -- `{"type": "button", "button_id": ...}` or `{"type": "object_tapped", "instance_id": ...}` -- or `None` if nothing new. A button event ends the panel's goal; the next `update_user_panel()` call transparently opens a fresh one                                                                                                |
+| `publish_overlay_image(image) -> bool`                                                | Publishes one frame (a `sensor_msgs/Image`, e.g. from a wrist camera) of this capability's own camera to the UI bridge's shared overlay topic, stamped with this run's session token                                                                                                                                                                                                                              |
+| `set_overlay_visible(visible: bool) -> bool`                                          | Shows/hides this capability's overlay camera view in UE -- independent of `publish_overlay_image()`: frames keep flowing either way; this calls UE's parameterless `Open Camera Feed`/`Close Camera Feed` Remote Control function via the bridge. The orchestrator already hides it automatically once this run's `execute_action` ends, so call this yourself only to show/hide it at some other specific moment |
+
+All four return `False` (a no-op, logged) if this run holds no session token
+(e.g. standalone with no orchestrator) or the bridge is unreachable/rejects the
+request.
+
+See [`docs/UI_JSON_SCHEMA.md`](docs/UI_JSON_SCHEMA.md) for the full
+`panel_json`/`objects`/`poll_ui_event()` JSON shapes.
 
 ### `self.arm` (`ArmInterface`)
 
