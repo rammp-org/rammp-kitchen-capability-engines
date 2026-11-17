@@ -241,8 +241,9 @@ def test_a_refusals_advice_to_jog_is_said_once():
     assert core._without_jog("planning failed for home") == "planning failed for home"
 
 
-def _body_ctx(monkeypatch, tmp_path, boxes):
-    """flatbot's ctx (bench world, FakeClient) with a body model of `boxes` attached to its chain."""
+def _body_ctx(monkeypatch, tmp_path, boxes, robot=ROBOT):
+    """flatbot's ctx (bench world, FakeClient) with a body model of `boxes` attached to its chain, the arm's
+    spheres from `robot` (a robot.yaml's text)."""
     client = FakeClient()
     monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), client))
     monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
@@ -250,11 +251,57 @@ def _body_ctx(monkeypatch, tmp_path, boxes):
     lines = ["layer: test", "obstacles:"]
     lines += ["  - {name: %s, position: %s, dims: %s}" % (n, list(c), list(d)) for n, c, d in boxes]
     (tmp_path / "layer_test.yaml").write_text("\n".join(lines) + "\n")
-    (tmp_path / "robot.yaml").write_text(ROBOT)
+    (tmp_path / "robot.yaml").write_text(robot)
     (tmp_path / "planner.yaml").write_text("robot: robot.yaml\nlayers: [layer_test.yaml]\n")
     approach.set_body(body.load(str(tmp_path / "planner.yaml")))
     approach.set_chain_root("arm_mount", flatbot_urdf())
     return ctx, approach._chain(), client
+
+
+# flatbot's own spheres (its cuRobo robot.yaml, sheppy-local flatbot_fwd8 as on 2026-11-17): link, [(centre, radius)]
+_G = [(0.04, 0.04), (0.055, 0.042), (0.078, 0.035)]  # the gripper base's spheres on its axis
+_RING = [(0.06, 0.04, 0.032), (0.1, 0.045, 0.026), (0.13, 0.045, 0.022), (0.145, 0.045, 0.018)]  # z, off it, radius
+FLATBOT_SPHERES = {
+    "arm_base_link": [((0, 0, 0.065), 0.075), ((0, 0, 0.125), 0.065)],
+    "arm_shoulder_link": [((0, 0, -0.04), 0.07), ((0, 0, -0.1), 0.072), ((0, 0, -0.16), 0.062)],
+    "arm_half_arm_1_link": [((0, 0, 0), 0.062), ((0, -0.06, 0), 0.062), ((0, -0.12, 0), 0.062), ((0, -0.17, 0), 0.06)],
+    "arm_half_arm_2_link": [((0, 0, 0), 0.058), ((0, 0, -0.07), 0.056), ((0, 0, -0.15), 0.056), ((0, 0, -0.21), 0.056)],
+    "arm_forearm_link": [((0, 0, 0), 0.06), ((0, -0.06, 0), 0.058), ((0, -0.12, 0), 0.058), ((0, -0.17, 0), 0.055)],
+    "arm_spherical_wrist_1_link": [((0, 0, 0), 0.06), ((0, 0, -0.085), 0.06)],
+    "arm_spherical_wrist_2_link": [((0, 0, 0), 0.055), ((0, -0.085, 0), 0.055)],
+    "arm_bracelet_link": [((0, 0, -0.045), 0.045), ((0, -0.05, -0.045), 0.045), ((0.045, 0, -0.05), 0.036)],
+    "arm_robotiq_85_base_link": [((0, 0, z), r) for z, r in _G[:2]]
+    + [((0, o, z), r) for z, o, r in _RING[:1] for o in (0.04, -0.04)]
+    + [((o, 0, z), r) for z, o, r in _RING[:1] for o in (-0.04, 0.04)]
+    + [((0, 0, z), r) for z, r in _G[2:]]
+    + [(c, r) for z, o, r in _RING[1:] for c in ((0, o, z), (0, -o, z), (-o, 0, z), (o, 0, z))],
+    "arm_robotiq_85_left_finger_link": [((-0.010026, 0, 0.019663), 0.03)],
+    "arm_robotiq_85_left_finger_tip_link": [((-0.021578, 0, 0.031998), 0.02)],
+    "arm_robotiq_85_right_finger_link": [((0.010026, 0, 0.019663), 0.03)],
+    "arm_robotiq_85_right_finger_tip_link": [((0.021578, 0, 0.031998), 0.02)],
+}
+# its chair's seat and person boxes in arm_mount (the planner's padding, 20 mm, is added by body.load)
+FLATBOT_SEAT = [
+    ("armrest_arm", (-0.3493, -0.0127, 0.3556), (0.3939, 0.1018, 0.051)),
+    ("armrest_far", (-0.3493, -0.6888, 0.3556), (0.3939, 0.1017, 0.051)),
+    ("backrest", (-0.6467, -0.3508, 0.2841), (0.4238, 0.4827, 0.3794)),
+    ("seat", (-0.2783, -0.3636, -0.0319), (0.5424, 0.457, 0.2528)),
+    ("knees", (-0.0523, -0.3508, 0.197), (0.7652, 0.4827, 0.0806)),
+    ("lap", (-0.1031, -0.3508, 0.2774), (0.6636, 0.4827, 0.0804)),
+    ("legs", (-0.0015, -0.3508, -0.182), (0.8668, 0.4827, 0.6776)),
+    ("torso", (-0.319, -0.3508, 0.7048), (0.2318, 0.4827, 0.7749)),
+]
+# where the arm stood on 2026-11-17 when home_arm refused twice: folded back, the forearm 79 mm into
+# seat/armrest_arm's padding beside the user, joint_2 0.17 and joint_4 0.10 rad from their limits
+ARMREST_START = [-0.004184, -2.071172, 2.978066, -2.476589, 0.097651, -1.271526, 1.397432]
+
+
+def _robot_yaml(spheres):
+    lines = ROBOT.split("    collision_spheres:")[0].splitlines() + ["    collision_spheres:"]
+    for link, ss in spheres.items():
+        lines.append("      %s:" % link)
+        lines += ["      - {center: %s, radius: %s}" % ([float(v) for v in c], r) for c, r in ss]
+    return "\n".join(lines) + "\n"
 
 
 def test_a_start_inside_the_padding_steps_out_first_never_deeper_the_tool_held_and_home_plans_from_its_end(
@@ -648,3 +695,50 @@ def test_a_goal_that_would_itself_stand_in_the_planners_table_keeps_the_planner_
     core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append)
     assert set(plan.worlds) == {PLANNER_WORLD}
     assert any("the planner is not handed the table" in s for s in said)
+
+
+def test_a_start_whose_own_walk_is_refused_beside_the_user_steps_out_another_way_and_home_plans_from_its_end(
+    monkeypatch, tmp_path
+):
+    # 2026-11-17 on flatbot: home_arm refused twice, "every way clear goes deeper into the padding, lowers the tool
+    # more than 5 mm or meets a joint limit ... jog the arm clear by hand". The walk's own step pushed joint_2 and
+    # joint_4 off their limits, which drove the forearm deeper. Owner: "make it figure itself out on its own"
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, FLATBOT_SEAT, robot=_robot_yaml(FLATBOT_SPHERES))
+    q = list(ARMREST_START)
+    client.live = q
+    b = chain.body
+    assert 0.075 < float(b.sphere_depths([q])[0].max()) < 0.085  # as on the robot: 79 mm in
+    legs, _state, info = core.EscapeBodyFree().plan(ctx, core.PlanState(joints=q, chain=0))
+    assert info["around"] > 0  # the walk's own step was refused on the way, and another way taken
+    pts = np.array([p.positions for p in legs[0].traj.points])
+    depth = b.sphere_depths(pts)[0].max(axis=1)
+    assert np.all(depth[1:] <= np.maximum(depth[:-1], -core.ESCAPE_CLEAR_M) + 1e-6)  # never deeper, nor back in
+    assert depth[-1] <= -core.ESCAPE_OUT_M  # out of the padding
+    assert b.refusal(pts) is None  # into no box, and deeper in none than the start rule lets it, box by box
+    z = np.array([chain.fk(list(p))[1][2] for p in pts])
+    assert z.min() >= z[0] - core.ESCAPE_DROP_M - 1e-9  # the tool held
+    assert np.abs(pts - pts[0]).max() <= core.ESCAPE_MAX_RAD + 1e-9
+    assert legs[0].compliant is True and legs[0].gains == core.GAINS_SOFT and legs[0].guard is None
+    assert legs[0].speed == core.ESCAPE_SPEED
+    again, _s, _i = core.EscapeBodyFree().plan(ctx, core.PlanState(joints=q, chain=0))
+    assert np.array_equal(np.array([p.positions for p in again[0].traj.points]), pts)  # the same way every time
+    said = []
+    home = core.home_any(ctx, core.PlanState(joints=q, chain=0), HOME, Planner(), say=said.append)
+    assert home[0].name == "escape-body" and home[-1].name == "home"
+    assert np.allclose(home[0].goal_joints, pts[-1])
+
+
+def test_where_the_walks_own_way_gets_out_no_other_way_is_taken(monkeypatch, tmp_path):
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, [("slab", (0.6, 0.0, 0.40), (0.30, 0.30, 0.06))])
+    q = chain.nearest_solution([0.0, 0.3, 0.0, 1.8, 0.0, 1.0, 1.57], [0.6, 0.0, 0.45], DOWN)
+    _legs, _state, info = core.EscapeBodyFree().plan(ctx, core.PlanState(joints=list(q), chain=0))
+    assert info["around"] == 0
+
+
+def test_where_the_only_ways_out_go_into_the_user_it_still_refuses_and_says_to_jog(monkeypatch, tmp_path):
+    # the forearm as one sphere at the elbow (ROBOT): out of the armrest's padding it goes only down, into the lap's
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, FLATBOT_SEAT)
+    q = list(ARMREST_START)
+    assert float(chain.body.sphere_depths([q])[0].max()) > 0.0
+    with pytest.raises(RuntimeError, match="jog the arm clear by hand$"):
+        core.EscapeBodyFree().plan(ctx, core.PlanState(joints=q, chain=0))

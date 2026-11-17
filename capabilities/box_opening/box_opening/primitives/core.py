@@ -713,6 +713,28 @@ ESCAPE_SPEED = 0.10  # slowly: a cruise fraction (Leg.speed), below CONTACT_SPEE
 # flown, and an arm that soft may not follow the step at all. Flown compliant, nothing the run reads stops it (the
 # client's guards only watch): the arm gives way where it meets something; the e-stop and Ctrl+C remain.
 ESCAPE_GAINS = GAINS_SOFT
+# 2026-11-17 on flatbot: home_arm refused twice with the forearm 79 mm into seat/armrest_arm's padding beside the
+# user, joint_2 0.17 and joint_4 0.10 rad from their limits. The walk's own step pushes those two off their limits,
+# which drove the forearm deeper, and every halving of it was refused: "jog the arm clear by hand". Owner: "i dont
+# want to physically need to move the arm. make it figure itself out on its own". So where the walk's own step is
+# refused, the other ways from where the arm stands are tried before any refusal: the padding's way alone, each
+# joint alone either way, and ESCAPE_TRIES fixed directions (seeded, the same every run), each held to the walk's
+# rules and to the start box by box (Body.first_hit's start rule), none past ESCAPE_MAX_RAD a joint; the one that
+# leaves least missing is taken. Wherever the walk's own step goes, it is taken as before.
+ESCAPE_TRIES = 48
+ESCAPE_SEED = 20261117
+_ESCAPE_DIRS = {}
+
+
+def _escape_dirs(n):
+    """The ESCAPE_TRIES fixed directions in an n-joint space (seeded: every run tries the same), each scaled to 1
+    on its largest joint."""
+    import numpy as np
+
+    if n not in _ESCAPE_DIRS:
+        w = np.random.default_rng(ESCAPE_SEED).normal(size=(ESCAPE_TRIES, n))
+        _ESCAPE_DIRS[n] = w / np.abs(w).max(axis=1, keepdims=True)
+    return _ESCAPE_DIRS[n]
 
 
 class EscapeBodyFree:
@@ -725,8 +747,9 @@ class EscapeBodyFree:
     outside, the tool never lower than ESCAPE_DROP_M under its start (its downward pull projected out where it
     would go lower), no joint past its limit. Flown slowly (ESCAPE_SPEED) in the driver's joint impedance at its
     lightest (ESCAPE_GAINS, SOFT): a joint line through the way out that gives way where it meets something.
-    Refused (RuntimeError) where no way of up to ESCAPE_MAX_RAD a joint gets there: the operator jogs the arm
-    clear by hand."""
+    Where the walk's own step is refused, the other ways from where the arm stands are tried (ESCAPE_TRIES above)
+    and the best taken. Refused (RuntimeError) where none of them gets there within ESCAPE_MAX_RAD a joint: the
+    operator jogs the arm clear by hand."""
 
     def __init__(self, name="escape-body", speed=None, touch_nm=4.0):
         self.name = name
@@ -797,10 +820,13 @@ class EscapeBodyFree:
         def tool_z(q):
             return float(chain.fk(list(q))[1][2])
 
-        def missing(q):
-            """(merit, [sphere m, table m, [joint rad ...]]): what the point `q` still lacks."""
-            vp = max(0.0, float(depth(q)[0]) + ESCAPE_CLEAR_M) if body is not None else 0.0
-            vt = max(0.0, float(table_z) + over - tool_z(q)) if table_z is not None else 0.0
+        def missing(q, dp=None, tz=None):
+            """(merit, [sphere m, table m, [joint rad ...]]): what the point `q` still lacks (`dp` its depth and
+            `tz` its tool's height where already known)."""
+            dp = float(depth(q)[0]) if dp is None and body is not None else dp
+            vp = max(0.0, dp + ESCAPE_CLEAR_M) if body is not None else 0.0
+            tz = tool_z(q) if tz is None and table_z is not None else tz
+            vt = max(0.0, float(table_z) + over - tz) if table_z is not None else 0.0
             vl = [max(0.0, ESCAPE_ROOM_RAD - min(q[j] - a, b - q[j])) for j, a, b in limited]
             return vp + vt + ESCAPE_M_PER_RAD * sum(vl), (vp, vt, vl)
 
@@ -814,6 +840,54 @@ class EscapeBodyFree:
         def grad(f):
             return np.array([(f(q + eye[i]) - f(q - eye[i])) / 2e-4 for i in range(n)])
 
+        def stepped(way, m, d):
+            """(the point, its depth) of the first of six halvings of a step along `way` from q that leaves less
+            missing, never deeper, the tool held; None where none does."""
+            if float(np.max(np.abs(way))) < 1e-9:
+                return None
+            dq = way / float(np.max(np.abs(way))) * ESCAPE_STEP_RAD
+            for _half in range(6):
+                qn = np.clip(q + dq, lo, hi)
+                dn = float(depth(qn)[0])
+                if (
+                    missing(qn)[0] < m - 1e-9
+                    and dn <= max(d, -ESCAPE_CLEAR_M) + 1e-6  # never deeper, nor in from outside
+                    and tool_z(qn) >= z0 - ESCAPE_DROP_M
+                ):
+                    return qn, dn
+                dq = dq / 2.0
+            return None
+
+        def sideways(ways, m, d):
+            """Where the walk's own step is refused: of `ways`, each joint alone either way and the fixed
+            directions (_escape_dirs), the step (stepped) that leaves least missing, within ESCAPE_MAX_RAD a joint
+            of the start and no sphere deeper in any box than the start rule lets it (Body.first_hit); None where
+            none does."""
+            W = np.array([*ways, *np.eye(n), *(-np.eye(n)), *_escape_dirs(n)], float)
+            W = W / np.maximum(np.abs(W).max(axis=1, keepdims=True), 1e-12) * ESCAPE_STEP_RAD
+            found = {}  # each direction's first halving that passes: (what it leaves missing, point, its depth)
+            for _half in range(6):  # all directions at once, each halved until it passes, as stepped() does one
+                todo = [i for i in range(len(W)) if i not in found]
+                if not todo:
+                    break
+                Qn = np.clip(q + W[todo], lo, hi)
+                for i, qn, dn in zip(todo, Qn, depth(Qn), strict=True):
+                    dn = float(dn)
+                    if dn > max(d, -ESCAPE_CLEAR_M) + 1e-6 or float(np.max(np.abs(qn - q0))) > ESCAPE_MAX_RAD:
+                        continue
+                    tz = tool_z(qn)
+                    if tz < z0 - ESCAPE_DROP_M:
+                        continue
+                    left = missing(qn, dn, tz)[0]
+                    if left < m - 1e-9:
+                        found[i] = (left, qn, dn)
+                W[todo] = W[todo] / 2.0
+            for _left, qn, dn in sorted(found.values(), key=lambda f: f[0]):
+                if body is None or body.refusal([q0, qn], step_rad=0.0) is None:
+                    return qn, dn
+            return None
+
+        around = 0
         for _k in range(ESCAPE_MAX_STEPS):
             m, (vp, vt, vl) = missing(q)
             if m <= 0.0:
@@ -824,49 +898,47 @@ class EscapeBodyFree:
                     % (self.name, ESCAPE_MAX_RAD, _short_of(vp, vt, vl, limited))
                 )
             way = np.zeros(n)
+            ways = []  # the padding's and the table's ways alone, for sideways()
             if vp > 0.0:
                 g = grad(lambda x: float(depth(x)[0]))
                 way -= g / max(float(np.max(np.abs(g))), 1e-12)
+                ways.append(way.copy())
             zg = grad(tool_z)
             if vt > 0.0:
                 way += zg / max(float(np.max(np.abs(zg))), 1e-12)
+                ways.append(zg.copy())
             for (j, a, b), v in zip(limited, vl, strict=True):
                 if v > 0.0:
                     way[j] += 1.0 if q[j] - a < b - q[j] else -1.0
             if tool_z(q) - z0 <= -ESCAPE_DROP_M + 0.001 and way @ zg < 0.0 and zg @ zg > 0.0:
                 way = way - (way @ zg) / (zg @ zg) * zg  # at the floor of the drop: nothing downward
-            if float(np.max(np.abs(way))) < 1e-9:
-                raise RuntimeError(
-                    "%s refused: no direction clear (short: %s) — jog the arm clear by hand"
-                    % (self.name, _short_of(vp, vt, vl, limited))
-                )
-            dq = way / float(np.max(np.abs(way))) * ESCAPE_STEP_RAD
-            for _half in range(6):
-                qn = np.clip(q + dq, lo, hi)
-                dn = float(depth(qn)[0])
-                if (
-                    missing(qn)[0] < m - 1e-9
-                    and dn <= max(d, -ESCAPE_CLEAR_M) + 1e-6  # never deeper, nor in from outside
-                    and tool_z(qn) >= z0 - ESCAPE_DROP_M
-                ):
-                    break
-                dq = dq / 2.0
-            else:
+            got = stepped(way, m, d)
+            if got is None:
                 rooms = [min(q[j] - a, b - q[j]) for j, a, b in limited]
                 if d <= -ESCAPE_OUT_M and min(rooms, default=np.inf) >= CLEAR_MARGIN_FIRST_RAD:
                     break  # out of the padding, off the limits, short of the margins: HOME is asked for from here
-                raise RuntimeError(
-                    "%s refused: every way clear goes deeper into the padding, lowers the tool more than %.0f mm or "
-                    "meets a joint limit (short: %s) — jog the arm clear by hand"
-                    % (self.name, 1000 * ESCAPE_DROP_M, _short_of(vp, vt, vl, limited))
-                )
-            q, d = qn, dn
+                got = sideways(ways, m, d)
+                if got is None:
+                    raise RuntimeError(
+                        "%s refused: every way clear goes deeper into the padding, lowers the tool more than %.0f mm "
+                        "or meets a joint limit, the walk's own way and %d others tried (short: %s) — jog the arm "
+                        "clear by hand"
+                        % (
+                            self.name,
+                            1000 * ESCAPE_DROP_M,
+                            len(ways) + 2 * n + ESCAPE_TRIES,
+                            _short_of(vp, vt, vl, limited),
+                        )
+                    )
+                around += 1
+            q, d = got
             pts.append(q.copy())
         else:
             raise RuntimeError("%s refused: not clear in %d steps" % (self.name, ESCAPE_MAX_STEPS))
         z_all = [tool_z(p) for p in pts]
         info = {
             "steps": len(pts) - 1,
+            "around": around,  # of them, steps another way where the walk's own was refused (sideways)
             "largest_rad": float(np.max(np.abs(q - q0))),
             "depth_mm": start_mm,
             "tool_drop_mm": 1000 * max(0.0, z0 - min(z_all)),
