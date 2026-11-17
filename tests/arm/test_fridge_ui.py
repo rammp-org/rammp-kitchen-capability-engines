@@ -15,13 +15,13 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from capability_ui import DONE, STOP, STOPPED_MESSAGE, panel_open
 from door_common import common as dc
 from fridge import close_door, constants, open_door, push_open
 from fridge import constants as F
 from fridge_fake import door_is_open, fridge  # noqa: F401 -- fridge: the fake-planner fixture
 
 from capability_engine import Cancelled, EngineError
-from capability_ui import DONE, STOP, STOPPED_MESSAGE, panel_open
 
 fridge_node = None  # fridge.node, imported by the fixture below
 

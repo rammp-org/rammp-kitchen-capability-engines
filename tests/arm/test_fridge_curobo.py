@@ -1,6 +1,7 @@
-"""The fridge's planning on FakeCurobo (fridge_fake.py): what reaches cuRobo (the worlds, the legs, the joined
-motions), what the arm is sent (one trajectory per motion, impedance, the gripper while it moves) and what the door file
-says after. Collisions are cuRobo's and are not checked here (data/curobo_sim's GPU harness does)."""
+"""The fridge's planning on FakeCurobo (fridge_fake.py): what reaches cuRobo (the worlds, the legs,
+the joined motions), what the arm is sent (one trajectory per motion, impedance, the gripper while
+it moves) and what the door file says after. Collisions are cuRobo's and are not checked here
+(data/curobo_sim's GPU harness does)."""
 
 import json
 import time
@@ -36,11 +37,13 @@ def _closed_door(tmp_path):
     from door_common import open_door as shared
 
     with dc.quiet():
-        geom["hinge"], h, grasp, _ = shared.FIND_HINGE(geom["h_raw"], geom["orient"], geom["n"], None)
+        geom["hinge"], h, grasp, _ = shared.FIND_HINGE(
+            geom["h_raw"], geom["orient"], geom["n"], None
+        )
     return open_door.closed_door(geom, h, np.asarray(grasp.position))
 
 
-# --- the arm's own model --------------------------------------------------------------------------------------------
+# --- the arm's own model --------------------------------------------------------------------------
 
 
 def test_the_nodes_forward_kinematics_is_the_drivers_model():
@@ -74,52 +77,93 @@ def test_local_ik_stays_on_its_branch_and_refuses_a_limit():
     assert q is None and "J2" in why
 
 
-# --- the fridge in cuRobo's world -----------------------------------------------------------------------------------
+# --- the fridge in cuRobo's world -----------------------------------------------------------------
 
 
-def test_the_door_model_is_the_slab_the_cabinet_and_the_handle_where_the_door_file_says(fridge, tmp_path):
+def test_the_door_model_is_the_slab_the_cabinet_and_the_handle_where_the_door_file_says(
+    fridge, tmp_path
+):
     door = _closed_door(tmp_path)
     model = FridgeModel(door)
     df = DoorFrame(door, door["open_sign"])
     (slab,), (body,), (handle,) = model.slab(0.0), model.body(), model.handle(0.0)
-    face_x = HANDLE[0] + F.MEASURED["handle_centre_to_face_m"]  # the door square to the arm: its face in x
+    face_x = (
+        HANDLE[0] + F.MEASURED["handle_centre_to_face_m"]
+    )  # the door square to the arm: its face in x
     assert slab["position"][0] - slab["dims"][0] / 2 == pytest.approx(face_x, abs=1e-3)
-    assert slab["dims"][0] == pytest.approx(F.MEASURED["door_depth_m"]) and slab["dims"][1] == pytest.approx(df.length)
-    assert body["position"][0] - body["dims"][0] / 2 == pytest.approx(slab["position"][0] + slab["dims"][0] / 2, abs=1e-3)
-    assert handle["position"][0] + handle["dims"][0] / 2 == pytest.approx(face_x, abs=1e-3)  # on the face, toward the arm
+    assert slab["dims"][0] == pytest.approx(F.MEASURED["door_depth_m"]) and slab["dims"][
+        1
+    ] == pytest.approx(df.length)
+    assert body["position"][0] - body["dims"][0] / 2 == pytest.approx(
+        slab["position"][0] + slab["dims"][0] / 2, abs=1e-3
+    )
+    assert handle["position"][0] + handle["dims"][0] / 2 == pytest.approx(
+        face_x, abs=1e-3
+    )  # on the face, toward the arm
     open_slab = model.slab(90.0)[0]  # open 90: turned a quarter, its middle swung toward the arm
     assert abs(open_slab["rpy_deg"][2] - slab["rpy_deg"][2]) == pytest.approx(90.0, abs=1e-6)
     assert open_slab["position"][0] < slab["position"][0] - 0.1
-    # a window round the hand (the door runs on only ~9 cm past the handle): the slab in four pieces round it
-    pieces = model.slab(0.0, window=(df.u_handle - 0.05, df.u_handle + 0.05, HANDLE[2] - 0.1, HANDLE[2] + 0.1))
-    assert sorted(b["name"] for b in pieces) == ["door_above", "door_below", "door_free_side", "door_hinge_side"]
-    assert sum(np.prod(b["dims"]) for b in pieces) == pytest.approx(np.prod(slab["dims"]) - 0.1 * 0.2 * df.t, rel=1e-6)
+    # a window round the hand (the door runs on only ~9 cm past the handle): the slab in four pieces
+    # round it
+    pieces = model.slab(
+        0.0, window=(df.u_handle - 0.05, df.u_handle + 0.05, HANDLE[2] - 0.1, HANDLE[2] + 0.1)
+    )
+    assert sorted(b["name"] for b in pieces) == [
+        "door_above",
+        "door_below",
+        "door_free_side",
+        "door_hinge_side",
+    ]
+    assert sum(np.prod(b["dims"]) for b in pieces) == pytest.approx(
+        np.prod(slab["dims"]) - 0.1 * 0.2 * df.t, rel=1e-6
+    )
 
 
 def test_the_planner_gets_the_scene_with_the_robots_layers_and_gets_its_own_world_back(tmp_path):
     arm = FakeCurobo()
-    w = PlannerWorld(arm, tmp_path / "w", "/rammp_planner_worlds", ["/config/robot/curobo/layer_mebot_floor.yaml"],
-                     extra=[chair_stand_in(0.1)])
-    box = {"name": "b", "position": [1.0, 0.0, 0.0], "rpy_deg": [0.0, 0.0, 0.0], "dims": [0.1, 0.1, 0.1]}
+    w = PlannerWorld(
+        arm,
+        tmp_path / "w",
+        "/rammp_planner_worlds",
+        ["/config/robot/curobo/layer_mebot_floor.yaml"],
+        extra=[chair_stand_in(0.1)],
+    )
+    box = {
+        "name": "b",
+        "position": [1.0, 0.0, 0.0],
+        "rpy_deg": [0.0, 0.0, 0.0],
+        "dims": [0.1, 0.1, 0.1],
+    }
     w.push([box], "test")
-    assert arm.world_calls == [("/rammp_planner_worlds/fridge_world.yaml", False)]  # as the planner sees it
+    assert arm.world_calls == [
+        ("/rammp_planner_worlds/fridge_world.yaml", False)
+    ]  # as the planner sees it
     scene = (tmp_path / "w" / "fridge_world.yaml").read_text()
-    assert "layer_mebot_floor.yaml" in scene and "chair_stand_in" in scene and "base_frame: arm_mount" in scene
+    assert (
+        "layer_mebot_floor.yaml" in scene
+        and "chair_stand_in" in scene
+        and "base_frame: arm_mount" in scene
+    )
     w.push([box], "again")  # the planner holds it already: nothing sent
     assert len(arm.world_calls) == 1
     w.restore()
     assert arm.world_calls[-1] == ("world.yaml", True)  # put back even after a cancel
-    assert chair_stand_in(0.381)["position"][0] + 0.5 == pytest.approx(-0.381)  # the level mount's box starts there
+    assert chair_stand_in(0.381)["position"][0] + 0.5 == pytest.approx(
+        -0.381
+    )  # the level mount's box starts there
 
 
 def test_a_refused_world_refuses(tmp_path):
     arm = FakeCurobo()
-    arm.set_world = lambda name, even_if_cancelled=False: (False, "a layer box reaches into the arm")
+    arm.set_world = lambda name, even_if_cancelled=False: (
+        False,
+        "a layer box reaches into the arm",
+    )
     with pytest.raises(dc.Refused, match="refused the fridge's collision world"):
         PlannerWorld(arm, tmp_path).push([], "test")
 
 
-# --- the planner ----------------------------------------------------------------------------------------------------
+# --- the planner ----------------------------------------------------------------------------------
 
 
 def test_a_leg_along_the_door_follows_its_path_and_cuRobo_checks_it(fridge):
@@ -128,7 +172,9 @@ def test_a_leg_along_the_door_follows_its_path_and_cuRobo_checks_it(fridge):
     goal = planning.line(p + [0.0, 0.0, 0.05], quat, "up", [], contact=True)
     plan, why = planner.leg(goal, arm.q)
     assert why is None and isinstance(plan, planning.LocalPlan)
-    assert np.allclose(plan.q[0], arm.q) and not plan.qd[0].any() and not plan.qd[-1].any()  # from the start, at rest
+    assert (
+        np.allclose(plan.q[0], arm.q) and not plan.qd[0].any() and not plan.qd[-1].any()
+    )  # from the start, at rest
     pos, _ = arm.fk.poses(plan.q)
     assert np.max(np.linalg.norm(pos[:, :2] - p[:2], axis=1)) < 1e-3  # straight up
     assert arm.blends[-1][0] == 1  # cuRobo's one-leg check
@@ -139,11 +185,23 @@ def test_the_timing_starts_on_the_arm_ends_still_and_slows_for_bends_and_caps():
     q0 = np.zeros(7)
     straight = np.array([[0.01 * k] + [0.0] * 6 for k in range(1, 101)])
     t, q, qd = planning.timed(q0, straight)
-    assert np.allclose(q[0], q0) and not qd[0].any() and not qd[-1].any() and np.allclose(q[-1], straight[-1])
-    assert np.abs(qd).max() <= planning.LOCAL_JOINT_SPEED * 1.05 and t[1] - t[0] == pytest.approx(0.02)
+    assert (
+        np.allclose(q[0], q0)
+        and not qd[0].any()
+        and not qd[-1].any()
+        and np.allclose(q[-1], straight[-1])
+    )
+    assert np.abs(qd).max() <= planning.LOCAL_JOINT_SPEED * 1.05 and t[1] - t[0] == pytest.approx(
+        0.02
+    )
     t2, _, _ = planning.timed(q0, straight, caps=[1.0] * 50 + [0.3] * 50)
     assert t2[-1] > t[-1] * 1.3  # the capped half takes longer
-    corner = np.vstack([straight[:50], straight[49] + np.array([[0.0, 0.01 * k] + [0.0] * 5 for k in range(1, 51)])])
+    corner = np.vstack(
+        [
+            straight[:50],
+            straight[49] + np.array([[0.0, 0.01 * k] + [0.0] * 5 for k in range(1, 51)]),
+        ]
+    )
     _, qc, qdc = planning.timed(q0, corner)
     k = int(np.argmin(np.linalg.norm(qc - straight[49], axis=1)))
     assert np.abs(qdc[k]).max() < 0.3 * np.abs(qdc).max()  # slowed into the corner
@@ -173,13 +231,17 @@ def test_a_search_stops_at_its_budget_and_repeats_are_planned_once(fridge):
 
 
 def test_join_keeps_a_stop_after_a_cut_corner_unless_curobo_refuses_it():
-    """RAMMP-CuRobo 2.0.1's blend can reject a stop right after a blended junction (when the corner swallows the leg
-    between): join asks for the true stop first, and only if that is refused makes it a BLEND_MIN_M corner."""
+    """RAMMP-CuRobo 2.0.1's blend can reject a stop right after a blended junction (when the corner
+    swallows the leg between): join asks for the true stop first, and only if that is refused makes
+    it a BLEND_MIN_M corner."""
     arm = FakeCurobo()
     w = PlannerWorld(arm, "/tmp/fridge_join_test")
     planner = planning.Planner(arm, w, arm.fk)
     p, quat = arm.fk.pose(arm.q)
-    goals = [planning.free(p + [0.02 * k, 0, 0], quat, f"g{k}", [], blend=b) for k, b in ((1, 0.03), (2, 0.0), (3, 0.0))]
+    goals = [
+        planning.free(p + [0.02 * k, 0, 0], quat, f"g{k}", [], blend=b)
+        for k, b in ((1, 0.03), (2, 0.0), (3, 0.0))
+    ]
     motion, _ = planner.motion(goals, arm.q)
     planner.join(motion, [])
     assert arm.blends[-1][1] == [0.03, 0.0] and not motion.notes  # the true stop
@@ -188,16 +250,21 @@ def test_join_keeps_a_stop_after_a_cut_corner_unless_curobo_refuses_it():
     def refuses_the_stop(legs, radii, **kw):
         if radii == [0.03, 0.0]:
             arm.blends.append((len(legs), list(radii), None, None))
-            return Plan(False, "blend raised ValueError('overlap 0 at junction 1 is outside 0..-1')")
+            return Plan(
+                False, "blend raised ValueError('overlap 0 at junction 1 is outside 0..-1')"
+            )
         return blend(legs, radii, **kw)
 
     arm.blend = refuses_the_stop
     motion, _ = planner.motion(goals, arm.q)
     planner.join(motion, [])
-    assert [b[1] for b in arm.blends[-2:]] == [[0.03, 0.0], [0.03, planning.BLEND_MIN_M]] and motion.notes
+    assert [b[1] for b in arm.blends[-2:]] == [
+        [0.03, 0.0],
+        [0.03, planning.BLEND_MIN_M],
+    ] and motion.notes
 
 
-# --- the open -------------------------------------------------------------------------------------------------------
+# --- the open -------------------------------------------------------------------------------------
 
 
 def test_a_dry_open_plans_everything_and_moves_nothing(fridge):
@@ -214,14 +281,16 @@ def test_a_dry_open_plans_everything_and_moves_nothing(fridge):
 def test_the_open_runs_each_motion_as_one_trajectory_and_lets_go_while_moving(fridge):
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, True)
-    # the approach (position control), the swing + release, then off the handle + round the door + the push
+    # the approach (position control), the swing + release, then off the handle + round the door +
+    # the push
     assert len(arm.sent) == 3
     assert "control_mode" not in arm.sent[0]
     for kw in arm.sent[1:]:
         assert kw["control_mode"] == IMPEDANCE and kw["gains"]["kq"] == F.PULL_GAINS["kq"]
     assert arm.sent[1]["path_tolerance"] == F.PULL_PATH_TOL_RAD
     assert arm.sent[2]["path_tolerance"] == F.AFTER_RELEASE_PATH_TOL_RAD
-    # the gripper: closes as the swing starts, opens slowly while it runs on (then is seen open before what follows)
+    # the gripper: closes as the swing starts, opens slowly while it runs on (then is seen open
+    # before what follows)
     assert arm.grips[0] == (1.0, F.GRASP_FORCE, None)
     assert arm.grips[1] == (0.0, None, F.GRIP_OPEN_SPEED)
     door = json.loads(dc.DOOR_FILE.read_text())
@@ -231,12 +300,15 @@ def test_the_open_runs_each_motion_as_one_trajectory_and_lets_go_while_moving(fr
     end = np.asarray(arm.get_state()["ee_pos"][:3])
     df = DoorFrame(door, door["open_sign"])
     v = float((df._rot(90.0).T @ (end[:2] - df.hinge[:2])) @ df.n) - df.mid
-    assert v < -df.t / 2 - hand_reach(arm.get_state()["ee_pos"][3:7], np.r_[df._rot(90.0) @ df.n, 0], F.HAND_BOX_TOOL_M)
+    assert v < -df.t / 2 - hand_reach(
+        arm.get_state()["ee_pos"][3:7], np.r_[df._rot(90.0) @ df.n, 0], F.HAND_BOX_TOOL_M
+    )
 
 
 def test_the_swing_stops_at_the_angle_asked_for_then_lets_go(fridge):
-    """User, 11-09: smooth, but the pull comes to a stop at the angle and only then do the fingers open -- the hand
-    never pulls the door on past it (until 11-09 it ran on 8 deg while opening, and the door ended ~68 deg on a 60)."""
+    """User, 11-09: smooth, but the pull comes to a stop at the angle and only then do the fingers
+    open -- the hand never pulls the door on past it (until 11-09 it ran on 8 deg while opening, and
+    the door ended ~68 deg on a 60)."""
     arm, planner, _ = fridge
     order = []
     send, grip = arm.execute_joint_trajectory, arm.gripper
@@ -258,9 +330,12 @@ def test_the_swing_stops_at_the_angle_asked_for_then_lets_go(fridge):
         end = side_grasp.swing_poses(plan["cand"], df, 60, plan["lag"], [60.0])[0]
     else:
         end = open_door.swung(plan["cand"]["pos"], plan["cand"]["quat"], df.hinge, df.sign, 60)
-    np.testing.assert_allclose(goal.through[-1][0], end[0], atol=1e-9)  # the swing's last pose: exactly 60 deg
-    assert all(abs(open_door.hand_angle(plan["door"], [*p, *q])) <= 60 + 1e-6
-               for p, q in goal.through)
+    np.testing.assert_allclose(
+        goal.through[-1][0], end[0], atol=1e-9
+    )  # the swing's last pose: exactly 60 deg
+    assert all(
+        abs(open_door.hand_angle(plan["door"], [*p, *q])) <= 60 + 1e-6 for p, q in goal.through
+    )
     # approach; close as the swing starts; the swing; THEN open (the arm still); then the back-off
     seq = order
     assert [k for k, _ in seq] == ["move", "grip", "move", "grip", "move"], order
@@ -294,20 +369,28 @@ def test_the_open_refuses_a_pull_that_leaves_nothing_to_push(fridge):
 def test_the_push_asks_for_the_smallest_wheelchair_move_that_lets_it_push(fridge):
     arm, planner, _ = fridge
     # cuRobo finds no arm configuration in behind the open door where it stands: only after a move
-    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(obstacles)
+    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(
+        obstacles
+    )
     assert open_door.run(arm, planner, False)
     assert "stops, asking you to" in push_open.NEXT_STEP and "BACK" in push_open.NEXT_STEP.upper()
     after = open_door.LAST_PLAN["after"]
     assert after.chair_move == F.CHAIR_MOVES_M[1]
     # the route for it is planned against the door all along the move (the arm held still)
-    swept = [w for w in arm.worlds if isinstance(w, list) and any(b["name"].startswith("m2_") for b in w)]
+    swept = [
+        w for w in arm.worlds if isinstance(w, list) and any(b["name"].startswith("m2_") for b in w)
+    ]
     assert swept and {"m0_door", "m1_door", "m2_door", "m0_handle"} <= {b["name"] for b in swept[0]}
     assert open_door.run(arm, planner, True)  # executed: the pull, off the handle, then it asks
     assert len(arm.sent) == 3 and "chair_moved true" in push_open.NEXT_STEP
-    assert json.loads(dc.DOOR_FILE.read_text())["push_after_chair_move"] == pytest.approx(after.chair_move)
+    assert json.loads(dc.DOOR_FILE.read_text())["push_after_chair_move"] == pytest.approx(
+        after.chair_move
+    )
     hinge = json.loads(dc.DOOR_FILE.read_text())["hinge"]
     arm.unreachable = lambda *a: False
-    assert open_door.run(arm, planner, True, chair_moved=True)  # the push, against the door where it now is
+    assert open_door.run(
+        arm, planner, True, chair_moved=True
+    )  # the push, against the door where it now is
     door = json.loads(dc.DOOR_FILE.read_text())
     assert door["push_after_chair_move"] is None and door["door_open_deg"] == F.PUSH_OPEN_TO_DEG
     assert door["hinge"][0] == pytest.approx(hinge[0] + after.chair_move)
@@ -328,7 +411,7 @@ def test_release_only_backs_off_the_handle(fridge):
     assert arm.grips[-1][0] == 0.0 and len(arm.sent) == 1
 
 
-# --- the close ------------------------------------------------------------------------------------------------------
+# --- the close ------------------------------------------------------------------------------------
 
 
 def test_the_close_runs_as_one_trajectory_and_leaves_the_door_to_swing_shut(fridge):
@@ -337,19 +420,24 @@ def test_the_close_runs_as_one_trajectory_and_leaves_the_door_to_swing_shut(frid
     sent = len(arm.sent)
     assert close_door.run(arm, planner, True)  # an empty hand
     assert len(arm.sent) == sent + 1 and "control_mode" not in arm.sent[-1]
-    assert all(h == planning.HOLD_NONE for h in arm.blends[-1][3])  # nothing held: no leg holds the tilt
+    assert all(
+        h == planning.HOLD_NONE for h in arm.blends[-1][3]
+    )  # nothing held: no leg holds the tilt
     assert json.loads(dc.DOOR_FILE.read_text())["door_open_deg"] == F.CLOSE_TO_DEG
     assert close_door.LAST_CHAIR_BACK == 0.0
 
 
 def test_the_container_is_carried_with_the_hand_and_the_fridge_is_never_shifted(fridge):
-    """11-11: the close stood the container in by planning the whole fridge 17.8 cm nearer the arm, which put the
-    push-open's end pose inside the door. Now every world the close plans in has the cabinet where the door file says
-    (the door itself moves as the close pushes it), holding the container or not."""
+    """11-11: the close stood the container in by planning the whole fridge 17.8 cm nearer the arm,
+    which put the push-open's end pose inside the door. Now every world the close plans in has the
+    cabinet where the door file says (the door itself moves as the close pushes it), holding the
+    container or not."""
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, True)
     door = json.loads(dc.DOOR_FILE.read_text())
-    want = {b["name"]: b["position"] for b in FridgeModel(door).body()}  # the cabinet: the same at every door angle
+    want = {
+        b["name"]: b["position"] for b in FridgeModel(door).body()
+    }  # the cabinet: the same at every door angle
     for grip in (0.8, 0.0):  # the gripper closed (holding the container), then open (an empty hand)
         arm.gripper_pos = grip
         n0 = len(arm.worlds)
@@ -357,7 +445,9 @@ def test_the_container_is_carried_with_the_hand_and_the_fridge_is_never_shifted(
             close_door.run(arm, planner, False, chair_back=0.0)
         except dc.Refused:
             pass
-        worlds = [w for w in arm.worlds[n0:] if isinstance(w, list)]  # every world the close pushed to cuRobo
+        worlds = [
+            w for w in arm.worlds[n0:] if isinstance(w, list)
+        ]  # every world the close pushed to cuRobo
         assert any(b["name"] == "door" for w in worlds for b in w)
         for w in worlds:
             for b in w:
@@ -366,21 +456,34 @@ def test_the_container_is_carried_with_the_hand_and_the_fridge_is_never_shifted(
 
 
 def _close_geometries(arm, planner, container=False):
-    """The close's geometry for the fixture's door (the open leaves it at 90), the hand as it is now turned by each of
-    CLOSE_YAWS_DEG."""
+    """The close's geometry for the fixture's door (the open leaves it at 90), the hand as it is now
+    turned by each of CLOSE_YAWS_DEG."""
     assert open_door.run(arm, planner, False, save_door=True)
     door = json.loads(dc.DOOR_FILE.read_text())
     quat = np.asarray(arm.get_state()["ee_pos"][3:7], float)
-    return [close_door.CloseGeometry(door, 90.0, (R.from_euler("z", yaw, degrees=True) * R.from_quat(quat)).as_quat(),
-                                     0.30, dict(F.CLOSE_SETTINGS), F.CLOSE_TO_DEG, container)
-            for yaw in F.CLOSE_YAWS_DEG]
+    return [
+        close_door.CloseGeometry(
+            door,
+            90.0,
+            (R.from_euler("z", yaw, degrees=True) * R.from_quat(quat)).as_quat(),
+            0.30,
+            dict(F.CLOSE_SETTINGS),
+            F.CLOSE_TO_DEG,
+            container,
+        )
+        for yaw in F.CLOSE_YAWS_DEG
+    ]
 
 
-def test_without_base_moves_the_push_plans_no_wheelchair_move_and_the_open_refuses(fridge, monkeypatch):
+def test_without_base_moves_the_push_plans_no_wheelchair_move_and_the_open_refuses(
+    fridge, monkeypatch
+):
     arm, planner, _ = fridge
     monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", 0.0)
     # as above: the push plans only after a wheelchair move -- which base_moves false never plans
-    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(obstacles)
+    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(
+        obstacles
+    )
     with pytest.raises(dc.Refused, match="base_moves false: no wheelchair move was planned"):
         open_door.run(arm, planner, False, base_moves=False)
     assert arm.sent == [] and push_open.NEXT_MOVE == 0.0
@@ -395,15 +498,18 @@ def test_without_base_moves_the_push_plans_no_wheelchair_move_and_the_open_refus
 
 
 def test_the_push_starts_behind_the_open_door_and_meets_it_on_its_arc(fridge):
-    """User, 11-09: any part of the hand (or container) may push, at any angle, anywhere on the door (further out for
-    leverage); only reaching ~45 deg matters. The push starts round the hinge past the open door, clear of it, tried
-    furthest from the hinge first, and goes round the hinge at that distance until it meets the door at 45."""
+    """User, 11-09: any part of the hand (or container) may push, at any angle, anywhere on the door
+    (further out for leverage); only reaching ~45 deg matters. The push starts round the hinge past
+    the open door, clear of it, tried furthest from the hinge first, and goes round the hinge at
+    that distance until it meets the door at 45."""
     arm, planner, _ = fridge
     for container in (False, True):
         geos = _close_geometries(arm, planner, container)
         radii = geos[0].radii()
         assert radii == sorted(radii, reverse=True)
-        assert radii[0] == pytest.approx(geos[0].df.length - min(F.CLOSE_RADII_FROM_EDGE_M))  # past the free edge first
+        assert radii[0] == pytest.approx(
+            geos[0].df.length - min(F.CLOSE_RADII_FROM_EDGE_M)
+        )  # past the free edge first
         found = 0
         for geo, r in [(g, r) for g in geos for r in radii]:
             deg0, sweep = geo.push(r)
@@ -415,10 +521,14 @@ def test_the_push_starts_behind_the_open_door_and_meets_it_on_its_arc(fridge):
             dists = np.array([np.linalg.norm((p - geo.h)[:2]) for _, p in sweep])
             r0 = np.linalg.norm((geo.at(r, deg0) - geo.h)[:2])
             assert np.all(np.diff(dists) <= 1e-9)  # round the hinge, drawing in (never out) ...
-            assert dists[-1] >= min(r0, F.CLOSE_PUSH_END_RADIUS_M) - 1e-6  # ... no nearer than CLOSE_PUSH_END_RADIUS_M
+            assert (
+                dists[-1] >= min(r0, F.CLOSE_PUSH_END_RADIUS_M) - 1e-6
+            )  # ... no nearer than CLOSE_PUSH_END_RADIUS_M
             end = sweep[-1][1]
             gap = min(close_door._box_gap(geo.body(end), b) for b in geo.end_door)
-            assert abs(gap) < 2e-3  # it ends touching the door at 45 deg: the hand, or the container
+            assert (
+                abs(gap) < 2e-3
+            )  # it ends touching the door at 45 deg: the hand, or the container
         assert found
 
 
@@ -470,8 +580,9 @@ def test_the_close_refuses_without_an_opened_door_or_a_planned_move(fridge):
 def test_the_close_asks_for_the_smallest_move_and_an_executed_close_uses_it(fridge):
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False, save_door=True)
-    # the door where it stands now: no plan; moved with the chair: plans -- during the move AND after it (11-12: a move
-    # is only offered if the after-move plan, the one an executed close makes, plans too)
+    # the door where it stands now: no plan; moved with the chair: plans -- during the move AND
+    # after it (11-12: a move is only offered if the after-move plan, the one an executed close
+    # makes, plans too)
     first = {}
 
     def unreachable(pos, quat, obstacles):
@@ -483,11 +594,18 @@ def test_the_close_asks_for_the_smallest_move_and_an_executed_close_uses_it(frid
     arm.unreachable = unreachable
     assert close_door.run(arm, planner, False)  # dry: picks and saves the move
     move = close_door.LAST_CHAIR_BACK
-    assert move == F.CLOSE_CHAIR_MOVES_M[1] and json.loads(dc.DOOR_FILE.read_text())["close_chair_back"] == move
-    with pytest.raises(dc.Refused, match="WHEELCHAIR"):  # executed without the move made: asks for it
+    assert (
+        move == F.CLOSE_CHAIR_MOVES_M[1]
+        and json.loads(dc.DOOR_FILE.read_text())["close_chair_back"] == move
+    )
+    with pytest.raises(
+        dc.Refused, match="WHEELCHAIR"
+    ):  # executed without the move made: asks for it
         close_door.run(arm, planner, True)
     assert arm.sent == []
-    assert close_door.run(arm, planner, False, chair_moved=True)  # a dry run with chair_moved plans what the execute will
+    assert close_door.run(
+        arm, planner, False, chair_moved=True
+    )  # a dry run with chair_moved plans what the execute will
     assert close_door.LAST_CHAIR_BACK == move and arm.sent == []
     arm.unreachable = lambda *a: False
     assert close_door.run(arm, planner, True, chair_moved=True)  # made: closes
@@ -495,8 +613,9 @@ def test_the_close_asks_for_the_smallest_move_and_an_executed_close_uses_it(frid
 
 
 def test_holding_the_container_the_close_only_turns_the_hand_about_vertical(fridge, monkeypatch):
-    """The container stays upright: holding it, every hand orientation the close tries keeps the tilt (and every leg
-    holds it); with an empty hand it may also tip the hand down (any part may push, at any angle -- user, 11-09)."""
+    """The container stays upright: holding it, every hand orientation the close tries keeps the
+    tilt (and every leg holds it); with an empty hand it may also tip the hand down (any part may
+    push, at any angle -- user, 11-09)."""
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False, save_door=True)
     quat0 = np.asarray(arm.get_state()["ee_pos"][3:7])
@@ -513,10 +632,14 @@ def test_holding_the_container_the_close_only_turns_the_hand_about_vertical(frid
         arm.gripper_pos = grip
         with pytest.raises(dc.Refused):
             close_door.run(arm, planner, False, chair_back=0.0)
-        tilts[label] = [np.degrees(np.arccos(np.clip(R.from_quat(q).inv().apply([0.0, 0.0, 1.0]) @ up0, -1, 1)))
-                        for q in seen["quats"]]
+        tilts[label] = [
+            np.degrees(np.arccos(np.clip(R.from_quat(q).inv().apply([0.0, 0.0, 1.0]) @ up0, -1, 1)))
+            for q in seen["quats"]
+        ]
     assert max(tilts["container"]) < 1e-3  # holding it: turned about vertical only
-    assert max(tilts["empty"]) == pytest.approx(max(F.CLOSE_PITCHES_DEG), abs=1e-3)  # empty: tipped down too
+    assert max(tilts["empty"]) == pytest.approx(
+        max(F.CLOSE_PITCHES_DEG), abs=1e-3
+    )  # empty: tipped down too
 
 
 # --- searches, timed events, retiming: edge cases ----------------------------------------------
@@ -567,14 +690,18 @@ def test_a_trajectory_that_stops_short_drops_its_later_events(fridge, monkeypatc
     arm, planner, _ = fridge
     fired = []
     arm.execute_joint_trajectory = lambda names, points, **kw: types.SimpleNamespace(
-        error_code=-1, error_string="e-stopped", final_error=np.zeros(7))
+        error_code=-1, error_string="e-stopped", final_error=np.zeros(7)
+    )
     q = np.asarray(arm.q, float)
     p, quat = arm.fk.pose(q)
     joined = Plan(True, "", np.array([0.02, 0.04]), np.vstack([q, q]), np.zeros((2, 7)))
     motion = planning.Motion([planning.free(p, quat, "here", [])], [], q, joined=joined)
     monkeypatch.setattr(planning, "_timed_events", REAL_TIMED_EVENTS)
-    assert not planner.run(motion, "swing", events=[(0.0, lambda: fired.append("close")),
-                                                   (0.5, lambda: fired.append("open"))])
+    assert not planner.run(
+        motion,
+        "swing",
+        events=[(0.0, lambda: fired.append("close")), (0.5, lambda: fired.append("open"))],
+    )
     time.sleep(0.7)
     assert fired in ([], ["close"])  # the gripper never opens after the arm stopped
 
@@ -596,8 +723,9 @@ def test_start_not_clear_names_what_blocks_it():
 
 
 def test_the_push_open_comes_to_rest_at_exactly_its_angle_however_fast_it_runs(fridge, monkeypatch):
-    """User, 11-09: the push must land on PUSH_OPEN_TO_DEG at any speed setting: the hand (the door isn't held) comes
-    to rest there, its last PUSH_EASE_DEG no faster than PUSH_END_JOINT_SPEED, then steps off in a leg of its own."""
+    """User, 11-09: the push must land on PUSH_OPEN_TO_DEG at any speed setting: the hand (the door
+    isn't held) comes to rest there, its last PUSH_EASE_DEG no faster than PUSH_END_JOINT_SPEED,
+    then steps off in a leg of its own."""
     import rammp_arm
 
     arm, planner, _ = fridge
@@ -607,16 +735,22 @@ def test_the_push_open_comes_to_rest_at_exactly_its_angle_however_fast_it_runs(f
     k = next(i for i, g in enumerate(goals) if g.label.startswith("onto the inner face"))
     push, off = goals[k], goals[k + 1]
     assert push.blend == 0.0, labels  # it stops at 90 ...
-    assert goals[k - 1].blend > 0.0  # ... and nowhere before it: in behind the door, it blends onto the inner face
+    assert (
+        goals[k - 1].blend > 0.0
+    )  # ... and nowhere before it: in behind the door, it blends onto the inner face
     arm2, planner2, _ = arm, planner, None
     motion = open_door.LAST_PLAN["after"].motion
     planner2.join(motion, [])
     radii = arm2.blends[-1][1]
     assert radii[k] == 0.0 and not motion.notes  # joined with the true stop at 90
-    df = FridgeModel(json.loads(dc.DOOR_FILE.read_text()) if dc.DOOR_FILE.exists() else
-                     open_door.opened(open_door.LAST_PLAN["door"], F.PUSH_OPEN_PULL_DEG)).df
+    df = FridgeModel(
+        json.loads(dc.DOOR_FILE.read_text())
+        if dc.DOOR_FILE.exists()
+        else open_door.opened(open_door.LAST_PLAN["door"], F.PUSH_OPEN_PULL_DEG)
+    ).df
     assert abs(df.angle_of(push.through[-1][0]) - df.angle_of(push.through[0][0])) == pytest.approx(
-        F.PUSH_OPEN_TO_DEG - F.PUSH_OPEN_PULL_DEG, abs=0.5)
+        F.PUSH_OPEN_TO_DEG - F.PUSH_OPEN_PULL_DEG, abs=0.5
+    )
     assert "off the door" in off.label
     # the end of the push: the same joint speed limit at full speed and at 0.2
     ends = []
@@ -633,8 +767,14 @@ def test_the_push_open_comes_to_rest_at_exactly_its_angle_however_fast_it_runs(f
 def _refusal(arm, planner, handle, normal=(-1.0, 0.0, 0.0), **kw):
     from door_common import open_door as shared
 
-    shared.detect_handle = lambda: (np.asarray(handle, float), np.array([-0.5, 0.5, 0.5, -0.5]),
-                                    np.asarray(normal, float), None, None, None)
+    shared.detect_handle = lambda: (
+        np.asarray(handle, float),
+        np.array([-0.5, 0.5, 0.5, -0.5]),
+        np.asarray(normal, float),
+        None,
+        None,
+        None,
+    )
     with pytest.raises(dc.Refused) as e:
         open_door.run(arm, planner, False, **kw)
     return str(e.value)
@@ -650,7 +790,9 @@ def test_a_refusal_about_feasibility_leads_with_where_to_move_the_wheelchair(fri
     assert "NOT the cause" not in msg
     print("\n=== feasibility example ===\n" + msg)
     msg = _refusal(arm, planner, [0.85, -0.22, 0.30])  # inside it: nothing about placement
-    assert "no grasp" in msg and "Wheelchair placement" not in msg and "wheelchair" not in msg.lower()
+    assert (
+        "no grasp" in msg and "Wheelchair placement" not in msg and "wheelchair" not in msg.lower()
+    )
 
 
 def test_a_refusal_about_something_else_mentions_placement_only_as_an_aside(fridge, monkeypatch):
@@ -658,38 +800,51 @@ def test_a_refusal_about_something_else_mentions_placement_only_as_an_aside(frid
     arm, planner, _ = fridge
     arm.start_blocked = True  # the arm's start isn't clear: not about where the wheelchair is
     turned = (-0.96, 0.28, 0.0)  # the door 16 deg off square: outside the region's +-10 deg
-    msg = _refusal(arm, planner, [0.85, -0.04, 0.30], normal=turned)  # right of the region, and turned
+    msg = _refusal(
+        arm, planner, [0.85, -0.04, 0.30], normal=turned
+    )  # right of the region, and turned
     assert msg.index("start pose is not clear") < msg.index("NOT the cause of this stop")
-    assert "to its left" in msg and "front swings right" in msg and "Wheelchair placement (" not in msg
+    assert (
+        "to its left" in msg and "front swings right" in msg and "Wheelchair placement (" not in msg
+    )
     msg = _refusal(arm, planner, [0.85, -0.22, 0.30])  # inside, square: no aside
     assert "start pose is not clear" in msg and "wheelchair" not in msg.lower()
     print("\n=== aside example ===\n" + _refusal(arm, planner, [0.85, -0.04, 0.30], normal=turned))
 
 
 def _placement_region(monkeypatch, xs=(0.75, 0.95), ys=(-0.30, -0.15), yaw=(-10.0, 10.0)):
-    """A made-up placement region for the advice tests, independent of the real table (constants.MOUNTS): every
-    5 cm cell from xs[0] to xs[1] and ys[0] to ys[1] (handle x, y in arm_mount), and the door yaw window `yaw`. The
-    defaults: x 0.75-0.95 (5 cells), y -0.30 to -0.15 (4 cells), so a handle at y -0.04 is right of it and one at
-    x 0.85, y -0.22 is well inside it."""
+    """A made-up placement region for the advice tests, independent of the real table
+    (constants.MOUNTS): every 5 cm cell from xs[0] to xs[1] and ys[0] to ys[1] (handle x, y in
+    arm_mount), and the door yaw window `yaw`. The defaults: x 0.75-0.95 (5 cells), y -0.30 to -0.15
+    (4 cells), so a handle at y -0.04 is right of it and one at x 0.85, y -0.22 is well inside
+    it."""
     step = open_door.PLACEMENT_CELL_M
-    cells = tuple((round(x, 3), round(y, 3)) for x in np.arange(xs[0], xs[1] + 1e-9, step)
-                  for y in np.arange(ys[0], ys[1] + 1e-9, step))
+    cells = tuple(
+        (round(x, 3), round(y, 3))
+        for x in np.arange(xs[0], xs[1] + 1e-9, step)
+        for y in np.arange(ys[0], ys[1] + 1e-9, step)
+    )
     monkeypatch.setattr(F, "PLACEMENT_CELLS", cells)
     monkeypatch.setattr(F, "PLACEMENT_X", tuple(xs))
     monkeypatch.setattr(F, "PLACEMENT_Y", tuple(ys))
     monkeypatch.setattr(F, "PLACEMENT_YAW_DEG", tuple(yaw))
 
 
-def test_the_placement_advice_does_not_flip_with_centimetres_of_detection_noise(fridge, monkeypatch):
-    """11-09: x 0.797 got "1 cm back", x 0.856 "1 cm closer" (each snapped to its nearest cell's centre) when only y was
-    off. The advice now moves to the region's nearest point and drops moves under PLACEMENT_DEADBAND_M."""
+def test_the_placement_advice_does_not_flip_with_centimetres_of_detection_noise(
+    fridge, monkeypatch
+):
+    """11-09: x 0.797 got "1 cm back", x 0.856 "1 cm closer" (each snapped to its nearest cell's
+    centre) when only y was off. The advice now moves to the region's nearest point and drops moves
+    under PLACEMENT_DEADBAND_M."""
     _placement_region(monkeypatch)
     n = np.array([-1.0, 0.0, 0.0])
     # x between the region's cell centres (0.80, 0.85, 0.90), y off to its right: only y may move
     for x in (0.797, 0.81, 0.83, 0.856):
         advice = open_door.placement_advice([x, -0.06, 0.32], n)
         assert "closer to the fridge" not in advice and "back from the fridge" not in advice, advice
-        assert "to its left" in advice  # y -0.06 is right of the region (y <= -0.15): the chair goes left
+        assert (
+            "to its left" in advice
+        )  # y -0.06 is right of the region (y <= -0.15): the chair goes left
     dx, dy = open_door._placement_move(0.80, -0.06)
     assert dx == 0.0 and dy < -0.05
     # inside: no move at all
@@ -698,8 +853,8 @@ def test_the_placement_advice_does_not_flip_with_centimetres_of_detection_noise(
 
 
 def test_a_refused_open_searches_the_wheelchair_moves_that_make_it_plan(fridge, monkeypatch):
-    """The advice the planner checked: the open is planned again with the fridge shifted as wheelchair moves would
-    shift it, the smallest that plans reported."""
+    """The advice the planner checked: the open is planned again with the fridge shifted as
+    wheelchair moves would shift it, the smallest that plans reported."""
     arm, planner, _ = fridge
     # cuRobo can't reach the grasp unless the handle is 5 cm further left (+y) than detected
     ok_y = HANDLE[1] + 0.05
@@ -707,7 +862,11 @@ def test_a_refused_open_searches_the_wheelchair_moves_that_make_it_plan(fridge, 
 
     def leg(self, goal, q_start, start_pose=None, from_arm=False):
         if "line up" in goal.label and goal.pos[1] < ok_y - 0.01:
-            return None, f"{goal.label}: cuRobo found no plan (MotionGenStatus.IK_FAIL: no collision-free joint)"
+            return (
+                None,
+                f"{goal.label}: cuRobo found no plan "
+                "(MotionGenStatus.IK_FAIL: no collision-free joint)",
+            )
         return real_ik(self, goal, q_start, start_pose, from_arm)
 
     monkeypatch.setattr(planning.Planner, "leg", leg)
@@ -715,7 +874,9 @@ def test_a_refused_open_searches_the_wheelchair_moves_that_make_it_plan(fridge, 
     with pytest.raises(dc.Refused) as e:
         open_door.run(arm, planner, False)
     msg = str(e.value)
-    assert "checked by planning it: the open plans" in msg and "to its right" in msg and "~5 cm" in msg
+    assert (
+        "checked by planning it: the open plans" in msg and "to its right" in msg and "~5 cm" in msg
+    )
     assert planner.budget_s == budget  # the search's per-try budget put back
     monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", 0.0)
     with pytest.raises(dc.Refused) as e:
@@ -730,7 +891,8 @@ def test_a_close_starting_inside_the_door_tries_the_moves_that_take_the_door_awa
 
     def door_in_the_way(pos, quat, start_joints, hold=0):
         world = arm.worlds[-1] if arm.worlds else []
-        # the door where it stands (not where a move takes it): the hand is within the planner's padding of it
+        # the door where it stands (not where a move takes it): the hand is within the planner's
+        # padding of it
         if isinstance(world, list) and door_where_it_stands(world):
             return _blocked_by(["door (29 mm)"])
         return plan_to_pose(pos, quat, start_joints, hold)
@@ -753,7 +915,9 @@ def test_a_close_whose_start_is_blocked_by_unnamed_boxes_tries_the_other_moves(f
 
     def unexplained(pos, quat, start_joints, hold=0):
         world = arm.worlds[-1] if arm.worlds else []
-        if isinstance(world, list) and door_where_it_stands(world):  # the door where it stands, not once moved
+        if isinstance(world, list) and door_where_it_stands(
+            world
+        ):  # the door where it stands, not once moved
             return Plan(
                 False,
                 "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides "
@@ -793,8 +957,9 @@ def test_a_move_whose_start_is_blocked_costs_one_plan(fridge):
 
 
 def test_a_goal_with_no_arm_configuration_is_not_asked_again_from_another_start(fridge):
-    """IK_FAIL is about the goal pose alone: another start (the next grasp's) can't change it -- 11-09 sim, the same
-    impossible push placements asked again for every grasp ran a search out of its budget."""
+    """IK_FAIL is about the goal pose alone: another start (the next grasp's) can't change it --
+    11-09 sim, the same impossible push placements asked again for every grasp ran a search out of
+    its budget."""
     arm, planner, _ = fridge
     p, quat = arm.fk.pose(arm.q)
     asked = []
@@ -803,7 +968,9 @@ def test_a_goal_with_no_arm_configuration_is_not_asked_again_from_another_start(
     assert planner.leg(goal, arm.q)[0] is None
     assert planner.leg(goal, np.asarray(arm.q) + 0.05)[0] is None  # another start: not asked again
     assert len(asked) == 1
-    arm.unreachable = lambda *a: False  # a goal that failed otherwise (not unreachable) is still asked again
+    arm.unreachable = (
+        lambda *a: False
+    )  # a goal that failed otherwise (not unreachable) is still asked again
     other = planning.free(p + [0.06, 0, 0], quat, "y", [])
     arm.blend_fails = False
     assert planner.leg(other, arm.q)[0] is not None
@@ -833,7 +1000,8 @@ def test_a_leg_whose_curobo_plan_raised_is_asked_again(fridge):
 
 
 def test_the_push_open_ends_in_front_of_the_fridge_facing_it_in_the_same_leg(fridge):
-    """After the push and its step-off, on to finish_pose in the push's one leg: no stop, no blend."""
+    """After the push and its step-off, on to finish_pose in the push's one leg: no stop, no
+    blend."""
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, True)
     door = json.loads(dc.DOOR_FILE.read_text())
@@ -844,14 +1012,18 @@ def test_the_push_open_ends_in_front_of_the_fridge_facing_it_in_the_same_leg(fri
     assert R.from_quat(quat).as_matrix()[2, 1] == pytest.approx(1.0)
     u = float((pos[:2] - df.hinge[:2]) @ df.e)
     assert u == pytest.approx(df.length * F.PUSH_OPEN_FINISH_U, abs=1e-6)
-    ee = np.asarray(arm.get_state()["ee_pos"], float)  # at one of the stand-offs (the first that plans)
+    ee = np.asarray(
+        arm.get_state()["ee_pos"], float
+    )  # at one of the stand-offs (the first that plans)
     ends = [push_open.finish_pose(door, out) for out in F.PUSH_OPEN_FINISH_OUT_M]
     assert min(np.linalg.norm(ee[:3] - p) for p, _ in ends) < 0.01
     assert abs(float(np.dot(ee[3:7], quat))) == pytest.approx(1.0, abs=1e-3)
     assert len(arm.sent) == 3  # approach, swing, and the push-open: still one trajectory
 
 
-def test_the_push_open_ends_at_its_step_off_if_the_hand_would_pass_near_the_door(fridge, monkeypatch):
+def test_the_push_open_ends_at_its_step_off_if_the_hand_would_pass_near_the_door(
+    fridge, monkeypatch
+):
     arm, planner, _ = fridge
     monkeypatch.setattr(F, "PUSH_OPEN_FINISH_CLEAR_M", 10.0)
     assert open_door.run(arm, planner, False)
@@ -882,6 +1054,7 @@ def test_the_pushed_door_keeps_its_front_and_leaves_out_the_hands_window(fridge,
 def test_a_through_leg_is_checked_segment_by_segment_against_its_own_worlds(fridge):
     arm, planner, _ = fridge
     p, quat = arm.fk.pose(arm.q)
+
     def box(name, x):
         return [{"name": name, "position": [x, 0, 0], "rpy_deg": [0, 0, 0], "dims": [0.1] * 3}]
 
@@ -903,8 +1076,9 @@ def test_a_through_leg_is_checked_segment_by_segment_against_its_own_worlds(frid
         return blend(legs, radii, **kw)
 
     arm.blend = refuse_second
-    goal = planning.through([(p + [0.03, 0, 0], quat), (p + [0.05, 0, 0], quat)], "push2", [],
-                            segment_worlds=worlds)
+    goal = planning.through(
+        [(p + [0.03, 0, 0], quat), (p + [0.05, 0, 0], quat)], "push2", [], segment_worlds=worlds
+    )
     motion, why = planner.motion([goal], arm.q)
     assert motion is None and "against second" in why
 
@@ -915,7 +1089,9 @@ def test_the_push_is_checked_against_the_door_where_it_is_at_each_step(fridge):
     goals = open_door.LAST_PLAN["after"].motion.goals
     push = next(g for g in goals if g.label.startswith("onto the inner face"))
     assert push.path == "through" and len(push.segment_worlds) == len(push.through)
-    off = goals[next(i for i, g in enumerate(goals) if g is push) + 1]  # the step-off after the stop: against the door at 90
+    off = goals[
+        next(i for i, g in enumerate(goals) if g is push) + 1
+    ]  # the step-off after the stop: against the door at 90
     assert all(label.startswith("the door at 90 deg") for label, _ in off.segment_worlds)
     labels = [label for label, _ in push.segment_worlds]
     assert labels[0].startswith(f"the door at {F.PUSH_OPEN_PULL_DEG} deg")  # where the pull stopped

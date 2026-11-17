@@ -506,8 +506,10 @@ class Capability(CapabilityEngine):
         if not self._contact_client.wait_for_service(timeout_sec=CONTACT_SERVICE_WAIT_S):
             return False, f"{CONTACT_THRESHOLDS_SERVICE} does not answer"
         req = SetContactThresholds.Request()
-        req.profile = {"loose": SetContactThresholds.Request.PROFILE_LOOSE,
-                       "default": SetContactThresholds.Request.PROFILE_DEFAULT}[name]
+        req.profile = {
+            "loose": SetContactThresholds.Request.PROFILE_LOOSE,
+            "default": SetContactThresholds.Request.PROFILE_DEFAULT,
+        }[name]
         token = getattr(getattr(self.arm, "_driver", None), "token", None)
         if token is not None:
             req.token = list(token)
@@ -598,8 +600,11 @@ class Capability(CapabilityEngine):
         try:
             # before the arm moves, if this goal may drive the base: its odometry and the arm's e-stop status are there
             if action_id == "open":
-                may_drive = (bool(params.get("push_open", True)) and not params.get("release_only")
-                             and bool(params.get("base_moves", True)))
+                may_drive = (
+                    bool(params.get("push_open", True))
+                    and not params.get("release_only")
+                    and bool(params.get("base_moves", True))
+                )
             else:
                 may_drive = params.get("chair_back") is None or float(params["chair_back"]) != 0
             if drive_base and may_drive:

@@ -43,7 +43,15 @@ MEASURED = {
 # --- the start pose (action go_to_start, sent before an open): the web app's Fridge pose, the start every fridge sim
 # plans from (fridge-grasp-sims: FRIDGE_START), clear of the planner's wheelchair and occupant layers. Joints J1..J7
 # (deg); the node's start_joints_deg parameter, per robot ---
-START_JOINTS_DEG = (103.04, -30.7, -169.63, -123.05, 101.64, 110.04, 2.5)  # 11-12: the start of the first open that executed through (run
+START_JOINTS_DEG = (
+    103.04,
+    -30.7,
+    -169.63,
+    -123.05,
+    101.64,
+    110.04,
+    2.5,
+)  # 11-12: the start of the first open that executed through (run
 # 20261112_194816_open, flatbot); was the web app's Fridge pose (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
 START_REACHED_DEG = 2.0  # every joint already this close (self.arm's GO_TO_TRACK_DEG): nothing moves
 
@@ -107,9 +115,9 @@ SIDE_FACE_RECESS_M = 0.05  # ... its face this much deeper than the model's: cuR
 # deeper still collided, 3 cm planned)
 
 # --- how the motions are planned (planning.py, world.py): free-space legs by cuRobo, in a collision world of the fridge
-# (FridgeModel: cabinet, door at its angle, handle) plus the planner's own chair layers (scene camera included), the arm's
-# configuration cuRobo's to choose; legs on or along the door by local IK along their exact path, checked by cuRobo;
-# each motion one trajectory joined by cuRobo. The poses below are the only places a motion is told to pass ---
+# (FridgeModel: cabinet, door at its angle, handle) plus the planner's own chair layers (scene camera included), the
+# arm's configuration cuRobo's to choose; legs on or along the door by local IK along their exact path, checked by
+# cuRobo; each motion one trajectory joined by cuRobo. The poses below are the only places a motion is told to pass ---
 GRASP_PITCHES_DEG = (25, 30, 40, -25, -30, -40)  # the grasp's tilts tried, + nose-down, - nose-up (configure sets
 # them per mount), each with the hand either way up (fingers across the bar both ways): the first of these whose whole
 # open plans is used. Only 25-40 deg either way: under 15 the fingers don't grip the bar firmly enough to pull the door
@@ -130,9 +138,9 @@ HAND_WINDOW_Z_M = 0.15  # ... and up or down, is out of cuRobo's check (the hand
 SWING_DEG = 90  # the full pull (push_open false) without a swing_deg. Exactly this swing or the run refuses: no smaller
 # fallback
 
-# --- how the open moves (the side grasp's 11-06 hardware runs, side_run/; run_general.py): the swing held compliant, the
-# gripper closing as the pull starts, the swing stopping at its angle, then the gripper opening, everything after the
-# release one motion ---
+# --- how the open moves (the side grasp's 11-06 hardware runs, side_run/; run_general.py): the swing held compliant,
+# the gripper closing as the pull starts, the swing stopping at its angle, then the gripper opening, everything after
+# the release one motion ---
 PULL_GAINS = {  # joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad, torque_limit <= the URDF's effort
     # limits), critically damped: the swing and everything after the release run under it. The shoulder and elbow
     # (j1-j4) at the driver's stiffest, to carry the door; the wrist (j5-j7) at the driver's own stiff profile, 60. At
@@ -180,7 +188,9 @@ PUSH_OPEN_DZ_M = -0.10  # ... this far above the handle's height (negative: belo
 PUSH_OPEN_AT_M = (0.35, 0.30, 0.40, 0.25)  # ... this far from the hinge along the door (tried in order) ...
 PUSH_OPEN_APPROACH_DEG = (0, 20)  # ... the fingers this far off "along the door toward the hinge", toward pointing
 # into the cabinet (tried in order, each with the tool's y up and down) ...
-PUSH_OPEN_ROLL_DEG = 90  # ... rolled this far about the approach (90: fingers open vertically, the flat side to the door)
+PUSH_OPEN_ROLL_DEG = (
+    90  # ... rolled this far about the approach (90: fingers open vertically, the flat side to the door)
+)
 PUSH_OPEN_PRELOAD_M = 0.01  # the push: the side of the hand this far past touching the inner face ...
 PUSH_DOOR_PANEL_M = 0.025  # ... checked (world.FridgeModel.pushed) against the door where it is at each step: its outer
 # panel this thick (the front face, the outer part of the free edge: the real door is ~3.2 cm, the rest of the model its
@@ -189,12 +199,14 @@ PUSH_DOOR_PANEL_M = 0.025  # ... checked (world.FridgeModel.pushed) against the 
 PUSH_DOOR_WINDOW_M = (0.08, 0.25, 0.15)  # ... the window: this far toward the hinge and toward the free edge from the
 # hand, and up and down (11-08: 5 cm toward the hinge reached the inner part by 19 mm; these, nothing)
 PUSH_OPEN_POINT_DEG = 2  # ... held in the door's frame, turned about the hinge (a pose every this much door) ...
-# ... coming to rest at exactly PUSH_OPEN_TO_DEG (the door isn't held: a hand still moving there lets it coast past; user,
-# 11-09: it must land on the angle at any speed), its last PUSH_EASE_DEG at most PUSH_END_JOINT_SPEED (rad/s, the
+# ... coming to rest at exactly PUSH_OPEN_TO_DEG (the door isn't held: a hand still moving there lets it coast past;
+# user, 11-09: it must land on the angle at any speed), its last PUSH_EASE_DEG at most PUSH_END_JOINT_SPEED (rad/s, the
 # fastest joint) whatever the goal's speed. Not yet tuned on the arm: if the door still coasts past 90, lower it ...
 PUSH_EASE_DEG = 10.0
 PUSH_END_JOINT_SPEED = 0.10
-PUSH_OPEN_AWAY_M = 0.10  # ... then, from rest, straight off the inner face this far (to the right): out of the planner's padding
+PUSH_OPEN_AWAY_M = (
+    0.10  # ... then, from rest, straight off the inner face this far (to the right): out of the planner's padding
+)
 # round the door (6 cm left the hand inside it, so nothing could be planned from there) ...
 PUSH_OPEN_FINISH_U = 0.5  # ... then to in front of the fridge, facing into it, upright (as the grasp): this fraction of
 # the door's width from the hinge (the middle of the opening) ...
@@ -215,12 +227,12 @@ CHAIR_MOVES_M = tuple(  # + back (away from the fridge), - forward: 0 to +-35 cm
 )
 CHAIR_MOVE_STEPS = 3  # while the chair moves, the arm (held) must clear the door at this many points along the move
 
-# --- close: the hand (and the container it may hold) pushes the open door round toward shut, never tilting. cuRobo routes
-# from where the hand is to a push start behind the door -- tried at several distances from the hinge, furthest first
-# (leverage) -- then the push follows the arc about the hinge at that distance until whatever part of the hand or the
-# container touches first has the door at CLOSE_TO_DEG (it swings shut by itself), and it backs straight out. Only the
-# push is scripted: it is contact, which cuRobo (every plan kept 2 cm off everything) can't plan. The door is where the
-# door file says (the push-open leaves it at PUSH_OPEN_TO_DEG) ---
+# --- close: the hand (and the container it may hold) pushes the open door round toward shut, never tilting. cuRobo
+# routes from where the hand is to a push start behind the door -- tried at several distances from the hinge, furthest
+# first (leverage) -- then the push follows the arc about the hinge at that distance until whatever part of the hand or
+# the container touches first has the door at CLOSE_TO_DEG (it swings shut by itself), and it backs straight out. Only
+# the push is scripted: it is contact, which cuRobo (every plan kept 2 cm off everything) can't plan. The door is where
+# the door file says (the push-open leaves it at PUSH_OPEN_TO_DEG) ---
 CHAIR_BACK_M = 0.30  # what a close goal's chair_back used to default to (the goal now leaves it to the plan) ...
 # ... without a chair_back, the close tries these wheelchair moves (m, + back, - forward), smallest first, out to the
 # base's base_max_distance, and moves the chair by the first whose plan passes every gate
@@ -249,7 +261,9 @@ CLOSE_START_GAP_M = 0.02  # the push start: the hand and the container this clea
 # 11-09, with no stated reason)
 CLOSE_START_STEP_DEG = 2.0  # the push start: round the hinge past the open door, every this much ...
 CLOSE_START_MAX_DEG = 175.0  # ... up to this (180: flat against the cabinet's side)
-CLOSE_TRIES = 12  # per wheelchair move, at most this many push starts (that pass the geometry) are planned by cuRobo ...
+CLOSE_TRIES = (
+    12  # per wheelchair move, at most this many push starts (that pass the geometry) are planned by cuRobo ...
+)
 CLOSE_TRIES_PER_RADIUS = 3  # ... at most this many at each distance from the hinge (furthest first), and only push
 # starts the arm can reach with the hand turned that way (its own IK, CLOSE_IK_SEEDS seeds; none beyond the mount's
 # max_reach): an unreachable distance or hand turn can't use up the tries (11-10: the 3 nearest the arm were hand turns
@@ -265,8 +279,8 @@ CLOSE_PUSH_END_RADIUS_M = 0.30  # the push draws in to this far from the hinge b
 CLOSE_RETREAT_M = (0.20, 0.15, 0.10)  # back straight out this far after the push (the first that plans, at most
 # the goal's retreat_dist)
 CLOSE_MAX_TILT_DEG = 2.0  # the close never tilts the hand -- no roll, no pitch; turning about vertical is fine (it may
-# hold a container). Every leg is planned holding the tilt (HOLD_LEVEL, which the planner checks to its own 2 deg) and the
-# joined trajectory is checked again: within this of where it starts, or it refuses
+# hold a container). Every leg is planned holding the tilt (HOLD_LEVEL, which the planner checks to its own 2 deg) and
+# the joined trajectory is checked again: within this of where it starts, or it refuses
 CONTAINER_M = 6.5 * INCH  # the container held for the close (measured 10-24): ~a 6.5 in diameter sphere (11-06) ...
 CONTAINER_CLEARANCE_M = 0.5 * INCH  # ... which keeps this from the door and cabinet on the way to the push (11-06) ...
 CONTAINER_CENTRE_TOOL_M = 0.043 + CONTAINER_M / 2  # ... held sticking out ~6.5 in past the fingertips (11-06), which
@@ -277,7 +291,8 @@ CONTAINER_CENTRE_TOOL_M = 0.043 + CONTAINER_M / 2  # ... held sticking out ~6.5 
 CLOSE_HOLDING_GRIPPER = 0.2  # the close carries the container exactly when the gripper reads more closed than this at
 # its start (0 open, 1 closed: 11-11, 0.004 with an empty open hand, 0.965 holding the container); the open never does
 CLOSE_SETTINGS = dict(  # the close's fixed settings; a goal may set the GOAL_SETTINGS among them
-    push_radius=None,  # the tool's distance from the hinge in the push (m); None: CLOSE_RADII_FROM_EDGE_M, furthest first
+    push_radius=None,  # the tool's distance from the hinge in the push (m); None: CLOSE_RADII_FROM_EDGE_M,
+    # furthest first
     retreat_dist=0.20,
 )
 
@@ -306,19 +321,57 @@ MOUNTS = {
         # in a fresh planner process (fridge-grasp-sims: flatbot model with the arm base 8 in further forward on the
         # chair, the web app's Fridge start pose, door square to the chair); the close was not part of it
         placement_cells=(
-            (0.65, -0.15), (0.65, -0.10), (0.65, -0.05), (0.70, -0.15), (0.70, -0.10), (0.70, -0.05),
-            (0.75, -0.25), (0.75, -0.20), (0.75, -0.15), (0.75, -0.10), (0.75, -0.05), (0.80, -0.25),
-            (0.80, -0.20), (0.80, -0.15), (0.80, -0.10), (0.80, -0.05), (0.80, 0.00), (0.85, -0.30),
-            (0.85, -0.25), (0.85, -0.20), (0.85, -0.15), (0.85, -0.10), (0.85, -0.05), (0.90, -0.30),
-            (0.90, -0.25), (0.90, -0.20), (0.90, -0.15), (0.90, -0.10), (0.90, 0.00), (0.95, -0.25),
-            (0.95, -0.20), (0.95, -0.15), (0.95, -0.05), (0.95, 0.00), (1.00, -0.25), (1.00, -0.20),
-            (1.00, -0.15), (1.00, -0.10), (1.00, -0.05), (1.05, -0.15), (1.05, -0.10),
+            (0.65, -0.15),
+            (0.65, -0.10),
+            (0.65, -0.05),
+            (0.70, -0.15),
+            (0.70, -0.10),
+            (0.70, -0.05),
+            (0.75, -0.25),
+            (0.75, -0.20),
+            (0.75, -0.15),
+            (0.75, -0.10),
+            (0.75, -0.05),
+            (0.80, -0.25),
+            (0.80, -0.20),
+            (0.80, -0.15),
+            (0.80, -0.10),
+            (0.80, -0.05),
+            (0.80, 0.00),
+            (0.85, -0.30),
+            (0.85, -0.25),
+            (0.85, -0.20),
+            (0.85, -0.15),
+            (0.85, -0.10),
+            (0.85, -0.05),
+            (0.90, -0.30),
+            (0.90, -0.25),
+            (0.90, -0.20),
+            (0.90, -0.15),
+            (0.90, -0.10),
+            (0.90, 0.00),
+            (0.95, -0.25),
+            (0.95, -0.20),
+            (0.95, -0.15),
+            (0.95, -0.05),
+            (0.95, 0.00),
+            (1.00, -0.25),
+            (1.00, -0.20),
+            (1.00, -0.15),
+            (1.00, -0.10),
+            (1.00, -0.05),
+            (1.05, -0.15),
+            (1.05, -0.10),
         ),
         # ... of those, the cells where the open plans only with the push's wheelchair move: an open goal with
         # base_moves false (no wheelchair move planned) can't start there, and its placement advice leaves them out
         cells_needing_base_move=(
-            (0.65, -0.15), (0.65, -0.10), (0.65, -0.05),  # the nearest row
-            (0.70, -0.15), (0.75, -0.25), (0.90, -0.10),
+            (0.65, -0.15),
+            (0.65, -0.10),
+            (0.65, -0.05),  # the nearest row
+            (0.70, -0.15),
+            (0.75, -0.25),
+            (0.90, -0.10),
         ),
         # the side grasp's (grasp: side): every handle x, y where the side grasp's open (60 deg pull, any tilt of
         # -40..40 in 10s, a wheelchair move of up to +-35 cm before the push if it needed one -- all but 2 of the 231
@@ -329,14 +382,53 @@ MOUNTS = {
         side_placement_x=(0.65, 0.90),
         side_placement_y=(-0.50, -0.05),
         side_placement_cells=(
-            (0.65, -0.45), (0.65, -0.40), (0.65, -0.35), (0.65, -0.30), (0.65, -0.25), (0.65, -0.20),
-            (0.65, -0.15), (0.70, -0.50), (0.70, -0.45), (0.70, -0.40), (0.70, -0.35), (0.70, -0.30),
-            (0.70, -0.25), (0.70, -0.20), (0.70, -0.15), (0.75, -0.50), (0.75, -0.45), (0.75, -0.40),
-            (0.75, -0.35), (0.75, -0.30), (0.75, -0.25), (0.75, -0.20), (0.75, -0.15), (0.75, -0.10),
-            (0.75, -0.05), (0.80, -0.50), (0.80, -0.45), (0.80, -0.40), (0.80, -0.35), (0.80, -0.30),
-            (0.80, -0.25), (0.80, -0.20), (0.80, -0.15), (0.80, -0.10), (0.80, -0.05), (0.85, -0.40),
-            (0.85, -0.35), (0.85, -0.30), (0.85, -0.25), (0.85, -0.20), (0.85, -0.15), (0.85, -0.10),
-            (0.85, -0.05), (0.90, -0.40), (0.90, -0.35), (0.90, -0.30), (0.90, -0.20),
+            (0.65, -0.45),
+            (0.65, -0.40),
+            (0.65, -0.35),
+            (0.65, -0.30),
+            (0.65, -0.25),
+            (0.65, -0.20),
+            (0.65, -0.15),
+            (0.70, -0.50),
+            (0.70, -0.45),
+            (0.70, -0.40),
+            (0.70, -0.35),
+            (0.70, -0.30),
+            (0.70, -0.25),
+            (0.70, -0.20),
+            (0.70, -0.15),
+            (0.75, -0.50),
+            (0.75, -0.45),
+            (0.75, -0.40),
+            (0.75, -0.35),
+            (0.75, -0.30),
+            (0.75, -0.25),
+            (0.75, -0.20),
+            (0.75, -0.15),
+            (0.75, -0.10),
+            (0.75, -0.05),
+            (0.80, -0.50),
+            (0.80, -0.45),
+            (0.80, -0.40),
+            (0.80, -0.35),
+            (0.80, -0.30),
+            (0.80, -0.25),
+            (0.80, -0.20),
+            (0.80, -0.15),
+            (0.80, -0.10),
+            (0.80, -0.05),
+            (0.85, -0.40),
+            (0.85, -0.35),
+            (0.85, -0.30),
+            (0.85, -0.25),
+            (0.85, -0.20),
+            (0.85, -0.15),
+            (0.85, -0.10),
+            (0.85, -0.05),
+            (0.90, -0.40),
+            (0.90, -0.35),
+            (0.90, -0.30),
+            (0.90, -0.20),
         ),
         push_open_dz_m=0.10,  # 10 cm ABOVE the handle
         grasp_pitches_deg=(25, 30, 40, -25, -30, -40),  # 25-40 either way (GRASP_PITCHES_DEG): nose-down first; 11-09:

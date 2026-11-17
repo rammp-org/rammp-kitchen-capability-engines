@@ -1,11 +1,14 @@
-"""A CPU stand-in for self.arm's cuRobo planner and driver, for the fridge's planning tests (no GPU in this image).
+"""A CPU stand-in for self.arm's cuRobo planner and driver, for the fridge's planning tests (no GPU
+in this image).
 
-FakeCurobo answers the calls the fridge's planning makes, on the flatbot model these tests run on: plan_to_pose solves
-the goal with the node's own local IK (kinematics.Chain) and goes there in a straight joint-space line; blend joins the
-legs end to end; set_world records the world it is given; execute_joint_trajectory jumps to the trajectory's end;
-gripper records its call. It checks NO collisions -- that is cuRobo's, checked in data/curobo_sim's GPU harness: these
-tests cover the control flow, the worlds pushed, the trajectories sent and the files written. `unreachable(pos, quat,
-world)` lets a test say which goals cuRobo finds no arm configuration for. Nothing here can reach a real arm.
+FakeCurobo answers the calls the fridge's planning makes, on the flatbot model these tests run on:
+plan_to_pose solves the goal with the node's own local IK (kinematics.Chain) and goes there in a
+straight joint-space line; blend joins the legs end to end; set_world records the world it is given;
+execute_joint_trajectory jumps to the trajectory's end; gripper records its call. It checks NO
+collisions -- that is cuRobo's, checked in data/curobo_sim's GPU harness: these tests cover the
+control flow, the worlds pushed, the trajectories sent and the files written. `unreachable(pos,
+quat, world)` lets a test say which goals cuRobo finds no arm configuration for. Nothing here can
+reach a real arm.
 """
 
 import json
@@ -24,8 +27,12 @@ from fridge.planning import Planner
 from fridge.world import PlannerWorld
 
 URDF = Path("/fixtures/urdf/flatbot.urdf")  # the 30-deg flatbot arm (rammp-arm-test's fixture)
-FRIDGE_START = np.radians((98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1))  # the web app's Fridge pose
-HANDLE = np.array([0.85, -0.20, 0.30])  # in the placement that passed (MOUNTS[30]), the 11-01 handle height
+FRIDGE_START = np.radians(
+    (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
+)  # the web app's Fridge pose
+HANDLE = np.array(
+    [0.85, -0.20, 0.30]
+)  # in the placement that passed (MOUNTS[30]), the 11-01 handle height
 NORMAL = np.array([-1.0, 0.0, 0.0])  # the door square to the arm
 HANDLE_QUAT = np.array([-0.5, 0.5, 0.5, -0.5])  # door_common.perception.HANDLE_QUAT
 IK_FAIL = "MotionGenStatus.IK_FAIL: no collision-free joint solution AT the goal"
@@ -43,8 +50,9 @@ class Plan:
 
 
 def door_is_open(obstacles):
-    """True when `obstacles` (a pushed world) holds a door slab turned off the cabinet (open), wherever it is: also
-    one shifted by a planned wheelchair move (door_where_it_stands tells them apart)."""
+    """True when `obstacles` (a pushed world) holds a door slab turned off the cabinet (open),
+    wherever it is: also one shifted by a planned wheelchair move (door_where_it_stands tells them
+    apart)."""
     by = {b["name"]: b for b in obstacles}
     if "door" not in by or "body" not in by:
         return False
@@ -52,9 +60,10 @@ def door_is_open(obstacles):
 
 
 def door_where_it_stands(obstacles):
-    """True when `obstacles` holds the open door where the door file puts it: not shifted by a wheelchair move. The
-    close plans against the door shifted by a move under the same box names (the after-move check, 11-12), so a fake
-    cuRobo that means "the door where it stands now is in the way" must check where the door is, not its name."""
+    """True when `obstacles` holds the open door where the door file puts it: not shifted by a
+    wheelchair move. The close plans against the door shifted by a move under the same box names
+    (the after-move check, 11-12), so a fake cuRobo that means "the door where it stands now is in
+    the way" must check where the door is, not its name."""
     if not door_is_open(obstacles) or not dc.DOOR_FILE.exists():
         return False
     door = json.loads(dc.DOOR_FILE.read_text())
@@ -104,11 +113,15 @@ class FakeCurobo:
         obstacles = self.worlds[-1] if self.worlds else []
         self.pose_goals.append((np.asarray(pos, float), obstacles))
         if self.start_blocked:
-            return Plan(False, "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides")
+            return Plan(
+                False,
+                "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides",
+            )
         if self.unreachable(np.asarray(pos, float), np.asarray(quat, float), obstacles):
             return Plan(False, IK_FAIL)
-        if hold:  # as cuRobo keeps a hold (HOLD_LEVEL: the tilt) all the way: along a straight tool path, the hand
-            # turning only from the start's orientation to the goal's (about vertical, for a level hold)
+        if hold:  # as cuRobo keeps a hold (HOLD_LEVEL: the tilt) all the way: along a straight
+            # tool path, the hand turning only from the start's orientation to the goal's (about
+            # vertical, for a level hold)
             p0, q0 = self.fk.pose(start_joints)
             path, _ = planning.path_poses(planning.Goal(pos, quat, "", [], path="line"), p0, q0)
             qs, q = [], np.asarray(start_joints, float)
@@ -123,8 +136,9 @@ class FakeCurobo:
         return Plan(False, IK_FAIL) if q is None else self._to(start_joints, q)
 
     def plan_to_joints(self, q_goal, start_joints):
-        # cuRobo checks a joint goal's start and the goal itself in its world as it does a pose goal's: the same hooks
-        # (a test's unreachable / start_blocked, or its own plan_to_pose standing in for cuRobo) apply
+        # cuRobo checks a joint goal's start and the goal itself in its world as it does a pose
+        # goal's: the same hooks (a test's unreachable / start_blocked, or its own plan_to_pose
+        # standing in for cuRobo) apply
         pos, quat = self.fk.pose(np.asarray(q_goal, float))
         if "plan_to_pose" in self.__dict__:  # a test's stand-in
             res = self.plan_to_pose(pos, quat, start_joints)
@@ -132,7 +146,10 @@ class FakeCurobo:
                 return res
         obstacles = self.worlds[-1] if self.worlds else []
         if self.start_blocked:
-            return Plan(False, "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides")
+            return Plan(
+                False,
+                "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides",
+            )
         if self.unreachable(np.asarray(pos, float), np.asarray(quat, float), obstacles):
             return Plan(False, IK_FAIL)
         return self._to(start_joints, q_goal)
@@ -151,13 +168,17 @@ class FakeCurobo:
     def set_world(self, name, even_if_cancelled=False):
         self.world_calls.append((name, even_if_cancelled))
         path = Path(name)
-        self.worlds.append(yaml.safe_load(path.read_text())["obstacles"] if path.is_file() else name)
+        self.worlds.append(
+            yaml.safe_load(path.read_text())["obstacles"] if path.is_file() else name
+        )
         return True, ""
 
     # -- the driver --
     def execute_joint_trajectory(self, names, points, **kw):
         points = list(points)
-        assert np.degrees(np.max(np.abs(np.asarray(points[0][1]) - self.q))) < 1.0, "starts away from the arm"
+        assert (
+            np.degrees(np.max(np.abs(np.asarray(points[0][1]) - self.q))) < 1.0
+        ), "starts away from the arm"
         self.sent.append(kw)
         self.q = np.asarray(points[-1][1], float)
         return types.SimpleNamespace(error_code=0, error_string="", final_error=np.zeros(7))
@@ -169,7 +190,8 @@ class FakeCurobo:
 
 
 def _events_now(events, on_error):
-    """planning._timed_events for the tests: every event at once, in order (the fake arm takes no time)."""
+    """planning._timed_events for the tests: every event at once, in order (the fake arm takes no
+    time)."""
     for _, fn in sorted(events, key=lambda e: e[0]):
         fn()
     return types.SimpleNamespace(join=lambda timeout=None: None, cancel=lambda: None)
@@ -186,11 +208,17 @@ def fridge(request, tmp_path, monkeypatch):
 
     open_door.configure(tmp_path, 30, grasp=request.param)
     shared.configure(HANDLE_SOURCE="depth")
-    monkeypatch.setattr(shared, "detect_handle", lambda: (HANDLE.copy(), HANDLE_QUAT, NORMAL.copy(), None, None, None))
+    monkeypatch.setattr(
+        shared,
+        "detect_handle",
+        lambda: (HANDLE.copy(), HANDLE_QUAT, NORMAL.copy(), None, None, None),
+    )
     monkeypatch.setattr(planning, "_timed_events", _events_now)
     dc.set_camera(type("NoFrames", (), {"grab": lambda self: None})())
     arm = FakeCurobo()
-    planner_world = PlannerWorld(arm, tmp_path / "worlds", base_layers=["/config/robot/curobo/layer_mebot_floor.yaml"])
+    planner_world = PlannerWorld(
+        arm, tmp_path / "worlds", base_layers=["/config/robot/curobo/layer_mebot_floor.yaml"]
+    )
     yield arm, Planner(arm, planner_world, arm.fk), planner_world
     dc.set_camera(None)
     for m, v in zip((dc, shared, constants, world, motion), saved, strict=True):
