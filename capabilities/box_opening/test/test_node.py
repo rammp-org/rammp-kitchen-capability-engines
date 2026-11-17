@@ -45,7 +45,8 @@ import json, os, sys, time
 from pathlib import Path
 if "--line-up" in sys.argv:
     # press_demo --line-up: says where the box is (LINE_UP: "in place" | "far" | "dies") until a line on
-    # stdin: go and the run goes on, stop (or the pipe closed) and it ends 5, nothing pressed
+    # stdin: go and the run goes on, stop (or the pipe closed) and it ends 5, nothing pressed, once its
+    # wrist is back at rest (TURN_BACK_S: how long that turn takes; a Ctrl+C stops it there, 130)
     import select
     mode = os.environ.get("LINE_UP", "in place")
     if mode == "dies":
@@ -68,6 +69,11 @@ if "--line-up" in sys.argv:
         sys.stdout.write("[press_demo] stopped by Ctrl+C\\n")
         sys.exit(130)
     if not heard.get("go"):
+        try:
+            time.sleep(float(os.environ.get("TURN_BACK_S", "0")))
+        except KeyboardInterrupt:
+            sys.stdout.write("[press_demo] stopped by Ctrl+C\\n")
+            sys.exit(130)
         sys.stdout.write("[press_demo] LINE-UP: ended without a go; nothing was pressed, the wrist back at rest\\n")
         sys.stdout.flush()
         sys.exit(5)
@@ -1318,6 +1324,52 @@ def test_out_of_time_the_run_is_told_so_turns_back_and_ends_and_nothing_was_pres
     assert sent == []  # told on its stdin, and it ended of its own accord: no Ctrl+C
     assert engine._run is None and ctx.objects == {} and ctx.world == []
     assert {p for p, *_ in ctx.said} == {"line_up"}
+
+
+@pytest.mark.parametrize("by", ["the orchestrator", "the panel"])
+def test_a_cancel_while_the_wrist_turns_back_is_the_runs_own_ctrl_c(engine, monkeypatch, by):
+    """Out of time, the run is told to stop and turns its wrist back to rest, beside the user. That turn is a
+    motion as any other: the panel says so and keeps its Cancel, and a cancel (the orchestrator's, or that
+    button) is the run's Ctrl+C at the next poll, the action cancelled. The run stays the node's to stop (a
+    shutdown) until it has ended."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    monkeypatch.setenv("TURN_BACK_S", "20")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    monkeypatch.setattr(node, "LINE_UP_END_S", 4.0)
+    ctx = FakeCtx()
+    sent, base, told = [], [], []
+    real, real_send = node.Run.interrupt, node.Run.send
+    monkeypatch.setattr(
+        node.Run, "interrupt", lambda run: (sent.append((time.monotonic(), engine._run is run)), real(run))
+    )
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda: base.append(1))
+    cancel = {
+        "the orchestrator": lambda: setattr(ctx, "cancel", True),
+        "the panel": lambda: ctx.events.append(CANCEL_PRESS),
+    }
+
+    def send(run, msg):
+        if msg.get("stop"):  # the wrist starts its turn back: the cancel comes half a second into it
+            told.append(time.monotonic())
+            threading.Timer(0.5, cancel[by]).start()
+        real_send(run, msg)
+
+    monkeypatch.setattr(node.Run, "send", send)
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    ((at, still_the_nodes),) = sent  # one Ctrl+C, not the kill of a run that did not end in time
+    assert 0.5 <= at - told[0] < 1.0 and still_the_nodes and engine._run is None
+    assert base == ([1] if by == "the panel" else [])  # the button's press is made the orchestrator's cancel
+    turning = [p for p in ctx.panels if p["message"] == node.PANEL_TURNING_BACK]
+    assert turning and all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in turning)
+    assert all(p["progress"]["pausable"] is False for p in turning)
+    assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.said[-1][2] == node.PANEL_TURNING_BACK
+    assert ctx.objects == {} and ctx.world == []
 
 
 def test_a_cancel_while_the_wrist_looks_is_the_runs_own_ctrl_c(engine, monkeypatch):

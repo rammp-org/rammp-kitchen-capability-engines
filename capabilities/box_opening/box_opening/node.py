@@ -403,6 +403,8 @@ PANEL_PCT = 100.0
 PANEL_REFRESH_S = 1.0
 PANEL_CANCELLED = "Cancelled: the arm is stopping where it is"
 PANEL_TIMED_OUT = "Taking too long: the arm is stopping where it is"
+# a line-up that ended without its Open: the run turns its wrist back to rest, and Cancel stays on the screen
+PANEL_TURNING_BACK = "The wrist is turning back to rest"
 
 
 class Panel:
@@ -706,33 +708,66 @@ class Capability(CapabilityEngine):
         Until then it only watches (the wrist turned to look, gently, where the arm stands at rest). A
         line-up that ends any other way ends the run before this raises: a cancel is its Ctrl+C, as every
         cancel is (the arm stops where it is); out of time it is told so, turns its wrist back to rest and
-        ends (LINE_UP_END_S, then its stop). A run that ended of itself while lining up (not ready, its
-        wrist's turn stopped) raises what it said."""
+        ends, a cancel read all through that turn (_turned_back). A run that ended of itself while lining up
+        (not ready, its wrist's turn stopped) raises what it said."""
         run_ = Run(self._argv(action_id, instance_id) + ["--line-up"], env, view.relay(LOGGER.log), talk=True)
         self._run = run_  # a shutdown stops it (_on_shutdown)
         try:
             self._line_up(ctx, lambda: self._box_source(env, instance_id, watch=run_))
         except BaseException as e:
-            self._run = None
             cancelled = isinstance(e, Cancelled)
-            if cancelled:
-                self.get_logger().warning("cancelled while lining up: the run's own stop (Ctrl+C) sent")
-                run_.stop(CANCEL_ESCALATE_S)
-            else:
-                run_.send({"stop": True})
-                try:
-                    run_.proc.wait(LINE_UP_END_S)
-                except subprocess.TimeoutExpired:
-                    self.get_logger().error(f"the run did not end its line-up in {LINE_UP_END_S:.0f} s: its stop")
+            try:
+                if cancelled:
+                    self.get_logger().warning("cancelled while lining up: the run's own stop (Ctrl+C) sent")
                     run_.stop(CANCEL_ESCALATE_S)
-            code = run_.finish()
+                else:
+                    run_.send({"stop": True})
+                    cancelled = self._turned_back(ctx, run_)
+                code = run_.finish()
+            finally:
+                self._run = None  # only now: until it has ended, a shutdown must still be able to stop it
             view.finish(code, cancelled=cancelled, timed_out=False, held=False)
+            if cancelled and not isinstance(e, Cancelled):
+                raise Cancelled() from e  # cancelled while its wrist turned back
             if isinstance(e, EngineError) and e.error_code == "line_up_unavailable" and code != EXIT_NOT_LINED_UP:
                 raise error_for(action_id, code, run_.lines) from e  # it ended of itself: what it said
             raise
         run_.send({"go": True})
         self.get_logger().info("line-up: Open pressed: the run goes on")
         return run_
+
+    def _turned_back(self, ctx, run_):
+        """A run told its line-up is over ({"stop": true}), followed until it has ended. It turns its wrist
+        back to rest, beside the user: a motion as any other, so a cancel is read all through it (every
+        line_up.POLL_S) and the panel says what the arm does and keeps its Cancel, which is the orchestrator's
+        cancel as the run's own panel's is. A cancel is the run's Ctrl+C (the arm stops where it is): True
+        where one came. A run still going LINE_UP_END_S after it was told is stopped that way too, and killed
+        if it has not ended CANCEL_ESCALATE_S after that."""
+        panel = Panel(ctx, self._ui_live)
+        panel.say(line_up.PHASE, 0.0, PANEL_TURNING_BACK)
+        told = time.monotonic()
+        cancelled, sent = False, None
+        if run_.alive():  # one that ended of itself already has nothing to turn back
+            ctx.progress(line_up.PHASE, 0.0, PANEL_TURNING_BACK, pausable=False)
+        while run_.proc.poll() is None:
+            if panel.tick():
+                self._cancel_from_ui()
+            now = time.monotonic()
+            if sent is None and (ctx.cancelled() or panel.pressed):
+                self.get_logger().warning("cancelled while the wrist turned back: the run's own stop (Ctrl+C) sent")
+                cancelled, panel.stopping = True, PANEL_CANCELLED
+                run_.interrupt()
+                sent = now
+            elif sent is None and now - told > LINE_UP_END_S:
+                self.get_logger().error(f"the run did not end its line-up in {LINE_UP_END_S:.0f} s: its stop")
+                panel.stopping = PANEL_TIMED_OUT
+                run_.interrupt()
+                sent = now
+            elif sent is not None and now - sent > CANCEL_ESCALATE_S:
+                self.get_logger().error("the run did not stop: killed (a motion may still be in flight)")
+                run_.proc.kill()
+            time.sleep(line_up.POLL_S)
+        return cancelled
 
     def _box_source(self, env, instance_id, watch=None):
         """A real run's line-up source (line_up.BoxSource): a watch follows the container and reach_probe judges
