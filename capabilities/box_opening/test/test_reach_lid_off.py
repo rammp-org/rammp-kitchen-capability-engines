@@ -489,6 +489,7 @@ def test_with_the_free_air_in_position_the_arm_stands_while_the_springs_come_in_
     legs = [r["leg"] for r in rows]
     (switch,) = (r for r in rows if r["leg"] == "air_switch")
     assert switch["primed"] is True and switch["wait_s"] == AIR_SWITCH_S and waits.count(AIR_SWITCH_S) == 1
+    assert switch["tries"] == 1 and rp.AIR_PRIME_RETRY_S not in waits  # sent at the first ask: no second
     assert legs.index("depth:turn") < legs.index("air_switch") < legs.index("depth:press")
     assert ctx.client.primes == [None]  # that one hold, of the joints it reads then; none at the run's start
     # the press is watched as an execution of its own, and its flight is the stroke's
@@ -599,6 +600,62 @@ def test_in_position_a_stroke_that_does_not_start_leaves_from_over_the_box_the_c
     else:
         assert "nothing was pressed" in last and "holds" not in last
         assert ctx.client.lets_go == []
+
+
+@pytest.mark.parametrize("press_only", [False, True], ids=["the full run", "the press alone"])
+def test_in_position_a_spring_the_driver_was_not_asked_for_flies_no_stroke_and_the_arm_goes_home(
+    ctx, monkeypatch, tmp_path, capsys, press_only
+):
+    """The stroke flies on the driver's joint impedance, entered at rest at its start by the hold
+    client.prime_compliant sends. Where that hold did not go out (no fresh /joint_states, the driver's
+    action server not answering) the stroke flew all the same, the first impedance goal after a position
+    one, on a spring still fading in: behind its reference, which the contact watch reads as a box met
+    early (review 2026-11-16). It is asked for once more after AIR_PRIME_RETRY_S; still not sent, no stroke
+    is flown: nothing pressed, said for what it is, and the arm goes home from over the box."""
+    from box_opening.constants import AIR_SWITCH_S
+
+    monkeypatch.setenv("BOX_OPENING_AIR_CONTROL", "position")
+    waits = []
+    monkeypatch.setattr(rp.time, "sleep", lambda s: waits.append(s))
+    asked = []  # each ask: how many goals had gone out by then
+    monkeypatch.setattr(ctx.client, "prime_compliant", lambda q=None: asked.append(len(ctx.client.executed)) or False)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], press_only=press_only)
+    assert code == 1
+    assert asked == [2, 2]  # twice, the look and the free air flown, nothing sent between
+    assert waits.count(rp.AIR_PRIME_RETRY_S) == 1 and AIR_SWITCH_S not in waits  # no spring to wait in
+    # no stroke: its legs never reached the runner, and nothing was held on the button
+    assert rec.events == ["reach:look", "aim:reach-aim", *WAY_IN[:-1], "depth:clear", "home"]
+    (switch,) = (r for r in rows if r["leg"] == "air_switch")
+    assert (switch["primed"], switch["tries"], switch["wait_s"]) == (False, 2, 0.0)
+    assert not [r for r in rows if r["leg"] in ("reach_way_in_flight", "press_refused")]
+    out = capsys.readouterr().out
+    assert "the way in did not start" not in out
+    last = [line for line in out.splitlines() if "STOP" in line][-1]  # what the node reads the run's end from
+    assert "STOP: the press stroke did not start (the driver did not enter its joint impedance" in last
+    assert "nothing was pressed" in last and "holds" not in last
+    assert ctx.client.lets_go == []  # home: nothing let go
+
+
+def test_in_position_a_spring_not_asked_for_at_first_is_asked_for_once_more_and_the_press_flies(
+    ctx, monkeypatch, tmp_path
+):
+    """A hiccup of the joint stream or of the driver's action server at the one moment the hold is sent
+    does not cost the run: asked once more after AIR_PRIME_RETRY_S, sent, its fade-in waited as ever, and
+    the press and all after it fly as they do."""
+    from box_opening.constants import AIR_SWITCH_S
+
+    monkeypatch.setenv("BOX_OPENING_AIR_CONTROL", "position")
+    waits = []
+    monkeypatch.setattr(rp.time, "sleep", lambda s: waits.append(s))
+    answers = [False, True]
+    monkeypatch.setattr(ctx.client, "prime_compliant", lambda q=None: answers.pop(0))
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0 and answers == []
+    assert [names for names, _g in _executions(rec)][:3] == [["reach:look"], WAY_IN[:-1], WAY_IN[-1:]]
+    (switch,) = (r for r in rows if r["leg"] == "air_switch")
+    assert (switch["primed"], switch["tries"], switch["wait_s"]) == (True, 2, AIR_SWITCH_S)
+    # the wait before the second ask, then the spring's fade-in, in that order, each once
+    assert [s for s in waits if s in (rp.AIR_PRIME_RETRY_S, AIR_SWITCH_S)] == [rp.AIR_PRIME_RETRY_S, AIR_SWITCH_S]
 
 
 def test_in_position_a_free_air_part_that_does_not_start_still_goes_home_from_the_look_pose(

@@ -1533,6 +1533,15 @@ def way_in_parts(legs):
     return None
 
 
+# With the free air in position, the hold that puts the driver in its joint impedance at the stroke's start
+# (client.prime_compliant) is asked for once more, this long after, where the client did not send it: no
+# /joint_states sample newer than its 0.2 s, or the driver's action server not answering within its 0.2 s.
+# 0.5 s is some 25 periods of the ~49 Hz joint stream and more than twice that wait on the server: a hiccup
+# of either is over by then, and the arm stands in position control meanwhile, which holds it. One the
+# second ask does not get past is no hiccup, and the stroke is not flown (fly_way_in).
+AIR_PRIME_RETRY_S = 0.5
+
+
 def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     """The way in flown: (results, the press's contact watch or None, the names of the legs of the
     execution the last result is of, whether the free air brought the arm over the box).
@@ -1542,6 +1551,8 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     where it arrived, the arm stood still, the driver put in its joint impedance there
     (client.prime_compliant) and AIR_SWITCH_S waited, and the stroke flown and watched as an execution of
     its own. A free-air part that did not arrive is where it ends: no springs, no stroke, no watch.
+    Nor is the stroke flown where that hold did not go out, asked twice (AIR_PRIME_RETRY_S apart): the
+    last result is then a refusal that says so, of a stroke that did not start.
     `lookahead` is hosted by the one execution only, never by a stroke flown on its own: the runner's
     lookahead_result is then None, and the caller plans after the hold (_fly_way_in).
 
@@ -1549,6 +1560,7 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     arrived, whatever the stroke did after. A stroke that then did not start leaves the arm at its start,
     the hand turned down 35-60 mm over the lid — not at the look pose, where a way in of one execution
     that did not start leaves it — and the callers bring it home from there (_home_from_over_box)."""
+    from box_opening.runtime.runner import LegResult
     from box_opening.tasks import depth_press as dp
 
     kw = {} if lookahead is None else {"lookahead": lookahead}
@@ -1561,8 +1573,30 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     if any(not r.ok for r in res):
         return res, None, [lg.name for lg in air], False
     runner.wait_still("the stroke's start, before its spring")
-    primed = bool(ctx.client.prime_compliant())
-    runner.note("air_switch", primed=primed, wait_s=AIR_SWITCH_S, at=[round(float(v), 4) for v in ctx.client.joints()])
+    primed, tries = bool(ctx.client.prime_compliant()), 1
+    if not primed:
+        time.sleep(AIR_PRIME_RETRY_S)  # at rest in position control, no goal in flight
+        primed, tries = bool(ctx.client.prime_compliant()), 2
+    runner.note(
+        "air_switch",
+        primed=primed,
+        tries=tries,
+        wait_s=AIR_SWITCH_S if primed else 0.0,
+        at=[round(float(v), 4) for v in ctx.client.joints()],
+    )
+    if not primed:
+        # No stroke on a spring the driver was never asked for. It would be the first impedance goal after
+        # a position one: the driver waits out its switch and fades the spring in under the descent, the
+        # arm flies behind its reference, and the press's contact watch reads that as a box met early — a
+        # refusal that blames the box for a hold that was not sent. Refused here instead, for what it is,
+        # as a result of a stroke that did not start (no flown_traj, no progress): the callers take the arm
+        # home from over the box
+        why = (
+            "the driver did not enter its joint impedance at the stroke's start: the client's request for it "
+            "did not go out, asked twice"
+        )
+        log.info("[press_demo] %s — the stroke is not flown" % why)
+        return res + [LegResult(press[0].name, "refused", False, why)], None, [lg.name for lg in press], True
     time.sleep(AIR_SWITCH_S)
     contact = dp.watch_press(ctx, press, stroke, top_z)
     # No lookahead on this execution. The client runs what a goal hosts once the goal is accepted and only
