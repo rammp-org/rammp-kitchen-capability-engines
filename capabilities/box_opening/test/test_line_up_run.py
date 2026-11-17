@@ -183,6 +183,14 @@ def test_a_turn_that_is_not_flown_watches_nothing(front, fly, state):
     assert runner.notes[-1][1]["flown"] is False
 
 
+def test_a_stop_heard_before_the_turn_turns_nothing(front):
+    """The engine's stop (or its go) may come while the views are being chosen: the wrist then turned out to
+    the view only to be turned straight back."""
+    state, runner = _watch(front, 0)  # stopped from the start
+    assert state == ("none", "stopped before the turn") and front.flown == [] and front.said == []
+    assert runner.stills == [] and front.asked == []
+
+
 def test_with_no_view_or_no_body_model_the_wrist_does_not_turn(front, monkeypatch):
     from box_opening.runtime import approach
 

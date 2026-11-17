@@ -1557,7 +1557,8 @@ def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camer
 
     Only the three wrist joints move, once, and the arm then stands until the caller moves it on (the run)
     or back (rest_wrist). ("watched", None) at `stop()`; ("none" | "refused" | "stopped", why) where the
-    wrist was not turned at all, or its turn stopped part way (the arm holds there)."""
+    wrist was not turned at all (`stop()` already true before the turn among them), or its turn stopped part
+    way (the arm holds there)."""
     from box_opening.constants import HOME
     from box_opening.perception import wrist_finder as wf
     from box_opening.runtime import approach
@@ -1572,6 +1573,10 @@ def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camer
     if not views:
         return "none", why
     view = replace(views[0], name=LINE_UP_VIEW)
+    if stop():
+        # the engine's answer came while the views were chosen: a wrist turned out now would only be turned
+        # straight back
+        return "none", "stopped before the turn"
     state, why = fly_view(ctx, runner, view, FrontBand(check, rest), execute)
     if state != "flown":
         runner.note("line_up", stage=view.name, flown=False, why=why)
