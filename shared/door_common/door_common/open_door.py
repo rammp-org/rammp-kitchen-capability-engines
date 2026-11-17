@@ -446,7 +446,36 @@ def detect_handle():
     return h, orient, n, door_z, door_mid, hinge
 
 
-def grasp_pose(h, orient, n, pitch_deg=0.0):
+# the grasp also turned this far about the vertical handle bar (deg), the hand coming in from the arm's left (+y,
+# away from the user): its line-up and straight-in follow it, away from the user's lap. Tried in this order, each
+# with every tilt; the least turn wins a tie. 11-10: with the handle 39 cm to the user's side every straight-on
+# line-up put the elbow in the lap box
+GRASP_SIDES_DEG = (0, 15, 30)
+GRASP_SIDE_FACE_CLEAR_M = 0.01  # an angled grasp's finger links stay this far in front of the door face (no door
+# model in the open: a turned hand brings one fingertip nearer the door)
+
+
+def _fingers_in_front(rb, q, face_pt, n):
+    """The smallest distance (m) of the gripper's finger link origins in front of the door face (the plane through
+    `face_pt`, outward normal `n`) at joints `q`."""
+    c = rb.physics_client_id
+    for j, jj in enumerate(ARM):
+        p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
+    base = make_sim()[0].robot_base_pose
+    inv_pos, inv_orn = p.invertTransform(base.position, base.orientation)
+    nn = np.r_[np.asarray(n, dtype=float)[:2], 0.0]
+    nn /= np.linalg.norm(nn)
+    best = np.inf
+    for k in range(p.getNumJoints(rb.robot_id, physicsClientId=c)):
+        if "finger" not in p.getJointInfo(rb.robot_id, k, physicsClientId=c)[12].decode():
+            continue
+        ls = p.getLinkState(rb.robot_id, k, computeForwardKinematics=True, physicsClientId=c)
+        pt = np.asarray(p.multiplyTransforms(inv_pos, inv_orn, ls[4], ls[5])[0])
+        best = min(best, float(np.dot(pt - np.asarray(face_pt, dtype=float), nn)))
+    return best
+
+
+def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0):
     """Grasp pose for handle position `h` (vertical-corrected here), squared to the door face, tilted
     `pitch_deg` nose-down about the finger axis. The tool point doesn't depend on the tilt."""
     h = h + np.array([0.0, 0.0, VERTICAL_CORR])
@@ -468,6 +497,10 @@ def grasp_pose(h, orient, n, pitch_deg=0.0):
     # along the tilted approach
     approach = np.r_[tilted[:2], 0.0] / np.linalg.norm(tilted[:2])
     pos = h + approach * (GRASP_X_ADJUST - GRIP_EXT) + (approach - tilted) * GRASP_PADS_PAST_TOOL
+    if side_deg:  # turned about the vertical bar through `h`: the pads stay on it, the hand from the arm's left
+        rz = R.from_euler("z", -side_deg, degrees=True)
+        quat = (rz * R.from_quat(quat)).as_quat()
+        pos = h + rz.apply(pos - h)
     say(f"grasp {np.round(pos, 4)}  range {np.linalg.norm(pos):.3f}")
     if np.linalg.norm(pos) > MAX_REACH or not _height_ok(pos[2]):
         raise Refused(
@@ -719,6 +752,32 @@ def _joint_dist_deg(qa, qb):
     return float(np.degrees(np.max(np.abs(short_delta(qa, qb)))))
 
 
+CUROBO_GRASP_TRIES = 3  # cuRobo's IK is asked this many times per tilt for grasp arm shapes the sim's seeds miss
+
+
+def _curobo_grasp_shapes(ai, scene, rb, grasp, q0):
+    """Grasp joints from cuRobo's own IK (plan_to_pose from `q0`, nothing moves; asked CUROBO_GRASP_TRIES times, its
+    IK varies): each reaching `grasp` (within CUROBO_LINE_UP_TOL_*), within the J4/J6 guards and cuRobo's limit margin,
+    and clear of the chair and user (keep_out_message). Empty without a planner."""
+    if not hasattr(ai, "plan_to_pose"):
+        return []
+    g_p, g_q = np.asarray(grasp.position, dtype=float), np.asarray(grasp.orientation, dtype=float)
+    shapes = []
+    for _ in range(CUROBO_GRASP_TRIES):
+        pl = ai.plan_to_pose(g_p, g_q, q0)
+        if not pl.success or len(pl.q) == 0:
+            continue
+        q = np.asarray(pl.q[-1], dtype=float)
+        pos, quat = sim.tool_pose(scene, rb, q)
+        off_deg = np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(quat, g_q))))))
+        if np.linalg.norm(pos - g_p) > CUROBO_LINE_UP_TOL_M or off_deg > CUROBO_LINE_UP_TOL_DEG:
+            continue
+        if _guard_margin([q]) < 0 or _near_limit(rb, q, CUROBO_LIMIT_MARGIN_DEG) or keep_out_message(rb, q):
+            continue
+        shapes.append(q)
+    return shapes
+
+
 def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=False):
     """Plan the whole open before any motion, searching the arm's configurations: for each nose-down tilt
     (GRASP_PITCHES_DEG), each distinct grasp configuration from _config_seeds, its approach and the largest swing that
@@ -730,13 +789,17 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
     if swings[-1] != min(min_swing, max_swing):
         swings.append(min(min_swing, max_swing))
     cands, explained = [], quick  # explained: the first failing approach has been printed in full
-    for pitch in GRASP_PITCHES_DEG:
+    ai_planner = getattr(after_swing, "ai", None)  # _CuroboFirst carries the arm; plain AfterSwing has none
+    face_pt = geom.get("hinge_seen")  # on the door face (the detected edge): angled grasps need it
+    sides = (0,) if quick or face_pt is None else GRASP_SIDES_DEG
+    for side, pitch in [(sd, pt) for sd in sides for pt in GRASP_PITCHES_DEG]:
         _checkpoint()
+        tag = f"tilt {pitch:2d} deg" + (f", {side} deg from the left" if side else "")
         try:
             with quiet():
-                h, g = grasp_pose(h_raw, orient, n, pitch)
+                h, g = grasp_pose(h_raw, orient, n, pitch, side)
         except Refused as e:
-            say(f"  tilt {pitch:2d} deg: {e}")
+            say(f"  {tag}: {e}")
             continue
         g_p, g_q = np.asarray(g.position), np.asarray(g.orientation)
         configs = []
@@ -747,7 +810,17 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
             if q_g is not None and all(
                 np.degrees(np.max(np.abs(short_delta(c, q_g)))) > SAME_CONFIG_DEG for c in configs
             ):
-                configs.append(q_g)
+                if not side or _fingers_in_front(rb, q_g, face_pt, n) >= GRASP_SIDE_FACE_CLEAR_M:
+                    configs.append(q_g)
+        from_curobo = 0
+        if not quick and ai_planner is not None and not configs:  # cuRobo's own IK: where the sim's seeds miss
+            with quiet():
+                for q_c in _curobo_grasp_shapes(ai_planner, scene, rb, g, q0):
+                    if side and _fingers_in_front(rb, q_c, face_pt, n) < GRASP_SIDE_FACE_CLEAR_M:
+                        continue
+                    if all(np.degrees(np.max(np.abs(short_delta(c, q_c)))) > SAME_CONFIG_DEG for c in configs):
+                        configs.append(q_c)
+                        from_curobo += 1
         best, why = None, "no grasp configuration within the J4/J6 guards"
         for q_g in configs:
             _checkpoint()
@@ -756,7 +829,7 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
             if appr is None:
                 why = "no line-up + straight-in passes"
                 if not explained:  # once, out loud: which standoff, step and check fail
-                    say(f"  tilt {pitch:2d} deg: no line-up + straight-in passes -- why, the first configuration's:")
+                    say(f"  {tag}: no line-up + straight-in passes -- why, the first configuration's:")
                     _approach_from(scene, rb, g, q_g)
                     explained = True
                 continue
@@ -770,6 +843,7 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
                 if ok:
                     c = dict(
                         pitch=pitch,
+                        side=side,
                         swing=d,
                         grasp=g,
                         h=h,
@@ -791,15 +865,24 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
                     break
                 why = f"swing: {msg}"
         say(
-            f"  tilt {pitch:2d} deg: {len(configs)} arm configuration(s) -> "
+            f"  {tag}: {len(configs)} arm configuration(s)"
+            + (f" ({from_curobo} from cuRobo)" if from_curobo else "")
+            + " -> "
             + (f"swing {best['swing']} deg fits, {best['margin']:.0f} deg from the J4/J6 guards" if best else why)
         )
     if not cands:
         return None, "no tilt and arm configuration gives a grasp + swing that passes the sim checks"
     if PREFER_NEAR_START:  # largest swing; then least reconfiguration (in NEAR_START_BUCKET_DEG steps); then margin
-        cands.sort(key=lambda c: (-c["swing"], _joint_dist_deg(q0, c["q_pre"]) // NEAR_START_BUCKET_DEG, -c["margin"]))
+        cands.sort(
+            key=lambda c: (
+                -c["swing"],
+                c["side"],
+                _joint_dist_deg(q0, c["q_pre"]) // NEAR_START_BUCKET_DEG,
+                -c["margin"],
+            )
+        )
     else:
-        cands.sort(key=lambda c: (c["swing"], c["margin"]), reverse=True)
+        cands.sort(key=lambda c: (c["swing"], -c["side"], c["margin"]), reverse=True)  # the least turn wins a tie
     reason = None
     for c in cands[: 3 if quick else SEARCH_AFTER_SWING_MAX]:
         ok, m = after_swing.check(scene, rb, geom, c, reason is None and not quick)
@@ -899,7 +982,8 @@ def open_task(
     deg, pitch, grasp, h = plan["swing"], plan["pitch"], plan["grasp"], plan["h"]
     g_p, g_q = np.asarray(grasp.position), np.asarray(grasp.orientation)
     say(
-        f"chosen: tilt {pitch} deg nose-down, swing {deg} deg, line-up {plan['standoff'] * 100:.0f} cm out, "
+        f"chosen: tilt {pitch} deg nose-down, {plan.get('side', 0)} deg from the left, swing {deg} deg, "
+        f"line-up {plan['standoff'] * 100:.0f} cm out, "
         f"{plan['margin']:.0f} deg from the J4/J6 guards; grasp {np.round(g_p, 4)}; line-up joints "
         f"{np.round(np.degrees(plan['q_pre']), 1)}{'; ' + plan['after'] if plan.get('after') else ''}"
     )

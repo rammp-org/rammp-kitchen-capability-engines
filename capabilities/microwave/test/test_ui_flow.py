@@ -1,4 +1,4 @@
-"""Offline UI flow tests for the microwave's one-press open; production methods run without ROS or hardware."""
+"""Offline UI flow tests for the microwave's one-press open / close; production methods run without ROS or hardware."""
 
 import ast
 import time
@@ -65,9 +65,18 @@ def panels(ctx):
 def test_one_press_open_runs_the_open_executing(flow):
     node, ctx, _ = flow
     assert node._ui_run("open_door_ui", ctx) == {"executed": True}
-    node.execute.assert_called_once_with("open", {"execute": True}, ctx)
+    node.execute.assert_called_once_with("open", {"execute": True, "push_open": True}, ctx)
     assert panels(ctx)[0]["buttons"] == []
     assert panels(ctx)[-1]["message"] == "Microwave door opened."
+
+
+def test_one_press_close_uses_the_settings_that_closed_it(flow):
+    node, ctx, scope = flow
+    node._ui_run("close_door_ui", ctx)
+    action, params, _ = node.execute.call_args.args
+    assert action == "close"
+    assert params == scope["UI_ACTIONS"]["close_door_ui"][2]
+    assert params["execute"] and params["face_door"] and params["route_over"]
 
 
 def test_recoverable_refusal_waits_for_explicit_retry_then_runs_again(flow):
@@ -101,7 +110,7 @@ def test_unrecoverable_failure_is_reported_without_retry(flow):
     node, ctx, _ = flow
     node.execute.side_effect = EngineError("bad_params", "bad speed", False)
     with pytest.raises(EngineError, match="bad speed"):
-        node._ui_run("open_door_ui", ctx)
+        node._ui_run("close_door_ui", ctx)
     assert node.execute.call_count == 1
     assert "bad speed" in panels(ctx)[-1]["message"]
 
@@ -120,7 +129,7 @@ def test_execution_disabled_never_moves(flow):
     node, ctx, _ = flow
     node.cfg["allow_execute"] = False
     with pytest.raises(EngineError, match="disabled"):
-        node._ui_run("open_door_ui", ctx)
+        node._ui_run("close_door_ui", ctx)
     node.execute.assert_not_called()
 
 

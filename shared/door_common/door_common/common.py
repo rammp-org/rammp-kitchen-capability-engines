@@ -1,6 +1,6 @@
 """Shared motion pieces for the door tasks: planning, the door model, files, output.
 
-Used by `open_door.py` and `demo_replay.py`, here and in each capability.
+Used by `open_door.py`, `close_door.py` and `demo_replay.py`, here and in each capability.
 
 * `release_and_back_off` -- records the current grasp (pose + joints) to
   `LAST_GRASP_FILE`, opens the gripper, then backs straight off the handle along the
@@ -28,6 +28,7 @@ constants here with no default (None), set once at startup with `configure` (and
 """
 
 import json
+import os
 import re
 import sys
 import threading
@@ -50,7 +51,6 @@ from capability_engine.cornell_commands import (
 from capability_engine.sim import (  # noqa: F401 -- re-exported for the task modules
     ARM,
     Pose,
-    clearance,
     continuous_ok,
     keep_out_message,
     make_sim,
@@ -60,6 +60,25 @@ from capability_engine.sim import (  # noqa: F401 -- re-exported for the task mo
     wrap_joints,
 )
 from scipy.spatial.transform import Rotation as R
+
+
+def clearance(rb, q, bodies, closed=False, held=None):
+    """capability_engine.sim.clearance (the smallest distance from any arm link to `bodies` at joints `q`, gripper open
+    or `closed`), and with `held` = (body_id, (offset_pos, offset_quat)) an object rigidly held in the gripper -- e.g.
+    the container -- posed at the tool link x offset and checked against every body too (named "container")."""
+    best = sim.clearance(rb, q, bodies, closed)  # leaves the arm at `q`
+    if held is None:
+        return best
+    c = rb.physics_client_id
+    held_id, (off_pos, off_quat) = held
+    ls = p.getLinkState(rb.robot_id, rb.end_effector_id, physicsClientId=c)
+    wp, wq = p.multiplyTransforms(ls[4], ls[5], off_pos, off_quat)
+    p.resetBasePositionAndOrientation(held_id, wp, wq, physicsClientId=c)
+    for bid, name in bodies:
+        for pt in p.getClosestPoints(held_id, bid, sim.CLEARANCE_QUERY_M, physicsClientId=c):
+            if pt[8] < best[0]:
+                best = (float(pt[8]), f"container vs {name}")
+    return best
 
 
 class Refused(Exception):
@@ -287,7 +306,9 @@ def plan_straight_line(scene, rb, start_pos, quat, direction, dist, seed_joints,
 BIG_MOVE_TIMEOUT_S = 40.0
 
 
-def plan_cartesian(scene, rb, p0, q0_quat, p1, q1_quat, seed_joints, label, bodies=None, min_clear=None, closed=False):
+def plan_cartesian(
+    scene, rb, p0, q0_quat, p1, q1_quat, seed_joints, label, bodies=None, min_clear=None, closed=False, held=None
+):
     """Straight line p0 -> p1 with the orientation slerped q0 -> q1, ~2 cm / <= 5 deg per step,
     each step IK-solved from the previous one. Gates: IK, per-step jump, J6, wrap and (if
     `bodies`) >= MIN_CLEAR from the door model, checked along each step too."""
@@ -312,7 +333,8 @@ def plan_cartesian(scene, rb, p0, q0_quat, p1, q1_quat, seed_joints, label, bodi
         jump = float(np.degrees(np.max(np.abs((nq - q + np.pi) % (2 * np.pi) - np.pi))))
         if bodies is not None:
             worst = min(
-                [worst] + [clearance(rb, q + short_delta(q, nq) * s_ / 3, bodies, closed) for s_ in (1, 2, 3)],
+                [worst]
+                + [clearance(rb, q + short_delta(q, nq) * s_ / 3, bodies, closed, held=held) for s_ in (1, 2, 3)],
                 key=lambda w: w[0],
             )
         bad = (
@@ -588,13 +610,14 @@ def free_move_problem(ai, start, q_goal, in_front=None, end_tool_tol=None, keep_
 FREE_MOVE_MAX_JOINT_DEG = 60.0  # no joint turns more than this in one free move (the arm keeps its shape)
 
 
-def reconfiguration(start, q_goal):
-    """Why the move `start` -> `q_goal` changes the arm's shape (a joint turning more than FREE_MOVE_MAX_JOINT_DEG,
-    the free joints the short way), or ""."""
+def reconfiguration(start, q_goal, max_deg=None):
+    """Why the move `start` -> `q_goal` changes the arm's shape (a joint turning more than `max_deg`, None:
+    FREE_MOVE_MAX_JOINT_DEG, the free joints the short way), or ""."""
+    limit = FREE_MOVE_MAX_JOINT_DEG if max_deg is None else max_deg
     d = np.degrees(np.abs(short_delta(np.asarray(start, dtype=float), q_goal)))
     j = int(np.argmax(d))
-    if d[j] > FREE_MOVE_MAX_JOINT_DEG:
-        return f"J{j + 1} would turn {d[j]:.0f} deg (max {FREE_MOVE_MAX_JOINT_DEG:.0f}): the arm would change its shape"
+    if d[j] > limit:
+        return f"J{j + 1} would turn {d[j]:.0f} deg (max {limit:.0f}): the arm would change its shape"
     return ""
 
 
@@ -648,14 +671,18 @@ def checked_curobo_move(ai, q_goal, label, speed_scale=None, in_front=None, end_
 POSE_END_TOL = (0.01, 5.0)  # a checked pose move's plan must end the tool this close (m, deg) to the pose asked
 
 
-def checked_pose_move(ai, pos, quat, label, hold=0, speed_scale=None, gains=None, keep_shape=True):
+POSE_MOVE_TRIES = 3  # cuRobo's plans vary: a checked pose move is asked this many times for one that passes
+
+
+def checked_pose_move(ai, pos, quat, label, hold=0, speed_scale=None, gains=None, keep_shape=True, max_joint_deg=None):
     """cuRobo's plan to the tool pose (plan_to_pose from where the arm is, nothing moves), checked -- the arm keeping
-    its shape (reconfiguration, unless not `keep_shape`), the floor, no joint swinging FREE_MOVE_MAX_SWING_RAD past its
-    straight range, the tool ending within POSE_END_TOL of the pose -- then run EXACTLY (execute_joint_trajectory),
-    under joint impedance `gains` if given. Raises Refused before anything moves when a check fails; returns whether
-    the motion succeeded."""
+    its shape (reconfiguration with `max_joint_deg`, unless not `keep_shape`), the floor, no joint swinging
+    FREE_MOVE_MAX_SWING_RAD past its straight range, the tool ending within POSE_END_TOL of the pose -- then run
+    EXACTLY (execute_joint_trajectory), under joint impedance `gains` if given. Asked POSE_MOVE_TRIES times: the first
+    plan that passes runs. Raises Refused before anything moves when none does; returns whether the motion
+    succeeded."""
     start = np.asarray(ai.raw_joints(), dtype=float)
-    pl, why = pose_plan_problem(ai, start, pos, quat, hold, keep_shape)
+    pl, why = pose_plan_problem(ai, start, pos, quat, hold, keep_shape, POSE_MOVE_TRIES, max_joint_deg)
     if why:
         raise Refused(f"{label}: {why} -- nothing moved.")
     return run_checked_plan(ai, pl, label, speed_scale, gains)
@@ -676,11 +703,12 @@ def run_checked_plan(ai, pl, label, speed_scale=None, gains=None):
     return res.error_code == 0
 
 
-def pose_plan_problem(ai, start, pos, quat, hold=0, keep_shape=True, tries=1):
+def pose_plan_problem(ai, start, pos, quat, hold=0, keep_shape=True, tries=1, max_joint_deg=None):
     """checked_pose_move's plan and checks, nothing moves: cuRobo's plan to the tool pose from joints `start` -- the
-    arm keeping its shape (reconfiguration, unless not `keep_shape`), the floor, no joint swinging
-    FREE_MOVE_MAX_SWING_RAD past its straight range, the tool ending within POSE_END_TOL of the pose. Asked `tries`
-    times (cuRobo's plans vary) for one that passes. (plan, "") when one does, else (the last plan or None, why)."""
+    arm keeping its shape (reconfiguration with `max_joint_deg`, unless not `keep_shape`), the floor, no joint
+    swinging FREE_MOVE_MAX_SWING_RAD past its straight range, the tool ending within POSE_END_TOL of the pose. Asked
+    `tries` times (cuRobo's plans vary) for one that passes. (plan, "") when one does, else (the last plan or None,
+    why)."""
     start = np.asarray(start, dtype=float)
     pl, why = None, ""
     for _ in range(max(1, int(tries))):
@@ -693,7 +721,7 @@ def pose_plan_problem(ai, start, pos, quat, hold=0, keep_shape=True, tries=1):
             why = f"cuRobo can't plan it ({pl.message})"
             continue
         qs = np.asarray(pl.q, dtype=float)
-        why = (reconfiguration(start, qs[-1]) if keep_shape else "") or path_below_floor(qs)
+        why = (reconfiguration(start, qs[-1], max_joint_deg) if keep_shape else "") or path_below_floor(qs)
         if not why:
             off = np.abs(np.array([short_delta(start, q) for q in qs]))
             swing = off.max(axis=0) - np.abs(short_delta(start, qs[-1]))
@@ -936,10 +964,10 @@ def _yaw_about(center, xy, ang):
     return center[:2] + np.array([c * d[0] - s_ * d[1], s_ * d[0] + c * d[1]])
 
 
-def add_door_model(scene, rb, door, open_grasp_pos):
-    """Add the door slab (rotated to its current opening) and the appliance's fixed body to
-    the sim as collision-only boxes. Returns (bodies, info) -- bodies is [(id, name)]."""
-    c = rb.physics_client_id
+def door_model_boxes(door, open_grasp_pos):
+    """The door slab (rotated to its current opening) and the appliance's fixed body as boxes in the arm's frame
+    (arm_mount: the door file's), each (name, centre xyz, half extents, yaw about z), plus info -- what add_door_model
+    puts in the sim and door_in_curobo in cuRobo's world, so the two check the same door."""
     n = np.asarray(door["closed_normal"], float)
     n[2] = 0
     n /= np.linalg.norm(n)  # out of the door
@@ -960,29 +988,116 @@ def add_door_model(scene, rb, door, open_grasp_pos):
         dz = float(door["closed_handle"][2]) - DOOR_Z_HANDLE_Z if "closed_handle" in door else 0.0
         z_lo, z_hi = DOOR_Z[0] + dz, DOOR_Z[1] + dz
     zc, zh = (z_lo + z_hi) / 2, (z_hi - z_lo) / 2
-    base = np.asarray(scene.robot_base_pose.position)  # identity rotation
-    yaw_closed = np.arctan2(n[1], n[0])
-
-    def box(center_xy, half, yaw):
-        cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=half, physicsClientId=c)
-        return p.createMultiBody(
-            0,
-            cs,
-            basePosition=(base + [center_xy[0], center_xy[1], zc]).tolist(),
-            baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
-            physicsClientId=c,
-        )
-
+    yaw_closed = float(np.arctan2(n[1], n[0]))
     mid = (lo + hi) / 2
     door_c_closed = face + t[:2] * mid - n[:2] * door_t / 2
-    door_id = box(_yaw_about(hinge, door_c_closed, ang), [door_t / 2, (hi - lo) / 2, zh], yaw_closed + ang)
+    door_c = _yaw_about(hinge, door_c_closed, ang)
     body_c = face + t[:2] * mid - n[:2] * (door_t + body_depth / 2)
-    body_id = box(body_c, [body_depth / 2, (hi - lo) / 2, zh], yaw_closed)
+    boxes = [
+        ("door", (door_c[0], door_c[1], zc), (door_t / 2, (hi - lo) / 2, zh), yaw_closed + float(ang)),
+        (f"{APPLIANCE} body", (body_c[0], body_c[1], zc), (body_depth / 2, (hi - lo) / 2, zh), yaw_closed),
+    ]
     free_edge = _yaw_about(hinge, face + t[:2] * lo, ang)
-    return [(door_id, "door"), (body_id, f"{APPLIANCE} body")], {
-        "open_deg": float(np.degrees(ang)),
-        "free_edge": free_edge,
-    }
+    return boxes, {"open_deg": float(np.degrees(ang)), "free_edge": free_edge}
+
+
+def add_sim_box(scene, rb, centre, half, yaw):
+    """A collision-only box in the sim at `centre` (arm frame) turned `yaw` about z: its body id."""
+    c = rb.physics_client_id
+    base = np.asarray(scene.robot_base_pose.position)  # identity rotation
+    cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=list(half), physicsClientId=c)
+    return p.createMultiBody(
+        0,
+        cs,
+        basePosition=(base + np.asarray(centre, float)).tolist(),
+        baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
+        physicsClientId=c,
+    )
+
+
+def add_door_model(scene, rb, door, open_grasp_pos):
+    """Add the door slab (rotated to its current opening) and the appliance's fixed body to
+    the sim as collision-only boxes (door_model_boxes). Returns (bodies, info) -- bodies is [(id, name)]."""
+    boxes, info = door_model_boxes(door, open_grasp_pos)
+    return [(add_sim_box(scene, rb, centre, half, yaw), name) for name, centre, half, yaw in boxes], info
+
+
+# --- the door in cuRobo's world: cuRobo plans AROUND the door model, instead of the sim refusing its paths after ---
+# set_world takes a world YAML by path, read inside the planner's container. That container (sheppy's) mounts the host's
+# robot config, SHEPPY_ROBOT_CONFIG, as /config/robot: a capability run natively on the host (ros2 run / launch) writes
+# the world under it and the planner reads it there -- no mount of our own. Elsewhere (a container): set
+# RAMMP_DOOR_WORLD_DIR to a directory the planner sees as RAMMP_DOOR_WORLD_PLANNER_DIR.
+SHEPPY_ROBOT_CONFIG = Path(
+    os.environ.get("SHEPPY_ROBOT_CONFIG", "~/sheppy-local/december_2026/config/robots/current")
+).expanduser()
+DOOR_WORLD_DIR = Path(os.environ.get("RAMMP_DOOR_WORLD_DIR", SHEPPY_ROBOT_CONFIG / "curobo" / "door_world"))
+DOOR_WORLD_PLANNER_DIR = os.environ.get("RAMMP_DOOR_WORLD_PLANNER_DIR", "/config/robot/curobo/door_world")
+CUROBO_BOOT_WORLD = "world.yaml"  # planner.yaml's own world, next to its config: what set_world goes back to
+# a pushed world replaces world.yaml's floor, so the door world lists the planner's own floor layer (the chair and
+# user are planner.yaml's layers: in every world, pushed ones too)
+CUROBO_FLOOR_LAYER = "/config/robot/curobo/layer_mebot_floor.yaml"
+DOOR_WORLD_PAD_M = 0.015  # each door box this much bigger per side in cuRobo than in the sim (on top of the
+# planner's own world_padding): its plans must still pass the sim's MIN_CLEAR from the unpadded model after
+
+
+def door_world(boxes, pad=DOOR_WORLD_PAD_M):
+    """A cuRobo world (the dict a world YAML holds) of the planner's floor and `boxes` ((name, centre, half, yaw),
+    door_model_boxes' form, the arm's frame = arm_mount), each grown `pad` per side."""
+    obstacles = [
+        {
+            "name": "door_model_" + re.sub(r"\W+", "_", name).strip("_"),
+            "position": [round(float(v), 5) for v in centre],
+            "dims": [round(2 * (float(h) + pad), 5) for h in half],
+            "rpy_deg": [0.0, 0.0, round(float(np.degrees(yaw)), 3)],
+        }
+        for name, centre, half, yaw in boxes
+    ]
+    return {"base_frame": "arm_mount", "layers": [CUROBO_FLOOR_LAYER], "obstacles": obstacles}
+
+
+@contextmanager
+def door_in_curobo(ai, boxes, label):
+    """cuRobo's world with the door model in it (door_world(boxes)) for the `with` block, then the planner's boot world
+    again (CUROBO_BOOT_WORLD) -- also on an exception. Yields whether the door went in; when it didn't (says why),
+    cuRobo's world is as it was."""
+    if not hasattr(ai, "set_world"):
+        say(f"  {label}: no set_world on this arm interface -- the door can't go into cuRobo's world")
+        yield False
+        return
+    name = f"door_world_{os.getpid()}.yaml"
+    if not DOOR_WORLD_DIR.parent.is_dir():  # not where the planner looks: its set_world would find no file
+        say(
+            f"  {label}: no {DOOR_WORLD_DIR.parent} here (not on the host with sheppy's robot config?) -- set "
+            "SHEPPY_ROBOT_CONFIG, or RAMMP_DOOR_WORLD_DIR + RAMMP_DOOR_WORLD_PLANNER_DIR"
+        )
+        yield False
+        return
+    try:
+        DOOR_WORLD_DIR.mkdir(parents=True, exist_ok=True)
+        (DOOR_WORLD_DIR / name).write_text(yaml.safe_dump(door_world(boxes), sort_keys=False))
+    except OSError as e:
+        say(f"  {label}: can't write the door world in {DOOR_WORLD_DIR} ({e})")
+        yield False
+        return
+    ok, msg = ai.set_world(f"{DOOR_WORLD_PLANNER_DIR.rstrip('/')}/{name}")
+    if not ok:
+        say(f"  {label}: the planner refused the door world ({msg})")
+        (DOOR_WORLD_DIR / name).unlink(missing_ok=True)
+        yield False
+        return
+    say(f"  {label}: door in cuRobo's world ({', '.join(b[0] for b in boxes)}, +{DOOR_WORLD_PAD_M * 100:.1f} cm)")
+    try:
+        yield True
+    finally:
+        ok, msg = ai.set_world(CUROBO_BOOT_WORLD)
+        if ok:  # the file is there exactly while cuRobo has the door (collision_viz shows it then)
+            (DOOR_WORLD_DIR / name).unlink(missing_ok=True)
+        else:  # every later plan would dodge a door that has since moved: say so loudly
+            say(
+                f"  !! {label}: cuRobo's world NOT put back to {CUROBO_BOOT_WORLD} ({msg}) -- it still has the door "
+                "in it: `ros2 service call /rammp_curobo/set_world rammp_curobo_interfaces/srv/SetWorld "
+                f'"{{world: {CUROBO_BOOT_WORLD}}}"`'
+            )
 
 
 class DoorFrame:

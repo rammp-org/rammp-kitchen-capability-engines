@@ -196,12 +196,16 @@ def _make_detector():
 # no arm link or the tool lower than this on a cuRobo path (door_common.common.FREE_MOVE_MIN_Z): the table top is
 # ~0.19 in the arm's frame (11-10), + 5 cm
 FREE_MOVE_MIN_Z = 0.24
+# cuRobo's moves (go-to, and those run exactly as checked) at this fraction of their planned speed: rammp_arm's
+# GO_TO_SPEED_SCALE, 0.3 by default, was slow (11-10). Its full-speed J2 acceleration (~26 rad/s^2) is ~5 here
+CUROBO_SPEED = 0.45
 
 
 def configure(data_dir):
     """Everything door_common needs from the microwave: call once at startup."""
     constants.configure(data_dir)
     dc.FREE_MOVE_MIN_Z = FREE_MOVE_MIN_Z
+    rammp_arm.GO_TO_SPEED_SCALE = CUROBO_SPEED  # the open and the close (one process)
     shared.configure(
         MAKE_DETECTOR=_make_detector,
         FIND_HINGE=shared.hinge_detected(HINGE_BEHIND_FACE, HINGE_PAST_EDGE),
@@ -336,7 +340,9 @@ def _plan_push_open(ai, door, ee, q, loud=False):
             return None, None, "push-open: the hinge's y is on the door's closing side of the hand -- refusing"
         start, plans = np.asarray(q, dtype=float), []
         for label, pos, quat, hold, keep_shape in _push_moves(P):
-            pl, why = dc.pose_plan_problem(ai, start, pos, quat, hold, keep_shape, PUSH_PLAN_TRIES)
+            pl, why = dc.pose_plan_problem(
+                ai, start, pos, quat, hold, keep_shape, PUSH_PLAN_TRIES, PUSH_MAX_JOINT_DEG if keep_shape else None
+            )
             if why:
                 whys.append(f"{P.how}: '{label}': {why}")
                 if loud:
@@ -720,6 +726,45 @@ def _view_step(view_only, ai, scene, rb, execute):
     return False
 
 
+def close_view_step(ai, execute):
+    """Before the close: to the view pose (VIEW_JOINTS_DEG), so the close always plans from the same place -- where
+    the open now ends (PUSH_END_AT_VIEW). Already there (VIEW_AT_TOL_M and every joint within VIEW_AT_JOINTS_DEG):
+    nothing moves. Elsewhere, a dry run stops (it can't plan from where the arm isn't): returns why; a real run
+    moves there through a checked cuRobo move (cuRobo's world has no door: someone on the e-stop). Returns "" to go
+    on with the close, else why it stops here (nothing commanded). Raises Refused."""
+    if VIEW_JOINTS_DEG is None:
+        return ""
+    q_view = np.radians(VIEW_JOINTS_DEG)
+    scene, rb = dc.make_sim()
+    p_view = np.asarray(sim.tool_pose(scene, rb, q_view)[0], dtype=float)
+    ko = sim.keep_out_message(rb, q_view)
+    if ko is not None:
+        raise Refused(f"The fixed view pose (VIEW_JOINTS_DEG) puts the arm in the keep-out: {ko}")
+    st = ai.get_state()
+    off = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - p_view))
+    joints_off = float(np.degrees(np.max(np.abs(short_delta(st["position"], q_view)))))
+    if off <= VIEW_AT_TOL_M and joints_off <= VIEW_AT_JOINTS_DEG:
+        say(f"close: at the view pose ({off * 100:.1f} cm) -- planning the close from here")
+        return ""
+    if not execute:
+        why = (
+            f"DRY RUN -- the close first goes to the view pose ({off * 100:.0f} cm / a joint {joints_off:.0f} deg "
+            "away) and plans from there; nothing commanded. To dry-run the close: a view_only open goal (moves "
+            "there), then this dry run again."
+        )
+        say(f"\n{why}")
+        return why
+    say(f"close: to the view pose first ({off * 100:.0f} cm away) ...")
+    moved = (
+        dc.checked_curobo_move(ai, q_view, "close: to view pose", keep_shape=False)
+        if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints")
+        else ai.go_to_joint_config(q_view, "close: to view pose")
+    )
+    if not moved:
+        raise Refused("close: did not reach the view pose -- stopping before the close.")
+    return ""
+
+
 def open_task(
     ai,
     execute,
@@ -744,12 +789,17 @@ def open_task(
     )
 
 
+# the push-open's moves travel further than the line-up: their shape cap (the line-up's is 60, FREE_MOVE_MAX_JOINT_DEG).
+# 11-10: 'over the door' turned J3 60.x deg and was refused
+PUSH_MAX_JOINT_DEG = 90.0
+
+
 def _pose_move(ai, pos, quat, label, hold, speed=None, held=False, keep_shape=True):
     """One push-open move: cuRobo's plan checked and run exactly as checked (dc.checked_pose_move) where the arm can,
     else cuRobo's own go_to_ee_pose. `held`: under the grasp's joint impedance (GRASPED_GAINS)."""
     gains = shared.GRASPED_GAINS if held else None
     if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints"):
-        return dc.checked_pose_move(ai, pos, quat, label, hold, speed, gains, keep_shape)
+        return dc.checked_pose_move(ai, pos, quat, label, hold, speed, gains, keep_shape, PUSH_MAX_JOINT_DEG)
     go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
     return ai.go_to_ee_pose(pos, quat, label, orientation_hold=hold, **go_to)
 
@@ -771,7 +821,7 @@ def _run_push_exact(ai, P, label, pl, speed, held):
         say(f"  push-open: {label}: the arm is {off:.1f} deg from the checked start -- planned again from here")
         moves = {lb: (pos, quat, hold, keep) for lb, pos, quat, hold, keep in _push_moves(P)}
         pos, quat, hold, keep = moves[label]
-        ok = dc.checked_pose_move(ai, pos, quat, f"push-open: {label}", hold, speed, held, keep)
+        ok = dc.checked_pose_move(ai, pos, quat, f"push-open: {label}", hold, speed, held, keep, PUSH_MAX_JOINT_DEG)
     if not ok:
         raise Refused(f"push-open: '{label}' stopped ({getattr(ai, 'last_error', '')}) -- the arm holds where it is.")
 
