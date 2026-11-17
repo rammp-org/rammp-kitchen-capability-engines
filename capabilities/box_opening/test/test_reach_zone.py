@@ -354,6 +354,47 @@ def test_a_lid_at_another_height_gets_its_own_boundary(served, tmp_path):
     assert heights[0] == 0.32 and heights[-1] == 0.36 and heights == sorted(heights)
 
 
+def test_a_grid_goes_on_serving_a_lid_read_a_little_past_its_buckets_edge():
+    """Each frame reads the lid's height anew, and a lid near an odd centimetre reads either side of it."""
+    from box_opening import reach_zone
+
+    z = _zone(_band)  # asked for a lid at 0.30: its own bucket is 0.29 to 0.31
+    assert z.serves(0.30) and z.serves(0.291) and z.serves(0.309)
+    assert z.serves(0.311) and z.serves(0.314) and z.serves(0.289) and z.serves(0.286)  # past the edge, in the margin
+    assert not z.serves(0.316) and not z.serves(0.284)  # well outside: another grid's
+    assert not z.serves(0.32) and not z.serves(0.28) and not z.serves(0.36)
+    # a grid never serves the height its neighbour was asked at, and a height always has a grid that serves it
+    assert 0 < reach_zone.LID_Z_HOLD_M < reach_zone.LID_Z_BUCKET_M / 2
+    for mm in range(250, 400):
+        own = _zone()
+        own.lid_z = reach_zone.lid_bucket(mm / 1000.0)
+        assert own.serves(mm / 1000.0)
+    assert not Zone.blank((0.0, 1.0), (-0.5, 0.5)).serves(0.30)  # asked at no height
+
+
+def test_a_lid_read_either_side_of_a_buckets_edge_does_not_swap_the_boundary(served, tmp_path):
+    from box_opening.tasks import reach_probe
+
+    server, said, proved = served
+    for k in range(12):  # 0.311 is the 0.32 grid's, 0.309 the 0.30 grid's: frame about
+        server.hear({"box": [0.65, 0.0, 0.309 if k % 2 else 0.311]})
+        server.step()
+    assert [m["zone"]["lid_z"] for m in said if "zone" in m][:1] == [0.32]
+    assert {m["zone"]["lid_z"] for m in said if "zone" in m} == {0.32} and server.zone.lid_z == 0.32
+    assert len({top for top, _t in proved}) == 12 and {top[2] for top, _t in proved} == {0.32}  # one grid's cells
+    assert not reach_probe.zone_path("k", 0.30, tmp_path).exists()  # no second grid was begun
+    server.hear({"box": [0.65, 0.0, 0.304]})  # 16 mm under: well outside, the 0.30 grid's
+    server.step()
+    assert server.zone.lid_z == 0.30 and proved[-1][0] == (0.65, 0.0, 0.30)
+    assert _asked(Zone.from_json(reach_probe.zone_path("k", 0.32, tmp_path).read_text())) == 12  # the first is kept
+    server.hear({"box": [0.65, 0.0, 0.3145]})  # back over the edge, inside the margin: it stays
+    server.step()
+    assert server.zone.lid_z == 0.30 and _asked(server.zone) == 2
+    server.hear({"box": [0.65, 0.0, 0.3155]})  # past the margin: the 0.32 grid again, as it was kept
+    server.step()
+    assert server.zone.lid_z == 0.32 and _asked(server.zone) == 13
+
+
 def test_the_served_loop_hears_the_engines_lines_and_ends_when_it_says_or_goes(served):
     import os
 

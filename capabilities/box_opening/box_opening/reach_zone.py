@@ -42,8 +42,19 @@ STEP_M = 0.05  # a cell's side
 MARGIN_M = 0.03  # inside: nothing that does not work is nearer than this
 COARSE = 2  # the lattice asked first: every COARSE-th cell each way
 # a lid's height is read to the centimetre at best (the wrist camera read the lid 40-44 mm under the arm's
-# touch on 2026-11-12): one grid serves every lid within half this of the height it was asked at
+# touch on 2026-11-12): one grid serves every lid within half this of the height it was asked at (and
+# LID_Z_HOLD_M past that, below)
 LID_Z_BUCKET_M = 0.02
+# How far past its own bucket's edge a grid goes on serving a lid (Zone.serves). Every frame reads the lid's
+# height anew, and a lid that stands near an edge (the odd centimetres) reads either side of it from frame
+# to frame: by the bare buckets each such frame put another grid under the box, the engine's grid did not
+# serve the newest sighting, and the panel dropped "Ready" for "Hold still, checking". With this, a height
+# must pass the edge by 5 mm before the grid changes and come 5 mm back inside it before it changes back: a
+# centimetre between the two. 5 mm is a quarter of a bucket: a grid then serves lids up to 15 mm from the
+# height it was asked at, and never the height its neighbour was asked at, 20 mm away. How far a lid's
+# height scatters from frame to frame is not measured yet (2026-11-16); a scatter wider than a centimetre
+# would still swap grids.
+LID_Z_HOLD_M = 0.005
 _CHARS = {WORKS: "#", FAILS: ".", UNASKED: "?"}
 _STATES = {c: s for s, c in _CHARS.items()}
 
@@ -109,8 +120,14 @@ class Zone:
         return FAILS if ij is None else int(self.cells[ij])
 
     def serves(self, lid_z):
-        """Whether this grid is the one for a lid at `lid_z`: asked at that height's bucket."""
-        return self.lid_z is not None and abs(float(self.lid_z) - lid_bucket(lid_z)) < 1e-6
+        """Whether this grid goes on being the one for a lid at `lid_z`: the height is in the bucket the
+        grid was asked at, or past its edge by no more than LID_Z_HOLD_M. The probe keeps the grid it has
+        for as long as this holds and the engine reads the grid it was told by the same rule, so a height
+        read either side of an edge keeps one grid under the box. A lid with no grid yet gets its own
+        bucket's (lid_bucket)."""
+        if self.lid_z is None:
+            return False
+        return abs(float(self.lid_z) - float(lid_z)) <= LID_Z_BUCKET_M / 2.0 + LID_Z_HOLD_M + 1e-9
 
     def set(self, i, j, works):
         self.cells[i, j] = WORKS if works else FAILS

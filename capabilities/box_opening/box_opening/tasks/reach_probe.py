@@ -361,7 +361,11 @@ class Server:
             self.prove = bool(msg.get("prove"))
 
     def _zone_for(self, lid_z):
-        if self.zone is None or self.zone.lid_z != lid_bucket(lid_z):
+        """The grid for a lid at `lid_z`: the one in hand for as long as it serves that height (Zone.serves:
+        its own bucket and a margin past it, so a height read either side of a bucket's edge from frame to
+        frame does not swap grids, each swap a save, a load and a boundary said anew), else the one kept
+        for the height's own bucket."""
+        if self.zone is None or not self.zone.serves(lid_z):
             self.close()
             self.zone = load_zone(self.key, lid_z, self.ctx.model, self.zone_dir)
             self._tell_zone()  # what is kept for this height, at once
