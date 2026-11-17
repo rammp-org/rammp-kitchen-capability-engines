@@ -228,6 +228,34 @@ def test_a_place_the_arm_cannot_reach_is_no_rival_of_one_it_can(pink):
     assert "two places pass" in wf.find_container([f], pink, reachable=lambda top: True).why
 
 
+def test_where_no_place_is_within_reach_the_one_nearest_the_arm_alone_is_a_far_find_for_who_asks(pink):
+    """The line-up's watch (far_nearest; survey.watch_front): the user is still driving up, so a container out of
+    reach is the one to bring nearer. Replayed on the 20 wrist frames past runs kept (2026-11-16): judged with no
+    word on reach the watch found the container in 4, and in neither frame of the two runs that opened the box
+    on 2026-11-12 (a second lid-sized top stood 1.08 m out); by this rule in 14, never the wrong one."""
+    things = canister(0.30, 0.30) + canister(0.52, 0.30)  # 0.42 m and 0.60 m from the arm's base
+    f = render((0.41, 0.30, COUNTER_Z + LID_H + 0.40), (0.41 + 1e-4, 0.30, COUNTER_Z), things)
+    assert "two places pass" in wf.find_container([f], pink, check_buttons=False).why  # with no word on reach
+    # two tops, one beyond reach: the one within it, as the run's own survey takes it, and no far find
+    found = wf.find_container([f], pink, check_buttons=False, reachable=lambda top: top[0] < 0.40, far_nearest=True)
+    assert found.fix is not None, found.why
+    assert found.fix.top_xyz[0] == pytest.approx(0.30, abs=0.005) and found.far is False
+    # none within reach, one nearest the arm's base alone (the other a lid's width further and more): a fix
+    # there, marked far
+    found = wf.find_container([f], pink, check_buttons=False, reachable=lambda top: False, far_nearest=True)
+    assert found.fix is not None, found.why
+    assert found.fix.top_xyz[0] == pytest.approx(0.30, abs=0.005) and found.far is True and len(found.places) == 2
+    # ... for who asks only: a run's survey is refused there, as before
+    none = wf.find_container([f], pink, check_buttons=False, reachable=lambda top: False)
+    assert none.fix is None and "out of the arm's reach" in none.why and none.far is False
+    # none within reach and two as near as each other (0.60 m both): nothing says which, and no fix
+    things = canister(0.30, 0.52) + canister(0.52, 0.30)
+    f = render((0.41, 0.41, COUNTER_Z + LID_H + 0.40), (0.41 + 1e-4, 0.41, COUNTER_Z), things)
+    none = wf.find_container([f], pink, check_buttons=False, reachable=lambda top: False, far_nearest=True)
+    assert none.fix is None and len(none.places) == 2 and none.far is False
+    assert "out of the arm's reach" in none.why and "none is nearest the arm alone" in none.why
+
+
 def test_another_cameras_detector_names_one_of_two_places_and_the_wrist_places_it(pink):
     """Flatbot 2026-11-12 18:41: tape rolls, a bowl and a bottle on the table passed as lid-sized tops
     beside the box in all 4 of the wrist's views ("refusing to guess"), the box 33 mm from where the

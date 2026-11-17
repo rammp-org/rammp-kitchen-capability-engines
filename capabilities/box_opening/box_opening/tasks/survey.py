@@ -1517,17 +1517,17 @@ LINE_UP_VIEW = "line-up:view"
 LINE_UP_REST = "line-up:rest"
 
 
-def _fix_line(fix, age_s):
+def _fix_line(fix, age_s, far=False):
     """A fix as the engine's line-up reads it (tasks/box_watch's line): the lid's top, the table it was read
-    on, how old the frame is, and `rough` for a lid the view cut (enough to say which way to move, never to
-    ask on)."""
+    on, how old the frame is, and `rough` for a lid the view cut or one out of the arm's reach (`far`:
+    WristFind.far): enough to say which way to move, never to ask on."""
     table_z = float(fix.table_z_scene)
     return {
         "fix": {
             "xyz": [round(float(v), 4) for v in fix.top_xyz],
             "table_z": round(table_z, 4) if math.isfinite(table_z) else None,
             "age_s": round(max(0.0, float(age_s)), 3),
-            "rough": bool(getattr(fix, "partial", "") or getattr(fix, "rough", False)),
+            "rough": bool(far or getattr(fix, "partial", "") or getattr(fix, "rough", False)),
             "by": "wrist",
         }
     }
@@ -1538,8 +1538,10 @@ def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camer
     look flies, to the front view that shows the most of where the arm presses (angled_views' first; the
     one at `hint`, where the scene camera has the box, before it), and from there every wrist frame judged
     as it comes until `stop()`, the user driving the chair the while. Each frame is judged alone (the box
-    moves between them), and with no test of reach: a box the arm cannot reach is the one the user is told
-    to bring nearer. `say(line)`: a fix for each frame that shows the container (_fix_line), "none" and why
+    moves between them). A lid-sized top out of the arm's reach is no rival of one within it, as in the run's
+    own survey (_within_reach); where none is within reach, the one nearest the arm alone is said roughly
+    (wrist_finder's far_nearest): a box the arm cannot reach is the one the user is told to bring nearer.
+    `say(line)`: a fix for each frame that shows the container (_fix_line), "none" and why
     at most every LINE_UP_NONE_S where one does not. `also()`: called on a frame that shows none (the scene
     camera's own look, which may see what the wrist does not).
 
@@ -1569,20 +1571,21 @@ def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camer
     runner.wait_still(view.name)
     n = found = 0
     said_none = None
+    within = _within_reach(model)
     while not stop():
         frame, snap, _pose, why = grab_frame(node, watcher, None, view.name, n=1, timeout_s=LINE_UP_FRAME_S)
-        fix = None
+        fix, far = None, False
         if frame is not None:
             n += 1
-            find = wf.find_container([frame], model, check_buttons=False)
-            fix, why = find.fix, find.why
+            find = wf.find_container([frame], model, check_buttons=False, reachable=within, far_nearest=True)
+            fix, why, far = find.fix, find.why, find.far
         if fix is not None:
             found += 1
             age = 0.0
             if node is not None and getattr(snap, "color_stamp", None) is not None:
                 stamp = snap.color_stamp
                 age = (node.get_clock().now().nanoseconds - (int(stamp.sec) * 10**9 + int(stamp.nanosec))) / 1e9
-            say(_fix_line(fix, age))
+            say(_fix_line(fix, age, far=far))
             continue
         if also is not None:
             also()

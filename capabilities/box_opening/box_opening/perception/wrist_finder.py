@@ -208,6 +208,9 @@ class WristFind:
     frames: int = 0
     counters: int = 0  # frames that showed a counter
     timing_s: dict = field(default_factory=dict)
+    # the fix is of a place OUT of the arm's reach, the nearest the arm alone (find_container's far_nearest):
+    # enough to say which way to bring it, never a place to open a container at
+    far: bool = False
 
 
 def lift(frame, max_range=MAX_RANGE_M):
@@ -627,7 +630,15 @@ def _nearest_alone(live, seen_at, d_lid):
     return None
 
 
-def find_container(frames, model, check_buttons=True, reachable=None, seen_at=None):
+def _nearest_arm_alone(live, d_lid):
+    """The one of the places `live` that stands nearest the arm's base ((0, 0) of the planning frame), every
+    other at least a lid's width further from it (_nearest_alone's margin); or None."""
+    by = sorted(live, key=lambda q: math.hypot(q.xy[0], q.xy[1]))
+    d = [math.hypot(q.xy[0], q.xy[1]) for q in by[:2]]
+    return by[0] if len(d) < 2 or d[1] >= d[0] + d_lid else None
+
+
+def find_container(frames, model, check_buttons=True, reachable=None, seen_at=None, far_nearest=False):
     """The container in wrist frames (WristFrame, one or more), as a WristFind: its `fix` a
     scene_source.SceneFix with source "wrist" — or None, and `why`, when no counter shows,
     nothing on it is the container, the one lid-sized top shows no button where the view
@@ -637,7 +648,9 @@ def find_container(frames, model, check_buttons=True, reachable=None, seen_at=No
     place counts): a place it calls out of reach is no candidate beside one it does not, and where
     none is within reach there is no fix (it says so). `seen_at` ((x, y) where another camera's detector has
     the container, or None): of several places that pass, the one it names alone (_nearest_alone) is
-    taken, placed by the wrist's own points."""
+    taken, placed by the wrist's own points. `far_nearest` (the line-up's watch, whose user is still driving
+    up; it needs `reachable`): where NO place is within reach, the one nearest the arm's base alone
+    (_nearest_arm_alone) is the fix all the same, the find marked `far`; none nearest alone, and no fix."""
     import time
 
     from box_opening.models.container import ContainerPose
@@ -663,6 +676,7 @@ def find_container(frames, model, check_buttons=True, reachable=None, seen_at=No
     passing = [p for p in patches if not p.why]
     places = tuple(_place(g) for g in _pool(passing, d_lid))
     live = [q for q in places if q.button != "none"]
+    far = False
 
     def refuse(why):
         return WristFind(
@@ -696,10 +710,20 @@ def find_container(frames, model, check_buttons=True, reachable=None, seen_at=No
         # (reach_press.out_of_reach), the arm's kinematic bound and no number of the scene's.
         near = [q for q in live if reachable((q.xy[0], q.xy[1], q.top_z))]
         if not near:
-            return refuse(
-                "the lid-sized top%s at %s stand%s out of the arm's reach"
-                % ("s" if len(live) > 1 else "", " and ".join(_xy(q) for q in live[:3]), "" if len(live) > 1 else "s")
+            out = "the lid-sized top%s at %s stand%s out of the arm's reach" % (
+                "s" if len(live) > 1 else "",
+                " and ".join(_xy(q) for q in live[:3]),
+                "" if len(live) > 1 else "s",
             )
+            if not far_nearest:
+                return refuse(out)
+            # The line-up's watch: nothing is opened from this find, the user is told which way to bring the
+            # container. The one nearest the arm is the one being brought to it, where it is nearest alone
+            # (the 20 wrist frames past runs kept, replayed 2026-11-16: the container in 14, never another top).
+            nearest = _nearest_arm_alone(live, d_lid)
+            if nearest is None:
+                return refuse("%s, and none is nearest the arm alone: refusing to guess" % out)
+            near, far = [nearest], True
         live = near
     if len(live) > 1:
         boxed = [q for q in live if any(p.boxed for p in q.patches)]
@@ -770,8 +794,10 @@ def find_container(frames, model, check_buttons=True, reachable=None, seen_at=No
         *_n(len(frames)),
         q.button,
     )
+    if far:
+        why += "; out of the arm's reach, the nearest the arm"
     return WristFind(
-        fix, why, conf, q.button_xyz, tuple(clouds), places, tuple(patches), len(frames), len(counters), timing
+        fix, why, conf, q.button_xyz, tuple(clouds), places, tuple(patches), len(frames), len(counters), timing, far
     )
 
 

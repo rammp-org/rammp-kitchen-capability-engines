@@ -62,12 +62,19 @@ def front(monkeypatch):
 
     monkeypatch.setattr(sv, "grab_frame", grab)
 
-    def find(frames, model, check_buttons=True, reachable=None, seen_at=None):
-        assert len(frames) == 1 and check_buttons is False and reachable is None  # each frame alone, no reach test
+    def find(frames, model, check_buttons=True, reachable=None, seen_at=None, far_nearest=False):
+        # each frame alone; a top out of the arm's reach no rival of one within it, and where none is within it
+        # the nearest alone (the run's own word on reach: survey._within_reach)
+        assert len(frames) == 1 and check_buttons is False and reachable is w.within and far_nearest is True
         got = w.finds.pop(0) if w.finds else "no lid-sized top"
-        return SimpleNamespace(fix=None if isinstance(got, str) else got, why=got if isinstance(got, str) else "found")
+        far = bool(getattr(got, "far", False))
+        return SimpleNamespace(
+            fix=None if isinstance(got, str) else got, why=got if isinstance(got, str) else "found", far=far
+        )
 
     monkeypatch.setattr(wf, "find_container", find)
+    w.within = lambda top: True
+    monkeypatch.setattr(sv, "_within_reach", lambda model: w.within)
     return w
 
 
@@ -116,6 +123,54 @@ def test_a_lid_the_view_cuts_is_said_roughly_and_no_box_no_oftener_than_its_peri
     front.asked.clear()
     _watch(front, 30)  # thirty frames in a moment, none showing a box
     assert len([m for m in front.said if "none" in m]) == 1 and front.also == 30
+
+
+def test_a_container_out_of_the_arms_reach_is_said_roughly(front):
+    """A far find (none within the arm's reach, this one nearest the arm alone: wrist_finder's far_nearest) says
+    which way to move and is never asked on."""
+    far = _fix((1.05, 0.0, 0.315))
+    far.far = True
+    front.finds = [far, _fix((0.65, 0.0, 0.315))]
+    _watch(front, 2)
+    assert [(m["fix"]["xyz"][0], m["fix"]["rough"]) for m in front.said] == [(1.05, True), (0.65, False)]
+
+
+def test_a_second_lid_sized_top_beyond_the_arms_reach_does_not_blind_the_watch(monkeypatch):
+    """The real finder on a frame of two lid-sized tops (2026-11-12's table: a second one 1.08 m out). The watch
+    as first written judged each frame with no word on reach: "two places pass", and never a fix. One within
+    reach is the container; none within reach, the one nearest the arm alone, roughly."""
+    from test_wrist_finder import COUNTER_Z, LID_H, PINK, canister, render
+
+    from box_opening.models.container import ContainerModel
+    from box_opening.perception import wrist_finder as wf
+    from box_opening.runtime import approach
+
+    model = ContainerModel.load(PINK)
+    frame = render(
+        (0.41, 0.30, COUNTER_Z + LID_H + 0.40),
+        (0.41 + 1e-4, 0.30, COUNTER_Z),
+        canister(0.30, 0.30) + canister(0.52, 0.30),
+    )
+    assert "two places pass" in wf.find_container([frame], model, check_buttons=False).why
+    grabbed = []
+    monkeypatch.setattr(
+        sv, "grab_frame", lambda *a, **k: grabbed.append(1) or (frame, SimpleNamespace(color_stamp=None), None, None)
+    )
+    monkeypatch.setattr(sv, "fly_view", lambda *a, **k: ("flown", None))
+    monkeypatch.setattr(sv, "angled_views", lambda *a, **k: ([_view()], None, {}))
+    monkeypatch.setattr(sv, "camera_of", lambda watcher, name=None: object())
+    monkeypatch.setattr(sv, "FrontBand", lambda check, rest: "band")
+    monkeypatch.setattr(approach, "body_check", lambda: object())
+    monkeypatch.setattr(approach, "_chain", lambda: object())
+    for within, rough in ((lambda top: top[0] < 0.40, False), (lambda top: False, True)):
+        monkeypatch.setattr(sv, "_within_reach", lambda model, w=within: w)
+        said = []
+        grabbed.clear()
+        ctx = SimpleNamespace(client=FakeClient(), model=model)
+        sv.watch_front(None, ctx, Runner(), object(), True, said.append, lambda: len(grabbed) >= 1)
+        (line,) = (m for m in said if "fix" in m or "none" in m)
+        assert "fix" in line, line
+        assert line["fix"]["xyz"][0] == pytest.approx(0.30, abs=0.005) and line["fix"]["rough"] is rough
 
 
 @pytest.mark.parametrize(
