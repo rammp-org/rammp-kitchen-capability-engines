@@ -422,9 +422,27 @@ def _say(line, to=None):
     to.flush()
 
 
+# How far the probe lowers its own priority as it starts (os.nice's step). It computes one proof after
+# another for as long as a line-up lasts, a core's worth, beside the arm's driver, and this computer has lost
+# that driver under CPU load before. 10 is half the way to the lowest: everything at the ordinary priority
+# (the driver, the planner, the run and its cameras) goes first, and what is niced further (the video
+# encoder's 19) still gives way to a proof the user is waiting on.
+NICE = 10
+
+
+def _lower_priority():
+    """The probe's own process niced by NICE. Where that is not this user's or this platform's to do, the
+    probe works on at the priority it was started with: a proof late is worth more than none."""
+    try:
+        os.nice(NICE)
+    except (AttributeError, OSError) as e:
+        log.warning("reach_probe: not niced (%s): it runs at the priority it was started with" % e)
+
+
 def main(argv=None):
     from box_opening.tasks import cli_common
 
+    _lower_priority()  # before anything is computed: --serve, a fill and --at alike
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--urdf", required=True, help="the arm's URDF (the robot's own, as /arm/robot_description has it)")
     ap.add_argument("--root", default="arm_mount", help="the URDF's root, the planning frame")

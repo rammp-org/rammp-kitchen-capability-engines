@@ -318,6 +318,30 @@ def test_the_served_loop_hears_the_engines_lines_and_ends_when_it_says_or_goes(s
     assert [m["proof"]["ok"] for m in said if "proof" in m] == [True]
 
 
+def test_the_probe_lowers_its_own_priority_before_it_works_and_works_on_where_it_may_not(monkeypatch, capsys):
+    """It runs proofs back to back beside the arm's driver: whatever it is asked, it is niced first."""
+    import os
+
+    from box_opening.tasks import reach_probe
+
+    did = []
+    monkeypatch.setattr(os, "nice", lambda by: did.append(("nice", by)))
+    monkeypatch.setattr(reach_probe, "setup", lambda *_a: did.append("setup") or (None, None))
+    monkeypatch.setattr(reach_probe, "press_plans", lambda *_a, **_k: did.append("proof") or (True, "", 15))
+    argv = ["--urdf", "arm.urdf", "--container", "box.yaml", "--at", "0.65", "0.0", "0.315"]
+    assert reach_probe.main(argv) == 0
+    assert did == [("nice", 10), "setup", "proof"] and reach_probe.NICE == 10
+
+    def refused(_by):
+        raise PermissionError("not this user's to change")
+
+    monkeypatch.setattr(os, "nice", refused)
+    assert reach_probe.main(argv) == 0  # a proof at the priority it was started with, not none
+    monkeypatch.delattr(os, "nice")  # a platform that has no niceness
+    assert reach_probe.main(argv) == 0
+    assert capsys.readouterr().out.count('"ok": true') == 3
+
+
 # -- kept on disk --------------------------------------------------------------------------
 def test_a_grid_is_kept_and_read_back_only_for_what_it_was_asked_of(tmp_path):
     from box_opening.tasks import reach_probe
