@@ -200,9 +200,7 @@ def measure_bar_front_normal(depth_mm, K, base_T_cam, handle_mask, edge_trim_px=
     if off > MAX_OFF_CAMERA_DEG:
         problems.append(f"the normal faces {off:.0f} deg away from the camera (max {MAX_OFF_CAMERA_DEG:.0f})")
     if problems:
-        raise DoorNormalError(
-            f"door normal from the bar's front (yaw {res.yaw_deg:+.1f} deg): " + "; ".join(problems)
-        )
+        raise DoorNormalError(f"door normal from the bar's front (yaw {res.yaw_deg:+.1f} deg): " + "; ".join(problems))
     return res
 
 
@@ -311,8 +309,12 @@ def _footprint(P, R, t, model):
     lo, hi = model[4], model[5]
     m = FOOTPRINT_MARGIN_M
     return (
-        (M[:, 0] > lo[0] - m) & (M[:, 0] < hi[0] + m) & (M[:, 1] > lo[1] - m) & (M[:, 1] < hi[1] + m)
-        & (M[:, 2] > lo[2] - FOOTPRINT_FRONT_M) & (M[:, 2] < hi[2] + FOOTPRINT_BEHIND_M)
+        (M[:, 0] > lo[0] - m)
+        & (M[:, 0] < hi[0] + m)
+        & (M[:, 1] > lo[1] - m)
+        & (M[:, 1] < hi[1] + m)
+        & (M[:, 2] > lo[2] - FOOTPRINT_FRONT_M)
+        & (M[:, 2] < hi[2] + FOOTPRINT_BEHIND_M)
     )
 
 

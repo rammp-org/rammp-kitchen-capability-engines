@@ -61,8 +61,10 @@ def test_every_tilt_from_40_up_to_40_down_keeps_the_pads_on_the_bar(side):
     assert [c["pitch"] for c in cands] == list(F.SIDE_TILTS_DEG)
     assert min(F.SIDE_TILTS_DEG) == -40 and max(F.SIDE_TILTS_DEG) == 40
     assert F.SIDE_TILTS_DEG[0] == 0  # level first: what ran on the arm
-    pads = [c["pos"] + R.from_quat(c["quat"]).as_matrix()[:, 2] * shared.GRASP_PADS_PAST_TOOL
-            for c in cands]
+    pads = [
+        c["pos"] + R.from_quat(c["quat"]).as_matrix()[:, 2] * shared.GRASP_PADS_PAST_TOOL
+        for c in cands
+    ]
     for c, p in zip(cands, pads, strict=True):
         np.testing.assert_allclose(p, pads[0], atol=1e-9)
         nose = R.from_quat(c["quat"]).as_matrix()[:, 2][2]  # + tilt: nose down
@@ -78,8 +80,14 @@ def test_the_door_file_is_the_front_grasps_so_the_close_reads_it_the_same(side):
         _, h, _, _ = shared.FIND_HINGE(HANDLE, HANDLE_QUAT, NORMAL, None)
         level = np.asarray(shared.grasp_pose(h, HANDLE_QUAT, NORMAL, 0)[1].position)
     front = open_door.closed_door(geom, h, level)
-    for k in ("closed_grasp_pos", "closed_handle", "hinge", "face_behind_grasp", "door_t",
-              "door_past_handle"):
+    for k in (
+        "closed_grasp_pos",
+        "closed_handle",
+        "hinge",
+        "face_behind_grasp",
+        "door_t",
+        "door_past_handle",
+    ):
         np.testing.assert_allclose(door[k], front[k], atol=1e-9)
     # the door's angle is read from where the hand holds the bar, however it turned about it
     pos, quat = side_grasp.swing_poses(cand, FridgeModel(door).df, 60.0, 25.0, [60.0])[0]
@@ -146,10 +154,12 @@ def test_the_side_back_off_slides_off_the_bar_then_out_then_to_the_front_grasps_
     assert float((back.pos - pos) @ n60) > 0  # off the bar away from the door's face, never into it
     np.testing.assert_allclose(out.pos, back.pos + n60 * F.SIDE_BACK_OUT_M, atol=1e-9)
     # where the front grasp's back-off ends: its hold carried round with the door, BACK_OFF_M back
-    p, q = push_open._swung(model.df, np.asarray(cand["front"][:3]), np.asarray(cand["front"][3:]),
-                            60.0)
-    np.testing.assert_allclose(front.pos, p - R.from_quat(q).as_matrix()[:, 2] * F.BACK_OFF_M,
-                               atol=1e-9)
+    p, q = push_open._swung(
+        model.df, np.asarray(cand["front"][:3]), np.asarray(cand["front"][3:]), 60.0
+    )
+    np.testing.assert_allclose(
+        front.pos, p - R.from_quat(q).as_matrix()[:, 2] * F.BACK_OFF_M, atol=1e-9
+    )
     assert any(b["name"].startswith("handle") for b in front.world)  # round the handle too
 
 

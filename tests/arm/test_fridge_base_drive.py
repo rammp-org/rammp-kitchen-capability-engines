@@ -11,7 +11,11 @@ from functools import partial
 import pytest
 from door_common import common as dc
 from fridge import base_drive, close_door, constants, open_door, push_open
-from fridge_fake import door_is_open, door_where_it_stands, fridge  # noqa: F401 -- fridge: the fixture
+from fridge_fake import (  # noqa: F401 -- fridge: the fixture
+    door_is_open,
+    door_where_it_stands,
+    fridge,
+)
 
 from capability_engine import BaseError, StateTimeout
 from capability_engine.engine import Cancelled
@@ -300,7 +304,9 @@ def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(fridge, cl
     arm, planner, _ = fridge
     arm.unreachable = _needs_a_move
     base, drive = _driver(clock, arm)
-    assert open_door.run(arm, planner, False, drive_chair=drive)  # a dry run: says it will drive, drives nothing
+    assert open_door.run(
+        arm, planner, False, drive_chair=drive
+    )  # a dry run: says it will drive, drives nothing
     assert "DRIVES THE BASE" in push_open.NEXT_STEP and base.sent == [] and arm.sent == []
     m = re.search(r"DRIVES THE BASE ~(\d+) cm (back|forward)", push_open.NEXT_STEP)
     planned = int(m.group(1)) * (1 if m.group(2) == "back" else -1)
@@ -321,7 +327,10 @@ def test_the_open_drives_the_base_for_the_push_and_pushes_in_one_goal(fridge, cl
     moved = -base.x
     assert abs(moved * 100 - planned) <= 1
     door = json.loads(dc.DOOR_FILE.read_text())
-    assert door["door_open_deg"] == constants.PUSH_OPEN_TO_DEG and door["push_after_chair_move"] is None
+    assert (
+        door["door_open_deg"] == constants.PUSH_OPEN_TO_DEG
+        and door["push_after_chair_move"] is None
+    )
     assert seen["push_after_chair_move"] == pytest.approx(moved)  # the drive really made
     assert door["hinge"][0] == pytest.approx(seen["hinge"][0] + moved)  # the door where it now is
 
@@ -334,7 +343,9 @@ def test_an_open_whose_drive_stops_leaves_no_push_waiting(fridge, clock):
         open_door.run(arm, planner, True, drive_chair=drive)
     assert base.vx == 0.0 and arm.gripper_pos == 0.0  # off the handle, base stopped
     assert json.loads(dc.DOOR_FILE.read_text()).get("push_after_chair_move") is None
-    with pytest.raises(dc.Refused, match="no push waiting"):  # a chair_moved goal can't push the wrong door
+    with pytest.raises(
+        dc.Refused, match="no push waiting"
+    ):  # a chair_moved goal can't push the wrong door
         open_door.run(arm, planner, True, chair_moved=True)
 
 

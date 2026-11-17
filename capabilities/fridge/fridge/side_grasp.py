@@ -254,7 +254,9 @@ def swing_worlds(model, degs):
     for d in degs:
         if current is None or d - start > F.SIDE_SWING_CHECK_DEG + 1e-9:
             start = out[-1][2] if out else 0.0
-            current = (f"the door at {start:.0f} deg (the hand's window: its face recessed, no handle)",
-                       hold_world(model, (start,)))
+            current = (
+                f"the door at {start:.0f} deg (the hand's window: its face recessed, no handle)",
+                hold_world(model, (start,)),
+            )
         out.append((*current, d))
     return [(label, world) for label, world, _ in out]

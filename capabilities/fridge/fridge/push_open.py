@@ -83,8 +83,17 @@ def back_off_goals(model, deg, pose):
     # turned along the door ends the move on it (11-10 sim: J6 114 of 119.7 deg, no plan could start from there)
     out = np.r_[model.df._rot(deg) @ model.df.n, 0.0]
     pos_out = back.pos + out * F.SIDE_BACK_OUT_M
-    goals = [back, pl.free(pos_out, S.unbend(pos_out, back.quat), f"{F.SIDE_BACK_OUT_M * 100:.0f} cm out from the door",
-                           back.world, blend=0.03, world_label=back.world_label)]
+    goals = [
+        back,
+        pl.free(
+            pos_out,
+            S.unbend(pos_out, back.quat),
+            f"{F.SIDE_BACK_OUT_M * 100:.0f} cm out from the door",
+            back.world,
+            blend=0.03,
+            world_label=back.world_label,
+        ),
+    ]
     # then (cuRobo, round the door and its handle) to where the front grasp's back-off would have left the hand -- in
     # front of the handle, facing the door, straight off it: the push-open (and what follows a full pull) go on from
     # there as they do after the front grasp. From the side grasp's own end the arm is in a configuration the push
@@ -93,8 +102,16 @@ def back_off_goals(model, deg, pose):
     if front is not None:
         p, q = _swung(model.df, np.asarray(front[:3], float), np.asarray(front[3:7], float), deg)
         off = p - R.from_quat(q).as_matrix()[:, 2] * F.BACK_OFF_M
-        goals.append(pl.free(off, q, "in front of the handle, as after a front grasp", model.full(deg), blend=0.03,
-                             world_label="the open door"))
+        goals.append(
+            pl.free(
+                off,
+                q,
+                "in front of the handle, as after a front grasp",
+                model.full(deg),
+                blend=0.03,
+                world_label="the open door",
+            )
+        )
     return goals
 
 
@@ -112,13 +129,30 @@ def back_off_goal(model, deg, pose):
     if F.GRASP == "side":  # back along the hand's own axis (the fingers' way off the bar, and away from the door
         # whatever the hand's turn on the bar: side_grasp.swing_poses' lag), only until the bar is past the fingertips
         label = f"back {F.SIDE_BACK_OFF_M * 100:.0f} cm off the handle"
-        return pl.line(pos - approach * F.SIDE_BACK_OFF_M, quat, label, S.hold_world(model, (deg,)), contact=False,
-                       blend=0.03, world_label="the door, the side grasp's window (face recessed)")
-    world = model.holding((deg,), model.df.u_handle, float(model.door.get("handle_mid_z", model.door["closed_handle"][2])),
-                          F.HAND_WINDOW_U_M, F.HAND_WINDOW_Z_M)
+        return pl.line(
+            pos - approach * F.SIDE_BACK_OFF_M,
+            quat,
+            label,
+            S.hold_world(model, (deg,)),
+            contact=False,
+            blend=0.03,
+            world_label="the door, the side grasp's window (face recessed)",
+        )
+    world = model.holding(
+        (deg,),
+        model.df.u_handle,
+        float(model.door.get("handle_mid_z", model.door["closed_handle"][2])),
+        F.HAND_WINDOW_U_M,
+        F.HAND_WINDOW_Z_M,
+    )
     return pl.line(
-        pos - approach * F.BACK_OFF_M, quat, f"back {F.BACK_OFF_M * 100:.0f} cm off the handle", world,
-        contact=False, blend=0.03, world_label="the door, hand window",
+        pos - approach * F.BACK_OFF_M,
+        quat,
+        f"back {F.BACK_OFF_M * 100:.0f} cm off the handle",
+        world,
+        contact=False,
+        blend=0.03,
+        world_label="the door, hand window",
     )
 
 
@@ -144,27 +178,54 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
     if via_from is not None:
         d = df._rot(deg0).T @ (np.asarray(via_from[:2]) - df.hinge[:2])
         v_out = max(float(d @ df.n) - df.mid, F.AROUND_OUT_M)
-        goals.append(pl.free(df.pos(df.length + F.PUSH_OPEN_EDGE_CLEAR_M, v_out, deg0, float(via_from[2])), q_in,
-                             "past the free edge", route_world, blend=0.06, world_label="the open door"))
-    goals.append(pl.free(df.pos(u_push, v_in, deg0, z_in), q_in, "in behind the door", route_world, blend=0.02,
-                         world_label="the open door"))
+        goals.append(
+            pl.free(
+                df.pos(df.length + F.PUSH_OPEN_EDGE_CLEAR_M, v_out, deg0, float(via_from[2])),
+                q_in,
+                "past the free edge",
+                route_world,
+                blend=0.06,
+                world_label="the open door",
+            )
+        )
+    goals.append(
+        pl.free(
+            df.pos(u_push, v_in, deg0, z_in),
+            q_in,
+            "in behind the door",
+            route_world,
+            blend=0.02,
+            world_label="the open door",
+        )
+    )
     # the push: ONE leg onto the inner face and round with the door (the hand held in the door's frame, a pose every
     # PUSH_OPEN_POINT_DEG) to exactly PUSH_OPEN_TO_DEG, where it comes to REST, still against the door: the door isn't
     # held, so a hand still moving at 90 would let it coast on past. Its last PUSH_EASE_DEG at most PUSH_END_JOINT_SPEED
     # whatever the goal's speed (push_caps), so the door is as slow at the end however fast the push ran
     n = max(1, int(np.ceil((F.PUSH_OPEN_TO_DEG - deg0) / F.PUSH_OPEN_POINT_DEG)))
     degs = [deg0] + [deg0 + (F.PUSH_OPEN_TO_DEG - deg0) * k / n for k in range(1, n + 1)]
-    poses = [(df.pos(u_push, v_push, d, z_in), q_in if k == 0 else hand_quat(df, d, approach_deg, y_up))
-             for k, d in enumerate(degs)]
+    poses = [
+        (df.pos(u_push, v_push, d, z_in), q_in if k == 0 else hand_quat(df, d, approach_deg, y_up))
+        for k, d in enumerate(degs)
+    ]
     worlds = {}
     for d in degs:
         if d not in worlds:  # each step against the door where it is then: its front panel, edges, inner part all but
             # round the hand
-            worlds[d] = (f"the door at {d:.0f} deg (its front and edges; the hand's window left out)",
-                         model.pushed(d, u_push, z_in, *F.PUSH_DOOR_WINDOW_M, F.PUSH_DOOR_PANEL_M))
-    goals.append(pl.through(poses, f"onto the inner face, push to {F.PUSH_OPEN_TO_DEG} deg and stop there",
-                            model.cabinet(), caps=push_caps(degs), world_label="the cabinet (pushing)",
-                            segment_worlds=[worlds[d] for d in degs]))
+            worlds[d] = (
+                f"the door at {d:.0f} deg (its front and edges; the hand's window left out)",
+                model.pushed(d, u_push, z_in, *F.PUSH_DOOR_WINDOW_M, F.PUSH_DOOR_PANEL_M),
+            )
+    goals.append(
+        pl.through(
+            poses,
+            f"onto the inner face, push to {F.PUSH_OPEN_TO_DEG} deg and stop there",
+            model.cabinet(),
+            caps=push_caps(degs),
+            world_label="the cabinet (pushing)",
+            segment_worlds=[worlds[d] for d in degs],
+        )
+    )
     # then, from rest, straight off the inner face -- the close starts from there, the door left at 90 stays -- and on
     # to in front of the fridge (`finish`), one more leg
     deg = float(F.PUSH_OPEN_TO_DEG)
@@ -173,8 +234,15 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
     if finish is not None:
         off.append((np.asarray(finish[0], float), np.asarray(finish[1], float)))
         label += ", then in front of the fridge"
-    goals.append(pl.through(off, label, model.cabinet(), world_label="the cabinet (off the door)",
-                            segment_worlds=[worlds[deg]] * len(off)))
+    goals.append(
+        pl.through(
+            off,
+            label,
+            model.cabinet(),
+            world_label="the cabinet (off the door)",
+            segment_worlds=[worlds[deg]] * len(off),
+        )
+    )
     return goals
 
 
@@ -250,7 +318,7 @@ def swept_world(door, move, chair_dir, skip_start=False):
     points then run from one step along the move to its end): the arm is already there, maybe within the planner's
     padding of it, and every plan would refuse its start for a door the move takes away."""
     out = []
-    steps = np.linspace(0.0, move, F.CHAIR_MOVE_STEPS + int(skip_start))[int(skip_start):]
+    steps = np.linspace(0.0, move, F.CHAIR_MOVE_STEPS + int(skip_start))[int(skip_start) :]
     for k, s in enumerate(steps):
         m = FridgeModel(shifted(door, float(s), chair_dir), prefix=f"m{k}_")
         deg = float(door["door_open_deg"])
@@ -307,8 +375,10 @@ class PushOpen:
                 self.motion, self.push = off, push
             return True, f"push-open OK, {_after(move)} ({self.describe()}); the push {self.finish}"
         if len(self.moves) == 1:
-            return False, (f"push-open: no hand placement behind the door plans without a wheelchair move "
-                           f"(base_moves false; last: {why})")
+            return False, (
+                f"push-open: no hand placement behind the door plans without a wheelchair move "
+                f"(base_moves false; last: {why})"
+            )
         moves = ", ".join(f"{m * 100:+.0f}" for m in self.moves)
         return False, f"push-open: no hand placement behind the door plans (wheelchair moves {moves} cm; last: {why})"
 
@@ -426,8 +496,9 @@ def push_after_chair_move(ai, planner, execute, chair_dir):
     deg0 = float(moved["door_open_deg"])
     pose = (np.asarray(st["ee_pos"][:3]), np.asarray(st["ee_pos"][3:7]))
     planner.search()  # a new search: the base's drive (or the goal before) doesn't count against it
-    motion, placed, finish = plan_finished_push(planner, moved, st["position"], pose, model.full(deg0), model,
-                                                from_arm=True)
+    motion, placed, finish = plan_finished_push(
+        planner, moved, st["position"], pose, model.full(deg0), model, from_arm=True
+    )
     if motion is None:
         raise Refused(
             f"no hand placement behind the door plans from here, with the door {_how(move)} from where it was "
@@ -460,4 +531,3 @@ def planned_door_after(door, push, after):
     if push and after is not None and after.chair_move:
         out = shifted(out, after.chair_move, after.chair_dir)
     return out
-

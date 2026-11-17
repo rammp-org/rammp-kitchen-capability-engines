@@ -27,6 +27,7 @@ LIMIT_MARGIN_RAD = 0.1  # cuRobo's joint_limit_margin_rad: a goal this close to 
 NS_WEIGHTS = np.array([0.0, 1.0, 0.0, 1.0, 0.0, 4.0, 0.0])
 NS_ACTIVE_RAD = np.radians([180.0, 110.0, 180.0, 120.0, 180.0, 60.0, 180.0])  # ... only past these (|q|): J2, J4, J6
 NS_STEP_RAD = np.radians(3.0)  # at most this much null-space turn per solve: the elbow drifts, never jumps
+IK_BATCH_TOL_RAD = np.radians(2.0)  # ik_batch's default orientation tolerance
 
 
 def _floats(el, attr, default):
@@ -147,7 +148,7 @@ class Chain:
             J[:, 3:, k] += z
         return tip, T[:, :3, :3], J
 
-    def ik_batch(self, pos, quat, q_seed, iters=30, tol_m=0.003, tol_rad=np.radians(2.0)):
+    def ik_batch(self, pos, quat, q_seed, iters=30, tol_m=0.003, tol_rad=IK_BATCH_TOL_RAD):
         """ik() for many targets at once: tool positions `pos` (N, 3), quaternions `quat` (N, 4), seeds `q_seed`
         (N, 7) -- damped least squares, all N together (no null-space step). Returns (q (N, 7), ok (N,)): ok where it
         converged and is not within LIMIT_MARGIN_RAD of a limit."""
@@ -200,12 +201,18 @@ class Chain:
             if np.linalg.norm(e[:3]) < tol_m and np.linalg.norm(e[3:]) < tol_rad:
                 break
             if it == iters:
-                return None, f"local IK did not converge ({np.linalg.norm(e[:3]) * 1000:.1f} mm, {np.degrees(np.linalg.norm(e[3:])):.1f} deg off)"
+                return (
+                    None,
+                    f"local IK did not converge ({np.linalg.norm(e[:3]) * 1000:.1f} mm, {np.degrees(np.linalg.norm(e[3:])):.1f} deg off)",
+                )
             J = self.jacobian(q)
             Jp = J.T @ np.linalg.inv(J @ J.T + IK_DAMP**2 * np.eye(6))
             q = q + np.clip(Jp @ e, -IK_MAX_STEP_RAD, IK_MAX_STEP_RAD)
         near = (q < self.lower + LIMIT_MARGIN_RAD) | (q > self.upper - LIMIT_MARGIN_RAD)
         if near.any():
             k = int(np.argmax(near))
-            return None, f"J{k + 1} at {np.degrees(q[k]):.0f} deg, within {np.degrees(LIMIT_MARGIN_RAD):.0f} deg of its limit"
+            return (
+                None,
+                f"J{k + 1} at {np.degrees(q[k]):.0f} deg, within {np.degrees(LIMIT_MARGIN_RAD):.0f} deg of its limit",
+            )
         return q, ""

@@ -10,3 +10,5 @@ select = ["E", "F", "W", "I", "B", "UP", "T20"]
 [lint.per-file-ignores]
 "scripts/*" = ["T20"]
 "tests/*" = ["T20"]
+# The fridge tests import the `fridge` pytest fixture and take it as a parameter of that name.
+"tests/arm/test_fridge_*.py" = ["F811"]

@@ -419,4 +419,3 @@ def test_the_way_back_is_one_motion_from_the_drop_to_the_start(model):
     radii = plan.return_radii(model, moves, 0.03)
     assert len(radii) == len(moves) and radii[-1] == 0.0
     assert all(r == plan.RETURN_BLEND for r in radii[:k])  # tight by the container
-

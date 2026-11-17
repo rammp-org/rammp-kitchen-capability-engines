@@ -24,8 +24,12 @@ from fridge.planning import Planner
 from fridge.world import PlannerWorld
 
 URDF = Path("/fixtures/urdf/flatbot.urdf")  # the 30-deg flatbot arm (rammp-arm-test's fixture)
-FRIDGE_START = np.radians((98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1))  # the web app's Fridge pose
-HANDLE = np.array([0.85, -0.20, 0.30])  # in the placement that passed (MOUNTS[30]), the 11-01 handle height
+FRIDGE_START = np.radians(
+    (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
+)  # the web app's Fridge pose
+HANDLE = np.array(
+    [0.85, -0.20, 0.30]
+)  # in the placement that passed (MOUNTS[30]), the 11-01 handle height
 NORMAL = np.array([-1.0, 0.0, 0.0])  # the door square to the arm
 HANDLE_QUAT = np.array([-0.5, 0.5, 0.5, -0.5])  # door_common.perception.HANDLE_QUAT
 IK_FAIL = "MotionGenStatus.IK_FAIL: no collision-free joint solution AT the goal"
@@ -104,7 +108,10 @@ class FakeCurobo:
         obstacles = self.worlds[-1] if self.worlds else []
         self.pose_goals.append((np.asarray(pos, float), obstacles))
         if self.start_blocked:
-            return Plan(False, "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides")
+            return Plan(
+                False,
+                "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides",
+            )
         if self.unreachable(np.asarray(pos, float), np.asarray(quat, float), obstacles):
             return Plan(False, IK_FAIL)
         if hold:  # as cuRobo keeps a hold (HOLD_LEVEL: the tilt) all the way: along a straight tool path, the hand
@@ -132,7 +139,10 @@ class FakeCurobo:
                 return res
         obstacles = self.worlds[-1] if self.worlds else []
         if self.start_blocked:
-            return Plan(False, "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides")
+            return Plan(
+                False,
+                "MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION: the start state collides",
+            )
         if self.unreachable(np.asarray(pos, float), np.asarray(quat, float), obstacles):
             return Plan(False, IK_FAIL)
         return self._to(start_joints, q_goal)
@@ -151,13 +161,17 @@ class FakeCurobo:
     def set_world(self, name, even_if_cancelled=False):
         self.world_calls.append((name, even_if_cancelled))
         path = Path(name)
-        self.worlds.append(yaml.safe_load(path.read_text())["obstacles"] if path.is_file() else name)
+        self.worlds.append(
+            yaml.safe_load(path.read_text())["obstacles"] if path.is_file() else name
+        )
         return True, ""
 
     # -- the driver --
     def execute_joint_trajectory(self, names, points, **kw):
         points = list(points)
-        assert np.degrees(np.max(np.abs(np.asarray(points[0][1]) - self.q))) < 1.0, "starts away from the arm"
+        assert (
+            np.degrees(np.max(np.abs(np.asarray(points[0][1]) - self.q))) < 1.0
+        ), "starts away from the arm"
         self.sent.append(kw)
         self.q = np.asarray(points[-1][1], float)
         return types.SimpleNamespace(error_code=0, error_string="", final_error=np.zeros(7))
@@ -186,11 +200,17 @@ def fridge(request, tmp_path, monkeypatch):
 
     open_door.configure(tmp_path, 30, grasp=request.param)
     shared.configure(HANDLE_SOURCE="depth")
-    monkeypatch.setattr(shared, "detect_handle", lambda: (HANDLE.copy(), HANDLE_QUAT, NORMAL.copy(), None, None, None))
+    monkeypatch.setattr(
+        shared,
+        "detect_handle",
+        lambda: (HANDLE.copy(), HANDLE_QUAT, NORMAL.copy(), None, None, None),
+    )
     monkeypatch.setattr(planning, "_timed_events", _events_now)
     dc.set_camera(type("NoFrames", (), {"grab": lambda self: None})())
     arm = FakeCurobo()
-    planner_world = PlannerWorld(arm, tmp_path / "worlds", base_layers=["/config/robot/curobo/layer_mebot_floor.yaml"])
+    planner_world = PlannerWorld(
+        arm, tmp_path / "worlds", base_layers=["/config/robot/curobo/layer_mebot_floor.yaml"]
+    )
     yield arm, Planner(arm, planner_world, arm.fk), planner_world
     dc.set_camera(None)
     for m, v in zip((dc, shared, constants, world, motion), saved, strict=True):
