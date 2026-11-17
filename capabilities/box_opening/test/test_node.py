@@ -1307,6 +1307,33 @@ def test_with_the_wrist_look_the_run_itself_lines_up_and_goes_on_at_open(engine,
     assert phases.index("locate") > phases.index("line_up") and phases[-1] == "home"
 
 
+def test_a_run_that_has_its_go_is_stopped_when_what_comes_before_following_it_raises(engine, monkeypatch):
+    """REVIEW_RULES R3, for a run that lined up: at Open it has its go and flies. Whatever raises between
+    that and the loop that follows it (here the first progress report) must not leave it flying with no
+    cancel, no budget and no one to stop it."""
+    import threading
+
+    given(monkeypatch, FULL_RUN[:3], wait=True)
+    _wrist_lining_up(engine, monkeypatch)
+    sent, runs = [], []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), runs.append(run), real(run)))
+    ctx = FakeCtx()
+    line_up_says = ctx.progress
+
+    def progress(phase, pct, message="", pausable=True):
+        if phase != "line_up":
+            raise RuntimeError("the goal's feedback could not be published")
+        line_up_says(phase, pct, message, pausable)
+
+    ctx.progress = progress
+    threading.Timer(2.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    with pytest.raises(RuntimeError):
+        engine.execute("open_box", {}, ctx)
+    assert sent == [signal.SIGINT]  # its own stop, not a kill
+    assert runs[0].proc.poll() in (130, -signal.SIGINT) and engine._run is None  # ended by its Ctrl+C
+
+
 def test_out_of_time_the_run_is_told_so_turns_back_and_ends_and_nothing_was_pressed(engine, monkeypatch):
     given(monkeypatch, FULL_RUN)
     monkeypatch.setenv("LINE_UP", "far")

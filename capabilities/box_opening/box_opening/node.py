@@ -886,11 +886,24 @@ class Capability(CapabilityEngine):
             # nothing moves, and nothing runs but on the line-up's Open
             lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
-        ctx.progress(first, 0.0, "starting", pausable=False)
-        panel = Panel(ctx, self._ui_live)  # on the UI from now until the action ends
-        panel.say(first, 0.0, "starting")
-        panel.tick()
-        world = WorldWriter(self.get_logger())
+        try:
+            ctx.progress(first, 0.0, "starting", pausable=False)
+            panel = Panel(ctx, self._ui_live)  # on the UI from now until the action ends
+            panel.say(first, 0.0, "starting")
+            panel.tick()
+            world = WorldWriter(self.get_logger())
+        except BaseException:
+            if run_ is not None:
+                # a run that lined up has its go and flies already, and the loop that follows it (its cancel,
+                # its budget, its stop where following it raises) has not begun: its own stop here, or
+                # nothing would stop it once this goal has ended
+                try:
+                    run_.stop(CANCEL_ESCALATE_S)
+                finally:
+                    self._run = None
+                view.finish(run_.finish(), cancelled=False, timed_out=False, held=False)
+                self.get_logger().error("the run was stopped (Ctrl+C): the engine failed before it could follow it")
+            raise
         if run_ is None:
             view.start(action_id, track.instance_id)
             run_ = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
