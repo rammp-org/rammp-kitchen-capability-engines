@@ -260,3 +260,23 @@ def test_free_air_executions_fly_under_the_default_thresholds_and_the_rest_loose
         [],
     ):
         assert contact_profile_for(names) == "loose", names
+
+
+def test_the_line_ups_wrist_turns_and_the_way_ins_free_air_flown_alone_are_free_air():
+    """The line-up's wrist turn is the run's own look under another name, flown over the user's lap and stood at
+    for up to the whole line-up: the driver's DEFAULT thresholds, not LOOSE. So is the way in's free air where it
+    is an execution of its own (air_control=position: position control, no guard of the run's, nothing met on
+    purpose). With the stroke in the same execution, as it flew, the execution ends on the button: LOOSE."""
+    from box_opening.runtime.driver import contact_profile_for
+
+    assert contact_profile_for(["line-up:view"]) == contact_profile_for(["line-up:rest"]) == "default"
+    assert contact_profile_for(["reach:re-aim", "reach:slide-in", "depth:turn"]) == "default"
+    assert contact_profile_for(["reach:re-aim", "reach:slide-in"]) == "default"
+    for names in (
+        ["reach:re-aim", "reach:slide-in", "depth:approach", "depth:press"],  # the flown one-execution form
+        ["reach:re-aim", "reach:slide-in", "depth:turn", "depth:approach", "depth:press"],
+        ["depth:approach", "depth:press"],  # the stroke as an execution of its own
+        ["depth:turn", "depth:press"],
+        ["reach:look", "reach:re-aim"],  # a mix the run does not fly: not vouched for
+    ):
+        assert contact_profile_for(names) == "loose", names

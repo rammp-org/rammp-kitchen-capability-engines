@@ -188,21 +188,33 @@ def health_refusal(health):
 
 # The driver's contact monitor as a backstop (contact_detection: enforce on the arm node): its
 # thresholds per execution, by what the execution does. Free air only — the run's look, the wrist
-# survey's looks (tasks/survey), its way home, the clear before it — is held to the driver's
+# survey's looks (tasks/survey) and the line-up's wrist turns, which are the same looks flown before
+# the go (survey.LINE_UP_VIEW / LINE_UP_REST), its way home, the clear before it — is held to the driver's
 # DEFAULT; an execution that meets anything on
 # purpose (the way in to the button, the grip, the lift off the box and the set-down, the retreat
 # off the lid) to LOOSE. The planner holds no flatbot body (world_empty): a home that met it is what
 # DEFAULT stops. Observe mode stops nothing and is left at its profile; the residual's peaks per
 # execution are logged either way (Runner: driver_contact)
 CONTACT_PROFILES = {"default": 0, "sensitive": 1, "loose": 2}
-FREE_AIR_LEGS = ("reach:look", "survey", "home", "clear-margin", "retreat:home")
+FREE_AIR_LEGS = ("reach:look", "survey", "line-up", "home", "clear-margin", "retreat:home")
+# The way in's free air: the re-aim, the slide in over the lid and the turn down in place. They meet
+# nothing on purpose either, and an execution made of them alone is free air: the way in's first part
+# with air_control=position (reach_press.fly_way_in), flown in position control with no give, where
+# the driver's monitor is the one thing that would stop the arm. In the one-execution form that flew
+# the same legs run straight on into the stroke (depth:approach, depth:press), which ends on the
+# button: an execution with a stroke leg in it is not made of these alone, and stays LOOSE.
+WAY_IN_AIR_LEGS = ("reach:re-aim", "reach:slide-in", "depth:turn")
 
 
 def contact_profile_for(names):
     """The contact profile an execution of the legs `names` flies under: "default" where every
-    leg is free air (FREE_AIR_LEGS, a leg's name or its prefix), else "loose"."""
-    free = all(any(str(n) == f or str(n).startswith(f + ":") for f in FREE_AIR_LEGS) for n in names)
-    return "default" if names and free else "loose"
+    leg is free air (FREE_AIR_LEGS, a leg's name or its prefix), or every leg is of the way in's
+    free air (WAY_IN_AIR_LEGS: no stroke leg among them); else "loose"."""
+
+    def all_of(legs):
+        return all(any(str(n) == f or str(n).startswith(f + ":") for f in legs) for n in names)
+
+    return "default" if names and (all_of(FREE_AIR_LEGS) or all_of(WAY_IN_AIR_LEGS)) else "loose"
 
 
 def setpoint_position(knuckle_rad):
