@@ -14,7 +14,7 @@ import numpy as np
 import pybullet as p
 import pytest
 import rammp_arm
-from fake_driver import FLATBOT_URDF, FakeDriver, counts
+from fake_driver import FLATBOT_URDF, FakeBase, FakeDriver, counts
 from geometry_msgs.msg import TransformStamped
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import Result
@@ -37,6 +37,7 @@ from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 from capability_engine import arm as arm_module
+from capability_engine import base as base_module
 from capability_engine import engine as engine_module
 from capability_engine import sim
 from capability_engine.action_scope import TF_STATIC_QOS, ScopeClosed
@@ -79,6 +80,7 @@ class ArmEngine(CapabilityEngine):
     """One action, "run", whose execute() calls `body(engine, ctx)`."""
 
     actions = [Action("run", "Run")]
+    required_resources = ["arm", "gripper", "base"]
 
     def __init__(self, engine_id, body, **node_kwargs):
         super().__init__(engine_id, **node_kwargs)
@@ -157,6 +159,45 @@ def test_engine_has_arm_and_releases_everything(env):
     assert seen["counts"] != base
     assert counts(engine) == base
     assert len(env.fake.goals["execute_joint_trajectory"]) == 1
+
+
+def test_a_failed_action_leaves_the_base_stopped(env):
+    """An exception after a twist: the engine's end of the action sends the base zeros, and
+    destroys the publisher."""
+    fake_base = FakeBase()
+    env.executor.add_node(fake_base)
+
+    def body(engine, ctx):
+        wait_until(lambda: (engine.base.send_twist(0.3, 0.1), fake_base.received())[1])
+        raise RuntimeError("bug in execute()")
+
+    try:
+        engine = env.make(body)
+        idle = counts(engine)
+        result = env.run(engine)
+        assert (result.status, result.error_code) == (Result.STATUS_FAILED, "exception")
+        wait_until(lambda: fake_base.received()[-1][:3] == (0.0, 0.0, 0.0))
+        assert counts(engine) == idle
+    finally:
+        env.executor.remove_node(fake_base)
+        fake_base.destroy_node()
+
+
+def test_self_base_needs_base_in_required_resources(env, monkeypatch):
+    """An engine that does not declare "base" fails the action, and nothing reaches the base."""
+    monkeypatch.setattr(ArmEngine, "required_resources", ["arm", "gripper"])
+    fake_base = FakeBase()
+    env.executor.add_node(fake_base)
+    try:
+        engine = env.make(lambda engine, ctx: engine.base.send_twist(0.3, 0.1))
+        idle = counts(engine)
+        result = env.run(engine)
+        assert (result.status, result.error_code) == (Result.STATUS_FAILED, "exception")
+        time.sleep(0.2)  # a stray twist has landed
+        assert fake_base.received() == [] and counts(engine) == idle
+    finally:
+        env.executor.remove_node(fake_base)
+        fake_base.destroy_node()
 
 
 def test_token_none_until_orchestrator_sends_one(env):
@@ -917,5 +958,6 @@ def test_the_stop_budget_follows_the_arm_parameters(env):
         + 10.0
         + arm_module.CANCEL_SETTLE_S  # end_action()'s
         + 2 * arm_module.CLOSE_STREAM_WAIT_S
+        + base_module.BaseInterface.worst_settle_s()
         + engine_module.STOP_MARGIN_S
     )
