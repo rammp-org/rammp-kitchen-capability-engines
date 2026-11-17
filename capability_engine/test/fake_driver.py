@@ -64,7 +64,7 @@ from rammp_base_interfaces.msg import DriveCommand, MibStatus
 from rammp_base_interfaces.msg import TwistSetpoint as BaseTwistSetpoint
 from rammp_common_interfaces.msg import ControlStatus, EStop
 from rammp_common_interfaces.srv import AcquireControl, ReleaseControl, RevokeControl
-from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
+from rammp_curobo_interfaces.action import Blend, PlanToJoints, PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -112,8 +112,9 @@ ACTIONS = {
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),
+    "blend": (Blend, "/rammp_curobo/blend"),
 }
-PLANNER_ACTIONS = {"plan_to_pose", "plan_to_joints"}
+PLANNER_ACTIONS = {"plan_to_pose", "plan_to_joints", "blend"}
 SERVICES = {
     "open_stream": (OpenStream, "/open_stream"),
     "close_stream": (CloseStream, "/close_stream"),
@@ -483,6 +484,8 @@ class FakeDriver(Node):
             result.success = code == SUCCESSFUL and self._plan is not None
             result.message = "" if result.success else "FakeDriver: no plan_result set, or failed"
             result.trajectory = self._plan or JointTrajectory()
+            if name == "blend" and result.success:  # one corner per junction of the goal's legs
+                result.corner_m = [0.01 * (k + 1) for k in range(len(handle.request.legs) - 1)]
         else:
             result.error_code = code
             result.error_string = ERRORS.get(code, "")
