@@ -128,6 +128,7 @@ def _full_flow(
     one_motion=True,
     from_press=False,
     setdown="met",
+    touch_table=False,
 ):
     """run_reach_press as a full run (compliant --depth-press, no
     --press-only), everything faked: `aims` the wrist's aims in order, each
@@ -143,9 +144,11 @@ def _full_flow(
     set-down's watch felt (_Felt: "met", the lid met the table where the
     plan has it; "never", "held", "failed": it did not, and the lid is not
     let go; None: the real watch, which the fake client feeds nothing). The
-    table the set-down goes by is the cameras' (setdown_table_z's move is
-    its own tests': the fake chain's fk stands still, and its fingers' hold
-    says nothing of the lid's top); `rise` depth_press.rise_back_up's stand-in (None:
+    table the set-down goes by is the cameras' (the fake chain's fk stands
+    still, and its fingers' hold says nothing of the lid's top) unless
+    `touch_table`: then setdown_table_z's own, the cameras' table moved by
+    where that fk has the fingers hold the knob (_touch_table_z);
+    `rise` depth_press.rise_back_up's stand-in (None:
     back up the stroke); `at_spot_look()` what else happens at the spot
     look; `one_motion` False: the grip's lookahead plans the lift alone,
     as before the close flew on to the set-down — the lift, then the spot
@@ -195,7 +198,8 @@ def _full_flow(
             rec.planning -= 1
 
     monkeypatch.setattr(rp, "_plan_motion", plan)
-    monkeypatch.setattr(rlo, "setdown_table_z", lambda ctx_, table_z, fix_, q_grip=None: (float(table_z), None))
+    if not touch_table:
+        monkeypatch.setattr(rlo, "setdown_table_z", lambda ctx_, table_z, fix_, q_grip=None: (float(table_z), None))
     if setdown is not None:
 
         def felt(ctx_, legs, carry):
@@ -4491,3 +4495,80 @@ def test_a_set_down_watch_that_fails_stops_the_descent_and_the_lid_is_not_let_go
     det = rlo.SetdownContact(tpc._Chain(), client, 0.20, 0.28, 0.192)
     assert det(0.4) is True and det.verdict == "failed" and not det.credible()
     assert det.refusal()[0] == "failed" and "the descent was stopped there" in det.refusal()[1]
+
+
+# ---- the table the set-down goes by, in the whole run (review 2026-11-17) ---------------------------------
+
+
+def _touch_table_z(chain):
+    """Where _full_flow's `touch_table` has the set-down's table: setdown_table_z's rule on the fake arm,
+    whose fk stands the pads at one height whatever the joints, and on _full_flow's fix, the lid's top
+    121 mm over its table — as far under the lid's top as the cameras saw it, the top where the fingers
+    hold it."""
+    from box_opening.tasks.press_contact import pads_z
+
+    return pads_z(chain, [0.0] * 7) + rlo.GRIP_BELOW_LID_M - (BUTTON[2] - TABLE_Z)
+
+
+def _setdown_by(ctx, chain, rows, table):
+    """The run's set-down went by the table at `table`, not the cameras': the lid's spot, the row that
+    records it, and the lines flown down onto it."""
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["xyz"][2] == pytest.approx(table, abs=1e-4) and ctx.lid_drop.xyz[2] == pytest.approx(table)
+    assert spot["table"]["z"] == pytest.approx(TABLE_Z, abs=1e-4)  # the cameras' own, kept beside it
+    assert spot["table"]["setdown_z"] == pytest.approx(table, abs=1e-4)
+    # the way down ends SETDOWN_SLOW_M over where the lid meets THAT table, the touch SETDOWN_PAST_M under it
+    _quat, contact, _hover = rlo.setdown_poses(ctx, ctx.lid_drop)
+    cameras = ContainerPose(xyz=(*ctx.lid_drop.xyz[:2], TABLE_Z), yaw=ctx.lid_drop.yaw)
+    assert contact[2] - rlo.setdown_poses(ctx, cameras)[1][2] == pytest.approx(table - TABLE_Z)
+    ends = [xyz[2] for xyz, _q in chain.lines if xyz[:2] == pytest.approx(contact[:2])]
+    assert any(z == pytest.approx(contact[2] + rlo.SETDOWN_SLOW_M) for z in ends)
+    assert any(z == pytest.approx(contact[2] - rlo.SETDOWN_PAST_M) for z in ends)
+    assert not any(z < contact[2] - rlo.SETDOWN_PAST_M - 1e-6 for z in ends)  # and nothing flies lower
+    return spot
+
+
+@pytest.mark.parametrize("from_press", [False, True], ids=["gripped from the look pose", "gripped from the press"])
+def test_the_one_motion_sets_the_lid_down_by_the_table_moved_to_where_the_fingers_hold_the_lid(
+    ctx, monkeypatch, tmp_path, capsys, from_press
+):
+    """2026-11-13 and 11-17: the set-down's plan stood 46-55 mm under the table, built on the wrist
+    camera's heights; setdown_table_z moves the table by where the fingers hold the lid's top. The function
+    was tested alone and every run in these tests flew with it switched off (review 2026-11-17: with
+    spot_candidates made to ignore it, every test stayed green). Here it is in the whole run. The fake
+    arm's fingers hold the knob 63 mm over where the cameras' table and the box's height put the lid's top:
+    the spot planned while the hand comes down — before any lift is on the run's context, by the joints
+    the knob is gripped at handed to the lookahead (grip_ahead, grip_ahead_rise) —, the plan's contact and
+    the touch's end all stand 63 mm over the cameras' table, and the run says so."""
+    code, rec, chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], touch_table=True, from_press=from_press
+    )
+    assert code == 0 and "spot-look" not in rec.events
+    table = _touch_table_z(chain)
+    assert table == pytest.approx(TABLE_Z + 0.063, abs=5e-4)
+    spot = _setdown_by(ctx, chain, rows, table)
+    assert spot["chosen"] == "ahead, with the scene camera"
+    out = capsys.readouterr().out
+    assert "the table the lid is set down by: %.3f, 63 mm over the cameras' %.3f" % (table, TABLE_Z) in out
+    assert "lid goes to [%.2f, %.2f, %.3f]" % (*ctx.lid_drop.xyz[:2], table) in out
+
+
+@pytest.mark.parametrize("ahead", [True, False], ids=["the carry planned as the lift flew", "the carry planned there"])
+def test_the_spot_chosen_after_the_lift_is_set_down_by_the_table_moved_to_where_the_fingers_hold_the_lid(
+    ctx, monkeypatch, tmp_path, ahead
+):
+    """The same where the spot is chosen with the lid lifted (choose_and_carry): the table moved by the
+    lift's own grip (ctx.lid_lifted) — for the carry planned while the lift flew (carry_ahead, which is
+    handed no grip there), and for the one planned at the spot look where none was — the spot, its row
+    and the set-down's lines on it."""
+    if not ahead:
+        monkeypatch.setattr(rlo, "carry_ahead", lambda *a, **k: None)
+    code, rec, chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], touch_table=True, one_motion=False
+    )
+    assert code == 0 and "spot-look" in rec.events
+    spot = _setdown_by(ctx, chain, rows, _touch_table_z(chain))
+    assert (spot["ahead"] is not None and spot["ahead"]["flown"] is True) if ahead else spot["ahead"] is None
+    # planned while the lift flew, or at the spot look
+    planned = [at for name, at in rec.plans if name == "lid:carry"]
+    assert planned == [rec.events.index("spot-look") + (0 if ahead else 1)]
