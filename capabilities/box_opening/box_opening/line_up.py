@@ -262,7 +262,9 @@ class Child:
 class BoxSource:
     """The box as its watch sees it, judged by the boundary reach_probe fills. `watch`: box_watch's command
     line, run as a child of this source's own; or a process already running that says the same lines (the
-    run itself, with --line-up: node.Run), which is its owner's to end. `probe_argv(urdf, root)`:
+    run itself, with --line-up: node.Run), which is its owner's to end. Such a run says the wrist camera's
+    fixes ("by": "wrist") and, between them, the scene camera's: the wrist's are kept to while one is fresh
+    (guide.LOST_S). `probe_argv(urdf, root)`:
     reach_probe's, once the watch has said which robot this is (run with PROBE_ENV). `far_m`: the
     deployment's bound on the boundary (None: none). close() ends the children that are this source's own,
     the probe by its own quit so that it keeps its grid; it can take PROBE_QUIT_S, so what must not wait is
@@ -275,6 +277,7 @@ class BoxSource:
         self.watch = spawn(watch, env, log, clock) if self._owns_watch else watch
         self.probe = None
         self._fix = None  # the newest sighting: (Fix, lid z, table z, rough)
+        self._wrist_at = None  # when the wrist camera last saw the box (its newest fix's time)
         self._zone = None
         self._proof = None  # the newest proof: ((x, y, z), ok)
         self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
@@ -294,8 +297,17 @@ class BoxSource:
                     self._log("the robot's URDF was not heard: no boundary can be worked out")
             elif "fix" in msg:
                 f = msg["fix"]
+                by_wrist = f.get("by") == "wrist"
+                if not by_wrist and self._wrist_at is not None and t - self._wrist_at <= guide.LOST_S:
+                    # the scene camera's sighting, said where a wrist frame showed no box: it has a box in
+                    # front of the arm centimetres from where the wrist has it, often roughly and at another
+                    # height. While the wrist's fix is fresh it is left out whole: it does not replace the
+                    # fix, enter the guide's track (the box would have "moved") or go to the probe
+                    continue
                 xyz = [float(v) for v in f["xyz"]]
-                fix = guide.Fix(t - float(f.get("age_s") or 0.0), (xyz[0], xyz[1]), "scene")
+                fix = guide.Fix(t - float(f.get("age_s") or 0.0), (xyz[0], xyz[1]), "wrist" if by_wrist else "scene")
+                if by_wrist:
+                    self._wrist_at = fix.t
                 self._fix = (fix, xyz[2], f.get("table_z"), bool(f.get("rough")))
                 new = True
             elif "none" in msg:

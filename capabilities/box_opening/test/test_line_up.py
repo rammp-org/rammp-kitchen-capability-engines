@@ -254,8 +254,10 @@ def _source(far_m=None):
     return source, source.watch, source.probe
 
 
-def _fix(xyz, age_s=0.1, rough=False, table_z=0.22):
-    return {"fix": {"xyz": list(xyz), "table_z": table_z, "age_s": age_s, "rough": rough, "score": 0.9}}
+def _fix(xyz, age_s=0.1, rough=False, table_z=0.22, by=None):
+    """A sighting as the watch says it: the scene camera's, or with `by` "wrist" the wrist camera's."""
+    fix = {"xyz": list(xyz), "table_z": table_z, "age_s": age_s, "rough": rough, "score": 0.9}
+    return {"fix": dict(fix, by=by) if by else fix}
 
 
 def test_the_probe_starts_once_the_watch_has_said_which_robot_this_is():
@@ -313,6 +315,37 @@ def test_a_rough_sighting_says_which_way_to_move_and_is_never_asked_on():
     watch.says(2.0, _fix((0.65, 0.0, 0.315), rough=True))
     fix, reach = source.look(2.1)
     assert fix is not None and reach is None and probe.sent[-1]["prove"] is False  # in place, roughly: checking
+
+
+def test_while_the_wrist_sees_the_box_the_scene_cameras_sightings_are_left_out():
+    """With the wrist look, a wrist frame that shows no box lets the scene camera's sighting be said in its
+    place: centimetres from where the wrist has the box, often rough, at another height. While a wrist fix
+    is fresh (guide.LOST_S) such a sighting neither replaces the fix, nor enters the guide's track (the
+    box "moved"), nor goes to the probe (another grid); the question stays. With no fresh wrist fix the
+    scene camera's are used as ever."""
+    source, watch, probe = _source()
+    probe.says(1.0, {"zone": _band_zone().to_dict()})
+    probe.says(1.0, {"proof": {"xyz": [0.65, 0.0, 0.315], "ok": True, "why": "", "tilt_deg": 15, "s": 0.5}})
+    asked = guide.Guide()
+    for i in range(8):  # the wrist sees it stand still, 1.0 .. 2.4 s
+        t = 1.0 + 0.2 * i
+        watch.says(t, _fix((0.65, 0.0, 0.315), age_s=0.0, by="wrist"))
+        fix, reach = source.look(t)
+        say = asked.update(t, fix, reach)
+    assert say.state == guide.READY and fix == guide.Fix(pytest.approx(2.4), (0.65, 0.0), "wrist")
+    sent = len(probe.sent)
+    watch.says(2.5, _fix((0.73, 0.02, 0.36), age_s=0.0, rough=True))  # the scene camera's, in between
+    fix, reach = source.look(2.5)
+    assert fix is None and reach.inside and reach.planned is True  # the wrist's fix stands, judged as it was
+    assert len(probe.sent) == sent and asked.update(2.5, fix, reach).state == guide.READY
+    watch.says(2.6, _fix((0.65, 0.0, 0.315), age_s=0.0, by="wrist"))
+    fix, reach = source.look(2.6)
+    assert asked.update(2.6, fix, reach).state == guide.READY and asked.steady(2.6)  # and it never "moved"
+    late = 2.6 + guide.LOST_S + 0.1  # the wrist has shown nothing for LOST_S: the scene camera's word again
+    watch.says(late, _fix((0.95, 0.0, 0.315), age_s=0.0))
+    fix, reach = source.look(late)
+    assert fix == guide.Fix(pytest.approx(late), (0.95, 0.0), "scene") and not reach.inside
+    assert probe.sent[-1]["box"] == [0.95, 0.0, 0.315]
 
 
 def test_a_place_the_grid_has_working_and_the_proof_refuses_is_led_away_from():
