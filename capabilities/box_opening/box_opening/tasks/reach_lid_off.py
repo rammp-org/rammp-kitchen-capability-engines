@@ -1921,7 +1921,9 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     way back to the look pose (_way_back) as one more. Returns (None,
     where the hold held the pads when it felt the button, else None) at the
     look pose, or (the exit code, None) where the run stopped: home from the
-    look pose where the way in did not start, the arm let go and held where
+    look pose where the way in did not start (from over the box, the clear
+    first, where its free air flew in position and only the stroke did not
+    start: rp.fly_way_in), the arm let go and held where
     a move stopped part-way, up off the button and home from over the box
     where the way back did not start. Home is planned from the look pose
     while the way back flies: ctx.home_ahead, for a stop there (_stop_home).
@@ -1947,7 +1949,7 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     # where the pads meet the box ends every press's stroke past it (review round 2: the second
     # too), and a contact well off the cameras' top refuses it (dp.watch_press)
     # (its free air in position control, rp.air_position: two executions, and `names` the last's)
-    res, contact, names = rp.fly_way_in(ctx, runner, legs, way.stroke, top_z)
+    res, contact, names, over_box = rp.fly_way_in(ctx, runner, legs, way.stroke, top_z)
     last = res[-1]
     flown = all(r.ok for r in res)
     retimed = rp._note_flight(runner, "reach_way_in_flight", names, last) if last.flown_traj is not None else {}
@@ -1958,6 +1960,20 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
             ctx, cfg, runner, way, ctx.client.joints(), dp.DepthPress(free=True, why=refused, judged=False)
         )
         return (code if code is not None else _stop_home(ctx, cfg, runner, refused)), None
+    if not flown and not _started(last) and over_box:
+        # Its free air flew in position and arrived, and the stroke's own execution did not start
+        # (rp.fly_way_in): the hand stands turned down at the stroke's start, 35-60 mm over the lid, not at
+        # the look pose. It leaves as every other stop over the box does, up and back clear of it before
+        # home is planned (rp._home_from_over_box), nothing pressed. An arm that does not get home says so
+        # last: the STOP before it reads as a run a retry may follow
+        why = "the press stroke did not start (%s) — nothing was pressed%s" % (
+            last.detail or last.outcome,
+            "" if press == 1 else " again",
+        )
+        if not rp._home_from_over_box(ctx, cfg, runner, dp.DepthPress(free=True, why=why, judged=False)):
+            rp.let_go(ctx)
+            log.info("[press_demo] STOP: the arm did not get home — it holds; home it with sheppy's home_arm")
+        return 1, None
     if not flown and not _started(last):
         return _stop_home(
             ctx,

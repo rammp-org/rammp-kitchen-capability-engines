@@ -1535,7 +1535,7 @@ def way_in_parts(legs):
 
 def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     """The way in flown: (results, the press's contact watch or None, the names of the legs of the
-    execution the last result is of).
+    execution the last result is of, whether the free air brought the arm over the box).
 
     One execution, as way_in_legs builds it in the joint impedance: watched from its lead (dp.watch_press)
     and flown, `lookahead` hosted in it. Its free air in position (air_position): that part first, then,
@@ -1543,18 +1543,23 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     (client.prime_compliant) and AIR_SWITCH_S waited, and the stroke flown and watched as an execution of
     its own. A free-air part that did not arrive is where it ends: no springs, no stroke, no watch.
     `lookahead` is hosted by the one execution only, never by a stroke flown on its own: the runner's
-    lookahead_result is then None, and the caller plans after the hold (_fly_way_in)."""
+    lookahead_result is then None, and the caller plans after the hold (_fly_way_in).
+
+    Over the box (the last of the four): True where the free air flew as an execution of its own and
+    arrived, whatever the stroke did after. A stroke that then did not start leaves the arm at its start,
+    the hand turned down 35-60 mm over the lid — not at the look pose, where a way in of one execution
+    that did not start leaves it — and the callers bring it home from there (_home_from_over_box)."""
     from box_opening.tasks import depth_press as dp
 
     kw = {} if lookahead is None else {"lookahead": lookahead}
     parts = way_in_parts(legs) or [list(legs)]
     if len(parts) == 1:
         contact = dp.watch_press(ctx, legs, stroke, top_z)
-        return runner.run(legs, execute=True, **kw), contact, [lg.name for lg in legs]
+        return runner.run(legs, execute=True, **kw), contact, [lg.name for lg in legs], False
     air, press = parts
     res = runner.run(air, execute=True)
     if any(not r.ok for r in res):
-        return res, None, [lg.name for lg in air]
+        return res, None, [lg.name for lg in air], False
     runner.wait_still("the stroke's start, before its spring")
     primed = bool(ctx.client.prime_compliant())
     runner.note("air_switch", primed=primed, wait_s=AIR_SWITCH_S, at=[round(float(v), 4) for v in ctx.client.joints()])
@@ -1565,7 +1570,7 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     # come down for as long as the planning took, and a planner call that outlasted the stroke would leave
     # it never polled at all, "none seen". As one execution the same planning runs at the re-aim's start,
     # seconds before the descent; here the execution is the descent
-    return res + runner.run(press, execute=True), contact, [lg.name for lg in press]
+    return res + runner.run(press, execute=True), contact, [lg.name for lg in press], True
 
 
 def _wrist_gravity():
@@ -2532,7 +2537,9 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
     the button whose top is at `top_z` (depth_press.compliant_hold) and the
     way home from it (_way_home): the rise back up the stroke, the clear
     and home, one execution where they meet. A way in that did not start
-    goes home from the look pose; one that stopped part-way holds the arm
+    goes home from the look pose — from over the box, the clear first,
+    where its free air flew in position and only the stroke did not start
+    (fly_way_in); one that stopped part-way holds the arm
     there, its STOP naming the leg in flight. From the way in's start to
     where the way home ends, a stop lets go (let_go): the way in stopped
     part-way, the way home stopped or did not get home (its fallback's
@@ -2561,7 +2568,7 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
         # The end the lookahead is handed, the stroke's bottom inside the
         # padded box, is no start for it, and is left unused. Where the pads
         # meet the box ends the stroke past it (the contact watch)
-        res, contact, names = fly_way_in(
+        res, contact, names, over_box = fly_way_in(
             ctx,
             runner,
             legs,
@@ -2570,7 +2577,7 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
             lookahead=lambda _end: plan_way_out(ctx, cfg, way.stroke.q0, way.stroke.quat),
         )
         ahead = runner.lookahead_result  # every run() resets it
-        if ahead is None and len(way_in_parts(legs) or ()) == 2:
+        if over_box:
             # its free air in position: the stroke flew as an execution of its own, which hosts no planning
             # (fly_way_in), so no plan failed. The way home is planned after the hold (_way_home: the rise,
             # then home from over the box)
@@ -2610,6 +2617,24 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
         # top, for as long as the driver runs
         let_go(ctx)
         raise
+    if not moved and over_box:
+        # Its free air flew in position and arrived, and the stroke's own execution did not start
+        # (fly_way_in): the hand stands turned down at the stroke's start, 35-60 mm over the lid, not at
+        # the look pose. Nothing was pressed, so there is no shove to pad the box for; and the arm leaves
+        # as every other stop over the box does, up and back clear of it before home is planned
+        # (_home_from_over_box) — as the press flown leg by leg does where its stroke does not start
+        # (depth_press.press_compliant), in its words
+        ctx.contact_pad = pad
+        result = dp.DepthPress(
+            free=True,
+            why="the press stroke did not start (%s) — nothing was pressed" % (last.detail or last.outcome),
+            judged=False,
+        )
+        homed = _home_from_over_box(ctx, cfg, runner, result)
+        if not homed:
+            let_go(ctx)  # its clear or home stopped part-way, or a plan was refused: the arm holds
+        runner.finish()
+        return dp.finish(ctx, result, homed)
     if not moved:
         # from the look pose, in free air: nothing came near the box — no
         # shove to pad it for, and nothing to let go of but a home that

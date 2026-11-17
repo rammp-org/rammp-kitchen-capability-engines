@@ -558,6 +558,67 @@ def test_a_stroke_flown_on_its_own_hosts_no_planning_and_the_way_home_is_planned
     assert "the lookahead plan failed" not in out  # none was asked for: nothing failed
 
 
+@pytest.mark.parametrize("press_only", [False, True], ids=["the full run", "the press alone"])
+@pytest.mark.parametrize("home_refusals", [0, 2], ids=["home", "home refused"])
+def test_in_position_a_stroke_that_does_not_start_leaves_from_over_the_box_the_clear_first(
+    ctx, monkeypatch, tmp_path, capsys, press_only, home_refusals
+):
+    """As one motion, "the way in did not start" could only mean the arm still stood at the look pose, and
+    home is planned straight from there. With the free air in position that air has flown when the
+    stroke's own execution is turned down (the driver, the client's gates, the runner's): the hand stands
+    turned down at the stroke's start, 35-60 mm over the lid (review 2026-11-16). It leaves as every other
+    stop over the box does: up and back clear of the box first, then home — and says the stroke did not
+    start, nothing pressed. An arm that then does not get home is said to hold, never left as a stop a
+    retry may follow."""
+    monkeypatch.setenv("BOX_OPENING_AIR_CONTROL", "position")
+    monkeypatch.setattr(rp.time, "sleep", lambda s: None)
+    # the goals sent: the look, the way in's free air, then the stroke, which the driver turns down
+    code, rec, _chain, rows = _full_flow(
+        ctx,
+        monkeypatch,
+        tmp_path,
+        [(BUTTON, 0.4), (UP, 9.0)],
+        press_only=press_only,
+        ends={3: trp.REJECTED},
+        home_refusals=home_refusals,
+    )
+    assert code == 1
+    after = ["depth:clear", "home"] if not home_refusals else ["depth:clear", "reach:back-off"]
+    assert rec.events == ["reach:look", "aim:reach-aim", *WAY_IN, *after]
+    turned = list(rec.legs["depth:turn"].traj.points[-1].positions)
+    assert list(rec.legs["depth:clear"].traj.points[0].positions) == pytest.approx(turned)  # from the stroke's start
+    assert ctx.client.primes == [None] and "hold" not in rec.events  # the spring came in; nothing was pressed
+    out = capsys.readouterr().out
+    assert "the way in did not start" not in out
+    said = "STOP: the press stroke did not start (goal rejected by the driver) — nothing was pressed"
+    assert said + " — returning home" in out
+    last = [line for line in out.splitlines() if "STOP" in line][-1]  # what the node reads the run's end from
+    if home_refusals:
+        assert "the arm did not get home — it holds" in last
+        assert ctx.client.lets_go == [len(ctx.client.executed)]  # let go where it stands, after its last goal
+    else:
+        assert "nothing was pressed" in last and "holds" not in last
+        assert ctx.client.lets_go == []
+
+
+def test_in_position_a_free_air_part_that_does_not_start_still_goes_home_from_the_look_pose(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The free air's own execution turned down: nothing moved, the arm stands at the look pose, and home
+    is planned from there as it always was — no clear, which is for a hand over the box."""
+    monkeypatch.setenv("BOX_OPENING_AIR_CONTROL", "position")
+    monkeypatch.setattr(rp.time, "sleep", lambda s: None)
+    code, rec, _chain, _rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], ends={2: trp.REJECTED}
+    )
+    assert code == 1
+    assert rec.events == ["reach:look", "aim:reach-aim", *WAY_IN[:-1], "home"]
+    assert ctx.client.primes == [] and ctx.client.lets_go == []
+    assert (
+        "STOP: the way in did not start (goal rejected by the driver) — nothing was pressed" in capsys.readouterr().out
+    )
+
+
 def test_where_nothing_was_planned_ahead_the_lift_flies_alone_and_the_spot_is_looked_at_after_it(
     ctx, monkeypatch, tmp_path, capsys
 ):
