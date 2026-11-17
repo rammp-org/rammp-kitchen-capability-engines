@@ -119,10 +119,28 @@ def test_the_wrist_turns_once_to_the_view_that_shows_the_most_and_judges_every_f
     assert runner.notes[-1] == ("line_up", {"stage": "watched", "frames": 4, "found": 3})
 
 
+def test_the_wrist_says_once_where_it_stands_at_the_line_ups_view(front):
+    """{"view": {"joints": ...}}: the joints the arm stands at once its wrist has turned (as it stands, not as the
+    view was asked for), said once before any frame is judged: where the run after the go starts from, for the
+    engine's proof of the reach from there."""
+    front.finds = [_fix(), "no lid-sized top"]
+    _watch(front, 2)
+    assert front.said[0] == {"view": {"joints": [0.0] * 7}}  # the fake arm stands where it stood (fly_view's stub)
+    assert len([m for m in front.said if "view" in m]) == 1 and "fix" in front.said[1]
+    for fly in (("refused", "why"), ("stopped", "why")):  # a turn that was not flown: the wrist is not at the view
+        front.said.clear(), front.asked.clear()
+        front.fly = fly
+        _watch(front, 2)
+        assert front.said == []
+    front.fly = ("flown", None)
+    _watch(front, 2, execute=False)  # nor in a preview, where nothing moved
+    assert front.said == []
+
+
 def test_a_lid_the_view_cuts_is_said_roughly_and_no_box_no_oftener_than_its_period(front, monkeypatch):
     front.finds = [_fix(partial="cut off by the frame")]
     _watch(front, 1)
-    assert front.said[0]["fix"]["rough"] is True
+    assert front.said[1]["fix"]["rough"] is True  # after its word on where the wrist stands
     front.said.clear()
     front.asked.clear()
     _watch(front, 30)  # thirty frames in a moment, none showing a box
@@ -136,7 +154,7 @@ def test_a_container_out_of_the_arms_reach_is_said_roughly(front):
     far.far = True
     front.finds = [far, _fix((0.65, 0.0, 0.315))]
     _watch(front, 2)
-    assert [(m["fix"]["xyz"][0], m["fix"]["rough"]) for m in front.said] == [(1.05, True), (0.65, False)]
+    assert [(m["fix"]["xyz"][0], m["fix"]["rough"]) for m in front.said[1:]] == [(1.05, True), (0.65, False)]
 
 
 def test_a_second_lid_sized_top_beyond_the_arms_reach_does_not_blind_the_watch(monkeypatch):
@@ -206,7 +224,7 @@ def test_a_fix_the_caller_judges_out_is_said_as_none_with_its_reason(front):
         None, ctx, Runner(), object(), True, front.said.append, lambda: len(front.asked) >= 3, also=also, judge=judge
     )
     assert state == ("watched", None) and judged == [0.65, 0.66, 0.70]
-    assert front.said == [{"none": refused}, _said_fix(0.70)] and front.also == 2
+    assert front.said[1:] == [{"none": refused}, _said_fix(0.70)] and front.also == 2
 
 
 def test_a_stop_heard_before_the_turn_turns_nothing(front):

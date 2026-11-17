@@ -1558,7 +1558,8 @@ def watch_front(
     moves between them). A lid-sized top out of the arm's reach is no rival of one within it, as in the run's
     own survey (_within_reach); where none is within reach, the one nearest the arm alone is said roughly
     (wrist_finder's far_nearest): a box the arm cannot reach is the one the user is told to bring nearer.
-    `say(line)`: a fix for each frame that shows the container (_fix_line), "none" and why
+    `say(line)`: {"view": {"joints": [7]}} once, the joints the arm stands at with its wrist at the view;
+    then a fix for each frame that shows the container (_fix_line), "none" and why
     at most every LINE_UP_NONE_S where one does not. `also()`: called on a frame that shows none (the scene
     camera's own look, which may see what the wrist does not). `judge(fix)`: the caller's word on a find
     (None: every find is said): why it is not one to say, said as that frame's "none" in the fix's place, or
@@ -1593,6 +1594,9 @@ def watch_front(
     if not execute:
         return "none", "a preview ends at the line-up's view: its frames need --execute"
     runner.wait_still(view.name)
+    # where the arm stands with its wrist at the view, said once: the joints the run after the go starts its
+    # reach from, which the engine hands its proof of that reach (reach_probe's q_from)
+    say({"view": {"joints": [round(float(q), 4) for q in ctx.client.joints()]}})
     n = found = 0
     said_none = None
     within = _within_reach(model)
