@@ -351,17 +351,22 @@ def test_the_hand_spheres_cover_the_131mm_fingertips_and_the_wrist_camera_the_ro
     m = body.load(path)  # the shipped config/robot_body.yaml
     assert m.hand_source.endswith("config/robot_body.yaml") and [g.name for g in m.hand] == [
         "fingers_131mm",
+        "fingertips_151mm",  # flatbot's fingers since 2026-11: ~20 mm further out and wider (config/robot_body.yaml)
         "wrist_camera",
     ]
     check = m.check_for(chain, flatbot_urdf(), "arm_mount")
-    assert check.hand_added == ["fingers_131mm", "wrist_camera"] and check.hand_skipped == []
+    assert check.hand_added == ["fingers_131mm", "fingertips_151mm", "wrist_camera"] and check.hand_skipped == []
     assert (
-        len(check.spheres["arm_robotiq_85_base_link"][1]) == 19 + 4
+        len(check.spheres["arm_robotiq_85_base_link"][1]) == 19 + 4 + 5
         and len(check.spheres["arm_end_effector_link"][1]) == 12
     )
     tips, cam = _outside_mm(chain, check, PROBE_TIPS, qs), _outside_mm(chain, check, PROBE_CAMERA, qs)
     # now inside: the tips 11.5 mm and the tool point 10 mm deep (5 of them the buffer), every camera corner >= 12 mm
     assert max(tips.values()) <= -9.9 and max(cam.values()) <= -12.0, (tips, cam)
+    # and the longer, wider tips flatbot has had since 2026-11 (their ends ~0.151 m out, 26 and 22 mm either side)
+    new = {"end": (0.0, 0.0, 0.151), "end_left": (0.026, 0.0, 0.151), "end_right": (-0.022, 0.0, 0.151)}
+    assert max(_outside_mm(chain, check, new, qs).values()) <= -9.9
+    assert _outside_mm(chain, stock, new, qs)["end"] >= 20.0  # the robot file's own spheres leave them bare
     # and the bare spheres alone hold each group's boxes (the load checks it): none of them is the buffer's
     for g in m.hand:
         for _name, c, h in g.covers:
@@ -398,21 +403,21 @@ def test_a_robot_file_that_carries_the_hand_spheres_is_not_doubled(tmp_path):
     robot = STOCK_HAND.replace(
         "      arm_robotiq_85_left_finger_link:", "\n".join(lines) + "\n      arm_robotiq_85_left_finger_link:"
     )
-    assert len(yaml.safe_load(robot)["robot_cfg"]["kinematics"]["collision_spheres"]["arm_robotiq_85_base_link"]) == 35
+    assert len(yaml.safe_load(robot)["robot_cfg"]["kinematics"]["collision_spheres"]["arm_robotiq_85_base_link"]) == 40
     path = _model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=robot)
     check = body.load(path).check_for(ArmChain(root="arm_mount", path=flatbot_urdf()), flatbot_urdf(), "arm_mount")
-    assert check.hand_added == [] and check.hand_skipped == ["fingers_131mm", "wrist_camera"]
-    assert len(check.spheres["arm_robotiq_85_base_link"][1]) == 35 and "arm_end_effector_link" not in check.spheres
+    assert check.hand_added == [] and check.hand_skipped == ["fingers_131mm", "fingertips_151mm", "wrist_camera"]
+    assert len(check.spheres["arm_robotiq_85_base_link"][1]) == 40 and "arm_end_effector_link" not in check.spheres
 
 
 def test_a_robot_file_whose_hand_spheres_fall_short_by_less_than_the_buffer_is_not_taken_for_them(tmp_path):
-    # the same spheres 3 mm smaller: buffered they would still reach every box the groups stand for, but the
+    # the same spheres 4.5 mm smaller: buffered they would still reach every box the groups stand for, but the
     # boxes would keep none of the buffer the groups add — judged bare, as the groups' own, both are added
     hand = body.load_hand(body.robot_body_path())
     lines = []
     for g in hand:
         lines += [
-            "      - {center: %s, radius: %s}" % (list(map(float, c)), float(r) - 0.003)
+            "      - {center: %s, radius: %s}" % (list(map(float, c)), float(r) - 0.0045)
             for c, r in zip(g.centres, g.radii, strict=True)
         ]
     robot = STOCK_HAND.replace(
@@ -420,7 +425,9 @@ def test_a_robot_file_whose_hand_spheres_fall_short_by_less_than_the_buffer_is_n
     )
     path = _model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=robot)
     check = body.load(path).check_for(ArmChain(root="arm_mount", path=flatbot_urdf()), flatbot_urdf(), "arm_mount")
-    assert check.hand_added == ["fingers_131mm", "wrist_camera"] and check.hand_skipped == []
+    # (the two finger groups' spheres overlap enough that, smaller, they still hold both groups' boxes bare: those
+    # stay the robot file's; the camera's fall short and are added)
+    assert check.hand_added == ["wrist_camera"] and check.hand_skipped == ["fingers_131mm", "fingertips_151mm"]
 
 
 def test_distance_is_the_signed_gap_to_the_unpadded_boxes_per_state_and_vectorised(tmp_path):
@@ -446,7 +453,8 @@ def test_distance_is_the_signed_gap_to_the_unpadded_boxes_per_state_and_vectoris
 
 
 def test_pose_clear_is_strict_where_a_line_from_inside_may_still_leave(tmp_path):
-    chain = _chain(tmp_path, [("slab", (0.6, 0.0, 0.39), (0.30, 0.30, 0.06))])  # padded top 0.44
+    # padded top 0.42 (0.44 with the 131 mm fingers: these reach 28 mm more, and the line up has no more room)
+    chain = _chain(tmp_path, [("slab", (0.6, 0.0, 0.37), (0.30, 0.30, 0.06))])
     q = _over_table(chain)
     assert chain.body_refusal([q]) is None  # a line from where the arm stands: allowed to start inside
     assert not chain.body.pose_clear(q) and "test/slab" in chain.body.pose_refusal(q)  # a goal: refused
@@ -488,16 +496,17 @@ def test_near_the_user_no_sphere_moves_faster_than_the_profile_allows(tmp_path):
     from box_opening.constants import JOINT_VMAX
     from box_opening.runtime.retime import RetimeParams, positions_to_traj, retime_group
 
-    # a lap whose top is 0.24: a 0.3 m sweep of the hand 0.33 over the table brings the fingers ~55 mm over it
+    # a lap whose top is 0.24: a 0.3 m sweep of the hand 0.35 over the table brings the fingers ~55 mm over it
+    # (0.33 with the 131 mm fingers)
     path = _model_files(tmp_path, [("lap", (0.55, 0.0, 0.19), (0.30, 0.60, 0.10))], layer="person")
     approach.set_body(body.load(path))
     approach.set_chain_root("arm_mount", flatbot_urdf())
     chain = approach._chain()
     nu = chain.body.model.near_user
     assert nu.layers == ("person",) and (nu.far_m, nu.near_m, nu.far_mps, nu.near_fraction) == (0.15, 0.05, 0.5, 0.25)
-    q = chain.nearest_solution(list(HOME), [0.55, -0.15, 0.33], DOWN)
+    q = chain.nearest_solution(list(HOME), [0.55, -0.15, 0.35], DOWN)
     assert q is not None
-    pts, why = chain.straight_line(q, [0.55, 0.15, 0.33], DOWN)
+    pts, why = chain.straight_line(q, [0.55, 0.15, 0.35], DOWN)
     assert pts is not None, why
     assert chain.body.distance(pts[len(pts) // 2], layers="person").m == pytest.approx(0.055, abs=0.01)
     names = ["joint_%d" % (i + 1) for i in range(7)]

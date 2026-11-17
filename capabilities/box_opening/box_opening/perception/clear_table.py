@@ -619,7 +619,9 @@ def _clear_spots(
     return picked, why
 
 
-WRIST_NEAREST_M = 0.15  # nearer the wrist lens than this is the hand itself: the fingertips are 123 mm out
+# nearer the wrist lens than this is the hand itself: the fingertips are ~143 mm out (2026-11-17: flatbot's new
+# fingers reach ~20 mm further than the 123 mm this was set on, constants.FINGERS_PAST_MODEL_M; it stood at 0.15)
+WRIST_NEAREST_M = 0.17
 
 
 def depth_points(depth, k, rot_cam, trans_cam, stride=2):

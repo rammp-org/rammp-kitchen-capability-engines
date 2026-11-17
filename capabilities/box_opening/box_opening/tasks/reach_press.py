@@ -107,6 +107,7 @@ from box_opening.constants import (
     IMPEDANCE_NAMES,
     JOINT_VMAX,
     PLANNER_LIMIT_MARGIN_RAD,
+    TCP_OFFSET_M,
     TIP_TO_TOOL_M,
     TRANSIT_SPEED,
     CustomGains,
@@ -218,8 +219,8 @@ REACH_LOOK_RISE_M = 0.065
 AIM_FORWARD_M = 0.01
 # The closed 2F-85's lowest point at these tilts, in tool_frame, with the
 # reach attitude's roll (fingers side by side across the line to the box):
-# one fingertip's end, 11 mm past tool_frame like TCP_OFFSET_M straight down.
-CONTACT_TOOL = (0.0, -0.009, 0.011)
+# one fingertip's end, past tool_frame like TCP_OFFSET_M straight down.
+CONTACT_TOOL = (0.0, -0.009, TCP_OFFSET_M)
 TIP_MID_TOOL = (0.0, 0.0, -TIP_TO_TOOL_M)  # the finger-tip links' midpoint (client.contact_xyz)
 # Every guard below judges the gravity-compensated residual. On flatbot's
 # recording (kinematics.GravityModel) it stayed under 0.76 Nm on every wrist

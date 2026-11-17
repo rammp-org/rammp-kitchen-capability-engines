@@ -263,6 +263,20 @@ RECOIL_SPEED = 0.5
 # much HIGHER than where the fingertips should land.
 TCP_OFFSET_M = 0.011
 
+# 2026-11-17: flatbot's fingers were changed between 2026-11-03 and 11-12 (the wrist's videos: two plain black
+# tips on 11-03, wider black tips with a green part beside them since; the owner: "the green thing is just part
+# the gripper, and yes, they do reach deeper now"), and nothing here knew. Measured from the arm's own presses:
+# held on the button, the pads stood 9-17 mm above the top the wrist camera read on the 10 presses of 10-30 to
+# 11-04 (median 13) and 31-37 mm on the 5 of 11-12 to 11-17 (median 34): the new tips reach ~20 mm further than
+# TCP_OFFSET_M says. Every press since met the button 40-45 mm "early", at the edge of press_contact's 45 mm
+# refusal, and 2026-11-17 16:44's, at 56, was refused as something in the way.
+# For now this is a figure of its own, read where a contact is JUDGED (the press's band, depth_press.watch_press)
+# and by the hand's spheres (config/robot_body.yaml fingertips_151mm), and the heights the arm is flown at stay
+# as flown on 2026-11-12 (the press finds the button by touch): moving TCP_OFFSET_M itself shifts every
+# fingertip-referenced height by it and 21 replays of recorded flatbot geometry with it, a change to fly on its
+# own. A ruler on the hand, flange to the closed tips, would settle the figure to the millimetre (131 mm before).
+FINGERS_PAST_MODEL_M = 0.020
+
 # The fingertip links, for measuring a contact with the arm's own
 # kinematics. These EXIST in the live TF tree (kinova_gen3_description:
 # kortex_description's arm macro plus robotiq_description); tool_frame does

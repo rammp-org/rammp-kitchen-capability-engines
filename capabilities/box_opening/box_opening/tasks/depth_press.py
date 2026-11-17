@@ -54,6 +54,7 @@ from box_opening import LOGGER as log
 from box_opening.constants import (
     COMPLIANT_RUN_GAINS,
     CONTACT_SPEED,
+    FINGERS_PAST_MODEL_M,
     FREE_LINE_SPEED,
     IMPEDANCE_KQ,
     SANITY_MARGIN_RAD,
@@ -1366,8 +1367,11 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         cut=cut,
         final=True,
         slow_z=slow_z,
-        early_m=CONTACT_EARLY_M + corner,
-        late_m=CONTACT_LATE_M,
+        # ... and both ends of it stand where this hand's fingers meet a top: they reach FINGERS_PAST_MODEL_M
+        # further than the pads the watch measures (constants: every press since 2026-11-12 met its button 40-45 mm
+        # "above" it, and 2026-11-17 16:44's 56 mm was refused as something in the way)
+        early_m=CONTACT_EARLY_M + corner + FINGERS_PAST_MODEL_M,
+        late_m=max(CONTACT_LATE_M - FINGERS_PAST_MODEL_M, 0.0),
         abort_on_failure=True,
     )
     contact.watch_beside(SHADOW_RISE_M, SHADOW_WINDOW_S, SHADOW_SAMPLES)

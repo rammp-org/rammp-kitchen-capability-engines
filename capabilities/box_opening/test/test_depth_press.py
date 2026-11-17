@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from conftest import fixture_path, flatbot_urdf
 
-from box_opening.constants import GAINS_MEDIUM, GAINS_STIFF, IMPEDANCE_KQ
+from box_opening.constants import FINGERS_PAST_MODEL_M, GAINS_MEDIUM, GAINS_STIFF, IMPEDANCE_KQ
 from box_opening.models.container import ContainerModel, load_press_demo
 from box_opening.perception.d405 import quat_to_mat
 from box_opening.tasks import depth_press as dp
@@ -1772,18 +1772,31 @@ def test_a_leaning_presss_contact_band_is_wider_by_what_its_pads_corner_hangs_un
         stroke = SimpleNamespace(pad0=[0.8, -0.25, 0.40], end_z=0.28, quat=rp.reach_quat(model, (0.8, -0.25), lean))
         lead = SimpleNamespace(stop_when=None)
         watch = dp.watch_press(ctx, [lead], stroke, 0.316)
-        assert lead.stop_when is watch and watch.late_m == pc.CONTACT_LATE_M
+        assert lead.stop_when is watch
+        # ... the band's lower end stands where this hand's fingers would have met a top that far down
+        assert watch.late_m == pytest.approx(max(pc.CONTACT_LATE_M - FINGERS_PAST_MODEL_M, 0.0))
         return watch.early_m
 
-    assert band(0.0) == pytest.approx(pc.CONTACT_EARLY_M)
-    assert band(15.0) == pytest.approx(pc.CONTACT_EARLY_M + fingers.pad_corner_below_m(15.0), abs=1e-4)
-    assert band(25.0) == pytest.approx(pc.CONTACT_EARLY_M + 0.0046, abs=2e-4) and band(30.0) > band(25.0)
+    # both ends moved up by what flatbot's fingers reach past the pads the watch measures (constants, 2026-11-17)
+    early = pc.CONTACT_EARLY_M + FINGERS_PAST_MODEL_M
+    assert band(0.0) == pytest.approx(early)
+    assert band(15.0) == pytest.approx(early + fingers.pad_corner_below_m(15.0), abs=1e-4)
+    assert band(25.0) == pytest.approx(early + 0.0046, abs=2e-4) and band(30.0) > band(25.0)
+    # 2026-11-17 16:44, a press straight down (no lean), met its button 56 mm over the wrist's top and was refused
+    # as "something else is in the way" at the 45 mm the 131 mm fingers' presses set; the seven presses of 11-12
+    # to 11-17 that opened their box met it at 40-45. With this hand's reach in the band they are all inside it,
+    # and something standing a button's travel higher still is refused
+    assert 0.056 < band(0.0) and 0.045 < band(0.0) and band(0.0) < 0.056 + 0.012
 
 
 def test_a_compliant_press_that_meets_the_box_below_its_top_flies_its_stroke_as_planned(ctx, monkeypatch, tmp_path):
     """The box 8 mm lower than the cameras put it: as far past the contact
     as planned would be deeper than the stroke goes — never deeper than
-    planned: it flies to its end."""
+    planned: it flies to its end. (Judged by the band of a hand whose fingers
+    are the model's: with flatbot's longer ones, constants.FINGERS_PAST_MODEL_M,
+    a top met 8 mm under where it was read is 28 mm under where they would
+    meet it, and refused as late.)"""
+    monkeypatch.setattr(dp, "FINGERS_PAST_MODEL_M", 0.0)
     meet = COMPLIANT_TOP - 0.008
     _flies_onto(ctx, meet)
     result, _events, _arm, _legs, note = _compliant(ctx, monkeypatch, tmp_path, held_up_m=0.0)

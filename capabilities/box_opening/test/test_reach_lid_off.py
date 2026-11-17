@@ -14,7 +14,7 @@ import pytest
 import test_reach_press as trp
 from conftest import fixture_path, flatbot_urdf
 
-from box_opening.constants import GAINS_MEDIUM, HOME_SPEED
+from box_opening.constants import FINGERS_PAST_MODEL_M, GAINS_MEDIUM, HOME_SPEED
 from box_opening.models.container import ContainerModel, ContainerPose, load_press_demo
 from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_lid_off as rlo
@@ -1663,7 +1663,9 @@ def test_every_press_is_cut_at_its_contact_and_watched_all_the_way_down(ctx, mon
     assert [(lead, on, got.cut) for lead, on, got in watched] == [("reach:re-aim", True, True)] * 2
     for _lead, _on, got in watched:
         assert isinstance(got, pc.PressContact) and got.final and got.abort_on_failure
-        assert (got.early_m, got.late_m) == (pc.CONTACT_EARLY_M, pc.CONTACT_LATE_M)
+        # the band, both ends up by what flatbot's fingers reach past the pads it measures (constants, 2026-11-17)
+        assert got.early_m == pytest.approx(pc.CONTACT_EARLY_M + FINGERS_PAST_MODEL_M)
+        assert got.late_m == pytest.approx(pc.CONTACT_LATE_M - FINGERS_PAST_MODEL_M)
         assert got.slow_z == pytest.approx(got.top_z + dp.TOUCH_SLOW_M) and got.arm_z >= got.slow_z
 
 
