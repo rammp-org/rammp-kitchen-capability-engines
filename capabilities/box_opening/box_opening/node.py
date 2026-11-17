@@ -159,7 +159,14 @@ RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORL
 # still ends before its own stop. A user not in place by then is told to press open again
 RUN_LONGEST_S = 50.0
 LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 40 s
-LINE_UP_END_S = 12.0  # a run told its line-up is over turns its wrist back and ends within this, or is stopped
+# A run told its line-up is over turns its wrist back and ends within this, or is stopped. A stop that comes
+# while the wrist is still turning OUT (a reach_probe that ended as the line-up began) has the whole turn out,
+# its settle, the turn back (a look each, about 3-4 s) and the run's own end (its threads, its log, its
+# mission frames) before it: 11-13 s by the constants, which the 12 s this was until 2026-11-16 cut into, and
+# a run stopped then is the arm holding. A cancel is read all through the wait (_turned_back), so a longer
+# one costs nothing: out of time the action still ends inside the orchestrator's 120 s
+# (LINE_UP_S + line_up.LINGER_S + the source's close + this + CANCEL_ESCALATE_S + WORLD_WAIT_S)
+LINE_UP_END_S = 25.0
 # "nothing was pressed", not "nothing moved": with the wrist look the wrist turned to look, and back to rest
 NOT_LINED_UP = (
     "the container was not where the arm opens it within %.0f s: nothing was pressed (press open again in place)"
@@ -170,6 +177,8 @@ LINE_UP_LATE = (
     "the run did not end within %.0f s of being told its line-up was over and was stopped (Ctrl+C): the wrist "
     "may stand part-turned -- " + ARM_HOLDS
 )
+# press_demo's last word of a line-up that ended without a go, its wrist turned back (line_up_watch)
+LINE_UP_ENDED = "LINE-UP: ended without a go"
 LINE_UP_NO_UI = (
     "line_up is on and this goal has no UI to ask on (it came without the orchestrator's token, or the UI "
     "bridge is not there): nothing moved. Set line_up false to run without lining up"
@@ -770,6 +779,8 @@ class Capability(CapabilityEngine):
 
         try:
             self._line_up(ctx, lambda: self._box_source(env, instance_id, watch=run_), on_cancel=stop_first)
+            if self._cancelled_before_go(ctx):
+                raise Cancelled()  # ended as any cancel of the line-up is, below: the run is never told to go
         except BaseException as e:
             cancelled, late = isinstance(e, Cancelled), False
             try:
@@ -779,8 +790,18 @@ class Capability(CapabilityEngine):
                     run_.stop(CANCEL_ESCALATE_S, interrupt=False)  # the one Ctrl+C is sent: its end, or a kill
                 else:
                     run_.send({"stop": True})
-                    cancelled, late = self._turned_back(ctx, run_)
+                    try:
+                        cancelled, late = self._turned_back(ctx, run_)
+                    except BaseException:
+                        # the engine failed while the wrist turned back (the panel, the progress): the run's
+                        # own stop before anything else, or it would go on turning with nothing following it
+                        run_.stop(CANCEL_ESCALATE_S)
+                        raise
                 code = run_.finish()
+                if late and any(LINE_UP_ENDED in line for line in run_.lines):
+                    # stopped late, but it had said its line-up was over and the wrist back at rest: only its
+                    # own end was slow (its threads, its log), and that is no arm left part-turned
+                    late, code = False, EXIT_NOT_LINED_UP
             finally:
                 self._run = None  # only now: until it has ended, a shutdown must still be able to stop it
             view.finish(code, cancelled=cancelled, timed_out=False, held=False)
@@ -797,10 +818,23 @@ class Capability(CapabilityEngine):
                 self._report_arm_error(error, ctx, world)
                 world.wait(WORLD_WAIT_S)
             raise error from e
-        # _line_up returns on the user's Open alone (line_up.GO): every other end of a line-up raised above
-        run_.send({"go": True})
+        # _line_up returns on the user's Open alone (line_up.GO): every other end of a line-up raised above.
+        # The go is this function's last act: nothing after it can raise with the run flying and unfollowed
         self.get_logger().info("line-up: Open pressed: the run goes on")
+        run_.send({"go": True})
         return run_
+
+    def _cancelled_before_go(self, ctx):
+        """Whether a cancel came between the line-up's Open and the run's go. The line-up's source is closed
+        in between (reach_probe keeping its grid: up to line_up.PROBE_QUIT_S, and STOP_WAIT_S more for one
+        that does not end), the panel already says the container is being opened and has its Cancel, and
+        nothing reads the press or the orchestrator's cancel in that time: read here, once, so a cancel that
+        came then is acted on before the arm is told to go and not a moment after."""
+        event = ctx.poll_ui_event()
+        if event is not None and event.get("type") == "button" and event.get("button_id") == PANEL_CANCEL:
+            self._cancel_from_ui()
+            return True
+        return bool(ctx.cancelled())
 
     def _turned_back(self, ctx, run_):
         """A run told its line-up is over ({"stop": true}), followed until it has ended. It turns its wrist
@@ -985,6 +1019,8 @@ class Capability(CapabilityEngine):
         elif lines_up:
             # nothing moves, and nothing runs but on the line-up's Open
             lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
+            if self._cancelled_before_go(ctx):
+                raise Cancelled()  # nothing ran
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         try:
             ctx.progress(first, 0.0, "starting", pausable=False)

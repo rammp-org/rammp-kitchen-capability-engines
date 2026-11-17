@@ -362,11 +362,22 @@ class BoxSource:
         """The boundary's word on a box further from the arm's base than the deployment's bound (`far_m`),
         which needs no grid: nothing out there is in the boundary whatever the proof finds, so the box is not
         inside, and the way in is toward the base, by what it is beyond the bound at the least. None where
-        there is no bound, or the box is within it."""
-        r = math.hypot(xy[0], xy[1])
-        if self._far_m is None or r <= self._far_m:
+        there is no bound, or the box and the cell that holds it are within it."""
+        if self._far_m is None:
             return None
-        back = (r - self._far_m) / r
+        r = math.hypot(xy[0], xy[1])
+        beyond = r - self._far_m
+        if beyond <= 0.0 and self._zone is not None:
+            # within the bound itself, in a cell whose centre is beyond it: the bound goes by the cell's
+            # centre (Zone.within, reach_probe --far-m), so that cell is never asked and never works. Without
+            # this a box driven in from too far was told "closer" up to the bound and "hold still" just
+            # inside it, where holding still gets no answer
+            ij = self._zone.index(xy)
+            if ij is not None:
+                beyond = math.hypot(*self._zone.centre(*ij)) - self._far_m
+        if beyond <= 0.0 or r <= 0.0:
+            return None
+        back = beyond / r
         return guide.Reach(False, (-xy[0] * back, -xy[1] * back))
 
     def look(self, now):

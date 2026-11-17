@@ -448,6 +448,26 @@ def test_a_box_further_out_than_the_deployments_bound_is_told_closer_with_no_gri
     assert source.look(1.1)[1] is None
 
 
+def test_a_box_just_inside_the_bound_in_a_cell_whose_centre_is_beyond_it_is_told_closer_too():
+    """The bound goes by a cell's centre (Zone.within, reach_probe --far-m): the cell that holds a box at
+    0.796 m has its centre at 0.806 m, is never asked and never works. A user driving in from too far was
+    told "closer" up to the bound, then "Hold still, checking" in that band, where holding still gets no
+    answer: the box there is told closer as well, until it stands in a cell the proof is asked of."""
+    source, watch, probe = _source(far_m=0.80)
+    probe.says(0.5, {"zone": Zone.blank((0.0, 1.0), (-0.5, 0.5), lid_z=0.32, key="k").to_dict()})
+    watch.says(1.0, _fix((0.79, 0.10, 0.315)))
+    assert math.hypot(0.79, 0.10) < 0.80 < math.hypot(0.80, 0.10)  # the box within the bound, its cell's centre not
+    _fix_, reach = source.look(1.1)
+    assert reach is not None and not reach.inside
+    word, metres, _axis = guide.instruction(reach.to_zone)
+    assert word == "closer" and 0.0 < metres < 0.02
+    watch.says(2.0, _fix((0.74, 0.10, 0.315)))  # a cell within the bound, not asked yet: the grid's to say
+    assert source.look(2.1)[1] is None
+    source, watch, probe = _source(far_m=0.80)  # with no grid said at all there is no cell to go by
+    watch.says(1.0, _fix((0.79, 0.10, 0.315)))
+    assert source.look(1.1)[1] is None
+
+
 def test_the_probe_is_held_to_one_thread():
     """Its proofs are numpy's, beside the arm's driver on the robot's computer: its BLAS is not to take the
     cores. The watch's environment is as it was given."""

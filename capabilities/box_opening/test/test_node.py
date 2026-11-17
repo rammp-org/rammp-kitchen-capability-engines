@@ -92,6 +92,10 @@ if "--line-up" in sys.argv:
             sys.exit(4)
         sys.stdout.write("[press_demo] LINE-UP: ended without a go; nothing was pressed, the wrist back at rest\\n")
         sys.stdout.flush()
+        try:
+            time.sleep(float(os.environ.get("END_S", "0")))  # its own end (threads, log) taking this long
+        except KeyboardInterrupt:
+            sys.exit(130)
         sys.exit(5)
     sys.stdout.write("[press_demo] LINE-UP: go\\n")
 runs = Path(os.environ["BOX_OPENING_STATE"]) / "runs"
@@ -1617,6 +1621,95 @@ def test_a_run_that_had_to_be_stopped_after_its_line_up_is_the_arm_holding_too(e
     assert e.value.error_code == "arm_holds" and not e.value.recoverable and sent == [signal.SIGINT]
     assert "part-turned" in str(e.value) and "clear it, attended" in str(e.value)
     assert [w["system_status"]["arm"]["error_code"] for w in ctx.world] == ["arm_holds"]
+
+
+def test_a_run_stopped_late_that_had_its_wrist_back_at_rest_is_not_the_arm_holding(engine, monkeypatch):
+    """The stop for a run that outlasts LINE_UP_END_S is for a wrist that may stand part-turned. One that had
+    already said its line-up was over, the wrist back at rest, and was only slow to end (its threads, its
+    log) is the line-up's own end: not lined up, recoverable, and no arm error in the world state."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    monkeypatch.setenv("END_S", "20")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    monkeypatch.setattr(node, "LINE_UP_END_S", 0.5)
+    engine.orchestrated = True
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable and sent == [signal.SIGINT]
+    assert ctx.world == [] and engine._run is None
+
+
+def test_the_engine_failing_while_the_wrist_turns_back_stops_the_run(engine, monkeypatch):
+    """REVIEW_RULES R3, for the wrist's turn back: it is a motion, beside the user, and the panel and the
+    progress the engine reports all through it can raise as any call can. The run must not go on turning
+    with the goal ended and nothing following it: its own stop first, and it stays the node's to stop
+    (a shutdown) until it has ended."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    monkeypatch.setenv("TURN_BACK_S", "20")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    sent, runs = [], []
+    real = node.Run.interrupt
+    monkeypatch.setattr(
+        node.Run, "interrupt", lambda run: (sent.append(engine._run is run), runs.append(run), real(run))
+    )
+    ctx = FakeCtx()
+    line_up_says = ctx.progress
+
+    def progress(phase, pct, message="", pausable=True):
+        if message == node.PANEL_TURNING_BACK:
+            raise RuntimeError("the goal's feedback could not be published")
+        line_up_says(phase, pct, message, pausable)
+
+    ctx.progress = progress
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError):
+        engine.execute("open_box", {}, ctx)
+    assert sent == [True]  # its own stop (one Ctrl+C), sent while it was still the node's to stop
+    assert runs[0].proc.poll() in (130, -signal.SIGINT) and engine._run is None
+    assert time.monotonic() - t0 < 10.0  # stopped at once, not left to its 20 s turn
+
+
+@pytest.mark.parametrize("by", ["the orchestrator", "the panel"])
+def test_a_cancel_that_comes_while_the_line_up_closes_its_source_is_read_before_the_go(engine, monkeypatch, by):
+    """Between the user's Open and the run's go the line-up closes its source: reach_probe is given a moment
+    to keep its grid (line_up.PROBE_QUIT_S), the panel already says the container is being opened and has
+    its Cancel. A cancel in that moment is acted on before the arm is told to go, not just after: the run is
+    never told to go, gets its Ctrl+C as any cancelled line-up does, and the action ends cancelled."""
+    import threading
+
+    given(monkeypatch, FULL_RUN[:3], wait=True)
+    _wrist_lining_up(engine, monkeypatch)
+    ctx = FakeCtx()
+    told, sent, base = [], [], []
+    real_send, real_interrupt, real_close = node.Run.send, node.Run.interrupt, node.line_up.BoxSource.close
+    cancel = {
+        "the orchestrator": lambda: setattr(ctx, "cancel", True),
+        "the panel": lambda: ctx.events.append(CANCEL_PRESS),
+    }
+
+    def close(source):
+        cancel[by]()  # it comes as the source is closed, the Open already taken
+        real_close(source)
+
+    monkeypatch.setattr(node.line_up.BoxSource, "close", close)
+    monkeypatch.setattr(node.Run, "send", lambda run, msg: (told.append(msg), real_send(run, msg)))
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real_interrupt(run)))
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda: base.append(1))
+    threading.Timer(2.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert {"go": True} not in told and sent == [signal.SIGINT] and engine._run is None
+    assert base == ([1] if by == "the panel" else [])  # the button's press is made the orchestrator's cancel
+    assert ctx.objects == {} and ctx.world == []
 
 
 def test_a_run_halted_while_its_wrist_turned_back_says_so_not_that_nothing_moved(engine, monkeypatch):
