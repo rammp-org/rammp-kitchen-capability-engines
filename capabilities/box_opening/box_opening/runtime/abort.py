@@ -47,6 +47,9 @@ class ArmHalted(BaseException):
 EXIT_HALTED = 4
 # a line-up (press_demo --line-up) that ended without its go: nothing was pressed, the wrist back at rest
 EXIT_NOT_LINED_UP = 5
+# a line-up whose own wrist turn stopped part way, out or back: nothing was pressed, and the arm holds where
+# it stopped, the wrist turned (the node: arm_holds, not recoverable, as a run's own stop is)
+EXIT_LINE_UP_HOLDS = 6
 
 
 def check(client):
