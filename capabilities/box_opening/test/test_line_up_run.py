@@ -412,6 +412,18 @@ def test_a_wrist_that_cannot_look_leaves_the_scene_camera_and_says_why(lined):
     assert scene.looks >= 1
 
 
+def test_a_ctrl_c_asked_for_ends_the_scene_cameras_watch(lined):
+    """The scene-only watch only sleeps and reads: a Ctrl+C that was asked for and did not arrive as an exception
+    (it surfaced as another error under the wrist turn's planning, taken there for a refusal) is seen in the
+    client's abort flag, and ends the line-up as a Ctrl+C does."""
+    lined.watch = ("refused", "planning failed")
+    lined.ctx.client._abort = SimpleNamespace(requested=True)
+    scene = Scene()
+    with pytest.raises(KeyboardInterrupt):
+        _line_up(lined, Ear(50, go=True), locator=scene)
+    assert scene.looks == 0 and scene.on_sighting is None
+
+
 def _selecting(mine=None, held=None):
     """A scene locator that looks (Scene) and holds the orchestrator's selection as test_survey's does (_locator:
     `mine` the selected instance's box in the segmenter's newest frame, `held` how many frames of its last look

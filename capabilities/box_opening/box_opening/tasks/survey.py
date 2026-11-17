@@ -1324,6 +1324,11 @@ def fly_view(ctx, runner, view, band, execute):
         except PlanRefused as e:  # a plan that ends elsewhere than asked: asked again (SURVEY_PLAN_TRIES)
             why = str(e)
         except RuntimeError as e:
+            # A Ctrl+C asked for while the plan was waited on (no goal in flight: the handler raises) comes
+            # out of rclpy's message take as a RuntimeError (PlannerClient's own note): the client's abort
+            # flag says what it was. Read as a refusal, the line-up went on watching, deaf to the cancel.
+            if getattr(getattr(ctx.client, "_abort", None), "requested", False):
+                raise KeyboardInterrupt from e
             return "refused", str(e)
     if leg is None:
         return "refused", why

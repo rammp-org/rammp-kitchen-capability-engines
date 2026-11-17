@@ -1528,6 +1528,10 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             log.info("[press_demo] LINE-UP: the arm is not at rest: the wrist does not look before the go")
         last_none = 0.0
         while not ear.heard():  # the scene camera alone
+            # this watch only sleeps and reads, so a Ctrl+C that did not arrive as an exception (it came out
+            # as another error under the planner's wait, taken for a refusal) would never end it
+            if getattr(getattr(ctx.client, "_abort", None), "requested", False):
+                raise KeyboardInterrupt
             why = scene_look()
             if (why is not None or not_at_rest) and time.monotonic() - last_none >= sv.LINE_UP_NONE_S:
                 last_none = time.monotonic()

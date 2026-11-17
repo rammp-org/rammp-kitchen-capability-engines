@@ -456,6 +456,29 @@ def test_a_view_whose_plan_the_client_refuses_is_asked_for_again(monkeypatch):
     assert sv.fly_view(ctx, runner, _view("survey:angle-1"), band, True)[0] == "refused" and len(asked) == 1
 
 
+def test_a_ctrl_c_that_surfaces_as_a_runtime_error_while_a_view_is_planned_is_a_ctrl_c(monkeypatch):
+    """A Ctrl+C with no goal in flight raises from the signal handler, and inside rclpy's message take that
+    surfaces as a RuntimeError (client.py and press_demo's own notes). fly_view read it as the planner's refusal:
+    the line-up then went on watching with the scene camera, deaf to the cancel, until the engine killed it 15 s
+    later. The client's abort flag says what it was."""
+    from box_opening.primitives import core
+
+    def interrupted(*a, **k):
+        raise RuntimeError("take failed: the handler raised")
+
+    monkeypatch.setattr(core, "_plan_motion", interrupted)
+    monkeypatch.setattr(core, "_full_world", lambda ctx: ("full", "world_empty.yaml"))
+    ctx = SimpleNamespace(client=FakeClient())
+    ctx.client.live = list(HOME)
+    band = SimpleNamespace(path_refusal=lambda traj: None)
+    runner = SimpleNamespace(run=lambda legs, execute: [])
+    ctx.client._abort = SimpleNamespace(requested=False)  # no Ctrl+C: the planner's own refusal, as before
+    assert sv.fly_view(ctx, runner, _view("survey:angle-1"), band, True)[0] == "refused"
+    ctx.client._abort.requested = True
+    with pytest.raises(KeyboardInterrupt):
+        sv.fly_view(ctx, runner, _view("survey:angle-1"), band, True)
+
+
 def test_a_view_the_arm_already_stands_at_is_flown_without_a_plan(monkeypatch):
     """After a line-up's Open the run's first view is the pose the wrist already holds (the same candidates from
     the same rest pose, and no home in between). A plan from a pose to itself has no length, and the driver's
