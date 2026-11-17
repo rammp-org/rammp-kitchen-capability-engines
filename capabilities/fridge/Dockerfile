@@ -44,7 +44,7 @@ RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/r
 
 # rammp_ui_bridge_interfaces (capability_engine's direct UI panels: the error panel) is not in the base either: the
 # same pinned commit the example and microwave images build it from.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e.tar.gz /tmp/ui_bridge.tar.gz
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
 RUN tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
 
 # Dependencies first, from the package.xml files only, so a code-only change reuses this layer and

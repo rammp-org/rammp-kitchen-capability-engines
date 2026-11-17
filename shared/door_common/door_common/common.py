@@ -11,8 +11,10 @@ Used by `open_door.py`, `close_door.py` and `demo_replay.py`, here and in each c
 cuRobo (RAMMP's planner, through the driver's go_to_ee_pose / go_to_joint_config) does the
 free-space moves: to park, to the regrasp back-off point, to the open-door view -- as
 rammp_button_press does. Everything on or along the door (straight on/off the handle, the
-swings, the pushes) stays on joint paths planned and checked here: the planner takes a goal
-only and can't follow a line or an arc. `check_curobo_goal` gates a cuRobo goal.
+swings, the pushes) is a joint path planned and checked here: the planner takes a goal
+only and can't follow a line or an arc. `check_curobo_goal` gates a cuRobo goal. A checked
+path can still be sent through cuRobo (`through_curobo`: some of its joints as blended targets,
+each leg asked of cuRobo first by `curobo_path_problem`) -- the microwave sends all of them that way.
 
 All gripper motion goes through `execute_command(Open/CloseGripperCommand())` --
 `ArmInterfaceClient` has no `open_gripper()` method.
@@ -26,6 +28,8 @@ constants here with no default (None), set once at startup with `configure` (and
 """
 
 import json
+import os
+import re
 import sys
 import threading
 import time
@@ -35,7 +39,10 @@ from pathlib import Path
 import numpy as np
 import pybullet as p
 import rammp_arm
+import yaml
 from capability_engine import sim
+from capability_engine.arm import IMPEDANCE as IMPEDANCE_MODE
+from capability_engine.arm_messages import JointTarget
 from capability_engine.cornell_commands import (
     CartesianTrajectoryCommand,
     JointCommand,
@@ -132,6 +139,18 @@ def quiet():
         yield
     finally:
         _quiet -= 1
+
+
+@contextmanager
+def captured():
+    """say() lines inside go into the yielded list instead of the log (even inside quiet()): to sum up many tries."""
+    global _output, _quiet
+    saved, lines = (_output, _quiet), []
+    _output, _quiet = lines.append, 0
+    try:
+        yield lines
+    finally:
+        _output, _quiet = saved
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +374,8 @@ def _ik_within_guards(scene, rb, pos, quat, seed):
         if err <= sim.MAX_IK_ERR:
             break
         q, err = solve_ik(scene, rb, pos, quat, q)
+    if err >= sim.KEEP_OUT_ERR:  # reached, but the arm is in the chair / user (solve_ik's keep-out code, not a miss)
+        return None, f"goal {np.round(pos, 3)}: the arm would be in the keep-out zone ({keep_out_message(rb, q)})"
     if err > sim.MAX_IK_ERR:
         return None, f"goal {np.round(pos, 3)} unreachable (IK err {err * 100:.1f} cm)"
     j4, j6 = abs(np.degrees(q[3])), abs(np.degrees(q[5]))
@@ -441,7 +462,360 @@ def load_park():
     return wrap_joints(PARK_JOINTS)
 
 
-def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre_park_x=None):
+# ---------------------------------------------------------------------------
+# A checked joint path through cuRobo: every CUROBO_SEND_EVERY-th joints a target, asked of it first
+# ---------------------------------------------------------------------------
+CUROBO_SEND_EVERY = 4  # every 4th checked waypoint is a cuRobo target (+ the last)
+CUROBO_BLEND_M = 0.01  # the tool passes those targets this close, not stopping on each
+CUROBO_MAX_DETOUR = 1.5  # a leg may travel this many times the joints' direct distance (11-02: cuRobo alone took 78 cm
+# for a 12 cm push: not with the hand on the handle)
+CUROBO_RETRIES = 2  # a leg cuRobo's post-validation refuses (velocity / acceleration / jerk over a limit) is re-asked
+# this many times: its plans vary a little. 11-10: J2 acceleration 25.5-27.5 > 25 rad/s^2 on every straight-in
+CUROBO_DETOUR_FLOOR_DEG = 5.0  # legs shorter than this are measured against this
+FREE_MOVE_MIN_Z = None  # m (arm base frame): no arm link or the tool lower than this on a cuRobo path (the table:
+# cuRobo's world has none). None: no floor. 11-10: an unchecked cuRobo move took the fingertips to z 0.03, under the
+# microwave's table (top ~0.19), and hit it
+FREE_MOVE_MAX_SWING_RAD = np.radians(25.0)  # ... and no joint further than this past the straight start -> goal range
+FREE_MOVE_END_DEG = 2.0  # ... and the plan ends within this of the joints asked (cuRobo's pose fallback ends elsewhere)
+
+
+def curobo_knots(path):
+    """The joints of a checked path that cuRobo is given as targets."""
+    path = list(path)
+    knots = path[CUROBO_SEND_EVERY - 1 :: CUROBO_SEND_EVERY]
+    if not knots or knots[-1] is not path[-1]:
+        knots.append(path[-1])
+    return knots
+
+
+def curobo_path_problem(ai, start, path, label, in_front=None, knots=None):
+    """Ask cuRobo -- nothing moves -- for every leg of `path` from joints `start`: why it can't be used, or None.
+    `knots`: the targets to ask for, instead of curobo_knots(path). Without cuRobo (no plan_to_joints: the bench's
+    mock) it can't check, and passes."""
+    if not hasattr(ai, "plan_to_joints"):
+        return None
+    q = start
+    for k, goal in enumerate(knots if knots is not None else curobo_knots(path), 1):
+        pl = ai.plan_to_joints(goal, q)
+        for _ in range(CUROBO_RETRIES):
+            if pl.success or _over_limit(pl.message) is None:
+                break
+            pl = ai.plan_to_joints(goal, q)
+        if not pl.success:
+            slowed = _passes_slowed(pl.message)
+            if slowed is None:
+                return f"cuRobo can't plan {label}, leg {k}: {pl.message}"
+            say(f"  {label}, leg {k}: {slowed}")
+            q = goal
+            continue
+        if len(pl.q) > 1:
+            direct = max(float(np.linalg.norm(short_delta(q, goal))), np.radians(CUROBO_DETOUR_FLOOR_DEG))
+            went = sum(float(np.linalg.norm(short_delta(a, b))) for a, b in zip(pl.q[:-1], pl.q[1:], strict=True))
+            if went > CUROBO_MAX_DETOUR * direct:
+                return f"cuRobo's path for {label}, leg {k}, takes a detour ({went / direct:.1f}x the direct distance)"
+        low = path_below_floor(pl.q) or path_not_in_front(pl.q, in_front)
+        if low:
+            return f"cuRobo's path for {label}, leg {k}: {low}"
+        q = goal
+    return None
+
+
+def _lowest(rb, q):
+    """(z, link name) of the lowest arm link origin or the tool at joints `q`, in the arm's base frame."""
+    c = rb.physics_client_id
+    for j, jj in enumerate(ARM):
+        p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
+    base = make_sim()[0].robot_base_pose
+    inv_pos, inv_orn = p.invertTransform(base.position, base.orientation)
+    best = (np.inf, "")
+    for link in [*ARM[1:], rb.end_effector_id]:
+        ls = p.getLinkState(rb.robot_id, link, computeForwardKinematics=True, physicsClientId=c)
+        z = p.multiplyTransforms(inv_pos, inv_orn, ls[4], ls[5])[0][2]
+        if z < best[0]:
+            best = (z, p.getJointInfo(rb.robot_id, link, physicsClientId=c)[12].decode())
+    return best
+
+
+def path_below_floor(qs):
+    """Why a cuRobo path's joints `qs` take the arm below FREE_MOVE_MIN_Z, or "" (also with no floor set)."""
+    if FREE_MOVE_MIN_Z is None or len(qs) == 0:
+        return ""
+    rb = make_sim()[1]
+    for i, q in enumerate(qs):
+        z, link = _lowest(rb, q)
+        if z < FREE_MOVE_MIN_Z:
+            return f"{link} down to z {z:.3f} at sample {i}/{len(qs)}, under the floor {FREE_MOVE_MIN_Z:.2f}"
+    return ""
+
+
+def path_not_in_front(qs, in_front):
+    """Why a cuRobo path's joints `qs` take the tool behind `in_front` = (point, outward normal, least distance) --
+    the door's plane through the grasp: the tool never further into the door than the grasp -- or "" (also for
+    None)."""
+    if in_front is None or len(qs) == 0:
+        return ""
+    point, n, least = np.asarray(in_front[0], float), np.asarray(in_front[1], float), float(in_front[2])
+    n = n / np.linalg.norm(n)
+    scene, rb = make_sim()
+    for i, q in enumerate(qs):
+        d = float(np.dot(sim.tool_pose(scene, rb, q)[0] - point, n))
+        if d < least:
+            return f"tool {-d * 100:.1f} cm past the grasp into the door at sample {i}/{len(qs)}"
+    return ""
+
+
+def free_move_problem(ai, start, q_goal, in_front=None, end_tool_tol=None, keep_shape=True):
+    """cuRobo's plan to joints `q_goal` from joints `start` (plan_to_joints, nothing moves) and why it can't be run as
+    it is, "" when it can: the floor (path_below_floor), the tool in front (path_not_in_front), no joint swinging
+    FREE_MOVE_MAX_SWING_RAD past its straight range, the end within FREE_MOVE_END_DEG of `q_goal` (or, with
+    `end_tool_tol` (m, deg), the tool there). A plan refused only for a full-speed limit is asked again
+    (CUROBO_RETRIES). Returns (plan, why)."""
+    start = np.asarray(start, dtype=float)
+    big = reconfiguration(start, q_goal) if keep_shape else ""
+    if big:
+        return None, big
+    pl = ai.plan_to_joints(q_goal, start)
+    for _ in range(CUROBO_RETRIES):
+        if pl.success or _over_limit(pl.message) is None:
+            break
+        pl = ai.plan_to_joints(q_goal, start)
+    if not pl.success or len(pl.q) == 0:
+        return pl, f"cuRobo can't plan it ({pl.message})"
+    qs = np.asarray(pl.q, dtype=float)
+    low = path_below_floor(qs) or path_not_in_front(qs, in_front)
+    if low:
+        return pl, f"cuRobo's path takes the {low}"
+    off = np.abs(np.array([short_delta(start, q) for q in qs]))
+    swing = off.max(axis=0) - np.abs(short_delta(start, q_goal))
+    if float(swing.max()) > FREE_MOVE_MAX_SWING_RAD:
+        j = int(np.argmax(swing))
+        return pl, (
+            f"cuRobo's path swings J{j + 1} {np.degrees(swing[j]):.0f} deg past a straight move (max "
+            f"{np.degrees(FREE_MOVE_MAX_SWING_RAD):.0f})"
+        )
+    end = float(np.degrees(np.max(np.abs(short_delta(qs[-1], q_goal)))))
+    if end > FREE_MOVE_END_DEG:  # other joints: refused, unless `end_tool_tol` and the tool ends there
+        why = f"cuRobo's plan ends {end:.1f} deg off the goal joints"
+        if end_tool_tol is None:
+            return pl, why
+        scene, rb = make_sim()
+        (p_end, o_end), (p_goal, o_goal) = sim.tool_pose(scene, rb, qs[-1]), sim.tool_pose(scene, rb, q_goal)
+        d_m = float(np.linalg.norm(p_end - p_goal))
+        d_deg = float(np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(o_end, o_goal)))))))
+        if d_m > end_tool_tol[0] or d_deg > end_tool_tol[1]:
+            return pl, f"{why}, the tool {d_m * 100:.1f} cm / {d_deg:.1f} deg off"
+    return pl, ""
+
+
+FREE_MOVE_MAX_JOINT_DEG = 60.0  # no joint turns more than this in one free move (the arm keeps its shape)
+
+
+def reconfiguration(start, q_goal, max_deg=None):
+    """Why the move `start` -> `q_goal` changes the arm's shape (a joint turning more than `max_deg`, None:
+    FREE_MOVE_MAX_JOINT_DEG, the free joints the short way), or ""."""
+    limit = FREE_MOVE_MAX_JOINT_DEG if max_deg is None else max_deg
+    d = np.degrees(np.abs(short_delta(np.asarray(start, dtype=float), q_goal)))
+    j = int(np.argmax(d))
+    if d[j] > limit:
+        return f"J{j + 1} would turn {d[j]:.0f} deg (max {limit:.0f}): the arm would change its shape"
+    return ""
+
+
+FREE_MOVE_DIRECT_STEPS = 40  # the direct joint path (direct_move_problem) is checked at this many points
+
+
+def direct_move_problem(start, q_goal, keep_shape=True):
+    """Why the direct joint path `start` -> `q_goal` (every joint the short way, together) can't be run, or "": the
+    chair and user (keep_out_message, with CHAIR_SIM_MARGIN_M) and the floor (path_below_floor), at
+    FREE_MOVE_DIRECT_STEPS points along it."""
+    start = np.asarray(start, dtype=float)
+    big = reconfiguration(start, q_goal) if keep_shape else ""
+    if big:
+        return f"the direct joint path: {big}"
+    d = short_delta(start, q_goal)
+    qs = [start + d * k / FREE_MOVE_DIRECT_STEPS for k in range(FREE_MOVE_DIRECT_STEPS + 1)]
+    rb = make_sim()[1]
+    for k, q in enumerate(qs):
+        ko = keep_out_message(rb, q)
+        if ko is not None:
+            return f"the direct joint path, {k}/{FREE_MOVE_DIRECT_STEPS} of the way: {ko}"
+    low = path_below_floor(qs)
+    return f"the direct joint path: {low}" if low else ""
+
+
+def checked_curobo_move(ai, q_goal, label, speed_scale=None, in_front=None, end_tool_tol=None, keep_shape=True):
+    """cuRobo's plan to joints `q_goal` from where the arm is, checked (free_move_problem), then run EXACTLY
+    (execute_joint_trajectory), not planned again. Raises Refused before anything moves when a check fails; returns
+    whether the motion succeeded."""
+    pl, why = free_move_problem(ai, ai.raw_joints(), q_goal, in_front, end_tool_tol, keep_shape)
+    if why:  # cuRobo's path refused: the direct joint path, if it is clear (move_joints checks the keep-out again)
+        direct = (
+            "no in_front check for it"
+            if in_front is not None
+            else direct_move_problem(ai.raw_joints(), q_goal, keep_shape)
+        )
+        if direct:
+            raise Refused(f"{label}: {why}; {direct} -- nothing moved.")
+        say(f"  {label}: {why}; the direct joint path is clear (the chair and user, the floor): running that")
+        return bool(ai.move_joints([np.asarray(q_goal, dtype=float)]))
+    scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+    secs = float(pl.t[-1]) / scale
+    say(f"  {label}: cuRobo's plan checked ({len(pl.q)} samples, {secs:.1f} s at {scale:g} x), run as it is")
+    points = [(float(t), q, qd) for t, q, qd in zip(pl.t, pl.q, pl.qd, strict=True)]
+    res = ai.execute_joint_trajectory(list(rammp_arm.JOINTS), points, speed_scale=scale)
+    if res.error_code != 0:
+        say(f"  {label}: ended {res.error_string or res.error_code}")
+    return res.error_code == 0
+
+
+POSE_END_TOL = (0.01, 5.0)  # a checked pose move's plan must end the tool this close (m, deg) to the pose asked
+
+
+POSE_MOVE_TRIES = 3  # cuRobo's plans vary: a checked pose move is asked this many times for one that passes
+
+
+def checked_pose_move(ai, pos, quat, label, hold=0, speed_scale=None, gains=None, keep_shape=True, max_joint_deg=None):
+    """cuRobo's plan to the tool pose (plan_to_pose from where the arm is, nothing moves), checked -- the arm keeping
+    its shape (reconfiguration with `max_joint_deg`, unless not `keep_shape`), the floor, no joint swinging
+    FREE_MOVE_MAX_SWING_RAD past its straight range, the tool ending within POSE_END_TOL of the pose -- then run
+    EXACTLY (execute_joint_trajectory), under joint impedance `gains` if given. Asked POSE_MOVE_TRIES times: the first
+    plan that passes runs. Raises Refused before anything moves when none does; returns whether the motion
+    succeeded."""
+    start = np.asarray(ai.raw_joints(), dtype=float)
+    pl, why = pose_plan_problem(ai, start, pos, quat, hold, keep_shape, POSE_MOVE_TRIES, max_joint_deg)
+    if why:
+        raise Refused(f"{label}: {why} -- nothing moved.")
+    return run_checked_plan(ai, pl, label, speed_scale, gains)
+
+
+def run_checked_plan(ai, pl, label, speed_scale=None, gains=None):
+    """Run cuRobo's checked plan `pl` EXACTLY (execute_joint_trajectory), under joint impedance `gains` if given;
+    whether the motion succeeded."""
+    qs = np.asarray(pl.q, dtype=float)
+    scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+    secs = float(pl.t[-1]) / scale
+    say(f"  {label}: cuRobo's plan checked ({len(qs)} samples, {secs:.1f} s at {scale:g} x), run as it is")
+    points = [(float(t), q, qd) for t, q, qd in zip(pl.t, pl.q, pl.qd, strict=True)]
+    kw = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
+    res = ai.execute_joint_trajectory(list(rammp_arm.JOINTS), points, speed_scale=scale, **kw)
+    if res.error_code != 0:
+        say(f"  {label}: ended {res.error_string or res.error_code}")
+    return res.error_code == 0
+
+
+def pose_plan_problem(ai, start, pos, quat, hold=0, keep_shape=True, tries=1, max_joint_deg=None):
+    """checked_pose_move's plan and checks, nothing moves: cuRobo's plan to the tool pose from joints `start` -- the
+    arm keeping its shape (reconfiguration with `max_joint_deg`, unless not `keep_shape`), the floor, no joint
+    swinging FREE_MOVE_MAX_SWING_RAD past its straight range, the tool ending within POSE_END_TOL of the pose. Asked
+    `tries` times (cuRobo's plans vary) for one that passes. (plan, "") when one does, else (the last plan or None,
+    why)."""
+    start = np.asarray(start, dtype=float)
+    pl, why = None, ""
+    for _ in range(max(1, int(tries))):
+        pl = ai.plan_to_pose(pos, quat, start, hold)
+        for _ in range(CUROBO_RETRIES):
+            if pl.success or _over_limit(pl.message) is None:
+                break
+            pl = ai.plan_to_pose(pos, quat, start, hold)
+        if not pl.success or len(pl.q) == 0:
+            why = f"cuRobo can't plan it ({pl.message})"
+            continue
+        qs = np.asarray(pl.q, dtype=float)
+        why = (reconfiguration(start, qs[-1], max_joint_deg) if keep_shape else "") or path_below_floor(qs)
+        if not why:
+            off = np.abs(np.array([short_delta(start, q) for q in qs]))
+            swing = off.max(axis=0) - np.abs(short_delta(start, qs[-1]))
+            if float(swing.max()) > FREE_MOVE_MAX_SWING_RAD:
+                j = int(np.argmax(swing))
+                why = f"cuRobo's path swings J{j + 1} {np.degrees(swing[j]):.0f} deg past a straight move"
+        if not why:
+            scene, rb = make_sim()
+            p_end, o_end = sim.tool_pose(scene, rb, qs[-1])
+            d_m = float(np.linalg.norm(p_end - np.asarray(pos, dtype=float)))
+            d_deg = float(np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(o_end, np.asarray(quat, dtype=float))))))))
+            if d_m > POSE_END_TOL[0] or d_deg > POSE_END_TOL[1]:
+                why = f"cuRobo's plan ends the tool {d_m * 100:.1f} cm / {d_deg:.1f} deg off the pose"
+        if not why:
+            return pl, ""
+    return pl, why
+
+
+_LIMIT_RE = re.compile(r"(\w+) (velocity|acceleration|jerk) ([\d.]+) > limit ([\d.]+)")
+_LIMIT_POWER = {"velocity": 1, "acceleration": 2, "jerk": 3}  # how each scales with the motion's speed
+
+
+def _over_limit(message):
+    """(joint, quantity, value, limit) when cuRobo's post-validation refused a plan for a velocity, acceleration or
+    jerk over its limit -- its plans for plan_to_joints run at full speed -- else None."""
+    m = _LIMIT_RE.search(str(message))
+    if m is None or "VALIDATION" not in str(message):
+        return None
+    return m.group(1), m.group(2), float(m.group(3)), float(m.group(4))
+
+
+def _passes_slowed(message):
+    """Why a leg refused only for a velocity / acceleration / jerk over its limit passes anyway, or None: plan_to_joints
+    plans at full speed, the motion runs at rammp_arm.GO_TO_SPEED_SCALE, which scales velocity by it, acceleration by
+    its square and jerk by its cube. That leg's path is then unchecked for a detour."""
+    over = _over_limit(message)
+    if over is None:
+        return None
+    joint, kind, value, limit = over
+    scale = float(rammp_arm.GO_TO_SPEED_SCALE)
+    slowed = value * scale ** _LIMIT_POWER[kind]
+    if slowed > limit:
+        return None
+    return (
+        f"cuRobo's full-speed plan has {joint} {kind} {value:g} > {limit:g}; the motion runs at {scale:g} x speed: "
+        f"{slowed:.2f}, within it (passed; this leg's path not checked for a detour)"
+    )
+
+
+def through_curobo(ai, path, label, speed_scale=None, gains=None):
+    """Move along a checked joint path as one cuRobo motion, stiff or (`gains`) compliant."""
+    return through_curobo_knots(ai, curobo_knots(path), label, speed_scale, gains)
+
+
+def through_curobo_knots(ai, knots, label, speed_scale=None, gains=None, speeds=None, blends=None):
+    """One cuRobo motion through joints `knots`, passing each but the last within CUROBO_BLEND_M (not stopping).
+    `speeds`: a speed_scale per knot (None = `speed_scale`), e.g. a slow push inside the motion. `blends`: a blend
+    radius per knot instead (0 = reach it exactly, e.g. where a push must start); the last always stops."""
+    speeds = speeds if speeds is not None else [speed_scale] * len(knots)
+    blends = blends if blends is not None else [CUROBO_BLEND_M] * len(knots)
+    targets = [
+        JointTarget(tuple(q), 0.0 if k == len(knots) - 1 else bl, sp)
+        for k, (q, sp, bl) in enumerate(zip(knots, speeds, blends, strict=True))
+    ]
+    go_to = {} if gains is None else dict(control_mode=IMPEDANCE_MODE, gains=gains)
+    return ai.go_to_joint_configs(targets, label, **go_to)
+
+
+def gripper_on_the_move(ai, position, label, **kw):
+    """Start ai.gripper(position, **kw) in a thread so the arm can move meanwhile (self.arm may be called from any
+    thread during an action; the gripper is its own setpoint stream). Returns wait(): blocks until the gripper call
+    has ended, re-raises what it raised (Cancelled, Refused), returns its result."""
+    out = {}
+
+    def run():
+        try:
+            out["ok"] = ai.gripper(position, **kw)
+        except BaseException as e:  # noqa: BLE001 -- handed to wait(), which re-raises it in the caller's thread
+            out["error"] = e
+
+    t = threading.Thread(target=run, name=f"gripper: {label}", daemon=True)
+    say(f"{label}: gripper to {position:g} while the arm moves ...")
+    t.start()
+
+    def wait():
+        t.join()
+        if "error" in out:
+            raise out["error"]
+        return out.get("ok")
+
+    return wait
+
+
+def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre_park_x=None, curobo=False):
     """Record the current grasp, open the gripper, back straight off along -approach, then
     (park=True) cuRobo (go_to_joint_config) to the hand-placed park joints -- the end
     position of both the open and the close task. `pre_park_x`: before the park move, go
@@ -450,7 +824,9 @@ def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre
     The straight legs are planned and door-checked, and the park goal checked, before
     anything moves; a failed check means nothing is commanded. cuRobo's path to park is
     not previewed and its world has no door in it -- the straight legs get the hand out
-    of the door's way first."""
+    of the door's way first. `curobo`: the straight legs go through cuRobo too, every leg asked of it
+    (curobo_path_problem) before the gripper opens, and with park they and the park move are ONE blended
+    cuRobo motion (through_curobo_knots), not stopping between."""
     save_path = Path(save_path or LAST_GRASP_FILE)
     st = ai.get_state()
     ee = list(st["ee_pos"])
@@ -491,6 +867,14 @@ def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre
         if check_curobo_goal(scene, rb, "to park", q=q_park, bodies=bodies) is None:
             say("park goal fails a check -- NOT releasing, arm untouched.")
             return False
+    if curobo:
+        start = q0
+        for label, leg in legs:
+            why = curobo_path_problem(ai, start, leg, label)
+            if why:
+                say(f"{why} -- NOT releasing, arm untouched.")
+                return False
+            start = leg[-1]
     if not execute:
         say(f"\nDRY RUN (release + back-off{' + park' if park else ''}) -- nothing commanded.")
         return True
@@ -515,12 +899,18 @@ def release_and_back_off(ai, back_off_m, execute, save_path=None, park=True, pre
     say("Releasing ...")
     ai.execute_command(OpenGripperCommand())
     time.sleep(1.0)
-    ok = True
-    for label, leg in legs:
-        ok = ok and execute_joint_plan(ai, leg, label)
-    if ok and park:
-        ok = ai.go_to_joint_config(q_park, "to park")
-        say(f"  park: {'reached' if ok else 'did NOT reach the park joints'}")
+    if curobo and hasattr(ai, "go_to_joint_configs"):
+        knots = [q for _, leg in legs for q in curobo_knots(leg)] + ([q_park] if park else [])
+        label = " + ".join([lb for lb, _ in legs] + (["park"] if park else []))
+        say(f"  {label}: one cuRobo motion through {len(knots)} targets ...")
+        ok = through_curobo_knots(ai, knots, label)
+        if not ok:
+            say(f"  {label}: cuRobo stopped ({getattr(ai, 'last_error', '')}) -- stopping here.")
+    else:
+        ok = all(execute_joint_plan(ai, leg, label) for label, leg in legs)  # all(): stops at the first that fails
+        if ok and park:
+            ok = ai.go_to_joint_config(q_park, "to park")
+            say(f"  park: {'reached' if ok else 'did NOT reach the park joints'}")
     final = ai.get_state()
     say(
         f"\nRELEASE {'DONE' if ok else 'STOPPED EARLY'}. final EE:",
@@ -574,10 +964,10 @@ def _yaw_about(center, xy, ang):
     return center[:2] + np.array([c * d[0] - s_ * d[1], s_ * d[0] + c * d[1]])
 
 
-def add_door_model(scene, rb, door, open_grasp_pos):
-    """Add the door slab (rotated to its current opening) and the appliance's fixed body to
-    the sim as collision-only boxes. Returns (bodies, info) -- bodies is [(id, name)]."""
-    c = rb.physics_client_id
+def door_model_boxes(door, open_grasp_pos):
+    """The door slab (rotated to its current opening) and the appliance's fixed body as boxes in the arm's frame
+    (arm_mount: the door file's), each (name, centre xyz, half extents, yaw about z), plus info -- what add_door_model
+    puts in the sim and door_in_curobo in cuRobo's world, so the two check the same door."""
     n = np.asarray(door["closed_normal"], float)
     n[2] = 0
     n /= np.linalg.norm(n)  # out of the door
@@ -598,29 +988,116 @@ def add_door_model(scene, rb, door, open_grasp_pos):
         dz = float(door["closed_handle"][2]) - DOOR_Z_HANDLE_Z if "closed_handle" in door else 0.0
         z_lo, z_hi = DOOR_Z[0] + dz, DOOR_Z[1] + dz
     zc, zh = (z_lo + z_hi) / 2, (z_hi - z_lo) / 2
-    base = np.asarray(scene.robot_base_pose.position)  # identity rotation
-    yaw_closed = np.arctan2(n[1], n[0])
-
-    def box(center_xy, half, yaw):
-        cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=half, physicsClientId=c)
-        return p.createMultiBody(
-            0,
-            cs,
-            basePosition=(base + [center_xy[0], center_xy[1], zc]).tolist(),
-            baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
-            physicsClientId=c,
-        )
-
+    yaw_closed = float(np.arctan2(n[1], n[0]))
     mid = (lo + hi) / 2
     door_c_closed = face + t[:2] * mid - n[:2] * door_t / 2
-    door_id = box(_yaw_about(hinge, door_c_closed, ang), [door_t / 2, (hi - lo) / 2, zh], yaw_closed + ang)
+    door_c = _yaw_about(hinge, door_c_closed, ang)
     body_c = face + t[:2] * mid - n[:2] * (door_t + body_depth / 2)
-    body_id = box(body_c, [body_depth / 2, (hi - lo) / 2, zh], yaw_closed)
+    boxes = [
+        ("door", (door_c[0], door_c[1], zc), (door_t / 2, (hi - lo) / 2, zh), yaw_closed + float(ang)),
+        (f"{APPLIANCE} body", (body_c[0], body_c[1], zc), (body_depth / 2, (hi - lo) / 2, zh), yaw_closed),
+    ]
     free_edge = _yaw_about(hinge, face + t[:2] * lo, ang)
-    return [(door_id, "door"), (body_id, f"{APPLIANCE} body")], {
-        "open_deg": float(np.degrees(ang)),
-        "free_edge": free_edge,
-    }
+    return boxes, {"open_deg": float(np.degrees(ang)), "free_edge": free_edge}
+
+
+def add_sim_box(scene, rb, centre, half, yaw):
+    """A collision-only box in the sim at `centre` (arm frame) turned `yaw` about z: its body id."""
+    c = rb.physics_client_id
+    base = np.asarray(scene.robot_base_pose.position)  # identity rotation
+    cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=list(half), physicsClientId=c)
+    return p.createMultiBody(
+        0,
+        cs,
+        basePosition=(base + np.asarray(centre, float)).tolist(),
+        baseOrientation=R.from_euler("z", yaw).as_quat().tolist(),
+        physicsClientId=c,
+    )
+
+
+def add_door_model(scene, rb, door, open_grasp_pos):
+    """Add the door slab (rotated to its current opening) and the appliance's fixed body to
+    the sim as collision-only boxes (door_model_boxes). Returns (bodies, info) -- bodies is [(id, name)]."""
+    boxes, info = door_model_boxes(door, open_grasp_pos)
+    return [(add_sim_box(scene, rb, centre, half, yaw), name) for name, centre, half, yaw in boxes], info
+
+
+# --- the door in cuRobo's world: cuRobo plans AROUND the door model, instead of the sim refusing its paths after ---
+# set_world takes a world YAML by path, read inside the planner's container. That container (sheppy's) mounts the host's
+# robot config, SHEPPY_ROBOT_CONFIG, as /config/robot: a capability run natively on the host (ros2 run / launch) writes
+# the world under it and the planner reads it there -- no mount of our own. Elsewhere (a container): set
+# RAMMP_DOOR_WORLD_DIR to a directory the planner sees as RAMMP_DOOR_WORLD_PLANNER_DIR.
+SHEPPY_ROBOT_CONFIG = Path(
+    os.environ.get("SHEPPY_ROBOT_CONFIG", "~/sheppy-local/december_2026/config/robots/current")
+).expanduser()
+DOOR_WORLD_DIR = Path(os.environ.get("RAMMP_DOOR_WORLD_DIR", SHEPPY_ROBOT_CONFIG / "curobo" / "door_world"))
+DOOR_WORLD_PLANNER_DIR = os.environ.get("RAMMP_DOOR_WORLD_PLANNER_DIR", "/config/robot/curobo/door_world")
+CUROBO_BOOT_WORLD = "world.yaml"  # planner.yaml's own world, next to its config: what set_world goes back to
+# a pushed world replaces world.yaml's floor, so the door world lists the planner's own floor layer (the chair and
+# user are planner.yaml's layers: in every world, pushed ones too)
+CUROBO_FLOOR_LAYER = "/config/robot/curobo/layer_mebot_floor.yaml"
+DOOR_WORLD_PAD_M = 0.015  # each door box this much bigger per side in cuRobo than in the sim (on top of the
+# planner's own world_padding): its plans must still pass the sim's MIN_CLEAR from the unpadded model after
+
+
+def door_world(boxes, pad=DOOR_WORLD_PAD_M):
+    """A cuRobo world (the dict a world YAML holds) of the planner's floor and `boxes` ((name, centre, half, yaw),
+    door_model_boxes' form, the arm's frame = arm_mount), each grown `pad` per side."""
+    obstacles = [
+        {
+            "name": "door_model_" + re.sub(r"\W+", "_", name).strip("_"),
+            "position": [round(float(v), 5) for v in centre],
+            "dims": [round(2 * (float(h) + pad), 5) for h in half],
+            "rpy_deg": [0.0, 0.0, round(float(np.degrees(yaw)), 3)],
+        }
+        for name, centre, half, yaw in boxes
+    ]
+    return {"base_frame": "arm_mount", "layers": [CUROBO_FLOOR_LAYER], "obstacles": obstacles}
+
+
+@contextmanager
+def door_in_curobo(ai, boxes, label):
+    """cuRobo's world with the door model in it (door_world(boxes)) for the `with` block, then the planner's boot world
+    again (CUROBO_BOOT_WORLD) -- also on an exception. Yields whether the door went in; when it didn't (says why),
+    cuRobo's world is as it was."""
+    if not hasattr(ai, "set_world"):
+        say(f"  {label}: no set_world on this arm interface -- the door can't go into cuRobo's world")
+        yield False
+        return
+    name = f"door_world_{os.getpid()}.yaml"
+    if not DOOR_WORLD_DIR.parent.is_dir():  # not where the planner looks: its set_world would find no file
+        say(
+            f"  {label}: no {DOOR_WORLD_DIR.parent} here (not on the host with sheppy's robot config?) -- set "
+            "SHEPPY_ROBOT_CONFIG, or RAMMP_DOOR_WORLD_DIR + RAMMP_DOOR_WORLD_PLANNER_DIR"
+        )
+        yield False
+        return
+    try:
+        DOOR_WORLD_DIR.mkdir(parents=True, exist_ok=True)
+        (DOOR_WORLD_DIR / name).write_text(yaml.safe_dump(door_world(boxes), sort_keys=False))
+    except OSError as e:
+        say(f"  {label}: can't write the door world in {DOOR_WORLD_DIR} ({e})")
+        yield False
+        return
+    ok, msg = ai.set_world(f"{DOOR_WORLD_PLANNER_DIR.rstrip('/')}/{name}")
+    if not ok:
+        say(f"  {label}: the planner refused the door world ({msg})")
+        (DOOR_WORLD_DIR / name).unlink(missing_ok=True)
+        yield False
+        return
+    say(f"  {label}: door in cuRobo's world ({', '.join(b[0] for b in boxes)}, +{DOOR_WORLD_PAD_M * 100:.1f} cm)")
+    try:
+        yield True
+    finally:
+        ok, msg = ai.set_world(CUROBO_BOOT_WORLD)
+        if ok:  # the file is there exactly while cuRobo has the door (collision_viz shows it then)
+            (DOOR_WORLD_DIR / name).unlink(missing_ok=True)
+        else:  # every later plan would dodge a door that has since moved: say so loudly
+            say(
+                f"  !! {label}: cuRobo's world NOT put back to {CUROBO_BOOT_WORLD} ({msg}) -- it still has the door "
+                "in it: `ros2 service call /rammp_curobo/set_world rammp_curobo_interfaces/srv/SetWorld "
+                f'"{{world: {CUROBO_BOOT_WORLD}}}"`'
+            )
 
 
 class DoorFrame:
@@ -730,7 +1207,7 @@ def trajectory_keep_out(q0, knots, cart_lengths=None, speed_scale=1.0):
     """What self.arm.move_joints checks before sending `knots` from joints `q0`: the timed trajectory through them
     (rammp_arm.joint_trajectory, as move_joints times it), every 2nd sample + the end, against the keep-out. A plan
     checks only its own IK samples; between them the trajectory can graze the zone (11-05, sim: 0.0 cm in), and the arm
-    then refuses it mid-task. Why, or None -- always None while no keep-out is enabled (the microwave)."""
+    then refuses it mid-task. Why, or None -- always None while no keep-out is enabled."""
     if not sim.keep_out_enabled():
         return None
     samples = rammp_arm.joint_trajectory(np.asarray(q0, float), list(knots), cart_lengths, speed_scale)
@@ -743,6 +1220,69 @@ def trajectory_keep_out(q0, knots, cart_lengths=None, speed_scale=1.0):
         if msg is not None:
             return msg
     return None
+
+
+# ---------------------------------------------------------------------------
+# The chair and user: the boxes cuRobo plans around, for the moves PyBullet plans
+# ---------------------------------------------------------------------------
+CHAIR_DIR = Path(__file__).parent / "chair"  # copied from rammp-deployments by `make sync-chair`, see chair/SOURCE
+CHAIR_LAYERS = ("platform", "seat", "person")  # as flatbot's planner.yaml; its floor is not a chair part
+CHAIR_SIM_MARGIN_M = 0.015  # the sim's arm (meshes) must stay this far out of the boxes: cuRobo's arm is padded
+# spheres, fatter. 11-10: every line-up the sim passed was 1-9 mm into cuRobo's person/lap, start state refused
+
+
+def load_chair_boxes():
+    """Every chair and user box as (name, centre in the arm's base frame, half extents), padded as cuRobo pads them.
+    A missing or unreadable file raises: no boxes must never mean no check."""
+    boxes = []
+    for layer in CHAIR_LAYERS:
+        data = yaml.safe_load((CHAIR_DIR / f"layer_mebot_{layer}.yaml").read_text())
+        pad = float(data["meta"]["padding_assumed_m"])
+        for o in data["obstacles"]:
+            half = [float(d) / 2 + pad for d in o["dims"]]
+            boxes.append((f"{layer}/{o['name']}", tuple(float(v) for v in o["position"]), half))
+    return boxes
+
+
+def enable_chair_collision(boxes=None):
+    """Check every plan (sim.solve_ik, the open's swing check), every move_joints (so every move_cartesian) and every
+    cuRobo goal against the chair and user: the sim's keep-out hook, `boxes` (load_chair_boxes) added to the sim on
+    first use. cuRobo's own paths are its own to check: these boxes are in its world.
+
+    The arm's base and shoulder don't count. They can't leave where they are, and the boxes were carved around
+    cuRobo's spheres of them, not the meshes here, so they could read as in a box at every joint state."""
+    boxes = load_chair_boxes() if boxes is None else boxes
+    bodies = {}  # physics client id -> [(body id, box name)]
+
+    def keep_out(rb, q):
+        """Why joints `q` put the arm in the chair or user, or None. The arm is left at `q`."""
+        c = rb.physics_client_id
+        if c not in bodies:
+            base = sim.make_sim()[0].robot_base_pose
+            bodies[c] = []
+            for name, centre, half in boxes:
+                at = multiply_poses(base, Pose(centre, (0.0, 0.0, 0.0, 1.0)))
+                cs = p.createCollisionShape(p.GEOM_BOX, halfExtents=half, physicsClientId=c)
+                body = p.createMultiBody(
+                    0, cs, basePosition=list(at.position), baseOrientation=list(at.orientation), physicsClientId=c
+                )
+                bodies[c].append((body, name))
+        for j, jj in enumerate(ARM):
+            p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
+        fixed = {-1, *range(ARM[0] + 1)}  # the root, the links before joint 1, and the shoulder
+        worst = None
+        for body, name in bodies[c]:
+            for pt in p.getClosestPoints(rb.robot_id, body, CHAIR_SIM_MARGIN_M, physicsClientId=c):
+                if pt[3] not in fixed and pt[8] < CHAIR_SIM_MARGIN_M and (worst is None or pt[8] < worst[0]):
+                    worst = (pt[8], pt[3], name)
+        if worst is None:
+            return None
+        link = p.getJointInfo(rb.robot_id, worst[1], physicsClientId=c)[12].decode()
+        if worst[0] >= 0:
+            return f"{link} {worst[0] * 100:.1f} cm from {worst[2]}, under the {CHAIR_SIM_MARGIN_M * 100:g} cm margin"
+        return f"{link} {-worst[0] * 100:.1f} cm into {worst[2]} (the chair and user, padding included)"
+
+    sim.set_keep_out(keep_out)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ setup(
     name=package_name,
     version="0.1.0",
     packages=[package_name],
+    # the chair and user boxes (make sync-chair)
+    package_data={package_name: ["chair/*.yaml", "chair/SOURCE"]},
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
