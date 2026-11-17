@@ -309,9 +309,11 @@ class Run:
         if self.proc.poll() is None:
             self.proc.send_signal(signal.SIGINT)
 
-    def stop(self, wait_s):
-        """Its own stop, then a kill if it has not ended within `wait_s`."""
-        self.interrupt()
+    def stop(self, wait_s, interrupt=True):
+        """Its own stop (`interrupt` False: it was sent already, and a second Ctrl+C is its escalation), then
+        a kill if it has not ended within `wait_s`."""
+        if interrupt:
+            self.interrupt()
         try:
             self.proc.wait(wait_s)
         except subprocess.TimeoutExpired:
@@ -737,14 +739,25 @@ class Capability(CapabilityEngine):
         that is not recoverable the world state is told the arm is in error, as a run's own stop tells it."""
         run_ = Run(self._argv(action_id, instance_id) + ["--line-up"], env, view.relay(LOGGER.log), talk=True)
         self._run = run_  # a shutdown stops it (_on_shutdown)
+        stopped = []  # a cancel's Ctrl+C was sent
+
+        def stop_first():
+            """A cancel: the run's own stop at once, BEFORE the line-up closes its source. Closing gives
+            reach_probe a moment to keep its grid (line_up.PROBE_QUIT_S), and the arm's stop never waits on
+            that."""
+            self.get_logger().warning("cancelled while lining up: the run's own stop (Ctrl+C) sent")
+            run_.interrupt()
+            stopped.append(True)
+
         try:
-            self._line_up(ctx, lambda: self._box_source(env, instance_id, watch=run_))
+            self._line_up(ctx, lambda: self._box_source(env, instance_id, watch=run_), on_cancel=stop_first)
         except BaseException as e:
             cancelled, late = isinstance(e, Cancelled), False
             try:
                 if cancelled:
-                    self.get_logger().warning("cancelled while lining up: the run's own stop (Ctrl+C) sent")
-                    run_.stop(CANCEL_ESCALATE_S)
+                    if not stopped:
+                        stop_first()
+                    run_.stop(CANCEL_ESCALATE_S, interrupt=False)  # the one Ctrl+C is sent: its end, or a kill
                 else:
                     run_.send({"stop": True})
                     cancelled, late = self._turned_back(ctx, run_)
@@ -826,7 +839,7 @@ class Capability(CapabilityEngine):
             watch, probe, env, far_m=self._far_m(), log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}")
         )
 
-    def _line_up(self, ctx, make_source):
+    def _line_up(self, ctx, make_source, on_cancel=None):
         """The line-up before a run (line_up.LineUp), for an execution that lines up (_lines_up, decided by
         execute(): neither the param nor the UI is asked after again here): the panel tells the user which
         way to move and asks, and this returns only on its Open (line_up.GO), with the seconds it took.
@@ -836,7 +849,8 @@ class Capability(CapabilityEngine):
         or ended: BoxSource.gone), is EngineError("line_up_unavailable"), at once and with why: with the
         line-up asked for, no run starts without its Open. `make_source()`: what sees the box and judges its place
         (BoxSource; the mock's MockApproach), made only where it is used, and closed before this returns: no
-        run starts while it lives."""
+        run starts while it lives. `on_cancel()`: called as the line-up ends cancelled, before the source is
+        closed (closing can take line_up.PROBE_QUIT_S): what a cancel must not keep waiting."""
         t0 = time.monotonic()
 
         def said(say):
@@ -852,6 +866,8 @@ class Capability(CapabilityEngine):
         try:
             lining = line_up.LineUp(ctx, self._ui_live, source, LINE_UP_S, on_say=said)
             outcome = lining.run()
+            if outcome == line_up.CANCELLED and on_cancel is not None:
+                on_cancel()
         except OSError as e:
             # with the wrist look the probe is started inside the loop, once the run has said which robot this is
             raise EngineError(

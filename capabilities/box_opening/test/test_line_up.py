@@ -222,8 +222,8 @@ class FakeChild:
     def send(self, msg):
         self.sent.append(msg)
 
-    def stop(self, wait_s=None):
-        self.stopped = True
+    def stop(self, wait_s=None, quit_s=0.0):
+        self.stopped, self.quit_s = True, quit_s
 
     def alive(self):
         return not self.stopped
@@ -348,10 +348,14 @@ def test_the_deployments_bound_and_the_lids_height_decide_which_boundary_speaks(
     assert reach.inside
 
 
-def test_closing_ends_both_children():
+def test_closing_ends_both_children_the_probe_told_to_quit_and_given_time_to_keep_its_grid():
     source, watch, probe = _source()
     source.close()
     assert watch.stopped and probe.stopped
+    # reach_probe keeps what it asked only where it ends of itself: told to quit, then given a bounded time
+    assert probe.sent[-1] == {"quit": True} and probe.quit_s == line_up.PROBE_QUIT_S
+    assert 0.0 < line_up.PROBE_QUIT_S <= 3.0
+    assert watch.sent == [] and watch.quit_s == 0.0  # the watch keeps nothing: ended as it always was
     FakeChild.made = []
     alone = BoxSource(["box_watch"], lambda urdf, root: [], {}, spawn=FakeChild)
     alone.close()  # the probe never started
@@ -488,3 +492,45 @@ def test_a_child_keeps_the_end_of_its_log_for_whoever_asks_why_it_ended(tmp_path
     said = child.last_lines()
     assert said[-2:] == ["line 39", "ValueError: no chain from arm_mount"]  # its log's lines, not its messages
     assert 2 < len(said) <= line_up.TAIL_LINES
+
+
+PROBE = """
+import json, sys, time
+from pathlib import Path
+print('@@ {"up": true}', flush=True)
+for line in sys.stdin:
+    if json.loads(line).get("quit") and sys.argv[2] == "saves":
+        time.sleep(0.4)  # the proof in flight is finished first
+        Path(sys.argv[1]).write_text("the grid")
+        sys.exit(0)
+"""
+
+
+@pytest.mark.parametrize("probe", ["saves", "hangs"])
+def test_a_probe_told_to_quit_keeps_its_grid_and_one_that_does_not_end_is_ended_all_the_same(tmp_path, probe):
+    """close() against a real process standing in for reach_probe --serve, which writes its grid only as it
+    ends of itself (on {"quit": true}): the grid is there afterwards. One that does not end is terminated
+    once its time is up, so a close is bounded either way."""
+    import sys
+    import time
+
+    script, kept = tmp_path / "probe.py", tmp_path / "grid.json"
+    script.write_text(PROBE)
+    FakeChild.made = []
+    run = FakeChild(["press_demo", "--line-up"], {})
+    source = BoxSource(
+        run, lambda urdf, root: [sys.executable, str(script), str(kept), probe], None, spawn=line_up.Child
+    )
+    run.says(0.0, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    source.look(0.1)
+    t0 = time.monotonic()
+    while not source.probe.messages() and time.monotonic() - t0 < 10.0:  # it is up, and reading its stdin
+        time.sleep(0.02)
+    t0 = time.monotonic()
+    source.close()
+    took = time.monotonic() - t0
+    assert not source.probe.alive() and not run.stopped
+    if probe == "saves":
+        assert kept.read_text() == "the grid" and 0.4 <= took < line_up.PROBE_QUIT_S
+    else:
+        assert not kept.exists() and line_up.PROBE_QUIT_S <= took < line_up.PROBE_QUIT_S + line_up.STOP_WAIT_S

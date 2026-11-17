@@ -1620,6 +1620,31 @@ def test_the_line_ups_holds_exit_is_the_arm_holding_whatever_the_run_said_last()
         assert error.error_code == "arm_holds" and not error.recoverable and "clear it, attended" in str(error)
 
 
+def test_a_cancel_while_the_wrist_looks_stops_the_run_before_the_line_ups_source_is_closed(engine, monkeypatch):
+    """Closing the line-up's source gives reach_probe a moment to keep its grid (line_up.PROBE_QUIT_S). The
+    arm's stop does not wait on that: on a cancel the run gets its Ctrl+C first, the once."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    _wrist_lining_up(engine, monkeypatch)
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda: None)
+    order = []
+    real, real_close = node.Run.interrupt, node.line_up.BoxSource.close
+
+    def close(source):
+        order.append("the source closed")
+        time.sleep(1.0)  # the probe finishing its proof and writing its grid
+        real_close(source)
+
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (order.append("Ctrl+C"), real(run)))
+    monkeypatch.setattr(node.line_up.BoxSource, "close", close)
+    ctx = FakeCtx()
+    threading.Timer(1.0, ctx.events.append, args=(CANCEL_PRESS,)).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert order == ["Ctrl+C", "the source closed"] and engine._run is None
+
+
 def test_a_run_that_ends_of_itself_while_lining_up_fails_with_what_it_said(engine, monkeypatch):
     given(monkeypatch, FULL_RUN)
     monkeypatch.setenv("LINE_UP", "dies")

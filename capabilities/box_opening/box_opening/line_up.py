@@ -165,6 +165,10 @@ class MockApproach:
 MARK = "@@ "  # a child's line that is for the engine (tasks/box_watch, tasks/reach_probe); the rest is its log
 PROOF_NEAR_M = guide.STEADY_M  # a proof speaks for a box this near the place it was made for
 STOP_WAIT_S = 2.0  # a child asked to end is killed after this long
+# reach_probe keeps the cells it asked this line-up only where it ends of itself: told to quit, it finishes
+# the proof in flight (0.8 to 2 s by its own notes), writes its grid and exits. It is given this long to,
+# before it is ended as any child is and what it had not yet written is asked again next time
+PROBE_QUIT_S = 2.5
 # the end of a child's own log is kept, for the error of one that died: this many lines hold a traceback's
 # last frame and its exception ...
 TAIL_LINES = 4
@@ -174,7 +178,7 @@ TAIL_WAIT_S = 0.5  # ... and its reader is given this long to read what it wrote
 class Child:
     """A child process whose marked stdout lines are messages: (when it was read, the message), oldest first.
     `log(text)` gets every other line it prints, and the last TAIL_LINES of them are kept (last_lines). It is
-    ended by terminate(), then a kill."""
+    ended by terminate(), then a kill (stop)."""
 
     def __init__(self, argv, env, log=None, clock=time.monotonic):
         self._log, self._clock = log, clock
@@ -234,7 +238,14 @@ class Child:
         with self._lock:
             return list(self._said)
 
-    def stop(self, wait_s=STOP_WAIT_S):
+    def stop(self, wait_s=STOP_WAIT_S, quit_s=0.0):
+        """terminate(), then a kill `wait_s` later. `quit_s`: a child already told to end of itself (its own
+        quit line) is first given that long to."""
+        if quit_s > 0.0 and self.proc.poll() is None:
+            try:
+                self.proc.wait(quit_s)
+            except subprocess.TimeoutExpired:
+                pass
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -249,7 +260,8 @@ class BoxSource:
     line, run as a child of this source's own; or a process already running that says the same lines (the
     run itself, with --line-up: node.Run), which is its owner's to end. `probe_argv(urdf, root)`:
     reach_probe's, once the watch has said which robot this is. `far_m`: the deployment's bound on the
-    boundary (None: none). close() ends the children that are this source's own."""
+    boundary (None: none). close() ends the children that are this source's own, the probe by its own quit
+    so that it keeps its grid; it can take PROBE_QUIT_S, so what must not wait is done before it."""
 
     def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
@@ -346,6 +358,9 @@ class BoxSource:
         return True
 
     def close(self):
-        for child in (self.watch, self.probe) if self._owns_watch else (self.probe,):
-            if child is not None:
-                child.stop()
+        if self.probe is not None:
+            self.probe.send({"quit": True})  # first: it finishes its proof while the watch is ended
+        if self._owns_watch:
+            self.watch.stop()
+        if self.probe is not None:
+            self.probe.stop(quit_s=PROBE_QUIT_S)
