@@ -1,0 +1,28 @@
+# The mock: the real alternative's exact interface, no hardware. Other teams
+# develop against it, the all-mock profile runs on it, and CI smoke-tests it.
+# check_capabilities.py rejects a mock whose topics differ from the real one.
+id: fridge_mock
+tier: experimental
+kind: docker
+container:
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev
+  network_mode: host
+  ipc: host
+  # To give make_sim() a model, append "mock_urdf:=/path/to/robot.urdf" (arm.mock_urdf).
+  command: ["ros2", "launch", "fridge", "fridge.launch.py", "mock:=true"]
+# No `params:` here: they would need `ros2 run`, and this fragment uses `ros2 launch` for mock:=true.
+publishes: [/fridge/status]
+subscribes:
+  - /tf
+  - /tf_static
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/color/camera_info
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /wrist_camera/infra1/image_rect_raw
+  - /wrist_camera/infra1/camera_info
+  - /wrist_camera/infra2/image_rect_raw
+  - /wrist_camera/infra2/camera_info
+  - /perception/object_detections_3d

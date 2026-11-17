@@ -1,8 +1,12 @@
 # Every capability names its owner here; check_capabilities.py fails without a
 # line for /capabilities/<name>/. Owners approve PRs touching their capability.
 
-*                       @SwapnilPande
-/capabilities/example/  @SwapnilPande
-/capabilities/microwave/  @dhyi-svg
-/shared/door_common/  @dhyi-svg
-/capabilities/button_press/  @EvuhLi
+*                                 @SwapnilPande
+/capabilities/example/            @SwapnilPande
+/capabilities/box_opening/        @SwapnilPande
+/capabilities/button_press/       @cailyn-s
+/capabilities/microwave/          @cailyn-s
+/capabilities/fridge/             @cailyn-s
+/shared/door_common/              @cailyn-s
+/capabilities/microwave_place/    @seanliyucheng
+/capabilities/place_container/    @seanliyucheng

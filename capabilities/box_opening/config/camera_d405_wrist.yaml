@@ -1,0 +1,44 @@
+# The wrist D405, bracket-mounted on top of the wrist above the Kinova
+# vision module, lenses along the tool axis.
+#
+# SHEPPY runs its driver: the `wrist_camera` node of rammp-deployments'
+# december_2026 manifest, a container on rammp-base (Cyclone) running
+#   realsense2_camera rs_launch.py camera_name:=wrist_camera
+#                     camera_namespace:=/ align_depth.enable:=true
+# so the streams below are /wrist_camera/... (848 x 480 at 30 Hz, depth
+# 16UC1 in mm). press_demo.launch.py can still start a host driver on these
+# same names (camera:=true) when sheppy is not running the node.
+#
+# Owned here since RAMMP-CuRobo v1.0.0 dropped perception: this was its
+# rammp_curobo_ros/config/camera_d405_wrist.yaml (feat/perceived-world
+# 71db879), mount included.
+depth_topic: /wrist_camera/depth/image_rect_raw  # the grabber derives its namespace
+parent_frame: end_effector_link
+# Offsets vs end_effector_link (z = tool direction, +y = vision-module
+# side): ~7.5 cm off-axis on the module side, lens face at ~the flange
+# plane. Never hand-tune: check with press_demo --detect-only against a
+# tape-measured box (docs/HARDWARE_BRINGUP.md) and re-measure after ANY
+# bracket change — a wrong mount shifts the whole world by exactly its error.
+mount_xyz: [0.0, 0.075, -0.005]
+# 180 deg about the lens axis — MEASURED 2026-08-25 on the bench: identity
+# mirrored the tag across the arm (y sign flip; x error invisible because
+# the offset was small) and read yaw +180 off.
+mount_quat_xyzw: [0.0, 0.0, 1.0, 0.0]
+# The camera's timestamp lag against the arm's joint states, seconds: a
+# frame stamped t was really taken at t + this. Frames taken while the arm
+# moves are placed at velocity x lag from where they were shot, which is why
+# the precise detector trusts only still frames until this is MEASURED:
+#   python3 scripts/record_scan_frames.py --lag-sweep   # during any run
+#   python3 scripts/record_scan_frames.py --analyze-lag <capture dir>
+# and the reported offset goes here. 0.0 = unmeasured; detect.confirm_in_flight
+# stays off until it is not.
+stamp_offset_s: 0.0
+# The lens origin from tool_frame (0.12 m past end_effector_link, same axes),
+# in its axes (m): mount_xyz above, less that 0.12 m. The depth press
+# centres on TF's mount only when TF agrees with this within 5 mm sideways
+# (tasks/depth_press.MOUNT_XY_TOL_M). Re-measure with the mount.
+wrist_lens_in_hand_m: [0.0, 0.075, -0.125]
+# Depth preset: the driver's default. RAMMP-CuRobo's perceived-world
+# cameras node pushed depth_module.visual_preset 3 (High Accuracy), but this
+# repo's launch never ran that node — the depth gates in depth_source.py
+# were tuned on the default preset, so changing it is its own bench change.
