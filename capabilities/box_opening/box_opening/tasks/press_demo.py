@@ -189,8 +189,10 @@ SCENE_LOCATE_S = 5.0
 # (26-28 depth points in each) and the run went home; 25 s later the next
 # run had the box 0.83 s in. Looking longer costs only time.
 SCENE_FIRST_LOCATE_S = 15.0
-# ... but short after the go of a line-up whose wrist looked (--line-up): the wrist already holds the
-# container (it is why the user was asked to open), and the scene camera had the whole line-up to see it.
+# ... but short after the go of a line-up whose wrist held the container as the go came (--line-up; its
+# watch's last word a fix: line_up_watch's wrist_held), and the scene camera had the whole line-up to see it.
+# A wrist that was turned and never showed the box (the scene camera's sightings brought the Ready) leaves
+# the scene camera all the run has, and that keeps the long look.
 # This look only refreshes the selected container's box (selection_tie reads the segmenter's newest frame)
 # and the hint for where the wrist looks first. At 15 s the arm stood with its wrist turned for 15 s after
 # Open, which reads as a hang, and the time came out of a run budget the line-up had already used: both
@@ -1431,7 +1433,8 @@ def wrist_looks_from(live, rest, rest_tol):
 
 
 def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None):
-    """--line-up: say where the container is until the engine answers, (went, wrist_turned).
+    """--line-up: say where the container is until the engine answers, (went, wrist_turned, wrist_held:
+    the wrist's own watch held the container as the go came, its last word a fix).
 
     The scene camera's sightings are said as they are made, as tasks/box_watch says them
     (SceneLocator.on_sighting). With --wrist-first, --execute and the arm at rest (within `rest_tol`) or at
@@ -1452,8 +1455,13 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     from box_opening.tasks import survey as sv
 
     out = sys.stdout if out is None else out
+    held = [False]  # the wrist's own watch last said a fix: its camera held the container
 
     def say(msg):
+        if msg.get("fix", {}).get("by") == "wrist":
+            held[0] = True
+        elif "none" in msg:
+            held[0] = False
         out.write(LINE_UP_MARK + json.dumps(msg) + "\n")
         out.flush()
 
@@ -1480,11 +1488,15 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     judge = None
     if selected:
 
-        def judge(_fix):
-            """Why the run after the go would not turn its wrist for the selected container, or None."""
+        def judge(fix, find):
+            """Why the run after the go would not take this find for the selected container, or None: it
+            would not turn its wrist for it at all (selection_look), or would and not take what stands here
+            (tie_refusal, alone_refusal: wrist_first's own tests)."""
             tie, alone = selection_look(locator, None, ctx.model, selected, getattr(args, "wrist_alone", False))
-            if tie is not None or alone:
-                return None
+            if tie is not None:
+                return tie_refusal(tie, find, fix.top_xyz)[0]
+            if alone:
+                return alone_refusal(alone, find, fix.top_xyz, ctx.model)
             return (
                 "the selected container %s is in none of the scene camera's detections: the run would not look "
                 "for it" % selected
@@ -1504,6 +1516,7 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 log.info("[press_demo] LINE-UP: the fingers did not close: the wrist does not look")
         if wrist:
             log.info("[press_demo] LINE-UP: the wrist turns to look at the table in front; the arm above it stands")
+            stood = list(ctx.client.joints())
             state, why = sv.watch_front(
                 node,
                 ctx,
@@ -1518,6 +1531,11 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 judge=judge,
             )
             turned = state == "watched"
+            if state == "stopped" and rest_distance(ctx.client.joints(), stood) <= rest_tol:
+                # "stopped" is also the turn the client would not send at all (no fresh joint states, the
+                # driver's action not there, its gate): the arm stands where it stood, nothing holds
+                # part-turned, and the line-up goes on by the scene camera as for any look that did not start
+                state = "not flown"
             if state == "stopped":
                 log.info("[press_demo] STOP: the line-up's wrist turn: %s — the arm holds; nothing was pressed" % why)
                 sys.exit(EXIT_LINE_UP_HOLDS)
@@ -1558,8 +1576,8 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 seg.near = None
     if ear.go:
         log.info("[press_demo] LINE-UP: go — the run starts")
-        runner.note("line_up", stage="go", wrist=turned)
-        return True, turned
+        runner.note("line_up", stage="go", wrist=turned, held=turned and held[0])
+        return True, turned, turned and held[0]
     runner.note("line_up", stage="stop", wrist=turned)
     if turned:
         state, why = sv.rest_wrist(ctx, runner, args.execute, rest=rest)
@@ -1570,7 +1588,7 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
         "[press_demo] LINE-UP: ended without a go; nothing was pressed%s"
         % (", the wrist back at rest" if turned else "")
     )
-    return False, False
+    return False, False, False
 
 
 def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
@@ -1818,6 +1836,43 @@ def other_tops(find, xy, lid_m):
     return out
 
 
+def tie_refusal(tie, find, at):
+    """(why the wrist's find at `at` is not taken for the selected container `tie` ties, or None where it is
+    taken; how the tie judged it): it does not stand in the direction the scene camera has the selected
+    container, or a second lid-sized top of `find` stands in that direction too. wrist_first's rule, asked
+    by the line-up's watch as well, so the panel asks the user to open only what the run would take."""
+    tied, how = tie.judge(at[:2])
+    rival = tie.rival(find, at[:2]) if tied else None
+    if tied and rival is None:
+        return None, how
+    why = "a container at [%.3f, %.3f], %s" % (at[0], at[1], how)
+    if rival is not None:
+        why += ", and another lid-sized top at [%.3f, %.3f] in the same direction" % rival
+    return why + ": not taken for the selected container %s" % tie.instance_id, how
+
+
+def alone_refusal(alone, find, at, model):
+    """Why the wrist's find at `at` is not taken for the selected container `alone` (--wrist-alone: in none
+    of the scene camera's detections, so nothing ties a find to it), or None where it is: a second lid-sized
+    top stands in the wrist's frames, and nothing says which of the two was selected. A top out of the
+    arm's reach is no second container: the arm could not open it, so it is not what was selected to be
+    opened, the rule the finder itself goes by (wrist_finder: "a place the arm cannot reach is no rival of
+    one it can"; both runs that opened the box on 2026-11-12 had a lid-sized top 1.08 m out in the wrist's
+    frame, which refused every find here). wrist_first's rule, asked by the line-up's watch as well."""
+    from box_opening.tasks import survey as sv
+
+    within = sv._within_reach(model)
+    others = other_tops(find, at[:2], float(max(model.lid_dims[0], model.lid_dims[1])))
+    others = [o for o in others if within((o[0], o[1], float(at[2])))]
+    if not others:
+        return None
+    return (
+        "a container at [%.3f, %.3f] and another lid-sized top at [%.3f, %.3f]: two containers, and the "
+        "selected one (%s) is in none of the scene camera's detections, so nothing says which it is"
+        % (at[0], at[1], *others[0], alone)
+    )
+
+
 def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie=None, alone=None):
     """--wrist-first: the wrist turned where the arm rests (tasks/survey.run_survey, front) and
     the container its camera finds in front of the arm: the fix (a SceneFix, source "wrist"), its
@@ -1853,13 +1908,8 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         sys.exit(0)
     if survey.fix is not None and tie is not None:
         at = survey.fix.top_xyz
-        tied, how = tie.judge(at[:2])
-        rival = tie.rival(survey.find, at[:2]) if tied else None
-        if not tied or rival is not None:
-            why = "a container at [%.3f, %.3f], %s" % (at[0], at[1], how)
-            if rival is not None:
-                why += ", and another lid-sized top at [%.3f, %.3f] in the same direction" % rival
-            why += ": not taken for the selected container %s" % tie.instance_id
+        why, how = tie_refusal(tie, survey.find, at)
+        if why is not None:
             log.info("[press_demo] WRIST LOOK: %s" % why)
             runner.note("wrist_first", found=True, tied=False, why=why, scene=scene_fix is not None)
             if said is not None:
@@ -1870,13 +1920,8 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         )
     if survey.fix is not None and alone:
         at = survey.fix.top_xyz
-        others = other_tops(survey.find, at[:2], float(max(ctx.model.lid_dims[0], ctx.model.lid_dims[1])))
-        if others:
-            why = (
-                "a container at [%.3f, %.3f] and another lid-sized top at [%.3f, %.3f]: two containers, and the "
-                "selected one (%s) is in none of the scene camera's detections, so nothing says which it is"
-                % (at[0], at[1], *others[0], alone)
-            )
+        why = alone_refusal(alone, survey.find, at, ctx.model)
+        if why is not None:
             log.info("[press_demo] WRIST LOOK: %s" % why)
             runner.note("wrist_first", found=True, alone=True, taken=False, why=why, scene=False)
             if said is not None:
@@ -2278,12 +2323,12 @@ def main():
         # guarded reach-out reads an at-rest reference at the rest pose and
         # checks gravity against it.
         start_tol = REST_TOL_RAD if (args.compliant and not args.wrist_detect) else AT_REST_RAD
-        wrist_turned = False
+        wrist_turned = wrist_held = False
         if getattr(args, "line_up", False):
             # THE LINE-UP (--line-up; owner 2026-11-16): the user is told which way to drive until the
             # container is where the arm opens it, and nothing of the run starts but on their Open
             # (a wrist turn of its own that stopped part way ends the run in there: EXIT_LINE_UP_HOLDS)
-            went, wrist_turned = line_up_watch(node, ctx, cfg, runner, watcher, args, locator, start_tol)
+            went, wrist_turned, wrist_held = line_up_watch(node, ctx, cfg, runner, watcher, args, locator, start_tol)
             if not went:
                 sys.exit(EXIT_NOT_LINED_UP)
         # (a line-up that turned the wrist started from rest, or from rest but for its wrist, and the run's own
@@ -2337,7 +2382,7 @@ def main():
         # where the wrist looks, and the wrist's aim from there places the
         # button (SceneFix.rough).
         t_scene = time.monotonic()
-        scene_fix = locator.locate(SCENE_LINED_UP_LOCATE_S if wrist_turned else SCENE_FIRST_LOCATE_S)
+        scene_fix = locator.locate(SCENE_LINED_UP_LOCATE_S if wrist_held else SCENE_FIRST_LOCATE_S)
         viz_hook("scene", locator, scene_fix)  # what it judged, drawn off this thread (perception/viz)
         if ctx.mission_frames is not None:
             ctx.mission_frames.scene(

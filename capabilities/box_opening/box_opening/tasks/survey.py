@@ -1561,7 +1561,7 @@ def watch_front(
     `say(line)`: {"view": {"joints": [7]}} once, the joints the arm stands at with its wrist at the view;
     then a fix for each frame that shows the container (_fix_line), "none" and why
     at most every LINE_UP_NONE_S where one does not. `also()`: called on a frame that shows none (the scene
-    camera's own look, which may see what the wrist does not). `judge(fix)`: the caller's word on a find
+    camera's own look, which may see what the wrist does not). `judge(fix, find)`: the caller's word on a find
     (None: every find is said): why it is not one to say, said as that frame's "none" in the fix's place, or
     None.
 
@@ -1607,9 +1607,10 @@ def watch_front(
             n += 1
             find = wf.find_container([frame], model, check_buttons=False, reachable=within, far_nearest=True)
             fix, why, far = find.fix, find.why, find.far
-        none = "wrist camera: %s" % str(why)[:260]
+        # (the finder's own word already names the camera; "no frame" does not)
+        none = str(why)[:280] if str(why).startswith("wrist camera:") else "wrist camera: %s" % str(why)[:260]
         if fix is not None and judge is not None:
-            refused = judge(fix)
+            refused = judge(fix, find)
             if refused is not None:
                 fix, none = None, str(refused)[:300]
         if fix is not None:

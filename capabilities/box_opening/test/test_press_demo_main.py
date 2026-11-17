@@ -331,7 +331,7 @@ def test_every_other_run_still_starts_at_its_exact_rest_pose(monkeypatch, tmp_pa
 
 
 def _lining_up(monkeypatch, answer):
-    """press_demo.line_up_watch stood in for: it answers (went, wrist_turned); returns its calls."""
+    """press_demo.line_up_watch stood in for: it answers (went, wrist_turned, wrist_held); returns its calls."""
     from box_opening.tasks import press_demo
 
     calls = []
@@ -351,7 +351,7 @@ def test_a_line_up_comes_before_anything_of_the_run_and_a_stop_ends_it_there(mon
     from box_opening.runtime.abort import EXIT_NOT_LINED_UP
 
     HOME_FIRSTS.clear(), REACH_OUTS.clear(), LOCATES.clear()
-    calls = _lining_up(monkeypatch, (False, False))
+    calls = _lining_up(monkeypatch, (False, False, False))
     code, client, _rows = run_main(monkeypatch, tmp_path, ["--execute", "--line-up", "--wrist-first"], _refused)
     assert code == EXIT_NOT_LINED_UP == 5
     assert calls == [(True, REST_TOL_RAD, 0, 0)]  # asked before any home or look
@@ -380,7 +380,7 @@ def test_after_a_go_the_run_goes_on_and_homes_first_unless_its_wrist_looked(monk
     look goes on from that view, so no home first. From one that turned nothing, the run starts as always."""
     for i, (turned, homes) in enumerate(((True, 0), (False, 1))):
         HOME_FIRSTS.clear(), REACH_OUTS.clear()
-        calls = _lining_up(monkeypatch, (True, turned))
+        calls = _lining_up(monkeypatch, (True, turned, turned))
         code, _c, _rows = run_main(monkeypatch, tmp_path / str(i), ["--execute", "--line-up"], _refused)
         assert code == 1 and len(calls) == 1 and len(REACH_OUTS) == 1  # the run went on to its reach-out
         assert len(HOME_FIRSTS) == homes, turned
@@ -389,24 +389,28 @@ def test_after_a_go_the_run_goes_on_and_homes_first_unless_its_wrist_looked(monk
 def test_after_a_go_from_a_line_up_whose_wrist_looked_the_first_scene_look_is_short(monkeypatch, tmp_path):
     """After Open the arm stood about 15 s before anything moved (both clean runs of 2026-11-12 spent the whole
     first look and the scene camera found nothing in front of the arm), which reads as a hang and comes out of
-    the run's budget. The line-up's wrist already holds the container: that look only refreshes the selection's
-    box and the hint. Every other start keeps the long first look."""
+    the run's budget. Where the line-up's wrist held the container as the go came, that look only refreshes the
+    selection's box and the hint. Every other start keeps the long first look: a run with no line-up, a
+    line-up that turned nothing, and one whose wrist was turned and did not show the box (the scene camera's
+    sightings brought the Ready, and the scene camera is then all the run has)."""
     from box_opening.tasks import press_demo
 
-    for i, (turned, argv) in enumerate(((True, ["--line-up"]), (False, ["--line-up"]), (False, []))):
+    cases = (((True, True, True), ["--line-up"]), ((True, True, False), ["--line-up"]),
+             ((True, False, False), ["--line-up"]), ((True, False, False), []))  # fmt: skip
+    for i, (answer, argv) in enumerate(cases):
         LOCATES.clear(), HOME_FIRSTS.clear(), REACH_OUTS.clear()
-        _lining_up(monkeypatch, (True, turned))
+        _lining_up(monkeypatch, answer)
         run_main(monkeypatch, tmp_path / str(i), ["--execute", *argv], _refused)
-        if turned:
+        if answer[2]:
             assert LOCATES[0] <= 3.0, "the arm stands this long after Open"
             assert LOCATES[0] == press_demo.SCENE_LINED_UP_LOCATE_S
         else:
-            assert LOCATES[0] == press_demo.SCENE_FIRST_LOCATE_S == 15.0, argv
+            assert LOCATES[0] == press_demo.SCENE_FIRST_LOCATE_S == 15.0, (answer, argv)
 
 
 def test_a_run_without_line_up_never_waits_on_anyone(monkeypatch, tmp_path):
     HOME_FIRSTS.clear(), REACH_OUTS.clear()
-    calls = _lining_up(monkeypatch, (False, False))
+    calls = _lining_up(monkeypatch, (False, False, False))
     code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute"], _refused)
     assert code == 1 and calls == [] and len(HOME_FIRSTS) == 1 and len(REACH_OUTS) == 1
 

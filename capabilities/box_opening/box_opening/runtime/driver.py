@@ -202,19 +202,23 @@ FREE_AIR_LEGS = ("reach:look", "survey", "line-up", "home", "clear-margin", "ret
 # with air_control=position (reach_press.fly_way_in), flown in position control with no give, where
 # the driver's monitor is the one thing that would stop the arm. In the one-execution form that flew
 # the same legs run straight on into the stroke (depth:approach, depth:press), which ends on the
-# button: an execution with a stroke leg in it is not made of these alone, and stays LOOSE.
+# button: an execution with a stroke leg in it is not made of these alone, and stays LOOSE. So does one of
+# these legs flown as an execution of its own: that is the way in's leg-by-leg form (the fallback where the
+# legs do not fly as one motion, and the guarded run), flown on the springs, which went under LOOSE on every
+# flight so far and is not changed here. The position group is the legs before the stroke together.
 WAY_IN_AIR_LEGS = ("reach:re-aim", "reach:slide-in", "depth:turn")
 
 
 def contact_profile_for(names):
     """The contact profile an execution of the legs `names` flies under: "default" where every
-    leg is free air (FREE_AIR_LEGS, a leg's name or its prefix), or every leg is of the way in's
-    free air (WAY_IN_AIR_LEGS: no stroke leg among them); else "loose"."""
+    leg is free air (FREE_AIR_LEGS, a leg's name or its prefix), or the legs are two or more of the way
+    in's free air and nothing else (WAY_IN_AIR_LEGS: no stroke leg among them); else "loose"."""
 
     def all_of(legs):
         return all(any(str(n) == f or str(n).startswith(f + ":") for f in legs) for n in names)
 
-    return "default" if names and (all_of(FREE_AIR_LEGS) or all_of(WAY_IN_AIR_LEGS)) else "loose"
+    air_group = len(names) >= 2 and all_of(WAY_IN_AIR_LEGS)
+    return "default" if names and (all_of(FREE_AIR_LEGS) or air_group) else "loose"
 
 
 def setpoint_position(knuckle_rad):

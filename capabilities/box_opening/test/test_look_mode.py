@@ -4,7 +4,7 @@ because it looks snappy and scary"; and of the arm on its way to the button: "a 
 
 import numpy as np
 import pytest
-from conftest import Q0, FakeClient
+from conftest import Q0, Q1, FakeClient
 from conftest import leg as make_leg
 from conftest import runner as make_runner
 
@@ -98,7 +98,7 @@ def test_the_wrist_looks_views_fly_as_looks(ctx, tmp_path, monkeypatch):
     flown = []
     monkeypatch.setattr(runner, "run", lambda legs, execute=False: flown.extend(legs) or [SimpleNamespace(ok=True)])
     band = SimpleNamespace(path_refusal=lambda traj: None)
-    view = SimpleNamespace(name="survey:angle-1", joints=list(Q0))
+    view = SimpleNamespace(name="survey:angle-1", joints=list(Q1))  # away from where the arm stands (Q0)
     assert sv.fly_view(ctx, runner, view, band, True) == ("flown", None)
     (leg,) = flown
     assert (leg.speed, leg.ease) == (LOOK_SPEED, (LOOK_ACCEL, LOOK_DECEL)) and leg.gains is None
