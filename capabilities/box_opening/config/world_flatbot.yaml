@@ -1,0 +1,34 @@
+# Flatbot collision world — arm_mount frame, 2026-10-20.
+#
+# arm_mount is gravity-aligned (+Z up). arm_base_link shares this origin but
+# is rotated 30° around Y (forward lean, new_adapter_plate_v3).
+#
+# Box opening sends the planner no world (worlds.py; owner 2026-10-29, #86):
+# the planner plans in the world its deployment starts it with,
+# rammp_curobo's world_empty.yaml on flatbot, the arm and nothing else.
+# Nothing in this file reaches the planner. WorldStore reads its robot
+# settings below, and a 'table' obstacle where a bench surveys one
+# (world_bench.yaml); flatbot has none: the working surface in front of the
+# wheelchair varies with the environment, and SceneLocator measures it from
+# the scene camera's depth on every run, around the box it found
+# (SceneFix.table_z_scene / table_extent -> WorldStore.table_top_z /
+# table_extent). What stands on that table is the mission's own, measured
+# each run, and keeps no place in any planner world.
+#
+# The planner has NO floor or wheelchair-seat keep-out: world_empty.yaml
+# holds none, and this file's old 'floor' entry never reached it. A keep-out
+# belongs in the planner deployment's own world (rammp-deployments).
+base_frame: arm_mount
+# In a gravity-aligned frame the table normal is purely +Z.
+table_normal_base: [0.0, 0.0, 1.0]
+# Camera config names — both cameras are OAK-D PoE on flatbot.
+wrist_camera_config: camera_oak_wrist.yaml
+scene_camera_config: camera_oak_scene.yaml
+# sheppy's static_tf node (rammp-deployments manifest) publishes all camera
+# and world TF — press_demo.launch.py must not also spawn a
+# static_transform_publisher for the scene camera.
+external_static_tf: true
+
+# No obstacles: none would reach the planner (above), and flatbot surveys no
+# table. A bench's file names its table here (world_bench.yaml).
+obstacles: []
