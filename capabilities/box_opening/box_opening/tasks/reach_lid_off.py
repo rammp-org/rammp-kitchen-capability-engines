@@ -138,7 +138,7 @@ from box_opening.runtime.guards import in_band, sanity_violations
 from box_opening.runtime.legs import merge_groups
 from box_opening.tasks import depth_press as dp
 from box_opening.tasks import reach_press as rp
-from box_opening.tasks.press_contact import HISTORY_S, PressContact
+from box_opening.tasks.press_contact import CONTACT_ONSET_M, HISTORY_S, PressContact
 
 # The press, then once more where the look does not see the knob up (owner
 # 2026-10-28) and the lid did not rise (LID_POP_M: a released lid is not
@@ -402,40 +402,98 @@ SETDOWN_PAST_M = 0.008
 # the catching up lasts is not on record: 0.6 s is the press's own settle
 # (press_contact.CONTACT_SETTLE_S), 33 mm of the slow stretch.
 #
-# SETDOWN_CREDIBLE_M: a rise met higher than this over where the plan has
-# the lid meet the table is not the table: it is noted, the watch settles
+# SETDOWN_CREDIBLE_M: a rise that BEGAN higher than this over where the plan
+# has the lid meet the table is not the table: it is noted, the watch settles
 # again, and the descent goes on, slowly. The 19 real ones stood -0.4..+26.3
 # mm from the plan (setdown_table_z's).
 #
-# SETDOWN_HELD_M: the pads held up this far over the least gap since the
-# watch last settled are held up by something, whatever the settle says:
-# where they stand held within SETDOWN_CREDIBLE_M of the plan it is the
-# table (met while the watch settled again); above it, something else, and
-# the descent stops there with the lid not let go. Past what the catching up
-# can make: what had risen by the three cuts and what the joints' errors left
-# there are worth, 8-11 mm at the pads in all. "Since it last settled": since
-# it armed while its first settle lasts, and from where a settle ended once
-# one has (what rose in it was the arm's own; a rise above the band that
-# settles it again and then goes on is counted from there too, and is the lid
-# held up). And the contact is where the pads STAND held as it is seen, not
-# where that least was. Until the review of 2026-11-17 it was the least gap
-# since the watch ARMED, all the way down, and the contact was dated to that
-# least's sample. Replayed there (the pads 9 mm under the reference, coming
-# up 5 mm as the slow stretch begins):
-# after one rise above the band the rules are blind for the next 33 mm of the
-# descent, +40 down to +7 mm over the plan, where the 19 recorded tables
-# stood (mean +13); only this rule sees a table there, and it called one at
-# +10, +13, +20 and +26 mm "something held the lid up 69 mm over the plan" —
-# the height the watch armed at, the bottom of the catching up — and the lid
-# went back on the box from a table it stood on. The same with no rise above
-# the band once the catching up reached 13 mm (the 2026-11-17 flight's gap
-# stood 13.7 mm under the reference where this watch would arm, had risen 6.0
-# mm by its cut and was still rising 25 mm/s). A catching up of the whole
-# SETDOWN_HELD_M inside the first settle still reads as held (the descent
-# stops in free air and the lid goes back on the box, not let go): no flight
-# on record came near it.
+# SETDOWN_FREE_REF_M, SETDOWN_FREE_RISE_M: where a rise began is where the
+# pads last came FREELY down — the least gap since they last kept the
+# reference's pace: the gap no more than SETDOWN_FREE_RISE_M higher at the end
+# of SETDOWN_FREE_REF_M of the reference's descent than at its start, on
+# three kept samples in a row (a gap that falls back takes it down with it).
+# What holds the pads up from there on is ONE thing, whichever rule sees it
+# and however far they have sunk into it since: the table only where that
+# began inside the band. The second review of 2026-11-17: a rise was dated by
+# the rule that saw it (the fast one by the least of its last 0.2 s) and
+# "held up" was counted from where a settle ended, so something that YIELDS,
+# first met above the band — a bag, a cloth, a hand: the pads sinking half of
+# the way their free path goes under its top — was noted "not the table",
+# then taken for the table once the pads had sunk inside the band (met at +48
+# mm: let go at +30, the reference 37 mm past the first touch; at +56: after
+# 67 mm), and the arm's catching up, where it was more than SETDOWN_HELD_M
+# and straddled the settle's end, was let go on in free air (24 mm at 26
+# mm/s: "the table" at +35). The catching up is such a rise too, begun where
+# the slow stretch begins (the three recorded stood lowest 9-62 ms after it,
+# the pads 67-68 mm over the plan): never the table, whatever its size and
+# pace, and over once the pads come freely down again — the table met after
+# that is the table (the first review's cases: at +10..+26 mm after a 5 mm
+# rise above the band that fell back; after 13 mm of catching up; after one
+# that outlasts the settle). Of the 19 set-downs flown onto the table, the 17
+# the watch feels began +1.1..+27.2 mm over the plan by this; the heights the
+# rules date them to, +0.6..+24.0, are what the record says, as before. 10 mm
+# and 1.5 mm: a lid that settles on its rim raises the gap 0.26 mm a mm of
+# descent or more (SETDOWN_PAST_M's note), the catching up 0.3-0.45 (the
+# three recorded), free air once it has settled 0.1 (press_contact: the dip
+# recovers at 5-6 mm/s).
+#
+# SETDOWN_STALL_REF_M, SETDOWN_STALL_PADS_M, SETDOWN_HELD_M: the pads held up
+# are held up by something, whatever the settle says — the table where that
+# began inside the band (met while the watch settled again); above it,
+# something else, and the descent stops there with the lid not let go. Held
+# up, by the pads' own descent: STALLED, they came down less than
+# SETDOWN_STALL_PADS_M while the reference came down SETDOWN_STALL_REF_M
+# (three kept samples in a row), which the catching up never shows — in the
+# three recorded flights the pads came down 6.9-8.3 mm in every 12 mm of the
+# reference's (55-69 % of its pace), in the 19 flown onto the table 6.4 mm or
+# more before the table and still 3.9 mm where the rise rules felt it;
+# something rigid stops the descent 12.4 mm of the reference past where the
+# pads met it at most (some 20 N at the hand's 1.6 N/mm), wherever between 36
+# and 60 mm over the plan it stands and whatever the arm's lag. Or RISEN: the
+# gap SETDOWN_HELD_M over where the pads last came freely down — what yields
+# without stalling them, stopped with the spring 15-16 mm deflected (some 25
+# N). Past what the catching up can make: what had risen by the three cuts and
+# what the joints' errors left there are worth, 8-11 mm at the pads in all;
+# one of the whole SETDOWN_HELD_M still reads as held (the descent stops in
+# free air and the lid goes back on the box, not let go): no flight on record
+# came near it. The history, both reviews of 2026-11-17: "held up" was the gap
+# SETDOWN_HELD_M over its least since the watch ARMED, dated to that least's
+# sample — the pads 9 mm under the reference coming up 5 mm as the slow
+# stretch begins, then one rise above the band (the rules blind for the next
+# 33 mm, +40 down to +7 mm over the plan, where the 19 recorded tables stood),
+# a table at +10, +13, +20 and +26 mm read "something held the lid up 69 mm
+# over the plan", the height the watch armed at, and the lid went back on the
+# box from a table it stood on; the same with no rise above the band once the
+# catching up reached 13 mm (2026-11-17's gap stood 13.7 mm under the
+# reference where this watch would arm, had risen 6.0 mm by its cut and was
+# still rising 25 mm/s). Then it was counted from where a settle ended and
+# dated where the pads stood: the count dropped just short of its 15 mm where
+# the settle ended and begun again, something rigid 36-54 mm over the plan —
+# or a table the plan stands that far under: setdown_table_z does not move it
+# for a rough fix, or with no grip height — was pressed up to 33 mm, some 52 N
+# (it had been 17 mm; the owner, 2026-11-02, of ~60 N: "presses the lid down
+# onto the table waaaaaaay too hard").
+#
+# Not covered, said plainly (on synthetic descents: the tests' and the second
+# review's). A "catching up" that begins with the pads within ~3 mm of the
+# band or inside it — 0.55 s or later after the slow stretch begins with the
+# lags on record (8.5-13.8 mm, lowest 9-62 ms after it), from 0.25 s with one
+# of 28 mm — reads as the table, as a lid settling on its rim does. So does
+# something that yields met 36-38 mm over the plan (dated up to 3 mm lower,
+# where its rise has reached CONTACT_ONSET_M), and something so soft that the
+# pads sink nine tenths of the way (the gap rising no faster than free air's
+# own; four fifths, where it stands within 38 mm) — these as before both
+# reviews. And a table met before the pads have come freely down again — the
+# catching up still under way less than ~10 mm of the descent before it, or a
+# rise above the band that has not fallen back — is one rise with that, and
+# the lid goes back on the box: a table 34 mm over the plan under such a rise,
+# one 20 mm or more over it under 13.8 mm of catching up that takes 0.75 s.
 SETDOWN_SETTLE_S = 0.6
 SETDOWN_CREDIBLE_M = 0.035
+SETDOWN_FREE_REF_M = 0.010
+SETDOWN_FREE_RISE_M = 0.0015
+SETDOWN_STALL_REF_M = 0.012
+SETDOWN_STALL_PADS_M = 0.002
 SETDOWN_HELD_M = 0.015
 # Owner 2026-10-29: "we also need to speed up the lid placement". The way down
 # to SETDOWN_SLOW_M over the table is free air, so it flies at the free-air
@@ -2004,21 +2062,24 @@ SLOW_Q_TOL_RAD = 0.02
 
 class SetdownContact(PressContact):
     """The set-down's watch: a PressContact on where the lid meets the table, by the set-down's
-    own rules (SETDOWN_SETTLE_S, SETDOWN_CREDIBLE_M, SETDOWN_HELD_M's notes). The fingers open only
-    where credible() says the lid met the table:
+    own rules (SETDOWN_SETTLE_S, SETDOWN_CREDIBLE_M, SETDOWN_FREE_REF_M and SETDOWN_HELD_M's notes).
+    The fingers open only where credible() says the lid met the table:
 
      - no rise is judged until `settle_s` after it armed (where the slow stretch begins): the arm
        is still catching up with its reference, which reads as a rise (the three "contacts" of
        2026-11-13 and 11-17);
-     - a rise met no more than `credible_m` over where the plan has the lid meet the table
+     - a rise that began no more than `credible_m` over where the plan has the lid meet the table
        (`top_z`) is the table: the reference is stopped where it stands (with the cut on) and the
        lid may be let go;
-     - one met higher is not the table (`early` keeps it): the watch settles again and the descent
-       goes on, slowly;
-     - the pads held up `held_m` over the least gap since the watch last settled (SETDOWN_HELD_M's
-       note: since it armed, then since a settle last ended) are held up by something, settle or
-       not: the table where they stand held within `credible_m` of the plan; above it, something
-       else, and the descent is stopped there, the lid not let go (verdict "held");
+     - where a rise began is where the pads last came freely down (`_free`, _began): what holds
+       them up from there on is one thing, whichever rule sees it and however far they have sunk
+       into it by then. One that began higher is not the table (`early` keeps it): the watch
+       settles again and the descent goes on, slowly;
+     - the pads held up are held up by something, settle or not — stalled (they came down next to
+       nothing while the reference came on: how "held") or the gap risen `held_m` since they last
+       came freely down (how "risen"), met where they stand as it is seen: the table where that and
+       where the rise began lie within `credible_m` of the plan; else something else, and the
+       descent is stopped there, the lid not let go (verdict "held");
      - the touch ended with nothing met (verdict "never"), or the watch failed (verdict "failed":
        the descent is stopped — where it failed once it watches; where its slow stretch begins
        where it failed before that, the lift and the carry flying on, __call__): the lid is not
@@ -2049,15 +2110,27 @@ class SetdownContact(PressContact):
 
     def _reset(self):
         super()._reset()
-        self.early = []  # rises above where the table can be: (when it began, the pads there, which rise, when seen)
+        self.early = []  # rises that began above where the table can be: (when, the pads there, which rise, when seen)
         self._judge_from = None  # the rises are judged from here on
-        self._settling = False  # whether the last sample judged fell in a settle (before _judge_from)
-        self._low = None  # the least gap since the watch last settled (its sample): what "held up" is counted from
-        self._n_held = 0
+        self._free = None  # the least gap since the pads last came freely down (its sample): where a rise began
+        self._n_free = 0  # kept samples in a row that say the pads come freely down ...
+        self._n_stall = 0  # ... that they have stalled ...
+        self._n_risen = 0  # ... that the gap stands held_m over where they last came freely down
+        self.began = None  # (when, the pads there, the gap) where the rise last met began (_began)
+        self._noted = None  # when the rise last noted in `early` began: one thing is noted once
         self.failed_when = None  # a watch that failed: "watching" its stretch | "before" it | "after" the flight
         self.fail_from = None  # ... the fraction it stops the descent from (None: nowhere, the flight flies on)
         self.read_after = 0  # the kept samples read once the execution was over (read_rest)
         self.seen_after = False  # ... and what it says of the lid was only seen in those
+
+    def _back(self, z_ref, by):
+        """The newest kept sample at which the reference's pads stood `by` or more over `z_ref`:
+        what the pads have done while the reference came down that far. None: it has not, since
+        the watch armed."""
+        for s in reversed(self._hist):
+            if s[2] - s[1] >= z_ref + by:
+                return s
+        return None
 
     def _judge(self, t, frac, z_ref, z_meas):
         gap = z_meas - z_ref
@@ -2067,24 +2140,35 @@ class SetdownContact(PressContact):
         sample = (t, gap, z_meas)
         if self._judge_from is None:
             self._judge_from = t + self.settle_s
-        settling = t < self._judge_from
-        if self._settling and not settling:
-            # it has settled: what rose while it did was the arm's own catching up (or is a rise the
-            # rules judge from here, which see it go on), and "held up" is counted from here on
-            self._low, self._n_held = None, 0
-        self._settling = settling
-        if self._low is None or gap < self._low[1]:
-            self._low, self._n_held = sample, 0
-        elif gap - self._low[1] > self.held_m:
-            self._n_held += 1
-        else:
-            self._n_held = 0
-        if self._n_held >= self._rule()[2]:
-            # held up: met where the pads stand as it is seen (what holds them stands there), not where
-            # the least gap was — the arm's catching up, or a rise that fell back, may lie between
+        in_a_row = self._rule()[2]
+        # where a rise began: the least gap since the pads last came freely down — they kept the
+        # reference's pace over the last SETDOWN_FREE_REF_M of its descent, so what had risen
+        # before that is over (the arm's catching up, something that gave way) and the count
+        # starts from that stretch's least
+        was = self._back(z_ref, SETDOWN_FREE_REF_M)
+        self._n_free = self._n_free + 1 if was is not None and gap - was[1] <= SETDOWN_FREE_RISE_M else 0
+        if self._free is None or gap < self._free[1]:
+            self._free = sample
+        elif self._n_free >= in_a_row:
+            least = sample
+            for s in reversed(self._hist):
+                least = s if s[1] < least[1] else least
+                if s is was:
+                    break
+            if least[1] > self._free[1]:
+                self._free = least
+        # held up, whatever the settle says, by the pads' own descent: stalled while the reference
+        # came on (which the catching up never shows: the pads come down through it at half the
+        # reference's pace and more), or the gap risen held_m since they last came freely down
+        was = self._back(z_ref, SETDOWN_STALL_REF_M)
+        self._n_stall = self._n_stall + 1 if was is not None and was[2] - z_meas < SETDOWN_STALL_PADS_M else 0
+        self._n_risen = self._n_risen + 1 if gap - self._free[1] > self.held_m else 0
+        if self._n_stall >= in_a_row or self._n_risen >= in_a_row:
             self._hist.append(sample)
-            self._met(t, frac, sample, "held")
-        elif settling:
+            # met where the pads stand as it is seen (what holds them stands there, or they have sunk that
+            # far into it); whether that is the table is asked of where the rise began (_met)
+            self._met(t, frac, sample, "held" if self._n_stall >= in_a_row else "risen")
+        elif t < self._judge_from:
             # catching up with its reference: kept for where a rise began, judged by nothing yet
             self._hist.append(sample)
             while self._hist and t - self._hist[0][0] > HISTORY_S:
@@ -2092,21 +2176,44 @@ class SetdownContact(PressContact):
         else:
             super()._judge(t, frac, z_ref, z_meas)
 
+    def _began(self):
+        """Where the rise the pads stand in began: (when, the pads there, the gap) of the last kept
+        sample, from where they last came freely down on (`_free`), whose gap lay within
+        CONTACT_ONSET_M of the gap there — PressContact._met's onset, counted from there and not
+        from the least of the rule that saw the rise (the fast one's is the least of its last 0.2
+        s: of a rise that goes on, wherever the pads have sunk to by then)."""
+        on = self._free
+        for s in self._hist:
+            if s[0] >= self._free[0] and s[1] - self._free[1] <= CONTACT_ONSET_M:
+                on = s
+        return (on[0], on[2], on[1])
+
     def _met(self, t, frac, least, how):
         super()._met(t, frac, least, how)
+        band = self.top_z + self.credible_m
+        self.began = self._began()
         t_c, z_c, _gap = self.contact
-        if z_c <= self.top_z + self.credible_m:
+        if max(z_c, self.began[1]) <= band:
+            # the table: the rise began inside the band (the pads had come freely down to there) and that
+            # is where the rule that saw it has it
             if self.cut:
                 self.f_stop = frac  # stopped where it stands now: it has gone on past the touch since it began
             return
-        if how == "held":
-            # something holds the lid up above where the table can be: stopped here, not let go
+        if how in ("held", "risen"):
+            # something holds the lid up that was met above where the table can be — there still, or the
+            # pads sunk into it since (inside the band, even): stopped here, not let go
             self.verdict, self.f_stop = "held", frac
             return
-        # a rise above where the table can be is no table: noted, settled again, and the descent goes on.
-        # "Held up" goes on being counted from the least gap since the watch last settled, which lies at or
-        # under where this rise began: one that goes on is the lid held up, and stops the descent held_m on
-        self.early.append((t_c, z_c, how, t))
+        # a rise that began above where the table can be is no table: noted where it began (once, however
+        # often the rules see it go on, and not where the rule that saw it has it, which may lie inside the
+        # band by then), settled again, and the descent goes on. It is what holds the pads up until they come
+        # freely down again: held up by it — stalled on it, or the gap risen held_m from where it began — the
+        # descent stops
+        if self.began[1] > band:
+            t_c, z_c = self.began[0], self.began[1]
+        if self._noted != self.began[0]:
+            self.early.append((t_c, z_c, how, t))
+            self._noted = self.began[0]
         self.contact = self.detected_t = self.how = self.stop_z = self.f_stop = None
         self._resettle(t)
         self._judge_from = t + self.settle_s
@@ -2221,10 +2328,18 @@ class SetdownContact(PressContact):
                 "there" if self.failed_when == "watching" else "where its slow stretch begins",
             )
         if self.verdict == "held":
+            stands = 1000 * (self.contact[1] - self.top_z)
+            if stands > 1000 * self.credible_m or self.began is None:
+                return "held", (
+                    "something held the lid up %.0f mm over where the plan has it meet the table (more than %.0f): "
+                    "that is not the table, and the descent was stopped there%s"
+                    % (stands, 1000 * self.credible_m, rises)
+                )
+            # the pads have sunk into what they met to inside the band: it is still what they met above it
             return "held", (
-                "something held the lid up %.0f mm over where the plan has it meet the table (more than %.0f): "
-                "that is not the table, and the descent was stopped there%s"
-                % (1000 * (self.contact[1] - self.top_z), 1000 * self.credible_m, rises)
+                "something met %.0f mm over where the plan has the lid meet the table (more than %.0f) still held it "
+                "up, %.0f mm over it: that is not the table, and the descent was stopped there%s"
+                % (1000 * (self.began[1] - self.top_z), 1000 * self.credible_m, stands, rises)
             )
         if self.contact is None:
             if self.armed_t is None:
@@ -2240,9 +2355,13 @@ class SetdownContact(PressContact):
 
     def record(self):
         """PressContact.record's, and the set-down's own: whether the contact is one the fingers
-        open on (`credible`), the band and the settle it was judged by, the rises above the band
-        that were not taken for the table (`early`: when after the goal went out, how far over the
-        plan, which rise), and how many of its samples were read only once the execution was over
+        open on (`credible`), the band, the settle and the held-up rules it was judged by (`held_mm`
+        the gap's rise; `stall_mm` the reference's descent and the most the pads came down in it;
+        `free_mm` the reference's descent and the most the gap rose in it where the pads came
+        freely down), the rises that began above the band and were not taken for the table
+        (`early`: when after the goal went out, how far over the plan, which rise), where a rise
+        that was met began (`began_above_mm`: where the pads last came freely down before it), and
+        how many of its samples were read only once the execution was over
         (`read_after_flight`, read_rest: the last few, or all of them where no poll came while it
         flew — `seen_after_flight` where what it says of the lid was only seen in those, nothing
         cut)."""
@@ -2256,6 +2375,8 @@ class SetdownContact(PressContact):
             credible_above_mm=round(1000 * self.credible_m, 1),
             settle_s=self.settle_s,
             held_mm=round(1000 * self.held_m, 1),
+            stall_mm=[round(1000 * SETDOWN_STALL_REF_M, 1), round(1000 * SETDOWN_STALL_PADS_M, 1)],
+            free_mm=[round(1000 * SETDOWN_FREE_REF_M, 1), round(1000 * SETDOWN_FREE_RISE_M, 1)],
             early=[
                 [None if sent is None else round(t_c - float(sent), 3), round(1000 * (z - self.top_z), 1), how]
                 for t_c, z, how, _seen in self.early
@@ -2263,6 +2384,8 @@ class SetdownContact(PressContact):
             read_after_flight=self.read_after,
             seen_after_flight=self.seen_after,
         )
+        if self.contact is not None and self.began is not None:
+            out["began_above_mm"] = round(1000 * (self.began[1] - self.top_z), 1)
         return out
 
 

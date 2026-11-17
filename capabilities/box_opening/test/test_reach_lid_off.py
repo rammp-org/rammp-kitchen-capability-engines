@@ -4440,6 +4440,9 @@ def _descent(
     polled=True,
     chain=None,
     slow_q=False,
+    sinks=0.0,
+    firm=None,
+    told=None,
 ):
     """A set-down's last stretch flown over a table: the reference's pads from 12 cm over where the plan
     has the lid meet the table (`top`) to SETDOWN_PAST_M under it, fast (135 mm/s) to where the slow
@@ -4448,6 +4451,12 @@ def _descent(
     `rate` (m/s), at that pace from `delay` s after it begins until all of `catch_up` has come (the recorded
     flights' own: _flown_lag) —, held up by a table at `table` (the pads' height there; None: none), and by
     `bump`: (the pads' height it begins at, how far it lifts them, for how many mm of the reference).
+    `sinks`: what stands at `table` yields — the pads sink that part of the way their free path goes under
+    its top (0: rigid, a table; 0.5: a bag, a hand) — down to `firm` (the pads' height it gives no further
+    at; None: nowhere). `told` (a dict) is told of the flight: "touch_ref", the reference's pads where the
+    measured ones first met what stands at `table`; "free", where the pads would stand at the flight's last
+    sample with nothing under them (what stands at `table` is pushed down `sinks` of the way from its top
+    to there, the hand's spring deflected by the rest).
     `polled` False: the client keeps the flight's feedback and the watch is not polled while it flies
     (something the execution hosted), then reads it once it is over (read_rest). `chain`: the kinematics
     it measures by (None: test_press_contact's, joint 1 the tool's height); `slow_q` True: the watch is told
@@ -4472,7 +4481,14 @@ def _descent(
         free = zr - under + came_up + float(rng.normal(0.0, noise))
         if bump is not None and bump[0] - bump[2] < zr <= bump[0]:
             free += bump[1] * min((bump[0] - zr) / 0.004, 1.0)
-        return free if table is None else max(free, table)
+        if told is not None:
+            told["free"] = free
+        if table is None or free >= table:
+            return free
+        if told is not None:
+            told.setdefault("touch_ref", zr)
+        sunk = table - sinks * (table - free)
+        return sunk if firm is None else max(sunk, firm)
 
     stopped, info = tpc._fly(det if polled else (lambda frac: False), client, z, 0.01, measured)
     if not polled:
@@ -4520,6 +4536,8 @@ def test_the_arm_catching_up_as_the_slow_stretch_begins_is_not_the_table_and_the
     rec = det.record()
     assert rec["credible"] and rec["met"] and rec["cut"] and rec["above_top_mm"] == pytest.approx(13.0, abs=2.0)
     assert (rec["settle_s"], rec["credible_above_mm"], rec["held_mm"], rec["early"]) == (0.6, 35.0, 15.0, [])
+    assert (rec["stall_mm"], rec["free_mm"]) == ([12.0, 2.0], [10.0, 1.5])
+    assert rec["began_above_mm"] == pytest.approx(13.0, abs=2.0)  # the pads came freely down to the table
 
 
 @pytest.mark.parametrize("table_mm", [0, 5, 10, 13, 20, 26])
@@ -4544,11 +4562,13 @@ def test_a_rise_well_above_the_table_is_not_the_table_and_the_descent_goes_on_to
     rec = det.record()
     assert rec["early"][0][1] == pytest.approx(39.0, abs=3.0) and rec["early"][0][2] == "fast"
     assert rec["above_top_mm"] == pytest.approx(table_mm, abs=2.0) and rec["credible"] is True and rec["cut"]
-    # seen as the pads held up where the watch still settled again (blind), by a rise where it had settled
-    assert det.how == ("held" if table_mm >= 20 else "fast")
-    # ... and stopped no more than SETDOWN_HELD_M and three samples past where the pads met it (4 mm under
-    # the reference), never at the touch's end
-    assert table + 0.004 - z_stop < rlo.SETDOWN_HELD_M + 0.004 and z_stop > 0.20 - rlo.SETDOWN_PAST_M + 0.002
+    # seen as the pads stalled where the watch still settled again (blind), by a rise where it had settled
+    assert det.how == ("held" if table_mm >= 10 else "fast")
+    # ... where the pads last came freely down before it is the table too: the rise above the band fell back
+    assert rec["began_above_mm"] == pytest.approx(table_mm, abs=2.0)
+    # ... and stopped no more than SETDOWN_STALL_REF_M past where the pads met it (4 mm under the
+    # reference), never at the touch's end
+    assert table + 0.004 - z_stop < rlo.SETDOWN_STALL_REF_M + 0.001 and z_stop > 0.20 - rlo.SETDOWN_PAST_M + 0.002
 
 
 def test_a_rise_well_above_the_table_with_no_table_under_it_is_not_let_go_on():
@@ -4591,17 +4611,19 @@ def test_with_each_recorded_flights_own_lag_caught_up_all_the_way_the_table_is_t
 def test_a_catching_up_that_outlasts_the_settle_is_not_the_table_and_the_table_after_it_is(table_mm):
     """2026-11-17's lag once more (the pads 13.8 mm under the reference, coming up 26 mm/s), the catching
     up beginning 0.25 s after the slow stretch does: still under way when the settle ends, 0.6 s in. What
-    rises after that is met as a rise, with the pads more than SETDOWN_CREDIBLE_M over the plan: not the
-    table, noted, the watch settles again — and the table under it, met while it does, is the table. It
-    was "something held the lid up" at the height the watch armed at: all 13.8 mm of the catching up
-    counted toward SETDOWN_HELD_M."""
+    rises after that is met as a rise that began with the pads more than SETDOWN_CREDIBLE_M over the plan
+    (where the catching up began): not the table, noted, the watch settles again — and the table under
+    it, met while it does, is the table: the catching up is over 37 mm over the plan and the pads come
+    freely down the 11 mm and more from there to it. It was "something held the lid up" at the height the
+    watch armed at: all 13.8 mm of the catching up counted toward SETDOWN_HELD_M."""
     under, _risen, rate, _low_at = _flown_lag("20261117-164059")
     table = 0.20 + table_mm / 1000.0
     det, stopped, z_stop = _descent(table=table, under=under, catch_up=under, rate=rate, delay=0.25)
-    assert len(det.early) == 1 and det.early[0][1] > 0.20 + rlo.SETDOWN_CREDIBLE_M
+    assert len(det.early) == 1 and det.early[0][1] == pytest.approx(0.20 + 0.0525, abs=0.004)  # where it began
     assert stopped is not None and det.credible() and det.verdict is None
     assert det.contact[1] == pytest.approx(table, abs=0.002)
-    assert table - z_stop < rlo.SETDOWN_HELD_M + 0.004
+    assert det.record()["began_above_mm"] == pytest.approx(table_mm, abs=2.0)
+    assert table - z_stop < rlo.SETDOWN_STALL_REF_M + 0.001
     # and in free air: nothing met, the lid not let go
     det, stopped, _z = _descent(under=under, catch_up=under, rate=rate, delay=0.25)
     assert stopped is None and not det.credible() and det.refusal()[0] == "never" and len(det.early) == 1
@@ -4609,13 +4631,14 @@ def test_a_catching_up_that_outlasts_the_settle_is_not_the_table_and_the_table_a
 
 def test_something_holding_the_lid_up_above_where_the_table_can_be_stops_the_descent_and_is_not_let_go_on():
     """The pads stop 60 mm over where the plan has the lid meet the table, as the arm still settles, and
-    the reference goes on: 15 mm of it (SETDOWN_HELD_M) and whatever holds the lid up is no catching up.
-    Above SETDOWN_CREDIBLE_M it is not the table: the descent is stopped there (the spring pressing no
-    harder), and the lid is not let go on it. The table itself met that early — 30 mm over the plan,
-    inside the band — is the table."""
+    the reference goes on: 12 mm of it (SETDOWN_STALL_REF_M) with the pads no lower and whatever holds the
+    lid up is no catching up. Above SETDOWN_CREDIBLE_M it is not the table: the descent is stopped there
+    (the spring pressing no harder), and the lid is not let go on it. The table itself met that early — 30
+    mm over the plan, inside the band — is the table."""
     det, stopped, z_stop = _descent(table=0.26)
-    assert stopped is not None and det.verdict == "held" and not det.credible()
-    assert 0.26 + 0.009 - 0.015 - 0.006 < z_stop < 0.26 + 0.009 - 0.015 + 0.002  # 15 mm of the reference on, no more
+    assert stopped is not None and det.verdict == "held" and not det.credible() and det.how == "held"
+    # 10 mm of the reference on (the pads may come down 2 of the 12) and three samples, no more
+    assert 0.26 + 0.009 - 0.0125 < z_stop < 0.26 + 0.009 - 0.0095
     verdict, why = det.refusal()
     assert verdict == "held" and "something held the lid up 60 mm over where the plan has it meet the table" in why
     assert det.record()["credible"] is False and det.record()["verdict"] == "held"
@@ -4633,27 +4656,28 @@ def test_something_holding_the_lid_up_above_where_the_table_can_be_stops_the_des
 def test_a_rise_above_the_band_that_goes_on_is_something_holding_the_lid_up_and_stops_the_descent(thing_mm):
     """Something stands 40-50 mm over where the plan has the lid meet the table: met as a rise once the
     watch has settled, above SETDOWN_CREDIBLE_M, so not the table — noted, and the watch settles again.
-    But the rise goes on: SETDOWN_HELD_M of it from where it began (from where the settle ended, where it
-    began before that) and it is the lid held up. The descent stops there — the reference no more than
-    twice SETDOWN_HELD_M past where the pads met the thing — the lid is not let go, and the height said
-    is the thing's."""
+    But the pads stand on it: SETDOWN_STALL_REF_M of the reference's descent with the pads no lower and
+    it is the lid held up. The descent stops there — the reference no further past where the pads met the
+    thing than that — the lid is not let go, and the height said is the thing's. (At 50 mm the pads meet
+    it while the watch still settles, and they have stalled before a rise rule is asked.)"""
     thing = 0.20 + thing_mm / 1000.0
     det, stopped, z_stop = _descent(table=thing, catch_up=0.005)
-    assert stopped is not None and det.verdict == "held" and not det.credible()
-    assert len(det.early) == 1 and det.early[0][1] == pytest.approx(thing, abs=0.002)
+    assert stopped is not None and det.verdict == "held" and not det.credible() and det.how == "held"
+    assert [how for _t, _z, how, _seen in det.early] == ([] if thing_mm == 50 else ["fast"])
+    assert all(z == pytest.approx(thing, abs=0.002) for _t, z, _how, _seen in det.early)
     assert det.contact[1] == pytest.approx(thing, abs=0.002)
     assert "something held the lid up %d mm over where the plan has it meet the table" % thing_mm in det.refusal()[1]
-    assert thing + 0.004 - z_stop < 2 * rlo.SETDOWN_HELD_M  # the pads met it 4 mm under the reference
+    assert thing + 0.004 - z_stop < rlo.SETDOWN_STALL_REF_M + 0.001  # the pads met it 4 mm under the reference
 
 
 def test_what_the_pads_came_up_by_while_the_watch_settled_is_not_counted_once_it_has_settled():
     """The arm catches up 14.7 mm while the watch settles — 0.3 mm short of SETDOWN_HELD_M — and, flying
     on, the pads come up one millimetre more with the reference 25 mm over the plan (too little and too
     slow for either rise rule; the gap wanders that much in free air). Nothing holds the lid up: "held
-    up" is counted from where the settle ended, what rose in it being the arm's own. Counted from the
-    least gap since the watch armed, that millimetre read as the lid held up 27 mm over the plan — inside
-    the band, so "the table", and the fingers would have opened in free air. The table under it is still
-    the table."""
+    up" is counted from where the pads last came freely down — after the catching up, which is over by
+    then. Counted from the least gap since the watch armed and dated where the pads stand, that
+    millimetre read as the lid held up 27 mm over the plan — inside the band, so "the table", and the
+    fingers would have opened in free air. The table under it is still the table."""
     det, stopped, _z = _descent(catch_up=0.0147, bump=(0.225, 0.001, 0.040))
     assert stopped is None and det.contact is None and det.verdict is None and det.early == []
     assert not det.credible() and det.refusal()[0] == "never"
@@ -4673,6 +4697,218 @@ def test_a_catching_up_of_the_whole_held_height_inside_the_settle_stops_the_desc
     det, stopped, z_stop = _descent(catch_up=0.0155)
     assert stopped is not None and det.verdict == "held" and not det.credible()
     assert det.contact[1] > 0.20 + rlo.SETDOWN_CREDIBLE_M and z_stop > 0.20 + rlo.SETDOWN_CREDIBLE_M
+
+
+# ---- one thing holds the lid up from where the pads last came freely down (second review 2026-11-17) ------
+
+
+def _lags():
+    """The lags the yielding and rigid things are flown with: the tests' own (the pads 9 mm under the
+    reference, 5 mm caught up in 0.35 s), and each recorded flight's (setdown_flown.SETDOWNS_FLOWN: 8.6,
+    8.5 and 13.8 mm under, at its own pace from where it stood lowest) caught up all the way. As
+    _descent's keywords."""
+    own = [dict(under=0.009, catch_up=0.005)]
+    for name in sorted(flown.SETDOWNS_FLOWN):
+        under, _risen, rate, low_at = _flown_lag(name)
+        own.append(dict(under=under, catch_up=under, rate=rate, delay=low_at))
+    return own
+
+
+@pytest.mark.parametrize("thing_mm", [40, 48, 56])
+@pytest.mark.parametrize("sinks", [0.2, 0.35, 0.5, 0.65])
+def test_something_that_yields_first_met_above_where_the_table_can_be_is_never_the_table(sinks, thing_mm):
+    """A bag, a cloth, a hand 40-56 mm over where the plan has the lid meet the table: the pads sink a
+    fifth to two thirds of the way their free path goes under its top, so the gap goes on rising and the
+    pads go on coming down, into the band. Second review 2026-11-17: the rise was noted "not the table",
+    the watch settled again, the "held up" count began afresh where that settle ended and the contact was
+    dated where the pads stood by then — inside the band: "the lid met the table", the fingers opened on
+    it (met at +48, the pads sinking half-way: let go at +30, the reference 37 mm past the first touch;
+    at +56, two thirds: after 67 mm). What holds the pads up is one thing from where they last came
+    freely down, however far they have sunk into it: met above the band it is never the table. The
+    descent stops with the hand's spring no more than SETDOWN_HELD_M and three samples deflected, the lid
+    is not let go, and the words say where it was met — with the tests' lag and with each recorded
+    flight's own (where the arm was still catching up as the pads met it, that is one rise with the
+    catching up, begun higher still)."""
+    thing = 0.20 + thing_mm / 1000.0
+    for lag in _lags():
+        told = {}
+        det, stopped, _z = _descent(table=thing, sinks=sinks, told=told, **lag)
+        assert stopped is not None and det.verdict == "held" and not det.credible(), lag
+        assert det.how == "risen" and len(det.early) <= 1  # one thing: noted once at most, then held up by it
+        rec = det.record()
+        assert rec["verdict"] == "held" and rec["credible"] is False and rec["met"] is True
+        # where the pads last came freely down: its top (the first millimetre of a rise is not yet one), or
+        # higher; where they stand as the descent stops: on it, or sunk into it
+        assert rec["began_above_mm"] > max(thing_mm - 3.0, 1000 * rlo.SETDOWN_CREDIBLE_M), lag
+        assert rec["above_top_mm"] < thing_mm + 0.5, lag
+        why = det.refusal()[1]
+        assert "that is not the table, and the descent was stopped there" in why
+        stands, began = 1000 * (det.contact[1] - 0.20), 1000 * (det.began[1] - 0.20)
+        if stands > 1000 * rlo.SETDOWN_CREDIBLE_M:
+            assert "something held the lid up %.0f mm over where the plan has it meet" % stands in why
+        else:  # sunk to inside the band: said with where it was met
+            assert "something met %.0f mm over where the plan has the lid meet the table" % began in why
+            assert "still held it up, %.0f mm over it" % stands in why
+        assert (1.0 - sinks) * (thing - told["free"]) < rlo.SETDOWN_HELD_M + 0.003, lag
+
+
+def test_something_that_yields_and_then_gives_no_further_inside_the_band_is_still_not_the_table():
+    """The same, and what yields gives no further once the pads have sunk to 30 mm over the plan (a bag
+    with something in it): they stop there, inside the band, where a table could be. They have not come
+    freely down since they met it 40 mm over the plan: it is that, not the table, whichever of the rules
+    sees them held up."""
+    det, stopped, z_stop = _descent(table=0.240, sinks=0.65, firm=0.230, catch_up=0.005)
+    assert stopped is not None and det.verdict == "held" and not det.credible()
+    assert det.how in ("held", "risen") and det.contact[1] == pytest.approx(0.230, abs=0.001)
+    rec = det.record()
+    assert rec["began_above_mm"] == pytest.approx(40.0, abs=3.0) and rec["above_top_mm"] == pytest.approx(30.0, abs=1.0)
+    assert z_stop > 0.20 + 0.010  # stopped on it: the reference never came down to the plan's table
+    assert det.refusal()[1].startswith(
+        "something met %.0f mm over where the plan has the lid meet the table (more than 35) still held it up, 30 mm "
+        "over it: that is not the table" % rec["began_above_mm"]
+    )
+
+
+def test_a_rise_that_goes_on_is_noted_once_and_where_it_began(monkeypatch):
+    """What the `early` rows say of one thing that goes on holding the lid up. With a settle of 0.1 s the
+    fast rule sees the same rise twice before the gap has risen SETDOWN_HELD_M (something met 56 mm over
+    the plan, the pads sinking half-way): one thing, noted once. And with one of 1.0 s the first rule to
+    see something met 48 mm over the plan (the pads sinking seven tenths of the way) is asked once they
+    have sunk to inside the band, and dates its rise there: the note says where the pads last came
+    freely down, 46-48 mm over the plan, not a height inside the band that "was not taken for the table"
+    (nor, of a rise whose rule has it above the band, wherever in it the rule's own window began)."""
+    monkeypatch.setattr(rlo, "SETDOWN_SETTLE_S", 0.1)
+    det, stopped, _z = _descent(table=0.256, sinks=0.5)
+    assert stopped is not None and det.verdict == "held" and det.how == "risen"
+    assert [how for _t, _z, how, _seen in det.early] == ["fast"]
+    assert det.early[0][1] == pytest.approx(0.256, abs=0.002)
+    monkeypatch.setattr(rlo, "SETDOWN_SETTLE_S", 1.0)
+    det, stopped, _z = _descent(table=0.248, sinks=0.7)
+    assert stopped is not None and det.verdict == "held" and det.how == "risen"
+    assert [how for _t, _z, how, _seen in det.early] == ["fast"]
+    assert det.early[0][1] == pytest.approx(0.247, abs=0.0015) and det.early[0][3] - det.early[0][0] > 0.5
+    assert (
+        "(rises +%.0f mm over it were not taken for the table)" % (1000 * (det.early[0][1] - 0.20)) in det.refusal()[1]
+    )
+
+
+_RIGID_LAGS = {
+    "the tests' lag": dict(under=0.009, catch_up=0.005),
+    "2026-11-13's, not yet caught up": dict(under=0.0085, catch_up=0.0),
+    "2026-11-17's, not yet caught up": dict(under=0.0138, catch_up=0.0),
+    "2026-11-17's, caught up as at its cut": dict(under=0.0138, catch_up=0.006),
+}
+
+
+@pytest.mark.parametrize("lag", list(_RIGID_LAGS.values()), ids=list(_RIGID_LAGS))
+@pytest.mark.parametrize("thing_mm", [36, 40, 44, 48, 52, 54, 60])
+def test_something_rigid_above_where_the_table_can_be_is_pressed_no_further_than_the_pads_stalling_shows(thing_mm, lag):
+    """Something rigid 36-60 mm over where the plan has the lid meet the table — or the table itself
+    where the plan stands that far under it: setdown_table_z does not move the plan for a rough fix or
+    with no grip height, and 2026-11-13's and 11-17's plans stood 46-55 mm low. Second review 2026-11-17:
+    met while the watch still settled, the "held up" count was dropped just short of its 15 mm where the
+    settle ended and begun again, and the reference went on up to 33 mm past the contact (54 mm over the
+    plan with 11-13's lag; 32 mm at +48 with 11-17's), some 52 N, before the descent stopped. It had been
+    17 mm; the owner, 2026-11-02, of ~60 N: "presses the lid down onto the table waaaaaaay too hard". The
+    pads' own descent says it: they have not come down while the reference came down SETDOWN_STALL_REF_M
+    (12 mm). Stopped no further past the contact than that, whatever the lag and wherever it stands, the
+    lid not let go, the height said its own."""
+    thing = 0.20 + thing_mm / 1000.0
+    told = {}
+    det, stopped, z_stop = _descent(table=thing, told=told, **lag)
+    # stalled on it; or, where the arm was still catching up as the pads met it, the gap risen SETDOWN_HELD_M
+    # with what it came up by: sooner still
+    assert stopped is not None and det.verdict == "held" and not det.credible() and det.how in ("held", "risen")
+    assert det.contact[1] == pytest.approx(thing, abs=0.002)
+    assert "something held the lid up %d mm over where the plan has it meet the table" % thing_mm in det.refusal()[1]
+    pressed = told["touch_ref"] - z_stop  # how far the reference went on past where the pads met it
+    assert 0.007 < pressed < rlo.SETDOWN_STALL_REF_M + 0.001 < 0.017
+
+
+@pytest.mark.parametrize("lag_mm", [16, 20, 24, 26])
+def test_a_catching_up_of_more_than_the_held_height_is_never_the_table_in_free_air(lag_mm):
+    """The pads 16-26 mm under the reference as the slow stretch begins (the most on record is 13.8) and
+    coming up on it by three quarters or all of that, 18-40 mm/s from 0, 0.1 or 0.25 s after it begins:
+    nothing under the lid. Second review 2026-11-17: what came up inside the settle was forgotten where it
+    ended, and the rest, rising with the pads inside the band by then, was taken for the table by the
+    fast rule — 24 mm at 26 mm/s from 0.1 s: "the lid met the table" 35 mm over the plan, in free air
+    (before the first review's fix that one read "held"; 16 mm at 18 mm/s from 0.25 s was let go on by
+    both). A catching up is one rise from where the slow stretch begins, the pads well above the band
+    there: never the table, whatever its size and pace. Past SETDOWN_HELD_M of it the descent may stop
+    ("held": something met above the band, wherever the pads stand by then) and the lid goes back on the
+    box."""
+    under = lag_mm / 1000.0
+    seen = set()
+    for part in (0.75, 1.0):
+        for rate in (0.018, 0.026, 0.040):
+            for delay in (0.0, 0.1, 0.25):
+                det, stopped, z_stop = _descent(under=under, catch_up=part * under, rate=rate, delay=delay)
+                assert not det.credible(), (part, rate, delay)
+                assert det.verdict in (None, "held") and det.refusal()[0] in ("never", "held")
+                if det.verdict == "held":
+                    assert det.began[1] > 0.20 + rlo.SETDOWN_CREDIBLE_M + 0.003, (part, rate, delay)
+                seen.add(det.refusal()[0])
+    assert "held" in seen  # ... which is what more than SETDOWN_HELD_M of it reads as
+
+
+def test_the_recorded_lag_caught_up_slower_than_on_record_is_never_the_table_however_long_it_takes():
+    """How long the catching up lasts is not on record (the three flights were cut 0.27-0.33 s in, the pads
+    coming up 18-29 mm/s). 2026-11-17's lag (13.8 mm under the reference), three quarters or all of it
+    caught up at 10 or 14 mm/s from 0, 0.1 or 0.25 s after the slow stretch begins: still rising 0.7-1.6 s
+    in, with the pads inside the band and the settle over. Nothing is under the lid. Dated by the
+    rule that saw it, that rise began inside the band: "the lid met the table" 29-35 mm over the plan, in
+    free air, in 20 of these 36 flights (the first work's open item: "if it outlasts 0.6 s, a false rise
+    inside the 35 mm band would still open the fingers"). It is one rise from where the slow stretch
+    begins, the pads 48 mm or more over the plan there: noted, never the table. (One of 9 mm/s or slower,
+    0.16 mm a mm of the descent, is no faster than free air's own drift and is not told from it.)"""
+    under, _risen, _rate, _low_at = _flown_lag("20261117-164059")
+    band = 0.20 + rlo.SETDOWN_CREDIBLE_M
+    noted = 0
+    for part in (0.75, 1.0):
+        for rate in (0.010, 0.014):
+            for delay in (0.0, 0.1, 0.25):
+                for seed in (0, 1, 2):
+                    det, stopped, _z = _descent(under=under, catch_up=part * under, rate=rate, delay=delay, seed=seed)
+                    case = (part, rate, delay, seed)
+                    assert stopped is None and not det.credible() and det.refusal()[0] == "never", case
+                    assert len(det.early) <= 1 and all(z > band + 0.010 for _t, z, _how, _seen in det.early), case
+                    noted += len(det.early)
+    assert noted >= 20  # the rise rules did see them: it is where they began that says what they are
+
+
+def _least_descent(rows):
+    """The least the pads came down in any SETDOWN_STALL_REF_M of the reference's descent over `rows`,
+    (the reference's pads, the measured pads) in order: what the watch's stall rule is asked (m)."""
+    least = None
+    for i, (ref, pads) in enumerate(rows):
+        was = next((p for r, p in reversed(rows[:i]) if r >= ref + rlo.SETDOWN_STALL_REF_M), None)
+        if was is not None:
+            least = was - pads if least is None else min(least, was - pads)
+    return least
+
+
+def test_in_no_recorded_set_down_do_the_pads_stall_before_the_table_is_felt():
+    """What SETDOWN_STALL_REF_M and SETDOWN_STALL_PADS_M rest on (held up: the pads came down less than 2
+    mm while the reference came down 12). The three set-downs flown with the watch, the arm catching up
+    with its reference from where the slow stretch begins to the cut: the pads came down 6.9-8.3 mm in
+    every 12 mm of the reference's descent (55-69 % of its pace). The 19 flown onto the table before it,
+    from where the watch arms to where it stops the descent (or the touch's end): 3.9 mm or more — the
+    least where the rise rules had just felt the table (10-30 14:26), 6.4 mm before any table (11-04
+    12:40, its gap rising 6.7 mm in free air 50-70 mm over the plan)."""
+    three = {}
+    for name, rec in flown.SETDOWNS_FLOWN.items():
+        tt, tz = (np.array(v, float) for v in zip(*rec["traj"], strict=True))
+        rows = [(float(np.interp(frac * tt[-1], tt, tz)), z) for _t, frac, z in rec["fed"]]
+        three[name] = _least_descent([(ref, z) for ref, z in rows if ref <= rec["plan"] + rlo.SETDOWN_WATCH_M])
+    assert sorted(round(1000 * v, 1) for v in three.values()) == pytest.approx([6.9, 7.9, 8.3], abs=0.15)
+    older = {}
+    for name in flown.SETDOWNS_OLDER:
+        _det, at = _older(name)
+        end = -rlo.SETDOWN_PAST_M if at is None else at
+        rows = [(ref, pads) for _t, ref, pads in flown.older_samples(name) if end <= ref <= rlo.SETDOWN_WATCH_M]
+        older[name] = _least_descent(rows)
+    assert min(older.values()) == pytest.approx(0.0039, abs=0.0002) == older["20261030-142611"]
+    assert min(min(three.values()), min(older.values())) > 1.9 * rlo.SETDOWN_STALL_PADS_M
 
 
 # ---- the watch that fails, and the feedback no poll read (review 2026-11-17) ------------------------------
@@ -5008,6 +5244,29 @@ def _older(name, past=None):
     return det, None
 
 
+# Where the watch has each of them meet the table (mm over the plan, the rule's own dating): the 17 it feels
+# with the touch ending SETDOWN_PAST_M under the plan, as replayed before the second review of 2026-11-17
+_OLDER_FELT_MM = {
+    "20261029-120248": 12.0,
+    "20261029-120459": 15.9,
+    "20261029-133204": 8.8,
+    "20261029-133716": 7.0,
+    "20261029-143035": 0.6,
+    "20261029-145127": 9.8,
+    "20261029-150250": 12.6,
+    "20261030-100830": 24.0,
+    "20261030-133221": 8.3,
+    "20261030-133311": 16.2,
+    "20261030-133506": 21.4,
+    "20261030-133548": 13.7,
+    "20261030-142532": 11.8,
+    "20261030-142611": 23.5,
+    "20261104-123929": 9.8,
+    "20261104-124050": 7.3,
+    "20261104-124212": 8.2,
+}
+
+
 def test_the_set_downs_flown_onto_the_table_are_felt_as_the_table_before_the_touch_ends_at_todays_pace():
     """The 19 set-downs flown onto the table before the watch (2026-10-29 to 11-04), replayed through it
     with the plan where setdown_table_z has it and the touch ending SETDOWN_PAST_M (8 mm) under that.
@@ -5023,13 +5282,14 @@ def test_the_set_downs_flown_onto_the_table_are_felt_as_the_table_before_the_tou
     note); this pins what 8 mm does and does not feel. The one whose lid had slipped out on the way
     (10-30 13:28) is not felt at all."""
     older = flown.SETDOWNS_OLDER
-    felt = {}
+    felt, began = {}, {}
     for name in older:
         det, at = _older(name)
         rec = det.record()
         assert rec["verdict"] in (None, "never") and rec["early"] == [], name  # never "held", never "early"
         assert det.credible() == (at is not None)
         felt[name] = (at, rec.get("above_top_mm"))
+        began[name] = rec.get("began_above_mm")
     kept = [name for name in sorted(older) if older[name]["kept"]]
     today = [name for name in kept if older[name]["touch"] < 70]
     faster = [name for name in kept if older[name]["touch"] > 100]
@@ -5039,6 +5299,16 @@ def test_the_set_downs_flown_onto_the_table_are_felt_as_the_table_before_the_tou
     assert [name for name in faster if felt[name][0] is None] == ["20261029-144545"]
     assert all(-0.0065 < felt[name][0] < -0.0015 for name in faster if felt[name][0] is not None)
     assert all(-1.0 < above < 27.0 for at, above in felt.values() if at is not None)  # where each met the table
+    # ... each at the height the rule that felt it dates it to, as before the second review of 2026-11-17
+    # (mm over the plan), the reference where it was then (the same samples stop the descent) ...
+    assert {name: above for name, (at, above) in felt.items() if at is not None} == pytest.approx(
+        _OLDER_FELT_MM, abs=0.11
+    )
+    # ... and what holds the pads up there is the table alone: they had come freely down to +1..+27 mm over
+    # the plan before it, inside the band every time (the nearest 8 mm under its edge: 10-30 10:08)
+    assert all(1.0 < began[name] < 27.5 for name in _OLDER_FELT_MM) and began["20261030-100830"] == max(
+        began[name] for name in _OLDER_FELT_MM
+    )
     assert felt["20261030-132845"][0] is None and not older["20261030-132845"]["kept"]
     # 14:45's is felt only by a touch that goes 14 mm under the plan
     assert _older("20261029-144545", past=0.012)[1] is None
