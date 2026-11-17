@@ -340,11 +340,32 @@ def _line_up(w, ear, wrist_first=True, execute=True, locator=None, instance_id=N
 def test_at_rest_the_wrist_looks_and_a_go_lets_the_run_go_on_from_there(lined):
     (went, turned), lines, runner = _line_up(lined, Ear(3, go=True))
     assert (went, turned) == (True, True) and lined.watched == [list(HOME)] and lined.rested == []
-    assert lined.held is True  # its watch's last word was a fix: the run's first scene look is the short one
+    assert lined.held is True  # its watch said a fix a moment before: the run's first scene look is the short one
     assert lines[0] == {"robot": {"urdf": str(lined.urdf), "root": "arm_mount"}}
     assert [ln["fix"]["by"] for ln in lines[1:]] == ["wrist"] * 3
     assert runner.gripper == []  # shut already: nothing sent
     assert runner.notes[-1] == ("line_up", {"stage": "go", "wrist": True, "held": True})
+
+
+def test_one_frame_without_a_find_before_the_go_is_not_the_wrist_having_lost_the_container(lined, monkeypatch):
+    """Between the user's Open and the go's arrival the watch goes on judging frames. One that shows no find
+    (or one the selection refuses) made the run's first scene look the long one again: the arm stood 15 s
+    after Open with its wrist turned. The wrist held the container where its last fix is a moment old."""
+
+    def watch_front(node, ctx, runner, watcher, execute, say, stop, **_kw):
+        say({"fix": {"xyz": [0.65, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}})
+        say({"none": "wrist camera: no lid-sized top on the table in view"})
+        while not stop():
+            pass
+        return "watched", None
+
+    monkeypatch.setattr(sv, "watch_front", watch_front)
+    (went, turned), _lines, _runner = _line_up(lined, Ear(2, go=True))
+    assert (went, turned) == (True, True) and lined.held is True
+    # ... but a fix that is old is the wrist no longer holding it
+    monkeypatch.setattr(press_demo, "LINE_UP_HELD_S", -1.0)
+    (went, turned), _lines, _runner = _line_up(lined, Ear(2, go=True))
+    assert (went, turned) == (True, True) and lined.held is False
 
 
 def test_a_stop_turns_the_wrist_back_and_nothing_is_pressed(lined):

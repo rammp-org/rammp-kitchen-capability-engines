@@ -154,11 +154,16 @@ SHUTDOWN_WAIT_S = 3.0  # on SIGTERM: the run's own stop first, inside docker sto
 ORCHESTRATOR_TIMEOUT_S = 120.0
 WORLD_WAIT_S = 3.0
 RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORLD_WAIT_S - 2.0  # 90 s
-# The line-up's share of those 120 s (LINE_UP_S): what the run's budget leaves once the longest run logged
-# has its time (45 s of 48 missions, plus ~5 s to start), so a run started on the line-up's last second
-# still ends before its own stop. A user not in place by then is told to press open again
-RUN_LONGEST_S = 50.0
-LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 40 s
+# The line-up's share of those 120 s (LINE_UP_S): what the run's budget leaves once a long run has its time,
+# so a run started on the line-up's last second still ends before its own stop (which leaves the arm where it
+# is, the lid in its fingers if it comes then). A user not in place by then is told to press open again.
+# A long run after its go, by the two runs of 2026-11-12 and the pacing since: ~1.5 s for the watch to hear
+# the go, the first scene look (2 s where the wrist held the box, else 15 s), ~25 s of flight as flown, ~8 s
+# more for the gentler looks and air_control=position (re-timed, not flown), ~10 s where a press or a grip is
+# made twice: 37 s clean, 47-50 s with one of the long cases, more with both. 50 s (the longest of 48 logged
+# missions with its start, before any of this) left such a run nothing: 55 until a lined-up run is timed
+RUN_LONGEST_S = 55.0
+LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 35 s
 # A run told its line-up is over turns its wrist back and ends within this, or is stopped. A stop that comes
 # while the wrist is still turning OUT (a reach_probe that ended as the line-up began) has the whole turn out,
 # its settle, the turn back (a look each, about 3-4 s) and the run's own end (its threads, its log, its
@@ -179,6 +184,11 @@ LINE_UP_LATE = (
 )
 # press_demo's last word of a line-up that ended without a go, its wrist turned back (line_up_watch)
 LINE_UP_ENDED = "LINE-UP: ended without a go"
+# A CANCEL that comes with no action running is for the action about to start (the user's cancel overtook
+# the goal: the orchestrator answers the press at once and takes a moment to send the goal). A goal that
+# starts within this long of it does not run. Longer would cancel a deliberate press that follows a stale
+# cancel; that press is then made again, which is the cheap mistake of the two
+CANCEL_EARLY_S = 3.0
 LINE_UP_NO_UI = (
     "line_up is on and this goal has no UI to ask on (it came without the orchestrator's token, or the UI "
     "bridge is not there): nothing moved. Set line_up false to run without lining up"
@@ -434,6 +444,7 @@ PANEL_CANCELLED = "Cancelled: the arm is stopping where it is"
 PANEL_TIMED_OUT = "Taking too long: the arm is stopping where it is"
 # a line-up that ended without its Open: the run turns its wrist back to rest, and Cancel stays on the screen
 PANEL_TURNING_BACK = "The wrist is turning back to rest"
+PANEL_LINE_UP_OVER = "Ending"  # the run told its line-up is over, where its wrist never turned
 
 
 class Panel:
@@ -647,6 +658,7 @@ class Capability(CapabilityEngine):
             self.declare_parameter(name, default)
         self._run = None  # the Run under way
         self._cancelled_token = None  # the execution a CANCEL came for before its goal did (_on_control)
+        self._cancelled_at = None  # ... and when it came (the clock's), where it came with no token to keep it by
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -714,16 +726,27 @@ class Capability(CapabilityEngine):
             idle = self._current is None
         response = super()._on_control(request, response)
         token = self._assigned_token
-        if idle and request.command == Control.Request.CANCEL and token != bytes(16):
-            self._cancelled_token = token
-            response.message = "ok (the action about to start is cancelled)"
-            self.get_logger().warning("cancelled before its goal came: the action about to start will not run")
+        if idle and request.command == Control.Request.CANCEL:
+            # With the token pushed ahead of the goal the cancel is kept for that token's execution. With
+            # the token in the goal itself (the engine update, 2026-11-16) there is none yet to keep it by:
+            # it is kept by when it came, for a goal that starts within CANCEL_EARLY_S of it
+            self._cancelled_token = token if token != bytes(16) else None
+            self._cancelled_at = time.monotonic()
+            response.message = "ok (an action that starts now is cancelled)"
+            self.get_logger().warning(
+                f"cancelled with no action running: one that starts within {CANCEL_EARLY_S:.0f} s will not run"
+            )
         return response
 
     def _cancelled_early(self):
-        """Whether a CANCEL came for THIS execution before its goal did (_on_control); asked once, as it starts."""
+        """Whether a CANCEL came for THIS execution before its goal did (_on_control); asked once, as it
+        starts: one kept for the token this execution has, or, kept with no token, one that came no longer
+        than CANCEL_EARLY_S ago."""
         token, self._cancelled_token = self._cancelled_token, None
-        return token is not None and token == self._assigned_token
+        at, self._cancelled_at = self._cancelled_at, None
+        if token is not None:
+            return token == self._assigned_token
+        return at is not None and time.monotonic() - at <= CANCEL_EARLY_S
 
     def _far_m(self):
         """line_up_far_m as it is now, None where it sets no bound (0 or less)."""
@@ -777,8 +800,14 @@ class Capability(CapabilityEngine):
             run_.interrupt()
             stopped.append(True)
 
+        made = []  # the line-up's source, once made: it knows whether the run's wrist turned (its "view")
+
+        def source():
+            made.append(self._box_source(env, instance_id, watch=run_))
+            return made[-1]
+
         try:
-            self._line_up(ctx, lambda: self._box_source(env, instance_id, watch=run_), on_cancel=stop_first)
+            self._line_up(ctx, source, on_cancel=stop_first)
             if self._cancelled_before_go(ctx):
                 raise Cancelled()  # ended as any cancel of the line-up is, below: the run is never told to go
         except BaseException as e:
@@ -791,7 +820,8 @@ class Capability(CapabilityEngine):
                 else:
                     run_.send({"stop": True})
                     try:
-                        cancelled, late = self._turned_back(ctx, run_)
+                        turned = bool(made and getattr(made[-1], "viewed", False))
+                        cancelled, late = self._turned_back(ctx, run_, turned)
                     except BaseException:
                         # the engine failed while the wrist turned back (the panel, the progress): the run's
                         # own stop before anything else, or it would go on turning with nothing following it
@@ -836,20 +866,22 @@ class Capability(CapabilityEngine):
             return True
         return bool(ctx.cancelled())
 
-    def _turned_back(self, ctx, run_):
-        """A run told its line-up is over ({"stop": true}), followed until it has ended. It turns its wrist
+    def _turned_back(self, ctx, run_, turned=True):
+        """A run told its line-up is over ({"stop": true}), followed until it has ended. Where its wrist
+        turned (`turned`: it said its view) it turns it
         back to rest, beside the user: a motion as any other, so a cancel is read all through it (every
         line_up.POLL_S) and the panel says what the arm does and keeps its Cancel, which is the orchestrator's
         cancel as the run's own panel's is. A cancel is the run's Ctrl+C (the arm stops where it is). A run
         still going LINE_UP_END_S after it was told is stopped that way too, and killed if it has not ended
         CANCEL_ESCALATE_S after that. Returns (cancelled, late): a cancel came; it had to be stopped, so its
         wrist may stand part-turned."""
+        says = PANEL_TURNING_BACK if turned else PANEL_LINE_UP_OVER  # never "turning back" of a wrist that did not turn
         panel = Panel(ctx, self._ui_live)
-        panel.say(line_up.PHASE, 0.0, PANEL_TURNING_BACK)
+        panel.say(line_up.PHASE, 0.0, says)
         told = time.monotonic()
         cancelled, late, sent = False, False, None
         if run_.alive():  # one that ended of itself already has nothing to turn back
-            ctx.progress(line_up.PHASE, 0.0, PANEL_TURNING_BACK, pausable=False)
+            ctx.progress(line_up.PHASE, 0.0, says, pausable=False)
         while run_.proc.poll() is None:
             if panel.tick():
                 self._cancel_from_ui()
@@ -921,9 +953,11 @@ class Capability(CapabilityEngine):
             raise EngineError(
                 "line_up_unavailable", f"the line-up could not start ({e}): nothing moved", recoverable=False
             ) from e
+        went = False
         try:
             lining = line_up.LineUp(ctx, self._ui_live, source, LINE_UP_S, on_say=said)
             outcome = lining.run()
+            went = outcome == line_up.GO
             if outcome == line_up.CANCELLED and on_cancel is not None:
                 on_cancel()
         except OSError as e:
@@ -933,7 +967,9 @@ class Capability(CapabilityEngine):
             ) from e
         finally:
             close = getattr(source, "close", None)
-            if close is not None:
+            if close is not None and went:
+                close(quit_s=0.0)  # the go waits on this: the probe is ended at once (it keeps its grid so too)
+            elif close is not None:
                 close()
         if outcome == line_up.CANCELLED:
             if lining.cancel_pressed:
@@ -953,6 +989,11 @@ class Capability(CapabilityEngine):
             raise EngineError(
                 "not_lined_up", NOT_LINED_UP % LINE_UP_S + (f" -- {why}" if why else ""), recoverable=True
             )
+        if outcome == line_up.UNABLE:
+            # what no waiting and no driving the chair cures (the arm not at its rest pose: a line-up moves
+            # nothing but the wrist of an arm at rest). Said on the panel, and ended at once: the user is not
+            # left "Looking for the container" for the whole line-up, to be told to press open again
+            raise EngineError("not_home", f"{source.unable}: nothing moved", recoverable=True)
         if outcome != line_up.GO:  # nothing but the user's Open lets a run start
             raise EngineError("line_up_unavailable", f"the line-up ended {outcome!r}: nothing ran", recoverable=False)
         return time.monotonic() - t0

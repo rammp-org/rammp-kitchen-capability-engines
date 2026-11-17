@@ -1565,10 +1565,15 @@ def watch_front(
     (None: every find is said): why it is not one to say, said as that frame's "none" in the fix's place, or
     None.
 
-    Only the three wrist joints move, once, and the arm then stands until the caller moves it on (the run)
-    or back (rest_wrist). ("watched", None) at `stop()`; ("none" | "refused" | "stopped", why) where the
-    wrist was not turned at all (`stop()` already true before the turn among them), or its turn stopped part
-    way (the arm holds there)."""
+    The three wrist joints turn, once, and the arm then stands until the caller moves it on (the run) or
+    back (rest_wrist). The view is the rest pose itself with its wrist turned, as every front view of the
+    run's own survey is: the four joints above the wrist, which stand within the start's tolerance of rest
+    (the spring's hold after a run leaves them a few hundredths of a radian off), are brought onto it in the
+    same motion, a centimetre or two at the hand.
+
+    ("watched", None) at `stop()`; ("none" | "refused" | "stopped", why) where the wrist was not turned at
+    all (`stop()` already true before the turn among them), or its turn stopped part way (the arm holds
+    there)."""
     from box_opening.constants import HOME
     from box_opening.perception import wrist_finder as wf
     from box_opening.runtime import approach

@@ -33,6 +33,11 @@ from dataclasses import dataclass, field
 LOOKING, MOVE, HOLD, READY, GO, TIMED_OUT = "looking", "move", "hold", "ready", "go", "timed_out"
 
 OPEN, CANCEL = "open", "cancel"  # the panel's button ids
+# What the run's line-up says, in the place of where the container is, of an arm that does not stand at its rest
+# pose (press_demo.line_up_watch): a line-up moves nothing but the wrist of an arm at rest, so no waiting and no
+# driving the chair brings its Ready. The engine ends the line-up on it at once, the panel saying it (UNABLE)
+ARM_NOT_AT_REST = "the arm is not at its rest pose: home it, then press open again"
+UNABLE = "unable"  # the panel's state where the line-up cannot go on and says why: no button
 TITLE = "Opening the container"
 
 LOST_S = 1.5  # no box seen for this long: looking again
@@ -89,6 +94,11 @@ class Say:
             "progress": {"phase": self.state, "pct": round(float(self.pct), 1), "pausable": False},
             "buttons": [{"button_id": b, "label": label} for b, label in self.buttons],
         }
+
+
+def unable(why):
+    """The panel for a line-up that cannot go on, in the user's words: `why`, a sentence, and no button."""
+    return Say(UNABLE, why[:1].upper() + why[1:])
 
 
 def instruction(to_zone, axis=None):

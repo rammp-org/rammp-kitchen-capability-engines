@@ -232,7 +232,7 @@ still in the fingers, no code is recoverable.
 | `not_allowed`         | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                                                                                                                         |
 | `bad_config`          | no          | A setting has a value it cannot have (`air_control` neither `impedance` nor `position`). Nothing ran                                                                                                                                                                     |
 | `line_up_unavailable` | yes or no   | With `line_up` on: the goal has no UI to ask on (recoverable: set `line_up` false, or send it from the UI), or what watches the container or judges its place could not start or ended (not recoverable; the message carries what it said). The run was never told to go |
-| `not_lined_up`        | yes         | With `line_up` on: the container was not where the arm opens it within 40 s, or the UI went. Nothing was pressed; a wrist that looked is back at rest                                                                                                                    |
+| `not_lined_up`        | yes         | With `line_up` on: the container was not where the arm opens it within 35 s, or the UI went. Nothing was pressed; a wrist that looked is back at rest                                                                                                                    |
 | `timeout`             | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers                                  |
 | `not_ready`           | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                                                                                                                   |
 | `not_found`           | yes         | The scene camera found no container (with `wrist_survey`, nor did the wrist camera's survey: nothing, or two places that could be it); nothing was pressed                                                                                                               |
@@ -313,14 +313,15 @@ without lining up. Every goal's settings (`line_up`, whether it has the UI,
 log as it starts: a `ros2 param set` lives only in the running node, and a
 restart puts the deployment's values back.
 
-| Panel message                            | Buttons      | When                                                               |
-| ---------------------------------------- | ------------ | ------------------------------------------------------------------ |
-| `Looking for the container`              | Cancel       | No container seen in the last 1.5 s                                |
-| `Move closer, about 15 cm`               | Cancel       | Outside the boundary: closer, back, left or right, the larger miss |
-| `Hold still, checking`                   | Cancel       | Inside, not yet still for 1 s, or not yet judged                   |
-| `Ready. Open the container?`             | Open, Cancel | Inside, still, and the run plans for it there                      |
-| `Press open again when you are in place` | none         | 40 s passed: shown 3 s, then the action fails `not_lined_up`       |
-| `The wrist is turning back to rest`      | Cancel       | The line-up is over and the wrist that looked turns back           |
+| Panel message                                                     | Buttons      | When                                                                                                           |
+| ----------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------- |
+| `Looking for the container`                                       | Cancel       | No container seen in the last 1.5 s                                                                            |
+| `Move closer, about 15 cm`                                        | Cancel       | Outside the boundary: closer, back, left or right, the larger miss                                             |
+| `Hold still, checking`                                            | Cancel       | Inside, not yet still for 1 s, or not yet judged                                                               |
+| `Ready. Open the container?`                                      | Open, Cancel | Inside, still, and the run plans for it there                                                                  |
+| `Press open again when you are in place`                          | none         | 35 s passed: shown 3 s, then the action fails `not_lined_up`                                                   |
+| `The arm is not at its rest pose: home it, then press open again` | none         | The arm stands off rest (more than a wrist a line-up left turned): shown 3 s, then the action fails `not_home` |
+| `The wrist is turning back to rest`                               | Cancel       | The line-up is over and the wrist that looked turns back                                                       |
 
 `progress.phase` is `looking`, `move`, `hold`, `ready`, `go` or `timed_out`,
 and `pct` how near the container is to the boundary (100 inside). The
@@ -335,14 +336,16 @@ it on the fingers close and the wrist turns to look as soon as the line-up
 starts, and turns back if it ends without **Open** (see below). No world state
 is written while lining up, but for an arm left holding (`arm_holds`).
 
-The 40 s are what the orchestrator's 120 s leave: the run's 90 s budget less
-the longest run logged (50 s with its start), so a run started on the last
-second still ends its own way. A run's own budget is shortened by what its
-line-up took. After the go of a line-up whose wrist held the container, the
-run's first scene look is 2 s, not its usual 15: on both runs of 2026-11-12
-that look found nothing in front of the arm, and the arm would stand through it
-with the wrist turned. `not_lined_up` is recoverable, and its message carries
-the watch's last word on why no container was seen, where that is why.
+The 35 s are what the orchestrator's 120 s leave: the run's 90 s budget less
+a long run after its go (55 s: about 37 s clean by the two runs of 2026-11-12
+and the pacing since, more where a press or a grip is made twice), so a run
+started on the last second still ends its own way and is not stopped part way.
+A run's own budget is shortened by what its line-up took. After the go of a
+line-up whose wrist held the container, the run's first scene look is 2 s, not
+its usual 15: on both runs of 2026-11-12 that look found nothing in front of
+the arm, and the arm would stand through it with the wrist turned.
+`not_lined_up` is recoverable, and its message carries the watch's last word
+on why no container was seen, where that is why.
 
 The boundary is not typed in. It is a grid of places where the run's own proof
 plans a press (`reach_zone`, filled by `reach_probe` from the robot's URDF and
@@ -351,8 +354,8 @@ chair model, for the lid height the cameras read) and is kept under
 a container further out is told to come closer at once, with no grid needed,
 and no proof is spent past it. A lid height read a little either side of a
 grid's 2 cm bucket keeps the grid it has.
-A proof takes about half a second, and the grid is filled from the container
-outward: on a height never met before, a container in place is judged after
+A proof takes half a second to two (about one on average), and the grid is
+filled from the container outward: on a height never met before, a container in place is judged after
 some 4 s (flatbot's computer, 2026-11-16), and the whole grid, some 500 proofs,
 takes 8 minutes across the line-ups that follow; each line-up keeps what it
 asked as it ends. `reach_probe --urdf <the arm's URDF> --lid-z <height>` fills
@@ -360,7 +363,7 @@ one ahead of time: run in the image the node runs in and without `--table-z`
 (a grid's key follows the code, and a fill on a table is another grid).
 `reach_probe` runs at low priority (nice 10) on one thread; if it ends or
 cannot start, the line-up ends at once (`line_up_unavailable`, with what it
-said), never 40 s of `Hold still, checking`.
+said), never a whole line-up of `Hold still, checking`.
 
 What follows the container while the panel is up depends on `wrist_first`:
 
@@ -378,9 +381,12 @@ What follows the container while the panel is up depends on `wrist_first`:
   for the selected container (the run's own tests; `wrist_alone` for a list
   typed by hand). While the wrist sees the container the scene camera's
   sightings are left out. On **Open** the node tells it to go and the same
-  process runs on from that view. An arm that stands anywhere else is not
-  moved before **Open**: only the scene camera looks, and the panel's end
-  reason says the arm is not at its rest pose (home it, then press open again).
+  process runs on from that view. The four joints above the wrist, which
+  rest within a few hundredths of a radian of the rest pose, are brought onto
+  it in the same turn (a centimetre or two at the hand), as in the run's own
+  wrist look. An arm that stands anywhere else is not moved by a line-up, and
+  no waiting brings its **Ready**: the panel says to home it and the action
+  ends at once, `not_home`, recoverable.
 - **`wrist_first` off:** `box_watch` follows the container by the scene camera
   alone and holds no client for the arm or the gripper; nothing moves before
   **Open**, and the run starts after it.
@@ -420,12 +426,11 @@ frame. Whether it holds the container while the chair moves is unmeasured: the
 frames are stills. A lid the one view cuts inside the boundary is said roughly
 and never asked on, so the panel stays on `Hold still, checking` there.
 
-A `CANCEL` on `/box_opening/control` that comes before its goal has no run to
-cancel in the base class. With the token pushed ahead of the goal (the protocol
-before 2026-11-16) the node kept it for that execution, which then ended
-cancelled before anything ran; with the token in the goal there is nothing yet
-to keep it for, and the goal that follows runs. With `line_up` on its first
-panel has a Cancel.
+A `CANCEL` on `/box_opening/control` that comes with no action running is
+taken for the action about to start (the user's cancel overtook the goal): a
+goal that starts within 3 s of it ends cancelled before anything runs, once.
+With the token pushed ahead of the goal (the protocol before 2026-11-16) it is
+kept for that token's execution instead.
 
 ## Parameters
 

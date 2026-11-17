@@ -57,11 +57,26 @@ if "--line-up" in sys.argv:
         sys.exit(1)
     robot = {"urdf": os.environ.get("URDF") or None, "root": "arm_mount"}  # URDF: reach_probe is started on it
     sys.stdout.write("@@ " + json.dumps({"robot": robot}) + "\\n")
+    if mode == "off rest":  # the arm does not stand at rest: nothing turns, and the engine is told so
+        heard = None
+        try:
+            while heard is None:
+                why = "the arm is not at its rest pose: home it, then press open again"
+                sys.stdout.write("@@ " + json.dumps({"none": why}) + "\\n")
+                sys.stdout.flush()
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    heard = sys.stdin.readline()
+        except KeyboardInterrupt:
+            sys.exit(130)
+        sys.stdout.write("[press_demo] LINE-UP: ended without a go; nothing was pressed\\n")
+        sys.stdout.flush()
+        sys.exit(5)
     sys.stdout.write("[press_demo] LINE-UP: the wrist turns to look at the table in front\\n")
     if mode == "holds":
         sys.stdout.write("[press_demo] STOP: the line-up's wrist turn: aborted - the arm holds; nothing was pressed\\n")
         sys.stdout.flush()
         sys.exit(6)
+    sys.stdout.write("@@ " + json.dumps({"view": {"joints": [0.0] * 7}}) + "\\n")  # its wrist stands at the view
     heard = None
     try:
         while heard is None:
@@ -656,14 +671,17 @@ def test_a_cancel_between_the_token_and_the_goal_is_kept_for_that_execution(engi
     lines = []
     monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: lines.append(msg))
     cancel = Control.Request(command=Control.Request.CANCEL)
-    # no token: no execution is coming, nothing is kept
-    assert engine._on_control(cancel, Control.Response()).message == "ok (no action running)"
+    # no token and no goal for longer than CANCEL_EARLY_S: no execution was coming, and the next one runs
+    monkeypatch.setattr(node, "CANCEL_EARLY_S", 0.2)
+    assert engine._on_control(cancel, Control.Response()).accepted
+    time.sleep(0.3)
     engine.execute("open_box", {}, FakeCtx())
     assert sum(ln.startswith("ARGV ") for ln in lines) == 1
+    monkeypatch.setattr(node, "CANCEL_EARLY_S", 3.0)
     # the token is here, the goal is not: the execution it is for ends cancelled, and nothing runs
     engine._assigned_token = bytes(range(1, 17))
     answer = engine._on_control(cancel, Control.Response())
-    assert answer.accepted and "about to start" in answer.message
+    assert answer.accepted and "starts now is cancelled" in answer.message
     ctx = FakeCtx()
     with pytest.raises(Cancelled):
         engine.execute("open_box", {}, ctx)
@@ -681,6 +699,27 @@ def test_a_cancel_between_the_token_and_the_goal_is_kept_for_that_execution(engi
     engine.execute("open_box", {}, FakeCtx())
     assert sum(ln.startswith("ARGV ") for ln in lines) == 4
     engine._assigned_token = bytes(16)
+
+
+def test_a_cancel_that_overtakes_its_goal_is_kept_where_the_goal_itself_brings_the_token(engine, monkeypatch):
+    """Since the engine update (2026-11-16) the execution's token comes in the goal: a CANCEL that arrives
+    before the goal finds no token to be kept by, was answered "ok" and dropped, and the goal then ran (with
+    line_up off, the whole run, after the user's cancel). It is kept by when it came: a goal that starts
+    within CANCEL_EARLY_S of it does not run. Once: the press made after it does."""
+    from rammp_orchestrator_interfaces.srv import Control
+
+    given(monkeypatch, FULL_RUN)
+    lines = []
+    monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: lines.append(msg))
+    assert engine._assigned_token == bytes(16)  # idle: the goal has not come, and nothing else brings a token
+    answer = engine._on_control(Control.Request(command=Control.Request.CANCEL), Control.Response())
+    assert answer.accepted and "starts now is cancelled" in answer.message
+    ctx = FakeCtx()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)  # the goal, a moment after its cancel
+    assert ctx.said == [] and not any(ln.startswith("ARGV ") for ln in lines)  # nothing ran
+    engine.execute("open_box", {}, FakeCtx())  # the next press runs
+    assert sum(ln.startswith("ARGV ") for ln in lines) == 1
 
 
 def test_a_run_is_stopped_when_following_it_raises(engine, monkeypatch):
@@ -1229,7 +1268,7 @@ class InPlace:
 
         return guide.Fix(now, (0.65, 0.0), "scene"), guide.Reach(True, None, True)
 
-    def close(self):
+    def close(self, quit_s=None):
         self.closed_at = time.monotonic()
 
 
@@ -1623,6 +1662,28 @@ def test_a_run_that_had_to_be_stopped_after_its_line_up_is_the_arm_holding_too(e
     assert [w["system_status"]["arm"]["error_code"] for w in ctx.world] == ["arm_holds"]
 
 
+def test_an_arm_that_is_not_at_rest_ends_the_line_up_at_once_and_the_panel_says_to_home_it(engine, monkeypatch):
+    """A line-up moves nothing but the wrist of an arm at rest. Where the arm stands anywhere else (after a
+    cancel or a stop part way through a run) the run says so, and no waiting or driving the chair brings a
+    Ready: the user was left "Looking for the container" for the whole line-up, told to press open again, and
+    the same again at every press. The panel says to home the arm, and the action ends at once: not_home,
+    recoverable. Nothing turned, so nothing is said to turn back."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "off rest")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+    ctx = FakeCtx()
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_home" and e.value.recoverable and time.monotonic() - t0 < 8.0
+    assert "the arm is not at its rest pose: home it" in str(e.value) and "nothing moved" in str(e.value)
+    said = [p for p in ctx.panels if p["message"].startswith("The arm is not at its rest pose")]
+    assert said and all(p["buttons"] == [] and p["progress"]["phase"] == "unable" for p in said)
+    assert not [p for p in ctx.panels if p["message"] == node.PANEL_TURNING_BACK]  # its wrist never turned
+    assert engine._run is None and ctx.objects == {} and ctx.world == []
+
+
 def test_a_run_stopped_late_that_had_its_wrist_back_at_rest_is_not_the_arm_holding(engine, monkeypatch):
     """The stop for a run that outlasts LINE_UP_END_S is for a wrist that may stand part-turned. One that had
     already said its line-up was over, the wrist back at rest, and was only slow to end (its threads, its
@@ -1689,16 +1750,17 @@ def test_a_cancel_that_comes_while_the_line_up_closes_its_source_is_read_before_
     given(monkeypatch, FULL_RUN[:3], wait=True)
     _wrist_lining_up(engine, monkeypatch)
     ctx = FakeCtx()
-    told, sent, base = [], [], []
+    told, sent, base, closes = [], [], [], []
     real_send, real_interrupt, real_close = node.Run.send, node.Run.interrupt, node.line_up.BoxSource.close
     cancel = {
         "the orchestrator": lambda: setattr(ctx, "cancel", True),
         "the panel": lambda: ctx.events.append(CANCEL_PRESS),
     }
 
-    def close(source):
+    def close(source, **kw):
+        closes.append(kw)
         cancel[by]()  # it comes as the source is closed, the Open already taken
-        real_close(source)
+        real_close(source, **kw)
 
     monkeypatch.setattr(node.line_up.BoxSource, "close", close)
     monkeypatch.setattr(node.Run, "send", lambda run, msg: (told.append(msg), real_send(run, msg)))
@@ -1710,6 +1772,8 @@ def test_a_cancel_that_comes_while_the_line_up_closes_its_source_is_read_before_
     assert {"go": True} not in told and sent == [signal.SIGINT] and engine._run is None
     assert base == ([1] if by == "the panel" else [])  # the button's press is made the orchestrator's cancel
     assert ctx.objects == {} and ctx.world == []
+    # (after the Open the source is closed at once, the probe not waited on: the go is what waits)
+    assert closes == [{"quit_s": 0.0}]
 
 
 def test_a_run_halted_while_its_wrist_turned_back_says_so_not_that_nothing_moved(engine, monkeypatch):
@@ -1749,10 +1813,10 @@ def test_a_cancel_while_the_wrist_looks_stops_the_run_before_the_line_ups_source
     order = []
     real, real_close = node.Run.interrupt, node.line_up.BoxSource.close
 
-    def close(source):
+    def close(source, **kw):
         order.append("the source closed")
         time.sleep(1.0)  # the probe finishing its proof and writing its grid
-        real_close(source)
+        real_close(source, **kw)
 
     monkeypatch.setattr(node.Run, "interrupt", lambda run: (order.append("Ctrl+C"), real(run)))
     monkeypatch.setattr(node.line_up.BoxSource, "close", close)

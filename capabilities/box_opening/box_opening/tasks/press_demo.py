@@ -65,6 +65,7 @@ from pathlib import Path
 import rclpy
 
 from box_opening import LOGGER as log
+from box_opening import guide
 from box_opening.constants import (
     COMPLIANT_DEFAULT,
     GRIPPER_CMD_CLOSED,
@@ -190,7 +191,8 @@ SCENE_LOCATE_S = 5.0
 # run had the box 0.83 s in. Looking longer costs only time.
 SCENE_FIRST_LOCATE_S = 15.0
 # ... but short after the go of a line-up whose wrist held the container as the go came (--line-up; its
-# watch's last word a fix: line_up_watch's wrist_held), and the scene camera had the whole line-up to see it.
+# watch's last fix a moment old at most: line_up_watch's wrist_held), and the scene camera had the whole
+# line-up to see it.
 # A wrist that was turned and never showed the box (the scene camera's sightings brought the Ready) leaves
 # the scene camera all the run has, and that keeps the long look.
 # This look only refreshes the selected container's box (selection_tie reads the segmenter's newest frame)
@@ -1381,8 +1383,13 @@ AT_REST_RAD = 0.01
 LINE_UP_MARK = "@@ "
 LINE_UP_LOOK_S = 0.3  # the scene camera's own look, each time round (its sightings said as they are made)
 # what the engine is told where the arm stands off rest by more than its wrist's own turn: nothing of a line-up
-# homes it (the wrist's turn is the one motion made before the go), so the panel's end reason has to name it
-LINE_UP_NOT_AT_REST = "the arm is not at its rest pose: home it, then press open again"
+# homes it (the wrist's turn is the one motion made before the go). The engine's line-up ends on these words
+# at once and its panel says them (guide.ARM_NOT_AT_REST: the one sentence, both sides')
+LINE_UP_NOT_AT_REST = guide.ARM_NOT_AT_REST
+# the wrist's watch held the container as the go came where its last fix is no older than this: the guide's own
+# "seen" (guide.LOST_S). One frame without a find between the user's Open and the go's arrival is not the
+# wrist having lost the box
+LINE_UP_HELD_S = guide.LOST_S
 
 
 class LineUpEar:
@@ -1434,7 +1441,7 @@ def wrist_looks_from(live, rest, rest_tol):
 
 def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=None, out=None):
     """--line-up: say where the container is until the engine answers, (went, wrist_turned, wrist_held:
-    the wrist's own watch held the container as the go came, its last word a fix).
+    the wrist's own watch held the container as the go came, its last fix no older than LINE_UP_HELD_S).
 
     The scene camera's sightings are said as they are made, as tasks/box_watch says them
     (SceneLocator.on_sighting). With --wrist-first, --execute and the arm at rest (within `rest_tol`) or at
@@ -1455,13 +1462,11 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     from box_opening.tasks import survey as sv
 
     out = sys.stdout if out is None else out
-    held = [False]  # the wrist's own watch last said a fix: its camera held the container
+    held_at = [None]  # when the wrist's own watch last said a fix: its camera held the container then
 
     def say(msg):
         if msg.get("fix", {}).get("by") == "wrist":
-            held[0] = True
-        elif "none" in msg:
-            held[0] = False
+            held_at[0] = time.monotonic()
         out.write(LINE_UP_MARK + json.dumps(msg) + "\n")
         out.flush()
 
@@ -1515,7 +1520,10 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 wrist = False
                 log.info("[press_demo] LINE-UP: the fingers did not close: the wrist does not look")
         if wrist:
-            log.info("[press_demo] LINE-UP: the wrist turns to look at the table in front; the arm above it stands")
+            log.info(
+                "[press_demo] LINE-UP: the wrist turns to look at the table in front; the arm above it only "
+                "settles onto its rest pose"
+            )
             stood = list(ctx.client.joints())
             state, why = sv.watch_front(
                 node,
@@ -1575,9 +1583,10 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             if seg is not None:
                 seg.near = None
     if ear.go:
+        held = turned and held_at[0] is not None and time.monotonic() - held_at[0] <= LINE_UP_HELD_S
         log.info("[press_demo] LINE-UP: go — the run starts")
-        runner.note("line_up", stage="go", wrist=turned, held=turned and held[0])
-        return True, turned, turned and held[0]
+        runner.note("line_up", stage="go", wrist=turned, held=held)
+        return True, turned, held
     runner.note("line_up", stage="stop", wrist=turned)
     if turned:
         state, why = sv.rest_wrist(ctx, runner, args.execute, rest=rest)

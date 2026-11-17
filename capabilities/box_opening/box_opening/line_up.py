@@ -34,7 +34,7 @@ from collections import deque
 from box_opening import guide
 from box_opening.reach_zone import Zone
 
-GO, CANCELLED, TIMED_OUT, GONE = "go", "cancelled", "timed_out", "gone"
+GO, CANCELLED, TIMED_OUT, GONE, UNABLE = "go", "cancelled", "timed_out", "gone", "unable"
 
 POLL_S = 0.05
 # a panel that changed is sent at once where its words or buttons did, and no oftener than this where only its
@@ -81,8 +81,10 @@ class LineUp:
             self._sent = panel if self._live() and self._ctx.update_user_panel(panel_json=panel) else None
 
     def run(self):
-        """Until the user says yes, cancels, or the time runs out: GO, CANCELLED or TIMED_OUT."""
-        timed_out_at = None
+        """Until the user says yes, cancels, or the time runs out: GO, CANCELLED or TIMED_OUT. Or the source
+        ended (GONE), or says what no waiting cures (its `unable`: the arm is not at rest): UNABLE, once the
+        panel has said so for LINGER_S, with no button but a cancel still read."""
+        timed_out_at = unable_at = None
         gone = getattr(self._source, "gone", None)
         while True:
             now = self._clock()
@@ -90,6 +92,16 @@ class LineUp:
                 return CANCELLED
             if gone is not None and gone():
                 return GONE
+            why = getattr(self._source, "unable", "")
+            if why:
+                unable_at = now if unable_at is None else unable_at
+                self._show(guide.unable(why), now)
+                if now - unable_at >= LINGER_S:
+                    return UNABLE
+                if self._ctx.poll_ui_event() is not None:
+                    self._sent = self._tried_at = None  # a press took the bridge's panel down: sent again
+                self._sleep(POLL_S)
+                continue
             event = self._ctx.poll_ui_event()
             if event is not None and event.get("type") == "button":
                 # any press ends the bridge's goal, and its panel with it: the next send opens it again
@@ -284,6 +296,8 @@ class BoxSource:
         self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
         self.why_none = ""  # the watch's newest word on why it sees no box; none once it has seen it since
         self.why_gone = ""  # where it is the probe that ended (gone): that, and the end of its log
+        self.unable = ""  # what the watch said that no waiting cures (guide.ARM_NOT_AT_REST): the line-up ends
+        self.viewed = False  # the run said its wrist stands at the line-up's view: it has turned
 
     def _hear(self):
         """What the children have said since the last tick. True where there is a new sighting."""
@@ -314,7 +328,10 @@ class BoxSource:
                 new = True
             elif "none" in msg:
                 self.why_none = str(msg["none"])
+                if self.why_none == guide.ARM_NOT_AT_REST:
+                    self.unable = self.why_none  # what no waiting cures: the line-up ends on it (LineUp.run)
             elif "view" in msg:
+                self.viewed = True
                 # said once, as the wrist stands at the line-up's view: the run starts its reach from these
                 # joints, not from rest, so the probe proves the box's own place from them ("q_from")
                 try:
@@ -335,6 +352,16 @@ class BoxSource:
                 elif "proof" in msg:
                     p = msg["proof"]
                     self._proof = (tuple(float(v) for v in p["xyz"]), bool(p["ok"]))
+                    if not p["ok"] and self._log is not None:
+                        # why the run's own proof refuses the place: the panel only shows the way to another
+                        self._log(
+                            "no press plans for the box at [%.3f, %.3f, %.3f] (proven from %s): %s"
+                            % (
+                                *self._proof[0],
+                                "the view's joints" if p.get("q_from") else "rest",
+                                str(p.get("why", ""))[:200],
+                            )
+                        )
                     zone = self._zone
                     if not p["ok"] and zone is not None and zone.serves(p["xyz"][2]) and zone.index(p["xyz"]):
                         # the grid has this cell working and the run's proof for the box itself does not plan
@@ -419,10 +446,14 @@ class BoxSource:
             )
         return True
 
-    def close(self):
+    def close(self, quit_s=PROBE_QUIT_S):
+        """Both children ended (the watch only where it is this source's own). `quit_s`: how long the probe is
+        given to end of itself on its quit before it is terminated; 0 where the caller cannot wait (the
+        user's Open: the run's go comes after this). Its terminate keeps its grid too (reach_probe's
+        end_on_terminate), cutting the proof in flight short where the quit lets it finish."""
         if self.probe is not None:
             self.probe.send({"quit": True})  # first: it finishes its proof while the watch is ended
         if self._owns_watch:
             self.watch.stop()
         if self.probe is not None:
-            self.probe.stop(quit_s=PROBE_QUIT_S)
+            self.probe.stop(quit_s=quit_s)
