@@ -1464,9 +1464,9 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     say({"robot": {"urdf": str(urdf) if urdf.is_file() else None, "root": ctx.worlds.base_frame}})
 
     def scene_look():
-        if locator is not None and locator.locate(LINE_UP_LOOK_S) is None and locator.last_why:
-            return str(locator.last_why)
-        return None
+        """The scene camera's own look: (its fix or None, why it has none where it says)."""
+        fix = None if locator is None else locator.locate(LINE_UP_LOOK_S)
+        return fix, (str(locator.last_why) if locator is not None and fix is None and locator.last_why else None)
 
     if locator is not None:
 
@@ -1532,15 +1532,20 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             # as another error under the planner's wait, taken for a refusal) would never end it
             if getattr(getattr(ctx.client, "_abort", None), "requested", False):
                 raise KeyboardInterrupt
-            why = scene_look()
+            t_look = time.monotonic()
+            fix, why = scene_look()
             if (why is not None or not_at_rest) and time.monotonic() - last_none >= sv.LINE_UP_NONE_S:
                 last_none = time.monotonic()
                 if why is not None:
                     say({"none": why[:300]})
                 if not_at_rest:  # said last: the engine's end reason is the last word it heard
                     say({"none": LINE_UP_NOT_AT_REST})
-            if locator is None:
-                time.sleep(LINE_UP_LOOK_S)
+            # a pass with no fix lasts the look's period: with no scene camera, or one whose look answers at
+            # once (no segmenter to read), the rest of it is slept out, and the loop never spins beside the
+            # arm's driver. A look that ends early with its fix is followed by the next at once, as ever.
+            left = LINE_UP_LOOK_S - (time.monotonic() - t_look)
+            if fix is None and left > 0.0:
+                time.sleep(left)
     finally:
         if locator is not None:
             locator.on_sighting = None

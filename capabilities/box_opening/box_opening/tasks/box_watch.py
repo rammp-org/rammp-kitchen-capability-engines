@@ -29,9 +29,13 @@ import os
 import signal
 import sys
 import threading
+import time
 
 MARK = "@@ "
 LOOK_S = 1.0  # each look's length: how soon a stop is heard, and how often "none" is said
+# a look that ended early with no fix is waited out in steps of this, a stop asked after between them: a
+# stop is heard within it, and the core is left alone meanwhile
+WAIT_STEP_S = 0.05
 
 
 def fix_line(sighting, age_s):
@@ -52,7 +56,11 @@ def fix_line(sighting, age_s):
 
 
 def watch(locator, say, stopped, look_s=LOOK_S):
-    """Look after look until `stopped()`: every sighting said as it is made, and a look with no fix's why."""
+    """Look after look until `stopped()`: every sighting said as it is made, and a look with no fix's why.
+    A look with no fix lasts `look_s` whatever the locator does: one that answers sooner (at once, where
+    there is no scene segmenter to read) is waited out, so "none" is said once a period and the loop never
+    spins. A look that ends early WITH its fix is followed by the next at once, as ever: its sightings are
+    what the user is being guided by, and a wait would only age them."""
 
     def told(sighting, age_s):
         line = fix_line(sighting, age_s)
@@ -61,8 +69,16 @@ def watch(locator, say, stopped, look_s=LOOK_S):
 
     locator.on_sighting = told
     while not stopped():
-        if locator.locate(look_s) is None and locator.last_why:
+        t0 = time.monotonic()
+        if locator.locate(look_s) is not None:
+            continue
+        if locator.last_why:
             say({"none": str(locator.last_why)[:300]})
+        while not stopped():
+            left = look_s - (time.monotonic() - t0)
+            if left <= 0.0:
+                break
+            time.sleep(min(left, WAIT_STEP_S))
 
 
 def main(argv=None):

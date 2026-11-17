@@ -302,6 +302,7 @@ def lined(monkeypatch, tmp_path):
     w.ctx = SimpleNamespace(client=client, worlds=SimpleNamespace(base_frame="arm_mount", wrist_camera_config=None))
     w.cfg = SimpleNamespace(park_tool_down=False)
     monkeypatch.setattr(press_demo.fingers, "already_closed", lambda pos: pos is not None and pos > 0.7)
+    monkeypatch.setattr(press_demo, "LINE_UP_LOOK_S", 0.01)  # the scene camera's looks here answer at once
     return w
 
 
@@ -410,6 +411,35 @@ def test_a_wrist_that_cannot_look_leaves_the_scene_camera_and_says_why(lined):
     (went, turned), lines, _runner = _line_up(lined, Ear(3, go=True), locator=scene)
     assert (went, turned) == (True, False) and {"none": "wrist camera: its way there: the knees"} in lines
     assert scene.looks >= 1
+
+
+def test_a_scene_look_that_returns_at_once_is_waited_out(lined, monkeypatch):
+    """A scene locator with no segmenter to read answers at once: the scene-only watch then span a core flat out
+    for the whole line-up, beside the arm's driver. Each pass lasts the look's period."""
+
+    class Clock:
+        """The engine's stop, a quarter of a second in."""
+
+        go, stop, t0 = False, False, time.monotonic()
+
+        def heard(self):
+            self.stop = time.monotonic() - self.t0 >= 0.25
+            return self.stop
+
+    monkeypatch.setattr(press_demo, "LINE_UP_LOOK_S", 0.1)
+    for locator in (Scene(), None):
+        ear = Clock()
+        _got, lines, _runner = _line_up(lined, ear, wrist_first=False, locator=locator)
+        assert len([ln for ln in lines if "none" in ln]) <= 1
+        if locator is not None:
+            assert 1 <= locator.looks <= 3  # 0.25 s of 0.1 s looks
+    # a look that ends early with its fix is followed by the next at once: a wait would only age its sightings
+    quick = Scene()
+    quick.locate = lambda timeout_s: setattr(quick, "looks", quick.looks + 1) or object()
+    monkeypatch.setattr(press_demo, "LINE_UP_LOOK_S", 5.0)
+    t0 = time.monotonic()
+    _line_up(lined, Ear(3, go=False), wrist_first=False, locator=quick)
+    assert quick.looks == 3 and time.monotonic() - t0 < 1.0
 
 
 def test_the_box_the_segmenter_followed_while_the_chair_moved_is_not_kept_for_the_run(lined):
