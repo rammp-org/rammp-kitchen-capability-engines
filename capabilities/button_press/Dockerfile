@@ -3,12 +3,13 @@
 # Built from the repo root (`make build CAP=button_press`). The image colcon-builds
 # capability_engine and this capability, and runs the same launch file.
 #
-# nightly-20261030 is the base the nightly arm driver is built on (interfaces
-# 73e7ed1716bf), so self.arm speaks the driver's exact messages. It carries the
-# arm, common, orchestrator and perception interfaces; rammp_curobo_interfaces it
-# does not. rammp-base, not rammp-cuda: nothing here uses the GPU (cuRobo runs in
-# the planner's own image). arm64 only.
-FROM ghcr.io/rammp-org/rammp-base:nightly-20261030
+# 2.1.0-jp6 carries rammp-interfaces-ros2 v2.0.0 (arm, base, common, orchestrator,
+# perception, peripheral, ui_bridge). Its arm messages are the arm driver's (v2.0.0
+# only added SetContactThresholds and CONTACT_STOP to the 73e7ed1716bf the nightly
+# driver builds on), so self.arm speaks them exactly. rammp_curobo_interfaces it does
+# not carry. rammp-base, not rammp-cuda: nothing here uses the GPU (cuRobo runs in the
+# planner's own image). arm64 only.
+FROM ghcr.io/rammp-org/rammp-base:2.1.0-jp6
 
 WORKDIR /module_ws
 
@@ -25,25 +26,17 @@ ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 # rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages behind ctx.update_user_panel /
-# poll_ui_event / set_overlay_visible) is not in the base either: build it from a pinned
-# rammp-interfaces-ros2 commit, as the example does.
+# poll_ui_event / set_overlay_visible): the base's v2.0.0 copy predates
+# SetEngineOverlayVisible, so build it from a pinned rammp-interfaces-ros2 commit, as the
+# example does; this overlay shadows the base's.
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
-
-# self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
-# rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
-# interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
-# geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
-# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
-# once the FROM moves to rammp-base 2.0.0.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
-RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
 
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/button_press/ src/button_press/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
-# base's entrypoint sources its install/ automatically. The nightly base ships
+# base's entrypoint sources its install/ automatically. The base ships
 # rosdep's sources but no cache, so rosdep update first.
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \
