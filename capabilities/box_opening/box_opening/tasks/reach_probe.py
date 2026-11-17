@@ -10,10 +10,14 @@ Nothing here talks to the arm, the planner or the cameras, and nothing moves. pr
 run asks before it moves (tasks/reach_press._reach_press, the proof before the look): out_of_reach, then
 plan_reach from HOME with the depth press's way down, then the way in from the look it planned
 (solve_way_in, or plan_reach again from the look where its lines do not fly), on the robot's own URDF
-and with the chair and user's model the run is held out of (--body-layers). The one thing a run has that
-this has not is the planner: the look's plan is DryClient's stand-in, the arm's own IK and a straight
-joint line, refused where a joint stands in the planner's limit margin. So a place this proves is one the
-run's kinematics reach, not a promise the planner's path there exists; the run's own plan is the last word.
+and with the chair and user's model the run is held out of (--body-layers). A cell of the boundary is
+always asked from HOME; the proof for the box where it stands is asked from the joints the engine names
+(a box line's "q_from": where the run will start its reach from, its wrist turned to the line-up's view),
+where it names any. A run has the planner, and this has not: the look's plan is DryClient's stand-in, the
+arm's own IK and a straight joint line, refused where a joint stands in the planner's limit margin. A run
+also holds its lines out of the table's edges as its cameras map them (press_demo.keep_out_counter), and
+this knows no table but its height. So a place this proves is one the run's kinematics reach, not a
+promise the planner's path there exists; the run's own plan is the last word.
 
 A proof takes about a second on the robot's computer (0.8 s where it refuses, 2 s where it plans: the
 reach simulations of 2026-11-11, 1363 places), so the boundary is filled a cell at a time, the box's own
@@ -320,12 +324,16 @@ def fill(zone, ctx, cfg, table_z=None, focus=None, budget_s=None, n=None, clock=
 
 # ------------------------------------------------------------------------------- for the engine's line-up
 # --serve: the engine (line_up.BoxSource) writes a JSON line on stdin each time it sees the box,
-#     {"box": [x, y, z], "table_z": z or null, "prove": bool}
+#     {"box": [x, y, z], "table_z": z or null, "prove": bool, "q_from": [7 joint values] (may be left out)}
 # and reads the lines on stdout that begin with MARK (every other line there is the proof's own log):
 #     @@ {"zone": {...}}                                       the boundary for that lid's height, as it fills
-#     @@ {"proof": {"xyz": [...], "ok": bool, "why": "...", "tilt_deg": n, "s": seconds}}
+#     @@ {"proof": {"xyz": [...], "ok": bool, "why": "...", "tilt_deg": n, "s": seconds, "q_from": bool}}
 # With "prove" the box's own place is proven first (the user is being asked to hold still for it); otherwise
 # the boundary is filled, the cells nearest the box first. The newest box is the only one worked on.
+# "q_from": the joints the run will start its reach from (after a wrist line-up, the wrist turned to its
+# view, not HOME). The box's own proof is made from them, and its answer's "q_from" says whether it was;
+# a line without them is proven from HOME. The boundary's cells are asked from HOME whatever a line says:
+# one grid, kept from run to run, for every start.
 # The engine ends it with {"quit": true} (heard after the proof in flight), by closing the pipe, or with a
 # terminate (at once): each way the grid is kept first.
 MARK = "@@ "
@@ -333,6 +341,22 @@ PROOF_NEAR_M = 0.015  # a box this near the place last proven is that place (gui
 ZONE_SAY_S = 0.5  # a boundary that is filling is said no oftener than this
 SAVE_EVERY = 20  # ... and kept on disk every this many cells, and as the server ends
 IDLE_S = 0.2  # with nothing to ask, how long stdin is waited on
+
+
+def _start_joints(said):
+    """A box line's "q_from" as the joints a proof starts from, or None: the line has none, or what it has
+    is not seven numbers. That is said in the log and the proof is made from HOME, as for a line without
+    it; the proof's answer says which, so the engine is not told of a start that was not used."""
+    if said is None:
+        return None
+    try:
+        q = [float(v) for v in said]
+    except (TypeError, ValueError):
+        q = []
+    if len(q) != len(NAMES) or not all(math.isfinite(v) for v in q):
+        log.warning("reach_probe: q_from is not seven joint values (%r): this place is proven from HOME" % (said,))
+        return None
+    return q
 
 
 class Server:
@@ -346,9 +370,10 @@ class Server:
         self._clock = clock
         self.box = self.table_z = None
         self.prove = False
+        self.q_from = None  # the joints the box's own proof starts from (None: HOME)
         self.quit = False
         self.zone = None
-        self.proven = None  # (xyz, table_z) of the place last proven
+        self.proven = None  # (xyz, table_z, q_from) of the place last proven
         self._dirty = self._unsaved = 0
         self._said_at = None
 
@@ -359,6 +384,7 @@ class Server:
             self.box = tuple(float(v) for v in msg["box"])
             self.table_z = None if msg.get("table_z") is None else float(msg["table_z"])
             self.prove = bool(msg.get("prove"))
+            self.q_from = _start_joints(msg.get("q_from"))
 
     def _zone_for(self, lid_z):
         """The grid for a lid at `lid_z`: the one in hand for as long as it serves that height (Zone.serves:
@@ -378,9 +404,10 @@ class Server:
     def _is_proven(self):
         if self.proven is None:
             return False
-        (x, y, z), table_z = self.proven
+        (x, y, z), table_z, q_from = self.proven
         near = math.hypot(self.box[0] - x, self.box[1] - y) <= PROOF_NEAR_M and abs(self.box[2] - z) <= PROOF_NEAR_M
-        return near and table_z == self.table_z
+        # the engine repeats the view's joints as it heard them, so the same start reads the same
+        return near and table_z == self.table_z and q_from == self.q_from
 
     def step(self):
         """One proof: the box's own place where it is asked for and not yet proven, else the boundary's next
@@ -390,10 +417,11 @@ class Server:
         zone = self._zone_for(self.box[2])
         if self.prove and not self._is_proven():
             t0 = self._clock()
-            ok, why, tilt = press_plans(self.ctx, self.cfg, self.box, table_z=self.table_z)
-            self.proven = (self.box, self.table_z)
+            ok, why, tilt = press_plans(self.ctx, self.cfg, self.box, table_z=self.table_z, q_from=self.q_from)
+            self.proven = (self.box, self.table_z, self.q_from)
             took = round(self._clock() - t0, 2)
-            self._say({"proof": {"xyz": list(self.box), "ok": ok, "why": why[:300], "tilt_deg": tilt, "s": took}})
+            proof = {"xyz": list(self.box), "ok": ok, "why": why[:300], "tilt_deg": tilt, "s": took}
+            self._say({"proof": dict(proof, q_from=self.q_from is not None)})
             return True
         # a cell is asked with the box on its own foot (table_z None): one grid for every table at this lid height
         asked = fill(zone, self.ctx, self.cfg, focus=self.box[:2], n=1, far_m=self.far_m)

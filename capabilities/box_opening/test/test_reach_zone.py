@@ -268,7 +268,7 @@ def served(monkeypatch, tmp_path):
 
     said, proved, now = [], [], [0.0]
 
-    def proof(_ctx, _cfg, top, table_z=None):
+    def proof(_ctx, _cfg, top, table_z=None, q_from=None):
         proved.append((tuple(round(float(v), 3) for v in top), table_z))
         now[0] += 0.3
         return math.hypot(top[0] - 0.65, top[1]) < 0.18, "no" * 400, 15
@@ -337,6 +337,70 @@ def test_the_boxs_own_place_is_proven_first_where_it_is_asked_for_and_once(serve
     n = len(proved)
     server.step()
     assert len(proved) == n + 1 and proved[-1][1] is None  # not asked for: the boundary goes on filling
+
+
+VIEW = [0.4425, -1.5718, -2.9033, -2.1048, -0.2, -1.4, 2.6]  # an arm at rest but for its wrist, turned to look
+
+
+@pytest.fixture
+def starts(served, monkeypatch):
+    """What each of the served stand-in's proofs was started from: its q_from, None where it was given none."""
+    from box_opening.tasks import reach_probe
+
+    stand_in, got = reach_probe.press_plans, []
+
+    def proof(*a, **k):
+        got.append(k.get("q_from"))
+        return stand_in(*a, **k)
+
+    monkeypatch.setattr(reach_probe, "press_plans", proof)
+    return got
+
+
+def test_the_boxs_own_proof_starts_from_the_joints_the_engine_names_and_the_cells_from_home(served, starts):
+    """q_from: where the run will start its reach from after a wrist line-up, the wrist turned to its view.
+    The box's own proof is made from there and says so; the boundary's cells are one grid for every start."""
+    server, said, proved = served
+    server.hear({"box": [0.652, 0.013, 0.3149], "table_z": 0.2159, "prove": True, "q_from": VIEW})
+    server.step()
+    assert starts == [VIEW] and proved == [((0.652, 0.013, 0.315), 0.2159)]
+    (proof,) = (m["proof"] for m in said if "proof" in m)
+    assert proof["q_from"] is True and proof["ok"] is True and proof["xyz"] == [0.652, 0.013, 0.3149]
+    for _ in range(3):
+        server.step()  # proven: the boundary's cells, each from HOME
+    assert starts[1:] == [None, None, None] and all(table_z is None for _top, table_z in proved[1:])
+    server.hear({"box": [0.652, 0.013, 0.3149], "table_z": 0.2159, "prove": True, "q_from": list(VIEW)})
+    server.step()
+    assert sum(1 for m in said if "proof" in m) == 1  # the same place from the same start: not proven again
+
+
+def test_a_box_line_without_q_from_is_proven_from_home_as_before_and_says_so(served, starts):
+    server, said, _proved = served
+    server.hear({"box": [0.652, 0.013, 0.3149], "table_z": 0.2159, "prove": True})
+    server.step()
+    assert starts == [None] and [m["proof"]["q_from"] for m in said if "proof" in m] == [False]
+    # the engine learns the view's joints: the same place is proven again, from there, once
+    server.hear({"box": [0.652, 0.013, 0.3149], "table_z": 0.2159, "prove": True, "q_from": VIEW})
+    server.step()
+    server.step()
+    assert starts == [None, VIEW, None] and [m["proof"]["q_from"] for m in said if "proof" in m] == [False, True]
+    # and a line with none again drops them: each line says the whole of what it asks
+    server.hear({"box": [0.70, 0.02, 0.3149], "table_z": 0.2159, "prove": True})
+    server.step()
+    assert starts[-1] is None and [m["proof"]["q_from"] for m in said if "proof" in m][-1] is False
+
+
+@pytest.mark.parametrize("said_from", [VIEW[:6], VIEW + [0.0], "home", [None] * 7, VIEW[:6] + [float("nan")], 7])
+def test_a_q_from_that_is_not_seven_joints_is_not_used_and_the_answer_says_so(said_from, served, starts, monkeypatch):
+    from box_opening.tasks import reach_probe
+
+    warned = []
+    monkeypatch.setattr(reach_probe.log, "warning", warned.append)
+    server, said, _proved = served
+    server.hear({"box": [0.652, 0.013, 0.3149], "table_z": 0.2159, "prove": True, "q_from": said_from})
+    server.step()
+    assert starts == [None] and [m["proof"]["q_from"] for m in said if "proof" in m] == [False]
+    assert len(warned) == 1 and "q_from" in warned[0]
 
 
 def test_a_lid_at_another_height_gets_its_own_boundary(served, tmp_path):
@@ -759,6 +823,29 @@ def test_a_press_plans_in_front_of_the_arm_and_not_past_its_reach(flatbot):
     ok, why, tilt = reach_probe.press_plans(ctx, cfg, (1.20, 0.0, 0.315), table_z=0.216)
     assert not ok and tilt is None and why == "past everything the arm reaches"
     assert ctx.client.live != [], "the stand-in holds the joints the proof left it at"
+
+
+def test_the_proof_is_made_from_the_start_it_is_given_a_wrist_turned_to_look(flatbot, monkeypatch):
+    """press_plans' q_from on the arm's own kinematics: the proof before the look is asked from those joints,
+    and a press in front of the arm still plans from a wrist turned as the line-up's view turns it."""
+    from box_opening.constants import HOME
+    from box_opening.tasks import reach_press, reach_probe
+
+    ctx, cfg = flatbot
+    view = [h + d for h, d in zip(HOME, (0.0, 0.0, 0.0, 0.0, 0.5, -0.5, 0.4), strict=True)]
+    asked_from, plan_reach = [], reach_press.plan_reach
+
+    def spy(ctx_, cfg_, button, q_from, **kw):
+        asked_from.append(list(q_from))
+        return plan_reach(ctx_, cfg_, button, q_from, **kw)
+
+    monkeypatch.setattr(reach_press, "plan_reach", spy)
+    ok, why, tilt = reach_probe.press_plans(ctx, cfg, (0.65, -0.10, 0.315), table_z=0.216, q_from=view)
+    assert asked_from[0] == pytest.approx(view)
+    assert ok and why == "" and tilt in (15, 20, 25, 30, 35)
+    asked_from.clear()
+    assert reach_probe.press_plans(ctx, cfg, (0.65, -0.10, 0.315), table_z=0.216)[0]
+    assert asked_from[0] == pytest.approx(HOME)  # none given: HOME, as the cells are asked
 
 
 def test_the_grids_ground_is_the_arms_own_reach(flatbot):
