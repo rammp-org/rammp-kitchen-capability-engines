@@ -26,7 +26,9 @@ writes, beside them:
 A step's lower-case line is written as it starts, its numbered line as it ends: `ok`, `FAIL`, or
 `??` where the run could not tell and went on. `note` is something that worked but looked off,
 `next` what the run does after a failure. The result says where the box, the lid and the arm were
-left.
+left, and says the lid is on the table only of a set-down the run said it felt meet the table (its
+"SET-DOWN CONTACT" line): flatbot 2026-11-17 16:40 let the lid go over the floor and this said
+"lid on the table". A set-down that felt none is a failed step, the lid carried back to the box.
 
 The engine writes it to its stdout. The run's full lines are kept in a file of their own beside the run
 log (runs/console-<stamp>.log in box opening's state folder: node.NodeLogHandler), which the result's last
@@ -81,6 +83,8 @@ AFTER_LOST = re.compile(r"^AFTER PRESS (\d+): the wrist does not find the button
 KNOB_DOWN = re.compile(r"^the knob is not up \(%s mm above the lid\): pressing once more" % NUM)
 KNOB_UNJUDGED = re.compile(r"^the knob is not judged after press (\d+)")
 SETDOWN = re.compile(r"^SET-DOWN CONTACT")
+SETDOWN_NONE = re.compile(r"^SET-DOWN: no table felt")
+BACK_ON_BOX = re.compile(r"the lid is back on the box, and the arm is home")
 RELEASE = re.compile(r"^RELEASE as the retreat starts")
 PUT_BACK = re.compile(r"^PUT BACK: ")
 REFUSED = re.compile(r"^REFUSED: (\S+) — ")
@@ -378,20 +382,21 @@ class FlightView:
         if SETDOWN.match(s):
             self.setdown_met = True
             return
+        if SETDOWN_NONE.match(s):
+            # the arm felt no table under the lid: it is not let go (reach_lid_off.carry_back)
+            self._carried()
+            self._fail("the arm felt no table under the lid; the lid was not let go", "SET DOWN", final=True)
+            self._note("carrying the lid back to the box", "next")
+            return
         if RELEASE.match(s):
-            self._end("ok")  # whatever was in flight
-            self._end("ok", name="LIFT")
-            self._end(
-                "ok",
-                "" if self.spot_mm is None else "lid to %.0f cm from the box" % (self.spot_mm / 10.0),
-                name="CARRY",
-            )
-            self._end(
-                "ok",
-                "let go where the lid met the table" if self.setdown_met else "let go over the table",
-                name="SET DOWN",
-            )
-            self.lid = "on the table"
+            self._carried()
+            if self.setdown_met:
+                self._end("ok", "let go where the lid met the table", name="SET DOWN")
+                self.lid = "on the table"
+            else:
+                # a release with no contact said: where the lid went is not known to be the table
+                self._end("??", "let go, and no table was felt under the lid", name="SET DOWN")
+                self.lid = "let go where no table was felt"
             self.going_home = True
             self._begin("HOME", "letting go and going home")
             return
@@ -414,6 +419,16 @@ class FlightView:
         if m:
             self._stop(m.group(1))
 
+    def _carried(self):
+        """The lid's way to its spot is over: whatever was in flight, the lift and the carry ended well."""
+        self._end("ok")
+        self._end("ok", name="LIFT")
+        self._end(
+            "ok",
+            "" if self.spot_mm is None else "lid to %.0f cm from the box" % (self.spot_mm / 10.0),
+            name="CARRY",
+        )
+
     def _fail(self, why, name, final=False):
         """A step fails; `final`: nothing follows it but the way home."""
         self._end("FAIL", why, name=name if self.cur is None else None)
@@ -422,10 +437,19 @@ class FlightView:
 
     def _stop(self, stop):
         """The run's STOP: the step in flight (else the one it names) failed for good."""
+        back = BACK_ON_BOX.search(stop) is not None
+        if back:
+            self.lid, self.arm = "on the box", "home"  # the run's own words: nothing held, the arm home
+            if self.failed is not None:
+                # the step that failed is said already (a set-down that felt no table): this is how it ended
+                self._end("ok", "lid back on the box, arm home", name="PUT BACK")
+                return
         name = None
         m = DURING.search(stop)
         if m:
             name = next((step for leg, step in LEG_STEPS if m.group(1).startswith(leg)), None)
+        if name is None and back:
+            name = "CARRY"  # the lid had nowhere to go: not the way home, which it flew
         if name is None:
             if stop.startswith("pressed") or "the press " in stop:
                 name = "PRESS"
@@ -480,7 +504,9 @@ class FlightView:
         if held:
             self.lid = "in the hand"
         if code == 0 and self.done and not cancelled:
-            self._say(("RESULT  DONE — box open, lid on the table, arm home").ljust(WIDTH - 8) + " " + took)
+            # "on the table" only of a set-down the run felt meet the table; else what is known
+            lid = "lid on the table" if self.setdown_met else "lid let go (no table was felt under it)"
+            self._say(("RESULT  DONE — box open, %s, arm home" % lid).ljust(WIDTH - 8) + " " + took)
             self._where()
             return
         failed = self.failed or self.last_fail

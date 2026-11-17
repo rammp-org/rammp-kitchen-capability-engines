@@ -885,8 +885,10 @@ def test_a_run_is_told_on_stdout_one_short_line_a_step_beside_its_full_lines(eng
             p + "PRESSED with ~21 N, 2 N sideways",
             p + "GRIP STRAIGHT FROM THE PRESS: up 45 mm, the fingers opening round the knob",
             p + "LID GRIPPED — grip 0.492 vs band [0.3, 0.55]",
+            # the set-down felt the lid meet the table: the one case the run lets go in, and "on the table" is said
+            p + "SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it; the touch stopped there",
             p + "RELEASE as the retreat starts (place:retreat), then HOME, slow, in MEDIUM impedance: home",
-            p + "DONE — box open, lid set down at [0.65, 0.05] (clear), arm home",
+            p + "DONE — box open, lid on the table at [0.65, 0.05] (clear), let go where the arm felt it, arm home",
         ],
     )
     said = []

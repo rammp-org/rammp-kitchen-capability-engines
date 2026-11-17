@@ -389,3 +389,95 @@ def test_a_stop_names_the_step_it_ended(stop, step):
         1,
     )
     assert any(line[3:12].strip() == step and " FAIL " in line for line in out), out
+
+
+CARRIED = [
+    (29, P + "lid goes to [0.65, 0.05, 0.259] — 200 mm from the box (45 mm outside its no-land radius)"),
+    (29, P + "CLOSE, then ONE MOTION: lid:lift, lid:clear, lid:carry, place:down, place:touch — 40 mm straight up"),
+    (34, P + "LID GRIPPED — grip 0.492 vs band [0.3, 0.55]"),
+]
+
+
+def test_the_result_says_the_lid_is_on_the_table_only_of_a_set_down_that_felt_the_table():
+    """Flatbot 2026-11-17 16:40: the lid was let go past the table's edge, over the floor, and the result
+    read "DONE — box open, lid on the table, arm home". "On the table" is said only where the run said
+    its set-down felt the lid meet the table (its SET-DOWN CONTACT line, which it now writes of a
+    credible contact alone). A release with no such line — nothing a run of this build does — is a step
+    the view could not vouch for, and the result says what is known."""
+    met = [
+        (34, P + "SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it; the touch stopped there"),
+        (34, P + "RELEASE as the retreat starts (place:retreat), then HOME, slow, in MEDIUM impedance: home"),
+        (39, P + "DONE — box open, lid on the table at [0.65, 0.05] (clear), let go where the arm felt it, arm home"),
+    ]
+    out = _view(FOUND + PRESSED + CARRIED + met, 0)
+    assert out[-4] == " 7 SET DOWN  ok    let go where the lid met the table"
+    assert out[-1] == "RESULT  DONE — box open, lid on the table, arm home           44 s"
+    out = _view(FOUND + PRESSED + CARRIED + met[1:], 0)
+    assert out[-4] == " 7 SET DOWN  ??    let go, and no table was felt under the lid"
+    assert out[-1].startswith("RESULT  DONE — box open, lid let go (no table was felt under it), arm home")
+    assert "on the table" not in out[-1]
+
+
+def test_a_set_down_that_felt_no_table_is_a_failed_step_and_the_lid_goes_back_on_the_box():
+    """The set-down ended and the arm felt no table under the lid: the lid is not let go (the run's
+    "SET-DOWN: no table felt" line), and is carried back onto the box. The set-down is the step that
+    failed; the put-back that follows ends well, and the result says where things were left: the box
+    open, the lid on it, the arm home — never "on the table"."""
+    why = "the touch ended 8 mm under where the plan has the lid meet the table and the arm felt no table"
+    out = _view(
+        FOUND
+        + PRESSED
+        + CARRIED
+        + [
+            (
+                36,
+                P + "SET-DOWN: no table felt — %s; the lid is not let go: back up with it, and back onto the box" % why,
+            ),
+            (
+                37,
+                P + "PUT BACK: the set-down felt no table (%s) — the lid back on the box where it was gripped, "
+                "then home" % why,
+            ),
+            (44, P + "home after putting the lid back (the set-down felt no table (%s)) — returning home" % why),
+            (
+                49,
+                P + "STOP: the set-down felt no table (%s) — the lid is back on the box, and the arm is home" % why,
+            ),
+        ],
+        1,
+    )
+    assert out[8:] == [
+        " 4 GRIP      ok    knob held                                   8.0 s",
+        " 5 LIFT      ok",
+        " 6 CARRY     ok    lid to 20 cm from the box",
+        " 7 SET DOWN  FAIL  the arm felt no table under the lid; the lid was not let go",
+        "             next  carrying the lid back to the box",
+        "             next  putting the lid back on the box",
+        " 8 PUT BACK  ok    lid back on the box, arm home",
+        "RESULT  FAILED at step 7 (SET DOWN)                           54 s",
+        "        why: the arm felt no table under the lid; the lid was not let go",
+        "        box: open (knob up)    lid: on the box    arm: home",
+    ]
+
+
+def test_a_lid_put_back_with_no_spot_for_it_leaves_the_arm_home_in_the_result():
+    """No spot on the table the cameras measured: the lid goes back on the box and the run's last line
+    says the arm is home. The result said "arm: not confirmed home" of that line."""
+    why = "no carry plans to a spot on the table the cameras measured (of the spots looked at, 57 not on it)"
+    out = _view(
+        FOUND
+        + PRESSED
+        + [
+            (29, P + "CLOSE, then ONE MOTION: lid:lift, lid:clear — 40 mm straight up, then 50 mm back toward the arm"),
+            (34, P + "LID GRIPPED — grip 0.492 vs band [0.3, 0.55]"),
+            (36, P + "PUT BACK: %s — the lid back on the box where it was gripped, then home" % why),
+            (49, P + "STOP: %s — the lid is back on the box, and the arm is home" % why),
+        ],
+        1,
+    )
+    assert out[-4:] == [
+        " 5 CARRY     FAIL  no carry plans to a spot on the table the cameras measured",
+        "RESULT  FAILED at step 5 (CARRY)                              54 s",
+        "        why: no carry plans to a spot on the table the cameras measured",
+        "        box: open (knob up)    lid: on the box    arm: home",
+    ]
