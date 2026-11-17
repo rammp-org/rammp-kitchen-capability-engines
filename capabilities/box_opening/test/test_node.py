@@ -76,7 +76,8 @@ if "--line-up" in sys.argv:
         sys.stdout.write("[press_demo] STOP: the line-up's wrist turn: aborted - the arm holds; nothing was pressed\\n")
         sys.stdout.flush()
         sys.exit(6)
-    sys.stdout.write("@@ " + json.dumps({"view": {"joints": [0.0] * 7}}) + "\\n")  # its wrist stands at the view
+    if not os.environ.get("NO_VIEW"):  # NO_VIEW: stopped before its turn was done, the view never said
+        sys.stdout.write("@@ " + json.dumps({"view": {"joints": [0.0] * 7}}) + "\\n")  # its wrist stands at the view
     heard = None
     try:
         while heard is None:
@@ -1681,7 +1682,28 @@ def test_an_arm_that_is_not_at_rest_ends_the_line_up_at_once_and_the_panel_says_
     said = [p for p in ctx.panels if p["message"].startswith("The arm is not at its rest pose")]
     assert said and all(p["buttons"] == [] and p["progress"]["phase"] == "unable" for p in said)
     assert not [p for p in ctx.panels if p["message"] == node.PANEL_TURNING_BACK]  # its wrist never turned
+    ending = [p for p in ctx.panels if p["message"] == node.PANEL_LINE_UP_OVER]
+    assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in ending)
     assert engine._run is None and ctx.objects == {} and ctx.world == []
+
+
+def test_a_line_up_that_ends_while_the_wrist_is_still_turning_out_says_the_wrist_turns_back(engine, monkeypatch):
+    """A line-up that ends in its first seconds (a reach_probe that died as it started) stops a run whose
+    wrist is still on its way to the view: it has not said its view, and it will finish that turn and turn
+    back, beside the user. The panel says the wrist is turning back from the run's own word that it turns."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    monkeypatch.setenv("NO_VIEW", "1")
+    monkeypatch.setenv("TURN_BACK_S", "1")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up"
+    assert [p for p in ctx.panels if p["message"] == node.PANEL_TURNING_BACK]
+    assert not [p for p in ctx.panels if p["message"] == node.PANEL_LINE_UP_OVER]
 
 
 def test_a_run_stopped_late_that_had_its_wrist_back_at_rest_is_not_the_arm_holding(engine, monkeypatch):

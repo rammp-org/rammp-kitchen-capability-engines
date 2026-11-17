@@ -17,6 +17,7 @@ example does (capabilities/example: ctx.update_user_panel / ctx.poll_ui_event).
     READY     inside, steady, and the run plans    "Ready. Open the container?"  [Open] [Cancel]
     GO        Open pressed on a fresh READY        the arm flies
     TIMED_OUT the time for lining up ran out       "Press open again when you are in place"
+    UNABLE    the run says what no waiting cures   "The arm is not at its rest pose: home it, then ..."  (unable())
 
 The words are the user's moves, not the box's place: the box too far away is "Move closer", the box
 too far to the left is "Move left" (toward it). One instruction at a time, the larger miss first, and

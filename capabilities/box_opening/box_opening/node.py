@@ -184,6 +184,9 @@ LINE_UP_LATE = (
 )
 # press_demo's last word of a line-up that ended without a go, its wrist turned back (line_up_watch)
 LINE_UP_ENDED = "LINE-UP: ended without a go"
+# ... its word as its wrist starts to turn to the view, and where the wrist then does not look after all
+LINE_UP_TURNS = "LINE-UP: the wrist turns to look"
+LINE_UP_NO_LOOK = "LINE-UP: the wrist does not look"
 # A CANCEL that comes with no action running is for the action about to start (the user's cancel overtook
 # the goal: the orchestrator answers the press at once and takes a moment to send the goal). A goal that
 # starts within this long of it does not run. Longer would cancel a deliberate press that follows a stale
@@ -820,7 +823,13 @@ class Capability(CapabilityEngine):
                 else:
                     run_.send({"stop": True})
                     try:
-                        turned = bool(made and getattr(made[-1], "viewed", False))
+                        # its wrist turned where it said its view, or said it was turning and has not said
+                        # since that it does not look: a line-up that ends in its first seconds (a
+                        # reach_probe that died as it started) is stopped while that turn is still in flight
+                        said = list(run_.lines)
+                        turned = bool(made and getattr(made[-1], "viewed", False)) or (
+                            any(LINE_UP_TURNS in ln for ln in said) and not any(LINE_UP_NO_LOOK in ln for ln in said)
+                        )
                         cancelled, late = self._turned_back(ctx, run_, turned)
                     except BaseException:
                         # the engine failed while the wrist turned back (the panel, the progress): the run's
@@ -856,8 +865,9 @@ class Capability(CapabilityEngine):
 
     def _cancelled_before_go(self, ctx):
         """Whether a cancel came between the line-up's Open and the run's go. The line-up's source is closed
-        in between (reach_probe keeping its grid: up to line_up.PROBE_QUIT_S, and STOP_WAIT_S more for one
-        that does not end), the panel already says the container is being opened and has its Cancel, and
+        in between (reach_probe ended at once on an Open, its terminate keeping its grid: a moment, and up to
+        line_up.STOP_WAIT_S for one that does not end), the panel already says the container is being opened
+        and has its Cancel, and
         nothing reads the press or the orchestrator's cancel in that time: read here, once, so a cancel that
         came then is acted on before the arm is told to go and not a moment after."""
         event = ctx.poll_ui_event()

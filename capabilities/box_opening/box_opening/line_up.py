@@ -8,10 +8,12 @@ where the box was last seen and what the boundary says of that place, is a `sour
     source.look(now) -> (Fix or None, Reach or None)     the newest sighting (None: nothing new since the
                                                          last tick) and the boundary's word on the box
 
-It ends one of four ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
+It ends one of five ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
 panel's Cancel, or the orchestrator's), TIMED_OUT (the time for lining up ran out: the panel says to press
 open again, and holds that for LINGER_S), GONE (what watched the box, or what judged its place, has ended:
-`source.gone()`). Nothing here moves the arm or starts a run: the caller does, on GO alone.
+`source.gone()`), UNABLE (the source says what no waiting cures, `source.unable`: the arm is not at its
+rest pose; the panel says so for LINGER_S). Nothing here moves the arm or starts a run: the caller does,
+on GO alone.
 
 MockApproach is the mock's source: a box that comes into reach as a user driving up to a table brings it,
 so the UI's side of a line-up can be rehearsed with no arm and no camera.
@@ -98,8 +100,12 @@ class LineUp:
                 self._show(guide.unable(why), now)
                 if now - unable_at >= LINGER_S:
                     return UNABLE
-                if self._ctx.poll_ui_event() is not None:
+                event = self._ctx.poll_ui_event()
+                if event is not None and event.get("type") == "button":
                     self._sent = self._tried_at = None  # a press took the bridge's panel down: sent again
+                    if event.get("button_id") == guide.CANCEL:  # pressed on the panel before this one
+                        self.cancel_pressed = True
+                        return CANCELLED
                 self._sleep(POLL_S)
                 continue
             event = self._ctx.poll_ui_event()

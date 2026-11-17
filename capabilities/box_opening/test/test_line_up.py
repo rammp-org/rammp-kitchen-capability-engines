@@ -601,6 +601,57 @@ def test_a_line_up_ends_at_once_where_its_probe_has_died_and_says_what_the_probe
     assert "setup(args.urdf)" in source.why_gone  # the last few lines, not the last alone
 
 
+def test_an_arm_that_is_not_at_rest_ends_the_line_up_once_the_panel_has_said_so():
+    """What no waiting cures: the run says the arm does not stand at its rest pose (guide.ARM_NOT_AT_REST, in
+    the place of where the container is). The panel says it, with no button, for LINGER_S, and the line-up
+    ends UNABLE: not a whole line-up of "Looking for the container". Any other reason for seeing no container
+    is not that, and the line-up goes on."""
+    source, watch, _probe = _source()
+    watch.says(0.0, {"none": "wrist camera: no lid-sized top on the table in view"})
+    source.look(0.1)
+    assert source.unable == "" and source.why_none.startswith("wrist camera")
+    watch.says(0.2, {"none": guide.ARM_NOT_AT_REST})
+    outcome, ctx, said, lining = lined_up(source)
+    assert outcome == line_up.UNABLE and source.unable == guide.ARM_NOT_AT_REST
+    assert line_up.LINGER_S <= ctx.clock.t - ctx.t0 < line_up.LINGER_S + 3 * line_up.POLL_S
+    shown = [
+        p for _t, p in ctx.panels if p["message"] == "The arm is not at its rest pose: home it, then press open again"
+    ]
+    assert shown and all(p["buttons"] == [] and p["progress"]["phase"] == guide.UNABLE for p in shown)
+    assert said[-1].state == guide.UNABLE and not lining.cancel_pressed
+
+
+@pytest.mark.parametrize("by", ["the orchestrator", "the panel"])
+def test_a_cancel_is_still_a_cancel_while_the_panel_says_the_arm_is_not_at_rest(by):
+    """The orchestrator's cancel is read every tick of that panel's time too, and a press of Cancel made on
+    the panel before it (it has no button of its own) is the user's cancel, not lost."""
+    source, watch, _probe = _source()
+    watch.says(0.0, {"none": guide.ARM_NOT_AT_REST})
+    press = [(0.5, {"type": "button", "button_id": "cancel"})] if by == "the panel" else []
+    outcome, ctx, _said, lining = lined_up(source, presses=press, cancel_at=0.5 if by == "the orchestrator" else None)
+    assert outcome == CANCELLED and ctx.clock.t - ctx.t0 < 0.5 + 3 * line_up.POLL_S
+    assert lining.cancel_pressed is (by == "the panel")
+
+
+def test_the_source_knows_the_wrist_turned_once_the_run_says_its_view():
+    source, watch, _probe = _source()
+    assert source.viewed is False
+    watch.says(0.5, {"view": {"joints": [0.0] * 7}})
+    source.look(0.6)
+    assert source.viewed is True
+
+
+def test_closing_on_the_users_open_does_not_wait_on_the_probe():
+    """The run's go comes after the source is closed: on an Open the probe is ended at once (its terminate
+    keeps its grid too), not given PROBE_QUIT_S to finish the proof in flight."""
+    source, _watch, probe = _source()
+    source.close(quit_s=0.0)
+    assert probe.sent[-1] == {"quit": True} and probe.stopped and probe.quit_s == 0.0
+    source, _watch, probe = _source()
+    source.close()
+    assert probe.quit_s == line_up.PROBE_QUIT_S
+
+
 def test_a_child_keeps_the_end_of_its_log_for_whoever_asks_why_it_ended(tmp_path):
     import sys
     import time

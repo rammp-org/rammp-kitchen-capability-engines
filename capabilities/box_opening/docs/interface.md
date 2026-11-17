@@ -322,8 +322,10 @@ restart puts the deployment's values back.
 | `Press open again when you are in place`                          | none         | 35 s passed: shown 3 s, then the action fails `not_lined_up`                                                   |
 | `The arm is not at its rest pose: home it, then press open again` | none         | The arm stands off rest (more than a wrist a line-up left turned): shown 3 s, then the action fails `not_home` |
 | `The wrist is turning back to rest`                               | Cancel       | The line-up is over and the wrist that looked turns back                                                       |
+| `Ending`                                                          | Cancel       | The line-up is over and no wrist turned: the run is ending                                                     |
 
-`progress.phase` is `looking`, `move`, `hold`, `ready`, `go` or `timed_out`,
+`progress.phase` is `looking`, `move`, `hold`, `ready`, `go`, `timed_out` or
+`unable`,
 and `pct` how near the container is to the boundary (100 inside). The
 orchestrator's progress reports phase `line_up` at 0 with the same message.
 The run starts only on **Open**, and only where it is pressed on a `Ready`
@@ -372,8 +374,7 @@ What follows the container while the panel is up depends on `wrist_first`:
   the arm stands at rest, or at rest but for a wrist an earlier line-up left
   turned, it closes the fingers, as every run does at its start, and turns the
   wrist to the front view that shows the most of where the arm presses: the
-  three wrist joints, once, flown as a look (slow and eased), the arm above
-  them standing. From there it judges every wrist frame as it comes, the user
+  three wrist joints, once, flown as a look (slow and eased). From there it judges every wrist frame as it comes, the user
   driving the chair the while. A lid-sized top beyond the arm's reach is no
   rival of one within it (the run's own rule); where none is within reach yet
   the nearest alone is followed roughly, enough to say which way to move. With
