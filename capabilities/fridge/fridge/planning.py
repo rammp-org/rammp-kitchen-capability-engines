@@ -21,6 +21,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import partial
 
 import numpy as np
 import rammp_arm
@@ -68,6 +69,21 @@ class StartNotClear(Refused):
 
 class OverBudget(Refused):
     """The search has used up its planning time (Planner's budget_s)."""
+
+
+class PlannerBusy(Refused):
+    """The cuRobo planner is serving another client: no plan or check from it means anything until it is free."""
+
+
+BUSY_RETRIES = 3  # cuRobo answered "planner busy" (it plans one request at a time, for every client): asked again this
+BUSY_WAIT_S = 0.5  # often, this long apart, then the search stops (PlannerBusy). 11-13 14:40: two fridge nodes ran the
+# same open at once against one planner; each counted its 526 "busy" answers as "no plan", searched wheelchair
+# placements for 82 s and refused, blaming the placement
+
+
+def busy(message):
+    """True when cuRobo refused a request because it was planning another one."""
+    return "planner busy" in str(message)
 
 
 GOAL_FAILURES = (
@@ -195,6 +211,20 @@ class Planner:
         if self.budget_s is not None and time.monotonic() - self.search_t0 > self.budget_s:
             raise OverBudget(f"planning took longer than its {self.budget_s:.0f} s budget ({self.plans} plans)")
 
+    def _ask(self, request, label):
+        """cuRobo's answer to `request()` (a plan or a blend: .success, .message), asked again while the planner is busy
+        with another client (BUSY_RETRIES), then PlannerBusy: a busy answer is not "no plan"."""
+        for k in range(1 + BUSY_RETRIES):
+            res = request()
+            if res.success or not busy(res.message):
+                return res
+            if k < BUSY_RETRIES:
+                time.sleep(BUSY_WAIT_S)
+        raise PlannerBusy(
+            f"{label}: the cuRobo planner stayed busy with another client ({_short(res.message, 80)}) -- is a second "
+            "fridge node (or another capability) planning at the same time? Nothing was planned."
+        )
+
     def tool(self, q):
         """(position, quat) of the tool at joints `q`."""
         return self.fk.pose(q)
@@ -236,9 +266,15 @@ class Planner:
             return self._along(goal, q_start, start_pose)
         for _ in range(1 + RAISED_RETRIES):
             if goal.joints is not None:
-                plan = self.arm.plan_to_joints(list(map(float, goal.joints)), list(map(float, q_start)))
+                plan = self._ask(
+                    lambda: self.arm.plan_to_joints(list(map(float, goal.joints)), list(map(float, q_start))),
+                    goal.label,
+                )
             else:
-                plan = self.arm.plan_to_pose(goal.pos, goal.quat, list(map(float, q_start)), hold=goal.hold)
+                plan = self._ask(
+                    lambda: self.arm.plan_to_pose(goal.pos, goal.quat, list(map(float, q_start)), hold=goal.hold),
+                    goal.label,
+                )
             self.plans += 1
             # cuRobo raised (no planning answer: RAMMP-CuRobo 2.0.1 reports it as EXCEPTION; 11-08 a
             # "shape '[1, 1, 1, 3]' is invalid" seen in some runs and not others): ask again rather than take
@@ -290,12 +326,15 @@ class Planner:
         # the search can still try another placement, not when the motion is joined
         self.world.push(goal.world, goal.world_label or goal.label)
         t0 = time.monotonic()
-        res = self.arm.blend(
-            [plan],
-            [],
-            speed_scale=[1.0],
-            hold=[goal.hold],
-            hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+        res = self._ask(
+            lambda: self.arm.blend(
+                [plan],
+                [],
+                speed_scale=[1.0],
+                hold=[goal.hold],
+                hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+            ),
+            goal.label,
         )
         self.plan_s += time.monotonic() - t0
         if not res.success:
@@ -321,12 +360,16 @@ class Planner:
             t, qq, qd = timed(before, qs[start : end + 1])
             self.world.push(world, label)
             t0 = time.monotonic()
-            res = self.arm.blend(
-                [LocalPlan(True, "local IK", t, qq, qd)],
-                [],
-                speed_scale=[1.0],
-                hold=[goal.hold],
-                hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+            res = self._ask(
+                partial(
+                    self.arm.blend,
+                    [LocalPlan(True, "local IK", t, qq, qd)],
+                    [],
+                    speed_scale=[1.0],
+                    hold=[goal.hold],
+                    hold_orientation=[goal.quat if goal.hold != HOLD_NONE else None],
+                ),
+                f"{goal.label} against {label}",
             )
             self.plan_s += time.monotonic() - t0
             if not res.success:
@@ -387,7 +430,10 @@ class Planner:
         self.world.push(world, world_label)
         for attempt in attempts:
             self.checkpoint()
-            plan = self.arm.blend(motion.legs, attempt, speed_scale=scales, hold=holds, hold_orientation=quats)
+            plan = self._ask(
+                partial(self.arm.blend, motion.legs, attempt, speed_scale=scales, hold=holds, hold_orientation=quats),
+                "blend",
+            )
             if plan.success:
                 motion.joined = plan
                 if attempt is bumped:
@@ -415,12 +461,12 @@ class Planner:
         pos, _ = self.fk.poses(motion.joined.q)
         return float(motion.joined.t[int(np.argmin(np.linalg.norm(pos - np.asarray(point, float), axis=1)))])
 
-    def run(self, motion, label, impedance=None, events=()):
+    def run(self, motion, label, impedance=None, events=(), tol=KEYPOINT_TOL_M):
         """Run the joined `motion` (join first). Refuses if the arm has moved since it was planned. `impedance`: run it
         compliant -- the driver's joint impedance with these gains ({kq, zeta, torque_limit}, + path_tol: the tracking
         limit, rad) instead of stiff position control. `events`: [(t s into the trajectory, fn)] called while it runs (a
-        thread: the gripper closing or opening as the arm moves). Returns True when the tool ended within
-        KEYPOINT_TOL_M of the last goal."""
+        thread: the gripper closing or opening as the arm moves). Returns True when the driver finished the trajectory
+        and the tool ended within `tol` (m) of the last goal."""
         plan = motion.joined
         q_now = np.asarray(self.arm.get_state()["position"], float)
         off = np.degrees(np.max(np.abs(_short_delta(motion.q0, q_now))))
@@ -458,7 +504,7 @@ class Planner:
             say(f"{label}: STOPPED ({rammp_arm.ERRORS.get(res.error_code, res.error_code)} {res.error_string})")
             return False
         say(f"{label}: done, tool {err * 100:.1f} cm from the last goal")
-        return err <= KEYPOINT_TOL_M
+        return err <= tol
 
     @staticmethod
     def say_error(what, e):
@@ -468,7 +514,8 @@ class Planner:
         return (
             f"{self.plans} cuRobo plans + {self.local} legs along the door ({self.cached} repeats skipped), "
             f"{self.plan_s:.1f} s planning, "
-            f"{self.world.pushes} world pushes, {time.monotonic() - self.t0:.1f} s in all"
+            f"{self.world.pushes} world pushes ({getattr(self.world, 'push_s', 0.0):.1f} s), "
+            f"{time.monotonic() - self.t0:.1f} s in all"
         )
 
 

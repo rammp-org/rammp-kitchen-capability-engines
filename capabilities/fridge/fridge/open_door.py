@@ -38,6 +38,7 @@ GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs onl
 Refusals raise door_common.common.Refused: the arm holds where it is.
 """
 
+import threading
 import time
 from functools import partial
 
@@ -356,6 +357,75 @@ def hand_angle(door, ee):
     d = p[:2] - np.asarray(door["hinge"], float)[:2]
     g = ref - np.asarray(door["hinge"], float)[:2]
     return float(np.degrees(np.arctan2(g[0] * d[1] - g[1] * d[0], g @ d)))
+
+
+class ArcTrace:
+    """While it is open (`with`): the tool's position (x y, arm_mount) every 1/HINGE_FIT_HZ s, while the gripper is
+    closed -- the hand on the handle, so the path is the door's arc."""
+
+    def __init__(self, ai):
+        self.ai, self.xy = ai, []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+
+    def _sample(self):
+        while not self._stop.wait(1.0 / F.HINGE_FIT_HZ):
+            try:
+                st = self.ai.get_state()
+                if float(st["gripper_pos"]) > 0.5:
+                    self.xy.append(np.asarray(st["ee_pos"][:2], float))
+            except Exception:  # a missed sample only thins the fit
+                pass
+
+
+def fit_circle(xy):
+    """The least-squares circle through points `xy` (N, 2): (centre, radius, RMS off it m, the arc it spans deg)."""
+    p = np.asarray(xy, float)
+    cx, cy, c = np.linalg.lstsq(np.c_[2 * p, np.ones(len(p))], (p**2).sum(axis=1), rcond=None)[0]
+    centre = np.array([cx, cy])
+    r = float(np.sqrt(c + cx**2 + cy**2))
+    d = p - centre
+    rms = float(np.sqrt(np.mean((np.linalg.norm(d, axis=1) - r) ** 2)))
+    span = float(np.degrees(np.ptp(np.unwrap(np.arctan2(d[:, 1], d[:, 0])))))
+    return centre, r, rms, span
+
+
+def record_swing_hinge(xy):
+    """The hinge from the swing's path `xy` (ArcTrace), into the door file (hinge and hinge_pivot) when the fit is
+    good (HINGE_FIT_*); else the estimate stays. Also says it as the node's measured offset, from the handle."""
+    if len(xy) < 10:
+        say(f"  hinge from the swing: {len(xy)} samples with the gripper closed -- not fitted, the estimate stays")
+        return
+    door = load_door()
+    old = np.asarray(door["hinge"], float)
+    centre, r, rms, span = fit_circle(xy)
+    shift = float(np.linalg.norm(centre - old[:2]))
+    n = np.asarray(door["closed_normal"], float)[:2]
+    n /= np.linalg.norm(n)
+    d = centre - np.asarray(door["closed_handle"], float)[:2]
+    into, along = float(d @ -n), float(d @ np.array([n[1], -n[0]]))  # as hinge_measured: -n, n x z
+    msg = (
+        f"hinge from the swing's arc: {np.round(centre, 4)}, radius {r:.3f} m, {rms * 1000:.1f} mm RMS over "
+        f"{span:.0f} deg, {shift * 100:.1f} cm from the estimate (from the handle: {into:.3f} m into the door, "
+        f"{along:.3f} m along it)"
+    )
+    if span < F.HINGE_FIT_MIN_DEG or rms > F.HINGE_FIT_MAX_RMS_M or shift > F.HINGE_FIT_MAX_SHIFT_M:
+        say(
+            f"  {msg} -- not used (needs {F.HINGE_FIT_MIN_DEG:.0f} deg, {F.HINGE_FIT_MAX_RMS_M * 1000:.0f} mm RMS, "
+            f"{F.HINGE_FIT_MAX_SHIFT_M * 100:.0f} cm): the estimate stays"
+        )
+        return
+    hinge = [float(centre[0]), float(centre[1]), float(old[2])]
+    save_door_geometry(hinge=hinge, hinge_pivot=hinge, hinge_estimate=old.tolist())
+    say(f"  {msg} -- the door file's hinge now")
 
 
 def record_hand_angle(ee):
@@ -878,13 +948,26 @@ def execute_open(ai, planner, plan):
         + (", the gripper closing as it starts" if F.GRIP_DURING_SWING else "")
         + f", to a stop there ({float(sw.joined.t[-1]):.1f} s); then the gripper opens"
     )
-    ok = planner.run(sw, "swing", impedance={**F.PULL_GAINS, "path_tol": F.PULL_PATH_TOL_RAD}, events=events)
+    # the door, not the plan, sets where the hand ends (F.SWING_END_TOL_M): judged by the angle it reached
+    with ArcTrace(ai) as arc:
+        ok = planner.run(
+            sw,
+            "swing",
+            impedance={**F.PULL_GAINS, "path_tol": F.PULL_PATH_TOL_RAD},
+            events=events,
+            tol=F.SWING_END_TOL_M,
+        )
     final = ai.get_state()
-    say(
-        f"SWING {'DONE' if ok else 'STOPPED SHORT'}: EE {np.round(final['ee_pos'][:3], 4)}, gripper "
-        f"{float(final['gripper_pos']):.2f}"
-    )
+    record_swing_hinge(arc.xy)  # the real hinge, for the angle below and everything after (the push-open, the close)
     record_hand_angle(final["ee_pos"])  # the hand still holds the handle: it says where the door is
+    deg = float(load_door()["door_open_deg"])
+    if ok and deg < plan["swing_deg"] - F.SWING_ANGLE_TOL_DEG:
+        say(f"  the door is ~{deg:.0f} deg open, over {F.SWING_ANGLE_TOL_DEG:.0f} short of {plan['swing_deg']}")
+        ok = False
+    say(
+        f"SWING {'DONE' if ok else 'STOPPED SHORT'}: door ~{deg:.1f} deg, EE {np.round(final['ee_pos'][:3], 4)}, "
+        f"gripper {float(final['gripper_pos']):.2f}"
+    )
     if not ok:
         return False
     P._release(ai)  # stopped at the angle: let go, the hand still (Refused if the gripper doesn't open)

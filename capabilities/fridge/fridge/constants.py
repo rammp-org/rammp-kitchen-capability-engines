@@ -153,6 +153,28 @@ PULL_GAINS = {  # joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad
     "torque_limit": (39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0),
 }
 PULL_PATH_TOL_RAD = 0.15  # the swing's tracking limit (rad, per joint)
+# The swing's end is the door's, not the plan's: the hand is clamped on a handle that the door holds to its own arc,
+# and under impedance the arm gives to it. 11-13 morning (fridge_data/runs/*_open, all kq 400): both executed swings
+# ran to the end (no driver stop) and opened the door 61.6 and 62.4 deg of a 60 deg pull, but the hand ended 1.7 and
+# 3.0 cm off the planned goal -- the hinge was not detected (handle + measured offset), the real arc's radius ~2 cm
+# off it -- so the planner's 1.5 cm check called both "stopped short" and they never let go. The swing now counts as
+# done when the door (from the hand, about the hinge) is no more than SWING_ANGLE_TOL_DEG short of the angle asked for
+# and the hand within SWING_END_TOL_M of the planned end; what follows is planned again from where the arm is. Past
+# the angle is fine (the push-open refuses a door already too far open): a hinge estimate too far from the handle
+# carries the hand further round the real one -- the 14:55 open's 60 deg plan opened it ~68 about the fitted hinge.
+SWING_END_TOL_M = 0.04  # the hand's end off the planned one: beyond this something else held it (the seal, a slip)
+SWING_ANGLE_TOL_DEG = 5.0  # the door's angle at the end, from the hand: at most this short of swing_deg
+# The hinge from the swing itself: the hand clamped on the handle traces the door's real arc, so a circle fitted to the
+# tool's path (sampled at HINGE_FIT_HZ while the gripper is closed) is the hinge -- written to the door file for what
+# follows (the push-open, the close). The detected hinge is handle + a measured offset, and the handle's estimate moves
+# from open to open: 11-13 morning, the fit (0.2 mm RMS over 61 deg) put the 14:55 open's hinge 4.0 cm from the
+# estimate (along the door 0.329 m, not 0.368). The close planned the door turned 63 deg about that estimate, its
+# handle ~4 cm off the real one -- past the close's 1.3-2 cm clearances -- and the hand hit the handle going round.
+HINGE_FIT_HZ = 20.0
+HINGE_FIT_MIN_DEG = 20.0  # used only over at least this much of the swing ...
+HINGE_FIT_MAX_RMS_M = 0.01  # ... the path this close to a circle (11-13: 7.3 mm with the gripper closed to 0.97, 2.1
+# mm holding the bar at 0.68) ...
+HINGE_FIT_MAX_SHIFT_M = 0.08  # ... and the fit this close to the estimate: further, the hand slipped or the fit is off
 GRIP_DURING_SWING = True  # the gripper closes on the bar as the swing starts (the 2F-85 takes ~1 s), no stop on the
 # handle; False: it closes first, then the swing
 # the release (user, 11-09): the swing comes to a STOP at exactly swing_deg, the gripper then opens with the hand still
