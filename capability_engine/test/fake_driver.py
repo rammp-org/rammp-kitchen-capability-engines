@@ -199,6 +199,7 @@ class FakeDriver(Node):
         # /control_status
         self._arbitration = False
         self._estopped = False
+        self._estop_source = ""  # who engaged the stop: only its NOT_ENGAGED releases it
         self._owner_id = ""
         self._generation = 0
         self._halts = 0  # bumped by seize() and engage_estop(): running goals settle HALTED
@@ -566,7 +567,11 @@ class FakeDriver(Node):
     def _on_estop(self, msg):
         self.setpoints["/estop"].append(msg)
         with self._lock:
-            self._estopped = msg.engaged
+            # EStop 2.0: any ENGAGED engages; the stop ends only on NOT_ENGAGED from its source.
+            if msg.state != EStop.STATE_NOT_ENGAGED:
+                self._estopped, self._estop_source = True, msg.source
+            elif msg.source == self._estop_source:
+                self._estopped = False
         self._publish_control_status()
 
     def _publish_control_status(self):
