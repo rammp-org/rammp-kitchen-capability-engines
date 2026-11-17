@@ -11,4 +11,12 @@ container:
   command: ["ros2", "launch", "place_container", "place_container.launch.py", "mock:=true"]
 # No `params:` here: they would need `ros2 run`, and this fragment uses `ros2 launch` for mock:=true.
 publishes: [/place_container/status]
-subscribes: []
+subscribes:
+  # place_here's tap-to-place (during that action only): the scene camera's depth and camera_info, the scene
+  # segmenter's detections (the table's mask), tf (arm_mount <- the camera); and the run bag's camera topics
+  - /tf
+  - /tf_static
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /perception/object_detections

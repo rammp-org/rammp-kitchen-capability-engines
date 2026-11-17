@@ -4,17 +4,23 @@ Ported from RAMMP-table (place_bowl.py + kinova_arm.py), where it placed the con
 sticky note on the flatbot (2026-10-26). Everything is in arm_mount (x forward, y left, z true up).
 
 Actions:
-  place_here  the UI's one tap (offered on a `table`; no params): place for real at the marked spot and
-           end back at the start. Every action shows its phases and any error on the UI panel and is
-           recorded (a rosbag + run.json, bag.py).
+  place_here  the UI's tap on a `table`: tap-to-place. The scene camera's view of the table gets a grid of
+           free spots (spots.py: the segmenter's table mask or a plane fit to depth, the reach, the table's
+           edge, what is on it); the user taps one and presses Place here (or Use marked spot), and it is
+           placed for real there and ends back at the start (capability_ui.RunUI: Stop on every panel).
+           Every action shows its phases and any error on the UI panel and is recorded (a rosbag + run.json,
+           bag.py).
   mark     the closed fingertips touching the target -> saved as the spot (its z = the table). No motion.
   place    the container, gripped by its lip, to the spot ({x, y, table_z}, or the marked one):
              1. adjust: square the hand in place to the nearest hold (level, pointing `pitch_deg` down);
              2. lift to SAFE_HEIGHT above the table, if lower; 3. transit to above the spot; 3b. the
              approach straight down to `lower_from` above where the container meets the table
-             -- 1-3b are ONE go_to_joint_configs motion through our planned joints (cuRobo, around the
-             chair's collision volumes, blended at the waypoints; `carry_targets` pose: go_to_ee_poses;
-             `blend` false: separate moves as before);
+             -- 1-3 are ONE go_to_joint_configs motion through our planned joints (cuRobo, around the
+             chair's collision volumes, blended at the waypoints), stopping above the spot; 3b runs
+             right after on move_joints in position mode, through the planned straight line's joints
+             (cuRobo planned each 4 cm of it on its own and swung the hand out and back on every one,
+             plan.split_carry); `carry_targets` pose: go_to_ee_poses for 1-3b; `blend` false: separate
+             moves as before;
              4. the rest of the straight line down in the driver's IMPEDANCE mode
              until contact, then hold `hold_press` below it (lower.py); 5. open, drop `release_drop`;
              6. back out: straight back, or a short way back and then a turn of the hand that swings
@@ -42,11 +48,13 @@ from pathlib import Path
 import numpy as np
 import rammp_arm
 from capability_engine import Action, ArmError, Cancelled, CapabilityEngine, EngineError, run
-from capability_engine.arm import HOLD_LEVEL, HOLD_NONE, JointTarget, PoseTarget
+from capability_engine.arm import HOLD_LEVEL, HOLD_NONE, SUCCESSFUL, JointTarget, PoseTarget
+from capability_ui import RunUI, cancel_own_run
 from rammp_arm import _unwrap_from
 from scipy.spatial.transform import Rotation
 
-from . import lower, plan, ui
+from . import level_path, lower, plan, spots, ui
+from .scene import SceneCamera
 
 # The arm moved 8 in (0.2032 m) forward on the flatbot's chair (rammp-deployments #156, merged
 # 2026-11-07 17:56 UTC). Everything here is in arm_mount, which moved with the arm: the arm's own
@@ -56,6 +64,10 @@ ARM_MOVED = 1794074180.0  # 2026-11-07T17:56:20Z
 # deg: after the carry, the planned line down is used if the arm is within this of its first joints
 # (lower() starts the line from the measured joints, so this much is a smooth start, not a jump)
 REPLAN_DEG = 1.0
+# the level place's scripted back-out, right after the gripper opens: this far back along the hand's
+# horizontal heading and this far up, one straight line (position control, retreat_speed peak)
+BACK_OUT_M = 0.08
+BACK_OUT_UP_M = 0.03
 
 # ROS parameter -> default: the flatbot's values (2026-10-26, unless noted).
 PARAMS = {
@@ -95,7 +107,7 @@ PARAMS = {
     # (2026-10-29): the hand's speed where the table should be (m/s)
     "lower_speed": 0.02,
     # speed_scale of the carrying moves (go_to_ee_pose; was 0.2)
-    "go_to_speed_scale": 0.6,  # flatbot 2026-11-10 (was 0.4)
+    "go_to_speed_scale": 0.8,  # 80% (flatbot 2026-11-12, the level place; was 0.6, 0.4 on 2026-11-10)
     # speed_scale of the squaring turn with blend false (move_joints; was 0.5)
     "adjust_speed_scale": 1.0,
     # adjust -> lift -> transit as ONE go_to_ee_poses motion (cuRobo, blended at the waypoints, all at
@@ -105,13 +117,17 @@ PARAMS = {
     # "joints" = a go_to_joint_config to our checked joints first (if cuRobo swings the hand for the
     # pose, as it did 2026-10-08), then lift -> transit blended
     "adjust_mode": "pose",
-    # with blend: "joints" = the carrying motion goes through OUR planned joints (go_to_joint_configs,
-    # blended; plan_segment keeps each leg level, above the table and under 120 deg a joint), so the arm
-    # keeps the start's posture; "pose" = hand poses, cuRobo picks the joints -- on 2026-11-10 it chose
-    # another posture at the spot (J1 +101, J3 -147 deg from the start) and reset could not undo it
-    "carry_targets": "joints",
+    # with blend: "level" = level_path.py: however the start holds the container is the reference; the
+    # carry goes straight to above the spot (the lowest height that plans, the container's bottom >= 10 cm
+    # over the table), the hand only turning about vertical, the elbow kept clear of the chair and user by
+    # the arm's spare joint, every timed sample checked (tilt, clearance, height, limits) and exactly that
+    # trajectory run; then straight down (flatbot 2026-11-12: a joint-space carry from a home-based start
+    # flipped the arm and tipped the container 70-90 deg); "joints" = through OUR planned joints
+    # (go_to_joint_configs, blended, cuRobo's path unchecked); "pose" = hand poses, cuRobo picks the joints
+    # -- on 2026-11-10 it chose another posture at the spot (J1 +101, J3 -147 deg from the start)
+    "carry_targets": "level",
     # the retreat's peak speed (m/s; was 0.03)
-    "retreat_speed": 0.10,  # flatbot 2026-11-10 (was 0.06)
+    "retreat_speed": 0.128,  # 80% of arm.cart_speed (flatbot 2026-11-12; was 0.10, 0.06 on 2026-11-10)
     # speed_scale of reset's joint moves with reset_mode legacy (move_joints; was ~0.5)
     "reset_speed_scale": 1.0,
     # reset: "curobo" = one go_to_joint_configs motion (up, then the start), planned around the chair's
@@ -167,6 +183,28 @@ PARAMS = {
     # mock only: place fails at this phase (carry, lower, open, return), to try the UI's error panel
     # from the UI (which sends no params); "" = none. A goal's own mock_fail wins
     "mock_fail": "",
+    # place_here's tap-to-place (spots.py): the scene camera's depth (aligned to colour), its camera_info, and
+    # the scene segmenter's detections (the table's mask; "" = the plane fit to depth only)
+    "scene_depth_topic": "/scene_camera/depth/image_rect_raw",
+    "scene_info_topic": "/scene_camera/color/camera_info",
+    "detections_topic": "/perception/object_detections",
+    # wait this long (s) for the scene camera's depth, camera_info and tf
+    "scene_wait_s": 3.0,
+    # the offered spots: this far apart (m); the table must reach this far past the container's footprint (m),
+    # and nothing on it may be closer to the footprint than this (m)
+    "spot_step": 0.09,
+    "spot_edge_margin": 0.03,
+    "spot_clearance": 0.03,
+    # the table's height at the chosen spot (a plane fitted to the depth around it) is raised by this (m): the
+    # descent stops on contact, so a table found too high only makes it stop later; too low would be pushed
+    # into faster (the approach ends lower_from above it)
+    "table_z_bias": 0.01,
+    # a table that looks more tilted than this (deg) to the scene camera: its mount is off, no spots
+    "max_table_tilt_deg": 3.0,
+    # with a marked spot: the camera's table height there more than this (m) from the arm's mark = no spots
+    "table_check_tol": 0.03,
+    # where (m, arm_mount z) a table may be, for the plane fit without the segmenter's table mask
+    "table_z_range": [-0.10, 0.50],
 }
 EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
 PLACE = {
@@ -214,6 +252,9 @@ class _PanelContext:
     def __init__(self, ctx, action_id, panel=True):
         self._ctx, self._action_id, self._panel = ctx, action_id, panel
         self.bag = None  # the run's RunBag while it records: each phase goes in it too
+        self.ui_run = None  # place_here: its RunUI, which shows each phase with Stop
+        self.phase = None  # the last phase reported
+        self.camera = None  # place_here: the scene camera's subscriptions, made once per action
 
     def __getattr__(self, name):
         return getattr(self._ctx, name)
@@ -223,9 +264,14 @@ class _PanelContext:
 
     def progress(self, phase, pct, message="", pausable=True):
         self._ctx.progress(phase, pct, message, pausable)
+        self.phase = phase
         if self.bag is not None:
             self.bag.event("phase", dict(phase=phase, pct=pct, message=message))
-        self.update_user_panel(panel_json=ui.progress_panel(self._action_id, phase, message))
+        if self.ui_run is not None:
+            text, bar = ui.PHASES.get(phase, (message or phase, None))
+            self.ui_run.moving(text, bar, phase)
+        else:
+            self.update_user_panel(panel_json=ui.progress_panel(self._action_id, phase, message))
 
 
 class Capability(CapabilityEngine):
@@ -234,7 +280,7 @@ class Capability(CapabilityEngine):
     perception_classes = ["table"]
     required_resources = ["arm", "gripper"]
     actions = [
-        # The UI's one tap (it sends no params): the place for real, at the marked spot, back to the start
+        # The UI's tap on a table: pick a spot on the scene camera's view, then the place for real, back to the start
         Action("place_here", ui.PLACE_HERE),
         Action("place", "Place the container on the table", params_schema=PLACE),
         Action("mark", "Save the fingertip position as the spot", params_schema={"type": "object"}),
@@ -259,9 +305,12 @@ class Capability(CapabilityEngine):
     def execute(self, action_id, params, ctx):
         """Runs the action with the user's UI panel showing each phase; a failure is shown there too
         (with an OK button, waited for up to ui_error_wait_s) before the action ends with it.
-        Standalone (no orchestrator, no session token) every panel call is a logged no-op."""
+        Standalone (no orchestrator, no session token) every panel call is a logged no-op.
+        place_here is the UI's tap-to-place (_place_here)."""
+        if action_id == "place_here":
+            return self._place_here(params, ctx)
         ctx = _PanelContext(ctx, action_id, panel=self.orchestrated)
-        first = {"place": "plan", "place_here": "plan", "reset": "reset", "retreat": "retreat"}
+        first = {"place": "plan", "reset": "reset", "retreat": "retreat"}
         first = first.get(action_id, action_id)
         while True:
             ctx.update_user_panel(panel_json=ui.progress_panel(action_id, first))
@@ -275,26 +324,211 @@ class Capability(CapabilityEngine):
             except Cancelled:
                 raise
             except EngineError as e:
-                # The UI's tap, refused before anything moved: the reason and the same button to try
-                # again (once the user has fixed it). After the arm moved ("STOPPED ..."): Done only.
-                # As microwave's UI flow (feature/14-microwave-close).
-                if action_id == "place_here" and e.recoverable and "STOPPED" not in str(e):
-                    if self._wait_for_button(ctx, ui.retry_panel(str(e)), ui.RETRY):
-                        continue
-                    raise
-                self._show_error(ctx, action_id, str(e))
+                self._show_error(ctx, action_id, ui.failure_message(action_id, str(e)))
                 raise
-            except Exception as e:  # a bug: still say so on the UI, then let the engine report it
-                self._show_error(ctx, action_id, f"Unexpected error ({type(e).__name__}): {e}")
+            except Exception:  # a bug: still say so on the UI, then let the engine report it
+                self._show_error(ctx, action_id, ui.bug_message(action_id))
                 raise
         if bag is not None:
             self.get_logger().info(f"run recorded: {bag.run_dir} (bag + run.json)")
             result = {**result, "bag_path": str(bag.path), "recording_errors": list(bag.errors)}
-        if action_id == "place_here":  # the UI's one tap: say it's done, until the user taps Done
-            self._wait_for_button(ctx, ui.placed_panel(), ui.DONE)
-        else:
-            ctx.update_user_panel(panel_json=ui.done_panel(action_id, "Done"))
+        ctx.update_user_panel(panel_json=ui.done_panel(action_id, "Done"))
         return result
+
+    # -- place_here: the UI's tap-to-place ---------------------------------------------------------
+
+    def _place_here(self, params, ctx):
+        """The spot picker (_pick_spot), then the place there for real under a progress panel with Stop, then
+        a Done notice. A refusal before anything moved goes back to the picker with the reason; a failure after
+        the arm moved ("STOPPED ...") is shown and ends the action; Stop shows what was left where. Goal params
+        x, y, table_z (all three) skip the picker (driving it by CLI)."""
+        pctx = _PanelContext(ctx, "place_here", panel=self.orchestrated)
+        run_ui = RunUI(pctx, ui.title("place_here"), cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+        pctx.ui_run = run_ui
+        if not self.mock and not self.cfg["allow_execute"]:
+            run_ui.refuse(ui.REFUSED_OFF_UI)
+            raise EngineError("refused", ui.REFUSED_OFF, recoverable=True)
+        given = {k: params[k] for k in ("x", "y", "table_z") if k in params}
+        note = ""
+        while True:
+            choice = given or self._pick_spot(pctx, run_ui, note)
+            try:
+                result = run_ui.motion(
+                    ui.MOVING,
+                    lambda choice=choice: self._place_here_run(pctx, choice),
+                    stopped_note=lambda: ui.stopped_note(pctx.phase),
+                )
+                break
+            except Cancelled:
+                raise
+            except EngineError as e:
+                if run_ui.user_stopped:  # motion() has shown "Stopped"
+                    raise
+                if e.recoverable and "STOPPED" not in str(e) and not given and run_ui.connected:
+                    # refused before anything moved: back to the picker, with the reason
+                    self.get_logger().warning(f"place_here: {e} -- back to the spot picker")
+                    note = ui.retry_note(str(e))
+                    continue
+                run_ui.error(ui.failure_message("place_here", str(e)))
+                raise
+            except Exception:  # a bug: still say so on the UI, then let the engine report it
+                if not run_ui.user_stopped:
+                    run_ui.error(ui.bug_message("place_here"))
+                raise
+        run_ui.done(ui.PLACED, mock=self.mock)
+        return result
+
+    def _place_here_run(self, pctx, choice):
+        """The place itself (recorded): at `choice` (x, y, table_z), or {} for the marked spot."""
+        with self._recording("place_here", choice) as bag:
+            pctx.bag = bag
+            result = self._act("place_here", dict(choice), pctx)
+            if bag is not None:
+                bag.result = result
+        result = {**result, "spot": dict(choice) or "marked"}
+        if bag is not None:
+            self.get_logger().info(f"run recorded: {bag.run_dir} (bag + run.json)")
+            result = {**result, "bag_path": str(bag.path), "recording_errors": list(bag.errors)}
+        return result
+
+    def _pick_spot(self, pctx, run_ui, note=""):
+        """Ask the user where to put the container: the free spots on the scene camera's view of the table as
+        tappable boxes, Place here (after a tap), Use marked spot (if a valid one is saved). Returns the place's
+        params: {x, y, table_z} of the tapped spot, or {} for the marked spot. Without a UI (standalone): the
+        marked spot (mock: the first free spot), else refused."""
+        marked = self._marked_spot()
+        look = True
+        while True:
+            if look:
+                search, scene = self._find_spots(pctx, marked)
+                objects = [] if search.problem else spots.ui_objects(search.spots, scene, self.cfg["spot_step"])
+                shown = {o["instance_id"] for o in objects}
+                by_id = {k: s for k, s in search.by_id().items() if k in shown}
+                look = False
+            tapped = {"id": None}
+
+            def on_tap(instance_id, by_id=by_id, tapped=tapped):
+                if instance_id in by_id:
+                    tapped["id"] = instance_id
+                    pctx.update_user_panel(selected_instance_id=instance_id)  # the highlight follows the tap
+
+            if objects:
+                buttons, message = [ui.PLACE], ui.pick_message(len(objects), note)
+            else:
+                buttons, message = [ui.LOOK], ui.no_spot_message(search.problem, marked is not None, note)
+            buttons += [ui.MARKED] if marked is not None else []
+            answer = run_ui.ask(message, buttons, objects=objects, on_tap=on_tap)
+            note = ""
+            if answer is None:
+                if run_ui.connected:
+                    raise EngineError("no_answer", "no spot was chosen on the UI in time", recoverable=True)
+                if marked is not None:
+                    return {}
+                if self.mock and by_id:
+                    s = next(iter(by_id.values()))
+                    return dict(x=s["x"], y=s["y"], table_z=s["z"])
+                raise EngineError(
+                    "refused",
+                    "place_here without the UI needs x, y and table_z, or a marked spot (run mark)",
+                    recoverable=True,
+                )
+            if answer == ui.LOOK["button_id"]:
+                look = True
+            elif answer == ui.MARKED["button_id"]:
+                return {}
+            elif tapped["id"] is None:
+                note = ui.TAP_FIRST
+            else:
+                spot = by_id[tapped["id"]]
+                table_z, why = self._table_z(search, spot)
+                if table_z is not None:
+                    self.get_logger().info(
+                        f"place_here: spot {spot['id']} x={spot['x']:.3f} y={spot['y']:.3f}, table z "
+                        f"{table_z:.3f} (incl. +{self.cfg['table_z_bias']:.3f} bias), from the {search.source}"
+                    )
+                    return dict(x=spot["x"], y=spot["y"], table_z=table_z)
+                note = ui.table_note(why)
+
+    def _find_spots(self, pctx, marked):
+        """(spots.Search, spots.Scene) of the scene camera's newest frame (mock: a made-up table). A Search
+        with `problem` when there is nothing to offer: the camera isn't ready, no table, the camera's view of
+        the table disagrees with the arm (tilted, or not at the marked height)."""
+        if self.mock:
+            scene = spots.synthetic_scene()
+        else:
+            if pctx.camera is None:
+                pctx.camera = SceneCamera(
+                    self,
+                    rammp_arm.FRAME,
+                    self.cfg["scene_depth_topic"],
+                    self.cfg["scene_info_topic"],
+                    self.cfg["detections_topic"],
+                )
+            try:
+                scene = pctx.camera.grab(float(self.cfg["scene_wait_s"]), pctx.checkpoint)
+            except RuntimeError as e:
+                return spots.Search(problem=f"the scene camera isn't ready ({e})"), None
+        search = spots.find_spots(
+            scene,
+            step=float(self.cfg["spot_step"]),
+            edge_margin=float(self.cfg["spot_edge_margin"]),
+            clearance=float(self.cfg["spot_clearance"]),
+            footprint_r=plan.BOWL_RADIUS + plan.LIP_WIDTH,
+            reach=tuple(float(v) for v in self.cfg["reach"]),
+            table_z_range=tuple(float(v) for v in self.cfg["table_z_range"]),
+            max_tilt_deg=float(self.cfg["max_table_tilt_deg"]),
+            exclude=self._hand_exclusion(),
+        )
+        if not search.problem and marked is not None:
+            # the camera against the arm: the table's height where the fingertips marked it
+            off = float(spots.plane_z(search.plane, marked["x"], marked["y"])) - float(marked["table_z"])
+            if abs(off) > float(self.cfg["table_check_tol"]):
+                search.spots = []
+                search.problem = (
+                    f"the scene camera sees the table {abs(off) * 100:.0f} cm {'higher' if off > 0 else 'lower'} "
+                    f"than the arm measured it at the marked spot, so the camera's calibration is off"
+                )
+        self.get_logger().info(
+            f"place_here: {len(search.spots)} free spots from the {search.source or 'scene camera'} "
+            f"{getattr(search, 'counts', '')}, table tilt "
+            + ("?" if search.tilt_deg is None else f"{search.tilt_deg:.1f} deg")
+            + (f"; {search.problem}" if search.problem else "")
+        )
+        return search, scene
+
+    def _hand_exclusion(self):
+        """[(x, y, r)]: the hand and the container it holds, which the scene camera may see over the table, are
+        not obstacles. None in mock or without the arm's state."""
+        if self.mock:
+            return ()
+        try:
+            x, y = (float(v) for v in self.arm.get_state()["ee_pos"][:2])
+        except Exception as e:  # no state: nothing left out (more conservative)
+            self.get_logger().warning(f"place_here: no hand position to leave out of the obstacles ({e})")
+            return ()
+        return ((x, y, plan.BOWL_RADIUS + plan.LIP_WIDTH + 0.06),)
+
+    def _table_z(self, search, spot):
+        """(table_z for the place at `spot`, "") or (None, why): a plane fitted to the table's depth around the
+        spot, raised by table_z_bias (erring high is safe: the descent stops on contact)."""
+        try:
+            z = spots.local_table_z(search.inliers, spot["x"], spot["y"])
+        except ValueError as e:
+            return None, str(e)
+        if abs(z - spot["z"]) > 0.02:
+            return None, f"the table there is {abs(z - spot['z']) * 100:.0f} cm off the table's plane"
+        return z + float(self.cfg["table_z_bias"]), ""
+
+    def _marked_spot(self):
+        """The saved spot.json if it can be used (saved after state_valid_after, younger than
+        max_spot_age_min), else None. Never raises: it only decides whether Use marked spot is offered."""
+        try:
+            spot = self._load("spot.json", "no marked spot")
+        except (plan.Refused, OSError, ValueError):
+            return None
+        if (time.time() - float(spot.get("time", 0.0))) / 60 > float(self.cfg["max_spot_age_min"]):
+            return None
+        return spot
 
     def _recording(self, action_id, params):
         """The run's RunBag (a context manager), or a no-op one with record_bag off. A recording
@@ -371,13 +605,13 @@ class Capability(CapabilityEngine):
             if action_id == "mark":
                 return self._mark(model, log)
             if action_id == "place_here":
-                # The UI's tap: for real (it sends no params), at the marked spot, back to the start
+                # The UI's tap: for real, at the chosen spot (x, y, table_z; none = the marked spot), back to the start
                 if not self.cfg["allow_execute"]:
                     raise plan.Refused(
                         "placing is switched off on this robot (allow_execute is false). Next: start "
                         "place_container with allow_execute:=true, with someone at the e-stop"
                     )
-                result = self._place(model, {}, True, ctx, log)
+                result = self._place(model, params, True, ctx, log)
                 if self.cfg["return_mode"] != "blended":  # legacy: the separate reset brings it back
                     ctx.progress("reset", 0.0)
                     self._reset(model, {"execute": True, "empty": True}, True, log)
@@ -431,6 +665,8 @@ class Capability(CapabilityEngine):
                 f"NOTE: the spot is {r:.2f} m from the arm's base axis, outside the reach param {lo:.2f}-{hi:.2f} m "
                 "(measured without the chair volumes); the plan decides"
             )
+        if self.cfg["blend"] and self.cfg["carry_targets"] == "level":
+            return self._place_level(model, spot, table_z, q_now, execute, ctx, log)
         moves, descent, info = plan.plan_place(
             model,
             q_now,
@@ -452,33 +688,57 @@ class Capability(CapabilityEngine):
             f"adjust turns the hand {info['adjust_deg']:.1f} deg. cuRobo avoids the chair's collision volumes; the "
             "table and what is on it are NOT in its world -- keep the way to the spot clear"
         )
-        # Before anything moves (no pause at the top): the ends of the line down and the retreat
-        # against the chair's volumes, on the planned line (the one from where the arm ends is the same
-        # line down, a few mm apart at most).
-        self._check_contact_zone(model, descent, table_z, log)
+        # With joint targets the approach (3b) runs on move_joints after the carrying motion, not
+        # through cuRobo: it must be the straight line it was planned as.
+        carry, approach = plan.split_carry(moves)
+        on_line = bool(approach) and self.cfg["blend"] and self.cfg["carry_targets"] == "joints"
+        if on_line:
+            problems = plan.check_approach(model, carry[-1][1], approach)
+            if problems:
+                raise plan.Refused("the approach down to the slow line is not straight: " + "; ".join(problems))
+        # Before anything moves (no pause at the top): the ends of the approach, the line down and the
+        # retreat against the chair's volumes, on the planned line (the one from where the arm ends is
+        # the same line down, a few mm apart at most).
+        self._check_contact_zone(model, descent, table_z, log, q_approach=carry[-1][1] if on_line else None)
         if not execute:
             if self.cfg["blend"] and self.cfg["curobo_check"]:
                 if self.cfg["carry_targets"] == "joints":
-                    self._check_carry_joints(moves, log)
+                    self._check_carry_joints(carry if on_line else moves, log)
                 else:
                     self._check_carry(info["waypoints"], log)
+            if on_line:
+                log(f"approach: {self._approach_text(model, carry[-1][1], approach)}")
             log("DRY RUN -- all checks passed, nothing commanded")
             return {"executed": False, "plan": steps}
 
         self._ready()
         self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
         if self.cfg["blend"] and self.cfg["carry_targets"] == "joints":
-            self._carry_joints(model, moves, table_z, ctx, log)
+            self._carry_joints(model, carry if on_line else moves, table_z, ctx, log)
+            if on_line:
+                self._approach(model, carry[-1][1], approach, log)
         elif self.cfg["blend"]:
             self._carry(info["waypoints"], table_z, ctx, log)
         else:
             self._carry_separately(model, moves, ctx, log)
+        return self._lower_and_let_go(model, spot, table_z, q_now, descent, info, ctx, log)
+
+    def _lower_and_let_go(self, model, spot, table_z, q_now, descent, info, ctx, log, up_tool=None):
+        """After the carrying motion (and the approach): the container's level checked above the spot,
+        the line down (again from where the arm IS when it ended elsewhere), then lower.py's impedance
+        lowering, letting go and backing out (or the blended return)."""
         q_top = self._joints()
-        tilt = model.tilt(q_top)
-        if tilt > 1.0:
+        if up_tool is not None:  # the level place: off how the START held it
+            tilt = level_path.tilt_from(model.fk(q_top)[:3, :3], up_tool)
+            if tilt > level_path.MAX_TILT_DEG:
+                raise plan.Refused(
+                    f"STOPPED above the spot: the container is {tilt:.1f} deg from how the start held it "
+                    f"(max {level_path.MAX_TILT_DEG:g}) -- nothing let go"
+                )
+        elif model.tilt(q_top) > 1.0:
             raise plan.Refused(
-                f"STOPPED above the spot: the container is {tilt:.1f} deg off level after the carrying motion "
-                "(max 1.0); "
+                f"STOPPED above the spot: the container is {model.tilt(q_top):.1f} deg off level after the carrying "
+                "motion (max 1.0); "
                 "nothing let go. Next: reset, then run again with adjust_mode:=joints or blend:=false"
             )
         # The arm ended on the planned joints (a joint-target carry does): the planned line down starts
@@ -486,6 +746,11 @@ class Capability(CapabilityEngine):
         # (pose targets: cuRobo chose the joints) the line again, from where the arm IS, or a line planned
         # from other joints would start with a jump between the two postures.
         off_deg = float(np.max(np.abs(plan.wrap_deg(q_top - np.asarray(descent[1][0])))))
+        if off_deg > REPLAN_DEG and up_tool is not None:  # the level line was searched clear: not replanned blind
+            raise plan.Refused(
+                f"STOPPED above the spot: the arm ended {off_deg:.1f} deg from the planned line's start -- "
+                "nothing let go"
+            )
         if off_deg > REPLAN_DEG:
             log(f"the arm ended {off_deg:.1f} deg from the planned joints: the line down planned again from there")
             descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
@@ -502,7 +767,25 @@ class Capability(CapabilityEngine):
             ctx.progress("open", 0.0)
             lower.let_go(self.arm, rec, log)
             drop = self.cfg["release_drop"]
-            if self.cfg["return_mode"] == "blended":
+            if up_tool is not None:  # the level place: no sink, no pause, the scripted back-out
+                ctx.progress("retreat", 0.0)
+                lower.exit_impedance(self.arm, log)
+                q = np.asarray(self.arm.raw_joints(), dtype=float)
+                back, _ = self._plan_back_out(model, q, table_z)
+                log(
+                    f"-> back-out: {BACK_OUT_M * 100:.0f} cm back, {BACK_OUT_UP_M * 100:.0f} cm up "
+                    f"(position control, {back[0][-1]:.1f} s)"
+                )
+                res = self.arm.execute_joint_trajectory(
+                    rammp_arm.JOINTS, list(zip(*back, strict=True)), path_tolerance=rammp_arm.PATH_TOL_RAD
+                )
+                if res.error_code != SUCCESSFUL:
+                    raise plan.Refused(
+                        "STOPPED in the back-out (the container is down, the gripper open): "
+                        + plan.explain_failure(f"back-out ended {res.error_code} {res.error_string}", ["retreat"])
+                    )
+                where = "Position control, the hand backed out by the container."
+            elif self.cfg["return_mode"] == "blended":
                 # the drop, the retreat (and swing) and the way back to the start: ONE blended motion
                 ctx.progress("return", 0.0)
                 moves = plan.return_moves(model, hold_q, q_now, drop=drop, log=log)
@@ -659,6 +942,187 @@ class Capability(CapabilityEngine):
         if not self.arm.go_to_joint_configs(targets, label):
             raise plan.Refused("STOPPED: " + plan.explain_failure(self.arm.last_error, names, where))
 
+    def _approach_text(self, model, q_top, approach):
+        lengths = plan.approach_lengths(model, q_top, approach)
+        z_top, z_end = model.fk(q_top)[2, 3], model.fk(approach[-1][1])[2, 3]
+        return (
+            f"straight down {sum(lengths) * 100:.0f} cm (z {z_top:.3f} -> {z_end:.3f}) through {len(approach)} "
+            f"joint waypoint(s), move_joints in position mode, speed x{self.cfg['go_to_speed_scale']}"
+        )
+
+    def _approach(self, model, q_top, approach, log):
+        """3b: from above the spot straight down to where the slow line starts, on move_joints through
+        the planned line's joints (check_approach checked it straight and level), position mode, timed
+        in metres of tool travel. Not a cuRobo leg: cuRobo doesn't keep a path straight (split_carry);
+        its ends were checked against the chair's volumes (contact_zone_checks)."""
+        lengths = plan.approach_lengths(model, q_top, approach)
+        log(f"-> approach: {self._approach_text(model, q_top, approach)}")
+        ok = self.arm.move_joints(
+            [q for _, q in approach], cart_lengths=lengths, speed_scale=self.cfg["go_to_speed_scale"]
+        )
+        if not ok:
+            where = {"approach": model.fk(approach[-1][1])[:3, 3]}
+            raise plan.Refused(
+                "STOPPED above the spot, nothing let go: "
+                + plan.explain_failure(self.arm.last_error, ["approach"], where)
+            )
+
+    def _plan_back_out(self, model, q, table_z):
+        """The scripted back-out from joints q (the hand on the lip, the gripper open): the tool straight back
+        BACK_OUT_M along the hand's horizontal heading and BACK_OUT_UP_M up (one straight line), orientation
+        kept, searched and timed like the carry (retreat_speed peak) and every sample checked against the chair
+        and user boxes (the hand is empty: no container). ((t, q, qd), summary)."""
+        chair = self._chair(model)
+        chair.set_container(None)
+        try:
+            T = model.fk(q)
+            h = T[:3, 2].copy()
+            h[2] = 0.0
+            h /= np.linalg.norm(h)
+            p_to = T[:3, 3] - BACK_OUT_M * h + np.array([0.0, 0.0, BACK_OUT_UP_M])
+            knots = level_path.search_line(
+                model, chair, q, p_to, T[:3, :3], level_path.LINE_KNOT_M, "back-out", level_path.LINE_NULL_STEPS
+            )
+            scale = min(1.0, self.cfg["retreat_speed"] / rammp_arm.CART_SPEED)
+            samples, _ = level_path.timed(q, knots, model, scale)
+            summary = level_path.check_samples(
+                model, chair, samples, level_path.up_in_tool(T[:3, :3]), table_z, "back-out", scale, min_bottom=None
+            )
+        finally:
+            chair.set_container(None)
+        return samples, summary
+
+    def _chair(self, model):
+        """The chair and user boxes in the model's sim (level_path.Chair), made once per sim."""
+        key = model.rb.physics_client_id
+        if getattr(self, "_chair_cache", None) is None or self._chair_cache[0] != key:
+            self._chair_cache = (key, level_path.Chair(model))
+        return self._chair_cache[1]
+
+    def _place_level(self, model, spot, table_z, q_now, execute, ctx, log):
+        """carry_targets level (level_path.py): the start, however it holds the container, is the reference.
+        The carry goes straight to above the spot (the lowest height whose path plans, the container's bottom
+        >= 10 cm over the table), the hand only turning about vertical, the elbow kept clear of the chair and
+        its user; then straight down, fast to lower_from and slow in impedance until it feels the table.
+        Every timed sample of the carry, the approach and the line down is checked before anything moves,
+        and exactly those trajectories run."""
+        chair = self._chair(model)
+        q0 = np.asarray(self.arm.raw_joints(), dtype=float)  # as the driver reports them: the plan starts here
+        T0 = model.fk(q0)
+        up = level_path.up_in_tool(T0[:3, :3])
+        chair.set_container(up)  # the held container is checked against the chair and user too
+        heading = plan.approach_direction(spot)
+        speed = self.cfg["go_to_speed_scale"]
+        t_plan = time.monotonic()
+        height, knots = level_path.carry(model, chair, q0, spot, table_z, heading)
+        (t, q, qd), _ = level_path.timed(q0, knots, model, speed)
+        s_carry = level_path.check_samples(model, chair, (t, q, qd), up, table_z, "carry", speed)
+        # The lip is at the fingertips, below the tool frame by the hand's pitch: the tool-frame heights the
+        # line down and the lowering use (table_z + BOWL_DEPTH where the bottom meets the table) move up by it
+        table_tool = table_z + level_path.tip_drop(model, knots[-1])
+        floor_z = table_tool + max(plan.BOWL_DEPTH - plan.PRESS_BELOW, plan.MIN_TOOL_HEIGHT)
+        line = level_path.descent_line(model, chair, knots[-1], floor_z)
+        if not plan.reaches(line, table_tool):
+            raise plan.Refused(plan.reach_refusal(line, table_tool, spot) + " -- nothing moved")
+        approach, descent = plan.split_approach(line, table_tool, self.cfg["lower_from"])
+        if approach:  # through every point of the searched line, not only split_approach's 4 cm waypoints
+            k = len(line[0]) - len(descent[0])
+            approach = [("approach'", qq) for qq in line[1][1:k]] + [("approach", line[1][k])]
+            appr = level_path.timed(knots[-1], [qq for _, qq in approach], model, speed)[0]
+            s_appr = level_path.check_samples(
+                model,
+                chair,
+                appr,
+                up,
+                table_z,
+                "approach",
+                speed,
+                min_bottom=None,
+                vertical=True,
+            )
+        slow = (None, descent[1], np.zeros_like(descent[1]))  # the lowering is slow (lower_speed): no speed check
+        s_line = level_path.check_samples(
+            model, chair, slow, up, table_z, "line down", speed, min_bottom=None, vertical=True
+        )
+        q_meet = plan.hold_point(descent[1], descent[0], table_tool + plan.BOWL_DEPTH)
+        q_meet = np.asarray(descent[1][-1] if q_meet is None else q_meet, dtype=float)
+        back, s_back = self._plan_back_out(model, q_meet, table_z)
+        self._check_contact_zone(
+            model, descent, table_tool, log, q_approach=knots[-1] if approach else None, q_retreat=back[1][-1]
+        )
+        top = model.fk(knots[-1])[:3, 3]
+        log(
+            f"carry: straight to above the spot at {height * 100:.0f} cm (tool {np.round(top, 3).tolist()}), "
+            f"{len(knots)} knots, {t[-1]:.1f} s at speed x{speed}: container within {s_carry['tilt_deg']:.1f} deg of "
+            f"how the start holds it, arm >= {s_carry['clear_m'] * 100:.1f} cm from the padded chair/user boxes "
+            f"(closest: {s_carry['clear_link']} to {s_carry['clear_box']}), container bottom >= "
+            f"{s_carry['bottom_m'] * 100:.0f} cm over the table"
+        )
+        log(
+            "carry joints (deg): "
+            + " ".join(f"J{j + 1} {np.degrees(q[:, j]).min():.0f}..{np.degrees(q[:, j]).max():.0f}" for j in range(7))
+        )
+        if approach:
+            log(
+                f"approach: straight down {(line[0][0] - descent[0][0]) * 100:.0f} cm in {appr[0][-1]:.1f} s "
+                f"(position control, every 2 mm point of the line); tilt {s_appr['tilt_deg']:.1f} deg, "
+                f">= {s_appr['clear_m'] * 100:.1f} cm from the boxes"
+            )
+        zs = descent[0]
+        log(
+            f"lower: from z={zs[0]:.3f} down to at most {zs[-1]:.3f} ({(zs[0] - zs[-1]) * 100:.0f} cm) in impedance "
+            f"until it feels the table; tilt {s_line['tilt_deg']:.1f} deg, >= {s_line['clear_m'] * 100:.1f} cm from "
+            f"the boxes (closest: {s_line['clear_link']} to {s_line['clear_box']}). "
+            f"Planned in {time.monotonic() - t_plan:.0f} s. "
+            "The table and what is on it are NOT modelled: keep the way to the spot clear"
+        )
+        log(
+            f"back-out: as soon as the gripper is open, {BACK_OUT_M * 100:.0f} cm back and "
+            f"{BACK_OUT_UP_M * 100:.0f} cm up along the hand, one straight line "
+            f"(position control, {back[0][-1]:.1f} s, no sink, no pause); >= {s_back['clear_m'] * 100:.1f} cm from the "
+            "boxes from where the container should touch the table (planned again from where it does)"
+        )
+        steps = [
+            dict(name="carry", tool=np.round(top, 3).tolist(), above_table=round(float(top[2] - table_z), 3)),
+            dict(name="lower", from_z=round(float(zs[0]), 3), to_z=round(float(zs[-1]), 3)),
+        ]
+        if not execute:
+            log("DRY RUN -- all checks passed, nothing commanded")
+            return {"executed": False, "plan": steps}
+
+        self._ready()
+        off = float(np.degrees(np.max(np.abs(plan.wrap(np.asarray(self.arm.raw_joints()) - q0)))))
+        if off > 0.5:
+            raise plan.Refused(
+                f"the arm moved {off:.1f} deg while the place was planned -- nothing moved; run it again"
+            )
+        self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
+        ctx.progress("carry", 0.0)
+        log(f"-> carry: the checked trajectory as planned (execute_joint_trajectory, {t[-1]:.1f} s)")
+        res = self.arm.execute_joint_trajectory(
+            rammp_arm.JOINTS, list(zip(t, q, qd, strict=True)), path_tolerance=rammp_arm.PATH_TOL_RAD
+        )
+        if res.error_code != SUCCESSFUL:
+            raise plan.Refused(
+                "STOPPED in the carry, nothing let go: "
+                + plan.explain_failure(f"carry ended {res.error_code} {res.error_string}", ["carry"], {"carry": top})
+            )
+        if approach:  # exactly the checked samples, from where the carry ended
+            off = float(np.degrees(np.max(np.abs(plan.wrap(np.asarray(self.arm.raw_joints()) - appr[1][0])))))
+            if off > 1.0:
+                raise plan.Refused(f"STOPPED above the spot: the arm is {off:.1f} deg from the approach's start")
+            log(f"-> approach: the checked straight line down ({appr[0][-1]:.1f} s)")
+            res = self.arm.execute_joint_trajectory(
+                rammp_arm.JOINTS, list(zip(*appr, strict=True)), path_tolerance=rammp_arm.PATH_TOL_RAD
+            )
+            if res.error_code != SUCCESSFUL:
+                raise plan.Refused(
+                    "STOPPED in the approach, nothing let go: "
+                    + plan.explain_failure(f"approach ended {res.error_code} {res.error_string}", ["approach"])
+                )
+        info = {"floor_z": floor_z}
+        return self._lower_and_let_go(model, spot, table_tool, q_now, descent, info, ctx, log, up_tool=up)
+
     def _check_carry_joints(self, moves, log):
         """Dry run: cuRobo plans each joint leg of the carrying motion (nothing moves), from the
         measured joints and then each planned one."""
@@ -731,13 +1195,14 @@ class Capability(CapabilityEngine):
             log(f"cuRobo check: {w['name']} plans ({res.planning_time:.2f} s)")
             start = starts[k]
 
-    def _check_contact_zone(self, model, descent, table_z, log):
-        """cuRobo plans (nothing moves) to the ends of the line down and the retreat, which run on
-        move_joints and so are never checked against the chair's collision volumes otherwise."""
+    def _check_contact_zone(self, model, descent, table_z, log, q_approach=None, q_retreat=None):
+        """cuRobo plans (nothing moves) to the ends of the approach (from `q_approach`, if it runs on
+        move_joints), the line down and the retreat, which run on move_joints and so are never checked
+        against the chair's collision volumes otherwise."""
         if not self.cfg["curobo_check"]:
-            log("curobo_check is off: the line down and the retreat are NOT checked against the chair")
+            log("curobo_check is off: the approach, the line down and the retreat are NOT checked against the chair")
             return
-        for label, q_from, q_to in plan.contact_zone_checks(model, descent, table_z):
+        for label, q_from, q_to in plan.contact_zone_checks(model, descent, table_z, q_approach, q_retreat):
             try:
                 res = self.arm.plan_to_joints(q_to, q_from)
             except ArmError as e:

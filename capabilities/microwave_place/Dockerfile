@@ -34,6 +34,9 @@ ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 COPY capability_engine/ src/capability_engine/
+# capability_ui: the UI actions' panels (RunUI: Stop on every panel, bounded waits), shared with the other capabilities
+COPY shared/capability_ui/package.xml src/capability_ui/package.xml
+COPY shared/capability_ui/ src/capability_ui/
 COPY capabilities/microwave_place/ src/microwave_place/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the

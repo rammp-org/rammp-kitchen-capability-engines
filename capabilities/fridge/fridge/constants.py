@@ -56,13 +56,55 @@ START_REACHED_DEG = 2.0  # every joint already this close (self.arm's GO_TO_TRAC
 # 0.8 cm behind the tool frame), not door_common's FINGERTIP_PAST_TOOL 6.2 cm; the detected bar front was right
 # to <0.5 cm (fingers teleoped onto it: /fridge_data/true_handle_20261109.json). A level grasp now puts the
 # fingertips 3 cm past the bar's front (tool = bar front - 1.3 cm). Backup constants.py.bak_20261109.
-GRIP_EXT = 0.053
+# 11-13: - 0.014 for the sensor puck (rammp-deployments af2396b, #149): the puck was on the arm when 0.053 was
+# tuned, but the model put arm_tool_frame 0.120 m past the flange, so every grasp went 14 mm deeper than planned
+# and 0.053 held back those 14 mm. The model now has arm_tool_frame at 0.134 m and parks the flange 14 mm further
+# back by itself, so 0.053 would grasp 14 mm shallower than the grasp that worked: take the 14 mm out again.
+GRIP_EXT = 0.053 - 0.014
 VERTICAL_CORR = 0.0  # world z
 GRASP_X_ADJUST = 0.040  # along the approach axis
 GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose, to let its bar turn)
 # the open's grasp_offset_m (up from the middle of the bar) keeps the middle of the finger pads at least this far in
 # from either end of handle_length_m: half the 2F-85 pad's ~2.2 cm width, plus ~2 cm for the detected middle being off
 GRASP_END_MARGIN_M = 0.03
+
+# --- which grasp the open uses (the node's `grasp` parameter; configure sets GRASP): "side" (side_grasp.py, this
+# branch's default: in along the door from the hinge side, one finger behind the bar) or "front" (fingers across the
+# bar, straight in from in front of it: feature/15-fridge's). Everything after the grasp is the same code ---
+GRASPS = ("side", "front")
+GRASP = "side"
+# --- the side grasp (side_grasp.py). Its pads' place is the one that ran on the arm on 11-06 (89504f3's
+# side_grasp_poses, with the then GRIP_EXT 0.126 - GRASP_X_ADJUST 0.040 - GRASP_PADS_PAST_TOOL 0.042 - SIDE_DEEPER_M
+# 0.055), written out because GRIP_EXT has changed since (the front grasp's, 11-09). It was found with the SCENE
+# camera's handle point; the wrist camera's (detect_camera wrist, the default) is unchecked for it: watch where the
+# fingers close ---
+SIDE_INSERT_DEG = 70.0  # the hand slides in this far off the door normal: 20 deg off the face, from in front of it
+SIDE_PADS_INTO_M = 0.011  # the pads' line: this far behind the detected handle point, into the door ...
+SIDE_PADS_PAST_BAR_M = 0.05  # ... and the pads this far further along the approach (11-06: 17 cm in from a waypoint
+# 12 cm short of the bar: the fingers wrap the bar deep in the hand)
+SIDE_TILTS_DEG = (0, -10, 10, -20, 20, -30, 30, -40, 40)  # nose-down (+) / nose-up (-) tilts about the finger axis,
+# tried in this order -- level first (what ran on the arm), then out to +-40 (user, 11-10). The pads stay put
+SIDE_SLIDE_M = (0.15, 0.12, 0.09)  # line up this far straight back along the (level) approach from the grasp, then
+# slide in; the first that plans. 0.15: the fingertips run 8 cm straight before the bar (11-06's slide); 0.09: 2 cm
+SIDE_HAND_LAGS_DEG = (25, 30, 20, 15, 10, 5, 0)  # in the swing the hand turns about the bar this much less than the
+# door, the first whose swing and back-off plan (the bar turns in the closed gripper, held compliant: the side branch's
+# hand_turns, 11-06 on the arm; turned fully with the door, J6 runs into its limit). In this order: 25-30 is what
+# planned in the 11-10 sims (11-09 detections), smaller turns rarely did -- each one tried costs a swing
+SIDE_SWING_CHECK_DEG = 6.0  # the swing is checked against the door every this much (side_grasp.swing_worlds): the door
+# where that stretch starts, so at most this far behind the hand (~4 cm at the handle, less toward the hinge)
+SIDE_BACK_OFF_M = 0.07  # off the handle: back along the hand's own axis this far -- the bar sits ~1 cm past the tool
+# point, the fingertips 4.3 cm: 3.5 cm frees it, + 3.5 cm -- (further bends the wrist, J6, into its limit) ...
+SIDE_BACK_OUT_M = 0.08  # ... then (cuRobo's path) this far straight out from the door's face (side branch, 11-06: "then
+# out from the open door's face"), clear of cuRobo's padding round the door ...
+SIDE_UNBEND_DEG = 45.0  # ... the hand turned about vertical on the way, up to this far, toward the way the arm reaches
+# (the wrist, J6, is near its limit after the swing) ... then (cuRobo) to where the front grasp's back-off ends
+SIDE_CONFIGS = 2  # if no grasp gives a whole open, each grasp is tried again from at most this many other arm
+# configurations (side_grasp.config_seeds), the most room at the wrist (J6) first
+SIDE_WINDOW_HINGE_M = 0.40  # sliding in, holding and backing off, the door within this far toward the hinge from the
+# handle (and HAND_WINDOW_U_M past it, HAND_WINDOW_Z_M up and down) is in cuRobo's world only as its inner part ...
+SIDE_FACE_RECESS_M = 0.05  # ... its face this much deeper than the model's: cuRobo's 2 cm padding and fat spheres
+# call the finger behind the bar a collision with the real face (side branch, 11-06: its goal 2 cm out of a face 2 cm
+# deeper still collided, 3 cm planned)
 
 # --- how the motions are planned (planning.py, world.py): free-space legs by cuRobo, in a collision world of the fridge
 # (FridgeModel: cabinet, door at its angle, handle) plus the planner's own chair layers (scene camera included), the arm's
@@ -91,9 +133,14 @@ SWING_DEG = 90  # the full pull (push_open false) without a swing_deg. Exactly t
 # --- how the open moves (the side grasp's 11-06 hardware runs, side_run/; run_general.py): the swing held compliant, the
 # gripper closing as the pull starts, the swing stopping at its angle, then the gripper opening, everything after the
 # release one motion ---
-PULL_GAINS = {  # the driver's stiffest joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad, torque_limit <=
-    # the URDF's effort limits), critically damped: the swing and everything after the release run under it
-    "kq": (400.0,) * 7,
+PULL_GAINS = {  # joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad, torque_limit <= the URDF's effort
+    # limits), critically damped: the swing and everything after the release run under it. The shoulder and elbow
+    # (j1-j4) at the driver's stiffest, to carry the door; the wrist (j5-j7) at the driver's own stiff profile, 60. At
+    # 400 the wrist, the hand clamped on a handle that the door holds to its own arc, turned any mismatch between the
+    # planned arc and the door's into torque: 400 N m/rad x 0.9 deg = 6 N m, the driver's contact stop at its loose
+    # profile (j5-j7). 11-13: two of three pulls stopped -11 "unexpected contact" late in the swing, j6 ~6 N m off the
+    # pull that finished, j1-j4 well inside theirs. At 60 the same mismatch is ~0.9 N m.
+    "kq": (400.0, 400.0, 400.0, 400.0, 60.0, 60.0, 60.0),
     "zeta": 1.0,
     "torque_limit": (39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0),
 }
@@ -273,6 +320,24 @@ MOUNTS = {
             (0.65, -0.15), (0.65, -0.10), (0.65, -0.05),  # the nearest row
             (0.70, -0.15), (0.75, -0.25), (0.90, -0.10),
         ),
+        # the side grasp's (grasp: side): every handle x, y where the side grasp's open (60 deg pull, any tilt of
+        # -40..40 in 10s, a wheelchair move of up to +-35 cm before the push if it needed one -- all but 2 of the 231
+        # tilt / spot pairs that planned needed one, 15-35 cm back mostly) planned in sim, the handle 0.315 m above the
+        # arm base: fridge-grasp-sims results/side_tilt_z0.315.jsonl (plots/front_vs_side_any_tilt_z0.315.png, 47
+        # spots), 11-10, the side branch's own planner (89504f3 + the tilt and the chair move) on the real cuRobo core,
+        # the same model and grid as the front grasp's; the close was not part of it
+        side_placement_x=(0.65, 0.90),
+        side_placement_y=(-0.50, -0.05),
+        side_placement_cells=(
+            (0.65, -0.45), (0.65, -0.40), (0.65, -0.35), (0.65, -0.30), (0.65, -0.25), (0.65, -0.20),
+            (0.65, -0.15), (0.70, -0.50), (0.70, -0.45), (0.70, -0.40), (0.70, -0.35), (0.70, -0.30),
+            (0.70, -0.25), (0.70, -0.20), (0.70, -0.15), (0.75, -0.50), (0.75, -0.45), (0.75, -0.40),
+            (0.75, -0.35), (0.75, -0.30), (0.75, -0.25), (0.75, -0.20), (0.75, -0.15), (0.75, -0.10),
+            (0.75, -0.05), (0.80, -0.50), (0.80, -0.45), (0.80, -0.40), (0.80, -0.35), (0.80, -0.30),
+            (0.80, -0.25), (0.80, -0.20), (0.80, -0.15), (0.80, -0.10), (0.80, -0.05), (0.85, -0.40),
+            (0.85, -0.35), (0.85, -0.30), (0.85, -0.25), (0.85, -0.20), (0.85, -0.15), (0.85, -0.10),
+            (0.85, -0.05), (0.90, -0.40), (0.90, -0.35), (0.90, -0.30), (0.90, -0.20),
+        ),
         push_open_dz_m=0.10,  # 10 cm ABOVE the handle
         grasp_pitches_deg=(25, 30, 40, -25, -30, -40),  # 25-40 either way (GRASP_PITCHES_DEG): nose-down first; 11-09:
         # 45 ran the wrist camera into the handle
@@ -290,15 +355,24 @@ UI_NOTICE_TIMEOUT_S = 30.0
 UI_PROMPT_TIMEOUT_S = 600.0
 
 
-def configure(data_dir, mount_tilt_deg=0):
-    """Point door_common's paths at `data_dir`, name the appliance and pick the mount's placement. No door-size
-    defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
-    global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, CELLS_NEEDING_BASE_MOVE, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG
+def configure(data_dir, mount_tilt_deg=0, grasp="side"):
+    """Point door_common's paths at `data_dir`, name the appliance and pick the mount's and the grasp's placement. No
+    door-size defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
+    global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, CELLS_NEEDING_BASE_MOVE, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG, GRASP
     if mount_tilt_deg not in MOUNTS:
         raise ValueError(f"mount_tilt_deg must be one of {sorted(MOUNTS)}, not {mount_tilt_deg!r}")
-    PLACEMENT_X, PLACEMENT_Y = MOUNTS[mount_tilt_deg]["placement_x"], MOUNTS[mount_tilt_deg]["placement_y"]
-    PLACEMENT_CELLS = MOUNTS[mount_tilt_deg].get("placement_cells")
-    CELLS_NEEDING_BASE_MOVE = MOUNTS[mount_tilt_deg].get("cells_needing_base_move", ())
+    if grasp not in GRASPS:
+        raise ValueError(f"grasp must be one of {', '.join(GRASPS)}, not {grasp!r}")
+    GRASP = grasp
+    mount = MOUNTS[mount_tilt_deg]
+    # the side grasp's own placement where a sim gave one; else the front grasp's (the level mount has no side sim)
+    key = "side_" if grasp == "side" and "side_placement_x" in mount else ""
+    PLACEMENT_X, PLACEMENT_Y = mount[f"{key}placement_x"], mount[f"{key}placement_y"]
+    PLACEMENT_CELLS = mount.get(f"{key}placement_cells")
+    # the cells base_moves false leaves out of the advice: the front grasp's only. The side grasp has no such list (its
+    # sim mostly planned only with a wheelchair move), so with base_moves false its advice may name a cell whose open
+    # then refuses -- before any motion
+    CELLS_NEEDING_BASE_MOVE = mount.get(f"{key}cells_needing_base_move", ())
     PUSH_OPEN_DZ_M = MOUNTS[mount_tilt_deg]["push_open_dz_m"]
     GRASP_PITCHES_DEG = MOUNTS[mount_tilt_deg]["grasp_pitches_deg"]
     dc.configure_paths(data_dir)

@@ -1,13 +1,15 @@
 """fridge.node's UI buttons (UI_ACTIONS): the panels a press shows through ctx.update_user_panel(),
-the wheelchair-move and retry questions, the Done notices, and that a failure is still reported
-unchanged. A fake ctx (with a scripted user answering the panels), a fake clock and a scripted
-_execute stand in for the engine's UI-bridge plumbing, time and the arm; nothing here starts a node
-or reaches the UI bridge, the arm or the base."""
+the wheelchair-move and retry questions, the Done notices, Stop (a cancel of the run), and that a
+failure is still reported unchanged. A fake ctx (with a scripted user answering the panels), a fake
+clock, a stubbed cancel_own_run and a scripted _execute stand in for the engine's UI-bridge
+plumbing and cancel, time and the arm; nothing here starts a node or reaches the UI bridge, the arm
+or the base."""
 
 import importlib.util
 import json
 import sys
 import threading
+import time
 import types
 from unittest.mock import MagicMock
 
@@ -19,6 +21,7 @@ from fridge import constants as F
 from fridge_fake import door_is_open, fridge  # noqa: F401 -- fridge: the fake-planner fixture
 
 from capability_engine import Cancelled, EngineError
+from capability_ui import DONE, STOP, STOPPED_MESSAGE, panel_open
 
 fridge_node = None  # fridge.node, imported by the fixture below
 
@@ -26,7 +29,9 @@ fridge_node = None  # fridge.node, imported by the fixture below
 @pytest.fixture(autouse=True)
 def _fridge_node(monkeypatch):
     """fridge.node, without open3d / message_filters where the image has none (its perception
-    imports them; nothing here uses the camera), as test_fridge_detection's fixture does."""
+    imports them; nothing here uses the camera), as test_fridge_detection's fixture does. Its
+    cancel_own_run (the engine's own CANCEL; it imports the ROS interfaces) is stubbed to cancel
+    the press's ctx, as the engine's cancel does."""
     global fridge_node
     for name in ("open3d", "message_filters"):
         if importlib.util.find_spec(name) is None:
@@ -34,6 +39,7 @@ def _fridge_node(monkeypatch):
     from fridge import node
 
     fridge_node = node
+    monkeypatch.setattr(node, "cancel_own_run", lambda cap: setattr(cap.ui_ctx, "cancel", True))
     monkeypatch.setattr(push_open, "NEXT_MOVE", 0.0)
     monkeypatch.setattr(close_door, "LAST_CHAIR_BACK", None)
     return node
@@ -63,7 +69,7 @@ def clock(monkeypatch, _fridge_node):
 
 
 class Run:
-    """The engine's _Run, only what _panel_open reads."""
+    """The engine's _Run, only what capability_ui.panel_open reads."""
 
     def __init__(self):
         self.ui_lock = threading.Lock()
@@ -72,10 +78,11 @@ class Run:
 
 
 class Ctx:
-    """ctx with a scripted user: each new panel with buttons takes the next of `answers` (a
-    button_id, pressed 0.5 s after it shows; None: never pressed). A pressed button ends the
-    panel's goal, as the bridge does. `session` False: no UI session (update_user_panel is a
-    no-op returning False)."""
+    """ctx with a scripted user: each new panel with a button other than Stop takes the next of
+    `answers` (a button_id, pressed 0.5 s after it shows; None: never pressed); the moving panel
+    (Stop only) takes none. A pressed button ends the panel's goal, as the bridge does. `cancel`:
+    the run is cancelled (checkpoint() raises Cancelled). `session` False: no UI session
+    (update_user_panel is a no-op returning False)."""
 
     def __init__(self, clock, answers=(), session=True):
         self.clock, self.answers, self.session = clock, list(answers), session
@@ -96,7 +103,7 @@ class Ctx:
         resend = bool(self.panels) and panel_json == self.panels[-1]  # sent again: no new answer
         self.panels.append(panel_json)
         self._run.ui_goal_handle = object()
-        if panel_json["buttons"] and not resend:
+        if any(b["button_id"] != STOP["button_id"] for b in panel_json["buttons"]) and not resend:
             answer = self.answers.pop(0) if self.answers else None
             self.pending = (answer, self.clock.t + 0.5) if answer else None
         return True
@@ -152,6 +159,7 @@ def engine(*outcomes, mock=False, allow_execute=True):
 
 
 def press(cap, ui_id, ctx):
+    cap.ui_ctx = ctx  # what the stubbed cancel_own_run cancels
     return cap.execute(ui_id, {}, ctx)
 
 
@@ -179,6 +187,21 @@ def pulled_asking(move):
     return out
 
 
+def stopped_while_moving(ctx):
+    """An _execute outcome: Stop is pressed on the moving panel and the motion ends once the run is
+    cancelled, as self.arm does (the Stop watcher runs in its own thread, on real time)."""
+
+    def out(action_id, params):
+        ctx.pending = ("stop", ctx.clock.t)
+        end = time.time() + 2.0
+        while not ctx.cancel and time.time() < end:
+            time.sleep(0.005)
+        assert ctx.cancel
+        return Cancelled()
+
+    return out
+
+
 OK = {"executed": True, "note": ""}
 
 
@@ -193,7 +216,8 @@ def test_each_button_runs_its_action_with_the_tested_settings(_fridge_node):
     # the start pose: the node's start_joints_deg (constants.START_JOINTS_DEG, or a profile's)
     assert ui["go_to_start_ui"] == ("go_to_start", "Go to Fridge", {"execute": True, "speed": 0.7})
     assert constants.START_JOINTS_DEG == (103.04, -30.7, -169.63, -123.05, 101.64, 110.04, 2.5)
-    assert ui["open_door_ui"][2] == {"execute": True, "speed": 0.2}
+    assert ui["open_door_ui"][2] == {"execute": True, "speed": 0.7}
+    assert ui["open_door_drive_ui"][2]["speed"] == 0.7
     assert ui["close_door_ui"][2] == {
         "execute": True
     }  # the close's own 0.7: slower doesn't shut it
@@ -218,10 +242,10 @@ def test_go_to_fridge(clock):
     assert moving == {
         "title": "Go to fridge",
         "message": "Moving the arm to the fridge.",
-        "buttons": [],
+        "buttons": [STOP],
     }
     assert done["message"] == "The arm is in front of the fridge."
-    assert done["buttons"] == [{"button_id": "done", "label": "Done", "style": "normal"}]
+    assert done["buttons"] == [DONE] and "style" not in done
     assert clock.t < 1.0  # ended at Done
 
 
@@ -235,22 +259,37 @@ def test_open_asks_for_the_wheelchair_move_then_pushes(clock):
     cap, ctx = engine(pulled_asking(0.05), OK), Ctx(clock, ["continue", "done"])
     assert press(cap, "open_door_ui", ctx) == OK
     assert cap.calls == [
-        ("open", {"execute": True, "speed": 0.2}),
-        ("open", {"execute": True, "speed": 0.2, "chair_moved": True}),
+        ("open", {"execute": True, "speed": 0.7}),
+        ("open", {"execute": True, "speed": 0.7, "chair_moved": True}),
     ]
     ask = ctx.panels[1]
     assert "straight back, away from the fridge, about 5 cm" in ask["message"]
     assert "Continue to push the door open" in ask["message"]
-    assert [b["button_id"] for b in ask["buttons"]] == ["continue", "stop"]
+    assert ask["buttons"] == [{"button_id": "continue", "label": "Continue"}, STOP]
     assert messages(ctx)[-1] == "Fridge door opened."
 
 
-def test_stop_at_the_wheelchair_question_ends_the_goal(clock):
+def test_stop_at_the_wheelchair_question_cancels_the_run(clock):
     cap, ctx = engine(pulled_asking(0.05)), Ctx(clock, ["stop"])
-    with pytest.raises(EngineError) as raised:
+    with pytest.raises(Cancelled):
         press(cap, "open_door_ui", ctx)
-    assert raised.value.error_code == "stopped_by_user"
+    assert ctx.cancel  # through the engine's own cancel
     assert len(cap.calls) == 1
+
+
+def test_stop_while_the_arm_moves_cancels_the_run_and_says_stopped(clock):
+    """Stop on the moving panel cancels the run (the motion stops on it); the Stopped notice says
+    the hand may be on the handle (an open), with Done."""
+    ctx = Ctx(clock, ["done"])
+    cap = engine(stopped_while_moving(ctx))
+    with pytest.raises(Cancelled):
+        press(cap, "open_door_ui", ctx)
+    assert ctx.cancel and len(cap.calls) == 1
+    stopped = ctx.panels[-1]
+    assert stopped["title"] == "Open fridge: stopped"
+    assert stopped["message"] == f"{STOPPED_MESSAGE} {fridge_node.UI_STOPPED_OPEN}"
+    assert stopped["buttons"] == [DONE] and stopped["style"] == "warning"
+    assert clock.t < 1.0  # ended at Done
 
 
 def test_close_asks_for_its_planned_move_then_closes(clock):
@@ -286,22 +325,27 @@ def test_a_refusal_offers_the_same_button_again(clock):
     )
     assert press(cap, "open_door_ui", ctx) == OK
     retry = ctx.panels[1]
-    assert retry["title"] == "Couldn't open the fridge" and retry["style"] == "warning"
+    assert retry["title"] == "Couldn't open the fridge"
     assert "Press Open Fridge Door to try again" in retry["message"]
-    assert retry["buttons"][0] == {
-        "button_id": "retry",
-        "label": "Open Fridge Door",
-        "style": "normal",
-    }
+    assert retry["buttons"] == [{"button_id": "retry", "label": "Open Fridge Door"}, STOP]
     assert "NO DETECTION" not in retry["message"]  # the log has it, not the UI
     assert len(cap.calls) == 2
 
 
-def test_stop_instead_of_retry(clock):
+def test_a_retry_panel_is_warning_styled(clock):
+    cap, ctx = (
+        engine(EngineError("refused", "NO DETECTION", True), OK),
+        Ctx(clock, ["retry", "done"]),
+    )
+    press(cap, "open_door_ui", ctx)
+    assert ctx.panels[1].get("style") == "warning"
+
+
+def test_stop_instead_of_retry_cancels_the_run(clock):
     cap, ctx = engine(EngineError("refused", "x", True)), Ctx(clock, ["stop"])
-    with pytest.raises(EngineError) as raised:
+    with pytest.raises(Cancelled):
         press(cap, "go_to_start_ui", ctx)
-    assert raised.value.error_code == "stopped_by_user"
+    assert ctx.cancel and len(cap.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -356,10 +400,11 @@ def test_a_bug_shows_the_generic_failure_and_is_reraised(clock):
 
 
 def test_a_cancel_shows_no_failure(clock):
+    """An orchestrator cancel: only the moving panel was shown; no failure or Stopped notice."""
     cap, ctx = engine(Cancelled()), Ctx(clock)
     with pytest.raises(Cancelled):
         press(cap, "open_door_ui", ctx)
-    assert all(p["buttons"] == [] for p in ctx.panels)
+    assert [p["buttons"] for p in ctx.panels] == [[STOP]]
 
 
 def test_execution_off_says_so_and_runs_nothing(clock):
@@ -477,7 +522,8 @@ def test_a_failure_panel_that_raises_never_hides_the_failure(clock):
 
 
 def test_every_panel_matches_the_bridge_schema(clock):
-    """rammp-UI-bridge's InteractionPanel: title, message, buttons (button_id, label, style)."""
+    """rammp-UI-bridge's InteractionPanel: title, message, buttons (button_id, label; no per-button
+    style any more), and the panel's optional style."""
     cap = engine(EngineError("refused", "x", True), pulled_asking(0.05), OK)
     ctx = Ctx(clock, ["retry", "continue", "done"])
     press(cap, "open_door_ui", ctx)
@@ -487,12 +533,15 @@ def test_every_panel_matches_the_bridge_schema(clock):
             <= set(panel)
             <= {"title", "message", "buttons", "style"}
         )
-        assert all(set(b) == {"button_id", "label", "style"} for b in panel["buttons"])
+        assert all(set(b) == {"button_id", "label"} for b in panel["buttons"])
+        assert STOP in panel["buttons"] or panel["buttons"] == [DONE]  # Stop, or the final Done
         json.dumps(panel)
 
 
-def test_panel_open_without_a_run_record_counts_as_open(_fridge_node):
-    assert fridge_node._panel_open(types.SimpleNamespace()) is True
+def test_panel_open_without_a_run_record_counts_as_open():
+    """capability_ui.panel_open (was fridge.node._panel_open): no run record, nothing re-sent."""
+    assert panel_open(types.SimpleNamespace()) is True
+    assert not hasattr(fridge_node, "_panel_open")
 
 
 def test_on_the_robot_already_at_the_pose_is_done(clock):
@@ -581,3 +630,11 @@ def test_an_executed_open_that_needs_a_move_reports_it_in_next_move(fridge):  # 
     arm.unreachable = lambda *a: False
     assert open_door.run(arm, planner, True, chair_moved=True)  # Continue: the push
     assert push_open.NEXT_MOVE == 0.0  # reset each run
+
+
+@pytest.fixture(autouse=True)
+def _no_ui_wrap(monkeypatch):
+    """Messages are compared whole here; capability_uis own tests cover the UIs line wrapping."""
+    from capability_ui import panels as ui_panels
+
+    monkeypatch.setattr(ui_panels, "WRAP_CHARS", 10**6)

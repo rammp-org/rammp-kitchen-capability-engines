@@ -16,15 +16,14 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
     make action CAP=microwave ACTION=close PARAMS='{"execute": false, "route_over": true}'
 """
 
-import time
-
 import rammp_arm
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
+from capability_ui import RunUI, cancel_own_run
 from door_common import close_door
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import open_door, recording
+from . import open_door, recording, ui_text
 from .perception import WristCamera
 from .tee_logger import TeeLogger
 
@@ -201,75 +200,76 @@ class Capability(CapabilityEngine):
         )
 
     def _ui_run(self, ui_id, ctx):
-        """One UI press runs the whole open or close (UI_ACTIONS) with no intermediate prompts. A recoverable failure
-        before the hand is on the handle (a check refused, nothing past it moved) shows its reason and offers the
-        same button again, waiting for an explicit tap; one with the hand still on the handle, or any other, is shown
-        with Done only and not retried. Success / error notices remain until Done or cancellation."""
+        """One UI press runs the whole open or close (UI_ACTIONS) with no intermediate prompts, under a panel with Stop
+        (capability_ui.RunUI: Stop cancels this run as the orchestrator's cancel does; the motion stops and a "Stopped"
+        notice says whether the hand may be on the handle). A recoverable failure before the hand is on the handle (a
+        check refused, nothing past it moved) shows its reason and offers the same button again, with Stop, waiting
+        for an explicit tap; one with the hand still on the handle, or any other, is shown with Done only and not
+        retried. Every wait is bounded: Done at most NOTICE_TIMEOUT_S, a retry at most PROMPT_TIMEOUT_S (then the
+        refusal is returned as it is)."""
         action_id, label, params = UI_ACTIONS[ui_id]
         title = UI_TITLE[action_id]
+        ui = RunUI(ctx, title, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
         if not self.mock and not self.cfg["allow_execute"]:
             message = f"{title} is disabled: launch with allow_execute:=true for an attended run."
-            self._ui_notice(ctx, title, message)
+            ui.refuse(ui_text.disabled(title))
             raise EngineError("execution_disabled", message, recoverable=True)
         while True:
             ctx.checkpoint()
-            self._ui_panel(ctx, title, f"{label}: the arm is moving.")
+            self._holding_handle = None  # unknown until execute() says (on_hold)
+            self._said = []  # this run's logged lines (execute's say output): what a "stopped short" panel names
+            arm_error_before = getattr(getattr(self, "arm", None), "last_error", "")
             try:
-                result = self.execute(action_id, dict(params), ctx)
+                result = ui.motion(
+                    f"{label}: the arm is moving.",
+                    lambda: self.execute(action_id, dict(params), ctx),
+                    stopped_note=lambda: self._ui_stopped_note(action_id),
+                )
             except EngineError as error:
+                if ui.user_stopped:  # stopped on the UI: the "Stopped" notice has said so
+                    raise
                 holding = "holding the handle" in str(error) or error.error_code == "holding_handle"
                 self.get_logger().error(f"{ui_id}: {error}")
+                # the panel's words (ui_text): the arm's error only if this run set it (it outlives a run)
+                arm_error = getattr(getattr(self, "arm", None), "last_error", "")
+                arm_error = arm_error if arm_error and arm_error != arm_error_before else ""
+                said = list(getattr(self, "_said", None) or [])
                 if holding or not error.recoverable:
-                    note = " The hand is still on the handle: let go of it before anything else." if holding else ""
-                    self._ui_notice(ctx, title, f"{title} failed: {error}.{note}")
+                    ui.error(ui_text.failure(action_id, str(error), holding, said, arm_error))
                     raise
-                panel = {
-                    "title": f"Unable to {title.lower()}",
-                    "message": f"{error}. Press {label} to try again.",
-                    "buttons": [{"button_id": "retry", "label": label}],
-                }
-                # Standalone has no UI session: fail recoverably instead of waiting for an impossible tap.
-                if not ctx.update_user_panel(panel_json=panel):
+                # no UI session (standalone), no answer in time: the recoverable failure as it is
+                if not ui.retry(
+                    ui_text.retry(action_id, str(error), said, arm_error), label, title=f"Unable to {title.lower()}"
+                ):
                     raise
-                self._wait_for_button(ctx, "retry", panel)
                 continue
-            message = f"Mock: {UI_DONE[action_id].lower()} No arm motion." if result.get("mock") else UI_DONE[action_id]
-            self._ui_notice(ctx, title, message)
+            except Cancelled:
+                raise  # Stop showed its own notice; an orchestrator cancel has taken the UI back
+            except Exception as error:  # an arm error (e-stop, control taken) or a bug: shown, then raised as it is
+                self.get_logger().error(f"{ui_id}: {error!r}")
+                if not (ui.user_stopped or ctx.cancelled()):
+                    ui.error(ui_text.unexpected(action_id, error, bool(getattr(self, "_holding_handle", False))))
+                raise
+            ui.done(UI_DONE[action_id], mock=bool(result.get("mock")))
             return result
 
-    def _ui_notice(self, ctx, title, message):
-        panel = {"title": title, "message": message, "buttons": [{"button_id": "done", "label": "Done"}]}
-        if ctx.update_user_panel(panel_json=panel):
-            self._wait_for_button(ctx, "done", panel)
+    def _say(self, text):
+        """The run's say() output: logged, and kept for the UI's failure panel (what a run that ended False said)."""
+        said = getattr(self, "_said", None)
+        if said is not None:
+            said.append(str(text))
+            del said[:-200]
+        self.get_logger().info(text)
 
-    @staticmethod
-    def _ui_panel(ctx, title, message):
-        ctx.update_user_panel(panel_json={"title": title, "message": message, "buttons": []})
-
-    @staticmethod
-    def _panel_open(ctx):
-        """Whether the panel's UI goal is still open (or opening) -- the engine's own run record; True when it can't
-        tell, so nothing is re-sent needlessly."""
-        run = getattr(ctx, "_run", None)
-        if run is None or not hasattr(run, "ui_goal_handle"):
-            return True
-        return bool(run.ui_goal_handle is not None or getattr(run, "ui_opening", False))
-
-    @staticmethod
-    def _wait_for_button(ctx, button_id, panel):
-        refresh_at = time.monotonic() + 1.0
-        while True:
-            ctx.checkpoint()
-            event = ctx.poll_ui_event()
-            if event and event.get("type") == "button" and event.get("button_id") == button_id:
-                return
-            # Reopen only after a rejected/aborted UI goal or a bridge outage: re-sending an open panel every second
-            # redrew it on the UI, which flashed (11-12)
-            if time.monotonic() >= refresh_at:
-                if not Capability._panel_open(ctx):
-                    ctx.update_user_panel(panel_json=panel)
-                refresh_at = time.monotonic() + 1.0
-            time.sleep(0.1)
+    def _ui_stopped_note(self, action_id):
+        """What the "Stopped" notice adds: whether the hand may be on the handle (only the open grasps it; the close
+        pushes with the side of the hand)."""
+        if action_id != "open":
+            return ""
+        holding = getattr(self, "_holding_handle", None)
+        if holding is None:
+            return "If the hand is on the handle, let go of it before anything else."
+        return "The hand is still on the handle: let go of it before anything else." if holding else ""
 
     def availability(self, instance_id, world_state):
         """The UI is offered only the one-press actions (UI_ACTIONS); `open` / `close` stay callable directly (their
@@ -313,16 +313,16 @@ class Capability(CapabilityEngine):
                     box2d_topic=self.cfg["scene_detections_topic"],
                 )
             )
-        dc.set_output(self.get_logger().info)
+        dc.set_output(self._say)
         ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
         log_args = {**params, "execute": execute}
-        holding = False
+        holding = self._holding_handle = False
 
         def on_hold(now):
             """From the grasp until the push-open lets go the hand is on the handle: a pause or cancel there would
-            leave it holding the door, so the step is not pausable and the result says so."""
+            leave it holding the door, so the step is not pausable and the result says so (and a UI Stop's notice)."""
             nonlocal holding
-            holding = now
+            holding = self._holding_handle = now
             ctx.progress(action_id, 50.0, "holding the handle" if now else "let go of the handle", pausable=not now)
 
         held = " -- still holding the handle" if action_id == "open" else ""

@@ -9,7 +9,11 @@
 Opens and closes the fridge door with the Kinova arm. On an `open` goal it finds the handle with SAM 3
 on the wrist camera (`detect_camera`, `handle_source`) and measures the door's direction by fitting
 the printed handle's model (`RAMMP.Fridge.Handle5.STL`) to the handle's depth (`door_normal: handle_model`, the side grasp's method); two looks must agree within 3°. It grasps the handle
-squared to the door (at the middle of the bar, or `grasp_offset_m` above or below it), the gripper
+from the side (`grasp: side`, the default): the hand slides in along the door from the hinge side,
+20° off its face, one finger between the bar and the door, level or tilted up to 40° nose-up or
+nose-down (the first tilt whose whole open plans, level first); `grasp: front` grasps it squared to the
+door instead, fingers across the bar. Either grasps at the middle of the bar, or `grasp_offset_m` above
+or below it; the gripper
 closing as the pull starts, pulls the door smoothly to exactly 60° and stops there, the door
 stopped with it; the gripper then opens with the hand still. Then, in one motion, it backs
 straight off the handle, goes round the door's free edge and pushes the door on to
@@ -124,32 +128,36 @@ Failures: `refused` (a check failed; the message says which and the arm holds), 
 
 The UI is offered only these (`availability`); `go_to_start` / `open` / `close` stay callable directly. One press runs
 the whole action (`UI_ACTIONS` in `node.py`), executing: `allow_execute` must be true on hardware (else a panel says
-it is off). Panels go through the UI bridge (`ctx.update_user_panel()`; JSON in `docs/UI_JSON_SCHEMA.md`).
+it is off). Panels go through the UI bridge (`ctx.update_user_panel()`; JSON in `docs/UI_JSON_SCHEMA.md`), made by
+the shared `capability_ui.RunUI`.
 
 | Action id             | Button                                | Runs                                               |
 | --------------------- | ------------------------------------- | -------------------------------------------------- |
 | `go_to_start_ui`      | Go to Fridge                          | `go_to_start` (to `start_joints_deg`), speed 0.7   |
-| `open_door_ui`        | Open Fridge Door                      | `open`, speed 0.2; a wheelchair move is asked for  |
-| `open_door_drive_ui`  | Open Fridge Door (wheelchair drives)  | `open`, speed 0.2, `drive_base` at 0.03 m/s        |
+| `open_door_ui`        | Open Fridge Door                      | `open`, speed 0.7; a wheelchair move is asked for  |
+| `open_door_drive_ui`  | Open Fridge Door (wheelchair drives)  | `open`, speed 0.7, `drive_base` at 0.03 m/s        |
 | `close_door_ui`       | Close Fridge Door                     | `close`, speed 0.7; a wheelchair move is asked for |
 | `close_door_drive_ui` | Close Fridge Door (wheelchair drives) | `close`, speed 0.7, `drive_base` at 0.03 m/s       |
 
 Panels, in order:
 
-- While it runs: what it is doing (no buttons).
+- While it runs: what it is doing, with **Stop**. Stop cancels the goal as the orchestrator's cancel does: the arm
+  (and a driving base) stops and holds, then "Stopped. The arm is holding still where it was." with **Done**; after
+  an open it adds that the hand may be on the handle (let go with `release_only`), after a drive that the wheelchair
+  has moved. The goal ends `Cancelled`.
 - A wheelchair move (the open's push, or the close's planned move; not on the driving buttons): "Move your wheelchair
   straight back, away from the fridge, about N cm, without turning it. Then press Continue ..." with **Continue**
   (runs the rest with `chair_moved`) and **Stop**.
 - A recoverable refusal (`refused`, the hand not on the handle): the reason and the same button to try again, and
   **Stop**.
-- The end: done ("Fridge door opened." ...; in mock "Mock: ... No arm motion.") or failed (error-styled, the reason
+- The end: done ("Fridge door opened." ...; in mock "Mock: ... No arm motion.") or failed ("Couldn't ...", the reason
   in plain words; after an open that stopped short or refused holding the handle, "The hand may still be holding the
   handle."), with
   **Done**. The full message stays in the log.
 
 Done waits at most `UI_NOTICE_TIMEOUT_S` (30 s) and a question `UI_PROMPT_TIMEOUT_S` (600 s; then `no_answer`):
-the goal keeps the arm, gripper and base meanwhile. **Stop** fails the goal `stopped_by_user`. A dropped question is
-sent again. With no UI session (no token) nothing is shown or waited for, and a move or retry ends the goal as the
+the goal keeps the arm, gripper and base meanwhile. **Stop** at a question cancels the goal (`Cancelled`), as Stop
+while moving does. A dropped panel is sent again. With no UI session (no token) nothing is shown or waited for, and a move or retry ends the goal as the
 direct action would.
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
@@ -245,6 +253,7 @@ passes them as a params file.
 | `camera_info_topic`                                                                              | `/wrist_camera/color/camera_info`                                                                                                                    | Wrist camera intrinsics                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `depth_topic`                                                                                    | `/wrist_camera/depth/image_rect_raw`                                                                                                                 | Wrist depth, aligned to colour (flatbot's OAK, the D405); a D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `mount_tilt_deg`                                                                                 | `0`                                                                                                                                                  | The arm's forward lean in its mount: `0` (dojo) or `30` (flatbot, gen_1_5)                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `grasp`                                                                                          | `side`                                                                                                                                               | The open's grasp: `side` (in along the door from the hinge side, one finger behind the bar, tilts -40 to 40 deg: `side_grasp.py`) or `front` (fingers across the bar, straight in). Picks the placement advice (`MOUNTS`) |
 | `camera_frame`                                                                                   | `""`                                                                                                                                                 | Camera optical frame; `""` = the colour image's frame_id                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `detect_camera`                                                                                  | `wrist`                                                                                                                                              | Which camera finds the handle and measures the door: `scene` (the `scene_*_topic` topics) or `wrist` (`color_topic`, ...)                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `handle_source`                                                                                  | `sam3`                                                                                                                                               | `sam3` (SAM 3's handle mask) or `depth` (the vertical bar sticking out of the door)                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
