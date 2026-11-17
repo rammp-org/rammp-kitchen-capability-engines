@@ -131,6 +131,13 @@ def test_a_y_to_the_question_opens_and_the_terminal_ends_with_the_nodes_result(g
     assert not any("Traceback" in line or "Error" in line for line in said), _report(node, terminal)
     # the question is asked once the mock's box has come into reach, each instruction a line
     assert any(line.startswith(">> Move ") for line in said)
+    # ... and on the node's own console each is there once, the flight view's line: until the review of
+    # 2026-11-17 the node's "[INFO] ... line-up: Ready. Open the container?" stood beside it
+    assert node.wait_for("LINE UP   ok    yes", 30), _report(node, terminal)
+    console = node.said()
+    assert len([line for line in console if "Ready. Open the container?" in line]) == 1, _report(node, terminal)
+    assert "             ask   Ready. Open the container?   y / n" in console
+    assert not [line for line in console if "line-up: " in line], _report(node, terminal)
 
 
 def test_an_n_is_the_cancel_and_the_terminal_ends_with_the_nodes_result(graph):

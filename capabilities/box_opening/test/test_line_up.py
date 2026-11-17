@@ -294,8 +294,8 @@ def test_out_of_time_with_no_ui_it_says_the_words_it_was_given():
 def test_a_distance_that_only_shrinks_is_said_once_a_second_and_everything_else_at_once():
     """The console is read by a person driving a chair: "one short line each time what it says changes,
     never five a second". A box driven in changes the distance every few ticks. With say_min_s the same
-    instruction's new distance waits out the second (the newest is the one said), and a new direction, hold
-    still and the question are said the tick they come."""
+    instruction's new distance waits out the second (the newest is the one said), as does "hold still"
+    where it takes an instruction's place; a new direction and the question are said the tick they come."""
     fast = dict(pace_s=3.0)  # 0.65 m in 3 s: a new 5 cm every quarter second
     _outcome, every, _lining, _unasked = answered(MockApproach(**fast), typed=[(8.0, "y")])
     outcome, said, _lining, _unasked = answered(MockApproach(**fast), typed=[(8.0, "y")], say_min_s=1.0)
@@ -306,10 +306,13 @@ def test_a_distance_that_only_shrinks_is_said_once_a_second_and_everything_else_
     kind = lambda m: m.split(",")[0].replace(" a little", "")  # noqa: E731
     for (t0, m0), (t1, m1) in zip(moves, moves[1:], strict=False):
         assert kind(m0) != kind(m1) or t1 - t0 >= 1.0 - 1e-6, (t0, m0, t1, m1)
-    # never five a second, and nothing but distances was held: the other words come when they did without it
+    # never five a second. Held: a distance, and "hold still" after an instruction (the second at most). The
+    # question and what follows it come when they did without it
     assert all(sum(1 for t, _m in said if t0 <= t < t0 + 1.0) < 5 for t0, _m in said)
-    others = lambda lines: [(t, m) for t, m in lines if not m.startswith("Move")]  # noqa: E731
-    assert others(said) == others(every)
+    others = lambda lines: [(t, m) for t, m in lines if not m.startswith(("Move", "Hold"))]  # noqa: E731
+    assert others(said) == others(every) and others(said)[0][1] == "Ready. Open the container?"
+    hold = lambda lines: next(t for t, m in lines if m.startswith("Hold"))  # noqa: E731
+    assert hold(every) <= hold(said) <= hold(every) + 1.0
     first_of = lambda lines, word: next(t for t, m in lines if m.startswith(word))  # noqa: E731
     assert first_of(said, "Move left") == first_of(every, "Move left")  # a new direction is said at once
     # a chair that stops is still told the newest distance, once the second has passed
@@ -324,6 +327,45 @@ def test_a_distance_that_only_shrinks_is_said_once_a_second_and_everything_else_
     _outcome, said, _lining, _unasked = answered(still, budget_s=3.0, say_min_s=1.0)
     assert [m for _t, m in said][:2] == ["Move closer, about 40 cm", "Move closer, about 20 cm"]
     assert said[1][0] == pytest.approx(1.0, abs=0.06)
+
+
+class Edge:
+    """A box on the boundary's edge: each wrist frame (five a second) reads it the other side of the margin."""
+
+    def look(self, now):
+        inside = int(round((now - 100.0) / 0.2 - 0.5)) % 2 == 0
+        reach = guide.Reach(True, None, None) if inside else guide.Reach(False, (-0.02, 0.0), None)
+        return guide.Fix(now, (0.70, 0.0), "wrist"), reach
+
+
+def test_a_box_on_the_boundarys_edge_is_one_line_on_the_console_not_five_a_second():
+    """The review's replay, 2026-11-17: with the box reading inside and 2 cm outside on alternate frames
+    the console got "Hold still, checking" / "Move closer a little" 51 times in 10 s. It is told the move
+    that is still to make, once, and then that the time is up."""
+    outcome, said, _lining, _unasked = answered(Edge(), budget_s=10.0, say_min_s=1.0, again="Out of time")
+    assert outcome == TIMED_OUT
+    assert [m for _t, m in said] in (
+        ["Move closer a little", "Out of time"],
+        ["Hold still, checking", "Move closer a little", "Out of time"],  # (its first frame read inside)
+    )
+
+    # the console's own hold, whatever the guide says: "hold still" and an instruction that take each other's
+    # place every 0.6 s (longer than the guide's hold) are a line a second at the most, never two
+    class Slow:
+        def look(self, now):
+            inside = int((now - 100.0) / 0.6) % 2 == 1
+            reach = guide.Reach(True, None, None) if inside else guide.Reach(False, (-0.02, 0.0), None)
+            return guide.Fix(now, (0.70, 0.0), "wrist"), reach
+
+    _outcome, every, _lining, _unasked = answered(Slow(), budget_s=10.0)
+    _outcome, said, _lining, _unasked = answered(Slow(), budget_s=10.0, say_min_s=1.0)
+    told = [t for t, m in said if m.startswith(("Move", "Hold"))]  # (the time's end is said when it comes)
+    assert len(every) > len(said) and len(told) >= 6
+    assert all(b - a >= 1.0 - 1e-6 for a, b in zip(told, told[1:], strict=False))
+    # the question is never held, nor its being taken away: a person must not answer what is no longer asked
+    outcome, said, _lining, _unasked = answered(MockApproach(pace_s=0.0), typed=[(3.0, "y")], say_min_s=5.0)
+    assert outcome == GO and [m for _t, m in said][:2] == ["Hold still, checking", "Ready. Open the container?"]
+    assert said[1][0] < 2.0  # (five seconds were not waited out)
 
 
 # -- the mock's box --------------------------------------------------------------------------------
@@ -538,6 +580,62 @@ def test_a_place_the_run_itself_refused_does_not_work_for_its_line_up_whatever_t
     watch.says(4.1, _fix((0.712, -0.10, 0.315)))
     _f, reach = source.look(4.15)
     assert not reach.inside and reach.planned is False
+
+
+def test_a_refused_place_is_refused_at_whatever_height_this_line_ups_watch_reads_the_lid():
+    """The review of 2026-11-17: the run's refused place counted only within 15 mm of the RUN's lid height,
+    and its cell only in the grid of that height. The run's fix and the line-up's watch are two readings
+    of one lid (the scene camera's against the wrist's: centimetres apart in height, another grid's
+    bucket), so the box could stand on the very spot the run refused and be asked "Ready?". A place is
+    refused by where it is on the table."""
+    FakeChild.made = []
+    source = BoxSource(
+        ["box_watch"],
+        lambda urdf, root: ["reach_probe", urdf, root],
+        {},
+        spawn=FakeChild,
+        refused=[[0.712, -0.10, 0.2945]],  # as the run measured the lid: 40 mm under the watch's reading
+    )
+    watch = source.watch
+    watch.says(0.0, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    source.look(0.0)
+    probe = source.probe
+    probe.says(1.1, {"zone": _band_zone(lid_z=0.34).to_dict()})  # the grid of the height the watch reads
+    probe.says(1.2, {"proof": {"xyz": [0.712, -0.10, 0.335], "ok": True, "why": "", "tilt_deg": 30, "s": 0.5}})
+    watch.says(1.3, _fix((0.713, -0.101, 0.335), by="wrist"))
+    _f, reach = source.look(1.35)
+    assert not reach.inside and reach.planned is False and reach.to_zone is not None
+    assert probe.sent[-1]["prove"] is False
+    # a place given without a height (x, y) is refused the same way
+    source = BoxSource(["box_watch"], lambda u, r: ["reach_probe"], {}, spawn=FakeChild, refused=[(0.712, -0.10)])
+    source.watch.says(0.0, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    source.look(0.0)
+    source.probe.says(1.1, {"zone": _band_zone().to_dict()})
+    source.watch.says(1.3, _fix((0.713, -0.101, 0.315)))
+    _f, reach = source.look(1.35)
+    assert not reach.inside and reach.planned is False
+
+
+def test_every_place_a_run_refused_is_held_against_the_line_up_not_only_the_newest():
+    """A second guidance of one run, or the line-up carried to the next open_box, is told every place the
+    runs refused (node.Asking.refused). As first written the engine handed over only the place of the
+    request in hand: the first place was forgotten at the second guidance, and the person could be led
+    back onto it and asked "Ready?" there."""
+    FakeChild.made = []
+    places = [[0.712, -0.10, 0.315], [0.60, 0.10, 0.315]]
+    source = BoxSource(["box_watch"], lambda u, r: ["reach_probe"], {}, spawn=FakeChild, refused=places)
+    source.watch.says(0.0, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
+    source.look(0.0)
+    source.probe.says(1.0, {"zone": _band_zone().to_dict()})
+    for t, place in enumerate(places, start=2):
+        source.probe.says(t, {"proof": {"xyz": place, "ok": True, "why": "", "tilt_deg": 30, "s": 0.5}})
+        source.watch.says(t + 0.1, _fix(place))
+        _f, reach = source.look(t + 0.2)
+        assert not reach.inside and reach.planned is False, place
+    # ... and a place neither run refused, a chair's move from both, is judged as ever
+    source.watch.says(5.0, _fix((0.55, -0.10, 0.315)))
+    _f, reach = source.look(5.1)
+    assert reach.inside and reach.planned is None
 
 
 def test_a_rough_sighting_says_which_way_to_move_and_is_never_asked_on():

@@ -123,7 +123,10 @@ if "--line-up" in sys.argv:
 # press_demo --guide, where no press plans from where the chair stands (GUIDE: how many times it finds none
 # before one plans; GUIDE_AFTER_S: how long its look and proof took before each): it says so (no STOP),
 # asks the engine to guide, and watches as a line-up does (GUIDE_BOX: where its frames show the box) until
-# the engine's go, from which it "finds the box again"; a stop, and it ends 5 as a line-up does
+# the engine's go, from which it "finds the box again" (AGAIN_S: how long that takes, nothing written the
+# while); a stop, and it ends 5 as a line-up does. GUIDE_ROWS: it writes its run log's rows as press_demo
+# does, BEFORE it asks: the box found, the refusal (guided), and with GUIDE_HOME_S the home to rest that
+# takes that long (the aimed button's case: reach_press.no_way_in), then its "guide" row
 WHY = (
     "no reach-out press plans for the scene camera's box (30 deg: the way down (the slide in: trajectory sanity "
     "gate: arm_joint_1 excursion 2.012 rad > |d| + margin 1.632); 40 deg: the way down (the press stroke is not a "
@@ -140,10 +143,34 @@ for n in range(int(os.environ.get("GUIDE", "0"))):
     except KeyboardInterrupt:
         sys.exit(130)
     sys.stdout.write("[press_demo] WRIST SURVEY: box at [0.712, -0.331] yaw 0.0 deg (WRIST 0.60) — reaching out\\n")
-    sys.stdout.write("[press_demo] NO WAY IN: " + WHY + "; nothing moved\\n")
-    sys.stdout.write("@@ " + json.dumps({"guide": {"n": n + 1, "box": [0.712, -0.331, 0.2945], "why": WHY}}) + "\\n")
+    homes = os.environ.get("GUIDE_HOME_S")
+    ends = "; nothing moved" if homes is None else " — nothing was pressed — returning home"
+    sys.stdout.write("[press_demo] NO WAY IN: " + WHY + ends + "\\n")
+    sys.stdout.flush()
+    if os.environ.get("GUIDE_ROWS"):
+        def row(**fields):
+            runs = Path(os.environ["BOX_OPENING_STATE"]) / "runs"
+            runs.mkdir(parents=True, exist_ok=True)
+            with open(runs / "run-20261030-140000.jsonl", "a") as f:
+                f.write(json.dumps(fields) + "\\n")
+        row(leg="scene_fix", kind="note", origin_xyz=[0.712, -0.331, 0.2])
+        row(leg="reach_refused", kind="note", why=WHY, guided=True)
+        if homes is not None:
+            try:
+                time.sleep(float(homes))
+            except KeyboardInterrupt:
+                sys.exit(130)
+            row(leg="home", kind="motion", ok=True, outcome="arrived")
+        row(leg="guide", kind="note", n=n + 1)
+    # (each time it stands somewhere else: 5 cm nearer the arm than the time before)
+    box = [round(0.712 - 0.05 * n, 3), -0.331, 0.2945]
+    sys.stdout.write("@@ " + json.dumps({"guide": {"n": n + 1, "box": box, "why": WHY}}) + "\\n")
     sys.stdout.flush()
     lines_up(os.environ.get("GUIDE_BOX", "in place"))
+    try:
+        time.sleep(float(os.environ.get("AGAIN_S", "0")))
+    except KeyboardInterrupt:
+        sys.exit(130)
 runs = Path(os.environ["BOX_OPENING_STATE"]) / "runs"
 runs.mkdir(parents=True, exist_ok=True)
 with open(runs / "run-20261030-140000.jsonl", "a") as f:
@@ -1438,7 +1465,7 @@ def test_a_real_run_lines_up_first_and_starts_only_on_open_its_source_closed(eng
     engine.set_parameters([Parameter("line_up", value=True)])
     monkeypatch.setattr(engine, "_ui_live", lambda: True)
     source, made, started = InPlace(), [], []
-    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id: (made.append(instance_id), source)[1])
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id, **kw: (made.append(instance_id), source)[1])
     real_argv = engine._argv
     monkeypatch.setattr(engine, "_argv", lambda *a: (started.append((time.monotonic(), a)), real_argv(*a))[1])
     engine.instance_id = "food_container_1"
@@ -1463,7 +1490,7 @@ def test_a_real_run_cancelled_or_out_of_time_while_lining_up_never_starts(engine
     engine.set_parameters([Parameter("line_up", value=True)])
     monkeypatch.setattr(engine, "_ui_live", lambda: True)
     source, started = InPlace(), []
-    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id: source)
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id, **kw: source)
     monkeypatch.setattr(engine, "_argv", lambda *a: started.append(a) or [])
     monkeypatch.setattr(engine, "_cancel_from_ui", lambda: None)
     ctx = FakeCtx()
@@ -1509,7 +1536,7 @@ def test_a_reach_probe_that_died_ends_the_line_up_at_once_with_what_it_said(engi
             return True
 
     source, started = ProbeDied(), []
-    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id: source)
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id, **kw: source)
     monkeypatch.setattr(engine, "_argv", lambda *a: started.append(a) or [])
     t0 = time.monotonic()
     with pytest.raises(EngineError) as e:
@@ -2205,7 +2232,7 @@ def test_a_box_no_press_plans_for_does_not_end_the_run_the_chair_is_guided_on_th
     assert ctx.panels == []
     view = capsys.readouterr().out.splitlines()
     assert " 2 PRESS     FAIL  " + REASON in view  # E: why, not "out of the arm's reach"
-    assert "             next  the chair is to move: the run does not end here" in view
+    assert "             next  the run does not end here: wait while the arm comes to rest" in view
     assert "   line up   ...   " + node.GUIDE_DOING in view
     assert "             ask   Ready. Open the container?   y / n" in view
     assert any(ln.startswith(" 3 LINE UP   ok    yes") for ln in view)
@@ -2255,6 +2282,175 @@ def test_with_the_ui_the_guidance_in_the_middle_of_a_run_is_on_its_panel_and_ope
     assert "LINE UP   ok    Open pressed" in view and node.CONSOLE_HOW not in view
 
 
+def _panels_as_sent(ctx):
+    """`ctx`, every panel it is sent kept with when: [(seconds, message, button ids)], each change once."""
+    t0, seen, real = time.monotonic(), [], ctx.update_user_panel
+
+    def update(panel_json=None, objects=None, selected_instance_id=None):
+        now = (panel_json["message"], [b["button_id"] for b in panel_json["buttons"]])
+        if not seen or seen[-1][1:] != now:
+            seen.append((time.monotonic() - t0, *now))
+        return real(panel_json=panel_json)
+
+    ctx.update_user_panel = update
+    return seen
+
+
+def _tells_to_move(text):
+    """Whether a line tells the person to move the chair, or that it is to be moved."""
+    text = text.lower()
+    return "move" in text or "chair is to" in text or "no way in" in text
+
+
+def test_after_open_on_a_guidance_nothing_tells_the_person_to_move_while_the_run_goes_on(engine, monkeypatch, capsys):
+    """The review of 2026-11-17, with the UI: the run writes its refusal's row before it asks to be guided,
+    the panel said Ready, the person pressed Open, and the run's own panel came back with its last word
+    still on it: "No way in from here: the chair is to move", beside Cancel, for as long as the run took to
+    find the box again (2 s of scene look and the wrist's frames, up to 15 s more), while the arm was about
+    to reach out. A person who drives on that word moves the chair under it. Once they have said yes,
+    nothing tells them to move: the panel, the progress and the console say the run is looking again."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_ROWS", "1")  # its rows as press_demo writes them: the refusal before the request
+    monkeypatch.setenv("AGAIN_S", "2.0")  # ... and after the go it finds the box again, no row the while
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    _made, told, _runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    seen = _panels_as_sent(ctx)
+    capsys.readouterr()
+    threading.Timer(2.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and told == [{"go": True}]
+    said = [message for _t, message, _buttons in seen]
+    opened = said.index("Opening the container")
+    assert said[opened - 1] == "Ready. Open the container?"
+    after = seen[opened + 1 :]
+    assert not [m for _t, m, _b in after if _tells_to_move(m)], after
+    # what stands while the run finds the box again: that it is looking, with Cancel alone, for the whole of
+    # that look (sent, and sent again at its period, until the run's next row)
+    assert after[0][1:] == ("Looking for the container again", ["cancel"])
+    assert len([p for p in ctx.panels if p["message"] == "Looking for the container again"]) >= 2
+    # the progress, which a person at open_box_terminal reads, says the same from the yes on
+    progress = [m for _p, _pct, m, _pausable in ctx.said]
+    went = progress.index("Opening the container")
+    assert progress[went + 1] == "looking for the container again"
+    assert not [m for m in progress[went:] if _tells_to_move(m)]
+    # ... and so does the console
+    view = capsys.readouterr().out.splitlines()
+    yes = next(i for i, line in enumerate(view) if "LINE UP   ok" in line)
+    assert view[yes + 1] == "   find      ...   looking for the box again"
+    assert not [line for line in view[yes:] if _tells_to_move(line)]
+
+
+def test_a_row_of_before_the_yes_that_is_read_after_it_says_nothing():
+    """The run writes its refusal's row (and the row of its home to rest) before it asks to be guided, and
+    the engine reads a run's rows as it polls: one read only after the line-up, with the run flying on the
+    person's yes, is still of before it. It says nothing then, and the run's next home is not taken for the
+    arm going to rest. A row is known by when the run wrote it (its "t", this host's clock)."""
+    track = node.Tracker("open_box")
+    refused = {"leg": "reach_refused", "kind": "note", "why": "no reach-out press plans (x)", "guided": True}
+    home = {"leg": "home", "kind": "motion", "ok": True}
+    track.add(dict(FULL_RUN[0], t=1000.0))
+    assert track.went(asked_at=1010.0) == ("locate", 0.05, "looking for the container again")
+    assert track.add(dict(refused, t=1009.9)) is None and not track.to_rest  # read late
+    assert track.add(dict(home, t=1009.95)) is None and track.pct == 0.05  # (nor is that home the way home)
+    for row in FULL_RUN[:-1]:
+        track.add(dict(row, t=1020.0))
+    assert track.add(dict(home, t=1050.0)) == ("home", 1.0, "going home")
+    # a refusal written after that yes is a new one, and is said; one with no time is taken as it comes
+    track = node.Tracker("open_box")
+    track.add(dict(refused, t=1009.9)), track.went(asked_at=1010.0)
+    assert track.add(dict(refused, t=1031.0)) == ("locate", 0.0, node.NO_WAY_IN_WAIT) and track.to_rest
+    assert track.went(asked_at=1032.0)[2] == "looking for the container again" and not track.to_rest
+    assert track.add(refused) == ("locate", 0.0, node.NO_WAY_IN_WAIT)
+
+
+def test_until_the_arm_is_at_rest_nothing_says_the_chair_is_to_move(engine, monkeypatch, capsys):
+    """The review of 2026-11-17: where no press reaches the aimed button the run notes its refusal and THEN
+    homes from the look pose (about 5 s on run 1). The engine reads the note within 50 ms, and the panel
+    said "No way in from here: the chair is to move" for the whole home flight, then "Going to rest: the
+    chair is to move"; the progress the same; the console `next  the chair is to move` before `home ...`.
+    A person who starts to drive on that word moves the chair with the arm still out over the table. The
+    first word that the chair is to move is the line-up's, and it comes only once the run has asked: its
+    arm at rest."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_ROWS", "1")
+    monkeypatch.setenv("GUIDE_HOME_S", "1.5")  # the home to rest, flown before it asks to be guided
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    _made, told, _runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    seen = _panels_as_sent(ctx)
+    capsys.readouterr()
+    threading.Timer(4.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and told == [{"go": True}]
+    # the progress: everything before the line-up's first word, in the order it was said
+    phases = [p for p, *_ in ctx.said]
+    before = [m for _p, _pct, m, _pausable in ctx.said[: phases.index("line_up")]]
+    assert before[-2:] == ["no press plans from here: wait, the arm comes to rest first", "going to rest"]
+    assert not [m for m in before if _tells_to_move(m)], before
+    # ... and the first word of the line-up is the reason and that the chair is to move, the arm at rest
+    assert ctx.said[phases.index("line_up")][2].endswith(". Move the chair as told")
+    # the panel: for the whole home flight it says to wait
+    said = [message for _t, message, _buttons in seen]
+    wait = said.index("No press plans from here: wait, the arm comes to rest first")
+    assert seen[wait + 1][0] - seen[wait][0] >= 1.2 and said[wait + 1] == "Going to rest"
+    asked = said.index("Hold still, checking")  # the line-up's own first panel (its box stands in place)
+    assert asked > wait + 1 and not [m for m in said[:asked] if _tells_to_move(m)]
+    # the console: no word of moving before the line-up's own step, which follows the home's end
+    view = capsys.readouterr().out.splitlines()
+    step = next(i for i, line in enumerate(view) if line.startswith("   line up   ..."))
+    assert view[step - 3 : step] == [
+        "             next  the run does not end here: wait while the arm comes to rest",
+        "   home      ...   going to rest before the chair is guided",
+        next(line for line in view if " HOME      ok" in line),
+    ]
+    assert not [line for line in view[:step] if _tells_to_move(line)]
+
+
+def test_a_line_ups_instruction_is_on_the_console_once_and_in_the_goals_file(engine, monkeypatch, capsys, tmp_path):
+    """The review of 2026-11-17: every line-up line stood on the node's console twice, this node's own
+    "[INFO] ... line-up: Move closer, about 25 cm" and under it the flight view's "say   Move closer, about
+    25 cm". A goal's full lines go to a file of their own since that day (NodeLogHandler): where the flight
+    view says a line-up's line, the node's own copy of it is that file's alone."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    _guided(engine, monkeypatch)
+    log = Lines()
+    monkeypatch.setattr(engine, "get_logger", lambda: log)
+    capsys.readouterr()
+    threading.Timer(0.5, engine._answers.put, args=("y",)).start()  # typed ahead: no yes, and said once too
+    threading.Timer(2.5, engine._answers.put, args=("y",)).start()
+    out = engine.execute("open_box", {}, FakeCtx())
+    assert out["lid_off"]
+    view = capsys.readouterr().out.splitlines()
+    assert len([line for line in view if line == "             ask   Ready. Open the container?   y / n"]) == 1
+    assert len([line for line in view if "that y was not to a question" in line]) == 1
+    # this node's own log (its console) has none of them, nor the reason the flight view's PRESS line gives
+    mine = [line for line in log.said if "line-up:" in line or "a y came with nothing asked" in line]
+    assert mine == [] and not [line for line in log.said if "the run is not ended" in line]
+    assert [line for line in log.said if line.startswith("open_box goal:")]  # (its own few lines are its own)
+    # ... and the goal's file has them all, with the run's full lines
+    (kept,) = (tmp_path / "runs").glob("console-*.log")
+    kept = kept.read_text()
+    for line in (
+        "INFO    line-up: Ready. Open the container?",
+        "INFO    line-up: Opening the container",
+        "INFO    line-up: the user's yes: the run goes on",
+        "WARNING a y came with nothing asked",
+        "WARNING no press plans from where the chair stands (no press plans from here: the slide in swings",
+        "[press_demo] NO WAY IN: no reach-out press plans",
+    ):
+        assert line in kept, line
+
+
 def test_under_the_orchestrators_120_s_a_guidance_that_does_not_fit_ends_recoverable_and_the_next_goal_lines_up_first(
     engine, monkeypatch, capsys, tmp_path
 ):
@@ -2272,7 +2468,7 @@ def test_under_the_orchestrators_120_s_a_guidance_that_does_not_fit_ends_recover
     monkeypatch.setattr(engine, "_ui_live", lambda: True)
     monkeypatch.setattr(node, "LINE_UP_S", 5.0)  # of which 4 are left: under GUIDE_MIN_S
     assert node.GUIDE_MIN_S == 8.0 and node.LINE_UP_S + node.RUN_LONGEST_S <= node.RUN_BUDGET_S
-    _made, told, runs = _guided(engine, monkeypatch)
+    made, told, runs = _guided(engine, monkeypatch)
     sent = []
     real = node.Run.interrupt
     monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
@@ -2298,11 +2494,15 @@ def test_under_the_orchestrators_120_s_a_guidance_that_does_not_fit_ends_recover
     threading.Timer(2.0, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
     out = engine.execute("open_box", {}, ctx)
     assert out["lid_off"] and "--line-up" in runs[1].argv and [p for p, *_ in ctx.said][0] == "line_up"
-    # ... once: the goal after it starts its run at once
+    # the place the run before it refused is held against the carried line-up too: as first written it was
+    # built with none, and could ask "Ready?" on the very spot (review of 2026-11-17)
+    assert made == [{"watch": runs[1], "refused": [[0.712, -0.331, 0.2945]]}]
+    # ... once: the goal after it starts its run at once, and holds nothing against any place
     _forget_run_logs(tmp_path)
     ctx = FakeCtx()
     out = engine.execute("open_box", {}, ctx)
     assert out["lid_off"] and "--line-up" not in runs[2].argv and "line_up" not in [p for p, *_ in ctx.said]
+    assert len(made) == 1 and engine._line_up_first is None
 
 
 def test_a_guidance_that_runs_out_of_time_says_what_was_still_to_do_and_turns_the_wrist_back(
@@ -2491,6 +2691,13 @@ def test_a_run_may_be_guided_more_than_once_each_time_on_the_persons_yes(engine,
     assert out["lid_off"] and told == [{"go": True}, {"go": True}] and len(runs) == 1 and len(made) == 2
     said = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
     assert said.count("Opening the container") == 2
+    # the second guidance holds BOTH places the run refused against its line-up, not only the newest: as
+    # first written the first was forgotten, and the person could be led back onto it (review of 2026-11-17)
+    assert made[0]["refused"] == [[0.712, -0.331, 0.2945]]
+    assert made[1]["refused"] == [[0.712, -0.331, 0.2945], [0.662, -0.331, 0.2945]]
+    # ... and after each yes the run is looking again, whatever it said before it
+    progress = [m for _p, _pct, m, _pausable in ctx.said]
+    assert progress.count("looking for the container again") == 2
 
 
 def test_a_home_before_the_chair_is_guided_is_not_the_way_home_and_the_bar_keeps_its_room():
@@ -2514,8 +2721,9 @@ def test_a_home_before_the_chair_is_guided_is_not_the_way_home_and_the_bar_keeps
             home,
         )
     ]
-    assert said[2] == ("locate", 0.1, "no way in from here: the chair is to move")
-    assert said[3] == ("locate", 0.1, "going to rest: the chair is to move")
+    # neither says the chair is to move: the arm is on its way to rest (test_until_the_arm_is_at_rest_...)
+    assert said[2] == ("locate", 0.1, "no press plans from here: wait, the arm comes to rest first")
+    assert said[3] == ("locate", 0.1, "going to rest")
     pcts = [pct for _phase, pct, _m in filter(None, said)]
     assert pcts == sorted(pcts) and pcts[-2] < 1.0 and said[-1] == ("home", 1.0, "going home")
     # a run that is NOT guided: its reach_refused row is no such word, and its home is the way home

@@ -233,6 +233,18 @@ CONSOLE_AGAIN = "Out of time. Start open_box again when you are in place"
 LINE_UP_DOING = "lining the chair up with the box: move it as told"
 GUIDE_DOING = "the arm rests and the wrist looks: move the chair as told"
 GUIDE_SAYS = ". Move the chair as told"  # after why no press plans, in the progress of a run that is guided
+# What a run that found no press from where the chair stands says, on the panel and in the progress, from
+# that moment until it asks to be guided: it has not ended, and the arm may still be on its way to rest (the
+# aimed button's case homes from the look pose, about 5 s on 2026-11-17's run 1). Nothing in it tells the
+# person to move: until 2026-11-17's review these read "no way in from here: the chair is to move" and
+# "going to rest: the chair is to move", for the whole home flight, and a person who drives on that word
+# moves the chair under an arm still out over the table. The first word about moving is the line-up's own
+# (GUIDE_SAYS, then "Move closer, about 15 cm"), which is said only once the run has asked: the arm at rest
+NO_WAY_IN_WAIT = "no press plans from here: wait, the arm comes to rest first"
+TO_REST = "going to rest"
+# ... and what it says from the person's yes to a line-up in the middle of it, until its next row: the run
+# has its go and looks for the box again. Nothing of before the yes is said after it (Tracker.went)
+LOOKING_AGAIN = "looking for the container again"
 # what is said of an arm that holds where it stopped (error_for's arm_holds)
 ARM_HOLDS = "the arm holds where it stopped: clear it, attended, before the next run"
 LINE_UP_LATE = (
@@ -592,11 +604,17 @@ class Asking:
     cancels it, and each line-up waits CONSOLE_LINE_UP_S for the person.
     `view`: the goal's flight view (None: nothing is written). `find`: whether a find follows a yes on it
     (the mock's does not: it has no flight view of its run). `carried`: this goal lines up first because
-    the one before it ended in the middle of a line-up (Capability._lines_up)."""
+    the one before it ended in the middle of a line-up (Capability._lines_up).
+    `refused`: every place ((x, y, lid z), the arm's frame) where a run found no press and asked to be
+    guided, for as long as the goal lasts and into the goal a line-up is carried to: each line-up's source
+    is told them all (line_up.BoxSource). As first written only the place of the request in hand was held,
+    for that one line-up: a second guidance forgot the first place, and the carried line-up knew none, so
+    either could ask "Ready?" on the very spot a run had refused (review of 2026-11-17)."""
 
-    def __init__(self, ui, timed, started, view=None, find=True, carried=False):
+    def __init__(self, ui, timed, started, view=None, find=True, carried=False, refused=()):
         self.ui, self.timed, self.started, self.view, self.find = bool(ui), bool(timed), started, view, find
         self.carried = bool(carried)
+        self.refused = [list(place) for place in refused or ()]
 
     def left_s(self, now=None):
         """How long a line-up that begins now may take."""
@@ -620,6 +638,9 @@ class Tracker:
         # so): a home row from here to its request (its "guide" row) is the arm going to rest for the chair's
         # move, not the way home, and no more of the run is done by it
         self.to_rest = False
+        # when the run last asked to be guided and was let go on (went): a row it wrote before that is of
+        # before the person's yes, whenever it is read
+        self.asked_at = None
         self.presses = 0
         self.grips = 0
         self.lid_spot = None
@@ -632,11 +653,15 @@ class Tracker:
     def add(self, row):
         """The (phase, %, message) this row says, or None."""
         leg, kind = str(row.get("leg", "")), row.get("kind")
+        if self._of_before_the_yes(row):
+            # read late: the chair was guided and the person has said yes since (went). What the row says
+            # (that no press plans, that the arm goes to rest) was true before that, and is not said after it
+            return None
         if kind == "note":
             self.past_start = self.past_start or leg in PAST_START
             if leg == "reach_refused" and row.get("guided"):
                 self.to_rest = True
-                return "locate", self.pct, "no way in from here: the chair is to move"
+                return "locate", self.pct, NO_WAY_IN_WAIT  # (never that the chair is to move: NO_WAY_IN_WAIT)
             if leg == "guide":
                 self.to_rest = False
             return self._note(leg, row)
@@ -658,12 +683,32 @@ class Tracker:
                 elif phase == "home" and self.to_rest:
                     # the arm goes to rest before the chair is guided (reach_press.no_way_in, press_demo.
                     # guide_chair): the run goes on from the find after it, and its bar must still have room
-                    phase, pct, doing = "locate", self.pct, "going to rest: the chair is to move"
+                    phase, pct, doing = "locate", self.pct, TO_REST
                 else:
                     self.past_start = True
                 self.pct = max(self.pct, pct)
                 return phase, self.pct, doing if ok else f"{doing}: stopped"
         return None
+
+    def went(self, asked_at=None):
+        """The person's yes to a line-up in the middle of the run (Capability._follow), and the progress
+        that says where the run is from here: ("locate", %, LOOKING_AGAIN). The run has its go, so whatever
+        was said of the refusal the chair was guided for is over: with the UI, the run's panel came back
+        after Open with its last word still on it, "No way in from here: the chair is to move" beside
+        Cancel, for as long as the run took to find the box again (the scene look's 2 s and the wrist's
+        frames, up to 15 s more), while the arm was about to reach out (review of 2026-11-17). Nothing may
+        tell the person to move once they have said yes. `asked_at`: when the run asked to be guided (this
+        host's time.time(), which stamps the run's rows too): a row it wrote before that says nothing
+        from here on, whenever it is read (add)."""
+        self.asked_at = time.time() if asked_at is None else asked_at
+        self.to_rest = False
+        return "locate", self.pct, LOOKING_AGAIN
+
+    def _of_before_the_yes(self, row):
+        """Whether the run wrote `row` before it last asked to be guided and was let go on (its "t": the run
+        stamps every row; one with none is taken as it comes)."""
+        t = row.get("t")
+        return self.asked_at is not None and isinstance(t, int | float) and t < self.asked_at
 
     def up(self):
         """("locate", %, message) the once, as the run's log appears: the run is up (its start-up and readiness
@@ -783,7 +828,8 @@ class Capability(CapabilityEngine):
         self._cancelled_token = None  # the execution a CANCEL came for before its goal did (_on_control)
         self._cancelled_at = None  # ... and when it came (the clock's), where it came with no token to keep it by
         self._answers = line_up.Answers()  # the y or n heard on ~/answer while an action runs (_hear_answers)
-        self._line_up_first = None  # when an open_box ended not_lined_up in the middle of its run (_lines_up)
+        # (when an open_box ended not_lined_up in the middle of its run, the places its runs refused): _lines_up
+        self._line_up_first = None
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -934,19 +980,40 @@ class Capability(CapabilityEngine):
         return value
 
     def _lines_up(self):
-        """(whether this execution lines up before its first move, whether that is carried over): the
-        `line_up` param as its goal comes; or, carried, the open_box before it ended not_lined_up from a
-        line-up in the middle of its run no longer than LINE_UP_FIRST_S ago, so that "press open again" goes
-        on from the line-up and not from another look and proof. Asked ONCE, by execute(), and handed down
-        from there. A goal with no UI lines up too (owner 2026-11-17): on the console (Asking). Until then
-        it was refused, line_up_unavailable."""
+        """(whether this execution lines up before its first move, whether that is carried over, the places
+        carried with it): the `line_up` param as its goal comes; or, carried, the open_box before it ended
+        not_lined_up from a line-up in the middle of its run no longer than LINE_UP_FIRST_S ago, so that
+        "press open again" goes on from the line-up and not from another look and proof. With it come the
+        places that goal's run refused (Asking.refused): the carried line-up does not ask "Ready?" on one of
+        them, as the line-up it takes up would not have. Asked ONCE, by execute(), and handed down from
+        there. A goal with no UI lines up too (owner 2026-11-17): on the console (Asking). Until then it was
+        refused, line_up_unavailable."""
         first, self._line_up_first = self._line_up_first, None
-        carried = first is not None and time.monotonic() - first <= LINE_UP_FIRST_S
+        carried = first is not None and time.monotonic() - first[0] <= LINE_UP_FIRST_S
         if carried and not self._param("line_up"):
             self.get_logger().info(
                 "the open_box before this one ended in the middle of a line-up: this one lines up first"
             )
-        return bool(self._param("line_up")) or carried, carried
+        return bool(self._param("line_up")) or carried, carried, (list(first[1]) if carried else [])
+
+    def _line_up_again(self, ask):
+        """The next open_box lines up first (_lines_up), and knows every place this goal's runs refused."""
+        self._line_up_first = (time.monotonic(), [list(place) for place in ask.refused])
+
+    def _logged(self, text, view=None, level=logging.INFO):
+        """A line of this node's own about a line-up. Where the goal's flight view says the same thing on
+        the console (`view`: it is there), the line is kept in the goal's file alone (NodeLogHandler.keep),
+        and nowhere where the goal has no file (the mock, full_console): the console has each thing once.
+        Until 2026-11-17's review every instruction stood there twice, "[INFO] ... line-up: Move closer,
+        about 25 cm" and under it the flight view's "say   Move closer, about 25 cm". With no view it is
+        this node's log line, as it always was."""
+        if view is None:
+            logger = self.get_logger()
+            (logger.warning if level >= logging.WARNING else logger.info)(text)
+            return
+        lines = getattr(self, "lines", None)
+        if lines is not None:
+            lines.keep(text, logging.getLevelName(level))
 
     def _lined_up_run(self, ctx, env, action_id, instance_id, ask):
         """The run started with --line-up and taken through its line-up (_run_lines_up): the Run, told to
@@ -988,8 +1055,11 @@ class Capability(CapabilityEngine):
             stopped.append(True)
 
         made = []  # the line-up's source, once made: it knows whether the run's wrist turned (its "view")
-        # where the run has just found no press: that place does not work for this line-up (BoxSource)
-        refused = [asked["box"]] if asked is not None and asked.get("box") else []
+        # where the run has just found no press, and wherever a run of this goal (or of the goal this
+        # line-up is carried from) found none before: those places do not work for this line-up (BoxSource)
+        if asked is not None and asked.get("box"):
+            ask.refused.append(list(asked["box"]))
+        refused = [list(place) for place in ask.refused]
 
         def source():
             made.append(self._box_source(env, instance_id, watch=run_, refused=refused))
@@ -999,7 +1069,7 @@ class Capability(CapabilityEngine):
             left = ask.left_s()
             if asked is not None and ask.timed and left < GUIDE_MIN_S:
                 why = no_press_reason(str(asked.get("why") or "no press plans from where the chair stands"))
-                self._line_up_first = time.monotonic()  # the next open_box lines up first, with its whole time
+                self._line_up_again(ask)  # the next open_box lines up first, with its whole time
                 if view is not None:
                     view.guide_end(False, "no time left to guide the chair (%.0f s): open again" % max(0.0, left))
                 raise EngineError(
@@ -1066,7 +1136,7 @@ class Capability(CapabilityEngine):
             raise error from e
         # _line_up returns on the user's yes alone (line_up.GO): every other end of a line-up raised above.
         # The go is this function's last act: nothing after it can raise with the run flying and unfollowed
-        self.get_logger().info("line-up: the user's yes: the run goes on")
+        self._logged("line-up: the user's yes: the run goes on", view)
         run_.send({"go": True})
 
     def _cancelled_before_go(self, ctx):
@@ -1181,7 +1251,9 @@ class Capability(CapabilityEngine):
 
         def said(say):
             ctx.progress(line_up.PHASE, 0.0, say.message, pausable=False)
-            self.get_logger().info(f"line-up: {say.message}")
+            # on the console once: the flight view's line where the goal has one (its yes is the step's own
+            # end: guide_end), and then this node's line is the goal's file's alone (_logged)
+            self._logged(f"line-up: {say.message}", view)
             if view is not None and say.state != guide.GO:
                 asks = say.state == guide.READY
                 view.guide_say(
@@ -1193,7 +1265,9 @@ class Capability(CapabilityEngine):
         def unasked():
             # typed ahead, or as the box rolled out of place: never a yes (guide.Guide.press), and said, so
             # that the person does not wait on an answer that was not taken
-            self.get_logger().warning("a y came with nothing asked (or asked of a box no longer seen): not a yes")
+            self._logged(
+                "a y came with nothing asked (or asked of a box no longer seen): not a yes", view, logging.WARNING
+            )
             if view is not None:
                 view.guide_say("that y was not to a question: answer once it asks")
 
@@ -1262,7 +1336,7 @@ class Capability(CapabilityEngine):
             told = lining.guide.instruction  # the newest "Move ...", where one was given
             if (asked is not None or getattr(ask, "carried", False)) and lining.guide.saw_box:
                 # "press open again" goes on from the line-up, with its whole time (_lines_up)
-                self._line_up_first = time.monotonic()
+                self._line_up_again(ask)
             ended("not in place within %.0f s%s" % (budget_s, f" (last told: {told})" if told else ""))
             message = NOT_LINED_UP % budget_s + (f" -- last told: {told}" if told else "")
             if asked is not None:
@@ -1343,9 +1417,9 @@ class Capability(CapabilityEngine):
         # whether this goal lines up before its first move, decided once and before anything is started; where
         # it is asked (the UI's panel, or with no UI this node's console and ~/answer) and how long a line-up
         # may take (the orchestrator's goal: what its 120 s leave; one sent by hand: CONSOLE_LINE_UP_S)
-        lines_up, carried = self._lines_up()
+        lines_up, carried, refused = self._lines_up()
         t0 = time.monotonic()
-        ask = Asking(ui, timed, t0, carried=carried)
+        ask = Asking(ui, timed, t0, carried=carried, refused=refused)
         self._hear_answers()  # the person's y or n, from here to the action's end
         if self.mock:
             return self._mock(action_id, ctx, lines_up, ask)
@@ -1374,7 +1448,9 @@ class Capability(CapabilityEngine):
         elif lines_up:
             # nothing moves, and nothing runs but on the line-up's yes
             try:
-                lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id), ask)
+                lined_up_s = self._line_up(
+                    ctx, lambda: self._box_source(env, instance_id, refused=[list(p) for p in ask.refused]), ask
+                )
                 if self._cancelled_before_go(ctx):
                     raise Cancelled()  # nothing ran
             except BaseException as e:
@@ -1504,15 +1580,30 @@ class Capability(CapabilityEngine):
             asked = run_.take_guide() if guide is not None else None
             if asked is not None and sent is None and not cancelled:
                 ask, env, action_id = guide
+                asked_at = time.time()  # (the run's rows carry the same clock's time: Tracker.went)
+                # every row the run wrote before it asked is read before its line-up begins: it writes them
+                # first (its refusal, the home to rest), and one read only after the yes would say on the
+                # panel what was true before it
+                self._progress(log, track, ctx, panel)
                 why = no_press_reason(str(asked.get("why") or "no reason given"))
-                self.get_logger().warning(
-                    "no press plans from where the chair stands (%s): the run is not ended, the chair is guided" % why
+                # (on the console the flight view says it, from the run's own line: this is the goal's file's)
+                self._logged(
+                    "no press plans from where the chair stands (%s): the run is not ended, the chair is guided" % why,
+                    ask.view,
+                    logging.WARNING,
                 )
                 # why, to whoever follows the action's progress: a person at the terminal program has no
-                # console to read it on (the flight view says it from the run's own line)
+                # console to read it on. The run asks only once its arm is at rest (press_demo.guide_chair),
+                # so this is the first word that the chair is to move
                 ctx.progress(line_up.PHASE, 0.0, why[:1].upper() + why[1:] + GUIDE_SAYS, pausable=False)
                 self._run_lines_up(ctx, env, run_, action_id, track.instance_id, ask, asked=asked)
-                panel.again()  # the line-up had the screen: the run's panel is sent again at once
+                # the person's yes, and the run has its go. The line-up had the screen: the run's panel is
+                # sent again at once, and what it and the progress say is where the run is NOW (Tracker.went),
+                # never its last word from before the line-up, which was that no press planned
+                again = track.went(asked_at)
+                ctx.progress(*again, pausable=False)
+                panel.say(*again)
+                panel.again()
                 if not ask.timed:
                     since, budget_s = time.monotonic(), RUN_BUDGET_S
                 continue
@@ -1734,20 +1825,30 @@ class NodeLogHandler(logging.Handler):
             except OSError:
                 pass
 
+    def keep(self, text, levelname="INFO"):
+        """`text` as a line of the goal's file, and nowhere else: what the console is told another way (the
+        flight view's line for it: Capability._logged). False where no file is open, or it failed: the line
+        is then not kept."""
+        self.acquire()  # the handler's own lock (emit holds it already): the run's reader writes here too
+        try:
+            f = self._file
+            if f is None:
+                return False
+            now = time.time()
+            stamp = time.strftime("%H:%M:%S", time.gmtime(now)) + ".%03d" % (1000 * (now % 1))
+            f.write("%s %-7s %s\n" % (stamp, levelname, text))
+            f.flush()
+        except (OSError, ValueError):
+            return False
+        finally:
+            self.release()
+        return True
+
     def emit(self, record):
         logger = self.node.get_logger()
         msg = record.getMessage()
-        f = self._file
-        if f is not None:
-            try:
-                now = time.time()
-                stamp = time.strftime("%H:%M:%S", time.gmtime(now)) + ".%03d" % (1000 * (now % 1))
-                f.write("%s %-7s %s\n" % (stamp, record.levelname, msg))
-                f.flush()
-                if record.levelno < logging.ERROR:
-                    return
-            except (OSError, ValueError):  # a file that fails is not the run's problem: the console
-                pass
+        if self.keep(msg, record.levelname) and record.levelno < logging.ERROR:
+            return  # (a file that fails is not the run's problem: the console)
         if record.levelno >= logging.ERROR:
             logger.error(msg)
         elif record.levelno >= logging.WARNING:

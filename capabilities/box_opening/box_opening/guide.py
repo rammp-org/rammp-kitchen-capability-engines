@@ -22,7 +22,8 @@ example does (capabilities/example: ctx.update_user_panel / ctx.poll_ui_event).
 The words are the user's moves, not the box's place: the box too far away is "Move closer", the box
 too far to the left is "Move left" (toward it). One instruction at a time, the larger miss first, and
 no flicker: an instruction stands MIN_SAY_S, the axis it names changes only where the other miss is
-AXIS_SWITCH_M larger, and READY is left only once the box has been out, or moving, for LEAVE_S.
+AXIS_SWITCH_M larger, "Hold still" takes an instruction's place only once the box has read inside the
+boundary for HOLD_AFTER_MOVE_S, and READY is left only once the box has been out, or moving, for LEAVE_S.
 
 Open is taken only from READY and only on a box seen within FRESH_S: a press on anything older is not
 a yes to what is there now.
@@ -53,6 +54,14 @@ FRESH_S = 1.0  # Open counts only on a box seen this recently
 STEADY_S = 1.0  # the box has stood still this long ...
 STEADY_M = 0.015  # ... within this much: the chair is not moving
 LEAVE_S = 0.5  # READY is left once the box has been outside, moving, or not judged, this long
+# "Hold still, checking" replaces a "Move ..." only once the box has read inside the boundary (or not judged)
+# for this long without a break. A box on the boundary's edge reads inside on one wrist frame and a
+# centimetre or two outside on the next (five frames a second, the 3 cm margin either side of it): without
+# this the panel and the console changed between "Hold still, checking" and "Move closer a little" with
+# every frame, 51 lines in 10 s in the review's replay of 2026-11-17, and the person was told to hold still
+# where a small move was still to make. Half a second is two to three wrist frames. It delays no question:
+# READY is asked the moment the box is inside, steady and planned, from whatever stood before it
+HOLD_AFTER_MOVE_S = 0.5
 MIN_SAY_S = 0.7  # an instruction stands at least this long before another replaces it
 AXIS_SWITCH_M = 0.03  # the other axis is named only where its miss is this much the larger
 ROUND_M = 0.05  # distances are said to the nearest 5 cm ...
@@ -152,6 +161,7 @@ class Guide:
     _said: Say = None
     _said_at: float = None
     _bad_since: float = None  # in READY: since when the box has been outside, moving, or not judged
+    _hold_since: float = None  # with a "Move ..." up: since when the box has read inside without a break
 
     # -- the box's own motion ------------------------------------------------------
     @property
@@ -198,6 +208,15 @@ class Guide:
         self.state = say.state
         return say
 
+    def _hold(self, now, say, at_once):
+        """ "Hold still, checking" (`say`), unless a "Move ..." is up and the box has not yet read inside for
+        HOLD_AFTER_MOVE_S without a break: the instruction then stands (a box on the boundary's edge)."""
+        if self.state == MOVE and self._said is not None:
+            self._hold_since = now if self._hold_since is None else self._hold_since
+            if now - self._hold_since < HOLD_AFTER_MOVE_S:
+                return self._said
+        return self._answer(now, say, at_once=at_once)
+
     def update(self, now, fix, reach):
         """The tick: the newest Fix (or None: nothing new) and the Reach of the newest box seen (None: not
         judged yet). Returns what to show."""
@@ -212,7 +231,7 @@ class Guide:
         cancel = ((CANCEL, "Cancel"),)
         seen = self._last_fix
         if seen is None or now - seen.t > LOST_S:
-            self._bad_since = None
+            self._bad_since = self._hold_since = None
             return self._answer(now, Say(LOOKING, "Looking for the container", cancel), at_once=True)
         good = reach is not None and bool(reach.inside) and reach.planned is True and self.steady(now)
         if self.state == READY and not good:
@@ -224,12 +243,14 @@ class Guide:
         else:
             self._bad_since = None
         if reach is None:
-            return self._answer(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=self.state != READY)
+            return self._hold(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=self.state != READY)
         if good:
+            self._hold_since = None
             ready = Say(READY, ASK, ((OPEN, "Open"),) + cancel, 100.0)
             return self._answer(now, ready, at_once=True)
         if reach.inside and reach.planned is not False:
-            return self._answer(now, Say(HOLD, "Hold still, checking", cancel, 100.0), at_once=True)
+            return self._hold(now, Say(HOLD, "Hold still, checking", cancel, 100.0), at_once=True)
+        self._hold_since = None
         if reach.to_zone is None:
             return self._answer(now, Say(MOVE, "The arm cannot open it from here", cancel, 0.0), at_once=True)
         word, metres, self._axis = instruction(reach.to_zone, self._axis)

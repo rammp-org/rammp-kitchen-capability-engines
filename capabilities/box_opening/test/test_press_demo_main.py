@@ -568,6 +568,90 @@ def test_a_container_the_wrist_sees_out_of_the_arms_reach_is_no_no_box_for_a_gui
     assert code == 2 and calls == [] and len(homes) == 1
 
 
+def _side_survey(monkeypatch, finds):
+    """tasks/survey.run_survey stood in for (the wrist's survey over the arm's side, --wrist-survey):
+    `finds` True, it finds the container beside the chair; False, none. Returns (its calls, its fix)."""
+    from box_opening.models.container import ContainerModel
+    from box_opening.perception.depth_source import container_pose_from_top
+    from box_opening.tasks import survey as sv
+
+    model = ContainerModel.load(PINK)
+    table_z = -0.057 + 0.03
+    top = (0.30, -0.45, table_z + model.dims[2])  # beside the chair, not in front of it
+
+    class _SideFix:
+        pose = container_pose_from_top(top, 0.0, model, table_z)
+        top_xyz = top
+        n_points = 900
+        score = 0.6
+        source = "wrist"
+        table_z_scene = table_z
+        table_extent = None
+
+    calls = []
+
+    def run_survey(node, ctx, runner, watcher, execute, **kw):
+        calls.append(len(HOME_FIRSTS))
+        if finds:
+            return sv.Survey(fix=_SideFix, clouds=["the side survey's points"])
+        return sv.Survey(fix=None, why="wrist camera: no lid-sized top on the counter beside the arm")
+
+    monkeypatch.setattr(sv, "run_survey", run_survey)
+    return calls, _SideFix
+
+
+def test_with_the_wrist_survey_on_a_far_top_in_front_does_not_take_the_side_surveys_turn(monkeypatch, tmp_path, capsys):
+    """wrist_first and wrist_survey both on, no selection: the container stands beside the chair and
+    something lid-sized stands out of reach in front. Before there was any guidance the front look's none
+    led to the side survey, which found the box. As the guidance was first written the far top came first:
+    the user was guided toward it and the side survey was never tried (review of 2026-11-17).
+
+    What is chosen: the side survey keeps its turn, before anything is made of the far top. Where it finds
+    the container the run opens it and nobody is guided. Where it finds none either, the run still does
+    not end NO BOX: the chair is guided to the top in front (guide_chair brings the arm the survey left
+    over its side to rest first). With the orchestrator's selection there is no side survey (the wrist
+    cannot tell which container was selected), and the far top is guided to at once, as without the flag."""
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+    from box_opening.tasks import press_demo
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    far = [(1.02, -0.20, 0.30)]
+    _wrist_sees(monkeypatch, far)
+    argv = ["--execute", "--guide", "--wrist-first", "--wrist-survey"]
+    # the side survey finds the container: the run reaches out to IT, and nobody is guided anywhere
+    REACH_OUTS.clear()
+    surveys, side_fix = _side_survey(monkeypatch, finds=True)
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    code, _c, rows = run_main(monkeypatch, tmp_path / "beside", argv, _refused, found=False)
+    assert len(surveys) == 1 and calls == [] and REACH_OUTS == [side_fix] and code == 1  # (_refused's own end)
+    assert not [r for r in rows if r["leg"] == "reach_refused"] and "OUT OF REACH" not in capsys.readouterr().out
+    # it finds none either: no NO BOX and no end; the chair is guided to the top in front, after the survey
+    REACH_OUTS.clear()
+    surveys, _fix = _side_survey(monkeypatch, finds=False)
+    code, _c, rows = run_main(monkeypatch, tmp_path / "nowhere", argv, _refused, found=False)
+    assert len(surveys) == 1 and [c["place"] for c in calls] == [far[0]] and code == EXIT_NOT_LINED_UP
+    assert not REACH_OUTS and homes == []
+    out = capsys.readouterr().out
+    assert out.index("WRIST SURVEY: no container beside the arm either") < out.index("OUT OF REACH: the wrist")
+    assert "NO BOX" not in out
+    (refused,) = (r for r in rows if r["leg"] == "reach_refused")
+    assert refused["guided"] is True
+    # a selection: no side survey for it (as ever), so the far top is what the chair is guided to
+    calls.clear()
+    surveys, _fix = _side_survey(monkeypatch, finds=True)
+    code, _c, _rows = run_main(
+        monkeypatch, tmp_path / "selected", [*argv, "--instance-id", "food_container_1"], _refused, found=False
+    )
+    assert surveys == [] and [c["place"] for c in calls] == [far[0]] and code == EXIT_NOT_LINED_UP
+    # by hand (no --guide) nothing changed: the survey, then NO BOX and home where it finds none
+    calls.clear()
+    surveys, _fix = _side_survey(monkeypatch, finds=False)
+    by_hand = ["--execute", "--wrist-first", "--wrist-survey"]
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "by hand", by_hand, _refused, found=False)
+    assert len(surveys) == 1 and calls == [] and code == 2 and len(homes) == 1 and homes[0].startswith("NO BOX")
+
+
 def test_the_wrist_look_says_which_tops_it_saw_out_of_the_arms_reach(monkeypatch):
     """wrist_first keeps the finder's answer where it found no container: the lid-sized tops that all stand
     out of the arm's reach (far_tops), for main's guidance; none where it found the container."""

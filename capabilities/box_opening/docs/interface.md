@@ -274,7 +274,11 @@ container is found), `look` (0.1), `press` (0.35), `grip` (0.5), `carry`
 (0.85), `release` (0.9), `home` (1.0). A phase is reported as
 its motion ends, its message what the run is doing then, in a person's words
 (`pressing the button`, `setting the lid down`; `: stopped` where that motion
-stopped). A run is one motion from the press to the set-down, so it
+stopped). A run that finds no press from where the chair stands stays in
+`locate` at the fraction it had: `no press plans from here: wait, the arm comes to rest first`,
+`going to rest` where it homed for it, then the line-up's own progress (phase
+`line_up`, at 0), and from the user's yes `looking for the container again`.
+A run is one motion from the press to the set-down, so it
 cannot pause once it has started (every phase reports `pausable: false`); a
 cancel stops it at once. The cancel is the run's own Ctrl+C: the motion in
 flight is cancelled, and the action ends once the driver has confirmed it, with
@@ -394,8 +398,14 @@ the deployment's values back.
 and `pct` how near the container is to the boundary (100 inside). The
 orchestrator's progress reports phase `line_up` at 0 with the same message (in
 the middle of a run too, between the run's own phases); an instruction whose
-distance alone changed is reported no oftener than once a second (the panel
-itself is sent as it always was).
+distance alone changed, and `Hold still, checking` taking an instruction's
+place or giving way to one, are reported no oftener than once a second (the
+panel itself is sent as it always was). A container on the boundary's edge
+reads inside it on one wrist frame and a centimetre or two outside on the
+next: the instruction (`Move closer a little`) then stands, on the panel too,
+and `Hold still, checking` takes its place only once the container has read
+inside for half a second without a break. The question is not held back by
+that: it is asked the moment the container is inside, still and planned for.
 The run starts only on **Open**, and only where it is pressed on a `Ready`
 panel whose container was seen within the last second; then the panel is the
 run's. `Ready` is kept through half a second of frames that cannot be judged or
@@ -507,6 +517,14 @@ with `line_up` off as the owner flies. Now, with `line_up` on or off:
   goes home from the look pose first, as it always has; from a side survey's
   pose it homes. A home that fails ends the run, the arm holding
   (`arm_holds`): the chair is never told to move with the arm standing out.
+- Until the arm is at rest and the run has asked to be guided, nothing says
+  the chair is to move: the panel and the progress say
+  `No press plans from here: wait, the arm comes to rest first` (then
+  `Going to rest` as that home ends), the console
+  `next  the run does not end here: wait while the arm comes to rest`. The
+  first word about moving is the line-up's own (the progress's
+  `No press plans from here: ... Move the chair as told`, then the
+  instructions).
 - It forgets what its cameras measured from where the chair stood (the table's
   height and extent, the counter's edges it was held out of, the container's
   pose): after the move they are measured again, as at a run's first look.
@@ -516,9 +534,18 @@ with `line_up` off as the owner flies. Now, with `line_up` on or off:
   where the run found no press is not inside for this line-up, whatever the
   boundary's own proof says of it: the run has the planner and the table's
   edges, the proof has neither, and the user is shown the way to a place that
-  works, not asked on the place just refused.
+  works, not asked on the place just refused. Every such place of the goal is
+  held against each of its line-ups, and against the line-up carried to the
+  next `open_box` (see "How long a line-up may take"), by where it is on the
+  table whatever height the watch reads the lid at: the 5 cm cell of the
+  boundary that holds it does not work, so the container must stand 3 cm or
+  more outside that cell to be asked on. (A watch that reads the unmoved
+  container further than that from where the run had it, as the scene camera
+  can against the wrist's, is not caught by this.)
 - On the user's yes the run is told to go, finds the container again from where
-  the wrist stands and carries on; its own panel has the screen again. If no
+  the wrist stands and carries on; its own panel has the screen again, saying
+  `Looking for the container again` until the run's next step, and so does the
+  progress: nothing tells the user to move once they have said yes. If no
   press plans there either it asks again, and goes on only on another yes.
 - Without the yes it ends as a line-up before a run does: **Cancel** (or `n`)
   is the run's Ctrl+C, read at every moment; out of time the run turns its wrist
@@ -532,6 +559,12 @@ What is guided: `no reach-out press plans for the scene camera's box` (before
 the arm moves toward the container), `no press reaches the aimed button` (after
 the look and the aim), and a lid-sized top the wrist's look sees out of the
 arm's reach while the scene camera has no container (until now `not_found`).
+With `wrist_survey` on (and no selection) the survey over the arm's side keeps
+its turn before that last one: the container may stand beside the chair, and a
+lid-sized top far off in front is then not it. Where the survey finds the
+container the run opens it and nobody is guided; where it finds none either,
+the chair is guided to the top in front (the arm brought to rest from the
+survey's pose first).
 Not guided: a container no camera sees at all (`not_found`, as before), the
 guarded press's own stops (`press_demo --guarded`, never the engine's), and a
 run by hand (`press_demo` without `--guide`), which stops there as it always
@@ -542,12 +575,16 @@ where the planner's path swings wide): the planning is as it was.
 
 A goal with no UI is said and asked on the node's console, through the flight
 view: one line each time what it says changes (a distance that only shrinks,
-no oftener than once a second), and the question as `y / n`:
+or `Hold still, checking` and an instruction by turns, no oftener than once a
+second), and the question as `y / n`. Each is on the console once: the node's
+own copy of a line-up's line (`line-up: Move closer, about 15 cm`) is kept in
+the goal's file of full lines (`runs/console-<stamp>.log`), not on the console
+beside the flight view's:
 
 ```text
  1 FIND      ok    box 0.79 m out (wrist camera, 1 view)                 8.0 s
  2 PRESS     FAIL  no press plans from here (0.79 m out): the slide in swings the arm wide (30, 35 deg); the press stroke would pass too close to the user (40, 45 deg)
-             next  the chair is to move: the run does not end here
+             next  the run does not end here: wait while the arm comes to rest
    line up   ...   the arm rests and the wrist looks: move the chair as told
              say   Move closer, about 15 cm
              say   Hold still, checking
@@ -581,18 +618,23 @@ docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=$ROS_DOMAIN_ID \
 ```
 
 It sends the `open_box` goal as a goal sent by hand is sent (no token), shows
-what the node says as it goes (the action's progress: the run's steps, a
-line-up's instructions and its question), sends the `y` or `n` typed and Enter
-(a `y` only while the question stands), cancels the goal on Ctrl+C, and ends
-with the result. From any other terminal
+what the node says as it goes (the action's progress: the run's steps, why no
+press plans where none does, a line-up's instructions and its question), sends
+the `y` or `n` typed and Enter (a `y` only while the question stands), and ends
+with the action's result: `DONE`, `CANCELLED`, or `FAILED` with the error code
+and whether it can be started again. Ctrl+C cancels the goal (the action's own
+cancel) and then waits for that result as for any other, up to 45 s, the
+node's own stop at its worst; a second Ctrl+C leaves without it. A Ctrl+C
+before the goal is sent just leaves. From any other terminal
 `ros2 topic pub --once /box_opening/answer std_msgs/msg/String "{data: y}"`
 says the same. The mock lines up with no UI the same way, for rehearsing it.
 
-Not yet run on the robot, nor against a live node: the node's side is tested
-with the run stood in for by a script that asks to be guided as `press_demo`
-does, the run's side with its cameras and arm stood in for, and the terminal's
-words without ROS; its ROS wiring (the action client, the publisher, the
-keyboard) has not been run at all.
+Not yet run on the robot, nor against a node that moves an arm: the node's side
+is tested with the run stood in for by a script that asks to be guided as
+`press_demo` does, the run's side with its cameras and arm stood in for, and
+the terminal whole against the mock node over DDS inside the test container
+(`test_open_box_terminal_e2e.py`: a yes, an `n`, a Ctrl+C, each to the node's
+result).
 
 #### How long a line-up may take
 
@@ -601,9 +643,12 @@ keyboard) has not been run at all.
 | with the orchestrator's token (from the UI, or the UI bridge down) | ends 35 s after the goal began | ends 35 s after the goal began: what the run's look and proof left of them (run 2 of 2026-11-17 said "no press plans" 16 s in: about 19 s). With under 8 s left it is not given: `not_lined_up` at once | 90 s from the goal's start, the line-up inside it |
 | no token (sent by hand, `open_box_terminal`)                       | 10 minutes                     | 10 minutes, each time                                                                                                                                                                                   | 90 s from the last yes                            |
 
-Under the orchestrator a line-up is given only where a long run (55 s) still
-fits after it inside the 90, so none makes the run's own stop come part way
-through a motion; the orchestrator cancels at 120 s whatever the engine does.
+Under the orchestrator a line-up is given only where a run of 55 s still fits
+after it inside the 90; the orchestrator cancels at 120 s whatever the engine
+does. The 55 s are an estimate, not a measurement of a guided run (run 1 of
+2026-11-17 took 33.5 s and the runs of 2026-11-13 about 40 s from the first row
+to home): a guided run that takes longer still meets the run's own stop at
+90 s, part way through a motion, as a run after a line-up before it can.
 After an `open_box` that ended `not_lined_up` from a line-up in the middle of
 its run, the next one within 5 minutes lines up before its first move whatever
 `line_up` says, so that "press open again" goes on from the line-up with its

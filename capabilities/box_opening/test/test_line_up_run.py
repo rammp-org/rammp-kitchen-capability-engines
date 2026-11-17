@@ -723,6 +723,49 @@ def test_a_run_with_no_press_from_where_the_chair_stands_asks_to_be_guided_and_w
     assert ("guide", {"n": 1, "box": [0.712, -0.331, 0.2945], "why": lines[0]["guide"]["why"]}) in runner.notes
 
 
+# run 2 of 2026-11-17's own line (NOTES.md), 752 characters
+RUN2_WHY = (
+    "no reach-out press plans for the scene camera's box (30 deg: the way down (the slide in: trajectory sanity "
+    "gate: arm_joint_1 excursion 2.012 rad > |Δ| + margin 1.632; arm_joint_3 excursion 1.525 rad > |Δ| + margin "
+    "1.120); 35 deg: the way down (the slide in: trajectory sanity gate: arm_joint_1 excursion 2.188 rad > |Δ| + "
+    "margin 2.049; arm_joint_3 excursion 1.668 rad > |Δ| + margin 1.567); 40 deg: the way down (the press stroke "
+    "is not a straight line the arm can fly (the chair and user: arm_half_arm_1_link 0 mm into person/lap (padded "
+    "20 mm + 5 mm), 46% of the way)); 45 deg: the way down (the press stroke is not a straight line the arm can "
+    "fly (the chair and user: arm_half_arm_1_link 0 mm into person/lap (padded 20 mm + 5 mm), 92% of the way)))"
+)
+
+
+def test_the_engine_is_handed_the_whole_reason_not_its_first_300_characters(guided):
+    """The review of 2026-11-17: the request carried `str(why)[:300]`, which for run 2's own line ends inside
+    its second tilt. What the engine said from it (the progress a person at open_box_terminal reads, the
+    not_lined_up message, the run log's guide row) gave the slide in's two tilts and dropped "the press
+    stroke would pass too close to the user (40, 45 deg)": half the reason, for the person with no console."""
+    from box_opening.flight_view import no_press_reason
+
+    whole = (
+        "no press plans from here: the slide in swings the arm wide (30, 35 deg); the press stroke would pass "
+        "too close to the user (40, 45 deg)"
+    )
+    assert len(RUN2_WHY) > 700 and no_press_reason(RUN2_WHY) == whole
+    assert no_press_reason(RUN2_WHY[:300]) == "no press plans from here: the slide in swings the arm wide (30, 35 deg)"
+    _got, lines, runner = _guiding(guided, Round(1, go=True), why=RUN2_WHY)
+    assert lines[0]["guide"]["why"] == RUN2_WHY and no_press_reason(lines[0]["guide"]["why"]) == whole
+    (row,) = (fields for leg, fields in runner.notes if leg == "guide")
+    assert row["why"] == RUN2_WHY
+    # a line longer than a pipe writes whole (the request shares the run's log pipe) is shortened at the end
+    # of a tilt's reason, never inside one: what is said of a tilt is its real reason or nothing
+    gate = "the way down (the slide in: trajectory sanity gate: arm_joint_1 excursion 2.0 rad%s)"
+    long = "no reach-out press plans (%s)" % "; ".join(
+        "%d deg: %s" % (t, gate % (" x" * 450)) for t in (30, 35, 40, 45)
+    )
+    short = press_demo.reason_for_engine(long)
+    assert len(long) > 3600 and len(short) <= press_demo.GUIDE_WHY_MAX + 4 and short.endswith(") ...")
+    assert no_press_reason(short) == "no press plans from here: the slide in swings the arm wide (30, 35 deg)"
+    _got, lines, _runner = _guiding(guided, Round(1, go=True), why=long)
+    assert lines[0]["guide"]["why"] == short
+    assert len(json.dumps({"guide": {"n": 1, "box": [0.712, -0.331, 0.2945], "why": short}})) < 4096 - 3
+
+
 def test_what_the_cameras_measured_before_the_chair_moves_is_forgotten(guided):
     """The owner's rule: the table's height and extent, what stands on it, only from the cameras, each time.
     The run measured them from where the chair stood. After the move they are true of nowhere: the table's
@@ -818,6 +861,19 @@ def test_an_arm_the_look_left_away_from_rest_goes_home_before_the_chair_is_told_
     finally:
         press_demo.try_home = press_demo_try_home
     assert got == (True, True) and len(guided.homes) == 1 and "guide" in lines[0]
+    # what that home is called is read by the flight view, which took "NO WAY IN: the arm goes to rest ..."
+    # for a second refusal and printed a PRESS FAIL of a run that had tried no press (review of 2026-11-17):
+    # as try_home logs it, the line is the arm's way to rest and nothing else
+    from box_opening.flight_view import FlightView
+
+    said = []
+    view = FlightView(write=said.append)
+    view.start()
+    view.feed("[press_demo] OUT OF REACH: the wrist camera sees a lid-sized top at [1.02, -0.20]; nothing was pressed")
+    view.feed("[press_demo] %s — returning home" % guided.homes[0])
+    assert guided.homes[0].startswith("TO REST: ")
+    assert said[-1] == "   home      ...   going to rest before the chair is guided"
+    assert len([line for line in said if " FAIL " in line]) == 1 and not any("PRESS" in line for line in said)
     guided.ctx.client.live = list(away)
     watched = len(guided.watched)
     press_demo.try_home = lambda ctx, runner, execute, why: False

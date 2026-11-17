@@ -110,6 +110,17 @@ STOP = re.compile(r"^STOP: (.*)$")
 # press_demo's wrist look): not the run's end, so no STOP
 NO_WAY_IN = re.compile(r"^NO WAY IN: (.*)$")
 FAR_BOX = re.compile(r"^OUT OF REACH: (.*)$")
+# ... and the arm brought to rest for the chair's move, where the run's look left it anywhere else
+# (press_demo.guide_chair's own home): a way to rest, not a second refusal. Its line began "NO WAY IN:" until
+# 2026-11-17's review, and was read as one: "PRESS FAIL no press plans from here: the way in does not plan"
+# under a FIND that had just failed, of a run that had tried no press at all
+TO_REST = re.compile(r"^TO REST: ")
+# What follows a press with no way in. Not that the chair is to move: the arm may still be on its way to rest
+# (the aimed button's case homes from the look pose), and the first word about moving the chair is the
+# line-up's own, which begins only once the arm is there (review of 2026-11-17: this read "the chair is to
+# move: the run does not end here", written before the home began)
+NOT_THE_END = "the run does not end here: wait while the arm comes to rest"
+REST_DOING = "going to rest before the chair is guided"
 RUNNER_STOP = re.compile(r"^STOP: leg \S+ -> ")  # the runner's own word on one leg: the task's line says what it means
 
 # a leg named in a STOP ("... stopped during lid:carry (...)") -> the step it is
@@ -558,6 +569,9 @@ class FlightView:
             return
         if RUNNER_STOP.match(s):
             return
+        if TO_REST.match(s):
+            self._to_rest()
+            return
         m = NO_WAY_IN.match(s) or FAR_BOX.match(s)
         if m:
             self._no_way_in(m.group(1), far=s.startswith("OUT OF REACH"))
@@ -587,17 +601,23 @@ class FlightView:
 
     def _no_way_in(self, why, far=False):
         """No press plans from where the chair stands, and the run does not end on it: the step it found
-        that at fails with the real reason, and what follows is the chair's move (the engine's line-up)."""
+        that at fails with the real reason. What follows is the arm coming to rest (it may stand there
+        already) and then the chair's move, which the engine's line-up says once the arm rests (guide_start):
+        nothing here says the chair is to move."""
         if self.cur is not None and self.cur[0] in ("FIND", "LOOK") and not far:
             self._end("ok")  # the look itself ended well: it is the press that has no way in
         if far:
             self._fail("what the wrist camera sees is out of the arm's reach", "FIND")
         else:
             self._fail(no_press_reason(why, self.out_m), "PRESS")
-        self._note("the chair is to move: the run does not end here", "next")
+        self._note(NOT_THE_END, "next")
         if "returning home" in why:
-            self.going_home = True
-            self._begin("HOME", "going home")
+            self._to_rest()
+
+    def _to_rest(self):
+        """The arm goes to rest for the chair's move: a home that is not the run's way home (guide_end)."""
+        self.going_home = True
+        self._begin("HOME", REST_DOING)
 
     def _fail(self, why, name, final=False):
         """A step fails; `final`: nothing follows it but the way home."""

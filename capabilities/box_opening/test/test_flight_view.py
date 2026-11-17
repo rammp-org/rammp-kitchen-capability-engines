@@ -377,7 +377,7 @@ def test_a_run_that_finds_no_press_from_where_the_chair_stands_is_guided_and_goe
         "   find      ...   looking for the box",
         " 1 FIND      ok    box 0.79 m out (wrist camera)               8.0 s",
         " 2 PRESS     FAIL  " + RUN2_REASON,
-        "             next  the chair is to move: the run does not end here",
+        "             next  the run does not end here: wait while the arm comes to rest",
         "   line up   ...   the arm rests and the wrist looks: move the chair as told",
         "             say   Looking for the container",
         "             say   Move closer, about 15 cm",
@@ -438,8 +438,8 @@ def test_a_line_up_that_ends_without_its_yes_is_the_runs_end_and_says_where_the_
     assert out[4:] == [
         " 2 LOOK      ok    button found, 0.86 m out                    0.0 s",
         " 3 PRESS     FAIL  no press plans from here (0.86 m out): the way down is not a line the arm can follow",
-        "             next  the chair is to move: the run does not end here",
-        "   home      ...   going home",
+        "             next  the run does not end here: wait while the arm comes to rest",
+        "   home      ...   going to rest before the chair is guided",
         " 4 HOME      ok                                                0.0 s",
         "   line up   ...   move the chair as told; the arm rests and the wrist looks",
         " 5 LINE UP   FAIL  cancelled: n                                0.0 s",
@@ -458,7 +458,7 @@ def test_a_line_up_that_ends_without_its_yes_is_the_runs_end_and_says_where_the_
     )
     assert out[2:] == [
         " 1 FIND      FAIL  what the wrist camera sees is out of the arm's reach   0.0 s",
-        "             next  the chair is to move: the run does not end here",
+        "             next  the run does not end here: wait while the arm comes to rest",
     ]
 
     # the guide's three never raise either (a console that fails is not the run's problem)
@@ -471,6 +471,73 @@ def test_a_line_up_that_ends_without_its_yes_is_the_runs_end_and_says_where_the_
     view.guide_say("Ready. Open the container?", ask="y / n", how="x")
     view.guide_end(True, "yes")
     view.guide_end(False, "cancelled")
+
+
+def test_nothing_says_the_chair_is_to_move_before_the_arm_is_at_rest():
+    """The review of 2026-11-17: where no press reaches the aimed button the arm homes from the look pose
+    (about 5 s on run 1), and the console said `next  the chair is to move: the run does not end here`
+    BEFORE `home ... going home`. A person who drives on that word moves the chair under an arm still out
+    over the table. Until the line-up's own step begins (the engine's, once the run has asked: its arm at
+    rest) no line of the view speaks of moving the chair, and the way to rest is not called the way home."""
+    out, now = [], [0.0]
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    view.feed(P + "WRIST SURVEY: box at [0.80, -0.25] yaw 0.0 deg (WRIST 0.60) — reaching out")
+    view.feed(P + "REACH-OUT: hand tilted 30 deg; looking from 0.15 m back toward the arm")
+    view.feed(P + "AIMED from the look pose: button at [0.820, -0.254, 0.316], 29 mm from the scene camera's")
+    view.feed(
+        P + "NO WAY IN: no press reaches the aimed button (the way down (walk in: 0 deg short: a joint jump of 0.21 "
+        "rad 52% of the way)) — nothing was pressed — returning home"
+    )
+    now[0] = 5.0  # the home flew
+    before = list(out)
+    view.guide_start("the arm rests and the wrist looks: move the chair as told")
+    assert before[-2:] == [
+        "             next  the run does not end here: wait while the arm comes to rest",
+        "   home      ...   going to rest before the chair is guided",
+    ]
+    assert not any("move" in line.lower() or "chair is to" in line for line in before[:-1])
+    assert "going home" not in "".join(before)
+    # the chair's move is the line-up's word, after the home's end
+    assert out[len(before) :] == [
+        " 4 HOME      ok                                                5.0 s",
+        "   line up   ...   the arm rests and the wrist looks: move the chair as told",
+    ]
+    # the same where the arm stood at rest already (run 2's case): no word of moving before the line-up
+    out.clear()
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    for text in (FOUND[0][1], RUN2_FOUND, P + "NO WAY IN: " + RUN2_WHY + "; nothing moved"):
+        view.feed(text)
+    assert out[-1] == "             next  the run does not end here: wait while the arm comes to rest"
+    assert not any("move" in line.lower() for line in out if "nothing moved" not in line)
+
+
+def test_the_guidances_own_home_is_a_way_to_rest_not_a_second_press_that_failed():
+    """Where a look left the arm away from rest (the side survey's pose), the run homes before it asks to be
+    guided (press_demo.guide_chair). Its line for that began "NO WAY IN:", which the view read as a second
+    refusal: `2 PRESS FAIL no press plans from here: the way in does not plan` and a second `next`, of a
+    run that had tried no press at all (review of 2026-11-17). It is the arm going to rest, once."""
+    out, now = [], [0.0]
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    view.feed(
+        P + "OUT OF REACH: the wrist camera sees a lid-sized top at [1.02, -0.20], out of the arm's reach; "
+        "nothing was pressed"
+    )
+    view.feed(P + "TO REST: the arm goes to rest before the chair is guided — returning home")
+    now[0] = 6.0
+    view.guide_start("the arm rests and the wrist looks: move the chair as told")
+    assert out[1:] == [
+        "   find      ...   looking for the box",
+        " 1 FIND      FAIL  what the wrist camera sees is out of the arm's reach   0.0 s",
+        "             next  the run does not end here: wait while the arm comes to rest",
+        "   home      ...   going to rest before the chair is guided",
+        " 2 HOME      ok                                                6.0 s",
+        "   line up   ...   the arm rests and the wrist looks: move the chair as told",
+    ]
+    assert not any("PRESS" in line for line in out)
+    # (that this is the line the run says: test_line_up_run, the arm a look left away from rest)
 
 
 def test_a_refused_move_and_a_stop_with_the_lid_in_the_hand_say_where_things_were_left():

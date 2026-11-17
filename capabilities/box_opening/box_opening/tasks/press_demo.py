@@ -1662,6 +1662,31 @@ def forget_scene(ctx, worlds, watcher):
     watcher.roi = None
 
 
+# The longest reason handed to the engine with a request to be guided (reason_for_engine). Run 2 of
+# 2026-11-17's own line was 752 characters, four tilts with two joints' numbers each; a refusal that also
+# names the shifted proofs runs to two or three times that. The request is one line on the pipe the run's log
+# lines share, and a line of up to 4096 bytes is written whole (a pipe's atomic write): this keeps it under
+# that with room for the box and the few characters JSON writes as six
+GUIDE_WHY_MAX = 2500
+
+
+def reason_for_engine(why, limit=GUIDE_WHY_MAX):
+    """`why` (reach_press's line: "... (30 deg: <why>; 35 deg: <why>; ...)") as the engine is handed it:
+    whole. As first written it was cut at 300 characters, which for run 2 of 2026-11-17's own line ended
+    inside the second of its four tilts: everything the engine said from it (the progress line a person at
+    open_box_terminal reads, the not_lined_up message) gave "the slide in swings the arm wide (30, 35 deg)"
+    and dropped "the press stroke would pass too close to the user (40, 45 deg)" (review of 2026-11-17).
+    Only a line longer than `limit` is shortened, and then at the end of a whole tilt's reason, never inside
+    one: what is said of a tilt is its real reason or nothing."""
+    import re
+
+    why = str(why)
+    if len(why) <= limit:
+        return why
+    ends = [m.start() for m in re.finditer(r"; \d+ deg: ", why) if m.start() <= limit]
+    return (why[: ends[-1]] if ends else why[:limit]) + " ..."
+
+
 def guide_chair(node, ctx, cfg, runner, watcher, args, locator, rest_tol, place, why, n, ear, out=None):
     """--guide, where the run found no press from where the chair stands (reach_press.NO_WAY_IN, or a
     container the wrist sees out of the arm's reach): the run does not end. Flatbot 2026-11-17 16:43
@@ -1682,7 +1707,9 @@ def guide_chair(node, ctx, cfg, runner, watcher, args, locator, rest_tol, place,
     out = sys.stdout if out is None else out
     rest = rest_joints(cfg)
     if not wrist_looks_from(ctx.client.joints(), rest, rest_tol):
-        if not try_home(ctx, runner, args.execute, "NO WAY IN: the arm goes to rest before the chair is moved"):
+        # ("TO REST": the flight view's word for this home. It is no refusal: as "NO WAY IN: ..." the view read
+        # it as a second one, and printed a PRESS FAIL for a run that had tried no press: review of 2026-11-17)
+        if not try_home(ctx, runner, args.execute, "TO REST: the arm goes to rest before the chair is guided"):
             log.info(
                 "[press_demo] STOP: no press plans from where the chair stands, and the arm did not get home for "
                 "the chair to be moved — the arm holds; nothing was pressed"
@@ -1691,12 +1718,13 @@ def guide_chair(node, ctx, cfg, runner, watcher, args, locator, rest_tol, place,
     forget_scene(ctx, ctx.worlds, watcher)
     ear.again()
     box = None if place is None else [round(float(v), 4) for v in place[:3]]
-    runner.note("guide", n=n, box=box, why=str(why)[:300])
+    why = reason_for_engine(why)
+    runner.note("guide", n=n, box=box, why=why)
     log.info(
         "[press_demo] GUIDE %d: the arm rests and the wrist looks while the chair is moved; the run goes on at "
         "the user's yes" % n
     )
-    out.write(LINE_UP_MARK + json.dumps({"guide": {"n": n, "box": box, "why": str(why)[:300]}}) + "\n")
+    out.write(LINE_UP_MARK + json.dumps({"guide": {"n": n, "box": box, "why": why}}) + "\n")
     out.flush()
     went, turned, held = line_up_watch(
         node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=ear, out=out, rest_any=True
@@ -2131,7 +2159,16 @@ def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
     return scene_fix, locator, None
 
 
-def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator, wrist_look=None, scene_said=None):
+def side_survey_has_a_turn(args):
+    """Whether the wrist's survey over the arm's side is tried where nothing else finds the container
+    (wrist_survey_or_exit): --wrist-survey, and no selection of the orchestrator's (the wrist cannot tell
+    which container was selected)."""
+    return bool(getattr(args, "wrist_survey", False)) and not getattr(args, "instance_id", None)
+
+
+def wrist_survey_or_exit(
+    node, ctx, cfg, runner, watcher, args, locator, wrist_look=None, scene_said=None, or_none=False
+):
     """The scene camera found no box (locator.last_why): the wrist survey's fix (tasks/survey) with
     --wrist-survey, its frames' points kept on ctx (survey_clouds); else the run's end — NO BOX and
     home (exit 2), as without the survey; a survey motion stopped part way: the arm holds (exit 1);
@@ -2139,7 +2176,10 @@ def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator, wrist_l
     (--instance-id) does not survey: the selection is one of the scene camera's detections, and the
     wrist cannot tell which container it is (docs/interface.md). `wrist_look`: what the wrist
     look in front (--wrist-first) said where it found none too, said with the NO BOX; `scene_said`:
-    what to say of the scene camera where its own last word is not it (a rough fix not opened on)."""
+    what to say of the scene camera where its own last word is not it (a rough fix not opened on).
+    `or_none` (a guided run whose wrist saw a lid-sized top in front, out of the arm's reach): a survey
+    that finds no container is not the run's end; None is returned, the survey's word said, and the caller
+    has the chair guided to that top (main)."""
     from box_opening.tasks import survey as sv
 
     why = "scene camera: %s" % (scene_said or locator.last_why)
@@ -2172,6 +2212,12 @@ def wrist_survey_or_exit(node, ctx, cfg, runner, watcher, args, locator, wrist_l
             ctx.survey_clouds = survey.clouds
             return survey.fix
         why += "; wrist survey: %s" % survey.why
+        if or_none:
+            log.info(
+                "[press_demo] WRIST SURVEY: no container beside the arm either (%s): the chair is guided to the "
+                "lid-sized top the wrist saw in front" % survey.why
+            )
+            return None
     # the look's seconds and the segmenter's verdict: what a NO BOX was
     runner.note("reach_refused", why="NO BOX — %s" % why, **locator.look_record())
     try_home(ctx, runner, args.execute, "NO BOX — %s" % why)
@@ -2549,9 +2595,31 @@ def main():
                     node, ctx, cfg, runner, watcher, args, locator, scene_fix, wrist_said
                 )
             far = (getattr(ctx, "wrist_far", None) or []) if args.guide else []
-            if scene_fix is None and far:
-                # THE WRIST SEES IT, OUT OF THE ARM'S REACH (--guide): no NO BOX and no end. The chair is
-                # moved for it, as for a box no press plans to (guide_chair), and the run looks again
+            if scene_fix is None and (not far or side_survey_has_a_turn(args)):
+                # No camera has the container in front. With --wrist-survey the wrist looks over the arm's
+                # side BEFORE anything else is made of it, as it did before there was any guidance: the
+                # container may stand beside the chair, and a lid-sized top far off in front is then not
+                # it. As first written the guidance below came first, and with both flags on the side
+                # survey was never tried (review of 2026-11-17). Without a far top this is the run's end
+                # where the survey finds none (NO BOX); with one, the survey's None comes back here
+                scene_fix = wrist_survey_or_exit(
+                    node,
+                    ctx,
+                    cfg,
+                    runner,
+                    watcher,
+                    args,
+                    locator,
+                    wrist_look="; ".join(wrist_said),
+                    scene_said=scene_said,
+                    or_none=bool(far),
+                )
+                reach_locator = None
+            if scene_fix is None:
+                # THE WRIST SEES IT, OUT OF THE ARM'S REACH (--guide), and the side survey, where it has a
+                # turn, found no container either: no NO BOX and no end. The chair is moved for it, as for a
+                # box no press plans to (guide_chair, which first brings an arm the survey left over its
+                # side to rest), and the run looks again
                 why = "the wrist camera sees a lid-sized top at [%.2f, %.2f], out of the arm's reach%s" % (
                     far[0][0],
                     far[0][1],
@@ -2564,19 +2632,6 @@ def main():
                     node, ctx, cfg, runner, watcher, args, locator, start_tol, far[0], why, guided, ear
                 )
                 continue
-            if scene_fix is None:
-                scene_fix = wrist_survey_or_exit(
-                    node,
-                    ctx,
-                    cfg,
-                    runner,
-                    watcher,
-                    args,
-                    locator,
-                    wrist_look="; ".join(wrist_said),
-                    scene_said=scene_said,
-                )
-                reach_locator = None
             if not scene_by_tf and reach_locator is not None:
                 trusted, distrust = scene_trust(
                     residuals_path_for(args.scene_calib), args.scene_calib or scene_calib_path()

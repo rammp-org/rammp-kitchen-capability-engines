@@ -92,12 +92,15 @@ class Answers:
 class LineUp:
     """One line-up. `live()`: whether this execution has the UI (node.Capability._ui_live). `on_say(say)`:
     called where what the panel says changes (the node's progress, its log and its console). `say_min_s`:
-    an instruction that only changes its distance ("Move closer, about 25 cm" after "about 30 cm") is
-    handed to `on_say` no oftener than this; the newest is said once that long has passed, and anything
-    else (another direction, hold still, the question) at once. A chair driven in changes the distance
-    several times a second, and a console of five lines a second is not read (0: every change, as the
-    panel has it). `answers`: an Answers, for the y or n of a person with no panel (None: the panel
-    alone). `again`: what it says last where the time runs out (None: the panel's words).
+    an instruction that only changes its distance ("Move closer, about 25 cm" after "about 30 cm"), and
+    "Hold still, checking" and an instruction taking each other's place, are handed to `on_say` no oftener
+    than this; the newest is said once that long has passed, and anything else (another direction, the
+    question, the question taken away) at once. A chair driven in changes the distance several times a
+    second, a box on the boundary's edge reads either side of it frame by frame, and a console of five
+    lines a second is not read (0: every change, as the panel has it; the guide itself holds the edge's
+    flicker for both: guide.HOLD_AFTER_MOVE_S). `answers`: an Answers, for the y or n of a person with no
+    panel (None: the panel alone). `again`: what it says last where the time runs out (None: the panel's
+    words).
     `on_unasked()`: called for a y that came with nothing asked, which is no yes."""
 
     def __init__(
@@ -151,15 +154,22 @@ class LineUp:
 
     def _show(self, say, now):
         if (say.state, say.message) != self._told:
-            # only the distance of the same kind of instruction changed, and the last was said a moment ago:
-            # held, and said on a later tick where it still stands (this is called every tick with the newest)
+            # only the distance of the same kind of instruction changed, or "hold still" and an instruction
+            # took each other's place (the box on the boundary's edge), and the last line was said a moment
+            # ago: held, and said on a later tick where it still stands (this is called every tick with the
+            # newest). The question, and its being taken away, are never held
             quick = (
                 self._say_min_s > 0.0
                 and self._told is not None
-                and say.state == self._told[0] == guide.MOVE
-                and say.hint is not None
-                and self._told_hint == say.hint[0]
                 and now - self._told_at < self._say_min_s
+                and (
+                    (
+                        say.state == self._told[0] == guide.MOVE
+                        and say.hint is not None
+                        and self._told_hint == say.hint[0]
+                    )
+                    or {say.state, self._told[0]} == {guide.MOVE, guide.HOLD}
+                )
             )
             if not quick:
                 self._told, self._told_at = (say.state, say.message), now
@@ -379,17 +389,22 @@ class BoxSource:
     fixes ("by": "wrist") and, between them, the scene camera's: the wrist's are kept to while one is fresh
     (guide.LOST_S). `probe_argv(urdf, root)`: reach_probe's, once the watch has said which robot this is
     (run with PROBE_ENV). `far_m`: the deployment's bound on the boundary (None: none). `refused`: places
-    ((x, y, lid z), the arm's frame) where the run itself has just found no press (a line-up in the middle
-    of a run, whose box still stands there as it begins): their cells do not work for this line-up
-    whatever the probe's proof says of them, as a cell its own proof refuses does not. The run has the
-    planner and the table's edges and the probe has neither, and where the two disagree the run's word is
-    the last: without this the user would be asked "Ready?" on the very place the run refused. close() ends the
+    ((x, y), or (x, y, lid z), the arm's frame) where a run itself found no press (a line-up in the middle
+    of a run, whose box still stands there as it begins; every such place of the goal, and of the goal a
+    line-up is carried from: node.Asking.refused): their cells do not work for this line-up whatever the
+    probe's proof says of them, as a cell its own proof refuses does not. The run has the planner and the
+    table's edges and the probe has neither, and where the two disagree the run's word is the last: without
+    this the user would be asked "Ready?" on the very place the run refused. A place is refused by where it
+    is on the table alone, at whatever height this line-up's watch reads the lid: the run's fix and the
+    watch's are two readings of one lid (the scene camera's against the wrist's, centimetres apart in
+    height), and as first written a refused place counted only within 15 mm of the run's own lid height and
+    in that height's grid (review of 2026-11-17). close() ends the
     children that are this source's own, the probe by its own quit so that it keeps its grid; it can take
     PROBE_QUIT_S, so what must not wait is done before it."""
 
     def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child, refused=()):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
-        self._refused_at = [tuple(float(v) for v in xyz[:3]) for xyz in refused or () if len(xyz) >= 3]
+        self._refused_at = [(float(xy[0]), float(xy[1])) for xy in refused or () if len(xy) >= 2]
         self._log, self._clock, self._spawn = log, clock, spawn
         self._owns_watch = isinstance(watch, list | tuple)
         self.watch = spawn(watch, env, log, clock) if self._owns_watch else watch
@@ -454,9 +469,6 @@ class BoxSource:
             for _t, msg in self.probe.messages():
                 if "zone" in msg:
                     self._zone = Zone.from_dict(msg["zone"]).within(far_m=self._far_m)
-                    for xyz in self._refused_at:  # where the run found no press: its cell in this grid
-                        if self._zone.serves(xyz[2]) and self._zone.index(xyz):
-                            self._refuted.add((self._zone.lid_z, *self._zone.index(xyz)))
                     self._refute()
                 elif "proof" in msg:
                     p = msg["proof"]
@@ -481,16 +493,24 @@ class BoxSource:
         return new
 
     def _refute(self):
+        """The grid in hand without the cells that do not work for this line-up: those a proof for the box
+        itself refused (at that grid's height), and the cell of every place a run refused, in whichever
+        grid this is (`refused`: by where it is on the table, at any lid height)."""
         if self._zone is not None:
             for lid_z, i, j in self._refuted:
                 if lid_z == self._zone.lid_z:
                     self._zone.set(i, j, False)
+            for xy in self._refused_at:
+                ij = self._zone.index(xy)
+                if ij is not None:
+                    self._zone.set(*ij, False)
 
     def _planned(self, xy, z):
         """The proof's word for a box at `xy`, lid top `z`: True, False, or None where none was made there.
-        False, whatever the proof, within PROOF_NEAR_M of a place the run itself refused (`refused`)."""
-        for rx, ry, rz in self._refused_at:
-            if math.hypot(rx - xy[0], ry - xy[1]) <= PROOF_NEAR_M and abs(rz - z) <= PROOF_NEAR_M:
+        False, whatever the proof and whatever `z`, within PROOF_NEAR_M of a place a run itself refused
+        (`refused`)."""
+        for rx, ry in self._refused_at:
+            if math.hypot(rx - xy[0], ry - xy[1]) <= PROOF_NEAR_M:
                 return False
         if self._proof is None:
             return None
