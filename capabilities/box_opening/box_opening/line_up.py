@@ -165,6 +165,7 @@ class MockApproach:
 # ------------------------------------------------------------------------------------- a real run's source
 MARK = "@@ "  # a child's line that is for the engine (tasks/box_watch, tasks/reach_probe); the rest is its log
 PROOF_NEAR_M = guide.STEADY_M  # a proof speaks for a box this near the place it was made for
+VIEW_JOINTS = 7  # the arm's joints: a view the run says it looks from names them all, or is not taken
 STOP_WAIT_S = 2.0  # a child asked to end is killed after this long
 # reach_probe keeps the cells it asked this line-up only where it ends of itself: told to quit, it finishes
 # the proof in flight (0.8 to 2 s by its own notes), writes its grid and exits. It is given this long to,
@@ -277,6 +278,7 @@ class BoxSource:
         self.probe = None
         self._fix = None  # the newest sighting: (Fix, lid z, table z, rough)
         self._wrist_at = None  # when the wrist camera last saw the box (its newest fix's time)
+        self._q_from = None  # the joints the wrist looks from, once the run has said them ({"view": ...})
         self._zone = None
         self._proof = None  # the newest proof: ((x, y, z), ok)
         self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
@@ -312,6 +314,19 @@ class BoxSource:
                 new = True
             elif "none" in msg:
                 self.why_none = str(msg["none"])
+            elif "view" in msg:
+                # said once, as the wrist stands at the line-up's view: the run starts its reach from these
+                # joints, not from rest, so the probe proves the box's own place from them ("q_from")
+                try:
+                    q = [float(v) for v in msg["view"]["joints"]]
+                except (TypeError, KeyError, ValueError):
+                    q = []
+                if len(q) == VIEW_JOINTS:
+                    self._q_from = q
+                elif self._log is not None:
+                    self._log(
+                        "the view's joints were not heard as %d numbers: the probe is not told them" % VIEW_JOINTS
+                    )
         if self.probe is not None:
             for _t, msg in self.probe.messages():
                 if "zone" in msg:
@@ -371,7 +386,10 @@ class BoxSource:
         if new and self.probe is not None:
             # the place is proven only where the boundary has it inside and no proof speaks for it yet
             prove = reach is not None and reach.inside and reach.planned is None
-            self.probe.send({"box": [fix.xy[0], fix.xy[1], z], "table_z": table_z, "prove": prove})
+            line = {"box": [fix.xy[0], fix.xy[1], z], "table_z": table_z, "prove": prove}
+            if self._q_from is not None:
+                line["q_from"] = self._q_from
+            self.probe.send(line)
         return (fix if new else None), reach
 
     def gone(self):

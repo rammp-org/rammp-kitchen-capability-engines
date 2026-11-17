@@ -303,6 +303,27 @@ def test_why_no_box_is_seen_is_the_watchs_newest_word_and_a_later_sighting_takes
     assert source.why_none == "wrist camera: no frame"
 
 
+def test_the_joints_the_wrist_looks_from_go_to_the_probe_with_every_box_from_then_on():
+    """{"view": {"joints": [...]}}: said once by the run, as its wrist stands at the line-up's view. The run
+    starts its reach from there, so the probe is told ("q_from") with every box it is sent from then on."""
+    source, watch, probe = _source()
+    watch.says(1.0, _fix((0.95, 0.0, 0.315), by="wrist"))
+    source.look(1.1)
+    assert probe.sent[-1] == {"box": [0.95, 0.0, 0.315], "table_z": 0.22, "prove": False}  # none said yet
+    view = [0.0, 0.26, 3.14, -2.27, 0.35, 0.96, 1.2]
+    watch.says(2.0, {"view": {"joints": view}})
+    watch.says(2.1, _fix((0.90, 0.0, 0.315), by="wrist"))
+    source.look(2.2)
+    assert probe.sent[-1] == {"box": [0.90, 0.0, 0.315], "table_z": 0.22, "prove": False, "q_from": view}
+    said = []
+    source._log = said.append
+    watch.says(3.0, {"view": {"joints": [0.1, 0.2]}})  # not the arm's seven: not taken, and said
+    watch.says(3.1, {"view": None})
+    watch.says(3.2, _fix((0.85, 0.0, 0.315), by="wrist"))
+    source.look(3.3)
+    assert probe.sent[-1]["q_from"] == view and len(said) == 2 and "joints" in said[0]
+
+
 def test_the_boundary_judges_the_box_and_its_own_place_is_proven_where_it_is_inside():
     source, watch, probe = _source()
     probe.says(1.0, {"zone": _band_zone().to_dict()})
