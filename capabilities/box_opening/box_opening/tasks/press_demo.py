@@ -1544,6 +1544,13 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     finally:
         if locator is not None:
             locator.on_sighting = None
+            # A scene fix made here left the segmenter rung following the selected container by where its
+            # box was in the image then (SegmenterRung.follow). The scene camera rides the chair, which has
+            # moved since: in the run that box may be another container's. Forgotten, so the run's first
+            # look starts as a fresh run's does, the chair parked.
+            seg = getattr(locator, "seg", None)
+            if seg is not None:
+                seg.near = None
     if ear.go:
         log.info("[press_demo] LINE-UP: go — the run starts")
         runner.note("line_up", stage="go", wrist=turned)

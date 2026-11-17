@@ -412,6 +412,20 @@ def test_a_wrist_that_cannot_look_leaves_the_scene_camera_and_says_why(lined):
     assert scene.looks >= 1
 
 
+def test_the_box_the_segmenter_followed_while_the_chair_moved_is_not_kept_for_the_run(lined):
+    """A scene fix made while lining up leaves the segmenter rung following the selected container by where its
+    box was in the image then (SegmenterRung.near). The scene camera rides the chair, and the chair has moved
+    since: in the run that box could name another container. The run's first look starts as a fresh run's."""
+    for ear, kw in ((Ear(3, go=True), {}), (Ear(2, go=False), {}), (Ear(3, go=True), {"wrist_first": False})):
+        scene = Scene()
+        scene.seg = SimpleNamespace(near=(380.0, 150.0, 440.0, 230.0))
+        _line_up(lined, ear, locator=scene, **kw)
+        assert scene.seg.near is None and scene.on_sighting is None, kw
+    scene = Scene()  # a locator with no segmenter rung (its container names no classes): nothing to clear
+    scene.seg = None
+    assert _line_up(lined, Ear(1, go=True), locator=scene)[0] == (True, True)
+
+
 def test_a_ctrl_c_asked_for_ends_the_scene_cameras_watch(lined):
     """The scene-only watch only sleeps and reads: a Ctrl+C that was asked for and did not arrive as an exception
     (it surfaced as another error under the wrist turn's planning, taken there for a refusal) is seen in the
