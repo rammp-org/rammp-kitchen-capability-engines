@@ -1439,8 +1439,11 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     run's start and the wrist turns to look from where it stands (survey.watch_front, flown as a look), its
     frames' fixes said too. The wrist's turn is the only motion a line-up makes of its own: an arm that
     stands anywhere else is not brought home before the go, nothing turns, and the engine is told so
-    (LINE_UP_NOT_AT_REST). On a go the run goes on from there, the wrist where it looked. On a stop the
-    wrist is turned back to rest, as gently, and nothing was pressed (went False: main's EXIT_NOT_LINED_UP).
+    (LINE_UP_NOT_AT_REST). With the orchestrator's selection (--instance-id) a wrist fix is said only where
+    the run after the go would look for that container (selection_look, wrist_look's own rule); where it
+    would not, why is said in the fix's place. On a go the run goes on from there, the wrist where it
+    looked. On a stop the wrist is turned back to rest, as gently, and nothing was pressed (went False:
+    main's EXIT_NOT_LINED_UP).
     A turn stopped part way, out or back: the arm holds where it stopped, the wrist turned, and the run ends
     here with the exit that says so (EXIT_LINE_UP_HOLDS), as a wrist look stopped part way ends a run."""
     import json
@@ -1473,6 +1476,20 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 say(line)
 
         locator.on_sighting = told
+    selected = getattr(args, "instance_id", None) or None
+    judge = None
+    if selected:
+
+        def judge(_fix):
+            """Why the run after the go would not turn its wrist for the selected container, or None."""
+            tie, alone = selection_look(locator, None, ctx.model, selected, getattr(args, "wrist_alone", False))
+            if tie is not None or alone:
+                return None
+            return (
+                "the selected container %s is in none of the scene camera's detections: the run would not look "
+                "for it" % selected
+            )
+
     asked = bool(getattr(args, "wrist_first", False)) and bool(args.execute)
     wrist = asked and wrist_looks_from(ctx.client.joints(), rest, rest_tol)
     not_at_rest = asked and not wrist
@@ -1498,6 +1515,7 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 rest=rest,
                 camera_cfg_name=ctx.worlds.wrist_camera_config,
                 also=scene_look,
+                judge=judge,
             )
             turned = state == "watched"
             if state == "stopped":
@@ -1759,6 +1777,19 @@ def selection_unseen(locator):
     return seg is not None and seg.get("selected") == 0
 
 
+def selection_look(locator, scene_fix, model, selected, wrist_alone):
+    """Whether the wrist looks for the selected container `selected`, and by what its find is then taken:
+    (tie, alone). `tie`: the SelectionTie (selection_tie), or None where nothing the scene camera saw says
+    where the selected container is. `alone`: the selected id where there is no tie, the run has
+    --wrist-alone (`wrist_alone`), the scene camera has no fix and its last look held the selection in none
+    of its frames (selection_unseen); else None. Neither: the wrist is not turned for it. The run's own look
+    (wrist_look) and the line-up's watch before it (line_up_watch) both ask this, so the panel never asks
+    the user to open a container the run would then not look for."""
+    tie = selection_tie(locator, scene_fix, model, selected)
+    alone = tie is None and bool(wrist_alone) and scene_fix is None and selection_unseen(locator)
+    return tie, (selected if alone else None)
+
+
 def other_tops(find, xy, lid_m):
     """Every lid-sized top the wrist's frames hold besides the one at `xy` (a place that passes, or a top a view
     cut), at least half a lid from it and from each other: [(x, y), ...]."""
@@ -1894,9 +1925,8 @@ def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
     selected = getattr(args, "instance_id", None) or None
     tie, alone = None, None
     if selected:
-        tie = selection_tie(locator, scene_fix, ctx.model, selected)
-        if tie is None and getattr(args, "wrist_alone", False) and scene_fix is None and selection_unseen(locator):
-            alone = selected
+        tie, alone = selection_look(locator, scene_fix, ctx.model, selected, getattr(args, "wrist_alone", False))
+        if alone:
             log.info(
                 "[press_demo] WRIST LOOK: the selected container %s is in none of the scene camera's detections: the "
                 "wrist looks from its own views, and what it finds is taken only where it is the one container it "

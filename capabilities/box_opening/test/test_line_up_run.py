@@ -26,6 +26,10 @@ def _fix(xyz=(0.65, -0.1, 0.315), table_z=0.216, partial=""):
     return SimpleNamespace(top_xyz=xyz, table_z_scene=table_z, partial=partial, rough=False)
 
 
+def _said_fix(x):
+    return {"fix": {"xyz": [x, 0.0, 0.315], "table_z": 0.216, "age_s": 0.0, "rough": False, "by": "wrist"}}
+
+
 class Runner:
     def __init__(self):
         self.notes, self.stills, self.gripper = [], [], []
@@ -183,6 +187,28 @@ def test_a_turn_that_is_not_flown_watches_nothing(front, fly, state):
     assert runner.notes[-1][1]["flown"] is False
 
 
+def test_a_fix_the_caller_judges_out_is_said_as_none_with_its_reason(front):
+    """`judge` (the line-up's word on the orchestrator's selection): a find it refuses is no fix line, its own
+    reason is said in the fix's place, no oftener than any other "none", and the scene camera looks."""
+    refused = "the selected container x is in none of the scene camera's detections: the run would not look for it"
+    front.finds = [_fix((0.65, 0.0, 0.315)), _fix((0.66, 0.0, 0.315)), _fix((0.70, 0.0, 0.315))]
+    ctx = SimpleNamespace(client=FakeClient(), model=object())
+    judged = []
+
+    def judge(fix):
+        judged.append(fix.top_xyz[0])
+        return refused if fix.top_xyz[0] < 0.69 else None
+
+    def also():
+        front.also += 1
+
+    state = sv.watch_front(
+        None, ctx, Runner(), object(), True, front.said.append, lambda: len(front.asked) >= 3, also=also, judge=judge
+    )
+    assert state == ("watched", None) and judged == [0.65, 0.66, 0.70]
+    assert front.said == [{"none": refused}, _said_fix(0.70)] and front.also == 2
+
+
 def test_a_stop_heard_before_the_turn_turns_nothing(front):
     """The engine's stop (or its go) may come while the views are being chosen: the wrist then turned out to
     the view only to be turned straight back."""
@@ -249,12 +275,20 @@ def lined(monkeypatch, tmp_path):
     w.urdf.write_text("<robot/>")
     monkeypatch.setattr(press_demo.cli_common, "arm_urdf_file", lambda: w.urdf)
 
-    def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camera_cfg_name=None, also=None):
+    def watch_front(
+        node, ctx, runner, watcher, execute, say, stop, rest=None, camera_cfg_name=None, also=None, judge=None
+    ):
         w.watched.append(rest)
         if w.watch[0] != "watched":
             return w.watch
         while not stop():
-            say({"fix": {"xyz": [0.65, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}})
+            why = None if judge is None else judge(_fix((0.65, 0.0, 0.315)))
+            if why is not None:
+                say({"none": why})
+            else:
+                say(
+                    {"fix": {"xyz": [0.65, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}}
+                )
             also()
         return w.watch
 
@@ -271,9 +305,9 @@ def lined(monkeypatch, tmp_path):
     return w
 
 
-def _line_up(w, ear, wrist_first=True, execute=True, locator=None):
+def _line_up(w, ear, wrist_first=True, execute=True, locator=None, instance_id=None, wrist_alone=False):
     out, runner = io.StringIO(), Runner()
-    args = Namespace(wrist_first=wrist_first, execute=execute)
+    args = Namespace(wrist_first=wrist_first, execute=execute, instance_id=instance_id, wrist_alone=wrist_alone)
     got = press_demo.line_up_watch(None, w.ctx, w.cfg, runner, object(), args, locator, 0.05, ear=ear, out=out)
     lines = [json.loads(ln[3:]) for ln in out.getvalue().splitlines() if ln.startswith("@@ ")]
     return got, lines, runner
@@ -376,6 +410,45 @@ def test_a_wrist_that_cannot_look_leaves_the_scene_camera_and_says_why(lined):
     (went, turned), lines, _runner = _line_up(lined, Ear(3, go=True), locator=scene)
     assert (went, turned) == (True, False) and {"none": "wrist camera: its way there: the knees"} in lines
     assert scene.looks >= 1
+
+
+def _selecting(mine=None, held=None):
+    """A scene locator that looks (Scene) and holds the orchestrator's selection as test_survey's does (_locator:
+    `mine` the selected instance's box in the segmenter's newest frame, `held` how many frames of its last look
+    held the selection)."""
+    from test_survey import _locator
+
+    scene = Scene()
+    for name, value in vars(_locator(mine=mine, held=held)).items():
+        if name != "last_why":
+            setattr(scene, name, value)
+    return scene
+
+
+def test_with_a_selection_a_wrist_fix_is_said_only_where_the_run_would_look_for_that_container(lined):
+    """--instance-id: after Open the run turns its wrist only where something ties what it finds to the selected
+    container (wrist_look: the scene camera's box of it, or --wrist-alone for a selection the scene camera never
+    held). The line-up said every lid its wrist found, so the panel reached "Ready" for a run that then stood,
+    said "not looked for" and went home. It asks the run's own rule, and says why instead of the fix."""
+    from test_survey import SELECTED
+
+    lined.ctx.model = SimpleNamespace(lid_dims=(0.105, 0.105, 0.012))
+    why = "the selected container %s is in none of the scene camera's detections: the run would not look for it"
+    box = (380.0, 150.0, 440.0, 230.0)
+    for kw, said in (
+        ({"locator": _selecting(mine=None, held=0)}, False),  # the selection in none of its frames
+        ({"locator": _selecting(mine=box, held=9)}, True),  # its box in the scene image ties a find to it
+        ({"locator": _selecting(mine=None, held=0), "wrist_alone": True}, True),  # --wrist-alone: the one it sees
+        ({"locator": _selecting(mine=None, held=None), "wrist_alone": True}, False),  # ... only once a look says so
+        ({"locator": None}, False),  # no scene camera: nothing can tie it
+    ):
+        _got, lines, _runner = _line_up(lined, Ear(3, go=False), instance_id=SELECTED, **kw)
+        fixes = [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
+        assert bool(fixes) is said, kw
+        assert ({"none": why % SELECTED} in lines) is not said, kw
+    # no selection: every fix is said, as before
+    _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=_selecting(mine=None, held=0))
+    assert len([ln for ln in lines if "fix" in ln]) == 3
 
 
 def test_the_ear_hears_go_or_stop_and_a_closed_pipe_is_a_stop():

@@ -1543,7 +1543,9 @@ def _fix_line(fix, age_s, far=False):
     }
 
 
-def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camera_cfg_name=None, hint=None, also=None):
+def watch_front(
+    node, ctx, runner, watcher, execute, say, stop, rest=None, camera_cfg_name=None, hint=None, also=None, judge=None
+):
     """The line-up's eyes, with the wrist (owner 2026-11-16: "keep the wrist look"): the wrist turned, as a
     look flies, to the front view that shows the most of where the arm presses (angled_views' first; the
     one at `hint`, where the scene camera has the box, before it), and from there every wrist frame judged
@@ -1553,7 +1555,9 @@ def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camer
     (wrist_finder's far_nearest): a box the arm cannot reach is the one the user is told to bring nearer.
     `say(line)`: a fix for each frame that shows the container (_fix_line), "none" and why
     at most every LINE_UP_NONE_S where one does not. `also()`: called on a frame that shows none (the scene
-    camera's own look, which may see what the wrist does not).
+    camera's own look, which may see what the wrist does not). `judge(fix)`: the caller's word on a find
+    (None: every find is said): why it is not one to say, said as that frame's "none" in the fix's place, or
+    None.
 
     Only the three wrist joints move, once, and the arm then stands until the caller moves it on (the run)
     or back (rest_wrist). ("watched", None) at `stop()`; ("none" | "refused" | "stopped", why) where the
@@ -1594,6 +1598,11 @@ def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camer
             n += 1
             find = wf.find_container([frame], model, check_buttons=False, reachable=within, far_nearest=True)
             fix, why, far = find.fix, find.why, find.far
+        none = "wrist camera: %s" % str(why)[:260]
+        if fix is not None and judge is not None:
+            refused = judge(fix)
+            if refused is not None:
+                fix, none = None, str(refused)[:300]
         if fix is not None:
             found += 1
             age = 0.0
@@ -1607,7 +1616,7 @@ def watch_front(node, ctx, runner, watcher, execute, say, stop, rest=None, camer
         now = time.monotonic()
         if said_none is None or now - said_none >= LINE_UP_NONE_S:
             said_none = now
-            say({"none": "wrist camera: %s" % str(why)[:260]})
+            say({"none": none})
     runner.note("line_up", stage="watched", frames=n, found=found)
     return "watched", None
 
