@@ -14,7 +14,8 @@ lid's height is the cameras' that run. What this module adds is only how the gri
     to_zone(xy)   from the box to the nearest place that is inside, for guide.instruction's words
     order(focus)  which cells to ask next: the box's own, the surroundings of every cell found to
                   work, and a coarse lattice outward from the box to find them (a proof takes about a
-                  second on the robot's computer; the whole grid would take a quarter of an hour)
+                  second on the robot's computer; the whole grid would take a quarter of an hour);
+                  none past the deployment's bound, where one is given: within() drops those anyway
 
 Unasked cells are not inside. A grid part way through says None of a place it cannot yet judge (reach):
 the panel says it is checking, never that the arm cannot.
@@ -185,20 +186,32 @@ class Zone:
             return None
         return Reach(False, to, planned)
 
+    def _range(self):
+        """(nx, ny): how far each cell's centre is from the arm's base, the frame's origin."""
+        nx, ny = self.cells.shape
+        return np.hypot((self.x0 + np.arange(nx) * self.step)[:, None], (self.y0 + np.arange(ny) * self.step)[None, :])
+
+    def _past(self, far_m):
+        """(nx, ny) bool: the cells whose centre is further from the arm's base than `far_m` (None: none
+        is). A centre on the bound is within it."""
+        if far_m is None:
+            return np.zeros(self.cells.shape, bool)
+        return self._range() > float(far_m) + 1e-9
+
     def within(self, near_m=None, far_m=None):
         """A copy in which no cell works whose centre is nearer the arm's base than `near_m` or further
         than `far_m` (None: no bound): what a deployment trusts of what the proof finds. On 2026-11-12 the
         arm opened boxes 0.63 and 0.68 m out; the proof plans presses to about 0.90 m that have never
-        flown."""
+        flown. Past `far_m` a cell that is unasked fails too: the proof is not asked there (order's
+        `far_m`, reach_probe --far-m), so it is not an answer still to come, and done() and reach() must
+        not wait for it."""
         cells = self.cells.copy()
-        nx, ny = cells.shape
-        r = np.hypot((self.x0 + np.arange(nx) * self.step)[:, None], (self.y0 + np.arange(ny) * self.step)[None, :])
-        out = np.zeros(cells.shape, bool)
+        past = self._past(far_m)
+        out = past.copy()
         if near_m is not None:
-            out |= r < float(near_m) - 1e-9  # a centre on the bound is within it
-        if far_m is not None:
-            out |= r > float(far_m) + 1e-9
+            out |= self._range() < float(near_m) - 1e-9  # a centre on the bound is within it
         cells[out & (cells == WORKS)] = FAILS
+        cells[past] = FAILS
         return Zone(self.x0, self.y0, self.step, cells, self.lid_z, self.key)
 
     # -- filling it ----------------------------------------------------------------
@@ -213,18 +226,21 @@ class Zone:
                     near |= works[1 + di : 1 + di + nx, 1 + dj : 1 + dj + ny]
         return near & (self.cells == UNASKED)
 
-    def order(self, focus=None):
+    def order(self, focus=None, far_m=None):
         """The unasked cells worth asking, in the order to ask them: the cell that holds `focus` (the box),
         then the cells beside one that works, then the coarse lattice; each nearest `focus` first. So a box
         that stands where the arm opens it has its own surroundings asked at once (inside needs them), and
         from a box that does not, the lattice is asked outward until a cell works, and then that cell's
         surroundings: the nearest place inside is known a dozen proofs after the first that works. A cell
-        off the lattice with no working neighbour is never asked: it stays unasked, and so not inside."""
+        off the lattice with no working neighbour is never asked: it stays unasked, and so not inside.
+        `far_m`: the deployment's bound (None: none). No cell further from the arm's base is asked, the
+        box's own neither: the engine drops whatever works there (within), and from a box that is too far
+        the proofs would otherwise be spent in that band before the first cell the engine can use."""
         fx, fy = (self.x0, self.y0) if focus is None else (float(focus[0]), float(focus[1]))
         own = None if focus is None else self.index(focus)
         beside = self._beside_working()
         out = []
-        for i, j in np.argwhere(self.cells == UNASKED):
+        for i, j in np.argwhere((self.cells == UNASKED) & ~self._past(far_m)):
             i, j = int(i), int(j)
             if own == (i, j):
                 tier = 0
@@ -238,9 +254,10 @@ class Zone:
             out.append((tier, math.hypot(cx - fx, cy - fy), i, j))
         return [(i, j) for _tier, _d, i, j in sorted(out)]
 
-    def done(self):
-        """No cell is left worth asking, but perhaps the box's own (order()'s first)."""
-        unasked = self.cells == UNASKED
+    def done(self, far_m=None):
+        """No cell is left worth asking, but perhaps the box's own (order()'s first). `far_m`: the bound
+        the cells are asked under (order's)."""
+        unasked = (self.cells == UNASKED) & ~self._past(far_m)
         if not unasked.any():
             return True
         nx, ny = self.cells.shape

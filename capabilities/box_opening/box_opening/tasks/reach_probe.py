@@ -4,6 +4,7 @@ line-up's boundary (reach_zone.Zone) and behind "the run plans for the box where
     reach_probe --urdf <arm URDF> --lid-z 0.315                      the boundary for a lid at that height
     reach_probe --urdf <arm URDF> --at 0.65 -0.10 0.315              one place: does a press plan there
     reach_probe --urdf <arm URDF> --serve                            for the engine's line-up, while it runs
+    reach_probe ... --far-m 0.8                                      ask no cell further out than this
 
 Nothing here talks to the arm, the planner or the cameras, and nothing moves. press_plans() asks what a
 run asks before it moves (tasks/reach_press._reach_press, the proof before the look): out_of_reach, then
@@ -291,11 +292,12 @@ def save_zone(zone, where=None):
     return path
 
 
-def fill(zone, ctx, cfg, table_z=None, focus=None, budget_s=None, n=None, clock=time.monotonic):
-    """Ask the cells Zone.order names, at most `n` of them or for `budget_s`: the number asked."""
+def fill(zone, ctx, cfg, table_z=None, focus=None, budget_s=None, n=None, clock=time.monotonic, far_m=None):
+    """Ask the cells Zone.order names, at most `n` of them or for `budget_s`: the number asked. `far_m`:
+    the deployment's bound (--far-m; None: none), past which no cell is asked."""
     t0, asked = clock(), 0
     while (n is None or asked < n) and (budget_s is None or clock() - t0 < budget_s):
-        todo = zone.order(focus)
+        todo = zone.order(focus, far_m)
         if not todo:
             break
         i, j = todo[0]
@@ -322,10 +324,12 @@ IDLE_S = 0.2  # with nothing to ask, how long stdin is waited on
 
 
 class Server:
-    """One line-up's worth of proofs: hear() each line the engine writes, step() one proof at a time."""
+    """One line-up's worth of proofs: hear() each line the engine writes, step() one proof at a time.
+    `far_m`: the deployment's bound on the boundary (--far-m; None: none), past which no cell is asked."""
 
-    def __init__(self, ctx, cfg, key, zone_dir=None, say=None, clock=time.monotonic):
+    def __init__(self, ctx, cfg, key, zone_dir=None, say=None, clock=time.monotonic, far_m=None):
         self.ctx, self.cfg, self.key, self.zone_dir = ctx, cfg, key, zone_dir
+        self.far_m = far_m
         self._say = say if say is not None else (lambda msg: _say(MARK + json.dumps(msg)))
         self._clock = clock
         self.box = self.table_z = None
@@ -376,7 +380,7 @@ class Server:
             self._say({"proof": {"xyz": list(self.box), "ok": ok, "why": why[:300], "tilt_deg": tilt, "s": took}})
             return True
         # a cell is asked with the box on its own foot (table_z None): one grid for every table at this lid height
-        asked = fill(zone, self.ctx, self.cfg, focus=self.box[:2], n=1)
+        asked = fill(zone, self.ctx, self.cfg, focus=self.box[:2], n=1, far_m=self.far_m)
         self._dirty += asked
         self._unsaved += asked
         if self._unsaved >= SAVE_EVERY:
@@ -454,13 +458,22 @@ def main(argv=None):
     ap.add_argument("--focus", type=float, nargs=2, metavar=("X", "Y"), help="ask the cells nearest here first")
     ap.add_argument("--zone-dir", default=None, help="where grids are kept (default: the state dir's reach_zone)")
     ap.add_argument("--budget-s", type=float, default=None, help="stop asking after this long")
+    ap.add_argument(
+        "--far-m",
+        type=float,
+        default=0.0,
+        help="ask no cell further than this from the arm's base (m): the deployment's line_up_far_m; 0: no bound",
+    )
     ap.add_argument("--serve", action="store_true", help="for the engine's line-up: boxes on stdin, answers on stdout")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     container = args.container or cli_common.default_container_yaml()
+    # a grid is kept by what it was asked of, never by the bound it was filled under: its cells past a bound
+    # are only unasked, and the same file serves a later run under another
+    far_m = args.far_m if args.far_m > 0 else None
     ctx, cfg = setup(args.urdf, args.root, args.body_layers, container)
     if args.serve:
-        serve(Server(ctx, cfg, zone_key(args.urdf, container), args.zone_dir))
+        serve(Server(ctx, cfg, zone_key(args.urdf, container), args.zone_dir, far_m=far_m))
         return 0
     if args.at is not None:
         t0 = time.monotonic()
@@ -473,13 +486,13 @@ def main(argv=None):
     key = zone_key(args.urdf, container)
     zone = load_zone(key, args.lid_z, ctx.model, args.zone_dir)
     t0 = time.monotonic()
-    while not zone.done() and (args.budget_s is None or time.monotonic() - t0 < args.budget_s):
-        fill(zone, ctx, cfg, table_z=args.table_z, focus=args.focus, n=10)
+    while not zone.done(far_m) and (args.budget_s is None or time.monotonic() - t0 < args.budget_s):
+        fill(zone, ctx, cfg, table_z=args.table_z, focus=args.focus, n=10, far_m=far_m)
         save_zone(zone, args.zone_dir)
         _say(json.dumps(dict(zone.counts(), s=round(time.monotonic() - t0, 1))), sys.stderr)
     path = save_zone(zone, args.zone_dir)
     _say(zone.picture())
-    _say(json.dumps(dict(zone.counts(), done=zone.done(), lid_z=zone.lid_z, key=zone.key, path=str(path))))
+    _say(json.dumps(dict(zone.counts(), done=zone.done(far_m), lid_z=zone.lid_z, key=zone.key, path=str(path))))
     return 0
 
 

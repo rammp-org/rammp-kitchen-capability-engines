@@ -205,6 +205,60 @@ def test_fill_stops_at_its_budget(monkeypatch):
     assert reach_probe.fill(z, None, None, budget_s=3, clock=lambda: next(ticks)) == 2
 
 
+def test_cells_past_the_deployments_bound_are_not_asked_and_not_waited_for():
+    """reach_probe --far-m: the engine throws away what works past line_up_far_m, so no proof is spent there."""
+    z = _zone()
+    capped = z.order(focus=(0.95, 0.0), far_m=0.80)
+    assert capped and all(math.hypot(*z.centre(i, j)) <= 0.80 + 1e-9 for i, j in capped)
+    assert z.index((0.95, 0.0)) not in capped and z.order(focus=(0.95, 0.0))[0] == z.index((0.95, 0.0))
+    assert z.index((0.80, 0.0)) in capped  # a centre on the bound is within it, as Zone.within has it
+    assert capped == [ij for ij in z.order(focus=(0.95, 0.0)) if ij in capped]  # the order is the same
+    assert z.order(focus=(0.95, 0.0), far_m=None) == z.order(focus=(0.95, 0.0))
+    for i, j in capped:
+        z.set(i, j, False)
+    assert z.order(far_m=0.80) == [] and z.done(far_m=0.80) and not z.done()
+    z.set(*z.index((0.80, 0.0)), True)  # a cell that works on the bound: its neighbours further out stay unasked
+    beside = z.order(far_m=0.80)
+    assert beside and all(math.hypot(*z.centre(i, j)) <= 0.80 + 1e-9 for i, j in beside)
+    assert len(beside) < len([ij for ij in z.order() if abs(ij[0] - 16) <= 1 and abs(ij[1] - 10) <= 1])
+
+
+def test_the_engines_copy_does_not_wait_for_cells_past_its_bound():
+    """What the probe leaves unasked past the bound is outside for the engine, not something still to come:
+    with everything nearer asked and nothing working, the panel says the arm cannot, not 'checking'."""
+    z = _zone()
+    for i, j in z.order(far_m=0.80):
+        z.set(i, j, False)
+    assert z.reach((0.60, 0.0)) is None  # the whole grid: cells are still to be asked
+    near = z.within(far_m=0.80)
+    assert near.state((0.95, 0.0)) == FAILS and z.state((0.95, 0.0)) == UNASKED
+    assert near.done() and near.counts()["unasked"] > 0  # off the lattice, nearer than the bound: never asked
+    r = near.reach((0.60, 0.0))
+    assert r is not None and not r.inside and r.to_zone is None
+    # nearer than a near bound the proof is still asked, and still waited for
+    assert z.within(near_m=0.30).state((0.15, 0.0)) == UNASKED
+
+
+def test_fill_leaves_what_is_past_the_bound_unasked(monkeypatch):
+    from box_opening.tasks import reach_probe
+
+    asked = []
+
+    def proof(_ctx, _cfg, top, table_z=None):
+        asked.append(top)
+        return math.hypot(top[0] - 0.65, top[1]) < 0.18, "", 15  # works within 18 cm of (0.65, 0): out to 0.80
+
+    monkeypatch.setattr(reach_probe, "press_plans", proof)
+    z = Zone.blank((0.0, 0.95), (-0.95, 0.95), lid_z=0.30)
+    n = reach_probe.fill(z, None, None, focus=(0.9, 0.3), far_m=0.70)
+    assert n == len(asked) and z.done(far_m=0.70) and not z.done()
+    assert max(math.hypot(x, y) for x, y, _z in asked) <= 0.70 + 1e-9
+    assert z.state((0.65, 0.0)) == WORKS and z.state((0.75, 0.0)) == UNASKED  # works there, and was not asked
+    assert z.within(far_m=0.70).inside((0.60, 0.0))
+    more = reach_probe.fill(z, None, None, focus=(0.9, 0.3))  # the same grid under no bound: the rest is asked
+    assert more > 0 and z.done() and z.state((0.75, 0.0)) == WORKS
+
+
 # -- for the engine's line-up: the probe's serve mode ------------------------------------------
 @pytest.fixture
 def served(monkeypatch, tmp_path):
@@ -316,6 +370,73 @@ def test_the_served_loop_hears_the_engines_lines_and_ends_when_it_says_or_goes(s
     reach_probe.serve(server, r)
     os.close(r)
     assert [m["proof"]["ok"] for m in said if "proof" in m] == [True]
+
+
+def test_the_server_asks_no_cell_past_the_bound_it_was_started_with(served, tmp_path):
+    from box_opening.tasks import reach_probe
+
+    server, said, proved = served
+    server.far_m = 0.70
+    server.hear({"box": [0.90, 0.0, 0.315], "prove": False})  # the user is still too far
+    while server.step():
+        pass
+    assert proved and max(math.hypot(x, y) for (x, y, _z), _t in proved) <= 0.70 + 1e-9
+    assert server.zone.done(far_m=0.70) and server.zone.state((0.65, 0.0)) == WORKS
+    server.close()
+    # the bound is no part of what a grid is: it is kept under the same name, and read back under another
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["zone_k_z+0320.json"]
+    free = reach_probe.Server(server.ctx, None, "k", zone_dir=tmp_path, say=said.append, clock=lambda: 0.0)
+    assert free.far_m is None
+    free.hear({"box": [0.90, 0.0, 0.315], "prove": False})
+    n = len(proved)
+    free.step()
+    assert free.zone.counts()["works"] >= server.zone.counts()["works"]  # what was asked is not asked again
+    assert proved[n][0][:2] == (0.90, 0.0)  # the box's own cell, past the old bound
+
+
+@pytest.fixture
+def main_on_stand_ins(monkeypatch, tmp_path):
+    """reach_probe.main with no robot behind it: the stand-in proof (works within 18 cm of (0.65, 0)), a
+    small grid, the key "k", grids kept in tmp_path, and its own process left at its priority. Returns
+    (run, served): run(*more) is main's exit code for --urdf, --container, --zone-dir and `more`; `served`
+    holds the Server of each --serve, which is not looped."""
+    import os
+
+    from box_opening.tasks import reach_probe
+
+    served = []
+    monkeypatch.setattr(os, "nice", lambda _by: 0)
+    monkeypatch.setattr(reach_probe, "setup", lambda *_a: (type("C", (), {"model": None})(), None))
+    monkeypatch.setattr(reach_probe, "zone_key", lambda *_a, **_k: "k")
+    monkeypatch.setattr(reach_probe, "reach_span", lambda model, lid_z: ((0.0, 0.95), (-0.5, 0.5)))
+    monkeypatch.setattr(
+        reach_probe,
+        "press_plans",
+        lambda _ctx, _cfg, top, table_z=None: (math.hypot(top[0] - 0.65, top[1]) < 0.18, "", 15),
+    )
+    monkeypatch.setattr(reach_probe, "serve", served.append)
+
+    def run(*more):
+        return reach_probe.main(["--urdf", "arm.urdf", "--container", "box.yaml", "--zone-dir", str(tmp_path), *more])
+
+    return run, served
+
+
+def test_far_m_on_the_command_line_bounds_the_served_probe_and_the_offline_fill(main_on_stand_ins, tmp_path, capsys):
+    from box_opening.tasks import reach_probe
+
+    run, served = main_on_stand_ins
+    assert run("--serve", "--far-m", "0.8") == 0 and served[-1].far_m == 0.8
+    assert run("--serve") == 0 and served[-1].far_m is None
+    assert run("--serve", "--far-m", "0") == 0 and served[-1].far_m is None  # 0: no bound
+    assert run("--lid-z", "0.315", "--far-m", "0.7") == 0  # ends: what is past the bound is not waited for
+    kept = Zone.from_json(reach_probe.zone_path("k", 0.315, tmp_path).read_text())
+    assert kept.done(far_m=0.7) and not kept.done() and kept.state((0.75, 0.0)) == UNASKED
+    assert '"done": true' in capsys.readouterr().out
+    assert run("--lid-z", "0.315") == 0  # the same file under no bound: the rest of it is asked
+    whole = Zone.from_json(reach_probe.zone_path("k", 0.315, tmp_path).read_text())
+    assert whole.done() and whole.state((0.75, 0.0)) == WORKS
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["zone_k_z+0320.json"]
 
 
 def test_the_probe_lowers_its_own_priority_before_it_works_and_works_on_where_it_may_not(monkeypatch, capsys):
