@@ -2,6 +2,10 @@ CAP ?= example
 IMAGE = ghcr.io/rammp-org/rammp-kitchen-capability-engines/$(CAP)
 TAG ?= dev
 ROS_DOMAIN_ID ?= 0
+# The pinned images' Cyclone config caps a host at 10 DDS participants, and
+# a full robot stack already uses more. Layer ParticipantIndex none on top of
+# it (no cap). Drop once images are built on a rammp-base that sets none.
+DDS_ENV = -e CYCLONEDDS_URI='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>'
 SHEPPY = sheppy @ git+https://github.com/rammp-org/sheppy@main
 # STANDALONE=1 runs without the orchestrator; MOCK=1 skips hardware.
 STANDALONE ?= 0
@@ -11,7 +15,7 @@ LAUNCH_ARGS = use_orchestrator:=$(if $(filter 1,$(STANDALONE)),false,true) \
 ACTION ?=
 PARAMS ?= {}
 
-.PHONY: new build run action check smoke lint test-arm
+.PHONY: new build run action check smoke lint test-arm sync-chair
 
 # Start a capability from the example: make new CAP=button_press
 new:
@@ -28,13 +32,13 @@ build:
 	docker build -f capabilities/$(CAP)/Dockerfile -t $(IMAGE):$(TAG) .
 
 run:
-	docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+	docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) $(DDS_ENV) \
 		$(IMAGE):$(TAG) ros2 launch $(CAP) $(CAP).launch.py $(LAUNCH_ARGS)
 
 # Send one action to a running capability, as the orchestrator would:
 #   make action CAP=example ACTION=count PARAMS='{"to": 5}'
 action:
-	docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+	docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) $(DDS_ENV) \
 		$(IMAGE):$(TAG) ros2 action send_goal --feedback /$(CAP)/execute_action \
 		rammp_orchestrator_interfaces/action/ExecuteAction \
 		'{engine_id: $(CAP), action_id: $(ACTION), params_json: "$(subst ",\",$(PARAMS))"}'
@@ -61,3 +65,19 @@ test-arm:
 	docker build -f docker/test.Dockerfile -t $(ARM_TEST_IMAGE) docker
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
 		-v $(CURDIR):/repo $(ARM_TEST_IMAGE) $(ARM_CMD)
+
+# The chair and user boxes PyBullet checks, the same ones cuRobo plans around. Run this whenever
+# rammp-deployments changes them; chair/SOURCE records the commit they came from.
+CHAIR_REPO = rammp-org/rammp-deployments
+CHAIR_SRC = december_2026/config/robots/flatbot/curobo
+CHAIR_DIR = shared/door_common/door_common/chair
+CHAIR_REF ?= dev
+sync-chair:
+	@set -e; sha=$$(gh api repos/$(CHAIR_REPO)/commits/$(CHAIR_REF) --jq .sha); \
+	for l in platform seat person; do \
+		gh api -H "Accept: application/vnd.github.raw" \
+			"repos/$(CHAIR_REPO)/contents/$(CHAIR_SRC)/layer_mebot_$$l.yaml?ref=$$sha" \
+			> $(CHAIR_DIR)/layer_mebot_$$l.yaml; \
+	done; \
+	echo "$(CHAIR_REPO)@$$sha:$(CHAIR_SRC)" > $(CHAIR_DIR)/SOURCE; \
+	cat $(CHAIR_DIR)/SOURCE

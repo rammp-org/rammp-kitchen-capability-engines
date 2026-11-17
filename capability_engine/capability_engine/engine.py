@@ -9,9 +9,20 @@ contract (rammp_orchestrator_interfaces) once, for every capability:
   orchestrator appears, and never exiting because it is absent
 - publishes /<id>/status (JSON in std_msgs/String) at 1 Hz and on every change
 - accepts cancel from Control.CANCEL and from an action cancel alike
-- gives each action ROS entities that live only while it runs (self.arm's, and the
-  capability's own through create_action_subscription() and friends)
+- holds the per-execution control token the orchestrator embeds directly in
+  each execute_action goal's own token field, and passes it on to self.arm so
+  its commands carry the same token as the arm driver's own grant for that
+  execution
+- gives each action ROS entities that live only while it runs (self.arm's, self.base's, and
+  the capability's own through create_action_subscription() and friends)
 - on SIGTERM or SIGINT, cancels the running action, lets it end, then exits
+- lets execute() talk to the UI bridge directly (rammp_ui_bridge_interfaces),
+  bypassing the orchestrator, via ctx.update_user_panel()/ctx.poll_ui_event()
+  (a live, engine-owned panel -- progress bar, buttons, tappable objects --
+  independent of ctx.progress()'s orchestrator-only feedback),
+  ctx.publish_overlay_image() (this capability's own camera view), and
+  ctx.set_overlay_visible() (show/hide that camera view in UE), all using
+  the same per-execution token as self.arm, never acquiring one of its own
 
 The same node runs standalone with `-p use_orchestrator:=false`: it skips
 registration, and the orchestrator calls on `ctx` become logged no-ops. Drive
@@ -44,8 +55,11 @@ from rammp_orchestrator_interfaces.srv import (
     UpdateObjectState,
     WriteWorldState,
 )
+from rammp_ui_bridge_interfaces.action import RequestUserInput
+from rammp_ui_bridge_interfaces.msg import EngineOverlayImage
+from rammp_ui_bridge_interfaces.srv import SetEngineOverlayVisible, UpdateUserInputPanel
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -56,13 +70,14 @@ from capability_engine import sim
 from capability_engine.action_scope import ENDED_MESSAGE, ActionScope, ScopeClosed
 from capability_engine.arm import ArmInterface, wait_until
 from capability_engine.arm_params import PARAMS
+from capability_engine.base import BaseInterface
 
 ORCHESTRATOR = "/rammp_orchestrator"
 ARM_PARAMS_FIXED_MESSAGE = "arm.* parameters are read at startup; restart to change"
 REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
-STOP_MARGIN_S = 1.0  # on a stop, past self.arm's worst settle: for the action's own code
+STOP_MARGIN_S = 1.0  # on a stop, past self.arm's and self.base's worst settle: the action's code
 START_WAIT_S = 1.0  # an accepted goal not handed to execute within this was lost by rclpy
 SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them
 
@@ -79,10 +94,11 @@ class Action:
 
 
 def stop_wait_s() -> float:
-    """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's worst settle
-    (ArmInterface.worst_settle_s(), 7.8 s by default) plus STOP_MARGIN_S. docker stop's grace
-    (10 s) must cover it."""
-    return ArmInterface.worst_settle_s() + STOP_MARGIN_S
+    """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's and
+    self.base's worst settle (ArmInterface.worst_settle_s(), 7.8 s by default, and
+    BaseInterface.worst_settle_s(), 0.1 s) plus STOP_MARGIN_S. docker stop's grace (10 s) must
+    cover it."""
+    return ArmInterface.worst_settle_s() + BaseInterface.worst_settle_s() + STOP_MARGIN_S
 
 
 class Cancelled(Exception):
@@ -110,6 +126,36 @@ class _Run:
         self.cancelled = threading.Event()
         self.paused = threading.Event()
         self.scope = None
+        # UI-bridge panel state for this run only (see Context.update_user_panel/
+        # poll_ui_event below): the currently-open RequestUserInput goal handle (or
+        # None if none is open, e.g. before the first update_user_panel() call, or
+        # after the last one ended on a button press), and the most recent
+        # not-yet-read button-press/object-tap event. Entirely independent of
+        # ctx.progress()'s ExecuteAction feedback.
+        self.ui_lock = threading.Lock()
+        self.ui_goal_handle = None
+        self.ui_pending_event: dict | None = None
+        # The run's full desired panel state so far, merged across every
+        # update_user_panel() call (only the keys actually supplied at least
+        # once are present). Used -- not just the latest call's own partial
+        # payload -- whenever a *new* RequestUserInput goal is opened (first
+        # open, or a reopen after a refusal/forced-abort), so a replacement
+        # goal always carries forward previously-set panel/objects/selection
+        # content instead of silently dropping it.
+        self.ui_desired_state: dict = {}
+        # True from the moment a RequestUserInput goal's send is dispatched
+        # until its acceptance/rejection is known (_ui_on_goal_response). A
+        # second update_user_panel() call arriving in that window must not
+        # send a second goal (the bridge only allows one open goal per token
+        # and would reject it, silently losing that call's content) -- it
+        # merges into ui_desired_state above instead, and is pushed once the
+        # in-flight goal is accepted.
+        self.ui_opening = False
+        # Set by _ui_close() once execute() has ended. A RequestUserInput goal
+        # accepted after that point (e.g. its send was in flight when the run
+        # ended) must be cancelled immediately on arrival instead of being
+        # left dangling against a token this engine no longer holds.
+        self.ui_closed = False
 
 
 class Context:
@@ -128,6 +174,70 @@ class Context:
         )
         self._goal.publish_feedback(feedback)
 
+    def update_user_panel(
+        self,
+        panel_json: dict | None = None,
+        objects: list[dict] | None = None,
+        selected_instance_id: str | None = None,
+    ) -> bool:
+        """Push panel content directly to the UI bridge (rammp_ui_bridge_interfaces'
+        RequestUserInput/UpdateUserInputPanel), fully independent of `progress()`
+        above (which only reports to the orchestrator and is never shown to the
+        user) -- call either, both, or neither, as this capability needs. Each
+        argument left as None is omitted from the update, i.e. "leave unchanged";
+        pass one to replace just that aspect (`panel_json` entirely, `objects`
+        entirely, or just the highlight). At least one of `panel_json`/`objects`
+        must be given the first time this is called in a run, to have something
+        for the bridge to open a goal with.
+
+        Non-blocking: opens a RequestUserInput goal (lazily, on first call, or
+        again if the previous one just ended -- any button press ends it, see
+        poll_ui_event() below) or refreshes the open one via
+        UpdateUserInputPanel, then returns immediately without waiting for the
+        user to do anything, or for the bridge's service/action server to be
+        ready or respond -- readiness is checked immediately (never waited
+        for) and the request/response itself is tracked through callbacks, not
+        a blocking wait in this thread. Use poll_ui_event() to read back
+        button presses and object taps as they happen.
+
+        Returns False (no-op, logged) if this run holds no session token (e.g.
+        standalone with no orchestrator) or the bridge's client/server isn't
+        immediately ready. A True return means the request was dispatched, not
+        that the bridge has necessarily accepted it yet -- a refusal is
+        resolved transparently in the background (see _ui_update_panel)."""
+        return self._engine._ui_update_panel(
+            self, panel_json=panel_json, objects=objects, selected_instance_id=selected_instance_id
+        )
+
+    def poll_ui_event(self) -> dict | None:
+        """Non-blocking: returns (and consumes) the most recent event the bridge
+        has reported since the last call -- {"type": "button", "button_id": ...}
+        or {"type": "object_tapped", "instance_id": ...} -- or None if nothing
+        new. A button event means the panel's goal has ended; the next
+        update_user_panel() call transparently opens a fresh one."""
+        return self._engine._ui_poll_event(self)
+
+    def publish_overlay_image(self, image) -> bool:
+        """Publish one frame of this capability's own camera (e.g. a wrist cam)
+        to the UI bridge's shared overlay topic, stamped with this run's session
+        token -- `image` is a sensor_msgs/Image. Returns False (no-op, logged)
+        if this run holds no session token."""
+        return self._engine._ui_publish_overlay(image)
+
+    def set_overlay_visible(self, visible: bool) -> bool:
+        """Show/hide this capability's overlay camera feed in UE, via
+        SetEngineOverlayVisible -- a UE-side Remote Control toggle (`Open
+        Camera Feed`/`Close Camera Feed`), not a gate on
+        publish_overlay_image() above: keep publishing frames regardless, so
+        the feed is already live the moment you show it again.
+
+        Non-blocking: dispatches the call and returns immediately, not
+        waiting for the bridge to respond; a refusal (e.g. a stale token) is
+        only logged, not retried, since there's no run state to reconcile
+        here. Returns False (no-op, logged) if this run holds no session
+        token, or the bridge's service isn't immediately ready."""
+        return self._engine._ui_set_overlay_visible(visible)
+
     def checkpoint(self):
         """Call between steps: blocks while paused, raises Cancelled if cancelled."""
         while self._run.paused.is_set() and not self.cancelled():
@@ -139,6 +249,13 @@ class Context:
         """Whether the action has been cancelled. Never blocks, even while paused: self.arm
         polls it while a motion runs."""
         return self._run.cancelled.is_set() or self._goal.is_cancel_requested
+
+    def paused(self) -> bool:
+        """Whether the action is currently paused. Never blocks, unlike checkpoint():
+        a capability that must keep doing something while paused (e.g. still polling
+        poll_ui_event() for a Stop tap) should check this instead of calling
+        checkpoint(), which blocks for the whole pause."""
+        return self._run.paused.is_set()
 
     def request_intent(self, intent_type: str, params: dict | None = None) -> Result:
         """Ask the orchestrator to delegate an intent (e.g. MOVE_BASE) and wait (Cancelled
@@ -188,6 +305,9 @@ class CapabilityEngine(Node):
         self._declare_arm_params(engine_id)
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self.arm = ArmInterface(self, self._group, mock=self.mock)
+        self.base = BaseInterface(
+            self, self._group, declared="base" in self.required_resources, mock=self.mock
+        )
         # make_sim() loads the driver's model (in mock mode, arm.mock_urdf's)
         sim.set_model_provider(self.arm.robot_description)
         # The lifecycle: idle (no _current), running one goal from its acceptance until its
@@ -199,6 +319,13 @@ class CapabilityEngine(Node):
         self._registering = False
         self._register_sent = 0.0  # time.monotonic() the pending RegisterEngine call was sent
         self.instance_id = ""
+        # Per-execution control token: the orchestrator embeds one shared
+        # session token directly in this engine's execute_action goal (and
+        # separately pushes the same token to the arm driver's own
+        # ~/acquire_control), rather than this engine having to pull one
+        # reactively -- read off the goal in _on_execute below.
+        # bytes(16) (all-zero) means "nobody holds it".
+        self._assigned_token: bytes = bytes(16)
 
         self.create_service(Activate, "~/activate", self._on_activate, callback_group=self._group)
         self.create_service(Control, "~/control", self._on_control, callback_group=self._group)
@@ -225,6 +352,31 @@ class CapabilityEngine(Node):
             )
         }
 
+        # Direct engine<->UI-bridge wiring (rammp-UI-bridge's
+        # docs/ENGINE_UI_INTEGRATION_GUIDE.md section 2): bypasses the
+        # orchestrator entirely, and reuses the per-execution token pushed to
+        # self._assigned_token above instead of this engine acquiring its own
+        # ui_control grant -- see Context.update_user_panel/poll_ui_event/
+        # publish_overlay_image and the _ui_* helpers below.
+        self.declare_parameter("ui_bridge_node_name", "ui_bridge_node")
+        ui_ns = f"/{self.get_parameter('ui_bridge_node_name').value}"
+        self._ui_request_client = ActionClient(
+            self, RequestUserInput, f"{ui_ns}/request_user_input", callback_group=self._group
+        )
+        self._ui_update_client = self.create_client(
+            UpdateUserInputPanel, f"{ui_ns}/request_user_input/update", callback_group=self._group
+        )
+        self._ui_set_overlay_visible_client = self.create_client(
+            SetEngineOverlayVisible,
+            f"{ui_ns}/engine_overlay/set_visible",
+            callback_group=self._group,
+        )
+        # One shared topic, not per-engine -- see EngineOverlayImage.msg's own
+        # doc comment; the bridge tells engines apart by the token on each frame.
+        self._ui_overlay_pub = self.create_publisher(
+            EngineOverlayImage, "/engine_overlay/image_raw", 10
+        )
+
         self._status = self.create_publisher(String, "~/status", 10)
         self.create_timer(1.0, self._publish_status, callback_group=self._group)
         if self.orchestrated:
@@ -237,8 +389,33 @@ class CapabilityEngine(Node):
     # -- what a capability implements ---------------------------------------
 
     def availability(self, instance_id: str, world_state: dict) -> list[ActionAvailability]:
-        """Which actions can run on this object now. Default: all of them."""
-        return [ActionAvailability(action_id=a.action_id, available=True) for a in self.actions]
+        """Which actions can run on this object now. Default: every action
+        whose own `perception_classes` applies to this instance's class (or
+        declares none, i.e. applies to every class), all reported
+        available. Mirrors `MockEngine.activate()`'s reference semantics
+        (`rammp-orchestrator`'s `mocks/mock_engine.py`): an action whose
+        `perception_classes` doesn't include this instance's class is
+        omitted entirely (not just marked unavailable), since it doesn't
+        apply to this object at all, not merely blocked right now -- e.g. a
+        fridge-only action on a selected microwave instance. The instance's
+        class is looked up from `world_state["objects"][instance_id]
+        ["perception_class"]`; unknown (not yet reported by Perception, or
+        no such key) falls back to offering every action, same as
+        `MockEngine`. Object-state-dependent gating (e.g. "open" unavailable
+        once already open) is not implemented here -- override this method
+        to add it, using `world_state` the same way."""
+        instance = world_state.get("objects", {}).get(instance_id, {})
+        instance_class = instance.get("perception_class")
+        availability = []
+        for a in self.actions:
+            if (
+                a.perception_classes
+                and instance_class is not None
+                and (instance_class not in a.perception_classes)
+            ):
+                continue
+            availability.append(ActionAvailability(action_id=a.action_id, available=True))
+        return availability
 
     def execute(self, action_id: str, params: dict, ctx: Context) -> dict:
         """Run one action. Return the result payload; raise EngineError to fail.
@@ -368,6 +545,285 @@ class CapabilityEngine(Node):
             self.get_logger().warning(f"orchestrator rejected {name}: {response.message}")
         return bool(response and response.success)
 
+    # -- UI-bridge plumbing (Context.update_user_panel/poll_ui_event/publish_overlay_image) --
+    #
+    # Everything here is genuinely non-blocking, matching ctx.update_user_panel()'s
+    # docstring: readiness is checked immediately (never waited for), and every
+    # send's outcome (accept/refusal, result) is handled by a done-callback
+    # rather than a blocking wait in the caller's (execute()'s) thread.
+
+    def _ui_update_panel(
+        self,
+        ctx: Context,
+        *,
+        panel_json: dict | None,
+        objects: list[dict] | None,
+        selected_instance_id: str | None,
+    ) -> bool:
+        run = ctx._run
+        token = self._assigned_token
+        if token == bytes(16):
+            self.get_logger().warning("standalone/no session token: skipping update_user_panel")
+            return False
+        request_payload: dict = {}
+        if panel_json is not None:
+            request_payload["panel_json"] = json.dumps(panel_json)
+        if objects is not None:
+            request_payload["objects"] = objects
+        if selected_instance_id is not None:
+            request_payload["selected_instance_id"] = selected_instance_id
+
+        with run.ui_lock:
+            if run.ui_closed:
+                return False
+            # Merge into the run's full desired state regardless of which
+            # branch below actually fires -- a later reopen (after a refusal,
+            # or because a goal-open was already in flight) must still carry
+            # forward this call's content even though it isn't sent right now.
+            if panel_json is not None:
+                run.ui_desired_state["panel_json"] = request_payload["panel_json"]
+            if objects is not None:
+                run.ui_desired_state["objects"] = objects
+            if selected_instance_id is not None:
+                run.ui_desired_state["selected_instance_id"] = selected_instance_id
+            has_content = "panel_json" in run.ui_desired_state or "objects" in run.ui_desired_state
+            goal_handle = run.ui_goal_handle
+            opening = run.ui_opening
+            # Claim the open ourselves, still under the lock, if we're about
+            # to start one -- so a second call racing in right behind this
+            # one (before _ui_open_goal() itself runs) sees ui_opening
+            # already set and coalesces instead of also opening a goal.
+            will_open = goal_handle is None and not opening and has_content
+            if will_open:
+                run.ui_opening = True
+
+        if goal_handle is not None:
+            if not self._ui_update_client.service_is_ready():
+                self.get_logger().warning(
+                    "ui_bridge_node's ~/request_user_input/update unavailable"
+                )
+                return False
+            future = self._ui_update_client.call_async(
+                UpdateUserInputPanel.Request(
+                    token=list(token), request_json=json.dumps(request_payload)
+                )
+            )
+            future.add_done_callback(
+                lambda f: self._ui_on_update_response(run, token, goal_handle, f)
+            )
+            return True
+
+        if opening:
+            # A goal-open is already in flight for this run (sent by an
+            # earlier call, not yet accepted/rejected): don't send a second
+            # one -- the bridge only allows one open goal per token and would
+            # reject it, silently losing this call's content. It's already
+            # merged into ui_desired_state above and will reach the bridge
+            # once the in-flight open is accepted (see _ui_on_goal_response).
+            return has_content
+
+        if not has_content:
+            self.get_logger().warning(
+                "update_user_panel: need panel_json or objects to open a new goal"
+            )
+            return False
+        return self._ui_open_goal(run, token)
+
+    def _ui_on_update_response(self, run: "_Run", token: bytes, goal_handle, future) -> None:
+        """Done-callback for the UpdateUserInputPanel call `_ui_update_panel`
+        fires without waiting for. Reopens a fresh goal in the background if
+        the update was refused -- most likely the previous goal just ended (a
+        button press, or the bridge force-aborted it) since we last checked --
+        same as if this were the first call. Guarded against `goal_handle`
+        (the goal this particular update was sent against) having already
+        been replaced by a newer one: a delayed refusal callback must not
+        clear a newer goal's handle or trigger a redundant reopen on top of
+        it."""
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warning(
+                f"ui_bridge_node's ~/request_user_input/update failed: {error!r}"
+            )
+            return
+        if response.accepted:
+            return
+        with run.ui_lock:
+            if run.ui_closed or run.ui_goal_handle is not goal_handle:
+                # The run ended, or a newer goal has already replaced this
+                # one (e.g. an earlier refusal already reopened it) -- this
+                # stale refusal has nothing left to do.
+                return
+            run.ui_goal_handle = None
+        self.get_logger().info(f"update_user_panel update refused, reopening: {response.message}")
+        self._ui_open_goal(run, token)
+
+    def _ui_open_goal(self, run: "_Run", token: bytes) -> bool:
+        if not self._ui_request_client.server_is_ready():
+            with run.ui_lock:
+                run.ui_opening = False
+            self.get_logger().warning("ui_bridge_node's ~/request_user_input server unavailable")
+            return False
+        with run.ui_lock:
+            if run.ui_closed:
+                run.ui_opening = False
+                return False
+            # The run's full merged desired state, not just whichever call
+            # triggered this (re)open -- so a replacement goal always carries
+            # forward previously-set panel/objects/selection content.
+            request_payload = dict(run.ui_desired_state)
+            run.ui_opening = True
+        goal = RequestUserInput.Goal(
+            engine_id=self.get_name(), token=list(token), request_json=json.dumps(request_payload)
+        )
+        send_future = self._ui_request_client.send_goal_async(
+            goal, feedback_callback=lambda feedback_msg: self._ui_on_feedback(run, feedback_msg)
+        )
+        # Always tracked via this callback, not a blocking wait on
+        # send_future -- so a goal accepted after a slow send is never
+        # abandoned/untracked, however long it actually takes.
+        send_future.add_done_callback(lambda f: self._ui_on_goal_response(run, f))
+        return True
+
+    def _ui_on_goal_response(self, run: "_Run", send_future) -> None:
+        try:
+            goal_handle = send_future.result()
+        except Exception as error:
+            with run.ui_lock:
+                run.ui_opening = False
+            self.get_logger().warning(f"RequestUserInput goal send failed: {error!r}")
+            return
+        if goal_handle is None or not goal_handle.accepted:
+            with run.ui_lock:
+                run.ui_opening = False
+            self.get_logger().warning("RequestUserInput goal rejected")
+            return
+        with run.ui_lock:
+            run.ui_opening = False
+            if run.ui_closed:
+                # The run ended (_ui_close() already ran) while this goal's
+                # acceptance was still in flight -- don't leave it dangling
+                # against a token this engine no longer holds.
+                already_closed = True
+            else:
+                run.ui_goal_handle = goal_handle
+                already_closed = False
+        if already_closed:
+            goal_handle.cancel_goal_async()
+            return
+        goal_handle.get_result_async().add_done_callback(
+            lambda result_future: self._ui_on_result(run, goal_handle, result_future)
+        )
+        # Updates can arrive while acceptance is in flight. Flush the merged state.
+        with run.ui_lock:
+            payload = dict(run.ui_desired_state)
+        if self._ui_update_client.service_is_ready():
+            future = self._ui_update_client.call_async(
+                UpdateUserInputPanel.Request(
+                    token=list(self._assigned_token), request_json=json.dumps(payload)
+                )
+            )
+            future.add_done_callback(
+                lambda f: self._ui_on_update_response(run, self._assigned_token, goal_handle, f)
+            )
+
+    def _ui_on_feedback(self, run: "_Run", feedback_msg) -> None:
+        try:
+            payload = json.loads(feedback_msg.feedback.feedback_json)
+        except (json.JSONDecodeError, AttributeError):
+            return
+        if payload.get("event_type") == "object_tapped":
+            with run.ui_lock:
+                run.ui_pending_event = {
+                    "type": "object_tapped",
+                    "instance_id": payload.get("instance_id", ""),
+                }
+
+    def _ui_on_result(self, run: "_Run", goal_handle, result_future) -> None:
+        """A RequestUserInput goal always ends on a button press, an engine
+        cancel, or a bridge-forced abort (see the .action file's own doc
+        comment) -- there's no "button that keeps the goal open" concept.
+        Record the outcome, and clear ui_goal_handle only if it is still this
+        goal's handle: update_user_panel() may already have opened a newer
+        goal (e.g. after this one was refused) by the time this result
+        arrives, and must not have that replacement's handle wiped out from
+        under it."""
+        try:
+            payload = json.loads(result_future.result().result.result_json)
+        except Exception as error:
+            payload = {"status": "aborted", "reason": repr(error)}
+        with run.ui_lock:
+            if run.ui_goal_handle is goal_handle:
+                run.ui_goal_handle = None
+            if payload.get("status") == "button":
+                run.ui_pending_event = {"type": "button", "button_id": payload.get("button_id", "")}
+            elif payload.get("status") == "aborted":
+                self.get_logger().warning(
+                    f"RequestUserInput goal aborted: {payload.get('reason', '')}"
+                )
+
+    def _ui_poll_event(self, ctx: Context) -> dict | None:
+        run = ctx._run
+        with run.ui_lock:
+            event = run.ui_pending_event
+            run.ui_pending_event = None
+            return event
+
+    def _ui_publish_overlay(self, image) -> bool:
+        token = self._assigned_token
+        if token == bytes(16):
+            self.get_logger().warning("standalone/no session token: skipping publish_overlay_image")
+            return False
+        self._ui_overlay_pub.publish(EngineOverlayImage(image=image, token=list(token)))
+        return True
+
+    def _ui_set_overlay_visible(self, visible: bool) -> bool:
+        token = self._assigned_token
+        if token == bytes(16):
+            self.get_logger().warning("standalone/no session token: skipping set_overlay_visible")
+            return False
+        if not self._ui_set_overlay_visible_client.service_is_ready():
+            self.get_logger().warning("ui_bridge_node's ~/engine_overlay/set_visible unavailable")
+            return False
+        self.get_logger().info(
+            f"set_overlay_visible({visible}): dispatching to ui_bridge_node "
+            f"(token {token.hex()[:8]}...)"
+        )
+        future = self._ui_set_overlay_visible_client.call_async(
+            SetEngineOverlayVisible.Request(token=list(token), visible=visible)
+        )
+        future.add_done_callback(lambda f: self._ui_on_set_overlay_visible_response(f, visible))
+        return True
+
+    def _ui_on_set_overlay_visible_response(self, future, visible: bool) -> None:
+        """Done-callback for the fire-and-forget call `_ui_set_overlay_visible`
+        dispatches -- logs the outcome either way (accepted or refused),
+        nothing to retry or reconcile (unlike _ui_on_update_response,
+        there's no run state tied to this one-shot call)."""
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warning(f"set_overlay_visible({visible}) call failed: {error!r}")
+            return
+        if response.accepted:
+            self.get_logger().info(f"set_overlay_visible({visible}) accepted by ui_bridge_node")
+        else:
+            self.get_logger().warning(f"set_overlay_visible({visible}) refused: {response.message}")
+
+    def _ui_close(self, run: "_Run") -> None:
+        """Called once execute() ends: cancels any still-open panel goal rather
+        than leaving it dangling against a token this engine no longer holds.
+        Also marks the run closed, so a goal whose acceptance is still in
+        flight (see _ui_on_goal_response) is cancelled immediately on arrival
+        instead of being left dangling too."""
+        with run.ui_lock:
+            goal_handle = run.ui_goal_handle
+            run.ui_goal_handle = None
+            run.ui_pending_event = None
+            run.ui_closed = True
+        if goal_handle is not None:
+            goal_handle.cancel_goal_async()
+
     # -- servers ---------------------------------------------------------------
 
     def _on_activate(self, request, response):
@@ -455,8 +911,14 @@ class CapabilityEngine(Node):
             self._publish_status()
             ctx = Context(self, goal_handle, run)
             try:
-                # Follow-up: ExecuteAction carries no control token yet, so self.arm sends none.
-                self.arm.begin_action(ctx, token=None)
+                # Use the token the orchestrator embedded directly in this
+                # goal (bytes(16)/all-zero means "nobody holds it", e.g.
+                # running standalone with no orchestrator).
+                if bytes(goal.token) != bytes(16):
+                    self._assigned_token = bytes(goal.token)
+                token = self._assigned_token if self._assigned_token != bytes(16) else None
+                self.arm.begin_action(ctx, token=token)
+                self.base.begin_action(ctx)
                 params = json.loads(goal.params_json or "{}")
                 payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS
@@ -475,13 +937,26 @@ class CapabilityEngine(Node):
             finally:
                 try:
                     try:
-                        self.arm.end_action()  # settles its goals and stream, closes its scope
+                        # The base first: the arm's settle can take seconds, the base's does not.
+                        self.base.end_action()  # stops the base if this action drove it
                     finally:
-                        run.scope.close()  # destroys the capability's entities of this action
+                        try:
+                            self.arm.end_action()  # settles its goals and stream, closes its scope
+                        finally:
+                            run.scope.close()  # destroys the capability's entities of this action
                 except Exception as error:  # the run must still end and report its result
                     result.status = Result.STATUS_FAILED
                     result.error_code = "exception"
                     self.get_logger().error(f"{goal.action_id}: ending it raised: {error!r}")
+                # Cancel any still-open UI-bridge panel goal (Context.update_user_panel)
+                # rather than leaving it dangling against a token about to be released.
+                self._ui_close(run)
+                # Clear the pushed session token now that this execution is over: the
+                # orchestrator reclaims/replaces its copy on the arm driver independently,
+                # but this engine's own copy (self._assigned_token) has no other owner to
+                # reset it, so do it here rather than leaving a stale-but-still-valid token
+                # sitting around until the next execution's push overwrites it.
+                self._assigned_token = bytes(16)
 
             # canceled() is only a legal transition after an action-level cancel
             # request; a Control.CANCEL is reported through result.status instead.

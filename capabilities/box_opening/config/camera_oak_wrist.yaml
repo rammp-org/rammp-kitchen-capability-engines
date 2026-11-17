@@ -1,0 +1,25 @@
+# Wrist OAK-D PoE (flatbot) — rammp-suite-software/oak:0.3.1 topic layout.
+#
+# The arm URDF carries the full TF chain to the camera's optical frame, so
+# mount_xyz/quat are identity: camera_pose_at looks up arm_mount directly to
+# wrist_camera_color_optical_frame without any extra math.
+#
+# The oak container publishes depth registered to colour (depth_registration:
+# true in the manifest) on depth/image_rect_raw, in the colour pixel grid.
+# find_button samples the depth at colour-image pixels; misaligned depth
+# would land on the wrong 3-D point.
+color_topic: /wrist_camera/color/image_raw
+color_info_topic: /wrist_camera/color/camera_info
+aligned_depth_topic: /wrist_camera/depth/image_rect_raw
+parent_frame: wrist_camera_color_optical_frame
+mount_xyz: [0, 0, 0]
+mount_quat_xyzw: [0, 0, 0, 1]
+stamp_offset_s: 0.0
+# The lens origin from tool_frame, in its axes (m) — measured, not TF: the
+# depth press centres on TF's mount only when TF agrees with this within
+# 5 mm sideways (tasks/depth_press.MOUNT_XY_TOL_M). Fitted from the
+# 2026-10-22 runs (rammp-deployments#128: [0, 0.065, 0.015] from
+# arm_end_effector_link, tool_frame 0.12 m past it); the hand-measured mount
+# deployed before it ([0, 0.10, -0.10]) put the 20:04 press on the lid's
+# edge. Re-measure after ANY bracket change.
+wrist_lens_in_hand_m: [0.0, 0.065, -0.105]
