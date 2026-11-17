@@ -83,8 +83,22 @@ turntable's middle toward the opening, along the oven's axis) and the pre-insert
 cm out of the oven's front; it moves with the spot); it is not collision-checked. The hand keeps the
 tilt it has at the start until the release.
 
+**Safety hold (2026-11-17):** non-mock `place` execution requests currently refuse. Dry runs remain
+available for perception, IK planning and trajectory generation, and report kinematic feasibility
+separately from collision safety (`insertion_collision_status: UNVALIDATED`); they never command motion.
+The only available microwave collision model is a depth-derived outer box used for the side shift and
+cuRobo transit; it does not establish insertion clearance for the held container, all gripper links, the
+wrist camera, the opening rim, open door, turntable glass, side walls, ceiling or back wall. The
+flange/tool, gripper and held-container geometry have not been verified against the physical assembly.
+Do not treat the reported modeled container-bottom height as physical clearance. Re-enable placement
+only after those geometries and offsets are measured, represented conservatively, and reviewed, then
+collision-check the complete assembly over the full approach and insertion path.
+`insertion_bottom_clearance_cm`, when present in a saved plan, is only the modeled box-bottom estimate;
+it is not a full-assembly or glass-contact clearance check.
+
 1. **Locate** the opening (above). Nothing is checked before it: not the arm's state, the gripper or
    the tool frame.
+
 1. **Obstacle**: the microwave's body as one box, aligned with the oven, from the "microwave" mask's
    depth: from its outer front (the control panel's face) back, spanning the 2nd to 98th percentile of
    the mask's depth points at or behind that front and near the located opening (within 50 cm across
@@ -92,21 +106,27 @@ tilt it has at the start until the release.
    points). The open door, in front of the front, is not in the box. cuRobo gets the same box (written
    to `worlds_dir`, loaded with `set_world`). Only the side shift and cuRobo's transit to the
    pre-insert pose are checked against it; from the line in on, nothing is collision-checked.
+
 1. **Search**: each of `side_shifts_cm` in turn (3, -3, 6, -6, 9, -9 cm), each with every offset of
    `heading_offsets_deg` (default only 0). The side shift moves the hand straight and level to its
    left (- = right), orientation kept. The hand's heading is the oven's axis turned by the offset (+ to
    the left). The target puts the box's centre over the spot, the tool `above` over the glass; the
    pre-insert pose is back along the heading until the whole box is 3 cm outside the outer front. The
-   first shift and heading that pass every stage win: the side shift (`clear_min` from the box, tilt),
+   first shift and heading that pass the kinematic and partial-obstacle stages win: the side shift
+   (`clear_min` from the box, tilt),
    IK at the target and at the pre-insert pose, the straight line in, cuRobo's level transit
    (`plan_to_pose`, `HOLD_LEVEL`) from the shifted pose to the pre-insert pose (refused if it swings
    any joint more than 120 deg in total: cuRobo's pose goal can end in another arm posture), and the
-   check below. Every attempt is logged and returned with the stage and reason it failed.
+   checks below. Every attempt is logged and returned with its stage and reason. A feasible dry run
+   is not a collision-safe plan.
+
 1. **Check** (on the arm model; joint steps of at most 1 deg on the transit and 0.5 deg on the lines,
-   the short way round): the side shift and the transit keep every arm and gripper link at least
-   `clear_min` from the microwave box (clearance is computed at the first and last sample and wherever
+   the short way round): the side shift and transit keep modeled arm/gripper links at least
+   `clear_min` from the depth-derived outer box (clearance is computed at the first and last sample and wherever
    the joint motion since the last computed one could have moved some point more than that clearance's
-   margin over `clear_min`, from each joint's radius; the samples skipped are clear by that bound); the
+   margin over `clear_min`, from each joint's radius; the samples skipped are clear by that bound). This
+   partial outer-box result does not validate the held container or insertion path; the insertion
+   collision result is `UNVALIDATED`. The
    tilt stays within `tilt_max_deg` of the start on the side shift, the transit, the line in and the
    line down; cuRobo's end is on the pre-insert pose and the line in stays on its line and ends on the
    target (1 cm, 2 deg); the line down must reach 1 cm below where the box's bottom meets the glass.
@@ -114,9 +134,11 @@ tilt it has at the start until the release.
    stop), the release is planned: the hand pitched `RELEASE_TILT_DEG` (10 deg) nose-down about the
    tool frame, and from there the level line back out along the heading to above the pre-insert pose's
    x, y at that height, the hand's orientation kept (only that it stays on its line is checked); none
-   of it is collision-checked. A **dry run** stops here and returns the plan (target, pre-insert, side
-   shift, heading, the transit's clearance, tilt, joint changes and travel, the approach's duration,
-   the line down, attempts); it is written to `state_dir/plans/` and `state_dir/last_plan.json`.
+   of it is collision-checked. A **dry run** returns the kinematic plan and explicit `UNVALIDATED`
+   collision status (target, pre-insert, side shift, heading, partial transit outer-box clearance,
+   modeled container-bottom estimate, tilt, joint changes and travel, approach duration, line down and
+   attempts); it is written to `state_dir/plans/` and `state_dir/last_plan.json`.
+
 1. **Execute** (only with `execute`): the arm must be ready to command (`not_ready()`) and within 1 deg
    of the plan's start. The side shift, cuRobo's transit and the line in run as planned and checked in
    **one** position-control motion (`approach_knots`), with no stop or check between them. It is timed
@@ -135,6 +157,10 @@ tilt it has at the start until the release.
    container slides off the fingers; a stop; out of impedance; and, in position control, the level line
    back out with the hand kept tilted, to above the pre-insert pose's x, y at that height, outside the
    opening (its end checked within 1 cm).
+
+   Current behavior: `execute: true` fails closed after saving the `UNVALIDATED` plan and before any
+   arm motion. It must not be enabled until all required collision geometry and physical offsets have
+   been calibrated and reviewed.
 
 **Why the gripper opens only to 0.5.** The fingers stand vertically. Fully open they span about 15.5 cm
 of the 17.5 cm between the glass and the ceiling: 1.0 cm each side at best. Opened to 0.5 (0.4 rad)

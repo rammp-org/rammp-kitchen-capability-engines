@@ -372,6 +372,10 @@ class Capability(CapabilityEngine):
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
         )
+        self.get_logger().info(
+            f"record_bag={self.cfg['record_bag']}: state_dir={self.state_dir}, "
+            f"camera <= {self.cfg['bag_frame_hz']:g} Hz, arm state <= {self.cfg['bag_state_hz']:g} Hz"
+        )
 
     def execute(self, action_id, params, ctx):
         if action_id in UI_ACTIONS:
@@ -478,12 +482,15 @@ class Capability(CapabilityEngine):
             if action_id == "take_out":
                 return {**self._take_out(model, execute, ctx, log, site), "note": note}
             return {**self._place(model, execute, ctx, log), "note": note}
+        except place_motion.InsertionCollisionModelUnavailable as e:
+            raise EngineError("safety_model_unavailable", str(e), recoverable=False) from e
         except (place_motion.Refused, microwave_detection.NotLocated, rim_detection.NotDetected) as e:
             raise EngineError("refused", _site_words(str(e), site), recoverable=True) from e
 
     def _place(self, model, execute, ctx, log):
         c = self.cfg
         q0 = np.asarray(self.arm.raw_joints(), dtype=float)
+        place_motion.check_flange_model(model, q0, self.arm.ee_state())
         oven, loc, boxes, world, world_info, stamp = self._oven_world(ctx, log)
         checker = place_motion.Checker(model, boxes)
         try:
@@ -496,15 +503,20 @@ class Capability(CapabilityEngine):
             path = self._save_plan(record, stamp)
             summary["plan_file"] = str(path)
             log(
-                f"plan: side shift {cand['shift_cm']:+.0f} cm, heading {cand['offset_deg']:+.0f} deg, clearance "
-                + ", ".join(f"{k} {v[0]:.1f} cm" for k, v in summary["clearance_cm"].items())
+                f"plan: kinematics {summary['kinematic_status']}, insertion collision "
+                f"{summary['insertion_collision_status']}; side shift {cand['shift_cm']:+.0f} cm, "
+                f"heading {cand['offset_deg']:+.0f} deg, transit outer-box clearance "
+                + ", ".join(f"{k} {v[0]:.1f} cm" for k, v in summary["transit_outer_box_clearance_cm"].items())
+                + f", modeled container-bottom estimate {summary['insertion_bottom_clearance_cm']:+.1f} cm "
+                "over glass (not physical assembly clearance)"
                 + f", tilt {summary['max_tilt_deg']:.1f} deg, approach (shift + transit + line in "
                 f"{cand['insert_m'] * 100:.0f} cm) in {summary['duration_s']['approach']:.1f} s -> {path}"
             )
             if not execute:
-                log("DRY RUN -- all checks passed, nothing commanded")
+                log("DRY RUN -- kinematic plan only; collision safety UNVALIDATED; nothing commanded")
                 return {"executed": False, "plan": summary}
             # 6. execute
+            place_motion.require_full_assembly_insertion_model()
             with _started("place"):
                 result = place_motion.run_place(
                     self.arm,

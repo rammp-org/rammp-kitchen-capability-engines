@@ -58,6 +58,28 @@ class Refused(Exception):
     """A plan or check that does not hold: nothing more is commanded."""
 
 
+class InsertionCollisionModelUnavailable(Refused):
+    """Placement cannot proceed without a calibrated, full-scene collision model."""
+
+
+INSERTION_COLLISION_GEOMETRY_REQUIRED = (
+    "microwave interior: turntable glass, rim, side walls, ceiling and back wall",
+    "open microwave door",
+    "calibrated gripper collision geometry and flange-to-tool offset",
+    "wrist-camera collision geometry",
+    "held-container collision geometry and tool-relative offset",
+)
+
+
+def require_full_assembly_insertion_model():
+    raise InsertionCollisionModelUnavailable(
+        "place execution is disabled: full-assembly insertion clearance is not validated. The current model does not "
+        "collision-check the held container or insertion path against the microwave rim, open door, turntable "
+        "glass, side walls, ceiling and back wall, and does not verify the wrist-camera or flange/tool/container "
+        "geometry. Supply and review those physical measurements and collision geometry before executing."
+    )
+
+
 def wrap(rad):
     return (np.asarray(rad) + np.pi) % (2 * np.pi) - np.pi
 
@@ -605,6 +627,7 @@ LINE_STEP = 0.004  # m, between the straight line's joint waypoints
 TRANSIT_STEP_DEG = 1.0  # the check interpolates cuRobo's transit to at most this per joint ...
 LINE_STEP_DEG = 0.5  # ... and the straight lines (in, down, out) to this
 END_TOL, END_TOL_DEG = 0.01, 2.0  # m, deg: the line in ends this close to the target, pointing along the heading
+MODEL_POSE_TOL, MODEL_POSE_TOL_DEG = 0.005, 1.0  # measured flange vs driver-URDF FK before planning/execution
 DESCENT_BELOW_MEET = 0.01  # m, the line down must reach this far below where the box's bottom meets the glass
 # The world: the microwave as one box, from the depth points of SAM3's "microwave" mask.
 MICROWAVE_PCT = (2, 98)  # the microwave's box: these percentiles of its depth points, in oven coordinates
@@ -631,6 +654,11 @@ class StageFailed(Refused):
     def __init__(self, stage, reason):
         super().__init__(f"{stage}: {reason}")
         self.stage, self.reason = stage, reason
+
+
+def insertion_bottom_clearance(target, floor_z):
+    """Modeled container-bottom height above the glass; not full-assembly clearance."""
+    return float(np.asarray(target, dtype=float)[2] - BOX_BELOW - floor_z)
 
 
 def _stage(stage, fn, *args, **kwargs):
@@ -947,6 +975,31 @@ def end_pose_error(model, q, target, heading):
     return off, turn
 
 
+def check_flange_model(model, q, measured):
+    """Refuse if the driver's measured flange pose disagrees with the driver-URDF FK at joints q."""
+    if measured.frame_id != rammp_arm.FRAME:
+        raise Refused(
+            f"the measured flange is in {measured.frame_id!r}, not {rammp_arm.FRAME!r}; model geometry is unverified"
+        )
+    expected = model.fk(q, link="flange")
+    position_error = float(np.linalg.norm(np.asarray(measured.position, dtype=float) - expected[:3, 3]))
+    orientation_error = float(
+        np.degrees(
+            (
+                Rotation.from_quat(np.asarray(measured.orientation, dtype=float))
+                * Rotation.from_matrix(expected[:3, :3]).inv()
+            ).magnitude()
+        )
+    )
+    if position_error > MODEL_POSE_TOL or orientation_error > MODEL_POSE_TOL_DEG:
+        raise Refused(
+            f"driver flange / URDF FK mismatch: {position_error * 1000:.1f} mm, {orientation_error:.1f} deg "
+            f"(limits {MODEL_POSE_TOL * 1000:.0f} mm, {MODEL_POSE_TOL_DEG:.1f} deg); re-plan only after "
+            "resolving the geometry mismatch"
+        )
+    return position_error, orientation_error
+
+
 def line_floor(floor_z):
     """Where the line down is aimed: PRESS_BELOW under where the box's bottom meets the glass, the tool at
     least MIN_TOOL_HEIGHT over it (place_container's rule, with the box's BOX_BELOW)."""
@@ -971,12 +1024,9 @@ def plan_down(model, q, floor_z, log=None):
 
 def plan_place_in(model, checker, q0, cand, Qs, floor_z, cfg, log=None):
     """Everything after cuRobo's transit `Qs` for heading `cand`: the transit must end at the pre-insert pose and
-    is densely checked (every link clear_min from the microwave box); the straight line in from there (not
-    collision-checked) must end within END_TOL / END_TOL_DEG of the target; the tilt stays within tilt_max_deg of
-    the start on both; the line down from the target, and from where the model has the lowering stop the
-    release tilt (plan_tilt) and the level back-out (plan_level_back_out), none of them
-    collision-checked. Raises StageFailed. Returns the line in, the descent, the transit's clearance, the tilt,
-    the line in's end error and the release's numbers."""
+    is densely checked (every link clear_min from the microwave box); the straight line in, held container,
+    gripper, wrist camera and full microwave interior are not validated by the available collision model. This
+    supports kinematic dry-runs only; execution is guarded separately."""
     pre, target, h, L = cand["pre"], cand["target"], cand["heading"], cand["insert_m"]
     clear_min, tilt_max = cfg["clear_min"], cfg["tilt_max_deg"]
     R0 = model.fk(q0)[:3, :3]
@@ -998,7 +1048,7 @@ def plan_place_in(model, checker, q0, cand, Qs, floor_z, cfg, log=None):
     return dict(
         line=line,
         descent=descent,
-        clearance=worst,
+        transit_outer_box_clearance=worst,
         tilt=tilt,
         end=(end_off, end_turn),
     )
@@ -1053,6 +1103,18 @@ def cm(d):
     return round(float(d) * 100, 1)
 
 
+def insertion_collision_report(target, floor_z, transit_clearance):
+    """Report only modeled outputs; the incomplete model never validates full insertion collision safety."""
+    return dict(
+        kinematic_status="FEASIBLE",
+        insertion_collision_status="UNVALIDATED",
+        insertion_collision_missing_geometry=list(INSERTION_COLLISION_GEOMETRY_REQUIRED),
+        insertion_bottom_clearance_cm=cm(insertion_bottom_clearance(target, floor_z)),
+        insertion_bottom_clearance_basis="modeled container bottom only; not full-assembly clearance",
+        transit_outer_box_clearance_cm={k: [cm(d), link] for k, (d, link) in transit_clearance.items()},
+    )
+
+
 SHIFT_STEP = 0.004  # m, between the side shift's joint waypoints
 
 
@@ -1098,8 +1160,9 @@ def plan_side_shift(model, checker, q0, shift_m, cfg):
 def search_place(arm, model, checker, q0, oven, cfg, log):
     """For each of side_shifts_cm in turn (the hand moved that far level to its left, - = right, before the
     transit) and each of heading_offsets_deg: the side shift, the quick probe, cuRobo's transit from the
-    shifted pose and plan_place_in. The first that passes every stage wins: (cand, with cand["shift"] the side
-    shift's joints; cuRobo's plan; plan_place_in's result; attempts). Refused listing every attempt."""
+    shifted pose and plan_place_in. The first kinematically feasible candidate that passes partial outer-box
+    checks wins; insertion collision safety remains UNVALIDATED. Returns (cand, cuRobo's plan,
+    plan_place_in's result, attempts). Refused listing every attempt."""
     c, attempts = cfg, []
     for s_cm in c["side_shifts_cm"]:
         for off in c["heading_offsets_deg"]:
@@ -1121,8 +1184,10 @@ def search_place(arm, model, checker, q0, oven, cfg, log):
                 attempts.append(dict(shift_cm=float(s_cm), offset_deg=float(off), stage=e.stage, reason=e.reason))
                 log(f"{tag}: FAILED at {e.stage}: {e.reason}")
                 continue
-            attempts.append(dict(shift_cm=float(s_cm), offset_deg=float(off), stage="passed", reason=""))
-            log(f"{tag}: passed every stage")
+            attempts.append(
+                dict(shift_cm=float(s_cm), offset_deg=float(off), stage="kinematically_feasible", reason="")
+            )
+            log(f"{tag}: kinematically feasible; insertion collision safety is UNVALIDATED")
             cand = {**cand, "shift_cm": float(s_cm), "shift": shift}
             return cand, plan, res, attempts
     raise Refused(
@@ -1159,7 +1224,7 @@ def summarize(model, q0, loc, oven, world, world_info, boxes, cand, plan, res, a
         target=np.round(cand["target"], 3).tolist(),
         pre_insert=np.round(cand["pre"], 3).tolist(),
         insert_cm=cm(cand["insert_m"]),
-        clearance_cm={k: [cm(d), w] for k, (d, w) in res["clearance"].items()},
+        **insertion_collision_report(cand["target"], oven.floor_z, res["transit_outer_box_clearance"]),
         max_tilt_deg=round(res["tilt"], 2),
         end_off_cm=cm(res["end"][0]),
         end_turn_deg=round(res["end"][1], 2),
@@ -1232,14 +1297,18 @@ def approach_knots(shift, Qs, line):
 
 
 def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res):
-    """The checked place, on the arm (`res`: plan_place_in's result). The lowering's /ee_state recording goes
-    to descents_dir."""
+    """Execute only with validated full-assembly collision geometry.
+
+    The lowering's /ee_state recording goes to descents_dir.
+    """
+    require_full_assembly_insertion_model()
     c = cfg
     h, floor_z = cand["heading"], oven.floor_z
     R0 = model.fk(q0)[:3, :3]
     Qs = np.asarray(plan.q, dtype=float)
     ready(arm)
     q_now = np.asarray(arm.raw_joints(), dtype=float)
+    check_flange_model(model, q_now, arm.ee_state())
     off = float(np.max(np.abs(wrap_deg(q_now - q0))))
     if off > START_TOL_DEG:
         raise Refused(f"the arm is {off:.1f} deg from where the plan starts (max {START_TOL_DEG:g}): re-plan")

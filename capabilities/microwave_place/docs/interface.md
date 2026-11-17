@@ -6,15 +6,20 @@
 
 ## What it does
 
-Puts the container the gripper is already holding (after `grab_container`) into the open microwave. It
-finds the microwave's opening with the scene camera (the known-size opening fitted to SAM3's cavity mask,
-checked with depth), models the microwave's body as one obstacle box, tries side shifts and hand headings
-until one the arm can reach passes, plans a side shift and cuRobo's level transit to in front of the
-opening (both checked against the box on the arm model) and a straight line in, and runs the three as one
-position-control motion. It lowers the container onto the turntable glass in impedance until the glass
-stops it, opens the gripper part way in place, pitches the hand 10 deg nose-down so the container slides
-off the fingers, and backs out level with the hand tilted. Nothing from the line in on is
-collision-checked. Without it the microwave demo has no way to put the food in.
+Puts the container the gripper is already holding (after `grab_container`) into the open microwave. The
+intended sequence locates the opening from the scene camera, plans a side shift and cuRobo transit, inserts,
+lowers in impedance until contact, releases, and backs out.
+
+**Safety hold (2026-11-17):** non-mock dry runs remain available for perception, IK planning and trajectory
+generation. They report `kinematic_status: FEASIBLE` separately from
+`insertion_collision_status: UNVALIDATED`; no motion is commanded. Non-mock execute requests fail closed
+after saving the plan and before arm motion. The available collision model is only a depth-derived outer
+box used for the side shift and cuRobo transit; it does not validate the held container, insertion path, all
+gripper links, wrist camera, open door, rim, turntable glass, side walls, ceiling or back wall. The flange/tool,
+gripper and held-container geometry are not verified against the physical assembly. The
+`insertion_bottom_clearance_cm` field is only the modeled box-bottom estimate, not physical clearance.
+Placement execution must remain disabled until these measurements and a conservative full-scene collision
+model are supplied and reviewed.
 
 It also takes the container out (`take_out`). SAM3 finds the whole tupperware mask on the wrist
 image, with no rim query. It averages the 50 nearest locally consistent masked depths per frame, then the
