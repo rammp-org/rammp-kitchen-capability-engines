@@ -1,9 +1,12 @@
 # Fridge open and close — how to test
 
-- **Open** (`open`): detects the handle, grasps it, pulls the door 60° open, lets go and pushes it on to 90°. With
-  `"push_open": false`: a 90° pull, then let go and go back round the door.
+- **Open** (`open`): detects the handle, grasps it **from the side** (the hand slides in along the door from the hinge
+  side, one finger between the bar and the door, tilted anywhere from 40° nose-up to 40° nose-down, level first),
+  pulls the door 60° open, lets go and pushes it on to 90°. With `"push_open": false`: a 90° pull, then let go and go
+  back round the door. `-p grasp:=front` on the node (T2) grasps from the front instead (`feature/15-fridge`'s grasp);
+  everything after the grasp is the same code.
 - **Close** (`close`): pushes the door from behind with the side of the hand to 45°; it swings shut from there.
-- **Wheelchair moves:** the close picks the smallest straight move (up to 35 cm back or forward) its plan needs; the open's push sometimes needs 5–20 cm. You make them
+- **Wheelchair moves:** the close picks the smallest straight move (up to 35 cm back or forward) its plan needs; the open's push may need one between the pull and the push (up to 35 cm; the side grasp more often than the front: the 11-10 sim of this code: see the side sweep). You make them
   by hand when the goal asks, or the goal drives the base: [Driving the base](#driving-the-base-drive_base).
 
 T1–T4 are four terminals on the robot's computer: T1 sheppy, T2 the fridge node, T3 goals, T4 the e-stop.
@@ -25,7 +28,7 @@ docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=0 \
   -v /tmp/fridge_data:/fridge_data -v curobo_kernel_cache:/planner_cache \
   ghcr.io/rammp-org/rammp-kitchen-capability-engines/fridge:dev \
   ros2 run fridge fridge_node --ros-args -p use_orchestrator:=false -p allow_execute:=true \
-  -p mount_tilt_deg:=30 \
+  -p mount_tilt_deg:=30 -p grasp:=side \
   -p planner_world_dir:=/planner_cache/rammp_planner_worlds \
   -p planner_world_dir_in_planner:=/root/.cache/rammp_planner_worlds
 
@@ -78,7 +81,9 @@ ros2 run rammp_orchestrator interactive_perception_node    # U3, then type: add 
 T1 as in Set up; T2 as in Set up but `-p use_orchestrator:=true`. The buttons move the arm (`allow_execute:=true`);
 first try them with `-p mock:=true`: nothing moves and each ends "Mock: ... No arm motion."
 
-In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doing, then a panel with **Done**.
+In Unreal select **fridge_1**: it offers five buttons. Each shows what it is doing, with **Stop**, then a panel with
+**Done** (it waits at most 30 s; a question at most 600 s). **Stop** stops the arm (and base) where it is and shows
+"Stopped. ..."; after Stop during an open, if the hand is on the handle, send `release_only` before anything else.
 
 - **Go to Fridge** → "The arm is in front of the fridge."
 - **Open Fridge Door** → "Fridge door opened." If the push needs it, first: "Move your wheelchair straight back ...
@@ -112,12 +117,23 @@ NOT yet verified on the arm** -- test at rest first (`docker logs -f sheppy-arm`
 
 ```bash
 # stop (repeats at 10 Hz; Ctrl-C once the arm has halted)
-docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
+docker exec -it sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
   ros2 topic pub -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 1, source: operator, reason: stop}"'
 # release, only right before you continue (if it does not release: `sheppy restart arm`); then clear the faults (Set up, T3)
 docker exec sheppy-arm bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && \
-  ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear, clear_target: operator}"'
+  ros2 topic pub -t 10 -r 10 /estop rammp_common_interfaces/msg/EStop "{state: 0, source: operator, reason: clear}"'
 ```
+
+Two things the arm driver does (its `docs/interface.md`, "The e-stop"; both bit on 11-12):
+
+- **Ctrl-C must reach the stop's publisher**: hence `docker exec -it`. Without `-t`, Ctrl-C ends only the docker
+  client; `ros2 topic pub` keeps running inside `sheppy-arm`, keeps the arm stopped, and re-stops it after every
+  release. Check with `docker exec sheppy-arm ps -eo pid,args | grep "topic pub"`; end one left over with
+  `docker exec sheppy-arm kill -INT <pid>`.
+- **The release is a plain `state: 0` from the same `source`, with no `clear_target`.** A message with
+  `clear_target` set is the MIB's clear handshake and never releases anything. The driver logs
+  `E-STOP engaged by 'operator'` on the stop and the release on a release; `/control_status` shows `estopped`.
+  After the release, `/clear_faults` before the next action, or its first motion stops short.
 
 ## Arm + Drive Base
 
@@ -202,7 +218,8 @@ Do this before relying on it.
    cuRobo plans round the wheelchair's layers, not the fridge (not detected yet): keep the way clear of it.
 
 1. **Point the camera square-on at the closed door**, ~50–60 cm from it, the handle in view, by placing the
-   wheelchair (aim for `handle (mean)` x 0.85–1.0, y −0.20 to −0.34).
+   wheelchair (side grasp: aim for `handle (mean)` x 0.70–0.85, y −0.40 to −0.20, the middle of where the side
+   grasp's planner planned in sim; front grasp: x 0.85–1.0, y −0.20 to −0.34).
 
 1. **T3, the open:**
 
@@ -215,7 +232,9 @@ Do this before relying on it.
      '{engine_id: fridge, action_id: open, params_json: "{\"execute\": true, \"speed\": 0.2}"}'
    ```
 
-   It pulls to 60° and stops, lets go, backs off the handle and pushes on, or stops with
+   It pulls to 60° (with the side grasp the hand turns up to 30° less than the door, the bar turning in the gripper)
+   and stops, lets go, slides back off the bar, moves out and round to in front of the handle (where the front grasp's
+   back-off ends) and pushes on, or stops with
    `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`. A refused plan
    (dry run or not) then spends up to 90 s planning it again for wheelchair moves of 5 and 10 cm and ends
    `checked by planning it: the open plans with ... -- move the wheelchair ...` (or that no such move helps:
@@ -225,7 +244,9 @@ Do this before relying on it.
    `"{\"execute\": false, \"base_moves\": false}"` for the dry run): the push must plan from where the chair
    stands, or the open refuses before anything moves. The handle cells (x, y) (0.65, −0.15), (0.65, −0.10),
    (0.65, −0.05), (0.70, −0.15), (0.75, −0.25) and (0.90, −0.10) planned in sim only with the move, so the
-   `placement:` advice leaves them out.
+   `placement:` advice leaves them out. Those cells are the **front** grasp's: the side grasp has no such list (its
+   sim mostly planned only with a move), so with `grasp:=side` the advice may name a spot whose open then refuses,
+   before anything moves.
 
 1. **Only if asked:** move the wheelchair as it says (without turning it), then
    push the door on to 90°, in T3:
@@ -243,7 +264,11 @@ Any failed check refuses with nothing moved; a dry run (`"execute": false`) plan
 advance what it will do. cuRobo plans round the planner's wheelchair and occupant boxes, but those are best guesses:
 **keep the space in front of the arm's base clear**, and start from a pose outside them (the web app's Fridge pose;
 a start inside them refuses at once, naming the boxes). Watch where the fingers close (the gripper closes as the pull
-starts) and whether the fridge drags during the pull (hinge values off). A look failing with `handle model fit ...`
+starts) and whether the fridge drags during the pull (hinge values off). **Side grasp, first runs:** dry-run first and
+watch the slide in at a low `speed`: the finger behind the bar must pass between it and the door. Its depth on the bar
+is the one that worked on 11-06 (`SIDE_PADS_INTO_M`, `SIDE_PADS_PAST_BAR_M`), found with the scene camera's handle
+point; the wrist camera's (the default `detect_camera`) is unchecked for it. If the finger meets the bar's front or the
+door, stop (T4) and say how far off it was. The plan names the grasp it picked (`plan: side grasp, tilt +10 deg, ...`). A look failing with `handle model fit ...`
 says why the door's angle couldn't be measured (the handle too far, too little of it seen).
 
 Options: `execute` (`false`: dry run), `speed` (0–1, scales every motion), `push_open` (`false`: 90° pull, no push),
