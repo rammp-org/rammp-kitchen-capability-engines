@@ -10,12 +10,13 @@
 # torch/torchvision from your requirements (the base ships the Jetson wheels).
 # arm64 only.
 #
-# nightly-20261030 is the base the nightly arm driver is built on (interfaces
-# 73e7ed1716bf, which has GoToEEPoses / GoToJointConfigs: capability_engine's
-# self.arm imports them), so self.arm speaks the driver's exact messages. It
-# carries the arm, common and orchestrator interfaces; rammp_curobo_interfaces
-# it does not.
-FROM ghcr.io/rammp-org/rammp-base:nightly-20261030
+# 2.2.0-jp6 carries rammp-interfaces-ros2 v2.1.0, all seven packages (arm, base,
+# common, orchestrator, perception, peripheral, ui_bridge), with the ExecuteAction
+# token and SetEngineOverlayVisible capability_engine uses. Its arm messages are the
+# arm driver's (since 73e7ed1716bf, the nightly driver's, only SetContactThresholds
+# and CONTACT_STOP were added), so self.arm speaks them exactly.
+# rammp_curobo_interfaces it does not carry.
+FROM ghcr.io/rammp-org/rammp-base:2.2.0-jp6
 
 WORKDIR /module_ws
 
@@ -32,19 +33,6 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
-# Direct engine/UI panels use the same pinned interface package as feat/engine_update.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
-RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
-
-# self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
-# rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
-# interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
-# geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
-# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
-# once the FROM moves to rammp-base 2.0.0.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
-RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
-
 COPY capability_engine/ src/capability_engine/
 # capability_ui: the UI actions' panels (RunUI: Stop on every panel, bounded waits), shared with the other capabilities
 COPY shared/capability_ui/package.xml src/capability_ui/package.xml
@@ -52,7 +40,7 @@ COPY shared/capability_ui/ src/capability_ui/
 COPY capabilities/microwave_place/ src/microwave_place/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
-# base's entrypoint sources its install/ automatically. The nightly base ships
+# base's entrypoint sources its install/ automatically. The base ships
 # rosdep's sources but no cache, so rosdep update first.
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \

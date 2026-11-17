@@ -4,16 +4,16 @@
 # the same packages you build natively in ~/ros2_ws, capability_engine and this
 # capability, and runs the same node.
 #
-# nightly-20261103 is the base the nightly arm driver is built on (interfaces
-# 788be6341a8c: SetContactThresholds and CONTACT_STOP, which box opening's use of
-# the driver's contact monitor needs), so box opening speaks the driver's exact
-# messages. It carries the
-# arm, common, orchestrator, perception and UI-bridge interfaces (the base class's
-# panel calls: rammp_ui_bridge_interfaces 1.2.0, the definitions the example pins);
-# rammp_curobo_interfaces it does not. Nothing in it uses the GPU since the OWL detectors went (the box comes
-# from the scene segmenter); the base is still rammp-cuda's, as built and tested so
-# far, and may move to rammp-base. arm64 only.
-FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261103
+# 2.2.0-jp6 carries rammp-interfaces-ros2 v2.1.0, all seven packages (arm, base,
+# common, orchestrator, perception, peripheral, ui_bridge), with the ExecuteAction
+# token and SetEngineOverlayVisible capability_engine uses. Its arm messages are the
+# arm driver's (since 73e7ed1716bf, the nightly driver's, only SetContactThresholds
+# and CONTACT_STOP were added), so self.arm speaks them exactly.
+# rammp_curobo_interfaces it does not carry.
+# Nothing in it uses the GPU since the OWL detectors went (the box comes from the
+# scene segmenter); the base is still rammp-cuda's, as built and tested so far, and
+# may move to rammp-base. arm64 only.
+FROM ghcr.io/rammp-org/rammp-cuda:2.2.0-jp6
 
 WORKDIR /module_ws
 
@@ -27,21 +27,6 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 # action) alongside the packages below.
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
-
-# rammp_ui_bridge_interfaces as the base class now speaks it (SetEngineOverlayVisible, for
-# ctx.set_overlay_visible(); the example's pin): the base carries 1.2.0, which has no such service,
-# so the pinned one is built here and overlays it.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
-RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
-
-# self.base (capability_engine/base.py) imports DriveCommand and MibStatus, which the base's
-# rammp_base_interfaces (interfaces 73e7ed1716bf) predates. Overlay that one package from
-# interfaces v2.0.0 (a59207b43702), the commit rammp-base 2.0.0 carries; it depends on
-# geometry_msgs only, nothing in the base depends on it, and TwistSetpoint is unchanged.
-# The arm's interfaces stay the base's, the ones the running arm driver speaks. Drop this
-# once the FROM moves to rammp-base 2.0.0.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/a59207b43702bfdc741bbfd9002b55392851495e.tar.gz /tmp/interfaces.tar.gz
-RUN tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_base_interfaces' && rm /tmp/interfaces.tar.gz
 
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/box_opening/ src/box_opening/

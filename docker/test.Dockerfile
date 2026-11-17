@@ -6,9 +6,9 @@
 #   make test-arm [ARGS=...]
 FROM ros:humble-ros-base
 
-# Pins. Interfaces and curobo are full SHAs; kinova_gen3_description is dev.
-ARG INTERFACES_REF=ebaacf7ed71d81b40aea9541bb1cb104ce5fce7b
-ARG UI_BRIDGE_INTERFACES_REF=7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73
+# Pins. Interfaces is the release tag rammp-base 2.2.0-jp6 carries, so these tests and the
+# images compile the same contract; curobo is a full SHA; kinova_gen3_description is dev.
+ARG INTERFACES_REF=v2.1.0
 ARG CUROBO_REF=10ad896883158247039a8bd850bcabcab016a50d
 ARG KINOVA_REF=2546edbab9cda031cdfe82b33289f05e01341f88
 ARG DEPLOYMENTS_REF=9e0cd960fd7e1876a8a592b8fdb33a27da82a734
@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # hadolint ignore=DL3013
 RUN pip install --no-cache-dir numpy==1.26.4 scipy==1.14.0 pybullet==3.2.7 pytest
 
-# Fetch commit $2 of GitHub repo $1 into dir $3 (full SHA required for a shallow fetch).
+# Fetch commit $2 of GitHub repo $1 into dir $3 (a full SHA or a tag: a shallow fetch needs one).
 # hadolint ignore=SC2016
 RUN printf '%s\n' '#!/bin/sh' 'set -e' \
         'git init -q "$3" && cd "$3"' \
@@ -38,14 +38,13 @@ WORKDIR /ws
 RUN mkdir src \
     && fetch-commit rammp-org/rammp-interfaces-ros2 ${INTERFACES_REF} /tmp/interfaces \
     && cp -r /tmp/interfaces/rammp_arm_interfaces /tmp/interfaces/rammp_base_interfaces \
-        /tmp/interfaces/rammp_common_interfaces /tmp/interfaces/rammp_orchestrator_interfaces src/ \
-    && fetch-commit rammp-org/rammp-interfaces-ros2 ${UI_BRIDGE_INTERFACES_REF} /tmp/ui_bridge \
-    && cp -r /tmp/ui_bridge/rammp_ui_bridge_interfaces src/ \
+        /tmp/interfaces/rammp_common_interfaces /tmp/interfaces/rammp_orchestrator_interfaces \
+        /tmp/interfaces/rammp_ui_bridge_interfaces src/ \
     && fetch-commit rammp-org/RAMMP-CuRobo ${CUROBO_REF} /tmp/curobo \
     && cp -r /tmp/curobo/rammp_curobo_interfaces src/ \
     && fetch-commit rammp-org/kinova-gen3-ros2 ${KINOVA_REF} /tmp/kinova \
     && cp -r /tmp/kinova/kinova_gen3_description src/ \
-    && rm -rf /tmp/interfaces /tmp/ui_bridge /tmp/curobo /tmp/kinova
+    && rm -rf /tmp/interfaces /tmp/curobo /tmp/kinova
 
 RUN . /opt/ros/humble/setup.sh && colcon build --event-handlers console_direct-
 

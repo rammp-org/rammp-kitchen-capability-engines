@@ -469,7 +469,7 @@ capabilities/<name>/             one ament_python package per capability (`make 
   package.xml, setup.py, setup.cfg
   <name>/node.py                the capability: a CapabilityEngine subclass
   launch/<name>.launch.py       what both the native build and the image run
-  Dockerfile                    FROM a pinned rammp-base / rammp-cuda tag, built from the repo root
+  Dockerfile                    FROM a pinned rammp-base / rammp-cuda tag (2.2.0-jp6), built from the repo root
   rammp-alternative.yaml        the real alternative: sheppy's schema plus `tier`
   rammp-alternative.mock.yaml   same topics, no hardware — CI smoke-tests this one
   docs/interface.md             the page rammp-docs pulls; keep its headings
