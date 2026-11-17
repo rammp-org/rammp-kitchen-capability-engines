@@ -33,6 +33,16 @@ RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wi
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
 
+# rammp_orchestrator_interfaces as the base class now reads it: since the engine update (#42) the
+# per-execution token comes in the execute_action goal's own `token` field, which the base's
+# definition (788be63, 2026-11-03) does not have: the engine then failed EVERY goal with
+# AttributeError before anything ran (found 2026-11-16, in the image built from 49666ac). The pin is
+# docker/test.Dockerfile's INTERFACES_REF, the definitions the base class is tested against; the
+# package depends on nothing of RAMMP's, so it overlays the base's alone. An orchestrator that sends
+# goals of the older definition does not reach this image, nor this image's goals an older engine.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/ebaacf7ed71d81b40aea9541bb1cb104ce5fce7b.tar.gz /tmp/orchestrator.tar.gz
+RUN mkdir -p src && tar -xzf /tmp/orchestrator.tar.gz -C src --strip-components=1 --wildcards '*/rammp_orchestrator_interfaces' && rm /tmp/orchestrator.tar.gz
+
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/box_opening/ src/box_opening/
 
@@ -47,6 +57,12 @@ RUN . /opt/ros/humble/setup.sh \
     && rm -rf /var/lib/apt/lists/* \
     && colcon build \
     && rm -rf build log
+
+# The goal the base class reads is the goal this image holds: a build whose execute_action goal
+# has no token field is one whose every goal fails, and no test of the package shows it (they run
+# on docker/test.Dockerfile's image).
+RUN . /opt/ros/humble/setup.sh && . /ros2_ws/install/setup.sh && . /module_ws/install/setup.sh \
+    && python3 -c "from rammp_orchestrator_interfaces.action import ExecuteAction; g = ExecuteAction.Goal(); assert hasattr(g, 'token') and len(g.token) == 16, g.get_fields_and_field_types()"
 
 # The run's point-cloud work is numpy on one core at a time; one BLAS thread
 # keeps it from spreading over the Jetson's cores, the arm driver's included.
