@@ -143,7 +143,8 @@ def _full_flow(
     and so no table measured for the lid to go on); `setdown` what the
     set-down's watch felt (_Felt: "met", the lid met the table where the
     plan has it; "never", "held", "failed": it did not, and the lid is not
-    let go; None: the real watch, which the fake client feeds nothing). The
+    let go; a _Felt of the test's own; None: the real watch, which the fake
+    client feeds nothing). The
     table the set-down goes by is the cameras' (the fake chain's fk stands
     still, and its fingers' hold says nothing of the lid's top) unless
     `touch_table`: then setdown_table_z's own, the cameras' table moved by
@@ -203,7 +204,7 @@ def _full_flow(
     if setdown is not None:
 
         def felt(ctx_, legs, carry):
-            carry.contact = _Felt(setdown)
+            carry.contact = setdown if isinstance(setdown, _Felt) else _Felt(setdown)
             return carry.contact
 
         monkeypatch.setattr(rlo, "watch_setdown", felt)
@@ -764,11 +765,12 @@ def test_where_nothing_was_planned_ahead_the_lift_flies_alone_and_the_spot_is_lo
     assert runs[-1] == (HOMED, [GAINS_MEDIUM])
     assert all(lg.guard is None for lg in rec.legs.values() if lg.kind.value == "motion")
     # the carry planned while the lift and the clear flew (carry_ahead), before the spot look, and flown: the spot
-    # chosen with the lid lifted is its own; home while the carry flew
+    # chosen with the lid lifted is its own; home while the retreat flew, not while the set-down did (its watch
+    # is polled from its first sample: test_the_set_down_hosts_no_planning_...)
     planned = {name: at for name, at in rec.plans}
     assert planned["lid:carry"] == rec.events.index("lid:clear") + 1 == rec.events.index("spot-look")
     assert [name for name, _at in rec.plans].count("lid:carry") == 1
-    assert rec.events.index("place:touch") < planned["home"] <= rec.events.index("place:open")
+    assert planned["home"] == rec.events.index("place:retreat") + 1 == rec.events.index("home")
     # ... and from the look pose while the way back flew, for a stop there: unused, the lid coming off
     assert [at for name, at in rec.plans if name == "home"] == [rec.events.index("aim:reach-after"), planned["home"]]
     # nothing chose the lid's spot before the lift: it is chosen at the spot look, on the table the cameras measured
@@ -1449,11 +1451,25 @@ def test_the_full_runs_free_air_lines_fly_at_the_compliant_speed_and_only_under_
 def test_a_lid_that_slipped_on_the_way_is_released_the_arm_goes_home_and_the_run_says_so(
     ctx, monkeypatch, tmp_path, capsys
 ):
+    """The knuckle reads shut past the knob at the table: the lid left the fingers on the way. They open,
+    the arm goes home, and the run ends STOP, the lid slipped out. Whatever the set-down's watch felt
+    there was not the lid in the fingers meeting the table: the run does not say "SET-DOWN CONTACT: the
+    lid met the table" of it (the flight view and the node read that line as the lid on the table; review
+    2026-11-17), it says what was felt beside the slip."""
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], slipped=True)
     assert code == 1 and rec.events[-3:] == HOME
     (setdown,) = (r for r in rows if r["leg"] == "reach_setdown")
-    assert setdown["kept"] is False
-    assert "the lid slipped out of the fingers" in capsys.readouterr().out
+    assert setdown["kept"] is False and setdown["credible"] is True  # the watch felt something; the lid was gone
+    out = capsys.readouterr().out
+    assert "SET-DOWN CONTACT" not in out and "DONE" not in out
+    assert (
+        "the lid slipped on the way (the set-down felt a contact +12 mm from where the plan put the table: not the "
+        "lid's, which had left the fingers)"
+    ) in out
+    assert out.rstrip().endswith(
+        "STOP: the arm is home, but the lid slipped out of the fingers on the way to [%.2f, %.2f]"
+        % tuple(ctx.lid_drop.xyz[:2])
+    )
 
 
 def test_a_box_the_press_moved_is_not_gripped(ctx, monkeypatch, tmp_path, capsys):
@@ -1786,7 +1802,8 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
     watch begins SETDOWN_WATCH_M above the plan's table — where the slow
     stretch begins — on the execution's last stretch below there (final),
     from its first motion leg (not a gripper leg before it), cuts where the
-    lid meets (past 0), and stops the descent where it fails."""
+    lid meets (past 0), and stops the descent where it fails: it is told
+    the joints the way down ends at, where the slow stretch begins."""
     from box_opening.runtime import approach
     from box_opening.runtime.legs import Kind
     from box_opening.tasks.press_contact import pads_z
@@ -1799,9 +1816,10 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
     close = SimpleNamespace(kind=Kind.GRIPPER, stop_when=None)
     lift = SimpleNamespace(kind=Kind.MOTION, stop_when=None)
     touch = SimpleNamespace(kind=Kind.MOTION, stop_when=None, goal_joints=[0.25] + [0.0] * 6)
-    carry = SimpleNamespace(legs=[SimpleNamespace(), touch], over_m=rlo.SETDOWN_PAST_M, contact=None)
+    down = SimpleNamespace(kind=Kind.MOTION, stop_when=None, goal_joints=[0.338] + [0.0] * 6)
+    carry = SimpleNamespace(legs=[SimpleNamespace(), down, touch], over_m=rlo.SETDOWN_PAST_M, contact=None)
     ctx = SimpleNamespace(client=SimpleNamespace())
-    got = rlo.watch_setdown(ctx, [close, lift, touch], carry)
+    got = rlo.watch_setdown(ctx, [close, lift, down, touch], carry)
     end = pads_z(Chain(), touch.goal_joints)
     assert lift.stop_when is got is carry.contact and close.stop_when is None
     assert isinstance(got, rlo.SetdownContact) and got.abort_on_failure is True
@@ -1809,6 +1827,7 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
     assert got.arm_z == pytest.approx(end + rlo.SETDOWN_PAST_M + rlo.SETDOWN_WATCH_M) and got.past_m == 0.0
     assert got.cut is True and got.final is True and rlo.SETDOWN_WATCH_M == rlo.SETDOWN_SLOW_M
     assert (got.settle_s, got.credible_m, got.held_m) == (0.6, 0.035, 0.015)
+    assert got.slow_q == down.goal_joints and down.stop_when is None
     assert not got.credible() and got.refusal()[0] == "never"  # nothing fed: nothing says the lid met the table
 
 
@@ -2244,8 +2263,8 @@ def test_a_retreat_from_where_the_arm_stands_that_ends_past_the_drift_gate_plans
 ):
     """The home planned ahead starts where the planned retreat ends: one
     from the live joints ending past DRIFT_REPLAN_RAD of that is not flown
-    (the runner would refuse it with the lid let go), home is planned where
-    the retreat ends."""
+    (the runner would refuse it with the lid let go), home is planned from
+    where the retreat ends, while it flies."""
     real = rlo.retreat_from_live
     monkeypatch.setattr(rlo, "retreat_from_live", lambda c, carry, world: (real(c, carry, world)[0], 0.05))
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
@@ -2253,7 +2272,8 @@ def test_a_retreat_from_where_the_arm_stands_that_ends_past_the_drift_gate_plans
     (back,) = (r for r in rows if r["leg"] == "retreat_from_live")
     assert (back["home_ahead"], back["home_flies"]) == (True, False)
     homes = [at for name, at in rec.plans if name == "home"]
-    assert homes[-1] > rec.events.index("place:retreat")  # planned once the retreat had flown
+    assert homes[-1] == rec.events.index("place:retreat") + 1  # planned as the retreat flew, from where it ends
+    assert rec.events[-3:] == HOME
 
 
 def test_a_press_only_run_chooses_no_lid_spot(ctx, monkeypatch, tmp_path, capsys):
@@ -4267,10 +4287,19 @@ def test_run_1s_spot_in_front_of_the_tables_edge_is_no_longer_a_spot(monkeypatch
     assert none == [] and passed.unreachable > 0 and "the hand does not reach" in passed.says()
 
 
-def test_on_flatbot_run_1s_lid_goes_to_a_spot_on_the_measured_table_or_back_on_the_box(monkeypatch, capsys):
+def test_on_flatbots_bare_arm_run_1s_lid_goes_to_a_spot_on_the_measured_table_or_back_on_the_box(monkeypatch, capsys):
     """The same, with flatbot's arm (its URDF, the joints the carry began at): the first spot the hand
     reaches — straight down, else leaning — is on the table the wrist measured, or there is none and
-    the lid goes back on the box. Which, and where, is printed for the record."""
+    the lid goes back on the box. Which, and where, is printed for the record.
+
+    The BARE arm: its kinematics and joint limits alone. The chair and its user are not in it (the
+    chain has no body model, and approach.body_check is off), nor the counter's keep-out under the
+    edges that run's maps showed (two boxes in force then: its counter_edges rows) — the test data
+    holds neither flatbot's body layers nor its planner. On the robot both are in force for the hover
+    and the line down (kinematics.body_refusal; the same day's 16:43 run was refused by exactly that
+    check, "arm_half_arm_1_link 0 mm into person/lap"), so the spot printed here is where the arm's
+    own reach puts the lid, not a spot the robot's checks are known to pass: there it may be passed
+    over for another, or the lid put back on the box."""
     from box_opening.runtime import approach
     from box_opening.runtime.kinematics import ArmChain
 
@@ -4281,7 +4310,7 @@ def test_on_flatbot_run_1s_lid_goes_to_a_spot_on_the_measured_table_or_back_on_t
     got = next(rlo.spot_candidates(ctx, tmap, flown.RUN1_TABLE_Z, flown.RUN1_Q_CLEAR, passed=passed), None)
     with capsys.disabled():
         sys.stdout.write(
-            "\nrun 1 replayed on flatbot's URDF: %s (%s)\n"
+            "\nrun 1 replayed on flatbot's BARE arm (its URDF; no chair and user body, no counter keep-out): %s (%s)\n"
             % (
                 "no spot the hand reaches on the measured table: the lid goes back on the box"
                 if got is None
@@ -4398,14 +4427,32 @@ def test_the_three_contacts_recorded_as_the_slow_stretch_began_are_not_taken_for
     assert (rec["watched"], rec["met"], rec["credible"], rec["verdict"]) == (True, False, False, "never")
 
 
-def _descent(table=None, catch_up=0.0, bump=None, top=0.20, noise=0.0002, seed=0, under=0.009):
+def _descent(
+    table=None,
+    catch_up=0.0,
+    bump=None,
+    top=0.20,
+    noise=0.0002,
+    seed=0,
+    under=0.009,
+    rate=None,
+    delay=0.0,
+    polled=True,
+    chain=None,
+    slow_q=False,
+):
     """A set-down's last stretch flown over a table: the reference's pads from 12 cm over where the plan
     has the lid meet the table (`top`) to SETDOWN_PAST_M under it, fast (135 mm/s) to where the slow
     stretch begins and at 55 mm/s from there, as flown 2026-11-17; the pads measured `under` it (9 mm), coming
-    up on it by `catch_up` (m) over the 0.35 s after the slow stretch begins (the arm catching up), held
-    up by a table at `table` (the pads' height there; None: none), and by `bump`: (the pads' height it
-    begins at, how far it lifts them, for how many mm of the reference). Returns (the watch, the fraction
-    it stopped at or None, the reference's pads there)."""
+    up on it by `catch_up` (m) over the 0.35 s after the slow stretch begins (the arm catching up) — or, with
+    `rate` (m/s), at that pace from `delay` s after it begins until all of `catch_up` has come (the recorded
+    flights' own: _flown_lag) —, held up by a table at `table` (the pads' height there; None: none), and by
+    `bump`: (the pads' height it begins at, how far it lifts them, for how many mm of the reference).
+    `polled` False: the client keeps the flight's feedback and the watch is not polled while it flies
+    (something the execution hosted), then reads it once it is over (read_rest). `chain`: the kinematics
+    it measures by (None: test_press_contact's, joint 1 the tool's height); `slow_q` True: the watch is told
+    the joints the slow stretch begins at, as watch_setdown tells it. Returns (the watch, the fraction it
+    stopped at or None, the reference's pads there)."""
     import test_press_contact as tpc
 
     arm, end = top + rlo.SETDOWN_SLOW_M, top - rlo.SETDOWN_PAST_M
@@ -4415,21 +4462,43 @@ def _descent(table=None, catch_up=0.0, bump=None, top=0.20, noise=0.0002, seed=0
     t_slow = 0.02 + len(fast) * 0.01
     rng = np.random.default_rng(seed)
     client = SimpleNamespace(last_execution=None)
-    det = rlo.SetdownContact(tpc._Chain(), client, top, arm, end)
+    det = rlo.SetdownContact(
+        chain or tpc._Chain(), client, top, arm, end, slow_q=[arm - tpc.PAD] + [0.0] * 6 if slow_q else None
+    )
 
     def measured(t, zr):
-        free = zr - under + catch_up * min(max((t - t_slow) / 0.35, 0.0), 1.0) + float(rng.normal(0.0, noise))
+        since = t - t_slow - delay
+        came_up = catch_up * min(max(since / 0.35, 0.0), 1.0) if rate is None else min(max(rate * since, 0.0), catch_up)
+        free = zr - under + came_up + float(rng.normal(0.0, noise))
         if bump is not None and bump[0] - bump[2] < zr <= bump[0]:
             free += bump[1] * min((bump[0] - zr) / 0.004, 1.0)
         return free if table is None else max(free, table)
 
-    stopped, info = tpc._fly(det, client, z, 0.01, measured)
+    stopped, info = tpc._fly(det if polled else (lambda frac: False), client, z, 0.01, measured)
+    if not polled:
+        det.read_rest()
     z_stop = (
         None
         if stopped is None
         else float(np.interp(stopped * (0.02 + (len(z) - 1) * 0.01), 0.02 + np.arange(len(z)) * 0.01, z))
     )
     return det, stopped, z_stop
+
+
+def _flown_lag(name):
+    """How one recorded set-down's pads lagged their reference (setdown_flown.SETDOWNS_FLOWN[name], the
+    three flown with the watch): (the most they stood under it, m; how far they had come up on it by the
+    cut, m; how fast they were still coming up there, m/s, over the record's last 0.1 s; how long after
+    the slow stretch began they stood lowest, s)."""
+    rec = flown.SETDOWNS_FLOWN[name]
+    tt, tz = (np.array(v, float) for v in zip(*rec["traj"], strict=True))
+    fed = np.array(rec["fed"], float)
+    gap = fed[:, 2] - np.interp(fed[:, 1] * tt[-1], tt, tz)
+    slow = int(np.argmax(np.interp(fed[:, 1] * tt[-1], tt, tz) <= rec["plan"] + rlo.SETDOWN_SLOW_M))
+    low = slow + int(np.argmin(gap[slow:]))
+    last = fed[:, 0] >= fed[-1, 0] - 0.1
+    rate = float(np.polyfit(fed[last, 0], gap[last], 1)[0])
+    return -float(gap.min()), float(gap[-1] - gap[low]), rate, float(fed[low, 0] - fed[slow, 0])
 
 
 def test_the_arm_catching_up_as_the_slow_stretch_begins_is_not_the_table_and_the_table_under_it_is():
@@ -4453,21 +4522,89 @@ def test_the_arm_catching_up_as_the_slow_stretch_begins_is_not_the_table_and_the
     assert (rec["settle_s"], rec["credible_above_mm"], rec["held_mm"], rec["early"]) == (0.6, 35.0, 15.0, [])
 
 
-def test_a_rise_well_above_the_table_is_not_the_table_and_the_descent_goes_on_to_it():
-    """After the settle, 41 mm over where the plan has the lid meet the table (more than
-    SETDOWN_CREDIBLE_M), the pads come up 5 mm on the reference and fall back: a rise the press's rule
-    takes for a contact. It is not the table: noted (`early`), the watch settles again, the descent goes
-    on, slowly — and the table, met 10 mm over the plan, is."""
-    det, stopped, _z = _descent(table=0.21, bump=(0.243, 0.005, 0.012), under=0.002)
-    assert stopped is not None and det.credible() and det.contact[1] == pytest.approx(0.21, abs=0.002)
-    assert len(det.early) == 1 and det.early[0][1] == pytest.approx(0.241, abs=0.003)
+@pytest.mark.parametrize("table_mm", [0, 5, 10, 13, 20, 26])
+def test_a_rise_well_above_the_table_is_not_the_table_and_the_descent_goes_on_to_it(table_mm):
+    """After the settle, with the reference 43 mm over where the plan has the lid meet the table (the pads,
+    4 mm under it by then, more than SETDOWN_CREDIBLE_M over the plan), the pads come up 5 mm on the
+    reference and fall back: a rise the press's rule takes for a contact. It is not the table: noted
+    (`early`), the watch settles again, the descent goes on, slowly — and the table is the table, wherever
+    in the recorded range it stands (the 19 set-downs flown onto one: -0.4..+26 mm over the plan, mean +13).
+
+    The lag is the flown ones' (the pads 9 mm under the reference, coming up 5 mm as the slow stretch
+    begins). Review 2026-11-17: while the watch settles again its rules are blind for 33 mm of the descent,
+    +40 down to +7 mm over the plan; a table there (+10, +13, +20, +26) is seen only as the pads held up,
+    which was counted from the least gap since the watch ARMED and dated to that sample: "something held
+    the lid up 69 mm over where the plan has it meet the table", the lid carried back to the box from a
+    table it stood on. (This test passed with the pads 2 mm under the reference and no catching up.)"""
+    table = 0.20 + table_mm / 1000.0
+    det, stopped, z_stop = _descent(table=table, bump=(0.243, 0.005, 0.012), catch_up=0.005)
+    assert stopped is not None and det.credible() and det.verdict is None and det.refusal() is None
+    assert det.contact[1] == pytest.approx(table, abs=0.002)
+    assert len(det.early) == 1 and det.early[0][1] == pytest.approx(0.239, abs=0.003)
     rec = det.record()
-    assert rec["early"][0][1] == pytest.approx(41.0, abs=3.0) and rec["early"][0][2] == "fast"
-    assert rec["above_top_mm"] == pytest.approx(10.0, abs=2.0) and rec["credible"] is True
-    # and with no table under it at all: not let go, the early rise said
-    det, stopped, _z = _descent(bump=(0.243, 0.005, 0.012), under=0.002)
-    assert stopped is None and not det.credible() and len(det.early) == 1
+    assert rec["early"][0][1] == pytest.approx(39.0, abs=3.0) and rec["early"][0][2] == "fast"
+    assert rec["above_top_mm"] == pytest.approx(table_mm, abs=2.0) and rec["credible"] is True and rec["cut"]
+    # seen as the pads held up where the watch still settled again (blind), by a rise where it had settled
+    assert det.how == ("held" if table_mm >= 20 else "fast")
+    # ... and stopped no more than SETDOWN_HELD_M and three samples past where the pads met it (4 mm under
+    # the reference), never at the touch's end
+    assert table + 0.004 - z_stop < rlo.SETDOWN_HELD_M + 0.004 and z_stop > 0.20 - rlo.SETDOWN_PAST_M + 0.002
+
+
+def test_a_rise_well_above_the_table_with_no_table_under_it_is_not_let_go_on():
+    """The same rise, and nothing under the lid: the touch flies to its end, nothing is met, and the early
+    rise is said in why the lid is not let go."""
+    det, stopped, _z = _descent(bump=(0.243, 0.005, 0.012), catch_up=0.005)
+    assert stopped is None and not det.credible() and len(det.early) == 1 and det.verdict is None
+    assert det.refusal()[0] == "never"
     assert "rises +" in det.refusal()[1] and "were not taken for the table" in det.refusal()[1]
+
+
+@pytest.mark.parametrize("name", sorted(flown.SETDOWNS_FLOWN))
+@pytest.mark.parametrize("table_mm", [None, 0, 13, 26])
+def test_with_each_recorded_flights_own_lag_caught_up_all_the_way_the_table_is_the_table(name, table_mm):
+    """The three flights recorded with the watch were cut 0.27-0.33 s after the slow stretch began, the
+    pads still coming up on the reference: how far the catching up goes is not on record. Here each one's
+    own lag (the most its pads stood under the reference: 8.6, 8.5 and 13.8 mm; its pace at the cut: 29,
+    18 and 26 mm/s; from where it stood lowest) caught up ALL the way, to no lag at all. In free air
+    nothing is met and nothing stopped. Over a table 0, 13 or 26 mm over the plan the lid is let go on it,
+    at its height. With 2026-11-17's 13.8 mm the "held up" count, made from the least gap since the watch
+    armed, stood 1.2 mm short of SETDOWN_HELD_M once the arm had caught up, fired on the table's first
+    millimetres before the rise rule could, and dated the contact to where the watch armed: "held 66 mm
+    over the plan" (review 2026-11-17: "the same with no early rise once the catch-up reaches 13 mm")."""
+    under, risen, rate, low_at = _flown_lag(name)
+    assert 0.0075 < under < 0.0145 and 0.0035 < risen < 0.0065 and 0.015 < rate < 0.032 and low_at < 0.1
+    table = None if table_mm is None else 0.20 + table_mm / 1000.0
+    det, stopped, z_stop = _descent(table=table, under=under, catch_up=under, rate=rate, delay=low_at)
+    if table is None:
+        assert stopped is None and det.contact is None and det.verdict is None and not det.credible()
+        assert det.refusal()[0] == "never"
+        return
+    assert stopped is not None and det.credible() and det.refusal() is None
+    assert det.contact[1] == pytest.approx(table, abs=0.002) and det.record()["above_top_mm"] == pytest.approx(
+        table_mm, abs=2.0
+    )
+    assert table - z_stop < 0.008  # the reference stopped as the rise was seen: a few millimetres past the table
+
+
+@pytest.mark.parametrize("table_mm", [0, 13, 26])
+def test_a_catching_up_that_outlasts_the_settle_is_not_the_table_and_the_table_after_it_is(table_mm):
+    """2026-11-17's lag once more (the pads 13.8 mm under the reference, coming up 26 mm/s), the catching
+    up beginning 0.25 s after the slow stretch does: still under way when the settle ends, 0.6 s in. What
+    rises after that is met as a rise, with the pads more than SETDOWN_CREDIBLE_M over the plan: not the
+    table, noted, the watch settles again — and the table under it, met while it does, is the table. It
+    was "something held the lid up" at the height the watch armed at: all 13.8 mm of the catching up
+    counted toward SETDOWN_HELD_M."""
+    under, _risen, rate, _low_at = _flown_lag("20261117-164059")
+    table = 0.20 + table_mm / 1000.0
+    det, stopped, z_stop = _descent(table=table, under=under, catch_up=under, rate=rate, delay=0.25)
+    assert len(det.early) == 1 and det.early[0][1] > 0.20 + rlo.SETDOWN_CREDIBLE_M
+    assert stopped is not None and det.credible() and det.verdict is None
+    assert det.contact[1] == pytest.approx(table, abs=0.002)
+    assert table - z_stop < rlo.SETDOWN_HELD_M + 0.004
+    # and in free air: nothing met, the lid not let go
+    det, stopped, _z = _descent(under=under, catch_up=under, rate=rate, delay=0.25)
+    assert stopped is None and not det.credible() and det.refusal()[0] == "never" and len(det.early) == 1
 
 
 def test_something_holding_the_lid_up_above_where_the_table_can_be_stops_the_descent_and_is_not_let_go_on():
@@ -4484,17 +4621,282 @@ def test_something_holding_the_lid_up_above_where_the_table_can_be_stops_the_des
     assert det.record()["credible"] is False and det.record()["verdict"] == "held"
     det, stopped, _z = _descent(table=0.23)
     assert stopped is not None and det.credible() and det.contact[1] == pytest.approx(0.23, abs=0.002)
+    # with the arm catching up as flown (5 mm of it before the pads are held): the height said is where the
+    # pads STAND held, not where the gap was least (where the watch armed: it said "69 mm")
+    det, stopped, z_stop = _descent(table=0.26, catch_up=0.005)
+    assert stopped is not None and det.verdict == "held" and not det.credible()
+    assert "something held the lid up 60 mm over where the plan has it meet the table" in det.refusal()[1]
+    assert det.record()["above_top_mm"] == pytest.approx(60.0, abs=1.0)
 
 
-def test_a_set_down_watch_that_fails_stops_the_descent_and_the_lid_is_not_let_go(monkeypatch):
+@pytest.mark.parametrize("thing_mm", [40, 45, 50])
+def test_a_rise_above_the_band_that_goes_on_is_something_holding_the_lid_up_and_stops_the_descent(thing_mm):
+    """Something stands 40-50 mm over where the plan has the lid meet the table: met as a rise once the
+    watch has settled, above SETDOWN_CREDIBLE_M, so not the table — noted, and the watch settles again.
+    But the rise goes on: SETDOWN_HELD_M of it from where it began (from where the settle ended, where it
+    began before that) and it is the lid held up. The descent stops there — the reference no more than
+    twice SETDOWN_HELD_M past where the pads met the thing — the lid is not let go, and the height said
+    is the thing's."""
+    thing = 0.20 + thing_mm / 1000.0
+    det, stopped, z_stop = _descent(table=thing, catch_up=0.005)
+    assert stopped is not None and det.verdict == "held" and not det.credible()
+    assert len(det.early) == 1 and det.early[0][1] == pytest.approx(thing, abs=0.002)
+    assert det.contact[1] == pytest.approx(thing, abs=0.002)
+    assert "something held the lid up %d mm over where the plan has it meet the table" % thing_mm in det.refusal()[1]
+    assert thing + 0.004 - z_stop < 2 * rlo.SETDOWN_HELD_M  # the pads met it 4 mm under the reference
+
+
+def test_what_the_pads_came_up_by_while_the_watch_settled_is_not_counted_once_it_has_settled():
+    """The arm catches up 14.7 mm while the watch settles — 0.3 mm short of SETDOWN_HELD_M — and, flying
+    on, the pads come up one millimetre more with the reference 25 mm over the plan (too little and too
+    slow for either rise rule; the gap wanders that much in free air). Nothing holds the lid up: "held
+    up" is counted from where the settle ended, what rose in it being the arm's own. Counted from the
+    least gap since the watch armed, that millimetre read as the lid held up 27 mm over the plan — inside
+    the band, so "the table", and the fingers would have opened in free air. The table under it is still
+    the table."""
+    det, stopped, _z = _descent(catch_up=0.0147, bump=(0.225, 0.001, 0.040))
+    assert stopped is None and det.contact is None and det.verdict is None and det.early == []
+    assert not det.credible() and det.refusal()[0] == "never"
+    det, stopped, _z = _descent(table=0.213, catch_up=0.0147, bump=(0.225, 0.001, 0.040))
+    assert stopped is not None and det.credible() and det.contact[1] == pytest.approx(0.213, abs=0.002)
+    assert det.how == "fast"
+
+
+def test_a_catching_up_of_the_whole_held_height_inside_the_settle_stops_the_descent_and_lets_nothing_go():
+    """What the watch cannot tell apart, said plainly: pads that come up on the reference by all of
+    SETDOWN_HELD_M while the watch still settles read as held up, whether a table does it or the arm's
+    own catching up. 14 mm of it in free air is nothing; 15.5 mm stops the descent in free air, well
+    above the band, and the lid goes back on the box — never let go. The recorded flights had come up
+    3.8-6.0 mm by their cut, from 8.5-13.8 mm under the reference."""
+    det, stopped, _z = _descent(catch_up=0.014)
+    assert stopped is None and det.contact is None and det.verdict is None
+    det, stopped, z_stop = _descent(catch_up=0.0155)
+    assert stopped is not None and det.verdict == "held" and not det.credible()
+    assert det.contact[1] > 0.20 + rlo.SETDOWN_CREDIBLE_M and z_stop > 0.20 + rlo.SETDOWN_CREDIBLE_M
+
+
+# ---- the watch that fails, and the feedback no poll read (review 2026-11-17) ------------------------------
+
+
+class _Breaks:
+    """test_press_contact's chain (joint 1 the tool's height) whose kinematics raise once `broken`."""
+
+    broken = False
+
+    def fk(self, q):
+        if self.broken:
+            raise RuntimeError("boom")
+        return np.eye(3), np.array([0.0, 0.0, float(q[0])])
+
+
+def test_a_set_down_watch_that_fails_as_it_watches_stops_the_descent_there_and_the_lid_is_not_let_go():
     """press_contact's watch of the set-down flew its planned end where it failed. A lid is let go only on
-    a contact now, and a planned end is no contact: the descent stops where the watch failed."""
-    import test_press_contact as tpc
+    a contact now, and a planned end is no contact: a watch that fails on the stretch it watches stops the
+    descent where it failed — the reference does not go on down onto a table nothing watches for."""
 
+    class BreaksAfter(_Breaks):
+        """Sound for `calls` of its kinematics: the trajectory's heights (191 points), then some 50 samples
+        of the slow stretch."""
+
+        def __init__(self, calls):
+            self.left = calls
+
+        def fk(self, q):
+            self.left -= 1
+            self.broken = self.broken or self.left < 0
+            return super().fk(q)
+
+    det, stopped, z_stop = _descent(chain=BreaksAfter(100000), slow_q=True, catch_up=0.005)
+    assert stopped is None and det.failed is None and det.armed_t is not None  # sound: a free descent, watched
+    det, stopped, z_stop = _descent(chain=BreaksAfter(300), slow_q=True, catch_up=0.005)
+    assert det.failed == "RuntimeError: boom" and det.verdict == "failed" and det.failed_when == "watching"
+    assert stopped is not None and 0.20 + 0.030 < z_stop < 0.20 + rlo.SETDOWN_SLOW_M - 0.005  # where it failed
+    assert not det.credible() and det.refusal() == (
+        "failed",
+        "the set-down's watch failed (RuntimeError: boom) and the descent was stopped there",
+    )
+    rec = det.record()
+    assert (rec["credible"], rec["verdict"], rec["failed"]) == (False, "failed", "RuntimeError: boom")
+
+
+def test_a_set_down_watch_that_fails_before_the_descent_stops_the_descent_not_the_lift_or_the_carry(capsys):
+    """The watch is the stop_when of the whole one motion — the lift, the clear, the carry, the way down,
+    the touch — polled from its first sample. Where it failed there (it cannot make the heights of the
+    trajectory sent, on its first poll) it cancelled the flight on the spot: the lid half lifted or in
+    mid-carry, and the way back from there a line nothing had checked against the box (review 2026-11-17).
+    The lift and the carry fly on. The descent is what it stops: where the slow stretch begins, found in the
+    trajectory sent by the joints the way down ends at (no kinematics: those are what failed). The lid is
+    not let go."""
+    chain = _Breaks()
+    chain.broken = True
+    det, stopped, z_stop = _descent(chain=chain, slow_q=True)
+    assert det.failed == "RuntimeError: boom" and det.verdict == "failed" and det.failed_when == "before"
+    assert det.traj is None and det.armed_t is None  # it never had the trajectory's heights, and never watched
+    # not cancelled above the slow stretch: stopped where it begins, SETDOWN_SLOW_M over the plan
+    assert stopped is not None and z_stop == pytest.approx(0.20 + rlo.SETDOWN_SLOW_M, abs=0.001)
+    assert det.stopped_frac == pytest.approx(det.fail_from, abs=0.01)
+    assert not det.credible() and det.refusal() == (
+        "failed",
+        "the set-down's watch failed (RuntimeError: boom) and the descent was stopped where its slow stretch begins",
+    )
+    assert "the descent will be stopped where its slow stretch begins; the lid will not be let go" in (
+        capsys.readouterr().out
+    )
+    # joints further from the sent trajectory than SLOW_Q_TOL_RAD are no place in it: nothing is stopped
+    det.slow_q = [v + 2 * rlo.SLOW_Q_TOL_RAD for v in det.slow_q]
+    assert det._descent_from() is None
+
+
+def test_a_set_down_watch_that_fails_with_no_way_to_tell_the_descent_flies_the_planned_end_and_lets_nothing_go():
+    """Failed before the descent, and nothing says where that begins (no joints of the slow stretch's
+    start, or a trajectory it cannot read): the flight is not cancelled where it happens to be. It flies its
+    planned end, as the set-down did before it was watched, and the lid is not let go; the run says so."""
     client = SimpleNamespace(last_execution={"sent_at": 0.0, "sent_traj": object(), "feedback_q": [(0.0, 0.0, [0.0])]})
-    det = rlo.SetdownContact(tpc._Chain(), client, 0.20, 0.28, 0.192)
-    assert det(0.4) is True and det.verdict == "failed" and not det.credible()
-    assert det.refusal()[0] == "failed" and "the descent was stopped there" in det.refusal()[1]
+    for slow_q in (None, [0.28] + [0.0] * 6):
+        det = rlo.SetdownContact(_Breaks(), client, 0.20, 0.28, 0.192, slow_q=slow_q)
+        assert [det(f) for f in (0.1, 0.4, 0.9, 1.0)] == [False] * 4  # the lift, the carry, the descent: all fly
+        assert det.verdict == "failed" and det.failed_when == "before" and det.fail_from is None
+        assert not det.credible() and det.stopped_frac is None
+        assert det.refusal() == (
+            "failed",
+            "the set-down's watch failed (AttributeError: 'object' object has no attribute 'points') before the "
+            "descent, and where that begins was not known: the touch flew to its planned end with nothing watching "
+            "for the table",
+        )
+
+
+def test_the_feedback_no_poll_read_is_read_once_the_flight_is_over_and_says_whether_the_lid_met_the_table():
+    """client.execute polls a stop_when only once what its goal hosts has run. A watch never polled while
+    the set-down flew had read nothing when the release asked it, and the run said "the set-down was not
+    watched (no feedback of its last stretch)" of feedback the client had kept; a lid that stood on the
+    table went back on the box (review 2026-11-17). read_rest, once the execution is over, reads what was
+    kept and not read: the watch then says what ALL of the flight's samples say. Nothing is cut by it —
+    the reference flew to the touch's end — and its record says how it knows."""
+    det, stopped, _z = _descent(table=0.213, catch_up=0.005, polled=False)
+    assert stopped is None and det.stopped_frac is None  # not polled: nothing was stopped
+    assert det.credible() and det.refusal() is None and det.contact[1] == pytest.approx(0.213, abs=0.002)
+    rec = det.record()
+    assert rec["read_after_flight"] == rec["samples"] > 100 and rec["seen_after_flight"] is True
+    assert (rec["watched"], rec["met"], rec["credible"], rec["cut"]) == (True, True, True, False)
+    # over nothing: the touch ended and no table was felt, said of a flight that WAS read
+    det, _stopped, _z = _descent(catch_up=0.005, polled=False)
+    assert not det.credible() and det.record()["watched"] is True and det.record()["seen_after_flight"] is False
+    assert det.refusal() == (
+        "never",
+        "the touch ended 8 mm under where the plan has the lid meet the table and the arm felt no table",
+    )
+    # a watch polled all the way has nothing left to read, and what it saw it saw in flight
+    det, stopped, _z = _descent(table=0.213, catch_up=0.005)
+    assert stopped is not None and det.read_rest() == 0 and det.record()["seen_after_flight"] is False
+    assert det.record()["cut"] is True
+    # ... and what another execution left with the client since is not this set-down's to read
+    det.client.last_execution = {"sent_at": 9.0, "sent_traj": object(), "feedback_q": [(9.0, 0.5, [0.0])]}
+    assert det.read_rest() == 0 and det.credible() and det.failed is None
+    # no feedback kept at all: truly not watched
+    det = rlo.SetdownContact(_Breaks(), SimpleNamespace(last_execution=None), 0.20, 0.28, 0.192)
+    assert det.read_rest() == 0 and det.refusal()[1].startswith("the set-down was not watched (no feedback")
+    # a watch that fails reading it: said, and the lid is not let go
+    chain = _Breaks()
+    det, _stopped, _z = _descent(table=0.213, chain=chain, polled=False)  # reads fine ...
+    assert det.credible()
+    chain.broken = True
+    det, _stopped, _z = _descent(table=0.213, chain=chain, polled=False)  # ... and not
+    assert (
+        not det.credible()
+        and det.failed_when == "after"
+        and det.refusal()
+        == (
+            "failed",
+            "the set-down's watch failed (RuntimeError: boom) reading what was kept of the flight once it was over: "
+            "nothing says the lid met the table",
+        )
+    )
+
+
+class _FeltOnceRead(_Felt):
+    """A set-down's watch that no poll fed while it flew: what it felt is known only once it has read what
+    the client kept (read_rest), and then it is the lid on the table."""
+
+    def __init__(self):
+        super().__init__("never")
+        self.read = 0
+
+    def read_rest(self):
+        self.read += 1
+        self.how = "met"
+        return 87
+
+    def record(self):
+        out = super().record()
+        out.update(read_after_flight=87 if self.read else 0, seen_after_flight=bool(self.read))
+        if self.read:
+            out["cut"] = False
+        return out
+
+
+def test_the_release_reads_what_the_watch_has_not_read_before_it_asks_whether_the_lid_met_the_table(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """_release_and_home reads the rest of the flight's feedback into the watch first: a lid that met the
+    table while no poll came is let go there, the run saying how it knows; it was carried back to the box
+    as "not watched"."""
+    watch = _FeltOnceRead()
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown=watch)
+    assert watch.read == 1 and code == 0 and rec.events[-3:] == HOME and "lid:back-up" not in rec.events
+    (sd,) = (r for r in rows if r["leg"] == "reach_setdown")
+    assert sd["credible"] is True and sd["contact"]["seen_after_flight"] is True
+    assert (
+        "SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it; a cut would have ended the "
+        "touch 20 mm short of its planned end (seen only in the feedback read once the flight was over: nothing "
+        "was cut)"
+    ) in capsys.readouterr().out
+
+
+# ---- the set-down hosts no planning (review 2026-11-17) ---------------------------------------------------
+
+
+@pytest.mark.parametrize("one_motion", [True, False], ids=["the spot chosen ahead", "the spot chosen after the lift"])
+def test_the_set_down_hosts_no_planning_home_is_planned_before_it_or_while_the_retreat_flies(
+    ctx, monkeypatch, tmp_path, one_motion
+):
+    """The client runs what an execution hosts before it first polls that execution's stop_when
+    (client.execute), so the package hosts nothing on the press's stroke (reach_press.fly_way_in). The
+    set-down's execution carries the watch that stops the descent where the lid meets the table. With the
+    spot chosen after the lift (choose_and_carry) it hosted the home plan: for as long as that took the
+    watch saw nothing — the reference going on to the touch's end, 8 mm under the plan, onto a table it had
+    met — and a plan that outlasted the flight left it never polled (review 2026-11-17). Neither way of
+    setting the lid down hosts anything now. Home after it: planned with the carry while the hand came
+    down to the knob (the spot chosen ahead), or while the retreat flies, from where it ends, and flown
+    from there with no plan at rest."""
+    hosted = _hosting(ctx, monkeypatch)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], one_motion=one_motion)
+    assert code == 0
+    flown_ = [tuple(names) for names, gains in _executions(rec) for _goal in gains]
+    assert len(flown_) == len(hosted)
+    by = dict(zip(flown_, hosted, strict=True))
+    setdown = tuple(CLOSE + CARRY) if one_motion else tuple(CARRY)
+    assert setdown in by and by[setdown] is False  # the watch is polled from the execution's first sample
+    home_planned = [at for name, at in rec.plans if name == "home"][-1]
+    if one_motion:
+        assert by[tuple(RELEASED)] is False and home_planned <= rec.events.index("grip:close")
+        return
+    # the lift's execution hosts the carry's plan (no watch on it); the retreat's, home's
+    assert by[tuple(CLOSE)] is True and by[tuple(RELEASED)] is True
+    assert home_planned == rec.events.index("place:retreat") + 1 == rec.events.index("home")
+    (ahead,) = (r for r in rows if r["leg"] == "home_ahead")
+    assert ahead["flown"] is True  # ... and flown from where the retreat ended: no planner call at rest
+    assert rec.legs["home"].traj.points[0].positions == pytest.approx(rec.legs["place:retreat"].goal_joints)
+
+
+def test_a_home_that_does_not_plan_while_the_retreat_flies_is_planned_once_more_at_rest(ctx, monkeypatch, tmp_path):
+    """The home hosted by the retreat is refused (the planner can): the lid is let go and the hand back up
+    all the same, and home is planned once more where the arm stands, as it was before."""
+    plans = _home_plans(monkeypatch, refuse=(2,))  # the 1st is the way back's, from the look pose
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], one_motion=False)
+    assert code == 0 and rec.events[-3:] == HOME
+    assert [(at is not None, legs is not None) for at, legs in plans] == [(True, True), (True, False), (False, True)]
+    assert plans[1][0] == pytest.approx(rec.legs["place:retreat"].goal_joints)
+    assert not [r for r in rows if r["leg"] == "home_ahead"]  # none in hand: planned at rest
 
 
 # ---- the table the set-down goes by, in the whole run (review 2026-11-17) ---------------------------------

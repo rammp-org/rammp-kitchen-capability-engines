@@ -386,12 +386,32 @@ SETDOWN_PAST_M = 0.008
 # mm from the plan (setdown_table_z's).
 #
 # SETDOWN_HELD_M: the pads held up this far over the least gap since the
-# watch armed are held up by something, whatever the settle says: within
-# SETDOWN_CREDIBLE_M of the plan it is the table (met while the arm still
-# caught up); above it, something else, and the descent stops there with the
-# lid not let go. Past what the catching up can make: what had risen by the
-# three cuts and what the joints' errors left there are worth, 8-11 mm at the
-# pads in all.
+# watch last settled are held up by something, whatever the settle says:
+# where they stand held within SETDOWN_CREDIBLE_M of the plan it is the
+# table (met while the watch settled again); above it, something else, and
+# the descent stops there with the lid not let go. Past what the catching up
+# can make: what had risen by the three cuts and what the joints' errors left
+# there are worth, 8-11 mm at the pads in all. "Since it last settled": since
+# it armed while its first settle lasts, and from where a settle ended once
+# one has (what rose in it was the arm's own; a rise above the band that
+# settles it again and then goes on is counted from there too, and is the lid
+# held up). And the contact is where the pads STAND held as it is seen, not
+# where that least was. Until the review of 2026-11-17 it was the least gap
+# since the watch ARMED, all the way down, and the contact was dated to that
+# least's sample. Replayed there (the pads 9 mm under the reference, coming
+# up 5 mm as the slow stretch begins):
+# after one rise above the band the rules are blind for the next 33 mm of the
+# descent, +40 down to +7 mm over the plan, where the 19 recorded tables
+# stood (mean +13); only this rule sees a table there, and it called one at
+# +10, +13, +20 and +26 mm "something held the lid up 69 mm over the plan" —
+# the height the watch armed at, the bottom of the catching up — and the lid
+# went back on the box from a table it stood on. The same with no rise above
+# the band once the catching up reached 13 mm (the 2026-11-17 flight's gap
+# stood 13.7 mm under the reference where this watch would arm, had risen 6.0
+# mm by its cut and was still rising 25 mm/s). A catching up of the whole
+# SETDOWN_HELD_M inside the first settle still reads as held (the descent
+# stops in free air and the lid goes back on the box, not let go): no flight
+# on record came near it.
 SETDOWN_SETTLE_S = 0.6
 SETDOWN_CREDIBLE_M = 0.035
 SETDOWN_HELD_M = 0.015
@@ -1953,6 +1973,11 @@ class Carry:
 # fingers, the spring pressing on).
 SETDOWN_WATCH_M = SETDOWN_SLOW_M
 SETDOWN_FROM_CONTACT = True
+# A watch that failed before it had the sent trajectory's heights finds where the slow stretch
+# begins by the joints the way down ends at (SetdownContact._descent_from): the sent point nearest
+# them, no further off than this on any joint (the set-down's lines are sent 2 mm a point, a few
+# milliradians: 2026-11-17 16:40's trajectory)
+SLOW_Q_TOL_RAD = 0.02
 
 
 class SetdownContact(PressContact):
@@ -1968,24 +1993,49 @@ class SetdownContact(PressContact):
        lid may be let go;
      - one met higher is not the table (`early` keeps it): the watch settles again and the descent
        goes on, slowly;
-     - the pads held up `held_m` over the least gap since it armed are held up by something, settle
-       or not: the table where that began within `credible_m` of the plan; above it, something
+     - the pads held up `held_m` over the least gap since the watch last settled (SETDOWN_HELD_M's
+       note: since it armed, then since a settle last ended) are held up by something, settle or
+       not: the table where they stand held within `credible_m` of the plan; above it, something
        else, and the descent is stopped there, the lid not let go (verdict "held");
-     - the touch ended with nothing met (verdict "never"), or the watch failed (the descent is
-       stopped where it failed, verdict "failed"): the lid is not let go."""
+     - the touch ended with nothing met (verdict "never"), or the watch failed (verdict "failed":
+       the descent is stopped — where it failed once it watches; where its slow stretch begins
+       where it failed before that, the lift and the carry flying on, __call__): the lid is not
+       let go.
 
-    def __init__(self, chain, client, expect_z, arm_z, end_z, cut=True, credible_m=None, settle_s=None, held_m=None):
+    `slow_q`: the joints the slow stretch begins at (the way down's end), for a watch that failed
+    before it had the trajectory's heights (_descent_from). read_rest(), once the execution is
+    over, reads what the client kept of its feedback and no poll read."""
+
+    def __init__(
+        self,
+        chain,
+        client,
+        expect_z,
+        arm_z,
+        end_z,
+        cut=True,
+        credible_m=None,
+        settle_s=None,
+        held_m=None,
+        slow_q=None,
+    ):
         self.credible_m = SETDOWN_CREDIBLE_M if credible_m is None else float(credible_m)
         self.settle_s = SETDOWN_SETTLE_S if settle_s is None else float(settle_s)
         self.held_m = SETDOWN_HELD_M if held_m is None else float(held_m)
+        self.slow_q = None if slow_q is None else [float(v) for v in slow_q]
         super().__init__(chain, client, expect_z, arm_z, 0.0, end_z, cut=cut, final=True, abort_on_failure=True)
 
     def _reset(self):
         super()._reset()
         self.early = []  # rises above where the table can be: (when it began, the pads there, which rise, when seen)
         self._judge_from = None  # the rises are judged from here on
-        self._low = None  # the least gap since it armed (its sample): what "held up" is counted from
+        self._settling = False  # whether the last sample judged fell in a settle (before _judge_from)
+        self._low = None  # the least gap since the watch last settled (its sample): what "held up" is counted from
         self._n_held = 0
+        self.failed_when = None  # a watch that failed: "watching" its stretch | "before" it | "after" the flight
+        self.fail_from = None  # ... the fraction it stops the descent from (None: nowhere, the flight flies on)
+        self.read_after = 0  # the kept samples read once the execution was over (read_rest)
+        self.seen_after = False  # ... and what it says of the lid was only seen in those
 
     def _judge(self, t, frac, z_ref, z_meas):
         gap = z_meas - z_ref
@@ -1993,18 +2043,26 @@ class SetdownContact(PressContact):
         if self.contact is not None or self.verdict is not None:
             return
         sample = (t, gap, z_meas)
+        if self._judge_from is None:
+            self._judge_from = t + self.settle_s
+        settling = t < self._judge_from
+        if self._settling and not settling:
+            # it has settled: what rose while it did was the arm's own catching up (or is a rise the
+            # rules judge from here, which see it go on), and "held up" is counted from here on
+            self._low, self._n_held = None, 0
+        self._settling = settling
         if self._low is None or gap < self._low[1]:
             self._low, self._n_held = sample, 0
         elif gap - self._low[1] > self.held_m:
             self._n_held += 1
         else:
             self._n_held = 0
-        if self._judge_from is None:
-            self._judge_from = t + self.settle_s
         if self._n_held >= self._rule()[2]:
+            # held up: met where the pads stand as it is seen (what holds them stands there), not where
+            # the least gap was — the arm's catching up, or a rise that fell back, may lie between
             self._hist.append(sample)
-            self._met(t, frac, self._low, "held")
-        elif t < self._judge_from:
+            self._met(t, frac, sample, "held")
+        elif settling:
             # catching up with its reference: kept for where a rise began, judged by nothing yet
             self._hist.append(sample)
             while self._hist and t - self._hist[0][0] > HISTORY_S:
@@ -2014,7 +2072,7 @@ class SetdownContact(PressContact):
 
     def _met(self, t, frac, least, how):
         super()._met(t, frac, least, how)
-        z_c = self.contact[1]
+        t_c, z_c, _gap = self.contact
         if z_c <= self.top_z + self.credible_m:
             if self.cut:
                 self.f_stop = frac  # stopped where it stands now: it has gone on past the touch since it began
@@ -2023,11 +2081,97 @@ class SetdownContact(PressContact):
             # something holds the lid up above where the table can be: stopped here, not let go
             self.verdict, self.f_stop = "held", frac
             return
-        # a rise above where the table can be is no table: noted, settled again, and the descent goes on
-        self.early.append((self.contact[0], z_c, how, t))
+        # a rise above where the table can be is no table: noted, settled again, and the descent goes on.
+        # "Held up" goes on being counted from the least gap since the watch last settled, which lies at or
+        # under where this rise began: one that goes on is the lid held up, and stops the descent held_m on
+        self.early.append((t_c, z_c, how, t))
         self.contact = self.detected_t = self.how = self.stop_z = self.f_stop = None
         self._resettle(t)
         self._judge_from = t + self.settle_s
+
+    def _descent_from(self):
+        """The fraction of the sent trajectory's time from which a watch that failed stops the
+        descent: 0 where it failed watching (stopped where it failed); else where the stretch it
+        watches begins — its own arm_frac where it has the trajectory's heights, and where building
+        those is what failed, the last of the sent points nearest the joints the slow stretch
+        begins at (`slow_q`, within SLOW_Q_TOL_RAD: no kinematics). None: not known, or the
+        trajectory never comes down to that stretch — nothing is stopped."""
+        if self.armed_t is not None:
+            return 0.0
+        if self.traj is not None:
+            return self.arm_frac
+        if self.slow_q is None:
+            return None
+        try:
+            pts = list(self.client.last_execution["sent_traj"].points)
+            t = np.array([p.time_from_start.sec + 1e-9 * p.time_from_start.nanosec for p in pts], float)
+            off = np.array([list(p.positions) for p in pts], float) - np.asarray(self.slow_q, float)
+            far = np.abs(np.remainder(off + math.pi, 2.0 * math.pi) - math.pi).max(axis=1)
+            i = len(far) - 1 - int(np.argmin(far[::-1]))
+            return float(t[i] / t[-1]) if far[i] <= SLOW_Q_TOL_RAD and t[-1] > 0.0 else None
+        except Exception:  # noqa: BLE001 -- not known: nothing is stopped, and the lid is not let go
+            return None
+
+    def __call__(self, progress):
+        """stop_when: True once the reference stands where the descent ends — where the lid met the
+        table, or where something held it up. A watch that fails stops the descent, never the lift
+        or the carry before it (it is the stop_when of the whole execution, polled from its first
+        sample: a failure there used to cancel the flight where it was, the lid half lifted or in
+        mid-carry, and the way back from there is no line the run checked): from where the stretch
+        it watches begins (_descent_from), the reference not gone slowly down onto a table nothing
+        watches for. Where that is not known the flight flies its planned end, as the set-down's
+        watch did before 2026-11-17. Either way the lid is not let go (verdict "failed")."""
+        if self.failed is None:
+            try:
+                self._feed_new()
+            except Exception as e:  # noqa: BLE001 -- said; the descent stops, the lid is not let go
+                self.failed = "%s: %s" % (type(e).__name__, e)
+                self.verdict, self.f_stop = "failed", None
+                self.failed_when = "watching" if self.armed_t is not None else "before"
+                self.fail_from = self._descent_from()
+                log.info(
+                    "[press_demo] the set-down's watch failed (%s) — %s; the lid will not be let go"
+                    % (
+                        self.failed,
+                        "the descent stops here"
+                        if self.failed_when == "watching"
+                        else "the descent will be stopped where its slow stretch begins"
+                        if self.fail_from is not None
+                        else "where its slow stretch begins is not known: the flight flies its planned end",
+                    )
+                )
+        if self.failed is not None:
+            if self.stopped_frac is None and self.fail_from is not None and progress >= self.fail_from:
+                self.stopped_frac = float(progress)
+                self.held_ref = None if self.traj is None else [float(v) for v in self.traj.at(progress)]
+            return self.stopped_frac is not None
+        if self.f_stop is None or progress < self.f_stop:
+            return False
+        self.stopped_frac = float(progress)
+        self.held_ref = [float(v) for v in self.traj.at(progress)]
+        return True
+
+    def read_rest(self):
+        """The execution over: what the client kept of its feedback and no poll read is read now —
+        the last samples before its result came, or all of them where the watch was not polled
+        while they came (client.execute polls a stop_when only once what the goal hosts has run:
+        the set-down hosts nothing, choose_and_carry, but nothing here relies on that). Nothing is
+        stopped by it any more; it says only whether the lid met the table. Until 2026-11-17's
+        review the release asked credible() of a watch that had read none of them, and the run
+        said "the set-down was not watched (no feedback of its last stretch)" of feedback that
+        was kept. Returns how many it read."""
+        before, had = self.samples, self.contact is not None or self.verdict is not None
+        if self._sent is not None and getattr(self.client, "last_execution", None) is not self._sent:
+            return 0  # another execution has gone out since the one it watched: nothing of that is left to read
+        if self.failed is None:
+            try:
+                self._feed_new()
+            except Exception as e:  # noqa: BLE001 -- said in its record; the lid is not let go
+                self.failed = "%s: %s" % (type(e).__name__, e)
+                self.verdict, self.f_stop, self.failed_when = "failed", None, "after"
+        self.read_after = self.samples - before
+        self.seen_after = not had and (self.contact is not None or self.verdict is not None)
+        return self.read_after
 
     def credible(self):
         """Whether the lid met the table, at about the height the run has for it: the one case the
@@ -2040,7 +2184,20 @@ class SetdownContact(PressContact):
         above = ", ".join("%+.0f" % (1000 * (z - self.top_z)) for _t, z, _how, _seen in self.early)
         rises = "" if not self.early else " (rises %s mm over it were not taken for the table)" % above
         if self.verdict == "failed":
-            return "failed", "the set-down's watch failed (%s) and the descent was stopped there" % self.failed
+            if self.failed_when == "after":
+                return "failed", (
+                    "the set-down's watch failed (%s) reading what was kept of the flight once it was over: nothing "
+                    "says the lid met the table" % self.failed
+                )
+            if self.stopped_frac is None:
+                return "failed", (
+                    "the set-down's watch failed (%s) before the descent, and where that begins was not known: the "
+                    "touch flew to its planned end with nothing watching for the table" % self.failed
+                )
+            return "failed", "the set-down's watch failed (%s) and the descent was stopped %s" % (
+                self.failed,
+                "there" if self.failed_when == "watching" else "where its slow stretch begins",
+            )
         if self.verdict == "held":
             return "held", (
                 "something held the lid up %.0f mm over where the plan has it meet the table (more than %.0f): "
@@ -2061,9 +2218,12 @@ class SetdownContact(PressContact):
 
     def record(self):
         """PressContact.record's, and the set-down's own: whether the contact is one the fingers
-        open on (`credible`), the band and the settle it was judged by, and the rises above the
-        band that were not taken for the table (`early`: when after the goal went out, how far
-        over the plan, which rise)."""
+        open on (`credible`), the band and the settle it was judged by, the rises above the band
+        that were not taken for the table (`early`: when after the goal went out, how far over the
+        plan, which rise), and how many of its samples were read only once the execution was over
+        (`read_after_flight`, read_rest: the last few, or all of them where no poll came while it
+        flew — `seen_after_flight` where what it says of the lid was only seen in those, nothing
+        cut)."""
         out = super().record()
         sent = None if self._sent is None else self._sent.get("sent_at")
         refused = self.refusal()
@@ -2078,6 +2238,8 @@ class SetdownContact(PressContact):
                 [None if sent is None else round(t_c - float(sent), 3), round(1000 * (z - self.top_z), 1), how]
                 for t_c, z, how, _seen in self.early
             ],
+            read_after_flight=self.read_after,
+            seen_after_flight=self.seen_after,
         )
         return out
 
@@ -2089,8 +2251,10 @@ def watch_setdown(ctx, legs, carry):
     where the plan puts that on, the execution's last stretch below there —
     cut where it meets with SETDOWN_FROM_CONTACT. Kept on the carry
     (carry.contact): the release asks it whether the lid met the table
-    (credible), and the reach_setdown row keeps its record. Returns it, or
-    None: nothing to watch."""
+    (credible), and the reach_setdown row keeps its record. It is told the
+    joints the slow stretch begins at (the way down's end): a watch that
+    fails stops the descent from there, never the lift or the carry
+    (SetdownContact.__call__). Returns it, or None: nothing to watch."""
     from box_opening.runtime import approach
     from box_opening.runtime.legs import Kind
     from box_opening.tasks.press_contact import pads_z
@@ -2103,7 +2267,16 @@ def watch_setdown(ctx, legs, carry):
     end = pads_z(chain, touch.goal_joints)
     over = float(carry.over_m or 0.0)
     expect = end + over  # where the plan has the lid meet the table
-    carry.contact = SetdownContact(chain, ctx.client, expect, expect + SETDOWN_WATCH_M, end, cut=SETDOWN_FROM_CONTACT)
+    down = carry.legs[-2] if len(carry.legs) >= 2 else None  # 'place:down': it ends where the slow stretch begins
+    carry.contact = SetdownContact(
+        chain,
+        ctx.client,
+        expect,
+        expect + SETDOWN_WATCH_M,
+        end,
+        cut=SETDOWN_FROM_CONTACT,
+        slow_q=getattr(down, "goal_joints", None),
+    )
     lead.stop_when = carry.contact
     return carry.contact
 
@@ -2260,7 +2433,9 @@ def plan_home_after(ctx, cfg, carry):
     """The retreat back up from the set-down and home planned from its
     end, with the lid lying at the spot (ctx.lid_at, for this plan only):
     the legs after the release, home under its own gains (MEDIUM), or
-    (None, why). The carry's lookahead."""
+    (None, why). Planned with the carry while the hand comes down to the
+    knob (CarrySearch.finish, the grip's lookahead) — never while the
+    set-down flies: that execution hosts nothing (choose_and_carry)."""
     from box_opening.runtime import approach
 
     world = _full_world(ctx)
@@ -3864,9 +4039,10 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
     the arm within DRIFT_REPLAN_RAD of where it was made, its reach
     verdicts are taken (_Reach), and its carry flies where the spot chosen
     is its own (_same_spot) — no plan at rest; else the carry is planned
-    here, as without one. Then the carry and the set-down, ONE execution,
-    home planned while it flies (plan_home_after); the knuckle read (the
-    lid slipped?); the release; the retreat and home, ONE execution. The
+    here, as without one. Then the carry and the set-down, ONE execution
+    that hosts no planning (its watch is polled from its first sample); the
+    knuckle read (the lid slipped?); the release and the retreat, home
+    planned while that flies (_release_and_home); home. The
     lid_spot note says how long each part took here, and whether the carry
     planned ahead flew (_ahead_note). Returns the exit code: 0 with the lid
     set down and the arm home."""
@@ -3970,8 +4146,16 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         % (", ".join(lg.name for lg in carry.legs), drop.xyz[0], drop.xyz[1], _touch_says(carry))
     )
     watch_setdown(ctx, carry.legs, carry)  # where the lid meets the table, watched
-    res = runner.run(carry.legs, execute=True, lookahead=lambda _end: plan_home_after(ctx, cfg, carry))
-    ahead = runner.lookahead_result
+    # No lookahead on this execution, as on the press's own (reach_press.fly_way_in). The client runs what a
+    # goal hosts once the goal is accepted and only then starts to poll its stop_when (client.execute): home
+    # was planned here (plan_home_after), and for as long as that took the set-down's watch saw nothing. A
+    # plan still running where the lid met the table left the reference going on to the touch's end, 8 mm
+    # under the plan, the spring pressing 21-34 mm into a table 13-26 mm over it; one that outlasted the
+    # flight left the watch never polled, the run said "not watched" of feedback that was kept, and a lid
+    # that stood on the table went back on the box (review 2026-11-17; run 1's grip lookahead overran its
+    # host by 3.6 s). Home is planned while the retreat flies instead, where nothing is watched
+    # (_release_and_home)
+    res = runner.run(carry.legs, execute=True)
     last = res[-1]
     if len(res) == 1 and last.flown_traj is not None:
         rp._note_flight(runner, "reach_carry_flight", [lg.name for lg in merge_groups(carry.legs)[0]], last)
@@ -3997,10 +4181,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         if _started(last):
             rp.let_go(ctx)
         return 1
-    home, why = ahead if ahead is not None else (None, "the lookahead plan failed")
-    if home is None:
-        home, why = plan_home_after(ctx, cfg, carry)
-    return _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why)
+    return _release_and_home(ctx, cfg, runner, carry, drop, tier, None, None)
 
 
 def _say_spot(ctx, eyes, chosen, refused, tmap, table_z):
@@ -4231,21 +4412,30 @@ def retreat_from_live(ctx, carry, world):
 
 def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
     """The set-down of `carry` at `drop` flown: the knuckle read (the lid
-    slipped?), and what its watch felt (carry.contact). The fingers open only
-    where it felt the lid meet the table, at about the height the run has
-    for it (SetdownContact.credible): then the release, the retreat starting
-    as the fingers open (defer_join: the pads leave the knob in the first
-    millimetres, the retreat's first ones come slower than that); then
-    `home` — the legs after the release planned ahead, None: home planned
-    after the retreat (`why` there was none), slow and under MEDIUM as every
-    home flies (core.plan_home). No such contact, the lid still in the
-    fingers: it is not let go, and goes back onto the box (carry_back).
-    Returns the exit code: 0 with the lid let go on the table and the arm
-    home."""
+    slipped?), and what its watch felt (carry.contact; first it reads what
+    the client kept of the flight's feedback and no poll read: read_rest).
+    The fingers open only where it felt the lid meet the table, at about the
+    height the run has for it (SetdownContact.credible): then the release,
+    the retreat starting as the fingers open (defer_join: the pads leave the
+    knob in the first millimetres, the retreat's first ones come slower than
+    that); then `home` — the legs after the release planned ahead. None, or
+    one the retreat from where the arm stands ends too far from (`why`):
+    home is planned while the retreat flies, from where it ends (the
+    runner's lookahead: nothing is watched on that execution), and where
+    that fails, after it. Slow and under MEDIUM as every home flies
+    (core.plan_home). No such contact, the lid still in the fingers: it is
+    not let go, and goes back onto the box (carry_back). A lid that slipped
+    out on the way (the knuckle outside the grip band): the fingers open,
+    the arm goes home, and the run ends STOP — no "the lid met the table" is
+    said of it, whatever the watch felt. Returns the exit code: 0 with the
+    lid let go on the table and the arm home."""
     world = _full_world(ctx)
     ok_q, pos, _stalled = ctx.client.gripper_cmd(None)  # query only: still on the knob?
     kept = not ok_q or pos is None or in_band(pos, cfg.grip_band)
     watch = getattr(carry, "contact", None)
+    read_rest = getattr(watch, "read_rest", None)
+    if read_rest is not None:
+        read_rest()  # the feedback no poll read: the watch says what ALL of the flight's kept samples say
     watched = None if watch is None else watch.record()
     met = watch is not None and bool(watch.credible())  # the arm felt the lid meet the table where one can be
     refused = ("never", "the set-down was not watched") if watch is None else watch.refusal()
@@ -4269,9 +4459,10 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
     )
     if not met and kept:
         return carry_back(ctx, cfg, runner, carry, refused[1] if refused else "nothing says the lid met the table")
-    if met:
+    if met and kept:
+        # only of a lid still in the fingers: the flight view and the node read this line as the lid on the table
         log.info(
-            "[press_demo] SET-DOWN CONTACT: the lid met the table %+.0f mm from where the plan put it; %s"
+            "[press_demo] SET-DOWN CONTACT: the lid met the table %+.0f mm from where the plan put it; %s%s"
             % (
                 watched["above_top_mm"],
                 (
@@ -4282,15 +4473,25 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
                 % watched["cut_mm"]
                 if watched.get("cut_mm") is not None
                 else "the touch's planned end stands",
+                " (seen only in the feedback read once the flight was over: nothing was cut)"
+                if watched.get("seen_after_flight")
+                else "",
             )
         )
     if not kept:
+        # the fingers have shut past the knob: the lid left them on the way, and whatever the watch felt at
+        # the table was not the lid in the fingers meeting it. Nothing here says where the lid lies. Until
+        # 2026-11-17's review a contact printed "SET-DOWN CONTACT: the lid met the table" first, and the
+        # flight view said "lid: on the table" of a lid that had slipped out
         log.info(
             "[press_demo] the fingers read %.3f at the table, outside the grip band %s: the lid slipped on the way%s"
             % (
                 pos,
                 list(cfg.grip_band),
-                "" if met else " (and the set-down felt no table: %s)" % (refused[1] if refused else "not watched"),
+                " (the set-down felt a contact %+.0f mm from where the plan put the table: not the lid's, which "
+                "had left the fingers)" % watched["above_top_mm"]
+                if met
+                else " (and the set-down felt no table: %s)" % (refused[1] if refused else "not watched"),
             )
         )
     release = _gripper_leg(ctx, PlanState(joints=None, chain=0), "place:open", GRIPPER_CMD_OPEN, world, defer_join=True)
@@ -4323,7 +4524,13 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
         % (", ".join(lg.name for lg in up), ": %s" % ", ".join(lg.name for lg in home_legs) if home_legs else "")
     )
     _video(ctx, "RELEASE as the retreat starts, then HOME")
-    res = runner.run([release, *up], execute=True)
+    # no home in hand (none was planned ahead: the spot chosen after the lift, whose set-down hosts no planning;
+    # or the one planned ahead starts too far from where this retreat ends): planned while the retreat flies,
+    # from where it ends, as the way back to the look pose hosts its home (_press_and_back) — it stood at the
+    # hover for the plan before
+    host = None if home_legs else (lambda end: rp._home_legs(ctx, cfg, start=end))
+    res = runner.run([release, *up], execute=True, lookahead=host)
+    home_ahead = None if host is None else runner.lookahead_result
     opened = runner.join_pending()
     if opened is not None and not opened.ok:
         log.info("[press_demo] STOP: the fingers did not open at the table (%s) — the arm holds" % opened.detail)
@@ -4348,7 +4555,7 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
                 log.info("[press_demo] STOP: the way up from the lid stopped (%s) — the arm holds" % res[-1].detail)
                 rp.let_go_part_way(ctx, res)
                 return 1
-        home_legs = []  # planned from where the arm stands now
+        home_legs, home_ahead = [], None  # planned from where the arm stands now
     if home_legs:
         res = runner.run(home_legs, execute=True)
         if not all(r.ok for r in res):
@@ -4360,7 +4567,9 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why):
                 rp.let_go(ctx)
             return 1
     else:
-        ok = rp._go_home(ctx, cfg, runner, "home from the lid (%s)" % why if why else "")
+        # the home planned while the retreat flew, where the arm stands where it starts (reach_press
+        # ._planned_ahead); else planned here, at rest
+        ok = rp._go_home(ctx, cfg, runner, "home from the lid (%s)" % why if why else "", ahead=home_ahead)
         if not ok:
             return 1
     runner.finish()

@@ -76,8 +76,14 @@ beside the container, and goes home. It has one action, `open_box`:
    after it begins (the arm is still catching up with its reference until then,
    which reads as a contact): the descent stops where the lid meets the table.
    A rise met more than 35 mm over where the table should be is not the table,
-   and the descent goes on; something that holds the lid up there for 15 mm of
-   the descent stops it.
+   and the descent goes on, the arm settling again for 0.6 s; a rise that goes
+   on for 15 mm of the descent is the lid held up, and stops it. Held up no
+   more than those 35 mm over where the table should be, it is the table (met
+   while the arm settled); held up higher, it is not, and the lid is not let
+   go. Nothing is planned while the set-down flies, so every sample of it is
+   read as it comes; what was not read by its end is read then. With the spot
+   chosen after the lift, the way home is planned while the arm rises off the
+   lid.
 1. **Release and home:** the fingers open, as the arm rises off the lid, only
    where the set-down felt the lid meet the table at about that height; then
    the arm goes home. The lid is never let go anywhere else.
@@ -86,7 +92,9 @@ If the run has to stop with the lid in the fingers and the arm standing (no
 spot on the table the cameras measured that the hand reaches and a carry plans
 to, the run's own checks refuse the carry before it starts, or the set-down
 ended without the arm feeling the lid meet the table: nothing met down to its
-end, something holding the lid up well above the table, or its watch failed),
+end, something holding the lid up well above the table, or its watch failed,
+which stops the descent where it failed, or where the slow stretch begins if it
+failed before that, and never the lift or the carry),
 it puts the lid back on the box first: back up to the carry's height where it
 had come down, back over the box and straight down to where the knob was
 gripped, the fingers open, the hand rises off the knob, and the arm goes home.
