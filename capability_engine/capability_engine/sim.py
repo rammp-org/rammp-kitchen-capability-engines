@@ -100,9 +100,9 @@ def has_model_provider() -> bool:
 
 
 def set_keep_out(fn):
-    """Fridge only: `fn(rb, joints) -> message if the arm is in a keep-out zone, else None`.
+    """`fn(rb, joints) -> message if the arm is in a keep-out zone, else None`.
 
-    The zone is the wheelchair. None (the microwave): no such check anywhere.
+    The zone is the wheelchair and its user. None: no such check anywhere.
     """
     global _KEEP_OUT
     _KEEP_OUT = fn
@@ -333,14 +333,14 @@ def continuous_ok(q_from, q_to):
 
 
 def keep_out_enabled() -> bool:
-    """Whether a keep-out zone is set (set_keep_out): fridge runs only."""
+    """Whether a keep-out zone is set (set_keep_out)."""
     return _KEEP_OUT is not None
 
 
 def keep_out_message(rb, q):
     """Why joints `q` are in the keep-out zone, or None.
 
-    Always None unless a fridge run switched it on.
+    Always None unless a capability switched it on.
     """
     return None if _KEEP_OUT is None else _KEEP_OUT(rb, q)
 
@@ -348,7 +348,7 @@ def keep_out_message(rb, q):
 def solve_ik(scene, rb, pos, quat, seed_joints):
     """PyBullet IK seeded from `seed_joints`; returns (joints, position error in m).
 
-    A solution in the keep-out zone (fridge runs only, set_keep_out) returns KEEP_OUT_ERR as its
+    A solution in the keep-out zone (when one is set, set_keep_out) returns KEEP_OUT_ERR as its
     error.
     """
     for j, jj in enumerate(ARM):
