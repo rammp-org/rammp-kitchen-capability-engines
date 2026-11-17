@@ -250,7 +250,7 @@ def test_it_drives_the_engines_base_interface_in_mock_mode():
     rclpy.init(context=context)
     node = rclpy.create_node("base_drive_test", context=context)
     try:
-        base = BaseInterface(node, ReentrantCallbackGroup(), mock=True)
+        base = BaseInterface(node, ReentrantCallbackGroup(), declared=True, mock=True)
         ctx = Ctx()
         base.begin_action(ctx)
         try:
