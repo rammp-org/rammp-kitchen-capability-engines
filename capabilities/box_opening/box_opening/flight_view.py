@@ -29,6 +29,9 @@ A step's lower-case line is written as it starts, its numbered line as it ends: 
 left, and says the lid is on the table only of a set-down the run said it felt meet the table (its
 "SET-DOWN CONTACT" line): flatbot 2026-11-17 16:40 let the lid go over the floor and this said
 "lid on the table". A set-down that felt none is a failed step, the lid carried back to the box.
+A lid that slipped out of the fingers on the way (the run's "the lid slipped on the way" line, the
+knuckle read at the table) is never "on the table" either, whatever the set-down felt: the step that
+failed is the carry, and the result says the lid slipped out and that where it lies is not known.
 
 The engine writes it to its stdout. The run's full lines are kept in a file of their own beside the run
 log (runs/console-<stamp>.log in box opening's state folder: node.NodeLogHandler), which the result's last
@@ -84,6 +87,9 @@ KNOB_DOWN = re.compile(r"^the knob is not up \(%s mm above the lid\): pressing o
 KNOB_UNJUDGED = re.compile(r"^the knob is not judged after press (\d+)")
 SETDOWN = re.compile(r"^SET-DOWN CONTACT")
 SETDOWN_NONE = re.compile(r"^SET-DOWN: no table felt")
+SLIPPED = re.compile(r"^the fingers read \S+ at the table, outside the grip band .*: the lid slipped on the way")
+SLIPPED_HOME = re.compile(r"^the arm is home, but the lid slipped out of the fingers")
+LID_SLIPPED = "slipped out of the fingers on the way (where it lies is not known)"
 BACK_ON_BOX = re.compile(r"the lid is back on the box, and the arm is home")
 RELEASE = re.compile(r"^RELEASE as the retreat starts")
 PUT_BACK = re.compile(r"^PUT BACK: ")
@@ -156,7 +162,7 @@ class FlightView:
         self.presses = 0
         self.contact_mm = None
         self.knob = None  # "up" | "down" | None: the last the run read of it
-        self.touched = self.setdown_met = False
+        self.touched = self.setdown_met = self.slipped = False
         self.spot_mm = None
         self.one_motion = False
         self.lid = "on the box"
@@ -388,6 +394,17 @@ class FlightView:
             self._fail("the arm felt no table under the lid; the lid was not let go", "SET DOWN", final=True)
             self._note("carrying the lid back to the box", "next")
             return
+        if SLIPPED.match(s):
+            # the fingers read shut past the knob at the table: the lid left them on the way there, and
+            # whatever the set-down felt was not the lid in the fingers meeting the table. Flatbot's view
+            # said "SET DOWN ok let go where the lid met the table" and "lid: on the table" of such a run
+            # (review 2026-11-17). Which of the lift, the carry and the way down it slipped on is not known
+            self._slipped()
+            return
+        if RELEASE.match(s) and self.slipped:
+            self.going_home = True
+            self._begin("HOME", "opening the fingers and going home")
+            return
         if RELEASE.match(s):
             self._carried()
             if self.setdown_met:
@@ -429,6 +446,15 @@ class FlightView:
             name="CARRY",
         )
 
+    def _slipped(self):
+        """The lid slipped out of the fingers on its way to the spot: the lid's way there is the step that
+        failed, no set-down is said of it, and where the lid lies is not known."""
+        if self.slipped:
+            return
+        self.slipped, self.setdown_met, self.lid = True, False, LID_SLIPPED
+        self._end("ok")
+        self._fail("the lid slipped out of the fingers on the way", "CARRY", final=True)
+
     def _fail(self, why, name, final=False):
         """A step fails; `final`: nothing follows it but the way home."""
         self._end("FAIL", why, name=name if self.cur is None else None)
@@ -437,6 +463,14 @@ class FlightView:
 
     def _stop(self, stop):
         """The run's STOP: the step in flight (else the one it names) failed for good."""
+        if SLIPPED_HOME.match(stop):
+            # the run's last word of a lid that slipped out: the arm IS home (its way there ended well),
+            # the fingers empty, and the step that failed is the lid's way to its spot
+            self.arm = "home"
+            if self.cur is not None and self.cur[0] == "HOME":
+                self._end("ok")
+            self._slipped()  # said already where its "slipped on the way" line was read; else here
+            return
         back = BACK_ON_BOX.search(stop) is not None
         if back:
             self.lid, self.arm = "on the box", "home"  # the run's own words: nothing held, the arm home

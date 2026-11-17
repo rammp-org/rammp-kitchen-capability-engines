@@ -481,3 +481,48 @@ def test_a_lid_put_back_with_no_spot_for_it_leaves_the_arm_home_in_the_result():
         "        why: no carry plans to a spot on the table the cameras measured",
         "        box: open (knob up)    lid: on the box    arm: home",
     ]
+
+
+def test_a_lid_that_slipped_out_on_the_way_is_never_on_the_table_whatever_the_set_down_felt():
+    """The knuckle reads shut past the knob at the table: the lid left the fingers on the way (the run's
+    "the lid slipped on the way" line), the fingers open, the arm goes home, and the run ends "STOP: the arm
+    is home, but the lid slipped out of the fingers". Whatever the set-down's watch felt, the view does not
+    say the lid was let go where it met the table: the lid's way to its spot is the step that failed, the
+    arm got home, and the result says the lid slipped out and that where it lies is not known. Review
+    2026-11-17, fed these lines with the contact line a run then wrote first: " 6 SET DOWN  ok    let go
+    where the lid met the table" and "lid: on the table"."""
+    slipped = [
+        (
+            34,
+            P + "the fingers read 0.790 at the table, outside the grip band [0.3, 0.55]: the lid slipped on the way "
+            "(the set-down felt a contact +12 mm from where the plan put the table: not the lid's, which had left "
+            "the fingers)",
+        ),
+        (34, P + "RELEASE as the retreat starts (place:retreat), then HOME, slow, in MEDIUM impedance: home"),
+        (39, P + "STOP: the arm is home, but the lid slipped out of the fingers on the way to [0.65, 0.05]"),
+    ]
+    want = [
+        " 4 GRIP      ok    knob held                                   8.0 s",
+        " 5 CARRY     FAIL  the lid slipped out of the fingers on the way",
+        "   home      ...   opening the fingers and going home",
+        " 6 HOME      ok                                                5.0 s",
+        "RESULT  FAILED at step 5 (CARRY)                              44 s",
+        "        why: the lid slipped out of the fingers on the way",
+        "        box: open (knob up)    lid: slipped out of the fingers on the way (where it lies is not known)    "
+        "arm: home",
+    ]
+    out = _view(FOUND + PRESSED + CARRIED + slipped, 1)
+    assert out[-7:] == want
+    assert not any("SET DOWN" in line or "on the table" in line for line in out)
+    # the same of a console that wrote the contact line first, as a run did until that review
+    contact = (34, P + "SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it; the touch stopped")
+    out = _view(FOUND + PRESSED + CARRIED + [contact] + slipped, 1)
+    assert out[-7:] == want and not any("on the table" in line for line in out)
+    # ... and of one whose "slipped on the way" line was not read: the run's last word says it
+    out = _view(FOUND + PRESSED + CARRIED + [contact] + slipped[1:], 1)
+    assert out[-3:] == [
+        "RESULT  FAILED at step 9 (CARRY)                              44 s",
+        "        why: the lid slipped out of the fingers on the way",
+        "        box: open (knob up)    lid: slipped out of the fingers on the way (where it lies is not known)    "
+        "arm: home",
+    ]

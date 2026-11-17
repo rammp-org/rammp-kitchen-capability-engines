@@ -120,6 +120,9 @@ went on), a `note` for what worked but looked off, a `next` for what follows a
 failure, and a result that says where the box, the lid and the arm were left.
 It says `lid on the table` only of a set-down the run felt meet the table; a
 set-down that felt none reads `7 SET DOWN  FAIL  the arm felt no table under the lid; the lid was not let go`, then `8 PUT BACK  ok`, and the result's `lid: on the box`.
+A lid that slipped out of the fingers on the way is never `on the table`
+either, whatever the set-down felt: `5 CARRY  FAIL  the lid slipped out of the fingers on the way`,
+and the result's `lid: slipped out of the fingers on the way (where it lies is not known)`.
 Everything else the node logs goes to stderr, so:
 
 ```bash
