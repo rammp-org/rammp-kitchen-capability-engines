@@ -1368,7 +1368,8 @@ def test_the_full_run_hands_over_each_press_the_grip_and_the_lid_spot_as_reach_l
     lid = trlo.BUTTON[2] - 0.006 + rlo.GRIP_LID_ABOVE_HELD_M
     assert isinstance(grip.stroke, rlo.GripDescent) and grip.lid_z == pytest.approx(lid)
     assert grip.stroke.pad_z == pytest.approx(grip.lid_z - rlo.GRIP_BELOW_LID_M)
-    assert spot.drop is ctx.lid_drop and spot.tier == "beside the box" and spot.tmap is None  # no camera data
+    # on the table the scene camera measured (no camera data, no spot: reach_lid_off, 2026-11-17)
+    assert spot.drop is ctx.lid_drop and spot.tier == "clear" and spot.tmap is not None
     assert "[viz]" not in capsys.readouterr().out
     monkeypatch.setattr(approach, "_CHAIN", chain)  # the run's chain, as approach._chain() built it
     v.step()
@@ -1377,4 +1378,4 @@ def test_the_full_run_hands_over_each_press_the_grip_and_the_lid_spot_as_reach_l
     assert shown["grip: the closed pads"].pose.position.z == pytest.approx(grip.stroke.pad_z)
     lid = shown["lid spot"].pose.position
     assert (lid.x, lid.y) == pytest.approx(ctx.lid_drop.xyz[:2])
-    assert shown["lid spot: label"].text.startswith("LID SPOT (beside the box): ")
+    assert shown["lid spot: label"].text.startswith("LID SPOT (clear): ")

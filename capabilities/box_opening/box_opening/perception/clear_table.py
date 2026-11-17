@@ -20,6 +20,13 @@ cm "below" the table.
 What the camera could not see (behind the microwave, past its frame) is not
 known to be clear, so nothing comes down there; past a table's edge it sees
 the floor, so no lid goes down there.
+
+And the map is what says where the table IS (off_table): the lid is let go
+only where the cells under the whole of it are table the cameras measured
+this run, whatever chose the spot. Flatbot 2026-11-17 16:40: nothing read
+clear, the spot with "the most room" was taken, and it lay 12 cm in front of
+the table's near edge, over cells no camera had seen; the lid was let go
+over the floor.
 """
 
 import math
@@ -304,6 +311,113 @@ def carry_clearance(tmap, start_xy, end_xy, lid_r, tips_h, lid_h):
                 if c < worst[0]:
                     worst = (c, name, (float(p[0]), float(p[1])))
     return worst
+
+
+# The lid is let go only on table the cameras measured this run (owner 2026-11-17: "the first run,
+# the arm dropped the lid off the table"). Run 16:40 that day: the wrist had measured the table over
+# x 0.64..1.15, y -0.64..0.21; the search for a clear spot looked in x 0.28..0.65 (press_demo's reach
+# band of the bench), found none, and the spot with "the most room" was [0.52, -0.42]: 12 cm in front
+# of the table's near edge, every cell under it unseen. A spot's ROOM says how near anything the hand
+# comes; whether there is a table under the lid at all is asked here, of every spot, whatever tier
+# chose it (reach_lid_off.spot_candidates):
+#  - the whole lid, its rim LID_CLEAR_M more, on cells the map saw at the table's height: none of
+#    them unseen, past the edge (TableMap.off) or under something that stands;
+#  - what the hand brings down (HAND_PARTS, each part's own rectangle) over cells the map saw and
+#    not past the edge, and on nothing taller than that part comes down to: the wrist camera never
+#    over the floor or a thing, whatever margin a tier gives up;
+#  - where the fix measured the table's extent, the lid's rim TABLE_EDGE_M inside it and the hand
+#    inside it (press_demo.DROP_EDGE_M's 30 mm: the extent is the fix's own, a rectangle round its
+#    table points, and may be one the scene camera assumed for want of points: never enough alone).
+# No map: no camera measured the table where the lid would lie, and nothing is let go there.
+TABLE_EDGE_M = 0.03
+
+
+def off_table(tmap, xy, quat, lid_r, tips_h, extent=None, hand_xy=None):
+    """Why the lid let go at `xy` would not rest on table the cameras measured this run, or None
+    where it would (the comment above): the lid's disc (`lid_r`) at `xy`, the hand at `quat` with
+    its tool over `hand_xy` (None: over `xy`; a leaning hand stands a little back from the lid's
+    middle), the fingertips `tips_h` above the table; `extent` (x0, x1, y0, y1) the table as the
+    fix measured it, or None. `tmap` None: no map, and that is why."""
+    sx, sy = float(xy[0]), float(xy[1])
+    px, py = (sx, sy) if hand_xy is None else (float(hand_xy[0]), float(hand_xy[1]))
+    if tmap is None:
+        return "no camera's map shows the table there"
+    ax, ay = _hand_axes(quat)
+    if extent is not None:
+        x0, x1, y0, y1 = (float(v) for v in extent)
+        inset = float(lid_r) + TABLE_EDGE_M
+        past = max(x0 + inset - sx, sx - (x1 - inset), y0 + inset - sy, sy - (y1 - inset))
+        if past > 1e-9:
+            return (
+                "the lid would lie %.0f mm past where it may on the table the cameras measured (x %.2f..%.2f, y "
+                "%.2f..%.2f, its rim %.0f mm inside)" % (1000 * past, x0, x1, y0, y1, 1000 * TABLE_EDGE_M)
+            )
+        for name, (xa, xb), (ya, yb), _bottom, _need in HAND_PARTS:
+            for hx, hy in ((xa, ya), (xa, yb), (xb, ya), (xb, yb)):
+                cx, cy = px + hx * ax[0] + hy * ay[0], py + hx * ax[1] + hy * ay[1]
+                if not (x0 - 1e-9 <= cx <= x1 + 1e-9 and y0 - 1e-9 <= cy <= y1 + 1e-9):
+                    return "%s would come down past the table the cameras measured (x %.2f..%.2f, y %.2f..%.2f)" % (
+                        name,
+                        x0,
+                        x1,
+                        y0,
+                        y1,
+                    )
+    c = tmap.cell
+    nx, ny = tmap.tall.shape
+    half = 0.5 * c
+    near = float(lid_r) + LID_CLEAR_M + 0.12  # past the lid's rim and the hand's farthest corner (99 mm)
+    i0 = max(0, int(math.floor((min(sx, px) - near - tmap.x0) / c)))
+    i1 = min(nx, int(math.floor((max(sx, px) + near - tmap.x0) / c)) + 1)
+    j0 = max(0, int(math.floor((min(sy, py) - near - tmap.y0) / c)))
+    j1 = min(ny, int(math.floor((max(sy, py) + near - tmap.y0) / c)) + 1)
+    xs = tmap.x0 + (np.arange(i0, i1) + 0.5) * c
+    ys = tmap.y0 + (np.arange(j0, j1) + 0.5) * c
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    win = (slice(i0, i1), slice(j0, j1))
+    tall, seen, off = np.nan_to_num(tmap.tall[win], nan=-1.0), tmap.seen[win], tmap.off[win]
+    reach = float(lid_r) + LID_CLEAR_M
+    # the map's own end is the end of what it saw
+    if sx - reach < tmap.x0 or sx + reach > tmap.x0 + nx * c or sy - reach < tmap.y0 or sy + reach > tmap.y0 + ny * c:
+        return "the lid would lie past the end of the cameras' map of the table"
+    under = np.hypot(_to_square(X - sx, half), _to_square(Y - sy, half)) < reach
+    for bad, what in (
+        (~seen, "on %d cm2 the cameras did not see"),
+        (off, "past the table's edge (%d cm2 of what the cameras saw under it is below the table)"),
+        (tall > 0.0, "on what stands there (%d cm2 of it)"),
+    ):
+        n = int((under & bad).sum())
+        if n:
+            return "the lid would lie " + what % round(n * c * c * 1e4)
+    dx, dy = X - px, Y - py
+    hx, hy = dx * ax[0] + dy * ax[1], dx * ay[0] + dy * ay[1]
+    for name, (xa, xb), (ya, yb), bottom, _need in HAND_PARTS:
+        over = (np.maximum(xa - hx, hx - xb) < half) & (np.maximum(ya - hy, hy - yb) < half)
+        if (over & (~seen | off)).any():
+            return "%s would come down past the table the cameras measured (unseen, or past its edge)" % name
+        hit = over & (tall > float(tips_h) + bottom - UP_SLACK_M)
+        if hit.any():
+            return "%s would come down on what stands there (%.0f mm tall)" % (name, 1000 * float(tall[hit].max()))
+    return None
+
+
+def table_bounds(tmap):
+    """(x0, x1, y0, y1): the box round every cell `tmap` saw at the table's height or with
+    something standing in it (seen, not past the edge), or None where it saw none: how far the
+    table the cameras measured reaches, for where a spot is looked for (reach_lid_off.spot_zone)."""
+    if tmap is None:
+        return None
+    on = tmap.seen & ~tmap.off
+    if not on.any():
+        return None
+    i, j = np.nonzero(on)
+    c = tmap.cell
+    return (
+        float(tmap.x0 + i.min() * c),
+        float(tmap.x0 + (i.max() + 1) * c),
+        float(tmap.y0 + j.min() * c),
+        float(tmap.y0 + (j.max() + 1) * c),
+    )
 
 
 # Whether clear_spots judges its spots in batches (clearance_batch): the
@@ -869,12 +983,15 @@ EDGE_BEYOND_FRAC = 0.25
 #  - "the counter": the solid behind it, as deep as the map saw the counter there, its padded top
 #    COUNTER_TOP_CLEAR_M from the counter's top: no part of the arm goes down into the counter. The
 #    hand comes down onto it, though: the robot file's 2F-85 spheres (locked open, 32 mm past the
-#    real 131 mm tips) stand ~1 mm over the table, buffered, where the set-down's plan ends (the tips
-#    33 mm up), and flatbot's 2026-11-03 16:32 set-down flight went 1 mm into a top padded to 5 mm
-#    over it. So the padded top stands 5 mm UNDER the counter's top; the set-down's own guard feels
-#    the table.
+#    real 131 mm tips) stand ~1 mm over the table, buffered, with the tips 33 mm up, and flatbot's
+#    2026-11-03 16:32 set-down flight went 1 mm into a top padded to 5 mm over it. The set-down's
+#    touch now ends reach_lid_off.SETDOWN_PAST_M (8 mm) UNDER where the plan has the lid meet the
+#    table, the tips 15 mm up (2026-11-17: its watch lets go only where it feels the table, and a
+#    reference that stops over the table never feels one): those spheres 17 mm under the table's top.
+#    So the padded top stands 25 mm UNDER the counter's top (it was 5); the set-down's own watch
+#    feels the table and stops there.
 COUNTER_SOLID_M = 1.2  # to the floor: a counter stands at most ~1 m tall, and nothing reaches under the floor
-COUNTER_TOP_CLEAR_M = -0.005
+COUNTER_TOP_CLEAR_M = -0.025
 COUNTER_MAX_DEPTH_M = 0.8  # the solid behind an edge reaches back at most this far (the map's own reach)
 
 
@@ -1042,7 +1159,7 @@ def counter_keep_out(edges, table_z, cell=CELL_M, pad_m=PLANNER_PADDING_M):
     """The keep-out boxes of `edges` (counter_edges) for runtime/body Body.with_obstacles: per edge
     "cabinet/edge<k>" (where the edge may be, from the counter's top at `table_z` down
     COUNTER_SOLID_M) and "cabinet/counter<k>" (the solid behind it, its top lowered so that, padded
-    `pad_m` as with_obstacles pads it, it stands COUNTER_TOP_CLEAR_M from the counter's top: 5 mm
+    `pad_m` as with_obstacles pads it, it stands COUNTER_TOP_CLEAR_M from the counter's top: 25 mm
     under it), each a dict (name, centre, half, rotation: columns along, out, up)."""
     boxes = []
     top = float(table_z)

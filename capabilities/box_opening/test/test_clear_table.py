@@ -511,3 +511,88 @@ def test_a_cloud_with_no_level_plane_has_no_map_and_says_why():
     why = []
     assert ct.table_map([(_front_edge(), TABLE_Z)], BOX, why=why) is None
     assert len(why) == 1 and why[0].startswith("no level plane among the")
+
+
+# ---- on the table the cameras measured (off_table): owner 2026-11-17 ---------------------------
+
+
+def _edge_map():
+    """A table from x 0.64 out (its near edge there, the floor seen in front of it from x 0.40, nothing
+    seen nearer the arm), a block standing on it at y -0.60..-0.48, the box at [0.78, -0.13]: 2026-11-17
+    16:40's table as the wrist's survey saw it, in round numbers."""
+    box = (0.78, -0.13)
+    cloud = np.concatenate(
+        [
+            _table(0.64, 1.15, -0.64, 0.21, holes=[(0.70, 1.00, -0.60, -0.48)]),
+            _flat(0.40, 0.64, -0.64, 0.21, TABLE_Z - 0.60),  # the floor, past the near edge
+            _block(0.70, 1.00, -0.60, -0.48, TABLE_Z + 0.30),
+        ]
+    )
+    return ct.table_map([(cloud, TABLE_Z)], box), box
+
+
+def test_a_spot_in_front_of_the_tables_edge_is_not_on_the_table_whatever_room_it_reads(pink):
+    """Flatbot 2026-11-17 16:40 (owner: "the arm dropped the lid off the table"): the wrist had measured
+    the table over x 0.64..1.15, y -0.64..0.21; nothing read clear in the bench's reach band, the spot with
+    "the most room" was [0.52, -0.42], and the lid was let go there, over the floor. A spot's room says how
+    near things the hand comes; off_table says whether there is a table under the lid at all: not where the
+    cameras saw nothing, nor past the edge, nor on what stands, the hand's parts included."""
+    tmap, _box = _edge_map()
+    lid_r, lid_h = 0.5 * pink.lid_dims[0], pink.lid_dims[2]
+    extent = (0.64, 1.15, -0.64, 0.21)
+
+    def off(xy, ext=None, turn=0.0):
+        return ct.off_table(
+            tmap, xy, yaw_about_world_z(pink.press_quat((xy[0], xy[1], TABLE_Z)), turn), lid_r, lid_h, ext
+        )
+
+    # the spot of 16:40: by the map (the floor under it) and by the extent the fix measured
+    assert "past the table's edge" in off((0.52, -0.42))
+    assert "past where it may on the table the cameras measured (x 0.64..1.15" in off((0.52, -0.42), extent)
+    # where the cameras saw nothing, and half over the edge
+    assert "did not see" in off((0.30, -0.42))
+    assert "past the table's edge" in off((0.61, -0.20)) and off((0.68, -0.20)) is not None
+    # on what stands
+    assert "on what stands there" in off((0.85, -0.54))
+    # the lid on bare table, but the wrist camera (85 mm out along the hand's y: world +x at the press
+    # attitude) turned a quarter over the block beside it, or a half turn out over the near edge
+    assert any(
+        "the wrist camera would come down on what stands there" in (off((0.85, y), turn=-math.pi / 2) or "")
+        for y in np.arange(-0.42, -0.37, 0.002)
+    )
+    assert any(
+        "the wrist camera would come down past the table" in (off((x, -0.20), turn=math.pi) or "")
+        for x in np.arange(0.70, 0.76, 0.002)
+    )
+    # well on the table: the whole lid and the hand on cells seen at its height, inside the extent
+    assert off((0.80, 0.08)) is None and off((0.80, 0.08), extent) is None
+    # ... but not within the lid's half-width and TABLE_EDGE_M of the extent's side
+    assert ct.TABLE_EDGE_M == pytest.approx(0.03)
+    assert off((0.80, 0.21 - lid_r - 0.02), extent) is not None and off((0.80, 0.21 - lid_r - 0.04), extent) is None
+    # no map: no camera measured the table there, whatever the extent says
+    assert "no camera's map" in ct.off_table(
+        None, (0.80, 0.08), pink.press_quat((0.80, 0.08, TABLE_Z)), lid_r, lid_h, extent
+    )
+
+
+def test_a_spot_that_reads_clear_is_on_the_table(pink):
+    """Every spot clear_spots finds with room is one off_table passes: its room is counted from what was
+    not seen and what lies past the edge too."""
+    tmap, box = _edge_map()
+    lid_r, lid_h = 0.5 * pink.lid_dims[0], pink.lid_dims[2]
+    spots, why = _spots(pink, tmap, box, zone=(0.60, 0.80, -0.55, 0.30))
+    assert spots and why is None
+    for s in spots:
+        quat = yaw_about_world_z(pink.press_quat((s.xy[0], s.xy[1], TABLE_Z)), s.turn)
+        assert ct.off_table(tmap, s.xy, quat, lid_r, lid_h) is None
+        assert s.xy[0] - lid_r >= 0.64  # the whole lid behind the table's near edge
+
+
+def test_the_measured_table_reaches_as_far_as_the_map_saw_it():
+    """table_bounds: the box round every cell seen at the table's height or with something standing in it;
+    what was seen past the edge (the floor) is not table. None with no map."""
+    tmap, _box = _edge_map()
+    x0, x1, y0, y1 = ct.table_bounds(tmap)
+    assert x0 == pytest.approx(0.64, abs=0.021) and x1 == pytest.approx(1.15, abs=0.021)
+    assert y0 == pytest.approx(-0.64, abs=0.021) and y1 == pytest.approx(0.21, abs=0.021)
+    assert ct.table_bounds(None) is None

@@ -53,18 +53,46 @@ beside the container, and goes home. It has one action, `open_box`:
    the button and close on it. A grip that misses goes back to the look pose and
    tries again from there, a centimetre lower.
 1. **Carry:** the lid is lifted, carried and set down beside the container in
-   one motion, at a spot the scene camera sees is clear. Never inside the
+   one motion, at a spot the cameras see is clear. Never inside the
    no-land radius: the lid's rim at least 50 mm off the container's (0.155 m
    centre to centre for the pink canister), round both where the press held
-   the button and where the cameras put the container.
-1. **Release and home:** the fingers open as the arm rises off the lid, and the
-   arm goes home.
+   the button and where the cameras put the container. And only on table the
+   cameras measured this run: the whole lid, its rim 15 mm more, on cells the
+   run's map saw at the table's height (not unseen, not past an edge, not on
+   what stands there), the hand's parts over such cells too, and inside the
+   table's extent where the fix measured one, the lid's rim 30 mm from its
+   sides. That holds for every spot, the fallbacks included (the most room
+   seen where nothing reads clear, beside the box, the nearest table point).
+   A spot is looked for round the container as far out from the arm as the
+   container stands, no longer only inside the bench's reach band (x
+   0.28-0.65 m). With no map of the table (no camera's points show one) there
+   is no spot.
+1. **Set down:** fast to 80 mm over where the run has the lid meet the table,
+   then slowly, to 8 mm under it at most. That height is the cameras' table
+   moved by what the fingers found: the table is taken as far under the lid's
+   top as the cameras saw it, the top where the fingers hold the knob (on
+   2026-11-13 and 11-17 the wrist camera read the lid's top, and so the table,
+   46-55 mm low). The arm feels for the table on the slow stretch, from 0.6 s
+   after it begins (the arm is still catching up with its reference until then,
+   which reads as a contact): the descent stops where the lid meets the table.
+   A rise met more than 35 mm over where the table should be is not the table,
+   and the descent goes on; something that holds the lid up there for 15 mm of
+   the descent stops it.
+1. **Release and home:** the fingers open, as the arm rises off the lid, only
+   where the set-down felt the lid meet the table at about that height; then
+   the arm goes home. The lid is never let go anywhere else.
 
 If the run has to stop with the lid in the fingers and the arm standing (no
-carry to any spot plans, or the run's own checks refuse the carry before it
-starts), it puts the lid back on the box first: back over the box and straight
-down to where the knob was gripped, the fingers open, the hand rises off the
-knob, and the arm goes home. The action still fails (`failed`, recoverable).
+spot on the table the cameras measured that the hand reaches and a carry plans
+to, the run's own checks refuse the carry before it starts, or the set-down
+ended without the arm feeling the lid meet the table: nothing met down to its
+end, something holding the lid up well above the table, or its watch failed),
+it puts the lid back on the box first: back up to the carry's height where it
+had come down, back over the box and straight down to where the knob was
+gripped, the fingers open, the hand rises off the knob, and the arm goes home.
+The action still fails (`lid_put_back`, recoverable), and its message says
+which of these it was. Where a line of that way back does not fly, the arm
+holds the lid where it stands (`arm_holds`).
 After a cancel, an e-stop or a motion the driver stopped part way, nothing more
 moves: the arm holds where it stopped (`arm_holds`, or the cancel). After the
 e-stop (the driver's `HALTED`) or lost control (`NOT_AUTHORIZED`), the run ends
@@ -90,6 +118,8 @@ The node writes a flight view of each run to its stdout: one short line a step a
 it starts and as it ends (`ok`, `FAIL`, or `??` where the run could not tell and
 went on), a `note` for what worked but looked off, a `next` for what follows a
 failure, and a result that says where the box, the lid and the arm were left.
+It says `lid on the table` only of a set-down the run felt meet the table; a
+set-down that felt none reads `7 SET DOWN  FAIL  the arm felt no table under the lid; the lid was not let go`, then `8 PUT BACK  ok`, and the result's `lid: on the box`.
 Everything else the node logs goes to stderr, so:
 
 ```bash
@@ -190,7 +220,9 @@ a run stopped with the lid in the fingers leaves set).
 | ---------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `open_box` | none   | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log"}`, and `world_state` when the lid came off |
 
-`lid_xyz` is where the lid was set down, in `arm_mount` (m). `video` is the MP4
+`lid_xyz` is where the lid was set down, in `arm_mount` (m), its height the
+table's as the set-down went by it (the cameras' moved by the fingers' hold of
+the lid's top). `video` is the MP4
 of both cameras from the grip to the set-down, where one was recorded. As the
 lid is let go on the table, the container's object record gets `opened: true`.
 It is written then, not at the run's end, so a run that stops or is cancelled on
@@ -244,7 +276,7 @@ still in the fingers, no code is recoverable.
 | `not_popped`          | yes         | Pressed, but the knob did not come up (or the stroke pressed nothing); the arm went home                                                                                                                                                                                 |
 | `no_button`           | yes         | The look found no button; nothing was pressed                                                                                                                                                                                                                            |
 | `no_press`            | yes         | No press plans to the button; nothing was pressed or moved                                                                                                                                                                                                               |
-| `lid_put_back`        | yes         | No carry for the lid: it is back on the box and the arm home                                                                                                                                                                                                             |
+| `lid_put_back`        | yes         | No spot for the lid on the table the cameras measured (or no carry to one), or a set-down that did not feel the table: the lid was not let go there, it is back on the box and the arm home                                                                              |
 | `lid_dropped`         | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                                                      |
 | `arm_holds`           | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                                                      |
 | `arm_halted`          | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                                                              |

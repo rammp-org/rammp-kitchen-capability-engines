@@ -170,7 +170,7 @@ def test_the_keep_out_holds_the_edge_and_the_solid_behind_it_to_the_floor():
     # the edge: where it may be (the boundary, half a cell either side), up to the counter's top
     assert edge["centre"][1] - edge["half"][1] <= 0.06 <= edge["centre"][1] + edge["half"][1]
     assert edge["centre"][2] + edge["half"][2] == pytest.approx(TOP)
-    # the counter: behind the edge, padded it stands COUNTER_TOP_CLEAR_M (5 mm under) from the top
+    # the counter: behind the edge, padded it stands COUNTER_TOP_CLEAR_M (25 mm under) from the top
     assert under["centre"][2] + under["half"][2] + 0.02 == pytest.approx(TOP + ct.COUNTER_TOP_CLEAR_M)
     assert under["centre"][1] - under["half"][1] == pytest.approx(edge["centre"][1] + edge["half"][1])
     assert ct.counter_keep_out([], TOP) == []
@@ -211,8 +211,12 @@ def test_a_line_into_the_counter_edge_is_refused_one_onto_the_counter_top_is_not
     # 10 cm back from it, onto the counter as the set-down's plan ends (19.5 mm over it, buffered): clear
     pts, why = _down_to(chain, (0.60, 0.0), 0.20 + 0.0195)
     assert pts is not None, why
-    # ... but never below the counter's top
-    pts, why = _down_to(chain, (0.60, 0.0), 0.20 - 0.010)
+    # ... and as far under the counter's top as the set-down's touch ends (reach_lid_off.SETDOWN_PAST_M under
+    # where the plan has the lid meet the table: the hand's spheres 17 mm under the top, 2026-11-17): clear
+    pts, why = _down_to(chain, (0.60, 0.0), 0.20 - 0.017)
+    assert pts is not None, why
+    # ... but never deeper into the counter
+    pts, why = _down_to(chain, (0.60, 0.0), 0.20 - 0.030)
     assert pts is None and "cabinet/counter0" in why
 
 

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import setdown_flown as flown
 import test_reach_press as trp
 from conftest import fixture_path, flatbot_urdf
 
@@ -68,6 +69,38 @@ class _Rec(trp._Rec):
         self.aim_hits = []  # (each aim's tag, the agreeing hits it asked for: None, the reach-out's)
 
 
+class _Felt:
+    """reach_lid_off.SetdownContact's stand-in: what the set-down's watch felt, as the release asks
+    it (credible, refusal, record)."""
+
+    WHY = {
+        "never": "the touch ended 8 mm under where the plan has the lid meet the table and the arm felt no table",
+        "held": "something held the lid up 60 mm over where the plan has it meet the table (more than 35)",
+        "failed": "the set-down's watch failed (boom) and the descent was stopped there",
+    }
+
+    def __init__(self, how):
+        self.how = how
+
+    def credible(self):
+        return self.how == "met"
+
+    def refusal(self):
+        return None if self.how == "met" else (self.how, self.WHY[self.how])
+
+    def record(self):
+        met = self.how in ("met", "held")
+        out = {
+            "watched": True,
+            "met": met,
+            "credible": self.credible(),
+            "verdict": None if self.credible() else self.how,
+        }
+        if met:
+            out.update(above_top_mm=12.0 if self.how == "met" else 60.0, cut=True, cut_mm=20.0)
+        return out
+
+
 def _walk_or_turn(ctx_, q_look, slide, start, quat, top_z=None):
     """reach_press.walk_or_turn for the fake chain: the turn in place where
     the slide ends, as test_reach_press._way_down's."""
@@ -88,12 +121,13 @@ def _full_flow(
     ends=None,
     home_refusals=0,
     wrist=None,
-    scene=None,
+    scene="table",
     refuse_carry=False,
     rise=None,
     at_spot_look=None,
     one_motion=True,
     from_press=False,
+    setdown="met",
 ):
     """run_reach_press as a full run (compliant --depth-press, no
     --press-only), everything faked: `aims` the wrist's aims in order, each
@@ -103,8 +137,15 @@ def _full_flow(
     whether the fingers read that still at the table; `extent` the table
     the scene camera saw (no room map: the lid goes beside the box, in its
     zone); `ends`: {n: (outcome, info)} for the n-th goal sent; `wrist`
-    the wrist's points at the spot look, `scene` the scene camera's (None:
-    no camera data); `rise` depth_press.rise_back_up's stand-in (None:
+    the wrist's points at the spot look, `scene` the scene camera's (the
+    default: a flat table 0.3 m round the box, _table(r=0.3); None: no camera data,
+    and so no table measured for the lid to go on); `setdown` what the
+    set-down's watch felt (_Felt: "met", the lid met the table where the
+    plan has it; "never", "held", "failed": it did not, and the lid is not
+    let go; None: the real watch, which the fake client feeds nothing). The
+    table the set-down goes by is the cameras' (setdown_table_z's move is
+    its own tests': the fake chain's fk stands still, and its fingers' hold
+    says nothing of the lid's top); `rise` depth_press.rise_back_up's stand-in (None:
     back up the stroke); `at_spot_look()` what else happens at the spot
     look; `one_motion` False: the grip's lookahead plans the lift alone,
     as before the close flew on to the set-down — the lift, then the spot
@@ -154,6 +195,16 @@ def _full_flow(
             rec.planning -= 1
 
     monkeypatch.setattr(rp, "_plan_motion", plan)
+    monkeypatch.setattr(rlo, "setdown_table_z", lambda ctx_, table_z, fix_, q_grip=None: (float(table_z), None))
+    if setdown is not None:
+
+        def felt(ctx_, legs, carry):
+            carry.contact = _Felt(setdown)
+            return carry.contact
+
+        monkeypatch.setattr(rlo, "watch_setdown", felt)
+    if isinstance(scene, str):
+        scene = _table(r=0.3)  # a small one: every spot on it is judged in each of these runs
     monkeypatch.setattr(rlo, "GRIP_FROM_PRESS", from_press)
     if not one_motion:
         monkeypatch.setattr(
@@ -405,11 +456,12 @@ def test_a_knob_up_after_the_press_is_gripped_lifted_carried_set_down_and_the_ar
     assert planned["lid:carry"] == planned["home"] == gripping
     assert [name for name, _at in rec.plans].count("lid:carry") == 1
     assert [at for name, at in rec.plans if name == "home"] == [rec.events.index("aim:reach-after"), gripping]
-    # the spot chosen ahead, said before the close: no camera data, so beside the box
+    # the spot chosen ahead, said before the close: on the table the scene camera measured, where it reads clear
     legs = [r["leg"] for r in rows]
     assert legs.index("reach_grip") < legs.index("lid_spot") < legs.index("reach_grip_result")
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
-    assert (spot["tier"], spot["mapped"], spot["chosen"]) == ("beside the box", False, "ahead, with the scene camera")
+    assert (spot["tier"], spot["mapped"], spot["chosen"]) == ("clear", True, "ahead, with the scene camera")
+    assert spot["table"]["off_table"] == 0 and spot["table"]["z"] == pytest.approx(TABLE_Z, abs=1e-4)
     assert spot["room_s"] is not None  # the room judged while the press flew
     # of ahead_s, the wait for that room; the spots whose reach was judged, their IK's time; the
     # lookahead's overrun (None: this client says nothing of what it sent)
@@ -715,10 +767,10 @@ def test_where_nothing_was_planned_ahead_the_lift_flies_alone_and_the_spot_is_lo
     assert rec.events.index("place:touch") < planned["home"] <= rec.events.index("place:open")
     # ... and from the look pose while the way back flew, for a stop there: unused, the lid coming off
     assert [at for name, at in rec.plans if name == "home"] == [rec.events.index("aim:reach-after"), planned["home"]]
-    # nothing chose the lid's spot before the lift: no camera data, so beside the box
+    # nothing chose the lid's spot before the lift: it is chosen at the spot look, on the table the cameras measured
     assert [r["leg"] for r in rows].index("lid_spot") > [r["leg"] for r in rows].index("reach_grip_result")
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
-    assert spot["tier"] == "beside the box" and spot["mapped"] is False
+    assert spot["tier"] == "clear" and spot["mapped"] is True
     assert spot["xyz"] == pytest.approx(list(ctx.lid_drop.xyz), abs=1e-4)
     hover = rec.legs["lid:carry"].target[1]
     assert hover[:2] == pytest.approx(list(ctx.lid_drop.xyz[:2]))
@@ -1596,30 +1648,141 @@ def test_a_stop_at_the_look_pose_flies_the_home_planned_while_the_way_back_flew(
     assert ahead["flown"] is True and ahead["off_rad"] == pytest.approx(0.0)
 
 
-def test_the_set_down_is_cut_where_the_lid_meets_the_table(ctx, monkeypatch, tmp_path):
+def test_the_set_down_is_cut_where_the_lid_meets_the_table(ctx, monkeypatch, tmp_path, capsys):
     """Owner 2026-11-02: the arm "presses the lid down onto the table
     waaaaaaay too hard ... the lid should just be let go of when it's ~1 cm
     above the table". The lift-to-set-down execution's lead carries a
-    PressContact that cuts the touch where the lid meets the table
-    (SETDOWN_FROM_CONTACT), and the reach_setdown row says what it saw (here:
-    no flight reported by the fake client, so nothing watched)."""
+    SetdownContact that cuts the touch where the lid meets the table
+    (SETDOWN_FROM_CONTACT), and the reach_setdown row says what it saw. Here
+    the real watch, and a client that reports no flight: nothing watched, so
+    nothing says the lid met the table, and (owner 2026-11-17) the fingers
+    do not open there."""
     from box_opening.tasks.press_contact import PressContact
 
     assert rlo.SETDOWN_FROM_CONTACT is True
-    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
-    assert code == 0
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown=None)
     lead = rec.legs["lid:lift"]  # the one motion's lead: lift, clear, carry, down, touch
-    assert isinstance(lead.stop_when, PressContact) and lead.stop_when.cut is True and lead.stop_when.final
+    assert isinstance(lead.stop_when, rlo.SetdownContact) and isinstance(lead.stop_when, PressContact)
+    assert lead.stop_when.cut is True and lead.stop_when.final
     (sd,) = (r for r in rows if r["leg"] == "reach_setdown")
     assert sd["contact"]["cut_on"] is True and sd["contact"]["watched"] is False and sd["contact"]["met"] is False
+    assert sd["credible"] is False and sd["contact"]["verdict"] == "never"
+    assert code == 1 and "place:open" not in rec.events
+    assert "the set-down was not watched" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("felt", ["never", "held", "failed"])
+def test_a_set_down_that_felt_no_table_does_not_let_go_and_puts_the_lid_back_on_the_box(
+    ctx, monkeypatch, tmp_path, capsys, felt
+):
+    """Owner 2026-11-17: "the first run, the arm dropped the lid off the table": 16:40 carried the lid
+    past the table's edge, its watch reported a contact 64 mm over the plan with nothing under the lid,
+    the fingers opened and the run said DONE. The fingers open only where the watch felt the lid meet
+    the table (SetdownContact.credible). The touch ended and nothing was felt, something held the lid
+    up well above the table, or the watch failed: the lid is NOT let go. Back up with it the way the
+    retreat goes, back over the box, down onto it, the fingers open there, the hand off the knob, home
+    — the one place known to take the lid. Exit 1, and the run says the lid is back on the box."""
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown=felt)
+    assert code == 1 and "place:open" not in rec.events and "place:retreat" not in rec.events
+    after = rec.events[rec.events.index("place:touch") + 1 :]
+    assert after == ["lid:back-up", "lid:back-over", "lid:put-back", "lid:release", "lid:rise-off", "home"]
+    # the way back up is the retreat's own line from where the arm stands, the fingers shut: no hold for them
+    assert rec.legs["lid:back-up"].start_hold_s == 0.0 and rec.legs["lid:back-up"].gains == dp.COMPLIANT_GAINS
+    (sd,) = (r for r in rows if r["leg"] == "reach_setdown")
+    assert sd["credible"] is False and sd["kept"] is True and sd["contact"]["verdict"] == felt
+    (back,) = (r for r in rows if r["leg"] == "lid_put_back")
+    assert back["ok"] is True and back["why"].startswith("the set-down felt no table (")
+    assert ctx.lid_lifted is None and ctx.lid_at is None  # out of the fingers, on the box: no lid lies at the spot
+    out = capsys.readouterr().out
+    assert "SET-DOWN: no table felt — " in out and "the lid is not let go" in out
+    assert "SET-DOWN CONTACT" not in out and "DONE" not in out and "RELEASE as the retreat starts" not in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+class _WalksBack(_Chain):
+    """A chain that refuses the next `refuse_next` straight lines (the hand does not hold their attitude
+    from where it stands) and, once `walk_ok`, walks to a pose turning as it goes."""
+
+    refuse_next, walk_ok = 0, False
+
+    def __init__(self):
+        super().__init__()
+        self.walked = []
+
+    def straight_line(self, q0, xyz, quat, max_step_rad=None):
+        if self.refuse_next:
+            self.refuse_next -= 1
+            return None, "a joint would jump 0.4 rad over one step"
+        return super().straight_line(q0, xyz, quat, max_step_rad)
+
+    def walk(self, q0, xyz, quat, step_m=None, step_rad=None, max_step_rad=None):
+        if not self.walk_ok:
+            return super().walk(q0, xyz, quat, step_m, step_rad, max_step_rad)
+        self.walked.append((list(quat), step_m, step_rad))
+        return [list(q0), [v + 0.01 for v in q0]], None
+
+
+def test_the_way_back_over_the_box_turns_the_hand_back_where_no_line_holds_the_grips_attitude(
+    ctx, monkeypatch, tmp_path
+):
+    """The set-down's hand stands turned to its spot, or leaning: from there no straight line holds the
+    attitude the knob was gripped at (put_lid_back's way back over the box was only ever flown from the
+    clear's end, which has it). Refused so, the way back over the box is the arm's own walk, turning back
+    as it goes, in the carry walk's steps; the lid still goes down onto the box and the arm home."""
+    chain = _WalksBack()
+    real = rlo.put_lid_back
+
+    def back(ctx_, cfg_, runner_, why):
+        chain.refuse_next, chain.walk_ok = 1, True
+        return real(ctx_, cfg_, runner_, why)
+
+    monkeypatch.setattr(rlo, "put_lid_back", back)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], chain=chain, setdown="never"
+    )
+    assert code == 1 and "place:open" not in rec.events
+    after = rec.events[rec.events.index("place:touch") + 1 :]
+    assert after == ["lid:back-up", "lid:back-over", "lid:put-back", "lid:release", "lid:rise-off", "home"]
+    ((quat, step_m, step_rad),) = chain.walked
+    assert quat == pytest.approx(list(rec.legs["lid:lift"].target[2]))  # back to the attitude the knob was held at
+    assert (step_m, step_rad) == (rlo.CARRY_WALK_STEP_M, rlo.CARRY_WALK_STEP_RAD)
+    (put,) = (r for r in rows if r["leg"] == "lid_put_back")
+    assert put["ok"] is True
+
+
+def test_a_lid_that_met_the_table_is_let_go_there_and_only_then_the_run_says_it_is_on_the_table(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The watch felt the lid meet the table where the plan has it: the fingers open as the retreat
+    starts, and the run's DONE says the lid is on the table, let go where the arm felt it."""
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0 and rec.events[-3:] == HOME and "lid:back-up" not in rec.events
+    (sd,) = (r for r in rows if r["leg"] == "reach_setdown")
+    assert sd["credible"] is True
+    out = capsys.readouterr().out
+    assert "SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it" in out
+    assert "DONE — box open, lid on the table at [" in out and "let go where the arm felt it meet the table" in out
+
+
+def test_a_set_down_that_felt_no_table_and_cannot_fly_back_up_holds_the_lid(ctx, monkeypatch, tmp_path, capsys):
+    """No line back up solves from where the arm stands: nothing is let go, the arm holds the lid
+    where it is, and says so (a person clears it)."""
+    monkeypatch.setattr(rlo, "retreat_from_live", lambda ctx_, carry, world: (None, "IK did not converge"))
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown="never")
+    assert code == 1 and rec.events[-1] == "place:touch" and "place:open" not in rec.events
+    assert "no way back up solves from where the arm stands (IK did not converge) — the arm holds the lid" in (
+        capsys.readouterr().out
+    )
 
 
 def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_table(monkeypatch):
-    """watch_setdown: the plan has the lid meet the table SETDOWN_RELEASE_M
-    under the touch's end (carry.over_m); the watch begins SETDOWN_WATCH_M
-    above that — where the slow stretch begins — on the execution's last
-    stretch below there (final), from its first motion leg (not a gripper
-    leg before it), and cuts where the lid meets (past 0)."""
+    """watch_setdown: the plan has the lid meet the table SETDOWN_PAST_M
+    over the touch's end (carry.over_m: the touch goes on that far under it,
+    for the arm to feel a table that stands where the plan has it); the
+    watch begins SETDOWN_WATCH_M above the plan's table — where the slow
+    stretch begins — on the execution's last stretch below there (final),
+    from its first motion leg (not a gripper leg before it), cuts where the
+    lid meets (past 0), and stops the descent where it fails."""
     from box_opening.runtime import approach
     from box_opening.runtime.legs import Kind
     from box_opening.tasks.press_contact import pads_z
@@ -1632,14 +1795,17 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
     close = SimpleNamespace(kind=Kind.GRIPPER, stop_when=None)
     lift = SimpleNamespace(kind=Kind.MOTION, stop_when=None)
     touch = SimpleNamespace(kind=Kind.MOTION, stop_when=None, goal_joints=[0.25] + [0.0] * 6)
-    carry = SimpleNamespace(legs=[SimpleNamespace(), touch], over_m=-rlo.SETDOWN_RELEASE_M, contact=None)
+    carry = SimpleNamespace(legs=[SimpleNamespace(), touch], over_m=rlo.SETDOWN_PAST_M, contact=None)
     ctx = SimpleNamespace(client=SimpleNamespace())
     got = rlo.watch_setdown(ctx, [close, lift, touch], carry)
     end = pads_z(Chain(), touch.goal_joints)
     assert lift.stop_when is got is carry.contact and close.stop_when is None
-    assert got.end_z == pytest.approx(end) and got.top_z == pytest.approx(end - rlo.SETDOWN_RELEASE_M)
-    assert got.arm_z == pytest.approx(end - rlo.SETDOWN_RELEASE_M + rlo.SETDOWN_WATCH_M) and got.past_m == 0.0
+    assert isinstance(got, rlo.SetdownContact) and got.abort_on_failure is True
+    assert got.end_z == pytest.approx(end) and got.top_z == pytest.approx(end + rlo.SETDOWN_PAST_M)
+    assert got.arm_z == pytest.approx(end + rlo.SETDOWN_PAST_M + rlo.SETDOWN_WATCH_M) and got.past_m == 0.0
     assert got.cut is True and got.final is True and rlo.SETDOWN_WATCH_M == rlo.SETDOWN_SLOW_M
+    assert (got.settle_s, got.credible_m, got.held_m) == (0.6, 0.035, 0.015)
+    assert not got.credible() and got.refusal()[0] == "never"  # nothing fed: nothing says the lid met the table
 
 
 def test_every_press_is_cut_at_its_contact_and_watched_all_the_way_down(ctx, monkeypatch, tmp_path):
@@ -1862,7 +2028,7 @@ def test_no_spot_of_any_tier_lands_the_lid_inside_the_no_land_radius(ctx, monkey
     press held its button, or where ctx.cpose has the box, is passed over and never counted as
     a try; the first spot outside both is taken, and the run record says how far outside."""
     from box_opening.models.container import from_container
-    from box_opening.tasks import press_demo as pd
+    from box_opening.runtime import approach
     from box_opening.tasks.press_demo import container_half
 
     r = rlo.no_land_radius(ctx.model)
@@ -1877,8 +2043,13 @@ def test_no_spot_of_any_tier_lands_the_lid_inside_the_no_land_radius(ctx, monkey
     aimed = ContainerPose(xyz=(bx, by - 0.180, -0.07), yaw=0.0)  # 180 mm from the aim, 140 from the held one
     clear = ContainerPose(xyz=(bx, by + 0.200, -0.07), yaw=0.0)  # outside both
     assert rlo.box_clearance(ctx, rim) < 0 and rlo.box_clearance(ctx, aimed) < 0 < rlo.box_clearance(ctx, clear)
-    spots = [SimpleNamespace(room_m=0.02, what="nothing", rotation=0.0)] * 3
-    monkeypatch.setattr(pd, "clear_lid_drops", lambda *a, **k: ([rim, aimed, clear], spots, None))
+    from box_opening.perception.clear_table import Spot
+
+    def three(m, cpose, worlds, tmap_, table_z, judged_out=None, hand_at=None, cache=None):
+        judged_out.extend(Spot(d.xyz[:2], 0.0, 0.02, "nothing", 0.0) for d in (rim, aimed, clear))
+        return [], None
+
+    monkeypatch.setattr(rlo, "lid_spots", three)
     monkeypatch.setattr(rlo, "TIER_TRIES", dict(rlo.TIER_TRIES, clear=1))  # one try: the passed-over are not tries
     checked = []
     tmap = _standing_ring((bx, by), 0.5, 0.6)  # seen, nothing standing near the box
@@ -1891,8 +2062,11 @@ def test_no_spot_of_any_tier_lands_the_lid_inside_the_no_land_radius(ctx, monkey
     assert (drop, tier) == (clear, "clear") and checked == [clear]
     note = rlo.no_land_note(ctx, drop)
     assert note["radius_mm"] == pytest.approx(1000 * r, abs=0.1) and note["clear_mm"] > 0 and len(note["centres"]) == 2
-    # and with no camera's map at all (12:40's): every spot offered lies outside the radius
-    offered = list(rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=lambda *a, **k: None))
+    # and where no room was judged (the tiers of 12:40's run: beside the box, nearest): every spot offered
+    # lies outside the radius
+    monkeypatch.setattr(rlo, "lid_spots", lambda *a, **k: ([], "none judged"))
+    monkeypatch.setattr(approach, "_chain", lambda: _Chain())
+    offered = list(rlo.spot_candidates(ctx, tmap, -0.07, [0.0] * 7, reach=lambda *a, **k: None))
     assert offered and all(rlo.box_clearance(ctx, d) >= 0.0 for d, _t, _s in offered)
 
 
@@ -1909,6 +2083,13 @@ def _standing_ring(centre, inner, outer, cell=0.02, tall=0.03):
     d = np.hypot(X - centre[0], Y - centre[1])
     tall_ = np.where((d >= inner) & (d <= outer), tall, np.nan)
     return TableMap(x0, y0, cell, tall_, np.ones((n, n), bool), np.zeros((n, n), bool), tuple(centre))
+
+
+def _bare(monkeypatch, ctx):
+    """A table seen bare all round ctx's box (a TableMap), no room judged on it (lid_spots finds
+    none): the tiers that follow the room's — beside the box, the nearest — on a measured table."""
+    monkeypatch.setattr(rlo, "lid_spots", lambda *a, **k: ([], "none judged"))
+    return _standing_ring((float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])), 5.0, 6.0)
 
 
 def test_the_nearest_rings_centre_on_the_held_button_and_pass_over_what_stands(ctx):
@@ -1998,9 +2179,7 @@ def test_the_pooled_room_map_is_built_beside_the_scene_cameras_and_does_not_choo
     from box_opening.tasks import press_demo
 
     monkeypatch.setattr(
-        press_demo,
-        "clear_lid_drops",
-        lambda m, cpose, tmap, table_z, cache=None: judged.append(tmap) or ([], [], "none"),
+        rlo, "lid_spots", lambda m, cpose, worlds, tmap, table_z, cache=None: judged.append(tmap) or ([], "none")
     )
     for pool in (False, True):
         monkeypatch.setattr(rlo, "POOL_AIM_FRAME", pool)
@@ -2092,23 +2271,42 @@ def test_a_clear_spot_the_wrist_sees_after_the_lift_is_where_the_lid_goes(ctx, m
     assert not [r for r in rows if r["leg"] == "seen_obstacles"]  # the map is the mission's: no planner world gets it
 
 
-def test_nothing_clear_still_sets_the_lid_down_at_the_most_room_seen(ctx, monkeypatch, tmp_path, capsys):
+def test_with_nothing_but_what_stands_round_the_box_the_lid_goes_back_on_the_box(ctx, monkeypatch, tmp_path, capsys):
+    """Something standing all round the box, as far as the hand reaches (_wall): until 2026-11-17
+    "nothing reads clear ... the most room seen" set the lid down on top of it, or (16:40) in front of
+    the table's edge. No spot has table the cameras measured under the whole lid: the lid is taken
+    nowhere. It goes back on the box, and the run says why."""
     code, rec, _chain, rows = _full_flow(
         ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, wrist=_wall(_table()), one_motion=False
     )
-    assert code == 0 and rec.events[-3:] == HOME
+    assert code == 1 and "lid:carry" not in rec.events and "place:open" not in rec.events
+    after = rec.events[rec.events.index("spot-look") + 1 :]
+    assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
-    assert spot["tier"] == "most room"
+    assert (
+        spot["xyz"] is None and spot["table"]["off_table"] > 0 and "on what stands there" in spot["table"]["first_off"]
+    )
     out = capsys.readouterr().out
-    assert "nothing reads clear" in out and "STOP" not in out and out.rstrip().endswith("arm home")
+    assert "PUT BACK: no carry plans to a spot on the table the cameras measured (of the spots looked at, " in out
+    assert "not on the table the cameras measured" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
 
 
-def test_no_camera_data_still_sets_the_lid_down_beside_the_box(ctx, monkeypatch, tmp_path, capsys):
-    code, _rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY)
-    assert code == 0
+def test_with_no_camera_data_the_lid_is_taken_nowhere_and_goes_back_on_the_box(ctx, monkeypatch, tmp_path, capsys):
+    """No camera's points of the table at all (it was "no camera shows the table: beside the box", a
+    spot derived from the box alone, in the bench's zone): nothing measured a table this run, so the
+    lid has nowhere it may be let go, whatever extent is on record. Lifted, looked for a spot with the
+    wrist, none: back on the box."""
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=None
+    )
+    assert code == 1 and "place:open" not in rec.events and "lid:carry" not in rec.events
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
-    assert (spot["tier"], spot["mapped"], spot["wrist_points"]) == ("beside the box", False, None)
-    assert "no camera shows the table: beside the box" in capsys.readouterr().out
+    assert (spot["xyz"], spot["tier"], spot["mapped"]) == (None, None, False)
+    assert "no camera's map shows the table there" in spot["table"]["first_off"]
+    out = capsys.readouterr().out
+    assert "PUT BACK: no carry plans to a spot on the table the cameras measured" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
 
 
 def test_a_clear_spot_the_scene_camera_sees_is_where_the_lid_goes_its_room_judged_while_the_press_flew(
@@ -2150,14 +2348,27 @@ def test_a_clear_spot_the_scene_camera_sees_is_where_the_lid_goes_its_room_judge
 def test_nothing_clear_the_scene_camera_sees_still_sets_the_lid_down_at_the_most_room_in_one_motion(
     ctx, monkeypatch, tmp_path, capsys
 ):
-    code, rec, _chain, rows = _full_flow(
-        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_wall(_table())
-    )
+    """Nothing reads clear — every spot has a part of the hand nearer something than its margin
+    asks — but the table is measured and bare under the lid and the hand: the spot with the most
+    room is still where the lid goes (the fallback of 2026-10-28), in one motion."""
+    from box_opening.perception.clear_table import Spot
+
+    def short(m, cpose, worlds, tmap, table_z, judged_out=None, hand_at=None, cache=None):
+        if judged_out is not None:
+            judged_out.extend(
+                Spot((BOX_XY[0] - 0.10, BOX_XY[1] + dy), 0.0, room, "the wrist camera", 0.0)
+                for dy, room in ((0.20, -0.012), (-0.20, -0.004), (0.24, -0.030))
+            )
+        return [], "nowhere has room for the lid and the hand among what the cameras see"
+
+    monkeypatch.setattr(rlo, "lid_spots", short)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY)
     assert code == 0 and [names for names, _g in _executions(rec)][-3:] == [CLOSE + CARRY, RELEASED, HOMED]
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
-    assert spot["tier"] == "most room"
+    assert spot["tier"] == "most room" and spot["xyz"][:2] == pytest.approx([BOX_XY[0] - 0.10, BOX_XY[1] - 0.20])
     out = capsys.readouterr().out
-    assert "nothing reads clear" in out and "STOP" not in out and out.rstrip().endswith("arm home")
+    assert "nothing reads clear" in out and "the wrist camera 4 mm short" in out and "STOP" not in out
+    assert out.rstrip().endswith("arm home")
 
 
 def test_a_spot_home_does_not_plan_from_after_the_set_down_is_passed_over(ctx, monkeypatch, tmp_path):
@@ -2322,10 +2533,10 @@ def test_no_carry_that_plans_puts_the_lid_back_on_the_box_and_goes_home(ctx, mon
     after = rec.events[rec.events.index("spot-look") + 1 :]
     assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
     (back,) = (r for r in rows if r["leg"] == "lid_put_back")
-    assert back["ok"] is True and back["why"].startswith("no carry to a spot the lid could go to plans")
+    assert back["ok"] is True and back["why"].startswith("no carry plans to a spot on the table the cameras measured")
     assert ctx.lid_lifted is None and not ctx.client.lets_go  # out of the fingers; nothing stopped part way
     out = capsys.readouterr().out
-    assert "PUT BACK: no carry to a spot the lid could go to plans" in out
+    assert "PUT BACK: no carry plans to a spot on the table the cameras measured" in out
     assert "the lid is back on the box, and the arm is home" in out and "the arm holds" not in out.split("PUT BACK")[-1]
 
 
@@ -2504,7 +2715,7 @@ def test_the_lid_s_spot_is_mapped_and_its_carry_planned_from_where_the_arm_stood
         ctx.client.live = list(stood)  # the arm came to rest while the spot look waited
         return None
 
-    def candidates(ctx_, tmap, table_z, q, seeds=(), reach=None):
+    def candidates(ctx_, tmap, table_z, q, seeds=(), reach=None, spot_z=None, passed=None):
         seen.append(("spot_candidates", list(q)))
         yield SimpleNamespace(xyz=(0.45, -0.25, -0.027)), "beside the box", "beside the box"
 
@@ -2598,24 +2809,25 @@ def test_the_carry_planned_while_the_lift_flies_is_not_flown_where_the_wrist_sho
 ):
     """The scene camera sees room beside the box; the wrist, the lid lifted,
     sees something standing all round it (_wall): the spot is chosen on what
-    the wrist shows (owner: chosen with the lid lifted), not the scene's, and
-    the carry is planned there at rest as before — the one planned while
-    the lift flew is not flown, and the record says why."""
+    the wrist shows (owner: chosen with the lid lifted), not the scene's —
+    the carry planned while the lift flew is not flown, and the record says
+    why. With something standing wherever the lid could go, it goes nowhere:
+    back on the box (until 2026-11-17 it went on top of what stood there,
+    "the most room")."""
     code, rec, _chain, rows = _full_flow(
         ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], one_motion=False, wrist=_wall(_table(r=0.4)), **NEAR
     )
-    assert code == 0
+    assert code == 1 and "lid:carry" not in rec.events and "place:open" not in rec.events
     flight = _lift_flight(rec)
     carries = [at for name, at in rec.plans if name == "lid:carry"]
-    assert carries[0] == flight and len(carries) == 2 and carries[1] > rec.events.index("spot-look")
+    assert carries == [flight]  # planned ahead once, on the scene camera's map; none at rest: no spot to plan to
     assert rec.most_at_once == 1
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
     ahead = spot["ahead"]
-    assert spot["tier"] == "most room" and ahead["flown"] is False
-    assert ahead["why"].startswith("the spot chosen with the lid lifted is ")
-    assert math.hypot(spot["xyz"][0] - ahead["xyz"][0], spot["xyz"][1] - ahead["xyz"][1]) > rlo.AHEAD_SAME_SPOT_M
-    assert rec.legs["lid:carry"].target[1][:2] == pytest.approx(spot["xyz"][:2])  # the carry flown is to the new spot
-    assert "the carry planned while the lift flew is not flown" in capsys.readouterr().out
+    assert spot["xyz"] is None and ahead["flown"] is False and ahead["why"] == "no carry plans here"
+    out = capsys.readouterr().out
+    assert "the carry planned while the lift flew is not flown" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
 
 
 @pytest.mark.parametrize("push, flown", [(0.03, True), (0.05, False)])
@@ -2765,11 +2977,19 @@ def test_the_set_downs_slow_stretch_begins_below_every_containers_hover(name):
     """The carry's hover (Place.hover_for: hover_standoff and a lid over
     where the plan has the lid meet the table, at least) stands above where
     the set-down's slow stretch begins, SETDOWN_SLOW_M over that: the way
-    down from it goes down. And the touch's end, SETDOWN_RELEASE_M over it,
-    below that: the lid let go 1 cm over the table where the plan is right."""
+    down from it goes down. And the touch's end is under the plan's table,
+    SETDOWN_PAST_M: far enough for the watch's rises (3 and 5 mm of the
+    reference past the touch) where the table stands as planned, and not so
+    far that the lid's own thickness is gone (the fingertips stay over the
+    table)."""
+    from box_opening.tasks import press_contact as pc
+
     model = ContainerModel.load("capabilities/box_opening/config/containers/%s.yaml" % name)
     assert model.hover_standoff + model.lid_dims[2] > rlo.SETDOWN_SLOW_M + 0.01
-    assert 0.0 < rlo.SETDOWN_RELEASE_M < rlo.SETDOWN_SLOW_M
+    assert (
+        max(pc.CONTACT_RISE_M, pc.CONTACT_SLOW_RISE_M) < rlo.SETDOWN_PAST_M < model.lid_dims[2] - rlo.GRIP_BELOW_LID_M
+    )
+    assert rlo.SETDOWN_CREDIBLE_M < rlo.SETDOWN_SLOW_M - 0.03  # the settle's 33 mm end above the band
 
 
 @pytest.mark.parametrize("shortest_walk", [False, True], ids=["today's posture", "the quickest walks' posture"])
@@ -2858,18 +3078,18 @@ def test_on_flatbot_the_whole_lid_off_is_reachable_for_every_box_of_the_brief(
     assert [lg.name for lg in lift.legs] == ["lid:lift", "lid:clear"]
     q_look = lift.legs[-1].goal_joints
     # where the lid goes, from the spot look: the first the hand reaches from there
-    drop, tier, _says = next(rlo.spot_candidates(ctx, None, LID - 0.10, q_look, seeds=(home,)))
+    drop, tier, _says = next(rlo.spot_candidates(ctx, _bare(monkeypatch, ctx), LID - 0.10, q_look, seeds=(home,)))
     assert tier == "beside the box" and type(drop) is ContainerPose  # straight down: no lean was judged
     carry, why = rlo.plan_carry(ctx, cfg, q_look, drop)
     assert carry is not None, why
     # the way down to SETDOWN_SLOW_M over where the plan has the lid meet the table, the touch on down to
-    # SETDOWN_RELEASE_M over it (cut where the lid meets the table: watch_setdown)
+    # SETDOWN_PAST_M under it (cut where the lid meets the table: watch_setdown)
     _quat, contact, _hover = rlo.setdown_poses(ctx, drop)
     _R, t_down = chain.fk(carry.legs[1].goal_joints)
     _R, t_touch = chain.fk(carry.legs[2].goal_joints)
     assert t_down[2] == pytest.approx(contact[2] + rlo.SETDOWN_SLOW_M, abs=5e-4)
-    assert t_touch[2] == pytest.approx(contact[2] + rlo.SETDOWN_RELEASE_M, abs=5e-4)
-    assert carry.over_m == -rlo.SETDOWN_RELEASE_M and carry.k_z > 0.0
+    assert t_touch[2] == pytest.approx(contact[2] - rlo.SETDOWN_PAST_M, abs=5e-4)
+    assert carry.over_m == rlo.SETDOWN_PAST_M and carry.k_z > 0.0
     home_legs, why = rlo.plan_home_after(ctx, cfg, carry)
     assert home_legs is not None, why
     names = [lg.name for lg in carry.legs + home_legs]
@@ -2974,7 +3194,9 @@ def test_on_flatbot_the_free_air_lines_fly_faster_under_the_wrists_ceiling_and_s
     monkeypatch.setattr(rp, "_plan_motion", _plan_by_ik(chain, home))
     lift, why = rlo.plan_lift(ctx, cfg, grip_in[-1].goal_joints, grip.stroke.quat)
     assert lift is not None, why
-    drop, _tier, _says = next(rlo.spot_candidates(ctx, None, LID - 0.10, lift.legs[-1].goal_joints, seeds=(home,)))
+    drop, _tier, _says = next(
+        rlo.spot_candidates(ctx, _bare(monkeypatch, ctx), LID - 0.10, lift.legs[-1].goal_joints, seeds=(home,))
+    )
     carry, why = rlo.plan_carry(ctx, cfg, lift.legs[-1].goal_joints, drop)
     assert carry is not None, why
     retreat, why = rlo.plan_home_after(ctx, cfg, carry)
@@ -3774,18 +3996,23 @@ def test_a_lift_no_straight_line_flies_goes_up_with_the_hand_leaning_further_bac
     )
 
 
-def test_where_no_hand_reaches_a_spot_straight_down_the_same_spots_follow_leaning(ctx):
+def test_where_no_hand_reaches_a_spot_straight_down_the_same_spots_follow_leaning(ctx, monkeypatch):
     """Every tier straight down first, as the bench's runs chose (a straight-down spot reached is
     offered before any lean is judged); only past them all the same spots again as LeanSpots, the
     hand leaning SETDOWN_LEAN_DEG — the chair study's high counters, where no straight-down hand
-    reaches its carry height over any spot."""
+    reaches its carry height over any spot. (A table seen bare all round, no room judged on it:
+    the spots beside the box and the nearest.)"""
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(approach, "_chain", lambda: _Chain())
+    bare = _bare(monkeypatch, ctx)
     asked = []
 
     def nothing_straight_down(ctx_, d, q, seeds=()):
         asked.append(d)
         return "no straight-down hand reaches its carry height 0.514" if rlo._spot_lean(d) == 0.0 else None
 
-    gen = rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=nothing_straight_down)
+    gen = rlo.spot_candidates(ctx, bare, -0.07, [0.0] * 7, reach=nothing_straight_down)
     drop, tier, says = next(gen)
     assert isinstance(drop, rlo.LeanSpot) and drop.lean_deg == rlo.SETDOWN_LEAN_DEG and "leaning 20 deg" in says
     straight = [d for d in asked if rlo._spot_lean(d) == 0.0]
@@ -3803,7 +4030,7 @@ def test_where_no_hand_reaches_a_spot_straight_down_the_same_spots_follow_leanin
         asked.append(d)
         return None if len(asked) == 3 else "no straight-down hand reaches its carry height 0.514"
 
-    drop, _tier, _says = next(rlo.spot_candidates(ctx, None, -0.07, [0.0] * 7, reach=third_only))
+    drop, _tier, _says = next(rlo.spot_candidates(ctx, bare, -0.07, [0.0] * 7, reach=third_only))
     assert type(drop) is ContainerPose and len(asked) == 3 and all(rlo._spot_lean(d) == 0.0 for d in asked)
 
 
@@ -3971,3 +4198,296 @@ def test_the_scene_cloud_is_moved_by_the_cameras_error_at_the_box_but_not_by_a_r
     rough = SimpleNamespace(pose=off, table_points=table, table_z_scene=TABLE_Z, rough=True)
     pts, _tz = rlo._scene_cloud(ctx, rough, None, TABLE_Z)
     assert pts == pytest.approx(table)
+
+
+# ---- 2026-11-17: the lid is let go only resting on the table (owner: "the arm dropped the lid off the table") ----
+# What the runs of 2026-11-13 and 11-17 recorded, replayed (setdown_flown: the numbers, off their run files).
+
+
+class _Z:
+    """A chain whose first joint is the tool frame's height; the hand straight down."""
+
+    def fk(self, q):
+        return np.diag([1.0, -1.0, -1.0]), np.array([0.0, 0.0, float(q[0])])
+
+
+def _run1(monkeypatch, chain=None):
+    """2026-11-17 16:40's inputs to the lid's spot: the box where the run had it, the table as the wrist
+    survey's fix measured it, the room map it chose on."""
+    from box_opening.runtime import approach
+
+    ctx = SimpleNamespace(
+        model=ContainerModel.load(PINK),
+        cpose=ContainerPose(xyz=(*flown.RUN1_BOX_XY, flown.RUN1_TABLE_Z), yaw=0.0),
+        worlds=SimpleNamespace(table_extent=flown.RUN1_EXTENT),
+        held_xy=None,
+        client=None,
+    )
+    monkeypatch.setattr(approach, "_chain", lambda: chain or _Chain())
+    return ctx, flown.run1_map()
+
+
+def test_run_1s_spot_in_front_of_the_tables_edge_is_no_longer_a_spot(monkeypatch):
+    """Flatbot 2026-11-17 16:40: "lid goes to [0.52, -0.42, 0.205] ... nothing reads clear (nowhere in x
+    0.28 to 0.65 ... has room ...): the most room seen, the lid 67 mm short", with the table measured over
+    x 0.64..1.15. On that run's own map and extent: that spot is not on the table (nothing was seen under
+    it; 12 cm in front of the extent), the search now reaches as far out as the box (x 0.78), and every
+    spot offered, whatever its tier, has the whole lid on table the cameras measured."""
+    ctx, tmap = _run1(monkeypatch)
+    m = ctx.model
+    lid_r = 0.5 * m.lid_dims[0]
+    old = ContainerPose(xyz=(*flown.RUN1_SPOT, flown.RUN1_TABLE_Z), yaw=0.0)
+    assert "past where it may on the table the cameras measured (x 0.64..1.15" in rlo.spot_off_table(ctx, tmap, old)
+    ctx.worlds.table_extent = None  # ... and by the map alone
+    assert "did not see" in rlo.spot_off_table(ctx, tmap, old)
+    ctx.worlds.table_extent = flown.RUN1_EXTENT
+    x0, x1, y0, y1 = rlo.spot_zone(m, ctx.cpose, ctx.worlds, tmap)
+    assert x0 >= 0.64 + lid_r + 0.03 - 0.02 and x1 == pytest.approx(flown.RUN1_BOX_XY[0])  # it was 0.28..0.65
+    passed = rlo.SpotsPassed()
+    offered = list(
+        rlo.spot_candidates(ctx, tmap, flown.RUN1_TABLE_Z, flown.RUN1_Q_CLEAR, reach=lambda *a: None, passed=passed)
+    )
+    assert offered and offered[0][1] in ("clear", "most room")
+    assert {tier for _d, tier, _s in offered} <= {"clear", "most room", "beside the box", "nearest"}
+    for d, _tier, _says in offered:
+        assert flown.RUN1_EXTENT[0] + lid_r + 0.03 <= d.xyz[0] <= flown.RUN1_EXTENT[1] - lid_r - 0.03
+        assert flown.RUN1_EXTENT[2] + lid_r + 0.03 <= d.xyz[1] <= flown.RUN1_EXTENT[3] - lid_r - 0.03
+        assert rlo.spot_off_table(ctx, tmap, d, flown.RUN1_Q_CLEAR) is None
+        assert math.hypot(d.xyz[0] - old.xyz[0], d.xyz[1] - old.xyz[1]) > 0.15
+    assert passed.off_table > 0  # the spots in front of the edge and on what stands were looked at, and passed over
+    # where the hand reaches none of them, none is offered: the caller puts the lid back on the box
+    passed = rlo.SpotsPassed()
+    none = list(
+        rlo.spot_candidates(ctx, tmap, flown.RUN1_TABLE_Z, flown.RUN1_Q_CLEAR, reach=lambda *a: "no IK", passed=passed)
+    )
+    assert none == [] and passed.unreachable > 0 and "the hand does not reach" in passed.says()
+
+
+def test_on_flatbot_run_1s_lid_goes_to_a_spot_on_the_measured_table_or_back_on_the_box(monkeypatch, capsys):
+    """The same, with flatbot's arm (its URDF, the joints the carry began at): the first spot the hand
+    reaches — straight down, else leaning — is on the table the wrist measured, or there is none and
+    the lid goes back on the box. Which, and where, is printed for the record."""
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(root="arm_mount", path=flatbot_urdf())
+    ctx, tmap = _run1(monkeypatch, chain)
+    monkeypatch.setattr(approach, "body_check", lambda: None, raising=False)
+    passed = rlo.SpotsPassed()
+    got = next(rlo.spot_candidates(ctx, tmap, flown.RUN1_TABLE_Z, flown.RUN1_Q_CLEAR, passed=passed), None)
+    with capsys.disabled():
+        sys.stdout.write(
+            "\nrun 1 replayed on flatbot's URDF: %s (%s)\n"
+            % (
+                "no spot the hand reaches on the measured table: the lid goes back on the box"
+                if got is None
+                else "the lid goes to [%.2f, %.2f] (%s; lean %.0f deg)"
+                % (got[0].xyz[0], got[0].xyz[1], got[1], rlo._spot_lean(got[0])),
+                passed.says(),
+            )
+        )
+    if got is not None:
+        assert rlo.spot_off_table(ctx, tmap, got[0], flown.RUN1_Q_CLEAR) is None
+        assert got[0].xyz[0] >= flown.RUN1_EXTENT[0] + 0.5 * ctx.model.lid_dims[0] + 0.03
+
+
+def test_a_box_inside_the_bench_s_reach_band_is_searched_round_as_before():
+    """spot_zone for a box the straight-down hand's band holds (press_demo.DROP_X_M, x 0.28..0.65) on a
+    table measured all round: the zone clear_lid_drops searched, the same lattice — so a bench run's
+    spots are the spots it had."""
+    from box_opening.tasks import press_demo as pd
+
+    m = ContainerModel.load(PINK)
+    cpose = ContainerPose(xyz=(0.45, -0.25, 0.0), yaw=0.0)
+    bare = _standing_ring((0.45, -0.25), 5.0, 6.0)
+    x0, x1, y0, y1 = rlo.spot_zone(m, cpose, SimpleNamespace(table_extent=None), bare)
+    reach = pd.lid_place_min_clear(m) + 0.20
+    assert (x0, x1) == pytest.approx(pd.DROP_X_M) and y1 == pytest.approx(-0.25 + reach)
+    assert ((x0 - pd.DROP_X_M[0]) / 0.02) % 1.0 == pytest.approx(0.0, abs=1e-6)
+    assert (((y0 - (-0.25 - pd.CLEAR_SPOTS_Y_M)) / 0.02 + 0.5) % 1.0) - 0.5 == pytest.approx(0.0, abs=1e-6)
+    # a box past the band: as far out as the box itself, on the table the fix measured
+    far = ContainerPose(xyz=(0.78, -0.13, 0.0), yaw=0.0)
+    bare = _standing_ring((0.78, -0.13), 5.0, 6.0)
+    zone = rlo.spot_zone(m, far, SimpleNamespace(table_extent=(0.64, 1.15, -0.64, 0.21)), bare)
+    assert zone[0] >= 0.64 + 0.0525 + 0.03 - 0.02 and zone[1] == pytest.approx(0.78) and zone[3] <= 0.21 - 0.0825
+
+
+def test_the_table_the_set_down_goes_by_is_the_cameras_moved_by_where_the_fingers_hold_the_lid(monkeypatch, capsys):
+    """2026-11-17 16:40: the wrist's fix had the lid's top at 0.2938 and the table at 0.2046 (89 mm
+    under it); the press met the lid 45 mm over the cameras' top, and the knob was gripped with the pads
+    at 0.3465. The cameras' heights were ~5 cm low at the box, the table's with them, and the set-down's
+    plan stood that far under the table. The table is as far under the lid's top as the cameras saw it,
+    the top where the fingers hold it: 0.2593, 55 mm over the cameras'. (11-13 01:52 and 01:53: 46 and
+    54 mm.) No grip, a rough fix, or a difference past TOUCH_TABLE_MAX_M: the cameras' table."""
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(approach, "_chain", lambda: _Z())
+    grip = [0.3465 + dp.DOWN_CONTACT_TOOL[2]] + [0.0] * 6  # the pads at 0.3465
+    fix = SimpleNamespace(top_xyz=(0.756, -0.1165, flown.RUN1_FIX_TOP_Z), table_z_scene=flown.RUN1_TABLE_Z)
+    ctx = SimpleNamespace(lid_lifted=None)
+    z, moved = rlo.setdown_table_z(ctx, flown.RUN1_TABLE_Z, fix, grip)
+    assert z == pytest.approx(0.3465 + rlo.GRIP_BELOW_LID_M - (flown.RUN1_FIX_TOP_Z - flown.RUN1_TABLE_Z))
+    assert moved == pytest.approx(0.0547, abs=2e-4) and z == pytest.approx(0.2593, abs=2e-4)
+    # the lift's own grip, once the lid is in the fingers
+    ctx.lid_lifted = SimpleNamespace(q_grip=grip)
+    assert rlo.setdown_table_z(ctx, flown.RUN1_TABLE_Z, fix) == (pytest.approx(z), pytest.approx(moved))
+    # nothing to go by: the cameras' own
+    ctx.lid_lifted = None
+    assert rlo.setdown_table_z(ctx, flown.RUN1_TABLE_Z, fix) == (flown.RUN1_TABLE_Z, None)
+    assert rlo.setdown_table_z(ctx, flown.RUN1_TABLE_Z, None, grip) == (flown.RUN1_TABLE_Z, None)
+    rough = SimpleNamespace(top_xyz=fix.top_xyz, table_z_scene=fix.table_z_scene, rough=True)
+    assert rlo.setdown_table_z(ctx, flown.RUN1_TABLE_Z, rough, grip) == (flown.RUN1_TABLE_Z, None)
+    way_off = SimpleNamespace(top_xyz=(0.0, 0.0, flown.RUN1_FIX_TOP_Z - 0.04), table_z_scene=flown.RUN1_TABLE_Z)
+    capsys.readouterr()
+    assert rlo.setdown_table_z(ctx, flown.RUN1_TABLE_Z, way_off, grip) == (flown.RUN1_TABLE_Z, None)
+    assert "95 mm from where the cameras' table and the box's height put it (more than 80)" in capsys.readouterr().out
+
+
+def _flown(name, watch):
+    """One recorded set-down (setdown_flown.SETDOWNS_FLOWN) fed to `watch(chain, client, plan, arm, end)`'s
+    watch as the client fed it: the trajectory sent, then each kept sample of the feedback in order.
+    Returns (the watch, the fraction it stopped the descent at or None)."""
+    rec = flown.SETDOWNS_FLOWN[name]
+    traj = SimpleNamespace(
+        points=[
+            SimpleNamespace(
+                positions=[z + dp.DOWN_CONTACT_TOOL[2]] + [0.0] * 6,
+                time_from_start=SimpleNamespace(sec=int(t), nanosec=int(round((t - int(t)) * 1e9))),
+            )
+            for t, z in rec["traj"]
+        ]
+    )
+    info = {"sent_at": 0.0, "sent_traj": traj, "feedback_q": []}
+    client = SimpleNamespace(last_execution=info)
+    det = watch(_Z(), client, rec["plan"], rec["plan"] + rlo.SETDOWN_WATCH_M, rec["end"])
+    stopped = None
+    for t, frac, z in rec["fed"]:
+        info["feedback_q"].append((t, frac, [z + dp.DOWN_CONTACT_TOOL[2]] + [0.0] * 6, None))
+        if det(frac) and stopped is None:
+            stopped = frac
+    return det, stopped
+
+
+@pytest.mark.parametrize("name", sorted(flown.SETDOWNS_FLOWN))
+def test_the_three_contacts_recorded_as_the_slow_stretch_began_are_not_taken_for_the_table(name):
+    """2026-11-13 01:52, 01:53 and 11-17 16:40: the set-down's watch reported "the lid met the table"
+    62.3-64.2 mm over the plan, 74-165 ms after it armed, each time — the last with the lid over the
+    floor. Their flights replayed (the pads' height, reference and measured): the watch as it was
+    (PressContact, armed where the slow stretch begins, judging from its first sample) meets the same
+    contact the run recorded, from the arm catching up with its reference as that slows; the set-down's
+    own watch (SetdownContact) judges nothing while the arm settles, takes nothing in the record for the
+    table, stops nothing, and would not have opened the fingers."""
+    from box_opening.tasks.press_contact import PressContact
+
+    old, stopped = _flown(
+        name, lambda chain, client, plan, arm, end: PressContact(chain, client, plan, arm, 0.0, end, final=True)
+    )
+    above_mm, at_s = flown.SETDOWNS_FLOWN[name]["old"]
+    assert old.contact is not None and old.how == "fast"
+    assert 1000 * (old.contact[1] - old.top_z) == pytest.approx(above_mm, abs=0.3)
+    assert old.contact[0] == pytest.approx(at_s, abs=0.005) and 0.07 < old.contact[0] - old.armed_t < 0.17
+    new, stopped = _flown(name, rlo.SetdownContact)
+    assert new.armed_t == pytest.approx(old.armed_t) and new.samples == old.samples  # the same samples, watched
+    assert new.contact is None and new.early == [] and stopped is None and new.f_stop is None
+    assert not new.credible() and new.refusal()[0] == "never"
+    rec = new.record()
+    assert (rec["watched"], rec["met"], rec["credible"], rec["verdict"]) == (True, False, False, "never")
+
+
+def _descent(table=None, catch_up=0.0, bump=None, top=0.20, noise=0.0002, seed=0, under=0.009):
+    """A set-down's last stretch flown over a table: the reference's pads from 12 cm over where the plan
+    has the lid meet the table (`top`) to SETDOWN_PAST_M under it, fast (135 mm/s) to where the slow
+    stretch begins and at 55 mm/s from there, as flown 2026-11-17; the pads measured `under` it (9 mm), coming
+    up on it by `catch_up` (m) over the 0.35 s after the slow stretch begins (the arm catching up), held
+    up by a table at `table` (the pads' height there; None: none), and by `bump`: (the pads' height it
+    begins at, how far it lifts them, for how many mm of the reference). Returns (the watch, the fraction
+    it stopped at or None, the reference's pads there)."""
+    import test_press_contact as tpc
+
+    arm, end = top + rlo.SETDOWN_SLOW_M, top - rlo.SETDOWN_PAST_M
+    fast = np.arange(top + 0.12, arm, -0.135 * 0.01)
+    slow = np.arange(arm, end, -0.055 * 0.01)
+    z = np.concatenate([fast, slow, [end]])
+    t_slow = 0.02 + len(fast) * 0.01
+    rng = np.random.default_rng(seed)
+    client = SimpleNamespace(last_execution=None)
+    det = rlo.SetdownContact(tpc._Chain(), client, top, arm, end)
+
+    def measured(t, zr):
+        free = zr - under + catch_up * min(max((t - t_slow) / 0.35, 0.0), 1.0) + float(rng.normal(0.0, noise))
+        if bump is not None and bump[0] - bump[2] < zr <= bump[0]:
+            free += bump[1] * min((bump[0] - zr) / 0.004, 1.0)
+        return free if table is None else max(free, table)
+
+    stopped, info = tpc._fly(det, client, z, 0.01, measured)
+    z_stop = (
+        None
+        if stopped is None
+        else float(np.interp(stopped * (0.02 + (len(z) - 1) * 0.01), 0.02 + np.arange(len(z)) * 0.01, z))
+    )
+    return det, stopped, z_stop
+
+
+def test_the_arm_catching_up_as_the_slow_stretch_begins_is_not_the_table_and_the_table_under_it_is():
+    """The pads come up 5 mm on the reference in the 0.35 s after the slow stretch begins (17-22 mm/s:
+    2026-11-17's), nothing under the lid: nothing is met, the touch flies to its end 8 mm under the plan,
+    and the lid may not be let go. The same with a table where the lid meets it 13 mm over the plan (the
+    mean of the 19 set-downs flown to their end): met there, the descent stopped within a few millimetres
+    of it, and that contact is the one the fingers open on."""
+    det, stopped, _z = _descent(catch_up=0.005)
+    assert stopped is None and det.contact is None and det.early == [] and not det.credible()
+    assert det.refusal() == (
+        "never",
+        "the touch ended 8 mm under where the plan has the lid meet the table and the arm felt no table",
+    )
+    det, stopped, z_stop = _descent(table=0.20 + 0.013, catch_up=0.005)
+    assert stopped is not None and det.credible() and det.verdict is None and det.refusal() is None
+    assert det.contact[1] == pytest.approx(0.213, abs=0.002) and det.how == "fast"
+    assert 0.213 - 0.009 - 0.012 < z_stop < 0.213 + 0.009  # the reference stopped as the rise was seen
+    rec = det.record()
+    assert rec["credible"] and rec["met"] and rec["cut"] and rec["above_top_mm"] == pytest.approx(13.0, abs=2.0)
+    assert (rec["settle_s"], rec["credible_above_mm"], rec["held_mm"], rec["early"]) == (0.6, 35.0, 15.0, [])
+
+
+def test_a_rise_well_above_the_table_is_not_the_table_and_the_descent_goes_on_to_it():
+    """After the settle, 41 mm over where the plan has the lid meet the table (more than
+    SETDOWN_CREDIBLE_M), the pads come up 5 mm on the reference and fall back: a rise the press's rule
+    takes for a contact. It is not the table: noted (`early`), the watch settles again, the descent goes
+    on, slowly — and the table, met 10 mm over the plan, is."""
+    det, stopped, _z = _descent(table=0.21, bump=(0.243, 0.005, 0.012), under=0.002)
+    assert stopped is not None and det.credible() and det.contact[1] == pytest.approx(0.21, abs=0.002)
+    assert len(det.early) == 1 and det.early[0][1] == pytest.approx(0.241, abs=0.003)
+    rec = det.record()
+    assert rec["early"][0][1] == pytest.approx(41.0, abs=3.0) and rec["early"][0][2] == "fast"
+    assert rec["above_top_mm"] == pytest.approx(10.0, abs=2.0) and rec["credible"] is True
+    # and with no table under it at all: not let go, the early rise said
+    det, stopped, _z = _descent(bump=(0.243, 0.005, 0.012), under=0.002)
+    assert stopped is None and not det.credible() and len(det.early) == 1
+    assert "rises +" in det.refusal()[1] and "were not taken for the table" in det.refusal()[1]
+
+
+def test_something_holding_the_lid_up_above_where_the_table_can_be_stops_the_descent_and_is_not_let_go_on():
+    """The pads stop 60 mm over where the plan has the lid meet the table, as the arm still settles, and
+    the reference goes on: 15 mm of it (SETDOWN_HELD_M) and whatever holds the lid up is no catching up.
+    Above SETDOWN_CREDIBLE_M it is not the table: the descent is stopped there (the spring pressing no
+    harder), and the lid is not let go on it. The table itself met that early — 30 mm over the plan,
+    inside the band — is the table."""
+    det, stopped, z_stop = _descent(table=0.26)
+    assert stopped is not None and det.verdict == "held" and not det.credible()
+    assert 0.26 + 0.009 - 0.015 - 0.006 < z_stop < 0.26 + 0.009 - 0.015 + 0.002  # 15 mm of the reference on, no more
+    verdict, why = det.refusal()
+    assert verdict == "held" and "something held the lid up 60 mm over where the plan has it meet the table" in why
+    assert det.record()["credible"] is False and det.record()["verdict"] == "held"
+    det, stopped, _z = _descent(table=0.23)
+    assert stopped is not None and det.credible() and det.contact[1] == pytest.approx(0.23, abs=0.002)
+
+
+def test_a_set_down_watch_that_fails_stops_the_descent_and_the_lid_is_not_let_go(monkeypatch):
+    """press_contact's watch of the set-down flew its planned end where it failed. A lid is let go only on
+    a contact now, and a planned end is no contact: the descent stops where the watch failed."""
+    import test_press_contact as tpc
+
+    client = SimpleNamespace(last_execution={"sent_at": 0.0, "sent_traj": object(), "feedback_q": [(0.0, 0.0, [0.0])]})
+    det = rlo.SetdownContact(tpc._Chain(), client, 0.20, 0.28, 0.192)
+    assert det(0.4) is True and det.verdict == "failed" and not det.credible()
+    assert det.refusal()[0] == "failed" and "the descent was stopped there" in det.refusal()[1]
