@@ -1560,7 +1560,6 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
     arrived, whatever the stroke did after. A stroke that then did not start leaves the arm at its start,
     the hand turned down 35-60 mm over the lid — not at the look pose, where a way in of one execution
     that did not start leaves it — and the callers bring it home from there (_home_from_over_box)."""
-    from box_opening.runtime.runner import LegResult
     from box_opening.tasks import depth_press as dp
 
     kw = {} if lookahead is None else {"lookahead": lookahead}
@@ -1591,6 +1590,8 @@ def fly_way_in(ctx, runner, legs, stroke, top_z, lookahead=None):
         # refusal that blames the box for a hold that was not sent. Refused here instead, for what it is,
         # as a result of a stroke that did not start (no flown_traj, no progress): the callers take the arm
         # home from over the box
+        from box_opening.runtime.runner import LegResult
+
         why = (
             "the driver did not enter its joint impedance at the stroke's start: the client's request for it "
             "did not go out, asked twice"
@@ -2664,6 +2665,10 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
             why="the press stroke did not start (%s) — nothing was pressed" % (last.detail or last.outcome),
             judged=False,
         )
+        # (the clear is solved in milliseconds and would be sent the instant the stroke was refused: a driver
+        # that refused the stroke for an arm still moving would refuse it too. At rest first, as any goal
+        # after a stop is)
+        runner.wait_still("the clear, after a stroke that did not start")
         homed = _home_from_over_box(ctx, cfg, runner, result)
         if not homed:
             let_go(ctx)  # its clear or home stopped part-way, or a plan was refused: the arm holds

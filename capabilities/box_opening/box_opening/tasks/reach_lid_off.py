@@ -1970,6 +1970,9 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
             last.detail or last.outcome,
             "" if press == 1 else " again",
         )
+        # (at rest first: the clear is sent the instant the stroke was refused, and a driver that refused
+        # the stroke for an arm still moving would refuse that too)
+        runner.wait_still("the clear, after a stroke that did not start")
         if not rp._home_from_over_box(ctx, cfg, runner, dp.DepthPress(free=True, why=why, judged=False)):
             rp.let_go(ctx)
             log.info("[press_demo] STOP: the arm did not get home — it holds; home it with sheppy's home_arm")
