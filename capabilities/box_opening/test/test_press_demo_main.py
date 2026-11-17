@@ -386,6 +386,24 @@ def test_after_a_go_the_run_goes_on_and_homes_first_unless_its_wrist_looked(monk
         assert len(HOME_FIRSTS) == homes, turned
 
 
+def test_after_a_go_from_a_line_up_whose_wrist_looked_the_first_scene_look_is_short(monkeypatch, tmp_path):
+    """After Open the arm stood about 15 s before anything moved (both clean runs of 2026-11-12 spent the whole
+    first look and the scene camera found nothing in front of the arm), which reads as a hang and comes out of
+    the run's budget. The line-up's wrist already holds the container: that look only refreshes the selection's
+    box and the hint. Every other start keeps the long first look."""
+    from box_opening.tasks import press_demo
+
+    for i, (turned, argv) in enumerate(((True, ["--line-up"]), (False, ["--line-up"]), (False, []))):
+        LOCATES.clear(), HOME_FIRSTS.clear(), REACH_OUTS.clear()
+        _lining_up(monkeypatch, (True, turned))
+        run_main(monkeypatch, tmp_path / str(i), ["--execute", *argv], _refused)
+        if turned:
+            assert LOCATES[0] <= 3.0, "the arm stands this long after Open"
+            assert LOCATES[0] == press_demo.SCENE_LINED_UP_LOCATE_S
+        else:
+            assert LOCATES[0] == press_demo.SCENE_FIRST_LOCATE_S == 15.0, argv
+
+
 def test_a_run_without_line_up_never_waits_on_anyone(monkeypatch, tmp_path):
     HOME_FIRSTS.clear(), REACH_OUTS.clear()
     calls = _lining_up(monkeypatch, (False, False))

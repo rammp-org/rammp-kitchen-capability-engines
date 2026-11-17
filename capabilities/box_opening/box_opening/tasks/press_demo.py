@@ -189,6 +189,14 @@ SCENE_LOCATE_S = 5.0
 # (26-28 depth points in each) and the run went home; 25 s later the next
 # run had the box 0.83 s in. Looking longer costs only time.
 SCENE_FIRST_LOCATE_S = 15.0
+# ... but short after the go of a line-up whose wrist looked (--line-up): the wrist already holds the
+# container (it is why the user was asked to open), and the scene camera had the whole line-up to see it.
+# This look only refreshes the selected container's box (selection_tie reads the segmenter's newest frame)
+# and the hint for where the wrist looks first. At 15 s the arm stood with its wrist turned for 15 s after
+# Open, which reads as a hang, and the time came out of a run budget the line-up had already used: both
+# clean runs of 2026-11-12 spent the whole first look and the scene camera found nothing in front of the
+# arm. 2 s is about ten of the segmenter's messages at its 5 Hz, several times the 0.35 s a fix takes it.
+SCENE_LINED_UP_LOCATE_S = 2.0
 # How long the straight-down aim gets (aim_button_at_staging's default:
 # record_detection_set's, from its staging over a placed box; the reach-out
 # gives its oblique aim its own). From 12 cm the lid fills a third of the
@@ -2283,7 +2291,7 @@ def main():
         # where the wrist looks, and the wrist's aim from there places the
         # button (SceneFix.rough).
         t_scene = time.monotonic()
-        scene_fix = locator.locate(SCENE_FIRST_LOCATE_S)
+        scene_fix = locator.locate(SCENE_LINED_UP_LOCATE_S if wrist_turned else SCENE_FIRST_LOCATE_S)
         viz_hook("scene", locator, scene_fix)  # what it judged, drawn off this thread (perception/viz)
         if ctx.mission_frames is not None:
             ctx.mission_frames.scene(
