@@ -36,7 +36,7 @@ own image and launched by sheppy from `rammp-deployments`.
   use"). Don't add a detector or segmenter to a capability without asking.
 - **Leave arm control and safety alone.** Never call `/acquire_control`,
   `/release_control`, `/revoke_control`, or publish `/estop`. A cancel,
-  failure or exception must leave the arm still and the gripper safe.
+  failure or exception must leave the arm and base still and the gripper safe.
 - **Keep `capability_engine/` changes small and separate.** Every capability
   depends on it. Make additive changes in their own PR; propose a redesign in
   an issue, not inside a capability PR.
