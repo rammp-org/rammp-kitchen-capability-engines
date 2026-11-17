@@ -18,7 +18,12 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     flags = ("use_orchestrator", "true"), ("mock", "false"), ("allow_execute", "false")
-    strings = ("mock_urdf", ""), ("state_dir", "/config/microwave_place"), ("ui_bridge_node_name", "ui_bridge_node")
+    strings = (
+        ("mock_urdf", ""),
+        ("state_dir", "/config/microwave_place"),
+        ("collision_geometry_file", ""),
+        ("ui_bridge_node_name", "ui_bridge_node"),
+    )
     # Reloading the cuRobo collision world took ~13 s on Snorlax; the shared 10 s default is too short.
     timeouts = (("service_call_s", "30.0"),)
     return LaunchDescription(
@@ -34,7 +39,7 @@ def generate_launch_description():
                 + [{"arm.service_call_s": ParameterValue(LaunchConfiguration("service_call_s"), value_type=float)}]
                 + [
                     {name: ParameterValue(LaunchConfiguration(name), value_type=str)}
-                    for name in ("state_dir", "ui_bridge_node_name")
+                    for name in ("state_dir", "collision_geometry_file", "ui_bridge_node_name")
                 ],
             ),
         ]

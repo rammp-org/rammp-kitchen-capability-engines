@@ -25,24 +25,127 @@ def joint_state(stamp_ns=1_000_000_000):
     return SimpleNamespace(position=np.zeros(7), stamp_ns=stamp_ns)
 
 
+def synthetic_geometry():
+    surfaces = [
+        {"name": role, "role": role, "type": "box", "center_m": [0, 0, 0], "size_m": [0.1, 0.1, 0.1]}
+        for role in sorted(place_motion.REQUIRED_SURFACE_ROLES)
+    ]
+    attachments = [
+        {"name": role, "role": role, "type": "box", "center_m": [0, 0, 0], "size_m": [0.1, 0.1, 0.1]}
+        for role in sorted(place_motion.REQUIRED_ATTACHMENT_ROLES)
+    ]
+    return {
+        "version": 1,
+        "synthetic": True,
+        "uncertainty": {name: 0.001 for name in place_motion.UNCERTAINTY_FIELDS},
+        "turntable_contact": {"max_gap_m": 0.002, "max_penetration_m": 0.001},
+        "robot_collision_links": {"flange": ["synthetic_flange"], "gripper": ["synthetic_gripper"]},
+        "surfaces": surfaces,
+        "attachments": attachments,
+    }
+
+
+class SyntheticChecker:
+    """No robot geometry: deterministic pair distances, explicitly limited to unit tests."""
+
+    def __init__(self, collision=None):
+        self.geometry = synthetic_geometry()
+        self.collision = collision
+
+    def assembly_clearances(self, q, **_kwargs):
+        phase = int(round(float(np.asarray(q)[0])))
+        result = [(0.10, "gripper vs cavity", "robot", "surface")]
+        if phase in (3, 4):
+            result.append((0.0, "container vs turntable", "container", "turntable"))
+        if self.collision is not None and phase == self.collision[0]:
+            result.append(self.collision[1])
+        return result
+
+
+def synthetic_phases():
+    names = ("side shift", "transit", "insertion", "lowering", "release", "retreat")
+    return [(name, [np.full(7, index, dtype=float)], 0.5, index < 4, index < 4) for index, name in enumerate(names)]
+
+
+def test_collision_free_complete_trajectory_validates_all_six_phases():
+    worst, required = place_motion._collision_path(SyntheticChecker(), synthetic_phases(), 0.01)
+
+    assert set(worst) == {"side shift", "transit", "insertion", "lowering", "release", "retreat"}
+    assert required == pytest.approx(0.014)
+
+
+def test_container_rim_contact_is_rejected():
+    checker = SyntheticChecker((2, (-0.001, "container vs rim", "container", "rim")))
+    with pytest.raises(place_motion.StageFailed, match="insertion: container vs rim"):
+        place_motion._collision_path(checker, synthetic_phases(), 0.01)
+
+
+def test_container_turntable_penetration_is_rejected():
+    checker = SyntheticChecker((3, (-0.002, "container vs turntable", "container", "turntable")))
+    with pytest.raises(place_motion.StageFailed, match="lowering: container vs turntable"):
+        place_motion._collision_path(checker, synthetic_phases(), 0.01)
+
+
+def test_gripper_interior_wall_collision_is_rejected():
+    checker = SyntheticChecker((1, (-0.001, "gripper vs left_wall", "robot", "left_wall")))
+    with pytest.raises(place_motion.StageFailed, match="transit: gripper vs left_wall"):
+        place_motion._collision_path(checker, synthetic_phases(), 0.01)
+
+
+def test_invalid_or_missing_geometry_fails_closed(tmp_path):
+    with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="not configured"):
+        place_motion.load_collision_geometry("")
+    with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="does not exist"):
+        place_motion.load_collision_geometry(tmp_path / "missing.yaml")
+    with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="marked synthetic"):
+        place_motion.validate_collision_geometry(synthetic_geometry())
+    assert place_motion.validate_collision_geometry(synthetic_geometry(), allow_synthetic=True)["synthetic"]
+
+
+def _validation_inputs(stamp_ns=1_000_000_000):
+    q = np.zeros(7)
+    checker = SyntheticChecker()
+    state = SimpleNamespace(position=q, stamp_ns=stamp_ns)
+    flange = SimpleNamespace(stamp_ns=stamp_ns)
+    cand = {"shift": [q]}
+    plan = SimpleNamespace(q=np.asarray([q]))
+    res = {
+        "line": [np.full(7, 2.0)],
+        "descent": (np.array([0.2]), [np.full(7, 3.0)]),
+        "floor_z": 0.15,
+        "tilt_line": [np.full(7, 4.0)],
+        "back_out": [np.full(7, 5.0)],
+    }
+    cfg = {"collision_state_max_age_s": 0.25, "clear_min": 0.01}
+    return checker, state, flange, cand, plan, res, cfg
+
+
+def test_stale_robot_state_refuses_collision_authorization(monkeypatch):
+    checker, state, flange, cand, plan, res, cfg = _validation_inputs()
+    monkeypatch.setattr(place_motion, "check_flange_model", lambda *_args: None)
+    with pytest.raises(place_motion.Refused, match="robot state is stale"):
+        place_motion.validate_place_collision(
+            Model(), checker, np.zeros(7), cand, plan, res, cfg, state, flange, 1_300_000_001
+        )
+
+
+def test_trajectory_state_mismatch_refuses_collision_authorization(monkeypatch):
+    checker, state, flange, cand, plan, res, cfg = _validation_inputs()
+    state.position = np.radians(np.full(7, 0.31))
+    monkeypatch.setattr(place_motion, "check_flange_model", lambda *_args: None)
+    with pytest.raises(place_motion.Refused, match="trajectory/state mismatch"):
+        place_motion.validate_place_collision(
+            Model(), checker, np.zeros(7), cand, plan, res, cfg, state, flange, 1_100_000_000
+        )
+
+
 def test_place_refuses_without_full_assembly_collision_geometry():
     with pytest.raises(place_motion.InsertionCollisionModelUnavailable) as error:
-        place_motion.require_full_assembly_insertion_model()
+        place_motion.require_full_assembly_insertion_model(None)
 
     message = str(error.value)
     assert message.startswith("place execution is disabled")
-    assert "side shift, transit, insertion, lowering, release and retreat" in message
-    assert tuple(place_motion.INSERTION_COLLISION_GEOMETRY_REQUIRED) == (
-        "measured 3D microwave interior geometry: glass/turntable footprint and height, rim, floor, side walls, "
-        "ceiling and back wall",
-        "open-door 3D geometry, hinge axis and measured open pose",
-        "hardware-verified flange, gripper-link collision geometry and tool transforms",
-        "wrist-camera collision geometry and calibrated tool-relative transform",
-        "held-container 3D geometry and grasp-relative pose, including grasp variation",
-        "bounded microwave registration, perception, calibration, grasp and trajectory-tracking uncertainty",
-    )
-    for requirement in place_motion.INSERTION_COLLISION_GEOMETRY_REQUIRED:
-        assert requirement in message
+    assert "current trajectory, robot state and full assembly" in message
 
 
 def test_plan_place_in_remains_available_for_kinematic_dry_run(monkeypatch):
@@ -151,6 +254,7 @@ def test_execution_guard_precedes_any_arm_access():
             log=None,
             descents_dir=None,
             res=None,
+            validation=None,
         )
 
 

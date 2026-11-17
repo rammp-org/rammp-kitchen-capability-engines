@@ -83,12 +83,16 @@ turntable's middle toward the opening, along the oven's axis) and the pre-insert
 cm out of the oven's front; it moves with the spot); it is not collision-checked. The hand keeps the
 tilt it has at the start until the release.
 
-**Safety hold (2026-11-17):** non-mock `place` execution requests currently refuse. Dry runs remain
-available for perception, IK planning and trajectory generation, and report kinematic feasibility
-separately from collision safety (`insertion_collision_status: UNVALIDATED`); they never command motion.
+**Conditional execution validation (2026-11-17):** dry runs remain available for perception, IK planning and
+trajectory generation. A non-mock `place` execution is authorized only when `collision_geometry_file` loads a
+non-synthetic v1 geometry, the active URDF contains every configured flange/gripper collision link, fresh synchronized
+joint/flange state matches the trajectory start, and sampled PyBullet clearance passes for side shift, cuRobo transit,
+insertion, lowering, release and retreat. The planned container/turntable contact is the only permitted contact.
+Empty, missing, invalid or synthetic geometry refuses before motion.
 Before planning, the driver's flange pose is compared with FK from the same active driver URDF, and
 the joint and flange messages must have valid timestamps within 10 ms.
-The only available microwave collision model is a depth-derived outer box used for the side shift and
+The default deployment still has no `collision_geometry_file`; therefore it remains fail-closed. The depth-derived
+outer box is used for the side shift and
 cuRobo transit; it does not establish insertion clearance for the held container, all gripper links, the
 wrist camera, the opening rim, open door, turntable glass, side walls, ceiling or back wall. The
 flange/tool, gripper and held-container geometry have not been verified against the physical assembly.
@@ -120,6 +124,30 @@ measurement uncertainty. The shortest route to a reviewed collision check is:
 The supplied `plan_20261117_203139.json` was not present in this workspace, and the active Jetson URDF,
 collision meshes, cavity/door model and calibration/uncertainty records were not available here. Therefore
 no minimum full-scene clearance or worst-case collision pair can be reported from this environment.
+
+### Collision geometry v1
+
+The YAML is deliberately limited to conservative boxes. Surface `center_m` / `size_m` are `[across-left,
+depth-into-cavity, up-from-opening-bottom]` in the detected oven frame. Attachment coordinates are XYZ in
+`arm_tool_frame`. `rpy_deg` is optional. Values must be measurements (or conservative CAD bounds), in metres:
+
+```yaml
+version: 1
+uncertainty: {registration_m: null, perception_m: null, grasp_m: null, tracking_m: null}
+turntable_contact: {max_gap_m: null, max_penetration_m: null}
+robot_collision_links:
+  flange: []       # active-URDF link names with collision shapes
+  gripper: []
+surfaces:           # box: center_m, size_m; every listed role is required
+  # roles: rim, floor, left_wall, right_wall, ceiling, back_wall, turntable, open_door
+attachments:        # roles container and wrist_camera are required; box pose is tool-relative
+  # - {name: held_container, role: container, type: box, center_m: [...], size_m: [...]}
+```
+
+`null` and empty lists above are placeholders, not defaults: validation rejects them. Synthetic unit-test files must
+set `synthetic: true`; that marker is always rejected by the robot execution path. The four uncertainty bounds are
+summed with `clear_min`. Supply the measured cavity surface boxes (including rim and glass footprint), open-door box,
+container and wrist-camera tool-relative boxes, real active-URDF flange/gripper link names, and contact tolerances.
 
 1. **Locate** the opening (above). Nothing is checked before it: not the arm's state, the gripper or
    the tool frame.
@@ -185,9 +213,9 @@ no minimum full-scene clearance or worst-case collision pair can be reported fro
    back out with the hand kept tilted, to above the pre-insert pose's x, y at that height, outside the
    opening (its end checked within 1 cm).
 
-   Current behavior: `execute: true` fails closed after saving the `UNVALIDATED` plan and before any
-   arm motion. It must not be enabled until all required collision geometry and physical offsets have
-   been calibrated and reviewed.
+   With `execute: true`, the exact six-phase trajectory is checked against the configured measured geometry and fresh
+   robot state before saving a `VALIDATED` plan or commanding motion. The checked-out deployment has no geometry file,
+   so it still fails closed until all required dimensions and physical offsets are measured, configured and reviewed.
 
 **Why the gripper opens only to 0.5.** The fingers stand vertically. Fully open they span about 15.5 cm
 of the 17.5 cm between the glass and the ceiling: 1.0 cm each side at best. Opened to 0.5 (0.4 rad)

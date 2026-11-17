@@ -139,6 +139,10 @@ PARAMS = {
     "side_shifts_cm": [3.0, -3.0, 6.0, -6.0, 9.0, -9.0],
     # the side shift and the transit: every arm and gripper link at least this far (m) from the microwave box
     "clear_min": 0.01,
+    # Measured v1 primitive geometry. Empty/missing/synthetic files keep physical place execution disabled.
+    "collision_geometry_file": "",
+    # Maximum age of the joint and flange samples bound to collision authorization.
+    "collision_state_max_age_s": 0.25,
     # the hand's tilt vs the start, anywhere on the transit and the lines (deg)
     "tilt_max_deg": 2.0,
     # cuRobo's world files go here; the planner's container must see this directory at the SAME path
@@ -501,6 +505,38 @@ class Capability(CapabilityEngine):
             summary, record = place_motion.summarize(
                 model, q0, loc, oven, world, world_info, boxes, cand, plan, res, attempts, c
             )
+            validation = None
+            if execute:
+                geometry = place_motion.load_collision_geometry(c["collision_geometry_file"])
+                assembly_checker = place_motion.Checker(model, [], geometry, oven)
+                try:
+                    joint_state = self.arm.joint_states()
+                    flange_state = self.arm.ee_state()
+                    validation = place_motion.validate_place_collision(
+                        model,
+                        assembly_checker,
+                        q0,
+                        cand,
+                        plan,
+                        res,
+                        c,
+                        joint_state,
+                        flange_state,
+                        self.get_clock().now().nanoseconds,
+                    )
+                finally:
+                    assembly_checker.close()
+                summary.update(
+                    insertion_collision_status=validation.status,
+                    insertion_collision_missing_geometry=[],
+                    full_path_clearance_cm={
+                        phase: [place_motion.cm(distance), pair]
+                        for phase, (distance, pair) in validation.phase_clearance.items()
+                    },
+                    collision_required_clearance_cm=place_motion.cm(validation.required_clearance_m),
+                    collision_plan_token=validation.plan_token,
+                )
+                record["summary"] = summary
             path = self._save_plan(record, stamp)
             summary["plan_file"] = str(path)
             log(
@@ -516,8 +552,7 @@ class Capability(CapabilityEngine):
             if not execute:
                 log("DRY RUN -- kinematic plan only; collision safety UNVALIDATED; nothing commanded")
                 return {"executed": False, "plan": summary}
-            # 6. execute
-            place_motion.require_full_assembly_insertion_model()
+            # 6. execute the exact trajectory authorized against fresh state and measured geometry
             with _started("place"):
                 result = place_motion.run_place(
                     self.arm,
@@ -531,6 +566,7 @@ class Capability(CapabilityEngine):
                     log,
                     self.state_dir / "descents",
                     res,
+                    validation,
                 )
             return {**result, "plan": summary}
         finally:

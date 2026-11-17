@@ -19,7 +19,11 @@ places the target and the pre-insert pose; it is not collision-checked.
 """
 
 import csv
+import hashlib
+import json
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import rammp_arm
@@ -73,15 +77,123 @@ INSERTION_COLLISION_GEOMETRY_REQUIRED = (
 )
 
 
-def require_full_assembly_insertion_model():
-    raise InsertionCollisionModelUnavailable(
-        "place execution is disabled: full-assembly insertion clearance is not validated. The current model does not "
-        "collision-check the complete assembly over the side shift, transit, insertion, lowering, release and "
-        "retreat against a measured microwave interior and open door. Missing inputs: "
-        + "; ".join(INSERTION_COLLISION_GEOMETRY_REQUIRED)
-        + ". Supply, register, uncertainty-bound and review those measurements and collision geometry before "
-        "executing."
-    )
+REQUIRED_SURFACE_ROLES = {
+    "rim",
+    "floor",
+    "left_wall",
+    "right_wall",
+    "ceiling",
+    "back_wall",
+    "turntable",
+    "open_door",
+}
+REQUIRED_ATTACHMENT_ROLES = {"container", "wrist_camera"}
+REQUIRED_ROBOT_LINK_ROLES = {"flange", "gripper"}
+UNCERTAINTY_FIELDS = {"registration_m", "perception_m", "grasp_m", "tracking_m"}
+
+
+@dataclass(frozen=True)
+class CollisionValidation:
+    """Evidence produced only after the current plan, live state and measured geometry pass."""
+
+    plan_token: str
+    state_stamps_ns: tuple[int, int]
+    required_clearance_m: float
+    phase_clearance: dict
+
+    @property
+    def status(self):
+        return "VALIDATED"
+
+
+def _geometry_error(message):
+    raise InsertionCollisionModelUnavailable(f"place execution is disabled: collision_geometry_file {message}")
+
+
+def load_collision_geometry(path):
+    """Load and validate the measured microwave/assembly primitive schema. Empty values fail closed."""
+    if not str(path).strip():
+        _geometry_error("is not configured")
+    path = Path(path)
+    if not path.is_file():
+        _geometry_error(f"does not exist: {path}")
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        _geometry_error(f"cannot be read: {exc}")
+    return validate_collision_geometry(data)
+
+
+def _validate_primitives(items, where, required_roles):
+    if not isinstance(items, list):
+        _geometry_error(f"must define a {where} list")
+    roles = set()
+    names = set()
+    for item in items:
+        if not isinstance(item, dict):
+            _geometry_error(f"has a non-object entry in {where}")
+        missing = {"name", "role", "type", "center_m", "size_m"} - set(item)
+        if missing:
+            _geometry_error(f"{where} {item.get('name', '<unnamed>')!r} is missing {sorted(missing)}")
+        if item["type"] != "box":
+            _geometry_error(f"{where} {item['name']!r} type must be 'box'")
+        if item["name"] in names:
+            _geometry_error(f"contains duplicate primitive name {item['name']!r}")
+        names.add(item["name"])
+        roles.add(item["role"])
+        for field in ("center_m", "size_m"):
+            values = np.asarray(item[field], dtype=float)
+            if values.shape != (3,) or not np.all(np.isfinite(values)):
+                _geometry_error(f"{where} {item['name']!r} {field} must contain three finite numbers")
+            if field == "size_m" and np.any(values <= 0):
+                _geometry_error(f"{where} {item['name']!r} size_m must be positive")
+        rpy = np.asarray(item.get("rpy_deg", [0.0, 0.0, 0.0]), dtype=float)
+        if rpy.shape != (3,) or not np.all(np.isfinite(rpy)):
+            _geometry_error(f"{where} {item['name']!r} rpy_deg must contain three finite numbers")
+    missing_roles = required_roles - roles
+    if missing_roles:
+        _geometry_error(f"{where} is missing required roles {sorted(missing_roles)}")
+
+
+def validate_collision_geometry(data, *, allow_synthetic=False):
+    """Validate the v1 primitive schema; tests may opt into explicitly marked synthetic data."""
+    if not isinstance(data, dict) or data.get("version") != 1:
+        _geometry_error("must be a mapping with version: 1")
+    if data.get("synthetic", False) and not allow_synthetic:
+        _geometry_error("is marked synthetic and cannot authorize robot motion")
+    uncertainty = data.get("uncertainty")
+    if not isinstance(uncertainty, dict) or UNCERTAINTY_FIELDS - set(uncertainty):
+        _geometry_error(f"uncertainty must define {sorted(UNCERTAINTY_FIELDS)}")
+    for name in UNCERTAINTY_FIELDS:
+        value = uncertainty[name]
+        if not isinstance(value, int | float) or not np.isfinite(value) or value < 0:
+            _geometry_error(f"uncertainty.{name} must be a finite non-negative number")
+    contact = data.get("turntable_contact")
+    if not isinstance(contact, dict) or {"max_gap_m", "max_penetration_m"} - set(contact):
+        _geometry_error("turntable_contact must define max_gap_m and max_penetration_m")
+    if any(not np.isfinite(contact[k]) or contact[k] < 0 for k in ("max_gap_m", "max_penetration_m")):
+        _geometry_error("turntable_contact values must be finite and non-negative")
+    _validate_primitives(data.get("surfaces"), "surfaces", REQUIRED_SURFACE_ROLES)
+    _validate_primitives(data.get("attachments"), "attachments", REQUIRED_ATTACHMENT_ROLES)
+    robot_links = data.get("robot_collision_links")
+    if not isinstance(robot_links, dict) or REQUIRED_ROBOT_LINK_ROLES - set(robot_links):
+        _geometry_error(f"robot_collision_links must define {sorted(REQUIRED_ROBOT_LINK_ROLES)}")
+    for role, names in robot_links.items():
+        if not isinstance(names, list) or not names or not all(isinstance(name, str) and name for name in names):
+            _geometry_error(f"robot_collision_links.{role} must be a non-empty list of link names")
+    return data
+
+
+def require_full_assembly_insertion_model(validation):
+    """Authorize only the exact plan/state/geometry combination returned by validate_place_collision()."""
+    if not isinstance(validation, CollisionValidation) or not validation.plan_token:
+        raise InsertionCollisionModelUnavailable(
+            "place execution is disabled: the current trajectory, robot state and full assembly have not passed "
+            "collision validation"
+        )
+    return validation
 
 
 def wrap(rad):
@@ -753,8 +865,54 @@ def _box_body(model, box):
 
     cid = model.rb.physics_client_id
     shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[d / 2 for d in box["dims"]], physicsClientId=cid)
-    pos, orn = _world_pose(model, box["position"], Rotation.from_euler("xyz", box["rpy_deg"], degrees=True).as_quat())
+    quat = box.get("quat", Rotation.from_euler("xyz", box["rpy_deg"], degrees=True).as_quat())
+    pos, orn = _world_pose(model, box["position"], quat)
     return p.createMultiBody(0, shape, basePosition=pos, baseOrientation=orn, physicsClientId=cid)
+
+
+def _oven_box(oven, primitive):
+    """Schema [across, depth, up] box -> the existing world-box representation [depth, across, up]."""
+    center = np.asarray(primitive["center_m"], dtype=float)
+    size = np.asarray(primitive["size_m"], dtype=float)
+    position = oven.b0 + center[0] * oven.w + center[1] * oven.n + center[2] * UP
+    oven_rotation = np.column_stack((oven.n, oven.w, UP))
+    relative = Rotation.from_euler("xyz", primitive.get("rpy_deg", [0, 0, 0]), degrees=True).as_matrix()
+    box = {
+        "name": primitive["name"],
+        "position": position.tolist(),
+        "quat": Rotation.from_matrix(oven_rotation @ relative).as_quat().tolist(),
+        # Body-local axes are depth, across, up, matching Oven.box and the oven_rotation columns.
+        "dims": [float(size[1]), float(size[0]), float(size[2])],
+    }
+    box["role"] = primitive["role"]
+    return box
+
+
+def _tool_box_body(model, primitive):
+    """Create a movable box whose configured pose is relative to arm_tool_frame."""
+    import pybullet as p
+
+    cid = model.rb.physics_client_id
+    shape = p.createCollisionShape(
+        p.GEOM_BOX, halfExtents=(np.asarray(primitive["size_m"], dtype=float) / 2).tolist(), physicsClientId=cid
+    )
+    body = p.createMultiBody(0, shape, physicsClientId=cid)
+    return body
+
+
+def _link_collision_names(model):
+    import pybullet as p
+
+    cid, rid = model.rb.physics_client_id, model.rb.robot_id
+    names = {}
+    base = p.getBodyInfo(rid, physicsClientId=cid)[0].decode()
+    if p.getCollisionShapeData(rid, -1, physicsClientId=cid):
+        names[base] = -1
+    for index in range(p.getNumJoints(rid, physicsClientId=cid)):
+        name = p.getJointInfo(rid, index, physicsClientId=cid)[12].decode()
+        if p.getCollisionShapeData(rid, index, physicsClientId=cid):
+            names[name] = index
+    return names
 
 
 def finger_clearance(rb, q, bodies, closed):
@@ -778,15 +936,34 @@ def finger_clearance(rb, q, bodies, closed):
 
 
 class Checker:
-    """The obstacle boxes as bodies in the shared sim, for clearance checks (the arm and gripper; the held
-    container is not checked). close()
-    removes them; use it in a finally."""
+    """Existing PyBullet clearance checker, optionally extended with measured interior and attached boxes."""
 
-    def __init__(self, model, boxes):
+    def __init__(self, model, boxes, geometry=None, oven=None, *, allow_synthetic=False):
         self.model, self.bodies = model, []
+        self.surface_bodies, self.attachments = [], []
+        self.geometry = None
         try:
             for b in boxes:
                 self.bodies.append((_box_body(model, b), b["name"]))
+            if geometry is not None:
+                self.geometry = validate_collision_geometry(geometry, allow_synthetic=allow_synthetic)
+                if oven is None:
+                    _geometry_error("requires a located oven frame")
+                for primitive in self.geometry["surfaces"]:
+                    box = _oven_box(oven, primitive)
+                    self.surface_bodies.append((_box_body(model, box), primitive["name"], primitive["role"]))
+                for primitive in self.geometry["attachments"]:
+                    self.attachments.append((_tool_box_body(model, primitive), primitive))
+                if not self.geometry.get("synthetic", False):
+                    available = _link_collision_names(model)
+                    missing = {
+                        name
+                        for names in self.geometry["robot_collision_links"].values()
+                        for name in names
+                        if name not in available
+                    }
+                    if missing:
+                        _geometry_error(f"names URDF links without collision geometry: {sorted(missing)}")
         except BaseException:
             self.close()
             raise
@@ -796,13 +973,65 @@ class Checker:
         False fully open, a number: the fingers at that angle in rad) to every box."""
         return finger_clearance(self.model.rb, q, self.bodies, closed)
 
+    def _place_attachments(self, q, include_container=True):
+        import pybullet as p
+
+        cid = self.model.rb.physics_client_id
+        T = self.model.fk(q)
+        world_pos, world_quat = _world_pose(self.model, T[:3, 3], Rotation.from_matrix(T[:3, :3]).as_quat())
+        placed = []
+        for body, primitive in self.attachments:
+            if primitive["role"] == "container" and not include_container:
+                continue
+            pos, quat = p.multiplyTransforms(
+                world_pos,
+                world_quat,
+                primitive["center_m"],
+                Rotation.from_euler("xyz", primitive.get("rpy_deg", [0, 0, 0]), degrees=True).as_quat(),
+                physicsClientId=cid,
+            )
+            p.resetBasePositionAndOrientation(body, pos, quat, physicsClientId=cid)
+            placed.append((body, primitive["name"], primitive["role"]))
+        return placed
+
+    def assembly_clearances(self, q, *, closed=True, include_container=True, extra_obstacles=()):
+        """Robot and each attachment/surface clearance at one joint state."""
+        import pybullet as p
+
+        if self.geometry is None:
+            _geometry_error("was not loaded")
+        cid = self.model.rb.physics_client_id
+        attached = self._place_attachments(q, include_container)
+        obstacles = [*self.surface_bodies, *extra_obstacles]
+        robot = finger_clearance(self.model.rb, q, [(b, n) for b, n, _ in obstacles], closed)
+        results = [(float(robot[0]), robot[1], "robot", "surface")]
+        for moving_body, moving_name, moving_role in attached:
+            for obstacle_body, obstacle_name, obstacle_role in obstacles:
+                points = p.getClosestPoints(moving_body, obstacle_body, sim.CLEARANCE_QUERY_M, physicsClientId=cid)
+                if points:
+                    candidate = min(float(point[8]) for point in points)
+                    results.append((candidate, f"{moving_name} vs {obstacle_name}", moving_role, obstacle_role))
+        return results
+
+    def assembly_clearance(self, q, **kwargs):
+        return min(self.assembly_clearances(q, **kwargs), key=lambda result: result[0])
+
+    def container_body(self):
+        return next((body, primitive) for body, primitive in self.attachments if primitive["role"] == "container")
+
     def close(self):
         import pybullet as p
 
         cid = self.model.rb.physics_client_id
         for bid, _ in self.bodies:
             p.removeBody(bid, physicsClientId=cid)
+        for bid, _, _ in self.surface_bodies:
+            p.removeBody(bid, physicsClientId=cid)
+        for bid, _ in self.attachments:
+            p.removeBody(bid, physicsClientId=cid)
         self.bodies = []
+        self.surface_bodies = []
+        self.attachments = []
 
 
 def microwave_obstacles(oven, depth_m, K, world_T_cam, mw_mask):
@@ -1001,6 +1230,87 @@ def check_path(model, checker, legs, R0, clear_min, tilt_max, closed=True, stage
     return worst, tilt
 
 
+def _collision_path(checker, phases, clear_min):
+    """Check dense full-assembly paths. Only container/turntable contact is allowed, during lowering/release."""
+    geometry = checker.geometry
+    uncertainty = sum(float(geometry["uncertainty"][name]) for name in UNCERTAINTY_FIELDS)
+    required = float(clear_min) + uncertainty
+    penetration = float(geometry["turntable_contact"]["max_penetration_m"])
+    worst = {}
+    turntable_final = None
+    for phase, qs, step_deg, closed, include_container in phases:
+        best = (9.0, "")
+        samples = dense(qs, step_deg)
+        for index, q in enumerate(samples):
+            for distance, pair, moving_role, obstacle_role in checker.assembly_clearances(
+                q, closed=closed, include_container=include_container
+            ):
+                best = min(best, (float(distance), pair))
+                contact = (
+                    moving_role == "container" and obstacle_role == "turntable" and phase in {"lowering", "release"}
+                )
+                limit = -penetration if contact else required
+                if distance < limit:
+                    raise StageFailed(
+                        "collision validation",
+                        f"{phase}: {pair} clearance {distance * 100:.1f} cm < {limit * 100:.1f} cm",
+                    )
+                if phase == "lowering" and index == len(samples) - 1 and contact:
+                    turntable_final = min(float(distance), turntable_final if turntable_final is not None else 9.0)
+        worst[phase] = [best[0], best[1]]
+    max_gap = float(geometry["turntable_contact"]["max_gap_m"])
+    if turntable_final is None or turntable_final > max_gap:
+        value = "not the closest pair" if turntable_final is None else f"{turntable_final * 100:.1f} cm"
+        raise StageFailed(
+            "collision validation", f"lowering does not end in modeled container/turntable contact ({value})"
+        )
+    return worst, required
+
+
+def validate_place_collision(model, checker, q0, cand, plan, res, cfg, joint_state, flange_state, now_ns):
+    """Bind measured geometry and fresh live state to this exact six-phase plan before any command is sent."""
+    if checker.geometry is None:
+        _geometry_error("was not loaded")
+    check_flange_model(model, joint_state, flange_state)
+    stamps = (int(joint_state.stamp_ns), int(flange_state.stamp_ns))
+    max_age_ns = int(float(cfg["collision_state_max_age_s"]) * 1e9)
+    ages = [int(now_ns) - stamp for stamp in stamps]
+    if any(age < 0 or age > max_age_ns for age in ages):
+        raise Refused(
+            f"collision validation robot state is stale (ages {[round(age / 1e3) / 1e3 for age in ages]} ms; "
+            f"limit {max_age_ns / 1e6:.0f} ms)"
+        )
+    q_live = np.asarray(joint_state.position, dtype=float)
+    mismatch = float(np.max(np.abs(wrap_deg(q_live - np.asarray(q0, dtype=float)))))
+    if mismatch > REUSE_TOL_DEG:
+        raise Refused(
+            f"collision validation trajectory/state mismatch {mismatch:.2f} deg > {REUSE_TOL_DEG:.1f} deg; re-plan"
+        )
+    Qs = np.asarray(plan.q, dtype=float)
+    descent = res["descent"]
+    contact = contact_index(descent, res["floor_z"])
+    lowering = list(descent[1][: contact + 1])
+    phases = [
+        ("side shift", cand["shift"], LINE_STEP_DEG, True, True),
+        ("transit", Qs, TRANSIT_STEP_DEG, True, True),
+        ("insertion", res["line"], LINE_STEP_DEG, True, True),
+        ("lowering", lowering, LINE_STEP_DEG, True, True),
+        # Lowering's final sample checks the still-held container at contact. Release opens there; from the first
+        # tilt sample onward the container is supported by the turntable, not rigidly attached to the tool.
+        ("release", res["tilt_line"], LINE_STEP_DEG, False, False),
+        ("retreat", res["back_out"], LINE_STEP_DEG, False, False),
+    ]
+    worst, required = _collision_path(checker, phases, cfg["clear_min"])
+    token_data = {
+        "state_stamps": stamps,
+        "start_q": np.asarray(q0, dtype=float).round(9).tolist(),
+        "phase_ends": [np.asarray(qs[-1], dtype=float).round(9).tolist() for _, qs, *_ in phases],
+        "geometry": checker.geometry,
+    }
+    token = hashlib.sha256(json.dumps(token_data, sort_keys=True).encode()).hexdigest()
+    return CollisionValidation(token, stamps, required, worst)
+
+
 def end_pose_error(model, q, target, heading):
     """(m, deg): the tool at q from `target`, its horizontal pointing from `heading`."""
     T = model.fk(q)
@@ -1088,10 +1398,13 @@ def plan_place_in(model, checker, q0, cand, Qs, floor_z, cfg, log=None):
     i_hold = contact_index(descent, floor_z)
     q_hold = descent[1][i_hold]
     tilt_line = plan_tilt(model, q_hold)
-    plan_level_back_out(model, tilt_line[-1], pre)
+    back_out = plan_level_back_out(model, tilt_line[-1], pre)
     return dict(
         line=line,
         descent=descent,
+        floor_z=float(floor_z),
+        tilt_line=tilt_line,
+        back_out=back_out,
         transit_outer_box_clearance=worst,
         tilt=tilt,
         end=(end_off, end_turn),
@@ -1352,12 +1665,12 @@ def approach_stop_indices(shift, Qs, line):
     return tuple(index for index in boundaries if 0 < index < knot_count)
 
 
-def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res):
+def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res, validation):
     """Execute only with validated full-assembly collision geometry.
 
     The lowering's /ee_state recording goes to descents_dir.
     """
-    require_full_assembly_insertion_model()
+    require_full_assembly_insertion_model(validation)
     c = cfg
     h, floor_z = cand["heading"], oven.floor_z
     R0 = model.fk(q0)[:3, :3]
