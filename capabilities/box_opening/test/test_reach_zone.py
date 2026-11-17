@@ -678,6 +678,15 @@ def test_a_grid_that_cannot_be_kept_is_still_served(served, monkeypatch):
     assert len(proved) == reach_probe.SAVE_EVERY + 5
     assert len(warned) == 2 and all("not kept" in w and "not this user's folder" in w for w in warned)
     assert _asked(Zone.from_dict(said[-1]["zone"])) == len(proved)
+    # ... and what a failed save held is tried again as the probe ends, even with nothing asked since
+    server, said, proved = served
+    warned.clear()
+    kept = []
+    for _ in range(reach_probe.SAVE_EVERY):
+        server.step()
+    monkeypatch.setattr(reach_probe, "save_zone", lambda zone, where=None: kept.append(zone))
+    server.close()
+    assert len(kept) == 1
 
 
 def test_the_probe_lowers_its_own_priority_before_it_works_and_works_on_where_it_may_not(monkeypatch, capsys):
@@ -963,6 +972,10 @@ def test_the_key_of_a_grid_asked_on_a_table_is_not_the_served_grids(flatbot):
     assert on_table != key and len(on_table) == 16
     assert on_table == reach_probe.zone_key(flatbot_urdf(), CFG, table_z=0.216)
     assert on_table != reach_probe.zone_key(flatbot_urdf(), CFG, table_z=0.25)
+    # ... and the link the chain is rooted at is the frame the grid's x and y are in
+    rooted = reach_probe.zone_key(flatbot_urdf(), CFG, root="arm_mount")
+    assert rooted == reach_probe.zone_key(flatbot_urdf(), CFG, root="arm_mount")
+    assert rooted != key and rooted != reach_probe.zone_key(flatbot_urdf(), CFG, root="base_link")
 
 
 def test_a_fill_asked_on_a_table_is_not_the_grid_the_line_up_reads(main_on_stand_ins, tmp_path, monkeypatch):
@@ -971,7 +984,7 @@ def test_a_fill_asked_on_a_table_is_not_the_grid_the_line_up_reads(main_on_stand
 
     run, served = main_on_stand_ins
     monkeypatch.setattr(
-        reach_probe, "zone_key", lambda _urdf, _container, table_z=None: "k" if table_z is None else "k%g" % table_z
+        reach_probe, "zone_key", lambda _u, _c, table_z=None, root=None: "k" if table_z is None else "k%g" % table_z
     )
     assert run("--lid-z", "0.315", "--table-z", "0.216") == 0
     assert [p.name for p in tmp_path.iterdir()] == ["zone_k0.216_z+0320.json"]

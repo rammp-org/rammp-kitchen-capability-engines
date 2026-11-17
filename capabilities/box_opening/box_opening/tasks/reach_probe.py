@@ -225,7 +225,7 @@ def press_plans(ctx, cfg, top_xyz, table_z=None, q_from=None):
 
 
 # ---------------------------------------------------------------------------------------- the boundary
-def zone_key(urdf, container, table_z=None):
+def zone_key(urdf, container, table_z=None, root=None):
     """What a grid is asked of, as one word: the arm's URDF, the chair model in force (its boxes, the arm's
     spheres it holds out of them, and the robot-body config the hand's spheres come from), the container's
     config, HOME, and the source of everything the proof runs (the run's own modules, and this one's proof
@@ -233,7 +233,8 @@ def zone_key(urdf, container, table_z=None):
     second time, so a grid read back under other code would steer the user away from a place that works.
     `table_z`: the table an offline fill asks its cells on (--table-z). None is the served grid, every
     cell asked with the box on its own foot; a fill on a table is another grid under another key, and a
-    line-up never reads it back as its own."""
+    line-up never reads it back as its own. `root`: the link of the URDF the chain is rooted at (--root:
+    the planning frame the grid's x and y are in); the same file rooted elsewhere is another grid."""
     import inspect
 
     from box_opening import constants
@@ -269,6 +270,8 @@ def zone_key(urdf, container, table_z=None):
         h.update(Path(module.__file__).read_bytes())
     if table_z is not None:
         h.update(("table %.4f" % float(table_z)).encode())
+    if root is not None:
+        h.update(("root %s" % root).encode())
     return h.hexdigest()[:16]
 
 
@@ -376,9 +379,14 @@ def _start_joints(said):
     except (TypeError, ValueError):
         q = []
     if len(q) != len(NAMES) or not all(math.isfinite(v) for v in q):
-        log.warning("reach_probe: q_from is not seven joint values (%r): this place is proven from HOME" % (said,))
+        if repr(said) not in _BAD_Q_FROM:  # once for each: the engine sends it with every sighting
+            _BAD_Q_FROM.add(repr(said))
+            log.warning("reach_probe: q_from is not seven joint values (%r): proven from HOME instead" % (said,))
         return None
     return q
+
+
+_BAD_Q_FROM = set()  # the q_from values already said to be no joints (_start_joints)
 
 
 class Server:
@@ -397,6 +405,7 @@ class Server:
         self.zone = None
         self.proven = None  # (xyz, table_z, q_from) of the place last proven
         self._dirty = self._unsaved = 0
+        self._unkept = False  # a save failed, and what it held is still to be kept
         self._said_at = None
 
     def hear(self, msg):
@@ -462,12 +471,16 @@ class Server:
         try:
             save_zone(self.zone, self.zone_dir)
         except OSError as e:
+            # what was asked stays to be kept (_unkept): tried again SAVE_EVERY cells on and at the end, not
+            # at every cell, with a warning each time
             log.warning("reach_probe: the boundary is not kept (%s)" % e)
-        self._unsaved = 0
+            self._unsaved, self._unkept = 0, True
+            return
+        self._unsaved, self._unkept = 0, False
 
     def close(self):
         """What was asked is kept, and said."""
-        if self.zone is not None and self._unsaved:
+        if self.zone is not None and (self._unsaved or self._unkept):
             self._keep()
         if self.zone is not None and self._dirty:
             self._tell_zone()
@@ -494,6 +507,9 @@ def serve(server, fd=0):
                 except (ValueError, TypeError, AttributeError):
                     log.warning("reach_probe: not a line of the engine's: %r" % line[:120])
     finally:
+        # on its way out from here on, however the loop ended (the pipe closed with no quit said, too): a
+        # terminate that comes now must not cut the save below in two (end_on_terminate reads this)
+        server.quit = True
         server.close()
 
 
@@ -573,7 +589,7 @@ def main(argv=None):
     far_m = args.far_m if args.far_m > 0 else None
     ctx, cfg = setup(args.urdf, args.root, args.body_layers, container)
     if args.serve:
-        server = Server(ctx, cfg, zone_key(args.urdf, container), args.zone_dir, far_m=far_m)
+        server = Server(ctx, cfg, zone_key(args.urdf, container, root=args.root), args.zone_dir, far_m=far_m)
         end_on_terminate(server)
         serve(server)
         return 0
@@ -585,7 +601,7 @@ def main(argv=None):
         return 0 if ok else 1
     if args.lid_z is None:
         ap.error("one of --lid-z, --at and --serve is needed")
-    key = zone_key(args.urdf, container, table_z=args.table_z)
+    key = zone_key(args.urdf, container, table_z=args.table_z, root=args.root)
     zone = load_zone(key, args.lid_z, ctx.model, args.zone_dir)
     t0 = time.monotonic()
     while not zone.done(far_m) and (args.budget_s is None or time.monotonic() - t0 < args.budget_s):
