@@ -350,9 +350,7 @@ def test_retreat_backs_off_the_wall_before_it_swings(model, monkeypatch):
     notes = []
     line = plan.plan_retreat(model, q_start, log=notes.append)
     assert "backs 2.0 cm, then the hand swings out" in notes[0] and "WARNING" not in notes[0]
-    turned = [
-        np.degrees((Rotation.from_matrix(model.fk(q)[:3, :3]) * start_rot.inv()).magnitude()) for q in line
-    ]
+    turned = [np.degrees((Rotation.from_matrix(model.fk(q)[:3, :3]) * start_rot.inv()).magnitude()) for q in line]
     first_turn = next(k for k, d in enumerate(turned) if d > 0.5)
     tip_back = (model.fk(line[first_turn - 1], "tip")[:2, 3] - model.fk(q_start, "tip")[:2, 3]) @ back
     assert tip_back == pytest.approx(0.02, abs=plan.IK_TOL)  # straight back 2 cm, THEN the turn
