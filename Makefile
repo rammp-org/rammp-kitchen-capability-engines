@@ -53,8 +53,9 @@ smoke:
 lint:
 	pre-commit run --all-files
 
-# self.arm tests, in an x86 ROS 2 Humble image with the repo mounted at /repo (edits need
-# no rebuild). Directories that do not exist yet are skipped. ARGS replaces the paths:
+# self.arm tests, and every capability's own test/ directory, in an x86 ROS 2 Humble image with
+# the repo mounted at /repo (edits need no rebuild). Directories that do not exist yet are
+# skipped. ARGS replaces the paths:
 #   make test-arm ARGS=tests/arm/test_sim.py -k golden
 # ARM_CMD replaces pytest with another command in the same container:
 #   make test-arm ARM_CMD='python3 /repo/scripts/compare_models.py'
