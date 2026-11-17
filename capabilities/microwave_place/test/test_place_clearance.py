@@ -1,5 +1,6 @@
 """Regression checks for fail-closed microwave insertion clearance."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -100,6 +101,51 @@ def test_invalid_or_missing_geometry_fails_closed(tmp_path):
     with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="marked synthetic"):
         place_motion.validate_collision_geometry(synthetic_geometry())
     assert place_motion.validate_collision_geometry(synthetic_geometry(), allow_synthetic=True)["synthetic"]
+
+
+def test_real_snorlax_inventory_names_verified_links_and_precise_missing_measurements():
+    import yaml
+
+    path = Path(__file__).parents[1] / "config/snorlax_collision_geometry.yaml"
+    geometry = yaml.safe_load(path.read_text())
+
+    assert geometry["robot_collision_links"]["flange"] == []
+    assert geometry["robot_collision_links"]["gripper"] == [
+        "arm_robotiq_85_base_link",
+        "arm_robotiq_85_left_knuckle_link",
+        "arm_robotiq_85_right_knuckle_link",
+        "arm_robotiq_85_left_finger_link",
+        "arm_robotiq_85_right_finger_link",
+        "arm_robotiq_85_left_inner_knuckle_link",
+        "arm_robotiq_85_right_inner_knuckle_link",
+        "arm_robotiq_85_left_finger_tip_link",
+        "arm_robotiq_85_right_finger_tip_link",
+    ]
+    with pytest.raises(place_motion.InsertionCollisionModelUnavailable) as error:
+        place_motion.load_collision_geometry(path)
+    for field in geometry["missing_measurements"]:
+        assert field in str(error.value)
+
+
+def test_empty_urdf_flange_list_requires_measured_attachment():
+    geometry = synthetic_geometry()
+    geometry["robot_collision_links"]["flange"] = []
+    with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="measured primitive with role 'flange'"):
+        place_motion.validate_collision_geometry(geometry, allow_synthetic=True)
+
+    geometry["attachments"].append(
+        {
+            "name": "measured_flange",
+            "role": "flange",
+            "type": "box",
+            "center_m": [0, 0, 0],
+            "size_m": [0.1, 0.1, 0.1],
+        }
+    )
+    assert (
+        place_motion.validate_collision_geometry(geometry, allow_synthetic=True)["robot_collision_links"]["flange"]
+        == []
+    )
 
 
 def _validation_inputs(stamp_ns=1_000_000_000):

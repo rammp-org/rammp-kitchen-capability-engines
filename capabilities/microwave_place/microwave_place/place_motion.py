@@ -163,6 +163,13 @@ def validate_collision_geometry(data, *, allow_synthetic=False):
         _geometry_error("must be a mapping with version: 1")
     if data.get("synthetic", False) and not allow_synthetic:
         _geometry_error("is marked synthetic and cannot authorize robot motion")
+    missing_measurements = data.get("missing_measurements", [])
+    if not isinstance(missing_measurements, list) or not all(
+        isinstance(measurement, str) and measurement for measurement in missing_measurements
+    ):
+        _geometry_error("missing_measurements must be a list of non-empty field names")
+    if missing_measurements:
+        _geometry_error("is incomplete; missing measurements: " + ", ".join(missing_measurements))
     uncertainty = data.get("uncertainty")
     if not isinstance(uncertainty, dict) or UNCERTAINTY_FIELDS - set(uncertainty):
         _geometry_error(f"uncertainty must define {sorted(UNCERTAINTY_FIELDS)}")
@@ -176,13 +183,22 @@ def validate_collision_geometry(data, *, allow_synthetic=False):
     if any(not np.isfinite(contact[k]) or contact[k] < 0 for k in ("max_gap_m", "max_penetration_m")):
         _geometry_error("turntable_contact values must be finite and non-negative")
     _validate_primitives(data.get("surfaces"), "surfaces", REQUIRED_SURFACE_ROLES)
-    _validate_primitives(data.get("attachments"), "attachments", REQUIRED_ATTACHMENT_ROLES)
+    attachments = data.get("attachments")
+    _validate_primitives(attachments, "attachments", REQUIRED_ATTACHMENT_ROLES)
     robot_links = data.get("robot_collision_links")
     if not isinstance(robot_links, dict) or REQUIRED_ROBOT_LINK_ROLES - set(robot_links):
         _geometry_error(f"robot_collision_links must define {sorted(REQUIRED_ROBOT_LINK_ROLES)}")
     for role, names in robot_links.items():
-        if not isinstance(names, list) or not names or not all(isinstance(name, str) and name for name in names):
-            _geometry_error(f"robot_collision_links.{role} must be a non-empty list of link names")
+        if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+            _geometry_error(f"robot_collision_links.{role} must be a list of link names")
+        if role != "flange" and not names:
+            _geometry_error(f"robot_collision_links.{role} must not be empty")
+    attachment_roles = {primitive["role"] for primitive in attachments}
+    if not robot_links["flange"] and "flange" not in attachment_roles:
+        _geometry_error(
+            "robot_collision_links.flange is empty because the URDF flange has no collision shape; "
+            "attachments must include a measured primitive with role 'flange'"
+        )
     return data
 
 

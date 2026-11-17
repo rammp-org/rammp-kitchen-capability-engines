@@ -1,0 +1,67 @@
+# Snorlax's real microwave-place measurement inventory. This is deliberately
+# non-synthetic and deliberately incomplete: the validator reports every item
+# below before it can authorize motion. Never replace nulls with estimates.
+version: 1
+
+verified_measurements:
+  source: microwave_detection.py tape measurements and plan_20261117_203139.json dry-run summary
+  opening_width_m: 0.3048
+  opening_height_m: 0.1905
+  cavity_depth_m: 0.3048
+  turntable_top_above_opening_bottom_m: 0.0159
+  turntable_to_ceiling_m: 0.1746
+  control_panel_face_to_opening_plane_m: 0.0286
+  container_brim_radius_m: 0.0843
+  latest_plan:
+    file: plan_20261117_203139.json
+    side_shift_m: 0.03
+    approach_duration_s: 7.1
+    transit_outer_box_clearance_m: 0.177
+    modeled_container_bottom_clearance_m: 0.005
+    status: dry-run kinematics only
+
+robot_collision_links:
+  # arm_end_effector_link has no collision shape in the active URDF. Do not list it.
+  # A measured flange primitive is still required under attachments before validation can pass.
+  flange: []
+  gripper:
+    - arm_robotiq_85_base_link
+    - arm_robotiq_85_left_knuckle_link
+    - arm_robotiq_85_right_knuckle_link
+    - arm_robotiq_85_left_finger_link
+    - arm_robotiq_85_right_finger_link
+    - arm_robotiq_85_left_inner_knuckle_link
+    - arm_robotiq_85_right_inner_knuckle_link
+    - arm_robotiq_85_left_finger_tip_link
+    - arm_robotiq_85_right_finger_tip_link
+
+missing_measurements:
+  - surfaces.rim.center_m/size_m
+  - surfaces.floor.center_m/size_m
+  - surfaces.left_wall.center_m/size_m
+  - surfaces.right_wall.center_m/size_m
+  - surfaces.ceiling.center_m/size_m
+  - surfaces.back_wall.center_m/size_m
+  - surfaces.turntable.center_m/size_m
+  - surfaces.open_door.center_m/size_m/rpy_deg
+  - attachments.flange.center_m/size_m/rpy_deg
+  - attachments.wrist_camera.center_m/size_m/rpy_deg
+  - attachments.container.center_m/size_m/rpy_deg
+  - uncertainty.registration_m
+  - uncertainty.perception_m
+  - uncertainty.grasp_m
+  - uncertainty.tracking_m
+  - turntable_contact.max_gap_m
+  - turntable_contact.max_penetration_m
+
+# Schema placeholders. They are unreachable while missing_measurements is non-empty.
+uncertainty:
+  registration_m: null
+  perception_m: null
+  grasp_m: null
+  tracking_m: null
+turntable_contact:
+  max_gap_m: null
+  max_penetration_m: null
+surfaces: []
+attachments: []

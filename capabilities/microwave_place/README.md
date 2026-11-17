@@ -91,7 +91,8 @@ insertion, lowering, release and retreat. The planned container/turntable contac
 Empty, missing, invalid or synthetic geometry refuses before motion.
 Before planning, the driver's flange pose is compared with FK from the same active driver URDF, and
 the joint and flange messages must have valid timestamps within 10 ms.
-The default deployment still has no `collision_geometry_file`; therefore it remains fail-closed. The depth-derived
+The Snorlax deployment points at the packaged `config/snorlax_collision_geometry.yaml` inventory. It remains
+fail-closed because that file explicitly lists the physical measurements still missing. The depth-derived
 outer box is used for the side shift and
 cuRobo transit; it does not establish insertion clearance for the held container, all gripper links, the
 wrist camera, the opening rim, open door, turntable glass, side walls, ceiling or back wall. The
@@ -136,7 +137,7 @@ version: 1
 uncertainty: {registration_m: null, perception_m: null, grasp_m: null, tracking_m: null}
 turntable_contact: {max_gap_m: null, max_penetration_m: null}
 robot_collision_links:
-  flange: []       # active-URDF link names with collision shapes
+  flange: []       # allowed only when attachments contains a measured role: flange primitive
   gripper: []
 surfaces:           # box: center_m, size_m; every listed role is required
   # roles: rim, floor, left_wall, right_wall, ceiling, back_wall, turntable, open_door
@@ -144,7 +145,10 @@ attachments:        # roles container and wrist_camera are required; box pose is
   # - {name: held_container, role: container, type: box, center_m: [...], size_m: [...]}
 ```
 
-`null` and empty lists above are placeholders, not defaults: validation rejects them. Synthetic unit-test files must
+`null` and empty geometry lists above are placeholders, not defaults: validation rejects them. A flange link list may
+be empty because `arm_end_effector_link` has no active-URDF collision shape, but then a measured tool-relative
+`attachments` primitive with role `flange` is mandatory. `robot_collision_links` asserts that named links really have
+PyBullet collision shapes; it does not restrict the existing whole-robot clearance check. Synthetic unit-test files must
 set `synthetic: true`; that marker is always rejected by the robot execution path. The four uncertainty bounds are
 summed with `clear_min`. Supply the measured cavity surface boxes (including rim and glass footprint), open-door box,
 container and wrist-camera tool-relative boxes, real active-URDF flange/gripper link names, and contact tolerances.
