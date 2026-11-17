@@ -209,6 +209,7 @@ class FakeChild:
 
     def __init__(self, argv, env, log=None, clock=None):
         self.argv, self.env, self.sent, self.stopped, self._got = list(argv), env, [], False, []
+        self.lines = []  # its own log's last lines
         FakeChild.made.append(self)
 
     def says(self, t, msg):
@@ -226,6 +227,9 @@ class FakeChild:
 
     def alive(self):
         return not self.stopped
+
+    def last_lines(self, wait_s=None):
+        return list(self.lines)
 
 
 def _band_zone(lid_z=0.32):
@@ -443,3 +447,44 @@ def test_a_line_up_ends_at_once_where_its_watch_has_gone():
     lining = LineUp(ctx, lambda: True, source, 40.0, clock=clock, sleep=clock.sleep)
     source.watch.stopped = True  # it ended (not ready, its camera gone)
     assert lining.run() == line_up.GONE and clock.t - ctx.t0 < 0.1
+
+
+def test_a_line_up_ends_at_once_where_its_probe_has_died_and_says_what_the_probe_said_last():
+    """A reach_probe that died judges nothing: the panel would say "Hold still, checking" until the time ran
+    out, and the user be told the container was not in place. The source is gone from then on, and says it
+    was the probe, with the end of its log."""
+    source, _watch, probe = _source()
+    assert not source.gone()
+    probe.lines = [
+        '  File "reach_probe.py", line 446, in main',
+        "    ctx, cfg = setup(args.urdf)",
+        "ValueError: no chain",
+    ]
+    probe.stopped = True  # it ended of itself: a traceback at its start, an exception in a proof
+    clock = Clock()
+    ctx = Ctx(clock)
+    lining = LineUp(ctx, lambda: True, source, 40.0, clock=clock, sleep=clock.sleep)
+    assert lining.run() == line_up.GONE and clock.t - ctx.t0 < 0.1
+    assert "reach_probe" in source.why_gone and "ValueError: no chain" in source.why_gone
+    assert "setup(args.urdf)" in source.why_gone  # the last few lines, not the last alone
+
+
+def test_a_child_keeps_the_end_of_its_log_for_whoever_asks_why_it_ended(tmp_path):
+    import sys
+    import time
+
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import sys\n"
+        "for i in range(40):\n"
+        "    print('line %d' % i)\n"
+        "print('@@ {\"zone\": {}}')\n"
+        "sys.exit('ValueError: no chain from arm_mount')\n"
+    )
+    child = line_up.Child([sys.executable, str(script)], None)
+    t0 = time.monotonic()
+    while child.alive() and time.monotonic() - t0 < 10.0:
+        time.sleep(0.02)
+    said = child.last_lines()
+    assert said[-2:] == ["line 39", "ValueError: no chain from arm_mount"]  # its log's lines, not its messages
+    assert 2 < len(said) <= line_up.TAIL_LINES

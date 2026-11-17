@@ -10,8 +10,8 @@ where the box was last seen and what the boundary says of that place, is a `sour
 
 It ends one of four ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
 panel's Cancel, or the orchestrator's), TIMED_OUT (the time for lining up ran out: the panel says to press
-open again, and holds that for LINGER_S), GONE (what watched the box has ended: `source.gone()`). Nothing
-here moves the arm or starts a run: the caller does, on GO alone.
+open again, and holds that for LINGER_S), GONE (what watched the box, or what judged its place, has ended:
+`source.gone()`). Nothing here moves the arm or starts a run: the caller does, on GO alone.
 
 MockApproach is the mock's source: a box that comes into reach as a user driving up to a table brings it,
 so the UI's side of a line-up can be rehearsed with no arm and no camera.
@@ -28,6 +28,7 @@ import math
 import subprocess
 import threading
 import time
+from collections import deque
 
 from box_opening import guide
 from box_opening.reach_zone import Zone
@@ -164,16 +165,22 @@ class MockApproach:
 MARK = "@@ "  # a child's line that is for the engine (tasks/box_watch, tasks/reach_probe); the rest is its log
 PROOF_NEAR_M = guide.STEADY_M  # a proof speaks for a box this near the place it was made for
 STOP_WAIT_S = 2.0  # a child asked to end is killed after this long
+# the end of a child's own log is kept, for the error of one that died: this many lines hold a traceback's
+# last frame and its exception ...
+TAIL_LINES = 4
+TAIL_WAIT_S = 0.5  # ... and its reader is given this long to read what it wrote as it died
 
 
 class Child:
     """A child process whose marked stdout lines are messages: (when it was read, the message), oldest first.
-    `log(text)` gets every other line it prints. It is ended by terminate(), then a kill."""
+    `log(text)` gets every other line it prints, and the last TAIL_LINES of them are kept (last_lines). It is
+    ended by terminate(), then a kill."""
 
     def __init__(self, argv, env, log=None, clock=time.monotonic):
         self._log, self._clock = log, clock
         self._lock = threading.Lock()
         self._got = []
+        self._said = deque(maxlen=TAIL_LINES)
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -185,7 +192,8 @@ class Child:
             bufsize=1,
             start_new_session=True,  # a Ctrl+C at the node's terminal is the node's to pass on
         )
-        threading.Thread(target=self._read, name="line-up-child", daemon=True).start()
+        self._reader = threading.Thread(target=self._read, name="line-up-child", daemon=True)
+        self._reader.start()
 
     def _read(self):
         for line in self.proc.stdout:
@@ -197,7 +205,10 @@ class Child:
                     continue
                 with self._lock:
                     self._got.append((self._clock(), msg))
-            elif self._log is not None:
+                continue
+            with self._lock:
+                self._said.append(line)
+            if self._log is not None:
                 self._log(line)
 
     def messages(self):
@@ -214,6 +225,14 @@ class Child:
 
     def alive(self):
         return self.proc.poll() is None
+
+    def last_lines(self, wait_s=TAIL_WAIT_S):
+        """The end of its own log. Of a child that has ended: what it said as it died, its reader given
+        `wait_s` to have read it."""
+        if not self.alive():
+            self._reader.join(wait_s)
+        with self._lock:
+            return list(self._said)
 
     def stop(self, wait_s=STOP_WAIT_S):
         if self.proc.poll() is None:
@@ -243,6 +262,7 @@ class BoxSource:
         self._proof = None  # the newest proof: ((x, y, z), ok)
         self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
         self.why_none = ""  # the watch's last word on why it sees no box
+        self.why_gone = ""  # where it is the probe that ended (gone): that, and the end of its log
 
     def _hear(self):
         """What the children have said since the last tick. True where there is a new sighting."""
@@ -310,8 +330,20 @@ class BoxSource:
         return (fix if new else None), reach
 
     def gone(self):
-        """The watch has ended: nothing sees the box any more."""
-        return not self.watch.alive()
+        """What the line-up cannot go on without has ended: the watch (nothing sees the box any more), or the
+        probe once it was started (nothing judges where the box stands: the panel would say "Hold still,
+        checking" until the time ran out, and the user be told the container was not in place). `why_gone`
+        then says it was the probe, with the end of its log."""
+        if not self.watch.alive():
+            return True
+        if self.probe is None or self.probe.alive():
+            return False
+        if not self.why_gone:
+            said = " | ".join(line.strip()[:200] for line in self.probe.last_lines())
+            self.why_gone = "reach_probe, which judges where the arm opens the container, ended" + (
+                f" (it said last: {said})" if said else ""
+            )
+        return True
 
     def close(self):
         for child in (self.watch, self.probe) if self._owns_watch else (self.probe,):

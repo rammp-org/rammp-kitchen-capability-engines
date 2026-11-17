@@ -832,8 +832,9 @@ class Capability(CapabilityEngine):
         way to move and asks, and this returns only on its Open (line_up.GO), with the seconds it took.
         Cancel on it is the orchestrator's cancel (Cancelled); out of time, EngineError("not_lined_up"),
         recoverable: nothing moved. A UI that goes while lining up shows no panel and takes no press, so it
-        ends that way too. A source that cannot start is EngineError("line_up_unavailable"): with the line-up
-        asked for, no run starts without its Open. `make_source()`: what sees the box and judges its place
+        ends that way too. A source that cannot start, or cannot go on (its reach_probe not there to start,
+        or ended: BoxSource.gone), is EngineError("line_up_unavailable"), at once and with why: with the
+        line-up asked for, no run starts without its Open. `make_source()`: what sees the box and judges its place
         (BoxSource; the mock's MockApproach), made only where it is used, and closed before this returns: no
         run starts while it lives."""
         t0 = time.monotonic()
@@ -851,6 +852,11 @@ class Capability(CapabilityEngine):
         try:
             lining = line_up.LineUp(ctx, self._ui_live, source, LINE_UP_S, on_say=said)
             outcome = lining.run()
+        except OSError as e:
+            # with the wrist look the probe is started inside the loop, once the run has said which robot this is
+            raise EngineError(
+                "line_up_unavailable", f"the line-up could not go on ({e}): nothing was pressed", recoverable=False
+            ) from e
         finally:
             close = getattr(source, "close", None)
             if close is not None:
@@ -860,9 +866,12 @@ class Capability(CapabilityEngine):
                 self._cancel_from_ui()
             raise Cancelled()
         if outcome == line_up.GONE:
+            why = getattr(source, "why_gone", "")  # the probe, where it was the probe that ended
             raise EngineError(
                 "line_up_unavailable",
-                "what watched the container ended while lining up: nothing ran",
+                f"the line-up could not go on: {why}: nothing was pressed"
+                if why
+                else "what watched the container ended while lining up: nothing ran",
                 recoverable=False,
             )
         if outcome == line_up.TIMED_OUT:

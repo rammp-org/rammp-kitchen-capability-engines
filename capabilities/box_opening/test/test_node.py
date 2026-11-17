@@ -55,7 +55,8 @@ if "--line-up" in sys.argv:
         sys.stdout.write("[press_demo] not starting: the arm driver is not up\\n")
         sys.stdout.flush()
         sys.exit(1)
-    sys.stdout.write('@@ {"robot": {"urdf": null, "root": "arm_mount"}}\\n')
+    robot = {"urdf": os.environ.get("URDF") or None, "root": "arm_mount"}  # URDF: reach_probe is started on it
+    sys.stdout.write("@@ " + json.dumps({"robot": robot}) + "\\n")
     sys.stdout.write("[press_demo] LINE-UP: the wrist turns to look at the table in front\\n")
     if mode == "holds":
         sys.stdout.write("[press_demo] STOP: the line-up's wrist turn: aborted - the arm holds; nothing was pressed\\n")
@@ -1289,6 +1290,57 @@ def test_a_line_up_that_cannot_start_starts_no_run(engine, monkeypatch):
         engine.execute("open_box", {}, FakeCtx())
     assert e.value.error_code == "line_up_unavailable" and not e.value.recoverable and started == []
     assert "nothing moved" in str(e.value)
+
+
+def test_a_reach_probe_that_died_ends_the_line_up_at_once_with_what_it_said(engine, monkeypatch):
+    """line_up.BoxSource.gone / why_gone: the probe ended, so nothing judges the box's place. Not 40 s of
+    "Hold still, checking" and then "the container was not where the arm opens it"."""
+    given(monkeypatch, FULL_RUN)
+    engine.set_parameters([Parameter("line_up", value=True)])
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+
+    class ProbeDied(InPlace):
+        why_gone = "reach_probe, which judges where the arm opens the container, ended (ValueError: no chain)"
+
+        def gone(self):
+            return True
+
+    source, started = ProbeDied(), []
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id: source)
+    monkeypatch.setattr(engine, "_argv", lambda *a: started.append(a) or [])
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "line_up_unavailable" and not e.value.recoverable and started == []
+    assert "reach_probe" in str(e.value) and "ValueError: no chain" in str(e.value)
+    assert time.monotonic() - t0 < 2.0 and source.closed_at is not None
+
+
+@pytest.mark.parametrize("probe", ["missing", "dies"])
+def test_with_the_wrist_look_a_reach_probe_that_cannot_start_or_dies_ends_the_line_up_as_unavailable(
+    engine, monkeypatch, tmp_path, probe
+):
+    """With the wrist look the probe is started inside the line-up's loop, once the run has said which robot
+    this is. One that cannot be started (its command line not there) or that dies as it starts ends the
+    line-up at once, line_up_unavailable with why: not "exception", and not the line-up's whole time. The
+    run is told to stop and never to go."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("URDF", "/state/arm.urdf")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    if probe == "dies":
+        (tmp_path / "reach_probe").write_text("#!/bin/sh\necho 'ValueError: no chain from arm_mount' >&2\nexit 1\n")
+        (tmp_path / "reach_probe").chmod(0o755)
+    monkeypatch.setattr(node, "executable", lambda name: str(tmp_path / name))  # press_demo: the fixture's stand-in
+    told, real_send = [], node.Run.send
+    monkeypatch.setattr(node.Run, "send", lambda run, msg: (told.append(msg), real_send(run, msg)))
+    ctx = FakeCtx()
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "line_up_unavailable" and not e.value.recoverable
+    assert time.monotonic() - t0 < 8.0 and told == [{"stop": True}] and engine._run is None
+    assert ("No such file" if probe == "missing" else "ValueError: no chain from arm_mount") in str(e.value)
+    assert "nothing was pressed" in str(e.value)
 
 
 def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(engine, monkeypatch):
