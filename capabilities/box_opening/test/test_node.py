@@ -44,9 +44,11 @@ FAKE_RUN = """
 import json, os, sys, time
 from pathlib import Path
 if "--line-up" in sys.argv:
-    # press_demo --line-up: says where the box is (LINE_UP: "in place" | "far" | "dies") until a line on
-    # stdin: go and the run goes on, stop (or the pipe closed) and it ends 5, nothing pressed, once its
-    # wrist is back at rest (TURN_BACK_S: how long that turn takes; a Ctrl+C stops it there, 130)
+    # press_demo --line-up: says where the box is (LINE_UP: "in place" | "far" | "dies" | "holds", its wrist's
+    # turn to the view stopped part way: 6) until a line on stdin: go and the run goes on, stop (or the pipe
+    # closed) and it ends 5, nothing pressed, once its wrist is back at rest (TURN_BACK_S: how long that turn
+    # takes; a Ctrl+C stops it there, 130. TURN_BACK: "holds", that turn stopped part way: 6; "halted", the
+    # e-stop came during it: 4)
     import select
     mode = os.environ.get("LINE_UP", "in place")
     if mode == "dies":
@@ -55,6 +57,10 @@ if "--line-up" in sys.argv:
         sys.exit(1)
     sys.stdout.write('@@ {"robot": {"urdf": null, "root": "arm_mount"}}\\n')
     sys.stdout.write("[press_demo] LINE-UP: the wrist turns to look at the table in front\\n")
+    if mode == "holds":
+        sys.stdout.write("[press_demo] STOP: the line-up's wrist turn: aborted - the arm holds; nothing was pressed\\n")
+        sys.stdout.flush()
+        sys.exit(6)
     heard = None
     try:
         while heard is None:
@@ -74,6 +80,14 @@ if "--line-up" in sys.argv:
         except KeyboardInterrupt:
             sys.stdout.write("[press_demo] stopped by Ctrl+C\\n")
             sys.exit(130)
+        if os.environ.get("TURN_BACK") == "holds":
+            sys.stdout.write("[press_demo] STOP: the line-up ended and the wrist did not turn back - the arm holds\\n")
+            sys.stdout.flush()
+            sys.exit(6)
+        if os.environ.get("TURN_BACK") == "halted":
+            sys.stdout.write("[press_demo] STOP: the arm was halted (e-stop) during line-up:rest\\n")
+            sys.stdout.flush()
+            sys.exit(4)
         sys.stdout.write("[press_demo] LINE-UP: ended without a go; nothing was pressed, the wrist back at rest\\n")
         sys.stdout.flush()
         sys.exit(5)
@@ -1476,6 +1490,82 @@ def test_a_cancel_while_the_wrist_looks_is_the_runs_own_ctrl_c(engine, monkeypat
     with pytest.raises(Cancelled):
         engine.execute("open_box", {}, ctx)
     assert sent == [signal.SIGINT] and engine._run is None and ctx.world == []
+
+
+@pytest.mark.parametrize("turn", ["out", "back"])
+def test_a_line_up_whose_wrist_turn_stopped_part_way_is_the_arm_holding_and_the_world_state_is_told(
+    engine, monkeypatch, turn
+):
+    """The line-up's own wrist turn stopped part way, on its way to the view or, the line-up over, on its
+    way back to rest: the run says so and exits abort.EXIT_LINE_UP_HOLDS. That is the arm holding where it
+    stopped, as a run's own stop is: arm_holds, not recoverable, the arm's error in the world state. Never
+    "nothing moved, press open again"."""
+    given(monkeypatch, FULL_RUN)
+    if turn == "out":
+        monkeypatch.setenv("LINE_UP", "holds")
+    else:
+        monkeypatch.setenv("LINE_UP", "far")
+        monkeypatch.setenv("TURN_BACK", "holds")
+        monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    engine.orchestrated = True  # the arm's system_status is the orchestrator's (standalone: nothing to tell)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_holds" and not e.value.recoverable
+    assert "STOP: the line-up" in str(e.value) and "clear it, attended" in str(e.value)
+    (status,) = (w["system_status"] for w in ctx.world)
+    assert status["arm"]["state"] == "error" and status["arm"]["error_code"] == "arm_holds"
+    assert engine._run is None and ctx.objects == {}
+
+
+def test_a_run_that_had_to_be_stopped_after_its_line_up_is_the_arm_holding_too(engine, monkeypatch):
+    """Told its line-up is over, the run did not end within LINE_UP_END_S and got its Ctrl+C: its wrist may
+    stand part-turned. arm_holds, not recoverable; not "not lined up, press open again"."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    monkeypatch.setenv("TURN_BACK_S", "20")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    monkeypatch.setattr(node, "LINE_UP_END_S", 0.5)
+    engine.orchestrated = True
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_holds" and not e.value.recoverable and sent == [signal.SIGINT]
+    assert "part-turned" in str(e.value) and "clear it, attended" in str(e.value)
+    assert [w["system_status"]["arm"]["error_code"] for w in ctx.world] == ["arm_holds"]
+
+
+def test_a_run_halted_while_its_wrist_turned_back_says_so_not_that_nothing_moved(engine, monkeypatch):
+    """Whatever the line-up's own end was (here: out of time), a run that then ended any way but "nothing
+    pressed, the wrist back at rest" is reported by what it said: the e-stop during the turn back is
+    arm_halted, in the world state too."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    monkeypatch.setenv("TURN_BACK", "halted")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    engine.orchestrated = True
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_halted" and not e.value.recoverable
+    assert [w["system_status"]["arm"]["error_code"] for w in ctx.world] == ["arm_halted"]
+
+
+def test_the_line_ups_holds_exit_is_the_arm_holding_whatever_the_run_said_last():
+    from box_opening.runtime.abort import EXIT_LINE_UP_HOLDS
+
+    for lines in ([], ["[press_demo] LINE-UP: the wrist turns to look"], ["[press_demo] STOP: nothing was pressed"]):
+        error = node.error_for("open_box", EXIT_LINE_UP_HOLDS, lines)
+        assert error.error_code == "arm_holds" and not error.recoverable and "clear it, attended" in str(error)
 
 
 def test_a_run_that_ends_of_itself_while_lining_up_fails_with_what_it_said(engine, monkeypatch):

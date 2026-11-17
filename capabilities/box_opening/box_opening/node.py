@@ -49,7 +49,7 @@ from rammp_orchestrator_interfaces.srv import Control
 from . import LOGGER, line_up
 from .constants import AIR_CONTROL_ENV, state_dir
 from .flight_view import FlightView
-from .runtime.abort import EXIT_HALTED, EXIT_NOT_LINED_UP
+from .runtime.abort import EXIT_HALTED, EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
 from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
 # ROS parameter -> default. Container and world name files in the image's config/ (or are
@@ -158,6 +158,12 @@ RUN_LONGEST_S = 50.0
 LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 40 s
 LINE_UP_END_S = 12.0  # a run told its line-up is over turns its wrist back and ends within this, or is stopped
 NOT_LINED_UP = "the container was not where the arm opens it within %.0f s: nothing moved (press open again in place)"
+# what is said of an arm that holds where it stopped (error_for's arm_holds)
+ARM_HOLDS = "the arm holds where it stopped: clear it, attended, before the next run"
+LINE_UP_LATE = (
+    "the run did not end within %.0f s of being told its line-up was over and was stopped (Ctrl+C): the wrist "
+    "may stand part-turned -- " + ARM_HOLDS
+)
 LINE_UP_NO_UI = (
     "line_up is on and this goal has no UI to ask on (it came without the orchestrator's token, or the UI "
     "bridge is not there): nothing moved. Set line_up false to run without lining up"
@@ -590,13 +596,15 @@ def error_for(action_id, code, lines):
         return EngineError("not_home", why, recoverable=True)
     if code == EXIT_NOT_LINED_UP:  # its line-up ended with no go (the engine's own stop is said by the engine)
         return EngineError("not_lined_up", why, recoverable=True)
+    if code == EXIT_LINE_UP_HOLDS:  # its line-up's own wrist turn stopped part way, out or back: the code says so
+        return EngineError("arm_holds", f"{why} -- {ARM_HOLDS}", recoverable=False)
     if code is not None and code < 0:  # killed: whatever it said last, it did not end its own way
         return EngineError("stopped", f"the run was ended by signal {-code}: {why}", recoverable=False)
     if said:
         for pattern, error_code, recoverable in STOP_CODES:
             if pattern.search(why):
                 if error_code == "arm_holds":
-                    why = f"{why} -- the arm holds where it stopped: clear it, attended, before the next run"
+                    why = f"{why} -- {ARM_HOLDS}"
                 return EngineError(error_code, why, recoverable=recoverable)
     return EngineError("failed", why, recoverable=False)
 
@@ -722,30 +730,41 @@ class Capability(CapabilityEngine):
         Until then it only watches (the wrist turned to look, gently, where the arm stands at rest). A
         line-up that ends any other way ends the run before this raises: a cancel is its Ctrl+C, as every
         cancel is (the arm stops where it is); out of time it is told so, turns its wrist back to rest and
-        ends, a cancel read all through that turn (_turned_back). A run that ended of itself while lining up
-        (not ready, its wrist's turn stopped) raises what it said."""
+        ends, a cancel read all through that turn (_turned_back). Only a run that then ended "nothing
+        pressed, the wrist back at rest" (EXIT_NOT_LINED_UP) leaves the line-up's own end as the error. One
+        that ended any other way (not ready, its wrist's turn stopped part way: EXIT_LINE_UP_HOLDS, the
+        e-stop) raises what it said, and one that had to be stopped is the arm holding (LINE_UP_LATE); where
+        that is not recoverable the world state is told the arm is in error, as a run's own stop tells it."""
         run_ = Run(self._argv(action_id, instance_id) + ["--line-up"], env, view.relay(LOGGER.log), talk=True)
         self._run = run_  # a shutdown stops it (_on_shutdown)
         try:
             self._line_up(ctx, lambda: self._box_source(env, instance_id, watch=run_))
         except BaseException as e:
-            cancelled = isinstance(e, Cancelled)
+            cancelled, late = isinstance(e, Cancelled), False
             try:
                 if cancelled:
                     self.get_logger().warning("cancelled while lining up: the run's own stop (Ctrl+C) sent")
                     run_.stop(CANCEL_ESCALATE_S)
                 else:
                     run_.send({"stop": True})
-                    cancelled = self._turned_back(ctx, run_)
+                    cancelled, late = self._turned_back(ctx, run_)
                 code = run_.finish()
             finally:
                 self._run = None  # only now: until it has ended, a shutdown must still be able to stop it
             view.finish(code, cancelled=cancelled, timed_out=False, held=False)
             if cancelled and not isinstance(e, Cancelled):
                 raise Cancelled() from e  # cancelled while its wrist turned back
-            if isinstance(e, EngineError) and e.error_code == "line_up_unavailable" and code != EXIT_NOT_LINED_UP:
-                raise error_for(action_id, code, run_.lines) from e  # it ended of itself: what it said
-            raise
+            if cancelled or (code == EXIT_NOT_LINED_UP and not late):
+                raise  # nothing was pressed and the wrist is back at rest: how the line-up itself ended
+            if late:
+                error = EngineError("arm_holds", LINE_UP_LATE % LINE_UP_END_S, recoverable=False)
+            else:
+                error = error_for(action_id, code, run_.lines)  # it ended its own way: what it said
+            if not error.recoverable and self.orchestrated:  # standalone: no world state to tell
+                world = WorldWriter(self.get_logger())
+                self._report_arm_error(error, ctx, world)
+                world.wait(WORLD_WAIT_S)
+            raise error from e
         # _line_up returns on the user's Open alone (line_up.GO): every other end of a line-up raised above
         run_.send({"go": True})
         self.get_logger().info("line-up: Open pressed: the run goes on")
@@ -755,13 +774,14 @@ class Capability(CapabilityEngine):
         """A run told its line-up is over ({"stop": true}), followed until it has ended. It turns its wrist
         back to rest, beside the user: a motion as any other, so a cancel is read all through it (every
         line_up.POLL_S) and the panel says what the arm does and keeps its Cancel, which is the orchestrator's
-        cancel as the run's own panel's is. A cancel is the run's Ctrl+C (the arm stops where it is): True
-        where one came. A run still going LINE_UP_END_S after it was told is stopped that way too, and killed
-        if it has not ended CANCEL_ESCALATE_S after that."""
+        cancel as the run's own panel's is. A cancel is the run's Ctrl+C (the arm stops where it is). A run
+        still going LINE_UP_END_S after it was told is stopped that way too, and killed if it has not ended
+        CANCEL_ESCALATE_S after that. Returns (cancelled, late): a cancel came; it had to be stopped, so its
+        wrist may stand part-turned."""
         panel = Panel(ctx, self._ui_live)
         panel.say(line_up.PHASE, 0.0, PANEL_TURNING_BACK)
         told = time.monotonic()
-        cancelled, sent = False, None
+        cancelled, late, sent = False, False, None
         if run_.alive():  # one that ended of itself already has nothing to turn back
             ctx.progress(line_up.PHASE, 0.0, PANEL_TURNING_BACK, pausable=False)
         while run_.proc.poll() is None:
@@ -775,14 +795,14 @@ class Capability(CapabilityEngine):
                 sent = now
             elif sent is None and now - told > LINE_UP_END_S:
                 self.get_logger().error(f"the run did not end its line-up in {LINE_UP_END_S:.0f} s: its stop")
-                panel.stopping = PANEL_TIMED_OUT
+                late, panel.stopping = True, PANEL_TIMED_OUT
                 run_.interrupt()
                 sent = now
             elif sent is not None and now - sent > CANCEL_ESCALATE_S:
                 self.get_logger().error("the run did not stop: killed (a motion may still be in flight)")
                 run_.proc.kill()
             time.sleep(line_up.POLL_S)
-        return cancelled
+        return cancelled, late
 
     def _box_source(self, env, instance_id, watch=None):
         """A real run's line-up source (line_up.BoxSource): a watch follows the container and reach_probe judges
