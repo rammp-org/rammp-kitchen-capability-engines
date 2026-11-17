@@ -1,5 +1,7 @@
 """The line-up before a run (line_up.LineUp): the panel's instruction, the question, and its three ends."""
 
+import math
+
 import pytest
 
 from box_opening import guide, line_up
@@ -346,6 +348,42 @@ def test_the_deployments_bound_and_the_lids_height_decide_which_boundary_speaks(
     watch.says(2.6, _fix((0.65, 0.0, 0.36)))
     _fix_, reach = source.look(2.7)
     assert reach.inside
+
+
+def test_a_box_further_out_than_the_deployments_bound_is_told_closer_with_no_grid_to_judge_it():
+    """line_up_far_m: nothing further out than it is in the boundary, whatever the grid comes to hold. So a
+    box out there is not inside and the way in is toward the arm: said at once, not "Hold still, checking"
+    for as long as a blank grid takes to fill."""
+    source, watch, probe = _source(far_m=0.80)
+    watch.says(1.0, _fix((0.90, 0.05, 0.315)))  # no grid said at all yet
+    fix, reach = source.look(1.1)
+    assert reach is not None and not reach.inside and reach.planned is None
+    word, metres, _axis = guide.instruction(reach.to_zone)
+    assert word == "closer" and metres == pytest.approx(0.10, abs=0.005)
+    assert math.hypot(0.90 + reach.to_zone[0], 0.05 + reach.to_zone[1]) == pytest.approx(0.80)  # toward the base
+    assert guide.Guide().update(1.1, fix, reach).message == "Move closer, about 10 cm"
+    assert probe.sent[-1]["prove"] is False
+    probe.says(1.5, {"zone": Zone.blank((0.0, 1.0), (-0.5, 0.5), lid_z=0.32, key="k").to_dict()})
+    watch.says(1.6, _fix((0.90, 0.05, 0.315)))  # a grid with nothing asked yet: the same
+    _fix_, reach = source.look(1.7)
+    assert not reach.inside and guide.instruction(reach.to_zone)[0] == "closer"
+    watch.says(2.0, _fix((0.70, 0.0, 0.315)))  # within the bound the grid alone can say, and cannot yet
+    assert source.look(2.1)[1] is None
+    probe.says(2.5, {"zone": _band_zone().to_dict()})  # ... and where the grid can say, the way in is its own
+    watch.says(2.6, _fix((0.90, 0.05, 0.315)))
+    _fix_, reach = source.look(2.7)
+    assert not reach.inside and reach.to_zone == pytest.approx((-0.15, -0.05))
+    source, watch, probe = _source()  # no bound: nothing is known without the grid
+    watch.says(1.0, _fix((0.90, 0.05, 0.315)))
+    assert source.look(1.1)[1] is None
+
+
+def test_the_probe_is_held_to_one_thread():
+    """Its proofs are numpy's, beside the arm's driver on the robot's computer: its BLAS is not to take the
+    cores. The watch's environment is as it was given."""
+    source, watch, probe = _source()
+    assert watch.env == {"E": "1"}
+    assert probe.env == {"E": "1", "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
 
 
 def test_closing_ends_both_children_the_probe_told_to_quit_and_given_time_to_keep_its_grid():

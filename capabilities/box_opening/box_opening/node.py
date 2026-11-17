@@ -830,13 +830,17 @@ class Capability(CapabilityEngine):
                 watch += ["--instance-id", instance_id]
         layers = self._param("body_layers")
         layers = PARAMS["body_layers"] if layers is None else str(layers)
+        far = self._far_m()
 
         def probe(urdf, root):
             argv = [executable("reach_probe"), "--serve", "--urdf", urdf, "--container", container]
-            return argv + ["--root", root or "arm_mount", "--body-layers", layers]
+            argv += ["--root", root or "arm_mount", "--body-layers", layers]
+            # the deployment's bound, for the probe too: its proofs are not spent on cells the line-up will
+            # not trust (reach_probe --far-m; none said, it asks as far as the proof plans)
+            return argv + (["--far-m", str(far)] if far is not None else [])
 
         return line_up.BoxSource(
-            watch, probe, env, far_m=self._far_m(), log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}")
+            watch, probe, env, far_m=far, log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}")
         )
 
     def _line_up(self, ctx, make_source, on_cancel=None):

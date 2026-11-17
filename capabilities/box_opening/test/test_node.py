@@ -1366,10 +1366,14 @@ def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(
     pink = node.config_path("ankou_pink.yaml", "containers")
     argv = probe("/state/arm.urdf", "arm_mount")
     assert argv[:6] == ["/lib/reach_probe", "--serve", "--urdf", "/state/arm.urdf", "--container", pink]
-    assert argv[6:] == ["--root", "arm_mount", "--body-layers", "/cfg/planner.yaml"]
+    # the deployment's bound goes to the probe too: it asks no cell further out than the line-up trusts
+    assert argv[6:] == ["--root", "arm_mount", "--body-layers", "/cfg/planner.yaml", "--far-m", "0.8"]
     assert env_ is env and far_m == 0.8
     engine._box_source(env, "")
     assert "--instance-id" not in made[-1][0]
+    engine.set_parameters([Parameter("line_up_far_m", value=0.0)])  # no bound: none said
+    engine._box_source(env, "")
+    assert made[-1][3] is None and "--far-m" not in made[-1][1]("/state/arm.urdf", "arm_mount")
 
 
 # -- the line-up with the wrist look: the run's own process watches, and goes on at Open ---------------

@@ -25,6 +25,7 @@ either.
 
 import json
 import math
+import os
 import subprocess
 import threading
 import time
@@ -169,6 +170,9 @@ STOP_WAIT_S = 2.0  # a child asked to end is killed after this long
 # the proof in flight (0.8 to 2 s by its own notes), writes its grid and exits. It is given this long to,
 # before it is ended as any child is and what it had not yet written is asked again next time
 PROBE_QUIT_S = 2.5
+# reach_probe's proofs are numpy's, whose BLAS starts a thread for every core. It works beside the arm's driver
+# and the run's own process on the robot's computer, so it is held to one
+PROBE_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
 # the end of a child's own log is kept, for the error of one that died: this many lines hold a traceback's
 # last frame and its exception ...
 TAIL_LINES = 4
@@ -259,9 +263,10 @@ class BoxSource:
     """The box as its watch sees it, judged by the boundary reach_probe fills. `watch`: box_watch's command
     line, run as a child of this source's own; or a process already running that says the same lines (the
     run itself, with --line-up: node.Run), which is its owner's to end. `probe_argv(urdf, root)`:
-    reach_probe's, once the watch has said which robot this is. `far_m`: the deployment's bound on the
-    boundary (None: none). close() ends the children that are this source's own, the probe by its own quit
-    so that it keeps its grid; it can take PROBE_QUIT_S, so what must not wait is done before it."""
+    reach_probe's, once the watch has said which robot this is (run with PROBE_ENV). `far_m`: the
+    deployment's bound on the boundary (None: none). close() ends the children that are this source's own,
+    the probe by its own quit so that it keeps its grid; it can take PROBE_QUIT_S, so what must not wait is
+    done before it."""
 
     def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
@@ -283,7 +288,8 @@ class BoxSource:
             if "robot" in msg and self.probe is None:
                 robot = msg["robot"]
                 if robot.get("urdf"):
-                    self.probe = self._spawn(self._probe_argv(robot["urdf"], robot.get("root")), self._env, self._log)
+                    env = dict(os.environ if self._env is None else self._env, **PROBE_ENV)
+                    self.probe = self._spawn(self._probe_argv(robot["urdf"], robot.get("root")), env, self._log)
                 elif self._log is not None:
                     self._log("the robot's URDF was not heard: no boundary can be worked out")
             elif "fix" in msg:
@@ -325,6 +331,17 @@ class BoxSource:
         near = math.hypot(px - xy[0], py - xy[1]) <= PROOF_NEAR_M and abs(pz - z) <= PROOF_NEAR_M
         return ok if near else None
 
+    def _too_far(self, xy):
+        """The boundary's word on a box further from the arm's base than the deployment's bound (`far_m`),
+        which needs no grid: nothing out there is in the boundary whatever the proof finds, so the box is not
+        inside, and the way in is toward the base, by what it is beyond the bound at the least. None where
+        there is no bound, or the box is within it."""
+        r = math.hypot(xy[0], xy[1])
+        if self._far_m is None or r <= self._far_m:
+            return None
+        back = (r - self._far_m) / r
+        return guide.Reach(False, (-xy[0] * back, -xy[1] * back))
+
     def look(self, now):
         new = self._hear()
         if self._fix is None:
@@ -335,6 +352,10 @@ class BoxSource:
             reach = self._zone.reach(fix.xy, None if rough else self._planned(fix.xy, z))
             if rough and reach is not None and reach.inside:
                 reach = None  # a rough sighting says which way to move, and is never asked on
+        if reach is None:
+            # the grid cannot say yet (blank at this lid's height, or still filling): a box beyond the
+            # deployment's bound is told to come closer all the same, not to hold still for it
+            reach = self._too_far(fix.xy)
         if new and self.probe is not None:
             # the place is proven only where the boundary has it inside and no proof speaks for it yet
             prove = reach is not None and reach.inside and reach.planned is None
