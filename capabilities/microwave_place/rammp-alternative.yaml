@@ -32,6 +32,10 @@ container:
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
 params:
+  ui_bridge_node_name: ui_bridge_node
+  record_bag: true
+  bag_frame_hz: 1.0
+  bag_state_hz: 25.0
   # The arm moves only with this true AND `execute` in the goal; otherwise every goal is a dry run.
   # true only for attended runs, someone on the e-stop.
   allow_execute: false
@@ -84,6 +88,42 @@ params:
   # the hand's peak speed (m/s; position control, min-jerk: about half of it on average) on the approach
   # (side shift + transit + line in, one motion) and the back-out
   insert_speed: 0.16
+  # cuRobo approach: world path resolved by the planner, plus fraction of planned speed.
+  take_approach_world: /config/robot/curobo/world.yaml
+  take_approach_speed_scale: 0.3
+  take_exit_speed_scale: 0.3
+  take_pullback_m: 0.05
+  take_home_joints: [-2.9723690063395423, 0.4406113803695808, -0.4320526131268245, -2.4519407240189826, 2.8028915598374065, -0.9451441529603253, -1.413206432450548]
+  # take_out: the wrist camera (colour, aligned depth, camera_info); the whole container is found on it
+  wrist_topics:
+    - /wrist_camera/color/image_raw
+    - /wrist_camera/depth/image_rect_raw
+    - /wrist_camera/color/camera_info
+  # SAM3 prompt: the whole container with its sleeve
+  container_prompt: food container together with its blue sleeve
+  sam3_threshold: 0.5
+  # Historical names: consecutive agreeing whole-container masks; no rim query.
+  rim_frames: 3
+  rim_mask_iou: 0.85
+  rim_timeout_s: 60.0
+  # the grasp: the tool frame this far (m) past the detected container point along the hand's heading (- = short of it) ...
+  grasp_depth: 0.0
+  # ... and this far (m) above it
+  grasp_up: 0.035
+  # the pre-grasp pose this far (m) back from the grasp along the hand's level heading: the line in's length
+  reach_in: 0.30
+  # the gripper's opening for the reach in (0 = fully open .. 1 closed)
+  grip_open: 0.0
+  # the last this far (m) of the line in, in joint impedance (a short stop to switch); position control before it,
+  # and from the gripper's close on
+  impedance_in: 0.10
+  # take_out's joint impedance (the driver caps kq at 400); torque limits: impedance_torque_limit
+  take_impedance_kq: [400.0, 400.0, 400.0, 400.0, 200.0, 200.0, 200.0]
+  take_impedance_zeta: 0.7
+  # the hand's peak speed (m/s) on that impedance part of the line in
+  impedance_speed: 0.08
+  # after closing: straight up this far (m), then the level line back out
+  take_lift: 0.03
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -130,16 +170,26 @@ params:
   "arm.gripper_still_s": 0.3
   "arm.plan_timeout_s": 30.0
   "arm.service_wait_s": 5.0
-  "arm.service_call_s": 10.0
+  "arm.service_call_s": 30.0
   "arm.stream_timeout_s": 0.1
   "arm.publisher_match_s": 1.0
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
-publishes: [/microwave_place/status]
+publishes: [/microwave_place/status, /microwave_place/sam3_overlay]
 subscribes:
   - /tf
   - /tf_static
   - /scene_camera/depth/image_rect_raw
   - /scene_camera/color/camera_info
   - /perception/object_detections_3d
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/depth/image_rect_raw
+  - /wrist_camera/color/camera_info
+  - /joint_states
+  - /ee_state
+  - /gripper_state
+  - /diagnostics
+  - /rosout
+  - /arm/robot_description
+  - /microwave_place/sam3_overlay

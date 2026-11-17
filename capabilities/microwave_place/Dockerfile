@@ -32,9 +32,7 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
-# rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages behind ctx.update_user_panel /
-# poll_ui_event / set_overlay_visible) is not in the base either: build it from a pinned
-# rammp-interfaces-ros2 commit, as the example does.
+# Direct engine/UI panels use the same pinned interface package as feat/engine_update.
 ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
 
