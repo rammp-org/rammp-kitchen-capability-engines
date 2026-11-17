@@ -98,6 +98,29 @@ collision-check the complete assembly over the full approach and insertion path.
 `insertion_bottom_clearance_cm`, when present in a saved plan, is only the modeled box-bottom estimate;
 it is not a full-assembly or glass-contact clearance check.
 
+The currently documented tape measurements (30.48 cm opening width and depth, 19.05 cm opening height,
+1.59 cm glass height above the opening bottom, 17.46 cm glass-to-ceiling height, and 2.86 cm panel-to-frame
+recess) do not define a collision model: they omit the glass footprint/center, rim profile, door pose, and
+measurement uncertainty. The shortest route to a reviewed collision check is:
+
+1. Save the active `/arm/robot_description` and every referenced collision mesh from the Jetson. Confirm
+   the physical flange/tool transforms and that the Robotiq links and wrist-camera mount/shape agree with it.
+1. With the robot stationary and microwave door in its intended open pose, measure or obtain verified CAD
+   for the complete cavity (glass footprint and top, rim, floor, side walls, ceiling and back wall) and door
+   (panel, thickness, hinge axis and open pose). Register this geometry to `arm_mount`; record measurement
+   and registration uncertainty. The existing tape dimensions may constrain this model but must not be used
+   to infer unmeasured surfaces.
+1. Measure or obtain verified CAD for the actual container, including lid/handle, and its pose relative to
+   the tool when grasped. Bound grasp repeatability, perception/TF calibration error, and trajectory tracking
+   error for this setup.
+1. Build the conservative full-assembly scene and check the exact saved plan's swept volume through approach,
+   insertion, lowering, release and retreat, including the measured uncertainty bounds. Record the minimum
+   uncertainty-adjusted clearance and its link/object pair; require a robotics review before changing the hold.
+
+The supplied `plan_20261117_203139.json` was not present in this workspace, and the active Jetson URDF,
+collision meshes, cavity/door model and calibration/uncertainty records were not available here. Therefore
+no minimum full-scene clearance or worst-case collision pair can be reported from this environment.
+
 1. **Locate** the opening (above). Nothing is checked before it: not the arm's state, the gripper or
    the tool frame.
 

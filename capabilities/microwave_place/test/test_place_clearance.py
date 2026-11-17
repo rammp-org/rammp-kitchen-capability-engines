@@ -30,8 +30,19 @@ def test_place_refuses_without_full_assembly_collision_geometry():
         place_motion.require_full_assembly_insertion_model()
 
     message = str(error.value)
-    for component in ("held container", "wrist-camera", "turntable", "side walls", "ceiling"):
-        assert component in message
+    assert message.startswith("place execution is disabled")
+    assert "side shift, transit, insertion, lowering, release and retreat" in message
+    assert tuple(place_motion.INSERTION_COLLISION_GEOMETRY_REQUIRED) == (
+        "measured 3D microwave interior geometry: glass/turntable footprint and height, rim, floor, side walls, "
+        "ceiling and back wall",
+        "open-door 3D geometry, hinge axis and measured open pose",
+        "hardware-verified flange, gripper-link collision geometry and tool transforms",
+        "wrist-camera collision geometry and calibrated tool-relative transform",
+        "held-container 3D geometry and grasp-relative pose, including grasp variation",
+        "bounded microwave registration, perception, calibration, grasp and trajectory-tracking uncertainty",
+    )
+    for requirement in place_motion.INSERTION_COLLISION_GEOMETRY_REQUIRED:
+        assert requirement in message
 
 
 def test_plan_place_in_remains_available_for_kinematic_dry_run(monkeypatch):
@@ -73,9 +84,7 @@ def test_dry_run_summary_distinguishes_estimate_from_unvalidated_clearance():
     assert report["insertion_collision_status"] == "UNVALIDATED"
     assert report["insertion_bottom_clearance_cm"] == pytest.approx(5.0)
     assert report["transit_outer_box_clearance_cm"] == {"transit": [2.0, "arm vs outer box"]}
-    assert (
-        "held-container collision geometry and tool-relative offset" in report["insertion_collision_missing_geometry"]
-    )
+    assert report["insertion_collision_missing_geometry"] == list(place_motion.INSERTION_COLLISION_GEOMETRY_REQUIRED)
 
 
 def test_saved_plan_uses_same_unvalidated_summary_keys():

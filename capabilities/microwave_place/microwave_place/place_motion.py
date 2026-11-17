@@ -63,20 +63,24 @@ class InsertionCollisionModelUnavailable(Refused):
 
 
 INSERTION_COLLISION_GEOMETRY_REQUIRED = (
-    "microwave interior: turntable glass, rim, side walls, ceiling and back wall",
-    "open microwave door",
-    "calibrated gripper collision geometry and flange-to-tool offset",
-    "wrist-camera collision geometry",
-    "held-container collision geometry and tool-relative offset",
+    "measured 3D microwave interior geometry: glass/turntable footprint and height, rim, floor, side walls, "
+    "ceiling and back wall",
+    "open-door 3D geometry, hinge axis and measured open pose",
+    "hardware-verified flange, gripper-link collision geometry and tool transforms",
+    "wrist-camera collision geometry and calibrated tool-relative transform",
+    "held-container 3D geometry and grasp-relative pose, including grasp variation",
+    "bounded microwave registration, perception, calibration, grasp and trajectory-tracking uncertainty",
 )
 
 
 def require_full_assembly_insertion_model():
     raise InsertionCollisionModelUnavailable(
         "place execution is disabled: full-assembly insertion clearance is not validated. The current model does not "
-        "collision-check the held container or insertion path against the microwave rim, open door, turntable "
-        "glass, side walls, ceiling and back wall, and does not verify the wrist-camera or flange/tool/container "
-        "geometry. Supply and review those physical measurements and collision geometry before executing."
+        "collision-check the complete assembly over the side shift, transit, insertion, lowering, release and "
+        "retreat against a measured microwave interior and open door. Missing inputs: "
+        + "; ".join(INSERTION_COLLISION_GEOMETRY_REQUIRED)
+        + ". Supply, register, uncertainty-bound and review those measurements and collision geometry before "
+        "executing."
     )
 
 
