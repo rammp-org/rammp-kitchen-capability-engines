@@ -33,7 +33,7 @@ RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wi
 # rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages, see
 # CapabilityEngine's Context.update_user_panel/poll_ui_event/publish_overlay_image)
 # is not in the base either: build it from a pinned rammp-interfaces-ros2 commit.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e.tar.gz /tmp/ui_bridge.tar.gz
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/7731552bf7b1288d2d4d93adcb78ae0bfc9b5e73.tar.gz /tmp/ui_bridge.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
 
 COPY capability_engine/ src/capability_engine/
