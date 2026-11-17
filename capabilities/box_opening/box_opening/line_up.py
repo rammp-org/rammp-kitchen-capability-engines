@@ -264,11 +264,10 @@ class BoxSource:
     line, run as a child of this source's own; or a process already running that says the same lines (the
     run itself, with --line-up: node.Run), which is its owner's to end. Such a run says the wrist camera's
     fixes ("by": "wrist") and, between them, the scene camera's: the wrist's are kept to while one is fresh
-    (guide.LOST_S). `probe_argv(urdf, root)`:
-    reach_probe's, once the watch has said which robot this is (run with PROBE_ENV). `far_m`: the
-    deployment's bound on the boundary (None: none). close() ends the children that are this source's own,
-    the probe by its own quit so that it keeps its grid; it can take PROBE_QUIT_S, so what must not wait is
-    done before it."""
+    (guide.LOST_S). `probe_argv(urdf, root)`: reach_probe's, once the watch has said which robot this is
+    (run with PROBE_ENV). `far_m`: the deployment's bound on the boundary (None: none). close() ends the
+    children that are this source's own, the probe by its own quit so that it keeps its grid; it can take
+    PROBE_QUIT_S, so what must not wait is done before it."""
 
     def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
@@ -281,7 +280,7 @@ class BoxSource:
         self._zone = None
         self._proof = None  # the newest proof: ((x, y, z), ok)
         self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
-        self.why_none = ""  # the watch's last word on why it sees no box
+        self.why_none = ""  # the watch's newest word on why it sees no box; none once it has seen it since
         self.why_gone = ""  # where it is the probe that ended (gone): that, and the end of its log
 
     def _hear(self):
@@ -309,6 +308,7 @@ class BoxSource:
                 if by_wrist:
                     self._wrist_at = fix.t
                 self._fix = (fix, xyz[2], f.get("table_z"), bool(f.get("rough")))
+                self.why_none = ""  # it is seen: whatever it said before is no longer why
                 new = True
             elif "none" in msg:
                 self.why_none = str(msg["none"])

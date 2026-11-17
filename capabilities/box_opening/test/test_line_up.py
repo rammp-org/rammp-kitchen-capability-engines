@@ -287,6 +287,22 @@ def test_a_sighting_is_a_fix_as_old_as_it_says_and_goes_to_the_probe():
     assert source.why_none.startswith("scene segmenter")
 
 
+def test_why_no_box_is_seen_is_the_watchs_newest_word_and_a_later_sighting_takes_it_back():
+    """why_none goes into the error of a line-up that ran out of time: it must not say the container was
+    not seen where it was seen since, only not brought into reach."""
+    source, watch, _probe = _source()
+    watch.says(1.0, {"none": "wrist camera: no lid-sized top on the table in view"})
+    watch.says(1.2, {"none": "wrist camera: the lid is cut by the view's edge"})
+    source.look(1.3)
+    assert source.why_none == "wrist camera: the lid is cut by the view's edge"  # the newest
+    watch.says(2.0, _fix((0.95, 0.0, 0.315), by="wrist"))
+    source.look(2.1)
+    assert source.why_none == ""  # seen since: that reason is no longer why
+    watch.says(3.0, {"none": "wrist camera: no frame"})
+    source.look(3.1)
+    assert source.why_none == "wrist camera: no frame"
+
+
 def test_the_boundary_judges_the_box_and_its_own_place_is_proven_where_it_is_inside():
     source, watch, probe = _source()
     probe.says(1.0, {"zone": _band_zone().to_dict()})

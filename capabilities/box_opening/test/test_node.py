@@ -44,11 +44,11 @@ FAKE_RUN = """
 import json, os, sys, time
 from pathlib import Path
 if "--line-up" in sys.argv:
-    # press_demo --line-up: says where the box is (LINE_UP: "in place" | "far" | "dies" | "holds", its wrist's
-    # turn to the view stopped part way: 6) until a line on stdin: go and the run goes on, stop (or the pipe
-    # closed) and it ends 5, nothing pressed, once its wrist is back at rest (TURN_BACK_S: how long that turn
-    # takes; a Ctrl+C stops it there, 130. TURN_BACK: "holds", that turn stopped part way: 6; "halted", the
-    # e-stop came during it: 4)
+    # press_demo --line-up: says where the box is (LINE_UP: "in place" | "far" | "unseen", its frames show no
+    # container | "dies" | "holds", its wrist's turn to the view stopped part way: 6) until a line on stdin:
+    # go and the run goes on, stop (or the pipe closed) and it ends 5, nothing pressed, once its wrist is
+    # back at rest (TURN_BACK_S: how long that turn takes; a Ctrl+C stops it there, 130. TURN_BACK: "holds",
+    # that turn stopped part way: 6; "halted", the e-stop came during it: 4)
     import select
     mode = os.environ.get("LINE_UP", "in place")
     if mode == "dies":
@@ -67,7 +67,8 @@ if "--line-up" in sys.argv:
         while heard is None:
             x = 0.65 if mode == "in place" else 1.2
             fix = {"xyz": [x, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}
-            sys.stdout.write("@@ " + json.dumps({"fix": fix}) + "\\n")
+            said = {"none": "wrist camera: no lid-sized top on the table in view"} if mode == "unseen" else {"fix": fix}
+            sys.stdout.write("@@ " + json.dumps(said) + "\\n")
             sys.stdout.flush()
             if select.select([sys.stdin], [], [], 0.1)[0]:
                 line = sys.stdin.readline()
@@ -1106,7 +1107,9 @@ def test_a_user_not_in_place_in_time_is_told_to_press_open_again_and_nothing_run
         ctx = FakeCtx()
         with pytest.raises(EngineError) as e:
             cap.execute("open_box", {}, ctx)
-        assert e.value.error_code == "not_lined_up" and e.value.recoverable and "nothing moved" in str(e.value)
+        assert e.value.error_code == "not_lined_up" and e.value.recoverable
+        # never "nothing moved": with the wrist look the wrist turned to look, and back
+        assert "nothing was pressed" in str(e.value) and "nothing moved" not in str(e.value)
         assert ctx.panels[-1]["message"] == "Press open again when you are in place"
         assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.objects == {} and ctx.world == []
     finally:
@@ -1481,6 +1484,7 @@ def test_out_of_time_the_run_is_told_so_turns_back_and_ends_and_nothing_was_pres
     with pytest.raises(EngineError) as e:
         engine.execute("open_box", {}, ctx)
     assert e.value.error_code == "not_lined_up" and e.value.recoverable and time.monotonic() - t0 < 8.0
+    assert "nothing was pressed" in str(e.value) and "nothing moved" not in str(e.value)  # the wrist did turn
     assert sent == []  # told on its stdin, and it ended of its own accord: no Ctrl+C
     assert engine._run is None and ctx.objects == {} and ctx.world == []
     assert {p for p, *_ in ctx.said} == {"line_up"}
@@ -1530,6 +1534,23 @@ def test_a_cancel_while_the_wrist_turns_back_is_the_runs_own_ctrl_c(engine, monk
     assert all(p["progress"]["pausable"] is False for p in turning)
     assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.said[-1][2] == node.PANEL_TURNING_BACK
     assert ctx.objects == {} and ctx.world == []
+
+
+def test_out_of_time_the_error_says_why_the_run_last_saw_no_container(engine, monkeypatch):
+    """The run's own word on why its cameras showed no container ({"none": ...}) is in the not_lined_up
+    error: "press open again in place" is not all the user is told where the box was never seen."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "unseen")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable
+    assert "nothing was pressed" in str(e.value)
+    assert str(e.value).endswith("-- wrist camera: no lid-sized top on the table in view")
+    assert "Looking for the container" in [m for _p, _pct, m, _pausable in ctx.said]
 
 
 def test_a_cancel_while_the_wrist_looks_is_the_runs_own_ctrl_c(engine, monkeypatch):

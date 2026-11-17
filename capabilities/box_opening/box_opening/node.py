@@ -160,7 +160,10 @@ RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORL
 RUN_LONGEST_S = 50.0
 LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 40 s
 LINE_UP_END_S = 12.0  # a run told its line-up is over turns its wrist back and ends within this, or is stopped
-NOT_LINED_UP = "the container was not where the arm opens it within %.0f s: nothing moved (press open again in place)"
+# "nothing was pressed", not "nothing moved": with the wrist look the wrist turned to look, and back to rest
+NOT_LINED_UP = (
+    "the container was not where the arm opens it within %.0f s: nothing was pressed (press open again in place)"
+)
 # what is said of an arm that holds where it stopped (error_for's arm_holds)
 ARM_HOLDS = "the arm holds where it stopped: clear it, attended, before the next run"
 LINE_UP_LATE = (
@@ -864,10 +867,11 @@ class Capability(CapabilityEngine):
         execute(): neither the param nor the UI is asked after again here): the panel tells the user which
         way to move and asks, and this returns only on its Open (line_up.GO), with the seconds it took.
         Cancel on it is the orchestrator's cancel (Cancelled); out of time, EngineError("not_lined_up"),
-        recoverable: nothing moved. A UI that goes while lining up shows no panel and takes no press, so it
-        ends that way too. A source that cannot start, or cannot go on (its reach_probe not there to start,
-        or ended: BoxSource.gone), is EngineError("line_up_unavailable"), at once and with why: with the
-        line-up asked for, no run starts without its Open. `make_source()`: what sees the box and judges its place
+        recoverable, with the watch's newest word on why it saw no container where that is why (why_none):
+        nothing was pressed. A UI that goes while lining up shows no panel and takes no press, so it ends
+        that way too. A source that cannot start, or cannot go on (its reach_probe not there to start, or
+        ended: BoxSource.gone), is EngineError("line_up_unavailable"), at once and with why: with the line-up
+        asked for, no run starts without its Open. `make_source()`: what sees the box and judges its place
         (BoxSource; the mock's MockApproach), made only where it is used, and closed before this returns: no
         run starts while it lives. `on_cancel()`: called as the line-up ends cancelled, before the source is
         closed (closing can take line_up.PROBE_QUIT_S): what a cancel must not keep waiting."""
