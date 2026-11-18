@@ -22,12 +22,22 @@ class FakeCtx:
     def __init__(self, session=True):
         self.session = session
         self.sent = []
+        self.overlay_images = []
+        self.overlay_visible_calls = []
         self._event = None
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
 
     def update_user_panel(self, panel_json=None, objects=None, selected_instance_id=None):
         self.sent.append({"panel": panel_json, "objects": objects, "selected": selected_instance_id})
+        return self.session
+
+    def publish_overlay_image(self, image):
+        self.overlay_images.append(image)
+        return self.session
+
+    def set_overlay_visible(self, visible):
+        self.overlay_visible_calls.append(visible)
         return self.session
 
     def poll_ui_event(self):
@@ -264,3 +274,37 @@ def test_wrap_keeps_paragraphs_and_long_words():
     assert panels.wrap("a\n\nb") == f"a{sep}{sep}b"
     word = "x" * 60
     assert panels.wrap(word) == word
+
+
+def test_publish_overlay_image_forwards_to_ctx_and_reflects_session():
+    ui, ctx, _ = make()
+    assert ui.publish_overlay_image("frame-1") is True
+    assert ctx.overlay_images == ["frame-1"]
+
+    ui_standalone, ctx_standalone, _ = make(session=False)
+    assert ui_standalone.publish_overlay_image("frame-2") is False
+    assert ctx_standalone.overlay_images == ["frame-2"]  # still forwarded; ctx itself no-ops standalone
+
+
+def test_show_and_hide_overlay_forward_to_ctx():
+    ui, ctx, _ = make()
+    assert ui.show_overlay() is True
+    assert ui.hide_overlay() is True
+    assert ctx.overlay_visible_calls == [True, False]
+
+
+def test_overlay_shown_brackets_with_show_then_hide():
+    ui, ctx, _ = make()
+    with ui.overlay_shown():
+        ui.publish_overlay_image("frame")
+        assert ctx.overlay_visible_calls == [True]
+    assert ctx.overlay_visible_calls == [True, False]
+    assert ctx.overlay_images == ["frame"]
+
+
+def test_overlay_shown_hides_even_when_the_block_raises():
+    ui, ctx, _ = make()
+    with pytest.raises(RuntimeError):
+        with ui.overlay_shown():
+            raise RuntimeError("boom")
+    assert ctx.overlay_visible_calls == [True, False]

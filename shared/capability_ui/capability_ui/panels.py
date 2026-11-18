@@ -20,9 +20,20 @@ Typical use, in `execute()`:
     ui.done("Microwave door opened.")
     return result
 
+A capability with its own camera (e.g. a wrist cam) can also show it alongside the panels above, via
+`publish_overlay_image`/`show_overlay`/`hide_overlay` (thin wrappers over `ctx.publish_overlay_image`/
+`ctx.set_overlay_visible` -- see `capability_engine.engine.Context` for the underlying contract), or the
+`overlay_shown()` bracket below for the common show-then-hide-on-every-exit-path shape:
+
+    with ui.overlay_shown():
+        for frame in frames:
+            ui.publish_overlay_image(frame)
+            ...
+
 Nothing here imports ROS: the tests drive it with a fake ctx.
 """
 
+import contextlib
 import textwrap
 import threading
 import time
@@ -130,6 +141,46 @@ class RunUI:
             if objects is not None:
                 kwargs["objects"] = objects
             self.ctx.update_user_panel(**kwargs)
+
+    # -- this run's own camera overlay (e.g. a wrist cam), alongside the panels above -----------------------------
+
+    def publish_overlay_image(self, image) -> bool:
+        """Publish one frame of this run's own camera (`ctx.publish_overlay_image`) to the UI bridge's
+        shared overlay topic, stamped with this run's session token. `image` is a `sensor_msgs/Image`.
+        Returns False (no-op, logged by the engine) if this run holds no session token -- same as
+        `send()` above, there is nothing more to do standalone."""
+        return bool(self.ctx.publish_overlay_image(image))
+
+    def show_overlay(self) -> bool:
+        """Show this run's overlay camera feed in UE (`ctx.set_overlay_visible(True)`) -- UE's `Open
+        Camera Feed` Remote Control call. Not a gate on `publish_overlay_image()` above: keep
+        publishing frames regardless of visibility, so the feed is already live the moment it's
+        shown."""
+        return bool(self.ctx.set_overlay_visible(True))
+
+    def hide_overlay(self) -> bool:
+        """Hide this run's overlay camera feed in UE (`ctx.set_overlay_visible(False)`) -- UE's `Close
+        Camera Feed` Remote Control call. The orchestrator's own end-of-execution cleanup also
+        unconditionally hides the overlay, so calling this explicitly is redundant by the time
+        `execute()` returns -- use it (or `overlay_shown()` below) when the feed should hide the
+        instant this run's own loop ends, rather than wait on that later cleanup."""
+        return bool(self.ctx.set_overlay_visible(False))
+
+    @contextlib.contextmanager
+    def overlay_shown(self):
+        """Brackets a block with `show_overlay()`/`hide_overlay()`, hiding on every exit path --
+        normal completion, an exception, or Stop/Cancelled -- not just the happy path:
+
+            with ui.overlay_shown():
+                for frame in frames:
+                    ui.publish_overlay_image(frame)
+                    ...
+        """
+        self.show_overlay()
+        try:
+            yield
+        finally:
+            self.hide_overlay()
 
     # -- while the arm moves: a panel with Stop, watched from a thread -------------------------------------------
 
