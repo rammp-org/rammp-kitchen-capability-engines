@@ -30,6 +30,8 @@ In `december_2026/profiles/flatbot.yaml`, then rerun `sheppy up`:
 overrides:
   microwave:
     allow_execute: true
+    # keep each run's logs, plan and detection frames (and record_bag: a rosbag) -- never pruned
+    debug: true
 ```
 
 ## Run

@@ -66,9 +66,12 @@ params:
   max_reach_m: 0.90
   # The grasp's own limit (arm base to the grasp point); raise it with max_reach_m.
   grasp_max_reach_m: 0.915
-  # Every run's rosbag (in its run folder): both cameras' colour, depth and intrinsics bag_frame_hz times a
-  # second, the detections and TF (~75 MB a minute at 0.5); no more frames past bag_max_mb.
-  record_bag: true
+  # Keep what each run leaves behind under data_dir: its run folder (run.json, arm.npz, console.log, a dry
+  # run's plan.json) and every detection frame. Never pruned: true for attended testing only.
+  debug: false
+  # With debug, every run's rosbag too (in its run folder): both cameras' colour, depth and intrinsics
+  # bag_frame_hz times a second, the detections and TF (~75 MB a minute at 0.5); no more frames past bag_max_mb.
+  record_bag: false
   bag_frame_hz: 0.5
   bag_max_mb: 300.0
   # The wrist camera's rectified stereo pair in the bag too (~15 MB a minute more at 0.5); "" = not recorded.

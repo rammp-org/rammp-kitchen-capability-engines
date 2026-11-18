@@ -73,11 +73,14 @@ PARAMS = {
     # ... and the grasp itself (m, arm base to the grasp point): the farthest point of the open, since the handle
     # swings toward the arm as the door opens. Raise it with max_reach_m (the swing's first waypoint is the grasp)
     "grasp_max_reach_m": shared_open.MAX_REACH,
-    # every run also records a rosbag into its run folder (bag.RunBag): the wrist and scene cameras' colour, depth
-    # and intrinsics bag_frame_hz times a second, and TF. A 640x400 frame (colour + depth) is ~1.3 MB, so at 0.5 Hz
-    # the two cameras are ~75 MB a minute; past bag_max_mb no more frames (TF still). The arm's joints are in the
-    # run's arm.npz (RunLog), what the node logs (errors too) in its console.log
-    "record_bag": True,
+    # keep what each run leaves behind, under data_dir: its run folder (runs/<time>_open: run.json, the arm's joints in
+    # arm.npz, what the node logs in console.log, a dry run's plan.json) and every detection frame (detections/).
+    # Nothing prunes them: on for attended testing only. Off, only the door file and the grasp record are written
+    "debug": False,
+    # with debug, each run also records a rosbag into its run folder (bag.RunBag): the wrist and scene cameras'
+    # colour, depth and intrinsics bag_frame_hz times a second, and TF. A 640x400 frame (colour + depth) is ~1.3 MB, so
+    # at 0.5 Hz the two cameras are ~75 MB a minute; past bag_max_mb no more frames (TF still)
+    "record_bag": False,
     "bag_frame_hz": 0.5,
     "bag_max_mb": 300.0,
     # ... and the wrist camera's rectified stereo pair, for a learned stereo matcher later (+~15 MB a minute at 0.5):
@@ -175,7 +178,9 @@ class Capability(CapabilityEngine):
     ]
 
     def get_logger(self):
-        return TeeLogger(super().get_logger())
+        logger = super().get_logger()
+        # the console.log tee only with debug (getattr: the engine logs before __init__ has read the parameters)
+        return TeeLogger(logger) if getattr(self, "_debug", False) else logger
 
     def __init__(self):
         super().__init__("microwave")
@@ -184,7 +189,8 @@ class Capability(CapabilityEngine):
         self.cfg = {
             k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
         }
-        open_door.configure(self.cfg["data_dir"])
+        self._debug = bool(self.cfg["debug"])
+        open_door.configure(self.cfg["data_dir"], debug=self._debug)
         dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
@@ -192,7 +198,12 @@ class Capability(CapabilityEngine):
         dc.MAX_REACH_M = float(self.cfg["max_reach_m"])  # check_curobo_goal reads it at call time
         shared_open.configure(SWING_MAX_REACH=dc.MAX_REACH_M, MAX_REACH=float(self.cfg["grasp_max_reach_m"]))
         if self.cfg["record_bag"] and not self.mock:
-            self._set_up_bag()
+            if self._debug:
+                self._set_up_bag()
+            else:
+                self.get_logger().warning("record_bag needs debug (the bag goes in the run folder): no rosbags")
+        if self._debug:
+            self.get_logger().info(f"debug: every run's logs and frames are kept under {self.cfg['data_dir']}")
         self.get_logger().info(
             f"allow_execute={self.cfg['allow_execute']}: "
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")

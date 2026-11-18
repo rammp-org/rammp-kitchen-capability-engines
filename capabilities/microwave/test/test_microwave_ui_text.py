@@ -88,6 +88,28 @@ def test_no_placement_helps():
     assert "up to 10 cm wouldn't help" in what and "straight ahead" in todo
 
 
+def test_a_plan_that_fails_carries_the_robot_base_moves():
+    raw = (
+        "no tilt and arm configuration gives a grasp + swing that passes the sim checks -- refusing before any "
+        "motion. Start joints [1. 2.].\nWould work with the robot moved (forward / left as the arm's base faces): "
+        "5 cm back (tilt 14 deg, swing 50 deg); or 5 cm to the left (tilt 0 deg, swing 60 deg)." + HOLDS
+    )
+    what, todo = T.reason("open", raw)
+    assert what.startswith("The arm can't find a safe way to open the microwave door from here")
+    assert "It would work with the wheelchair 5 cm back." in what
+    assert todo == "Move the wheelchair 5 cm back, as the arm faces."
+    assert "Start joints" not in what
+
+
+def test_no_robot_base_move_helps():
+    raw = (
+        "no grasp -- refusing before any motion.\nNo robot base move tried (up to 10 cm, no turn) makes it work from "
+        "here." + HOLDS
+    )
+    what, todo = T.reason("open", raw)
+    assert "up to 10 cm wouldn't help" in what and "straight ahead" in todo
+
+
 def test_a_stop_with_nothing_said_names_the_arms_error():
     what, todo = T.reason("close", "the close stopped short" + HOLDS, [], "arm is E-STOPPED -- clear it first")
     assert what.startswith("The arm stopped before the door was shut: the emergency stop is pressed")

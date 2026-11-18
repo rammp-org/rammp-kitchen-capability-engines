@@ -46,13 +46,15 @@ On the bench (rammp_arm.RammpArm, no node):
    asked for each (plan_to_pose, nothing moves) from the planned swing's end before the grasp, and again from the
    real one before letting go.
 
-`--release` (separate run, after the swing; instead of the push-open): open the gripper, then ONE blended cuRobo
-motion: back straight off the handle, toward the base to clear the door's free edge, on to `PARK_JOINTS`
-(constants) -- every leg asked of cuRobo before the gripper opens.
+`--release` (`release`; separate run, after the swing or an open that stopped holding the handle; instead of
+the push-open): open the gripper, then ONE blended cuRobo motion: back straight off the
+handle, toward the base to clear the door's free edge, on to `PARK_JOINTS` (constants) -- every leg asked of cuRobo
+before the gripper opens.
 
-Under the engine: the node's `open` action (node.py -> `run`). Every run is recorded in RUNS_DIR/<time>_open: the
-arm's joints (RunLog, arm.npz), the node's log, errors too (console.log), and a size-capped rosbag (bag.RunBag:
-an occasional camera frame, colour and depth, and TF). On the bench:
+Under the engine: the node's `open` action (node.py -> `run`). With DEBUG (the node's `debug` parameter, off by
+default) every run is recorded in RUNS_DIR/<time>_open: the arm's joints (RunLog, arm.npz), the node's log, errors
+too (console.log), a size-capped rosbag (bag.RunBag, with record_bag: an occasional camera frame, colour and depth,
+and TF), and every detection frame in DETECT_FRAMES_DIR. None of it is pruned. On the bench:
 the commands above (rammp_arm.RammpArm). Refusals raise door_common.common.Refused: the arm holds where it is.
 
 The shared open (detect, plan, grasp, swing) is door_common.open_door; here is what is the microwave's: the view pose,
@@ -107,6 +109,7 @@ from .constants import (
 # --- view pose: before detecting, the wrist camera goes square in front of the microwave (placed from boxer's box, or
 # without boxer from a first detection) ---
 VIEW_DISTS = (0.40, 0.35, 0.45, 0.30)  # camera this far out from the box's front face (horizontally) ...
+# 11-10: 5 cm further back again (looked too far forward on the robot)
 # 11-10: 0.35 first again, now the camera looks square at the face: closer, the door (handle to hinge) didn't fit
 # 11-09: was 0.35 first -- with the arm 8 in further forward on the chair that put the hand over the user's lap, and
 # every view pose IK'd into the person keep-out. The wrist OAK sees down to ~24 cm, so 0.25 is the closest
@@ -201,12 +204,19 @@ FREE_MOVE_MIN_Z = 0.24
 CUROBO_SPEED = 0.45
 
 
-def configure(data_dir):
-    """Everything door_common needs from the microwave: call once at startup."""
+DEBUG = False  # each run's RunLog, console.log, rosbag and detection frames (configure's `debug`; never pruned)
+
+
+def configure(data_dir, debug=False):
+    """Everything door_common needs from the microwave: call once at startup. `debug`: keep each run's logs and
+    frames under `data_dir` (DEBUG)."""
+    global DEBUG
+    DEBUG = bool(debug)
     constants.configure(data_dir)
     dc.FREE_MOVE_MIN_Z = FREE_MOVE_MIN_Z
     rammp_arm.GO_TO_SPEED_SCALE = CUROBO_SPEED  # the open and the close (one process)
     shared.configure(
+        SAVE_FRAMES=DEBUG,
         MAKE_DETECTOR=_make_detector,
         FIND_HINGE=shared.hinge_detected(HINGE_BEHIND_FACE, HINGE_PAST_EDGE),
         GRIP_EXT=GRIP_EXT,
@@ -215,9 +225,10 @@ def configure(data_dir):
         GRASPED_GAINS=GAINS_RIGID,
         SWING_SPEED_SCALE=SWING_SPEED_SCALE,
         CUROBO_PATHS=True,
-        GRASP_FORCE=0.4,  # firmer: 0.25 (10-07) slipped off the bar on the exact swing, 11-10
         SWING_EXACT=True,  # the swing on its checked arc joints (move_joints), not cuRobo: 11-10
+        GRASP_FORCE=0.4,  # firmer: 0.25 (10-07) slipped off the bar on the exact swing, 11-10
         APPROACH_EXACT=True,  # the straight-in run exactly as checked (move_joints), 11-10
+        HINGE_SIDE=1,  # the Comfee's hinge is left of its handle, looking at the door (the control panel right)
     )
 
 
@@ -480,7 +491,8 @@ def _box_face(cam):
 # The wrist detection's crop box is this much wider than the scene camera's door, each side. 11-10: the scene camera
 # read the door 32 cm wide (its depth stops short of the dark window), and the wrist detection then found the "hinge"
 # at the crop's edge (radius 23-25 cm, refused). Its hinge is the door edge farthest from the handle
-DOOR_BOX_WIDTH_PAD_M = 0.05
+DOOR_BOX_WIDTH_PAD_M = 0.05  # 11-10: 0.20 then, with the scene camera's whole 43 cm door, reached past the
+# microwave's side and took something beside it for the hinge (radius 61 cm, refused)
 
 
 def _door_box(door, score):
@@ -650,7 +662,7 @@ def plan_view(ai, scene, rb):
     raise Refused(
         f"No view pose ({len(tried)} tried: {VIEW_DISTS} m out x {VIEW_SIDES} m aside x {VIEW_HEIGHTS} m up) passes "
         "the checks -- "
-        "move the microwave or the robot."
+        "move the robot."
     )
 
 
@@ -980,23 +992,47 @@ def push_open(ai, execute, on_release=None):
     return True
 
 
+def release(ai, execute):
+    """The bench's --release: from the hand on the handle, open the gripper, back
+    straight off it, toward the base past the door's free edge, then park (common.release_and_back_off: every leg
+    planned and checked, and asked of cuRobo, before the gripper opens). Returns its True / False."""
+    return bool(release_and_back_off(ai, BACK_OFF_M, execute, pre_park_x=PRE_PARK_X, curobo=shared.CUROBO_PATHS))
+
+
+class _NoRunLog:
+    """RunLog's interface, keeping nothing: a run without DEBUG."""
+
+    dir = None
+
+    def frame(self, tag):
+        pass
+
+    def event(self, kind, **kw):
+        pass
+
+    def close(self, ok):
+        pass
+
+
 def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_only=False, on_hold=None):
     """The open task as the node runs it (was door_task.py `open`): to the view pose, grasp + swing, then
-    (`push`) let go and push the door further open, all logged to RUNS_DIR/<time>_open (RunLog), with what the
-    node logs in its console.log and (recording.BAG) a rosbag in its bag/. `speed` (0..1] scales every arm motion
-    for this run only. `view_only`: stop at the view pose. `on_hold(True)` once the gripper
-    closes on the handle, `on_hold(False)` once the push-open has let go of it. Returns True when it finished
-    (or the dry run passed); raises Refused."""
+    (`push`) let go and push the door further open. With DEBUG it is logged to RUNS_DIR/<time>_open (RunLog), with
+    what the node logs in its console.log and (recording.BAG) a rosbag in its bag/; without, nothing is kept.
+    `speed` (0..1] scales every arm motion for this run only. `view_only`: stop at the view pose. `on_hold(True)`
+    once the gripper closes on the handle, `on_hold(False)` once the push-open has let go of it. Returns True when
+    it finished (or the dry run passed); raises Refused."""
     import rammp_arm
 
     saved = (rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE)
     rammp_arm.CART_SPEED *= speed
     rammp_arm.JOINT_SPEED *= speed
     rammp_arm.GO_TO_SPEED_SCALE = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)
-    log = RunLog("open", log_args or {}, ai)
-    recording.set_console(log.dir / "console.log")
-    recording.to_console("INFO", f"run log: {log.dir}")
-    bag = recording.start_bag(log.dir)
+    log = RunLog("open", log_args or {}, ai) if DEBUG else _NoRunLog()
+    bag = None
+    if log.dir is not None:
+        recording.set_console(log.dir / "console.log")
+        recording.to_console("INFO", f"run log: {log.dir}")
+        bag = recording.start_bag(log.dir)
     ok = False
     try:
         log.frame("run_start")
@@ -1014,7 +1050,7 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_o
         elif push and not view_only:
             ok = push_open(ai, execute, on_release=partial(on_hold, False) if on_hold else None)
         log.event("open", ok=ok)
-        if ok and not execute and not view_only:
+        if ok and not execute and not view_only and log.dir is not None:
             _save_plan(ai, log.dir, push)
         say(f"\nOPEN {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")
         return ok
@@ -1052,7 +1088,7 @@ def main():
 
     from .perception import WristCamera
 
-    configure(constants.BENCH_DATA_DIR)
+    configure(constants.BENCH_DATA_DIR, debug=True)  # the bench keeps its detection frames, as before
     ai = rammp_arm.RammpArm()
     dc.set_camera(
         WristCamera(
@@ -1084,7 +1120,7 @@ def main():
 
 def _run(ai, args, swing, min_swing):
     if args.release:
-        release_and_back_off(ai, BACK_OFF_M, args.execute, pre_park_x=PRE_PARK_X, curobo=shared.CUROBO_PATHS)
+        release(ai, args.execute)
     elif open_task(ai, args.execute, swing, min_swing) and not args.no_push_open and not VIEW_STOP:
         push_open(ai, args.execute)
 
