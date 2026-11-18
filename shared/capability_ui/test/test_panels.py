@@ -206,6 +206,24 @@ def test_object_taps_go_to_on_tap_and_do_not_end_the_question():
     assert ctx.sent[-1]["objects"] == objects
 
 
+def test_select_object_highlights_and_updates_the_message_without_changing_buttons_or_objects():
+    ui, ctx, clock = make()
+    objects = [{"instance_id": "spot_3", "perception_class": "spot", "box": [0, 0, 1, 1], "source": "scene"}]
+    ui.send("Tap a spot.", [{"button_id": "place", "label": "Place here"}, panels.STOP], objects=objects)
+    assert ui.select_object("spot_3", message="Selected spot_3.") is True
+    sent = ctx.sent[-1]
+    assert sent["selected"] == "spot_3"
+    assert sent["panel"]["message"] == "Selected spot_3."
+    assert sent["panel"]["buttons"] == [{"button_id": "place", "label": "Place here"}, panels.STOP]
+    assert sent["objects"] == objects
+
+
+def test_select_object_before_any_panel_just_forwards_the_highlight():
+    ui, ctx, clock = make()
+    assert ui.select_object("spot_3") is True
+    assert ctx.sent == [{"panel": None, "objects": None, "selected": "spot_3"}]
+
+
 def test_standalone_never_waits():
     ui, ctx, clock = make(session=False)
     assert ui.motion("Moving.", lambda: 7) == 7

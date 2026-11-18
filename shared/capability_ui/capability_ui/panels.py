@@ -142,6 +142,25 @@ class RunUI:
                 kwargs["objects"] = objects
             self.ctx.update_user_panel(**kwargs)
 
+    def select_object(self, instance_id, message=None):
+        """Highlight `instance_id` (the selected-instance-id-follows-the-tap pattern) on the
+        currently shown panel, optionally updating its message too -- title/buttons/objects/style
+        stay as last sent. Call this from `on_tap` (see `ask()`) so the user sees their tap took
+        effect, instead of a panel that looks unchanged after tapping an object."""
+        with self._lock:
+            panel, objects = self._panel if self._panel else (None, None)
+        if panel is None:
+            return bool(self.ctx.update_user_panel(selected_instance_id=instance_id))
+        panel = dict(panel)
+        if message is not None:
+            panel["message"] = wrap(message)
+        with self._lock:
+            self._panel = (panel, objects)
+        kwargs = {"panel_json": panel, "selected_instance_id": instance_id}
+        if objects is not None:
+            kwargs["objects"] = objects
+        return bool(self.ctx.update_user_panel(**kwargs))
+
     # -- this run's own camera overlay (e.g. a wrist cam), alongside the panels above -----------------------------
 
     def publish_overlay_image(self, image) -> bool:
@@ -280,7 +299,9 @@ class RunUI:
 
     def ask(self, message, buttons, timeout_s=PROMPT_TIMEOUT_S, title=None, objects=None, on_tap=None, style=None):
         """A question with `buttons` plus Stop. Returns the tapped button's id, or None when there is no UI
-        (standalone) or no answer within `timeout_s`. Stop cancels the action (raises `Cancelled`)."""
+        (standalone) or no answer within `timeout_s`. Stop cancels the action (raises `Cancelled`). With `objects`:
+        `on_tap(instance_id)` runs on every object tap (the user may tap several before deciding) -- call
+        `select_object()` from it so the panel visibly reflects the tap, not just a tap the UI bridge accepted."""
         buttons = [b for b in buttons if b["button_id"] != STOP["button_id"]] + [STOP]
         if not self.send(message, buttons, title=title, objects=objects, style=style):
             return None

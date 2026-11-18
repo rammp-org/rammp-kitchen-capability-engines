@@ -195,9 +195,11 @@ class Capability(CapabilityEngine):
           Stop) before anything starts.
         - `RunUI.ask()` again with `objects=`/`on_tap=` (`_ask_start_marker`): two markers overlaid
           on the camera feed (`"source": "overlay"`, this run's own `publish_overlay_image()`
-          stream) the user can tap to choose where counting starts from, highlighting the tapped
-          one via `selected_instance_id` -- the same mechanism a real capability uses to let the
-          user pick between several detected objects (see `place_container`'s spot picker).
+          stream) the user can tap to choose where counting starts from. `on_tap` calls
+          `RunUI.select_object()` to both highlight the tapped marker and update the panel's
+          message to confirm which one was picked -- the same mechanism a real capability uses to
+          let the user pick between several detected objects (see `place_container`'s spot
+          picker), plus the message update so a tap never looks like it was ignored.
         - `RunUI.motion()` shows the progress-with-Stop panel and runs its own watcher thread that
           reads ctx.poll_ui_event() for the tap -- this loop never has to poll for it itself, unlike
           `_wait_for_stop()` above. Its `cancel` callback is wired to this engine's own cancel
@@ -218,7 +220,7 @@ class Capability(CapabilityEngine):
         with ui.overlay_shown():
             ui.publish_overlay_image(overlay_image)
             self._ask_to_start(ui, to)
-            start = self._ask_start_marker(ui, ctx)
+            start = self._ask_start_marker(ui)
 
             def do_count():
                 for n in range(start, to + 1):
@@ -247,12 +249,13 @@ class Capability(CapabilityEngine):
         ui.notice(message)
         raise EngineError("no_answer", message, recoverable=True)
 
-    def _ask_start_marker(self, ui: RunUI, ctx) -> int:
+    def _ask_start_marker(self, ui: RunUI) -> int:
         """Tap one of two markers overlaid on the camera feed to choose where counting starts from
         (1, or 5 past "Start at 1"), or just tap Start at 1 -- demonstrates `RunUI.ask()`'s
-        `objects=`/`on_tap=` for picking between objects shown on the overlay, including the
-        selected-highlight pattern (`ctx.update_user_panel(selected_instance_id=...)`) from
-        `docs/UI_JSON_SCHEMA.md`. Standalone, or with no tap, starts at 1."""
+        `objects=`/`on_tap=` for picking between objects shown on the overlay. `on_tap` calls
+        `RunUI.select_object()` so the panel's own message confirms which marker was tapped (e.g.
+        "Selected: start counting from high (5).") -- not just the object highlight on its own,
+        which the user may miss. Standalone, or with no tap, starts at 1."""
         markers = [
             {
                 "instance_id": "marker_low",
@@ -267,19 +270,24 @@ class Capability(CapabilityEngine):
                 "source": "overlay",
             },
         ]
+        start_for = {"marker_low": 1, "marker_high": 5}
+        label_for = {"marker_low": "low (1)", "marker_high": "high (5)"}
+        question = "Tap a marker to choose where counting starts from, or Start at 1."
         tapped = {"id": None}
 
         def on_tap(instance_id):
             tapped["id"] = instance_id
-            ctx.update_user_panel(selected_instance_id=instance_id)  # the highlight follows the tap
+            label = label_for.get(instance_id)
+            message = f"{question} Selected: start counting from {label}." if label else question
+            ui.select_object(instance_id, message=message)
 
         ui.ask(
-            "Tap a marker to choose where counting starts from, or Start at 1.",
+            question,
             [{"button_id": "start_at_1", "label": "Start at 1"}],
             objects=markers,
             on_tap=on_tap,
         )
-        return 5 if tapped["id"] == "marker_high" else 1
+        return start_for.get(tapped["id"], 1)
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
         """Sleeps `duration` seconds in short steps, honouring cancel and

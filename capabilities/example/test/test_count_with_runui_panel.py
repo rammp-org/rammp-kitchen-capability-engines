@@ -139,8 +139,14 @@ class FakeCtx:
     def update_user_panel(self, panel_json=None, objects=None, selected_instance_id=None):
         selected = selected_instance_id
         self.sent.append({"panel": panel_json, "objects": objects, "selected": selected})
-        is_question = panel_json is not None and (
-            [b["button_id"] for b in panel_json.get("buttons", [])] != ["stop"] or objects
+        # A call with `selected` set is a resend of the *same* question (RunUI.select_object(),
+        # highlighting/confirming a tap -- e.g. the example's marker picker), not a new one: only
+        # a fresh panel (no `selected`) consumes the next scripted reply, else the marker picker's
+        # own select_object() resend would steal the reply meant for the final "Done" notice.
+        is_question = (
+            panel_json is not None
+            and selected is None
+            and ([b["button_id"] for b in panel_json.get("buttons", [])] != ["stop"] or objects)
         )
         if self.session and is_question and self.replies:
             with self._lock:
@@ -259,24 +265,25 @@ def test_ask_to_start_stop_cancels():
 def test_ask_start_marker_tap_marker_high_starts_at_5():
     node, ctx = make(replies=[[tap_object("marker_high"), button("start_at_1")]])
     ui = make_ui(node)
-    assert node._ask_start_marker(ui, ctx) == 5
+    assert node._ask_start_marker(ui) == 5
     ask = ctx.sent[0]
     assert {o["instance_id"] for o in ask["objects"]} == {"marker_low", "marker_high"}
     assert all(o["source"] == "overlay" for o in ask["objects"])
-    # the highlight followed the tap (selected_instance_id), a separate update_user_panel call
-    assert any(s["selected"] == "marker_high" for s in ctx.sent)
+    # the tap both highlighted the marker and updated the panel's own message to confirm it
+    selected = next(s for s in ctx.sent if s["selected"] == "marker_high")
+    assert "high (5)" in selected["panel"]["message"]
 
 
 def test_ask_start_marker_tap_start_at_1_without_an_object_tap_starts_at_1():
     node, ctx = make(replies=[[button("start_at_1")]])
     ui = make_ui(node)
-    assert node._ask_start_marker(ui, ctx) == 1
+    assert node._ask_start_marker(ui) == 1
 
 
 def test_ask_start_marker_standalone_starts_at_1():
     node, ctx = make(session=False)
     ui = make_ui(node)
-    assert node._ask_start_marker(ui, ctx) == 1
+    assert node._ask_start_marker(ui) == 1
 
 
 # -- the whole action: start -> pick a marker -> count under the motion panel -> done -------------
