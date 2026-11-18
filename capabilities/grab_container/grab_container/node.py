@@ -69,6 +69,9 @@ UI_GRAB = "grab_by_brim"
 UI_GRAB_PARAMS = {"execute": True}
 # Steps (ui_text.step) whose failure comes before the hand reaches for the brim: the UI offers the grab again
 UI_RETRY_STEPS = ("", "home", "locate", "view", "detect")
+# How long the retry question waits for Grab (s): under the orchestrator's 120 s execute timeout (REVIEW_RULES O3),
+# which feat/orchestrator resets on each progress report. No answer ends the action with its refusal.
+UI_PROMPT_TIMEOUT_S = 90.0
 
 
 class _PhaseCtx:
@@ -120,6 +123,11 @@ class Capability(CapabilityEngine):
     def execute(self, action_id, params, ctx):
         if action_id == UI_GRAB:
             return self._ui_run(ctx)
+        return self._direct(action_id, params, ctx)
+
+    def _direct(self, action_id, params, ctx, sensors=None):
+        """`grab` or `park`. `sensors()`: the (wrist, scene camera, detections) to use; None makes them for this run
+        (_sensors)."""
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
@@ -132,59 +140,94 @@ class Capability(CapabilityEngine):
         try:
             if action_id == "park":
                 return {**grasp.park(self.arm, execute, log), "note": note}
-            # the cameras', detections' and tf subscriptions are per action: the engine drops them at its end
-            cfg = self.cfg
-            motion = {"control_mode": IMPEDANCE, "gains": cfg["impedance_gains"]} if params.get("impedance") else {}
-            tfbuf = self.create_action_tf_buffer()
-            wrist = self._camera(
-                tfbuf, cfg["color_topic"], cfg["camera_info_topic"], cfg["depth_topic"], cfg["camera_frame"]
-            )
-            scene_cam = self._camera(
-                tfbuf, cfg["scene_color_topic"], cfg["scene_camera_info_topic"], cfg["scene_depth_topic"]
-            )
-            detections = scene.SceneDetections(self, cfg["detections_topic"])
+            gains = self.cfg["impedance_gains"]
+            motion = {"control_mode": IMPEDANCE, "gains": gains} if params.get("impedance") else {}
+            wrist, scene_cam, detections = sensors() if sensors is not None else self._sensors()
             return {**self._grab(wrist, scene_cam, detections, execute, log, ctx, motion), "note": note}
         except grasp.Abort as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
+
+    def _sensors(self):
+        """(wrist camera, scene camera, scene detections) on one tf buffer. Their subscriptions are per action
+        (create_action_subscription, create_action_tf_buffer): the engine drops them when the action ends."""
+        cfg = self.cfg
+        tfbuf = self.create_action_tf_buffer()
+        wrist = self._camera(
+            tfbuf, cfg["color_topic"], cfg["camera_info_topic"], cfg["depth_topic"], cfg["camera_frame"]
+        )
+        scene_cam = self._camera(
+            tfbuf, cfg["scene_color_topic"], cfg["scene_camera_info_topic"], cfg["scene_depth_topic"]
+        )
+        return wrist, scene_cam, scene.SceneDetections(self, cfg["detections_topic"])
 
     def _ui_run(self, ctx):
         """The UI's one press: `grab` executing, under capability_ui.RunUI. A progress panel with Stop names each
         step (Stop cancels this run: the motion in flight stops), then Done, failed or Stopped (saying what the
         hand holds). A refusal before the hand reached for the brim (UI_RETRY_STEPS) shows its reason and offers
         the grab again, waiting for an explicit tap; anything later is shown with Done only, never retried. Every
-        final notice is shown and waited on (bounded) before this returns or raises."""
+        final notice is shown and waited on (bounded) before this returns or raises.
+
+        The cameras', detections' and tf subscriptions are made once, by the first try, and kept for every retry
+        (the engine drops them when this action ends). Before each wait for a tap, a ctx.progress tells the
+        orchestrator the action is alive (feat/orchestrator resets its 120 s execute timeout on each), and no wait
+        is longer than that: a notice NOTICE_TIMEOUT_S (60 s), the retry question UI_PROMPT_TIMEOUT_S."""
         ui = RunUI(ctx, ui_text.TITLE, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+
+        def waiting(what):  # the orchestrator's progress before a wait (never shown on the UI)
+            ctx.progress("ui", 100.0, f"waiting for {what} on the UI", pausable=False)
+
         if not self.mock and not self.cfg["allow_execute"]:
+            waiting("Done")
             ui.refuse(ui_text.disabled())
             raise EngineError(
                 "execution_disabled",
                 f"{ui_text.TITLE} is disabled: launch with allow_execute:=true for an attended run.",
                 recoverable=True,
             )
+        kept = []
+
+        def sensors():
+            if not kept:
+                kept.extend(self._sensors())
+            kept[0].reset()  # the wrist camera's image turn is per run (set_upright), as a new Camera's
+            return kept
+
+        def stopped_note(run_ctx):
+            waiting("Done")  # called just before the Stopped notice
+            return ui_text.hand(run_ctx.step)
+
         while True:
             ctx.checkpoint()
             run_ctx = _PhaseCtx(ctx, ui)
             try:
                 result = ui.motion(
                     ui_text.MOVING,
-                    lambda run_ctx=run_ctx: self.execute("grab", dict(UI_GRAB_PARAMS), run_ctx),
-                    stopped_note=lambda run_ctx=run_ctx: ui_text.hand(run_ctx.step),
+                    lambda run_ctx=run_ctx: self._direct("grab", dict(UI_GRAB_PARAMS), run_ctx, sensors),
+                    stopped_note=lambda run_ctx=run_ctx: stopped_note(run_ctx),
                 )
             except EngineError as error:
                 self.get_logger().error(f"{UI_GRAB}: {error}")
                 if ui.user_stopped or ctx.cancelled():
                     raise  # Stop showed its own notice; an orchestrator cancel has taken the UI back
                 if error.recoverable and error.error_code == "refused" and run_ctx.step in UI_RETRY_STEPS:
-                    if ui.retry(ui_text.retry(str(error)), ui_text.RETRY_LABEL, title=f"{ui_text.TITLE}: not done"):
+                    waiting(ui_text.RETRY_LABEL)
+                    message = f"{ui_text.retry(str(error))} Press {ui_text.RETRY_LABEL} to try again."
+                    retry = [{"button_id": "retry", "label": ui_text.RETRY_LABEL}]
+                    title = f"{ui_text.TITLE}: not done"
+                    # RunUI.retry's question, with a wait under the orchestrator's 120 s
+                    if ui.ask(message, retry, UI_PROMPT_TIMEOUT_S, title=title, style="warning") == "retry":
                         continue
                     raise  # no UI session, no answer in time
+                waiting("Done")
                 ui.error(ui_text.failure(str(error), ui_text.hand(run_ctx.step)))
                 raise
             except Exception as error:  # Cancelled, an arm error (e-stop, control taken), the detector, a bug
                 self.get_logger().error(f"{UI_GRAB}: {error!r}")
                 if not (ui.user_stopped or ctx.cancelled()):
+                    waiting("Done")
                     ui.error(ui_text.unexpected(error, ui_text.hand(run_ctx.step)))
                 raise
+            waiting("Done")
             if result.get("mock"):
                 ui.done(ui_text.DONE, mock=True)
             else:

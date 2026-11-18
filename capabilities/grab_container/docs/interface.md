@@ -58,6 +58,7 @@ plans the view move; `park` reports the move) and nothing moves.
 ## Subscribes
 
 Only while `grab` runs (the scene topics for the locate step); `self.arm` also subscribes to the arm driver's state then.
+Under `grab_by_brim` they are made by its first try and kept for its retries, until the action ends.
 
 | Topic                                | Type                                           | Required | Meaning                               |
 | ------------------------------------ | ---------------------------------------------- | -------- | ------------------------------------- |
@@ -125,7 +126,8 @@ In `execute()`:
   "The gripper was closing on the brim: it may be holding the tupperware.").
 - A `refused` failure before the hand reaches for the brim (home, locate, view
   or detect): the reason in plain words, with the grab again (button `retry`,
-  labelled Grab) and Stop. A tap re-runs it from home.
+  labelled Grab) and Stop. A tap re-runs it from home. The question waits at
+  most 90 s (`UI_PROMPT_TIMEOUT_S`); no answer ends the action with the refusal.
 - A failure from the open gripper's approach on, any other error, or an
   exception (e-stop, control taken, the detector's weights): a "failed" notice
   with the reason and what the hand holds, Done only, never retried.
@@ -133,7 +135,9 @@ In `execute()`:
   lifted it a little. Check by eye ..."; `grab` doesn't check the grip, and the
   notice says so when the lift didn't run). Mock: "Mock: ... No arm motion."
 - Every final notice is waited on for at most 60 s before `execute()` returns
-  or raises. An orchestrator cancel shows nothing more (the orchestrator has
+  or raises. Before each wait for a tap, a `ctx.progress` (phase `ui`) tells
+  the orchestrator the action is alive: `feat/orchestrator` cancels an action
+  silent for 120 s and resets that clock on each progress report. An orchestrator cancel shows nothing more (the orchestrator has
   taken the UI back). Without a UI session nothing waits: the error is
   returned.
 

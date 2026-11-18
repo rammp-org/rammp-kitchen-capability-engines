@@ -31,14 +31,18 @@ _spec = importlib.util.spec_from_file_location(
 UI_TEXT = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(UI_TEXT)
 
-GLOBALS = {"EXECUTE", "GRAB", "CONTAINER_CLASSES", "UI_GRAB", "UI_GRAB_PARAMS", "UI_RETRY_STEPS"}
+GLOBALS = {"EXECUTE", "GRAB", "CONTAINER_CLASSES", "UI_GRAB", "UI_GRAB_PARAMS", "UI_RETRY_STEPS", "UI_PROMPT_TIMEOUT_S"}
 FUNCTIONS = {"_PhaseCtx"}
-METHODS = {"_ui_run", "availability", "execute"}
+METHODS = {"_ui_run", "availability", "execute", "_direct"}
 STOP = [{"button_id": "stop", "label": "Stop"}]
 DONE = [{"button_id": "done", "label": "Done"}]
 
 
 class Cancelled(Exception):
+    pass
+
+
+class Abort(Exception):
     pass
 
 
@@ -89,6 +93,8 @@ def load():
         "RunUI": RunUI,
         "cancel_own_run": lambda engine: engine.fake_ctx.cancel(),  # the engine's cancel: sets the run's flag
         "ui_text": UI_TEXT,
+        "grasp": SimpleNamespace(Abort=Abort),
+        "IMPEDANCE": "impedance",
     }
     exec(compile(module, str(NODE), "exec"), scope)
     return scope
@@ -151,18 +157,26 @@ def scope():
 
 
 def make(scope, ctx, steps=(), result=None, error=None, **cfg):
-    """The node with `_grab` / the direct goal replaced: it reports `steps` ((phase, pct) as grab's ctx.progress),
-    then raises `error` or returns `result`."""
+    """The node with `_grab` and `_sensors` replaced (the real execute -> _direct around them): `_grab` reports
+    `steps` ((phase, pct) as grab's ctx.progress), then raises `error` or returns `result`. `node.calls`: each
+    _direct (action_id, params); `node.made`: each set of sensors subscribed; `node.grabs`: the sensors each grab
+    got."""
     node = scope["Capability"]()
     node.mock = False
-    node.cfg = {"allow_execute": True, **cfg}
+    node.model = object()  # loaded
+    node.cfg = {"allow_execute": True, "impedance_gains": "default", **cfg}
     node.get_logger = Mock(return_value=Mock())
     node.fake_ctx = ctx
-    node.calls = []
+    node.calls, node.made, node.grabs = [], [], []
     outcomes = list(error) if isinstance(error, list) else [error]
 
-    def grab(action_id, params, run_ctx):
-        node.calls.append((action_id, params))
+    def sensors():
+        made = (Mock(name="wrist"), Mock(name="scene_cam"), Mock(name="detections"))
+        node.made.append(made)
+        return made
+
+    def grab(wrist, scene_cam, detections, execute, log, run_ctx, motion):
+        node.grabs.append((wrist, scene_cam, detections))
         for phase, pct in steps:
             run_ctx.progress(phase, pct)
         outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
@@ -172,10 +186,13 @@ def make(scope, ctx, steps=(), result=None, error=None, **cfg):
             raise outcome
         return result or {"executed": True, "raised": True}
 
-    real_execute = node.execute
-    node.execute = lambda action_id, params, ctx: (
-        real_execute(action_id, params, ctx) if action_id == scope["UI_GRAB"] else grab(action_id, params, ctx)
-    )
+    real_direct = node._direct
+
+    def direct(action_id, params, run_ctx, sensors=None):
+        node.calls.append((action_id, params))
+        return real_direct(action_id, params, run_ctx, sensors)
+
+    node._direct, node._grab, node._sensors = direct, grab, sensors
     return node
 
 
@@ -190,9 +207,9 @@ GRAB_STEPS += [("grasp", 70.0), ("raise", 85.0)]
 def test_one_press_runs_grab_executing_with_each_step_on_the_stop_panel_then_done(scope):
     ctx = FakeCtx()
     node = make(scope, ctx, steps=GRAB_STEPS)
-    assert run(scope, node, ctx) == {"executed": True, "raised": True}
+    assert run(scope, node, ctx) == {"executed": True, "raised": True, "note": ""}
     assert node.calls == [("grab", {"execute": True})]
-    assert ctx.phases == [p for p, _ in GRAB_STEPS]
+    assert ctx.phases == [p for p, _ in GRAB_STEPS] + ["ui"]  # "ui": before the Done notice's wait
     *moving, final = ctx.sent
     assert all(p["buttons"] == STOP for p in moving)
     assert [p["message"] for p in moving] == [UI_TEXT.MOVING] + [UI_TEXT.progress(p, pct)[0] for p, pct in GRAB_STEPS]
@@ -277,6 +294,76 @@ def test_refusal_before_the_reach_offers_the_grab_again(scope, steps, raw, says)
         assert code not in retry["message"]
     assert retry["buttons"] == [{"button_id": "retry", "label": UI_TEXT.RETRY_LABEL}, *STOP]
     assert ctx.sent[-1]["message"] == UI_TEXT.DONE
+
+
+def test_retries_reuse_the_first_tries_subscriptions(scope):
+    """REVIEW_RULES R1: one set of camera, detection and tf subscriptions per action, however many retries; the
+    wrist camera's per-run state reset before each try."""
+    ctx = FakeCtx(answers=["retry", "retry"])
+    error = EngineError("refused", "no scene camera colour + depth -- the arm holds where it is", True)
+    node = make(scope, ctx, steps=[("locate", 2.0)], error=[error, error, None])
+    run(scope, node, ctx)
+    assert len(node.grabs) == 3 and len(node.made) == 1
+    assert all(g == node.made[0] for g in node.grabs)
+    assert node.made[0][0].reset.call_count == 3
+
+
+def test_a_hand_sent_grab_subscribes_for_its_own_run(scope):
+    ctx = FakeCtx()
+    node = make(scope, ctx)
+    for _ in range(2):
+        assert node.execute("grab", {"execute": True}, ctx)["executed"]
+    assert len(node.made) == 2 and node.grabs == node.made
+    assert not node.made[0][0].reset.called and ctx.sent == []
+
+
+@pytest.fixture
+def waits(monkeypatch):
+    """Each RunUI wait for a tap: (its timeout, the last progress reported to the orchestrator before it)."""
+    seen = []
+    real = RunUI._wait
+
+    def wait(self, wanted, timeout_s, *args, **kwargs):
+        seen.append((timeout_s, self.ctx.phases[-1] if self.ctx.phases else None))
+        return real(self, wanted, timeout_s, *args, **kwargs)
+
+    monkeypatch.setattr(RunUI, "_wait", wait)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "steps, error, answers",
+    [
+        (GRAB_STEPS, None, []),  # Done
+        ([("locate", 2.0)], [EngineError("refused", "no scene camera colour + depth", True), None], ["retry"]),
+        ([("locate", 2.0)], EngineError("refused", "no scene camera colour + depth", True), []),  # no answer
+        ([("approach", 30.0)], EngineError("refused", "approach: the arm is e-stopped", True), []),  # failed
+        ([("detect", 0.0)], RuntimeError("the arm is e-stopped"), []),  # unexpected
+        ([("approach", 30.0)], stop_now, []),  # Stopped
+    ],
+)
+def test_every_wait_is_under_the_orchestrators_120_s_and_follows_a_progress(
+    scope, waits, monkeypatch, steps, error, answers
+):
+    """REVIEW_RULES O3: feat/orchestrator cancels an action silent for 120 s (it resets on each progress)."""
+    assert scope["UI_PROMPT_TIMEOUT_S"] < 120.0 and panels.NOTICE_TIMEOUT_S < 120.0
+    monkeypatch.setitem(scope, "UI_PROMPT_TIMEOUT_S", 0.05)  # the node's global: no answer, quickly
+    ctx = FakeCtx(answers=answers)
+    node = make(scope, ctx, steps=steps, error=error)
+    try:
+        run(scope, node, ctx)
+    except (EngineError, RuntimeError, Cancelled):
+        pass
+    assert waits and all(phase == "ui" for _, phase in waits)
+    assert all(timeout in (0.05, panels.NOTICE_TIMEOUT_S) for timeout, _ in waits)
+
+
+def test_disabled_notice_follows_a_progress(scope, waits):
+    ctx = FakeCtx()
+    node = make(scope, ctx, allow_execute=False)
+    with pytest.raises(EngineError):
+        run(scope, node, ctx)
+    assert waits == [(panels.NOTICE_TIMEOUT_S, "ui")]
 
 
 def test_stop_on_the_retry_question_ends_without_moving_again(scope):
