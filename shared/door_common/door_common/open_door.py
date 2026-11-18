@@ -106,6 +106,9 @@ GRASP_FORCE = 0.25  # gripper current ceiling on the handle (self.arm default 0.
 # bar turn/shift in the fingers instead of tipping the microwave forward (10-07)
 SWING_FIT_MIN_DEG = 15  # fit a hinge to the measured path only over at least this much arc
 HINGE_RADIUS_RANGE = (0.25, 0.45)  # None: no gate (a measured hinge's radius is the measurement)
+HINGE_SIDE = None  # +1: the hinge is to the left of the handle, looking at the door (-1 right); a detection with it on
+# the other side is refused. None: no gate. 11-10: with the microwave moved, the hinge out of view, the control
+# panel's edge (right of the handle) was taken for the hinge at a plausible 32 cm
 
 # --- release ---
 BACK_OFF_M = 0.20
@@ -122,6 +125,8 @@ DOOR_FACE_BEHIND_HANDLE = None  # the door's front face this far behind the dete
 #   handle, more when tilted). None: DOOR_MODEL's face_behind_grasp, measured from the grasp itself
 DOOR_Z_FROM_HANDLE = None  # door bottom / top relative to the handle, when it is taller than any detection sees
 KEEP_ARM_IN_FRAMES = False  # each saved detection frame also keeps the arm's joints + tool pose
+SAVE_FRAMES = True  # keep every detection frame in DETECT_FRAMES_DIR (_save_frame). Never pruned, so a deployed
+#   capability turns it off (the microwave does, unless its `debug` parameter is on)
 LAST_PLAN = None  # the last open_task's chosen plan: {q0 (start joints), plan (plan_open's), geom} -- e.g. to save a
 #   dry run's plan for rendering
 GRASPED_GAINS = None  # joint impedance {kq, zeta, torque_limit} from the grasp on (the swing, what follows it); None:
@@ -319,7 +324,10 @@ FRAME_ARM = None  # KEEP_ARM_IN_FRAMES: the arm, so each saved detection frame a
 def _save_frame(frame, tag, attempt, det):
     """Keep every detection's colour + depth frame (and the result) for looking at misses afterwards: real
     depth (uint16 mm), K and the camera pose (common.save_frame). Until 10-21 the depth was written
-    as a float32 PNG, which saturated to 0/255 -- those older frames have no usable depth."""
+    as a float32 PNG, which saturated to 0/255 -- those older frames have no usable depth. Nothing with SAVE_FRAMES
+    off."""
+    if not SAVE_FRAMES:
+        return
     try:
         arm_state = None
         if FRAME_ARM is not None:
@@ -609,8 +617,12 @@ SEARCH_AFTER_SWING_MAX = 10  # how many swing-feasible candidates (best first) t
 # (11-10: 6 -> 10, now that cuRobo's own checks can pass a candidate over too)
 SAME_CONFIG_DEG = 10.0  # grasp IK solutions closer than this (every joint) are one configuration
 REPLAN_SWING_DEG = 3.0  # after the grasp, re-plan the swing from the real joints if they are further than this off
-PLACEMENT_SHIFTS_M = ((0.05, 0.0), (0.10, 0.0), (-0.05, 0.0), (0.0, 0.05), (0.0, -0.05), (0.05, 0.05), (0.05, -0.05))
-# (x away from the arm, y to the arm's left), tried on a refusal to say where the appliance would work
+BASE_SHIFTS_M = ((-0.05, 0.0), (-0.10, 0.0), (0.05, 0.0), (0.0, -0.05), (0.0, 0.05), (-0.05, -0.05), (-0.05, 0.05))
+# robot base moves (x forward along the arm base's x, y to the arm's left; no turn), tried on a refusal to say where
+# the robot would work from. The appliance can't be moved, so each is planned as the detection shifted the other way:
+# the chair and user boxes, the cameras and the table floor all move with the base, so that is the same plan
+PLACEMENT_SUGGESTIONS = []  # the last refusal's working base moves (_placement_advice), for a UI: [{base_forward_m,
+#   base_left_m, tilt_deg, swing_deg}], best first; [] when none worked or the last plan didn't need advice
 
 
 CUROBO_LIMIT_MARGIN_DEG = 6.0  # cuRobo refuses to plan to or from joints this close to a limit (its
@@ -891,11 +903,13 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
 
 
 def _placement_advice(scene, rb, geom, q0, max_swing, min_swing, after_swing):
-    """Where the appliance would work: the open re-planned (quick) with the detection shifted by PLACEMENT_SHIFTS_M."""
+    """Where the robot would work from: the open re-planned (quick) for each base move in BASE_SHIFTS_M, as the
+    detection shifted the opposite way. Also kept in PLACEMENT_SUGGESTIONS."""
     works = []
-    for dx, dy in PLACEMENT_SHIFTS_M:
+    PLACEMENT_SUGGESTIONS.clear()
+    for dx, dy in BASE_SHIFTS_M:
         _checkpoint()
-        shift = np.array([dx, dy, 0.0])
+        shift = -np.array([dx, dy, 0.0])  # the base forward by dx = the appliance dx nearer, in the arm's frame
         # hinge / hinge_seen may be None (a detector that reports no hinge, e.g. the fridge: it measures the hinge
         # from the grasp instead). plan_open uses geom["hinge"], never geom["hinge_seen"]; shift what is there, leave
         # None as None.
@@ -910,13 +924,16 @@ def _placement_advice(scene, rb, geom, q0, max_swing, min_swing, after_swing):
         if plan is not None:
             where = []
             if dx:
-                where.append(f"{abs(dx) * 100:.0f} cm {'further from' if dx > 0 else 'closer to'} the arm")
+                where.append(f"{abs(dx) * 100:.0f} cm {'forward' if dx > 0 else 'back'}")
             if dy:
-                where.append(f"{abs(dy) * 100:.0f} cm to the arm's {'left' if dy > 0 else 'right'}")
+                where.append(f"{abs(dy) * 100:.0f} cm to the {'left' if dy > 0 else 'right'}")
             works.append(f"{' and '.join(where)} (tilt {plan['pitch']} deg, swing {plan['swing']} deg)")
+            PLACEMENT_SUGGESTIONS.append(
+                dict(base_forward_m=dx, base_left_m=dy, tilt_deg=plan["pitch"], swing_deg=plan["swing"])
+            )
     if not works:
-        return f"\nNo shift of the {dc.APPLIANCE} tried (up to 10 cm) makes it work from here."
-    return f"\nWould work with the {dc.APPLIANCE} moved: " + "; or ".join(works) + "."
+        return "\nNo robot base move tried (up to 10 cm, no turn) makes it work from here."
+    return "\nWould work with the robot moved (forward / left as the arm's base faces): " + "; or ".join(works) + "."
 
 
 def open_task(
@@ -933,6 +950,7 @@ def open_task(
     once the gripper has closed on the handle -- from then on a stop leaves the hand holding it.
     Returns True when the swing finished (or the dry run passed); raises Refused on any refusal."""
     scene, rb = make_sim()
+    PLACEMENT_SUGGESTIONS.clear()  # this run's, if it refuses
     after_swing = after_swing or AfterSwing()
     plain_after_swing = after_swing  # the placement advice's quick re-plans skip cuRobo (7 shifts x candidates)
     if CUROBO_PATHS:
@@ -966,6 +984,13 @@ def open_task(
     say(f"hinge (detected) {np.round(hinge, 4)}  radius {radius * 100:.1f} cm")
     if HINGE_RADIUS_RANGE is not None and not HINGE_RADIUS_RANGE[0] <= radius <= HINGE_RADIUS_RANGE[1]:
         raise Refused(f"hinge radius {radius * 100:.1f} cm is implausible (door ~35 cm) -- refusing.{advice}")
+    left = np.cross([0.0, 0.0, 1.0], -np.asarray(n, dtype=float))  # looking at the door (along -n), its left
+    if HINGE_SIDE is not None and HINGE_SIDE * float(np.dot(hinge[:2] - np.asarray(grasp.position)[:2], left[:2])) <= 0:
+        raise Refused(
+            f"the hinge {np.round(hinge, 3)} is on the wrong side of the handle {np.round(h_raw, 3)} (it should be on "
+            f"the {'left' if HINGE_SIDE > 0 else 'right'}, looking at the door) -- a wrong handle or hinge: is the "
+            f"whole door in the wrist camera's view? Refusing.{advice}"
+        )
 
     # --- plan everything before any motion: tilts x arm configurations x swings, then what follows the swing ---
     geom = dict(h_raw=h_raw, orient=orient, n=n, hinge=hinge, hinge_seen=hinge_seen, door_z=door_z)

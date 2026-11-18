@@ -528,15 +528,24 @@ def _lowest(rb, q):
     return best
 
 
+FLOOR_START_TOL_M = 0.005  # a path that starts under the floor may dip this much below its start (planning noise)
+
+
 def path_below_floor(qs):
-    """Why a cuRobo path's joints `qs` take the arm below FREE_MOVE_MIN_Z, or "" (also with no floor set)."""
+    """Why a cuRobo path's joints `qs` take the arm below FREE_MOVE_MIN_Z, or "" (also with no floor set). A path that
+    STARTS under the floor (the arm already there: 11-16, the tool at z 0.222 pointing down) is not refused for its
+    start: it must just never go lower than it starts (less FLOOR_START_TOL_M) -- the floor keeps paths off the table,
+    and leaving a low pose is moving away from it."""
     if FREE_MOVE_MIN_Z is None or len(qs) == 0:
         return ""
     rb = make_sim()[1]
+    z0, _ = _lowest(rb, qs[0])
+    floor = min(FREE_MOVE_MIN_Z, z0 - FLOOR_START_TOL_M)
     for i, q in enumerate(qs):
         z, link = _lowest(rb, q)
-        if z < FREE_MOVE_MIN_Z:
-            return f"{link} down to z {z:.3f} at sample {i}/{len(qs)}, under the floor {FREE_MOVE_MIN_Z:.2f}"
+        if z < floor:
+            under = f"the floor {FREE_MOVE_MIN_Z:.2f}" if floor == FREE_MOVE_MIN_Z else f"its start's z {z0:.3f}"
+            return f"{link} down to z {z:.3f} at sample {i}/{len(qs)}, under {under}"
     return ""
 
 
@@ -600,6 +609,7 @@ def free_move_problem(ai, start, q_goal, in_front=None, end_tool_tol=None, keep_
 
 
 FREE_MOVE_MAX_JOINT_DEG = 60.0  # no joint turns more than this in one free move (the arm keeps its shape)
+# 11-10: 90 let J1 +89 / J3 -81 through (the elbow swung round); every good line-up that day turned <= 43
 
 
 def reconfiguration(start, q_goal, max_deg=None):
