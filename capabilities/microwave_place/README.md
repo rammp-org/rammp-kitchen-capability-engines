@@ -11,6 +11,7 @@ Put the tupperware the gripper is already holding (after `grab_container`) into 
 - `microwave_place/rim_detection.py`: `take_out`: where the container's rim is, from the **wrist camera**
   (`grab_container`'s SAM3 rim detection).
 - `microwave_place/take_out.py`: `take_out`: planning and running the arm.
+- `microwave_place/smoothness_test.py`: the direct-only non-contact test of the two approach trajectory joins.
 - `microwave_place/microwave_place_node.py`: the `CapabilityEngine` action server: parameters, the actions, the plan and
   state files.
 
@@ -305,7 +306,7 @@ Each shows one progress panel with Stop (`capability_ui.RunUI`); Stop cancels th
 the "Stopped" notice says what the hand holds. A recoverable refusal before the arm started on the place or take-out
 proper offers the action again; a failure once it started (`STOPPED ...`) is shown with Done only. The node must
 still run with `allow_execute:=true` for a hardware run; `mock:=true` exercises the panels without arm motion.
-`place` and `take_out` remain available for direct execution and dry runs.
+`place`, `take_out` and `test_stop_joins` remain available for direct execution and dry runs.
 
 This uses `ctx.update_user_panel()` / `ctx.poll_ui_event()` from the
 `feat/engine_update` counter example. Run with the orchestrator and UI bridge,
@@ -337,10 +338,11 @@ Snorlax's cuRobo world reload completed after the previous 10-second timeout.
 Override this launch setting with `service_call_s:=30.0`. Cancellation remains
 available during the wait; the collision-world and HOME checks still apply.
 
-| Action     | Params            | What it does                                                                                                      |
-| ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `place`    | `execute` (false) | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it                        |
-| `take_out` | `execute` (false) | Finds the container grasp point from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
+| Action            | Params                                              | What it does                                                                                                      |
+| ----------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `place`           | `execute` (false)                                   | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it                        |
+| `take_out`        | `execute` (false)                                   | Finds the container grasp point from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
+| `test_stop_joins` | `joint_waypoints_deg`, `speed_scale`, `execute`      | Plans three non-contact cuRobo legs and tests the two full-stop joins in a verified clear workspace               |
 
 A refusal fails the goal with error code `refused` (recoverable).
 
@@ -356,6 +358,29 @@ SAM3 (rammp-perception) and the cuRobo planner up; the planner must read `worlds
 ros2 launch microwave_place microwave_place.launch.py use_orchestrator:=false
 make action CAP=microwave_place ACTION=place                          # dry run
 ```
+
+### Non-contact stop-at-joins test
+
+`test_stop_joins` is a direct-only commissioning action. It does not detect, enter or contact the microwave,
+and it never calls the microwave insertion authorization guard. An operator supplies exactly three seven-joint
+waypoints in degrees, chosen in a physically verified clear workspace with an empty gripper. Each leg is planned
+by cuRobo in `take_approach_world`; the action rejects a leg changing any joint by more than 20 degrees, a planner
+detour over 40 degrees, or `speed_scale` over 0.2. The existing `approach_knots`, `approach_stop_indices` and
+`rammp_arm.joint_trajectory(..., stop_at=...)` generate the same two zero-velocity transitions as `place`.
+
+Dry-run first (no arm command, even if the node permits execution):
+
+```bash
+make action CAP=microwave_place ACTION=test_stop_joins \
+  PARAMS='{"joint_waypoints_deg":[[J1,J2,J3,J4,J5,J6,J7],[J1,J2,J3,J4,J5,J6,J7],[J1,J2,J3,J4,J5,J6,J7]],"speed_scale":0.1}'
+```
+
+For an attended run, keep a person on the e-stop, confirm the gripper is empty and the complete swept path is
+clear, inspect the saved dry plan, launch the node with `allow_execute:=true`, then send the same goal with
+`"execute":true`. The action still refuses a faulted/not-ready arm, a changed start, any cuRobo planning failure,
+or a controller diagnostic fault. It writes the planned command to `state_dir/plans/smoothness_*.json` and writes
+commanded/measured joint positions and velocities, tracking error and controller faults to
+`state_dir/smoothness/smoothness_*.csv`; the normal per-action ROS bag is also retained.
 
 On the arm, attended, someone on the e-stop:
 

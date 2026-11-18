@@ -75,8 +75,19 @@ The capability's `perception_classes` is `["microwave", "food_container", "food 
 is the scene segmenter's class; "food_container" the same without its space, for a selection typed by hand). Each
 UI action's own `perception_classes` picks where it is offered: a fridge tap offers nothing from this capability.
 The grab runs `take_out` from `take_home_joints`, wherever that viewing pose looks (the microwave by default).
-`place` and `take_out` (including `"site": "fridge"`) stay callable directly (dry runs, CLI) but are not offered
-to the UI.
+`place`, `take_out` (including `"site": "fridge"`) and `test_stop_joins` stay callable directly (dry runs, CLI)
+but are not offered to the UI.
+
+### Non-contact stop-at-joins commissioning action
+
+`test_stop_joins` accepts exactly three seven-joint waypoints in degrees plus `speed_scale` (default 0.1,
+maximum 0.2) and `execute` (default false). It is separate from microwave placement: it neither runs perception
+nor enters the cavity, and it does not weaken or invoke the insertion guard. In the configured
+`take_approach_world`, cuRobo must plan all three legs; each requested leg is limited to 20 degrees on every joint.
+The action then uses the place approach's existing knot assembly and stop indices, producing zero commanded
+velocity at both joins. Dry-run writes `state_dir/plans/smoothness_*.json`. An attended execution additionally
+writes `state_dir/smoothness/smoothness_*.csv` with commanded/measured joint position and velocity, tracking error
+and observed controller faults. The normal run bag records `/joint_states`, `/diagnostics` and `/rosout` as well.
 
 Every UI action, in `execute()`:
 

@@ -11,6 +11,11 @@
 Everything is in arm_mount (x forward, y left, z up).
 
 Action:
+  test_stop_joins
+           direct-only, non-contact test: cuRobo plans three short joint legs in the configured flatbot
+           world and the existing approach retimer executes them with zero velocity at both joins. The
+           goal supplies three operator-verified clear-workspace waypoints. Dry-run is the default.
+
   place    the tupperware, gripped by its side (after grab_container), into the open microwave:
              1. locate (microwave_detection.locate): the opening's known size fitted to SAM3's cavity mask,
                 frame after frame until `frames` consecutive detected frames agree (agree_m / agree_deg);
@@ -74,7 +79,7 @@ from capability_engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.driver_state import Refused as ArmRefused
 from capability_ui import RunUI, cancel_own_run
 
-from . import microwave_detection, place_motion, rim_detection, take_out, ui_text
+from . import microwave_detection, place_motion, rim_detection, smoothness_test, take_out, ui_text
 
 # the fridge take-out's own settings: take_out's setting <- this node's parameter
 FRIDGE_TAKE = {
@@ -231,6 +236,25 @@ TAKE_OUT = {
         "site": {"type": "string", "enum": list(SITES), "default": "microwave"},
     },
 }
+SMOOTHNESS_TEST = {
+    "type": "object",
+    "required": ["joint_waypoints_deg"],
+    "properties": {
+        "execute": {"type": "boolean", "default": False},
+        "speed_scale": {"type": "number", "minimum": 0.01, "maximum": smoothness_test.MAX_SPEED_SCALE, "default": 0.1},
+        "joint_waypoints_deg": {
+            "type": "array",
+            "minItems": smoothness_test.WAYPOINTS,
+            "maxItems": smoothness_test.WAYPOINTS,
+            "items": {
+                "type": "array",
+                "minItems": len(rammp_arm.JOINTS),
+                "maxItems": len(rammp_arm.JOINTS),
+                "items": {"type": "number"},
+            },
+        },
+    },
+}
 
 # The tupperware's perception classes: "food container" is the scene segmenter's class; "food_container" the same
 # without its space, for a selection typed by hand (as box_opening's perception_classes)
@@ -345,6 +369,11 @@ class Capability(CapabilityEngine):
     actions = [
         Action("place", "Place the held container in the open microwave", params_schema=PLACE),
         Action("take_out", "Take the container out of the open microwave (or the fridge)", params_schema=TAKE_OUT),
+        Action(
+            "test_stop_joins",
+            "Test both approach stops in a clear workspace",
+            params_schema=SMOOTHNESS_TEST,
+        ),
         *(
             Action(ui_id, label, perception_classes=list(classes))
             for ui_id, (_, label, _, classes) in UI_ACTIONS.items()
@@ -478,6 +507,11 @@ class Capability(CapabilityEngine):
             ctx.progress(action_id, 100.0, "mock: nothing planned or moved")
             return {"executed": False, "mock": True}
         log = self.get_logger().info
+        if action_id == "test_stop_joins":
+            try:
+                return {**self._smoothness_test(params, execute, ctx, log), "note": note}
+            except place_motion.Refused as e:
+                raise EngineError("refused", str(e), recoverable=True) from e
         site = params.get("site", "microwave") if action_id == "take_out" else "microwave"
         if site not in SITES:
             raise EngineError("bad_params", f"'site' must be one of {', '.join(SITES)}, not {site!r}", recoverable=True)
@@ -490,6 +524,89 @@ class Capability(CapabilityEngine):
             raise EngineError("safety_model_unavailable", str(e), recoverable=False) from e
         except (place_motion.Refused, microwave_detection.NotLocated, rim_detection.NotDetected) as e:
             raise EngineError("refused", _site_words(str(e), site), recoverable=True) from e
+
+    def _smoothness_test(self, params, execute, ctx, log):
+        """Plan three short cuRobo legs and optionally replay them with zero velocity at both joins."""
+        c = self.cfg
+        ctx.checkpoint()
+        world_message = take_out.set_approach_world(self.arm, c["take_approach_world"], log)
+        joint_state = self.arm.joint_states()
+        q0 = np.asarray(joint_state.position, dtype=float)
+        waypoints = params.get("joint_waypoints_deg", [])
+        legs, speed_scale = smoothness_test.plan_test(self.arm, q0, waypoints, params.get("speed_scale", 0.1))
+        trajectory = smoothness_test.test_trajectory(q0, legs, speed_scale)
+        plan_path = smoothness_test.save_plan(self.state_dir, q0, waypoints, legs, trajectory, world_message)
+        summary = {
+            "kind": "non_contact_stop_at_joins",
+            "world": world_message,
+            "plan_file": str(plan_path),
+            "duration_s": round(trajectory["duration_s"], 3),
+            "join_times_s": [round(value, 3) for value in trajectory["join_times"]],
+            "stop_at": list(trajectory["stop_at"]),
+            "speed_scale": speed_scale,
+            "max_leg_deg": smoothness_test.MAX_LEG_DEG,
+        }
+        log(
+            f"non-contact stop-at-joins plan: {len(trajectory['knots'])} knots, "
+            f"stops {trajectory['stop_at']} at {summary['join_times_s']} s, "
+            f"duration {trajectory['duration_s']:.1f} s -> {plan_path}"
+        )
+        if not execute:
+            log("DRY RUN -- three cuRobo legs planned in the clear-workspace world; nothing commanded")
+            return {"executed": False, "test": summary}
+
+        place_motion.ready(self.arm)
+        q_now = np.asarray(self.arm.joint_states().position, dtype=float)
+        mismatch = float(np.max(np.abs(place_motion.wrap_deg(q_now - q0))))
+        if mismatch > smoothness_test.START_TOL_DEG:
+            raise place_motion.Refused(
+                f"smoothness test start moved {mismatch:.2f} deg while planning "
+                f"(maximum {smoothness_test.START_TOL_DEG:.1f} deg)"
+            )
+        ctx.checkpoint()
+        recorder = smoothness_test.Recorder(self)
+        csv_path = self.state_dir / "smoothness" / f"{plan_path.stem}.csv"
+        recorder.start()
+        ctx.progress("smoothness-test", 0.0)
+        ok, evidence, motion_error = False, None, None
+        try:
+            ok = self.arm.move_joints(
+                trajectory["knots"],
+                speed_scale=speed_scale,
+                stop_at=trajectory["stop_at"],
+                monitor=recorder.monitor,
+            )
+        except Exception as error:
+            motion_error = error
+        finally:
+            try:
+                evidence = recorder.finish(csv_path, trajectory)
+            except place_motion.Refused:
+                if motion_error is None:
+                    raise
+        if motion_error is not None:
+            raise motion_error
+        if self.arm.monitor_stopped or evidence["controller_faults"]:
+            raise place_motion.Refused(
+                "STOPPED during non-contact smoothness test: controller fault: "
+                + "; ".join(evidence["controller_faults"])
+            )
+        if not ok:
+            raise place_motion.Refused(f"STOPPED during non-contact smoothness test: {self.arm.last_error}")
+        q_end = np.asarray(self.arm.joint_states().position, dtype=float)
+        end_error = float(np.max(np.abs(place_motion.wrap_deg(q_end - legs[-1][-1]))))
+        if end_error > smoothness_test.END_TOL_DEG:
+            raise place_motion.Refused(
+                f"STOPPED after non-contact smoothness test: endpoint error {end_error:.2f} deg "
+                f"> {smoothness_test.END_TOL_DEG:.1f} deg"
+            )
+        ctx.progress("smoothness-test", 100.0)
+        log(
+            f"non-contact stop-at-joins evidence: max tracking error "
+            f"{evidence['max_tracking_error_deg']:.2f} deg, measured join velocities "
+            f"{np.round(evidence['measured_join_velocity_deg_s'], 2).tolist()} deg/s -> {csv_path}"
+        )
+        return {"executed": True, "test": {**summary, "csv_file": str(csv_path), **evidence}}
 
     def _place(self, model, execute, ctx, log):
         c = self.cfg
