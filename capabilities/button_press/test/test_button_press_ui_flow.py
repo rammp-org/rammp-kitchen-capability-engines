@@ -74,7 +74,7 @@ def load():
     body += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("failure", "arm_at_start")]
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Capability")
     cls.bases = [ast.Name(id="Base", ctx=ast.Load())]
-    keep = {"_ui_run", "_ui_presses", "availability", "execute"}
+    keep = {"_ui_run", "_ui_presses", "_press", "availability", "execute"}
     cls.body = [
         n
         for n in cls.body
@@ -358,6 +358,45 @@ def test_arm_at_start_asks_the_run_and_never_raises():
         raise ArmError("no /joint_states")
 
     assert arm_at_start(SimpleNamespace(at_home=unreadable)) is None
+
+
+class FakeRun:
+    """press_button.Run for Capability._press: records the calls, at_home() as given (None: dev's Run, no at_home)."""
+
+    def __init__(self, home):
+        self.calls = []
+        if home is not None:
+            self.at_home = lambda: self.calls.append("at_home") or home
+
+    def record_end(self, phase, error=None):
+        self.calls.append("record_end")
+
+    def close(self):
+        self.calls.append("close")
+
+
+@pytest.mark.parametrize("home", [True, False, None])
+def test_press_puts_where_the_run_left_the_arm_on_its_error_before_closing_the_run(home, monkeypatch):
+    """The real Capability._press: a failed check comes out as `<phase>_failed` carrying the run's at_home(), read
+    while the run (and its arm) is still open."""
+    run = FakeRun(home)
+
+    def press_button(run_, args, pub):
+        phase[0] = "approach"
+        raise Abort("approach: leg refused")
+
+    monkeypatch.setitem(SCOPE, "Run", lambda *a: run)
+    monkeypatch.setitem(SCOPE, "press_button", press_button)
+    node, ctx = make()
+    del node._press  # the class's own
+    node.kin, node.target_pub = None, None
+    phase = ["preflight"]
+    args = SimpleNamespace(target="start_30s", presses=1, execute=True)
+    with pytest.raises(EngineError) as raised:
+        node._press(args, ctx, phase, ctx.checkpoint, quiet)
+    assert raised.value.error_code == "approach_failed"
+    assert raised.value.at_start is home
+    assert run.calls == (["record_end", "at_home", "close"] if home is not None else ["record_end", "close"])
 
 
 def test_a_recoverable_error_raised_at_the_panel_is_still_not_retried():
