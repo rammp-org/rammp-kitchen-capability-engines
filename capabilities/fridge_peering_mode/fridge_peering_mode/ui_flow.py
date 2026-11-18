@@ -15,6 +15,10 @@ RunCtx hands them to FoodTargets through its ctx.poll_ui_event(). The first wris
 FoodTargets publishes for the overlay also shows the overlay (ctx.set_overlay_visible); the
 orchestrator hides it when the run ends.
 
+The orchestrator cancels a run that sends no progress for 120 s (execute_timeout), and teleop
+sends none after it starts: the button's teleop ends by itself after LOOK_S (a Done notice), and a
+progress goes out before each final notice, so the run is never silent that long.
+
 No ROS imported here at load time: the UI tests drive it with a fake ctx.
 """
 
@@ -25,11 +29,20 @@ from capability_ui.panels import STOP
 
 from . import ui_text
 
+# How long one press looks around (peer's max_teleop_s): under the orchestrator's 120 s without
+# progress, with room for the pick that may follow a tap. Press again to keep looking.
+LOOK_S = 90.0
+
 # The UI's buttons (the orchestrator shows the label): what each runs, with fixed params, and on
 # which tapped class it is offered. `peer` and `pick` stay callable directly (dry runs by default,
 # the CLI), not offered.
 UI_ACTIONS = {
-    "look_in_fridge": ("peer", "Look Inside Fridge", {"execute": True}, ["fridge"]),
+    "look_in_fridge": (
+        "peer",
+        "Look Inside Fridge",
+        {"execute": True, "max_teleop_s": LOOK_S},
+        ["fridge"],
+    ),
 }
 
 
@@ -126,10 +139,18 @@ def run(engine, ui_id, ctx):
         # Stop showed its own notice; an orchestrator cancel has taken the UI back
         if not (ui.user_stopped or ctx.cancelled()):
             hand = ui_text.hand_note(run_ctx.phase)
+            _notice_progress(ctx, "failed")
             if isinstance(error, EngineError):
                 ui.error(ui_text.failure(str(error), hand, error.error_code))
             else:
                 ui.error(ui_text.unexpected(error, hand))
         raise
+    _notice_progress(ctx, "done")
     ui.done(ui_text.done(result), mock=bool(result.get("mock")))
     return result
+
+
+def _notice_progress(ctx, outcome):
+    """A progress before a final notice: the orchestrator's 120 s without progress then counts
+    from here, not from the start of teleop."""
+    ctx.progress("notice", 100.0, f"{outcome}: the final notice is up", pausable=False)

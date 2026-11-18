@@ -156,7 +156,7 @@ def test_one_press_runs_peer_executing_then_done():
     engine = make(ctx, lambda a, p, c: {"executed": True, "ended": "max_teleop_s"})
     assert ui_flow.run(engine, "look_in_fridge", ctx)["executed"]
     (action_id, params, run_ctx), _ = engine.execute.call_args
-    assert (action_id, params) == ("peer", {"execute": True})
+    assert (action_id, params) == ("peer", {"execute": True, "max_teleop_s": ui_flow.LOOK_S})
     assert isinstance(run_ctx, ui_flow.RunCtx)
     moving, final = ctx.panels
     assert moving["buttons"] == [STOP]
@@ -172,6 +172,42 @@ def test_a_pick_ends_with_the_container_held():
     )
     ui_flow.run(engine, "look_in_fridge", ctx)
     assert unwrap(ctx.panels[-1]["message"]) == ui_text.DONE_PICKED
+
+
+def test_one_look_ends_by_itself_before_the_orchestrator_timeout():
+    """The orchestrator cancels a run silent for 120 s, and teleop sends no progress: the button's
+    teleop is bounded below that, and the final notice's wait starts with a progress of its own."""
+    assert 0.0 < ui_flow.LOOK_S < 120.0
+    progress_before_notice = []
+
+    def run(action_id, params, run_ctx):
+        ctx.update_user_panel = record(ctx.update_user_panel)
+        return {"executed": True, "ended": "max_teleop_s"}
+
+    def record(send):
+        def wrapped(panel_json=None, **kwargs):
+            if DONE in panel_json.get("buttons", []):
+                progress_before_notice.append(ctx.phases[-1:])
+            return send(panel_json=panel_json, **kwargs)
+
+        return wrapped
+
+    ctx = FakeCtx()
+    ui_flow.run(make(ctx, run), "look_in_fridge", ctx)
+    assert progress_before_notice == [["notice"]]
+    assert "keep looking" in unwrap(ctx.panels[-1]["message"])
+
+
+def test_a_failure_notice_follows_a_progress():
+    ctx = FakeCtx()
+
+    def run(action_id, params, run_ctx):
+        run_ctx.progress("teleop", 50.0, "")
+        raise EngineError("stream_closed", "session 4 closed -- the arm holds where it is", True)
+
+    with pytest.raises(EngineError):
+        ui_flow.run(make(ctx, run), "look_in_fridge", ctx)
+    assert ctx.phases[-2:] == ["teleop", "notice"]
 
 
 def test_mock_says_nothing_moved():
@@ -256,7 +292,8 @@ def test_the_panel_follows_the_steps_with_stop_on_every_one():
         "pick",
         "reach",
         "leave",
-    ]  # the orchestrator still gets every step
+        "notice",
+    ]  # the orchestrator still gets every step, and one before the Done
 
 
 def test_teleop_without_tap_to_pick_does_not_mention_tapping():

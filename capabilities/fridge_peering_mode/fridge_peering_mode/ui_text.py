@@ -11,7 +11,10 @@ from capability_ui import wording as W
 
 TITLE = "Look inside the fridge"
 MOVING = "Getting ready to look inside the fridge. The arm may move."
-DONE_LOOKING = "Done looking inside the fridge. The arm is holding still in front of it."
+DONE_LOOKING = (
+    "Done looking inside the fridge. The arm is holding still in front of it. "
+    "To keep looking, tap the fridge and press Look Inside Fridge again."
+)
 DONE_PICKED = "Holding the container outside the fridge."
 NOTHING_HELD = "Nothing has been grasped."
 

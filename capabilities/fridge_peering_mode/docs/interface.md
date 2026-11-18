@@ -62,9 +62,9 @@ A `fridge` tap offers one button (`availability()` returns only it; the orchestr
 params). It runs `peer` with fixed params under `capability_ui.RunUI` (`shared/capability_ui`),
 from `fridge_peering_mode/ui_flow.py`, its wording in `ui_text.py`:
 
-| Action id        | Button               | Offered on a tap of | Runs                       |
-| ---------------- | -------------------- | ------------------- | -------------------------- |
-| `look_in_fridge` | "Look Inside Fridge" | `fridge`            | `peer` `{"execute": true}` |
+| Action id        | Button               | Offered on a tap of | Runs                                             |
+| ---------------- | -------------------- | ------------------- | ------------------------------------------------ |
+| `look_in_fridge` | "Look Inside Fridge" | `fridge`            | `peer` `{"execute": true, "max_teleop_s": 90.0}` |
 
 `peer` and `pick` stay callable directly (dry runs by default, the CLI) but are not offered to the
 UI: from it they would only dry-run. A `pick` goal sent while `look_in_fridge` runs is refused
@@ -81,8 +81,10 @@ UI: from it they would only dry-run. A `pick` goal sent while `look_in_fridge` r
 - Stop cancels the engine's own run, as the orchestrator's cancel does: in teleop the stream's next
   send raises `Cancelled` and closing the stream holds the arm; in a planned move `self.arm` stops
   it. A "Stopped" notice then says what the hand holds (from the run's last progress phase, e.g.
-  "The hand is holding the container, part way out of the fridge."). With `max_teleop_s` null (the
-  button's), Stop is also how the user ends looking.
+  "The hand is holding the container, part way out of the fridge.").
+- Teleop ends by itself after 90 s (`ui_flow.LOOK_S`), with a Done notice that says how to keep
+  looking. The orchestrator cancels a run that sends no progress for 120 s, and teleop sends none
+  after it starts; a progress also goes out before each final notice for the same reason.
 - A failure (`no_tf`, `no_fridge`, `refused`, `pick_failed`, `estopped`, `control_taken`,
   `stream_closed`, ...) or an exception: a "failed" notice with the reason in plain words and what
   the hand holds, Done only. A tap's pick refused before anything moved still goes back to teleop.
