@@ -145,6 +145,8 @@ Panels, in order:
   (and a driving base) stops and holds, then "Stopped. The arm is holding still where it was." with **Done**; after
   an open it adds that the hand may be on the handle (let go with `release_only`), after a drive that the wheelchair
   has moved. The goal ends `Cancelled`.
+- While the base drives the wheelchair (the "(wheelchair drives)" buttons): "The wheelchair is driving itself straight
+  back, away from the fridge, about N cm. Press Stop to stop it." with **Stop**, then the action's own text again.
 - A wheelchair move (the open's push, or the close's planned move; not on the driving buttons): "Move your wheelchair
   straight back, away from the fridge, about N cm, without turning it. Then press Continue ..." with **Continue**
   (runs the rest with `chair_moved`) and **Stop**.

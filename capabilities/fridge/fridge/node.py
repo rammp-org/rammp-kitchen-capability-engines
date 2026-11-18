@@ -341,7 +341,10 @@ class Capability(CapabilityEngine):
 
     def execute(self, action_id, params, ctx):
         if action_id in UI_ACTIONS:
-            return self._ui_run(action_id, ctx)
+            try:
+                return self._ui_run(action_id, ctx)
+            finally:
+                self._ui = None  # a direct goal after it shows nothing
         return self._execute(action_id, params, ctx)
 
     # -- the UI's buttons (UI_ACTIONS): panels through ctx.update_user_panel(), docs/UI_JSON_SCHEMA.md -----------
@@ -360,6 +363,7 @@ class Capability(CapabilityEngine):
         log = self.get_logger()
         # the clock is this module's `time`, so a test can run the waits on a fake one
         ui = RunUI(ctx, title, cancel=lambda: cancel_own_run(self), logger=log, clock=time.monotonic, sleep=time.sleep)
+        self._ui = ui  # _ui_driving's panel while the base drives the wheelchair (drive_base)
         if not self.mock and not self.cfg["allow_execute"]:
             error = EngineError(
                 "execution_disabled", "allow_execute is false: the UI's buttons run only with it true", recoverable=True
@@ -449,6 +453,25 @@ class Capability(CapabilityEngine):
         if getattr(self, "_drove", False):
             note += f" {ui_text.DROVE} {ui_text.DROVE_TODO}"
         return note.strip()
+
+    @contextlib.contextmanager
+    def _ui_driving(self, action_id, move):
+        """Around a drive_base move of the wheelchair, on a UI button: the moving panel says the wheelchair is driving
+        (`move` m, + back), Stop still on it; once the drive ends, the action's own moving text again. Panel text only:
+        nothing here changes the drive, and a panel that fails is only logged. A direct goal shows nothing."""
+        ui = getattr(self, "_ui", None)
+
+        def show(message):
+            try:
+                ui.moving(message)
+            except Exception as e:
+                self.get_logger().warning(f"UI driving panel: couldn't show it: {e!r}")
+
+        if ui is not None:
+            show(ui_text.driving(move))
+        yield
+        if ui is not None:  # not after a drive that raised: the Stopped or failure notice follows
+            show(UI_MOVING[action_id])
 
     def _ui_failed(self, ui, action_id, error):
         """The failure on the UI (Done): its reason in plain words, the state it leaves things in, what to do
@@ -594,7 +617,8 @@ class Capability(CapabilityEngine):
 
             def drive_chair(move):
                 self._drove = True  # from its first command on, wherever it ends: the UI then never retries
-                return move_chair(move)
+                with self._ui_driving(action_id, move):  # a UI button's panel says the wheelchair is driving
+                    return move_chair(move)
 
         contact = contextlib.ExitStack()  # the loose contact profile while an executed open / close runs
         try:

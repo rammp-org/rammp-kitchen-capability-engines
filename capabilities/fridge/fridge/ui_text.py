@@ -23,6 +23,12 @@ STOPPED_OPEN = (
 )
 
 
+def driving(move):
+    """The moving panel while the base drives the wheelchair `move` m (+ back) on a "(wheelchair drives)" button."""
+    way = "back, away from the fridge" if move > 0 else "forward, toward the fridge"
+    return f"The wheelchair is driving itself straight {way}, about {abs(move) * 100:.0f} cm. Press Stop to stop it."
+
+
 def _moves_sentence(moves):
     """chair_moves' words ("move the wheelchair ~5 cm closer to the fridge and move the wheelchair ~5 cm to its
     left") as one sentence ("Move the wheelchair ~5 cm closer to the fridge and ~5 cm to its left.")."""
