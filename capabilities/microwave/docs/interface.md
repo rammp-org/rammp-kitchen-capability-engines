@@ -94,22 +94,25 @@ Failures: `refused` (a check failed; the message says which and the arm holds), 
 
 `open_door_ui` and `close_door_ui` are the UI actions **Open Microwave Door** and **Close Microwave Door**.
 Each runs the whole `open` or `close` from one press, with no params and no intermediate prompts: `open` with
-`execute` and `push_open` (explicitly: off by default on this branch; ending at the view pose); `close` with `execute` and the settings that closed the door
-on 11-12 (`face_door`, `route_over`, `over_above` 0.10, `side_past_hinge` 0.12, `push_radius` 0.31 to 0.25,
+`execute` and `push_open` (set explicitly: the direct `open` defaults it off; the open ends at the view pose); `close`
+with `execute` and the settings that closed the door on 11-12 (`face_door`, `route_over`, `over_above` 0.10, `side_past_hinge` 0.12, `push_radius` 0.31 to 0.25,
 `push_z` 0.46; the node's `UI_ACTIONS`), starting from the view pose. It requests execution;
-`allow_execute` must be true on hardware. Panels come from the shared `capability_ui.RunUI`. While the arm moves the
-panel has **Stop**: it cancels the run as the orchestrator's cancel does (the motion stops, the arm holds), then a
+`allow_execute` must be true on hardware. Panels come from the shared `capability_ui.RunUI`, their wording from
+`microwave/ui_text.py`. While the arm moves the panel has **Stop**; during an open its text follows the hand: "the arm
+is moving", then "the hand has the handle and is swinging the door open" once the gripper has closed on the handle,
+then "... let go of the handle and is pushing the door further open" (the close's text stays "the arm is moving").
+Stop cancels the run as the orchestrator's cancel does (the motion stops, the arm holds), then a
 "Stopped" notice with **Done** says whether the hand may be on the handle (during an open after the grasp: it is; let
 go of it before anything else). A recoverable failure before the hand is on the handle (a check refused, nothing past
 it moved) shows its reason with the same button and **Stop**; retry waits for an explicit tap. A failure with the hand
 still on the handle, or an unrecoverable one, is shown with Done only and not retried. Every wait is bounded: Done at
 most `NOTICE_TIMEOUT_S` (60 s; the result stands either way), a retry question at most `PROMPT_TIMEOUT_S` (600 s; then
-the refusal is returned as it is). A panel is re-sent only if the bridge dropped it. The UI is offered only the UI
+the refusal is returned as it is). An orchestrator cancel shows nothing more, whatever the run raises: the
+orchestrator has taken the UI back. A panel is re-sent only if the bridge dropped it. The UI is offered only the UI
 actions (`availability`); the direct `open` / `close` dry-run/execute API is unchanged.
 
-The engine uses the counter example's direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_ui_event()`,
-ported from `feat/engine_update` as on `feature/12-microwave-grab`), including the orchestrator-pushed execution
-token. `ui_bridge_node_name` (default `ui_bridge_node`) selects the bridge. No UI session means no panel; a
+The engine uses the direct UI bridge API (`ctx.update_user_panel()` / `ctx.poll_ui_event()`; README, "UI (`ctx`)"),
+including the orchestrator-pushed execution token. `ui_bridge_node_name` (default `ui_bridge_node`) selects the bridge. No UI session means no panel; a
 recoverable failure then returns as it is. JSON shapes are in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
@@ -126,6 +129,7 @@ passes them as a params file.
 | `use_orchestrator`        | `true`                               | `false` runs standalone: no registration, drive it by CLI                                                                                                                   |
 | `mock`                    | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                                                                        |
 | `allow_execute`           | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                                                                  |
+| `ui_bridge_node_name`     | `ui_bridge_node`                     | The UI bridge the UI buttons' panels go to (`/<name>/request_user_input`)                                                                                                   |
 | `data_dir`                | `/microwave_data`                    | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                         |
 | `color_topic`             | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                                                                          |
 | `camera_info_topic`       | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                                                                     |

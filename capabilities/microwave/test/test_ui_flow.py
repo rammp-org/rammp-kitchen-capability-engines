@@ -23,9 +23,15 @@ from capability_ui.panels import DONE, NOTICE_TIMEOUT_S, PROMPT_TIMEOUT_S, STOP,
 
 
 def load(path, names, methods=None, **scope):
-    """The module-level assignments `names` and (methods) the Capability class with only those methods, no bases."""
+    """The module-level assignments and classes `names` and (methods) the Capability class with only those methods, no
+    bases."""
     tree = ast.parse(path.read_text())
-    body = [n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") in names for t in n.targets)]
+    body = [
+        n
+        for n in tree.body
+        if (isinstance(n, ast.Assign) and any(getattr(t, "id", "") in names for t in n.targets))
+        or (isinstance(n, ast.ClassDef) and n.name in names)
+    ]
     if methods is not None:
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Capability")
         cls.bases = []
@@ -66,6 +72,7 @@ class FakeCtx:
     def __init__(self, answers=(), session=True):
         self.answers, self.session = list(answers), session
         self.sent = []
+        self.progressed = []
         self._event = None
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
@@ -78,6 +85,9 @@ class FakeCtx:
             if answer:
                 self.tap(answer)
         return self.session
+
+    def progress(self, phase, pct, message="", pausable=True):
+        self.progressed.append((phase, pct, message, pausable))
 
     def poll_ui_event(self):
         with self._lock:
@@ -128,7 +138,7 @@ def flow():
 
     scope = load(
         NODE,
-        {"UI_ACTIONS", "UI_TITLE", "UI_DONE"},
+        {"UI_ACTIONS", "UI_TITLE", "UI_DONE", "_PanelCtx"},
         {"_ui_run", "_ui_stopped_note"},
         EngineError=EngineError,
         Cancelled=Cancelled,
@@ -170,7 +180,10 @@ def until_stopped(ctx, holding=None, node=None):
 def test_one_press_open_runs_the_open_executing(flow):
     node, ctx, _, _ = flow
     assert node._ui_run("open_door_ui", ctx) == {"executed": True}
-    node.execute.assert_called_once_with("open", {"execute": True, "push_open": True}, ctx)
+    node.execute.assert_called_once()
+    action, params, run_ctx = node.execute.call_args.args
+    assert (action, params) == ("open", {"execute": True, "push_open": True})
+    assert run_ctx.checkpoint == ctx.checkpoint and run_ctx.cancelled == ctx.cancelled  # the run's own ctx underneath
     moving = ctx.sent[0]
     assert moving["message"] == "Open Microwave Door: the arm is moving."
     assert moving["buttons"] == [STOP]
@@ -434,3 +447,76 @@ def test_an_arm_error_that_isnt_an_engine_error_is_shown_then_raised(flow):
     last = ctx.sent[-1]
     assert last["title"] == "Close microwave: failed" and last["buttons"] == [DONE]
     assert "Release the emergency stop" in last["message"].replace(f"</>\n<{panels.UI_TEXT_STYLE}>", " ")
+
+
+def test_the_stop_panel_follows_the_open_through_the_grasp_and_the_release(flow):
+    node, ctx, _, _ = flow
+
+    def run(action_id, params, run_ctx):  # execute()'s ctx.progress calls: on_hold(True), then on_hold(False)
+        run_ctx.progress(action_id, 0.0, "executing")
+        run_ctx.progress(action_id, 50.0, "holding the handle", pausable=False)
+        run_ctx.progress(action_id, 50.0, "let go of the handle", pausable=True)
+        return {"executed": True}
+
+    node.execute.side_effect = run
+    node._ui_run("open_door_ui", ctx)
+    assert [p[2] for p in ctx.progressed] == ["executing", "holding the handle", "let go of the handle"]
+    assert ctx.progressed[1][3] is False  # passed on as it was: the hold isn't pausable
+    assert [p["message"] for p in ctx.sent] == [
+        "Open Microwave Door: the arm is moving.",
+        "Open Microwave Door: the hand has the handle and is swinging the door open.",
+        "Open Microwave Door: the hand has let go of the handle and is pushing the door further open.",
+        "Microwave door opened.",
+    ]
+    assert all(p["buttons"] == [STOP] for p in ctx.sent[:3])
+
+
+def test_no_panel_update_after_stop(flow):
+    node, ctx, _, _ = flow
+
+    def run(action_id, params, run_ctx):
+        ctx.tap("stop")
+        assert wait_until(ctx.cancelled)
+        run_ctx.progress(action_id, 50.0, "holding the handle", pausable=False)
+        raise Cancelled()
+
+    node.execute.side_effect = run
+    with pytest.raises(Cancelled):
+        node._ui_run("open_door_ui", ctx)
+    assert [p["title"] for p in ctx.sent] == ["Open microwave", "Open microwave: stopped"]
+
+
+@pytest.mark.parametrize("held", [" -- still holding the handle", ""])  # before: a failure panel, a retry question
+def test_orchestrator_cancel_that_ends_as_an_engine_error_shows_nothing_more(flow, held):
+    node, ctx, _, _ = flow
+
+    def run(action_id, params, _ctx):  # a legacy move returns False on a cancel: execute() raises "stopped"
+        ctx.cancel()
+        raise EngineError("stopped", f"the open stopped short -- the arm holds where it is{held}", True)
+
+    node.execute.side_effect = run
+    with pytest.raises(EngineError, match="stopped short"):
+        node._ui_run("open_door_ui", ctx)
+    assert node.execute.call_count == 1
+    assert [p["buttons"] for p in ctx.sent] == [[STOP]]
+
+
+def test_a_panel_update_that_raises_never_stops_the_open(flow):
+    node, ctx, _, _ = flow
+    sent = ctx.update_user_panel
+
+    def update_user_panel(panel_json=None, **kwargs):  # the bridge call fails on the grasp's panel only
+        if "swinging" in panel_json["message"]:
+            raise RuntimeError("bridge gone")
+        return sent(panel_json, **kwargs)
+
+    ctx.update_user_panel = update_user_panel
+
+    def run(action_id, params, run_ctx):
+        run_ctx.progress(action_id, 50.0, "holding the handle", pausable=False)
+        return {"executed": True}  # the open goes on past the failed update
+
+    node.execute.side_effect = run
+    assert node._ui_run("open_door_ui", ctx) == {"executed": True}
+    assert ctx.sent[-1]["message"] == "Microwave door opened."
+    node.get_logger().warning.assert_called_once()
