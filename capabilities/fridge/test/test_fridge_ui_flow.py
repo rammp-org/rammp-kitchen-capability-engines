@@ -6,6 +6,7 @@ False with no UI session); cancel_own_run is stubbed to set that flag, as the en
 direct action) is scripted. The waits run on a fake clock (the node's `time`). Nothing reaches the arm or the base."""
 
 import ast
+import contextlib
 import importlib.util
 import sys
 import threading
@@ -54,6 +55,7 @@ UI_METHODS = {
     "_ui_answer",
     "_ui_ask_move",
     "_ui_ask_retry",
+    "_ui_driving",
 }
 
 
@@ -168,6 +170,7 @@ class Flow:
             EngineError=EngineError,
             Cancelled=Cancelled,
             RunUI=RunUI,
+            contextlib=contextlib,
             cancel_own_run=lambda engine: engine.ctx.cancel(),
             time=types.SimpleNamespace(monotonic=self.clock.monotonic, sleep=self.clock.sleep),
             constants=types.SimpleNamespace(UI_NOTICE_TIMEOUT_S=NOTICE_S, UI_PROMPT_TIMEOUT_S=PROMPT_S),
@@ -311,6 +314,61 @@ def test_an_orchestrator_cancel_shows_no_panel_after_the_motion():
     with pytest.raises(Cancelled):
         f.press("open_door_ui")
     assert [p["buttons"] for p in f.ctx.sent] == [[STOP]]
+
+
+# -- the wheelchair driving itself (drive_base) ----------------------------------------------------------------------
+
+
+def drives(flow, move, then=OK):
+    """An _execute outcome: the base drives the wheelchair `move` (m) as _execute's drive_chair does, then `then`."""
+
+    def out(action_id, params):
+        flow.node._drove = True
+        with flow.node._ui_driving(action_id, move):
+            pass
+        return then
+
+    return out
+
+
+def test_the_panel_says_the_wheelchair_is_driving_then_goes_back():
+    f = Flow()
+    f = _with_outcomes(f, drives(f, 0.12))
+    assert f.press("close_door_drive_ui") == OK
+    moving, driving, again, done = f.ctx.sent
+    assert (
+        driving["message"] == "The wheelchair is driving itself straight back, away from the fridge, about 12 cm. "
+        "Press Stop to stop it."
+    )
+    assert driving["buttons"] == [STOP] and again == moving
+    assert done["message"] == "Fridge door closed."
+
+
+def test_stop_while_the_wheelchair_drives_says_it_moved():
+    f = Flow()
+
+    def out(action_id, params):
+        f.node._drove = True
+        with f.node._ui_driving(action_id, -0.05):
+            f.ctx.tap("stop")
+            assert wait_until(f.ctx.cancelled)
+            raise Cancelled()
+
+    f = _with_outcomes(f, out)
+    with pytest.raises(Cancelled):
+        f.press("open_door_drive_ui")
+    assert "forward, toward the fridge, about 5 cm" in f.ctx.sent[1]["message"]
+    assert f.ctx.sent[-1]["title"] == "Open fridge: stopped"
+    assert "The wheelchair has already moved" in f.ctx.sent[-1]["message"]
+    assert not any(p == f.ctx.sent[0] for p in f.ctx.sent[2:])  # no moving panel after the drive raised
+
+
+def test_a_direct_goal_drives_with_no_panel():
+    f = Flow()
+    f.node._ui = None
+    with f.node._ui_driving("close", 0.1):
+        pass
+    assert f.ctx.sent == []
 
 
 # -- the wheelchair question ----------------------------------------------------------------------------------------

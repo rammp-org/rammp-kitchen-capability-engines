@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from capability_ui import DONE, STOP, STOPPED_MESSAGE, panel_open
 from door_common import common as dc
-from fridge import close_door, constants, open_door, push_open
+from fridge import close_door, constants, open_door, push_open, ui_text
 from fridge import constants as F
 from fridge_fake import door_is_open, fridge  # noqa: F401 -- fridge: the fake-planner fixture
 
@@ -287,7 +287,7 @@ def test_stop_while_the_arm_moves_cancels_the_run_and_says_stopped(clock):
     assert ctx.cancel and len(cap.calls) == 1
     stopped = ctx.panels[-1]
     assert stopped["title"] == "Open fridge: stopped"
-    assert stopped["message"] == f"{STOPPED_MESSAGE} {fridge_node.UI_STOPPED_OPEN}"
+    assert stopped["message"] == f"{STOPPED_MESSAGE} {ui_text.STOPPED_OPEN}"
     assert stopped["buttons"] == [DONE] and stopped["style"] == "warning"
     assert clock.t < 1.0  # ended at Done
 
@@ -326,7 +326,7 @@ def test_a_refusal_offers_the_same_button_again(clock):
     assert press(cap, "open_door_ui", ctx) == OK
     retry = ctx.panels[1]
     assert retry["title"] == "Couldn't open the fridge"
-    assert "Press Open Fridge Door to try again" in retry["message"]
+    assert "press Open Fridge Door to try again" in retry["message"]
     assert retry["buttons"] == [{"button_id": "retry", "label": "Open Fridge Door"}, STOP]
     assert "NO DETECTION" not in retry["message"]  # the log has it, not the UI
     assert len(cap.calls) == 2
@@ -354,19 +354,19 @@ def test_stop_instead_of_retry_cancels_the_run(clock):
         (
             EngineError("refused", "x -- stopping, the hand on the handle", True),
             "open_door_ui",
-            "safety check",
+            "Open the gripper and move the arm off the handle",
             True,
         ),
         (
             EngineError("stopped", "the open stopped short", True),
             "open_door_ui",
-            "stopped partway",
+            "The arm stopped.",
             True,
         ),
         (
             EngineError("stopped", "the close stopped short", True),
             "close_door_ui",
-            "stopped partway",
+            "The arm stopped.",
             False,
         ),
         (
@@ -396,7 +396,9 @@ def test_a_bug_shows_the_generic_failure_and_is_reraised(clock):
     with pytest.raises(KeyError) as raised:
         press(cap, "close_door_ui", ctx)
     assert raised.value is bug
-    assert ctx.panels[-1]["message"] == fridge_node.UI_ERROR_OTHER
+    assert ctx.panels[-1]["message"].startswith(
+        "Something unexpected went wrong in the fridge program"
+    )
 
 
 def test_a_cancel_shows_no_failure(clock):
@@ -412,7 +414,7 @@ def test_execution_off_says_so_and_runs_nothing(clock):
     with pytest.raises(EngineError) as raised:
         press(cap, "open_door_ui", ctx)
     assert raised.value.error_code == "execution_disabled" and cap.calls == []
-    assert "allow_execute is false" in ctx.panels[-1]["message"]
+    assert "Arm motion is turned off" in ctx.panels[-1]["message"]
     assert "holding the handle" not in ctx.panels[-1]["message"]  # nothing moved
 
 
