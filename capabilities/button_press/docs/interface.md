@@ -108,9 +108,9 @@ A failure before the fingertip reaches the panel that is `recoverable` (a refuse
 final notice waits up to 60 s for Done before the action returns.
 
 A failure panel says what happened, where the arm is and what to do (`ui_text.py`). Where the arm is
-comes from the run itself: if the run can tell the arm is back at its start joints (`Run.at_home()`,
-present once the run goes back to the start after a failed check) it says "The arm is back where it
-started."; otherwise it says by step: nothing moved (`preflight`, `detect`), holding where it stopped,
+comes from the run itself: if the arm is at its start joints (`Run.at_home()`: every joint within
+1 deg of the joints read in preflight, read from `/joint_states` only) it says "The arm is back where
+it started."; otherwise it says by step: nothing moved (`preflight`, `detect`), holding where it stopped,
 or, in `approach`, `press` or `return`, that the fingertip may be at the buttons, with "move the arm
 clear" as the next step.
 

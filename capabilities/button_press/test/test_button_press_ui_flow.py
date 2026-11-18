@@ -360,8 +360,38 @@ def test_arm_at_start_asks_the_run_and_never_raises():
     assert arm_at_start(SimpleNamespace(at_home=unreadable)) is None
 
 
+def real_at_home():
+    """press_button.Run.at_home and HOME_TOL_DEG, loaded with `ast` (press_button imports ROS)."""
+    tree = ast.parse((PKG / "press_button.py").read_text())
+    body = [n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "HOME_TOL_DEG"]
+    run_cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Run")
+    run_cls.body = [n for n in run_cls.body if isinstance(n, ast.FunctionDef) and n.name == "at_home"]
+    _spec = importlib.util.spec_from_file_location("bp_geometry", PKG / "geometry.py")
+    geometry = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(geometry)
+    scope = {"max_joint_delta_deg": geometry.max_joint_delta_deg}
+    exec(compile(ast.Module(body=body + [run_cls], type_ignores=[]), "press_button.py", "exec"), scope)
+    return scope["Run"]
+
+
+def test_the_runs_at_home_reads_the_joints_against_the_start_joints():
+    """The real Run.at_home that arm_at_start asks: every joint within 1 deg of the start joints (q0, from preflight),
+    False before preflight has set them. It only reads the arm's joints."""
+    np = pytest.importorskip("numpy")
+    q0 = np.radians([10.0, 20.0, -30.0, 40.0, -50.0, 60.0, 170.0])
+    Run = real_at_home()
+    run = Run.__new__(Run)
+    run.q0, run.arm = q0, SimpleNamespace(joints=lambda: q0 + np.radians([0, 0, 0, 0, 0, 0.9, 0]))
+    assert run.at_home() is True
+    run.arm = SimpleNamespace(joints=lambda: q0 + np.radians([0, 0, 0, 0, 0, 1.5, 0]))
+    assert run.at_home() is False
+    run.q0 = None
+    assert run.at_home() is False
+    assert arm_at_start(run) is False
+
+
 class FakeRun:
-    """press_button.Run for Capability._press: records the calls, at_home() as given (None: dev's Run, no at_home)."""
+    """press_button.Run for Capability._press: records the calls, at_home() as given (None: a run without at_home)."""
 
     def __init__(self, home):
         self.calls = []
