@@ -44,6 +44,9 @@ someone stands at the e-stop whenever allow_execute is on.
 import threading
 
 import rammp_arm
+import threading
+
+import rammp_arm
 from capability_engine import (
     Action,
     ArmError,
@@ -57,7 +60,10 @@ from capability_engine import (
 from capability_engine.driver_state import Refused
 
 from . import food_pick
+from . import food_pick
 from . import geometry as geo
+from .handoff import hand_off
+from .food_pick import FoodPicker, PickRefused
 from .handoff import hand_off
 from .food_pick import FoodPicker, PickRefused
 from .streaming import PeerSession, facing, follow_params
@@ -317,6 +323,7 @@ def _problems(cfg) -> list[str]:
         out.append(f"follow_mode must be one of {FOLLOW_MODES}, got {cfg['follow_mode']!r}")
     out += [f"follow_*: {p}" for p in follow_params(cfg).problems()]
     out += food_pick.check_params(cfg)
+    out += food_pick.check_params(cfg)
     try:
         facing(cfg)
         geo.axis_vector(cfg["up_axis"])
@@ -351,6 +358,7 @@ class Capability(CapabilityEngine):
     display_name = "Look inside the fridge"
     perception_classes = ["fridge"]
     required_resources = ["arm", "gripper"]  # the gripper: picking up food
+    required_resources = ["arm", "gripper"]  # the gripper: picking up food
     actions = [
         Action(
             "peer",
@@ -358,6 +366,8 @@ class Capability(CapabilityEngine):
             params_schema={
                 "type": "object",
                 "properties": {
+                    "execute": _EXECUTE,
+                    "speed": _SPEED,
                     "execute": _EXECUTE,
                     "speed": _SPEED,
                     # false: stop at the standoff (and fail with no_fridge instead of searching)
