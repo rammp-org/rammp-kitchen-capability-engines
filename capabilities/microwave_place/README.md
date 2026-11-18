@@ -12,6 +12,7 @@ Put the tupperware the gripper is already holding (after `grab_container`) into 
   (`grab_container`'s SAM3 rim detection).
 - `microwave_place/take_out.py`: `take_out`: planning and running the arm.
 - `microwave_place/smoothness_test.py`: the direct-only non-contact test of the two approach trajectory joins.
+- `microwave_place/preflight.py`: read-only live readiness checks and active-URDF collision-shape inventory.
 - `microwave_place/microwave_place_node.py`: the `CapabilityEngine` action server: parameters, the actions, the plan and
   state files.
 
@@ -81,15 +82,21 @@ The held tupperware (17 cm across) is planned as an 18 x 18 x 10 cm box, level, 
 `CONTAINER_REACH` (about 10.2 cm) ahead of the tool frame along the hand's level heading, at the tool's
 height. It is used only to place the target (the box's centre over the spot: `closer` back from the
 turntable's middle toward the opening, along the oven's axis) and the pre-insert pose (the whole box 3
-cm out of the oven's front; it moves with the spot); it is not collision-checked. The hand keeps the
-tilt it has at the start until the release.
+cm out of the oven's front; it moves with the spot); that kinematic search does not collision-check it.
+The conditional full-assembly validator instead uses the measured container attachment from the geometry file.
+The hand keeps the tilt it has at the start until the release.
 
-**Conditional execution validation (2026-11-17):** dry runs remain available for perception, IK planning and
-trajectory generation. A non-mock `place` execution is authorized only when `collision_geometry_file` loads a
+**Conditional execution validation (2026-11-17):** ordinary dry runs remain available for perception, IK planning
+and trajectory generation. A dry goal with `validate_collision: true` additionally runs the same six-phase
+full-assembly validator without moving. A non-mock `place` execution is authorized only when
+`collision_geometry_file` loads a
 non-synthetic v1 geometry, the active URDF contains every configured flange/gripper collision link, fresh synchronized
 joint/flange state matches the trajectory start, and sampled PyBullet clearance passes for side shift, cuRobo transit,
 insertion, lowering, release and retreat. The planned container/turntable contact is the only permitted contact.
 Empty, missing, invalid or synthetic geometry refuses before motion.
+The full validator reuses the depth-derived solid outer box for the robot and tool attachments only during the
+side shift and transit, while everything is outside the cavity. From insertion onward it removes that solid box and
+uses the configured rim, walls, floor, turntable, ceiling, back wall and open-door surfaces.
 Before planning, the driver's flange pose is compared with FK from the same active driver URDF, and
 the joint and flange messages must have valid timestamps within 10 ms.
 The Snorlax deployment points at the packaged `config/snorlax_collision_geometry.yaml` inventory. It remains
@@ -129,8 +136,7 @@ no minimum full-scene clearance or worst-case collision pair can be reported fro
 
 ### Collision geometry v1
 
-The YAML is deliberately limited to conservative boxes. Surface `center_m` / `size_m` are `[across-left,
-depth-into-cavity, up-from-opening-bottom]` in the detected oven frame. Attachment coordinates are XYZ in
+The YAML is deliberately limited to conservative boxes. Surface `center_m` / `size_m` are `[across-left, depth-into-cavity, up-from-opening-bottom]` in the detected oven frame. Attachment coordinates are XYZ in
 `arm_tool_frame`. `rpy_deg` is optional. Values must be measurements (or conservative CAD bounds), in metres:
 
 ```yaml
@@ -153,6 +159,9 @@ PyBullet collision shapes; it does not restrict the existing whole-robot clearan
 set `synthetic: true`; that marker is always rejected by the robot execution path. The four uncertainty bounds are
 summed with `clear_min`. Supply the measured cavity surface boxes (including rim and glass footprint), open-door box,
 container and wrist-camera tool-relative boxes, real active-URDF flange/gripper link names, and contact tolerances.
+The direct `preflight` action saves the active URDF's declared collision shapes and compares every configured robot
+link against them in `state_dir/preflight/preflight_*.json`; when the schema is complete it also requires PyBullet to
+have loaded those configured shapes.
 
 1. **Locate** the opening (above). Nothing is checked before it: not the arm's state, the gripper or
    the tool frame.
@@ -162,8 +171,8 @@ container and wrist-camera tool-relative boxes, real active-URDF flange/gripper 
    the mask's depth points at or behind that front and near the located opening (within 50 cm across
    its middle, 70 cm behind its plane, 15 cm below and 50 cm above its bottom edge; at least 200
    points). The open door, in front of the front, is not in the box. cuRobo gets the same box (written
-   to `worlds_dir`, loaded with `set_world`). Only the side shift and cuRobo's transit to the
-   pre-insert pose are checked against it; from the line in on, nothing is collision-checked.
+   to `worlds_dir`, loaded with `set_world`). Only the side shift and cuRobo transit are checked against this
+   solid outer box. Complete validation uses configured interior and open-door surfaces from insertion onward.
 
 1. **Search**: each of `side_shifts_cm` in turn (3, -3, 6, -6, 9, -9 cm), each with every offset of
    `heading_offsets_deg` (default only 0). The side shift moves the hand straight and level to its
@@ -184,20 +193,23 @@ container and wrist-camera tool-relative boxes, real active-URDF flange/gripper 
    the joint motion since the last computed one could have moved some point more than that clearance's
    margin over `clear_min`, from each joint's radius; the samples skipped are clear by that bound). This
    partial outer-box result does not validate the held container or insertion path; the insertion
-   collision result is `UNVALIDATED`. The
+   collision result is `UNVALIDATED` unless the caller requested `validate_collision`. The
    tilt stays within `tilt_max_deg` of the start on the side shift, the transit, the line in and the
    line down; cuRobo's end is on the pre-insert pose and the line in stays on its line and ends on the
    target (1 cm, 2 deg); the line down must reach 1 cm below where the box's bottom meets the glass.
    From where the box's bottom meets the glass on the line down (where the model has the lowering
    stop), the release is planned: the hand pitched `RELEASE_TILT_DEG` (10 deg) nose-down about the
    tool frame, and from there the level line back out along the heading to above the pre-insert pose's
-   x, y at that height, the hand's orientation kept (only that it stays on its line is checked); none
-   of it is collision-checked. A **dry run** returns the kinematic plan and explicit `UNVALIDATED`
+   x, y at that height, the hand's orientation kept. The initial kinematic stage checks only that this path stays
+   on its line; complete validation collision-checks it against the configured assembly. A normal **dry run**
+   returns the kinematic plan and explicit `UNVALIDATED`
    collision status (target, pre-insert, side shift, heading, partial transit outer-box clearance,
    modeled container-bottom estimate, tilt, joint changes and travel, approach duration, line down and
    attempts); it is written to `state_dir/plans/` and `state_dir/last_plan.json`.
+   With `validate_collision: true`, the dry run instead loads the measured geometry and runs the exact full-path
+   validator used before execution; any missing field or collision refuses and nothing moves.
 
-1. **Execute** (only with `execute`): the arm must be ready to command (`not_ready()`) and within 1 deg
+1. **Execute** (only with `execute`): the arm must be ready to command (`not_ready()`) and within 0.3 deg
    of the plan's start. The side shift, cuRobo's transit and the line in run as planned and checked in
    one position-control trajectory (`approach_knots`). It comes to a full stop at the two existing
    joins (side shift/transit and transit/line-in); each leg is timed independently with minimum-jerk
@@ -306,7 +318,7 @@ Each shows one progress panel with Stop (`capability_ui.RunUI`); Stop cancels th
 the "Stopped" notice says what the hand holds. A recoverable refusal before the arm started on the place or take-out
 proper offers the action again; a failure once it started (`STOPPED ...`) is shown with Done only. The node must
 still run with `allow_execute:=true` for a hardware run; `mock:=true` exercises the panels without arm motion.
-`place`, `take_out` and `test_stop_joins` remain available for direct execution and dry runs.
+`preflight`, `place`, `take_out` and `test_stop_joins` remain available for direct execution and dry runs.
 
 This uses `ctx.update_user_panel()` / `ctx.poll_ui_event()` from the
 `feat/engine_update` counter example. Run with the orchestrator and UI bridge,
@@ -338,11 +350,12 @@ Snorlax's cuRobo world reload completed after the previous 10-second timeout.
 Override this launch setting with `service_call_s:=30.0`. Cancellation remains
 available during the wait; the collision-world and HOME checks still apply.
 
-| Action            | Params                                              | What it does                                                                                                      |
-| ----------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `place`           | `execute` (false)                                   | Locates the oven, plans and checks the whole place and returns it; with `execute`, runs it                        |
-| `take_out`        | `execute` (false)                                   | Finds the container grasp point from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
-| `test_stop_joins` | `joint_waypoints_deg`, `speed_scale`, `execute`      | Plans three non-contact cuRobo legs and tests the two full-stop joins in a verified clear workspace               |
+| Action            | Params                                          | What it does                                                                                                      |
+| ----------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `preflight`       | none                                            | PASS/FAIL report for ROS, scene camera/TF, arm/gripper, faults, cuRobo, measured geometry and execution gating    |
+| `place`           | `execute`, `validate_collision` (both false)    | Locates and plans; optionally validates the full dry path; with `execute`, re-plans, validates and runs it        |
+| `take_out`        | `execute` (false)                               | Finds the container grasp point from the wrist camera, plans the take-out and returns it; with `execute`, runs it |
+| `test_stop_joins` | `joint_waypoints_deg`, `speed_scale`, `execute` | Plans three non-contact cuRobo legs and tests the two full-stop joins in a verified clear workspace               |
 
 A refusal fails the goal with error code `refused` (recoverable).
 
@@ -358,6 +371,30 @@ SAM3 (rammp-perception) and the cuRobo planner up; the planner must read `worlds
 ros2 launch microwave_place microwave_place.launch.py use_orchestrator:=false
 make action CAP=microwave_place ACTION=place                          # dry run
 ```
+
+### Full-scale placement session
+
+Run the capability with `allow_execute:=true` only after the attended session begins. The goal still must set
+`execute: true`, so preflight and collision-validating dry goals cannot move the arm.
+
+```bash
+# 1. Read-only live checks; require overall ready=true and every line PASS.
+make action CAP=microwave_place ACTION=preflight
+
+# 2. Fresh perception/kinematic plan plus the complete six-phase collision validator; no motion.
+make action CAP=microwave_place ACTION=place PARAMS='{"validate_collision":true}'
+
+# 3. After reviewing that result, explicitly authorize one supervised run. This detects and plans again so
+#    authorization is bound to fresh robot state, perception and the exact executed trajectory.
+make action CAP=microwave_place ACTION=place PARAMS='{"execute":true}'
+```
+
+Do not continue past a preflight or dry-validation FAIL. `preflight` saves its report under
+`state_dir/preflight/`; each `place` saves its plan and per-run bag. The executing approach also writes
+`state_dir/evidence/approach_*.csv`, with commanded/measured joint positions and velocities, tracking error,
+measured velocities at both full-stop joins, and observed controller faults. The terminal action result and the
+run's `run.json` contain the plan, collision token/clearances, descent CSV, approach evidence, and bag path. This
+actual-place evidence makes the separate `test_stop_joins` action optional for a full-scale session.
 
 ### Non-contact stop-at-joins test
 
@@ -460,7 +497,7 @@ The explicit `allow_execute` and goal `execute` gates apply to this move too.
 
 ## Per-run recording
 
-`record_bag` defaults to `true` for place, take-out, dry runs and mock runs. Each
+`record_bag` defaults to `true` for preflight, place, take-out, dry runs and mock runs. Each
 accepted action creates `state_dir/runs/<action>_<UTC timestamp>_<unique id>/bag`
 (sqlite3 ROS 2 bag) and a sibling `run.json`. The existing `state_dir` volume keeps
 these across container restarts. A successful result includes `bag_path` and
@@ -486,7 +523,7 @@ without blocking the run. Static-topic QoS is stored for replay. Recorder
 subscriptions belong to the action and do not remain active while idle.
 
 The bag-only `/microwave_place/run_event` topic stores start settings and the final
-result or exception. `run.json` also stores message counts and any recording I/O
+result or exception. Successful results include the bag path; `run.json` also stores message counts and any recording I/O
 errors. Failures include a synchronous error log and traceback; cancellation and
 exceptions close the bag just like success. Startup recording errors refuse the
 action; later recording errors are reported without interrupting arm cleanup.

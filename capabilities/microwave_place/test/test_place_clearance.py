@@ -52,8 +52,10 @@ class SyntheticChecker:
     def __init__(self, collision=None):
         self.geometry = synthetic_geometry()
         self.collision = collision
+        self.calls = []
 
-    def assembly_clearances(self, q, **_kwargs):
+    def assembly_clearances(self, q, **kwargs):
+        self.calls.append(kwargs)
         phase = int(round(float(np.asarray(q)[0])))
         result = [(0.10, "gripper vs cavity", "robot", "surface")]
         if phase in (3, 4):
@@ -69,10 +71,12 @@ def synthetic_phases():
 
 
 def test_collision_free_complete_trajectory_validates_all_six_phases():
-    worst, required = place_motion._collision_path(SyntheticChecker(), synthetic_phases(), 0.01)
+    checker = SyntheticChecker()
+    worst, required = place_motion._collision_path(checker, synthetic_phases(), 0.01)
 
     assert set(worst) == {"side shift", "transit", "insertion", "lowering", "release", "retreat"}
     assert required == pytest.approx(0.014)
+    assert [call["include_outer"] for call in checker.calls] == [True, True, False, False, False, False]
 
 
 def test_container_rim_contact_is_rejected():
@@ -301,6 +305,36 @@ def test_execution_guard_precedes_any_arm_access():
             descents_dir=None,
             res=None,
             validation=None,
+        )
+
+
+def test_execution_rechecks_collision_bound_start_tolerance(monkeypatch):
+    class Arm:
+        def not_ready(self):
+            return None
+
+        def joint_states(self):
+            return SimpleNamespace(position=np.radians(np.full(7, 0.31)))
+
+        def ee_state(self):
+            return object()
+
+    validation = place_motion.CollisionValidation("token", (1, 1), 0.01, {})
+    monkeypatch.setattr(place_motion, "check_flange_model", lambda *_args: None)
+    with pytest.raises(place_motion.Refused, match=r"0\.31 deg.*max 0\.3"):
+        place_motion.run_place(
+            Arm(),
+            Model(),
+            np.zeros(7),
+            SimpleNamespace(floor_z=0.0),
+            {"heading": np.array([1.0, 0.0, 0.0])},
+            SimpleNamespace(q=np.zeros((2, 7))),
+            {},
+            None,
+            None,
+            None,
+            {},
+            validation,
         )
 
 

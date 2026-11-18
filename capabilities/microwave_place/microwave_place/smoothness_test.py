@@ -32,7 +32,7 @@ def plan_test(arm, q0, waypoints_deg, speed_scale):
         direct = float(np.max(np.abs(pm.wrap_deg(goal - start))))
         if direct > MAX_LEG_DEG:
             raise pm.Refused(
-                f"smoothness test leg {index} changes a joint {direct:.1f} deg " f"(maximum {MAX_LEG_DEG:.0f} deg)"
+                f"smoothness test leg {index} changes a joint {direct:.1f} deg (maximum {MAX_LEG_DEG:.0f} deg)"
             )
         plan = arm.plan_to_joints(goal, start)
         if not plan.success:
@@ -44,12 +44,12 @@ def plan_test(arm, q0, waypoints_deg, speed_scale):
         end_error = float(np.max(np.abs(pm.wrap_deg(q[-1] - goal))))
         if start_error > START_TOL_DEG or end_error > END_TOL_DEG:
             raise pm.Refused(
-                f"smoothness test leg {index}: cuRobo endpoint mismatch " f"{start_error:.2f}/{end_error:.2f} deg"
+                f"smoothness test leg {index}: cuRobo endpoint mismatch {start_error:.2f}/{end_error:.2f} deg"
             )
         travel = pm.joint_travel_deg(q)
         if float(np.max(travel)) > 2 * MAX_LEG_DEG:
             raise pm.Refused(
-                f"smoothness test leg {index}: cuRobo detour has joint travel " f"{np.round(travel, 1).tolist()} deg"
+                f"smoothness test leg {index}: cuRobo detour has joint travel {np.round(travel, 1).tolist()} deg"
             )
         legs.append(q)
         start = q[-1]
@@ -61,22 +61,39 @@ def test_trajectory(q0, legs, speed_scale):
     first, second, third = legs
     knots = pm.approach_knots(first, second, third)
     stops = pm.approach_stop_indices(first, second, third)
-    samples = rammp_arm.joint_trajectory(q0, knots, speed_scale=speed_scale, stop_at=stops)
-    if samples is None or len(stops) != 2:
-        raise pm.Refused("smoothness test did not produce two interior segment joins")
-    times, positions, velocities = samples
-    join_times = []
+    trajectory = commanded_trajectory(q0, knots, speed_scale=speed_scale, stop_at=stops)
+    times, positions = trajectory["times"], trajectory["positions"]
+    join_times = trajectory["join_times"]
     boundaries = (first[-1], second[-1])
-    for boundary in boundaries:
-        index = int(np.argmin(np.linalg.norm(positions - boundary, axis=1)))
+    for boundary, join_time in zip(boundaries, join_times, strict=True):
+        index = int(np.argmin(np.abs(times - join_time)))
         if np.max(np.abs(pm.wrap_deg(positions[index] - boundary))) > 1e-6:
             raise pm.Refused("smoothness test retiming did not preserve a segment boundary")
+    return trajectory
+
+
+def commanded_trajectory(q0, knots, *, cart_lengths=None, speed_scale=1.0, stop_at=()):
+    """The exact command generator used by move_joints, plus its stop times for evidence alignment."""
+    samples = rammp_arm.joint_trajectory(
+        q0,
+        knots,
+        cart_lengths=cart_lengths,
+        speed_scale=speed_scale,
+        stop_at=stop_at,
+    )
+    if samples is None or len(stop_at) != 2:
+        raise pm.Refused("trajectory evidence needs exactly two interior segment joins")
+    times, positions, velocities = samples
+    join_times = []
+    for stop in stop_at:
+        boundary = np.asarray(knots[stop - 1], dtype=float)
+        index = int(np.argmin(np.linalg.norm(positions - boundary, axis=1)))
         if np.max(np.abs(velocities[index])) > 1e-9:
-            raise pm.Refused("smoothness test retiming did not stop at a segment boundary")
+            raise pm.Refused("trajectory evidence found non-zero commanded velocity at a segment join")
         join_times.append(float(times[index]))
     return {
         "knots": knots,
-        "stop_at": stops,
+        "stop_at": tuple(stop_at),
         "times": times,
         "positions": positions,
         "velocities": velocities,

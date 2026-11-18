@@ -8,14 +8,15 @@ recording. Added for the microwave:
   plan_line / check_line: a straight line of joint waypoints, and the check that every pose is on it;
   "Into the microwave": the microwave as one obstacle box, the hand's heading into the oven, the checks on
     the arm model (clearance per link against that box for the side shift and cuRobo's transit only; tilt and
-    joint travel), the straight lines, the release tilt and the level back-out (not collision-checked);
+    joint travel), the straight lines, the release tilt and the level back-out; the conditional full-assembly
+    validator checks all six phases against measured cavity and attachment geometry before execution;
   "The place on the arm": the side-shift and heading search, the plan's summary, and running the plan
     (run_place).
 
 Everything is in arm_mount, the driver's gravity-aligned frame: z true up, x forward, y left, origin on
 the arm base axis. The held container is modelled level (container_in_hand): an 18 x 18 x 10 cm box, its
 centre CONTAINER_REACH ahead of the tool frame along the hand's level heading (grab_container's grasp). It
-places the target and the pre-insert pose; it is not collision-checked.
+places the target and the pre-insert pose and is included in the conditional full-path collision check.
 """
 
 import csv
@@ -112,6 +113,11 @@ def _geometry_error(message):
 
 def load_collision_geometry(path):
     """Load and validate the measured microwave/assembly primitive schema. Empty values fail closed."""
+    return validate_collision_geometry(read_collision_geometry(path))
+
+
+def read_collision_geometry(path):
+    """Load the v1 YAML without accepting it, for preflight inventories and actionable error reports."""
     if not str(path).strip():
         _geometry_error("is not configured")
     path = Path(path)
@@ -123,7 +129,9 @@ def load_collision_geometry(path):
         data = yaml.safe_load(path.read_text())
     except (OSError, ValueError, TypeError) as exc:
         _geometry_error(f"cannot be read: {exc}")
-    return validate_collision_geometry(data)
+    if not isinstance(data, dict):
+        _geometry_error("must be a mapping")
+    return data
 
 
 def _validate_primitives(items, where, required_roles):
@@ -242,7 +250,7 @@ def _flange_link_index(p, rb):
     else:
         parent_name = p.getJointInfo(rb.robot_id, parent_index, physicsClientId=rb.physics_client_id)[12].decode()
     if parent_name != "arm_end_effector_link":
-        raise Refused("driver URDF arm_tool_frame_joint parent must be arm_end_effector_link, " f"not {parent_name!r}")
+        raise Refused(f"driver URDF arm_tool_frame_joint parent must be arm_end_effector_link, not {parent_name!r}")
     return parent_index
 
 
@@ -769,14 +777,14 @@ def open_to(arm, rec, log, position=RELEASE_OPEN):
 
 
 # ---------------------------------------------------------------------------------------------
-# Into the microwave: the microwave as one obstacle box, the hand's heading, cuRobo's transit to in front of
-# the opening (checked against that box), a straight line in and everything after it (not collision-checked).
+# Into the microwave: the microwave as one outer obstacle box for the approach, plus configured interior surfaces
+# and tool attachments used by the conditional full-path validator.
 #
 # The held tupperware is modelled as a BOX_SIDE x BOX_SIDE x (BOX_BELOW + BOX_ABOVE) box centred on the hand's
 # axis as container_in_hand has it. The target puts that centre over the placement point,
 # the tool `above` over the turntable glass, the hand pointing along the oven's axis turned by a heading
 # offset (default 0; turned, the line in runs off the opening's middle: the 17 cm tupperware's margin to the
-# opening's sides is ~6.8 cm at 0 deg, 1.7 at 15, none from ~19 deg, and nothing checks it). The
+# opening's sides is ~6.8 cm at 0 deg, 1.7 at 15, none from ~19 deg; full validation checks it). The
 # pre-insert pose is back along that heading until the whole box is INSERT_OUT outside the outer front.
 # ---------------------------------------------------------------------------------------------
 BOX_SIDE, BOX_BELOW, BOX_ABOVE = (
@@ -799,7 +807,7 @@ MICROWAVE_NEAR = dict(across=0.5, behind=0.7, below=0.15, above=0.5)  # m: the m
 # within this of the located opening (across its middle, behind its plane, below / above its bottom edge): a
 # few of the open door's pixels have depth 1-2 m off (seen 2026-11-03), and they are not the oven
 DEPTH_RANGE = (0.15, 2.5)  # m, the scene depth used
-MICROWAVE = "microwave"  # the one obstacle box; only the first motion (side shift, transit) avoids it
+MICROWAVE = "microwave"  # detected outer obstacle; used for side shift and transit only
 RELEASE_TILT_DEG = 10.0  # after opening on the glass: the hand pitched this far nose-down (about the tool frame,
 # in joint impedance) so the container slides off the fingers; it backs out tilted
 TILT_STEP_DEG = 2.0  # between the tilt's joint waypoints
@@ -808,7 +816,7 @@ TILT_JUMP_DEG = 15.0  # a tilt step moving any joint more than this is the IK fl
 # The release (2026-11-03): the gripper opens in place on the glass, still in the lowering's joint impedance;
 # then the hand pitches RELEASE_TILT_DEG nose-down about the tool frame, in impedance, so the container slides
 # off the fingers; then position control and a straight level line out, the hand kept tilted, to above the
-# pre-insert pose. None of it is collision-checked.
+# pre-insert pose. The conditional validator checks the nominal release and retreat paths before execution.
 
 
 class StageFailed(Refused):
@@ -931,6 +939,15 @@ def _link_collision_names(model):
     return names
 
 
+def validate_robot_collision_links(model, geometry):
+    """Require every configured robot link to have a shape loaded from the active driver URDF."""
+    available = _link_collision_names(model)
+    missing = {name for names in geometry["robot_collision_links"].values() for name in names if name not in available}
+    if missing:
+        _geometry_error(f"names URDF links without collision geometry: {sorted(missing)}")
+    return sorted(available)
+
+
 def finger_clearance(rb, q, bodies, closed):
     """sim.clearance with `closed` True/False, or with the fingers at the angle `closed` (rad, 0 = open)."""
     if isinstance(closed, bool):
@@ -971,15 +988,7 @@ class Checker:
                 for primitive in self.geometry["attachments"]:
                     self.attachments.append((_tool_box_body(model, primitive), primitive))
                 if not self.geometry.get("synthetic", False):
-                    available = _link_collision_names(model)
-                    missing = {
-                        name
-                        for names in self.geometry["robot_collision_links"].values()
-                        for name in names
-                        if name not in available
-                    }
-                    if missing:
-                        _geometry_error(f"names URDF links without collision geometry: {sorted(missing)}")
+                    validate_robot_collision_links(model, self.geometry)
         except BaseException:
             self.close()
             raise
@@ -1010,7 +1019,15 @@ class Checker:
             placed.append((body, primitive["name"], primitive["role"]))
         return placed
 
-    def assembly_clearances(self, q, *, closed=True, include_container=True, extra_obstacles=()):
+    def assembly_clearances(
+        self,
+        q,
+        *,
+        closed=True,
+        include_container=True,
+        include_outer=False,
+        extra_obstacles=(),
+    ):
         """Robot and each attachment/surface clearance at one joint state."""
         import pybullet as p
 
@@ -1018,7 +1035,8 @@ class Checker:
             _geometry_error("was not loaded")
         cid = self.model.rb.physics_client_id
         attached = self._place_attachments(q, include_container)
-        obstacles = [*self.surface_bodies, *extra_obstacles]
+        outer = [(body, name, "outer_microwave") for body, name in self.bodies] if include_outer else []
+        obstacles = [*self.surface_bodies, *outer, *extra_obstacles]
         robot = finger_clearance(self.model.rb, q, [(b, n) for b, n, _ in obstacles], closed)
         results = [(float(robot[0]), robot[1], "robot", "surface")]
         for moving_body, moving_name, moving_role in attached:
@@ -1053,8 +1071,8 @@ class Checker:
 def microwave_obstacles(oven, depth_m, K, world_T_cam, mw_mask):
     """The obstacle: the microwave's body as one box, aligned with the oven (oven.box): from its outer front
     back, spanning MICROWAVE_PCT of the depth points of SAM3's "microwave" mask at or behind that front, in
-    oven coordinates (what is in front of the front, the open door, is not in it). Only the first motion
-    avoids it.
+    oven coordinates (what is in front of the front, the open door, is not in it). It is used for side shift and
+    transit; configured interior surfaces are used from insertion onward.
 
     Returns ([box], [box] for cuRobo, info). Raises Refused without the mask or with too few points."""
     valid = np.isfinite(depth_m) & (depth_m > DEPTH_RANGE[0]) & (depth_m < DEPTH_RANGE[1])
@@ -1259,7 +1277,10 @@ def _collision_path(checker, phases, clear_min):
         samples = dense(qs, step_deg)
         for index, q in enumerate(samples):
             for distance, pair, moving_role, obstacle_role in checker.assembly_clearances(
-                q, closed=closed, include_container=include_container
+                q,
+                closed=closed,
+                include_container=include_container,
+                include_outer=phase in {"side shift", "transit"},
             ):
                 best = min(best, (float(distance), pair))
                 contact = (
@@ -1393,10 +1414,11 @@ def plan_down(model, q, floor_z, log=None):
 
 
 def plan_place_in(model, checker, q0, cand, Qs, floor_z, cfg, log=None):
-    """Everything after cuRobo's transit `Qs` for heading `cand`: the transit must end at the pre-insert pose and
-    is densely checked (every link clear_min from the microwave box); the straight line in, held container,
-    gripper, wrist camera and full microwave interior are not validated by the available collision model. This
-    supports kinematic dry-runs only; execution is guarded separately."""
+    """Plan after cuRobo's transit and perform the original kinematic/outer-box checks.
+
+    The conditional full-assembly validator separately checks insertion, lowering, release and retreat against
+    measured cavity and attachment geometry before execution can be authorized.
+    """
     pre, target, h, L = cand["pre"], cand["target"], cand["heading"], cand["insert_m"]
     clear_min, tilt_max = cfg["clear_min"], cfg["tilt_max_deg"]
     R0 = model.fk(q0)[:3, :3]
@@ -1456,7 +1478,8 @@ def plan_tilt(model, q, deg=RELEASE_TILT_DEG):
 def plan_level_back_out(model, q_from, pre):
     """From q_from (gripper open, the hand as it is, tilted after the release) the straight level line back out
     to above the pre-insert pose, at q_from's height, the hand's orientation kept: its joint waypoints, every pose
-    checked to be on the line (not collision-checked). Raises StageFailed("back-out", ...)."""
+    checked to be on the line. The conditional validator later collision-checks the resulting nominal path.
+    Raises StageFailed("back-out", ...)."""
     a = model.fk(q_from)[:3, 3]
     b = np.r_[np.asarray(pre, dtype=float)[:2], a[2]]
     line = _stage("back-out", plan_line, model, q_from, b - a, "back-out", step=LINE_STEP)
@@ -1681,7 +1704,21 @@ def approach_stop_indices(shift, Qs, line):
     return tuple(index for index in boundaries if 0 < index < knot_count)
 
 
-def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res, validation):
+def run_place(
+    arm,
+    model,
+    q0,
+    oven,
+    cand,
+    plan,
+    cfg,
+    ctx,
+    log,
+    descents_dir,
+    res,
+    validation,
+    approach_evidence=None,
+):
     """Execute only with validated full-assembly collision geometry.
 
     The lowering's /ee_state recording goes to descents_dir.
@@ -1696,8 +1733,8 @@ def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res
     q_now = np.asarray(joint_state.position, dtype=float)
     check_flange_model(model, joint_state, arm.ee_state())
     off = float(np.max(np.abs(wrap_deg(q_now - q0))))
-    if off > START_TOL_DEG:
-        raise Refused(f"the arm is {off:.1f} deg from where the plan starts (max {START_TOL_DEG:g}): re-plan")
+    if off > REUSE_TOL_DEG:
+        raise Refused(f"the arm is {off:.2f} deg from where the plan starts (max {REUSE_TOL_DEG:g}): re-plan")
 
     # Keep the checked path exactly; stop at the two existing segment joins instead of blending their corners.
     line = [np.asarray(q, dtype=float) for q in res["line"]]
@@ -1710,13 +1747,41 @@ def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res
         f"{sum(path_lengths(model, line)) * 100:.0f} cm; {sum(lengths) * 100:.0f} cm of tool path at "
         f"{c['insert_speed'] * 100:.0f} cm/s peak (position control)"
     )
-    try:
-        ok = arm.move_joints(
+    evidence = None
+    if approach_evidence is not None:
+        from . import smoothness_test
+
+        evidence_recorder, evidence_path = approach_evidence
+        command = smoothness_test.commanded_trajectory(
+            q_now,
             knots,
             cart_lengths=lengths,
             speed_scale=c["insert_speed"] / rammp_arm.CART_SPEED,
             stop_at=stop_at,
         )
+        evidence_recorder.start()
+    try:
+        try:
+            ok = arm.move_joints(
+                knots,
+                cart_lengths=lengths,
+                speed_scale=c["insert_speed"] / rammp_arm.CART_SPEED,
+                stop_at=stop_at,
+                monitor=evidence_recorder.monitor if approach_evidence is not None else None,
+            )
+        finally:
+            if approach_evidence is not None:
+                try:
+                    evidence = evidence_recorder.finish(evidence_path, command)
+                    evidence["file"] = str(evidence_path)
+                    log(
+                        f"approach evidence: max tracking error {evidence['max_tracking_error_deg']:.2f} deg, "
+                        f"measured join velocities {np.round(evidence['measured_join_velocity_deg_s'], 2).tolist()} "
+                        f"deg/s -> {evidence_path}"
+                    )
+                except Exception as error:  # noqa: BLE001 -- finish must not strand the held object in the oven
+                    evidence = {"file": str(evidence_path), "recording_error": str(error)}
+                    log(f"approach evidence recording failed: {error}")
     except EStopped as e:
         raise Refused(f"STOPPED, nothing moved: the arm is e-stopped ({e})") from e
     except ArmRefused as e:
@@ -1724,6 +1789,9 @@ def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res
             f"STOPPED, nothing moved: the driver did not take the approach ({e}). The driver rejects goals while "
             "the arm is FAULTED: clear the fault on the arm, then re-run the place"
         ) from e
+    if approach_evidence is not None and (arm.monitor_stopped or evidence.get("controller_faults")):
+        faults = evidence.get("controller_faults") or ["diagnostic monitor stopped the trajectory"]
+        raise Refused("STOPPED during the approach: controller fault: " + "; ".join(faults))
     if not ok:
         raise Refused(f"STOPPED: the approach did not complete ({arm.last_error})")
     time.sleep(SETTLE_AFTER_S)
@@ -1764,13 +1832,14 @@ def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res
     # still in impedance at the hold: open in place, tilt, then position control and the back-out
     release_and_back_out(arm, model, cand["pre"], h, cfg, ctx, log)
     log("Done: container placed, hand back at the pre-insert pose outside the opening (position control).")
-    return {"executed": True, "recording": str(path)}
+    return {"executed": True, "recording": str(path), "approach_evidence": evidence}
 
 
 def release_and_back_out(arm, model, pre, h, cfg, ctx, log):
     """At the hold, still in the lowering's joint impedance (gripper closed): open to RELEASE_OPEN in place, pitch
     the hand RELEASE_TILT_DEG nose-down about the tool frame (impedance), stop, back to position control, then the
-    level back-out with the hand tilted (_level_back_out). Not collision-checked."""
+    level back-out with the hand tilted (_level_back_out). The conditional validator checks the nominal release and
+    retreat paths before this function can run."""
     c = cfg
     pre, h = np.asarray(pre, dtype=float), np.asarray(h, dtype=float)
     ok = False
@@ -1796,13 +1865,13 @@ def release_and_back_out(arm, model, pre, h, cfg, ctx, log):
 
 def _level_back_out(arm, model, q, z, pre, c, ctx, log):
     """The level line out from joints q (the arm there, position control, gripper open) to above the pre-insert
-    pose's x,y at height z (plan_level_back_out, not collision-checked); its end measured."""
+    pose's x,y at height z (plan_level_back_out); its end measured. Execution is gated by full-path validation."""
     try:
         back = plan_level_back_out(model, q, pre)
     except Refused as e:
         raise Refused(f"STOPPED, gripper open, hand NOT backed out (position control): {e}") from e
     ctx.progress("back-out", 0.0)
-    log("-> back out level to above the pre-insert pose (not collision-checked)")
+    log("-> back out level to above the pre-insert pose (authorized by full-path validation)")
     move_line(arm, model, back, "the back-out", c["insert_speed"], "gripper open")
     end = np.r_[np.asarray(pre, dtype=float)[:2], z]
     d = float(np.linalg.norm(model.fk(np.asarray(arm.raw_joints(), dtype=float))[:3, 3] - end))
