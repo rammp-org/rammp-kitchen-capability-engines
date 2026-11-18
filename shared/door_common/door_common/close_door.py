@@ -27,6 +27,7 @@ import numpy as np
 import pybullet as p
 import rammp_arm
 from capability_engine import sim
+from capability_engine.arm_messages import HOLD_FIXED, HOLD_NONE
 from capability_engine.cornell_commands import CartesianTrajectoryCommand
 from scipy.spatial.transform import Rotation as R
 
@@ -413,6 +414,429 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
     }
 
 
+# curobo_ik: cuRobo chooses the arm's CONFIGURATION at the swing start (plan_to_pose, the door in its world: a global
+# choice); the arc is then followed from it by the sim's local IK (a 2 cm step has one nearby solution: nothing to
+# choose -- 11-16, asking cuRobo for each step bowed its path ~2 cm up and flipped configurations between steps),
+# gated as the sim's swing always was, then previewed by cuRobo as joint knots (as the 11-12 swing ran). cuRobo is
+# asked START_CONFIGS times for each start: its plans vary, and each distinct configuration is one to try the arc from
+START_CONFIGS = 3
+CONFIG_DISTINCT_DEG = 10.0  # two configurations closer than this (every joint) are one
+# Where on the door the hand pushes (curobo_ik): the close tries contacts until one works, most likely first. Height
+# from CONTACT_Z_BELOW_TOP_M under the door's top down in CONTACT_Z_STEP_M steps to CONTACT_Z_ABOVE_BOTTOM_M over its
+# bottom (11-12: 0.46, 2.8 cm under the top, closed it; 0.44 folded J4 past its guard: higher folds less). Distance
+# from the hinge: CONTACT_RADII_M in order (0.31 closed it 11-12), spiralling in by CONTACT_INWARD_M (0.31 -> 0.25 on
+# 11-12; or the goal's push_radius - push_radius_end), never ending on the handle. Ranked by how far each is from the
+# best guess (steps), the height breaking ties; a goal's own push_z / push_radius go first.
+CONTACT_Z_BELOW_TOP_M = 0.03
+CONTACT_Z_STEP_M = 0.015  # 11-16: only the top ~3 cm of the door was reachable at that placement: fine steps there
+CONTACT_Z_ABOVE_BOTTOM_M = 0.06
+CONTACT_RADII_M = (0.31, 0.34, 0.37, 0.28)
+CONTACT_INWARD_M = 0.06
+START_A_TRY_M = (0.12, 0.16, 0.20, 0.24)  # the swing start this far past the hinge, tried in order (cuRobo's way there)
+# When no contact works from here: the search again for each of these robot base moves (x forward along the arm
+# base's x, y to the arm's left, m; no turn), as the open's placement advice -- the door model shifted the other way
+# (the chair and user move with the base) -- ADVICE_CONTACTS contacts each, one cuRobo ask per start, to say where the
+# robot would work from (both closer and further: which one it is, the search says). PLACEMENT_SUGGESTIONS keeps them
+BASE_SHIFTS_M = (
+    (-0.05, 0.0),
+    (0.05, 0.0),
+    (-0.10, 0.0),
+    (0.10, 0.0),
+    (0.0, -0.05),
+    (0.0, 0.05),
+    (0.0, -0.10),
+    (0.0, 0.10),
+)
+ADVICE_CONTACTS = 6
+ADVICE_ENOUGH = 3  # stop once this many base moves work
+PLACEMENT_SUGGESTIONS = []  # [{base_forward_m, base_left_m, push_z, push_radius}], the last refusal's, best first
+
+
+def _pose_plan(ai, pos, quat, start, hold):
+    """cuRobo's plan for the tool to (pos, quat) from joints `start` (plan_to_pose, nothing moves), asked CUROBO_TRIES
+    times: (plan, "") or (None, why)."""
+    why = ""
+    for _ in range(CUROBO_TRIES):
+        pl = ai.plan_to_pose(pos, quat, np.asarray(start, float), hold)
+        if pl.success and len(pl.q):
+            return pl, ""
+        why = f"cuRobo can't plan it ({str(pl.message).split(' — ')[0]})"
+        if "IK_FAIL" in str(pl.message):  # no joints reach the pose at all: asking again gives the same
+            break
+    return None, why
+
+
+def _checked(scene, rb, qs, bodies, need, closed=False, held=None):
+    """Why cuRobo's joint path `qs` can't be run as it is (the floor; any sample nearer `bodies` than `need`), or ""."""
+    low = dc.path_below_floor(qs)
+    if low:
+        return f"its path takes the {low}"
+    for i, q in enumerate(qs):
+        gap, link = clearance(rb, q, bodies, closed, held=held)
+        if gap < need:
+            return (
+                f"its path brings {link} {gap * 100:.1f} cm from the door/body at sample {i}/{len(qs)} "
+                f"(needs {need * 100:.1f})"
+            )
+    return ""
+
+
+def _contacts(df, args):
+    """The (z, start radius, end radius) the close tries, most likely first (CONTACT_*): the goal's push_z /
+    push_radius first when it gives them."""
+    z_lo, z_hi = (float(v) for v in df.door["door_z"]) if df.door.get("door_z") else (0.30, 0.49)
+    zs = list(np.arange(z_hi - CONTACT_Z_BELOW_TOP_M, z_lo + CONTACT_Z_ABOVE_BOTTOM_M - 1e-9, -CONTACT_Z_STEP_M))
+    radii = list(CONTACT_RADII_M)
+    inward = CONTACT_INWARD_M
+    if args.push_z is not None:
+        zs = [float(args.push_z)] + [z for z in zs if abs(z - args.push_z) > 0.01]
+    # the goal's own radius first -- a default left as it is isn't one (the old close's 0.28 / 0.26)
+    if (args.push_radius, args.push_radius_end) != (CLOSE_DEFAULTS["push_radius"], CLOSE_DEFAULTS["push_radius_end"]):
+        radii = [float(args.push_radius)] + [r for r in radii if abs(r - args.push_radius) > 0.005]
+        inward = args.push_radius - args.push_radius_end
+    end_max = df.u_handle - CLOSE_HAND_HALF - HANDLE_MARGIN  # past this the hand ends on the handle
+    out = [  # a start further out spirals in further: it ends short of the handle all the same
+        (i + j, i, float(z), float(r), float(min(r - inward, end_max)))
+        for i, z in enumerate(zs)
+        for j, r in enumerate(radii)
+        if 0.12 <= min(r - inward, end_max) < r
+    ]
+    return [(z, r, r_end) for _, _, z, r, r_end in sorted(out)]
+
+
+def _frame_pos(df, h):
+    """pos(a, b): the point `a` along the closed door toward the hinge and `b` into the microwave from `h`."""
+    side = np.r_[-df.e, 0.0]
+    fwd = np.r_[-df.n, 0.0]
+    return lambda aa, bb: h + side * aa + fwd * bb
+
+
+def _start_configs(ai, scene, rb, df, args, deg0, pos, quat, r, shut, held, tries):
+    """cuRobo's ways to a contact's swing start (the door already in its world): ([(plan, a_side)], "") -- one per
+    distinct configuration it came back with in `tries` asks, for the first a_side in START_A_TRY_M it reaches -- or
+    ([], why)."""
+    q_now = ai.raw_joints()
+    whys = []
+    for a_side in START_A_TRY_M:
+        if a_side >= r:
+            break
+        found = []
+        for _ in range(tries):
+            pl, why = _pose_plan(ai, pos(a_side, -np.sqrt(r**2 - a_side**2)), quat, q_now, HOLD_NONE)
+            if not why:
+                bodies = _door_bodies(scene, rb, df, deg0, args)
+                try:
+                    qs = np.asarray(pl.q, float)
+                    why = _checked(scene, rb, qs, bodies, MIN_CLEAR, shut, held)
+                    if not why:
+                        gap, link = clearance(rb, qs[-1], bodies, shut, held=held)
+                        if gap < GAP:
+                            why = f"it ends with {link} {gap * 100:.1f} cm from the door (needs {GAP * 100:.0f})"
+                finally:
+                    drop(rb, bodies)
+            if why:
+                whys.append(f"a {a_side * 100:+.0f}: {why}")
+                if "IK_FAIL" in why:
+                    break  # no configuration reaches this start: asking again gives the same
+                continue
+            q_end = np.asarray(pl.q[-1], float)
+            if all(np.degrees(np.max(np.abs(dc.short_delta(q_end, f[0].q[-1])))) > CONFIG_DISTINCT_DEG for f in found):
+                found.append((pl, a_side))
+        if found:
+            return found, ""
+    return [], "; ".join(whys)[:240]
+
+
+def _swing_local(scene, rb, df, args, deg0, h, pos, quat, a_side, r, r_end, q_start, closed, shut, held, loud):
+    """The arc from the swing start's joints `q_start` (cuRobo's configuration) by the sim's local IK, ARC_STEP_M a
+    step, the radius spiralling r -> r_end, until the hand is `push_stop_short` from the closed door in the model;
+    gated as _plan_close's swing (IK, step, J4/J6 guards, continuity, MIN_CLEAR from the body, not ending on the
+    handle). ((sweep joints, poses, deg round the hinge, last joints), "") or (None, why)."""
+    r0 = pos(a_side, -np.sqrt(r**2 - a_side**2)) - h
+    span = max(float(np.degrees(np.arccos(np.clip(np.dot(r0[:2], df.e) / np.linalg.norm(r0[:2]), -1, 1)))) - 15.0, 10.0)
+
+    def at(d):
+        return h + np.r_[df._rot(-d) @ r0[:2] * (1.0 - (1.0 - r_end / r) * min(d / span, 1.0)), 0.0]
+
+    def door_gap(q):
+        return float(clearance(rb, q, [closed[0]], shut, held=held)[0])
+
+    stop = args.push_stop_short
+    step = np.degrees(ARC_STEP_M / r)
+    sweep, poses, d, qq = [], [], 0.0, np.asarray(q_start, float)
+    while True:
+        d_next = d + step
+        nq, err = solve_ik(scene, rb, at(d_next), quat, qq)
+        if door_gap(nq) <= stop:  # this step reaches the closed door: land exactly on the stop
+            lo, hi = d, d_next
+            for _ in range(12):
+                mid = (lo + hi) / 2
+                mq, _ = solve_ik(scene, rb, at(mid), quat, qq)
+                if door_gap(mq) <= stop:
+                    hi = mid
+                else:
+                    lo = mid
+            d_next = hi
+            nq, err = solve_ik(scene, rb, at(d_next), quat, qq)
+        c_door = door_gap(nq)
+        jump = float(np.degrees(np.max(np.abs(dc.short_delta(qq, nq)))))
+        c_body = clearance(rb, nq, closed[1:], shut, held=held)
+        j4, j6 = float(np.degrees(nq[3])), float(np.degrees(nq[5]))
+        if err > sim.MAX_IK_ERR:
+            why = f"IK {err * 100:.1f} cm off"
+        elif jump > sim.MAX_STEP_JUMP_DEG:
+            why = f"a {jump:.0f} deg joint step (max {sim.MAX_STEP_JUMP_DEG:.0f})"
+        elif abs(j6) > sim.J6_GUARD_DEG:
+            why = f"J6 {j6:.0f} past its guard ({sim.J6_GUARD_DEG:.0f})"
+        elif abs(j4) > sim.J4_GUARD_DEG:
+            why = f"J4 {j4:.0f} past its guard ({sim.J4_GUARD_DEG:.0f})"
+        elif not continuous_ok(qq, nq):
+            why = "a joint wrapping past +-180"
+        elif c_body[0] < MIN_CLEAR:
+            why = f"{c_body[1]} {c_body[0] * 100:.1f} cm from the body (needs {MIN_CLEAR * 100:.0f})"
+        else:
+            why = ""
+        k = len(sweep) + 1
+        last = c_door <= stop + 1e-4
+        if loud and (why or last or k == 1 or k % 6 == 0):
+            say(
+                f"    swing {k} ({d_next:5.1f} deg) -> {np.round(at(d_next), 3)}  J4 {j4:.1f}  J6 {j6:.1f}  to the "
+                f"closed door {c_door * 100:+.1f} cm  body {c_body[0] * 100:.1f} cm"
+            )
+        if why:
+            return None, f"swing step {k} ({d_next:.0f} deg round the hinge): {why}"
+        sweep.append(nq)
+        poses.append((at(d_next), quat))
+        qq, d = nq, d_next
+        if last:
+            break
+        if d > deg0 + 60:
+            return None, "the swing never reached the closed door in the model"
+    u_end = float(np.dot(at(d)[:2] - df.hinge[:2], df.e))
+    if u_end + CLOSE_HAND_HALF > df.u_handle - HANDLE_MARGIN:
+        return None, (
+            f"the hand would end on the handle ({u_end * 100:.0f} cm along the door, handle at {df.u_handle * 100:.0f})"
+        )
+    return (sweep, poses, d, qq), ""
+
+
+def _search_contacts(ai, scene, rb, df, args, deg0, stop_deg, quat, contacts, shut, held, tries, preview, loud):
+    """The first contact (in `contacts`' order) the close can do: cuRobo's configurations at its swing start (the door
+    in cuRobo's world, `tries` asks each), the arc from each by local IK (_swing_local), and (`preview`) the arc as
+    joint knots asked of cuRobo (dc.curobo_path_problem, SWING_CUROBO_TRIES). dict(contact, a_side, to_start, sweep,
+    poses, d, q) or None (`loud`: says why for each)."""
+    starts = {}
+    with dc.door_in_curobo(ai, _door_boxes(df, deg0, args), "to the swing starts") as inside:
+        if not inside:
+            if loud:
+                say("curobo_ik: the door couldn't be put in cuRobo's world -- refusing.")
+            return None
+        for ci, (z, r, _) in enumerate(contacts):
+            pos = _frame_pos(df, np.r_[df.hinge[:2], z])
+            found, why = _start_configs(ai, scene, rb, df, args, deg0, pos, quat, r, shut, held, tries)
+            if found:
+                starts[ci] = found
+            elif loud:
+                say(f"  contact z {z:.3f} r {r:.2f}: no swing start ({why})")
+    if not starts:
+        return None
+    closed = df.bodies(scene, rb, stop_deg)
+    if args.handle_protrusion_m:
+        closed = closed + [_handle_body(scene, rb, df, stop_deg, args.handle_protrusion_m, args.handle_length_m)]
+    try:
+        for ci in sorted(starts):
+            z, r, r_end = contacts[ci]
+            h = np.r_[df.hinge[:2], z]
+            pos = _frame_pos(df, h)
+            for n, (to_start, a_side) in enumerate(starts[ci], 1):
+                q_start = np.asarray(to_start.q[-1], float)
+                if loud:
+                    say(
+                        f"  contact z {z:.3f} r {r:.2f} -> {r_end:.2f}, start a {a_side * 100:+.0f} cm, cuRobo's "
+                        f"configuration {n}/{len(starts[ci])} {np.round(np.degrees(q_start), 0)}:"
+                    )
+                got, why = _swing_local(
+                    scene, rb, df, args, deg0, h, pos, quat, a_side, r, r_end, q_start, closed, shut, held, loud
+                )
+                if why:
+                    if loud:
+                        say(f"    {why}")
+                    continue
+                sweep, poses, d, q = got
+                if preview:
+                    for _ in range(SWING_CUROBO_TRIES):
+                        why = dc.curobo_path_problem(ai, q_start, sweep, "the swing")
+                        if not why:
+                            break
+                    if why:
+                        if loud:
+                            say(f"    the arc as cuRobo knots: {why}")
+                        continue
+                if loud:
+                    say(
+                        f"    cuRobo reaches the start ({len(to_start.q)} samples, checked against the door) and the "
+                        f"arc from its configuration passes every gate ({len(sweep)} steps, {d:.0f} deg round the "
+                        f"hinge{', previewed by cuRobo' if preview else ''}) -- this one"
+                    )
+                return dict(contact=(z, r, r_end), a_side=a_side, to_start=to_start, sweep=sweep, poses=poses, d=d, q=q)
+    finally:
+        drop(rb, closed)
+    return None
+
+
+def _close_placement_advice(ai, scene, rb, df, args, deg0, stop_deg, quat, shut, held):
+    """Where the robot would work from: the contact search again (short: ADVICE_CONTACTS, one cuRobo ask per start,
+    no preview) for each base move in BASE_SHIFTS_M, the door model shifted the other way. Says which work; also in
+    PLACEMENT_SUGGESTIONS."""
+    PLACEMENT_SUGGESTIONS.clear()
+    works = []
+    say(f"  where the robot would work from ({len(BASE_SHIFTS_M)} base moves, forward/back and left/right) ...")
+    for dx, dy in BASE_SHIFTS_M:
+        door2 = json.loads(json.dumps(df.door))
+        _shift_door(door2, (-dx, -dy))  # the base forward by dx = the appliance dx nearer, in the arm's frame
+        df2 = DoorFrame(door2, door2["open_sign"])
+        got = _search_contacts(
+            ai,
+            scene,
+            rb,
+            df2,
+            args,
+            deg0,
+            stop_deg,
+            quat,
+            _contacts(df2, args)[:ADVICE_CONTACTS],
+            shut,
+            held,
+            tries=1,
+            preview=False,
+            loud=False,
+        )
+        where = []
+        if dx:
+            where.append(f"{abs(dx) * 100:.0f} cm {'forward' if dx > 0 else 'back'}")
+        if dy:
+            where.append(f"{abs(dy) * 100:.0f} cm to the {'left' if dy > 0 else 'right'}")
+        say(f"    base {' and '.join(where)}: {'works' if got else 'no'}")
+        if got is None:
+            continue
+        z, r, _ = got["contact"]
+        works.append(f"{' and '.join(where)} (pushing at z {z:.2f}, {r * 100:.0f} cm from the hinge)")
+        PLACEMENT_SUGGESTIONS.append(dict(base_forward_m=dx, base_left_m=dy, push_z=z, push_radius=r))
+        if len(works) >= ADVICE_ENOUGH:
+            break
+    if not works:
+        say("  no robot base move tried (up to 10 cm, no turn) makes it work.")
+    else:
+        say("  would work with the robot moved (forward / left as the arm's base faces): " + "; or ".join(works) + ".")
+
+
+def _plan_close_curobo(ai, scene, rb, df, st, args, deg0, stop_deg=0.0, held=None):
+    """The close with cuRobo choosing the arm's configuration (`curobo_ik`) and the contact on the door chosen by what
+    works (_contacts, most likely first; _search_contacts: cuRobo to the swing start around the door in its world, the
+    arc from its configuration by local IK, gated, previewed by cuRobo as knots), then the push straight in (the
+    sim's IK from the swing's end: short, slow, torque-stopped) and the back-out (cuRobo, checked from the door
+    contact). When no contact works: where the robot would work from (_close_placement_advice). Returns
+    {"to_start", "sweep", "poses", "push", "back_goal", "contact"} or None (says why)."""
+    fwd = np.r_[-df.n, 0.0]
+    side = np.r_[-df.e, 0.0]
+    if args.face_door:
+        quat = _facing_forward(st["ee_pos"][3:7], fwd)
+    elif args.keep_orientation:
+        quat = tuple(st["ee_pos"][3:7])
+    else:
+        quat = _facing_forward(st["ee_pos"][3:7], side)
+    shut = bool(args.close_gripper)
+    contacts = _contacts(df, args)
+    if not contacts:
+        say("curobo_ik: no contact on the door clears the handle -- refusing.")
+        return None
+    say(
+        f"curobo_ik: cuRobo chooses the configuration; hinge {np.round(df.hinge[:2], 3)}, door {deg0:.0f} deg; "
+        f"{len(contacts)} contacts to try, first z {contacts[0][0]:.3f} radius {contacts[0][1]:.2f} -> "
+        f"{contacts[0][2]:.2f}"
+    )
+    got = _search_contacts(
+        ai, scene, rb, df, args, deg0, stop_deg, quat, contacts, shut, held, START_CONFIGS, preview=True, loud=True
+    )
+    if got is None:
+        say("curobo_ik: no contact works from here (every configuration cuRobo offered, every contact).")
+        _close_placement_advice(ai, scene, rb, df, args, deg0, stop_deg, quat, shut, held)
+        return None
+    sweep, poses, q, to_start = got["sweep"], got["poses"], got["q"], got["to_start"]
+    end = poses[-1][0]
+    closed = df.bodies(scene, rb, stop_deg)
+    if args.handle_protrusion_m:
+        closed = closed + [_handle_body(scene, rb, df, stop_deg, args.handle_protrusion_m, args.handle_length_m)]
+    try:
+        # the push: straight in, the sim's IK from the swing's end
+        push, pq_ = [], q
+        push_max = args.push_max if args.push_max is not None else args.push_stop_short + args.push_preload
+        for k in range(1, int(round(push_max / PUSH_STEP_M)) + 1):
+            nq, err = solve_ik(scene, rb, end + fwd * PUSH_STEP_M * k, quat, pq_)
+            jump = float(np.degrees(np.max(np.abs((nq - pq_ + np.pi) % (2 * np.pi) - np.pi))))
+            if err > sim.MAX_IK_ERR or jump > sim.MAX_STEP_JUMP_DEG or not continuous_ok(pq_, nq):
+                say(f"  push step {k}: IK err {err * 100:.2f} cm, jump {jump:.1f} deg -- push capped there")
+                break
+            push.append(nq)
+            pq_ = nq
+        say(f"  push: up to {len(push)} x {PUSH_STEP_M * 1000:.0f} mm straight in, stopped by the joint torques")
+
+        # the back-out, from the swing's end (where the push comes back to)
+        back_goal, why = None, ""
+        for dist in sorted({args.retreat_dist, 0.15, 0.10, 0.06}, reverse=True):
+            if dist > args.retreat_dist:
+                continue
+            pl, why = _pose_plan(ai, end - fwd * dist, quat, q, HOLD_FIXED)
+            if not why:
+                qs = np.asarray(pl.q, float)
+                need = min(MIN_CLEAR, clearance(rb, qs[0], closed, shut, held=held)[0] - 0.002)
+                why = _checked(scene, rb, qs, closed, need, shut, held)
+            if not why:
+                back_goal = qs[-1]
+                say(f"  back out {dist * 100:.0f} cm: cuRobo's path checked against the closed door and the body")
+                break
+        if back_goal is None:
+            say(f"  back out: {why} -- refusing.")
+            return None
+    finally:
+        drop(rb, closed)
+    return {
+        "to_start": to_start,
+        "sweep": sweep,
+        "poses": poses,
+        "push": push,
+        "back_goal": back_goal,
+        "contact": got["contact"],
+    }
+
+
+def _run_close_curobo(ai, scene, rb, df, args, plan, stop_deg, door_file):
+    """Run _plan_close_curobo's plan: cuRobo's path to the swing start exactly as checked (its world is the planner's
+    own again by now: nothing re-plans it), the swing through its poses' joints as one blended cuRobo motion, the
+    torque-stopped push, back off the door, then the back-out re-planned from where the arm is (checked)."""
+    if not _run_exact(ai, plan["to_start"], "to the swing start (cuRobo's joints, around the door)"):
+        return False
+    z, r, r_end = plan["contact"]
+    say(
+        f"sweep at z {z:.3f}, {r * 100:.0f} -> {r_end * 100:.0f} cm from the hinge: cuRobo through "
+        f"{len(dc.curobo_knots(plan['sweep']))} of its {len(plan['sweep'])} checked joints, one blended motion ..."
+    )
+    if not dc.through_curobo(ai, plan["sweep"], "sweep"):
+        return False
+    if plan["push"]:
+        done = _push_until_shut(ai, plan["push"], args.push_contact_nm)
+        back_steps = plan["push"][: max(done - 1, 0)][::-1] + [plan["sweep"][-1]]
+        if not execute_joint_plan(ai, back_steps, "off the door"):
+            return False
+    save_door_geometry(door_open_deg=stop_deg, door_file=door_file)
+    backed = _curobo_leg(ai, scene, rb, df, stop_deg, args, plan["back_goal"], "back out", True)
+    if not backed:
+        return False
+    st = ai.get_state()
+    say(f"\nPUSH-CLOSE DONE. final EE {np.round(st['ee_pos'][:3], 4)}  gripper {float(st['gripper_pos']):.3f}")
+    return True
+
+
 def _shift_door(door, dxy):
     """Move the door's recorded positions by `dxy` (arm-base x, y) -- a planning copy."""
     for k in ("hinge", "closed_grasp_pos", "closed_handle", "door_mid"):
@@ -488,6 +912,22 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
         )
     if args.handle_protrusion_m:
         say(f"handle modelled: a bar protruding {args.handle_protrusion_m * 100:.1f} cm from the door face")
+    if args.curobo_ik:
+        if behind or max_tilt_deg is not None:
+            say("curobo_ik: not with behind / max_tilt_deg (yet) -- refusing, arm untouched.")
+            return False
+        try:
+            cplan = _plan_close_curobo(ai, scene, rb, df, st, args, deg0, stop_deg=stop_deg, held=held)
+        finally:
+            if held is not None:
+                p.removeBody(held[0], physicsClientId=rb.physics_client_id)
+        if cplan is None:
+            say("\nno plan passes every check -- refusing, arm untouched.")
+            return False
+        if not args.execute:
+            say(f"\nDRY RUN (push-close from {deg0:.0f} deg, cuRobo's joints) -- nothing commanded.")
+            return True
+        return _run_close_curobo(ai, scene, rb, df, args, cplan, stop_deg, door_file)
     try:
         plan = _plan_close(scene, rb, df, st, args, deg0, behind=behind, stop_deg=stop_deg, held=held)
     finally:
@@ -846,6 +1286,11 @@ CLOSE_DEFAULTS = {
     # plan there, checked against the model in the sim too (route_over / the routes then unused). Writes the world where
     # the planner reads it (common.DOOR_WORLD_DIR: on the host, under sheppy's robot config)
     "door_world": False,
+    # cuRobo decides the arm's joints (_plan_close_curobo): it is given the swing start, the swing's arc and the
+    # back-out as hand POSES (the door in its world for the way to the swing start) and plans them itself; the sim
+    # checks what it planned against the door model after. Off: the sim's IK picks the joints and its gates refuse
+    # (the J4 guard, 11-16 at a closer placement, on a configuration cuRobo might not have chosen)
+    "curobo_ik": False,
 }
 
 
@@ -857,8 +1302,9 @@ def close_args(execute, **params):
     return SimpleNamespace(**{**CLOSE_DEFAULTS, **params}, execute=execute)
 
 
-def run(ai, execute, speed=1.0, log_args=None, **params):
-    """The close as the node runs it: push_close with `params` (CLOSE_DEFAULTS' names), logged to
+def run(ai, execute, speed=1.0, log_args=None, door_file=None, **params):
+    """The close as the node runs it: push_close with `params` (CLOSE_DEFAULTS' names) against `door_file` (default
+    DOOR_FILE; the microwave passes the re-detected door, close_redetect), logged to
     RUNS_DIR/<time>_close (RunLog). `speed` (0..1] scales every arm motion for this run only. Returns True when it
     finished (or the dry run passed)."""
     args = close_args(execute, **params)
@@ -874,7 +1320,7 @@ def run(ai, execute, speed=1.0, log_args=None, **params):
             say("closing the gripper first (close_gripper) ...")
             ai.gripper(1.0)
             time.sleep(0.8)
-        ok = push_close(ai, args)
+        ok = push_close(ai, args, door_file=door_file)
         log.event("close", ok=ok)
         log.frame("close_end")
         say(f"\nCLOSE {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")

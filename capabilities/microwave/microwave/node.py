@@ -62,6 +62,11 @@ PARAMS = {
     # box wasn't accurate enough on snorlax) = the scene camera places the view pose.
     "box_topic": "",
     "box_class": "microwave",
+    # the CLOSE's view pose (deg, J1..J7): the close goes there first and re-detects the open door with the wrist camera
+    # from it. Per placement: teleop the arm to where the wrist camera sees the open door from its hinge outward and the
+    # panel beside the opening, and put its joints here. Default: the open's view pose (open_door.VIEW_JOINTS_DEG). A
+    # list of numbers as the default, not []: rclpy types an empty list as a byte array and then refuses the numbers
+    "close_view_joints_deg": [float(v) for v in open_door.VIEW_JOINTS_DEG],
     # the view pose in front of the box (open_door.VIEW_*): camera distances out from its front face, offsets along it
     # away from the user (+y) and heights above its middle (m), every combination tried, sides first. Per setup.
     "view_dists": list(open_door.VIEW_DISTS),
@@ -153,8 +158,9 @@ class Capability(CapabilityEngine):
                 "properties": {
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 45, "maximum": 75},
-                    # off until the scene camera is in the checks: 11-10 the push-open's 'up and back' hit it
-                    "push_open": {"type": "boolean", "default": False},
+                    # on (2026-11-16, the user): the push-open ran on the arm 11-12. The scene camera is still
+                    # in no check (11-10 the push-open's 'up and back' hit it)
+                    "push_open": {"type": "boolean", "default": True},
                     # stop at the view pose (the open always goes there first, to detect the handle from it)
                     "view_only": {"type": "boolean", "default": False},
                 },
@@ -169,6 +175,8 @@ class Capability(CapabilityEngine):
                     **COMMON,
                     # first to the open's view pose, so the close always plans from the same place (11-12)
                     "from_view_pose": {"type": "boolean", "default": True},
+                    # then find the open door again (scene camera) and plan from where it is (open_door.close_redetect)
+                    "redetect": {"type": "boolean", "default": True},
                     **{k: _schema(v) for k, v in close_door.CLOSE_DEFAULTS.items()},
                 },
             },
@@ -192,6 +200,10 @@ class Capability(CapabilityEngine):
         self._debug = bool(self.cfg["debug"])
         open_door.configure(self.cfg["data_dir"], debug=self._debug)
         dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
+        if self.cfg["close_view_joints_deg"]:
+            if len(self.cfg["close_view_joints_deg"]) != 7:
+                raise ValueError(f"close_view_joints_deg needs 7 joints (deg), got {self.cfg['close_view_joints_deg']}")
+            open_door.CLOSE_VIEW_JOINTS_DEG = tuple(float(v) for v in self.cfg["close_view_joints_deg"])
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
         open_door.VIEW_SIDES = tuple(float(v) for v in self.cfg["view_sides"])
@@ -336,6 +348,7 @@ class Capability(CapabilityEngine):
             self.cfg["box_class"],
         )
         dc.set_camera(camera)
+        # the scene camera: the open's view pose without boxer (the close re-detects with the wrist camera only)
         if action_id == "open" and not self.cfg["box_topic"]:
             open_door.set_scene_camera(
                 WristCamera(
@@ -367,7 +380,7 @@ class Capability(CapabilityEngine):
                     self.arm,
                     execute,
                     swing_deg=params.get("swing_deg"),
-                    push=bool(params.get("push_open", False)),
+                    push=bool(params.get("push_open", True)),
                     speed=speed,
                     log_args=log_args,
                     view_only=bool(params.get("view_only", False)),
@@ -379,7 +392,12 @@ class Capability(CapabilityEngine):
                 if stop:  # a dry run away from the view pose: nothing planned or commanded
                     ok, note = True, stop
                 else:
-                    ok = close_door.run(self.arm, execute, speed=speed, log_args=log_args, **settings)
+                    door_file = None
+                    if bool(params.get("redetect", True)):
+                        door_file, settings["door_deg"] = open_door.close_redetect(self.arm)
+                    ok = close_door.run(
+                        self.arm, execute, speed=speed, log_args=log_args, door_file=door_file, **settings
+                    )
         except dc.Refused as e:
             raise EngineError(
                 "refused", f"{e} -- the arm holds where it is{held if holding else ''}", recoverable=True

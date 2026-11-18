@@ -740,43 +740,158 @@ def _view_step(view_only, ai, scene, rb, execute):
     return False
 
 
+CLOSE_VIEW_JOINTS_DEG = None  # the close's own view pose (deg; the node's close_view_joints_deg), else VIEW_JOINTS_DEG
+
+
 def close_view_step(ai, execute):
-    """Before the close: to the view pose (VIEW_JOINTS_DEG), so the close always plans from the same place -- where
-    the open now ends (PUSH_END_AT_VIEW). Already there (VIEW_AT_TOL_M and every joint within VIEW_AT_JOINTS_DEG):
+    """Before the close: to the close's view pose (CLOSE_VIEW_JOINTS_DEG, the node's close_view_joints_deg; else the
+    open's, VIEW_JOINTS_DEG, where the open now ends), where it re-detects the open door with the wrist camera and
+    plans from. Already there (VIEW_AT_TOL_M and every joint within VIEW_AT_JOINTS_DEG):
     nothing moves. Elsewhere, a dry run stops (it can't plan from where the arm isn't): returns why; a real run
     moves there through a checked cuRobo move (cuRobo's world has no door: someone on the e-stop). Returns "" to go
     on with the close, else why it stops here (nothing commanded). Raises Refused."""
-    if VIEW_JOINTS_DEG is None:
+    joints = CLOSE_VIEW_JOINTS_DEG if CLOSE_VIEW_JOINTS_DEG is not None else VIEW_JOINTS_DEG
+    if joints is None:
         return ""
-    q_view = np.radians(VIEW_JOINTS_DEG)
+    which = "the close's view pose" if CLOSE_VIEW_JOINTS_DEG is not None else "the view pose"
+    q_view = np.radians(joints)
     scene, rb = dc.make_sim()
     p_view = np.asarray(sim.tool_pose(scene, rb, q_view)[0], dtype=float)
     ko = sim.keep_out_message(rb, q_view)
     if ko is not None:
-        raise Refused(f"The fixed view pose (VIEW_JOINTS_DEG) puts the arm in the keep-out: {ko}")
+        raise Refused(f"{which} ({joints}) puts the arm in the keep-out: {ko}")
     st = ai.get_state()
     off = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - p_view))
     joints_off = float(np.degrees(np.max(np.abs(short_delta(st["position"], q_view)))))
     if off <= VIEW_AT_TOL_M and joints_off <= VIEW_AT_JOINTS_DEG:
-        say(f"close: at the view pose ({off * 100:.1f} cm) -- planning the close from here")
+        say(f"close: at {which} ({off * 100:.1f} cm) -- planning the close from here")
         return ""
     if not execute:
         why = (
-            f"DRY RUN -- the close first goes to the view pose ({off * 100:.0f} cm / a joint {joints_off:.0f} deg "
-            "away) and plans from there; nothing commanded. To dry-run the close: a view_only open goal (moves "
-            "there), then this dry run again."
+            f"DRY RUN -- the close first goes to {which} ({off * 100:.0f} cm / a joint {joints_off:.0f} deg away) "
+            "and plans from there; nothing commanded. Move the arm there (an execute close goes there itself), then "
+            "this dry run again."
         )
         say(f"\n{why}")
         return why
-    say(f"close: to the view pose first ({off * 100:.0f} cm away) ...")
+    say(f"close: to {which} first ({off * 100:.0f} cm away) ...")
     moved = (
         dc.checked_curobo_move(ai, q_view, "close: to view pose", keep_shape=False)
         if hasattr(ai, "execute_joint_trajectory") and hasattr(ai, "raw_joints")
         else ai.go_to_joint_config(q_view, "close: to view pose")
     )
     if not moved:
-        raise Refused("close: did not reach the view pose -- stopping before the close.")
+        raise Refused(f"close: did not reach {which} -- stopping before the close.")
     return ""
+
+
+CLOSE_REDETECT_LOOKS = 3  # wrist looks that must each find the door, and agree (close_redetect.combine) ...
+CLOSE_REDETECT_TRIES = 5  # ... out of at most this many
+CLOSE_REDETECT_FILE = "door_close.json"  # beside DOOR_FILE: the re-detected door the close plans from
+ARM_SAMPLE_M = 0.03  # the arm's links, for taking them out of the wrist camera's points: a point every this along them
+
+
+def _arm_points(ai):
+    """Points along the arm's links and on the gripper's, at its joints now, in the arm's base frame (for
+    close_redetect.drop_near): the wrist camera sees its own gripper, inside the door's swing."""
+    import pybullet as p
+
+    scene, rb = dc.make_sim()
+    c = rb.physics_client_id
+    q = ai.get_state()["position"]
+    for j, jj in enumerate(dc.ARM):
+        p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
+    inv_pos, inv_orn = p.invertTransform(scene.robot_base_pose.position, scene.robot_base_pose.orientation)
+
+    def at(link):
+        ls = p.getLinkState(rb.robot_id, link, computeForwardKinematics=True, physicsClientId=c)
+        return np.asarray(p.multiplyTransforms(inv_pos, inv_orn, ls[4], ls[5])[0])
+
+    chain = [np.zeros(3)] + [at(link) for link in [*dc.ARM, rb.end_effector_id]]
+    out = []
+    for a, b in zip(chain[:-1], chain[1:], strict=True):
+        k = max(1, int(np.linalg.norm(b - a) / ARM_SAMPLE_M))
+        out.extend(a + (b - a) * (i / k) for i in range(k + 1))
+    gripper = [i for i in range(p.getNumJoints(rb.robot_id, physicsClientId=c)) if i > max(dc.ARM)]
+    out.extend(at(i) for i in gripper)
+    return np.array(out)
+
+
+def close_redetect(ai):
+    """Before the close, at the view pose: find the open door again, as the open finds it -- the wrist camera measures
+    (close_redetect.measure: the front face's depth, the open door's line from above), the arm's own links taken out of
+    its points. CLOSE_REDETECT_LOOKS looks must find it and agree; their median moves the door file, written as
+    CLOSE_REDETECT_FILE (DOOR_FILE is left as the open wrote it). The scene camera's view of the microwave is logged
+    beside it. Returns (that file, the door's opening in deg); raises Refused."""
+    from door_common import close_redetect as cr
+
+    cam = dc.camera()
+    if cam is None:
+        raise Refused("close: no wrist camera to find the door with -- stopping before the close.")
+    door = json.loads(dc.DOOR_FILE.read_text())
+    dims = dc.door_dims(door)
+    time.sleep(1.0)  # frames from after the arm arrived
+    arm = _arm_points(ai)
+    looks, whys = [], []
+    for attempt in range(1, CLOSE_REDETECT_TRIES + 1):
+        if len(looks) >= CLOSE_REDETECT_LOOKS:
+            break
+        f = cam.grab()
+        pts = cr.frame_points(f)
+        m = None
+        if pts is None:
+            whys.append("no arm base <- wrist camera transform")
+        else:
+            try:
+                m = cr.measure(door, cr.drop_near(pts, arm), np.asarray(f["base_T_cam"])[:3, 3], dims, seed=attempt)
+                looks.append(m)
+                say(
+                    f"  close: look {attempt}: door open {m['deg']:.1f} deg, hinge {np.round(m['hinge'], 3)}, "
+                    f"{m['face_points']} face / {m['door_points']} door pts ({m['door_face_seen']})"
+                )
+            except ValueError as e:
+                whys.append(str(e))
+                say(f"  close: look {attempt}: no door ({e})")
+        shared._save_frame(f, "close_redetect", attempt, m)
+        time.sleep(0.3)
+    if len(looks) < CLOSE_REDETECT_LOOKS:
+        raise Refused(
+            f"close: the open door found in {len(looks)} of {attempt} wrist looks (needs {CLOSE_REDETECT_LOOKS}): "
+            f"{whys[-1] if whys else ''} -- stopping before the close."
+        )
+    try:
+        got = cr.combine(looks)
+    except ValueError as e:
+        raise Refused(f"close: {e} -- stopping before the close.") from e
+    moved = cr.move_door(door, got)
+    moved["redetected"] = got
+    out = dc.DOOR_FILE.with_name(CLOSE_REDETECT_FILE)
+    out.write_text(json.dumps(moved, indent=1))
+    hinge_moved = float(np.linalg.norm(np.asarray(moved["hinge"][:2]) - np.asarray(door["hinge"][:2])))
+    say(
+        f"close: door re-detected (wrist camera, {got['looks']} looks agreeing to "
+        f"{got['spread']['hinge_m'] * 100:.1f} cm"
+        f" / {got['spread']['deg']:.1f} deg): open {got['deg']:.1f} deg (the push-open's {door.get('door_open_deg')}); "
+        f"hinge {np.round(moved['hinge'][:2], 3)}, {hinge_moved * 100:.1f} cm from the open's"
+    )
+    if SCENE_CAMERA is not None:  # beside it, for comparing (not a gate yet): the scene camera's microwave front
+        try:
+            g = SCENE_CAMERA.grab(timeout_s=2.0)
+            if g.get("box2d") is not None:
+                det = _make_detector()
+                det.region_2d = g["box2d"]["xyxy"]
+                face = det.door_face(g["rgb"], g["K"], g["depth_mm"], g["base_T_cam"])
+                if face is not None:
+                    n0 = np.asarray(moved["closed_normal"], float)
+                    gap = float(n0 @ (np.asarray(face["door_mid"]) - np.asarray(moved["hinge"])))
+                    say(
+                        f"  close: scene camera's microwave front {np.round(face['door_mid'][:2], 3)}: "
+                        f"{gap * 100:+.1f} cm "
+                        "from the re-detected hinge along the face's normal (compare only)"
+                    )
+        except Exception as e:  # noqa: BLE001 -- a comparison only
+            say(f"  close: scene camera comparison skipped ({e!r})")
+    return out, float(got["deg"])
 
 
 def open_task(
