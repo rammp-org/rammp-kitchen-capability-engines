@@ -135,7 +135,6 @@ RETRY_BACKOFF_M = 0.03  # re-detect at staging failed: back straight out this fa
 # aborted stroke in a straight line, never through cuRobo.
 RETREAT_OUT_M = 0.15
 HOME_TOL_DEG = 1.0  # go_home: the arm is home when every joint is within this of its start
-START_REACHED_DEG = 2.0  # go_to_start: every joint already this close to start_joints_deg -> nothing moves (fridge's)
 # The wrist camera: box-opening's D405 mount. Was "camera_color_optical_frame" (this package's own hand-eye
 # node); 2026-10-15 the restarted arm driver began publishing the Kinova vision module's frames under that
 # name, pointing 90 deg sideways, and a run without camera_frame put the button 57 cm off.
@@ -217,9 +216,9 @@ class Args:
     lead_in: float = STAGE_LEAD_IN_M  # cuRobo only to a point this much further out than staging
     stage_out: float | None = None  # scene estimate: stage this far out (None = SCENE_STAGE_OUT_M)
     prepress_aim_mm: tuple = (0.0, 0.0)  # the pre-press spot this far off the button's centre, x right / y up
-    # the shared start/end joints J1..J7 (deg): the run goes there before detecting and comes back there (go_to_start,
-    # go_home). () = start and end wherever the arm is
-    start_joints_deg: tuple = ()
+    # the driver's named pose every run starts and ends at (go_to_start, go_home): "home", the working pose skills start
+    # from and return to (kinova-gen3-ros2 docs/guide-goto-actions.md, Presets). "" = wherever the arm is
+    start_preset: str = "home"
     # cuRobo's collision world (collision.PlannerWorld): written into planner_world_dir (seen by the planner at
     # planner_world_dir_in_planner, "" = the same path), listing planner_base_layers again; planner_restore_world
     # is put back when the action ends
@@ -465,27 +464,22 @@ class Run:
         self.arm.smooth_poses(path, knots, start, name, self.log, track_abort_m=track_abort_m, cart_speed=cart_speed)
 
     def go_to_start(self):
-        """With start_joints_deg set: the arm to those joints before detecting (cuRobo in joint space, against the
-        robot's own world: the microwave isn't detected yet), and they become q0, so go_home ends the run there too.
-        Already within START_REACHED_DEG: nothing moves. A dry run elsewhere refuses: it can't plan from where the arm
-        isn't. Raises Abort / MotionFailed (the arm holds)."""
-        if not self.args.start_joints_deg:
+        """With start_preset set: the arm to the driver's named pose ("home") before detecting (cuRobo in joint space,
+        against the robot's own world: the microwave isn't detected yet), and the joints it lands on become q0, so
+        go_home ends the run there too. A dry run doesn't move: it plans from where the arm is. Raises MotionFailed
+        (the arm holds, and keeps its old start) if the driver refuses or the move fails."""
+        name = self.args.start_preset
+        if not name:
             return
-        q = np.radians(np.asarray(self.args.start_joints_deg, dtype=float))
-        gap = max_joint_delta_deg(self.arm.joints(), q)
-        self.log({"stage": "start_joints", "target_deg": list(self.args.start_joints_deg), "gap_deg": gap})
-        if gap <= START_REACHED_DEG:
-            say(f"  at the start joints (every joint within {gap:.1f} deg)")
-        elif not self.args.execute:
-            raise Abort(
-                f"dry run: the arm is {gap:.0f} deg (its furthest joint) from start_joints_deg -- move it there "
-                "first (an execute run goes there itself)"
-            )
-        else:
-            say(f"  to the start joints first (furthest joint {gap:.0f} deg away)")
-            self.limit_retry(lambda: self.arm.go_to_joints(q, "to the start", self.log), "to the start")
-        self.q0 = q
-        self.seed_posture = self.arm.joints()
+        if not self.args.execute:
+            say(f"  dry run: an execute run goes to the '{name}' preset first; planning from where the arm is")
+            self.log({"stage": "start_preset", "preset": name, "executed": False})
+            return
+        say(f"  to the '{name}' preset first")
+        self.limit_retry(lambda: self.arm.go_to_preset(name, f"to {name}", self.log), f"to {name}")
+        self.q0 = self.arm.joints()
+        self.seed_posture = self.q0
+        self.log({"stage": "start_preset", "preset": name, "executed": True, "q0": self.q0.tolist()})
 
     def at_home(self):
         """True if the arm is at its start joints (within HOME_TOL_DEG on every joint)."""
@@ -1132,7 +1126,7 @@ def _press_button(run: Run, a, pub) -> dict:
     run.per.start_scene()  # now, so the scene camera's frames are arriving by the first look
     run.step("preflight", 0.0)
     run.preflight()
-    if a.start_joints_deg:
+    if a.start_preset:
         run.step("start", 0.05)
         run.go_to_start()
     p0, R0 = arm.ee_pose()

@@ -67,11 +67,9 @@ params:
   planner_world_dir_in_planner: ""
   planner_base_layers: [/config/robot/curobo/layer_mebot_floor.yaml]
   planner_restore_world: world.yaml
-  # The shared start/end pose with the microwave open and close: with use_start_joints, every run goes to these
-  # joints J1..J7 (deg) by cuRobo before detecting and comes back to them. The microwave's view pose
-  # (VIEW_JOINTS_DEG, teleoped 11-11 on flatbot). Not yet checked against gen_1_5's chair: turn on after it is.
-  use_start_joints: false
-  start_joints_deg: [21.4, -43.8, -92.2, -110.6, -58.8, -93.8, -165.7]
+  # Every run starts and ends at this driver preset (go_to_preset: "home", the working pose skills start from and
+  # return to; its joints are the driver's, per robot). "" = start and end wherever the arm is.
+  start_preset: home
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

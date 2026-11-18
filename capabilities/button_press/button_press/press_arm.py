@@ -505,6 +505,23 @@ class PressArm:
             raise MotionFailed(f"{name}: go_to_joint_config failed: {self.arm.last_error.strip()} -- HOLDING HERE")
         say(f"  {name:22s} reached the start joints")
 
+    def go_to_preset(self, preset, name, log):
+        """Long move to the driver's named pose `preset` (go_to_preset: cuRobo plans in joint space, the driver
+        executes at arm.go_to_speed_scale). Raises MotionFailed (arm holds) on a refusal or failure, with the
+        driver's message. Dry run: logs only."""
+        say(f"  {name:16s} go_to_preset {preset} (path planned by cuRobo in the driver, not previewed)")
+        rec = {"step": name, "planner": "go_to_preset", "preset": preset, "executed": False}
+        if not self.execute:
+            log(rec)
+            return
+        self.sent_goals += 1
+        ok = self.arm.go_to_preset(preset)
+        rec.update(executed=True, ok=ok, error="" if ok else self.arm.last_error, q_after=self.joints().tolist())
+        log(rec)
+        if not ok:
+            raise MotionFailed(f"{name}: go_to_preset {preset} failed: {self.arm.last_error.strip()} -- HOLDING HERE")
+        say(f"  {name:22s} reached the {preset} preset")
+
     def turn_off_limit(self, error, name, log):
         """cuRobo refuses to plan from a joint inside its limit margin (START_IN_LIMIT_MARGIN: the
         driver's message names the joint, its limits and the margin; the arm was not moved). Turn
