@@ -71,10 +71,10 @@ def load():
     body = [
         n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") in consts for t in n.targets)
     ]
-    body += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "failure"]
+    body += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("failure", "arm_at_start")]
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Capability")
     cls.bases = [ast.Name(id="Base", ctx=ast.Load())]
-    keep = {"_ui_run", "_ui_presses", "availability", "execute"}
+    keep = {"_ui_run", "_ui_presses", "_press", "availability", "execute"}
     cls.body = [
         n
         for n in cls.body
@@ -107,7 +107,7 @@ def load():
 
 
 SCOPE = load()
-Capability, failure = SCOPE["Capability"], SCOPE["failure"]
+Capability, failure, arm_at_start = SCOPE["Capability"], SCOPE["failure"], SCOPE["arm_at_start"]
 AT_PANEL, AT_PANEL_NOTE, UI_ACTIONS = SCOPE["AT_PANEL"], SCOPE["AT_PANEL_NOTE"], SCOPE["UI_ACTIONS"]
 
 
@@ -310,6 +310,125 @@ def test_a_failure_at_the_panel_is_shown_and_never_retried(phase):
     assert not any(b["button_id"] == "retry" for p in ctx.sent for b in p["buttons"])
 
 
+def at_start(error, value):
+    error.at_start = value  # as Capability._press sets it from the run (arm_at_start)
+    return error
+
+
+@pytest.mark.parametrize("phase", AT_PANEL)
+def test_a_failure_at_the_panel_after_the_arm_went_home_says_so_and_is_still_not_retried(phase):
+    """A run that goes back to the start after a failed check (go-home-on-failure): the panel says where the arm is,
+    not that the fingertip may be at the buttons."""
+    steps = ("preflight", "detect", "plan", *AT_PANEL[: AT_PANEL.index(phase) + 1])
+    error = at_start(failure(phase, Abort("press: no touch within 12 mm")), True)
+    node, ctx = make(replies=["presses_1", "done"], steps=steps, outcomes=(error, OK))
+    with pytest.raises(EngineError):
+        node.execute("press_defrost", {}, ctx)
+    assert len(node._press.calls) == 1
+    message = ctx.sent[-1]["message"]
+    assert ui_text.AT_START_STATE in message
+    assert ui_text.AT_PANEL_STATE not in message and ui_text.AT_PANEL_TODO not in message
+    assert not any(b["button_id"] == "retry" for p in ctx.sent for b in p["buttons"])
+
+
+@pytest.mark.parametrize("value", [False, None])
+def test_a_failure_at_the_panel_not_known_to_be_home_keeps_the_fingertip_warning(value):
+    error = at_start(failure("approach", Abort("x")), value)
+    node, ctx = make(replies=["presses_1", "done"], steps=("plan", "approach"), outcomes=(error,))
+    with pytest.raises(EngineError):
+        node.execute("press_start", {}, ctx)
+    message = ctx.sent[-1]["message"]
+    assert ui_text.AT_PANEL_STATE in message and message.endswith(ui_text.AT_PANEL_TODO)
+
+
+def test_a_retry_offer_after_the_arm_went_home_says_it_is_back_at_the_start():
+    refused = at_start(failure("redetect", Abort("dome detector: nothing in 7 frames")), True)
+    node, ctx = make(replies=["presses_1", "retry", "done"], steps=("stage", "redetect"), outcomes=(refused, OK))
+    node.execute("press_start", {}, ctx)
+    retry = next(p for p in ctx.sent if any(b["button_id"] == "retry" for b in p["buttons"]))
+    assert ui_text.AT_START_STATE in retry["message"] and ui_text.HOLDING_STATE not in retry["message"]
+
+
+def test_arm_at_start_asks_the_run_and_never_raises():
+    assert arm_at_start(SimpleNamespace(at_home=lambda: True)) is True
+    assert arm_at_start(SimpleNamespace(at_home=lambda: False)) is False
+    assert arm_at_start(SimpleNamespace()) is None  # a run without go-home-on-failure: unknown
+
+    def unreadable():
+        raise ArmError("no /joint_states")
+
+    assert arm_at_start(SimpleNamespace(at_home=unreadable)) is None
+
+
+def real_at_home():
+    """press_button.Run.at_home and HOME_TOL_DEG, loaded with `ast` (press_button imports ROS)."""
+    tree = ast.parse((PKG / "press_button.py").read_text())
+    body = [n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "HOME_TOL_DEG"]
+    run_cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Run")
+    run_cls.body = [n for n in run_cls.body if isinstance(n, ast.FunctionDef) and n.name == "at_home"]
+    _spec = importlib.util.spec_from_file_location("bp_geometry", PKG / "geometry.py")
+    geometry = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(geometry)
+    scope = {"max_joint_delta_deg": geometry.max_joint_delta_deg}
+    exec(compile(ast.Module(body=body + [run_cls], type_ignores=[]), "press_button.py", "exec"), scope)
+    return scope["Run"]
+
+
+def test_the_runs_at_home_reads_the_joints_against_the_start_joints():
+    """The real Run.at_home that arm_at_start asks: every joint within 1 deg of the start joints (q0, from preflight),
+    False before preflight has set them. It only reads the arm's joints."""
+    np = pytest.importorskip("numpy")
+    q0 = np.radians([10.0, 20.0, -30.0, 40.0, -50.0, 60.0, 170.0])
+    Run = real_at_home()
+    run = Run.__new__(Run)
+    run.q0, run.arm = q0, SimpleNamespace(joints=lambda: q0 + np.radians([0, 0, 0, 0, 0, 0.9, 0]))
+    assert run.at_home() is True
+    run.arm = SimpleNamespace(joints=lambda: q0 + np.radians([0, 0, 0, 0, 0, 1.5, 0]))
+    assert run.at_home() is False
+    run.q0 = None
+    assert run.at_home() is False
+    assert arm_at_start(run) is False
+
+
+class FakeRun:
+    """press_button.Run for Capability._press: records the calls, at_home() as given (None: a run without at_home)."""
+
+    def __init__(self, home):
+        self.calls = []
+        if home is not None:
+            self.at_home = lambda: self.calls.append("at_home") or home
+
+    def record_end(self, phase, error=None):
+        self.calls.append("record_end")
+
+    def close(self):
+        self.calls.append("close")
+
+
+@pytest.mark.parametrize("home", [True, False, None])
+def test_press_puts_where_the_run_left_the_arm_on_its_error_before_closing_the_run(home, monkeypatch):
+    """The real Capability._press: a failed check comes out as `<phase>_failed` carrying the run's at_home(), read
+    while the run (and its arm) is still open."""
+    run = FakeRun(home)
+
+    def press_button(run_, args, pub):
+        phase[0] = "approach"
+        raise Abort("approach: leg refused")
+
+    monkeypatch.setitem(SCOPE, "Run", lambda *a: run)
+    monkeypatch.setitem(SCOPE, "press_button", press_button)
+    node, ctx = make()
+    del node._press  # the class's own
+    node.kin, node.target_pub = None, None
+    phase = ["preflight"]
+    args = SimpleNamespace(target="start_30s", presses=1, execute=True)
+    with pytest.raises(EngineError) as raised:
+        node._press(args, ctx, phase, ctx.checkpoint, quiet)
+    assert raised.value.error_code == "approach_failed"
+    assert raised.value.at_start is home
+    assert run.calls == (["record_end", "at_home", "close"] if home is not None else ["record_end", "close"])
+
+
 def test_a_recoverable_error_raised_at_the_panel_is_still_not_retried():
     node, ctx = make(
         replies=["presses_1", "done"], steps=("plan", "approach"), outcomes=(EngineError("x", "odd", True), OK)
@@ -476,6 +595,19 @@ def test_a_message_no_rule_knows_is_shown_cleaned_not_replaced():
 )
 def test_the_state_follows_the_step(phase, motion_failed, state):
     assert ui_text.state(phase, motion_failed).startswith(state)
+
+
+@pytest.mark.parametrize(
+    "phase, motion_failed, state",
+    [
+        ("detect", False, ui_text.NOT_MOVED_STATE),  # nothing moved: said as such, not "back"
+        ("stage", False, ui_text.AT_START_STATE),
+        ("redetect", True, ui_text.AT_START_STATE),
+        ("press", False, ui_text.AT_START_STATE),
+    ],
+)
+def test_the_state_says_the_arm_is_back_at_the_start_when_the_run_found_it_there(phase, motion_failed, state):
+    assert ui_text.state(phase, motion_failed, at_start=True) == state
 
 
 def test_a_failure_message_names_the_button_and_the_step():
