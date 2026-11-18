@@ -118,16 +118,20 @@ UI_DONE = {"open": "Microwave door opened.", "close": "Microwave door closed."}
 class _PanelCtx:
     """A UI run's ctx for execute(): everything passes through to the run's own ctx; a ctx.progress() message the UI
     has words for (ui_text.moving: the open's grasp and release) also updates the Stop panel's text, unless the run
-    has been stopped or cancelled."""
+    has been stopped or cancelled. The update runs inside the open (on_hold, between the grasp and the swing), so it
+    never raises: a panel that fails to update is logged, and the open goes on."""
 
-    def __init__(self, ctx, ui, label):
-        self._ctx, self._ui, self._label = ctx, ui, label
+    def __init__(self, ctx, ui, label, logger):
+        self._ctx, self._ui, self._label, self._log = ctx, ui, label, logger
 
     def progress(self, phase, pct, message="", pausable=True):
         self._ctx.progress(phase, pct, message, pausable)
         text = ui_text.moving(self._label, message)
         if text and not (self._ui.user_stopped or self._ctx.cancelled()):
-            self._ui.moving(text)
+            try:
+                self._ui.moving(text)
+            except Exception as error:  # the panel's text must never stop the arm with the hand on the handle
+                self._log.warning(f"UI: panel update failed: {error!r}")
 
     def __getattr__(self, name):
         return getattr(self._ctx, name)
@@ -241,7 +245,7 @@ class Capability(CapabilityEngine):
             try:
                 result = ui.motion(
                     f"{label}: the arm is moving.",
-                    lambda: self.execute(action_id, dict(params), _PanelCtx(ctx, ui, label)),
+                    lambda: self.execute(action_id, dict(params), _PanelCtx(ctx, ui, label, self.get_logger())),
                     stopped_note=lambda: self._ui_stopped_note(action_id),
                 )
             except EngineError as error:

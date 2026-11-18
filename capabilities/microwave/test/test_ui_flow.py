@@ -486,15 +486,37 @@ def test_no_panel_update_after_stop(flow):
     assert [p["title"] for p in ctx.sent] == ["Open microwave", "Open microwave: stopped"]
 
 
-def test_orchestrator_cancel_that_ends_as_an_engine_error_shows_nothing_more(flow):
+@pytest.mark.parametrize("held", [" -- still holding the handle", ""])  # before: a failure panel, a retry question
+def test_orchestrator_cancel_that_ends_as_an_engine_error_shows_nothing_more(flow, held):
     node, ctx, _, _ = flow
 
     def run(action_id, params, _ctx):  # a legacy move returns False on a cancel: execute() raises "stopped"
         ctx.cancel()
-        raise EngineError("stopped", "the open stopped short -- still holding the handle", True)
+        raise EngineError("stopped", f"the open stopped short -- the arm holds where it is{held}", True)
 
     node.execute.side_effect = run
     with pytest.raises(EngineError, match="stopped short"):
         node._ui_run("open_door_ui", ctx)
     assert node.execute.call_count == 1
     assert [p["buttons"] for p in ctx.sent] == [[STOP]]
+
+
+def test_a_panel_update_that_raises_never_stops_the_open(flow):
+    node, ctx, _, _ = flow
+    sent = ctx.update_user_panel
+
+    def update_user_panel(panel_json=None, **kwargs):  # the bridge call fails on the grasp's panel only
+        if "swinging" in panel_json["message"]:
+            raise RuntimeError("bridge gone")
+        return sent(panel_json, **kwargs)
+
+    ctx.update_user_panel = update_user_panel
+
+    def run(action_id, params, run_ctx):
+        run_ctx.progress(action_id, 50.0, "holding the handle", pausable=False)
+        return {"executed": True}  # the open goes on past the failed update
+
+    node.execute.side_effect = run
+    assert node._ui_run("open_door_ui", ctx) == {"executed": True}
+    assert ctx.sent[-1]["message"] == "Microwave door opened."
+    node.get_logger().warning.assert_called_once()
