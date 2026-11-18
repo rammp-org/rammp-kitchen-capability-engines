@@ -54,6 +54,11 @@ class Camera:
         node.create_action_subscription(Image, color_topic, keep("color"), qos)
         node.create_action_subscription(Image, depth_topic, keep("depth"), qos)
 
+    def reset(self):
+        """Forget the last run's image turn and stamp, as a new Camera has, keeping the subscriptions (a UI retry
+        within the same action)."""
+        self.turns, self.stamp = 0, None
+
     def get(self, name, max_age=None):
         with self.lock:
             item = self.latest.get(name)

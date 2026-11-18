@@ -30,6 +30,8 @@ container:
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
 params:
+  # The UI bridge node ctx.update_user_panel / poll_ui_event talk to (the engine declares it).
+  ui_bridge_node_name: ui_bridge_node
   # false: every goal is a dry run (grab: detect and plan; park: report), whatever it asks.
   # true only for attended runs, someone on the e-stop.
   allow_execute: false

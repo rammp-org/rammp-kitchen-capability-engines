@@ -44,6 +44,7 @@ KUI_CAPS="fridge microwave" /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-
 | `place_container` | `table_1`      | Place Tupperware on Table                                                  |
 | `box_opening`     | `tupperware_1` | Open Container                                                             |
 | `button_press`    | `microwave_1`  | Press Start, Press Power, Press Timer/Clock, Press Defrost, Press Stop/Eco |
+| `grab_container`  | `tupperware_1` | Grab Tupperware by Brim (only when named in `KUI_CAPS`)                    |
 
 Only ever one node per capability: don't also start that capability standalone (N1-N6) while it runs here, or both
 take every goal and both move the arm. `down.sh` stops it all.
