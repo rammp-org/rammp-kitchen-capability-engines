@@ -11,6 +11,19 @@ from capability_ui import wording as W
 
 WHAT = {"open": "open the microwave door", "close": "close the microwave door"}
 
+# The Stop panel's text as the open moves on: execute()'s ctx.progress messages (its on_hold) -> what the arm does next
+PHASE = {
+    "holding the handle": "the hand has the handle and is swinging the door open.",
+    "let go of the handle": "the hand has let go of the handle and is pushing the door further open.",
+}
+
+
+def moving(label, message):
+    """The Stop panel's text for execute()'s progress `message` under the button `label`, or None (leave it)."""
+    what = PHASE.get(message)
+    return f"{label}: {what}" if what else None
+
+
 # Lines the run logs (say) that name why a close or open ended False ("stopped short"), newest first: (pattern,
 # what happened, what to do)
 SAID = (
