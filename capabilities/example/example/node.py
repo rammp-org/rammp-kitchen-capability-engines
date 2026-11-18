@@ -187,35 +187,99 @@ class Capability(CapabilityEngine):
     def _count_with_runui_panel(self, to: int, interval: float, ctx) -> dict:
         """Same as `count_with_panel` above, but built on `capability_ui.RunUI`'s reusable panel
         helpers instead of calling ctx.update_user_panel()/ctx.poll_ui_event()/
-        ctx.publish_overlay_image()/ctx.set_overlay_visible() by hand.
+        ctx.publish_overlay_image()/ctx.set_overlay_visible() by hand -- and exercising most of
+        RunUI's interactive surface, not just the progress bar, to serve as a worked reference for
+        it:
 
-        `RunUI.motion()` shows the progress-with-Stop panel and runs its own watcher thread that
-        reads ctx.poll_ui_event() for the tap -- this loop never has to poll for it itself, unlike
-        `_wait_for_stop()` above. Its `cancel` callback is wired to this engine's own cancel
-        (`cancel_own_run`), the same cancel the orchestrator's own Stop/cancel goes through, so a
-        Stop here shows a "Stopped" notice and re-raises `Cancelled` exactly as any other cancelled
-        action would -- a different (and more featureful) Stop behaviour than `count_with_panel`'s
-        own hand-rolled one above, which instead returns a normal result with `stopped_by_user:
-        true`. `RunUI.overlay_shown()` brackets the overlay camera feed's show/hide in one call, in
-        place of `count_with_panel`'s own `try`/`finally` around `ctx.set_overlay_visible()`.
+        - `RunUI.ask()` with a plain button (`_ask_to_start`): waits for a tap (plus the automatic
+          Stop) before anything starts.
+        - `RunUI.ask()` again with `objects=`/`on_tap=` (`_ask_start_marker`): two markers overlaid
+          on the camera feed (`"source": "overlay"`, this run's own `publish_overlay_image()`
+          stream) the user can tap to choose where counting starts from, highlighting the tapped
+          one via `selected_instance_id` -- the same mechanism a real capability uses to let the
+          user pick between several detected objects (see `place_container`'s spot picker).
+        - `RunUI.motion()` shows the progress-with-Stop panel and runs its own watcher thread that
+          reads ctx.poll_ui_event() for the tap -- this loop never has to poll for it itself, unlike
+          `_wait_for_stop()` above. Its `cancel` callback is wired to this engine's own cancel
+          (`cancel_own_run`), the same cancel the orchestrator's own Stop/cancel goes through, so a
+          Stop here shows a "Stopped" notice and re-raises `Cancelled` exactly as any other
+          cancelled action would -- a different (and more featureful) Stop behaviour than
+          `count_with_panel`'s own hand-rolled one above, which instead returns a normal result
+          with `stopped_by_user: true`.
+        - `RunUI.overlay_shown()` brackets the whole interactive run's overlay show/hide in one
+          call, in place of `count_with_panel`'s own `try`/`finally` around
+          `ctx.set_overlay_visible()` -- the markers are visible while being asked about, not just
+          during the counting loop.
+        - `RunUI.done()` ends the run with a final notice, waited on (bounded) as every notice is.
         """
         ui = RunUI(ctx, "Counting", cancel=lambda: cancel_own_run(self), logger=self.get_logger())
         overlay_image = _build_stripe_overlay_image()
 
-        def do_count():
-            with ui.overlay_shown():
-                for n in range(1, to + 1):
+        with ui.overlay_shown():
+            ui.publish_overlay_image(overlay_image)
+            self._ask_to_start(ui, to)
+            start = self._ask_start_marker(ui, ctx)
+
+            def do_count():
+                for n in range(start, to + 1):
                     ctx.checkpoint()  # honours pause and cancel between steps
                     pct = 100.0 * n / to
                     ui.moving(f"{n}/{to}", pct, "counting")
                     ui.publish_overlay_image(overlay_image)
                     time.sleep(interval)
                     ctx.progress("counting", pct, f"{n}/{to}")
-            return {"counted_to": to}
+                return {"counted_to": to, "started_at": start}
 
-        result = ui.motion(f"Counting to {to}.", do_count)
+            result = ui.motion(f"Counting to {to}.", do_count)
+
         ui.done(f"Counted to {to}.", mock=self.mock)
         return result
+
+    def _ask_to_start(self, ui: RunUI, to: int) -> None:
+        """A plain confirm button (plus the automatic Stop) before anything counts. Standalone (no
+        UI session) starts immediately; connected but unanswered within the timeout refuses --
+        nothing was counted -- rather than silently guessing. A Stop here cancels the action (via
+        `RunUI.ask()`'s own handling) and is never seen as a plain `None` answer."""
+        answer = ui.ask(f"Ready to count to {to}?", [{"button_id": "start", "label": "Start"}])
+        if answer == "start" or ui.connected is False:
+            return
+        message = "No answer: nothing was counted."
+        ui.notice(message)
+        raise EngineError("no_answer", message, recoverable=True)
+
+    def _ask_start_marker(self, ui: RunUI, ctx) -> int:
+        """Tap one of two markers overlaid on the camera feed to choose where counting starts from
+        (1, or 5 past "Start at 1"), or just tap Start at 1 -- demonstrates `RunUI.ask()`'s
+        `objects=`/`on_tap=` for picking between objects shown on the overlay, including the
+        selected-highlight pattern (`ctx.update_user_panel(selected_instance_id=...)`) from
+        `docs/UI_JSON_SCHEMA.md`. Standalone, or with no tap, starts at 1."""
+        markers = [
+            {
+                "instance_id": "marker_low",
+                "perception_class": "marker",
+                "box": [20.0, 20.0, 80.0, 80.0],
+                "source": "overlay",
+            },
+            {
+                "instance_id": "marker_high",
+                "perception_class": "marker",
+                "box": [_OVERLAY_WIDTH - 80.0, 20.0, _OVERLAY_WIDTH - 20.0, 80.0],
+                "source": "overlay",
+            },
+        ]
+        tapped = {"id": None}
+
+        def on_tap(instance_id):
+            tapped["id"] = instance_id
+            ctx.update_user_panel(selected_instance_id=instance_id)  # the highlight follows the tap
+
+        ui.ask(
+            "Tap a marker to choose where counting starts from, or Start at 1.",
+            [{"button_id": "start_at_1", "label": "Start at 1"}],
+            objects=markers,
+            on_tap=on_tap,
+        )
+        return 5 if tapped["id"] == "marker_high" else 1
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
         """Sleeps `duration` seconds in short steps, honouring cancel and

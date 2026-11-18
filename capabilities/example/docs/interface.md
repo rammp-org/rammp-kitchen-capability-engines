@@ -16,14 +16,22 @@ on the UI bridge, and showing/hiding its overlay camera feed
 (`ctx.set_overlay_visible()`) for the duration of the run — shown before the
 loop starts, hidden in a `finally` on every exit path; and
 `count_with_runui_panel`, the same again but built on `capability_ui.RunUI`'s
-reusable panel helpers (`RunUI.motion()`, `RunUI.overlay_shown()`) instead of
-calling `ctx` directly — its Stop button cancels the action (showing a
-"Stopped" notice) rather than returning a normal result. While shown, both
-panel actions also republish one static diagonal-stripe test frame
-(`ctx.publish_overlay_image()`/`RunUI.publish_overlay_image()`) every tick as
-a placeholder for a real capability's own camera. It is activated when the
-user selects a `counter`. Replace this paragraph with what your capability
-does and what would break without it.
+reusable panel helpers (`RunUI.ask()`, `RunUI.motion()`, `RunUI.overlay_shown()`,
+`RunUI.done()`) instead of calling `ctx` directly: it first asks for
+confirmation (a plain "Start" button, `_ask_to_start`), then asks the user to
+tap one of two markers overlaid on the camera feed to pick where counting
+starts from — 1, or 5 if `marker_high` is tapped (`_ask_start_marker`,
+demonstrating `RunUI.ask()`'s `objects=`/`on_tap=` and the
+selected-highlight-follows-the-tap pattern from `docs/UI_JSON_SCHEMA.md`) —
+before counting from there to `to` under the progress-with-Stop panel. Its
+Stop button cancels the action (showing a "Stopped" notice) rather than
+returning a normal result, unlike `count_with_panel`'s own hand-rolled Stop
+handling. While shown, both panel actions also republish one static
+diagonal-stripe test frame (`ctx.publish_overlay_image()`/
+`RunUI.publish_overlay_image()`) every tick as a placeholder for a real
+capability's own camera. It is activated when the user selects a `counter`.
+Replace this paragraph with what your capability does and what would break
+without it.
 
 ## Publishes
 
@@ -52,7 +60,7 @@ Served under `/example/`, types from `rammp_orchestrator_interfaces`:
 | ------------------ | ----------------------------------------------------- | --------------------------------------------- |
 | `count`            | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
 | `count_with_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |
-| `count_with_runui_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}` (Stop cancels the action instead) |
+| `count_with_runui_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "started_at": 1\|5}` (Stop cancels the action instead) |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
