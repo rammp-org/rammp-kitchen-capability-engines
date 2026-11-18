@@ -35,7 +35,11 @@ from button_press.geometry import fit_plane_inverse_depth, pixel_ray
 DOME_SPACING_MM = (16.8, 21.8)
 NAMES = ("power_level", "wgt_time_defrost", "timer_clock", "stop_eco", "start_30s")
 # Dome centres in units of the top-row spacing, origin = top-middle dome, x right, y DOWN the panel.
-LAYOUT = np.array([[-1.0, 0.0], [0.0, 0.0], [1.0, 0.0], [-0.58, 0.92], [0.42, 0.92]])
+# The demo's white Comfee, measured 2026-11-18 from 16 correct fits on snorlax's wrist camera (median):
+# the bottom row is centred under the top-middle dome. The cream Comfee's [-0.58, 0.92], [0.42, 0.92] put
+# start_30s 0.12 spacing off on this panel -- most of FIT_TOL before any glare, so the real layout was
+# refused in most frames and the hinted search could settle on a layout one column over.
+LAYOUT = np.array([[-1.0, 0.0], [0.0, 0.0], [1.0, 0.0], [-0.53, 0.97], [0.52, 0.97]])
 FIT_TOL = 0.2  # max dome miss, fraction of s (true fits: <= 0.17 on the test frames)
 MIN_RANGE_M = 0.22  # closer than this, domes break into several highlights: abstain
 MAX_RANGE_M = 1.2
