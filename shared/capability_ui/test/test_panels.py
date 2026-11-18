@@ -127,6 +127,69 @@ def test_stopped_notice_stays_up_until_done_although_the_run_is_cancelled():
     assert clock.t == pytest.approx(5.0, abs=0.2)
 
 
+class FakeEngine:
+    """The engine's stop state as CapabilityEngine keeps it: `_stopping` is None until stop() (SIGTERM/SIGINT), which
+    sets it and cancels the running action."""
+
+    def __init__(self, ctx):
+        self._stopping = None
+        self._ctx = ctx
+
+    def stop(self, at):
+        self._stopping = at
+        self._ctx.cancel()
+
+
+def stop_on_the_ui(ui, ctx):
+    """The user presses Stop on the moving panel; motion() shows the Stopped notice and re-raises."""
+
+    def motion():  # like self.arm: runs until ctx.cancelled(), then raises
+        assert wait_until(ctx.cancelled)
+        raise Cancelled()
+
+    threading.Timer(0.05, lambda: ctx.tap("stop")).start()
+    with pytest.raises(Cancelled):
+        ui.motion("Moving.", motion)
+    assert ui.user_stopped
+
+
+def test_a_stopped_notice_still_waits_for_done_after_a_plain_user_stop():
+    ui, ctx, clock = make()
+    ctx._engine = FakeEngine(ctx)  # running, not stopping
+    clock.script = [(5.0, lambda: ctx.tap("done"))]
+    stop_on_the_ui(ui, ctx)
+    assert ctx.panels()[-1]["title"] == "Do thing: stopped"
+    assert clock.t == pytest.approx(5.0, abs=0.2)
+
+
+def test_a_stopped_notice_ends_once_the_engine_is_stopping():
+    """docker stop (SIGTERM) while the Stopped notice waits for Done: the notice must end at once, or execute() outlives
+    the engine's stop wait and the container exits 1 after it (box_opening #60: 8.9 s)."""
+    ui, ctx, clock = make()
+    engine = ctx._engine = FakeEngine(ctx)
+    clock.script = [(2.0, lambda: engine.stop(at=2.0))]
+    stop_on_the_ui(ui, ctx)
+    assert ctx.panels()[-1]["title"] == "Do thing: stopped"
+    assert clock.t == pytest.approx(2.0, abs=0.2)
+
+
+def test_a_stopped_notice_shown_after_the_stop_already_began_does_not_wait():
+    ui, ctx, clock = make()
+    ctx._engine = FakeEngine(ctx)
+    ctx._engine.stop(at=0.0)
+    ui.user_stopped = True
+    ui.notice("Stopped.")
+    assert clock.t < 0.2
+
+
+def test_a_done_notice_ends_once_the_engine_is_stopping():
+    ui, ctx, clock = make()
+    engine = ctx._engine = FakeEngine(ctx)
+    clock.script = [(3.0, lambda: engine.stop(at=3.0))]
+    ui.done("Thing done.")
+    assert clock.t == pytest.approx(3.0, abs=0.2)
+
+
 def test_orchestrator_cancel_ends_a_notice_and_a_motion_without_the_stopped_panel():
     ui, ctx, clock = make()
 
