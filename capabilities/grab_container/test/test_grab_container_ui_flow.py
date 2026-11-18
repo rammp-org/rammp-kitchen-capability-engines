@@ -223,7 +223,7 @@ def stop_now(run_ctx):
         ([("view", 5.0), ("grasp", 10.0)], "nothing is held"),
         ([("approach", 30.0)], "at or near the tupperware's brim; nothing is held"),
         ([("approach", 30.0), ("grasp", 70.0)], "it may be holding the tupperware"),
-        ([("raise", 85.0)], "holding the tupperware by its brim"),
+        ([("raise", 85.0)], "closed on the brim: check by eye"),
     ],
 )
 def test_stop_cancels_and_says_what_the_hand_holds(scope, steps, holds):

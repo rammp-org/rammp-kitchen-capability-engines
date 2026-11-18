@@ -99,8 +99,8 @@ the orchestrator is up.
 
 ## UI
 
-The UI is offered one one-press action (`availability()` returns only it; the
-orchestrator sends no params). It runs `grab` with fixed params under
+The UI is offered a single one-press action (`availability()` returns only it;
+the orchestrator sends no params). It runs `grab` with fixed params under
 `capability_ui.RunUI` (`shared/capability_ui`); the panels' words are in
 `grab_container/ui_text.py`.
 
@@ -129,8 +129,9 @@ In `execute()`:
 - A failure from the open gripper's approach on, any other error, or an
   exception (e-stop, control taken, the detector's weights): a "failed" notice
   with the reason and what the hand holds, Done only, never retried.
-- Success: a Done notice ("Holding the tupperware by its brim, ..."; it says so
-  when the lift didn't run). Mock: "Mock: ... No arm motion."
+- Success: a Done notice ("The gripper closed on the tupperware's brim and
+  lifted it a little. Check by eye ..."; `grab` doesn't check the grip, and the
+  notice says so when the lift didn't run). Mock: "Mock: ... No arm motion."
 - Every final notice is waited on for at most 60 s before `execute()` returns
   or raises. An orchestrator cancel shows nothing more (the orchestrator has
   taken the UI back). Without a UI session nothing waits: the error is

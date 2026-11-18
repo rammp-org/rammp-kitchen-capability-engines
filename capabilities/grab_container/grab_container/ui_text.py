@@ -15,8 +15,9 @@ TITLE = "Grab tupperware"
 LABEL = "Grab Tupperware by Brim"
 RETRY_LABEL = "Grab"
 MOVING = "Grabbing the tupperware by its brim: the arm is moving."
-DONE = "Holding the tupperware by its brim, a little above where it stood."
-DONE_NOT_RAISED = "Holding the tupperware by its brim where it stood: the lift didn't run, so check the grip by eye."
+# grab doesn't check the grip after closing (grasp.grab: "confirm by eye"), so Done doesn't claim one
+DONE = "The gripper closed on the tupperware's brim and lifted it a little. Check by eye that it is holding it."
+DONE_NOT_RAISED = "The gripper closed on the tupperware's brim, but the lift didn't run. Check the grip by eye."
 
 # (phase as execute() reports it, gripper closing?) -> the progress panel's words and bar (%). `grasp` is reported
 # twice: opening (10 %) and closing (70 %).
@@ -50,7 +51,7 @@ def hand(step_):
         "open": "The hand is above the tupperware; nothing is held.",
         "approach": "The open hand is at or near the tupperware's brim; nothing is held.",
         "close": "The gripper was closing on the brim: it may be holding the tupperware.",
-        "raise": "The hand is holding the tupperware by its brim.",
+        "raise": "The gripper is closed on the brim: check by eye that it is holding the tupperware.",
     }
     return notes.get(step_, "Nothing has been grasped.")
 
