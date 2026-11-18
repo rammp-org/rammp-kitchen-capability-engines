@@ -622,6 +622,7 @@ class Capability(CapabilityEngine):
         self._cancelled_token = None  # the execution a CANCEL came for before its goal did (_on_control)
         self._ui_stopped = False  # this execution was stopped by the panel's own Stop (_cancel_from_ui)
         self._ui_held = False  # this execution's run ended with the lid in the fingers (for its Stopped notice)
+        self._ui_killed = False  # ... and was killed, not ended by its Ctrl+C: its notice says no arm state
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -735,6 +736,7 @@ class Capability(CapabilityEngine):
                     self.get_logger().error(f"the run did not end its line-up in {LINE_UP_END_S:.0f} s: its stop")
                     run_.stop(CANCEL_ESCALATE_S)
             code = run_.finish()
+            self._ui_killed = code == -signal.SIGKILL  # for its notice (execute)
             view.finish(code, cancelled=cancelled, timed_out=False, held=False)
             if isinstance(e, EngineError) and e.error_code == "line_up_unavailable" and code != EXIT_NOT_LINED_UP:
                 raise error_for(action_id, code, run_.lines) from e  # it ended of itself: what it said
@@ -836,21 +838,22 @@ class Capability(CapabilityEngine):
         panel's own Stop a Stopped notice. Each waits for its Done, bounded (_notice). An orchestrator cancel
         shows nothing more: the orchestrator has taken the UI back. Standalone (no UI) nothing is sent."""
         t0 = time.monotonic()
-        self._ui_stopped = self._ui_held = False
+        self._ui_stopped = self._ui_held = self._ui_killed = False
         ui = RunUI(ctx, PANEL_TITLE, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
         try:
             result = self._open_box(action_id, params, ctx)
         except Cancelled:
             if self._ui_stopped:
                 ui.user_stopped = True  # the notice stays up through the cancel it made, until Done
-                self._notice(ui, t0, ui_text.stopped(self._ui_held), f"{PANEL_TITLE}: stopped", "warning")
+                words = ui_text.stopped(self._ui_held, self._ui_killed)
+                self._notice(ui, t0, words, f"{PANEL_TITLE}: stopped", "warning")
             raise
         except EngineError as error:
             if not ctx.cancelled():
                 if error.error_code == "not_allowed":
                     self._notice(ui, t0, ui_text.NOT_ALLOWED, f"{PANEL_TITLE}: not started", "warning")
                 else:
-                    words = ui_text.failure(error.error_code, str(error))
+                    words = ui_text.failure(error.error_code, str(error), self._ui_killed)
                     self._notice(ui, t0, words, f"{PANEL_TITLE}: failed", "error")
             raise
         except Exception as error:
@@ -930,7 +933,8 @@ class Capability(CapabilityEngine):
             view.finish(
                 code, cancelled=ctx.cancelled() or panel.pressed, timed_out=run_.timed_out, held=bool(track.held)
             )
-            self._ui_held = bool(track.held)  # for a Stopped notice (execute)
+            self._ui_held = bool(track.held)  # for its notice (execute)
+            self._ui_killed = run_.proc.returncode == -signal.SIGKILL
         if ctx.cancelled() or panel.pressed:
             world.wait(WORLD_WAIT_S)  # those queued before the cancel
             raise Cancelled()

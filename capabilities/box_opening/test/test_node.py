@@ -1529,3 +1529,34 @@ def test_every_error_has_plain_words_on_the_ui(code):
     assert text and "STOP:" not in text and "press_demo" not in text and "slide-in" not in text
     held = ui_text.failure(code, "something -- the lid is still in the fingers")
     assert ui_text.HELD in held
+
+
+def test_a_notice_says_where_the_arm_is_only_where_the_run_said_it():
+    # said once the arm is home (tasks/reach_lid_off's STOP lines)
+    assert "The arm is home." in ui_text.failure("lid_dropped", "STOP: the arm is home, but the lid slipped out")
+    assert "The arm is home." in ui_text.failure(
+        "lid_put_back", "STOP: x — the lid is back on the box, and the arm is home"
+    )
+    # said before the way home, which may not get there: no state, and no "went back"
+    for code in ("contact_early", "contact_late", "box_moved", "not_popped", "watch_failed"):
+        text = ui_text.failure(code, "STOP: x")
+        assert "home" not in text and "went back" not in text and "holding still" not in text
+    # the lid in the fingers keeps where the arm is beside it
+    held = ui_text.failure("arm_holds", "STOP: x — the arm holds -- the lid is still in the fingers")
+    assert "holding still where it stopped" in held and ui_text.HELD in held
+    # a run that had to be killed says no arm state, after a Stop or its budget
+    for text in (ui_text.stopped(killed=True), ui_text.failure("timeout", "the run took longer", killed=True)):
+        assert "holding still" not in text and ui_text.KILLED in text and ui_text.CHECK_ARM in text
+    assert ui_text.failure("stopped", "signal 9", killed=True).count(ui_text.KILLED) == 1
+
+
+def test_a_killed_run_says_no_arm_state_on_its_notice(engine, monkeypatch):
+    given(monkeypatch, FULL_RUN[:5], ["[press_demo] STOP: the slide in stopped — the arm holds"], -9)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "stopped" and engine._ui_killed
+    (notice,) = _notices(ctx)
+    said = ui_text.failure("stopped", "", killed=True)
+    assert notice["message"] == node.wrap(said) and ui_text.CHECK_ARM in said and "holding still" not in said

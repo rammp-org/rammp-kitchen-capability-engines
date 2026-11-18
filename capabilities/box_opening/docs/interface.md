@@ -307,6 +307,13 @@ with one button, **Done**:
 | The panel's own **Stop**  | `Opening the container: stopped`     | `Stopped. The arm is holding still where it was.` (and the lid, if still held)                          |
 | The orchestrator's cancel | none                                 | The orchestrator has taken the UI back                                                                  |
 
+A notice says where the arm is only where the run's last STOP line says it
+(`arm_holds`, `arm_halted`, `lid_dropped`, `lid_put_back`, a stop before
+anything was pressed). Several STOP lines are said before the way home, which
+may not get there (`contact_early`, `box_moved`, ...): those notices say
+nothing about it. A run the node had to kill (its stop's last resort, Stop or
+`timeout`) says so and says no arm state.
+
 A notice waits for **Done** at most 60 s, and never past 110 s from the goal's
 start (the orchestrator's 120 s less 10): not tapping never changes the
 result, which is the run's own (error code and its STOP line, as in "Errors").
