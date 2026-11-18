@@ -1,7 +1,8 @@
 #!/bin/bash
 # Stop everything up.sh started: the capability nodes, the UI stack, the Unreal app. Nothing moves; sheppy stays up.
 S=kitchenui
-CAPS="fridge microwave microwave_place button_press place_container box_opening"
+# every capability node.sh can start, including those up.sh starts only when KUI_CAPS names them (grab_container)
+CAPS="fridge microwave microwave_place button_press place_container box_opening grab_container"
 for old in "$S" fridgeui0; do
   if tmux has-session -t "$old" 2>/dev/null; then
     for w in $CAPS perc orch bridge ue; do tmux send-keys -t "$old:$w" C-c 2>/dev/null; done
