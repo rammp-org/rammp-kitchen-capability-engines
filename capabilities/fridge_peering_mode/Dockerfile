@@ -31,6 +31,8 @@ ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 COPY capability_engine/ src/capability_engine/
+# tap-to-pick imports microwave_place's take-out (an exec_depend): built here too, its deps by rosdep
+COPY capabilities/microwave_place/ src/microwave_place/
 COPY capabilities/fridge_peering_mode/ src/fridge_peering_mode/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the

@@ -62,6 +62,32 @@ params:
   standoff_distance: 0.4
   offset_x: 0.0
   offset_y: 0.0
+  # Scene homing, first: the scene camera's scene_class box and depth (aligned to colour) place a
+  # point at scene_box_point (fractions across / down the box), ee_link goes scene_standoff_m in front
+  # of it looking along scene_approach (robot_forward | camera_ray | from_arm). Skipped, warned, when
+  # it finds nothing or cannot plan.
+  scene_homing: true
+  scene_detections_topic: /perception/object_detections
+  scene_depth_topic: /scene_camera/depth/image_rect_raw
+  scene_camera_info_topic: /scene_camera/color/camera_info
+  scene_class: fridge
+  scene_min_score: 0.5
+  scene_box_point: [0.75, 0.5]
+  scene_window_frac: 0.1
+  scene_depth_percentile: 50.0
+  scene_depth_range_m: [0.3, 3.0]
+  scene_min_samples: 30
+  scene_frames: 5
+  scene_wait_s: 3.0
+  scene_standoff_m: 0.4
+  scene_approach: robot_forward
+  scene_forward_axis: "+x"
+  # A go_to starting inside cuRobo's joint-limit margin is retried once after turning those joints
+  # unwind_extra_rad past it (a slow direct joint trajectory, not collision-checked; refused past
+  # unwind_max_rad).
+  unwind_limits: true
+  unwind_extra_rad: 0.05
+  unwind_max_rad: 0.25
   # The axes ee_twist setpoints are in (the driver: arm_mount).
   twist_frame: arm_mount
   # The servo: target speeds at full stick (m/s), gains (1/s), caps on the commanded twist (m/s,
@@ -103,19 +129,73 @@ params:
   axis_signs: [1.0, 1.0, 1.0]
   deadzone: 0.1
   expo: 2.0
-  # button_home (Back) goes back to the standoff; button_stop (X) ends the action with the arm
-  # holding (-1 disables). Neither is an e-stop: this node never publishes /estop.
-  button_home: 6
-  button_stop: 2
   # Older than this is not used (s): /joy holds the target (> 1 / joy_node's autorepeat_rate), the
   # fridge TF is not followed (<= 0 disables; a static TF is exempt), /ee_state sends a zero twist.
   joy_timeout_s: 0.25
   fridge_tf_timeout_s: 1.0
   ee_state_timeout_s: 0.2
-  # for when no fridge transform exists:
+  # No fridge TF within fridge_tf_wait_s: with teleop, search (the stick moves ee_link within
+  # +-search_range_m, orientation held); false fails with no_fridge.
   search_when_no_fridge: true
   search_range_m: 0.15
-  search_auto_home: false
+  # Tap-to-pick: while the arm is still, SAM3 finds pick_prompt on the wrist camera every
+  # pick_detect_period_s; the UI shows them as tappable boxes over the wrist colour stream
+  # (ui_overlay_hz, 0 = not published). A tap takes that container out of the fridge.
+  pick_enabled: true
+  wrist_topics:
+    - /wrist_camera/color/image_raw
+    - /wrist_camera/depth/image_rect_raw
+    - /wrist_camera/color/camera_info
+  # SAM3 always polling the wrist camera through peer and pick: one tracking session for
+  # track_prompts, re-detecting every track_redetect_s (new items get ids, tracked ones keep theirs).
+  # Its instance ids (food_3) are what a pick's label names. false: one-shot detections only.
+  track_enabled: true
+  track_prompts: [food, drink]
+  track_redetect_s: 2.0
+  track_max_objects: 10
+  track_lease_s: 10.0
+  # Wrist colour and depth frames buffered (each): SAM3's frame must still be in it when its answer
+  # comes (180 = 6 s at 30 Hz).
+  wrist_buffer_frames: 180
+  pick_prompt: food container
+  pick_sam3_threshold: 0.5
+  pick_detect_period_s: 1.0
+  ui_overlay_hz: 10.0
+  # The pick's detection: pick_frames agreeing masks (IoU >= pick_mask_iou) within pick_timeout_s,
+  # the tapped one by mask IoU >= pick_select_iou. pick_point: top (the near face's top edge) |
+  # nearest (the microwave's nearest depths).
+  pick_frames: 3
+  pick_mask_iou: 0.85
+  pick_timeout_s: 20.0
+  pick_select_iou: 0.3
+  pick_point: top
+  pick_face_band_m: 0.02
+  pick_top_percentile: 95.0
+  # The grasp (microwave take_out's, tuned on the tupperware; CHECK on the fridge): the tool frame
+  # pick_grasp_depth past / pick_grasp_up above the point; pre-grasp pick_reach_in back.
+  pick_grasp_depth: 0.0
+  pick_grasp_up: 0.035
+  pick_reach_in: 0.3
+  pick_grip_open: 0.0
+  # cuRobo's approach world (resolved in the planner's container, must have flatbot's layers; "" =
+  # whatever is loaded), its speed, and the corridor the tool must stay in (the fridge is not in it).
+  pick_world: /config/robot/curobo/world.yaml
+  pick_speed_scale: 0.3
+  pick_approach_corridor_m: 0.1
+  # The line in (m/s peak), its last pick_impedance_in_m in joint impedance (gains below), the lift.
+  pick_line_speed: 0.16
+  pick_impedance_in_m: 0.1
+  pick_impedance_speed: 0.08
+  pick_settle_s: 0.2
+  pick_impedance_kq: [400.0, 400.0, 400.0, 400.0, 200.0, 200.0, 200.0]
+  pick_impedance_zeta: 0.7
+  pick_impedance_torque_limit: [39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]
+  pick_lift_m: 0.03
+  # Leaving: straight and level pick_leave_back_m further out, then (pick_leave_to_joints) cuRobo to
+  # pick_leave_joints (rad; the container's tilt is not held on that move).
+  pick_leave_back_m: 0.2
+  pick_leave_to_joints: false
+  pick_leave_joints: [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -168,12 +248,17 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
-  
-# ~/goal_pose, ~/commanded_twist, ~/servo_target and ~/followed_plane exist only while an action
-# runs (create_action_publisher): not declared, since smoke checks every declared topic on an idle
+
+# ~/goal_pose, ~/commanded_twist, ~/servo_target, ~/followed_plane, ~/ui_panel and ~/in_view
+# (and the ~/simulate_tap subscription) exist only while an action runs
+# (create_action_publisher): not declared, since smoke checks every declared topic on an idle
 # mock. The arm driver's topics are self.arm's, as in every capability.
-publishes: [/fridge_peering_mode/status]
+publishes: [/fridge_peering_mode/status, /fridge_peering_mode/sam3_overlay]
 subscribes:
   - /tf
   - /tf_static
   - /joy
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/depth/image_rect_raw
+  - /wrist_camera/color/camera_info
+  - /perception/sam3/object_detections
