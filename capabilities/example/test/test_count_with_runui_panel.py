@@ -272,6 +272,22 @@ def test_ask_start_marker_tap_marker_high_starts_at_5():
     # the tap both highlighted the marker and updated the panel's own message to confirm it
     selected = next(s for s in ctx.sent if s["selected"] == "marker_high")
     assert "high (5)" in selected["panel"]["message"]
+    # and the confirm button's own label tracks the pick too, not just the message
+    assert selected["panel"]["buttons"][0] == {"button_id": "start_at_1", "label": "Start at 5"}
+
+
+def test_count_with_runui_panel_bumps_a_small_to_up_to_the_picked_start():
+    # to=3 < the high marker's start=5: counting must still happen (5/5), not silently no-op
+    # while still reporting a normal-looking result.
+    replies = [
+        [button("start")],
+        [tap_object("marker_high"), button("start_at_1")],
+        [button("done")],
+    ]
+    node, ctx = make(replies=replies)
+    result = node._count_with_runui_panel(3, 0.0, ctx)
+    assert result == {"counted_to": 5, "started_at": 5}
+    assert ctx.progress_calls == [("counting", 100.0, "5/5")]
 
 
 def test_ask_start_marker_tap_start_at_1_without_an_object_tap_starts_at_1():

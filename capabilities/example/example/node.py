@@ -70,7 +70,7 @@ class Capability(CapabilityEngine):
     _COUNT_PARAMS_SCHEMA = {
         "type": "object",
         "properties": {
-            "to": {"type": "integer", "minimum": 1, "default": 3},
+            "to": {"type": "integer", "minimum": 1, "default": 10},
             "interval_s": {"type": "number", "minimum": 0, "default": 1.0},
         },
     }
@@ -196,10 +196,12 @@ class Capability(CapabilityEngine):
         - `RunUI.ask()` again with `objects=`/`on_tap=` (`_ask_start_marker`): two markers overlaid
           on the camera feed (`"source": "overlay"`, this run's own `publish_overlay_image()`
           stream) the user can tap to choose where counting starts from. `on_tap` calls
-          `RunUI.select_object()` to both highlight the tapped marker and update the panel's
-          message to confirm which one was picked -- the same mechanism a real capability uses to
-          let the user pick between several detected objects (see `place_container`'s spot
-          picker), plus the message update so a tap never looks like it was ignored.
+          `RunUI.select_object()` to highlight the tapped marker, update the panel's message to
+          confirm which one was picked, and relabel the confirm button to match it -- the same
+          mechanism a real capability uses to let the user pick between several detected objects
+          (see `place_container`'s spot picker), plus the message/button update so a tap never
+          looks like it was ignored. `to` is bumped up to at least the picked start so the high
+          marker (start=5) always counts at least one step even with a small `to`.
         - `RunUI.motion()` shows the progress-with-Stop panel and runs its own watcher thread that
           reads ctx.poll_ui_event() for the tap -- this loop never has to poll for it itself, unlike
           `_wait_for_stop()` above. Its `cancel` callback is wired to this engine's own cancel
@@ -221,6 +223,10 @@ class Capability(CapabilityEngine):
             ui.publish_overlay_image(overlay_image)
             self._ask_to_start(ui, to)
             start = self._ask_start_marker(ui)
+            # The high marker picks a start past a small/default `to` (e.g. start=5, to=3) --
+            # bump `to` up to at least `start` so the loop below always counts at least one
+            # step instead of silently doing nothing while still reporting a normal result.
+            to = max(to, start)
 
             def do_count():
                 for n in range(start, to + 1):
@@ -254,8 +260,9 @@ class Capability(CapabilityEngine):
         (1, or 5 past "Start at 1"), or just tap Start at 1 -- demonstrates `RunUI.ask()`'s
         `objects=`/`on_tap=` for picking between objects shown on the overlay. `on_tap` calls
         `RunUI.select_object()` so the panel's own message confirms which marker was tapped (e.g.
-        "Selected: start counting from high (5).") -- not just the object highlight on its own,
-        which the user may miss. Standalone, or with no tap, starts at 1."""
+        "Selected: start counting from high (5)."), and the confirm button's label itself changes
+        from "Start at 1" to "Start at 5" -- not just the object highlight on its own, which the
+        user may miss. Standalone, or with no tap, starts at 1."""
         markers = [
             {
                 "instance_id": "marker_low",
@@ -277,9 +284,15 @@ class Capability(CapabilityEngine):
 
         def on_tap(instance_id):
             tapped["id"] = instance_id
+            start = start_for.get(instance_id)
             label = label_for.get(instance_id)
             message = f"{question} Selected: start counting from {label}." if label else question
-            ui.select_object(instance_id, message=message)
+            # The confirm button's own label must track the pick too, not just the message --
+            # otherwise it keeps reading "Start at 1" after the high marker was tapped, looking
+            # like the tap didn't really take effect.
+            label_str = f"Start at {start}" if start else "Start at 1"
+            buttons = [{"button_id": "start_at_1", "label": label_str}]
+            ui.select_object(instance_id, message=message, buttons=buttons)
 
         ui.ask(
             question,

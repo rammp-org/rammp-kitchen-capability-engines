@@ -218,6 +218,13 @@ def test_select_object_highlights_and_updates_the_message_without_changing_butto
     assert sent["objects"] == objects
 
 
+def test_select_object_can_also_update_the_buttons():
+    ui, ctx, clock = make()
+    ui.send("Tap a spot.", [{"button_id": "place", "label": "Place here"}, panels.STOP])
+    ui.select_object("spot_3", buttons=[{"button_id": "place", "label": "Place at spot 3"}])
+    assert ctx.sent[-1]["panel"]["buttons"] == [{"button_id": "place", "label": "Place at spot 3"}, panels.STOP]
+
+
 def test_select_object_before_any_panel_just_forwards_the_highlight():
     ui, ctx, clock = make()
     assert ui.select_object("spot_3") is True

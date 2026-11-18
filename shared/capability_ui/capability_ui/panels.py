@@ -142,11 +142,14 @@ class RunUI:
                 kwargs["objects"] = objects
             self.ctx.update_user_panel(**kwargs)
 
-    def select_object(self, instance_id, message=None):
+    def select_object(self, instance_id, message=None, buttons=None):
         """Highlight `instance_id` (the selected-instance-id-follows-the-tap pattern) on the
-        currently shown panel, optionally updating its message too -- title/buttons/objects/style
-        stay as last sent. Call this from `on_tap` (see `ask()`) so the user sees their tap took
-        effect, instead of a panel that looks unchanged after tapping an object."""
+        currently shown panel, optionally updating its message and/or `buttons` too (e.g. a confirm
+        button's label changing to reflect what got selected) -- title/objects/style stay as last
+        sent, and anything left as None (the default) is kept unchanged too. `buttons` is filtered
+        and Stop appended exactly like `ask()` does, so pass just the non-Stop buttons. Call this
+        from `on_tap` (see `ask()`) so the user sees their tap took effect, instead of a panel that
+        looks unchanged after tapping an object."""
         with self._lock:
             panel, objects = self._panel if self._panel else (None, None)
         if panel is None:
@@ -154,6 +157,8 @@ class RunUI:
         panel = dict(panel)
         if message is not None:
             panel["message"] = wrap(message)
+        if buttons is not None:
+            panel["buttons"] = [b for b in buttons if b["button_id"] != STOP["button_id"]] + [STOP]
         with self._lock:
             self._panel = (panel, objects)
         kwargs = {"panel_json": panel, "selected_instance_id": instance_id}

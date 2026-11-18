@@ -58,9 +58,9 @@ Served under `/example/`, types from `rammp_orchestrator_interfaces`:
 
 | Action             | Params                                                | Result payload                                |
 | ------------------ | ----------------------------------------------------- | --------------------------------------------- |
-| `count`            | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
-| `count_with_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |
-| `count_with_runui_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "started_at": 1\|5}` (Stop cancels the action instead) |
+| `count`            | `to` (int ≥ 1, default 10), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
+| `count_with_panel` | `to` (int ≥ 1, default 10), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |
+| `count_with_runui_panel` | `to` (int ≥ 1, default 10), `interval_s` (default 1.0) | `{"counted_to": n, "started_at": 1\|5}` (Stop cancels the action instead; `to` is bumped up to at least the picked start, e.g. 10 stays 10 but a smaller `to` would be raised to 5) |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
