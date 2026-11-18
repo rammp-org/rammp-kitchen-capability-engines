@@ -3,6 +3,8 @@ __pycache__/
 .pytest_cache/
 data/
 
+**/.vscode/*
+
 # Agent development docs (design specs, implementation plans): kept locally, not in the repo.
 docs/superpowers/
 
