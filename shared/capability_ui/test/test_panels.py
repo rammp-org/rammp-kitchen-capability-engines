@@ -128,6 +128,36 @@ def test_moving_panel_has_stop_and_stop_cancels_the_motion():
     assert stopped["buttons"] == [panels.DONE]
 
 
+def test_motion_waits_for_a_fresh_goal_to_finish_opening_before_running_fn():
+    ui, ctx, clock = make()
+
+    class Run:
+        ui_goal_handle = None
+        ui_opening = True
+        ui_lock = threading.Lock()
+
+    ctx._run = Run()
+    clock.script = [(1.5, lambda: setattr(Run, "ui_opening", False))]
+    started_at = []
+    assert ui.motion("Counting.", lambda: started_at.append(ui._clock()) or "ok") == "ok"
+    assert started_at == [pytest.approx(1.5, abs=0.2)]
+
+
+def test_motion_gives_up_waiting_for_the_goal_after_a_bound_and_runs_fn_anyway():
+    ui, ctx, clock = make()
+
+    class Run:
+        ui_goal_handle = None
+        ui_opening = True  # never flips: as if the bridge never accepts or rejects
+        ui_lock = threading.Lock()
+
+    ctx._run = Run()
+    ran = []
+    assert ui.motion("Counting.", lambda: ran.append(True) or "ok") == "ok"
+    assert ran == [True]
+    assert clock.t == pytest.approx(panels.GOAL_OPEN_WAIT_S, abs=0.2)
+
+
 def test_stopped_notice_stays_up_until_done_although_the_run_is_cancelled():
     ui, ctx, clock = make()
     ctx.cancel()

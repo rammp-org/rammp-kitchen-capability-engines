@@ -51,6 +51,16 @@ PROMPT_TIMEOUT_S = 600.0
 REFRESH_S = 1.0
 POLL_S = 0.1
 
+# How long `motion()` waits, right after opening a fresh UI goal, for that goal's accept round-trip to finish before
+# starting the caller's `fn()`. Opening a goal (e.g. the first panel of a new motion, after a prior question's goal
+# ended on its button press) is asynchronous: a call to update_user_panel() made while it's still *opening* (not yet
+# accepted) only merges its content locally and sends nothing over the network (capability_engine.Context's own
+# "opening" branch) -- so a fast-moving loop (e.g. counting once a second) can silently overwrite step 1's content
+# with step 2's, step 2's with step 3's, and so on, before the goal ever actually opens, and the first steps the user
+# was meant to see on screen never reach it. Bounded so a bridge that's down or slow to accept never stalls the
+# capability's real work indefinitely -- best effort only, same as every other wait in this module.
+GOAL_OPEN_WAIT_S = 3.0
+
 STOPPED_MESSAGE = "Stopped. The arm is holding still where it was."
 
 # The UI (Unreal) doesn't wrap panel text: a long line runs off the screen (fridge, 11-12). Messages are broken into
@@ -141,6 +151,18 @@ class RunUI:
             if objects is not None:
                 kwargs["objects"] = objects
             self.ctx.update_user_panel(**kwargs)
+
+    def _wait_while_opening(self, timeout_s):
+        """Blocks (bounded by `timeout_s`) while this run's UI goal is mid-open (accepted or
+        rejected yet, not either) -- see GOAL_OPEN_WAIT_S's own comment for why `motion()` calls
+        this right after its first panel. A no-op wherever `ctx` has no such concept (e.g. the
+        tests' simpler fakes, or no UI session at all)."""
+        run = getattr(self.ctx, "_run", None)
+        if run is None or not hasattr(run, "ui_opening"):
+            return
+        deadline = self._clock() + timeout_s
+        while getattr(run, "ui_opening", False) and self._clock() < deadline:
+            self._sleep(POLL_S)
 
     def select_object(self, instance_id, message=None, buttons=None):
         """Highlight `instance_id` (the selected-instance-id-follows-the-tap pattern) on the
@@ -247,8 +269,13 @@ class RunUI:
     def motion(self, message, fn, stopped_note=None):
         """Run `fn()` (the moving part) under the Stop panel. If the user presses Stop, the cancel stops the motion
         and whatever `fn` raises is re-raised after a "Stopped" notice; `stopped_note()` can add what state the
-        arm was left in (e.g. "The hand is still on the handle.")."""
+        arm was left in (e.g. "The hand is still on the handle.").
+
+        Waits (bounded, GOAL_OPEN_WAIT_S) for this panel's own UI goal-open to finish before running `fn()`, so a
+        fast-moving `fn` (e.g. counting once a second) doesn't outrun the goal's accept round-trip and silently lose
+        its first few updates -- see GOAL_OPEN_WAIT_S's own comment."""
         self.moving(message)
+        self._wait_while_opening(GOAL_OPEN_WAIT_S)
         try:
             return fn()
         except BaseException:
