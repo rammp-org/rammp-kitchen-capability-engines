@@ -71,7 +71,7 @@ def load():
     body = [
         n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") in consts for t in n.targets)
     ]
-    body += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "failure"]
+    body += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("failure", "arm_at_start")]
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Capability")
     cls.bases = [ast.Name(id="Base", ctx=ast.Load())]
     keep = {"_ui_run", "_ui_presses", "availability", "execute"}
@@ -107,7 +107,7 @@ def load():
 
 
 SCOPE = load()
-Capability, failure = SCOPE["Capability"], SCOPE["failure"]
+Capability, failure, arm_at_start = SCOPE["Capability"], SCOPE["failure"], SCOPE["arm_at_start"]
 AT_PANEL, AT_PANEL_NOTE, UI_ACTIONS = SCOPE["AT_PANEL"], SCOPE["AT_PANEL_NOTE"], SCOPE["UI_ACTIONS"]
 
 
@@ -310,6 +310,56 @@ def test_a_failure_at_the_panel_is_shown_and_never_retried(phase):
     assert not any(b["button_id"] == "retry" for p in ctx.sent for b in p["buttons"])
 
 
+def at_start(error, value):
+    error.at_start = value  # as Capability._press sets it from the run (arm_at_start)
+    return error
+
+
+@pytest.mark.parametrize("phase", AT_PANEL)
+def test_a_failure_at_the_panel_after_the_arm_went_home_says_so_and_is_still_not_retried(phase):
+    """A run that goes back to the start after a failed check (go-home-on-failure): the panel says where the arm is,
+    not that the fingertip may be at the buttons."""
+    steps = ("preflight", "detect", "plan", *AT_PANEL[: AT_PANEL.index(phase) + 1])
+    error = at_start(failure(phase, Abort("press: no touch within 12 mm")), True)
+    node, ctx = make(replies=["presses_1", "done"], steps=steps, outcomes=(error, OK))
+    with pytest.raises(EngineError):
+        node.execute("press_defrost", {}, ctx)
+    assert len(node._press.calls) == 1
+    message = ctx.sent[-1]["message"]
+    assert ui_text.AT_START_STATE in message
+    assert ui_text.AT_PANEL_STATE not in message and ui_text.AT_PANEL_TODO not in message
+    assert not any(b["button_id"] == "retry" for p in ctx.sent for b in p["buttons"])
+
+
+@pytest.mark.parametrize("value", [False, None])
+def test_a_failure_at_the_panel_not_known_to_be_home_keeps_the_fingertip_warning(value):
+    error = at_start(failure("approach", Abort("x")), value)
+    node, ctx = make(replies=["presses_1", "done"], steps=("plan", "approach"), outcomes=(error,))
+    with pytest.raises(EngineError):
+        node.execute("press_start", {}, ctx)
+    message = ctx.sent[-1]["message"]
+    assert ui_text.AT_PANEL_STATE in message and message.endswith(ui_text.AT_PANEL_TODO)
+
+
+def test_a_retry_offer_after_the_arm_went_home_says_it_is_back_at_the_start():
+    refused = at_start(failure("redetect", Abort("dome detector: nothing in 7 frames")), True)
+    node, ctx = make(replies=["presses_1", "retry", "done"], steps=("stage", "redetect"), outcomes=(refused, OK))
+    node.execute("press_start", {}, ctx)
+    retry = next(p for p in ctx.sent if any(b["button_id"] == "retry" for b in p["buttons"]))
+    assert ui_text.AT_START_STATE in retry["message"] and ui_text.HOLDING_STATE not in retry["message"]
+
+
+def test_arm_at_start_asks_the_run_and_never_raises():
+    assert arm_at_start(SimpleNamespace(at_home=lambda: True)) is True
+    assert arm_at_start(SimpleNamespace(at_home=lambda: False)) is False
+    assert arm_at_start(SimpleNamespace()) is None  # a run without go-home-on-failure: unknown
+
+    def unreadable():
+        raise ArmError("no /joint_states")
+
+    assert arm_at_start(SimpleNamespace(at_home=unreadable)) is None
+
+
 def test_a_recoverable_error_raised_at_the_panel_is_still_not_retried():
     node, ctx = make(
         replies=["presses_1", "done"], steps=("plan", "approach"), outcomes=(EngineError("x", "odd", True), OK)
@@ -476,6 +526,19 @@ def test_a_message_no_rule_knows_is_shown_cleaned_not_replaced():
 )
 def test_the_state_follows_the_step(phase, motion_failed, state):
     assert ui_text.state(phase, motion_failed).startswith(state)
+
+
+@pytest.mark.parametrize(
+    "phase, motion_failed, state",
+    [
+        ("detect", False, ui_text.NOT_MOVED_STATE),  # nothing moved: said as such, not "back"
+        ("stage", False, ui_text.AT_START_STATE),
+        ("redetect", True, ui_text.AT_START_STATE),
+        ("press", False, ui_text.AT_START_STATE),
+    ],
+)
+def test_the_state_says_the_arm_is_back_at_the_start_when_the_run_found_it_there(phase, motion_failed, state):
+    assert ui_text.state(phase, motion_failed, at_start=True) == state
 
 
 def test_a_failure_message_names_the_button_and_the_step():

@@ -18,6 +18,8 @@ AT_PANEL_STATE = "The fingertip may still be at the microwave's buttons, and the
 AT_PANEL_TODO = "Move the arm clear of the microwave (teleop or Home) before running anything else."
 HOLDING_STATE = "The arm is holding still where it stopped."
 NOT_MOVED_STATE = "The arm hasn't moved."
+# The run found the arm at its start joints after the failure (it went back there, or never left)
+AT_START_STATE = "The arm is back where it started."
 
 _CAMERA_DOWN = "Check that the wrist camera is running, then try again."
 _FACE = "Make sure the microwave's front faces the arm and nothing blocks the buttons, then try again."
@@ -177,23 +179,26 @@ def reason_and_todo(message):
     return wording.clean(_NOISE.sub("", text)), None  # no rule knows it: the message itself, log-only tails dropped
 
 
-def state(phase, motion_failed=False):
-    """What the panel says the arm is left like after a failure in step `phase`."""
-    if phase in ("approach", "press", "return"):
-        return AT_PANEL_STATE
+def state(phase, motion_failed=False, at_start=None):
+    """What the panel says the arm is left like after a failure in step `phase`. `at_start` True: the run found the
+    arm back at its start joints (it goes home after a failed check); None or False: not known to be there."""
     if phase in NOT_MOVED and not motion_failed:
         return NOT_MOVED_STATE
+    if at_start:
+        return AT_START_STATE
+    if phase in ("approach", "press", "return"):
+        return AT_PANEL_STATE
     return HOLDING_STATE
 
 
-def failure_message(name, step_words, phase, message, motion_failed=False):
+def failure_message(name, step_words, phase, message, motion_failed=False, at_start=None):
     """The failure panel's message for pressing `name`: "Couldn't press Start while <step>.", then what happened, the
-    arm's state and what to do (at the panel: move the arm clear first)."""
+    arm's state and what to do (at the panel and not back at the start: move the arm clear first)."""
     reason, todo = reason_and_todo(message)
-    if phase in ("approach", "press", "return"):
+    if phase in ("approach", "press", "return") and not at_start:
         todo = AT_PANEL_TODO
     head = f"Couldn't press {name} while {step_words[0].lower() + step_words[1:]}." if step_words else ""
-    return " ".join(p for p in (head, wording.failure_text(reason, state(phase, motion_failed), todo)) if p)
+    return " ".join(p for p in (head, wording.failure_text(reason, state(phase, motion_failed, at_start), todo)) if p)
 
 
 def bug_message(name, phase, error):
