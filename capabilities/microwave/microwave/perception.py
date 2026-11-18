@@ -17,7 +17,8 @@ from door_common.perception import WristCamera  # noqa: F401 -- re-exported for 
 BOX_MARGIN_M = np.array([0.10, 0.10, 0.02])
 # -- and from this far ABOVE the box's floor: the table it stands on is in no fit (its points in front of the door
 # fall inside the door plane's tolerance and drag the door's edge, i.e. the hinge, out sideways and down)
-BOX_FLOOR_CLEAR_M = 0.06
+BOX_FLOOR_CLEAR_M = 0.06  # 11-10: was 0.02 -- the box's floor (the scene camera's door bottom) wandered 4 cm and
+# sat below the table top; the table got in and the hinge landed on it (z 0.21, radius 46-61 cm)
 # -- but never higher than this (arm base z, m): the box's floor wanders (11-11: 0.281, then 0.327), and 6 cm
 # above a high one cut the door's lower third and the handle bar to 5 cm. Between the table top (~0.19) and the
 # door's bottom (~0.344)

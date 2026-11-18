@@ -51,6 +51,22 @@ def _num(text):
 
 def _placement(raw):
     """The door's own placement search, in the wheelchair's words: (sentence, what to do) or None."""
+    # door_common's base-move search: "Would work with the robot moved (forward / left as the arm's base faces): 5 cm
+    # back (tilt 14 deg, swing 50 deg); or ..." -- the wheelchair is the robot's base
+    m = re.search(r"Would work with the robot moved[^:]*: (.+?)(?: \(tilt [^)]*\))?(?:; or |\.\s*$|\.\s)", raw)
+    if m:
+        where = m.group(1)
+        return (
+            f"It would work with the wheelchair {where}.",
+            f"Move the wheelchair {where}, as the arm faces.",
+        )
+    if re.search(r"No robot base move tried \(up to (\d+) cm", raw):
+        n = re.search(r"up to (\d+) cm", raw).group(1)
+        return (
+            f"Moving the wheelchair by up to {n} cm wouldn't help either.",
+            "Move the wheelchair so the microwave is straight ahead, at the usual distance, facing it squarely.",
+        )
+    # the older wording (the appliance shifted)
     m = re.search(r"Would work with the microwave moved: (.+?)(?: \(tilt [^)]*\))?(?:; or |\.\s*$|\.\s)", raw)
     if m:
         where = m.group(1)
