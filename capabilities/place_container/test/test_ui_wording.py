@@ -6,6 +6,7 @@ import re
 
 import numpy as np
 import pytest
+from capability_ui import WRAP_CHARS
 
 from place_container import plan, ui
 
@@ -141,7 +142,10 @@ def test_the_pickers_note_says_why_and_leaves_the_tap_to_the_picker():
         ("too little of the table is seen", "blocking the camera's view"),
         ("", "no free space on the table"),
         ("no free spot big enough for the container within the arm's reach", "Clear a space"),
-        ("none of the table the camera sees is within the arm's reach (0.70-1.10 m)", "closer to the table"),
+        (
+            "none of the table the camera sees is within the arm's reach (0.70-1.10 m)",
+            "Move the wheelchair so the table",
+        ),
         ("the depth image is 640x400 but camera_info 1280x800: depth must be aligned to colour", "doesn't line up"),
     ],
 )
@@ -166,10 +170,11 @@ def test_an_uncalibrated_camera_says_so_and_points_at_the_marked_spot(problem):
     text = ui.no_spot_message(problem, marked=False)
     check_plain(text)
     assert "calibration" in text and "isn't sending images" not in text and "tf" not in text.split()
-    assert "operator can also mark a spot" in text  # the way to place without the camera
+    assert "ask the operator to mark a spot" in text  # the way to place without the camera
+    assert all(len(line) <= WRAP_CHARS for line in ui.wrap(text).split("</>\n<body-sm-light>"))  # no word too long
     text = ui.no_spot_message(problem, marked=True)
-    assert "press Use marked spot" in text and "operator can also mark" not in text
-    assert "operator can also mark" not in ui.no_spot_message("the scene camera sees no table in reach", False)
+    assert "press Use marked spot" in text and "operator to mark" not in text
+    assert "operator to mark" not in ui.no_spot_message("the scene camera sees no table in reach", False)
 
 
 def test_the_table_note_keeps_its_number():

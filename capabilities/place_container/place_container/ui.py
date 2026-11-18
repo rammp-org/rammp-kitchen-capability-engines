@@ -111,17 +111,20 @@ def pick_message(n_spots, note=""):
 # Why the picker has no spot to offer (spots.Search.problem, node._find_spots): what happened (words, or a
 # function of the match; None = the problem's own words), what to do. The first match wins.
 LOOK_AGAIN = "then press Look again"
-CHECK_CALIBRATION = "Ask the operator to check the scene camera's calibration (its mount on the wheelchair)."
-# The scene camera can't be trusted (not calibrated yet, or its mount moved): the arm's own mark still can
-MARK_INSTEAD = " The operator can also mark a spot with the arm; it then shows here as Use marked spot."
+# The scene camera can't be trusted (not calibrated yet, or its mount moved): the arm's own mark still can. The
+# engine runs one action at a time and the picker reads the marked spot once, so the mark comes after a Stop.
+MARK_INSTEAD = (
+    " Or press Stop and ask the operator to mark a spot with the arm; Use marked spot then shows when you tap the "
+    "table again."
+)
 _CALIBRATION = r"calibration|tilted|no tf "
 _PROBLEMS = (
     (
-        # SceneCamera.grab: no transform from the camera to the arm, i.e. the camera's calibration isn't loaded
+        # SceneCamera.grab: images arrive but there is no transform from the camera to the arm (most often the
+        # camera's calibration isn't loaded yet; it can also come up late, hence Look again)
         r"camera isn't ready \(no tf ",
-        "The robot doesn't know where the scene camera is on the wheelchair (its calibration isn't loaded), so it "
-        "can't find spots on the table.",
-        CHECK_CALIBRATION,
+        "The robot doesn't know where the scene camera is on the wheelchair, so it can't find spots on the table.",
+        f"Ask the operator to check that the scene camera's calibration is loaded, {LOOK_AGAIN}.",
     ),
     (
         r"depth must be aligned to colour",
@@ -173,7 +176,8 @@ _PROBLEMS = (
     (
         r"none of the table the camera sees is within the arm's reach",
         "The table the scene camera sees is out of the arm's reach.",
-        f"Bring the wheelchair closer to the table, {LOOK_AGAIN}.",
+        # in_reach == 0: the table may be too near the arm as well as too far
+        f"Move the wheelchair so the table is within the arm's reach, {LOOK_AGAIN}.",
     ),
     (
         r"no free spot big enough",

@@ -381,7 +381,8 @@ def test_an_uncalibrated_camera_still_lets_the_marked_spot_place(make):
     node, ctx = make([[press("marked")]], mock=False, marked=marked, camera=Mock(return_value=grabbed))
     node._place_here({}, ctx)
     picker = picker_panels(ctx)[0]
-    assert picker["objects"] == [] and "calibration isn't loaded" in picker["panel"]["message"]
+    text = picker["panel"]["message"].replace("</>\n<body-sm-light>", " ")
+    assert picker["objects"] == [] and "doesn't know where the scene camera is" in text and "isn't sending" not in text
     assert [b["label"] for b in picker["panel"]["buttons"]] == ["Look again", "Use marked spot", "Stop"]
     assert node._act.call_args.args[1] == {}  # {} = the marked spot
 
