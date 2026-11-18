@@ -363,12 +363,112 @@ def test_stop_while_the_wheelchair_drives_says_it_moved():
     assert not any(p == f.ctx.sent[0] for p in f.ctx.sent[2:])  # no moving panel after the drive raised
 
 
-def test_a_direct_goal_drives_with_no_panel():
-    f = Flow()
-    f.node._ui = None
-    with f.node._ui_driving("close", 0.1):
-        pass
-    assert f.ctx.sent == []
+class DriveFlow(Flow):
+    """Flow with the node's own execute() and _execute(), so its drive_chair (drive_base) is the one under test. The
+    close's planning and motion (close_door.run) are scripted to drive the wheelchair `move` m through drive_chair;
+    base_drive.move_chair is a fake base that records the panel up while it drives, and runs `during(flow)` there."""
+
+    def __init__(self, move, during=None, **kw):
+        super().__init__(**kw)
+        self.drives, self.panels_while_driving = [], []
+
+        def move_chair(base, arm, ctx, move, *, speed, cfg, execute):
+            self.drives.append({"move": move, "speed": speed, "execute": execute})
+            self.panels_while_driving.append(ctx.sent[-1] if ctx.sent else None)
+            if during is not None:
+                during(self)
+            return move
+
+        def close_run(arm, planner, execute, *, chair_back_dir, speed, log_args, drive_chair=None, **settings):
+            self.close_door.LAST_CHAIR_BACK = move
+            if drive_chair is not None:
+                drive_chair(move)
+            return True
+
+        self.close_door.run, self.close_door.GOAL_SETTINGS = close_run, ()
+        scope = load(
+            NODE,
+            UI_NAMES,
+            UI_METHODS | {"execute", "_execute"},
+            **{k: v for k, v in self.scope.items() if k != "__builtins__"},
+        )
+        scope["constants"].CLOSE_SPEED, scope["constants"].PLAN_BUDGET_S = 0.7, 1.0
+        scope.update(
+            base_drive=types.SimpleNamespace(
+                SPEED_DEFAULT=0.05, PARAMS=(), check=lambda base, arm: None, move_chair=move_chair
+            ),
+            BaseError=type("BaseError", (Exception,), {}),
+            Planner=lambda *a, **k: None,
+            WristCamera=lambda *a, **k: None,
+            dc=types.SimpleNamespace(
+                set_camera=lambda c: None,
+                set_output=lambda o: None,
+                Refused=type("Refused", (Exception,), {}),
+                RUNS_DIR="runs",
+            ),
+            rammp_arm=types.SimpleNamespace(FRAME="base_link"),
+            shared_open=types.SimpleNamespace(configure=lambda **k: None),
+            partial=__import__("functools").partial,
+        )
+        node = self.node = scope["Capability"]()
+        node.mock, node.cfg = False, {"allow_execute": True, "base_max_speed": 0.15, "chair_back_dir": (0, 0, 1)}
+        node.log = Mock()
+        node.get_logger = lambda: node.log
+        node.ctx = self.ctx
+        node.arm = node.base = node.sam3 = None
+        node._fk, node.detect_topics, node.instance_id = object(), (), "fridge_1"
+        node.cfg.update(detect_camera="wrist", camera_frame="", sam3_prompts=(), sam3_threshold=0.5)
+        node._planner_world = lambda: types.SimpleNamespace(restore=lambda: None)
+        node._contact_expected = lambda execute: contextlib.nullcontext()
+        self.ctx.progress = lambda *a, **k: None
+        self.ctx.update_object = lambda *a, **k: None
+
+    def press(self, ui_id):
+        return self.node.execute(ui_id, {}, self.ctx)
+
+
+DRIVING_12CM = (
+    "The wheelchair is driving itself straight back, away from the fridge, about 12 cm. Press Stop to stop it."
+)
+
+
+def test_the_real_drive_runs_under_the_driving_panel_then_the_moving_panel_again():
+    f = DriveFlow(0.12)
+    result = f.press("close_door_drive_ui")
+    assert result["executed"] is True
+    assert f.drives == [{"move": 0.12, "speed": 0.03, "execute": True}]
+    assert f.panels_while_driving == [{"title": "Close fridge", "message": DRIVING_12CM, "buttons": [STOP]}]
+    assert f.ctx.messages() == [
+        "Closing the fridge door. The arm is moving.",
+        DRIVING_12CM,
+        "Closing the fridge door. The arm is moving.",
+        "Fridge door closed.",
+    ]
+
+
+def test_stop_during_the_real_drive_cancels_it_and_says_the_wheelchair_moved():
+    def stop(flow):  # self.base.send_twist raises Cancelled once the run is cancelled
+        flow.ctx.tap("stop")
+        assert wait_until(flow.ctx.cancelled)
+        raise Cancelled()
+
+    f = DriveFlow(0.12, during=stop)
+    with pytest.raises(Cancelled):
+        f.press("close_door_drive_ui")
+    assert f.ctx.cancelled()  # through the engine's own cancel
+    assert f.panels_while_driving[0]["message"] == DRIVING_12CM
+    stopped = f.ctx.sent[-1]
+    assert stopped["title"] == "Close fridge: stopped" and stopped["buttons"] == [DONE]
+    assert "The wheelchair has already moved" in stopped["message"]
+    assert DRIVING_12CM not in f.ctx.messages()[2:]  # nothing re-shows the driving panel after the stop
+
+
+def test_a_direct_goal_after_a_press_drives_with_no_panel():
+    f = DriveFlow(0.12)
+    f.press("close_door_drive_ui")
+    sent = len(f.ctx.sent)
+    f.node.execute("close", {"execute": True, "drive_base": True}, f.ctx)
+    assert len(f.drives) == 2 and len(f.ctx.sent) == sent  # execute() let go of the press's panel
 
 
 # -- the wheelchair question ----------------------------------------------------------------------------------------
