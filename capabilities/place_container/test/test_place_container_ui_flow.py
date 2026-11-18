@@ -372,6 +372,20 @@ def test_a_camera_that_isnt_ready_says_so(make):
     node._act.assert_not_called()
 
 
+def test_an_uncalibrated_camera_still_lets_the_marked_spot_place(make):
+    """Before the scene camera is calibrated there is no tf from it to the arm: the picker says so (not "isn't sending
+    images") and Use marked spot still places."""
+    grabbed = Mock()
+    grabbed.grab.side_effect = RuntimeError("no tf arm_mount <- scene_camera_color_optical_frame (LookupException)")
+    marked = {"x": 0.9, "y": -0.2, "table_z": 0.2, "time": time.time() - 60}
+    node, ctx = make([[press("marked")]], mock=False, marked=marked, camera=Mock(return_value=grabbed))
+    node._place_here({}, ctx)
+    picker = picker_panels(ctx)[0]
+    assert picker["objects"] == [] and "calibration isn't loaded" in picker["panel"]["message"]
+    assert [b["label"] for b in picker["panel"]["buttons"]] == ["Look again", "Use marked spot", "Stop"]
+    assert node._act.call_args.args[1] == {}  # {} = the marked spot
+
+
 def picker_ids_of(scene):
     found = spots.find_spots(scene, footprint_r=PLAN.BOWL_RADIUS + PLAN.LIP_WIDTH)
     return [o["instance_id"] for o in spots.ui_objects(found.spots, scene)]
