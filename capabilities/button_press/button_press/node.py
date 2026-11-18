@@ -17,6 +17,8 @@ whenever allow_execute is on.
     make action CAP=button_press ACTION=press_button PARAMS='{"target": "start_30s"}'
 """
 
+import math
+
 from capability_engine import Action, ArmError, Cancelled, CapabilityEngine, EngineError, run
 from capability_ui import RunUI, cancel_own_run
 from geometry_msgs.msg import PoseStamped
@@ -68,6 +70,10 @@ PARAMS = {
     "planner_world_dir_in_planner": DEFAULTS.planner_world_dir_in_planner,
     "planner_base_layers": list(DEFAULTS.planner_base_layers),
     "planner_restore_world": DEFAULTS.planner_restore_world,
+    # The shared start/end pose (deg), used only with use_start_joints: a ROS parameter can't default to an empty
+    # list of doubles. Default: the microwave's view pose (microwave/open_door.py VIEW_JOINTS_DEG, 11-11)
+    "use_start_joints": False,
+    "start_joints_deg": [21.4, -43.8, -92.2, -110.6, -58.8, -93.8, -165.7],
 }
 
 
@@ -143,6 +149,9 @@ class Capability(CapabilityEngine):
         s = self.settings
         if s["far"] not in ("scene", "wrist"):
             raise EngineError("bad_config", f"the far parameter must be 'scene' or 'wrist', not {s['far']!r}")
+        start = tuple(float(v) for v in s["start_joints_deg"]) if s["use_start_joints"] else ()
+        if start and (len(start) != 7 or not all(math.isfinite(v) for v in start)):
+            raise EngineError("bad_config", f"start_joints_deg must be 7 joint angles (deg), not {list(start)!r}")
         return Args(
             target=target,
             presses=presses,
@@ -164,6 +173,7 @@ class Capability(CapabilityEngine):
             planner_world_dir_in_planner=s["planner_world_dir_in_planner"],
             planner_base_layers=tuple(s["planner_base_layers"]),
             planner_restore_world=s["planner_restore_world"],
+            start_joints_deg=start,
         )
 
     def availability(self, instance_id, world_state):

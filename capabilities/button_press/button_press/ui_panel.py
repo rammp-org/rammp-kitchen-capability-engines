@@ -18,6 +18,7 @@ STOP = "stop"
 # step (press_button's run.step names, and "done") -> what the user reads
 TEXT = {
     "preflight": "Checking the arm and cameras",
+    "start": "Moving to the start position",
     "detect": "Looking for the microwave",
     "stage": "Moving in front of the buttons",
     "redetect": "Finding the button",

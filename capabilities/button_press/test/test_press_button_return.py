@@ -357,3 +357,74 @@ def test_a_long_move_is_refused_until_curobo_has_the_microwave():
     run.world.loaded = [{"name": "microwave"}]
     run.long_move(HOME, np.eye(3), "to staging")
     assert len(sent) == 1
+
+
+# ---- the shared start pose (Run.go_to_start, start_joints_deg)
+START_DEG = (21.4, -43.8, -92.2, -110.6, -58.8, -93.8, -165.7)
+
+
+def start_run(execute=True, start=START_DEG):
+    run = run_at(HOME, execute=execute)
+    run.args.start_joints_deg = start
+    run.q0 = run.arm.q.copy()  # preflight's: where the arm happened to be
+    return run
+
+
+def test_go_to_start_moves_to_the_start_joints_and_makes_them_home():
+    run = start_run()
+    run.go_to_start()
+    assert [(k, n) for k, n, _ in run.sent] == [("curobo joints", "to the start")]
+    assert np.allclose(run.sent[0][2], np.radians(START_DEG))
+    assert np.allclose(run.q0, np.radians(START_DEG))  # go_home now ends the run there
+    assert np.allclose(run.seed_posture, np.radians(START_DEG))
+
+
+def test_go_to_start_already_there_moves_nothing():
+    run = start_run()
+    run.arm.q = np.radians(START_DEG) + np.radians(1.0)
+    run.go_to_start()
+    assert run.sent == []
+    assert np.allclose(run.q0, np.radians(START_DEG))
+
+
+def test_go_to_start_unset_keeps_the_arm_and_its_start():
+    run = start_run(start=())
+    q_before = run.q0.copy()
+    run.go_to_start()
+    assert run.sent == [] and np.allclose(run.q0, q_before)
+
+
+def test_go_to_start_in_a_dry_run_away_from_it_refuses():
+    run = start_run(execute=False)
+    with pytest.raises(Abort, match="start_joints_deg"):
+        run.go_to_start()
+    assert run.sent == []
+
+
+def test_go_to_start_refused_by_cuRobo_holds_and_keeps_the_old_start():
+    run = start_run()
+    q_before = run.q0.copy()
+    run.arm.refuse = ["to the start: go_to_joint_config failed: PLANNING_FAILED START_STATE_IN_COLLISION"]
+    with pytest.raises(MotionFailed):
+        run.go_to_start()
+    assert run.sent == [] and np.allclose(run.q0, q_before)  # go_home after it: already home, nothing moves
+
+
+def test_go_to_start_turns_a_joint_off_its_limit_and_tries_again():
+    run = start_run()
+    run.arm.refuse = [LIMIT_REFUSAL]
+    run.go_to_start()
+    assert [k for k, _, _ in run.sent] == ["turn off limit", "curobo joints"]
+
+
+def test_go_home_after_go_to_start_returns_to_the_start_joints():
+    run = start_run()
+    run.go_to_start()
+    run.arm.p, run.arm.q = SPOT, np.radians(START_DEG) + 0.4  # pressed, at the panel
+    run.sent.clear()
+    run.go_home()
+    assert [(k, n) for k, n, _ in run.sent] == [
+        ("straight", "back out from the panel"),
+        ("curobo joints", "back to start"),
+    ]
+    assert np.allclose(run.sent[1][2], np.radians(START_DEG))
