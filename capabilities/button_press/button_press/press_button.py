@@ -47,7 +47,7 @@ from scipy.spatial.transform import Rotation
 from button_press import Abort, MotionFailed, dome_pattern, say, scene_finder, set_tee
 from button_press.collision import Clearance, PlannerWorld, microwave_boxes
 from button_press.collision import describe as describe_boxes
-from button_press.geometry import PlaneFitError
+from button_press.geometry import PlaneFitError, max_joint_delta_deg
 from button_press.kinematics import MAX_IK_ERR_M
 from button_press.panel_frame import (
     describe,
@@ -131,6 +131,7 @@ RETRY_BACKOFF_M = 0.03  # re-detect at staging failed: back straight out this fa
 # in reverse, sim-gated and at this package's own speed -- and back to the pre-press spot after an
 # aborted stroke in a straight line, never through cuRobo.
 RETREAT_OUT_M = 0.15
+HOME_TOL_DEG = 1.0  # go_home: the arm is home when every joint is within this of its start
 # The wrist camera: box-opening's D405 mount. Was "camera_color_optical_frame" (this package's own hand-eye
 # node); 2026-10-15 the restarted arm driver began publishing the Kinova vision module's frames under that
 # name, pointing 90 deg sideways, and a run without camera_frame put the button 57 cm off.
@@ -290,6 +291,7 @@ class Run:
         # self-motion manifold (see Arm.solve_translation). Set by preflight, refreshed by
         # reanchor_seed() after a big move.
         self.seed_posture = None
+        self.q0 = None  # the start joints (preflight): where go_home returns the arm
 
     def log(self, rec):
         """Append one record (plus a timestamp) to the run log, if there is one."""
@@ -390,6 +392,7 @@ class Run:
 
         start_joints = self.arm.joints()
         self.seed_posture = start_joints
+        self.q0 = start_joints
         self.log(
             {
                 "stage": "preflight",
@@ -448,6 +451,10 @@ class Run:
         if collide:
             self.check_leg(name, start[0], knots)
         self.arm.smooth_poses(path, knots, start, name, self.log, track_abort_m=track_abort_m, cart_speed=cart_speed)
+
+    def at_home(self):
+        """True if the arm is at its start joints (within HOME_TOL_DEG on every joint)."""
+        return self.q0 is not None and max_joint_delta_deg(self.arm.joints(), self.q0) <= HOME_TOL_DEG
 
     def go_back(self, p0, R0, why, n_out=None):
         """After a move its checks refused (nothing sent: never after a MotionFailed): go back to
