@@ -396,9 +396,8 @@ def test_a_bug_shows_the_generic_failure_and_is_reraised(clock):
     with pytest.raises(KeyError) as raised:
         press(cap, "close_door_ui", ctx)
     assert raised.value is bug
-    assert ctx.panels[-1]["message"].startswith(
-        "Something unexpected went wrong in the fridge program"
-    )
+    assert ctx.panels[-1]["message"] == ui_text.failure("close", None)
+    assert ctx.panels[-1]["message"].startswith("Something unexpected went wrong")
 
 
 def test_a_cancel_shows_no_failure(clock):
