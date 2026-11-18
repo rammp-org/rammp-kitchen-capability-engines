@@ -38,7 +38,9 @@ fragment), the approach at 0.6. The approach needs an arm driver with
 `park` sends the arm to the scan pose by a direct joint move, which works when
 cuRobo refuses the start state; it is not collision-checked. A failed check
 stops the action with the arm holding where it is. It is activated when the
-user selects a `container`.
+user selects the tupperware (`food container`, the scene segmenter's class, or
+`food_container`), where the UI offers one button, "Grab Tupperware by Brim"
+(see [UI](#ui)).
 
 Ported from the tupperware grasp in `dhyi-svg/feeding-deployment@8f5a3352`
 (`rammp_grasp_tupperware/`).
@@ -84,6 +86,9 @@ Served under `/grab_container/`, types from `rammp_orchestrator_interfaces`:
 | `grab` | `execute`, `impedance` (bools, default `false`) | `{"executed", "container", "container_point", "view_pose", "grasp_point", "approach", "ring", "raised", "note"}`, in m |
 | `park` | `execute` (bool, default `false`)               | `{"executed", "note"}`                                                                                                 |
 
+`grab_by_brim` (the UI's button, no params) runs `grab` with `{"execute": true}`
+and returns its result; see [UI](#ui).
+
 `ring` is the detection's evidence: `radius`, `spread_m` (the frames' agreement),
 `fit_rms_m`, `conf` (YOLO's lowest) and `rejected` (frames left out, and why).
 
@@ -91,6 +96,50 @@ A failed check fails the action with `refused` (recoverable); the arm holds wher
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
+
+## UI
+
+The UI is offered one one-press action (`availability()` returns only it; the
+orchestrator sends no params). It runs `grab` with fixed params under
+`capability_ui.RunUI` (`shared/capability_ui`); the panels' words are in
+`grab_container/ui_text.py`.
+
+| Action id      | Button                    | Offered on a tap of                                 | Runs                       |
+| -------------- | ------------------------- | --------------------------------------------------- | -------------------------- |
+| `grab_by_brim` | "Grab Tupperware by Brim" | the tupperware: `food_container` / `food container` | `grab` `{"execute": true}` |
+
+`grab` and `park` stay callable directly (dry runs, `impedance`, CLI) but are
+not offered to the UI. On the demo the tupperware's "Grab Tupperware" button is
+`microwave_place`'s `retrieve`; with both capabilities up, a tupperware tap
+shows both buttons.
+
+In `execute()`:
+
+- `allow_execute` false (not mock): a "not started" notice with Done, then
+  `execution_disabled` (recoverable). Nothing moves.
+- While it runs: a progress panel with **Stop** that names each step as `grab`
+  reports it (home, locate, view, detect, opening, approach, closing, raise).
+  Stop cancels the engine's own run, as the orchestrator's cancel does:
+  `self.arm` stops the motion in flight and raises `Cancelled`. A "Stopped"
+  notice then says what the hand was left holding (from the last step, e.g.
+  "The gripper was closing on the brim: it may be holding the tupperware.").
+- A `refused` failure before the hand reaches for the brim (home, locate, view
+  or detect): the reason in plain words, with the grab again (button `retry`,
+  labelled Grab) and Stop. A tap re-runs it from home.
+- A failure from the open gripper's approach on, any other error, or an
+  exception (e-stop, control taken, the detector's weights): a "failed" notice
+  with the reason and what the hand holds, Done only, never retried.
+- Success: a Done notice ("Holding the tupperware by its brim, ..."; it says so
+  when the lift didn't run). Mock: "Mock: ... No arm motion."
+- Every final notice is waited on for at most 60 s before `execute()` returns
+  or raises. An orchestrator cancel shows nothing more (the orchestrator has
+  taken the UI back). Without a UI session nothing waits: the error is
+  returned.
+
+The engine uses the direct UI bridge API (`ctx.update_user_panel()` /
+`ctx.poll_ui_event()`). `ui_bridge_node_name` (default `ui_bridge_node`) selects
+`/ui_bridge_node/request_user_input` and its `/update` service. JSON shapes are
+documented in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
 
 ## Parameters
 
@@ -102,7 +151,8 @@ passes them as a params file.
 | ------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `use_orchestrator`        | `true`                                                      | `false` runs standalone: no registration, drive it by CLI                            |
 | `mock`                    | `false`                                                     | `true` skips hardware (the mock alternative sets it)                                 |
-| `allow_execute`           | `false`                                                     | `false`: every goal is a dry run, whatever it asks                                   |
+| `ui_bridge_node_name`     | `"ui_bridge_node"`                                          | The UI bridge node the panels talk to (declared by the engine)                       |
+| `allow_execute`           | `false`                                                     | `false`: every goal is a dry run, whatever it asks; the UI's grab is refused         |
 | `model_path`              | `"/models/best.pt"`                                         | YOLO segmentation weights with the `grabber` class                                   |
 | `color_topic`             | `"/wrist_camera/color/image_raw"`                           | Colour image                                                                         |
 | `camera_info_topic`       | `"/wrist_camera/color/camera_info"`                         | Its intrinsics                                                                       |

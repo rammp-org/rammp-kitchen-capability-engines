@@ -18,6 +18,10 @@ SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the g
 `execute`. Otherwise the goal is a dry run (grab: locate and plan the view move; park: report the
 move). Someone stands at the e-stop whenever allow_execute is on.
 
+UI action `grab_by_brim` (a tupperware tap, one press): `grab` executing, under capability_ui.RunUI: a
+progress panel with Stop that names each step, then Done, failed or Stopped (what the hand holds).
+`grab` and `park` stay direct goals (their params need setting) and are not offered to the UI.
+
     ros2 launch grab_container grab_container.launch.py use_orchestrator:=false
     make action CAP=grab_container ACTION=grab PARAMS='{"execute": false}'
 """
@@ -28,8 +32,9 @@ import numpy as np
 import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.arm import HOLD_LEVEL, IMPEDANCE
+from capability_ui import RunUI, cancel_own_run
 
-from . import grasp, scene
+from . import grasp, scene, ui_text
 
 # ROS parameter -> default. Topics, frames and paths are per robot (the fragment's params:).
 PARAMS = {
@@ -56,14 +61,43 @@ PARAMS = {
 EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
 GRAB = {"type": "object", "properties": {**EXECUTE["properties"], "impedance": {"type": "boolean", "default": False}}}
 
+# The tupperware's perception classes: "food container" is the scene segmenter's class (scene.CONTAINER_CLASS);
+# "food_container" the same without its space, for a selection typed by hand (as microwave_place's)
+CONTAINER_CLASSES = ["food_container", "food container"]
+# The UI's one press: grab, executing, its other params at their defaults (stiff position control)
+UI_GRAB = "grab_by_brim"
+UI_GRAB_PARAMS = {"execute": True}
+# Steps (ui_text.step) whose failure comes before the hand reaches for the brim: the UI offers the grab again
+UI_RETRY_STEPS = ("", "home", "locate", "view", "detect")
+
+
+class _PhaseCtx:
+    """The action's ctx, remembering the run's last step (ui_text.step) and showing each on the UI's panel."""
+
+    def __init__(self, ctx, ui):
+        self._ctx = ctx
+        self._ui = ui
+        self.step = ""
+
+    def progress(self, phase, pct, message="", pausable=True):
+        self.step = ui_text.step(phase, pct)
+        self._ctx.progress(phase, pct, message, pausable)
+        text, bar = ui_text.progress(phase, pct, message)
+        self._ui.moving(text, bar, phase)
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
 
 class Capability(CapabilityEngine):
     display_name = "Grab container"
-    perception_classes = ["container"]
+    # a tupperware tap activates the engine and offers the UI's grab (availability)
+    perception_classes = list(CONTAINER_CLASSES)
     required_resources = ["arm", "gripper"]
     actions = [
         Action("grab", "Grab the container", params_schema=GRAB),
         Action("park", "Park at the scan pose", params_schema=EXECUTE),
+        Action(UI_GRAB, ui_text.LABEL, perception_classes=list(CONTAINER_CLASSES)),
     ]
 
     def __init__(self, **node_kwargs):
@@ -79,7 +113,13 @@ class Capability(CapabilityEngine):
             + ("the arm WILL move on execute goals" if self.cfg["allow_execute"] else "every goal is a dry run")
         )
 
+    def availability(self, instance_id, world_state):
+        """The UI is offered only the one-press grab (on a tupperware tap); `grab` and `park` stay direct goals."""
+        return [a for a in super().availability(instance_id, world_state) if a.action_id == UI_GRAB]
+
     def execute(self, action_id, params, ctx):
+        if action_id == UI_GRAB:
+            return self._ui_run(ctx)
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
@@ -106,6 +146,50 @@ class Capability(CapabilityEngine):
             return {**self._grab(wrist, scene_cam, detections, execute, log, ctx, motion), "note": note}
         except grasp.Abort as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
+
+    def _ui_run(self, ctx):
+        """The UI's one press: `grab` executing, under capability_ui.RunUI. A progress panel with Stop names each
+        step (Stop cancels this run: the motion in flight stops), then Done, failed or Stopped (saying what the
+        hand holds). A refusal before the hand reached for the brim (UI_RETRY_STEPS) shows its reason and offers
+        the grab again, waiting for an explicit tap; anything later is shown with Done only, never retried. Every
+        final notice is shown and waited on (bounded) before this returns or raises."""
+        ui = RunUI(ctx, ui_text.TITLE, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+        if not self.mock and not self.cfg["allow_execute"]:
+            ui.refuse(ui_text.disabled())
+            raise EngineError(
+                "execution_disabled",
+                f"{ui_text.TITLE} is disabled: launch with allow_execute:=true for an attended run.",
+                recoverable=True,
+            )
+        while True:
+            ctx.checkpoint()
+            run_ctx = _PhaseCtx(ctx, ui)
+            try:
+                result = ui.motion(
+                    ui_text.MOVING,
+                    lambda run_ctx=run_ctx: self.execute("grab", dict(UI_GRAB_PARAMS), run_ctx),
+                    stopped_note=lambda run_ctx=run_ctx: ui_text.hand(run_ctx.step),
+                )
+            except EngineError as error:
+                self.get_logger().error(f"{UI_GRAB}: {error}")
+                if ui.user_stopped or ctx.cancelled():
+                    raise  # Stop showed its own notice; an orchestrator cancel has taken the UI back
+                if error.recoverable and error.error_code == "refused" and run_ctx.step in UI_RETRY_STEPS:
+                    if ui.retry(ui_text.retry(str(error)), ui_text.RETRY_LABEL, title=f"{ui_text.TITLE}: not done"):
+                        continue
+                    raise  # no UI session, no answer in time
+                ui.error(ui_text.failure(str(error), ui_text.hand(run_ctx.step)))
+                raise
+            except Exception as error:  # Cancelled, an arm error (e-stop, control taken), the detector, a bug
+                self.get_logger().error(f"{UI_GRAB}: {error!r}")
+                if not (ui.user_stopped or ctx.cancelled()):
+                    ui.error(ui_text.unexpected(error, ui_text.hand(run_ctx.step)))
+                raise
+            if result.get("mock"):
+                ui.done(ui_text.DONE, mock=True)
+            else:
+                ui.done(ui_text.DONE if result.get("raised", True) else ui_text.DONE_NOT_RAISED)
+            return result
 
     def _grab(self, wrist, scene_cam, detections, execute, log, ctx, motion):
         why = self.arm.not_ready()
