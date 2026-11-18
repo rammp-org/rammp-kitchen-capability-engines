@@ -61,6 +61,7 @@ from . import geometry as geo
 from .handoff import hand_off
 from .food_pick import FoodPicker, PickRefused
 from .streaming import PeerSession, facing, follow_params
+from . import ui_flow
 
 ENGINE_ID = "fridge_peering_mode"  # = the package, its image and /<id>/... (make action CAP=)
 FOLLOW_MODES = ("off", "idle", "continuous")
@@ -387,6 +388,11 @@ class Capability(CapabilityEngine):
                 },
             },
         ),
+        # the touchscreen's one-press buttons (ui_flow.py): peer, executing, under capability_ui
+        *(
+            Action(ui_id, label, perception_classes=list(classes))
+            for ui_id, (_, label, _, classes) in ui_flow.UI_ACTIONS.items()
+        ),
     ]
 
     def __init__(self):
@@ -427,6 +433,8 @@ class Capability(CapabilityEngine):
         )
 
     def execute(self, action_id, params, ctx):
+        if action_id in ui_flow.UI_ACTIONS:
+            return ui_flow.run(self, action_id, ctx)
         speed = float(params.get("speed", 1.0))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
@@ -482,6 +490,13 @@ class Capability(CapabilityEngine):
                 _error_code(e), f"{e} -- the arm holds where it is", recoverable=True
             ) from e
         return {"executed": execute, "note": note, **out}
+
+    def availability(self, instance_id, world_state):
+        """The UI is offered only the one-press actions (ui_flow.UI_ACTIONS): `peer` and `pick`
+        from the UI would only dry-run (the orchestrator sends no `execute`). Both stay callable
+        directly."""
+        offered = super().availability(instance_id, world_state)
+        return [a for a in offered if a.action_id in ui_flow.UI_ACTIONS]
 
     def _want_tracking(self, ctx) -> None:
         """This action wants SAM3 tracking food and drink (released when it ends)."""

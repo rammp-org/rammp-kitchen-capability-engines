@@ -56,6 +56,49 @@ detections; without SAM3 at all, picking is off for that action (warned) and tel
 
 ## Orchestrator interface
 
+### UI
+
+A `fridge` tap offers one button (`availability()` returns only it; the orchestrator sends no
+params). It runs `peer` with fixed params under `capability_ui.RunUI` (`shared/capability_ui`),
+from `fridge_peering_mode/ui_flow.py`, its wording in `ui_text.py`:
+
+| Action id        | Button               | Offered on a tap of | Runs                       |
+| ---------------- | -------------------- | ------------------- | -------------------------- |
+| `look_in_fridge` | "Look Inside Fridge" | `fridge`            | `peer` `{"execute": true}` |
+
+`peer` and `pick` stay callable directly (dry runs by default, the CLI) but are not offered to the
+UI: from it they would only dry-run. A `pick` goal sent while `look_in_fridge` runs is refused
+(busy): the handoff is only for a directly sent `peer`.
+
+- `allow_execute` false (not mock): a "not started" notice with Done, then `execution_disabled`
+  (recoverable). Nothing moves.
+- While it runs: one panel with **Stop**, from the press to the end, through scene homing, homing,
+  search or teleop, and a tap's pick. Its message follows the steps ("Moving the wrist camera in
+  front of the fridge's back wall.", "Move the joystick to look around. Hold still to find food,
+  then tap a container to pick it up.", "Taking the container: the arm is moving.", ...). The food
+  boxes (tap-to-pick) are on the same panel, over the wrist camera's overlay, which is shown with
+  its first frame (`ctx.set_overlay_visible(True)`; the orchestrator hides it when the run ends).
+- Stop cancels the engine's own run, as the orchestrator's cancel does: in teleop the stream's next
+  send raises `Cancelled` and closing the stream holds the arm; in a planned move `self.arm` stops
+  it. A "Stopped" notice then says what the hand holds (from the run's last progress phase, e.g.
+  "The hand is holding the container, part way out of the fridge."). With `max_teleop_s` null (the
+  button's), Stop is also how the user ends looking.
+- A failure (`no_tf`, `no_fridge`, `refused`, `pick_failed`, `estopped`, `control_taken`,
+  `stream_closed`, ...) or an exception: a "failed" notice with the reason in plain words and what
+  the hand holds, Done only. A tap's pick refused before anything moved still goes back to teleop.
+- Success: Done ("Holding the container outside the fridge." after a pick). Mock: "Mock: ... No arm
+  motion."
+- Every final notice waits at most 60 s. An orchestrator cancel shows nothing more. Without a UI
+  session nothing waits; FoodTargets then mirrors its panel on `~/ui_panel` and takes
+  `~/simulate_tap`, as before.
+
+The bridge's events have one reader while the run moves, RunUI's Stop watcher; the object taps it
+reads are handed to FoodTargets, so a tap never races Stop. `ui_bridge_node_name` (default
+`ui_bridge_node`) selects `/ui_bridge_node/request_user_input` and its `/update` service. JSON
+shapes: [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
+
+### Services and actions
+
 Served under `/fridge_peering_mode/`, types from `rammp_orchestrator_interfaces`:
 
 | Name                                  | Type                   | Meaning                                       |
@@ -102,6 +145,7 @@ per robot with an `overrides:` entry in its profile; sheppy passes them as a par
 
 | Name | Default | Meaning |
 | --- | --- | --- |
+| `ui_bridge_node_name` | `"ui_bridge_node"` | The UI bridge node the `look_in_fridge` panels and the wrist overlay go to |
 | `allow_execute` | `false` | `false`: every goal is a dry run (plans, streams nothing, picks nothing). `true` only attended, someone on the e-stop |
 | `rate_hz` | `50.0` | Teleop's ee_twist setpoint rate (Hz) |
 | `stream_timeout_s` | `0.2` | The driver closes the stream after this long with no setpoint (s, > 1 / rate_hz) |

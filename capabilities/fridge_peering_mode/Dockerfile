@@ -10,11 +10,13 @@
 # torch/torchvision from your requirements (the base ships the Jetson wheels).
 # arm64 only.
 #
-# nightly-20261030 is the base the nightly arm driver is built on (interfaces
-# 73e7ed1716bf, which has GoToEEPoses / GoToJointConfigs), so self.arm speaks
-# the driver's exact messages. It carries the arm, common and orchestrator
-# interfaces; rammp_curobo_interfaces it does not.
-FROM ghcr.io/rammp-org/rammp-base:nightly-20261030
+# 2.2.0-jp6 carries rammp-interfaces-ros2 v2.1.0, all seven packages (arm, base,
+# common, orchestrator, perception, peripheral, ui_bridge), with the ExecuteAction
+# token and SetEngineOverlayVisible capability_engine uses (the UI panels and the
+# wrist overlay need ui_bridge). Its arm messages are the arm driver's, so self.arm
+# speaks them exactly. rammp_curobo_interfaces it does not carry. Same base as
+# microwave_place, whose take-out this image runs.
+FROM ghcr.io/rammp-org/rammp-base:2.2.0-jp6
 
 WORKDIR /module_ws
 
@@ -26,11 +28,15 @@ WORKDIR /module_ws
 RUN pip install --no-cache-dir pybullet==3.2.7
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
-# build it from a pinned RAMMP-CuRobo commit alongside the packages below.
-ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
+# build it from a pinned RAMMP-CuRobo commit (v2.0.1, as microwave_place: self.arm.blend
+# needs its Blend action) alongside the packages below.
+ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/10ad896883158247039a8bd850bcabcab016a50d.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 COPY capability_engine/ src/capability_engine/
+# capability_ui: the UI action's panels (RunUI: Stop on every panel, bounded waits), shared with the
+# other capabilities; microwave_place depends on it too
+COPY shared/capability_ui/ src/capability_ui/
 # tap-to-pick imports microwave_place's take-out (an exec_depend): built here too, its deps by rosdep
 COPY capabilities/microwave_place/ src/microwave_place/
 COPY capabilities/fridge_peering_mode/ src/fridge_peering_mode/
