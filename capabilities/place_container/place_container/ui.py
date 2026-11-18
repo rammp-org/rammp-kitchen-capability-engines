@@ -108,9 +108,29 @@ def pick_message(n_spots, note=""):
     return f"{note}{PICK} ({n_spots} free spots shown.)"
 
 
-# Why the picker has no spot to offer (spots.Search.problem, node._find_spots): what happened, what to do
+# Why the picker has no spot to offer (spots.Search.problem, node._find_spots): what happened (words, or a
+# function of the match; None = the problem's own words), what to do. The first match wins.
 LOOK_AGAIN = "then press Look again"
+# The scene camera can't be trusted (not calibrated yet, or its mount moved): the arm's own mark still can. The
+# engine runs one action at a time and the picker reads the marked spot once, so the mark comes after a Stop.
+MARK_INSTEAD = (
+    " Or press Stop and ask the operator to mark a spot with the arm; Use marked spot then shows when you tap the "
+    "table again."
+)
+_CALIBRATION = r"calibration|tilted|no tf "
 _PROBLEMS = (
+    (
+        # SceneCamera.grab: images arrive but there is no transform from the camera to the arm (most often the
+        # camera's calibration isn't loaded yet; it can also come up late, hence Look again)
+        r"camera isn't ready \(no tf ",
+        "The robot doesn't know where the scene camera is on the wheelchair, so it can't find spots on the table.",
+        f"Ask the operator to check that the scene camera's calibration is loaded, {LOOK_AGAIN}.",
+    ),
+    (
+        r"depth must be aligned to colour",
+        "The scene camera's depth image doesn't line up with its colour image.",
+        f"Ask the operator to check the scene camera's settings, {LOOK_AGAIN}.",
+    ),
     (
         r"camera isn't ready",
         "The scene camera isn't sending images.",
@@ -137,25 +157,53 @@ _PROBLEMS = (
         f"Move anything blocking the camera's view of the table, {LOOK_AGAIN}.",
     ),
     (
-        r"calibration|tilted",
+        r"table looks (\d+) degrees tilted",
+        lambda m: f"The table looks {m[1]} degrees tilted to the scene camera, so the camera's calibration is off and "
+        "its spots can't be trusted.",
+        "The camera's mount on the wheelchair may have moved: ask the operator to check it.",
+    ),
+    (
+        r"sees the table (\d+) cm (higher|lower) than the arm measured",
+        lambda m: f"The scene camera sees the table {m[1]} cm {m[2]} than the arm measured it at the marked spot, so "
+        "the camera's calibration is off.",
+        "The camera's mount on the wheelchair may have moved: ask the operator to check it.",
+    ),
+    (
+        _CALIBRATION,
         None,  # the problem's own words: how far off, and that it is the camera's mount
         "The camera's mount on the wheelchair may have moved: ask the operator to check it.",
+    ),
+    (
+        r"none of the table the camera sees is within the arm's reach",
+        "The table the scene camera sees is out of the arm's reach.",
+        # in_reach == 0: the table may be too near the arm as well as too far
+        f"Move the wheelchair so the table is within the arm's reach, {LOOK_AGAIN}.",
+    ),
+    (
+        r"no free spot big enough",
+        "There is no free space on the table big enough for the container within the arm's reach.",
+        f"Clear a space on the table, {LOOK_AGAIN}.",
     ),
 )
 
 
 def no_spot_message(problem, marked, note=""):
-    """No spot to offer: why, and what the user can do."""
+    """No spot to offer: why, and what the user can do. When the scene camera can't be trusted and there is no
+    marked spot, it says how to get one (the marked spot needs no camera)."""
     text, todo = clean(problem), "Press Look again to try again."
     if not str(problem or "").strip():  # every spot in reach taken, or too near the edge
         text = "There is no free space on the table within the arm's reach."
         todo = f"Clear a space on the table, {LOOK_AGAIN}."
     for pattern, said, then in _PROBLEMS:
-        if re.search(pattern, str(problem)):
-            text, todo = (said or text), then
+        m = re.search(pattern, str(problem))
+        if m:
+            text, todo = (said(m) if callable(said) else said or text), then
             break
-    marked_too = " Or press Use marked spot to place at the spot marked earlier." if marked else ""
-    return f"{note}No spot to offer. {text} {todo}{marked_too}"
+    if marked:
+        other = " Or press Use marked spot to place at the spot marked earlier."
+    else:
+        other = MARK_INSTEAD if re.search(_CALIBRATION, str(problem)) else ""
+    return f"{note}No spot to offer. {text} {todo}{other}"
 
 
 def table_note(why):
