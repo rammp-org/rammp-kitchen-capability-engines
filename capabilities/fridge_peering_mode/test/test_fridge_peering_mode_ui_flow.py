@@ -49,8 +49,8 @@ Action = engine_class("Action", dataclass=dataclass, field=field)
 Base = engine_class(
     "CapabilityEngine",
     {"availability"},
-    ActionAvailability=lambda action_id, available: SimpleNamespace(
-        action_id=action_id, available=available
+    ActionAvailability=lambda action_id, available, reason="": SimpleNamespace(
+        action_id=action_id, available=available, reason=reason
     ),
 )
 
@@ -418,6 +418,32 @@ def test_stop_cancels_and_says_what_the_hand_holds(phase, holds):
     assert not any(p["title"].endswith(": failed") for p in ctx.panels)
 
 
+def test_the_stopped_notice_follows_a_progress():
+    """90 s of teleop then a 60 s Stopped notice would cross the orchestrator's 120 s without
+    progress: a progress goes out before it, as before Done and failed."""
+    ctx = FakeCtx()
+    progress_before_notice = []
+    send = ctx.update_user_panel
+
+    def record(panel_json=None, **kwargs):
+        if DONE in panel_json.get("buttons", []):
+            progress_before_notice.append(ctx.phases[-1:])
+        return send(panel_json=panel_json, **kwargs)
+
+    ctx.update_user_panel = record
+
+    def run(action_id, params, run_ctx):
+        run_ctx.progress("teleop", 0.0, "")
+        ctx.tap("stop")
+        assert ctx._cancelled.wait(2.0), "Stop did not cancel the run"
+        raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        ui_flow.run(make(ctx, run), "look_in_fridge", ctx)
+    assert ctx.panels[-1]["title"].endswith(": stopped")
+    assert progress_before_notice == [["notice"]]
+
+
 @pytest.mark.parametrize(
     "error, says",
     [
@@ -531,15 +557,34 @@ def node_capability():
     return scope["Capability"]
 
 
+def node_instance(allow_execute=True, mock=False):
+    cap = node_capability()()
+    cap.mock = mock
+    cap.cfg = {"allow_execute": allow_execute}
+    return cap
+
+
 def test_a_fridge_tap_offers_only_the_one_press_action():
     cap = node_capability()
     world = {"objects": {"fridge_1": {"perception_class": "fridge"}}}
-    assert [a.action_id for a in cap().availability("fridge_1", world)] == ["look_in_fridge"]
+    (offered,) = node_instance().availability("fridge_1", world)
+    assert (offered.action_id, offered.available) == ("look_in_fridge", True)
     world = {"objects": {"microwave_1": {"perception_class": "microwave"}}}
-    assert cap().availability("microwave_1", world) == []
+    assert node_instance().availability("microwave_1", world) == []
     labels = {a.action_id: a.label for a in cap.actions}
     assert labels["look_in_fridge"] == "Look Inside Fridge"
     assert {"peer", "pick"} <= set(labels)  # still there for direct goals
+
+
+@pytest.mark.parametrize("mock", [False, True])
+def test_with_arm_motion_off_the_button_is_unavailable_unless_mock(mock):
+    """REVIEW_RULES O1: an action reported available must be runnable. With allow_execute false a
+    press could only fail execution_disabled; the mock moves nothing and always runs."""
+    world = {"objects": {"fridge_1": {"perception_class": "fridge"}}}
+    (offered,) = node_instance(allow_execute=False, mock=mock).availability("fridge_1", world)
+    assert offered.action_id == "look_in_fridge"
+    assert offered.available is mock
+    assert offered.reason == ("" if mock else ui_flow.DISABLED_REASON)
 
 
 def test_every_panel_message_is_a_sentence():

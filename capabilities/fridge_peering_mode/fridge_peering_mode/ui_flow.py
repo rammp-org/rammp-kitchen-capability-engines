@@ -33,6 +33,10 @@ from . import ui_text
 # progress, with room for the pick that may follow a tap. Press again to keep looking.
 LOOK_S = 90.0
 
+# Why the button is greyed out with arm motion off (availability(), REVIEW_RULES O1: an action
+# reported available must be runnable).
+DISABLED_REASON = "arm motion is off: fridge_peering_mode was started with allow_execute false"
+
 # The UI's buttons (the orchestrator shows the label): what each runs, with fixed params, and on
 # which tapped class it is offered. `peer` and `pick` stay callable directly (dry runs by default,
 # the CLI), not offered.
@@ -132,7 +136,7 @@ def run(engine, ui_id, ctx):
         result = ui.motion(
             ui_text.MOVING,
             lambda: engine.execute(action_id, dict(params), run_ctx),
-            stopped_note=lambda: ui_text.hand_note(run_ctx.phase),
+            stopped_note=lambda: _stopped_note(ctx, run_ctx.phase),
         )
     except Exception as error:  # an EngineError, Cancelled, an arm error, a bug
         log.error(f"{ui_id}: {error!r}")
@@ -148,6 +152,13 @@ def run(engine, ui_id, ctx):
     _notice_progress(ctx, "done")
     ui.done(ui_text.done(result), mock=bool(result.get("mock")))
     return result
+
+
+def _stopped_note(ctx, phase):
+    """What the hand holds, for RunUI's Stopped notice, which shows right after: a progress goes
+    out first, as before the other final notices."""
+    _notice_progress(ctx, "stopped")
+    return ui_text.hand_note(phase)
 
 
 def _notice_progress(ctx, outcome):

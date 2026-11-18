@@ -494,9 +494,15 @@ class Capability(CapabilityEngine):
     def availability(self, instance_id, world_state):
         """The UI is offered only the one-press actions (ui_flow.UI_ACTIONS): `peer` and `pick`
         from the UI would only dry-run (the orchestrator sends no `execute`). Both stay callable
-        directly."""
+        directly. With arm motion off (not mock) they are offered unavailable, with the reason
+        (REVIEW_RULES O1: an action reported available must be runnable)."""
         offered = super().availability(instance_id, world_state)
-        return [a for a in offered if a.action_id in ui_flow.UI_ACTIONS]
+        offered = [a for a in offered if a.action_id in ui_flow.UI_ACTIONS]
+        if not (self.mock or self.cfg["allow_execute"]):
+            for a in offered:
+                a.available = False
+                a.reason = ui_flow.DISABLED_REASON
+        return offered
 
     def _want_tracking(self, ctx) -> None:
         """This action wants SAM3 tracking food and drink (released when it ends)."""

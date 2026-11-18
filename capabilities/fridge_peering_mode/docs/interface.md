@@ -70,8 +70,9 @@ from `fridge_peering_mode/ui_flow.py`, its wording in `ui_text.py`:
 UI: from it they would only dry-run. A `pick` goal sent while `look_in_fridge` runs is refused
 (busy): the handoff is only for a directly sent `peer`.
 
-- `allow_execute` false (not mock): a "not started" notice with Done, then `execution_disabled`
-  (recoverable). Nothing moves.
+- `allow_execute` false (not mock): `availability()` offers the button unavailable, with the reason
+  (an action offered as available must be runnable). A press that gets through anyway shows a
+  "not started" notice with Done, then fails `execution_disabled` (recoverable). Nothing moves.
 - While it runs: one panel with **Stop**, from the press to the end, through scene homing, homing,
   search or teleop, and a tap's pick. Its message follows the steps ("Moving the wrist camera in
   front of the fridge's back wall.", "Move the joystick to look around. Hold still to find food,
@@ -84,7 +85,8 @@ UI: from it they would only dry-run. A `pick` goal sent while `look_in_fridge` r
   "The hand is holding the container, part way out of the fridge.").
 - Teleop ends by itself after 90 s (`ui_flow.LOOK_S`), with a Done notice that says how to keep
   looking. The orchestrator cancels a run that sends no progress for 120 s, and teleop sends none
-  after it starts; a progress also goes out before each final notice for the same reason.
+  after it starts; a progress also goes out before each final notice (Done, failed, Stopped) for
+  the same reason.
 - A failure (`no_tf`, `no_fridge`, `refused`, `pick_failed`, `estopped`, `control_taken`,
   `stream_closed`, ...) or an exception: a "failed" notice with the reason in plain words and what
   the hand holds, Done only. A tap's pick refused before anything moved still goes back to teleop.
