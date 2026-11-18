@@ -9,17 +9,21 @@
 
 ## What it does
 
-The reference capability. It offers two actions: `count`, which counts up to
-`to` with progress feedback and honours pause and cancel, and
-`count_with_panel`, the same but also driving a live progress panel (with a
-Stop button) directly on the UI bridge, and showing/hiding its overlay
-camera feed (`ctx.set_overlay_visible()`) for the duration of the run —
-shown before the loop starts, hidden in a `finally` on every exit path.
-While shown, it also republishes one static diagonal-stripe test frame
-(`ctx.publish_overlay_image()`) every tick as a placeholder for a real
-capability's own camera. It is activated when the user selects a
-`counter`. Replace this paragraph with what your capability does and what
-would break without it.
+The reference capability. It offers three actions: `count`, which counts up to
+`to` with progress feedback and honours pause and cancel; `count_with_panel`,
+the same but also driving a live progress panel (with a Stop button) directly
+on the UI bridge, and showing/hiding its overlay camera feed
+(`ctx.set_overlay_visible()`) for the duration of the run — shown before the
+loop starts, hidden in a `finally` on every exit path; and
+`count_with_runui_panel`, the same again but built on `capability_ui.RunUI`'s
+reusable panel helpers (`RunUI.motion()`, `RunUI.overlay_shown()`) instead of
+calling `ctx` directly — its Stop button cancels the action (showing a
+"Stopped" notice) rather than returning a normal result. While shown, both
+panel actions also republish one static diagonal-stripe test frame
+(`ctx.publish_overlay_image()`/`RunUI.publish_overlay_image()`) every tick as
+a placeholder for a real capability's own camera. It is activated when the
+user selects a `counter`. Replace this paragraph with what your capability
+does and what would break without it.
 
 ## Publishes
 
@@ -48,6 +52,7 @@ Served under `/example/`, types from `rammp_orchestrator_interfaces`:
 | ------------------ | ----------------------------------------------------- | --------------------------------------------- |
 | `count`            | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
 | `count_with_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |
+| `count_with_runui_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}` (Stop cancels the action instead) |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.

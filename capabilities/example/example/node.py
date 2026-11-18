@@ -1,5 +1,7 @@
 """Reference capability: `count` counts up with progress; `count_with_panel`
-does the same while also driving a live UI-bridge panel.
+does the same while also driving a live UI-bridge panel by calling `ctx`
+directly; `count_with_runui_panel` does the same again but built on
+`capability_ui.RunUI`'s reusable panel helpers instead.
 
 Copy this directory with `make new CAP=<name>` and replace these with your
 capability's actions. Everything orchestrator-facing (registration, the
@@ -10,10 +12,12 @@ from capability_engine.CapabilityEngine.
     ros2 launch example example.launch.py use_orchestrator:=false  # standalone
     make action CAP=example ACTION=count PARAMS='{"to": 5}'        # send it a goal
     make action CAP=example ACTION=count_with_panel PARAMS='{"to": 5}'
+    make action CAP=example ACTION=count_with_runui_panel PARAMS='{"to": 5}'
 """
 
 import time
 
+from capability_ui import RunUI, cancel_own_run
 from sensor_msgs.msg import Image
 
 from capability_engine import Action, CapabilityEngine, EngineError, run
@@ -75,6 +79,9 @@ class Capability(CapabilityEngine):
     actions = [
         Action("count", "Count up", params_schema=_COUNT_PARAMS_SCHEMA),
         Action("count_with_panel", "Count up (live panel)", params_schema=_COUNT_PARAMS_SCHEMA),
+        Action(
+            "count_with_runui_panel", "Count up (RunUI panel)", params_schema=_COUNT_PARAMS_SCHEMA
+        ),
     ]
 
     def __init__(self):
@@ -93,6 +100,8 @@ class Capability(CapabilityEngine):
 
         if action_id == "count_with_panel":
             return self._count_with_panel(to, interval, ctx)
+        if action_id == "count_with_runui_panel":
+            return self._count_with_runui_panel(to, interval, ctx)
         return self._count(to, interval, ctx)
 
     def _count(self, to: int, interval: float, ctx) -> dict:
@@ -174,6 +183,39 @@ class Capability(CapabilityEngine):
             self.get_logger().info(
                 f"count_with_panel: set_overlay_visible(False) returned {hidden}"
             )
+
+    def _count_with_runui_panel(self, to: int, interval: float, ctx) -> dict:
+        """Same as `count_with_panel` above, but built on `capability_ui.RunUI`'s reusable panel
+        helpers instead of calling ctx.update_user_panel()/ctx.poll_ui_event()/
+        ctx.publish_overlay_image()/ctx.set_overlay_visible() by hand.
+
+        `RunUI.motion()` shows the progress-with-Stop panel and runs its own watcher thread that
+        reads ctx.poll_ui_event() for the tap -- this loop never has to poll for it itself, unlike
+        `_wait_for_stop()` above. Its `cancel` callback is wired to this engine's own cancel
+        (`cancel_own_run`), the same cancel the orchestrator's own Stop/cancel goes through, so a
+        Stop here shows a "Stopped" notice and re-raises `Cancelled` exactly as any other cancelled
+        action would -- a different (and more featureful) Stop behaviour than `count_with_panel`'s
+        own hand-rolled one above, which instead returns a normal result with `stopped_by_user:
+        true`. `RunUI.overlay_shown()` brackets the overlay camera feed's show/hide in one call, in
+        place of `count_with_panel`'s own `try`/`finally` around `ctx.set_overlay_visible()`.
+        """
+        ui = RunUI(ctx, "Counting", cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+        overlay_image = _build_stripe_overlay_image()
+
+        def do_count():
+            with ui.overlay_shown():
+                for n in range(1, to + 1):
+                    ctx.checkpoint()  # honours pause and cancel between steps
+                    pct = 100.0 * n / to
+                    ui.moving(f"{n}/{to}", pct, "counting")
+                    ui.publish_overlay_image(overlay_image)
+                    time.sleep(interval)
+                    ctx.progress("counting", pct, f"{n}/{to}")
+            return {"counted_to": to}
+
+        result = ui.motion(f"Counting to {to}.", do_count)
+        ui.done(f"Counted to {to}.", mock=self.mock)
+        return result
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
         """Sleeps `duration` seconds in short steps, honouring cancel and
