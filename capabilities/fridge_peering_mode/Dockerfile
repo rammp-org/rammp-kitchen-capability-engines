@@ -42,7 +42,7 @@ COPY capabilities/microwave_place/ src/microwave_place/
 COPY capabilities/fridge_peering_mode/ src/fridge_peering_mode/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
-# base's entrypoint sources its install/ automatically. The nightly base ships
+# base's entrypoint sources its install/ automatically. The base ships
 # rosdep's sources but no cache, so rosdep update first.
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \
