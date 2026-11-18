@@ -19,8 +19,9 @@ instance_id, passed to the run as --instance-id), and a lid box stacked on it. N
 runs in this node.
 
 Started from the UI (the orchestrator's token for the execution in hand), the run shows a panel
-for as long as it goes: what it is doing, a bar, and one button, Cancel, which is the
-orchestrator's cancel (Panel). No Pause: a run cannot pause.
+for as long as it goes: what it is doing, a bar, and one button, Stop, which is the
+orchestrator's cancel (Panel). No Pause: a run cannot pause. It ends on a final notice with Done
+(capability_ui.RunUI: Done, failed in ui_text's plain words, or Stopped), waited on, bounded.
 
 SAFETY: the arm moves only on a node with allow_execute:=true, set for an attended run (someone
 at the e-stop). With it false, open_box is reported unavailable and a goal that comes anyway is
@@ -43,10 +44,11 @@ from collections import deque
 from pathlib import Path
 
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
+from capability_ui import RunUI, cancel_own_run, wrap
 from rammp_orchestrator_interfaces.msg import ActionAvailability
 from rammp_orchestrator_interfaces.srv import Control
 
-from . import LOGGER, line_up
+from . import LOGGER, line_up, ui_text
 from .constants import AIR_CONTROL_ENV, state_dir
 from .flight_view import FlightView
 from .runtime.abort import EXIT_HALTED, EXIT_NOT_LINED_UP
@@ -395,19 +397,23 @@ class WorldWriter:
 
 # The run's panel on the UI (Panel). The bar's scale is the UI's, 0 to 100 (docs/UI_JSON_SCHEMA.md, the
 # base class's example); ctx.progress keeps REVIEW_RULES U2's fraction from 0 to 1.
-PANEL_TITLE = "Opening the container"
-PANEL_CANCEL = "cancel"  # the Cancel button's id
+PANEL_TITLE = ui_text.TITLE
+PANEL_CANCEL = "cancel"  # the Stop button's id
 PANEL_PCT = 100.0
 # an unchanged panel is sent again this often: a goal the bridge ended on its own (its abort, a refusal) is opened
 # again by the next send, and Cancel is back on the screen (the microwave engine's period)
 PANEL_REFRESH_S = 1.0
 PANEL_CANCELLED = "Cancelled: the arm is stopping where it is"
 PANEL_TIMED_OUT = "Taking too long: the arm is stopping where it is"
+# the final notice (Done, Stopped, failed) is waited on for its Done at most this long, and never past the
+# orchestrator's 120 s less NOTICE_MARGIN_S from the goal's start: a notice must never become its timeout
+NOTICE_S = 60.0
+NOTICE_MARGIN_S = 10.0
 
 
 class Panel:
     """open_box's panel on the UI for as long as it runs (REVIEW_RULES U3): what the run is doing (the phase and
-    the message its progress reports), a bar, and ONE button, Cancel. No Pause, and `pausable` false: a run is one
+    the message its progress reports), a bar, and ONE button, Stop. No Pause, and `pausable` false: a run is one
     motion and cannot pause. Once the run is being stopped (`stopping`: a cancel, its budget) it says so and has
     no button left: there is nothing more to ask of it.
 
@@ -436,9 +442,9 @@ class Panel:
         text = self.stopping or (message[:1].upper() + message[1:])
         return {
             "title": PANEL_TITLE,
-            "message": text,
+            "message": wrap(text),  # the UI does not wrap: a long line runs off its screen (capability_ui.wrap)
             "progress": {"phase": phase, "pct": round(PANEL_PCT * pct, 1), "message": text, "pausable": False},
-            "buttons": [] if self.stopping else [{"button_id": PANEL_CANCEL, "label": "Cancel"}],
+            "buttons": [] if self.stopping else [{"button_id": PANEL_CANCEL, "label": "Stop"}],
         }
 
     def tick(self):
@@ -614,6 +620,8 @@ class Capability(CapabilityEngine):
             self.declare_parameter(name, default)
         self._run = None  # the Run under way
         self._cancelled_token = None  # the execution a CANCEL came for before its goal did (_on_control)
+        self._ui_stopped = False  # this execution was stopped by the panel's own Stop (_cancel_from_ui)
+        self._ui_held = False  # this execution's run ended with the lid in the fingers (for its Stopped notice)
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -668,7 +676,8 @@ class Capability(CapabilityEngine):
     def _cancel_from_ui(self):
         """The panel's Cancel is the orchestrator's: the base class's own Control.CANCEL, so the run ends the
         one way a cancel ends it (its Ctrl+C, the result cancelled, no world-state write after it)."""
-        self.get_logger().warning("Cancel pressed on the UI: the action is cancelled")
+        self.get_logger().warning("Stop pressed on the UI: the action is cancelled")
+        self._ui_stopped = True  # the user's own Stop: the action ends on a Stopped notice (execute)
         CapabilityEngine._on_control(self, Control.Request(command=Control.Request.CANCEL), Control.Response())
 
     def _on_control(self, request, response):
@@ -822,6 +831,48 @@ class Capability(CapabilityEngine):
         return [ActionAvailability(action_id=a.action_id, available=not why, reason=why) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
+        """open_box (_open_box), and how it ended on the UI (capability_ui.RunUI, the shared panels): a Done
+        notice, a failed notice in plain words (ui_text) saying where the arm and the lid are, or after the
+        panel's own Stop a Stopped notice. Each waits for its Done, bounded (_notice). An orchestrator cancel
+        shows nothing more: the orchestrator has taken the UI back. Standalone (no UI) nothing is sent."""
+        t0 = time.monotonic()
+        self._ui_stopped = self._ui_held = False
+        ui = RunUI(ctx, PANEL_TITLE, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+        try:
+            result = self._open_box(action_id, params, ctx)
+        except Cancelled:
+            if self._ui_stopped:
+                ui.user_stopped = True  # the notice stays up through the cancel it made, until Done
+                self._notice(ui, t0, ui_text.stopped(self._ui_held), f"{PANEL_TITLE}: stopped", "warning")
+            raise
+        except EngineError as error:
+            if not ctx.cancelled():
+                if error.error_code == "not_allowed":
+                    self._notice(ui, t0, ui_text.NOT_ALLOWED, f"{PANEL_TITLE}: not started", "warning")
+                else:
+                    words = ui_text.failure(error.error_code, str(error))
+                    self._notice(ui, t0, words, f"{PANEL_TITLE}: failed", "error")
+            raise
+        except Exception as error:
+            if not ctx.cancelled():
+                self._notice(ui, t0, ui_text.unexpected(error), f"{PANEL_TITLE}: failed", "error")
+            raise
+        done = ui_text.done(result)
+        self._notice(ui, t0, f"Mock: {done} No arm motion." if result.get("mock") else done)
+        return result
+
+    def _notice(self, ui, t0, message, title=None, style=None):
+        """A final notice with Done, where this execution has the UI: waited on for at most NOTICE_S, and never
+        past the orchestrator's 120 s (less NOTICE_MARGIN_S) from `t0`, the goal's start. Never raises."""
+        try:
+            if not self._ui_live():
+                return
+            wait_s = max(0.0, min(NOTICE_S, ORCHESTRATOR_TIMEOUT_S - NOTICE_MARGIN_S - (time.monotonic() - t0)))
+            ui.notice(message, title=title, timeout_s=wait_s, style=style)
+        except Exception as e:  # noqa: BLE001 -- the action's outcome is decided: a notice must not change it
+            self.get_logger().warning(f"UI: the final notice was not shown: {type(e).__name__}: {e}")
+
+    def _open_box(self, action_id, params, ctx):
         if self._cancelled_early():
             raise Cancelled()  # nothing ran
         check_params(params)
@@ -879,6 +930,7 @@ class Capability(CapabilityEngine):
             view.finish(
                 code, cancelled=ctx.cancelled() or panel.pressed, timed_out=run_.timed_out, held=bool(track.held)
             )
+            self._ui_held = bool(track.held)  # for a Stopped notice (execute)
         if ctx.cancelled() or panel.pressed:
             world.wait(WORLD_WAIT_S)  # those queued before the cancel
             raise Cancelled()

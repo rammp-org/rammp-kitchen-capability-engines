@@ -94,7 +94,7 @@ params:
   ui_bridge_node_name: ui_bridge_node
   # the mock only (mock: true): how long each of its seven phases lasts, in seconds. 0: its run
   # is over at once. A second or two and the UI can be rehearsed on it with no arm: the run's
-  # panel, its bar, Cancel
+  # panel, its bar, Stop, its final notice
   mock_phase_s: 0.0
   # the line-up before a run, on the UI: the panel tells the user which way to move until the container
   # is where the arm opens it, then asks, and the arm moves only on its Open. false (the default): open_box
