@@ -340,12 +340,14 @@ def config_path(name, *where):
 
 def budget_env(env, budget_s, timed):
     """`env` with the run's own time in it (RUN_BUDGET_ENV), for the run started now: JSON, "s" the seconds
-    until this node stops it (Capability._follow's budget_s), "from" this host's time.time() they count from
-    (now: the run's start), and "go" whether they start again, whole, at each go the run is given — a goal
-    sent by hand (not `timed`), whose budget _follow counts from its last go; under the orchestrator's 120 s
-    it never moves. The run's side of it is tasks/reach_lid_off.RunClock. A copy: the line-up's other
-    children (reach_probe, the watch) are started on `env` as it was."""
-    told = {"s": round(float(budget_s), 1), "from": round(time.time(), 3), "go": not timed}
+    until this node stops it (Capability._follow's budget_s), "from" the time.monotonic() they count from
+    (now: the run's start, on the clock Run.started and _follow count by — the node and its run are
+    processes on one host, and that clock is the host's, which no step of the wall clock moves; it was
+    time.time() until the review of 2026-11-19), and "go" whether they start again, whole, at each go the
+    run is given — a goal sent by hand (not `timed`), whose budget _follow counts from its last go; under
+    the orchestrator's 120 s it never moves. The run's side of it is tasks/reach_lid_off.RunClock. A copy:
+    the line-up's other children (reach_probe, the watch) are started on `env` as it was."""
+    told = {"s": round(float(budget_s), 1), "from": round(time.monotonic(), 3), "go": not timed}
     return dict(env, **{RUN_BUDGET_ENV: json.dumps(told)})
 
 

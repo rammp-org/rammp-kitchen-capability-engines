@@ -35,8 +35,12 @@ to another spot (owner 2026-11-19: "it should keep trying spots"), one line a sp
      8 SET DOWN  FAIL  spot 2 (31 cm from the box): something held the lid up, lid kept
      9 SET DOWN  ok    spot 3 (25 cm from the box): let go where the lid met the table
 
-— or, where no other spot is tried (none left, no time for one, a set-down that could not be
-watched), carried back to the box: `next` says so and why, and the result says `lid: on the box`.
+— or, where no other spot is tried (none left, no time for one or a time the run cannot read, held
+up at the same height twice, a set-down that could not be watched), carried back to the box: `next`
+says so and why, and the result says `lid: on the box`.
+A run cut between two spots (the engine's budget, a cancel) has no step in flight by this view's
+steps: its end says which it was and where the lid was — on its way to the next spot, or in the
+hand while that spot was chosen — and that, not the spot left before it, is where the run failed.
 A lid that slipped out of the fingers on the way (the run's "the lid slipped on the way" line, the
 knuckle read at the table) is never "on the table" either, whatever the set-down felt: the step that
 failed is the carry, and the result says the lid slipped out and that where it lies is not known.
@@ -108,6 +112,7 @@ SETDOWN_NONE = re.compile(r"^SET-DOWN: no table felt")
 SETDOWN_ON = re.compile(r"^SET-DOWN: no table felt at spot (\d+), \[.*?\] — (.*); the lid is not let go: up with it")
 SPOT_N = re.compile(r"; spot (\d+) of this run")  # in the run's "lid goes to" line, from its second spot on
 NO_OTHER_SPOT = re.compile(r"back onto the box \(no other spot is tried: (.*)\)$")
+SPOT_FLIES = re.compile(r"^SPOT (\d+), ONE MOTION: ")  # the carry to a spot after the first goes out
 SLIPPED = re.compile(r"^the fingers read \S+ at the table, outside the grip band .*: the lid slipped on the way")
 SLIPPED_HOME = re.compile(r"^the arm is home, but the lid slipped out of the fingers")
 LID_SLIPPED = "slipped out of the fingers on the way (where it lies is not known)"
@@ -224,13 +229,27 @@ def _felt(why):
 def _no_other(why):
     """Why no other spot is tried after a set-down that felt no table (reach_lid_off.SpotSearch.no_more,
     _release_and_home), in a few plain words."""
+    if "cannot be read" in why:  # (before "the run's time": this one's words have that in them too)
+        return "the run's time cannot be read"
     if "run's time" in why:
         return "no time left for another spot"
     if "as many as a run tries" in why:
         return "as many spots as a run tries"
     if "could not be watched" in why:
         return "a set-down that cannot be watched is tried nowhere else"
+    if "at the same height" in why:
+        return "held up at the same height twice: probably the table, higher than planned"
     return "no other spot is tried"
+
+
+def _why_put_back(text):
+    """Why the lid is put back on the box from over a spot it was left at (reach_lid_off.another_spot's
+    PUT BACK line), in a few plain words; "" where the line gives none of these."""
+    if "run's time" in text:
+        return " (no time left for another spot)"
+    if "no other spot on the table" in text:
+        return " (no other spot found on the table)"
+    return ""
 
 
 def _plain(stop, out_m):
@@ -283,6 +302,12 @@ class FlightView:
         self.spot_n = 1  # which of the run's spots the lid is on its way to (1: the first)
         self.spots_left = []  # the set-downs that felt no table and kept the lid: each one's (n, name, why)
         self.carried = False  # the lift and the carry were said (once a grip: the next spots are set-downs alone)
+        # between two spots, where no step of this view is in flight: "choosing" (the lid in the hand over the
+        # spot left) | "carry" (on its way to the next spot) | None
+        self.between = None
+        self.box_why_said = (
+            False  # why the lid goes back to the box was said (once: the carry back's line, or the put-back's)
+        )
         self.one_motion = False
         self.lid = "on the box"
         self.log = None  # where the run's full lines are kept (the node's, node.Capability._lines_to_file)
@@ -566,6 +591,7 @@ class FlightView:
             return
         if SETDOWN.match(s):
             self.setdown_met = True
+            self.between = None
             return
         m = SETDOWN_ON.match(s)
         if m:
@@ -576,10 +602,15 @@ class FlightView:
             self._fail("%s: %s, lid kept" % (self._spot(), _felt(m.group(2))), "SET DOWN")
             self.spots_left.append(self.last_fail)
             self.setdown_met = False
+            self.between = "choosing"
+            return
+        if SPOT_FLIES.match(s):
+            self.between = "carry"
             return
         if SETDOWN_NONE.match(s):
             # the arm felt no table under the lid: it is not let go (reach_lid_off.carry_back), and no other
             # spot is tried
+            self.between = None
             self._carried()
             m = NO_OTHER_SPOT.search(s)
             if m is None and not self.spots_left:
@@ -590,6 +621,7 @@ class FlightView:
             self._fail("%s: %s, lid kept" % (self._spot(), _felt(why)), "SET DOWN")
             self.spots_left.append(self.last_fail)
             self.failed = self.failed or self.last_fail
+            self.box_why_said = m is not None
             self._note(
                 "carrying the lid back to the box%s" % ("" if m is None else " (%s)" % _no_other(m.group(1))), "next"
             )
@@ -620,7 +652,9 @@ class FlightView:
             return
         if PUT_BACK.match(s):
             self.lid = "on the box"
-            self._note("putting the lid back on the box", "next")
+            self.between = None
+            why = _why_put_back(s) if self.spots_left and not self.box_why_said else ""
+            self._note("putting the lid back on the box%s" % why, "next")
             return
         m = REFUSED.match(s)
         if m:
@@ -703,6 +737,7 @@ class FlightView:
 
     def _stop(self, stop):
         """The run's STOP: the step in flight (else the one it names) failed for good."""
+        self.between = None
         if SLIPPED_HOME.match(stop):
             # the run's last word of a lid that slipped out: the arm IS home (its way there ended well),
             # the fingers empty, and the step that failed is the lid's way to its spot
@@ -769,6 +804,23 @@ class FlightView:
 
     def _finish(self, code, cancelled, timed_out, held):
         took = "" if self.t0 is None else "%3.0f s" % (self._clock() - self.t0)
+        if self.cur is None and self.between is not None and (cancelled or timed_out or code != 0):
+            # cut between two spots: the lid on its way to the next, or in the hand while it was chosen. No
+            # step is in flight by this view's steps, and the last line written is a spot left behind — the
+            # result named that, "no table felt", of a run the engine's budget had cut with the lid in the air
+            word = (
+                "cancelled"
+                if cancelled
+                else "stopped: the run took too long"
+                if timed_out
+                else "the run ended here" + ("" if code is None else " (exit code %s)" % code)
+            )
+            if self.between == "carry":
+                self._fail("%s, the lid on its way to spot %d" % (word, self.spot_n), "CARRY", final=True)
+            else:
+                self._fail("%s, the next spot for the lid being chosen" % word, "SET DOWN", final=True)
+            self.lid = "in the hand"
+            self.between = None
         if self.cur is not None:
             if cancelled or timed_out:
                 self._fail("cancelled" if cancelled else "stopped: the run took too long", None, final=True)

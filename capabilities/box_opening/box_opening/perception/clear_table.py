@@ -420,6 +420,29 @@ def table_bounds(tmap):
     )
 
 
+def spheres_clearance(tmap, centres, radii, table_z):
+    """(metres, (x, y), tall, k): the least room any of the spheres has from what `tmap` shows
+    standing, or None where nothing stands (or there is no sphere). Each sphere (`centres` (n, 3)
+    in the base frame, `radii` (n,)) against each standing thing as the map has it — its whole
+    cell, a column from the table at `table_z` up to its height: the distance from the sphere's
+    surface to that column, negative inside it. With it: where the thing stands, how tall, and
+    which sphere. For a body that is not a hand straight down (HAND_PARTS' rectangles are): the
+    leaning hand and wrist of a set-down, as the arm's own body model has them
+    (reach_lid_off.hand_into_standing)."""
+    st = tmap.standing()
+    C = np.asarray(centres, float).reshape(-1, 3)
+    r = np.asarray(radii, float).reshape(-1)
+    if not len(st) or not len(C):
+        return None
+    half = 0.5 * tmap.cell
+    dx = _to_square(st[None, :, 0] - C[:, None, 0], half)
+    dy = _to_square(st[None, :, 1] - C[:, None, 1], half)
+    dz = np.maximum((C[:, None, 2] - float(table_z)) - st[None, :, 2], 0.0)  # over the thing's top: how far
+    d = np.sqrt(dx * dx + dy * dy + dz * dz) - r[:, None]
+    k, j = np.unravel_index(int(np.argmin(d)), d.shape)
+    return float(d[k, j]), (float(st[j, 0]), float(st[j, 1])), float(st[j, 2]), int(k)
+
+
 def table_places(tmap, step, inset, within=None):
     """[(x, y)]: every place on the table `tmap` measured, `step` apart — the points of a lattice over
     table_bounds, `inset` inside it (and inside `within`, (x0, x1, y0, y1), where given), whose own

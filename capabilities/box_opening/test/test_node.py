@@ -2174,12 +2174,14 @@ def test_the_run_is_told_the_time_it_has_as_it_is_started(engine, monkeypatch, t
     def run_once():
         _forget_run_logs(tmp_path)
         given(monkeypatch, FULL_RUN)
-        t0 = time.time()
+        t0 = time.monotonic()
         assert engine.execute("open_box", {}, FakeCtx())["lid_off"]
         (env,) = envs
         envs.clear()
         told = json.loads(env[node.RUN_BUDGET_ENV])
-        assert t0 - 0.01 <= told["from"] <= time.time()  # from the run's start, on this host's clock
+        # from the run's start, on the host's monotonic clock — the one Run.started and _follow count by, and
+        # the run's RunClock: the wall clock (time.time(), as first written) can step under a run
+        assert t0 - 0.01 <= told["from"] <= time.monotonic()
         return told
 
     # a goal sent by hand: the whole budget, again from each go

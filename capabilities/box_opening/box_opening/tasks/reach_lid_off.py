@@ -620,6 +620,44 @@ RUN_BUDGET_ENV = "BOX_OPENING_RUN_BUDGET"
 # table that is gone through (_offers, _thinned)
 WHOLE_TABLE_TRIES = 48
 WHOLE_TABLE = "the whole table"
+# What a carry flown with the lid is asked along the path it actually flies, once it is not the first
+# spot's own (lid_way_refusal; review of 2026-11-19). plan_carry asked a planned carry only of the
+# joint gate, the chair and its user and the box's footprint; the map only of the straight chord at
+# carry height (_offers' way); and the planner's world holds no table. On flatbot's URDF a joint-space
+# line between two hovers 0.35-0.85 m apart left that chord by 36-174 mm, and in two of seven pairs
+# sank 111-117 mm, to 80-89 mm over the table (the review's probes). So:
+#  - LID_HANG_M: the lid hangs this much lower than the model's cap puts it — the 19 set-downs flown
+#    to their plan's end first met the table 13.2 mm over the plan in the mean (setdown_table_z's
+#    note: lid_dims.z is an estimate) — and every height asked of the lid here is taken that much
+#    lower (the canister's top too: lid_low_over_box had no margin at all);
+#  - CARRY_SAG_M: the lid's lowest point may pass this far under the lower of the path's two ends
+#    (each a hover, the lid CARRY_CLEAR_M over the box's top at the least), no further: the arm's
+#    own walk between two hovers keeps their height, a path that sinks under it is no carry;
+#  - CARRY_CHECK_RAD: the path is asked between its waypoints too, no joint moving more than this
+#    from one state asked to the next (runtime/body's CHECK_STEP_RAD).
+LID_HANG_M = 0.013
+CARRY_SAG_M = 0.010
+CARRY_CHECK_RAD = 0.02
+# A leaning hand's real body and what stands on the table (hand_into_standing; the same review). The
+# gate's hand (clear_table.HAND_PARTS) is a hand straight down: two rectangles over the spot. Leaning
+# back toward the arm, the hand's body stands arm-side of the spot — at 30 deg a point 250 mm up the
+# hand is 125 mm arm-side and 217 mm up — and the rectangles stay where they were: a spot was taken
+# with a 15 cm thing 7 cm arm-side of the lid's middle, the arm's centre line passing through it; at
+# 20 deg that line passed 18 mm from its top. A leaning set-down of the wider search, or of a spot
+# after the first, is taken only where the body model's own spheres of the hand and wrist, at the
+# set-down's own joints all the way down, stand this far clear of everything the map shows standing:
+# clear_table.UP_SLACK_M, what the hand straight down keeps of a thing's height, on top of the
+# spheres' own buffer (5 mm) and the map's cell (a thing is its whole cell).
+HAND_STANDS_CLEAR_M = clear_table.UP_SLACK_M
+# The way back up from a touch that felt nothing, and what goes by before the next goal: the part of
+# SPOT_S that is not the carry's own flight (the retreat's line 1.3-1.7 s, 0.1-0.5 s between goals).
+# Once a carry is planned its own flight is known (flight_s), and the time is asked for that and this
+SPOT_UP_S = 2.5
+# Two spots where something held the lid up at heights no further apart than this are one thing: the
+# table itself, standing higher than the run has it (the plan is the same at both; the 19 flown met
+# the table within 27 mm of each other across runs whose plans stood up to 24 mm apart). No further
+# spot is pressed on: each "held" presses 12-16 mm into what it met, some 20-25 N (SETDOWN_STALL_REF_M)
+SAME_HELD_M = 0.015
 
 
 @dataclass(frozen=True)
@@ -778,17 +816,22 @@ def landing_tilt_deg(ctx, drop, held):
     return math.degrees(math.acos(max(-1.0, min(1.0, float(n[2])))))
 
 
-def lid_low_over_box(ctx, pts, held):
-    """Why the joint path `pts` would bring the held lid too low over the canister, or None: at one
-    of its points the lid's disc — level as the grip took it, the hand then at joints `held`
-    (_lean_setdown_poses' lid) — stands over the box's footprint (round every place the run has the
-    box: box_centres) with its lowest point under the top the lid came off: the cameras' top of the
-    box, or the lid's top as the fingers took it where that stands higher (_gripped_lid_top). The
-    hover of every spot holds the lid CARRY_CLEAR_M over that top (Place.hover_for, _lean_setdown_poses);
-    this asks it of the way between two hovers, and of a hand that leans further than any flown
-    (SETDOWN_LEAN_MAX_DEG's note: the canister stands open under it)."""
+def _path_states(pts, step_rad=CARRY_CHECK_RAD):
+    """The joint path `pts` as the arm flies it between its waypoints (straight joint lines): its
+    states, no joint moving more than `step_rad` from one to the next."""
+    out = [[float(v) for v in pts[0]]]
+    for a, b in zip(pts[:-1], pts[1:], strict=False):
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        n = max(1, int(math.ceil(float(np.abs(b - a).max()) / step_rad)))
+        out += [[float(v) for v in a + (b - a) * k / n] for k in range(1, n + 1)]
+    return out
+
+
+def _lid_along(ctx, pts, held):
+    """The held lid at each joint state of `pts`: ((n, 2) its bottom centre's x and y, (n,) the
+    height of its lowest point) — level as the grip took it, the hand then at joints `held`
+    (_lean_setdown_poses' lid), and hanging LID_HANG_M lower than the model's cap puts it."""
     from box_opening.runtime import approach
-    from box_opening.tasks.press_demo import container_half
 
     chain = approach._chain()
     m = ctx.model
@@ -797,28 +840,208 @@ def lid_low_over_box(ctx, pts, held):
     top = np.asarray(dp.DOWN_CONTACT_TOOL, float) + Rg.T @ (GRIP_BELOW_LID_M * up)  # the lid's top, in the tool frame
     normal = Rg.T @ up
     lid_r = 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1]))
-    over = container_half(m) + lid_r
-    floor = float(ctx.cpose.xyz[2]) + float(m.dims[2])
-    q_grip = getattr(getattr(ctx, "lid_lifted", None), "q_grip", None)
-    if q_grip is not None:
-        floor = max(floor, _gripped_lid_top(chain, q_grip))
-    centres = box_centres(ctx)
+    xy, low = [], []
     for p in pts:
         R, t = chain.fk([float(v) for v in p])
         R, t = np.asarray(R, float), np.asarray(t, float)
         n = R @ normal
         bottom = t + R @ top - float(m.lid_dims[2]) * n
-        if min(math.hypot(float(bottom[0]) - x, float(bottom[1]) - y) for x, y in centres) >= over:
-            continue
-        low = float(bottom[2]) - lid_r * math.sqrt(max(0.0, 1.0 - float(n[2]) ** 2))
-        if low < floor - 1e-4:
-            return "the lid's lowest point would pass %.0f mm under the top it came off, over the open canister" % (
-                1000 * (floor - low)
-            )
+        xy.append([float(bottom[0]), float(bottom[1])])
+        low.append(float(bottom[2]) - lid_r * math.sqrt(max(0.0, 1.0 - float(n[2]) ** 2)) - LID_HANG_M)
+    return np.asarray(xy, float).reshape(-1, 2), np.asarray(low, float)
+
+
+def lid_low_over_box(ctx, pts, held):
+    """Why the joint path `pts` would bring the held lid too low over the canister, or None:
+    somewhere along it (between its waypoints too: _path_states) the lid's disc — level as the grip
+    took it, the hand then at joints `held`, hanging LID_HANG_M lower than the model's cap
+    (_lid_along) — stands over the box's footprint (round every place the run has the box:
+    box_centres) with its lowest point under the top the lid came off: the cameras' top of the
+    box, or the lid's top as the fingers took it where that stands higher (_gripped_lid_top). The
+    hover of every spot holds the lid CARRY_CLEAR_M over that top (Place.hover_for, _lean_setdown_poses);
+    this asks it of the way between two hovers, and of a hand that leans further than any flown
+    (SETDOWN_LEAN_MAX_DEG's note: the canister stands open under it)."""
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_demo import container_half
+
+    m = ctx.model
+    over = container_half(m) + 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1]))
+    floor = float(ctx.cpose.xyz[2]) + float(m.dims[2])
+    q_grip = getattr(getattr(ctx, "lid_lifted", None), "q_grip", None)
+    if q_grip is not None:
+        floor = max(floor, _gripped_lid_top(approach._chain(), q_grip))
+    centres = box_centres(ctx)
+    xy, low = _lid_along(ctx, _path_states(pts), held)
+    under = 0.0  # the most the lid passes under that top, anywhere over the box (not the first state that does)
+    for (x, y), z in zip(xy, low, strict=True):
+        if min(math.hypot(float(x) - cx, float(y) - cy) for cx, cy in centres) < over:
+            under = max(under, floor - float(z))
+    if under > 1e-4:
+        return "the lid's lowest point would pass %.0f mm under the top it came off, over the open canister" % (
+            1000 * under
+        )
     return None
 
 
-def drop_reachable(ctx, drop, q_start, seeds=(), held=None):
+def lid_way_refusal(ctx, tmap, pts, held, table_z):
+    """Why the joint path `pts`, flown with the lid in the fingers, is no carry at carry height over
+    the table the cameras measured, or None (LID_HANG_M's note). Along the whole of it as the arm
+    flies it (_path_states), the lid as _lid_along has it:
+
+     - its lowest point never more than CARRY_SAG_M under the lower of the path's two ends: a path
+       that sinks between two hovers is refused, whatever it would or would not meet;
+     - nothing the map `tmap` shows standing under the path it sweeps, taller than the lid passes
+       there: the lid's disc and the hand over it, as clear_spots asks the straight way from the
+       box (clear_table.carry_clearance_fast: LID_CLEAR_M, HAND_PARTS' own margins, UP_SLACK_M),
+       asked here of the flown path stretch by stretch at the height the lid has on each, over the
+       table at `table_z`.
+
+    The canister is lid_low_over_box's (plan_carry asks both)."""
+    states = _path_states(pts)
+    xy, low = _lid_along(ctx, states, held)
+    ends = float(min(low[0], low[-1]))
+    k = int(np.argmin(low))
+    if float(low[k]) < ends - CARRY_SAG_M:
+        return "the lid would sink %.0f mm under the height it is carried at on the way, to %.0f mm over the table" % (
+            1000 * (ends - float(low[k])),
+            1000 * (float(low[k]) - float(table_z)),
+        )
+    if tmap is None or not len(tmap.standing()):
+        return None
+    m = ctx.model
+    lid_r, lid_h = 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1])), float(m.lid_dims[2])
+    last = 0
+    for i in range(1, len(states)):
+        if i < len(states) - 1 and math.hypot(*(xy[i] - xy[last])) < tmap.cell:
+            continue
+        over = float(low[last : i + 1].min()) - float(table_z)  # the lid's lowest point over the table on this stretch
+        room, what, at = clear_table.carry_clearance_fast(tmap, xy[last], xy[i], lid_r, over + lid_h, lid_h)
+        if room < 0.0:
+            return (
+                "%s would pass %.0f mm inside what it must keep from what stands near [%.2f, %.2f], the lid %.0f mm "
+                "over the table there"
+                % (
+                    what,
+                    -1000 * room,
+                    at[0],
+                    at[1],
+                    1000 * over,
+                )
+            )
+        last = i
+    return None
+
+
+def _hand_links(body):
+    """The links of `body` (runtime/body.Body) that are the hand and the wrist: every link five or
+    more of the arm's joints move (the wrist's two links, the bracelet, the gripper and the camera
+    on it). None: a body that does not say (every sphere it has is asked)."""
+    paths = getattr(body, "paths", None)
+    if not paths:
+        return None
+    return {link for link, path in paths.items() if sum(1 for step in path if step[2] is not None) >= 5}
+
+
+def _hand_room(body, tmap, pts, table_z, most):
+    """The least room the hand's and the wrist's spheres of `body` (_hand_links) have from what `tmap`
+    shows standing over the table at `table_z`, at no more than `most` states evenly along the joint
+    states `pts`, its ends among them: (metres, (x, y) of the thing, its height, the link), or None
+    where nothing stands (clear_table.spheres_clearance)."""
+    hand = _hand_links(body)
+    pts = [[float(v) for v in p] for p in pts]
+    every = max(1, int(math.ceil((len(pts) - 1) / max(1, most - 1))))
+    states = pts[::every] + ([pts[-1]] if (len(pts) - 1) % every else [])
+    worst = None
+    for q in states:
+        centres, radii, links = body.spheres_at(q)
+        keep = np.array([hand is None or link in hand for link in links], bool)
+        if not keep.any():
+            continue
+        got = clear_table.spheres_clearance(
+            tmap, np.asarray(centres, float)[keep], np.asarray(radii, float)[keep], table_z
+        )
+        if got is not None and (worst is None or got[0] < worst[0]):
+            worst = (got[0], got[1], got[2], [link for link, k in zip(links, keep, strict=True) if k][got[3]])
+    return worst
+
+
+def _into_what_stands(worst):
+    """The words for a _hand_room that is too little: how near, what, where, which link."""
+    room, at, tall, link = worst
+    return "%s what stands %.0f mm tall at [%.2f, %.2f] (%s; %.0f mm is kept)" % (
+        "%.0f mm into" % (-1000 * room) if room < 0.0 else "within %.0f mm of" % (1000 * room),
+        1000 * tall,
+        at[0],
+        at[1],
+        link,
+        1000 * HAND_STANDS_CLEAR_M,
+    )
+
+
+def hand_into_standing(ctx, tmap, pts, table_z):
+    """Why the hand, coming down the joint line `pts` to a leaning set-down, would come into what
+    the map shows standing on the table, or None (HAND_STANDS_CLEAR_M's note): the body model's
+    spheres of the hand and wrist (approach.body_check, _hand_links) at states all the way down the
+    line, each HAND_STANDS_CLEAR_M clear of every standing thing's column over the table at `table_z`
+    (clear_table.spheres_clearance). No body model (the bench, body_layers off): nothing tells the
+    leaning hand's body from what stands there, and that is why — a leaning set-down is then not
+    taken past the first spot's own."""
+    from box_opening.runtime import approach
+
+    body = approach.body_check()
+    if body is None:
+        return "no body model of the hand to hold it, leaning, out of what stands by the spot"
+    if tmap is None or not len(tmap.standing()):
+        return None
+    worst = _hand_room(body, tmap, pts, table_z, 9)
+    if worst is None or worst[0] >= HAND_STANDS_CLEAR_M:
+        return None
+    return "the hand leaning there would come %s" % _into_what_stands(worst)
+
+
+def hand_way_refusal(ctx, tmap, pts, table_z):
+    """Why the hand, flying the joint path `pts` with the lid, would come into what the map shows
+    standing on the table, or None: the same spheres by the same margin (hand_into_standing), at
+    states all along the path as the arm flies it (_path_states). lid_way_refusal asks the lid's
+    disc and a hand straight down over it (HAND_PARTS); from a set-down's attitude to the next the
+    hand leans and turns on the way, and its body is not over the lid. None too where there is no
+    body model: the lid's own check then stands alone, as for a hand straight down it may."""
+    from box_opening.runtime import approach
+
+    body = approach.body_check()
+    if body is None or tmap is None or not len(tmap.standing()):
+        return None
+    worst = _hand_room(body, tmap, _path_states(pts), table_z, 40)
+    if worst is None or worst[0] >= HAND_STANDS_CLEAR_M:
+        return None
+    return "the hand would pass %s on the way" % _into_what_stands(worst)
+
+
+class LaterWay:
+    """What the carry to a spot and its set-down are asked beyond what the first spot's are, on the
+    map `tmap` over the table at `table_z`, the lid as the hand at joints `held` holds it — for a
+    spot of the wider search and for every spot after the first (SpotSearch):
+      path(pts)           the carry's own path: lid_way_refusal, then the hand's own body along it,
+                          hand_way_refusal (plan_carry asks the canister of it too,
+                          lid_low_over_box);
+      descent(drop, pts)  a leaning set-down's way down: hand_into_standing (a hand straight down
+                          is the gate's own, clear_table.off_table's)."""
+
+    def __init__(self, ctx, tmap, table_z, held):
+        self.ctx, self.tmap, self.table_z = ctx, tmap, float(table_z)
+        self.held = [float(v) for v in held]
+
+    def path(self, pts):
+        why = lid_way_refusal(self.ctx, self.tmap, pts, self.held, self.table_z)
+        return why if why is not None else hand_way_refusal(self.ctx, self.tmap, pts, self.table_z)
+
+    def descent(self, drop, pts):
+        if _spot_lean(drop) == 0.0:
+            return None
+        return hand_into_standing(self.ctx, self.tmap, pts, self.table_z)
+
+
+def drop_reachable(ctx, drop, q_start, seeds=(), held=None, stands=None):
     """Why the hand does not set the lid down at `drop`, or None: no hand
     at the carry's hover at the set-down's attitude (straight down; for a
     LeanSpot leaning, the lid as gripped at `q_start`: setdown_poses) — the
@@ -827,7 +1050,8 @@ def drop_reachable(ctx, drop, q_start, seeds=(), held=None):
     has the lid meet the table). `held`: the joints the lid hangs level at,
     where those are not `q_start` (a carry from one spot to the next starts
     with the hand as the set-down left it, not as the grip had it:
-    SpotSearch.held)."""
+    SpotSearch.held). `stands(drop, line)`: what else the way down is asked
+    (LaterWay.descent: a leaning hand's body and what stands on the table)."""
     from box_opening.runtime import approach
     from box_opening.runtime import kinematics as kin
 
@@ -844,7 +1068,7 @@ def drop_reachable(ctx, drop, q_start, seeds=(), held=None):
     pts, why = chain.straight_line(q, [contact[0], contact[1], contact[2] - SETDOWN_PAST_M], quat)
     if pts is None:
         return "the set-down is not a straight line the arm can fly (%s)" % why
-    return None
+    return None if stands is None else stands(drop, pts)
 
 
 # ---- where the lid goes, chosen with the lid lifted -----------------------
@@ -1415,12 +1639,21 @@ class SpotsPassed:
     first_off: str = None
     no_land: int = 0
     unreachable: int = 0
-    aside: int = 0  # within the lid's own footprint of a spot it was taken to and felt no table at
+    aside: int = 0  # within the footprint left at a spot it was taken to and felt no table at (SpotSearch.aside)
     tilted: int = 0  # the hand leaning past SETDOWN_LEAN_DEG would land the lid tilted more than that lean lands it
     blocked: int = 0  # something the cameras saw stands in the lid's way there, taller than the lid is carried
+    tight: int = 0  # a place of the whole table with less room than the hand straight down asks (clearance)
 
     def says(self):
-        if not (self.off_table or self.no_land or self.unreachable or self.aside or self.tilted or self.blocked):
+        if not (
+            self.off_table
+            or self.no_land
+            or self.unreachable
+            or self.aside
+            or self.tilted
+            or self.blocked
+            or self.tight
+        ):
             return "no spot to try: no camera measured the table round the box"
         parts = []
         if self.off_table:
@@ -1428,7 +1661,7 @@ class SpotsPassed:
         if self.no_land:
             parts.append("%d inside the box's no-land radius" % self.no_land)
         if self.aside:
-            parts.append("%d within the lid's own footprint of a spot where no table was felt" % self.aside)
+            parts.append("%d within the footprint left at a spot where no table was felt" % self.aside)
         if self.tilted:
             parts.append(
                 "%d where the hand leaning %.0f deg would land the lid tilted more than %.0f"
@@ -1436,6 +1669,8 @@ class SpotsPassed:
             )
         if self.blocked:
             parts.append("%d with something standing in the lid's way there" % self.blocked)
+        if self.tight:
+            parts.append("%d with less room for the lid and the hand than a spot must have" % self.tight)
         if self.unreachable:
             parts.append("%d the hand does not reach" % self.unreachable)
         return "of the spots looked at, " + ", ".join(parts)
@@ -1455,6 +1690,7 @@ def table_note(ctx, table_z, spot_z, passed):
         "unreachable": None if passed is None else passed.unreachable,
         "aside": None if passed is None else passed.aside,
         "blocked": None if passed is None else passed.blocked,
+        "tight": None if passed is None else passed.tight,
     }
 
 
@@ -1490,7 +1726,19 @@ def _nearest_points(ctx, table_z, tmap=None):
 
 
 def spot_candidates(
-    ctx, tmap, table_z, q, seeds=(), reach=None, cache=None, spot_z=None, passed=None, aside=None, held=None, way=False
+    ctx,
+    tmap,
+    table_z,
+    q,
+    seeds=(),
+    reach=None,
+    cache=None,
+    spot_z=None,
+    passed=None,
+    aside=None,
+    held=None,
+    way=False,
+    stop=None,
 ):
     """Where the lid may go, best first, each one the hand reaches straight
     down from joints `q` (`reach`, drop_reachable's stand-in — _Reach, the
@@ -1524,13 +1772,16 @@ def spot_candidates(
     own footprint of it: SpotSearch.aside) — passed over, never a try.
     `held`: the joints the lid hangs level at, where those are not `q`
     (drop_reachable's). `way`: the lid's way there is asked of every spot
-    too (_offers: a carry that does not start over the box)."""
+    too (_offers: a carry that does not start over the box). `stop()`:
+    _offers' (the run's clock, asked all through a later spot's choice)."""
     passed = passed if passed is not None else SpotsPassed()
+    if stop is not None and stop():
+        return  # (before the room on the map is judged: that alone can take a second)
     tiers = _spot_tiers(ctx, tmap, table_z, q, cache, spot_z)
     # every tier straight down first, as the bench's runs chose; only past
     # them all, the same again with the hand leaning (SETDOWN_LEAN_DEG)
     passes = [(lean, tiers) for lean in (0.0, SETDOWN_LEAN_DEG)]
-    yield from _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=aside, held=held, way=way)
+    yield from _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=aside, held=held, way=way, stop=stop)
 
 
 def _spot_tiers(ctx, tmap, table_z, q, cache=None, spot_z=None):
@@ -1617,8 +1868,13 @@ def _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=None, held=None, s
     docstring: the no-land radius, `aside`, the measured table under the whole lid and the hand; for
     a lean past SETDOWN_LEAN_DEG how the lid lands, landing_tilt_deg) — none of those a try — then
     the hand's reach from `q`, at most TIER_TRIES of a tier in a pass. `skip`: the spots (_spot_key)
-    offered before, not offered again. `stop()`: asked before each reach check; true ends it all (the
-    run's time: SpotSearch.out_of_time).
+    offered before, not offered again. `stop()`: asked of every spot looked at, before anything is
+    worked out for it, and before each reach check; true ends it all (the run's time:
+    SpotSearch.out_of_time — the wider search goes through hundreds of places, and the clock was
+    asked only once a place had passed them all: 1-3 s later on a bare table, the review of
+    2026-11-19). A place of the whole table, the hand straight down, must also have the room a
+    'clear' spot has (clear_table.clearance: the lid's and the hand's own margins from what stands
+    and from what was not seen) — the tier is ranked by nothing, and asked no room at all before.
 
     `way`: the lid's way to a spot is asked too — the straight line from where the hand holds it at
     `q` to the spot, against what the map shows standing taller than the lid is carried
@@ -1627,7 +1883,7 @@ def _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=None, held=None, s
     stands on the table; and the other tiers never asked. So of a carry that starts elsewhere (from
     a spot the lid was left at) and of the whole table's places, far from the box, it is asked here:
     a spot with something standing in the lid's way is passed over, never a try."""
-    tried = []
+    tried, ended = [], []
     lid_from = q if held is None else held
     start = lid_r = carry_h = lid_h = None
     if way and tmap is not None:
@@ -1643,16 +1899,17 @@ def _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=None, held=None, s
 
     def passing(cands, lean):
         """`cands` through what a spot must pass before the hand's reach is asked, one at a time: (the
-        spot to try, a LeanSpot where `lean`; what it says). What is passed over is counted, never a try."""
+        spot to try, a LeanSpot where `lean`; what it says). What is passed over is counted, never a try.
+        `roomy` (the loop's): the tier whose places must have a clear spot's room."""
         for d, says in cands:
+            if stop is not None and stop():
+                ended.append(True)  # (the loop below ends with it: no tier after this one is begun)
+                return
             if not fresh(d):
                 continue
             tried.append(d)
             if box_clearance(ctx, d) < 0.0:
                 passed.no_land += 1  # inside the no-land radius: the lid would come down on the box's rim
-                continue
-            if aside is not None and aside(d):
-                passed.aside += 1  # where no table was felt, or within the lid's own footprint of there
                 continue
             if lean:
                 d = LeanSpot(xyz=d.xyz, yaw=d.yaw, lean_deg=lean)
@@ -1661,6 +1918,9 @@ def _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=None, held=None, s
                     "straight down" if lean <= SETDOWN_LEAN_DEG else "at %.0f deg too" % SETDOWN_LEAN_DEG,
                     lean,
                 )
+            if aside is not None and aside(d):
+                passed.aside += 1  # where no table was felt, or within the footprint that was left there
+                continue
             if _spot_key(d) in skip:
                 continue
             if lean > SETDOWN_LEAN_DEG and landing_tilt_deg(ctx, d, lid_from) > SETDOWN_LEAN_DEG + 0.5:
@@ -1680,11 +1940,20 @@ def _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=None, held=None, s
                 if room < 0.0:
                     passed.blocked += 1  # something stands in the lid's way there, taller than it is carried
                     continue
+            if roomy and not lean:
+                quat, _contact, _hover = setdown_poses(ctx, d)
+                if clear_table.clearance(tmap, d.xyz[:2], quat, lid_r, lid_h)[0] < 0.0:
+                    passed.tight += 1  # nearer something than the lid or the hand straight down may come
+                    continue
             yield d, says
 
     for lean, tiers in passes:
         tried.clear()
         for tier, cands in tiers:
+            roomy = tier == WHOLE_TABLE and tmap is not None
+            if roomy and lid_r is None:
+                lid_r = 0.5 * max(float(ctx.model.lid_dims[0]), float(ctx.model.lid_dims[1]))
+                lid_h = float(ctx.model.lid_dims[2])
             todo = passing(cands, lean)
             if tier == WHOLE_TABLE:
                 # all of the table: every place that passes, and where those are more than a pass asks the
@@ -1693,6 +1962,8 @@ def _offers(ctx, tmap, q, seeds, reach, passed, passes, aside=None, held=None, s
             n = 0
             while n < TIER_TRIES[tier]:
                 got = next(todo, None)
+                if ended:
+                    return
                 if got is None:
                     break
                 d, says = got
@@ -1773,6 +2044,8 @@ def wider_candidates(
     `skip`: the spots offered before (_spot_key), `stop()`: _offers'. The rest as spot_candidates'."""
     passed = passed if passed is not None else SpotsPassed()
     spot_z = float(table_z if spot_z is None else spot_z)
+    if stop is not None and stop():
+        return  # (before the table's places are gone through: the clock first)
     from box_opening.runtime import approach
 
     said = "no spot of any tier has a carry that plans: anywhere on the table the cameras measured, nearest the hand"
@@ -1819,13 +2092,14 @@ class _Reach:
     — are taken as they are, their time saved (saved_s); every spot not
     among them is judged here (ik_s) and kept (`found`)."""
 
-    def __init__(self, known=None, held=None):
+    def __init__(self, known=None, held=None, stands=None):
         self.known = dict(known or {})
         self.found = {}
         self.ik_s = 0.0
         self.saved_s = 0.0
         self.reused = 0
         self.held = held  # the joints the lid hangs level at, where not the ones it judges from (drop_reachable)
+        self.stands = stands  # what else a way down is asked (drop_reachable's: LaterWay.descent)
 
     def __call__(self, ctx, drop, q, seeds=()):
         key = _spot_key(drop)
@@ -1837,7 +2111,10 @@ class _Reach:
         if key in self.found:  # judged before from these joints (the same search, a later pass over the spot)
             return self.found[key][0]
         t = time.monotonic()
-        why = drop_reachable(ctx, drop, q, seeds, held=self.held)
+        if self.stands is None:
+            why = drop_reachable(ctx, drop, q, seeds, held=self.held)
+        else:
+            why = drop_reachable(ctx, drop, q, seeds, held=self.held, stands=self.stands)
         took = time.monotonic() - t
         self.ik_s += took
         self.found[key] = (why, took)
@@ -2803,7 +3080,7 @@ def walk_carry(ctx, chain, q_from, hover, quat, world):
     return dp.compliant_line(ctx, "lid:carry", pts, quat, rp.free_line_speed(ctx), world), None
 
 
-def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False):
+def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False, way=None):
     """The carry from joints `q_from` (where the spot look stands) to the
     spot `drop` (planned in the planner's own world, worlds.PLANNER_WORLD:
     it is told nothing of the box or the table; where it refuses the start
@@ -2814,8 +3091,18 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False):
     joints the lid hangs level at, where those are not `q_from`
     (drop_reachable's). `over_box`, and always for a hand leaning past
     SETDOWN_LEAN_DEG: a carry that would bring the lid too low over the
-    canister is refused (lid_low_over_box). Returns (Carry, None) or
-    (None, why)."""
+    canister is refused (lid_low_over_box).
+
+    `way` (a LaterWay: a spot of the wider search, and every spot after the
+    first): the carry is the arm's own walk first — a straight line from
+    hover to hover, at their height — and the planner's only where no walk
+    flies; whichever it is, its own path is asked of the canister and of
+    `way.path` (the carry's height all the way, and what the map shows
+    standing under it: the planner knows no table, and a joint-space path
+    between two hovers can sink a hand's width under them), and a leaning
+    set-down's way down of `way.descent`. A planned carry refused for the
+    canister with no `way` is flown as the walk where that clears it, before
+    the spot is refused. Returns (Carry, None) or (None, why)."""
     from box_opening.runtime import approach
     from box_opening.runtime import kinematics as kin
 
@@ -2824,19 +3111,41 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False):
     q_from = [float(v) for v in q_from]
     held = q_from if held is None else [float(v) for v in held]
     quat, contact, hover = setdown_poses(ctx, drop, held=held)
-    walked = False
-    try:
-        carry, _st = rp._plan_motion(
-            ctx, PlanState(joints=q_from, chain=0), "lid:carry", ("pose", hover, quat), world, TRANSIT_SPEED
-        )
-    except RuntimeError as e:
-        if not any(code in str(e) for code in CARRY_WALK_ON):
-            return None, "the carry (%s)" % rp._short(e)
-        carry, why = walk_carry(ctx, chain, q_from, hover, quat, world)
-        if carry is None:
-            return None, "the carry (%s; walked: %s)" % (rp._short(e), why)
-        walked = True
-        log.info("[press_demo] the planner refused the carry (%s): the arm's own walk instead" % rp._short(e))
+    asked = over_box or way is not None or _spot_lean(drop) > SETDOWN_LEAN_DEG
+
+    def too_low(leg):
+        """Why `leg`'s own path is no way for the lid here (the canister; `way`'s height and what stands), or None."""
+        if not asked or leg.traj is None:
+            return None
+        pts = [list(p.positions) for p in leg.traj.points]
+        why = lid_low_over_box(ctx, pts, held)
+        return why if why is not None or way is None else way.path(pts)
+
+    def walk():
+        leg, why = walk_carry(ctx, chain, q_from, hover, quat, world)
+        if leg is not None:
+            why = too_low(leg)
+        return (leg if why is None else None), why
+
+    carry, walked, no_walk = None, False, None
+    if way is not None:
+        carry, no_walk = walk()
+        walked = carry is not None
+    if carry is None:
+        try:
+            carry, _st = rp._plan_motion(
+                ctx, PlanState(joints=q_from, chain=0), "lid:carry", ("pose", hover, quat), world, TRANSIT_SPEED
+            )
+        except RuntimeError as e:
+            if way is not None:
+                return None, "the carry (walked: %s; planned: %s)" % (no_walk, rp._short(e))
+            if not any(code in str(e) for code in CARRY_WALK_ON):
+                return None, "the carry (%s)" % rp._short(e)
+            carry, why = walk()
+            if carry is None:
+                return None, "the carry (%s; walked: %s)" % (rp._short(e), why)
+            walked = True
+            log.info("[press_demo] the planner refused the carry (%s): the arm's own walk instead" % rp._short(e))
     if carry.traj is not None and not walked:
         carry.traj = approach.on_branch_of(carry.traj, q_from)  # continues the clear, not a turn away
         # the runner's sanity gate, here where another way can still be taken: it gates every leg of an
@@ -2847,7 +3156,9 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False):
         bad = sanity_violations(carry.traj, SANITY_MARGIN_RAD)
         if bad:
             swung = "the planner's carry swings wide (%s)" % "; ".join(bad)
-            carry, why = walk_carry(ctx, chain, q_from, hover, quat, world)
+            if way is not None:
+                return None, "the carry (walked: %s; planned: %s)" % (no_walk, swung)
+            carry, why = walk()
             if carry is None:
                 return None, "the carry (%s; walked: %s)" % (swung, why)
             walked = True
@@ -2858,15 +3169,39 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False):
         # chair and its user as the plan-free lines are (runtime/body), and a spot whose carry
         # enters them is passed over for the next
         why = kin.body_refusal(chain, [list(p.positions) for p in carry.traj.points])
-        if why is not None:
+        if why is None:
+            # ... and, where it is asked, off the canister, at its height and over nothing that stands
+            # (from one spot to the next the way may cross the box and the table, and a hand leaning past
+            # SETDOWN_LEAN_DEG hangs the lid's low edge lower than any carry flown)
+            low = too_low(carry)
+            if low is not None and way is None:
+                # the walk before the spot is refused: on 2026-11-17 16:40's map the joint-space way to every
+                # further spot brought the lid under the canister's top, and the walk to each cleared it
+                carry, why = walk()
+                if carry is None:
+                    return None, "the carry (%s; walked: %s)" % (low, why)
+                walked = True
+                log.info(
+                    "[press_demo] the planner's carry is no way for the lid (%s): the arm's own walk instead" % low
+                )
+            else:
+                why = low
+        if why is not None and not walked:
+            if way is not None:
+                return None, "the carry (walked: %s; planned: %s)" % (no_walk, why)
             return None, "the carry (%s)" % why
-    if (over_box or _spot_lean(drop) > SETDOWN_LEAN_DEG) and carry.traj is not None:
-        # from one spot to the next the way may cross the box, and a hand leaning past SETDOWN_LEAN_DEG
-        # hangs the lid's low edge lower than any carry flown: never under the top it came off, over the
-        # canister (the planner knows nothing of the box)
-        why = lid_low_over_box(ctx, [list(p.positions) for p in carry.traj.points], held)
-        if why is not None:
-            return None, "the carry (%s)" % why
+    if way is not None:
+        log.info(
+            "[press_demo] the lid's way to [%.2f, %.2f] is %s"
+            % (
+                drop.xyz[0],
+                drop.xyz[1],
+                "the arm's own walk, a straight line at the height it is carried at"
+                if walked
+                else "the planner's (no walk flies: %s): it keeps the carry's height, and nothing stands under it"
+                % no_walk,
+            )
+        )
     carry.gains = dp.COMPLIANT_GAINS
     lines = []
     q = carry.goal_joints
@@ -2883,6 +3218,11 @@ def plan_carry(ctx, cfg, q_from, drop, held=None, over_box=False):
             return None, "%s (%s)" % (name, why)
         lines.append([[float(v) for v in p] for p in pts])
         q = lines[-1][-1]
+    if way is not None:
+        # a leaning hand's own body, down the lines it flies, and what stands on the table (LaterWay.descent)
+        why = way.descent(drop, lines[0] + lines[1])
+        if why is not None:
+            return None, "the set-down (%s)" % why
     down_speed = max(float(cfg.setdown_speed), rp.free_line_speed(ctx))
     legs = [
         carry,
@@ -4036,10 +4376,23 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
     if gate is not None:
         return back_out("the lid has no way off the box (%s: %s) — not gripping it" % gate, opened=False)
     carried = None
+    search = None
     ctx.lid_lifted = lift  # the lid's way back onto the box, for a STOP before the carry (put_lid_back)
     if one:
         carry, drop = placed.carry, placed.drop
         flying = [close, *lift.legs, *carry.legs]
+        # where this set-down feels no table the lid goes on to another spot, chosen on the map this one was
+        search = SpotSearch(
+            ctx,
+            cfg,
+            eyes,
+            runner,
+            placed.tmap,
+            placed.table_z,
+            placed.spot_z,
+            cache=None if placed.room is None else placed.room.cache,
+            held=placed.q,
+        )
         runner.note(
             "lid_spot",
             xyz=[round(v, 4) for v in drop.xyz],
@@ -4072,7 +4425,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
                 1000 * lift.back_m,
                 drop.xyz[0],
                 drop.xyz[1],
-                _touch_says(carry),
+                _touch_says(carry, search.after_this(flight_s(runner, flying))),
             )
         )
         _video(
@@ -4136,18 +4489,6 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
         return choose_and_carry(ctx, cfg, runner, eyes, ahead=carried)
     if last.flown_traj is not None:
         rp._note_flight(runner, "reach_carry_flight", [lg.name for lg in merge_groups(flying)[-1]], last)
-    # where this set-down feels no table the lid goes on to another spot, chosen on the map this one was
-    search = SpotSearch(
-        ctx,
-        cfg,
-        eyes,
-        runner,
-        placed.tmap,
-        placed.table_z,
-        placed.spot_z,
-        cache=None if placed.room is None else placed.room.cache,
-        held=placed.q,
-    )
     return _release_and_home(ctx, cfg, runner, carry, drop, placed.tier, placed.home, None, search=search)
 
 
@@ -4534,10 +4875,11 @@ def _ahead_note(ahead, off, flew, chosen, reach, stale=None):
 
 
 def _last_go(runner):
-    """When this run last had the engine's go (time.time()), or None: the newest 'line_up' row of
-    stage 'go' in its own record, which press_demo.line_up_watch writes as it hears one — before the
-    run's first move (--line-up) and after each line-up in the middle of it (--guide). None too
-    where the record cannot be read: the clock then counts from the run's start, the earlier."""
+    """When this run last had the engine's go (time.time(), the stamp its rows carry), or None: the
+    newest 'line_up' row of stage 'go' in its own record, which press_demo.line_up_watch writes as it
+    hears one — before the run's first move (--line-up) and after each line-up in the middle of it
+    (--guide). None too where the record cannot be read: the clock then counts from the run's
+    start, the earlier."""
     path = getattr(runner, "_log_path", None)
     if path is None:
         return None
@@ -4562,55 +4904,137 @@ class RunClock:
     """How long this run still has before the engine stops it (SPOT_S's note): left_s().
 
     The engine hands the run its budget in RUN_BUDGET_ENV as it starts it (node.budget_env), JSON:
-    {"s": the seconds it has, "from": the time.time() they count from, "go": whether they start
-    again, whole, at each go the engine gives the run (a goal sent by hand: the time a person takes
-    to move a chair is none of the run's)}. The go's time is the run's own record's (_last_go).
-    Nothing handed, or nothing that reads as one (said once): no engine times this run (the command
-    line's), left_s() is None, and SETDOWN_SPOTS alone bounds its tries. `runner`: the run's, for its
-    record; `env`, `now`: the tests'."""
+    {"s": the seconds it has, "from": the time.monotonic() they count from (the engine and the run
+    are processes on one host, and that clock is the host's: no step of the wall clock moves it),
+    "go": whether they start again, whole, at each go the engine gives the run (a goal sent by
+    hand: the time a person takes to move a chair is none of the run's)}. The go's time is the
+    run's own record's (_last_go: the engine's go comes down the run's stdin to press_demo's ear,
+    and the row the run writes as it hears it is the only stamp of it this side has; its wall-clock
+    stamp is put on the engine's clock by what the two differ by now, and never dated later than
+    now or earlier than the budget's own start).
 
-    def __init__(self, runner=None, env=None, now=time.time):
-        self.runner, self._now = runner, now
+    Three cases, and they are not alike:
+      nothing handed (a run from the command line): no engine times it, left_s() is None, and
+        SETDOWN_SPOTS alone bounds its spots;
+      a budget handed: left_s() seconds, negative past it;
+      something handed that does not read as one (`unreadable` says what): an engine IS timing
+        this run and the run does not know by how much — left_s() is 0.0, so no further spot is
+        ever started on it (the first review of 2026-11-19: it was taken for "nothing handed", and
+        an unreadable budget would have let a run try every spot with the engine's Ctrl+C due).
+    `runner`: the run's, for its record; `env`, `now`, `wall`: the tests'."""
+
+    def __init__(self, runner=None, env=None, now=time.monotonic, wall=time.time):
+        self.runner, self._now, self._wall = runner, now, wall
         self.s = self.since = None
         self.from_go = False
+        self.unreadable = None
+        self._go = (None, None)  # (the record's size when it was last read, the go found in it)
         raw = (os.environ if env is None else env).get(RUN_BUDGET_ENV)
-        if not raw:
+        if raw is None:
             return
         try:
             told = json.loads(raw)
-            s, since = float(told["s"]), float(told["from"])
-            if not (math.isfinite(s) and math.isfinite(since)):
-                raise ValueError("not a number")
-            self.s, self.since, self.from_go = s, since, bool(told.get("go"))
+            if not isinstance(told, dict):
+                raise ValueError("not an object")
+            s, since, go = told["s"], told["from"], told.get("go", False)
+            for v in (s, since):
+                if isinstance(v, bool) or not isinstance(v, int | float) or not math.isfinite(v):
+                    raise ValueError("%r is not a number of seconds" % (v,))
+            if not isinstance(go, bool):
+                raise ValueError("go is %r, not true or false" % (go,))
+            self.s, self.since, self.from_go = float(s), float(since), go
         except (KeyError, TypeError, ValueError) as e:
+            self.unreadable = "%s=%r: %s" % (RUN_BUDGET_ENV, raw, e if not isinstance(e, KeyError) else "no %s" % e)
             log.info(
-                "[press_demo] the run's time as the engine handed it (%s=%r) cannot be read (%s): taken as none "
-                "handed" % (RUN_BUDGET_ENV, raw, e)
+                "[press_demo] the run's time as the engine handed it cannot be read (%s): the engine times this "
+                "run and the run does not know how long it has — a lid that feels no table at its spot goes back "
+                "on the box, no further spot is started" % self.unreadable
             )
 
+    def _go_since(self):
+        """The engine's clock at this run's last go, or None (none heard, or no record to read)."""
+        path = getattr(self.runner, "_log_path", None)
+        try:
+            size = None if path is None else os.path.getsize(path)
+        except OSError:
+            size = None
+        if size is None:
+            return None
+        if size != self._go[0]:  # rows were written since: read again (every reach check asks the clock)
+            self._go = (size, _last_go(self.runner))
+        go = self._go[1]
+        if go is None:
+            return None
+        now = float(self._now())
+        return min(max(go - (float(self._wall()) - now), self.since), now)
+
     def left_s(self):
-        """Seconds until the engine's stop, negative past it; None: nothing times this run."""
+        """Seconds until the engine's stop, negative past it; None: nothing times this run; 0.0
+        where what times it cannot be read."""
+        if self.unreadable is not None:
+            return 0.0
         if self.s is None:
             return None
         since = self.since
         if self.from_go:
-            go = _last_go(self.runner)
-            if go is not None and go > since:
+            go = self._go_since()
+            if go is not None:
                 since = go
         return since + self.s - float(self._now())
+
+
+def flight_s(runner, legs):
+    """How long `legs` take to fly as the runner will re-time them (its preview's own sum: each
+    merged group's profile), or None where that cannot be told (a group with no trajectory yet)."""
+    from dataclasses import replace
+
+    from box_opening.runtime import runner as rn
+    from box_opening.runtime.legs import Kind
+
+    try:
+        total = 0.0
+        for group in merge_groups(legs):
+            if group[0].kind is not Kind.MOTION:
+                continue
+            if any(g.traj is None for g in group):
+                return None
+            _traj, info = rn.retime_group(
+                [g.traj for g in group],
+                [g.speed for g in group],
+                rn.JOINT_VMAX,
+                replace(runner.retime_params(group[0]), time_scale=runner.time_scale),
+                folds=[g.fold for g in group],
+                step_caps=rn._step_caps(group),
+                **runner._near_user_kw(),
+            )
+            total += float(info["duration_s"])
+        return total
+    except Exception:  # noqa: BLE001 -- an estimate the clock is asked with: where it cannot be made, SPOT_S stands in
+        return None
+
+
+# the hand's farthest corner from its tool axis as the gate has it (clear_table.HAND_PARTS: the wrist
+# camera's, 99 mm): the footprint a hand leaves round where it came down
+HAND_REACH_M = max(
+    math.hypot(max(-xa, xb), max(-ya, yb)) for _n, (xa, xb), (ya, yb), _b, _need in clear_table.HAND_PARTS
+)
 
 
 @dataclass
 class SpotLeft:
     """A spot the lid was taken to and left again with the lid still in the fingers: which of the
     run's spots it was (`n`, 1 the first), where, its tier, and what the set-down's watch said
-    (`verdict`: "never" | "held"; `why`, its words)."""
+    (`verdict`: "never" | "held"; `why`, its words). `hand_xy`: where the hand's tool stood over the
+    table there (a leaning hand stands arm-side of the lid's middle). `above_m`: for a "held", how
+    far over where the plan had the table the lid was held up."""
 
     n: int
     drop: object
     tier: str
     verdict: str
     why: str
+    hand_xy: tuple = None
+    above_m: float = None
 
     def says(self):
         return "spot %d at [%.2f, %.2f]: %s" % (self.n, self.drop.xyz[0], self.drop.xyz[1], _why_short(self.verdict))
@@ -4628,28 +5052,38 @@ def _why_short(verdict):
 class Picked:
     """What SpotSearch.pick found: the carry that planned (None: no spot) and its spot (`chosen`:
     the spot, its tier, what it says), the spots the planner refused, what was passed over, the
-    reach verdicts, whether the carry planned while the lift flew is the one (`flew`; `stale`, why
-    the lid's own map refused that one), the plans' time, which searches it took (`searched`) and
-    whether the wrist looked again for it (`looked`)."""
+    reach verdicts (`reach`: the tiers', which take the lift's lookahead's; `reaches`: all), whether the
+    carry planned while the lift flew is the one (`flew`; `stale`, why the lid's own map refused
+    that one), the plans' time, which searches it took (`searched`), whether the wrist looked again
+    for it (`looked`), and whether the run's clock ended the choice (`timed_out`: the time left no
+    longer held a spot and the way back to the box after it)."""
 
     carry: object = None
     chosen: tuple = None
     refused: list = field(default_factory=list)
     passed: object = None
     reach: object = None
+    reaches: list = field(default_factory=list)  # every _Reach it asked, `reach` (the tiers' first) among them
     flew: bool = False
     stale: str = None
     carry_s: float = 0.0
     searched: list = field(default_factory=list)
     looked: bool = False
+    timed_out: bool = False
+
+    def ik_s(self):
+        return sum(r.ik_s for r in self.reaches)
+
+    def checks(self):
+        return sum(len(r.found) for r in self.reaches)
 
 
 class SpotSearch:
     """Where the lid goes, chosen with the lid in the fingers and the arm standing: after the lift
     (choose_and_carry) and after every set-down that felt no table (another_spot). It keeps what
     one choice hands the next: the map and the wrist's frames in it, the table's heights, the spots
-    the lid was taken to and left (`left`: each set aside for the run with the lid's own footprint
-    round it, `aside`), the joints the lid hangs level at (`held`: where the first carry began, the
+    the lid was taken to and left (`left`: each set aside for the run with the footprint that was
+    left there, `aside`), the joints the lid hangs level at (`held`: where the first carry began, the
     hand as the grip had it; later carries begin with the hand as a set-down left it), where the
     wrist last looked from (`looked_from`) and the run's clock.
 
@@ -4661,7 +5095,17 @@ class SpotSearch:
       3. still none, and the map in hand was not made with the wrist's frame from where the arm
          stands now (the scene camera's alone, made before the press; or a look from another stand):
          the wrist looks from here (look_again), its frame is pooled in, and 1 and 2 once more.
-    Nothing: no spot is left, and the caller's last resort is the box (put_lid_back)."""
+    Nothing: no spot is left, and the caller's last resort is the box (put_lid_back).
+
+    Every carry but the first spot's own from the tiers (planned as it was before 2026-11-19) is
+    asked what a LaterWay asks: the arm's own walk first, its path at carry height over the table
+    and over what stands on it, a leaning set-down's hand out of what stands (plan_carry's `way`).
+
+    The run's clock is asked all through the choice of a spot after the first — before it begins,
+    of every spot looked at, before each reach check and before each plan — and through the wider
+    search and before the second look of the first spot's too: the moment what is left no longer
+    holds a spot and the way back to the box after it (out_of_time), choosing stops, with the
+    box's own time still in hand (Picked.timed_out)."""
 
     def __init__(self, ctx, cfg, eyes, runner, tmap, table_z, spot_z, cache=None, held=None, looked_from=None):
         self.ctx, self.cfg, self.eyes = ctx, cfg, eyes
@@ -4674,45 +5118,123 @@ class SpotSearch:
         self.spots = 1  # the spots the lid has been taken to: the one in flight counts
         self.clock = RunClock(runner)
 
-    def aside(self, d):
-        """Whether the spot `d` is set aside for this run: the lid set down there would lie on some
-        of the place it was held over at a spot it was left at — their centres nearer than the lid
-        is wide. No table was felt there; what the map says of that place is not gone by again."""
-        m = self.ctx.model
-        wide = max(float(m.lid_dims[0]), float(m.lid_dims[1]))
-        return any(
-            math.hypot(float(d.xyz[0]) - float(s.drop.xyz[0]), float(d.xyz[1]) - float(s.drop.xyz[1])) < wide
-            for s in self.left
-        )
+    def _hand_xy(self, d):
+        """Where the hand's tool stands over the table setting the lid down at `d` (setdown_poses'
+        contact; `d`'s own xy where that cannot be told: a leaning spot with no grip to go by)."""
+        try:
+            return tuple(float(v) for v in setdown_poses(self.ctx, d, held=self.held)[1][:2])
+        except Exception:  # noqa: BLE001 -- the footprint's centre then; never what stops the search
+            return (float(d.xyz[0]), float(d.xyz[1]))
 
-    def leave(self, drop, tier, verdict, why):
+    def aside(self, d):
+        """Whether the spot `d` is set aside for this run.
+
+        After a spot where NOTHING was felt ("never"): `d`'s lid would lie on some of the place the
+        lid was held over there — their centres nearer than the lid is wide. No table was felt
+        there; what the map says of that place is not gone by again.
+
+        After a spot where something HELD the lid up, which the map did not show: no part of the
+        next lid or hand over the footprint that was left there, the lid's and the hand's (a disc
+        of HAND_REACH_M round where the tool stood: its farthest corner, whichever way it is
+        turned next). The lid's width alone let the next spot lie rim to rim with whatever held
+        it, 108 mm away for a 105 mm lid, the hand's parts coming down over it (the review of
+        2026-11-19)."""
+        m = self.ctx.model
+        lid_r = 0.5 * max(float(m.lid_dims[0]), float(m.lid_dims[1]))
+        at = (float(d.xyz[0]), float(d.xyz[1]))
+        hand = None
+        for s in self.left:
+            was = (float(s.drop.xyz[0]), float(s.drop.xyz[1]))
+            if math.dist(at, was) < 2.0 * lid_r:
+                return True
+            if s.verdict != "held":
+                continue
+            hand = self._hand_xy(d) if hand is None else hand
+            was_hand = was if s.hand_xy is None else s.hand_xy
+            if (
+                math.dist(at, was_hand) < lid_r + HAND_REACH_M
+                or math.dist(hand, was) < HAND_REACH_M + lid_r
+                or math.dist(hand, was_hand) < 2.0 * HAND_REACH_M
+            ):
+                return True
+        return False
+
+    def leave(self, drop, tier, verdict, why, above_m=None):
         """The lid leaves `drop` still in the fingers: set aside (aside). Returns the SpotLeft."""
-        self.left.append(SpotLeft(len(self.left) + 1, drop, tier, verdict, why))
+        self.left.append(
+            SpotLeft(len(self.left) + 1, drop, tier, verdict, why, hand_xy=self._hand_xy(drop), above_m=above_m)
+        )
         return self.left[-1]
 
-    def no_more(self, need_s):
-        """Why no further spot is started, or None: SETDOWN_SPOTS are spent, or the run's clock has
-        less than `need_s` and the way back to the box after it (BOX_S, END_S) left."""
+    def same_height(self, was):
+        """The earlier spot where something held the lid up at the height it was held up at `was`
+        (within SAME_HELD_M), or None: two of those are the table itself, higher than the run has it."""
+        if was.verdict != "held" or was.above_m is None:
+            return None
+        for s in self.left:
+            if s is not was and s.verdict == "held" and s.above_m is not None:
+                if abs(s.above_m - was.above_m) <= SAME_HELD_M:
+                    return s
+        return None
+
+    def no_more(self, need_s, own=False):
+        """Why no further spot is started, or None: SETDOWN_SPOTS are spent, the run's time cannot
+        be read, or its clock has less than `need_s` and the way back to the box after it (BOX_S,
+        END_S) left. `own`: `need_s` is a planned carry's own flight, not a spot's time on record."""
         if self.spots >= SETDOWN_SPOTS:
             return "%d spots is as many as a run tries (SETDOWN_SPOTS)" % SETDOWN_SPOTS
+        if self.clock.unreadable is not None:
+            return "the run's time as the engine handed it cannot be read (%s)" % self.clock.unreadable
         left = self.clock.left_s()
         if left is not None and left < need_s + BOX_S + END_S:
             return (
                 "%.0f s of the run's time are left: another spot and, should it feel no table either, the way "
-                "back to the box take %.0f (%.0f and %.0f, on record)"
-                % (max(left, 0.0), need_s + BOX_S + END_S, need_s, BOX_S + END_S)
+                "back to the box take %.0f (%.0f %sand %.0f, on record)"
+                % (
+                    max(left, 0.0),
+                    need_s + BOX_S + END_S,
+                    need_s,
+                    "by this spot's own carry " if own else "",
+                    BOX_S + END_S,
+                )
             )
+        return None
+
+    def after_this(self, flight=None):
+        """Why a set-down about to fly (`flight` s: its carry's own time, None: SPOT_S's) will be
+        followed by the box and not by another spot should it feel no table, or None: it is the
+        last of SETDOWN_SPOTS, or by its end the run's clock will not hold another (no_more, asked
+        of the time there will be then). What the line before a set-down promises is this."""
+        if self.spots >= SETDOWN_SPOTS:
+            return "the last of the %d spots a run tries" % SETDOWN_SPOTS
+        if self.clock.unreadable is not None:
+            return "the run's time cannot be read"
+        left = self.clock.left_s()
+        if left is None:
+            return None
+        then = left - (SPOT_S - SPOT_UP_S if flight is None else float(flight))
+        if then < CHOICE_S + SPOT_S + BOX_S + END_S:
+            return "the run's time will hold no further spot: %.0f s are left now" % max(left, 0.0)
         return None
 
     def out_of_time(self):
         """Whether the run's clock leaves no time for a spot still being looked for (SPOT_S) and the
-        way back to the box after it: wider_candidates' stop, and look_again's. Asked of the first
-        spot's search too — the tiers themselves are gone through whatever the clock says, as they
-        always were, but the wider search and the wrist's second look are work a run did not do
-        before 2026-11-19 (up to ~16 s of reach checks where the hand reaches nothing), and they must
-        not take the time the lid's way back to the box needs."""
+        way back to the box after it: the choice's stop. Asked of the first spot's search too — the
+        tiers themselves are gone through whatever the clock says, as they always were, but the
+        wider search and the wrist's second look are work a run did not do before 2026-11-19 (up
+        to ~16 s of reach checks where the hand reaches nothing), and they must not take the time
+        the lid's way back to the box needs. With 31 s left where it says so, the box's 23 are
+        still in hand whatever one more reach check or plan takes."""
         left = self.clock.left_s()
         return left is not None and left < SPOT_S + BOX_S + END_S
+
+    def way(self, held=None):
+        """The LaterWay a carry of this search is asked (the lid as the hand at `held` holds it:
+        this search's own where it has one): the table the set-down goes by, or the cameras' where
+        that stands higher — the less room of the two."""
+        heights = [float(z) for z in (self.table_z, self.spot_z) if z is not None]
+        # (no height at all: no table was measured, there is no map, and the height is in the words alone)
+        return LaterWay(self.ctx, self.tmap, max(heights, default=0.0), self.held if self.held is not None else held)
 
     def pick(self, runner, q, ahead=None, off=None):
         """The first spot whose carry plans from joints `q` (the class's note), as a Picked.
@@ -4722,12 +5244,19 @@ class SpotSearch:
         from box_opening.primitives.look import look_joints
         from box_opening.tasks import press_demo as pd
 
-        ctx, cfg = self.ctx, self.cfg
-        rest = list(pd.rest_joints(cfg))
+        ctx = self.ctx
+        rest = list(pd.rest_joints(self.cfg))
         near = ahead is not None and off is not None and off <= DRIFT_REPLAN_RAD
-        held = self.held if self.left else None  # the first carry begins where the lid hangs level: as before
-        out = Picked(passed=SpotsPassed(), reach=_Reach(ahead.known if near else None, held=held))
+        later = bool(self.left)
+        held = self.held if later else None  # the first carry begins where the lid hangs level: as before
+        out = Picked(passed=SpotsPassed())
         offered = set()  # every spot a carry was planned to here: refused, and not planned to twice
+        way = None  # (made on the map in hand each time round: the wrist's look gives another)
+
+        def stop():
+            if self.out_of_time():
+                out.timed_out = True
+            return out.timed_out
 
         def first(cands, wider):
             refused = 0
@@ -4736,8 +5265,10 @@ class SpotSearch:
                     break
                 if _spot_key(drop) in offered:
                     continue  # (the tiers gone through once more after the wrist's look: the planner's answer stands)
+                if (later or wider) and stop():
+                    return False  # a plan can take a second and more: the clock before each
                 offered.add(_spot_key(drop))
-                reuse = near and not wider and not self.left and ahead.carry is not None and out.stale is None
+                reuse = near and not wider and not later and ahead.carry is not None and out.stale is None
                 if reuse and _same_spot(drop, ahead.drop):
                     # planned before the lid's own map: held out of what that map shows too, or planned again
                     out.stale = carry_refusal(ahead.carry)
@@ -4745,7 +5276,10 @@ class SpotSearch:
                         out.carry, out.chosen, out.flew = ahead.carry, (ahead.drop, tier, says), True
                         return True
                 t = time.monotonic()
-                carry, why = self._plan(q, drop, held, wider)
+                if wider or later:
+                    carry, why = plan_carry(ctx, self.cfg, q, drop, held=held, over_box=True, way=way)
+                else:  # the first spot's own, from the tiers: planned as it was before 2026-11-19
+                    carry, why = plan_carry(ctx, self.cfg, q, drop)
                 out.carry_s += time.monotonic() - t
                 if carry is not None:
                     out.carry, out.chosen = carry, (drop, tier, says)
@@ -4755,19 +5289,35 @@ class SpotSearch:
             return False
 
         while True:
+            if later and stop():
+                return out
+            way = self.way(q)
+            # a later spot's reach is asked what its carry will be (a leaning hand out of what stands, on
+            # this map); the first spot's tiers as they always were, its wider search with a reach of its
+            # own that asks it
+            in_tiers = _Reach(
+                ahead.known if near and not out.reaches else None, held=held, stands=way.descent if later else None
+            )
+            in_wider = in_tiers if later else _Reach(held=held, stands=way.descent)
+            out.reaches += [in_tiers] if later else [in_tiers, in_wider]
+            out.reach = out.reach or in_tiers
             common = dict(
                 seeds=(look_joints(rest), rest),
-                reach=out.reach,
                 cache=self.cache,
                 spot_z=self.spot_z,
                 passed=out.passed,
-                aside=self.aside if self.left else None,
+                aside=self.aside if later else None,
                 held=held,
             )
-            # (from a spot the lid was left at, the way to the next is asked of every spot: _offers' `way`)
-            tiers = spot_candidates(ctx, self.tmap, self.table_z, q, way=bool(self.left), **common)
+            # (from a spot the lid was left at, the way to the next is asked of every spot: _offers' `way`;
+            # and the clock of every spot looked at)
+            tiers = spot_candidates(
+                ctx, self.tmap, self.table_z, q, reach=in_tiers, way=later, stop=stop if later else None, **common
+            )
             out.searched.append("the tiers")
             if first(tiers, False):
+                return out
+            if stop():  # before the wider search's own work, not after a second or three of it
                 return out
             log.info(
                 "[press_demo] no spot of the tiers has a carry that plans (%s): looking wider — the whole of the "
@@ -4775,27 +5325,22 @@ class SpotSearch:
                 % ("; ".join(out.refused[-CARRY_TRIES:]) or out.passed.says(), SETDOWN_LEAN_MAX_DEG)
             )
             out.searched.append("wider")
-            wider = wider_candidates(ctx, self.tmap, self.table_z, q, skip=offered, stop=self.out_of_time, **common)
+            wider = wider_candidates(ctx, self.tmap, self.table_z, q, reach=in_wider, skip=offered, stop=stop, **common)
             if first(wider, True):
                 return out
-            if out.looked or not self.look_again(runner, q):
+            if out.timed_out or out.looked or not self.look_again(runner, q):
                 return out
             out.looked = True
 
-    def _plan(self, q, drop, held, wider):
-        """plan_carry to `drop` from `q`. Kept off the canister (its over_box) on every carry but
-        the first spot's from the tiers, which is planned as it was before 2026-11-19."""
-        if not wider and not self.left:
-            return plan_carry(self.ctx, self.cfg, q, drop)
-        return plan_carry(self.ctx, self.cfg, q, drop, held=held, over_box=True)
-
-    def look_again(self, runner, q):
+    def look_again(self, runner, q, why=None):
         """The wrist's frame from where the arm stands, at joints `q`, pooled into the map (with
         the frames of the looks before it), where the map in hand was not made with one from here:
         the scene camera's alone (made before the press, from 14 cm over the table: edge-on), or
         with a look from another stand. What the map says may be stale by now, and from above the
-        wrist sees table the scene camera does not. Once a stand; not where the run's clock leaves
-        no time for a spot after it. Returns whether there is a new map to look for a spot on."""
+        wrist sees table the scene camera does not. `why`: what is said of it where it is not for
+        want of a spot (another_spot's, after something the map did not show held the lid up).
+        Once a stand; not where the run's clock leaves no time for a spot after it. Returns
+        whether there is a new map to look for a spot on."""
         from box_opening.geometry import ang_diff
         from box_opening.tasks import press_demo as pd
 
@@ -4808,10 +5353,10 @@ class SpotSearch:
             return False
         node, watcher, scene_fix, scene_q = self.eyes
         log.info(
-            "[press_demo] no spot on the map in hand, which was made before the arm stood here: the wrist looks at "
-            "the table from here, and the spot is looked for once more on a map with its frame in it"
+            "[press_demo] %s: the wrist looks at the table from here, and the spot is looked for on a map with its "
+            "frame in it" % (why or "no spot on the map in hand, which was made before the arm stood here")
         )
-        _video(ctx, "NO SPOT on the map in hand: the wrist looks at the table from here")
+        _video(ctx, "%s: the wrist looks at the table from here" % (why or "NO SPOT on the map in hand"))
         wrist = spot_look(node, watcher, runner)
         at = [float(v) for v in ctx.client.joints()]  # where the arm stood still for the frame
         self.looked_from = at
@@ -4829,7 +5374,7 @@ class SpotSearch:
                 getattr(getattr(watcher, "grab", None), "wrist_lens_in_hand_m", None),
                 more=self.frames,
             )
-        runner.note("lid_look_again", wrist_points=n, mapped=tmap is not None, looks=len(self.frames))
+        runner.note("lid_look_again", wrist_points=n, mapped=tmap is not None, looks=len(self.frames), why=why)
         if tmap is None:
             log.info("[press_demo] the wrist's look from here adds no map of the table (%d points)" % n)
             return False
@@ -4901,8 +5446,8 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
         look_s=round(t_look - t0, 3),
         map_s=round(t_map - t_look, 3),
         candidates_s=round(t_end - t_map - got.carry_s, 3),
-        ik_s=round(reach.ik_s, 3),
-        spot_checks=len(reach.found),  # the spots whose reach was judged here (the rest: ahead's)
+        ik_s=round(got.ik_s(), 3),
+        spot_checks=got.checks(),  # the spots whose reach was judged here (the rest: ahead's)
         carry_s=round(got.carry_s, 3),
         no_land=no_land_note(ctx, None if chosen is None else chosen[0]),
         table=table_note(ctx, table_z, spot_z, passed),
@@ -4921,11 +5466,21 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
             )
         )
     if carry is None:
+        left_s = search.clock.left_s()
         return put_lid_back(
             ctx,
             cfg,
             runner,
-            "no carry plans to a spot on the table the cameras measured (%s)" % ("; ".join(refused) or passed.says()),
+            "no carry plans to a spot on the table the cameras measured (%s)%s"
+            % (
+                "; ".join(refused) or passed.says(),
+                # (said, where the clock and not the table ended the looking: the tiers were gone through)
+                ""
+                if not got.timed_out
+                else ", and no more of the table is looked at: the run's time holds no spot found later and the way "
+                "back to the box after it (%.0f s are left, they take %.0f)"
+                % (max(left_s or 0.0, 0.0), SPOT_S + BOX_S + END_S),
+            ),
         )
     drop, tier, says = chosen
     _say_spot(ctx, eyes, chosen, refused, search.tmap, table_z)
@@ -4935,7 +5490,12 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
     )
     log.info(
         "[press_demo] ONE MOTION: %s — to [%.2f, %.2f] and down onto the table, %s"
-        % (", ".join(lg.name for lg in carry.legs), drop.xyz[0], drop.xyz[1], _touch_says(carry))
+        % (
+            ", ".join(lg.name for lg in carry.legs),
+            drop.xyz[0],
+            drop.xyz[1],
+            _touch_says(carry, search.after_this(flight_s(runner, carry.legs))),
+        )
     )
     return _fly_carry(ctx, cfg, runner, carry, drop, tier, search)
 
@@ -5008,12 +5568,21 @@ def _say_spot(ctx, eyes, chosen, refused, tmap, table_z):
     _video_spot(ctx, eyes, drop)
 
 
-def _touch_says(carry):
-    """Where `carry`'s set-down lets the lid go, and where it does not."""
+def _touch_says(carry, box=None):
+    """Where `carry`'s set-down lets the lid go, and what follows where it does not. `box`: why a
+    set-down that feels no table will be followed by the box and not by another spot
+    (SpotSearch.after_this: the run's time, the last of its spots), None where another spot will
+    be tried — said as it will be: the line promised "on to another spot" of set-downs whose clock
+    then sent them to the box (the review of 2026-11-19)."""
     return (
         "slowly from %.0f mm over where the plan has the lid meet it to %.0f mm under that, let go only where the "
-        "arm feels it meet the table (no more than %.0f mm over the plan); felt nowhere, up again with it and on "
-        "to another spot" % (1000 * SETDOWN_SLOW_M, 1000 * (carry.over_m or 0.0), 1000 * SETDOWN_CREDIBLE_M)
+        "arm feels it meet the table (no more than %.0f mm over the plan); felt nowhere, %s"
+        % (
+            1000 * SETDOWN_SLOW_M,
+            1000 * (carry.over_m or 0.0),
+            1000 * SETDOWN_CREDIBLE_M,
+            "up again with it and on to another spot" if box is None else "back onto the box (%s)" % box,
+        )
     )
 
 
@@ -5191,29 +5760,44 @@ def _back_up(ctx, runner, carry, why, world):
     return None
 
 
-def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused):
+def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=None):
     """The set-down at `drop` ended and the arm felt no table there (`refused`: the watch's verdict
-    and words), the lid still in the fingers. Owner 2026-11-19, asked whether such a set-down
-    should put the lid back on the box or try another spot first: "it should keep trying spots,
-    assume tere will always be a spot for the lid". So the lid is neither let go nor taken back:
+    and words; `above_m`: for a "held", how far over the plan's table the lid was held up), the lid
+    still in the fingers. Owner 2026-11-19, asked whether such a set-down should put the lid back
+    on the box or try another spot first: "it should keep trying spots, assume tere will always be a
+    spot for the lid". So the lid is neither let go nor taken back:
 
-     - the spot is left (SpotSearch.leave): it, and what lies within the lid's own footprint of
-       it, are set aside for the run;
+     - the spot is left (SpotSearch.leave): it, and the footprint that was left there, are set
+       aside for the run (the lid's; the lid's and the hand's where something held the lid up);
      - the arm rises with the lid to the carry's height over it (_back_up);
+     - where something the map did not show held the lid up, the wrist looks at the table from
+       there before anything is chosen (SpotSearch.look_again): the map was wrong of that place;
      - the next spot is chosen from there by the same rules in the same order (SpotSearch.pick:
        every spot still on table the cameras measured, outside the no-land radius, reached by the
-       hand, its carry held out of the chair, its user and the open canister), and where the tiers
-       have none left, wider;
+       hand, its carry held out of the chair, its user and the open canister, at carry height
+       over the table and what stands on it), and where the tiers have none left, wider;
      - the lid is carried there and set down the same watched way (_fly_carry), and what that
        watch feels decides again: spot after spot.
 
     The box stays the last resort (carry_back from the touch's end, put_lid_back from over the
     spot), and its STOP says which it was: SETDOWN_SPOTS are spent; the run's clock leaves no time
-    for another spot and the way back to the box after it (SpotSearch.no_more, SPOT_S's note); or
-    no spot is left on the table the cameras measured. Returns the exit code."""
+    for another spot and the way back to the box after it (asked before the spot is left, all
+    through the choice and, of the carry's own flight, before it is sent: SpotSearch.no_more,
+    out_of_time; SPOT_S's note); something held the lid up at the same height at two spots — the
+    table itself, higher than the run has it: no further spot is pressed on (SAME_HELD_M); or no
+    spot is left on the table the cameras measured. Returns the exit code."""
     verdict, why = refused
-    was = search.leave(drop, tier, verdict, why)
-    stop = search.no_more(CHOICE_S + SPOT_S)
+    was = search.leave(drop, tier, verdict, why, above_m=above_m)
+    same = search.same_height(was)
+    if same is not None:
+        stop = (
+            "something held the lid up at the same height at two spots, %+.0f mm from where the plan has the table "
+            "at spot %d and %+.0f mm at spot %d: that is probably the table itself, standing higher than the run "
+            "has it, and it is not pressed on at another spot"
+            % (1000 * same.above_m, same.n, 1000 * was.above_m, was.n)
+        )
+    else:
+        stop = search.no_more(CHOICE_S + SPOT_S)
     left_s = search.clock.left_s()
     runner.note(
         "lid_spot_left",
@@ -5222,6 +5806,8 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused):
         tier=tier,
         verdict=verdict,
         why=why,
+        above_mm=None if was.above_m is None else round(1000 * was.above_m, 1),
+        same_height_as=None if same is None else same.n,  # probably the table itself: held up there as here
         time_left_s=None if left_s is None else round(left_s, 1),
         next="the box" if stop is not None else "another spot",
         why_the_box=stop,
@@ -5230,8 +5816,7 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused):
         return carry_back(ctx, cfg, runner, carry, why, last_resort="no other spot is tried: %s" % stop)
     log.info(
         "[press_demo] SET-DOWN: no table felt at spot %d, [%.2f, %.2f] — %s; the lid is not let go: up with it and "
-        "on to another spot (this one, and what lies within the lid's own footprint of it, set aside for this "
-        "run%s)"
+        "on to another spot (this one, and the footprint that was left there, set aside for this run%s)"
         % (
             was.n,
             drop.xyz[0],
@@ -5247,9 +5832,21 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused):
     runner.wait_still("the next spot for the lid")
     q = [float(v) for v in ctx.client.joints()]
     t0 = time.monotonic()
+    looked = False
+    if verdict == "held":
+        # something stood there that the map did not show: the wrist looks before the next spot is chosen
+        looked = search.look_again(runner, q, why="something the map did not show held the lid up at spot %d" % was.n)
+        q = [float(v) for v in ctx.client.joints()]
     got = search.pick(runner, q)
     chosen, tried = got.chosen, "; ".join(s.says() for s in search.left)
-    stop = None if got.carry is None else search.no_more(SPOT_S)
+    flight = None if got.carry is None else flight_s(runner, got.carry.legs)
+    # the time once more before the carry is sent, for the flight this carry is (SPOT_S's until it was planned)
+    stop = (
+        None
+        if got.carry is None
+        else search.no_more((SPOT_S - SPOT_UP_S if flight is None else flight) + SPOT_UP_S, own=flight is not None)
+    )
+    left_s = search.clock.left_s()
     runner.note(
         "lid_spot",
         xyz=None if chosen is None or stop is not None else [round(v, 4) for v in chosen[0].xyz],
@@ -5257,9 +5854,12 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused):
         mapped=search.tmap is not None,
         refused="; ".join(got.refused) or None,
         candidates_s=round(time.monotonic() - t0 - got.carry_s, 3),
-        ik_s=round(got.reach.ik_s, 3),
-        spot_checks=len(got.reach.found),
+        ik_s=round(got.ik_s(), 3),
+        spot_checks=got.checks(),
         carry_s=round(got.carry_s, 3),
+        flight_s=None if flight is None else round(flight, 2),
+        time_left_s=None if left_s is None else round(left_s, 1),
+        timed_out=got.timed_out,
         no_land=no_land_note(ctx, None if chosen is None else chosen[0]),
         table=table_note(ctx, search.table_z, search.spot_z, got.passed),
         spot=search.spots + 1,
@@ -5268,8 +5868,17 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused):
             for s in search.left
         ],
         searched=got.searched,
-        looked_again=got.looked,
+        looked_again=looked or got.looked,
     )
+    if got.carry is None and got.timed_out:
+        return put_lid_back(
+            ctx,
+            cfg,
+            runner,
+            "no table was felt under the lid (%s), and no other spot is tried: the run's time ran out while one "
+            "was looked for (%.0f s are left; a spot and the way back to the box after it take %.0f)"
+            % (tried, max(left_s or 0.0, 0.0), SPOT_S + BOX_S + END_S),
+        )
     if got.carry is None:
         return put_lid_back(
             ctx,
@@ -5299,7 +5908,13 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused):
     )
     log.info(
         "[press_demo] SPOT %d, ONE MOTION: %s — to [%.2f, %.2f] and down onto the table, %s"
-        % (search.spots, ", ".join(lg.name for lg in got.carry.legs), nxt.xyz[0], nxt.xyz[1], _touch_says(got.carry))
+        % (
+            search.spots,
+            ", ".join(lg.name for lg in got.carry.legs),
+            nxt.xyz[0],
+            nxt.xyz[1],
+            _touch_says(got.carry, search.after_this(flight)),
+        )
     )
     return _fly_carry(ctx, cfg, runner, got.carry, nxt, tier2, search)
 
@@ -5415,7 +6030,18 @@ def _release_and_home(ctx, cfg, runner, carry, drop, tier, home, why, search=Non
                 last_resort="no other spot is tried: a set-down that could not be watched says nothing of this "
                 "spot, and the next would fly as blind",
             )
-        return another_spot(ctx, cfg, runner, search, carry, drop, tier, (refused[0], felt))
+        above = (watched or {}).get("above_top_mm") if refused[0] == "held" else None
+        return another_spot(
+            ctx,
+            cfg,
+            runner,
+            search,
+            carry,
+            drop,
+            tier,
+            (refused[0], felt),
+            above_m=None if above is None else 0.001 * float(above),
+        )
     if met and kept:
         # only of a lid still in the fingers: the flight view and the node read this line as the lid on the table
         log.info(
