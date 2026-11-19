@@ -4137,3 +4137,19 @@ def test_every_process_the_node_starts_is_handed_the_nodes_own_reading_of_the_re
     engine.set_parameters([Parameter("rest_pose", value=str(path))])
     with pytest.raises(EngineError, match="whole number among its angles"):
         engine._rest_args()
+
+
+def test_the_legs_of_a_lid_taken_on_or_back_are_not_said_as_lifting_it_off():
+    """The set-down that feels no table (2026-11-19: "it should keep trying spots") flies 'lid:' legs long
+    after the lid is off; the panel's words for them say what the arm is doing then."""
+
+    def says(leg):
+        return next(doing for start, _phase, _pct, doing in node.LEG_PHASES if leg.startswith(start))
+
+    assert says("lid:lift") == says("lid:carry") == "lifting the lid off"
+    assert says("lid:back-up") == "no table felt there: taking the lid to another spot"
+    assert says("lid:back-over") == "taking the lid back to the container"
+    assert says("lid:release") == "letting go of the lid on the container"
+    # ... and the fraction done never goes backwards from a set-down's touch to the next spot's carry
+    pct = {start: p for start, _phase, p, _doing in node.LEG_PHASES}
+    assert pct["place:down"] <= pct["lid:back-up"] <= pct["place:touch"] == pct["lid:back-"]

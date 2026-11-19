@@ -550,6 +550,12 @@ LEG_PHASES = (
     ("depth:approach", "press", 0.25, "pressing the button"),
     ("depth:", "press", 0.35, "pressing the button"),
     ("grip:", "grip", 0.5, "gripping the lid"),
+    # (a set-down that felt no table: the lid is taken up again and on to another spot, or back onto the
+    # container. These are 'lid:' legs too, and until 2026-11-19's merge the panel said "lifting the lid
+    # off" of each of them, minutes after the lid was off)
+    ("lid:back-up", "carry", 0.8, "no table felt there: taking the lid to another spot"),
+    ("lid:back-", "carry", 0.85, "taking the lid back to the container"),
+    ("lid:release", "release", 0.9, "letting go of the lid on the container"),
     ("lid:", "carry", 0.7, "lifting the lid off"),
     ("place:down", "carry", 0.8, "carrying the lid to the table"),
     ("place:touch", "carry", 0.85, "setting the lid down"),
