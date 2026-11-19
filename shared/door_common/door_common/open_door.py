@@ -5,13 +5,14 @@ shares. The capability sets what differs at startup (`configure`) and says what 
 2. Plan everything before any motion (plan_open), searching the arm's configurations: for each nose-down tilt, the
    grasp IK seeded from the start joints (_config_seeds) and from fixed seeds aimed at the handle
    (GRASP_EXTRA_SEEDS_DEG); for each configuration, a line-up point 25 cm out (or less), straight in along the door
-   normal, and the largest swing whose whole arc passes the sim gates (IK, reach, joint jump, J4/J6 guards, the chair
-   and user boxes with CHAIR_SIM_MARGIN_M to spare where the capability enables them). cuRobo can't be asked for a
-   line or an arc, so the straight-in and the swing are joint paths planned and checked here. With CUROBO_PATHS
-   those joints are cuRobo's targets (go_to_joint_configs), and each candidate, best first, is asked of cuRobo
-   (_CuroboFirst): one it can't plan, or plans with a detour, is passed over for the next; refused only when none of
-   SEARCH_AFTER_SWING_MAX passes, with where the appliance would work (_placement_advice). The leg from the start to
-   the line-up is cuRobo's alone: only its goal is checked.
+   normal, and the largest swing whose whole arc passes the gates on the arm model (common.make_sim: numpy, the
+   driver's URDF -- IK, reach, joint jump, J4/J6 guards). cuRobo can't be asked for a line or an arc, so the
+   straight-in and the swing are joint paths planned and checked here. With CUROBO_PATHS those joints are cuRobo's
+   targets (go_to_joint_configs) -- or, with APPROACH_EXACT / SWING_EXACT, run exactly as planned (move_joints) and
+   validated by cuRobo as sent (_exact_problem: the chair and user, the floor, the arm itself) -- and each candidate,
+   best first, is asked of cuRobo (_CuroboFirst): one it can't plan or validate, or plans with a detour, is passed
+   over for the next; refused only when none of SEARCH_AFTER_SWING_MAX passes, with where the appliance would work
+   (_placement_advice). The leg from the start to the line-up is cuRobo's alone: only its goal is checked.
 3. Execute: cuRobo to the line-up point and straight in (with CUROBO_PATHS one blended motion), close, one blended
    swing. The hand stays on the handle at the end.
 
@@ -21,7 +22,6 @@ Refusals raise common.Refused: the arm holds where it is.
 import time
 
 import numpy as np
-import pybullet as p
 import rammp_arm
 from capability_engine import sim
 from capability_engine.cornell_commands import CloseGripperCommand, OpenGripperCommand
@@ -29,17 +29,13 @@ from scipy.spatial.transform import Rotation as R
 
 from . import common as dc
 from .common import (
-    ARM,
     Pose,
     Refused,
     curobo_knots,
     curobo_path_problem,
     door_arc_waypoints,
-    ee_pose,
     fit_circle_xy,
-    keep_out_message,
     make_sim,
-    multiply_poses,
     plan_cartesian,
     quiet,
     record_door_angle,
@@ -50,7 +46,6 @@ from .common import (
     short_delta,
     through_curobo,
     through_curobo_knots,
-    trajectory_keep_out,
 )
 
 # --- detection ---
@@ -212,8 +207,32 @@ def _curobo_legs_all(cand):
     return ((cand["q_pre"], cand["leg"], "the straight-in", None), swing)
 
 
+def _exact_legs(cand):
+    """A candidate's joint paths run exactly as planned here (move_joints), not through cuRobo: (start joints, knots,
+    cart_lengths, speed_scale, label) -- the straight-in with APPROACH_EXACT, the swing with SWING_EXACT."""
+    legs = []
+    if CUROBO_PATHS and APPROACH_EXACT and not _direct():
+        lengths = _approach_lengths(cand["grasp"].position, cand["pre_p"], cand["leg"])
+        legs.append((cand["q_pre"], cand["leg"], lengths, 1.0, "the straight-in"))
+    if SWING_EXACT:
+        lengths = [SWING_WAYPOINT_SPACING_M] * len(cand["arc"])
+        legs.append((cand["leg"][-1], cand["arc"], lengths, SWING_SPEED_SCALE, "the swing"))
+    return legs
+
+
+def _exact_problem(ai, cand):
+    """Why cuRobo rejects one of the candidate's exactly-run paths as move_joints will send it (common.curobo_validates:
+    the chair and user, the floor, the arm itself), or None. Passes without a planner."""
+    for q0, knots, lengths, speed, label in _exact_legs(cand):
+        why = dc.curobo_validates(ai, q0, knots, label, lengths, speed)
+        if why:
+            return why
+    return None
+
+
 class _CuroboFirst(AfterSwing):
-    """cuRobo is asked for a candidate's straight-in and swing (_check_curobo_path) before `inner` plans what follows,
+    """cuRobo is asked for a candidate's straight-in and swing (_check_curobo_path; run exactly: validated,
+    _exact_problem) before `inner` plans what follows,
     so a candidate cuRobo can't run is passed over for the next instead of the whole open being refused. 11-10: the
     chosen line-up was 2 mm into cuRobo's person/lap (its arm is padded spheres, fatter than the sim's meshes)."""
 
@@ -235,14 +254,14 @@ class _CuroboFirst(AfterSwing):
         straight-in or swing, or None."""
         if hasattr(self.ai, "raw_joints") and hasattr(self.ai, "plan_to_joints"):
             _, why = dc.free_move_problem(self.ai, self.ai.raw_joints(), cand["q_pre"])
-            direct = dc.direct_move_problem(self.ai.raw_joints(), cand["q_pre"]) if why else ""
+            direct = dc.direct_move_problem(self.ai, self.ai.raw_joints(), cand["q_pre"]) if why else ""
             if direct:  # neither cuRobo's path nor the direct one (checked_curobo_move runs whichever passes)
                 return f"the move to the line-up: {why}; {direct}"
         for start, path, label, in_front in _curobo_legs(cand):
             why = _check_curobo_path(self.ai, start, path, label, in_front)
             if why:
                 return why
-        return None
+        return _exact_problem(self.ai, cand)
 
     def _other_approach(self, scene, rb, cand, why):
         """cuRobo refused the candidate (11-10: every line-up 25 cm out was 1-10 mm into its person/lap): the same
@@ -259,7 +278,7 @@ class _CuroboFirst(AfterSwing):
             with quiet():
                 appr = _approach_from(scene, rb, cand["grasp"], cand["q_g"], (standoff,), q_pre)
                 new = None if appr is None else _with_approach(scene, rb, cand, appr)
-            if new is not None and self._refused(new) is None:
+            if new is not None and self._refused({**cand, **new}) is None:  # the candidate as it would run
                 how = "cuRobo's own line-up joints" if curobos else "the sim's"
                 say(
                     f"  tilt {cand['pitch']} deg: cuRobo refused the line-up {cand['standoff'] * 100:.0f} cm out "
@@ -273,26 +292,13 @@ class _CuroboFirst(AfterSwing):
 
 
 def _check_arc(scene, rb, wps, q0):
-    """Chained sim IK over every swing waypoint from joints `q0`. Returns (ok, q_end, message, joints at each waypoint
-    -- what the swing sends, so the arm runs exactly what was checked)."""
+    """Chained local IK on the arm model over every swing waypoint from joints `q0` (each from the last: one branch,
+    the joints continuous). Returns (ok, q_end, message, joints at each waypoint -- what the swing sends, so the arm
+    runs exactly what was checked)."""
     q, qs = np.asarray(q0, dtype=float), []
     for i, w in enumerate(wps):
         pos, quat = w[:3], w[3:]
-        for j, jj in enumerate(ARM):
-            p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=rb.physics_client_id)
-        wpose = multiply_poses(scene.robot_base_pose, Pose(tuple(pos), tuple(quat)))
-        sol = p.calculateInverseKinematics(
-            rb.robot_id,
-            rb.end_effector_id,
-            list(wpose.position),
-            list(wpose.orientation),
-            physicsClientId=rb.physics_client_id,
-            maxNumIterations=200,
-        )
-        nq = np.array(sol[:7])
-        for j, jj in enumerate(ARM):
-            p.resetJointState(rb.robot_id, jj, float(nq[j]), physicsClientId=rb.physics_client_id)
-        ikerr = np.linalg.norm(np.array(ee_pose(rb).position) - np.array(wpose.position))
+        nq, ikerr = rb.ik(pos, quat, q, wrap=False)
         jump = float(np.max(np.degrees(np.abs(nq - q))))
         j6 = float(np.degrees(nq[5]))
         if (
@@ -310,9 +316,6 @@ def _check_arc(scene, rb, wps, q0):
                 ),
                 qs,
             )
-        ko = keep_out_message(rb, nq)  # None unless the capability enabled the keep-out
-        if ko is not None:
-            return False, q, f"waypoint {i + 1}: {ko}", qs
         q = nq
         qs.append(nq)
     return True, q, f"all {len(wps)} waypoints OK, final J6 {np.degrees(q[5]):.1f}deg", qs
@@ -462,23 +465,12 @@ GRASP_SIDE_FACE_CLEAR_M = 0.01  # an angled grasp's finger links stay this far i
 
 
 def _fingers_in_front(rb, q, face_pt, n):
-    """The smallest distance (m) of the gripper's finger link origins in front of the door face (the plane through
-    `face_pt`, outward normal `n`) at joints `q`."""
-    c = rb.physics_client_id
-    for j, jj in enumerate(ARM):
-        p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
-    base = make_sim()[0].robot_base_pose
-    inv_pos, inv_orn = p.invertTransform(base.position, base.orientation)
+    """The smallest distance (m) of the gripper's finger link origins (the model's, open) in front of the door face
+    (the plane through `face_pt`, outward normal `n`) at joints `q`."""
+    pts = rb.finger_points(q)
     nn = np.r_[np.asarray(n, dtype=float)[:2], 0.0]
     nn /= np.linalg.norm(nn)
-    best = np.inf
-    for k in range(p.getNumJoints(rb.robot_id, physicsClientId=c)):
-        if "finger" not in p.getJointInfo(rb.robot_id, k, physicsClientId=c)[12].decode():
-            continue
-        ls = p.getLinkState(rb.robot_id, k, computeForwardKinematics=True, physicsClientId=c)
-        pt = np.asarray(p.multiplyTransforms(inv_pos, inv_orn, ls[4], ls[5])[0])
-        best = min(best, float(np.dot(pt - np.asarray(face_pt, dtype=float), nn)))
-    return best
+    return float(np.min((pts - np.asarray(face_pt, dtype=float)) @ nn))
 
 
 def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0):
@@ -636,10 +628,10 @@ def _check_curobo_path(ai, start, path, label, in_front=None):
 
 def _near_limit(rb, q, margin_deg):
     """Which joint of `q` is within `margin_deg` of its limit in the model (continuous joints have none), or ""."""
-    for j, jj in enumerate(ARM):
-        info = p.getJointInfo(rb.robot_id, jj, physicsClientId=rb.physics_client_id)
-        lo, hi = info[8], info[9]
-        if lo < hi and not (lo + np.radians(margin_deg) <= q[j] <= hi - np.radians(margin_deg)):
+    ch = rb.chain
+    for j in range(len(q)):
+        lo, hi = ch.lower[j], ch.upper[j]
+        if ch.limited[j] and not (lo + np.radians(margin_deg) <= q[j] <= hi - np.radians(margin_deg)):
             return f"J{j + 1} {np.degrees(q[j]):.1f} deg is within {margin_deg:g} deg of its limit"
     return ""
 
@@ -682,8 +674,6 @@ def _approach_from(scene, rb, grasp, q_g, standoffs=PREGRASP_STANDOFFS, q_pre_gi
         if q_pre is None:
             say(f"  to line-up {standoff * 100:.0f} cm out: {why}")
             continue
-        if keep_out_message(rb, q_pre) is not None:
-            continue
         near = _near_limit(rb, q_pre, CUROBO_LIMIT_MARGIN_DEG)
         if near:
             say(f"  to line-up {standoff * 100:.0f} cm out: {near} -- cuRobo refuses goals that close")
@@ -692,11 +682,6 @@ def _approach_from(scene, rb, grasp, q_g, standoffs=PREGRASP_STANDOFFS, q_pre_gi
             return standoff, pre_p, q_pre, [np.asarray(q_g, dtype=float)]
         leg = plan_cartesian(scene, rb, pre_p, g_q, g_p, g_q, q_pre, "straight in")
         if leg is None:
-            continue
-        lengths = _approach_lengths(g_p, pre_p, leg)
-        ko = trajectory_keep_out(q_pre, leg, lengths) if APPROACH_EXACT else _sent_keep_out(q_pre, leg, lengths)
-        if ko is not None:  # the arm would refuse it, though every planned step passed
-            say(f"  straight in from {standoff * 100:.0f} cm out: the trajectory: {ko}")
             continue
         return standoff, pre_p, q_pre, leg
     return None
@@ -720,7 +705,7 @@ def _curobo_line_up(ai, scene, rb, grasp, standoff, q0):
     if dc.path_below_floor(pl.q):  # its way there dips toward the table: not this line-up
         return None
     q = np.asarray(pl.q[-1], dtype=float)
-    pos, quat = sim.tool_pose(scene, rb, q)
+    pos, quat = rb.pose(q)
     off_deg = np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(quat, g_q))))))
     if np.linalg.norm(pos - pre_p) > CUROBO_LINE_UP_TOL_M or off_deg > CUROBO_LINE_UP_TOL_DEG:
         return None
@@ -729,10 +714,10 @@ def _curobo_line_up(ai, scene, rb, grasp, standoff, q0):
 
 def _with_approach(scene, rb, cand, appr):
     """Candidate `cand` with approach `appr` (_approach_from) and its swing re-planned from the new grasp joints, or
-    None when that swing fails the sim gates."""
+    None when that swing fails the gates."""
     standoff, pre_p, q_pre, leg = appr
     ok, _, msg, arc = _check_arc(scene, rb, cand["wps"], leg[-1])
-    if not ok or _swing_keep_out(leg[-1], arc) is not None:
+    if not ok:
         return None
     margin = _guard_margin([q_pre, *leg, *arc])
     return dict(standoff=standoff, pre_p=pre_p, q_pre=q_pre, leg=leg, arc=arc, msg=msg, margin=margin)
@@ -741,19 +726,6 @@ def _with_approach(scene, rb, cand, appr):
 def _approach_lengths(g_p, pre_p, leg):
     """The straight-in leg's cart_lengths, as open_task sends it: the line's length split evenly over its steps."""
     return [float(np.linalg.norm(np.asarray(g_p) - np.asarray(pre_p))) / len(leg)] * len(leg)
-
-
-def _sent_keep_out(q0, knots, cart_lengths, speed_scale=1.0):
-    """trajectory_keep_out for what move_joints would send. None with CUROBO_PATHS: cuRobo checks its own path."""
-    return None if CUROBO_PATHS else trajectory_keep_out(q0, knots, cart_lengths, speed_scale)
-
-
-def _swing_keep_out(q0, arc):
-    """_sent_keep_out for the swing's joints `arc` from `q0`, timed as open_task sends them."""
-    lengths = [SWING_WAYPOINT_SPACING_M] * len(arc)
-    if SWING_EXACT:  # it runs through move_joints: checked as that sends it
-        return trajectory_keep_out(q0, arc, lengths, SWING_SPEED_SCALE)
-    return _sent_keep_out(q0, arc, lengths, SWING_SPEED_SCALE)
 
 
 def _joint_dist_deg(qa, qb):
@@ -767,7 +739,7 @@ CUROBO_GRASP_TRIES = 3  # cuRobo's IK is asked this many times per tilt for gras
 def _curobo_grasp_shapes(ai, scene, rb, grasp, q0):
     """Grasp joints from cuRobo's own IK (plan_to_pose from `q0`, nothing moves; asked CUROBO_GRASP_TRIES times, its
     IK varies): each reaching `grasp` (within CUROBO_LINE_UP_TOL_*), within the J4/J6 guards and cuRobo's limit margin,
-    and clear of the chair and user (keep_out_message). Empty without a planner."""
+    (cuRobo's own: clear of the chair and user). Empty without a planner."""
     if not hasattr(ai, "plan_to_pose"):
         return []
     g_p, g_q = np.asarray(grasp.position, dtype=float), np.asarray(grasp.orientation, dtype=float)
@@ -777,11 +749,11 @@ def _curobo_grasp_shapes(ai, scene, rb, grasp, q0):
         if not pl.success or len(pl.q) == 0:
             continue
         q = np.asarray(pl.q[-1], dtype=float)
-        pos, quat = sim.tool_pose(scene, rb, q)
+        pos, quat = rb.pose(q)
         off_deg = np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(quat, g_q))))))
         if np.linalg.norm(pos - g_p) > CUROBO_LINE_UP_TOL_M or off_deg > CUROBO_LINE_UP_TOL_DEG:
             continue
-        if _guard_margin([q]) < 0 or _near_limit(rb, q, CUROBO_LIMIT_MARGIN_DEG) or keep_out_message(rb, q):
+        if _guard_margin([q]) < 0 or _near_limit(rb, q, CUROBO_LIMIT_MARGIN_DEG):
             continue
         shapes.append(q)
     return shapes
@@ -846,9 +818,6 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
             for d in swings:
                 wps = _swing_waypoints(g, hinge, d)
                 ok, q_end, msg, arc = _check_arc(scene, rb, wps, leg[-1])
-                ko = _swing_keep_out(leg[-1], arc) if ok else None
-                if ko is not None:  # every waypoint passed, but the arm would refuse the trajectory between them
-                    ok, msg = False, f"the trajectory: {ko}"
                 if ok:
                     c = dict(
                         pitch=pitch,
@@ -880,7 +849,7 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
             + (f"swing {best['swing']} deg fits, {best['margin']:.0f} deg from the J4/J6 guards" if best else why)
         )
     if not cands:
-        return None, "no tilt and arm configuration gives a grasp + swing that passes the sim checks"
+        return None, "no tilt and arm configuration gives a grasp + swing that passes the arm model's checks"
     if PREFER_NEAR_START:  # largest swing; then least reconfiguration (in NEAR_START_BUCKET_DEG steps); then margin
         cands.sort(
             key=lambda c: (
@@ -1009,8 +978,12 @@ def open_task(
         f"{plan['margin']:.0f} deg from the J4/J6 guards; grasp {np.round(g_p, 4)}; line-up joints "
         f"{np.round(np.degrees(plan['q_pre']), 1)}{'; ' + plan['after'] if plan.get('after') else ''}"
     )
-    for start, path, label in () if plan.get("curobo_ok") else _curobo_legs(plan):  # asked in plan_open already
-        why = _check_curobo_path(ai, start, path, label)
+    if not plan.get("curobo_ok"):  # else asked in plan_open already
+        for start, path, label, in_front in _curobo_legs(plan):
+            why = _check_curobo_path(ai, start, path, label, in_front)
+            if why:
+                raise Refused(f"{why} -- refusing before any motion.{advice}")
+        why = _exact_problem(ai, plan)
         if why:
             raise Refused(f"{why} -- refusing before any motion.{advice}")
 
@@ -1089,12 +1062,14 @@ def open_task(
         say(f"  the grasp joints are {off:.1f} deg off the plan's -- re-planning the swing from them")
         wps = _swing_waypoints(Pose(tuple(ee[:3]), tuple(ee[3:7])), hinge, deg)
         ok, _, msg, arc = _check_arc(scene, rb, wps, st["position"])
-        ko = _swing_keep_out(st["position"], arc) if ok else None
-        if ko is not None:
-            ok, msg = False, f"the trajectory: {ko}"
         if not ok:
             raise Refused(f"swing re-check from the real grasp failed ({msg}) -- stopping, still holding the handle.")
-        why = _check_curobo_path(ai, st["position"], arc, "the swing")
+        lengths = [SWING_WAYPOINT_SPACING_M] * len(arc)
+        why = (
+            dc.curobo_validates(ai, st["position"], arc, "the swing", lengths, SWING_SPEED_SCALE)
+            if SWING_EXACT
+            else _check_curobo_path(ai, st["position"], arc, "the swing")
+        )
         if why:
             raise Refused(f"{why} -- stopping, still holding the handle.")
     after_swing.recheck(scene, rb, geom, {**plan, "wps": wps, "arc": arc}, advice)

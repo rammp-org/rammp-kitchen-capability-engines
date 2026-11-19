@@ -25,10 +25,11 @@ On the bench (rammp_arm.RammpArm, no node):
    until two agree within 3 cm (handle and hinge).
 2. Plan everything before any motion (door_common.open_door.plan_open): over tilts and arm configurations, a
    line-up point 25 cm out (or less), straight in along the door normal, and the largest swing (75 down to 45 deg)
-   whose whole arc passes the sim gates (IK, reach, joint jump, J4/J6 guards, the chair and user boxes with
-   CHAIR_SIM_MARGIN_M to spare: cuRobo's arm is fatter). cuRobo can't be asked for a line or an arc, so it is
-   given their checked joints as targets; each candidate, best first, is asked of it before any motion, and one it
-   can't plan (or plans with a detour) is passed over for the next. Refused only when none passes, with where the
+   whose whole arc passes the gates on the arm model (door_common.arm_model: numpy on the driver's URDF, no
+   PyBullet -- IK, reach, joint jump, J4/J6 guards). cuRobo can't be asked for a line or an arc: the straight-in and
+   the swing run exactly as checked (move_joints) and cuRobo validates them as sent -- the chair and user, the
+   floor, the arm itself; each candidate, best first, is asked of it before any motion, and one it can't plan or
+   validate (or plans with a detour) is passed over for the next. Refused only when none passes, with where the
    microwave would work.
 3. Execute, all cuRobo: to the line-up point and straight in (one blended motion), close, one blended swing. The
    hand stays on the handle at the end.
@@ -72,9 +73,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import rammp_arm
-from capability_engine import sim
 from capability_engine.arm import IMPEDANCE as IMPEDANCE_MODE
 from capability_engine.arm_messages import HOLD_FIXED, HOLD_NONE, PoseTarget
+from door_common import arm_model
 from door_common import common as dc
 from door_common import open_door as shared
 from door_common.common import (
@@ -669,15 +670,12 @@ def plan_view(ai, scene, rb):
 
 
 def _fixed_view(ai, scene, rb, face, n, hand, remember):
-    """The view pose at VIEW_JOINTS_DEG: checked against the chair and user and asked of cuRobo (plan_to_joints,
-    nothing moves). The scene camera's door (`face`, `n`) only crops the wrist detection, and is remembered as
+    """The view pose at VIEW_JOINTS_DEG: asked of cuRobo (plan_to_joints, nothing moves: its world has the chair and
+    user). The scene camera's door (`face`, `n`) only crops the wrist detection, and is remembered as
     plan_view does. Returns (joints, the hand's position there); raises Refused."""
     global SCENE_DOOR
     q = np.radians(VIEW_JOINTS_DEG)
-    pos = np.asarray(sim.tool_pose(scene, rb, q)[0], dtype=float)
-    ko = sim.keep_out_message(rb, q)
-    if ko is not None:
-        raise Refused(f"The fixed view pose (VIEW_JOINTS_DEG) puts the arm in the keep-out: {ko}")
+    pos = np.asarray(rb.pose(q)[0], dtype=float)
     if hasattr(ai, "plan_to_joints"):
         start = ai.raw_joints() if hasattr(ai, "raw_joints") else ai.get_state()["position"]
         pl = ai.plan_to_joints(q, start)
@@ -756,10 +754,7 @@ def close_view_step(ai, execute):
     which = "the close's view pose" if CLOSE_VIEW_JOINTS_DEG is not None else "the view pose"
     q_view = np.radians(joints)
     scene, rb = dc.make_sim()
-    p_view = np.asarray(sim.tool_pose(scene, rb, q_view)[0], dtype=float)
-    ko = sim.keep_out_message(rb, q_view)
-    if ko is not None:
-        raise Refused(f"{which} ({joints}) puts the arm in the keep-out: {ko}")
+    p_view = np.asarray(rb.pose(q_view)[0], dtype=float)
     st = ai.get_state()
     off = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - p_view))
     joints_off = float(np.degrees(np.max(np.abs(short_delta(st["position"], q_view)))))
@@ -793,27 +788,16 @@ ARM_SAMPLE_M = 0.03  # the arm's links, for taking them out of the wrist camera'
 
 def _arm_points(ai):
     """Points along the arm's links and on the gripper's, at its joints now, in the arm's base frame (for
-    close_redetect.drop_near): the wrist camera sees its own gripper, inside the door's swing."""
-    import pybullet as p
-
-    scene, rb = dc.make_sim()
-    c = rb.physics_client_id
+    close_redetect.drop_near): the wrist camera sees its own gripper, inside the door's swing. The arm model's joint
+    origins (J1..J7, the tool) from the base, sampled every ARM_SAMPLE_M, and its finger links."""
+    rb = dc.make_sim()[1]
     q = ai.get_state()["position"]
-    for j, jj in enumerate(dc.ARM):
-        p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
-    inv_pos, inv_orn = p.invertTransform(scene.robot_base_pose.position, scene.robot_base_pose.orientation)
-
-    def at(link):
-        ls = p.getLinkState(rb.robot_id, link, computeForwardKinematics=True, physicsClientId=c)
-        return np.asarray(p.multiplyTransforms(inv_pos, inv_orn, ls[4], ls[5])[0])
-
-    chain = [np.zeros(3)] + [at(link) for link in [*dc.ARM, rb.end_effector_id]]
+    chain = [np.zeros(3), *rb.joint_points(q)]
     out = []
     for a, b in zip(chain[:-1], chain[1:], strict=True):
         k = max(1, int(np.linalg.norm(b - a) / ARM_SAMPLE_M))
         out.extend(a + (b - a) * (i / k) for i in range(k + 1))
-    gripper = [i for i in range(p.getNumJoints(rb.robot_id, physicsClientId=c)) if i > max(dc.ARM)]
-    out.extend(at(i) for i in gripper)
+    out.extend(rb.finger_points(q))
     return np.array(out)
 
 
@@ -1207,6 +1191,7 @@ def main():
 
     configure(constants.BENCH_DATA_DIR, debug=True)  # the bench keeps its detection frames, as before
     ai = rammp_arm.RammpArm()
+    arm_model.set_model_provider(ai.robot_description)  # the door code's arm model: the driver's URDF
     dc.set_camera(
         WristCamera(
             ai.node,

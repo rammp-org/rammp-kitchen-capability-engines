@@ -19,7 +19,7 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
 import rammp_arm
 from capability_engine import Action, Cancelled, CapabilityEngine, EngineError, run
 from capability_ui import RunUI, cancel_own_run
-from door_common import close_door
+from door_common import arm_model, close_door
 from door_common import common as dc
 from door_common import open_door as shared_open
 
@@ -199,7 +199,9 @@ class Capability(CapabilityEngine):
         }
         self._debug = bool(self.cfg["debug"])
         open_door.configure(self.cfg["data_dir"], debug=self._debug)
-        dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
+        # the arm model the door code plans on (numpy, no PyBullet): the driver's URDF (mock: arm.mock_urdf's). The
+        # chair and user are cuRobo's: every move is planned by it, or validated by it as sent
+        arm_model.set_model_provider(self.arm.robot_description)
         if self.cfg["close_view_joints_deg"]:
             if len(self.cfg["close_view_joints_deg"]) != 7:
                 raise ValueError(f"close_view_joints_deg needs 7 joints (deg), got {self.cfg['close_view_joints_deg']}")
