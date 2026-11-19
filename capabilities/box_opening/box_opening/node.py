@@ -305,14 +305,15 @@ END_SAYS = {
 END_NO_ANSWER = "No answer in time. Nothing was pressed"
 END_UI_GONE = "The screen lost the arm's panel. Nothing was pressed"
 END_NOT_SEEN = "The arm never saw the container. Nothing was pressed"
-# ... the three ends of a find or a line-up on what no moving of the chair cures (not_found; by guide.K_*),
-# each true of every case that shows it: the first of a selected id the scene camera's detections do not
-# hold, whether or not a camera sees a container (it may be the very one the person chose, so it is not
-# said to be another); the second of two lid-sized tops, the second of which may be no container at all
+# ... the three ends of a find, and of a line-up (but for the second: guide.ENDS), on what no moving of the
+# chair cures (not_found; by guide.K_*), each true of every case that shows it: the first of something in
+# view that nothing ties to the selected container (it may be the very one the person chose, so it is not
+# said to be another); the second of two lid-sized tops, the second of which may be no container at all;
+# the third of all that "vision" is here: a camera, its pose or calibration, the scene segmenter, the watch
 END_NO_CURE = {
     guide.K_NOT_CHOSEN: "The arm cannot tell which container you chose. Choose it again",
     guide.K_SEVERAL: "The arm cannot choose between two things that could be the container",
-    guide.K_FAULT: "The arm's camera is not working. Nothing was pressed",
+    guide.K_FAULT: "The arm's vision is not working. Nothing was pressed",
 }
 # ... and of a goal whose run asked to be guided once more than GUIDES_MAX (not_lined_up)
 END_DISAGREE = "Ready three times, and the arm could not go on. Nothing was pressed"
@@ -498,7 +499,7 @@ CONSOLE_AGAIN_UNSEEN = "Out of time: the container was never seen. Start open_bo
 NO_CURE_WHY = {
     guide.K_NOT_CHOSEN: "a camera sees something that could be the container, and nothing ties it to the selected one",
     guide.K_SEVERAL: "a camera sees two things that could be the container, and nothing says which is meant",
-    guide.K_FAULT: "the camera the line-up watches with delivers nothing",
+    guide.K_FAULT: "what the line-up watches with delivers nothing",
 }
 # How often one goal's run may ask to be guided. Each guidance ends on the person's yes to "Ready", which
 # the WATCH asks (one frame's find, reach_probe's proof); the run then looks for itself (its own views, the
@@ -1750,12 +1751,13 @@ class Capability(CapabilityEngine):
         elif outcome == line_up.TIMED_OUT:
             uncured = getattr(lining.guide, "uncured", "")
         if uncured in END_NO_CURE:
-            # what no moving of the chair cures stood for guide.NO_CURE_S (BoxSource), or was what the panel
-            # said as the line-up's time ran out (Guide.uncured: a line-up the 120 s rule gave less): a
-            # camera that delivers nothing, two things that could be the container, a container nothing ties
-            # to the selection. Said on the panel as what it is, and ended as the find that meets it ends
-            # (not_found, recoverable; the wrist turned back by the caller), with the panel's own sentence
-            # for it. Nothing is carried to the next open_box: a line-up first would meet the same
+            # a state that ends a line-up (guide.ENDS) stood for guide.NO_CURE_S (BoxSource), or was what
+            # the panel said as the line-up's time ran out (Guide.uncured: a line-up the 120 s rule gave
+            # less): what watches delivering nothing (a camera, its pose, the segmenter, or the watch itself
+            # fallen silent), or something in view that nothing ties to the selection. Said on the panel as
+            # what it is, and ended as the find that meets it ends (not_found, recoverable; the wrist
+            # turned back by the caller), with the panel's own sentence for it. Nothing is carried to the
+            # next open_box: a line-up first would meet the same. (Two tops in a frame end no line-up)
             why = getattr(source, "why_none", "")
             if outcome == line_up.UNABLE:
                 when = "for %.0f s of the line-up" % guide.NO_CURE_S

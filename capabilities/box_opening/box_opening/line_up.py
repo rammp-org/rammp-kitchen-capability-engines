@@ -13,9 +13,12 @@ where the box was last seen and what the boundary says of that place, is a `sour
                                                          2026-11-19), and to move the chair
     source.none_kind                                     ... and what that is of (guide.K_*; a source without
                                                          it: guide.kind_of its word). What no chair move
-                                                         cures is said as what it is, and where it stands
-                                                         the source ends the line-up on it (`unable`,
-                                                         `uncured`: BoxSource)
+                                                         cures is said as what it is, and where one that
+                                                         ends a line-up stands (guide.ENDS) the source
+                                                         ends it (`unable`, `uncured`: BoxSource)
+    source.standing                                      a kind that is what watches' own state whatever
+                                                         the other camera sees (the wrist's camera at
+                                                         fault, the watch fallen silent), else ""
 
 It ends one of five ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
 panel's Cancel, or the orchestrator's), TIMED_OUT (the time for lining up ran out: the panel says to press
@@ -243,10 +246,12 @@ class LineUp:
                 # "The arm is not at its rest pose" (review of 2026-11-19)
                 continue
             # (read after look(): what the source heard this tick is in it)
-            kind = getattr(self._source, "none_kind", None)
+            standing = str(getattr(self._source, "standing", "") or "")
+            kind = standing or getattr(self._source, "none_kind", None)
             if kind is None:
                 kind = guide.kind_of(getattr(self._source, "why_none", ""))
-            say = self.guide.update(now, fix, reach, none=kind, looked=bool(getattr(self._source, "looked", False)))
+            looked = bool(getattr(self._source, "looked", False))
+            say = self.guide.update(now, fix, reach, none=kind, looked=looked, stands=bool(standing))
             self._show(say, now)
             if say.state == guide.TIMED_OUT:
                 timed_out_at = now if timed_out_at is None else timed_out_at
@@ -324,8 +329,22 @@ PROBE_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREA
 TAIL_LINES = 4
 TAIL_WAIT_S = 0.5  # ... and its reader is given this long to read what it wrote as it died
 # a watch's word on having no container still stands where its newest saying is no older than this: it says
-# one a second (survey.LINE_UP_NONE_S, box_watch.LOOK_S), and a watch that has fallen silent says nothing
+# one a second (survey.LINE_UP_NONE_S, box_watch.LOOK_S)
 NONE_FRESH_S = 3.0
+# A watch that has said a camera's word (a sighting, or that it has none) and then says nothing for this long
+# has fallen silent: no sentence of the panel has anything behind it any more, and that is itself what watches
+# not working (review of 2026-11-19: five sightings and then silence left "The arm cannot see the container.
+# Move the chair in front of it" up for 297 of a line-up's 300 s). Between two words a watch's own constants
+# allow 2.3 s: a wrist frame waited for 1 s (survey.LINE_UP_FRAME_S), the scene camera's look after a frame
+# that shows none (press_demo.LINE_UP_LOOK_S, 0.3 s), and "none" said no oftener than once a second
+# (survey.LINE_UP_NONE_S; box_watch.LOOK_S the same), besides the wrist finder's time on one frame, which no
+# record at hand measures. Twice that. Not counted before its first such word: the wrist's turn to its view,
+# and a run's own start before it, take what they take
+SILENT_S = 5.0
+SILENT = "the watch has said nothing for %.0f s"
+# how the wrist's own watch begins every word on having no container that is its camera's and not the
+# selection's (tasks/survey.watch_front): what a line-up reads as the WRIST camera's word
+WRIST_SAYS = "wrist camera:"
 
 
 class Child:
@@ -440,12 +459,22 @@ class BoxSource:
 
     What a "none" is OF (`none_kind`: the watch's own "kind" where it says one, the run's; else
     guide.kind_of its word) decides what the person is told, and whether moving the chair can cure it. A
-    kind that cannot (guide.NO_CURE: a camera that delivers nothing, two things that could be the
-    container, a container nothing ties to the selection) ends the line-up once it has been the watch's
-    word without a break for guide.NO_CURE_S, that word still fresh (NONE_FRESH_S): `unable` (its
-    sentence, said for the last LINGER_S of that with no button) and `uncured` (which it was). A word of
-    another kind, or a sighting, starts that time again: a segmenter message late for one look, or a
-    second lid passing through the view while the chair turns, does not end a guidance.
+    kind that ends a line-up (guide.ENDS: what watches delivering nothing, something in view that nothing
+    ties to the selection) ends it once it has been the watch's word without a break for guide.NO_CURE_S,
+    that word still fresh (NONE_FRESH_S): `unable` (its sentence, said for the last LINGER_S of that with
+    no button) and `uncured` (which it was). A word of another kind, or a sighting, starts that time
+    again: a segmenter message late for one look does not end a guidance. A container that is merely not
+    in view (guide.K_UNSEEN) never ends one, and nor do two tops in a frame: only the line-up's time does.
+
+    Two states are the watch's own whatever else is heard (`standing`: said at once, and no sighting
+    hides or restarts them; review of 2026-11-19, the second):
+      the WRIST camera at fault, where the line-up watches with the wrist (its words begin WRIST_SAYS). The
+        scene camera's sightings went on arriving, each started the fault's time again, and the panel said
+        "Hold still, checking" and "Looking for the container" by turns for the whole wait, of a line-up
+        whose Ready only the wrist's frames bring. Only a word of the wrist's own that shows its camera
+        delivering (a sighting by the wrist, a "none" of another kind) ends it;
+      the watch fallen SILENT (SILENT_S since its last camera word): what watches is not working, from
+        then on, until it speaks again.
 
     close() ends the children that are this source's own, the probe by its own quit so that it keeps its
     grid; it can take PROBE_QUIT_S, so what must not wait is done before it."""
@@ -487,6 +516,9 @@ class BoxSource:
         # since when the watch's "none" has been of the kind it is now, without a break, and when last said
         self._said_since = self._said_at = None
         self.uncured = ""  # the kind no chair move cures that this line-up ended on (`unable` says it)
+        self._heard_at = None  # when the watch last said a camera's word (a sighting, or that it has none)
+        self._wrist_fault = None  # the wrist camera at fault: (since when without a break, last said, its word)
+        self.standing = ""  # a kind that is the watch's own state whatever the other camera sees (_state)
         self.why_gone = ""  # where it is the probe that ended (gone): that, and the end of its log
         self.unable = ""  # what the watch said that no waiting cures (guide.ARM_NOT_AT_REST): the line-up ends
         self.viewed = False  # the run said its wrist stands at the line-up's view: it has turned
@@ -502,6 +534,9 @@ class BoxSource:
             elif "fix" in msg:
                 f = msg["fix"]
                 by_wrist = f.get("by") == "wrist"
+                self._heard_at = t
+                if by_wrist:
+                    self._wrist_fault = None  # its camera delivers (the scene camera's sighting says nothing of it)
                 if not by_wrist and self._wrist_at is not None and t - self._wrist_at <= guide.LOST_S:
                     # the scene camera's sighting, said where a wrist frame showed no box: it has a box in
                     # front of the arm centimetres from where the wrist has it, often roughly and at another
@@ -524,10 +559,16 @@ class BoxSource:
                 if self.why_none == guide.ARM_NOT_AT_REST:
                     self.unable = self.why_none  # what no waiting cures: the line-up ends on it (LineUp.run)
                     continue  # (the arm's word, not a camera's on a container: it is of no kind)
+                self._heard_at = t
                 kind = str(msg.get("kind") or "") or guide.kind_of(self.why_none)
                 if kind != self.none_kind or self._said_since is None:
                     self._said_since = t
                 self.none_kind, self._said_at = kind, t
+                if kind == guide.K_FAULT and self.why_none.startswith(WRIST_SAYS):
+                    since = t if self._wrist_fault is None else self._wrist_fault[0]
+                    self._wrist_fault = (since, t, self.why_none)
+                else:
+                    self._wrist_fault = None  # (any other word: the wrist judged a frame, or does not watch)
             elif "view" in msg:
                 self.viewed = True
                 # said once, as the wrist stands at the line-up's view: the run starts its reach from these
@@ -581,15 +622,28 @@ class BoxSource:
         elif self._log is not None:
             self._log("the robot's URDF was not heard: no boundary can be worked out")
 
-    def _stands(self, now):
-        """Whether what the watch says of having no container is a state no chair move cures that has stood
-        its time: the line-up then ends on it (`unable`, `uncured`), as on an arm that is not at rest."""
-        kind = self.none_kind
-        if self.unable or kind not in guide.NO_CURE or self._said_since is None:
+    def _state(self, now):
+        """What the watch's words come to at `now`: `standing`, a state of its own that no sighting hides
+        (the wrist camera at fault for guide.LOST_S and still said so; the watch silent for SILENT_S), and
+        whether a state that ends a line-up (guide.ENDS) has stood its time: the line-up then ends on it
+        (`unable`, `uncured`), as on an arm that is not at rest. A fault that is the watch's own counts
+        from when it began; any other kind from when it became the watch's word without a break, while
+        that word is fresh. guide.K_UNSEEN and two tops in a frame never end anything here."""
+        self.standing, since, why = "", None, ""
+        fault = self._wrist_fault
+        if fault is not None and now - fault[1] <= NONE_FRESH_S and now - fault[0] >= guide.LOST_S:
+            self.standing, since, why = guide.K_FAULT, fault[0], fault[2]
+        elif self._heard_at is not None and now - self._heard_at > SILENT_S:
+            self.standing, since = guide.K_FAULT, self._heard_at + SILENT_S
+            why = SILENT % (now - self._heard_at)
+        kind = self.standing or self.none_kind
+        if not self.standing and self._said_since is not None and now - self._said_at <= NONE_FRESH_S:
+            since = self._said_since
+        if self.unable or kind not in guide.ENDS or since is None:
             return
-        fresh = now - self._said_at <= NONE_FRESH_S
-        if fresh and now - self._said_since >= guide.NO_CURE_S - LINGER_S:
+        if now - since >= guide.NO_CURE_S - LINGER_S:
             self.uncured, self.unable = kind, guide.NO_CURE[kind]
+            self.why_none = why or self.why_none  # (what it ended on, for the engine's own message)
 
     def _refute(self):
         """The grid in hand without the cells that do not work for this line-up: those a proof for the box
@@ -641,8 +695,9 @@ class BoxSource:
 
     def look(self, now):
         new = self._hear()
-        self._stands(now)
-        if self._fix is None:
+        self._state(now)
+        if self._fix is None or self.standing:
+            # (a state of the watch's own: the other camera's sightings are not handed on while it stands)
             return None, None
         fix, z, table_z, rough = self._fix
         reach = None

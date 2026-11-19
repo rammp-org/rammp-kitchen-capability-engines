@@ -767,7 +767,9 @@ def test_what_a_find_with_no_container_is_of_decides_whether_the_chair_is_guided
     for wrist_first in (False, True):
         assert kind(wrist_first=wrist_first) == "unseen" and kind(wrist_first=wrist_first, record=DOWN) == "fault"
         assert kind(wrist_first=wrist_first, why=two) == "several"
-        assert kind(wrist_first=wrist_first, why=gone) == "not_chosen"  # it cannot tell it from an id it never had
+        # a selected id that is merely absent from its frames: the container may simply be out of its view,
+        # and that is a container the arm cannot see, which is guided for (review of 2026-11-19, the second)
+        assert kind(wrist_first=wrist_first, why=gone) == "unseen"
         assert kind(wrist_first=wrist_first, record={"timing": {}}) == "fault"
     assert kind(wrist_first=False, wrist="fault") == "unseen"  # (a wrist the guidance would not watch with)
     assert press_demo.no_container_kind(SimpleNamespace(), Namespace(wrist_first=False), None) == "fault"
@@ -859,10 +861,14 @@ def test_a_selection_the_scene_camera_does_not_hold_is_guided_only_where_nothing
     assert code == EXIT_NOT_LINED_UP and homes == [] and [c["what"] for c in calls] == ["unseen"]
     assert calls[0]["place"] is None and NOTHING_THERE in calls[0]["why"]
     assert "NO BOX" not in capsys.readouterr().out
-    # the scene camera alone (no wrist look): it cannot tell the two apart, so it is not guided for
-    calls.clear()
+    # the scene camera alone (no wrist look): all it knows is that the selected id is in none of its frames,
+    # as it is for a container that is simply out of its view. That is a container the arm cannot see:
+    # guided, never "Choose it again" (review of 2026-11-19, the second; a626985 ended it NO BOX, and the
+    # same word ended a scene-only line-up after ten seconds)
+    calls.clear(), homes.clear()
     code, _c, rows = run_main(monkeypatch, tmp_path / "scene", argv[:2] + argv[3:], _refused, found=False, why=gone)
-    assert code == 2 and calls == [] and [r["what"] for r in rows if r["leg"] == "reach_refused"] == ["not_chosen"]
+    assert code == EXIT_NOT_LINED_UP and homes == [] and [c["what"] for c in calls] == ["unseen"]
+    assert [r["what"] for r in rows if r["leg"] == "reach_refused"] == ["unseen"]
     # by hand the wrist is not turned for it and the run ends NO BOX, as it did, with nothing new in its row
     calls.clear(), asked.clear(), homes.clear()
     asked = _wrist_look_says(monkeypatch, _found_by_the_wrist())
@@ -1024,6 +1030,21 @@ def test_the_wrist_look_says_which_tops_it_saw_out_of_the_arms_reach(monkeypatch
     monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
     assert press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None) is None
     assert ctx.wrist_far == [] and ctx.wrist_seen is None
+    # a lid it HAS in view that the selection's tie does not take: off the scene camera's line to the selected
+    # container, it is something in view that nothing ties to it, not a container the arm cannot see (with
+    # the scene camera's mount off, as on 2026-11-17, that is the selected container itself); with a second
+    # top in the selection's direction, two that could be it
+    fix = SimpleNamespace(top_xyz=(0.65, 0.0, 0.30), table_z_scene=0.2, partial="")
+    survey = sv.Survey(fix=fix, why="", find=SimpleNamespace(fix=fix, places=(), patches=()), clouds=["c"])
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
+    off = "212 mm to the side of the scene camera's line of sight to it"
+    for judged, rival, seen in (((False, off), None, "not_chosen"), ((True, "on its line"), (0.70, 0.10), "several")):
+        tie = SimpleNamespace(instance_id="fc_1", judge=lambda xy, j=judged: j, rival=lambda find, xy, r=rival: r)
+        said = []
+        got = press_demo.wrist_first(
+            None, ctx, cfg, runner, object(), Namespace(execute=True), None, said=said, tie=tie
+        )
+        assert got is None and ctx.wrist_seen == seen and "not taken for the selected container fc_1" in said[0]
 
 
 def test_a_run_by_hand_is_never_guided(monkeypatch, tmp_path):
