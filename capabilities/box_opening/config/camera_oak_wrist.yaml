@@ -15,11 +15,19 @@ parent_frame: wrist_camera_color_optical_frame
 mount_xyz: [0, 0, 0]
 mount_quat_xyzw: [0, 0, 0, 1]
 stamp_offset_s: 0.0
-# The lens origin from tool_frame, in its axes (m) — measured, not TF: the
-# depth press centres on TF's mount only when TF agrees with this within
-# 5 mm sideways (tasks/depth_press.MOUNT_XY_TOL_M). Fitted from the
-# 2026-10-22 runs (rammp-deployments#128: [0, 0.065, 0.015] from
-# arm_end_effector_link, tool_frame 0.12 m past it); the hand-measured mount
-# deployed before it ([0, 0.10, -0.10]) put the 20:04 press on the lid's
-# edge. Re-measure after ANY bracket change.
+# The robot's own mount of this camera: the transform of that name in the active robot's
+# transforms/cameras.yaml (rammp-deployments config/robots/<robot>, mounted at /config/robot), whose child
+# frame the OAK's driver puts at the colour sensor and whose parent is the flange. Where that file can be
+# read the lens from tool_frame is taken from it, on the tool frame of the description the run is on
+# (perception/d405.wrist_lens_in_hand): flatbot's [0, 0.065, 0.015] with the tool frame 0.120 m out is
+# [0, 0.065, -0.105]; gen_1_5's calibration of 2026-11-18, [-0.005351, 0.06953, 0.022506], with its tool
+# frame 0.134 m out (the sensor puck) is [-0.005351, 0.06953, -0.111494]. The depth press centres on TF's
+# mount only when TF agrees with it within 5 mm sideways (tasks/depth_press.MOUNT_XY_TOL_M): a TF tree
+# and a robot config that are not the same robot's are refused there.
+robot_mount: wrist_camera
+# The same, kept by hand, for where no robot config is mounted (a test, an offline tool): the lens origin
+# from tool_frame, in its axes (m). Fitted from the 2026-10-22 runs (rammp-deployments#128: [0, 0.065,
+# 0.015] from arm_end_effector_link, tool_frame 0.12 m past it); the hand-measured mount deployed before
+# it ([0, 0.10, -0.10]) put the 20:04 press on the lid's edge. NOT read on a robot whose calibration is
+# mounted: do not edit this for a new mount or a new tool frame (#105 did, in the wrong frame: #106).
 wrist_lens_in_hand_m: [0.0, 0.065, -0.105]

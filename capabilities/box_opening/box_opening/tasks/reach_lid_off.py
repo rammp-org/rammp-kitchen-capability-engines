@@ -946,8 +946,10 @@ def wrist_table(ctx, pts, q, lens_in_hand=None):
     arm at joints `q` holding the lid: nearer the lens than WRIST_HAND_M
     (the hand, the fingers, the lid in them), inside the held lid's column
     (its radius and HELD_LID_CLEAR_M round the pads: the lid, and what it
-    hides) and over the box's footprint. `lens_in_hand`: the camera
-    config's measured wrist_lens_in_hand_m."""
+    hides) and over the box's footprint. `lens_in_hand`: the wrist lens
+    from the tool frame, as the grabber has it (wrist_lens_in_hand_m: the
+    robot's own calibration on this run's tool frame, d405.wrist_lens_in_hand;
+    None, a stand-in grabber's: the fitted mount on a tool frame 0.120 out)."""
     from box_opening.runtime import approach
     from box_opening.tasks.press_demo import container_half
 

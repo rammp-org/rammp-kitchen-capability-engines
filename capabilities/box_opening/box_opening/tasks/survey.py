@@ -99,8 +99,8 @@ REST_NEAR_LINKS = ("half_arm",)
 # [-0.5, -0.5, -0.5, 0.5] on arm_end_effector_link, the OAK's images turned 180 deg on the device),
 # looking along the tool, the image's long side along -x of the tool, its top toward +y
 OPTICAL_IN_TOOL = np.diag([-1.0, -1.0, 1.0])
-# the lens from tool_frame, where the camera config gives none (camera_oak_wrist.yaml
-# wrist_lens_in_hand_m: [0, 0.065, -0.105], the fitted mount)
+# the lens from tool_frame, where no camera config is named (camera_oak_wrist.yaml's own figure, the fitted
+# mount on a tool frame 0.120 out). A run's is camera_of's: the robot's calibration on its own tool frame
 LENS_IN_TOOL_M = (0.0, 0.065, -0.105)
 # the wrist OAK's colour stream, where the camera has sent none yet: 640 x 400, fy 398 px
 NOMINAL_K = ((398.0, 0.0, 320.0), (0.0, 398.0, 200.0), (0.0, 0.0, 1.0))
@@ -220,12 +220,13 @@ def camera(lens=None, k=None, size=None):
 
 
 def camera_of(watcher, camera_cfg_name=None):
-    """The Camera for this run: the camera config's lens, the grabber's newest intrinsics."""
+    """The Camera for this run: the lens where the robot's own calibration has it on this run's tool
+    frame, else the camera config's (d405.wrist_lens_in_hand); the grabber's newest intrinsics."""
     lens = None
     try:
-        from box_opening.perception.d405 import camera_config
+        from box_opening.perception.d405 import camera_config, wrist_lens_in_hand
 
-        lens = camera_config(camera_cfg_name).get("wrist_lens_in_hand_m") if camera_cfg_name else None
+        lens = wrist_lens_in_hand(camera_config(camera_cfg_name))[0] if camera_cfg_name else None
     except Exception:  # noqa: BLE001 - a config without it: the fitted mount's
         lens = None
     g = getattr(watcher, "grab", None)

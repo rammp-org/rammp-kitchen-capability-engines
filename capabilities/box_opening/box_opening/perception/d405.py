@@ -37,6 +37,85 @@ def camera_config(name=CAMERA_CONFIG):
     raise FileNotFoundError("camera config %r not found (tried %s)" % (name, candidates))
 
 
+# The active robot's own camera mounts: rammp-deployments config/robots/<robot>/transforms/cameras.yaml, the
+# file its static_tf publishes and a calibration replaces, in the robot config the node's container mounts at
+# /config/robot (as the planner's own files are read there: runtime/body). BOX_OPENING_ROBOT_CAMERAS names
+# another file (an offline tool); set empty, none is read.
+ROBOT_CAMERAS = "/config/robot/transforms/cameras.yaml"
+ROBOT_CAMERAS_ENV = "BOX_OPENING_ROBOT_CAMERAS"
+FLANGE_LINK = "end_effector_link"  # "arm_end_effector_link" where the description prefixes its links
+
+
+def robot_mount(name, path=None, env=None):
+    """(parent link, [x, y, z]) of the robot's own mount of camera frame `name` (ROBOT_CAMERAS, or `path`),
+    or None: no such file here (the bench, a test, an offline tool without the robot's config), or no such
+    mount in it. A file that is there and cannot be read as mounts is None too, said in the log: the
+    caller falls back to its own figure, and the depth press's check against TF still stands."""
+    env = os.environ if env is None else env
+    if path is None:
+        path = env[ROBOT_CAMERAS_ENV].strip() if ROBOT_CAMERAS_ENV in env else ROBOT_CAMERAS
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            params = (load_yaml(f).get("mounts") or {}).get("ros__parameters") or {}
+        m = params.get(str(name))
+        if not isinstance(m, dict):
+            return None
+        xyz = [float(v) for v in m["xyz"]]
+        if len(xyz) != 3 or not all(np.isfinite(xyz)):
+            raise ValueError("xyz %r" % (m["xyz"],))
+        return str(m["parent"]), xyz
+    except Exception as e:  # noqa: BLE001 - an unreadable calibration is not a reason to stop: the copy stands in
+        import logging
+
+        logging.getLogger("box_opening").warning("[camera] %s: no usable mount %s (%s)", path, name, e)
+        return None
+
+
+def wrist_lens_in_hand(cfg, chain=None, path=None, env=None):
+    """([x, y, z] or None, where it is from): the wrist lens from the tool frame, in the hand's axes (m).
+
+    Where the robot's own calibration can be read it is that, not a copy kept here: camera config `cfg`
+    names the mount whose child frame the driver puts AT the colour sensor (`robot_mount`: wrist_camera,
+    the root of the OAK's tree), its parent is the flange, and the tool frame stands straight out of the
+    flange with the flange's axes (kinematics.described_tool_m refuses any other), `chain`'s
+    tool_from_flange_m along z: the lens is the mount's xyz less that (to the nanometre: the team's
+    [0, 0.065, 0.015] on a tool frame 0.120 out is the [0, 0.065, -0.105] this was kept as). A copy written
+    for one tool frame and one mount was wrong on the next of either (the wrong frame once: #105, reverted
+    by #106; on gen_1_5, 2026-11-19: 7 mm sideways of the 11-18 calibration and 6.5 mm along the tool on
+    the puck's tool frame).
+
+    Else `cfg`'s own wrist_lens_in_hand_m: a config that names no mount (the bench's D405, whose mount is
+    in that same file), no robot config here, a mount on another link than the flange, or no chain to say
+    where the tool frame is. `chain`: None is the run's own (runtime/approach), where it has one."""
+    lens = cfg.get("wrist_lens_in_hand_m")
+    copy = None if lens is None else [float(v) for v in lens]
+    name = cfg.get("robot_mount")
+    if not name:
+        return copy, "the camera config"
+    mount = robot_mount(name, path=path, env=env)
+    if mount is None:
+        return copy, "the camera config (no robot calibration of %s here)" % name
+    parent, xyz = mount
+    bare = parent[4:] if parent.startswith("arm_") else parent
+    if bare != FLANGE_LINK:
+        return copy, "the camera config (the robot mounts %s on %s, not the flange)" % (name, parent)
+    if chain is None:
+        try:
+            from box_opening.runtime import approach
+
+            chain = approach._chain() if approach.chain_ready()[0] else None
+        except Exception:  # noqa: BLE001 - no chain (no URDF yet): the copy
+            chain = None
+    tool = getattr(chain, "tool_from_flange_m", None)
+    if tool is None:
+        return copy, "the camera config (no arm chain yet to say where the tool frame is)"
+    return [round(xyz[0], 9), round(xyz[1], 9), round(xyz[2] - float(tool), 9)], (
+        "the robot's calibration of %s, the tool frame %.0f mm out of the flange" % (name, 1000.0 * float(tool))
+    )
+
+
 def quat_to_mat(x, y, z, w):
     """xyzw quaternion (normalized here) -> 3x3 rotation matrix."""
     n = (x * x + y * y + z * z + w * w) ** 0.5 or 1.0
@@ -126,10 +205,10 @@ class D405Grabber:
         # the stamp lag against the arm; camera_pose_at looks the pose up at
         # stamp + this
         self.stamp_offset_s = float(cfg.get("stamp_offset_s", 0.0) or 0.0)
-        # the measured lens from tool_frame the depth press checks TF
-        # against (tasks/depth_press); None: unmeasured, it does not centre
-        lens = cfg.get("wrist_lens_in_hand_m")
-        self.wrist_lens_in_hand_m = None if lens is None else [float(v) for v in lens]
+        # the lens from tool_frame the depth press checks TF against (tasks/depth_press) and the lid's
+        # table map takes the hand out by: the robot's own calibration where it can be read, else this
+        # config's (wrist_lens_in_hand_m below, worked out when asked: the arm's chain is set by then)
+        self._cfg = cfg
         # Topic paths: explicit keys take precedence over namespace-derived
         # defaults (OAK-D uses /rgb and /stereo instead of /color and
         # /aligned_depth_to_color).
@@ -159,6 +238,13 @@ class D405Grabber:
         self._subs = []
         self.resubscribes = 0
         self._subscribe()
+
+    @property
+    def wrist_lens_in_hand_m(self):
+        """The lens from tool_frame, in the hand's axes (wrist_lens_in_hand: the robot's own calibration on
+        this run's tool frame, else the camera config's figure); None: unmeasured, the depth press does
+        not centre."""
+        return wrist_lens_in_hand(self._cfg)[0]
 
     def _subscribe(self):
         from rclpy.qos import qos_profile_sensor_data

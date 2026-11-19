@@ -157,7 +157,9 @@ KNOB_UP_MM = 6.0  # press_demo.KNOB_UP_MIN_MM
 # uses the same offset, so a wrong mount "converges" anyway, its whole error
 # off the button (20:04: TF's lens y 0.100 against a true ~0.065 — the press
 # 35 mm off, on the lid's edge). CENTRE runs only when TF's lens agrees with
-# the measured one in the camera config (wrist_lens_in_hand_m) ...
+# the grabber's (wrist_lens_in_hand_m: the robot's own calibration from the
+# mounted robot config, on this run's tool frame, else the camera config's
+# figure — perception/d405.wrist_lens_in_hand) ...
 MOUNT_XY_TOL_M = 0.005
 MOUNT_Z_TOL_M = 0.020
 # ... and the touch must meet the lid where TF's lens says the fingertips
