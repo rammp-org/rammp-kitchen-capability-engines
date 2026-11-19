@@ -11,7 +11,8 @@ where the box was last seen (Fix) and what the boundary says of that place (Reac
 what the panel shows (Say). The engine's loop feeds it and sends its panel, as the base class's
 example does (capabilities/example: ctx.update_user_panel / ctx.poll_ui_event).
 
-    LOOKING   no box seen lately                   "Looking for the container"
+    LOOKING   nothing has looked yet               "Looking for the container"
+              no camera sees the container         "The arm cannot see the container. Move the chair in front of it"
     MOVE      the box is outside the boundary      "Move closer, about 15 cm"   (or back / left / right)
     HOLD      inside, not yet steady or planned    "Hold still, checking"
     READY     inside, steady, and the run plans    "Ready. Open the container?"  [Open] [Cancel]
@@ -31,6 +32,16 @@ a yes to what is there now.
 A goal with no UI is guided by the same Guide (owner 2026-11-17: "don't end, just tell you how far to
 move until it's close enough then asking if ready y/n"): its lines are said on the node's console and
 its question (ASK) is answered y or n (line_up.Answers), a y taken exactly as Open is.
+
+A container NO camera sees is guided too (owner 2026-11-19, asked whether a box no camera sees at all
+should become guidance, "move so the container is in front of the arm": yes). Until then the panel stood
+on "Looking for the container" for the whole line-up, which tells the person nothing to do, and a run
+whose cameras found none ended `not_found`. Now, once what watches has looked and says it has no
+container (`none`: its own word on why), or a container that was seen has not been for LOST_S, the person
+is told so and what to do about it: move the CHAIR (UNSEEN). Never the container, nor anything on the
+table: the scene is not changed, only where the robot stands (the owner's rule of 2026-11-11). No
+direction and no distance are said then, because none is known; the moment a camera sees the container
+they are (MOVE), as ever.
 """
 
 import math
@@ -48,6 +59,30 @@ TITLE = "Opening the container"
 ASK = "Ready. Open the container?"  # the question: Open on the panel, y on the console (the terminal reads it too)
 # what a line-up out of its time says last. The UI's words; a goal with no UI is given its own (Guide.again)
 AGAIN = "Press open again when you are in place"
+# ... and where no camera saw the container in all that time: what was missing is that it never came into
+# view, not that it stood out of reach (Guide.again_unseen)
+AGAIN_UNSEEN = "Container not seen in time. Press open again in front of it"
+# What is said while no container is seen (state LOOKING). SEARCHING only until what watches has looked:
+# while the wrist turns to its view, before the scene camera's first look ends. Then the person is told
+# that the arm cannot see it and what to do: UNSEEN. Each is one short message on the UI's panel, no longer
+# than the longest it showed before these (ARM_NOT_AT_REST's sentence, 63 characters)
+SEARCHING = "Looking for the container"
+UNSEEN = "The arm cannot see the container. Move the chair in front of it"
+# ... and where what watches says it sees MORE than one thing that could be the container and cannot tell
+# which is meant (SEVERAL_MARKS): "cannot see the container" would not be true of a container that stands
+# in front of the arm beside a second lid-sized top. A top out of the arm's reach is no rival of one within
+# it (the finder's rule, perception/wrist_finder), so the chair's place can settle which is meant
+SEVERAL = "The arm sees two possible containers. Move in front of only one"
+# The words by which a run and its watch say that: the wrist finder's and the scene locator's "two places
+# pass as this container", the selection's "another lid-sized top ... in the same direction" and "two
+# containers, and the selected one ... is in none of the scene camera's detections" (press_demo.tie_refusal,
+# alone_refusal), and of tops that all stand out of reach "none is nearest the arm alone"
+SEVERAL_MARKS = ("two places pass", "another lid-sized top", "two containers", "none is nearest the arm alone")
+# one of those two sentences stands this long before the other takes its place (anything else replaces it
+# at once: a container seen, the time out). What watches judges each frame alone, a word a second
+# (survey.LINE_UP_NONE_S), and where one frame shows two lid-sized tops and the next shows one cut by the
+# view, the panel would change between two sentences of a dozen words faster than either is read
+UNSEEN_STANDS_S = 3.0
 
 LOST_S = 1.5  # no box seen for this long: looking again
 FRESH_S = 1.0  # Open counts only on a box seen this recently
@@ -123,6 +158,17 @@ def unable(why):
     return Say(UNABLE, why[:1].upper() + why[1:])
 
 
+def several(why):
+    """Whether `why` (a run's or its watch's word on why it has no container) says that more than one thing
+    it sees could be the container."""
+    return any(mark in str(why or "") for mark in SEVERAL_MARKS)
+
+
+def unseen(why=""):
+    """What the person is told where no camera has the container, `why` the watch's own word on it."""
+    return SEVERAL if several(why) else UNSEEN
+
+
 def instruction(to_zone, axis=None):
     """The user's move that brings a box `to_zone` away from the boundary into it: (word, metres, axis).
     The zone nearer the arm than the box (dx < 0) is "closer", further "back"; the zone to the box's
@@ -152,11 +198,13 @@ def words(word, metres):
 class Guide:
     """One line-up: update() every tick, press() for a button, until `state` is GO, TIMED_OUT or the
     caller's cancel. `budget_s`: how long the user has to line up (None: no limit). `again`: what it says
-    last where that time runs out. `instruction`: the newest "Move ..." it said (None: none yet), which the
-    engine's error carries where the line-up ends without its yes."""
+    last where that time runs out; `again_unseen`: ... where the container was never seen in it (saw_box).
+    `instruction`: the newest "Move ..." it said (None: none yet), which the engine's error carries where
+    the line-up ends without its yes."""
 
     budget_s: float = None
     again: str = AGAIN
+    again_unseen: str = AGAIN_UNSEEN
     instruction: str = None
     state: str = LOOKING
     started: float = None
@@ -222,9 +270,10 @@ class Guide:
                 return self._said
         return self._answer(now, say, at_once=at_once)
 
-    def update(self, now, fix, reach):
+    def update(self, now, fix, reach, none=""):
         """The tick: the newest Fix (or None: nothing new) and the Reach of the newest box seen (None: not
-        judged yet). Returns what to show."""
+        judged yet). `none`: where no container is seen, what watches' own word on why ("": it has not
+        said, as while its wrist still turns to look). Returns what to show."""
         now = float(now)
         if self.started is None:
             self.started = now
@@ -232,12 +281,24 @@ class Guide:
             return self._said
         self._see(fix)
         if self.budget_s is not None and now - self.started > self.budget_s:
-            return self._answer(now, Say(TIMED_OUT, self.again), at_once=True)
+            # what was missing, in its last words: the container in reach, or the container in view at all
+            return self._answer(now, Say(TIMED_OUT, self.again if self.saw_box else self.again_unseen), at_once=True)
         cancel = ((CANCEL, "Cancel"),)
         seen = self._last_fix
         if seen is None or now - seen.t > LOST_S:
             self._bad_since = self._hold_since = None
-            return self._answer(now, Say(LOOKING, "Looking for the container", cancel), at_once=True)
+            # no camera has it: lost (it was seen, and has not been for LOST_S), or what watches has looked
+            # and says it has none. Only before that is it still "looking": nothing is known yet
+            told = SEARCHING if seen is None and not none else unseen(none)
+            prev = self._said
+            if (
+                prev is not None
+                and prev.state == LOOKING
+                and {prev.message, told} == {UNSEEN, SEVERAL}
+                and now - self._said_at < UNSEEN_STANDS_S
+            ):
+                return prev
+            return self._answer(now, Say(LOOKING, told, cancel), at_once=True)
         good = reach is not None and bool(reach.inside) and reach.planned is True and self.steady(now)
         if self.state == READY and not good:
             # a jitter of the box or of the boundary is not yet a reason to take the question away; nor is a

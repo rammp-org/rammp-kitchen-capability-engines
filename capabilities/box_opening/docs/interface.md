@@ -40,7 +40,9 @@ beside the container, and goes home. It has one action, `open_box`:
    more nearer above it. The container found this way goes on to the look and
    the press as the scene camera's would, and the counter the wrist saw is the
    table the lid's spot is chosen on. Nothing found, or two places that could be
-   it, is `not_found`, nothing pressed, the arm home.
+   it, is a container no camera sees: the chair is guided (see "A container no
+   camera sees"); in a run by hand it is `not_found`, nothing pressed, the arm
+   home.
 1. **Look:** the arm moves to a pose looking down at the lid at 45 degrees, and
    the wrist camera aims at the button.
 1. **Press:** the fingers, closed, press the button in joint impedance. The arm
@@ -116,6 +118,10 @@ and how far to move the chair until the container is where the arm opens it.
 Then they are asked, and at their yes the run finds the container again and
 goes on (see "Lining up in the middle of a run"). On the UI's panel where the
 goal has one; on the node's console, answered `y` or `n`, where it has none.
+Nor does a container no camera sees at all (owner 2026-11-19): the user is told
+that the arm cannot see it and to move the chair in front of it, and the same
+guidance takes over the moment a camera has it (see "A container no camera
+sees").
 
 The action runs box opening's command line (`press_demo`) as a child process,
 the way it ran on flatbot until now. Its
@@ -275,7 +281,9 @@ container is found), `look` (0.1), `press` (0.35), `grip` (0.5), `carry`
 its motion ends, its message what the run is doing then, in a person's words
 (`pressing the button`, `setting the lid down`; `: stopped` where that motion
 stopped). A run that finds no press from where the chair stands stays in
-`locate` at the fraction it had: `no press plans from here: wait, the arm comes to rest first`,
+`locate` at the fraction it had: `no press plans from here: wait, the arm comes to rest first`
+(`out of reach from here: wait, ...` where its wrist sees the container out of
+the arm's reach, `no container in view: wait, ...` where no camera sees one),
 `going to rest` where it homed for it, then the line-up's own progress (phase
 `line_up`, at 0), and from the user's yes `looking for the container again`.
 A run is one motion from the press to the set-down, so it
@@ -290,30 +298,30 @@ recoverable also sets the world state's `system_status.arm` to
 no object or action flow until the arm's domain is normal again. With the lid
 still in the fingers, no code is recoverable.
 
-| Code                  | Recoverable | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bad_params`          | no          | The goal had params; `open_box` takes none. Nothing ran                                                                                                                                                                                                                                                                                                                                                                        |
-| `not_allowed`         | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                                                                                                                                                                                                                                                                               |
-| `bad_config`          | no          | A setting has a value it cannot have (`air_control` neither `impedance` nor `position`). Nothing ran                                                                                                                                                                                                                                                                                                                           |
-| `line_up_unavailable` | no          | What watches the container or judges its place could not start, or ended while lining up (the message carries what it said). The run was never told to go; a wrist that looked is back at rest                                                                                                                                                                                                                                 |
-| `not_lined_up`        | yes         | The container was not where the arm opens it in the time a line-up has (see "How long a line-up may take"), the UI went, or a line-up in the middle of a run had no time left under the orchestrator's 120 s. Nothing was pressed; a wrist that looked is back at rest. The message carries the last instruction the user was given and, in the middle of a run, why no press planned; the next `open_box` then lines up first |
-| `timeout`             | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the 120 s of an orchestrator that counts them from the goal cancel; not recoverable with the lid still in the fingers                                                                                                                                                           |
-| `not_ready`           | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                                                                                                                                                                                                                                                                         |
-| `not_found`           | yes         | The scene camera found no container (with `wrist_survey`, nor did the wrist camera's survey: nothing, or two places that could be it); nothing was pressed. A lid-sized top the wrist's look sees out of the arm's reach is not this: the chair is guided to it                                                                                                                                                                |
-| `not_home`            | yes         | The arm could not get to its start pose                                                                                                                                                                                                                                                                                                                                                                                        |
-| `contact_early`       | yes         | The press met something more than 45 mm above the button's top as the cameras saw it: stopped there, nothing pressed, the arm went home                                                                                                                                                                                                                                                                                        |
-| `contact_late`        | yes         | The press met nothing down to 25 mm below that top, or at all: the box is not where it was seen; the arm went home                                                                                                                                                                                                                                                                                                             |
-| `watch_failed`        | no          | The press's contact watch failed: the press stopped there                                                                                                                                                                                                                                                                                                                                                                      |
-| `box_moved`           | yes         | The press moved the container                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `not_popped`          | yes         | Pressed, but the knob did not come up (or the stroke pressed nothing); the arm went home                                                                                                                                                                                                                                                                                                                                       |
-| `no_button`           | yes         | The look found no button; nothing was pressed                                                                                                                                                                                                                                                                                                                                                                                  |
-| `no_press`            | yes         | A stop before the press that names no other code (the container's config has no reach-out press, the fingers did not shut, the knob's height unread): nothing was pressed. A container no press plans to from where the chair stands is not this: the chair is guided (see "Lining up in the middle of a run")                                                                                                                 |
-| `lid_put_back`        | yes         | No spot for the lid on the table the cameras measured (or no carry to one), or a set-down that did not feel the table: the lid was not let go there, it is back on the box and the arm home                                                                                                                                                                                                                                    |
-| `lid_dropped`         | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                                                                                                                                                                                                            |
-| `arm_holds`           | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                                                                                                                                                                                                            |
-| `arm_halted`          | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                                                                                                                                                                                                                    |
-| `stopped`             | no          | The run was ended from outside                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `failed`              | no          | Anything else, a traceback included; the message is the run's last STOP line (or line). Nothing says where the arm is                                                                                                                                                                                                                                                                                                          |
+| Code                  | Recoverable | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bad_params`          | no          | The goal had params; `open_box` takes none. Nothing ran                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `not_allowed`         | no          | `allow_execute` is off on this node. Nothing ran                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `bad_config`          | no          | A setting has a value it cannot have (`air_control` neither `impedance` nor `position`). Nothing ran                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `line_up_unavailable` | no          | What watches the container or judges its place could not start, or ended while lining up (the message carries what it said). The run was never told to go; a wrist that looked is back at rest                                                                                                                                                                                                                                                                                                                                                                                               |
+| `not_lined_up`        | yes         | The container was not where the arm opens it, or was never seen by a camera, in the time a line-up has (see "How long a line-up may take"), the UI went, or a line-up in the middle of a run had no time left under the orchestrator's 120 s. Nothing was pressed; a wrist that looked is back at rest. The message says which it was (`no camera saw the container within ...` where none did), and carries the last instruction the user was given and, in the middle of a run, why the chair was guided; the next `open_box` then lines up first, unless no camera had seen the container |
+| `timeout`             | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the 120 s of an orchestrator that counts them from the goal cancel; not recoverable with the lid still in the fingers                                                                                                                                                                                                                                                                                                                         |
+| `not_ready`           | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `not_found`           | yes         | No camera could look for the container at all (the scene camera's streams or its TF missing, the scene segmenter down, silent or showing another camera, and no wrist frame judged): a fault no moving of the chair cures; nothing was pressed, the arm home. A container the cameras looked for and do not see is not this: the chair is guided (see "A container no camera sees"). Only a run by hand (`press_demo` without `--guide`) ends `not_found` for it, as it always has                                                                                                           |
+| `not_home`            | yes         | The arm could not get to its start pose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `contact_early`       | yes         | The press met something more than 45 mm above the button's top as the cameras saw it: stopped there, nothing pressed, the arm went home                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `contact_late`        | yes         | The press met nothing down to 25 mm below that top, or at all: the box is not where it was seen; the arm went home                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `watch_failed`        | no          | The press's contact watch failed: the press stopped there                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `box_moved`           | yes         | The press moved the container                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `not_popped`          | yes         | Pressed, but the knob did not come up (or the stroke pressed nothing); the arm went home                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `no_button`           | yes         | The look found no button; nothing was pressed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `no_press`            | yes         | A stop before the press that names no other code (the container's config has no reach-out press, the fingers did not shut, the knob's height unread): nothing was pressed. A container no press plans to from where the chair stands is not this: the chair is guided (see "Lining up in the middle of a run")                                                                                                                                                                                                                                                                               |
+| `lid_put_back`        | yes         | No spot for the lid on the table the cameras measured (or no carry to one), or a set-down that did not feel the table: the lid was not let go there, it is back on the box and the arm home                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `lid_dropped`         | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `arm_holds`           | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `arm_halted`          | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `stopped`             | no          | The run was ended from outside                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `failed`              | no          | Anything else, a traceback included; the message is the run's last STOP line (or line). Nothing says where the arm is                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
@@ -409,18 +417,23 @@ the deployment's values back.
 
 | Panel message                                                     | Buttons      | When                                                                                                                                                                                                                                                               |
 | ----------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Looking for the container`                                       | Cancel       | No container seen in the last 1.5 s                                                                                                                                                                                                                                |
+| `Looking for the container`                                       | Cancel       | Nothing has looked yet: the wrist is turning to its view, the scene camera's first look has not ended                                                                                                                                                              |
+| `The arm cannot see the container. Move the chair in front of it` | Cancel       | What watches has looked and has no container, or one that was seen has not been for 1.5 s. No direction, no distance: none is known                                                                                                                                |
+| `The arm sees two possible containers. Move in front of only one` | Cancel       | What watches sees more than one thing that could be the container and cannot tell which is meant (stands 3 s before the line above replaces it, and the other way)                                                                                                 |
 | `Move closer, about 15 cm`                                        | Cancel       | Outside the boundary: closer, back, left or right, the larger miss                                                                                                                                                                                                 |
 | `Hold still, checking`                                            | Cancel       | Inside, not yet still for 1 s, or not yet judged                                                                                                                                                                                                                   |
 | `Ready. Open the container?`                                      | Open, Cancel | Inside, still, and the run plans for it there                                                                                                                                                                                                                      |
 | `Press open again when you are in place`                          | none         | The line-up's time passed (see "How long a line-up may take": 35 s from the goal's start, or `ui_line_up_s`; for a goal sent by hand, `Out of time. Start open_box again when you are in place` after 10 minutes): shown 3 s, then the action fails `not_lined_up` |
+| `Container not seen in time. Press open again in front of it`     | none         | ... and no camera saw the container in all that time (with no UI, `Out of time: the container was never seen. Start open_box again in front of it`): the same end                                                                                                  |
 | `The arm is not at its rest pose: home it, then press open again` | none         | The arm stands off rest (more than a wrist a line-up left turned): shown 3 s, then the action fails `not_home`                                                                                                                                                     |
 | `The wrist is turning back to rest`                               | Cancel       | The line-up is over and the wrist that looked turns back                                                                                                                                                                                                           |
 | `Ending`                                                          | Cancel       | The line-up is over and no wrist turned: the run is ending                                                                                                                                                                                                         |
+| `The screen is not showing this any more`                         | none         | The UI stopped showing the line-up's panel for 20 s (see "How long a line-up may take"): the line-up ends `not_lined_up` and the wrist turns back. Nobody may see it: it is what the panel is sent while that ends                                                 |
 
-`progress.phase` is `looking`, `move`, `hold`, `ready`, `go`, `timed_out` or
-`unable`,
-and `pct` how near the container is to the boundary (100 inside). The
+`progress.phase` is `looking` (the first three messages), `move`, `hold`,
+`ready`, `go`, `timed_out` or `unable`,
+and `pct` how near the container is to the boundary (100 inside). No message
+is longer than 63 characters, the panel's longest before 2026-11-19. The
 orchestrator's progress reports phase `line_up` at 0 with the same message (in
 the middle of a run too, between the run's own phases); an instruction whose
 distance alone changed, and `Hold still, checking` taking an instruction's
@@ -450,7 +463,10 @@ line-up whose wrist held the container, the run's first scene look is 2 s, not
 its usual 15: on both runs of 2026-11-12 that look found nothing in front of
 the arm, and the arm would stand through it with the wrist turned.
 `not_lined_up` is recoverable, and its message carries the watch's last word
-on why no container was seen, where that is why.
+on why no container was seen, where that is why. Where no camera saw the
+container at any time of the line-up the message says that, not that the
+container was not where the arm opens it:
+`no camera saw the container within 35 s: nothing was pressed (move the chair so that the container is in front of the arm, then press open again)`.
 
 The boundary is not typed in. It is a grid of places where the run's own proof
 plans a press (`reach_zone`, filled by `reach_probe` from the robot's URDF and
@@ -511,9 +527,11 @@ that had to be stopped because it did not end within 25 s of being told.
 
 **What it cannot see it never asks of.** Without the wrist the scene camera
 alone follows the container, and on flatbot that camera does not see a lid whole
-in front of the arm (the reach map of 2026-11-11): the panel stays on
-`Looking for the container` and the action ends `not_lined_up`, with the watch's
-reason in the message. A container a camera's frame cuts is placed roughly,
+in front of the arm (the reach map of 2026-11-11): the panel says
+`The arm cannot see the container. Move the chair in front of it`, though the
+container may stand in front of the arm already, and the action ends
+`not_lined_up`, with the watch's reason in the message. A container a camera's
+frame cuts is placed roughly,
 enough to say which way to move and never to ask on. With `line_up` off,
 `open_box` runs as it always has. The mock lines up on a box that comes into
 reach over six `mock_phase_s`, for rehearsing the UI. A line-up whose watch
@@ -590,11 +608,97 @@ lid-sized top far off in front is then not it. Where the survey finds the
 container the run opens it and nobody is guided; where it finds none either,
 the chair is guided to the top in front (the arm brought to rest from the
 survey's pose first).
-Not guided: a container no camera sees at all (`not_found`, as before), the
-guarded press's own stops (`press_demo --guarded`, never the engine's), and a
-run by hand (`press_demo` without `--guide`), which stops there as it always
-has. Nothing more is tried to get in from where the chair stands (a way round
-where the planner's path swings wide): the planning is as it was.
+A container no camera sees at all is guided too, since 2026-11-19 (below).
+Not guided: the guarded press's own stops (`press_demo --guarded`, never the
+engine's), and a run by hand (`press_demo` without `--guide`), which stops
+there as it always has. Nothing more is tried to get in from where the chair
+stands (a way round where the planner's path swings wide): the planning is as
+it was.
+
+#### A container no camera sees
+
+The owner was asked (2026-11-19): "A box no camera sees at all still ends as
+'not found'. Should that become guidance too ('move so the container is in
+front of the arm')?" and answered yes. Until then such a run said `NO BOX`,
+went home and failed `not_found`. Now, in every run the engine starts
+(`--guide`), each find that ends with no container goes into the same guidance
+as a container out of reach: the first look, the look after a line-up's yes,
+and the look after a guidance's yes where the run's own look does not find what
+the watch had held. That covers every reason the cameras give for having
+looked and found none: nothing lid-sized in view, a lid a view cuts, two places
+that could be the container, and a selected container that is in none of the
+scene camera's frames or that no wrist find can be tied to.
+
+- The run says `NOT SEEN: no camera sees the container (...)` with what each
+  camera said (no `NO BOX`, no `STOP`), notes it in its record (the
+  `reach_refused` row: `guided: true`, `what: "unseen"`, the look's seconds and
+  the segmenter's verdict, then a `guide` row), brings the arm to rest if a
+  side survey left it anywhere else, and asks the engine to guide with no place
+  (`box: null`): none was measured, and nothing is held against the line-up.
+- The arm rests with only its wrist turned. Where the wrist looks: where it
+  looks for every line-up, the front view that shows the most of where the arm
+  itself presses, solved on each run from the arm's kinematics, the chair model
+  and the camera's own view. That is where the container has to be brought, and
+  it stays true as the chair is driven. It is not turned toward the table as
+  the cameras measured it before the move: where that stood in the arm's frame
+  is true of nowhere once the chair has moved, which is why the run forgets it.
+- The user is told at once, with **Cancel** alone:
+  `The arm cannot see the container. Move the chair in front of it` (the run
+  has looked, so not `Looking for the container` while the wrist turns). Where
+  the cameras see more than one thing that could be the container and cannot
+  tell which is meant: `The arm sees two possible containers. Move in front of only one`
+  (a lid-sized top out of the arm's reach is no rival of one within it, so the
+  chair's place can settle it). The user is never told to move the container or
+  anything on the table: the scene is not changed, only where the robot stands.
+- The moment a camera sees the container (the wrist's frames, or the scene
+  camera's sightings while the wrist has none) the ordinary guidance takes
+  over: which way and how far, `Hold still, checking`, `Ready. Open the container?`.
+  Only what is known is said: a sighting the boundary cannot judge yet says
+  `Hold still, checking` (the boundary is worked out from the first sighting
+  on: `reach_probe` needs the lid's height to know which grid to use, so on a
+  lid height it has not met before the first direction comes some seconds after
+  the first sighting), and one with no known way in says
+  `The arm cannot open it from here`. Lost again for 1.5 s, the user is told
+  again that the arm cannot see it.
+- Everything else is the guidance's own: the same time (see "How long a
+  line-up may take"), **Cancel** or `n` at any moment ending with the run's
+  Ctrl+C, nothing moving toward the container without a yes, and at the yes a
+  fresh find. A user who never brings the container into view gets the end of
+  one who never brings it into reach: `not_lined_up`, recoverable, the wrist
+  back at rest, with the words for what was missing (the panel's
+  `Container not seen in time. Press open again in front of it`, the error's
+  `no camera saw the container within ...`). After that end the next `open_box`
+  does not line up first: a line-up that never saw the container has nothing to
+  go on from.
+
+Under the orchestrator's 120 s, and with `wrist_first` on, this guidance is
+seldom given in the goal that found no container: that find has spent the scene
+camera's whole first look (15 s) and the wrist's views (up to about 15 s more,
+an estimate) by then, which leaves under the 8 s a guidance needs of the 35.
+The action then fails at once, `not_lined_up`, recoverable
+(`no camera sees the container, and this run had no time left to guide the chair ...`).
+On the UI the user sees `Looking for the container` while the run looks, then
+(after an instant of `No container in view: wait, the arm comes to rest first`)
+`The wrist is turning back to rest`, and not yet that the chair is to move: the
+next `open_box` lines up first with its whole 35 s, and that is where they are
+told that the arm cannot see the container. With `wrist_first` off about 18 s
+of the 35 are left, and the user is guided in the goal itself by the scene
+camera alone. A goal sent by hand is guided in the goal itself, for up to 10
+minutes each time. None of these times is changed by this.
+
+What still ends `not_found`: cameras that could not look at all. A guided run
+is guided for an unseen container only where a camera did look: the scene
+segmenter gave the look at least one of the scene camera's frames to judge, or
+the wrist's finder judged a frame of its own. Where neither did (streams or TF
+missing, the segmenter down or silent, no wrist frame), no moving of the chair
+brings a container into view, and the run says `NO BOX` with what was missing
+and ends as it always has. Once a line-up is under way the same distinction is
+not made: a watch whose camera stops giving frames reads on the panel as a
+container that is not seen, and its own reason is in the error's message.
+
+Not flown, and never run against the robot's cameras: the run's side is tested
+with its cameras and arm stood in for, the node's with the run stood in for by
+a script that says what `press_demo` says.
 
 #### With no UI
 
@@ -836,8 +940,9 @@ same file slows the arm near the user. Unreadable, a run stops before it moves; 
 a run starts only on a planner started with that same config and `world ""`.
 
 `wrist_survey` is off by default: a run whose scene camera finds no container
-stops with `not_found` before anything moves. On, such a run surveys with the
-wrist camera instead (the Survey step above), adding about 20-40 s: choosing
+has found none (the chair is then guided, see "A container no camera sees"; a
+run by hand stops with `not_found`). On, such a run surveys with the
+wrist camera first (the Survey step above), adding about 20-40 s: choosing
 the poses (about 10 s), up to two survey poses and two looks again, each a
 planned move, a still frame and the finder (`tasks/survey.py`,
 `perception/wrist_finder.py`). It runs only for a
@@ -865,8 +970,9 @@ it took 1.7 s as a transit; not yet flown). A
 lid a view cuts is looked at again with the wrist turned to it (at most twice a
 run) and is the container only where that look shows it whole. What the wrist
 finds is taken over the scene camera's; where it finds none the scene camera's
-fix is used, and with neither the run stops with `not_found`, saying what each
-camera said. It adds about 3 s where the first view shows the container and
+fix is used, and with neither the run has found no container and says what each
+camera said (the chair is guided, see "A container no camera sees"; a run by
+hand stops with `not_found`). It adds about 3 s where the first view shows the container and
 up to about 15 s where none does (estimates from the look's re-timing); its frames are kept as captures
 (`captures/wrist-survey-*`). Only with the body model on.
 
@@ -884,10 +990,14 @@ line and 8 mm across it), and two containers cannot stand nearer than 152 mm
 centre to centre, so a lid within 75 mm of the line is the selected one and not
 a neighbour beside it. A second lid-sized top in the same direction, a find that
 is not tied, or no find: the run goes on with the scene camera's own fix of the
-selected container where that is a careful one, and stops with `not_found`
+selected container where that is a careful one, and has found no container
 where it is only a rough one or there is none, saying what each camera said.
 Where the selected container was in none of the scene camera's frames the wrist
-is not turned: nothing would tie its find to the selection. The instance the
+is not turned: nothing would tie its find to the selection. Either way the
+chair is then guided (see "A container no camera sees"; a run by hand stops
+with `not_found`): the guidance's watch says a wrist find only where the run
+would take it for the selected container, so the user is guided until the scene
+camera has the selected container. The instance the
 world state is written for is the selected one in every case.
 
 `wrist_alone` (off by default) is for that last case: a selection that is no
@@ -897,7 +1007,9 @@ selected id is in none of the segmenter's frames. With it on, the wrist looks
 from its own views, tied to nothing, and what it finds is taken only where it is
 the one container its frames hold; a second lid-sized top anywhere in them (a
 place that passes, or a top a view cut), or two places the finder cannot choose
-between, and the run stops with `not_found`, saying so. The look stops at the
+between, and the run has found no container, saying so (the chair is guided,
+the user told `The arm sees two possible containers. Move in front of only one`;
+a run by hand stops with `not_found`). The look stops at the
 first view that shows a lid whole, so "one" is one in the views looked from by
 then, not on the whole table. With it on the arm opens whichever single
 container stands in front of it, under the selected id: nothing checks that it
@@ -916,7 +1028,8 @@ for, has no detection and no `instance_id`, so the orchestrator cannot select
 it, and `open_box` is never offered for it. And for a selected container the
 scene camera does not find at the run, the wrist cannot tell which container
 it is: the survey would find whatever stands on the side counter. So a run with
-a selection does not survey; it stops with `not_found` as before, saying so.
+a selection does not survey; it has found no container, saying so (and the
+chair is guided for it as for any container no camera sees).
 Today the survey serves runs without a selection (`use_orchestrator: false`,
 the CLI action).
 

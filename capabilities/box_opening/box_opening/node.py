@@ -58,7 +58,7 @@ from rammp_orchestrator_interfaces.srv import Control
 
 from . import LOGGER, guide, line_up
 from .constants import AIR_CONTROL_ENV, state_dir
-from .flight_view import FlightView, no_press_reason
+from .flight_view import FAR_SEEN, FlightView, no_press_reason, not_seen_reason
 from .runtime.abort import EXIT_HALTED, EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
 from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
@@ -439,6 +439,36 @@ TO_REST = "going to rest"
 # ... and what it says from the person's yes to a line-up in the middle of it, until its next row: the run
 # has its go and looks for the box again. Nothing of before the yes is said after it (Tracker.went)
 LOOKING_AGAIN = "looking for the container again"
+# A run may ask to be guided for two more things than a press that does not plan (the "what" of its request
+# and of its reach_refused row: press_demo.GUIDE_FAR, GUIDE_UNSEEN): a container its wrist sees out of the
+# arm's reach, and (owner 2026-11-19) a container no camera sees at all. Each is said as what it is, from
+# that row until the run asks, as NO_WAY_IN_WAIT is said of a press with no way in (Tracker.add); of a
+# container that was never placed, "no press plans from here" is not what happened. Until 2026-11-19 the
+# far top's row read NO_WAY_IN_WAIT too, and its reason went through the words for a press that does not
+# plan ("no press plans from here: the way in does not plan")
+FAR, UNSEEN = "far", "unseen"
+WAITS = {
+    FAR: "out of reach from here: wait, the arm comes to rest first",
+    UNSEEN: "no container in view: wait, the arm comes to rest first",
+}
+# ... what this node's own log line calls each as the chair is guided for it (_follow)
+ASKED_FOR = {
+    FAR: "the wrist sees the container out of the arm's reach",
+    UNSEEN: "no camera sees the container",
+}
+# ... and what the not_lined_up of a line-up that ran out of time says the run had asked for (_line_up)
+GUIDED_BECAUSE = {
+    FAR: " -- the chair was guided because the wrist saw the container out of the arm's reach",
+    UNSEEN: " -- the chair was guided because the run's own look had found no container",
+}
+# A line-up in which NO camera ever saw the container ends as one whose container never came into reach
+# does (out of time: not_lined_up, recoverable, the wrist back at rest), with the words for what was
+# missing: it was not that the container stood in the wrong place
+NOT_SEEN = (
+    "no camera saw the container within %.0f s: nothing was pressed (move the chair so that the container is "
+    "in front of the arm, then press open again)"
+)
+CONSOLE_AGAIN_UNSEEN = "Out of time: the container was never seen. Start open_box again in front of it"
 # what is said of an arm that holds where it stopped (error_for's arm_holds)
 ARM_HOLDS = "the arm holds where it stopped: clear it, attended, before the next run"
 LINE_UP_LATE = (
@@ -861,7 +891,9 @@ class Tracker:
             self.past_start = self.past_start or leg in PAST_START
             if leg == "reach_refused" and row.get("guided"):
                 self.to_rest = True
-                return "locate", self.pct, NO_WAY_IN_WAIT  # (never that the chair is to move: NO_WAY_IN_WAIT)
+                # (never that the chair is to move: NO_WAY_IN_WAIT; what the run is guided for, where it
+                # says: a container out of reach, or one no camera sees)
+                return "locate", self.pct, WAITS.get(row.get("what"), NO_WAY_IN_WAIT)
             if leg == "guide":
                 self.to_rest = False
             return self._note(leg, row)
@@ -972,8 +1004,22 @@ STOP_CODES = (
 
 
 # the run's lines that say no press plans from where the chair stands and that the engine is asked to guide
-# (reach_press.no_way_in, press_demo's wrist look): never a run's last word (error_for)
-NOT_AN_END = ("NO WAY IN:", "OUT OF REACH:")
+# (reach_press.no_way_in, press_demo's wrist look), or that no camera sees the container (press_demo's main):
+# never a run's last word (error_for)
+NOT_AN_END = ("NO WAY IN:", "OUT OF REACH:", "NOT SEEN:")
+
+
+def guide_reason(asked, default="no reason given"):
+    """Why a run asked to be guided ({"what", "why"}: its request, press_demo.guide_chair), in a few plain
+    words for a person: what its cameras were missing (flight_view.not_seen_reason), that the container
+    stands out of reach, or each tilt's reason why no press plans (no_press_reason; `default` where the
+    request gives none)."""
+    what, why = asked.get("what"), str(asked.get("why") or "")
+    if what == UNSEEN:
+        return not_seen_reason(why)
+    if what == FAR:
+        return FAR_SEEN
+    return no_press_reason(why or default)
 
 
 def error_for(action_id, code, lines):
@@ -1323,14 +1369,20 @@ class Capability(CapabilityEngine):
             ask.refused.append(list(asked["box"]))
         refused = [list(place) for place in ask.refused]
 
+        # where the run asks because its own look found no container, that look's word on why: the line-up
+        # says at once that the arm cannot see it, before its watch has said a word of its own (BoxSource)
+        unseen = {}
+        if asked is not None and asked.get("what") == UNSEEN:
+            unseen = {"unseen": str(asked.get("why") or "no camera sees the container")}
+
         def source():
-            made.append(self._box_source(env, instance_id, watch=run_, refused=refused))
+            made.append(self._box_source(env, instance_id, watch=run_, refused=refused, **unseen))
             return made[-1]
 
         try:
             left = ask.left_s()
             if asked is not None and ask.timed and left < GUIDE_MIN_S:
-                why = no_press_reason(str(asked.get("why") or "no press plans from where the chair stands"))
+                why = guide_reason(asked, "no press plans from where the chair stands")
                 self._line_up_again(ask)  # the next open_box lines up first, with its whole time
                 if view is not None:
                     view.guide_end(False, "no time left to guide the chair (%.0f s): open again" % max(0.0, left))
@@ -1456,12 +1508,13 @@ class Capability(CapabilityEngine):
             time.sleep(line_up.POLL_S)
         return cancelled, late
 
-    def _box_source(self, env, instance_id, watch=None, refused=()):
+    def _box_source(self, env, instance_id, watch=None, refused=(), unseen=""):
         """A real run's line-up source (line_up.BoxSource): a watch follows the container and reach_probe judges
         where it stands, for as long as the panel is up. `watch`: the run itself, started with --line-up (its
         wrist looks; _lined_up_run); None, and box_watch is run for it, which reads the scene camera alone and
         holds no client for the arm. reach_probe never can move it. `refused`: places where the run itself has
-        just found no press (a line-up in the middle of it), which do not work for this line-up."""
+        just found no press (a line-up in the middle of it), which do not work for this line-up. `unseen`:
+        the run's own word on why its look found no container, where that is why it asked (BoxSource)."""
         container = config_path(self._param("container"), "containers")
         if watch is None:
             watch = [executable("box_watch"), "--container", container]
@@ -1486,6 +1539,7 @@ class Capability(CapabilityEngine):
             far_m=far,
             log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}"),
             refused=refused,
+            **({"unseen": unseen} if unseen else {}),  # (said only of a run that saw none: every other as it was)
         )
 
     def _line_up(self, ctx, make_source, ask, on_cancel=None, asked=None):
@@ -1567,6 +1621,7 @@ class Capability(CapabilityEngine):
                 say_min_s=SAY_MIN_S,
                 again=None if ask.ui else CONSOLE_AGAIN,
                 on_unasked=unasked,
+                again_unseen=None if ask.ui else CONSOLE_AGAIN_UNSEEN,
             )
             outcome = lining.run()
             went = outcome == line_up.GO
@@ -1607,9 +1662,16 @@ class Capability(CapabilityEngine):
             if (asked is not None or getattr(ask, "carried", False)) and lining.guide.saw_box:
                 # "press open again" goes on from the line-up, with its whole time (_lines_up)
                 self._line_up_again(ask)
-            ended("not in place within %.0f s%s" % (budget_s, f" (last told: {told})" if told else ""))
-            message = NOT_LINED_UP % budget_s + (f" -- last told: {told}" if told else "")
-            if asked is not None:
+            if lining.guide.saw_box:
+                ended("not in place within %.0f s%s" % (budget_s, f" (last told: {told})" if told else ""))
+                message = NOT_LINED_UP % budget_s + (f" -- last told: {told}" if told else "")
+            else:
+                # the same end, and what was missing said: no camera had the container at any time
+                ended("the container never came into view within %.0f s" % budget_s)
+                message = NOT_SEEN % budget_s
+            if asked is not None and asked.get("what") in GUIDED_BECAUSE:
+                message += GUIDED_BECAUSE[asked["what"]]
+            elif asked is not None:
                 message += " -- no press planned from where the chair stood: " + no_press_reason(
                     str(asked.get("why") or "no reason given")
                 )
@@ -1936,10 +1998,11 @@ class Capability(CapabilityEngine):
                 # first (its refusal, the home to rest), and one read only after the yes would say on the
                 # panel what was true before it
                 self._progress(log, track, ctx, panel)
-                why = no_press_reason(str(asked.get("why") or "no reason given"))
+                why = guide_reason(asked)
                 # (on the console the flight view says it, from the run's own line: this is the goal's file's)
                 self._logged(
-                    "no press plans from where the chair stands (%s): the run is not ended, the chair is guided" % why,
+                    "%s (%s): the run is not ended, the chair is guided"
+                    % (ASKED_FOR.get(asked.get("what"), "no press plans from where the chair stands"), why),
                     ask.view,
                     logging.WARNING,
                 )

@@ -669,7 +669,7 @@ def _guiding(w, ear, place=(0.712, -0.331, 0.2945), why="no reach-out press plan
     w.watcher = watcher
     try:
         got = press_demo.guide_chair(
-            None, w.ctx, w.cfg, runner, watcher, args, kw.pop("locator", None), 0.05, place, why, 1, ear, out=out
+            None, w.ctx, w.cfg, runner, watcher, args, kw.pop("locator", None), 0.05, place, why, 1, ear, out=out, **kw
         )
     except SystemExit as e:
         got = e.code
@@ -721,6 +721,87 @@ def test_a_run_with_no_press_from_where_the_chair_stands_asks_to_be_guided_and_w
     assert [ln["fix"]["by"] for ln in lines[2:]] == ["wrist"] * 3
     assert guided.watched == [list(HOME)] and guided.rested == [] and guided.homes == [] and runner.gripper == []
     assert ("guide", {"n": 1, "box": [0.712, -0.331, 0.2945], "why": lines[0]["guide"]["why"]}) in runner.notes
+
+
+NOT_SEEN = (
+    "no camera sees the container (scene camera: scene segmenter: saw no food container in 14 frames; the wrist's "
+    "look in front: wrist camera: no counter in 4 frames (no level plane wider than a container))"
+)
+
+
+def test_a_run_whose_cameras_saw_no_container_asks_to_be_guided_with_no_place_and_watches_the_same_way(guided):
+    """Owner 2026-11-19: a box no camera sees at all is guidance too. Nothing of the guidance starts from a
+    container having been seen, so the run that saw none is guided as one that found no press is: the engine
+    is asked first (with why, what it is guided for, and no place: none was measured), what the cameras
+    measured from where the chair stands is forgotten, and the run watches as every line-up's watch does
+    until the go. The arm rests; nothing but the wrist moves."""
+    guided.at = (1.05, 0.0, 0.315)  # where its frames then show the container: brought into view, still far
+    ear = Round(3, go=True)
+    got, lines, runner = _guiding(guided, ear, place=None, why=NOT_SEEN, what=press_demo.GUIDE_UNSEEN)
+    assert got == (True, True) and ear.rounds == 1
+    assert lines[0] == {"guide": {"n": 1, "box": None, "why": NOT_SEEN, "what": "unseen"}}
+    assert lines[1] == {"robot": {"urdf": str(guided.urdf), "root": "arm_mount"}}
+    assert [ln["fix"]["xyz"] for ln in lines[2:]] == [[1.05, 0.0, 0.315]] * 3  # whichever way it is seen, said
+    assert guided.watched == [list(HOME)] and guided.rested == [] and guided.homes == [] and runner.gripper == []
+    assert ("guide", {"n": 1, "box": None, "why": NOT_SEEN, "what": "unseen"}) in runner.notes
+    ctx = guided.ctx
+    assert ctx.cpose is None and ctx.worlds.table_top_z is None and ctx.worlds.table_extent is None
+    assert ctx.wrist_looked is False and guided.obstacles == [[]]
+    # a stop ends it as it ends every guidance: the wrist back to rest, nothing pressed
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+
+    got, _lines, _runner = _guiding(guided, Round(2, go=False), place=None, why=NOT_SEEN, what="unseen")
+    assert got == EXIT_NOT_LINED_UP and guided.rested == [list(HOME)]
+
+
+def test_with_no_container_seen_the_wrist_turns_to_the_arms_own_front_view_not_toward_any_place_of_the_scenes(
+    guided, monkeypatch
+):
+    """Where does the wrist look when nothing has been seen? Where it looks for every line-up: the front
+    view that shows the most of where the arm itself presses (survey.watch_front with no hint, chosen on
+    each run from the arm's kinematics and the chair's model). That is where the container has to be
+    brought, and it stays true as the chair is driven. It is handed no place of the scene's: not a box's
+    (none was seen), and not the table's as the cameras measured it before the move, which is forgotten
+    because it is true of nowhere once the chair has moved."""
+    asked = []
+
+    def watch_front(node, ctx, runner, watcher, execute, say, stop, **kw):
+        asked.append((kw, ctx.worlds.table_top_z, ctx.worlds.table_extent, ctx.cpose))
+        while not stop():
+            say({"none": "wrist camera: no counter in 1 frame (no level plane wider than a container)"})
+        return "watched", None
+
+    monkeypatch.setattr(sv, "watch_front", watch_front)
+    got, lines, _runner = _guiding(guided, Round(2, go=False), place=None, why=NOT_SEEN, what="unseen")
+    ((kw, table_z, extent, cpose),) = asked
+    assert kw.get("hint") is None and kw["rest"] == list(HOME)
+    assert (table_z, extent, cpose) == (None, None, None)  # nothing of the scene from before the move is kept
+    assert [ln for ln in lines if "none" in ln][0] == {
+        "none": "wrist camera: no counter in 1 frame (no level plane wider than a container)"
+    }
+    assert got == 5
+
+
+def test_an_arm_that_does_not_get_home_before_an_unseen_container_is_guided_for_holds_and_says_what_it_was(
+    guided, capsys
+):
+    """The side survey's pose: the arm homes before the chair is told to move, and one that does not get
+    home holds. Its STOP says what the run was to be guided for; until 2026-11-19 it said "no press plans
+    from where the chair stands" of a run that had tried no press."""
+    guided.ctx.client.live = [v + 0.5 for v in HOME]
+    press_demo_try_home = press_demo.try_home
+    press_demo.try_home = lambda ctx, runner, execute, why: False
+    try:
+        got, lines, _runner = _guiding(guided, Round(2, go=True), place=None, why=NOT_SEEN, what="unseen")
+        out = capsys.readouterr().out
+        assert got == 1 and lines == [] and guided.watched == []  # never asked, never watched from there
+        assert "STOP: no camera sees the container, and the arm did not get home for the chair to be moved" in out
+        got, _lines, _runner = _guiding(guided, Round(2, go=True))
+        assert (
+            "STOP: no press plans from where the chair stands, and the arm did not get home" in capsys.readouterr().out
+        )
+    finally:
+        press_demo.try_home = press_demo_try_home
 
 
 # run 2 of 2026-11-17's own line (NOTES.md), 752 characters

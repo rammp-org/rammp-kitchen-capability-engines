@@ -7,6 +7,10 @@ where the box was last seen and what the boundary says of that place, is a `sour
 
     source.look(now) -> (Fix or None, Reach or None)     the newest sighting (None: nothing new since the
                                                          last tick) and the boundary's word on the box
+    source.why_none                                      (where it has one) its newest word on why it sees
+                                                         no container, "" while it has not looked or sees it:
+                                                         the guide then says the arm cannot see it (owner
+                                                         2026-11-19), and to move the chair
 
 It ends one of five ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
 panel's Cancel, or the orchestrator's), TIMED_OUT (the time for lining up ran out: the panel says to press
@@ -100,7 +104,7 @@ class LineUp:
     lines a second is not read (0: every change, as the panel has it; the guide itself holds the edge's
     flicker for both: guide.HOLD_AFTER_MOVE_S). `answers`: an Answers, for the y or n of a person with no
     panel (None: the panel alone). `again`: what it says last where the time runs out (None: the panel's
-    words).
+    words); `again_unseen`: ... where the container was never seen in that time (None: the panel's).
     `on_unasked()`: called for a y that came with nothing asked, which is no yes."""
 
     def __init__(
@@ -116,6 +120,7 @@ class LineUp:
         say_min_s=0.0,
         again=None,
         on_unasked=None,
+        again_unseen=None,
     ):
         self._ctx = ctx
         self._live = live
@@ -126,7 +131,9 @@ class LineUp:
         self._answers = answers
         self._say_min_s = float(say_min_s)
         self._on_unasked = on_unasked
-        self.guide = guide.Guide(budget_s=budget_s, again=again or guide.AGAIN)
+        self.guide = guide.Guide(
+            budget_s=budget_s, again=again or guide.AGAIN, again_unseen=again_unseen or guide.AGAIN_UNSEEN
+        )
         self.cancel_pressed = False  # the panel's own Cancel ended it (the caller makes it the orchestrator's)
         self.said_no = False  # ... and it was the person's n, not a press on the panel
         self.said_yes = False  # it ended GO on the person's y (False: on Open, or not GO)
@@ -223,7 +230,8 @@ class LineUp:
                 if answered and self._on_unasked is not None:
                     self._on_unasked()  # a y with nothing asked (or asked of a box no longer seen): no yes
             fix, reach = (None, None) if timed_out_at is not None else self._source.look(now)
-            say = self.guide.update(now, fix, reach)
+            # (read after look(): what the source heard this tick is in it)
+            say = self.guide.update(now, fix, reach, none=str(getattr(self._source, "why_none", "") or ""))
             self._show(say, now)
             if say.state == guide.TIMED_OUT:
                 timed_out_at = now if timed_out_at is None else timed_out_at
@@ -398,11 +406,28 @@ class BoxSource:
     is on the table alone, at whatever height this line-up's watch reads the lid: the run's fix and the
     watch's are two readings of one lid (the scene camera's against the wrist's, centimetres apart in
     height), and as first written a refused place counted only within 15 mm of the run's own lid height and
-    in that height's grid (review of 2026-11-17). close() ends the
+    in that height's grid (review of 2026-11-17). `unseen`: where the line-up begins because the run's own
+    look found NO container (press_demo's "NOT SEEN"), that look's word on why: the watch's word on why it
+    sees none (why_none) until the watch says its own or sees one, so that the person is told at once that
+    the arm cannot see the container, not "Looking for the container" through the seconds the wrist takes
+    to turn to its view. Nothing else of a line-up starts from a container having been seen: the wrist's
+    view is chosen by the arm's own reach (tasks/survey.angled_views), and reach_probe waits, idle, for
+    the first sighting, whose lid height names its grid (tasks/reach_probe.Server.step). close() ends the
     children that are this source's own, the probe by its own quit so that it keeps its grid; it can take
     PROBE_QUIT_S, so what must not wait is done before it."""
 
-    def __init__(self, watch, probe_argv, env, far_m=None, log=None, clock=time.monotonic, spawn=Child, refused=()):
+    def __init__(
+        self,
+        watch,
+        probe_argv,
+        env,
+        far_m=None,
+        log=None,
+        clock=time.monotonic,
+        spawn=Child,
+        refused=(),
+        unseen="",
+    ):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
         self._refused_at = [(float(xy[0]), float(xy[1])) for xy in refused or () if len(xy) >= 2]
         self._log, self._clock, self._spawn = log, clock, spawn
@@ -415,7 +440,9 @@ class BoxSource:
         self._zone = None
         self._proof = None  # the newest proof: ((x, y, z), ok)
         self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
-        self.why_none = ""  # the watch's newest word on why it sees no box; none once it has seen it since
+        # the watch's newest word on why it sees no box; none once it has seen it since. Until its first word,
+        # the run's own where its look found none (`unseen`)
+        self.why_none = str(unseen or "")
         self.why_gone = ""  # where it is the probe that ended (gone): that, and the end of its log
         self.unable = ""  # what the watch said that no waiting cures (guide.ARM_NOT_AT_REST): the line-up ends
         self.viewed = False  # the run said its wrist stands at the line-up's view: it has turned
