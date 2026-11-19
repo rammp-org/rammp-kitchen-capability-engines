@@ -33,6 +33,8 @@ container:
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; see Parameters in docs/interface.md.
 params:
+  # The UI bridge node the UI actions' panels (count, progress with Stop, Done/failed notices) go to.
+  ui_bridge_node_name: ui_bridge_node
   # false: every action is a dry run (detect, plan, gate; nothing moves) and its result says so.
   # true only for attended runs, someone on the e-stop.
   allow_execute: false

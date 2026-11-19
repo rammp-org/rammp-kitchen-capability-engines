@@ -73,6 +73,12 @@ def panel_open(ctx):
         return bool(run.ui_goal_handle is not None or getattr(run, "ui_opening", False))
 
 
+def engine_stopping(ctx):
+    """Whether the engine is shutting down (SIGTERM/SIGINT: CapabilityEngine.stop() has set its `_stopping`), from
+    the engine's own state; False when it can't tell."""
+    return getattr(getattr(ctx, "_engine", None), "_stopping", None) is not None
+
+
 def cancel_own_run(engine):
     """Cancel the action this engine is running, exactly as a CANCEL on its `/<engine_id>/control` service does (the
     orchestrator's cancel). The motion in flight stops; `execute()` sees `Cancelled` at its next check."""
@@ -200,8 +206,11 @@ class RunUI:
         refresh_at = self._clock() + REFRESH_S
         while True:
             # A cancel from elsewhere (the orchestrator) ends the wait; our own Stop doesn't, so its "Stopped"
-            # notice stays up until Done.
-            if self.ctx.cancelled() and not (self.user_stopped and not raise_on_cancel):
+            # notice stays up until Done. Unless the engine is shutting down (docker stop): then it ends too, or
+            # execute() outlives the engine's stop wait and the container exits 1 after it.
+            if self.ctx.cancelled() and not (
+                self.user_stopped and not raise_on_cancel and not engine_stopping(self.ctx)
+            ):
                 if not raise_on_cancel:
                     return None
                 self.ctx.checkpoint()  # raises Cancelled

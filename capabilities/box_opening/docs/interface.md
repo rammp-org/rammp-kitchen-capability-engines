@@ -273,27 +273,51 @@ the UI (the base class's `ctx.update_user_panel()`, to the bridge's
   "title": "Opening the container",
   "message": "Pressing the button",
   "progress": {"phase": "press", "pct": 35.0, "message": "Pressing the button", "pausable": false},
-  "buttons": [{"button_id": "cancel", "label": "Cancel"}]
+  "buttons": [{"button_id": "cancel", "label": "Stop"}]
 }
 ```
 
 `message` is the progress message of the phase the run is in, `pct` the same
 fraction on the UI bar's scale, 0 to 100 (`docs/UI_JSON_SCHEMA.md`; the
-progress the orchestrator gets stays 0 to 1). The one button is **Cancel**, and
+progress the orchestrator gets stays 0 to 1). The one button is **Stop** (id `cancel`), and
 it is the orchestrator's cancel: the base class's own `CANCEL`, so the run gets
 its Ctrl+C (the motion in flight is cancelled first and the arm holds where it
 is), the action ends cancelled, and nothing is written to the world state after
-it. There is no Pause: a run cannot pause. Once the run is being stopped (Cancel,
+it. There is no Pause: a run cannot pause. Once the run is being stopped (Stop,
 the orchestrator's cancel, or the 90 s budget) the panel says so
 (`Cancelled: the arm is stopping where it is`) and has no button left.
 
 The panel asks the user nothing and the run never waits on it. It is sent as
 the phase changes, and again every second so a panel the bridge took down comes
-back with its Cancel; the base class closes it as the action ends, with the
+back with its Stop; the base class closes it as the action ends, with the
 token. The node acquires no `ui_control` of its own. Standalone (no token)
-nothing is sent. How a run ended is not shown on a panel of its own: the
-orchestrator's panel returns as the action ends, and the result is in the
-action's result and the node's log.
+nothing is sent. `message` is broken into lines of at most 40 characters
+(`capability_ui.wrap`): the UI does not wrap, and a longer line runs off its
+screen; `progress.message` is left whole.
+
+How the run ended is shown on a final notice before `execute()` returns
+(`capability_ui.RunUI`, the shared panels; words in `box_opening/ui_text.py`),
+with one button, **Done**:
+
+| Ended                     | Title                                | Message                                                                                                 |
+| ------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| Lid off                   | `Opening the container`              | `The container is open. The lid is on the table beside it.` (the mock: `Mock: ... No arm motion.`)      |
+| Any `EngineError`         | `Opening the container: failed`      | What happened in plain words, where the arm (and the lid, if still held) is, what to do; per error code |
+| `not_allowed`             | `Opening the container: not started` | Switched off on this robot; nothing moved                                                               |
+| The panel's own **Stop**  | `Opening the container: stopped`     | `Stopped. The arm is holding still where it was.` (and the lid, if still held)                          |
+| The orchestrator's cancel | none                                 | The orchestrator has taken the UI back                                                                  |
+
+A notice says where the arm is only where the run's last STOP line says it
+(`arm_holds`, `arm_halted`, `lid_dropped`, `lid_put_back`, a stop before
+anything was pressed). Several STOP lines are said before the way home, which
+may not get there (`contact_early`, `box_moved`, ...): those notices say
+nothing about it. A run the node had to kill (its stop's last resort, Stop or
+`timeout`) says so and says no arm state.
+
+A notice waits for **Done** at most 60 s, and never past 110 s from the goal's
+start (the orchestrator's 120 s less 10): not tapping never changes the
+result, which is the run's own (error code and its STOP line, as in "Errors").
+Standalone (no token) no notice is sent and nothing waits.
 
 #### Lining up first
 
@@ -303,20 +327,20 @@ a loop of the base class's example's shape (`ctx.update_user_panel`,
 `ctx.poll_ui_event`): where the container stands against the arm's reach, as
 what the user does about it.
 
-| Panel message                            | Buttons      | When                                                               |
-| ---------------------------------------- | ------------ | ------------------------------------------------------------------ |
-| `Looking for the container`              | Cancel       | No container seen in the last 1.5 s                                |
-| `Move closer, about 15 cm`               | Cancel       | Outside the boundary: closer, back, left or right, the larger miss |
-| `Hold still, checking`                   | Cancel       | Inside, not yet still for 1 s, or not yet judged                   |
-| `Ready. Open the container?`             | Open, Cancel | Inside, still, and the run plans for it there                      |
-| `Press open again when you are in place` | none         | 40 s passed: shown 3 s, then the action fails `not_lined_up`       |
+| Panel message                            | Buttons    | When                                                               |
+| ---------------------------------------- | ---------- | ------------------------------------------------------------------ |
+| `Looking for the container`              | Stop       | No container seen in the last 1.5 s                                |
+| `Move closer, about 15 cm`               | Stop       | Outside the boundary: closer, back, left or right, the larger miss |
+| `Hold still, checking`                   | Stop       | Inside, not yet still for 1 s, or not yet judged                   |
+| `Ready. Open the container?`             | Open, Stop | Inside, still, and the run plans for it there                      |
+| `Press open again when you are in place` | none       | 40 s passed: shown 3 s, then the action fails `not_lined_up`       |
 
 `progress.phase` is `looking`, `move`, `hold`, `ready`, `go` or `timed_out`,
 and `pct` how near the container is to the boundary (100 inside). The
 orchestrator's progress reports phase `line_up` at 0 with the same message.
 The arm moves only on **Open**, and only where it is pressed on a `Ready`
 panel whose container was seen within the last second; then the run starts
-and the panel is the run's. **Cancel** is the orchestrator's cancel, as on the
+and the panel is the run's. **Stop** is the orchestrator's cancel, as on the
 run's panel. Nothing moves and no world state is written while lining up.
 
 The 40 s are what the orchestrator's 120 s leave: the run's 90 s budget less
@@ -355,7 +379,7 @@ and the run's proof for the box itself once it is inside), and can move nothing.
 
 How a line-up that turned the wrist ends without **Open**: out of time, the run
 is told so, turns the wrist back to rest as gently and ends, nothing pressed.
-**Cancel** (the panel's or the orchestrator's) is the run's Ctrl+C as every
+**Stop** (the panel's) or the orchestrator's cancel is the run's Ctrl+C as every
 cancel is: a turn in flight stops and the arm holds where it is, the wrist where
 it looked; the next run's start brings it to rest.
 
@@ -388,7 +412,7 @@ passes them as a params file.
 | `use_orchestrator`    | `true`                 | `false` runs standalone: no registration, drive it by CLI                                                                                                                                                                                                                                                                                                                                           |
 | `mock`                | `false`                | `true` skips hardware (the mock alternative sets it)                                                                                                                                                                                                                                                                                                                                                |
 | `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                                                                                                                                                                                                                                                  |
-| `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel)                                                                                                                                                                                                                              |
+| `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Stop, its final notice)                                                                                                                                                                                                              |
 | `line_up`             | `false`                | Line up on the UI before a run: the panel says which way to move, asks, and the run goes on only on **Open** (see "Lining up first"). With `wrist_first` the wrist turns to look while the user lines up; without it only the scene camera follows the container                                                                                                                                    |
 | `line_up_far_m`       | `0.0`                  | How far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come closer. `0`: as far as the run's proof plans a press (on flatbot about 0.90 m; flown at 0.63 and 0.68 m)                                                                                                                                                                                   |
 | `air_control`         | `"impedance"`          | How the arm flies the free air before the press: `impedance`, every leg in the driver's joint impedance, one motion to under the button (as flown 2026-11-12); `position`, the look and the way in's free-air lines in position control and slower, about a second's stand while the springs come in, then the press on them as ever (see "The free air before the press"). `position` is not flown |

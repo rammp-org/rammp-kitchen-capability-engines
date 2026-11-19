@@ -216,7 +216,9 @@ class Capability(CapabilityEngine):
             run.record_end(phase[0])
         except (Abort, ArmError) as e:
             run.record_end(phase[0], e)
-            raise failure(phase[0], e) from None
+            error = failure(phase[0], e)
+            error.at_start = arm_at_start(run)  # for the UI's failure panel: where the arm was left
+            raise error from None
         except BaseException as e:  # a cancel, or a bug: in the run's folder too, then as before
             run.record_end(phase[0], e)
             raise
@@ -270,7 +272,12 @@ class Capability(CapabilityEngine):
                 self.get_logger().error(f"{ui_id}: {error.error_code} during {phase[0]}: {error}")
                 # the panel's words (ui_text): what happened, the arm's state, what to do
                 message = failure_message(
-                    name, TEXT.get(phase[0], phase[0]), phase[0], str(error), motion_failed=not error.recoverable
+                    name,
+                    TEXT.get(phase[0], phase[0]),
+                    phase[0],
+                    str(error),
+                    motion_failed=not error.recoverable,
+                    at_start=getattr(error, "at_start", None),
                 )
                 if error.recoverable and phase[0] not in AT_PANEL:
                     # the same press again (same count), on its own button: "<title>" and Stop
@@ -311,6 +318,19 @@ def failure(phase, error):
         recoverable = not isinstance(error, MotionFailed) and phase not in AT_PANEL
         return EngineError(f"{phase}_failed", str(error), recoverable=recoverable)
     return EngineError(f"{phase}_failed", f"{type(error).__name__}: {error}")
+
+
+def arm_at_start(run):
+    """Whether a failed run left the arm at its start joints, for the failure panel: the run's own `at_home()` (a run
+    that goes back to the start after a failed check has it), or None when the run can't tell (no such method, or the
+    arm's state can't be read). Only reads the arm's state."""
+    at_home = getattr(run, "at_home", None)
+    if at_home is None:
+        return None
+    try:
+        return bool(at_home())
+    except Exception:  # the panel must still show
+        return None
 
 
 def main():

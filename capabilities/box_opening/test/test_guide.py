@@ -42,7 +42,7 @@ def test_a_drive_up_is_told_closer_then_hold_still_then_asked_and_open_flies():
     said = _drive(guide, far)
     assert said[0][1].state == g.MOVE and said[0][1].message == "Move closer, about 25 cm"
     assert said[-1][1].message == "Move closer, about 5 cm" and said[-1][1].hint[0] == "closer"
-    assert [s.buttons for _t, s in said] == [((g.CANCEL, "Cancel"),)] * 10  # nothing to say yes to yet
+    assert [s.buttons for _t, s in said] == [((g.CANCEL, "Stop"),)] * 10  # nothing to say yes to yet
     assert said[-1][1].pct > said[0][1].pct  # the bar fills as the box comes in
     # inside, but still rolling: hold still
     rolling = [((0.75 - 0.02 * i, -0.15), IN) for i in range(4)]
@@ -54,12 +54,12 @@ def test_a_drive_up_is_told_closer_then_hold_still_then_asked_and_open_flies():
     said = _drive(guide, [((0.69, -0.15), IN)] * 3, t0=4.0)
     ready = said[-1][1]
     assert ready.state == g.READY and ready.message == "Ready. Open the container?"
-    assert ready.buttons == ((g.OPEN, "Open"), (g.CANCEL, "Cancel")) and ready.pct == 100.0
+    assert ready.buttons == ((g.OPEN, "Open"), (g.CANCEL, "Stop")) and ready.pct == 100.0
     assert ready.panel() == {
         "title": "Opening the container",
         "message": "Ready. Open the container?",
         "progress": {"phase": "ready", "pct": 100.0, "pausable": False},
-        "buttons": [{"button_id": "open", "label": "Open"}, {"button_id": "cancel", "label": "Cancel"}],
+        "buttons": [{"button_id": "open", "label": "Open"}, {"button_id": "cancel", "label": "Stop"}],
     }
     assert guide.press(g.CANCEL, 4.5) is False and guide.state == g.READY  # Cancel is the caller's
     assert guide.press(g.OPEN, 4.5) is True and guide.state == g.GO

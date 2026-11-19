@@ -33,6 +33,8 @@ container:
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
 params:
+  # The UI bridge the Open / Close Microwave Door buttons' panels go to (/<name>/request_user_input).
+  ui_bridge_node_name: ui_bridge_node
   # false: every goal is a dry run (detect, plan, gate; nothing moves), whatever it asks.
   # true only for attended runs, someone on the e-stop.
   allow_execute: false

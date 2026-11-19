@@ -110,6 +110,17 @@ A failure before the fingertip reaches the panel that is `recoverable` (a refuse
 (`MotionFailed`, e.g. an e-stop), an `ArmError` or a bug is shown with Done only, never retried. Every
 final notice waits up to 60 s for Done before the action returns.
 
+A failure panel says what happened, where the arm is and what to do (`ui_text.py`). Where the arm is
+comes from the run itself: if the arm is at its start joints (`Run.at_home()`: every joint within
+1 deg of the joints read in preflight, read from `/joint_states` only) it says "The arm is back where
+it started."; otherwise it says by step: nothing moved (`preflight`, `detect`), holding where it stopped,
+or, in `approach`, `press` or `return`, that the fingertip may be at the buttons, with "move the arm
+clear" as the next step.
+
+The panels go to the UI bridge through the engine's `ctx.update_user_panel()` / `ctx.poll_ui_event()`.
+`ui_bridge_node_name` (default `ui_bridge_node`) selects `/ui_bridge_node/request_user_input` and its
+`/update` service. JSON shapes are in [UI_JSON_SCHEMA.md](../../../docs/UI_JSON_SCHEMA.md).
+
 ### The user's panel (`press_button`)
 
 Run by the orchestrator, `press_button` shows a panel on the UI (`ui_panel.py`, through the engine's
@@ -120,9 +131,7 @@ Stop ends the action as a cancel does: its status is cancelled and the arm holds
 read at the run's checkpoints (between moves, in the press's own waits, and while paused), so a move
 already sent to the driver finishes first. It is not an e-stop.
 
-Standalone (`use_orchestrator:=false`) there is no session token and nothing is shown. The engine
-needs the UI calls of rammp-kitchen-capability-engines#42; on an engine without them the panel is
-skipped and the run is unchanged.
+Standalone (`use_orchestrator:=false`) there is no session token and nothing is shown.
 
 ## Parameters
 
@@ -134,6 +143,7 @@ params file.
 | ------------------------------ | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `use_orchestrator`             | `true`                                          | `false` runs standalone: no registration, drive it by CLI                                                                                                                          |
 | `mock`                         | `false`                                         | `true` skips hardware (the mock alternative sets it)                                                                                                                               |
+| `ui_bridge_node_name`          | `ui_bridge_node`                                | The UI bridge node the panels go to (`/<name>/request_user_input`)                                                                                                                 |
 | `allow_execute`                | `false`                                         | `true` lets the action move the arm. Attended runs only                                                                                                                            |
 | `mount_rpy_deg`                | `[0.0, 30.0, 0.0]`                              | The arm base's orientation in `arm_mount` (the robot's `mount.yaml`)                                                                                                               |
 | `camera_frame`                 | `""`                                            | Wrist camera optical frame; `""` = the colour image's own `frame_id`                                                                                                               |

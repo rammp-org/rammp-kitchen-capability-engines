@@ -6,6 +6,7 @@ import re
 
 import numpy as np
 import pytest
+from capability_ui import WRAP_CHARS
 
 from place_container import plan, ui
 
@@ -140,11 +141,40 @@ def test_the_pickers_note_says_why_and_leaves_the_tap_to_the_picker():
         ("the scene camera sees no table in reach", "Make sure the table"),
         ("too little of the table is seen", "blocking the camera's view"),
         ("", "no free space on the table"),
+        ("no free spot big enough for the container within the arm's reach", "Clear a space"),
+        (
+            "none of the table the camera sees is within the arm's reach (0.70-1.10 m)",
+            "Move the wheelchair so the table",
+        ),
+        ("the depth image is 640x400 but camera_info 1280x800: depth must be aligned to colour", "doesn't line up"),
     ],
 )
 def test_no_spot_says_why_and_what_to_do(problem, words):
     text = ui.no_spot_message(problem, marked=False)
     assert words in text and "camera_info" not in text
+
+
+# The scene camera before it is calibrated (docs/DEMO_TESTING.md: tap-to-place offers no spots until then): no tf
+# from it to the arm, or a placeholder one that shows the table tilted or at the wrong height.
+UNCALIBRATED = (
+    "the scene camera isn't ready (no tf arm_mount <- scene_camera_color_optical_frame (LookupException))",
+    "the table looks 7 degrees tilted to the scene camera, so the camera's calibration (its mount on the chair) is "
+    "off and a spot from it would be too",
+    "the scene camera sees the table 12 cm higher than the arm measured it at the marked spot, so the camera's "
+    "calibration is off",
+)
+
+
+@pytest.mark.parametrize("problem", UNCALIBRATED)
+def test_an_uncalibrated_camera_says_so_and_points_at_the_marked_spot(problem):
+    text = ui.no_spot_message(problem, marked=False)
+    check_plain(text)
+    assert "calibration" in text and "isn't sending images" not in text and "tf" not in text.split()
+    assert "ask the operator to mark a spot" in text  # the way to place without the camera
+    assert all(len(line) <= WRAP_CHARS for line in ui.wrap(text).split("</>\n<body-sm-light>"))  # no word too long
+    text = ui.no_spot_message(problem, marked=True)
+    assert "press Use marked spot" in text and "operator to mark" not in text
+    assert "operator to mark" not in ui.no_spot_message("the scene camera sees no table in reach", False)
 
 
 def test_the_table_note_keeps_its_number():
