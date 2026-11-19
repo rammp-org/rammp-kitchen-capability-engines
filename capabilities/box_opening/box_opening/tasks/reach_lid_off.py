@@ -653,6 +653,14 @@ HAND_STANDS_CLEAR_M = clear_table.UP_SLACK_M
 # SPOT_S that is not the carry's own flight (the retreat's line 1.3-1.7 s, 0.1-0.5 s between goals).
 # Once a carry is planned its own flight is known (flight_s), and the time is asked for that and this
 SPOT_UP_S = 2.5
+# A budget's "from" that this run cannot have been started at on this host's monotonic clock is no
+# budget read (RunClock; the review of 2026-11-19): one stamped by time.time() read as 1.8e9 s left,
+# one 60 s ahead as 150 s left of 90 — both valid, both failing open. Later than now by more than
+# RUN_FROM_AHEAD_S (the engine rounds it to a millisecond, and the run reads it seconds on), or
+# older than the run's own seconds and RUN_FROM_OLD_S more (no run with a line-up in it lasts an
+# hour): unreadable, and so no further spot.
+RUN_FROM_AHEAD_S = 1.0
+RUN_FROM_OLD_S = 3600.0
 # Two spots where something held the lid up at heights no further apart than this are one thing: the
 # table itself, standing higher than the run has it (the plan is the same at both; the 19 flown met
 # the table within 27 mm of each other across runs whose plans stood up to 24 mm apart). No further
@@ -4951,7 +4959,8 @@ class RunClock:
       nothing handed (a run from the command line): no engine times it, left_s() is None, and
         SETDOWN_SPOTS alone bounds its spots;
       a budget handed: left_s() seconds, negative past it;
-      something handed that does not read as one (`unreadable` says what): an engine IS timing
+      something handed that does not read as one (`unreadable` says what; a "from" this run
+        cannot have been started at among them: RUN_FROM_AHEAD_S's note): an engine IS timing
         this run and the run does not know by how much — left_s() is 0.0, so no further spot is
         ever started on it (the first review of 2026-11-19: it was taken for "nothing handed", and
         an unreadable budget would have let a run try every spot with the engine's Ctrl+C due).
@@ -4978,6 +4987,16 @@ class RunClock:
                     raise ValueError("%r is not a number of seconds" % (v,))
             if not isinstance(go, bool):
                 raise ValueError("go is %r, not true or false" % (go,))
+            ago = float(self._now()) - float(since)
+            if ago < -RUN_FROM_AHEAD_S:
+                raise ValueError(
+                    "it counts from %.0f s after now on this host's monotonic clock: stamped on another clock, "
+                    "or not this run's" % -ago
+                )
+            if ago > max(float(s), 0.0) + RUN_FROM_OLD_S:
+                raise ValueError(
+                    "it counts from %.0f s ago, more than its own %.0f s and an hour: no run is that old" % (ago, s)
+                )
             self.s, self.since, self.from_go = float(s), float(since), go
         except (KeyError, TypeError, ValueError) as e:
             self.unreadable = "%s=%r: %s" % (RUN_BUDGET_ENV, raw, e if not isinstance(e, KeyError) else "no %s" % e)

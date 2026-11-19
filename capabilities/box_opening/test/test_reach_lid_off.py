@@ -5762,10 +5762,49 @@ def test_a_budget_that_is_there_and_cannot_be_read_fails_closed(handed, capsys):
     assert rlo.RunClock(env={rlo.RUN_BUDGET_ENV: '{"s": 90, "from": 1}'}, now=lambda: 10.0).from_go is False
 
 
-def test_a_run_whose_budget_cannot_be_read_takes_the_lid_to_no_second_spot(ctx, monkeypatch, tmp_path, capsys):
-    """The same, in the run: its first set-down feels no table, and the lid goes back on the box. Nothing
-    the run says or records gives a time it does not know: not "0 s left"."""
-    monkeypatch.setenv(rlo.RUN_BUDGET_ENV, "ninety")
+def test_a_budget_stamped_on_another_clock_is_one_that_cannot_be_read(capsys):
+    """A budget that reads as one and counts from a time this run cannot have been started at on this
+    host's monotonic clock: later than now (one stamped by time.time() read as 1.8e9 s left; one 60 s
+    ahead as 150 s left of a 90 s budget), or older than the run's own seconds and an hour. Both were
+    taken as they stood and failed OPEN — every spot tried, the engine's Ctrl+C due (the second review of
+    2026-11-19). They are budgets that cannot be read: nothing is left, no further spot."""
+    now = 5000.0
+
+    def clock(since, s=90.0):
+        told = json.dumps({"s": s, "from": since, "go": False})
+        return rlo.RunClock(env={rlo.RUN_BUDGET_ENV: told}, now=lambda: now)
+
+    for since, why in (
+        (1.8e9, "after now on this host's monotonic clock"),  # time.time()'s
+        (now + 60.0, "it counts from 60 s after now"),
+        (now + 1.5, "after now"),
+        (now - 90.0 - 3601.0, "no run is that old"),
+    ):
+        stamped = clock(since)
+        assert stamped.left_s() == 0.0 and stamped.known_s() is None, since
+        assert why in stamped.unreadable and "cannot be read" in capsys.readouterr().out
+        search = rlo.SpotSearch(SimpleNamespace(), None, None, None, None, 0.0, 0.0)
+        search.clock = stamped
+        assert "cannot be read" in search.no_more(0.0) and search.out_of_time()
+    assert (rlo.RUN_FROM_AHEAD_S, rlo.RUN_FROM_OLD_S) == (1.0, 3600.0)
+    # the engine's rounding of its own clock, a run past its time, a long one: budgets, read as they stand
+    assert clock(now + 0.0004).left_s() == pytest.approx(90.0, abs=1e-3)
+    assert clock(now - 200.0).left_s() == pytest.approx(-110.0)
+    assert clock(now - 90.0 - 3599.0).left_s() == pytest.approx(-3599.0)
+    assert clock(now - 3000.0, s=-5.0).left_s() == pytest.approx(-3005.0)  # (a budget a line-up used up: its hour too)
+    assert clock(now - 30.0).unreadable is None and clock(now - 30.0).known_s() == pytest.approx(60.0)
+
+
+@pytest.mark.parametrize("handed", ["ninety", "the wall clock's"])
+def test_a_run_whose_budget_cannot_be_read_takes_the_lid_to_no_second_spot(ctx, monkeypatch, tmp_path, capsys, handed):
+    """The same, in the run — a budget that does not read, and one stamped by time.time(): its first
+    set-down feels no table, and the lid goes back on the box. Nothing the run says or records gives a
+    time it does not know: not "0 s left"."""
+    import time
+
+    if handed == "the wall clock's":
+        handed = json.dumps({"s": 90.0, "from": round(time.time(), 3), "go": False})
+    monkeypatch.setenv(rlo.RUN_BUDGET_ENV, handed)
     code, rec, _chain, rows = _full_flow(
         ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
     )
