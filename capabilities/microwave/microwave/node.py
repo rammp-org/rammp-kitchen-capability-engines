@@ -154,6 +154,10 @@ class Capability(CapabilityEngine):
                     "push_open": {"type": "boolean", "default": False},
                     # stop at the view pose (the open always goes there first, to detect the handle from it)
                     "view_only": {"type": "boolean", "default": False},
+                    # proof of concept, side-by-side planner tests: where the plan's IK comes from
+                    "planner": {"type": "string", "enum": ["serial", "pool", "curobo"], "default": "serial"},
+                    "plan_workers": {"type": "integer", "minimum": 2, "maximum": 15, "default": 8},
+                    "compare_planners": {"type": "boolean", "default": False},
                 },
             },
         ),
@@ -306,6 +310,9 @@ class Capability(CapabilityEngine):
         speed = float(params.get("speed", 1.0))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
+        planner = params.get("planner", "serial")  # proof of concept: side-by-side planner tests
+        if planner not in ("serial", "pool", "curobo"):
+            raise EngineError("bad_params", "'planner' must be serial, pool or curobo", recoverable=True)
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
@@ -361,6 +368,9 @@ class Capability(CapabilityEngine):
                     log_args=log_args,
                     view_only=bool(params.get("view_only", False)),
                     on_hold=on_hold,
+                    planner=planner,
+                    plan_workers=int(params.get("plan_workers", 8)),
+                    compare_planners=bool(params.get("compare_planners", False)),
                 )
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
