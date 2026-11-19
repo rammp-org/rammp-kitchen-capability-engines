@@ -297,7 +297,7 @@ still in the fingers, no code is recoverable.
 | `bad_config`          | no          | A setting has a value it cannot have (`air_control` neither `impedance` nor `position`). Nothing ran                                                                                                                                                                                                                                                                                                                           |
 | `line_up_unavailable` | no          | What watches the container or judges its place could not start, or ended while lining up (the message carries what it said). The run was never told to go; a wrist that looked is back at rest                                                                                                                                                                                                                                 |
 | `not_lined_up`        | yes         | The container was not where the arm opens it in the time a line-up has (see "How long a line-up may take"), the UI went, or a line-up in the middle of a run had no time left under the orchestrator's 120 s. Nothing was pressed; a wrist that looked is back at rest. The message carries the last instruction the user was given and, in the middle of a run, why no press planned; the next `open_box` then lines up first |
-| `timeout`             | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the orchestrator's fixed 120 s cancel; not recoverable with the lid still in the fingers                                                                                                                                                                                        |
+| `timeout`             | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the 120 s of an orchestrator that counts them from the goal cancel; not recoverable with the lid still in the fingers                                                                                                                                                           |
 | `not_ready`           | yes         | Refused before anything moved: a driver, planner, camera or TF missing                                                                                                                                                                                                                                                                                                                                                         |
 | `not_found`           | yes         | The scene camera found no container (with `wrist_survey`, nor did the wrist camera's survey: nothing, or two places that could be it); nothing was pressed. A lid-sized top the wrist's look sees out of the arm's reach is not this: the chair is guided to it                                                                                                                                                                |
 | `not_home`            | yes         | The arm could not get to its start pose                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -363,14 +363,29 @@ nothing is sent. Every button carries its `style` (the bridge's
 progress panel, Open `normal`.
 
 How the action ended is said on the panel for 5 s before the action ends
-(`END_SHOW_S`), with no button, in one short line: `Done. The lid is off, on the table`, `Cancelled. The arm stopped where it is`, or for an error what
-happened and whether it can be tried again (`Not in place in time. Nothing was pressed. You can try again`; `... Ask someone to check the arm`
-for an error that is not recoverable), with the panel's `style` `error`. The
-whole reason stays in the action's result and the node's log. The orchestrator
-shows no result of its own: its panel returns as the action ends. This is done
-only under an orchestrator whose 120 s restart at every progress item (see "How
-long a line-up may take"); under one that counts them from the goal the
-orchestrator's panel returns at once, as before.
+(`END_SHOW_S`), with no button, in one short line:
+
+| The end                                      | The panel says                                                                                       |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| the lid off and set down                     | `Done. The lid is off, on the table`                                                                 |
+| ended clean with the lid not off             | `Finished. The lid was not taken off`                                                                |
+| the person's Cancel (or `n`)                 | `Cancelled`                                                                                          |
+| an error                                     | what its code always means, then `You can try again` (recoverable) or `Ask someone to check the arm` |
+| a line-up nobody answered at `Ready`         | `No answer in time. Nothing was pressed. You can try again`                                          |
+| a line-up whose panel the UI stopped showing | `The screen lost the arm's panel. Nothing was pressed. You can try again`                            |
+| any end with the lid still in the fingers    | `Cancelled.` or `Stopped.` then `The lid is still in the fingers. Ask someone to check the arm`      |
+
+An error's line (`END_SAYS` in `node.py`) says only what its code always means:
+`timeout` is `Taking too long. The run was stopped`, never that the arm stands
+still (a run that had to be killed may leave a motion in flight), and
+`no_press` is `The button was not pressed`. An error's panel has the `style`
+`error`. The whole reason stays in the action's result and the node's log.
+
+The orchestrator shows no result of its own: its panel returns as the action
+ends. The end is shown only for a goal whose line-ups wait for the person (see
+"How long a line-up may take"), and not where nobody would see it: after the
+orchestrator's own cancel (the screen is its own again), while the node is being
+stopped, or once the bridge has not held the panel for 1.5 s (`END_UNSHOWN_S`).
 
 #### Lining up first
 
@@ -392,16 +407,16 @@ came with the orchestrator's token (`orchestrated`), `line_up_far_m`,
 starts: a `ros2 param set` lives only in the running node, and a restart puts
 the deployment's values back.
 
-| Panel message                                                     | Buttons      | When                                                                                                                                                                                            |
-| ----------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Looking for the container`                                       | Cancel       | No container seen in the last 1.5 s                                                                                                                                                             |
-| `Move closer, about 15 cm`                                        | Cancel       | Outside the boundary: closer, back, left or right, the larger miss                                                                                                                              |
-| `Hold still, checking`                                            | Cancel       | Inside, not yet still for 1 s, or not yet judged                                                                                                                                                |
-| `Ready. Open the container?`                                      | Open, Cancel | Inside, still, and the run plans for it there                                                                                                                                                   |
-| `Press open again when you are in place`                          | none         | The line-up's time passed (35 s from the goal's start; with no UI, `Out of time. Start open_box again when you are in place` after 10 minutes): shown 3 s, then the action fails `not_lined_up` |
-| `The arm is not at its rest pose: home it, then press open again` | none         | The arm stands off rest (more than a wrist a line-up left turned): shown 3 s, then the action fails `not_home`                                                                                  |
-| `The wrist is turning back to rest`                               | Cancel       | The line-up is over and the wrist that looked turns back                                                                                                                                        |
-| `Ending`                                                          | Cancel       | The line-up is over and no wrist turned: the run is ending                                                                                                                                      |
+| Panel message                                                     | Buttons      | When                                                                                                                                                                                                                                                               |
+| ----------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Looking for the container`                                       | Cancel       | No container seen in the last 1.5 s                                                                                                                                                                                                                                |
+| `Move closer, about 15 cm`                                        | Cancel       | Outside the boundary: closer, back, left or right, the larger miss                                                                                                                                                                                                 |
+| `Hold still, checking`                                            | Cancel       | Inside, not yet still for 1 s, or not yet judged                                                                                                                                                                                                                   |
+| `Ready. Open the container?`                                      | Open, Cancel | Inside, still, and the run plans for it there                                                                                                                                                                                                                      |
+| `Press open again when you are in place`                          | none         | The line-up's time passed (see "How long a line-up may take": 35 s from the goal's start, or `ui_line_up_s`; for a goal sent by hand, `Out of time. Start open_box again when you are in place` after 10 minutes): shown 3 s, then the action fails `not_lined_up` |
+| `The arm is not at its rest pose: home it, then press open again` | none         | The arm stands off rest (more than a wrist a line-up left turned): shown 3 s, then the action fails `not_home`                                                                                                                                                     |
+| `The wrist is turning back to rest`                               | Cancel       | The line-up is over and the wrist that looked turns back                                                                                                                                                                                                           |
+| `Ending`                                                          | Cancel       | The line-up is over and no wrist turned: the run is ending                                                                                                                                                                                                         |
 
 `progress.phase` is `looking`, `move`, `hold`, `ready`, `go`, `timed_out` or
 `unable`,
@@ -426,11 +441,11 @@ it on the fingers close and the wrist turns to look as soon as the line-up
 starts, and turns back if it ends without **Open** (see below). No world state
 is written while lining up, but for an arm left holding (`arm_holds`).
 
-The 35 s are what the orchestrator's 120 s leave: the run's 90 s budget less
+The 35 s are what an orchestrator's 120 s leave where it counts them from the goal: the run's 90 s budget less
 a long run after its go (55 s: about 37 s clean by the two runs of 2026-11-12
 and the pacing since, more where a press or a grip is made twice), so a run
 started on the last second still ends its own way and is not stopped part way.
-A run's own budget is shortened by what its line-up took. After the go of a
+Under that rule a run's own budget is shortened by what its line-up took. After the go of a
 line-up whose wrist held the container, the run's first scene look is 2 s, not
 its usual 15: on both runs of 2026-11-12 that look found nothing in front of
 the arm, and the arm would stand through it with the wrist turned.
@@ -654,28 +669,51 @@ result).
 | no token (sent by hand, `open_box_terminal`)                                                                 | 10 minutes                     | 10 minutes, each time                                                                                                                                                                                   | 90 s from the last yes                            |
 | with the orchestrator's token, its 120 s restarting at every progress item (`ui_line_up_s` 300, the default) | 5 minutes                      | 5 minutes, each time                                                                                                                                                                                    | 90 s from the last yes                            |
 
-Which of the first two rows a goal from the UI gets is the orchestrator's doing.
-rammp-orchestrator before e17c625 (2026-11-16) ends every action 120 s after its
-goal, whatever the engine reports: the first row. From e17c625 on it counts its
-120 s from the newest progress item, and only 120 s of silence cancel: the
-third row. Box opening then sends its newest progress again every 30 s with
-nothing new to say (`KEEP_ALIVE_S`), a line-up waits `ui_line_up_s` for the
-person (300 s: the owner's "5 min", 2026-11-19), and the run's 90 s start
-again at each yes, so that no wait can cut a motion short. `ui_line_up_s: 0` is
-the first row, for a deployment whose orchestrator is the older one; a build
-whose goal does not bring the UI's token talks to that older orchestrator and
-takes the first row whatever the param says. Each goal's log line says which
-(`line_up_waits=300s`, or `35s-of-the-goal`). Proved against the real
+Whether a goal from the UI gets the first row or the third is the deployment's
+word about its orchestrator. rammp-orchestrator before e17c625 (2026-11-16) ends
+every action 120 s after its goal, whatever the engine reports: the first row.
+From e17c625 on it counts its 120 s from the newest progress item, and only
+120 s of silence cancel: the third row, which the deployment asks for with
+`ui_line_up_s` above 0 (the package's fragment says `300.0`: the owner's "5
+min", 2026-11-19). Box opening then sends its newest progress again every 30 s
+with nothing new to say (`KEEP_ALIVE_S`), a line-up waits `ui_line_up_s` for the
+person, and the run's 90 s start again at each yes, so that no wait can cut a
+motion short.
+
+The node cannot ask the orchestrator which of the two it is, so the third row
+is taken only where nothing speaks against it. It is the first row:
+
+- with `ui_line_up_s` `0.0`, the node's own default (an integer `0` is read the
+  same);
+- on a build whose goal does not bring the UI's token (it talks to the
+  orchestrator before both changes);
+- for a goal that has no UI as it comes (the bridge not there yet): it asks on
+  the console of a node nobody sits at, and keeps its 35 s;
+- from the moment a goal is cancelled 117 to 126 s after it came with its
+  progress being sent and no cancel of the person's: the orchestrator is then
+  taken not to restart its clock, the log says so, and it stays so until the
+  node is started again. That first goal has still been cut; it does not happen
+  twice.
+
+A `ui_line_up_s` over 600 is taken as 600. Each goal's log line says which row
+it has (`line_up_waits=300s`, or `35s-of-the-goal`). Proved against the real
 orchestrator and UI bridge with the app stood in for (2026-11-19); not yet
-with the app.
+with the app. Before the first use on a robot the deployment's word should be
+proved there once: a line-up left unanswered for more than 120 s must not be
+cancelled.
 
 A line-up that waits minutes is not waited out on a screen that stopped showing
-it: under the third row, a line-up whose panel the bridge has not held for 20 s
-(`UI_GONE_S`: the bridge gone, or restarted and refusing this goal's token)
-ends `not_lined_up`, recoverable, its wrist turned back as at any line-up's
-end. (Seen on the rig: a bridge restarted in the middle of a line-up refuses
-the goal's token from then on, and the app goes on showing the last panel with
-a Cancel that reaches nobody.)
+it. Under the third row a line-up ends `not_lined_up`, recoverable, its wrist
+turned back as at any line-up's end, once the screen has not shown its panel
+for 20 s (`UI_GONE_S`). "Shown" is: the bridge's server is there, the bridge
+holds this goal's panel, and the bridge's own word on its app
+(`/ui_bridge_node/ue_connection`, once a second) is no older than 5 s and says
+connected. The 20 s count from when the node can tell, which is not when the
+screen went: a bridge that stopped is noticed within about 5 s by its silence,
+and one that restarted refuses the goal's token from its first answer. (Seen on
+the rig: a bridge restarted in the middle of a line-up refuses the goal's token
+from then on, and the app goes on showing the last panel with a Cancel that
+reaches nobody.) The panel's words while it ends: `The screen is not showing this any more`.
 
 Under the first row a line-up is given only where a run of 55 s still fits
 after it inside the 90; the orchestrator cancels at 120 s whatever the engine
@@ -686,7 +724,7 @@ to home): a guided run that takes longer still meets the run's own stop at
 After an `open_box` that ended `not_lined_up` from a line-up in the middle of
 its run, the next one within 5 minutes lines up before its first move whatever
 `line_up` says, so that "press open again" goes on from the line-up with its
-whole 35 s and not from another look and proof. Once: a line-up that then never
+whole time and not from another look and proof. Once: a line-up that then never
 sees the container does not ask for another.
 
 A goal sent by hand has no orchestrator to cancel it, and the owner's word for
@@ -716,7 +754,7 @@ passes them as a params file.
 | `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel)                                                                                                                                                                                                                                                                                                                                           |
 | `line_up`             | `false`                | Line up before a run's first move: the user is told which way to move, asked, and the run goes on only on their yes (**Open** on the UI; `y` on `/box_opening/answer` for a goal with no UI: see "Lining up first"). Off (the default), `open_box` starts its run at once and lines up only where it finds no press from where the chair stands ("Lining up in the middle of a run"). With `wrist_first` the wrist turns to look while the user lines up; without it only the scene camera follows the container |
-| `ui_line_up_s`        | `300.0`                | How long (s) a line-up of a goal from the UI waits for the person, under an orchestrator whose 120 s restart at every progress item (rammp-orchestrator e17c625 and later). `0`: the orchestrator ends every action 120 s after its goal, and a line-up has what those leave (35 s of the goal). Always `0` on a build whose goal brings no token                                                                                                                                                                |
+| `ui_line_up_s`        | `0.0`                  | How long (s) a line-up of a goal from the UI waits for the person. Above `0` it is the deployment's word that its orchestrator restarts its 120 s at every progress item (rammp-orchestrator e17c625 and later); the package's fragment says `300.0`. `0.0`: the orchestrator ends every action 120 s after its goal, and a line-up has what those leave (35 s of the goal). See "How long a line-up may take" for where it is `0.0` whatever is set                                                             |
 | `line_up_far_m`       | `0.0`                  | How far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come closer. `0`: as far as the run's proof plans a press (on flatbot about 0.90 m; flown at 0.63 and 0.68 m)                                                                                                                                                                                                                                                                                                |
 | `air_control`         | `"impedance"`          | How the arm flies the free air before the press: `impedance`, every leg in the driver's joint impedance, one motion to under the button (as flown 2026-11-12); `position`, the look and the way in's free-air lines in position control and slower, about a second's stand while the springs come in, then the press on them as ever (see "The free air before the press"). `position` is not flown                                                                                                              |
 | `allow_execute`       | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                                                                                                                                                                                                                                                                                                                                                                                                                                     |

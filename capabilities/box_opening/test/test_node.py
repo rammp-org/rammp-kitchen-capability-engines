@@ -2801,27 +2801,56 @@ def kept_alive(monkeypatch, **params):
     """The mock, lining up, for a goal of that orchestrator: its goal brings the token."""
     monkeypatch.setattr(node, "goal_brings_token", lambda: True)
     monkeypatch.setattr(node, "END_SHOW_S", 0.4)
-    return _mock_lining_up(monkeypatch, **params)
+    # ... and the deployment says so (`ui_line_up_s`: the package's fragment has the owner's 5 minutes)
+    return _mock_lining_up(monkeypatch, **dict({"ui_line_up_s": 300.0}, **params))
 
 
 OPEN_PRESS = {"type": "button", "button_id": "open"}
 
 
-def test_the_uis_goal_waits_five_minutes_for_its_person_only_where_the_orchestrators_clock_restarts(ros, monkeypatch):
-    """`ui_line_up_s`: the owner's "5 min" (2026-11-19), and only on a build whose goal brings the token (the
-    orchestrator before it ends every action 120 s after its goal, whatever the engine reports)."""
-    assert node.PARAMS["ui_line_up_s"] == node.UI_LINE_UP_S == 300.0  # as docs/interface.md states it
+def test_the_uis_goal_waits_five_minutes_only_where_the_deployment_says_its_orchestrators_clock_restarts(
+    ros, monkeypatch
+):
+    """`ui_line_up_s`: 0 in the node (it cannot ask the orchestrator which it is), the owner's "5 min"
+    (2026-11-19) in the package's deployment fragment, and 0 whatever is set wherever something speaks
+    against it."""
+    import yaml
+
+    assert node.PARAMS["ui_line_up_s"] == 0.0 and node.UI_LINE_UP_S == 300.0 and node.UI_LINE_UP_MAX_S == 600.0
+    fragment = yaml.safe_load(open(FRAGMENT_MOCK.with_name("rammp-alternative.yaml")))["params"]
+    assert fragment["ui_line_up_s"] == node.UI_LINE_UP_S  # as docs/interface.md states it
     handlers = list(LOGGER.handlers)
     cap = _mock_lining_up(monkeypatch)
     try:
-        assert cap._ui_wait_s() == 0.0  # no token in this build's goal: the 120 s are the goal's
         monkeypatch.setattr(node, "goal_brings_token", lambda: True)
-        assert cap._ui_wait_s() == 300.0
-        cap.set_parameters([Parameter("ui_line_up_s", value=0.0)])
-        assert cap._ui_wait_s() == 0.0  # the deployment's word for an orchestrator that does not restart it
+        assert cap._ui_wait_s() == 0.0  # nothing set: the 120 s are the goal's
+        for value, waits in (
+            (300.0, 300.0),
+            (300, 300.0),  # an integer, as a deployment may write it
+            (0, 0.0),
+            (-5.0, 0.0),
+            (float("nan"), 0.0),
+            (1e9, 600.0),
+            (float("inf"), 600.0),
+        ):
+            cap.set_parameters([Parameter("ui_line_up_s", value=value)])
+            assert cap._ui_wait_s() == waits, value
+        cap.set_parameters([Parameter("ui_line_up_s", value=300.0)])
+        monkeypatch.setattr(node, "goal_brings_token", lambda: False)
+        assert cap._ui_wait_s() == 0.0  # no token in this build's goal: its orchestrator is the older one
+        monkeypatch.setattr(node, "goal_brings_token", lambda: True)
+        cap._clock_from_goal = True  # a goal of this node's was cut at 120 s
+        assert cap._ui_wait_s() == 0.0
     finally:
         cap.destroy_node()
         LOGGER.handlers[:] = handlers
+    # the node starts with the integer a deployment writes for "my orchestrator is the older one"
+    cap = node.Capability(
+        parameter_overrides=[Parameter("mock", value=True), Parameter("use_orchestrator", value=False)]
+        + [Parameter("ui_line_up_s", value=0)]
+    )
+    cap.destroy_node()
+    LOGGER.handlers[:] = handlers
     t0 = 100.0
     assert node.Asking(True, False, t0, wait_s=300.0).left_s(t0 + 200.0) == 300.0  # each line-up, whole
     assert node.Asking(True, True, t0).left_s(t0 + 10.0) == node.LINE_UP_S - 10.0  # the 120 s rule, as it was
@@ -2888,13 +2917,21 @@ def test_a_cancel_under_such_an_orchestrator_is_said_on_the_panel_as_the_action_
     handlers = list(LOGGER.handlers)
     cap = kept_alive(monkeypatch, mock_phase_s=1.0)
     try:
-        monkeypatch.setattr(cap, "_cancel_from_ui", lambda: None)
+        monkeypatch.setattr(cap, "_cancel_from_ui", lambda *a: setattr(cap, "_person_cancelled", True))
         ctx = FakeCtx()
         threading.Timer(0.6, ctx.events.append, args=(CANCEL_PRESS,)).start()
         with pytest.raises(Cancelled):
             cap.execute("open_box", {}, ctx)
-        assert ctx.panels[-1] == {"title": node.PANEL_TITLE, "message": node.END_CANCELLED, "buttons": []}
+        assert ctx.panels[-1] == {"title": node.PANEL_TITLE, "message": "Cancelled", "buttons": []}
         assert ctx.objects == {} and ctx.world == []
+        # the orchestrator's own cancel: the screen is its own again, and no end is sent to it
+        ctx = FakeCtx()
+        threading.Timer(0.6, setattr, args=(ctx, "cancel", True)).start()
+        t0 = time.monotonic()
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
+        assert time.monotonic() - t0 < 0.6 + 0.35 and all(p["message"] != "Cancelled" for p in ctx.panels)
+        assert cap._clock_from_goal is False  # ... and nowhere near 120 s after the goal
     finally:
         cap.destroy_node()
         LOGGER.handlers[:] = handlers
@@ -2965,20 +3002,267 @@ def test_kept_alive_sends_the_newest_progress_again_only_after_its_period_of_sil
 def test_how_the_action_ended_is_one_short_line_in_the_persons_words():
     assert node.end_says(result={"lid_off": True}) == (node.END_DONE, False)
     assert node.end_says(result={"lid_off": False}) == (node.END_NOT_OFF, False)
-    assert node.end_says(cancelled=True) == (node.END_CANCELLED, False)
+    assert node.end_says(cancelled=True) == ("Cancelled", False)
     said, failed = node.end_says(error=EngineError("not_lined_up", "many words for the log", recoverable=True))
     assert failed and said == "Not in place in time. Nothing was pressed. You can try again"
-    # a run stopped at its budget with the lid still in the fingers is not to be tried again
-    said, failed = node.end_says(error=EngineError("timeout", "...", recoverable=False))
-    assert failed and said == "Taking too long. The arm stopped where it is. Ask someone to check the arm"
+    said, failed = node.end_says(error=EngineError("timeout", "...", recoverable=True))
+    assert failed and said == "Taking too long. The run was stopped. You can try again"
     said, _failed = node.end_says(error=EngineError("a_code_of_tomorrow", "...", recoverable=False))
     assert said == "The container was not opened. Ask someone to check the arm"
+    # an end with the lid in the fingers says that, whatever else (review of 2026-11-19: a cancel during the
+    # carry said only "Cancelled", and open_box was then not offered with no word why)
+    held = "The lid is still in the fingers. Ask someone to check the arm"
+    assert node.end_says(cancelled=True, holding=True) == ("Cancelled. " + held, True)
+    assert node.end_says(error=EngineError("timeout", "...", recoverable=False), holding=True) == (
+        "Stopped. " + held,
+        True,
+    )
+    # an error may carry its own words, where its code's are not true of it
+    error = node.saying(EngineError("not_lined_up", "...", recoverable=True), node.END_NO_ANSWER)
+    assert node.end_says(error=error) == ("No answer in time. Nothing was pressed. You can try again", True)
+    # no line claims what its code does not always mean (the review's three)
+    assert "stopped where it is" not in " ".join([node.END_CANCELLED, *node.END_SAYS.values()])
+    assert "reach" not in node.END_SAYS["no_press"] and "othing moved" not in node.END_SAYS["not_home"]
     # every way a run's last words are read has a line of its own, bar the one that names a fault inside
     assert {code for _pattern, code, _recoverable in node.STOP_CODES} - set(node.END_SAYS) == {"watch_failed"}
     for code in node.END_SAYS:
         for recoverable in (True, False):
             said, failed = node.end_says(error=EngineError(code, "", recoverable=recoverable))
             assert failed and len(said) <= 100 and "\n" not in said
+
+
+def test_the_end_is_not_held_on_the_panel_for_nobody(ros, monkeypatch):
+    """Not while the node is being stopped (the goal's result must be out inside its stop's wait), and no
+    longer than END_UNSHOWN_S where the bridge does not hold the panel (it refuses the goal's token)."""
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch)
+    try:
+        monkeypatch.setattr(node, "END_SHOW_S", 5.0)  # as flown
+        assert node.END_UNSHOWN_S == 1.5
+        monkeypatch.setattr(node, "END_UNSHOWN_S", 0.3)
+        ctx = cap._kept = FakeCtx()
+        ctx._run = _RunOf(held=False)
+        t0 = time.monotonic()
+        cap._show_end("Cancelled", False)
+        assert 0.3 <= time.monotonic() - t0 < 1.0
+        ctx = cap._kept = FakeCtx()
+        cap._on_shutdown()
+        t0 = time.monotonic()
+        cap._show_end("Cancelled", False)
+        assert time.monotonic() - t0 < 0.2 and ctx.panels == []
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_shown_is_the_bridges_goal_and_its_own_word_on_its_app(ros, monkeypatch):
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch)
+    try:
+        ctx = FakeCtx()
+        ctx._run = _RunOf(held=True)
+        assert cap._shown(ctx)  # the bridge holds the panel, and its word has not been heard in this action
+        cap._ue_heard = (time.monotonic(), True)
+        assert cap._shown(ctx)
+        cap._ue_heard = (time.monotonic(), False)  # the app is not connected: nobody sees the panel
+        assert not cap._shown(ctx)
+        assert node.UE_SILENT_S == 5.0
+        cap._ue_heard = (time.monotonic() - 5.1, True)  # the bridge has said nothing for 5 s: hung, or gone
+        assert not cap._shown(ctx)
+        cap._ue_heard = (time.monotonic(), True)
+        ctx._run.ui_goal_handle = None  # refused, or a press took it down
+        assert not cap._shown(ctx)
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_a_goal_cut_120_s_after_it_came_turns_the_long_wait_off_for_this_node(ros, monkeypatch):
+    """The orchestrator that does not restart its clock: a cancel nobody here asked for, 120 s after the goal
+    came, of a goal whose progress was being sent. The first cut cannot be undone; there is no second."""
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=5.0)
+    try:
+        assert node.CLOCK_FROM_GOAL_S == (117.0, 126.0)
+        monkeypatch.setattr(node, "CLOCK_FROM_GOAL_S", (0.5, 1.5))  # 120 s, in a test's time
+        ctx = FakeCtx()
+        threading.Timer(0.8, setattr, args=(ctx, "cancel", True)).start()
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
+        assert cap._clock_from_goal is True and cap._ui_wait_s() == 0.0
+        # the next goal is under the 120 s rule again: its line-up has what those leave, no end panel
+        monkeypatch.setattr(node, "LINE_UP_S", 0.6)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+        ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert (
+            e.value.error_code == "not_lined_up"
+            and ctx.panels[-1]["message"] == "Press open again when you are in place"
+        )
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_the_orchestrators_goal_with_no_ui_as_it_comes_keeps_the_35_s_it_always_had(ros, monkeypatch):
+    """The bridge's server not there (yet) as the goal comes: it is asked on the console of a node nobody
+    sits at. At 21aa7cc that line-up ended 35 s after the goal; it does not wait `ui_line_up_s` there."""
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=5.0)
+    try:
+        monkeypatch.setattr(cap, "_ui_live", lambda: False)
+        cap._assigned_token = bytes([7]) * 16  # ... of a goal that brought the orchestrator's token
+        monkeypatch.setattr(node, "LINE_UP_S", 0.6)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+        ctx = FakeCtx()
+        t0 = time.monotonic()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up" and "within 1 s" in str(e.value)
+        assert time.monotonic() - t0 < 3.0 and ctx.panels == [] and cap._kept is None
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_a_person_in_place_who_does_not_answer_is_not_told_they_were_not_in_place(ros, monkeypatch):
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=0.2, ui_line_up_s=3.6)  # asked at about 2.5 s; nobody answers
+    try:
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+        ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up" and e.value.says == node.END_NO_ANSWER
+        assert ctx.panels[-1]["message"] == "No answer in time. Nothing was pressed. You can try again"
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+# --- ... on the REAL path (its run FAKE_RUN): the tests above are all the mock's (review of 2026-11-19) ---
+
+
+def _kept_real(engine, monkeypatch, end_s=0.2):
+    """The real node for a goal of the orchestrator whose clock restarts, with the UI, as its deployment says."""
+    monkeypatch.setattr(node, "goal_brings_token", lambda: True)
+    monkeypatch.setattr(node, "END_SHOW_S", end_s)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    engine.set_parameters([Parameter("ui_line_up_s", value=300.0)])
+
+
+def test_a_real_runs_budget_starts_at_the_persons_yes_under_such_an_orchestrator(engine, monkeypatch, tmp_path):
+    """A yes that comes after more than the run's whole budget still gets a run with its whole budget: guided
+    in the middle of the run, lined up before it with the run watching, and with the scene camera's watch.
+    (With the 120 s rule's arithmetic left in place here every test of the mock's still passed.)"""
+    import threading
+
+    _kept_real(engine, monkeypatch)
+    monkeypatch.setattr(node, "RUN_BUDGET_S", 3.0)
+    monkeypatch.setenv("WAIT_S", "1.0")
+
+    def check(**env):
+        _forget_run_logs(tmp_path)
+        given(monkeypatch, FULL_RUN, wait=True)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        ctx = FakeCtx()
+        threading.Timer(4.0, ctx.events.append, args=(OPEN_PRESS,)).start()
+        t0 = time.monotonic()
+        out = engine.execute("open_box", {}, ctx)
+        assert out["lid_off"] and time.monotonic() - t0 >= 4.0
+        assert ctx.panels[-1]["message"] == node.END_DONE
+
+    _guided(engine, monkeypatch)
+    check(GUIDE="1")  # guided in the middle of the run
+    monkeypatch.delenv("GUIDE")
+    engine.set_parameters([Parameter("line_up", value=True), Parameter("wrist_first", value=True)])
+    check()  # lined up before it, the run itself watching
+    engine.set_parameters([Parameter("wrist_first", value=False)])
+    monkeypatch.setattr(engine, "_box_source", lambda env, instance_id, watch=None, refused=(): InPlace())
+    check()  # ... and with the scene camera's watch, the run started after
+
+
+def test_the_orchestrator_is_told_while_a_real_run_flies_in_silence_and_while_its_wrist_turns_back(
+    engine, monkeypatch, tmp_path
+):
+    _kept_real(engine, monkeypatch)
+    monkeypatch.setattr(node, "KEEP_ALIVE_S", 0.3)
+    given(monkeypatch, FULL_RUN[:3], wait=True)  # three rows, then silence
+    monkeypatch.setenv("WAIT_S", "2.5")
+    ctx = FakeCtx()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] is False and ctx.panels[-1]["message"] == node.END_NOT_OFF
+    last = ctx.said[-1]
+    assert sum(1 for said in ctx.said if said == last) >= 5
+    # ... and while the wrist turns back after a line-up the person did not get in place for
+    _forget_run_logs(tmp_path)
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("LINE_UP", "far")
+    monkeypatch.setenv("TURN_BACK_S", "2.0")
+    _wrist_lining_up(engine, monkeypatch, proven=False)
+    engine.set_parameters([Parameter("ui_line_up_s", value=1.0)])
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up"
+    assert len([m for _p, _pct, m, _pausable in ctx.said if m == node.PANEL_TURNING_BACK]) >= 4
+    assert ctx.panels[-1]["message"].startswith("Not in place in time")
+
+
+def test_a_real_guidance_whose_panel_the_ui_stopped_showing_turns_the_wrist_back_and_is_carried_over(
+    engine, monkeypatch
+):
+    _kept_real(engine, monkeypatch)
+    monkeypatch.setattr(node, "UI_GONE_S", 0.6)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("TURN_BACK_S", "0.5")
+    engine.set_parameters([Parameter("wrist_first", value=True)])
+    _made, told, runs = _guided(engine, monkeypatch)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    ctx._run = _RunOf(held=False)  # every send refused
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and "the UI stopped showing" in str(e.value)
+    assert e.value.says == node.END_UI_GONE  # not "not in place": the person was
+    # told its line-up is over, it turned its wrist back and ended its own way: no Ctrl+C
+    assert told == [{"stop": True}] and sent == [] and runs[0].proc.returncode == 5 and engine._run is None
+    assert any(m == node.PANEL_TURNING_BACK for _p, _pct, m, _pausable in ctx.said)
+    assert engine._line_up_first is not None  # the next open_box goes on from the line-up, as after a time-out
+
+
+def test_a_cancel_with_the_lid_in_the_fingers_says_so_on_the_panel(engine, monkeypatch):
+    import threading
+
+    _kept_real(engine, monkeypatch)
+    given(monkeypatch, FULL_RUN[:11], wait=True)  # ... to the grip that held the lid, then it flies on
+    engine.instance_id = "c1"
+    ctx = FakeCtx()
+
+    def cancel(*_by):
+        engine._person_cancelled = True
+        ctx.cancel = True
+
+    monkeypatch.setattr(engine, "_cancel_from_ui", cancel)
+    threading.Timer(1.5, ctx.events.append, args=(CANCEL_PRESS,)).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert ctx.world[-1] == {"gripper": {"holding": "c1:lid"}}
+    assert ctx.panels[-1] == {
+        "title": node.PANEL_TITLE,
+        "message": "Cancelled. The lid is still in the fingers. Ask someone to check the arm",
+        "buttons": [],
+        "style": "error",
+    }
 
 
 class _RunOf:

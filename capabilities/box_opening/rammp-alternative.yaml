@@ -116,7 +116,8 @@ params:
   # how long (s) a line-up of a goal from the UI waits for the person, the arm at rest with its wrist turned
   # the while: 5 minutes (the owner, 2026-11-19). It needs rammp-orchestrator e17c625 (2026-11-16) or later,
   # whose 120 s restart at every progress item: box opening then sends its newest progress again every 30 s.
-  # 0: the orchestrator ends every action 120 s after its goal, and a line-up has what those leave (35 s)
+  # 0.0: the orchestrator ends every action 120 s after its goal, and a line-up has what those leave (35 s).
+  # The node's own default is 0.0: this line is the deployment saying which orchestrator it runs
   ui_line_up_s: 300.0
 publishes:
   - /box_opening/status
