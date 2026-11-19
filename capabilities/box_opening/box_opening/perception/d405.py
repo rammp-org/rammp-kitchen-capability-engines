@@ -67,9 +67,9 @@ def robot_mount(name, path=None, env=None):
             raise ValueError("xyz %r" % (m["xyz"],))
         return str(m["parent"]), xyz
     except Exception as e:  # noqa: BLE001 - an unreadable calibration is not a reason to stop: the copy stands in
-        import logging
+        from box_opening import LOGGER as log
 
-        logging.getLogger("box_opening").warning("[camera] %s: no usable mount %s (%s)", path, name, e)
+        log.info("[camera] WARNING: the robot's camera mounts %s give no usable %s (%s)" % (path, name, e))
         return None
 
 

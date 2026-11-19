@@ -2378,6 +2378,7 @@ def main():
             "[press_demo] not starting: /arm/robot_description not heard in 5 s (arm_state_publisher down?) — "
             "the arm kinematics for %s are unavailable (%s). Nothing moved." % (worlds.base_frame, why)
         )
+    cli_common.log_hand("[press_demo]", worlds.wrist_camera_config)  # where this run has its hand, said first
     # the chair and its user, every plan-free line held out of them (runtime/body)
     body_model = cli_common.load_body_or_exit(args, "[press_demo]")
     # the goals the body check lets through: the rest this run starts and ends at (flatbot's HOME

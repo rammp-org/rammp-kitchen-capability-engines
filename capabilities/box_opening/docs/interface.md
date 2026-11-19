@@ -194,7 +194,7 @@ While an action runs (its run subscribes; the node itself reads only
 | Topic                                | Type                                           | Required | Meaning                                                                                                                                                                                                            |
 | ------------------------------------ | ---------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `/joint_states`                      | `sensor_msgs/JointState`                       | yes      | The arm's joints, efforts and gripper knuckle                                                                                                                                                                      |
-| `/arm/robot_description`             | `std_msgs/String`                              | yes      | The arm's URDF, rooted at `arm_mount` (the run's FK chain)                                                                                                                                                         |
+| `/arm/robot_description`             | `std_msgs/String`                              | yes      | The arm's URDF, rooted at `arm_mount`: the run's FK chain, and where its tool frame is (`arm_tool_frame`, the planner's own)                                                                                       |
 | `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | yes      | The aim at the button, the grip's close-up; with `wrist_survey`, the survey for a container the scene camera cannot see                                                                                            |
 | `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Its intrinsics                                                                                                                                                                                                     |
 | `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes      | Depth aligned to colour                                                                                                                                                                                            |
@@ -761,6 +761,25 @@ in it) and its arm spheres, with the hand's own in `config/robot_body.yaml`, hol
 every plan-free line and every planner goal out of the chair and the user, and the
 same file slows the arm near the user. Unreadable, a run stops before it moves; on,
 a run starts only on a planner started with that same config and `world ""`.
+
+The same mounted robot config and the arm's own description say where the hand is;
+nothing of it is kept per robot here:
+
+- the tool frame is the description's `arm_tool_frame` (the planner's `ee_link`),
+  read from `/arm/robot_description` each start: 0.120 m out of the flange with
+  the gripper bolted on it, 0.134 m on a description with Kinova's sensor puck
+  (`mount.yaml`'s `wrist: sensor_puck`). A description whose tool frame is not
+  straight out of the flange with the flange's axes gets no chain, and no run
+  starts on it. A URDF with no tool frame (a bench's) is given 0.120 m;
+- the wrist camera's lens is the robot's calibration, `wrist_camera` in
+  `/config/robot/transforms/cameras.yaml`, on that tool frame
+  (`BOX_OPENING_ROBOT_CAMERAS` names another file; empty, none). Where no such
+  file is mounted, the figure in `config/camera_oak_wrist.yaml` stands in;
+- how far out of the flange the shut fingertips end is one number,
+  `constants.PADS_FROM_FLANGE_M` (robot-body fact, 0.151 m, known to about
+  150-161 mm until someone holds a ruler from the flange's face to the pads'
+  ends). The press's contact band and the fingertips' spheres in
+  `config/robot_body.yaml` follow from it and the description's tool frame.
 
 `wrist_survey` is off by default: a run whose scene camera finds no container
 stops with `not_found` before anything moves. On, such a run surveys with the

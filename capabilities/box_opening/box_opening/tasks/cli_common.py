@@ -239,6 +239,45 @@ def load_body_or_exit(args, who):
     return model
 
 
+def log_hand(who, camera_cfg_name=None):
+    """One line of where this run has its hand, so a run on a description or a robot config it was not
+    flown on says so before it moves: the tool frame (the description's own, or the stock gripper's for a
+    URDF without one), the pads the heights go by and this hand's real ones (constants.PADS_FROM_FLANGE_M),
+    and the wrist lens with where it was read. Never a reason to stop: a run without a chain says nothing."""
+    try:
+        from box_opening.constants import PADS_FROM_FLANGE_M, TCP_OFFSET_M
+        from box_opening.runtime import fingers
+
+        if not approach.chain_ready()[0]:
+            return
+        chain = approach._chain()
+        tool = float(chain.tool_from_flange_m)
+        line = (
+            "%s hand: tool frame %.0f mm out of the flange (%s), the pads the heights go by %.0f mm out, "
+            "this hand's %.0f mm: %.0f mm past them"
+            % (
+                who,
+                1000 * tool,
+                "the arm's description" if chain.tool_described else "no tool frame in the URDF: the stock gripper's",
+                1000 * (tool + TCP_OFFSET_M),
+                1000 * PADS_FROM_FLANGE_M,
+                1000 * fingers.past_model_m(chain),
+            )
+        )
+        if camera_cfg_name:
+            from box_opening.perception.d405 import camera_config, wrist_lens_in_hand
+
+            lens, where = wrist_lens_in_hand(camera_config(camera_cfg_name), chain=chain)
+            if lens is not None:
+                line += "; wrist lens (%s) mm from the tool frame (%s)" % (
+                    ", ".join("%+.1f" % (1000 * v) for v in lens),
+                    where,
+                )
+        log.info(line)
+    except Exception as e:  # noqa: BLE001 - a line of the log, never a stop
+        log.info("%s hand: not described (%s)" % (who, e))
+
+
 def planner_body_or_exit(node, model, execute, who):
     """With the body model on, a run that moves the arm starts only where the planner plans around
     the same chair and user (preflight.planner_body_verdict: its config the body model's, world
@@ -276,6 +315,7 @@ def build_ctx(args):
     # when the description is missing: HOME is a joint goal and needs no
     # chain; only a plan-free lift refuses (LiftFree)
     approach.set_chain_root(worlds.base_frame, urdf_path=_arm_urdf_path(node, worlds.base_frame))
+    log_hand("[%s]" % ap_prog(), worlds.wrist_camera_config)
     # the body model, never in `model` (the container's: the Ctx below plans with it)
     body_model = load_body_or_exit(args, "[%s]" % ap_prog())
     planner_body_or_exit(node, body_model, bool(getattr(args, "execute", False)), "[%s]" % ap_prog())

@@ -65,7 +65,7 @@ def test_the_wrist_lens_is_the_robots_calibration_on_the_runs_own_tool_frame(tmp
     assert aside == pytest.approx(0.0070, abs=1e-4) and aside > dp.MOUNT_XY_TOL_M
 
 
-def test_the_cameras_own_figure_stands_in_where_no_calibration_can_be_read(tmp_path, monkeypatch):
+def test_the_cameras_own_figure_stands_in_where_no_calibration_can_be_read(tmp_path, capsys):
     cfg = d405.camera_config("camera_oak_wrist.yaml")
     plain, _puck = both_chains(tmp_path)
     copy = [0.0, 0.065, -0.105]
@@ -87,10 +87,12 @@ def test_the_cameras_own_figure_stands_in_where_no_calibration_can_be_read(tmp_p
     approach.set_chain_root("arm_mount", None)  # no description heard: no chain
     lens, where = d405.wrist_lens_in_hand(cfg, path=gen15)
     assert lens == copy and "no arm chain" in where
-    # a file that is no mounts file: the copy, never a stop
+    # a file that is no mounts file: the copy, never a stop, and said
     junk = tmp_path / "junk.yaml"
     junk.write_text("mounts: {ros__parameters: {wrist_camera: {parent: arm_end_effector_link, xyz: [1, 2]}}}\n")
+    capsys.readouterr()
     assert d405.wrist_lens_in_hand(cfg, chain=plain, path=str(junk))[0] == copy
+    assert "WARNING: the robot's camera mounts %s give no usable wrist_camera" % junk in capsys.readouterr().out
     # the bench's D405 names no robot mount: its own file holds its mount, and its figure stands
     bench = d405.camera_config("camera_d405_wrist.yaml")
     assert d405.wrist_lens_in_hand(bench, chain=plain, path=gen15) == ([0.0, 0.075, -0.125], "the camera config")
@@ -116,3 +118,33 @@ def test_a_run_on_gen_1_5_takes_its_lens_from_the_mounted_robot_config(tmp_path,
     monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, "")
     assert g.wrist_lens_in_hand_m == [0.0, 0.065, -0.105]
     assert np.allclose(sv.camera_of(None, "camera_oak_wrist.yaml").lens, sv.LENS_IN_TOOL_M)
+
+
+def test_a_run_says_where_it_has_its_hand_before_it_moves(tmp_path, monkeypatch, capsys):
+    """One line at the start: the tool frame and where it was read, the pads the heights go by and this
+    hand's real ones, the lens and where it is from. A run on a description or a robot config it was not
+    flown on shows there before anything moves."""
+    from box_opening.tasks import cli_common
+
+    approach.set_body(False)
+    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, _cameras_yaml(tmp_path, MOUNT_GEN15))
+    approach.set_chain_root("arm_mount", puck_urdf(tmp_path))
+    capsys.readouterr()
+    cli_common.log_hand("[press_demo]", "camera_oak_wrist.yaml")
+    assert capsys.readouterr().out.strip() == (
+        "[press_demo] hand: tool frame 134 mm out of the flange (the arm's description), the pads the heights go by "
+        "145 mm out, this hand's 151 mm: 6 mm past them; wrist lens (-5.4, +69.5, -111.5) mm from the tool frame "
+        "(the robot's calibration of wrist_camera, the tool frame 134 mm out of the flange)"
+    )
+    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, "")
+    approach.set_chain_root("arm_mount", flatbot_urdf())
+    cli_common.log_hand("[press_demo]", "camera_oak_wrist.yaml")
+    assert capsys.readouterr().out.strip() == (
+        "[press_demo] hand: tool frame 120 mm out of the flange (the arm's description), the pads the heights go by "
+        "131 mm out, this hand's 151 mm: 20 mm past them; wrist lens (+0.0, +65.0, -105.0) mm from the tool frame "
+        "(the camera config (no robot calibration of wrist_camera here))"
+    )
+    # no chain (no description heard): nothing is said, and nothing stops
+    approach.set_chain_root("arm_mount", None)
+    cli_common.log_hand("[press_demo]", "camera_oak_wrist.yaml")
+    assert capsys.readouterr().out == ""
