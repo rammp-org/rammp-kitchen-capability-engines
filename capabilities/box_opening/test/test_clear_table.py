@@ -596,3 +596,36 @@ def test_the_measured_table_reaches_as_far_as_the_map_saw_it():
     assert x0 == pytest.approx(0.64, abs=0.021) and x1 == pytest.approx(1.15, abs=0.021)
     assert y0 == pytest.approx(-0.64, abs=0.021) and y1 == pytest.approx(0.21, abs=0.021)
     assert ct.table_bounds(None) is None
+
+
+def test_the_places_of_the_measured_table_are_its_own_bare_cells_a_step_apart_and_inside_it():
+    """table_places, where a lid is looked for once the spots round the box are used up (owner
+    2026-11-19: "it should keep trying spots, assume tere will always be a spot for the lid"): the whole
+    of the table the map measured, not only round the box — a lattice on the map's own cells, `step`
+    apart, `inset` inside what it saw (and inside a given zone); never in front of the edge, where
+    nothing was seen, or on what stands. None with no map."""
+    tmap, box = _edge_map()
+    lid_r = 0.0525
+    inset = lid_r + ct.LID_CLEAR_M
+    places = ct.table_places(tmap, ct.SPOT_APART_M, inset)
+    assert len(places) > 100 and len(set(places)) == len(places)
+    xs, ys = sorted({x for x, _y in places}), sorted({y for _x, y in places})
+    assert min(b - a for a, b in zip(xs, xs[1:], strict=False)) == pytest.approx(ct.SPOT_APART_M)
+    assert min(b - a for a, b in zip(ys, ys[1:], strict=False)) == pytest.approx(ct.SPOT_APART_M)
+    x0, x1, y0, y1 = ct.table_bounds(tmap)
+    for x, y in places:
+        assert x0 + inset - 1e-9 <= x <= x1 - inset + 1e-9 and y0 + inset - 1e-9 <= y <= y1 - inset + 1e-9
+        assert x > 0.64  # never in front of the table's near edge (the floor), nor where nothing was seen
+        assert not (0.70 < x < 1.00 and -0.60 < y < -0.48)  # nor on the block
+        i, j = int((x - tmap.x0) / tmap.cell), int((y - tmap.y0) / tmap.cell)
+        assert tmap.seen[i, j] and not tmap.off[i, j] and not np.isfinite(tmap.tall[i, j])
+    # the whole table: far past the ring round the box that clear_spots searches (SPOT_REACH_M)
+    assert max(math.hypot(x - box[0], y - box[1]) for x, y in places) > 0.19 + ct.SPOT_REACH_M
+    # inside a zone, where one is given (the extent the fix measured, inset)
+    zone = (0.80, 1.00, -0.30, 0.10)
+    inside = ct.table_places(tmap, ct.SPOT_APART_M, inset, within=zone)
+    assert inside and set(inside) < set(places)
+    assert all(zone[0] <= x <= zone[1] and zone[2] <= y <= zone[3] for x, y in inside)
+    # a coarser step: fewer places, of the same lattice
+    assert set(ct.table_places(tmap, 2 * ct.SPOT_APART_M, inset)) < set(places)
+    assert ct.table_places(None, ct.SPOT_APART_M, inset) == []

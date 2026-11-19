@@ -420,6 +420,42 @@ def table_bounds(tmap):
     )
 
 
+def table_places(tmap, step, inset, within=None):
+    """[(x, y)]: every place on the table `tmap` measured, `step` apart — the points of a lattice over
+    table_bounds, `inset` inside it (and inside `within`, (x0, x1, y0, y1), where given), whose own
+    cell the map saw at the table's height with nothing standing in it. Where a lid may be looked for
+    once the spots round the box are used up (reach_lid_off.wider_candidates, owner 2026-11-19: "it
+    should keep trying spots, assume tere will always be a spot for the lid"): clear_spots looks no
+    further than SPOT_REACH_M past the nearest a spot may lie to the box. A place here is only where
+    to ask: whether the whole lid and the hand have measured table under them is off_table's, of each.
+    The lattice stands on the map's own cell centres, so the same map gives the same places."""
+    seen = table_bounds(tmap)
+    if seen is None:
+        return []
+    x0, x1, y0, y1 = seen[0] + inset, seen[1] - inset, seen[2] + inset, seen[3] - inset
+    if within is not None:
+        x0, x1, y0, y1 = (
+            max(x0, float(within[0])),
+            min(x1, float(within[1])),
+            max(y0, float(within[2])),
+            min(y1, float(within[3])),
+        )
+    c = tmap.cell
+    every = max(1, int(round(float(step) / c)))
+    nx, ny = tmap.tall.shape
+    bare = tmap.seen & ~tmap.off & ~np.isfinite(tmap.tall)
+    out = []
+    for i in range(0, nx, every):
+        x = tmap.x0 + (i + 0.5) * c
+        if not x0 - 1e-9 <= x <= x1 + 1e-9:
+            continue
+        for j in range(0, ny, every):
+            y = tmap.y0 + (j + 0.5) * c
+            if y0 - 1e-9 <= y <= y1 + 1e-9 and bare[i, j]:
+                out.append((float(x), float(y)))
+    return out
+
+
 # Whether clear_spots judges its spots in batches (clearance_batch): the
 # same answers as one by one, several times faster
 BATCHED_SPOTS = True
