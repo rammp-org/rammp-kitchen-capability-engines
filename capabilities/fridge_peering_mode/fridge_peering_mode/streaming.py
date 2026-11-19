@@ -68,12 +68,13 @@ from typing import NamedTuple
 
 import numpy as np
 import rammp_arm
-from capability_engine import ArmError, EngineError, StateTimeout
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import Joy
 from tf2_ros import TransformException
+
+from capability_engine import ArmError, EngineError, StateTimeout
 
 from . import geometry as geo
 from . import plane_follow as pf
@@ -168,8 +169,19 @@ def search_frame(R_SE: np.ndarray, p_SE: np.ndarray, optical_E, up_S) -> np.ndar
 class PeerSession:
     """The state of one `peer` action. Make it inside execute() (its entities are the action's)."""
 
-    def __init__(self, engine, ctx, cfg, *, execute: bool, speed: float, pick: bool = True,
-                 handoff=None, label: str = "", tracking=None):
+    def __init__(
+        self,
+        engine,
+        ctx,
+        cfg,
+        *,
+        execute: bool,
+        speed: float,
+        pick: bool = True,
+        handoff=None,
+        label: str = "",
+        tracking=None,
+    ):
         self._node = engine
         self._arm = engine.arm
         self._ctx = ctx
@@ -308,8 +320,14 @@ class PeerSession:
             if found is None:
                 if not teleop and scene_homed and homes == 0:
                     self._log.warning(f"scene-homed, but no usable fridge TF ({why})")
-                    return {"ended": "scene_homed", "scene_homed": True, "homes": 0,
-                            "searches": 0, "teleop_s": 0.0, "fridge_tf": why}
+                    return {
+                        "ended": "scene_homed",
+                        "scene_homed": True,
+                        "homes": 0,
+                        "searches": 0,
+                        "teleop_s": 0.0,
+                        "fridge_tf": why,
+                    }
                 if not (teleop and self.search_when_no_fridge):
                     raise EngineError(
                         "no_fridge",
@@ -327,13 +345,23 @@ class PeerSession:
                 if self._handoff is not None and self._handoff.is_set():
                     # a pick goal arrived as a search found the fridge: no homing, hand off here
                     self._take_handoff()
-                    return {"ended": "handed_off", "scene_homed": scene_homed, "homes": homes,
-                            "searches": searches, "teleop_s": round(teleop_s, 1)}
+                    return {
+                        "ended": "handed_off",
+                        "scene_homed": scene_homed,
+                        "homes": homes,
+                        "searches": searches,
+                        "teleop_s": round(teleop_s, 1),
+                    }
                 self._home(found)
                 homes += 1
                 if not teleop:
-                    return {"ended": "homed", "scene_homed": scene_homed, "homes": homes,
-                            "searches": 0, "teleop_s": 0.0}
+                    return {
+                        "ended": "homed",
+                        "scene_homed": scene_homed,
+                        "homes": homes,
+                        "searches": 0,
+                        "teleop_s": 0.0,
+                    }
                 mode = WALL
             if deadline is None and max_teleop_s is not None:
                 deadline = time.monotonic() + float(max_teleop_s)
@@ -344,9 +372,14 @@ class PeerSession:
                 teleop_s += time.monotonic() - started
                 picked = self._pick_tapped()
                 if picked is not None:
-                    return {"ended": "picked", "scene_homed": scene_homed, "homes": homes,
-                            "searches": searches, "teleop_s": round(teleop_s, 1),
-                            "pick": picked}
+                    return {
+                        "ended": "picked",
+                        "scene_homed": scene_homed,
+                        "homes": homes,
+                        "searches": searches,
+                        "teleop_s": round(teleop_s, 1),
+                        "pick": picked,
+                    }
                 started = time.monotonic()  # refused, nothing moved: teleop again, same mode
                 why = self._teleop(mode, deadline, resume=True)
             # The stream has closed: the arm comes to rest now. No fridge TF from before is a goal.
@@ -356,8 +389,13 @@ class PeerSession:
                 self._take_handoff()
             if why != "found":  # only a search ends with "found": home on it
                 ended = "handed_off" if why == "handoff" else why
-                return {"ended": ended, "scene_homed": scene_homed, "homes": homes,
-                        "searches": searches, "teleop_s": round(teleop_s, 1)}
+                return {
+                    "ended": ended,
+                    "scene_homed": scene_homed,
+                    "homes": homes,
+                    "searches": searches,
+                    "teleop_s": round(teleop_s, 1),
+                }
 
     def _wait_arm_tf(self) -> None:
         deadline = time.monotonic() + self.static_tf_timeout_s
@@ -392,24 +430,35 @@ class PeerSession:
         With SAM3's tracking session running (and no label it does not track) the boxes and ids
         are the tracked food and drink."""
         tracking = self._tracking
-        tracked = tracking is not None and tracking.active and (
-            not self.label or self.label in tracking.prompts)
+        tracked = (
+            tracking is not None
+            and tracking.active
+            and (not self.label or self.label in tracking.prompts)
+        )
         if not self.pick:
             if tracked:  # still ~/in_view (no points: no wrist camera without picking)
                 self._view = TrackedView(self._node, tracking.prompts)
             return
         try:
-            self._picker = FoodPicker(self._node, self._ctx, self._cfg, execute=self.execute,
-                                      speed=self.speed)
+            self._picker = FoodPicker(
+                self._node, self._ctx, self._cfg, execute=self.execute, speed=self.speed
+            )
         except PickRefused as exc:
             self._log.warning(f"tap-to-pick is off for this action: {exc}")
             return
         if tracked:
             self._view = TrackedView(self._node, tracking.prompts, self._picker.camera)
             self._picker.view = self._view
-        self._food = FoodTargets(self._node, self._ctx, self._picker.camera, self._cfg,
-                                 self._settled, self._now_ns, prompt=self.label or None,
-                                 view=self._view)
+        self._food = FoodTargets(
+            self._node,
+            self._ctx,
+            self._picker.camera,
+            self._cfg,
+            self._settled,
+            self._now_ns,
+            prompt=self.label or None,
+            view=self._view,
+        )
 
     def _take_handoff(self) -> None:
         """A `pick` goal is waiting: mark the handoff (the node keeps SAM3's tracking session for
@@ -501,8 +550,9 @@ class PeerSession:
         )
         ok, why = self._move_to("homing", (pos, R), "to the fridge standoff")
         if not ok:
-            raise EngineError("refused", f"homing: {why} -- the arm holds where it is",
-                              recoverable=True)
+            raise EngineError(
+                "refused", f"homing: {why} -- the arm holds where it is", recoverable=True
+            )
 
     def _move_to(self, phase: str, goal, label: str):
         """go_to_ee_pose the tool frame to `goal` = (position, rotation) in arm.frame; a dry run
@@ -533,7 +583,8 @@ class PeerSession:
         big = float(np.max(np.abs(delta)))
         moves = ", ".join(
             f"{rammp_arm.JOINTS[j]} {math.degrees(delta[j]):+.1f} deg"
-            for j in range(len(delta)) if abs(delta[j]) > 1e-6
+            for j in range(len(delta))
+            if abs(delta[j]) > 1e-6
         )
         if big > self.unwind_max_rad:
             return False, None, f"it needs {moves}, more than unwind_max_rad {self.unwind_max_rad}"
@@ -691,10 +742,14 @@ class PeerSession:
         elif self.fridge_tf_timeout_s > 0.0:
             age = (self._now_ns() - stamp_ns) * 1e-9
             if age > self.fridge_tf_timeout_s:
-                return None, (
-                    f"fridge TF is {age:.2f}s old (> fridge_tf_timeout_s = "
-                    f"{self.fridge_tf_timeout_s}s)"
-                ), 0
+                return (
+                    None,
+                    (
+                        f"fridge TF is {age:.2f}s old (> fridge_tf_timeout_s = "
+                        f"{self.fridge_tf_timeout_s}s)"
+                    ),
+                    0,
+                )
         T_BF = _tf_matrix(tf_BF)
         try:
             T_XB = self._lookup(frame, self.base_frame)
@@ -826,8 +881,7 @@ class PeerSession:
         self._log.info(message)
         # A stream ignores pause (holding still in a paused send() would expire the session): say
         # so. A dry run sends nothing and pauses at its checkpoint.
-        self._ctx.progress(phase, 50.0 if mode == WALL else 0.0, message,
-                           pausable=not self.execute)
+        self._ctx.progress(phase, 50.0 if mode == WALL else 0.0, message, pausable=not self.execute)
         self.in_teleop = True
         try:
             if not self.execute:

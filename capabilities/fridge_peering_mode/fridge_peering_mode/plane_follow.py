@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List, Sequence
 
 import numpy as np
 
@@ -65,10 +65,17 @@ class FollowParams:
     max_step_deg: float = 5.0  # from the follower's current normal
     max_step_m: float = 0.03  # from the follower's current offset
 
-    def problems(self) -> List[str]:
+    def problems(self) -> list[str]:
         out = []
-        for name in ("w0", "max_rate", "max_shift_rate", "max_tilt_deg",
-                     "max_shift_m", "max_step_deg", "max_step_m"):
+        for name in (
+            "w0",
+            "max_rate",
+            "max_shift_rate",
+            "max_tilt_deg",
+            "max_shift_m",
+            "max_step_deg",
+            "max_step_m",
+        ):
             if not getattr(self, name) > 0.0:
                 out.append(f"{name} must be > 0, got {getattr(self, name)}")
         if self.deadband_deg < 0.0 or self.deadband_m < 0.0:

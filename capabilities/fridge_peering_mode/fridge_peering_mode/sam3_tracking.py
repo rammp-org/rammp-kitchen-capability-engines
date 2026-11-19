@@ -31,8 +31,11 @@ from collections import deque
 import numpy as np
 
 DETECTIONS_TOPIC = "/perception/sam3/object_detections"
-START, RENEW, STOP = ("/perception/sam3/start_tracking", "/perception/sam3/renew_tracking",
-                      "/perception/sam3/stop_tracking")
+START, RENEW, STOP = (
+    "/perception/sam3/start_tracking",
+    "/perception/sam3/renew_tracking",
+    "/perception/sam3/stop_tracking",
+)
 RENEW_S = 2.0  # renew the lease this often
 HANDOVER_S = 20.0  # a session peer handed over, and no pick took within this: released
 RESTART_S = 5.0  # a lost session is restarted at most this often
@@ -82,7 +85,7 @@ class TrackingSession:
             self._types = dict(start=StartTracking, renew=RenewTracking, stop=StopTracking)
             clients = {
                 name: engine.create_client(t, srv, callback_group=group)
-                for (name, t), srv in zip(self._types.items(), (START, RENEW, STOP))
+                for (name, t), srv in zip(self._types.items(), (START, RENEW, STOP), strict=False)
             }
             engine.create_timer(1.0, self.tick, callback_group=group)
         else:  # tests: fake clients and service types, dict(start=, renew=, stop=)
@@ -107,8 +110,7 @@ class TrackingSession:
         if running:
             return True
         start = self._clients["start"]
-        if timeout_s > 0 and not start.wait_for_service(timeout_sec=min(timeout_s,
-                                                                         SERVICE_WAIT_S)):
+        if timeout_s > 0 and not start.wait_for_service(timeout_sec=min(timeout_s, SERVICE_WAIT_S)):
             self._log.warning(f"SAM3 tracking: {START} not available")
             return False
         self._send_start()
@@ -204,8 +206,10 @@ class TrackingSession:
                 req.session_id = int(r.session_id)
                 self._clients["stop"].call_async(req)
         if r.accepted:
-            self._log.info(f"SAM3 tracking: session {r.session_id} {self.prompts} on "
-                           f"{self.topic}: {r.message}")
+            self._log.info(
+                f"SAM3 tracking: session {r.session_id} {self.prompts} on "
+                f"{self.topic}: {r.message}"
+            )
         else:
             self._log.warning(f"SAM3 tracking: start refused: {r.message}")
         return True
@@ -220,8 +224,10 @@ class TrackingSession:
             with self._lock:
                 if self.session_id == sid:
                     self.session_id = 0
-            self._log.warning(f"SAM3 tracking: session {sid} is gone ({r.message}): replaced by "
-                              f"another StartTracking, or stopped; restarting")
+            self._log.warning(
+                f"SAM3 tracking: session {sid} is gone ({r.message}): replaced by "
+                f"another StartTracking, or stopped; restarting"
+            )
 
     def shutdown(self) -> None:
         """Engine teardown: stop our session (best effort; with SAM3's leases off nothing else
@@ -234,9 +240,14 @@ class TrackingSession:
 def visible_objects(msg, prompts, label=None):
     """The visible objects of `msg` that are ours (a track_prompts class; `label`: only that
     one), best-scoring first."""
-    out = [o for o in msg.objects
-           if o.perception_class in prompts and (label is None or o.perception_class == label)
-           and o.state == STATE_VISIBLE and o.mask_id]
+    out = [
+        o
+        for o in msg.objects
+        if o.perception_class in prompts
+        and (label is None or o.perception_class == label)
+        and o.state == STATE_VISIBLE
+        and o.mask_id
+    ]
     return sorted(out, key=lambda o: -o.score)
 
 
@@ -259,8 +270,9 @@ class TrackedView:
             from std_msgs.msg import String
 
             self._String = String
-            engine.create_action_subscription(ObjectDetections, DETECTIONS_TOPIC, self.on_msg,
-                                              QoSProfile(depth=2))
+            engine.create_action_subscription(
+                ObjectDetections, DETECTIONS_TOPIC, self.on_msg, QoSProfile(depth=2)
+            )
             self._pub = engine.create_action_publisher(String, "~/in_view", QoSProfile(depth=2))
 
     def on_msg(self, msg) -> None:  # on the executor
@@ -328,10 +340,14 @@ class TrackedView:
             "stamp": round(stamp_ns(msg) / 1e9, 3),
             "age_s": round(time.time() - stamp_ns(msg) / 1e9, 2),
             "objects": [
-                {"instance_id": o.instance_id, "class": o.perception_class,
-                 "score": round(float(o.score), 3), "box": [round(float(v)) for v in o.box[:4]],
-                 "point": p}
-                for o, p in zip(objs, points)
+                {
+                    "instance_id": o.instance_id,
+                    "class": o.perception_class,
+                    "score": round(float(o.score), 3),
+                    "box": [round(float(v)) for v in o.box[:4]],
+                    "point": p,
+                }
+                for o, p in zip(objs, points, strict=False)
             ],
         }
 

@@ -72,8 +72,10 @@ class SingleTarget:
             return None
         if self.prev is None:
             if len(cands) > 1:
-                raise NotDetected(f"{len(cands)} {self.prompt!r} in view: it must name exactly one "
-                                  f"(pick a tracked id from ~/in_view instead)")
+                raise NotDetected(
+                    f"{len(cands)} {self.prompt!r} in view: it must name exactly one "
+                    f"(pick a tracked id from ~/in_view instead)"
+                )
             self.prev = cands[0][0]
             return cands[0]
         ious = [mask_iou(m, self.prev) for m, _ in cands]
@@ -159,8 +161,9 @@ class WristCamera:
         """One SAM3 request on the colour topic, not waited for: its future (poll .done(); drop a
         late one with cancel_request())."""
         return self._sam3.call_async(
-            self._Detect.Request(prompts=[prompt], image_topic=self.color_topic,
-                                 score_threshold=threshold)
+            self._Detect.Request(
+                prompts=[prompt], image_topic=self.color_topic, score_threshold=threshold
+            )
         )
 
     def cancel_request(self, fut):
@@ -180,8 +183,12 @@ class WristCamera:
         with self._lock:
             stamps = [stamp_ns(m) for m in (*self._colors, *self._depths)]
             n_color, n_depth = len(self._colors), len(self._depths)
-        return dict(colors=n_color, depths=n_depth, oldest_ns=min(stamps, default=0),
-                    newest_ns=max(stamps, default=0))
+        return dict(
+            colors=n_color,
+            depths=n_depth,
+            oldest_ns=min(stamps, default=0),
+            newest_ns=max(stamps, default=0),
+        )
 
     def pair(self, stamp):
         """(colour, depth) buffered within rim_detection.PAIR_MAX_NS of `stamp` (ns), or None."""
@@ -208,8 +215,9 @@ class WristCamera:
         pair = self.pair(stamp)
         if pair is None:
             return None
-        return SimpleNamespace(depth_m=self.depth_array(pair[1]), depth_msg=pair[1], K=self.K,
-                               pose=self.pose)
+        return SimpleNamespace(
+            depth_m=self.depth_array(pair[1]), depth_msg=pair[1], K=self.K, pose=self.pose
+        )
 
     def pose(self, msg):
         """T (4x4) from msg's frame to `frame` at msg's stamp. Raises tf2's lookup errors."""
@@ -217,12 +225,15 @@ class WristCamera:
         from rclpy.time import Time
 
         t = self._tf.lookup_transform(
-            self.frame, msg.header.frame_id, Time.from_msg(msg.header.stamp),
+            self.frame,
+            msg.header.frame_id,
+            Time.from_msg(msg.header.stamp),
             timeout=Duration(seconds=0.5),
         ).transform
         T = np.eye(4)
         T[:3, :3] = Rotation.from_quat(
-            [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w]).as_matrix()
+            [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w]
+        ).as_matrix()
         T[:3, 3] = [t.translation.x, t.translation.y, t.translation.z]
         return T
 
@@ -237,19 +248,27 @@ class WristCamera:
         """Why SAM3's frame (stamp, ns) has no buffered colour + depth pair: a reject reason."""
         b = self.buffered()
         if not b["colors"] or not b["depths"]:
-            return (f"no wrist frames received (colour {b['colors']}, depth {b['depths']}): check "
-                    f"wrist_topics")
+            return (
+                f"no wrist frames received (colour {b['colors']}, depth {b['depths']}): check "
+                f"wrist_topics"
+            )
         if not stamp:
             return "SAM3's detections carry no stamp"
         if stamp < b["oldest_ns"]:
-            return (f"SAM3's frame is older than the buffer (by "
-                    f"{(b['oldest_ns'] - stamp) / 1e9:.2f} s; it holds "
-                    f"{(b['newest_ns'] - b['oldest_ns']) / 1e9:.2f} s): raise wrist_buffer_frames")
+            return (
+                f"SAM3's frame is older than the buffer (by "
+                f"{(b['oldest_ns'] - stamp) / 1e9:.2f} s; it holds "
+                f"{(b['newest_ns'] - b['oldest_ns']) / 1e9:.2f} s): raise wrist_buffer_frames"
+            )
         if stamp > b["newest_ns"]:
-            return (f"SAM3's frame is {(stamp - b['newest_ns']) / 1e9:.2f} s newer than any "
-                    f"buffered: clocks differ, or the wrist topics lag")
-        return (f"no colour AND depth within {rd.PAIR_MAX_NS / 1e6:.0f} ms of SAM3's frame (depth "
-                f"and colour out of step?)")
+            return (
+                f"SAM3's frame is {(stamp - b['newest_ns']) / 1e9:.2f} s newer than any "
+                f"buffered: clocks differ, or the wrist topics lag"
+            )
+        return (
+            f"no colour AND depth within {rd.PAIR_MAX_NS / 1e6:.0f} ms of SAM3's frame (depth "
+            f"and colour out of step?)"
+        )
 
     def _call(self, prompt, threshold, deadline):
         fut = self.detect_async(prompt, threshold)
@@ -307,14 +326,27 @@ class WristCamera:
         container, score = best
         ys, xs, stats = rd.select_depth_pixels(depth_m, container)
         self._publish_overlay(
-            color, container, np.column_stack((xs, ys)).tolist(),
+            color,
+            container,
+            np.column_stack((xs, ys)).tolist(),
             f"Samples {len(xs)}/{NEAREST_POINTS}; rejected {stats['depth_outliers_px']}",
         )
         return dict(container=container, depth_m=depth_m, depth_msg=depth, score=score), None
 
 
-def detect_container(camera, prompt, threshold, frames, mask_iou_min, timeout_s, log, checkpoint,
-                     select=None, point=None, progress=None):
+def detect_container(
+    camera,
+    prompt,
+    threshold,
+    frames,
+    mask_iou_min,
+    timeout_s,
+    log,
+    checkpoint,
+    select=None,
+    point=None,
+    progress=None,
+):
     """rim_detection.detect_container (`frames` consecutive masks agreeing pairwise at
     mask_iou_min, each frame's point with TF at its own stamp, averaged), with `select` (which of
     SAM3's objects, WristCamera.shot) and `point(depth_m, mask, K, T)` -> (point, info) or (None,
@@ -327,8 +359,10 @@ def detect_container(camera, prompt, threshold, frames, mask_iou_min, timeout_s,
 
     def say(message):
         took = getattr(camera, "last_call_s", 0.0)
-        line = (f"detect {prompt!r} try {attempts} ({time.monotonic() - t_start:.1f}/"
-                f"{timeout_s:.0f} s, SAM3 {took:.2f} s): {message}")
+        line = (
+            f"detect {prompt!r} try {attempts} ({time.monotonic() - t_start:.1f}/"
+            f"{timeout_s:.0f} s, SAM3 {took:.2f} s): {message}"
+        )
         log(line)
         if progress is not None:
             progress(line)
@@ -373,16 +407,27 @@ def detect_container(camera, prompt, threshold, frames, mask_iou_min, timeout_s,
             continue
         mean = np.mean(points, axis=0)
         spread = float(np.max(np.linalg.norm(np.asarray(points) - mean, axis=1)))
-        info = dict(infos[-1], depths_m=[i["depths_m"] for i in infos],
-                    frame_points=np.round(points, 4).tolist(), frames_spread_m=spread)
-        iou_min = min((mask_iou(a["container"], b["container"])
-                       for i, a in enumerate(streak) for b in streak[i + 1:]), default=1.0)
-        log(f"container: {frames} frames agree (mask IoU >= {iou_min:.3f}) in {attempts} tries; "
+        info = dict(
+            infos[-1],
+            depths_m=[i["depths_m"] for i in infos],
+            frame_points=np.round(points, 4).tolist(),
+            frames_spread_m=spread,
+        )
+        iou_min = min(
+            (
+                mask_iou(a["container"], b["container"])
+                for i, a in enumerate(streak)
+                for b in streak[i + 1 :]
+            ),
+            default=1.0,
+        )
+        log(
+            f"container: {frames} frames agree (mask IoU >= {iou_min:.3f}) in {attempts} tries; "
             f"per frame {info['frame_points']} -> mean {np.round(mean, 3).tolist()} (frames "
-            f"within {spread * 100:.1f} cm of it)")
+            f"within {spread * 100:.1f} cm of it)"
+        )
         return dict(point=mean, info=info, iou_min=iou_min, attempts=attempts, rejected=rejected)
     raise NotDetected(
         f"the container not seen in {frames} agreeing frames within {timeout_s:.0f} s ({attempts} "
-        f"tries; rejected: " + ("; ".join(f"{k} x{n}" for k, n in rejected.items()) or "none")
-        + ")"
+        f"tries; rejected: " + ("; ".join(f"{k} x{n}" for k, n in rejected.items()) or "none") + ")"
     )

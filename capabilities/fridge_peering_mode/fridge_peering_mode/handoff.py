@@ -56,12 +56,13 @@ def hand_off(lifecycle, current, session, params_json, event, log, wait_s=HANDOF
         session.handoff_request = iid
     event.set()
     if session is None or not session.in_teleop:
-        log.warning("pick goal: peer is not teleoperating (homing or waiting for the fridge TF): "
-                    "cancelling it, the arm stops where it is")
+        log.warning(
+            "pick goal: peer is not teleoperating (homing or waiting for the fridge TF): "
+            "cancelling it, the arm stops where it is"
+        )
         run.cancelled.set()
     else:
-        log.info(f"pick goal ({iid or 'the only food or drink in view'}): ending peer's "
-                 f"teleop")
+        log.info(f"pick goal ({iid or 'the only food or drink in view'}): ending peer's " f"teleop")
     deadline = time.monotonic() + wait_s
     with lifecycle:
         while current() is run and time.monotonic() < deadline:

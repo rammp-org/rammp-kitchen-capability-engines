@@ -44,6 +44,7 @@ someone stands at the e-stop whenever allow_execute is on.
 import threading
 
 import rammp_arm
+
 from capability_engine import (
     Action,
     ArmError,
@@ -56,12 +57,11 @@ from capability_engine import (
 )
 from capability_engine.driver_state import Refused
 
-from . import food_pick
+from . import food_pick, ui_flow
 from . import geometry as geo
-from .handoff import hand_off
 from .food_pick import FoodPicker, PickRefused
+from .handoff import hand_off
 from .streaming import PeerSession, facing, follow_params
-from . import ui_flow
 
 ENGINE_ID = "fridge_peering_mode"  # = the package, its image and /<id>/... (make action CAP=)
 FOLLOW_MODES = ("off", "idle", "continuous")
@@ -269,14 +269,34 @@ PARAMS = {
 def _problems(cfg) -> list[str]:
     """Everything wrong with the parameters; the node refuses to start on any."""
     out = []
-    for name in ("rate_hz", "joy_timeout_s", "ee_state_timeout_s", "fridge_tf_wait_s",
-                 "static_tf_timeout_s", "max_lin", "max_ang", "max_lead_m", "expo",
-                 "follow_stale_s", "standoff_distance", "search_range_m", "scene_wait_s",
-                 "scene_standoff_m", "scene_window_frac", "unwind_max_rad"):
+    for name in (
+        "rate_hz",
+        "joy_timeout_s",
+        "ee_state_timeout_s",
+        "fridge_tf_wait_s",
+        "static_tf_timeout_s",
+        "max_lin",
+        "max_ang",
+        "max_lead_m",
+        "expo",
+        "follow_stale_s",
+        "standoff_distance",
+        "search_range_m",
+        "scene_wait_s",
+        "scene_standoff_m",
+        "scene_window_frac",
+        "unwind_max_rad",
+    ):
         if not cfg[name] > 0.0:
             out.append(f"{name} must be > 0, got {cfg[name]}")
-    for name in ("max_speed", "standoff_speed", "kp_lin", "kp_ang", "follow_settle_s",
-                 "unwind_extra_rad"):
+    for name in (
+        "max_speed",
+        "standoff_speed",
+        "kp_lin",
+        "kp_ang",
+        "follow_settle_s",
+        "unwind_extra_rad",
+    ):
         if cfg[name] < 0.0:
             out.append(f"{name} must be >= 0, got {cfg[name]}")
     if cfg["rate_hz"] > 0.0 and not cfg["stream_timeout_s"] > 1.0 / cfg["rate_hz"]:
@@ -443,8 +463,9 @@ class Capability(CapabilityEngine):
             raise EngineError("bad_params", "'max_teleop_s' must be > 0 or null", recoverable=True)
         label = params.get("label") or ""
         if not isinstance(label, str) or len(label) > 120 or "\n" in label:
-            raise EngineError("bad_params", "'label' must be a one-line string (<= 120 chars)",
-                              recoverable=True)
+            raise EngineError(
+                "bad_params", "'label' must be a one-line string (<= 120 chars)", recoverable=True
+            )
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = ""
         if params.get("execute") and not execute:
@@ -468,14 +489,22 @@ class Capability(CapabilityEngine):
                 self._handoff_target = None
                 self._want_tracking(ctx)
                 # Its joystick subscription, tf buffer and debug publishers are this action's.
-                session = PeerSession(self, ctx, self.cfg, execute=execute, speed=speed,
-                                      pick=bool(params.get("pick", True)),
-                                      handoff=self._handoff, label=label.strip(),
-                                      tracking=self._tracking)
+                session = PeerSession(
+                    self,
+                    ctx,
+                    self.cfg,
+                    execute=execute,
+                    speed=speed,
+                    pick=bool(params.get("pick", True)),
+                    handoff=self._handoff,
+                    label=label.strip(),
+                    tracking=self._tracking,
+                )
                 self._session = session
                 try:
-                    out = session.run(teleop=bool(params.get("teleop", True)),
-                                      max_teleop_s=max_teleop_s)
+                    out = session.run(
+                        teleop=bool(params.get("teleop", True)), max_teleop_s=max_teleop_s
+                    )
                 finally:
                     self._session = None
                     if session.handoff_target is not None:
@@ -510,8 +539,9 @@ class Capability(CapabilityEngine):
             return
         ctx.progress("tracking", 0.0, "starting SAM3 tracking")
         if not self._tracking.want(timeout_s=3.0):
-            self.get_logger().warning("SAM3 tracking did not start: one-shot detections for "
-                                      "now (it keeps retrying)")
+            self.get_logger().warning(
+                "SAM3 tracking did not start: one-shot detections for " "now (it keeps retrying)"
+            )
 
     def destroy_node(self):
         if getattr(self, "_tracking", None) is not None:
@@ -522,8 +552,14 @@ class Capability(CapabilityEngine):
         """A pick goal while peer runs: end peer first (handoff.py), then the engine's own
         acceptance (only when idle)."""
         if goal.action_id == "pick":
-            hand_off(self._lifecycle, lambda: self._current, self._session, goal.params_json,
-                     self._handoff, self.get_logger())
+            hand_off(
+                self._lifecycle,
+                lambda: self._current,
+                self._session,
+                goal.params_json,
+                self._handoff,
+                self.get_logger(),
+            )
         return super()._on_goal(goal)
 
     def _pick(self, ctx, execute: bool, speed: float, params: dict) -> dict:

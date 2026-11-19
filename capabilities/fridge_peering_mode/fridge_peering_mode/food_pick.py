@@ -220,8 +220,12 @@ def open_camera(engine, cfg):
     from . import wrist_detection as wd
 
     try:
-        return wd.WristCamera(engine, rammp_arm.FRAME, list(cfg["wrist_topics"]),
-                              keep_frames=int(cfg["wrist_buffer_frames"]))
+        return wd.WristCamera(
+            engine,
+            rammp_arm.FRAME,
+            list(cfg["wrist_topics"]),
+            keep_frames=int(cfg["wrist_buffer_frames"]),
+        )
     except wd.NotDetected as exc:
         raise PickRefused(str(exc)) from exc
 
@@ -262,8 +266,11 @@ class FoodTargets:
         self._next_ui, self._next_debug = 0.0, 0.0
         self._state = {"panel_json": self._panel(LOOK), "objects": []}  # what the UI is showing
         engine.create_action_subscription(String, "~/simulate_tap", self._on_sim_tap, 10)
-        latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
-                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self._mirror = engine.create_action_publisher(String, "~/ui_panel", latched)
         self._ui = bool(ctx.update_user_panel(panel_json=self._state["panel_json"], objects=[]))
         if not self._ui:
@@ -362,8 +369,11 @@ class FoodTargets:
         if not mask.any():
             return None, "its mask is empty"
         return dict(
-            instance_id=instance_id(b, k), mask=mask, score=float(o.score),
-            box=[float(v) for v in o.box[:4]], prompt=self.prompt,
+            instance_id=instance_id(b, k),
+            mask=mask,
+            score=float(o.score),
+            box=[float(v) for v in o.box[:4]],
+            prompt=self.prompt,
         ), ""
 
     # ------------------------------------------------------------------ tracking
@@ -383,8 +393,14 @@ class FoodTargets:
             _, o = self._view.find(iid)
             if o is None:
                 return None, "not tracked in view now"
-        return dict(instance_id=o.instance_id, mask=None, tracked=True, score=float(o.score),
-                    box=[float(v) for v in o.box[:4]], prompt=o.perception_class), ""
+        return dict(
+            instance_id=o.instance_id,
+            mask=None,
+            tracked=True,
+            score=float(o.score),
+            box=[float(v) for v in o.box[:4]],
+            prompt=o.perception_class,
+        ), ""
 
     def _from_tracking(self, now: float) -> None:
         """The newest tracked frame's food and drink on the UI (5 Hz, on change) and on
@@ -397,8 +413,15 @@ class FoodTargets:
             return
         self._last_msg = msg
         objs = self._view.visible(msg, self._only)
-        objects = [{"instance_id": o.instance_id, "perception_class": o.perception_class,
-                    "box": [float(v) for v in o.box[:4]], "source": "overlay"} for o in objs]
+        objects = [
+            {
+                "instance_id": o.instance_id,
+                "perception_class": o.perception_class,
+                "box": [float(v) for v in o.box[:4]],
+                "source": "overlay",
+            }
+            for o in objs
+        ]
         sig = tuple((o["instance_id"], *(round(v / 8) for v in o["box"])) for o in objects)
         if sig != self._shown_sig:
             self._shown_sig = sig
@@ -426,8 +449,9 @@ class FoodTargets:
                 self._camera.cancel_request(fut)
                 self._fut = None
                 self._next_request = now + self.period
-                self._log.warning(f"SAM3 gave no answer in {REQUEST_TIMEOUT_S:.0f} s",
-                                  throttle_duration_sec=5.0)
+                self._log.warning(
+                    f"SAM3 gave no answer in {REQUEST_TIMEOUT_S:.0f} s", throttle_duration_sec=5.0
+                )
         if self._shown is not None and not self._settled(self._shown):
             self.say(LOOK, objects=[])  # the camera moved: the boxes no longer match the view
         if self._fut is None and now >= self._next_request and self._settled(self._now_ns()):
@@ -442,9 +466,14 @@ class FoodTargets:
         if not self._settled(stamp):
             return  # the camera moved while it ran (or since)
         objs = [
-            o for o in dets.objects
-            if o.perception_class == self.prompt and o.state == STATE_VISIBLE and o.mask_id
-            and o.score >= self.threshold and o.box[2] > o.box[0] and o.box[3] > o.box[1]
+            o
+            for o in dets.objects
+            if o.perception_class == self.prompt
+            and o.state == STATE_VISIBLE
+            and o.mask_id
+            and o.score >= self.threshold
+            and o.box[2] > o.box[0]
+            and o.box[3] > o.box[1]
         ]
         self._batch += 1
         b = self._batch
@@ -462,8 +491,10 @@ class FoodTargets:
         ]
         self.say(TAP if objs else NONE_SEEN, objects=objects)
         self._shown = stamp
-        self._draw(stamp_ns(dets), [(f"{instance_id(b, k)} {o.score:.2f}", o.box)
-                                    for k, o in enumerate(objs)])
+        self._draw(
+            stamp_ns(dets),
+            [(f"{instance_id(b, k)} {o.score:.2f}", o.box) for k, o in enumerate(objs)],
+        )
 
     # ------------------------------------------------------------------ images
 
@@ -493,8 +524,16 @@ class FoodTargets:
             for text, box in items:
                 x0, y0, x1, y1 = (int(round(float(v))) for v in box[:4])
                 cv2.rectangle(img, (x0, y0), (x1, y1), (0, 200, 255), 2)
-                cv2.putText(img, text, (x0 + 2, max(12, y0 - 4)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1, cv2.LINE_AA)
+                cv2.putText(
+                    img,
+                    text,
+                    (x0 + 2, max(12, y0 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (255, 255, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
             out = self._bridge.cv2_to_imgmsg(img, encoding="rgb8")
             out.header = pair[0].header
             self._engine.sam3_overlay.publish(out)
@@ -505,8 +544,9 @@ class FoodTargets:
 class FoodPicker:
     """Detect, plan and run one pick from where the arm is. Make it inside execute()."""
 
-    def __init__(self, engine, ctx, cfg, *, execute: bool, speed: float = 1.0, camera=None,
-                 view=None):
+    def __init__(
+        self, engine, ctx, cfg, *, execute: bool, speed: float = 1.0, camera=None, view=None
+    ):
         """`view` (sam3_tracking.TrackedView, or None): the target comes from SAM3's tracking."""
         from microwave_place import place_motion, take_out
 
@@ -546,8 +586,10 @@ class FoodPicker:
             if c["pick_world"]:
                 world = to.set_approach_world(self._arm, c["pick_world"], log)
             else:
-                self._log.warning("pick_world is empty: the approach is planned in whatever world "
-                                  "cuRobo has loaded")
+                self._log.warning(
+                    "pick_world is empty: the approach is planned in whatever world "
+                    "cuRobo has loaded"
+                )
             q0 = np.asarray(self._arm.raw_joints(), dtype=float)
             model = self.model
             heading = level_heading(model.fk(q0)[:3, 2])
@@ -558,12 +600,16 @@ class FoodPicker:
             view = self.view
             if target is not None and target.get("mask") is None:  # a tracked instance
                 if view is None:
-                    raise PickRefused(f"{target['instance_id']!r} is a tracked id, and SAM3 "
-                                      f"tracking is not available now")
+                    raise PickRefused(
+                        f"{target['instance_id']!r} is a tracked id, and SAM3 "
+                        f"tracking is not available now"
+                    )
                 tracked = self._tracked_instance(target["instance_id"], still_ns)
                 if label and label != tracked["prompt"]:
-                    raise PickRefused(f"{target['instance_id']!r} is tracked as "
-                                      f"{tracked['prompt']!r}, not {label!r}")
+                    raise PickRefused(
+                        f"{target['instance_id']!r} is tracked as "
+                        f"{tracked['prompt']!r}, not {label!r}"
+                    )
             elif target is None and view is not None and self._is_tracked(label):
                 tracked, in_view = self._tracked_label(label, still_ns)
             if tracked is not None:  # lock the precise one-shot masks onto the tracked one
@@ -583,19 +629,41 @@ class FoodPicker:
                 band, pct = float(c["pick_face_band_m"]), float(c["pick_top_percentile"])
 
                 def point(depth_m, mask, K, T):
-                    return face_top_point(depth_m, mask, K, T, heading, rd.consistent_depth_pixels,
-                                          rd.NEAREST_POINTS, band, pct)
+                    return face_top_point(
+                        depth_m,
+                        mask,
+                        K,
+                        T,
+                        heading,
+                        rd.consistent_depth_pixels,
+                        rd.NEAREST_POINTS,
+                        band,
+                        pct,
+                    )
 
             rim = rd.detect_container(
-                self.camera, prompt, float(c["pick_sam3_threshold"]),
-                int(c["pick_frames"]), float(c["pick_mask_iou"]), float(c["pick_timeout_s"]), log,
-                ctx.checkpoint, select=select, point=point,
+                self.camera,
+                prompt,
+                float(c["pick_sam3_threshold"]),
+                int(c["pick_frames"]),
+                float(c["pick_mask_iou"]),
+                float(c["pick_timeout_s"]),
+                log,
+                ctx.checkpoint,
+                select=select,
+                point=point,
                 progress=lambda m: ctx.progress("pick", 10.0, m),
             )
             ctx.progress("pick", 40.0, "planning the pick")
             ctx.checkpoint()
-            cand = to.grasp_pose(model, q0, rim["point"], float(c["pick_reach_in"]),
-                                 float(c["pick_grasp_depth"]), float(c["pick_grasp_up"]))
+            cand = to.grasp_pose(
+                model,
+                q0,
+                rim["point"],
+                float(c["pick_reach_in"]),
+                float(c["pick_grasp_depth"]),
+                float(c["pick_grasp_up"]),
+            )
             legs = to.plan_take_out(self._arm, model, q0, cand, self.tcfg)
             corridor = self._check_corridor(model, q0, legs["approach"], cand["pre"])
             leave = self._plan_leave(model, legs["out"][-1], cand["heading"])
@@ -617,16 +685,19 @@ class FoodPicker:
             pre_grasp=np.round(cand["pre"], 3).tolist(),
             grasp=np.round(cand["target"], 3).tolist(),
             approach_corridor_cm=round(corridor * 100, 1),
-            approach_duration_s=round(float(legs["approach_t"][-1])
-                                      / self.tcfg["take_approach_speed_scale"], 2),
+            approach_duration_s=round(
+                float(legs["approach_t"][-1]) / self.tcfg["take_approach_speed_scale"], 2
+            ),
             fingers_line_from_up_deg=round(
-                float(np.degrees(np.arccos(np.clip(T_pre[2, 0], -1.0, 1.0)))), 1),
+                float(np.degrees(np.arccos(np.clip(T_pre[2, 0], -1.0, 1.0)))), 1
+            ),
             lift_cm=round(self.tcfg["take_lift"] * 100, 1),
             withdrawal_end=np.round(model.fk(legs["out"][-1])[:3, 3], 3).tolist(),
             leave_end=None if leave is None else np.round(model.fk(leave[-1])[:3, 3], 3).tolist(),
             leave_to_joints=bool(c["pick_leave_to_joints"]),
-            collision_checked=dict(approach=bool(world), line_in=False, lift=False,
-                                   withdrawal=False, leave=False),
+            collision_checked=dict(
+                approach=bool(world), line_in=False, lift=False, withdrawal=False, leave=False
+            ),
         )
         self._log.info(f"pick plan: {summary}")
         ctx.progress("pick", 50.0, "planned the pick")
@@ -637,8 +708,10 @@ class FoodPicker:
         none comes within TRACK_WAIT_S."""
         msg = self.view.wait_newer(still_ns, TRACK_WAIT_S, self._ctx.checkpoint)
         if msg is None:
-            raise PickRefused(f"no tracked SAM3 frame within {TRACK_WAIT_S:.0f} s (is the "
-                              f"tracking session up? /perception/sam3/status)")
+            raise PickRefused(
+                f"no tracked SAM3 frame within {TRACK_WAIT_S:.0f} s (is the "
+                f"tracking session up? /perception/sam3/status)"
+            )
         return msg
 
     def _tracked_instance(self, iid, still_ns) -> dict:
@@ -652,8 +725,11 @@ class FoodPicker:
     def _is_tracked(self, label) -> bool:
         """Whether `label` is for the tracked objects: none, a tracked class, or a tracked id."""
         prompts = self.view.prompts
-        return not label or label in prompts or any(
-            re.fullmatch(re.escape(p.replace(" ", "_")) + r"_\d+", label) for p in prompts)
+        return (
+            not label
+            or label in prompts
+            or any(re.fullmatch(re.escape(p.replace(" ", "_")) + r"_\d+", label) for p in prompts)
+        )
 
     def _tracked_label(self, label, still_ns):
         """The one tracked object `label` names in the newest still frame: (dict(instance_id,
@@ -675,18 +751,22 @@ class FoodPicker:
             if len(match) > 1:
                 raise PickRefused(
                     f"{len(match)} {what} in view ({', '.join(o.instance_id for o in match)}): "
-                    f"send the one to pick as label")
+                    f"send the one to pick as label"
+                )
         o = match[0]
-        return dict(instance_id=o.instance_id, prompt=o.perception_class,
-                    mask=self.view.mask(msg, o)), ids
+        return dict(
+            instance_id=o.instance_id, prompt=o.perception_class, mask=self.view.mask(msg, o)
+        ), ids
 
     def _wait_still(self) -> None:
         t0, since = time.monotonic(), None
         while time.monotonic() - t0 < STILL_WAIT_S:
             self._ctx.checkpoint()
             ee = self._arm.ee_state()
-            still = (float(np.linalg.norm(ee.linear)) < STILL_LIN
-                     and float(np.linalg.norm(ee.angular)) < STILL_ANG)
+            still = (
+                float(np.linalg.norm(ee.linear)) < STILL_LIN
+                and float(np.linalg.norm(ee.angular)) < STILL_ANG
+            )
             since = (since or time.monotonic()) if still else None
             if since is not None and time.monotonic() - since >= STILL_HOLD_S:
                 return
@@ -697,8 +777,9 @@ class FoodPicker:
         """The farthest the tool gets (m) from the straight line to pre-grasp along cuRobo's
         approach; PickRefused past pick_approach_corridor_m. cuRobo knows the robot's platform, not
         the fridge: a detour is a swing through shelves it cannot see."""
-        qs = self._pm.dense([q0, *[np.asarray(q, dtype=float) for q in approach]],
-                            self._pm.TRANSIT_STEP_DEG)
+        qs = self._pm.dense(
+            [q0, *[np.asarray(q, dtype=float) for q in approach]], self._pm.TRANSIT_STEP_DEG
+        )
         pts = [model.fk(q)[:3, 3] for q in qs]
         worst = float(np.max(segment_distance(pts, pts[0], pre)))
         limit = float(self.cfg["pick_approach_corridor_m"])
@@ -733,48 +814,80 @@ class FoodPicker:
         model, cand = self.model, plan["cand"]
         try:
             ctx.progress("pick", 55.0, "taking the container")
-            out = to.run_take_out(self._arm, model, plan["q0"], cand, plan["legs"], self.tcfg,
-                                  ctx, log)
+            out = to.run_take_out(
+                self._arm, model, plan["q0"], cand, plan["legs"], self.tcfg, ctx, log
+            )
             left_m = 0.0
             if float(c["pick_leave_back_m"]) > 0.0:
                 ctx.checkpoint()
                 ctx.progress("leave", 80.0, "backing out of the fridge")
                 q = np.asarray(self._arm.raw_joints(), dtype=float)
                 qs = self._plan_leave(model, q, cand["heading"])  # from where the arm really is
-                log(f"-> straight, level back {c['pick_leave_back_m'] * 100:.0f} cm out of the "
-                    f"fridge (position control, not collision-checked)")
-                to.move_timed(self._arm, model, qs, "the leave", self.tcfg["insert_speed"],
-                              "holding the container")
+                log(
+                    f"-> straight, level back {c['pick_leave_back_m'] * 100:.0f} cm out of the "
+                    f"fridge (position control, not collision-checked)"
+                )
+                to.move_timed(
+                    self._arm,
+                    model,
+                    qs,
+                    "the leave",
+                    self.tcfg["insert_speed"],
+                    "holding the container",
+                )
                 left_m = float(c["pick_leave_back_m"])
             if c["pick_leave_to_joints"]:
                 ctx.checkpoint()
                 ctx.progress("leave", 90.0, "to pick_leave_joints")
                 log("-> cuRobo to pick_leave_joints (the container's tilt is not held)")
                 ok = self._arm.go_to_joint_config(
-                    [float(v) for v in c["pick_leave_joints"]], "leave the fridge",
+                    [float(v) for v in c["pick_leave_joints"]],
+                    "leave the fridge",
                     speed_scale=self.tcfg["take_approach_speed_scale"],
                 )
                 if not ok:
-                    raise pm.Refused(f"STOPPED holding the container: to pick_leave_joints failed "
-                                     f"({self._arm.last_error})")
+                    raise pm.Refused(
+                        f"STOPPED holding the container: to pick_leave_joints failed "
+                        f"({self._arm.last_error})"
+                    )
         except pm.Refused as exc:
             raise EngineError("pick_failed", f"{exc} -- the arm holds where it is") from exc
         tool = model.fk(np.asarray(self._arm.raw_joints(), dtype=float))[:3, 3]
         log(f"pick done: holding the container, tool at {np.round(tool, 3).tolist()}")
         ctx.progress("leave", 100.0, "holding the container outside the fridge")
-        return jsonable({**out, "executed": True, "left_m": left_m, "tool": np.round(tool, 3),
-                         "plan": plan["summary"]})
+        return jsonable(
+            {
+                **out,
+                "executed": True,
+                "left_m": left_m,
+                "tool": np.round(tool, 3),
+                "plan": plan["summary"],
+            }
+        )
 
 
 def check_params(cfg) -> list[str]:
     """Everything wrong with the pick_* / ui_* parameters (node._problems)."""
     out = []
-    for name in ("pick_detect_period_s", "pick_timeout_s", "pick_reach_in", "pick_line_speed",
-                 "pick_impedance_speed", "pick_approach_corridor_m", "pick_impedance_zeta"):
+    for name in (
+        "pick_detect_period_s",
+        "pick_timeout_s",
+        "pick_reach_in",
+        "pick_line_speed",
+        "pick_impedance_speed",
+        "pick_approach_corridor_m",
+        "pick_impedance_zeta",
+    ):
         if not float(cfg[name]) > 0.0:
             out.append(f"{name} must be > 0, got {cfg[name]}")
-    for name in ("ui_overlay_hz", "pick_lift_m", "pick_leave_back_m", "pick_face_band_m",
-                 "pick_settle_s", "pick_impedance_in_m"):
+    for name in (
+        "ui_overlay_hz",
+        "pick_lift_m",
+        "pick_leave_back_m",
+        "pick_face_band_m",
+        "pick_settle_s",
+        "pick_impedance_in_m",
+    ):
         if float(cfg[name]) < 0.0:
             out.append(f"{name} must be >= 0, got {cfg[name]}")
     if not 0.0 < float(cfg["pick_speed_scale"]) <= 1.0:
