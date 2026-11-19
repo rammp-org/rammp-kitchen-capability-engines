@@ -387,3 +387,45 @@ def test_a_mount_on_a_link_that_is_turned_on_the_flange_is_placed_with_its_turn(
     )
     assert where.endswith(", on arm_camera_plate_link") and lens == pytest.approx(LENS_GEN15, abs=1e-8)
     assert np.allclose(optical, R_mount @ d405.BODY_TO_OPTICAL, atol=1e-8)
+
+
+def test_a_guarded_press_demo_does_not_leave_rest_on_a_mount_no_press_has_flown_near(tmp_path, monkeypatch, capfd):
+    """press_demo --guarded centres its press on the wrist camera's mount. On gen_1_5's calibration it
+    stopped once the arm stood over the box (after depth:turn and the look); it stops where it says its
+    hand, before the first motion. The default, compliant run only warns and goes on."""
+    import sys
+
+    from box_opening.constants import HOME
+    from box_opening.tasks import press_demo
+
+    class Client:
+        joint_names = ["joint_%d" % i for i in range(1, 8)]
+        _base_frame = None
+
+        def joints(self):
+            return list(HOME)
+
+    pkg = Path(__file__).resolve().parents[1]
+    argv = ["press_demo", "--container", str(pkg / "config" / "containers" / "ankou_pink.yaml")]
+    argv += ["--bench-world", str(pkg / "config" / "world_flatbot.yaml")]
+    monkeypatch.setenv("BOX_OPENING_STATE", str(tmp_path))
+    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, _robot_config(tmp_path, MOUNT_GEN15))
+    monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), Client()))
+    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: puck_urdf(tmp_path))
+    called = []
+    monkeypatch.setattr(press_demo, "home_first", lambda *a, **k: called.append("home_first") or True)
+    monkeypatch.setattr(press_demo.Runner, "run", lambda self, *a, **k: called.append("run") or [])
+    monkeypatch.setattr(
+        cli_common, "load_body_or_exit", lambda *a, **k: sys.exit("the body's load: the test ends here")
+    )
+    monkeypatch.setattr(sys, "argv", argv + ["--guarded"])
+    with pytest.raises(
+        SystemExit, match=r"\[press_demo\] not starting: a guarded run centres its press .*Nothing moved"
+    ):
+        press_demo.main()
+    assert called == [] and "WARNING: the wrist camera's mount is one no press has flown near" in capfd.readouterr().out
+    monkeypatch.setattr(sys, "argv", argv)  # the default run: said, warned, and on to the body's load
+    with pytest.raises(SystemExit, match="the body's load: the test ends here"):
+        press_demo.main()
+    out = capfd.readouterr().out
+    assert "[press_demo] hand: tool frame 120 mm" in out and "WARNING: the wrist camera's mount is one no press" in out
