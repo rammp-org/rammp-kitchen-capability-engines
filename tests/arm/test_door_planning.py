@@ -1,5 +1,5 @@
-"""The microwave's door planned through door_common, dry, in the sim: a shared change that harms
-it shows up here.
+"""The microwave's door planned through door_common, dry, on the arm model (numpy, the driver's
+URDF): a shared change that harms it shows up here.
 
 CI starts capabilities in mock mode only, so nothing else runs this planning code. The door is a
 real recorded door file (10-24).
@@ -9,11 +9,10 @@ import json
 
 import numpy as np
 import pytest
-from door_common import close_door, open_door
+from door_common import arm_model, close_door, open_door
 from door_common import common as dc
 from microwave import open_door as microwave_open
 
-from capability_engine import sim
 from capability_engine.arm_messages import Plan
 
 HANDLE_QUAT = np.array([-0.5, 0.5, 0.5, -0.5])
@@ -44,7 +43,7 @@ class _Hand:
     """A resting arm at joints `q`, for a dry run: nothing here can move."""
 
     def __init__(self, scene, rb, q):
-        pos, quat = sim.tool_pose(scene, rb, q)
+        pos, quat = rb.pose(q)
         self.state = {"position": list(q), "ee_pos": [*pos, *quat], "gripper_pos": 0.0}
 
     def get_state(self):
@@ -53,14 +52,14 @@ class _Hand:
 
 @pytest.fixture
 def door_sim(tmp_path):
-    """The sim on the driver's model, door_common configured for the microwave, every constant
+    """The arm model on the driver's URDF, door_common configured for the microwave, every constant
     restored afterwards."""
     saved = dict(vars(dc)), dict(vars(open_door))
-    sim.reset_for_tests()
-    scene, rb = sim.make_sim("/fixtures/urdf/dojo.urdf")
+    arm_model.load("/fixtures/urdf/dojo.urdf")
+    scene, rb = dc.make_sim()
     microwave_open.configure(tmp_path)
     yield scene, rb
-    sim.reset_for_tests()
+    arm_model.set_model_provider(None)
     vars(dc).update(saved[0])
     vars(open_door).update(saved[1])
 
@@ -86,21 +85,70 @@ def test_chair_boxes_are_the_planners_with_its_padding():
     assert half == pytest.approx([0.2318 / 2 + 0.02, 0.4827 / 2 + 0.02, 0.7749 / 2 + 0.02])
 
 
-def test_chair_refuses_the_arm_but_not_its_base_and_shoulder():
-    sim.reset_for_tests()
-    try:
-        scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
-        q = KINOVA_HOME
-        tool = sim.tool_pose(scene, rb, q)[0]
-        half = [0.05, 0.05, 0.05]
-        dc.enable_chair_collision([("at the tool", tuple(tool), half)])
-        assert "at the tool" in sim.keep_out_message(rb, q)
-        sim.reset_for_tests()
-        scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
-        dc.enable_chair_collision([("at the base", (0.0, 0.0, 0.05), half)])
-        assert sim.keep_out_message(rb, q) is None
-    finally:
-        sim.reset_for_tests()
+def test_the_model_ik_returns_to_the_pose_it_was_given(door_sim):
+    _, rb = door_sim
+    q = KINOVA_HOME + np.radians([10.0, 5.0, -10.0, 8.0, 5.0, -6.0, 4.0])
+    pos, quat = rb.pose(q)
+    sol, err = rb.ik(pos, quat, KINOVA_HOME)
+    assert err < 1e-3
+    assert np.allclose(rb.pose(sol)[0], pos, atol=1e-3)
+
+
+def test_clearance_sees_a_box_at_the_tool_and_inside_the_hand(door_sim):
+    _, rb = door_sim
+    tool = rb.pose(KINOVA_HOME)[0]
+    # smaller than the hand: none of its surface points is in it
+    inside = dc.add_sim_box(None, rb, tool, (0.005, 0.005, 0.005), 0.0)
+    gap, what = dc.clearance(rb, KINOVA_HOME, [(inside, "a small box")])
+    assert gap < 0 and "gripper" in what
+    far = dc.add_sim_box(None, rb, tool + [0.0, 0.0, 1.0], (0.05, 0.05, 0.05), 0.0)
+    assert dc.clearance(rb, KINOVA_HOME, [(far, "far")])[0] > 0.5
+
+
+def test_a_held_container_is_checked_too(door_sim):
+    _, rb = door_sim
+    pos, quat = rb.pose(KINOVA_HOME)
+    held = close_door._container_held(rb, 0.16)
+    centre = pos + arm_model.R.from_quat(quat).apply(held.centre_tool)
+    over = centre + [0.0, 0.0, 0.10]  # just over the container
+    box = dc.add_sim_box(None, rb, over, (0.03, 0.03, 0.01), 0.0)
+    assert dc.clearance(rb, KINOVA_HOME, [(box, "lid")], held=held)[1].startswith("container")
+
+
+class _Validator:
+    """self.arm.blend as a fake: every one-leg check answers `answer`; what it was given is kept."""
+
+    def __init__(self, answer):
+        self.answer, self.legs = answer, []
+
+    def blend(self, legs, radii):
+        self.legs.append(legs[0])
+        return self.answer
+
+
+def test_curobo_validates_the_path_as_move_joints_sends_it():
+    ok = _Validator(Plan(True, "ok"))
+    assert dc.curobo_validates(ok, np.zeros(7), PATH, "the swing") == ""
+    leg = ok.legs[0]
+    # from the start, through every knot
+    assert np.allclose(leg.q[0], 0.0) and np.allclose(leg.q[-1], PATH[-1])
+    hit = _Validator(Plan(False, "COLLISION with person/lap"))
+    assert "person/lap" in dc.curobo_validates(hit, np.zeros(7), PATH, "the swing")
+
+
+def test_curobo_validation_passes_without_a_planner():
+    assert dc.curobo_validates(object(), np.zeros(7), PATH, "the swing") == ""
+
+
+def test_the_exact_swing_is_validated_by_curobo(door_sim):
+    assert open_door.SWING_EXACT and open_door.APPROACH_EXACT  # the microwave's
+    plan, _ = open_door.plan_open(
+        *door_sim, _detection(MICROWAVE_DOOR), KINOVA_HOME, 50, 45, microwave_open.PushOpen(None)
+    )
+    hit = _Validator(Plan(False, "COLLISION with person/lap"))
+    why = open_door._exact_problem(hit, plan)
+    assert "person/lap" in why
+    assert len(hit.legs) == 1  # the first exact leg refused: nothing after it asked
 
 
 class _Planner:
@@ -127,7 +175,6 @@ def curobo_paths(monkeypatch):
 
 def test_only_the_microwave_runs_its_paths_through_curobo(door_sim):
     assert open_door.CUROBO_PATHS
-    assert open_door._sent_keep_out(np.zeros(7), PATH, None) is None
 
 
 def test_curobo_paths_are_off_by_default(monkeypatch):
@@ -172,22 +219,46 @@ def test_curobo_path_is_not_checked_without_a_planner(curobo_paths):
     assert open_door._check_curobo_path(object(), np.zeros(7), PATH, "the swing") is None
 
 
-def test_microwave_close_plans(door_sim, tmp_path):
+class _CuroboHand(_Hand):
+    """_Hand with a stand-in cuRobo (the test image has none): plan_to_pose is the arm model's local
+    IK from the start (a joint line there), plan_to_joints a joint line, set_world accepted."""
+
+    def __init__(self, scene, rb, q):
+        super().__init__(scene, rb, q)
+        self.rb, self.q = rb, np.asarray(q, float)
+
+    def raw_joints(self):
+        return self.q.copy()
+
+    def set_world(self, world):
+        return True, "ok"
+
+    @staticmethod
+    def _line(start, goal):
+        t, q = np.linspace(0, 1, 8), np.linspace(start, goal, 8)
+        return Plan(True, "ok", t=t, q=q, qd=np.zeros((8, 7)))
+
+    def plan_to_joints(self, goal, start):
+        return self._line(start, goal)
+
+    def plan_to_pose(self, pos, quat, start, hold=0):
+        q, err = self.rb.ik(pos, quat, start)
+        return self._line(start, q) if err < 0.005 else Plan(False, "IK_FAIL")
+
+
+def test_microwave_close_plans(door_sim, tmp_path, monkeypatch):
     scene, rb = door_sim
+    (tmp_path / "curobo").mkdir()  # where the planner reads the door world: it must exist
+    monkeypatch.setattr(dc, "DOOR_WORLD_DIR", tmp_path / "curobo" / "door_world")
     dc.DOOR_FILE.write_text(json.dumps({**MICROWAVE_DOOR, "door_open_deg": 90.0}))
-    hand = _Hand(scene, rb, dc.load_park())
-    args = close_door.close_args(False, route_over=True, keep_orientation=True)
+    hand = _CuroboHand(scene, rb, dc.load_park())
+    # the default close (curobo_ik): cuRobo's configuration at the swing start, the arc by local IK
+    args = close_door.close_args(False, keep_orientation=True)
     assert close_door.push_close(hand, args)
 
 
-def test_keep_out_is_off_until_enabled_and_refuses_when_enabled(door_sim):
-    scene, rb = door_sim
-    assert not sim.keep_out_enabled()
-    behind = sim.tool_pose(scene, rb, np.radians((-135.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)))
-    assert sim.solve_ik(scene, rb, *behind, KINOVA_HOME)[1] != sim.KEEP_OUT_ERR
-    dc.enable_keep_out(0.0)
-    assert sim.keep_out_enabled()
-    assert sim.solve_ik(scene, rb, *behind, KINOVA_HOME)[1] == sim.KEEP_OUT_ERR
+def test_the_close_lets_curobo_choose_the_configuration_by_default():
+    assert close_door.CLOSE_DEFAULTS["curobo_ik"]
 
 
 def test_configure_refuses_what_is_not_a_constant_and_what_is_missing(door_sim):

@@ -24,7 +24,6 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
-import pybullet as p
 import rammp_arm
 from capability_engine import sim
 from capability_engine.arm_messages import HOLD_FIXED, HOLD_NONE
@@ -33,17 +32,16 @@ from scipy.spatial.transform import Rotation as R
 
 from . import common as dc
 from .common import (
-    ARM,
     FINGERTIP_PAST_TOOL,
     MIN_CLEAR,
     DoorFrame,
     RunLog,
+    Sphere,
     add_door_model,
     clearance,
     continuous_ok,
     door_dims,
     drop,
-    ee_pose,
     execute_joint_plan,
     make_sim,
     plan_cartesian,
@@ -66,15 +64,11 @@ CLOSE_HAND_HALF = 0.04  # half-width of the hand along the door, for the handle 
 def _container_held(rb, diameter, clearance_m=0.0):
     """A sphere of `diameter` (m) standing in for the container held in the gripper, centred on the
     approach axis FINGERTIP_PAST_TOOL + radius ahead of the tool point (its near surface at the
-    fingertips, as the old hold_offset_x assumed). The collision sphere is grown by `clearance_m`
-    (a safety margin the container must keep from the door/handle/body), while the centre stays at
-    the real radius. Returns (body_id, (offset_pos, offset_quat)) for clearance(held=...); remove the
-    body with p.removeBody when done."""
-    c = rb.physics_client_id
+    fingertips, as the old hold_offset_x assumed). The sphere is grown by `clearance_m` (a safety
+    margin the container must keep from the door/handle/body), while the centre stays at the real
+    radius. Returns the arm_model.Sphere for clearance(held=...)."""
     r = diameter / 2.0
-    cs = p.createCollisionShape(p.GEOM_SPHERE, radius=r + clearance_m, physicsClientId=c)
-    bid = p.createMultiBody(0, cs, physicsClientId=c)
-    return bid, ([0.0, 0.0, FINGERTIP_PAST_TOOL + r], [0.0, 0.0, 0.0, 1.0])
+    return Sphere(r + clearance_m, (0.0, 0.0, FINGERTIP_PAST_TOOL + r))
 
 
 def _handle_box(df, deg, protrusion, length, width=0.05):
@@ -196,10 +190,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
         b_start = -np.sqrt(args.push_radius**2 - a_side**2)
         qs, err = solve_ik(scene, rb, pos(a_side, b_start), quat, q0)
         at = np.round(pos(a_side, b_start), 3)
-        if err >= sim.KEEP_OUT_ERR:  # solve_ik's code for "in the keep-out", not a miss: say what hits what
-            ko = sim.keep_out_message(rb, qs)
-            tried.append((a_side, f"swing start {at}: the arm would be in the keep-out ({ko})"))
-        elif err >= sim.MAX_IK_ERR:
+        if err >= sim.MAX_IK_ERR:
             tried.append((a_side, f"swing start {at}: out of reach (IK {err * 100:.1f} cm off)"))
         else:
             gap, link = clearance(rb, qs, bodies, held=held)
@@ -849,13 +840,10 @@ def _max_tilt_deg(scene, rb, qs, quat):
     roll and pitch only -- turning about vertical (side to side) is free, as the driver's HOLD_LEVEL.
     Measured as how far "up" (base +z) moves in the tool's own frame. The gates check positions only, so this is
     what confirms the hand really stays level."""
-    base = R.from_quat(scene.robot_base_pose.orientation)
     up0 = R.from_quat(quat).inv().apply([0.0, 0.0, 1.0])
     worst = 0.0
     for q in qs:
-        for j, jj in enumerate(ARM):
-            p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=rb.physics_client_id)
-        up = (base.inv() * R.from_quat(ee_pose(rb).orientation)).inv().apply([0.0, 0.0, 1.0])
+        up = R.from_quat(rb.pose(q)[1]).inv().apply([0.0, 0.0, 1.0])
         worst = max(worst, float(np.degrees(np.arccos(np.clip(up @ up0, -1.0, 1.0)))))
     return worst
 
@@ -916,11 +904,7 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
         if behind or max_tilt_deg is not None:
             say("curobo_ik: not with behind / max_tilt_deg (yet) -- refusing, arm untouched.")
             return False
-        try:
-            cplan = _plan_close_curobo(ai, scene, rb, df, st, args, deg0, stop_deg=stop_deg, held=held)
-        finally:
-            if held is not None:
-                p.removeBody(held[0], physicsClientId=rb.physics_client_id)
+        cplan = _plan_close_curobo(ai, scene, rb, df, st, args, deg0, stop_deg=stop_deg, held=held)
         if cplan is None:
             say("\nno plan passes every check -- refusing, arm untouched.")
             return False
@@ -928,11 +912,7 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
             say(f"\nDRY RUN (push-close from {deg0:.0f} deg, cuRobo's joints) -- nothing commanded.")
             return True
         return _run_close_curobo(ai, scene, rb, df, args, cplan, stop_deg, door_file)
-    try:
-        plan = _plan_close(scene, rb, df, st, args, deg0, behind=behind, stop_deg=stop_deg, held=held)
-    finally:
-        if held is not None:
-            p.removeBody(held[0], physicsClientId=rb.physics_client_id)
+    plan = _plan_close(scene, rb, df, st, args, deg0, behind=behind, stop_deg=stop_deg, held=held)
     if plan is None:
         say("\nno plan passes every gate -- refusing, arm untouched.")
         return False
@@ -1286,11 +1266,12 @@ CLOSE_DEFAULTS = {
     # plan there, checked against the model in the sim too (route_over / the routes then unused). Writes the world where
     # the planner reads it (common.DOOR_WORLD_DIR: on the host, under sheppy's robot config)
     "door_world": False,
-    # cuRobo decides the arm's joints (_plan_close_curobo): it is given the swing start, the swing's arc and the
-    # back-out as hand POSES (the door in its world for the way to the swing start) and plans them itself; the sim
-    # checks what it planned against the door model after. Off: the sim's IK picks the joints and its gates refuse
-    # (the J4 guard, 11-16 at a closer placement, on a configuration cuRobo might not have chosen)
-    "curobo_ik": False,
+    # cuRobo decides the arm's configuration (_plan_close_curobo, the default): it plans the way to the swing start
+    # (the door in its world) and the back-out; the arc is followed from its configuration by local IK on the arm model,
+    # gated, then previewed by cuRobo as joint knots; the push contact is searched. Off: the older close, where local
+    # IK from the start joints picks the configuration and its gates refuse (the J4 guard, 11-16 at a closer
+    # placement, on a configuration cuRobo might not have chosen)
+    "curobo_ik": True,
 }
 
 

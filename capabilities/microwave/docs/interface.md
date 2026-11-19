@@ -9,9 +9,12 @@
 Opens and closes the microwave door with the Kinova arm. On an `open` goal it finds the handle from the
 wrist camera (the scene camera's door → door-plane fit → the vertical bar sticking out of it, and the hinge
 edge), grasps the handle squared to the door, swings the door open (the largest swing, 75 down
-to 45°, whose whole arc passes the sim gates), lets go and pushes the door further open by
-replaying the user's push-open demo relative to the door. Every leg is planned and sim-gated
-before anything moves; a failed check stops the run with the arm holding where it is. Without
+to 45°, whose whole arc passes the arm-model gates), lets go and pushes the door further open by
+replaying the user's push-open demo relative to the door. Every leg is planned and checked before
+anything moves: IK, joint guards and door clearance on a numpy model of the arm built from the
+driver's URDF (no PyBullet), and cuRobo for the chair, the user and the floor (it plans the free
+moves and validates the joint paths run exactly as planned). A failed check stops the run with
+the arm holding where it is. Without
 it, no kitchen task can put anything in the microwave.
 
 **The arm moves only if the node runs with `allow_execute: true` and the goal sets
