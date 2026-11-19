@@ -448,7 +448,7 @@ still in the fingers, no code is recoverable.
 | `not_lined_up`        | yes         | The container was not where the arm opens it, or was never seen by a camera, in the time a line-up has (see "How long a line-up may take"), the UI went, a line-up in the middle of a run had no time left under the orchestrator's 120 s, or the run asked to be guided a fourth time in one goal (see "Lining up in the middle of a run"). Nothing was pressed; a wrist that looked is back at rest. The message says which it was (`no camera saw the container within ...` where none did), and carries the last instruction the user was given and, in the middle of a run, why the chair was guided; the next `open_box` then lines up first, unless no camera had seen the container during the line-up (it does all the same where the 120 s cut short, or left no time for, the guidance of a run whose own look had found no container), and not after a fourth request |
 | `timeout`             | yes         | The run was still going after 90 s and was stopped its own way (one Ctrl+C); its stop's worst (a second Ctrl+C, then a kill) still ends before the 120 s of an orchestrator that counts them from the goal cancel; not recoverable with the lid still in the fingers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `not_ready`           | yes         | Refused before anything moved: the planner or the arm driver not up, the driver's link to the arm faulted or e-stopped, another program driving the arm, no TF to the wrist camera's mount, no scene camera calibration. No camera's stream is part of it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `not_found`           | yes         | A find, or a line-up's watch, with no container for a reason no moving of the chair cures: the camera it looks with delivers nothing, it sees two things that could be the container, or what it sees cannot be tied to the selected container (see "A container no camera sees" for each, and for what the panel says). Nothing was pressed, the arm home (after a line-up: at rest, the wrist turned back). A container that is simply in no camera's view is not this: the chair is guided. A run by hand (`press_demo` without `--guide`) ends `not_found` for all of them, as it always has                                                                                                                                                                                                                                                                                  |
+| `not_found`           | yes         | A find, or a line-up's watch, with no container for a reason no moving of the chair cures: what it looks with delivers nothing, what it sees cannot be tied to the selected container, or (a find only) it sees two things that could be the container (see "A container no camera sees" for each, and for what the panel says). Nothing was pressed, the arm home (after a line-up: at rest, the wrist turned back). A container that is simply in no camera's view is not this: the chair is guided, and nothing but the line-up's own time ends that. A run by hand (`press_demo` without `--guide`) ends `not_found` for all of them, as it always has                                                                                                                                                                                                                        |
 | `not_home`            | yes         | The arm could not get to its start pose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `contact_early`       | yes         | The press met something more than 45 mm above the button's top as the cameras saw it: stopped there, nothing pressed, the arm went home                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `contact_late`        | yes         | The press met nothing down to 25 mm below that top, or at all: the box is not where it was seen; the arm went home                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -514,20 +514,20 @@ progress panel, Open `normal`.
 How the action ended is said on the panel for 5 s before the action ends
 (`END_SHOW_S`), with no button, in one short line:
 
-| The end                                                             | The panel says                                                                                       |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| the lid off and set down                                            | `Done. The lid is off, on the table`                                                                 |
-| ended clean with the lid not off                                    | `Finished. The lid was not taken off`                                                                |
-| the person's Cancel (or `n`)                                        | `Cancelled`                                                                                          |
-| an error                                                            | what its code always means, then `You can try again` (recoverable) or `Ask someone to check the arm` |
-| a line-up nobody answered at `Ready`                                | `No answer in time. Nothing was pressed. You can try again`                                          |
-| a line-up in which no camera ever saw the container                 | `The arm never saw the container. Nothing was pressed. You can try again`                            |
-| a line-up whose panel the UI stopped showing                        | `The screen lost the arm's panel. Nothing was pressed. You can try again`                            |
-| what is seen cannot be tied to the selected container (`not_found`) | `The arm cannot tell which container you chose. Choose it again. You can try again`                  |
-| two things that could be the container (`not_found`)                | `The arm cannot choose between two things that could be the container. You can try again`            |
-| the camera delivers nothing (`not_found`)                           | `The arm's camera is not working. Nothing was pressed. You can try again`                            |
-| a fourth request to be guided in one goal (`not_lined_up`)          | `Ready three times, and the arm could not go on. Nothing was pressed. You can try again`             |
-| any end with the lid still in the fingers                           | `Cancelled.` or `Stopped.` then `The lid is still in the fingers. Ask someone to check the arm`      |
+| The end                                                                                                                    | The panel says                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| the lid off and set down                                                                                                   | `Done. The lid is off, on the table`                                                                 |
+| ended clean with the lid not off                                                                                           | `Finished. The lid was not taken off`                                                                |
+| the person's Cancel (or `n`)                                                                                               | `Cancelled`                                                                                          |
+| an error                                                                                                                   | what its code always means, then `You can try again` (recoverable) or `Ask someone to check the arm` |
+| a line-up nobody answered at `Ready`                                                                                       | `No answer in time. Nothing was pressed. You can try again`                                          |
+| a line-up in which no camera ever saw the container                                                                        | `The arm never saw the container. Nothing was pressed. You can try again`                            |
+| a line-up whose panel the UI stopped showing                                                                               | `The screen lost the arm's panel. Nothing was pressed. You can try again`                            |
+| something in view that cannot be tied to the selected container (`not_found`)                                              | `The arm cannot tell which container you chose. Choose it again. You can try again`                  |
+| two things that could be the container, at the find (`not_found`)                                                          | `The arm cannot choose between two things that could be the container. You can try again`            |
+| what watches delivers nothing: a camera, its pose or calibration, the scene segmenter, a watch fallen silent (`not_found`) | `The arm's vision is not working. Nothing was pressed. You can try again`                            |
+| a fourth request to be guided in one goal (`not_lined_up`)                                                                 | `Ready three times, and the arm could not go on. Nothing was pressed. You can try again`             |
+| any end with the lid still in the fingers                                                                                  | `Cancelled.` or `Stopped.` then `The lid is still in the fingers. Ask someone to check the arm`      |
 
 An error's line (`END_SAYS` in `node.py`) says only what its code always means:
 `timeout` is `Taking too long. The run was stopped`, never that the arm stands
@@ -561,22 +561,22 @@ came with the orchestrator's token (`orchestrated`), `line_up_far_m`,
 starts: a `ros2 param set` lives only in the running node, and a restart puts
 the deployment's values back.
 
-| Panel message                                                     | Buttons           | When                                                                                                                                                                                                                                                                                                        |
-| ----------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Looking for the container`                                       | Cancel            | Nothing has looked yet (the wrist is turning to its view, the scene camera's first look has not ended), or what watches has had no container for less than 1.5 s: one frame without it is not said as a container the arm cannot see                                                                        |
-| `The arm cannot see the container. Move the chair in front of it` | Cancel            | What watches delivers frames and has had nothing in them that could be the container for 1.5 s, or one that was seen has not been for 1.5 s. From the first panel where the run's own look had found none before it asked (and no yes was given yet in this goal). No direction, no distance: none is known |
-| `The arm's camera is not working`                                 | Cancel, then none | The camera the line-up watches with has delivered nothing for 1.5 s (no frame, no pose for its frame, no scene segmenter). No word of moving: no move cures it. Standing 10 s, its last 3 s with no button, the action fails `not_found`                                                                    |
-| `The arm cannot tell which container you chose`                   | Cancel, then none | What watches sees something that could be the container, and nothing ties it to the selected one (the selected id is in none of the scene camera's detections; `wrist_alone` off). The same 10 s and end                                                                                                    |
-| `The arm sees two things that could be the container`             | Cancel, then none | What watches sees two lid-sized tops it cannot choose between (the second may be no container at all). The same 10 s and end. Each of these sentences stands 3 s before another of them replaces it                                                                                                         |
-| `Move closer, about 15 cm`                                        | Cancel            | Outside the boundary: closer, back, left or right, the larger miss                                                                                                                                                                                                                                          |
-| `Hold still, checking`                                            | Cancel            | Inside, not yet still for 1 s, or not yet judged                                                                                                                                                                                                                                                            |
-| `Ready. Open the container?`                                      | Open, Cancel      | Inside, still, and the run plans for it there                                                                                                                                                                                                                                                               |
-| `Press open again when you are in place`                          | none              | The line-up's time passed (see "How long a line-up may take": 35 s from the goal's start, or `ui_line_up_s`; for a goal sent by hand, `Out of time. Start open_box again when you are in place` after 10 minutes): shown 3 s, then the action fails `not_lined_up`                                          |
-| `Container not seen in time. Press open again in front of it`     | none              | ... and no camera saw the container in all that time (with no UI, `Out of time: the container was never seen. Start open_box again in front of it`): the same end                                                                                                                                           |
-| `The arm is not at its rest pose: home it, then press open again` | none              | The arm stands off rest (more than a wrist a line-up left turned): shown 3 s, then the action fails `not_home`                                                                                                                                                                                              |
-| `The wrist is turning back to rest`                               | Cancel            | The line-up is over and the wrist that looked turns back                                                                                                                                                                                                                                                    |
-| `Ending`                                                          | Cancel            | The line-up is over and no wrist turned: the run is ending                                                                                                                                                                                                                                                  |
-| `The screen is not showing this any more`                         | none              | The UI stopped showing the line-up's panel for 20 s (see "How long a line-up may take"): the line-up ends `not_lined_up` and the wrist turns back. Nobody may see it: it is what the panel is sent while that ends                                                                                          |
+| Panel message                                                     | Buttons           | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Looking for the container`                                       | Cancel            | Nothing has looked yet (the wrist is turning to its view, the scene camera's first look has not ended), or what watches has had no container for less than 1.5 s: one frame without it is not said as a container the arm cannot see                                                                                                                                                                                                                                                 |
+| `The arm cannot see the container. Move the chair in front of it` | Cancel            | What watches delivers frames and has had nothing in them that could be the container for 1.5 s, or one that was seen has not been for 1.5 s. From the first panel where the run's own look had found none before it asked (and no yes was given yet in this goal). No direction, no distance: none is known. It never ends a line-up: only the line-up's time does                                                                                                                   |
+| `The arm's vision is not working`                                 | Cancel, then none | What the line-up watches with has delivered nothing for 1.5 s: a camera with no frame, no pose or calibration for its frames, the scene segmenter down or not for this container; or the watch itself has said nothing for 5 s. No word of moving: no move cures it. Standing 10 s, its last 3 s with no button, the action fails `not_found`. Where the line-up watches with the wrist, the scene camera's sightings neither hide the wrist camera's fault nor start its 10 s again |
+| `The arm cannot tell which container you chose`                   | Cancel, then none | What watches HAS something that could be the container in view, and nothing ties it to the selected one: the wrist has a lid and the selected id is in none of the scene camera's detections (`wrist_alone` off), or the lid stands off the scene camera's line to the selected container. The same 10 s and end. Never of a selected id that is merely absent with nothing in view: that is the cannot-see sentence                                                                 |
+| `The arm sees two things that could be the container`             | Cancel            | What watches sees two lid-sized tops it cannot choose between (the second may be no container at all). Said while they stand, and it ends nothing: the line-up goes on reading sightings to its own time. Each of these sentences stands 3 s before another of them replaces it                                                                                                                                                                                                      |
+| `Move closer, about 15 cm`                                        | Cancel            | Outside the boundary: closer, back, left or right, the larger miss                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `Hold still, checking`                                            | Cancel            | Inside, not yet still for 1 s, or not yet judged                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `Ready. Open the container?`                                      | Open, Cancel      | Inside, still, and the run plans for it there                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `Press open again when you are in place`                          | none              | The line-up's time passed (see "How long a line-up may take": 35 s from the goal's start, or `ui_line_up_s`; for a goal sent by hand, `Out of time. Start open_box again when you are in place` after 10 minutes): shown 3 s, then the action fails `not_lined_up`                                                                                                                                                                                                                   |
+| `Container not seen in time. Press open again in front of it`     | none              | ... and no camera saw the container in all that time (with no UI, `Out of time: the container was never seen. Start open_box again in front of it`): the same end                                                                                                                                                                                                                                                                                                                    |
+| `The arm is not at its rest pose: home it, then press open again` | none              | The arm stands off rest (more than a wrist a line-up left turned): shown 3 s, then the action fails `not_home`                                                                                                                                                                                                                                                                                                                                                                       |
+| `The wrist is turning back to rest`                               | Cancel            | The line-up is over and the wrist that looked turns back                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `Ending`                                                          | Cancel            | The line-up is over and no wrist turned: the run is ending                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `The screen is not showing this any more`                         | none              | The UI stopped showing the line-up's panel for 20 s (see "How long a line-up may take"): the line-up ends `not_lined_up` and the wrist turns back. Nobody may see it: it is what the panel is sent while that ends                                                                                                                                                                                                                                                                   |
 
 `progress.phase` is `looking` (the first five messages), `move`, `hold`,
 `ready`, `go`, `timed_out` or `unable` (the last 3 s of a line-up that ends on
@@ -796,12 +796,12 @@ its `reach_refused` row). The other three end the run as they always have
 (`NO BOX`, the arm home, `not_found`, recoverable: the arm is at rest and
 nothing was pressed), each with its own sentence as the panel's end:
 
-| `what`       | The find                                                                                                                                                                                                                                              | What follows                                                                                        |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `unseen`     | The camera a guidance would watch with delivered frames, and nothing in them could be the container: nothing lid-sized, a lid a view cuts, a wrist find that stands where the selected container does not                                             | The chair is guided (below)                                                                         |
-| `not_chosen` | Something that could be the container is seen, or may be, and nothing ties it to the selected one: the selected `instance_id` is in none of the scene camera's detections (typed by hand, or a track perception has dropped) and `wrist_alone` is off | `NO BOX`; `The arm cannot tell which container you chose. Choose it again. You can try again`       |
-| `several`    | Two things that could be the container, and nothing says which is meant: two places the finder cannot choose between, a second lid-sized top in the selected container's direction, two tops under `wrist_alone`                                      | `NO BOX`; `The arm cannot choose between two things that could be the container. You can try again` |
-| `fault`      | The camera a guidance would watch with delivered nothing: no wrist frame at a view the wrist stood at, or a scene camera's look the segmenter gave no frame of (streams or TF missing, the segmenter down, silent or showing another camera)          | `NO BOX`; `The arm's camera is not working. Nothing was pressed. You can try again`                 |
+| `what`       | The find                                                                                                                                                                                                                                                                                                                                                                                                                                   | What follows                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `unseen`     | The camera a guidance would watch with delivered frames, and nothing in them could be the container: nothing lid-sized, a lid a view cuts; for the scene camera also a selected `instance_id` that is in none of its frames (the container may simply be out of its view)                                                                                                                                                                  | The chair is guided (below)                                                                         |
+| `not_chosen` | Something that could be the container IS in view, and nothing ties it to the selected one: the wrist has a lid (or two places, or a top out of reach) and the selected `instance_id` is in none of the scene camera's detections (typed by hand, or a track perception has dropped; `wrist_alone` off), or the wrist's lid stands off the scene camera's line to the selected container and the scene camera has no careful fix of its own | `NO BOX`; `The arm cannot tell which container you chose. Choose it again. You can try again`       |
+| `several`    | Two things that could be the container, and nothing says which is meant: two places the finder cannot choose between, a second lid-sized top in the selected container's direction, two tops under `wrist_alone`                                                                                                                                                                                                                           | `NO BOX`; `The arm cannot choose between two things that could be the container. You can try again` |
+| `fault`      | The camera a guidance would watch with delivered nothing: no wrist frame at a view the wrist stood at, or a scene camera's look the segmenter gave no frame of (streams or TF missing, the segmenter down, silent or showing another camera)                                                                                                                                                                                               | `NO BOX`; `The arm's vision is not working. Nothing was pressed. You can try again`                 |
 
 Which camera that is: the wrist's, where `wrist_first` is on and the wrist
 looked from a view. Its word then counts, however alive or dead the scene
@@ -841,12 +841,31 @@ id as the chair moves: the moment its watch has something that could be the
 container and still nothing ties it to the selection, the panel says
 `The arm cannot tell which container you chose`, and 10 s of that end the
 line-up with the person told to choose again (the container is by then in
-front of the arm, to be chosen). With `wrist_first`
-off the two cannot be told apart, and it is `not_chosen`. Until this, such a
+front of the arm, to be chosen). Until this, such a
 run was guided with `The arm cannot see the container. Move the chair in front of it`
 while its watch had a lid in every frame and took none of them: no place of the
 chair could bring its `Ready`. A run by hand does not turn the wrist for it and
 ends `NO BOX`, as it did.
+
+With `wrist_first` off only the scene camera looks, and all it knows is that
+the selected id is in none of its frames, as it is for a container that is
+simply out of its view. That is a container the arm cannot see (`unseen`):
+guided, with the cannot-see sentence, and never ended but by the line-up's own
+time. What the scene camera cannot say is whether ANOTHER container stands in
+its view under another id: the segmenter rung keeps only the selected
+container's boxes of each frame. Where that is so the person is told to move
+the chair for the whole wait, and the cure is to choose again; telling the two
+apart needs the rung to count its classes' boxes whatever is selected
+(`perception/segmenter_source.py`, not changed here).
+
+The same rule decides a wrist find that the selection's tie does not take
+because it stands off the scene camera's line to the selected container: the
+wrist has a lid in view and nothing ties it, so it is `not_chosen`, at the find
+and in a line-up. (With the scene camera's mount off, as on 2026-11-17, that
+lid is the selected container itself; said as `unseen` it was the cannot-see
+sentence for the whole wait with a lid in every frame.) While the scene
+camera's own sightings of the selected container go on arriving, the line-up
+goes on by them.
 
 The guidance itself:
 
@@ -884,34 +903,56 @@ The guidance itself:
   never come into view. The cost: its start-up comes after the first sighting,
   so the first direction comes later than in a line-up that began with the
   container seen (how much later is not measured).
-- Where the watch comes to a state no moving of the chair cures (its camera
-  stops delivering, a second lid-sized top stands beside the first, what it
-  sees cannot be tied to the selected container), that is said as what it is,
-  with **Cancel** and no word of moving: `The arm's camera is not working`,
-  `The arm sees two things that could be the container`,
-  `The arm cannot tell which container you chose`. It is said once it has
-  stood 1.5 s (until then `Looking for the container`, or the sentence that
-  stood before it; never, for these, that the arm cannot see the container),
-  and once it has stood 10 s without a break (`NO_CURE_S`; the last 3 with no
-  button) the line-up ends: the wrist turns back and the action fails
-  `not_found`, recoverable, with that state's own end sentence (the table
+- Where the watch comes to a state no moving of the chair cures, that is said
+  as what it is, with **Cancel** and no word of moving, once it has stood 1.5 s
+  (until then `Looking for the container`, or the sentence that stood before
+  it; never, for these, that the arm cannot see the container):
+  `The arm's vision is not working` (what watches delivers nothing),
+  `The arm cannot tell which container you chose` (something in view that
+  nothing ties to the selected container),
+  `The arm sees two things that could be the container`.
+- The first two END the line-up once they have stood 10 s without a break
+  (`NO_CURE_S`; the last 3 with no button): the wrist turns back and the action
+  fails `not_found`, recoverable, with that state's own end sentence (the table
   above). A sighting, or a word of another kind, starts the 10 s again: a
-  segmenter message late for one look, or a second lid passing through the view
-  while the chair turns, ends nothing. A line-up whose own time runs out first
-  with such a sentence on the panel (under the 120 s it may have fewer than
-  10 s) ends the same way, that sentence its last word: not
+  segmenter message late for one look ends nothing. A line-up whose own time
+  runs out first with such a sentence on the panel (under the 120 s it may have
+  fewer than 10 s) ends the same way, that sentence its last word: not
   `Container not seen in time. Press open again in front of it`, which is not
-  true of a camera that is not working. This holds for every line-up, before a
-  run, carried, or in the middle of one. A watch that falls silent keeps its
-  last sentence on the panel and ends nothing: the line-up then lasts its time.
-- Which words are a camera that delivers nothing: of the run's own watch on
-  the scene camera, the segmenter's count of frames over a second of looks
-  (none at all), whatever the newest look says; of the wrist's watch and of
-  `box_watch`, their words (`no new wrist frame`,
-  `no camera pose for the frame (TF)`, `scene camera streams missing`,
-  `the scene segmenter cannot be read`, `no frame newer than the look` and the
-  like: `FAULT_MARKS` in `guide.py`, held to the modules that say them by a
-  test).
+  true of vision that is not working. This holds for every line-up, before a
+  run, carried, or in the middle of one.
+- Two tops in a frame end no line-up, as at 21aa7cc: their sentence stands
+  while they do, the line-up goes on reading sightings (the container alone in
+  view again is guided by at once), and its own time bounds it. (At the find, a
+  run with two candidates ends `NO BOX`, as it always has.) Nor does a
+  container that is merely not in view: that is what the guidance is for, and
+  only the line-up's time ends it.
+- Two states are the watch's own, whatever else is heard: said at once, and no
+  sighting hides them or starts their 10 s again. Where the line-up watches
+  with the wrist, the WRIST camera's fault (its `wrist camera: no new wrist frame`
+  and the like): the scene camera may go on placing a lid in front of the arm,
+  but on this robot only the wrist's frames bring a `Ready` there, so such a
+  line-up said `Hold still, checking` and `Looking for the container` by turns
+  for the whole wait. Only the wrist's own word that its camera delivers (a
+  sighting of its own, a frame it judged and found nothing in) ends that
+  state. And a watch that has fallen SILENT: 5 s with no word after it has said
+  a camera's word (`SILENT_S`: its own constants allow 2.3 s between two words,
+  a wrist frame waited for 1 s, the scene camera's look of 0.3 s and a `none` a
+  second, besides the finder's time on a frame, which is not measured) is what
+  watches not working, from then until it speaks again. Before its first such
+  word a watch is not silent: its wrist is turning to the view.
+- Which words are what watches delivering nothing: the wrist's watch's and
+  `box_watch`'s own (`no new wrist frame`, `no camera pose for the frame (TF)`,
+  `scene camera streams missing`, `the scene segmenter cannot be read`,
+  `no frame newer than the look` and the like: `FAULT_MARKS` in `guide.py`,
+  held to the modules that say them by a test). The run's own watch on the
+  scene camera says the kind with each word, and knows one thing better: a look
+  of its third of a second that the segmenter gave no frame newer than, the
+  segmenter delivering by its own state (a message within 1 s, no more than 1 s
+  behind the camera), has met a segmenter that is behind, not one that is down.
+  That is `unseen`, whatever number of looks it lasts (the first frame comes
+  0.04 to 0.24 s into a look by the logs the review read; the segmenter's own
+  second is four times that).
 - Everything else is the guidance's own: the same time (see "How long a
   line-up may take"), **Cancel** or `n` at any moment ending with the run's
   Ctrl+C, nothing moving toward the container without a yes, and at the yes a
@@ -1408,8 +1449,8 @@ and a run the engine started turns it only to tell whether anything that could
 be the container stands in front of the arm, and takes nothing it finds. What
 follows each of these (the chair guided where nothing that could be the
 selected container is in view; `not_found` where a second top stands in its
-direction, or where what is seen cannot be tied to it) is in "A container no
-camera sees"; a run by hand stops with `not_found`. A guidance's watch says a
+direction, or where a lid that is in view cannot be tied to it) is in "A
+container no camera sees"; a run by hand stops with `not_found`. A guidance's watch says a
 wrist find only where the run would take it for the selected container. The
 instance the world state is written for is the selected one in every case.
 

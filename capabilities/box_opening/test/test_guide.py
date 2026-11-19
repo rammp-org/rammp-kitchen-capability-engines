@@ -284,8 +284,11 @@ def test_what_no_moving_of_the_chair_cures_is_never_said_as_a_container_the_arm_
     assert g.NO_CURE == {
         SEVERAL: "The arm sees two things that could be the container",
         NOT_CHOSEN: "The arm cannot tell which container you chose",
-        FAULT: "The arm's camera is not working",
+        FAULT: "The arm's vision is not working",
     }
+    # ("vision": what it is said of is as often no camera at all as a camera, the scene segmenter down, a
+    # calibration missing, a container with no segmenter classes, a watch fallen silent: review of 2026-11-19)
+    assert "camera" not in g.NO_CURE[FAULT]
     for kind, told in g.NO_CURE.items():
         assert g.says(kind) == told and "move" not in told.lower() and told != g.UNSEEN
         guide = g.Guide()
@@ -319,12 +322,19 @@ def test_the_time_running_out_on_what_no_chair_move_cures_ends_in_its_own_words(
     120 s). Its time then runs out with that state's sentence on the panel, and the last word is the same
     sentence: "Container not seen in time. Press open again in front of it" is not true of a camera that is
     not working. `uncured` tells the engine which state it was, for the end it reports."""
-    for kind, told in g.NO_CURE.items():
+    assert set(g.ENDS) == {FAULT, NOT_CHOSEN}  # (two tops in a frame end no line-up: below)
+    for kind in g.ENDS:
+        told = g.NO_CURE[kind]
         guide = g.Guide(budget_s=4.0)
         guide.update(0.0, None, None, none=kind)
         assert guide.update(2.0, None, None, none=kind).message == told and guide.uncured == ""
         last = guide.update(4.1, None, None, none=kind)
         assert (last.state, last.message, last.buttons) == (g.TIMED_OUT, told, ()) and guide.uncured == kind
+    # two tops in a frame as the time runs out: the time ran out, as at 21aa7cc, and that is what is said
+    guide = g.Guide(budget_s=4.0)
+    guide.update(0.0, None, None, none=SEVERAL)
+    assert guide.update(2.0, None, None, none=SEVERAL).message == g.NO_CURE[SEVERAL]
+    assert guide.update(4.1, None, None, none=SEVERAL).message == g.AGAIN_UNSEEN and guide.uncured == ""
     # a container that is simply not in view, and one that was seen and is out of reach: as they were
     guide = g.Guide(budget_s=4.0)
     guide.update(0.0, None, None, none=UNSEEN)
@@ -338,6 +348,29 @@ def test_the_time_running_out_on_what_no_chair_move_cures_ends_in_its_own_words(
     guide.update(3.0, None, None, none=UNSEEN)
     assert guide.update(3.9, None, None, none=FAULT).message == g.SEARCHING
     assert guide.update(4.1, None, None, none=FAULT).message == g.AGAIN_UNSEEN and guide.uncured == ""
+
+
+def test_a_state_that_is_what_watches_own_is_said_at_once_whatever_was_seen_a_moment_ago():
+    """Where the line-up watches with the wrist and the wrist's camera is at fault, the scene camera's
+    sightings go on arriving; and a watch fallen silent leaves its last sighting on record. Neither hides
+    the state: what watches says it stands (`stands`, counted by the source), and it is said now. As first
+    written a sighting on record put off every such sentence by LOST_S and then by LOST_S again, and each
+    new one started that anew: the fault was never said at all (review of 2026-11-19, the second)."""
+    guide = g.Guide()
+    assert guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), g.Reach(False, (-0.2, 0.0))).state == g.MOVE
+    # a sighting half a second old, and the fault stands: said, with Cancel alone
+    said = guide.update(0.5, None, None, none=FAULT, stands=True)
+    assert (said.state, said.message) == (g.LOOKING, g.NO_CURE[FAULT])
+    assert [b for b, _label in said.buttons] == [g.CANCEL] and guide.press(g.OPEN, 0.6) is False
+    # ... and it goes on being said while it stands, a newer sighting of the other camera or none
+    assert guide.update(1.0, None, None, none=FAULT, stands=True).message == g.NO_CURE[FAULT]
+    # without it the same tick is the guidance it was: the sighting is fresh
+    plain = g.Guide()
+    plain.update(0.0, g.Fix(0.0, (0.9, 0.0)), g.Reach(False, (-0.2, 0.0)))
+    assert plain.update(0.5, None, None, none=FAULT).state == g.MOVE
+    # `stands` is for what no chair move cures alone: a container that is not in view is never hurried
+    plain = g.Guide()
+    assert plain.update(0.0, None, None, none=UNSEEN, stands=True).message == g.SEARCHING
 
 
 SAID_BY = {
@@ -387,10 +420,16 @@ SAID_BY = {
         ),
     },
     NOT_CHOSEN: {
-        "perception/scene_source.py": ("scene segmenter: the selected container (fc_1) was in none of its 70 frames",),
+        # something that could be the container IS in view (the wrist has a lid), and nothing ties it to the
+        # selected one: its id is in none of the scene camera's detections, or the lid stands off the scene
+        # camera's line to it
         "tasks/press_demo.py": (
             "the selected container fc_1 is in none of the scene camera's detections: nothing says that what the "
             "wrist sees is the one selected, and the run would not take it",
+            "a container at [0.620, 0.040], and the selected container fc_1 is in none of the scene camera's "
+            "detections: nothing says it is the one selected",
+            "a container at [0.650, 0.000], 212 mm to the side of the scene camera's line of sight to it: not "
+            "taken for the selected container fc_1",
         ),
     },
     UNSEEN: {
@@ -409,10 +448,11 @@ SAID_BY = {
             "scene segmenter: saw no food container in 14 frames",
             "scene segmenter: none of its 12 boxes is this container: the top is not at lid height",
             "scene segmenter: one of its boxes passed in 9 frames, and a fix needs two that agree",
-        ),
-        "tasks/press_demo.py": (
-            "a container at [0.650, 0.000], 212 mm to the side of the scene camera's line of sight to it: not "
-            "taken for the selected container fc_1",
+            # a selected id that is merely ABSENT from the scene camera's frames: the container may simply be
+            # out of its view, and nothing says that anything else is in it. Read as "not chosen" (a626985),
+            # it ended a scene-only line-up after ten seconds with "Choose it again" for a container that
+            # was not in view yet (review of 2026-11-19, the second)
+            "scene segmenter: the selected container (fc_1) was in none of its 70 frames",
         ),
     },
 }
@@ -459,8 +499,8 @@ def test_what_a_cameras_word_on_having_no_container_is_of_is_read_from_the_words
         "two places pass": "perception/wrist_finder.py",
         "another lid-sized top": "tasks/press_demo.py",
         "two containers": "tasks/press_demo.py",
-        "was in none of its": "perception/scene_source.py",
         "in none of the scene camera's detections": "tasks/press_demo.py",
+        "not taken for the selected container": "tasks/press_demo.py",
     }
     assert set(said_in) == set(g.FAULT_MARKS + g.SEVERAL_MARKS + g.NOT_CHOSEN_MARKS)
     for mark, name in said_in.items():

@@ -3201,14 +3201,8 @@ NO_CURE_CASES = [
     (
         "camera",
         "fault",
-        "The arm's camera is not working",
-        "The arm's camera is not working. Nothing was pressed. You can try again",
-    ),  # fmt: skip
-    (
-        "two",
-        "several",
-        "The arm sees two things that could be the container",
-        "The arm cannot choose between two things that could be the container. You can try again",
+        "The arm's vision is not working",
+        "The arm's vision is not working. Nothing was pressed. You can try again",
     ),  # fmt: skip
 ]
 
@@ -3217,14 +3211,14 @@ NO_CURE_CASES = [
 def test_what_no_chair_move_cures_is_said_as_what_it_is_and_ends_the_guidance_in_seconds(
     engine, monkeypatch, capsys, mode, kind, says, ends
 ):
-    """Guidance is for what moving the chair can cure. Three states it cannot cure were guided with "The arm
+    """Guidance is for what moving the chair can cure. States it cannot cure were guided with "The arm
     cannot see the container. Move the chair in front of it" until the time was out, which on the UI is five
     minutes of a person driving a wheelchair with the arm's wrist turned: a lid in every frame of the watch
-    that nothing ties to the selected container, a camera that gives no frame, two lid-sized tops side by
-    side. Each is said as what it is, with Cancel and no word of moving; standing guide.NO_CURE_S (ten
-    seconds; five here) it ends the guidance as the find that meets it ends, not_found and recoverable, with
-    a sentence of its own for the panel's end; the run is told to stop on its stdin and turns its wrist
-    back."""
+    that nothing ties to the selected container, a camera that gives no frame. Each is said as what it is,
+    with Cancel and no word of moving; standing guide.NO_CURE_S (ten seconds; five here) it ends the
+    guidance as the find that meets it ends, not_found and recoverable, with a sentence of its own for the
+    panel's end; the run is told to stop on its stdin and turns its wrist back. (Two lid-sized tops in a
+    frame are said too, and end nothing: the test after this one.)"""
     given(monkeypatch, FULL_RUN)
     monkeypatch.setenv("GUIDE", "1")
     monkeypatch.setenv("GUIDE_WHAT", "unseen")  # the run's own look saw nothing; its watch then does
@@ -3248,7 +3242,7 @@ def test_what_no_chair_move_cures_is_said_as_what_it_is_and_ends_the_guidance_in
     assert node.end_says(error=e.value) == (ends, True) and len(ends) <= 100
     assert node.NO_CURE_WHY[kind] in str(e.value) and "nothing was pressed" in str(e.value)
     # ... and the watch's own last word on it, for whoever reads the result
-    word = {"untied": "the run would not take it", "camera": "no new wrist frame", "two": "0.14]: refusing"}[mode]
+    word = {"untied": "the run would not take it", "camera": "no new wrist frame"}[mode]
     assert " -- " in str(e.value) and str(e.value).endswith(word)
     assert told == [{"stop": True}] and sent == [] and runs[0].proc.returncode == 5 and engine._run is None
     assert engine._line_up_first is None and ctx.world == [] and ctx.objects == {}
@@ -3262,6 +3256,35 @@ def test_what_no_chair_move_cures_is_said_as_what_it_is_and_ends_the_guidance_in
     view = capsys.readouterr().out
     assert "             say   " + says in view and "LINE UP   FAIL  " + node.NO_CURE_WHY[kind] in view
     assert "        box: not pressed    lid: on the box    arm: at rest, the wrist turned back" in view
+
+
+def test_two_things_that_could_be_the_container_are_said_and_end_no_guidance_before_its_time(engine, monkeypatch):
+    """Two lid-sized tops in the watch's frames: said as what the arm sees, and the guidance goes on to its
+    own time, as it did at 21aa7cc (the integrator, 2026-11-19: as a626985 had it they ended every line-up
+    after seven seconds). Here guide.NO_CURE_S is a second: anything that ended on it would have, long
+    before the line-up's five."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_WHAT", "unseen")
+    monkeypatch.setenv("GUIDE_BOX", "two")
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "LINE_UP_S", 5.0)
+    monkeypatch.setattr(node, "GUIDE_MIN_S", 0.5)
+    monkeypatch.setattr(node.guide, "NO_CURE_S", 1.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+    _made, told, _runs = _guided(engine, monkeypatch, proven=False)
+    ctx = FakeCtx()
+    seen = _panels_as_sent(ctx)
+    t0 = time.monotonic()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert time.monotonic() - t0 > 4.0  # its whole time
+    assert (e.value.error_code, e.value.recoverable) == ("not_lined_up", True)  # out of time, as ever
+    assert str(e.value).startswith("no camera saw the container within") and told == [{"stop": True}]
+    said = [message for _t, message, _buttons in seen]
+    two = said.index("The arm sees two things that could be the container")
+    assert seen[two][2] == ["cancel"] and not [m for m in said[two:] if "cannot see" in m]
+    assert said[two + 1] == "Container not seen in time. Press open again in front of it"
 
 
 def test_a_line_up_before_a_run_whose_camera_gives_no_frame_never_says_to_move_the_chair(engine, monkeypatch):
@@ -3279,9 +3302,9 @@ def test_a_line_up_before_a_run_whose_camera_gives_no_frame_never_says_to_move_t
         engine.execute("open_box", {}, ctx)
     assert (e.value.error_code, e.value.recoverable, e.value.says) == ("not_found", True, node.END_NO_CURE["fault"])
     said = [m for _p, _pct, m, _pausable in ctx.said]
-    assert said[:2] == ["Looking for the container", "The arm's camera is not working"]
+    assert said[:2] == ["Looking for the container", "The arm's vision is not working"]
     assert not [m for m in said if "cannot see" in m or _tells_to_move(m)]
-    assert {p["message"] for p in ctx.panels} >= {"Looking for the container", "The arm's camera is not working"}
+    assert {p["message"] for p in ctx.panels} >= {"Looking for the container", "The arm's vision is not working"}
     assert not [p for p in ctx.panels if "cannot see" in p["message"]]
 
 
@@ -3289,7 +3312,7 @@ def test_a_line_up_whose_time_runs_out_on_a_camera_that_gives_no_frame_ends_as_t
     engine, monkeypatch
 ):
     """Under the orchestrator's 120 s a line-up may have fewer seconds than guide.NO_CURE_S. Its time then
-    runs out with "The arm's camera is not working" on the panel, and its end is that state's: the same
+    runs out with "The arm's vision is not working" on the panel, and its end is that state's: the same
     sentence as its last, not_found with the camera's own end sentence. Not "Container not seen in time.
     Press open again in front of it" and "The arm never saw the container": no place of the chair is what
     was missing."""
@@ -3306,7 +3329,7 @@ def test_a_line_up_whose_time_runs_out_on_a_camera_that_gives_no_frame_ends_as_t
     assert (e.value.error_code, e.value.recoverable, e.value.says) == ("not_found", True, node.END_NO_CURE["fault"])
     assert "as the line-up's" in str(e.value) and "ran out" in str(e.value) and engine._line_up_first is None
     said = [m for _p, _pct, m, _pausable in ctx.said]
-    assert said[:2] == ["Looking for the container", "The arm's camera is not working"]
+    assert said[:2] == ["Looking for the container", "The arm's vision is not working"]
     assert not [m for m in said if "not seen" in m.lower() or "press open again" in m.lower() or "Out of time" in m]
     assert not [m for m in said if "cannot see" in m or _tells_to_move(m)]
 
@@ -3332,7 +3355,7 @@ def test_a_find_that_ends_on_what_no_chair_move_cures_ends_as_it_always_did_with
         == {
             "not_chosen": "The arm cannot tell which container you chose. Choose it again. You can try again",
             "several": "The arm cannot choose between two things that could be the container. You can try again",
-            "fault": "The arm's camera is not working. Nothing was pressed. You can try again",
+            "fault": "The arm's vision is not working. Nothing was pressed. You can try again",
             None: "The arm could not find the container. Nothing was pressed. You can try again",
         }[what]
     )

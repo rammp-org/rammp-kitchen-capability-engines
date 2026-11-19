@@ -273,12 +273,13 @@ class Ear:
 
 
 class Scene:
-    """SceneLocator's part: a look tells one sighting where it has one. `frames`: how many of the scene
-    camera's frames the segmenter gave each look (its record), None where its record does not say."""
+    """SceneLocator's part: a look tells one sighting where it has one. Its record of each look: `frames`,
+    how many of the scene camera's frames the segmenter gave it (None: the record says nothing of the
+    segmenter), and `state`, the segmenter's own at the look's end (SegmenterRung.state)."""
 
-    def __init__(self, tops=(), frames=1, why="scene segmenter: saw none"):
+    def __init__(self, tops=(), frames=1, why="scene segmenter: saw none", state="live"):
         self.tops, self.on_sighting, self.last_why, self.looks = list(tops), None, why, 0
-        self.frames = frames
+        self.frames, self.state = frames, state
 
     def locate(self, timeout_s):
         self.looks += 1
@@ -288,7 +289,9 @@ class Scene:
         return None
 
     def look_record(self):
-        return {"timing": {}} if self.frames is None else {"timing": {}, "segmenter": {"frames": self.frames}}
+        if self.frames is None:
+            return {"timing": {}}
+        return {"timing": {}, "segmenter": {"frames": self.frames, "state": self.state}}
 
 
 @pytest.fixture
@@ -598,8 +601,10 @@ def test_with_a_selection_a_wrist_fix_the_run_would_not_take_is_not_said_either(
     _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=scene, instance_id=SELECTED)
     assert not [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
     elsewhere = [ln for ln in lines if "not taken for the selected container %s" % SELECTED in ln.get("none", "")]
-    # (the selected one stands where the wrist does not see it: the chair cures that, and it is guided for)
-    assert elsewhere and {ln["kind"] for ln in elsewhere} == {"unseen"}
+    # (the wrist HAS a lid in view, and it cannot be tied to the selected one: that is not a container the arm
+    # cannot see. As a626985 had it this was "unseen": with the scene camera's mount off, the cannot-see
+    # sentence for the whole wait with a lid in every frame)
+    assert elsewhere and {ln["kind"] for ln in elsewhere} == {"not_chosen"}
     # --wrist-alone, the selection in none of the scene camera's frames: a second lid-sized top in the frames
     lined.at = (0.65, 0.0, 0.315)
     tops = [SimpleNamespace(xy=xy, button="unchecked") for xy in ((0.65, 0.0), (1.08, -0.23))]
@@ -621,32 +626,42 @@ def test_with_a_selection_a_wrist_fix_the_run_would_not_take_is_not_said_either(
 def test_the_scene_cameras_watch_says_what_its_none_is_of_a_camera_that_delivers_nothing_among_them(lined):
     """The review of 2026-11-19: a scene camera whose streams are missing, or whose segmenter is silent, read
     on the panel as "The arm cannot see the container. Move the chair in front of it". The run's own watch
-    knows more than its words: how many of the scene camera's frames the segmenter gave its looks. None in
-    a second of looks is a camera that delivers nothing, whatever the newest look says. One or more, and
-    "no frame newer than the look" of ONE look of a third of a second is a message that came late, not a
-    camera that is not working. And a selected id in none of its frames is, to the scene camera alone, a
-    container it cannot tell from one it never knew."""
+    says what each "none" is of: its words' own kind (guide.kind_of), with two things it knows better.
+
+    A look the segmenter gave no frame NEWER than its start, the segmenter delivering by its own state
+    (press_demo.SEG_DELIVERS): that segmenter is behind, not down. The watch's looks are a third of a second
+    and its first frame comes 0.04 to 0.24 s into one by the logs the second review read, so some looks
+    miss, and with a segmenter 0.3 s behind every look does: as a626985 had it, a second of such looks was
+    "a camera that is not working", and ten ended the line-up. And a selected id that is in none of its
+    frames says only that the id is absent: the container may simply be out of view, which is "unseen"."""
+    late = "scene segmenter: no frame newer than the look in 0.3 s"
+    silent = "scene segmenter: SILENT: no /perception/object_detections in 1.0 s"
+    stale = "scene segmenter: its newest frame is 4.2 s older than the scene camera's"
+    two = "scene segmenter: two places pass as this container, [0.8, -0.2] and [1.1, 0.3]"
+    gone = "scene segmenter: the selected container (fc_1) was in none of its 2 frames"
     for scene, kind in (
-        (Scene(frames=0, why="scene camera streams missing: color, depth"), "fault"),
-        (Scene(frames=0, why="scene segmenter: SILENT: no /perception/object_detections in 1.0 s"), "fault"),
-        (Scene(frames=0, why="scene segmenter: saw none"), "fault"),  # (whatever it says: no frame was judged)
-        (Scene(frames=2, why="scene segmenter: no frame newer than the look in 0.3 s"), "unseen"),
+        (Scene(frames=0, why="scene camera streams missing: color, depth", state=None), "fault"),
+        (Scene(frames=0, why=silent, state="silent"), "fault"),
+        (Scene(frames=0, why=stale, state="stale"), "fault"),
+        (Scene(frames=0, why=late, state="live"), "unseen"),  # behind, for look after look: no fault
+        (Scene(frames=0, why=late, state="waiting"), "unseen"),  # (its first second)
         (Scene(frames=2, why="scene segmenter: saw no food container in 2 frames"), "unseen"),
-        (
-            Scene(frames=2, why="scene segmenter: two places pass as this container, [0.8, -0.2] and [1.1, 0.3]"),
-            "several",
-        ),
-        (
-            Scene(frames=2, why="scene segmenter: the selected container (fc_1) was in none of its 2 frames"),
-            "not_chosen",
-        ),
-        # a record that does not say how many: the words alone
-        (Scene(frames=None, why="scene segmenter: no frame newer than the look in 0.3 s"), "fault"),
+        (Scene(frames=2, why=two), "several"),
+        (Scene(frames=2, why=gone), "unseen"),
+        # a record that says nothing of the segmenter: the words alone
+        (Scene(frames=None, why=late), "fault"),
         (Scene(frames=None, why="scene segmenter: saw none"), "unseen"),
     ):
         _got, lines, _runner = _line_up(lined, Ear(3, go=False), wrist_first=False, locator=scene)
         nones = [ln for ln in lines if "none" in ln]
         assert nones and all(ln == {"none": scene.last_why, "kind": kind} for ln in nones), scene.last_why
+    # the segmenter's own words for one that delivers are none of its words for one that is down
+    from box_opening import guide
+    from box_opening.perception import scene_source
+
+    assert press_demo.SEG_DELIVERS == ("live", "waiting")
+    assert not set(press_demo.SEG_DELIVERS) & set(scene_source.SEG_DOWN)
+    assert press_demo.SEG_LATE in late and press_demo.SEG_LATE in guide.FAULT_MARKS
 
 
 # -- in the middle of a run: no press plans from where the chair stands (--guide) -----------------------

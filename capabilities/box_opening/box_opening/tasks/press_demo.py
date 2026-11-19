@@ -1386,6 +1386,15 @@ AT_REST_RAD = 0.01
 # log), and the engine answers on stdin with one JSON line.
 LINE_UP_MARK = "@@ "
 LINE_UP_LOOK_S = 0.3  # the scene camera's own look, each time round (its sightings said as they are made)
+# SegmenterRung.state's words for a scene segmenter that delivers (perception/segmenter_source: a message
+# within its SEG_SILENT_S, 1 s, and no more than SEG_FRESH_S, 1 s, behind the camera's newest frame). A look
+# of LINE_UP_LOOK_S that ends "no frame newer than the look" with the segmenter in one of these has met a
+# segmenter that is BEHIND, not one that is down: its first frame comes 0.04 to 0.24 s into a look by the
+# logs the review of 2026-11-19 read, so a third of a second misses some, and one 0.3 s behind misses every
+# one. That is no fault of what watches (line_up_watch's scene_kind). The segmenter's own second is four
+# times the longest of those delays
+SEG_DELIVERS = ("live", "waiting")
+SEG_LATE = "no frame newer than the look"
 # what the watch says of a find where NOTHING ties any find to the selected container (the selected id is in
 # none of the scene camera's detections, and --wrist-alone is off): it is not said, and it is of the kind no
 # moving of the chair cures (line_up_watch's judge)
@@ -1511,27 +1520,22 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
         fix = None if locator is None else locator.locate(LINE_UP_LOOK_S)
         return fix, (str(locator.last_why) if locator is not None and fix is None and locator.last_why else None)
 
-    def scene_frames():
-        """How many of the scene camera's frames the segmenter gave the look that just ended (its record's
-        own count), or None where the record does not say."""
-        try:
-            return int((locator.look_record() or {})["segmenter"]["frames"])
-        except Exception:  # noqa: BLE001 - a record that cannot be read says nothing: the look's words do
-            return None
-
-    def scene_kind(why, frames):
-        """What the scene camera's word on having no container is of (guide.K_*), by `frames`, how many of
-        its frames the segmenter gave the looks since this was last said (a second of them; None: not
-        known, and the word alone says). None at all, and the camera delivers nothing, whatever the newest
-        look says (guide.K_FAULT). One or more, and it delivers: "no frame newer than the look" of ONE look
-        of LINE_UP_LOOK_S, a third of a second, is a segmenter message that came a moment late, not a
-        camera that is not working."""
+    def scene_kind(why):
+        """What the scene camera's word on having no container is of (guide.K_*): its words' own
+        (guide.kind_of: streams or TF missing, the segmenter down by its own state, a selected id that is
+        merely absent from its frames, which is a container not in view), but for a look that the segmenter,
+        delivering by its own state (SEG_DELIVERS, the look's record), gave no frame NEWER than its start:
+        a segmenter that is behind, of which nothing is known but that no container was seen. As first
+        written a second of such looks read as a camera that is not working, and ten of them ended the
+        line-up (review of 2026-11-19, the second)."""
         kind = guide.kind_of(why)
-        if frames is None:
+        if kind != guide.K_FAULT or SEG_LATE not in why:
             return kind
-        if not frames:
-            return guide.K_FAULT
-        return guide.K_UNSEEN if kind == guide.K_FAULT else kind
+        try:
+            state = (locator.look_record() or {})["segmenter"]["state"]
+        except Exception:  # noqa: BLE001 - a record that cannot be read says nothing: the look's words do
+            return kind
+        return guide.K_UNSEEN if state in SEG_DELIVERS else kind
 
     if locator is not None:
 
@@ -1549,14 +1553,17 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             """Why the run after the go would not take this find for the selected container, or None: nothing
             ties any find to it (selection_look: the id is in none of the scene camera's detections), or
             something does and what stands here is not it (tie_refusal, alone_refusal: wrist_first's own
-            tests). What that is of goes with it (`refused`, for say): a find nothing can tie to the
-            selection is one no moving of the chair makes the selected one (guide.K_NOT_CHOSEN), and so are
-            two that could be it (K_SEVERAL); one that stands where the selected one does not is the
-            selected one not in front of the arm (K_UNSEEN), which the chair cures."""
+            tests). What that is of goes with it (`refused`, for say). The wrist HAS a lid in view here, so
+            none of them is a container the arm cannot see: one that nothing ties to the selection, or that
+            stands off the scene camera's line to the selected one, is something in view that cannot be
+            tied (guide.K_NOT_CHOSEN); a second top beside it is two that could be it (K_SEVERAL). As
+            first written a find off the line was K_UNSEEN: with the scene camera's mount off, as on
+            2026-11-17, "The arm cannot see the container" for the whole wait with a lid in every frame
+            (review of 2026-11-19, the second)."""
             tie, alone = selection_look(locator, None, ctx.model, selected, getattr(args, "wrist_alone", False))
             if tie is not None:
                 why = tie_refusal(tie, find, fix.top_xyz)[0]
-                kind = guide.K_SEVERAL if why is not None and guide.kind_of(why) == guide.K_SEVERAL else guide.K_UNSEEN
+                kind = guide.K_NOT_CHOSEN if why is None else guide.kind_of(why)  # (its words: tie_refusal)
             elif alone:
                 why, kind = alone_refusal(alone, find, fix.top_xyz, ctx.model), guide.K_SEVERAL
             else:
@@ -1612,7 +1619,7 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 say({"none": "wrist camera: %s" % str(why)[:260], "kind": guide.K_UNSEEN})
         elif not_at_rest:
             log.info("[press_demo] LINE-UP: the arm is not at rest: the wrist does not look before the go")
-        last_none, frames = 0.0, 0
+        last_none = 0.0
         while not ear.heard():  # the scene camera alone
             # this watch only sleeps and reads, so a Ctrl+C that did not arrive as an exception (it came out
             # as another error under the planner's wait, taken for a refusal) would never end it
@@ -1620,15 +1627,12 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 raise KeyboardInterrupt
             t_look = time.monotonic()
             fix, why = scene_look()
-            got = None if locator is None else scene_frames()
-            frames = None if got is None or frames is None else frames + got
             if (why is not None or not_at_rest) and time.monotonic() - last_none >= sv.LINE_UP_NONE_S:
                 last_none = time.monotonic()
                 if why is not None:
-                    say({"none": why[:300], "kind": scene_kind(why, frames)})
+                    say({"none": why[:300], "kind": scene_kind(why)})
                 if not_at_rest:  # said last: the engine's end reason is the last word it heard
                     say({"none": LINE_UP_NOT_AT_REST})
-                frames = 0
             # a pass with no fix lasts the look's period: with no scene camera, or one whose look answers at
             # once (no segmenter to read), the rest of it is slept out, and the loop never spins beside the
             # arm's driver. A look that ends early with its fix is followed by the next at once, as ever.
@@ -1711,7 +1715,9 @@ def no_container_kind(ctx, args, locator, scene_said=None):
     guided with "The arm cannot see the container. Move the chair in front of it", for a wait that is five
     minutes on the UI):
 
-    K_NOT_CHOSEN  a look saw something that could be the container and nothing ties it to the selection;
+    K_NOT_CHOSEN  a look saw something that could be the container and nothing ties it to the selection
+                  (the wrist's lid with the selected id in none of the scene camera's detections, or off
+                  the scene camera's line to the selected one);
     K_SEVERAL     a look saw two that could be it, and nothing says which;
     K_FAULT       the camera the guidance would watch with delivered nothing.
 
@@ -1719,9 +1725,13 @@ def no_container_kind(ctx, args, locator, scene_said=None):
     view. It is then the wrist's word that counts, however alive or dead the scene segmenter is: a wrist
     camera with no frame is a fault whatever the scene camera gave, and a wrist that looked and saw
     nothing is a container not in view whatever the scene camera made of something further off. Else the
-    scene camera's: a look the segmenter gave no frame of, a selected id in none of its frames (it cannot
-    tell a container that is out of its view from an id no detection ever had: "was in none of its
-    frames" is all it knows, and without the wrist nothing can say more), two places that pass."""
+    scene camera's: a look the segmenter gave no frame of (K_FAULT), two places that pass (K_SEVERAL), and
+    K_UNSEEN for the rest, a selected id that is in none of its frames among them: that says only that
+    the id is absent, of a container that may simply be out of its view, and a container merely out of
+    view is guided for (review of 2026-11-19, the second: it was K_NOT_CHOSEN, and where only the scene
+    camera watched, "Choose it again" for a container that was not in view yet). What the scene camera
+    cannot say is whether another container stands in its view under another id: the segmenter rung keeps
+    only the selected one's boxes of a frame."""
     wrist, side = getattr(ctx, "wrist_seen", None), getattr(ctx, "side_seen", None)
     for ends in (guide.K_NOT_CHOSEN, guide.K_SEVERAL):
         if ends in (wrist, side):
@@ -2173,8 +2183,8 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
     --wrist-alone is off): the wrist looks only to tell whether anything that could be the container
     stands in front of the arm. What it finds is never taken (None), and said.
     What the look saw where it took no container is left on ctx.wrist_seen (looked_kind; of a find
-    it would not take: guide.K_NOT_CHOSEN, K_SEVERAL, or K_UNSEEN where the selected one stands
-    elsewhere), for main's word on what the find was (no_container_kind)."""
+    it would not take: guide.K_NOT_CHOSEN or K_SEVERAL), for main's word on what the find was
+    (no_container_kind)."""
     from box_opening.tasks import survey as sv
 
     survey = sv.run_survey(
@@ -2226,9 +2236,9 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         at = survey.fix.top_xyz
         why, how = tie_refusal(tie, survey.find, at)
         if why is not None:
-            # (a second top in the selection's direction: two that could be it; else the selected one
-            # stands where the wrist does not see it, which moving the chair cures)
-            ctx.wrist_seen = guide.K_SEVERAL if guide.kind_of(why) == guide.K_SEVERAL else guide.K_UNSEEN
+            # (a second top in the selection's direction: two that could be it; else a lid in view that
+            # stands off the scene camera's line to the selected one: something in view nothing ties to it)
+            ctx.wrist_seen = guide.kind_of(why)
             log.info("[press_demo] WRIST LOOK: %s" % why)
             runner.note("wrist_first", found=True, tied=False, why=why, scene=scene_fix is not None)
             if said is not None:
