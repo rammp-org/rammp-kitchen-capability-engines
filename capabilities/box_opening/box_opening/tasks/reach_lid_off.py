@@ -580,15 +580,16 @@ SETDOWN_SPOTS = 6
 # runs, 295 runs, the 22 that set a lid down, 2026-10-29 to 11-17; measured 2026-11-19):
 #
 # SPOT_S, a spot flown to its end: the carry, the way down and the touch as planned took 2.4-3.5 s
-# in 21 of the 22 (median 3.1; 7.8 s once, 10-29 12:02, the hand turning 91 deg), the touch 0.3 s
-# more since it ends 18 mm lower; the way back up is the retreat's line, 1.0-1.4 s flown alone (14
-# runs, without its 0.25 s hold), and 0.1-0.5 s go by between two goals.
+# in 20 of the 22 (median 3.1; 5.1 s on 10-30 14:26, and 7.8 s on 10-29 12:02, the hand turning 91
+# deg), the touch 0.3 s more since it ends 18 mm lower; the way back up is the retreat's line,
+# 1.3-1.7 s flown alone (14 runs, a 0.25 s hold in the newest), and 0.1-0.5 s go by between two
+# goals. 8 s holds 21 of the 22; the one it does not takes 2 s of what BOX_S and END_S have to spare.
 # CHOICE_S, the next spot chosen with the arm standing: the wrist's frame, the map, the reach of
 # the spots and the carry's plan took 1.3-1.8 s at rest (4 runs of 10-29); the same work under a
 # motion 0.7-4.6 s (22 runs, 3.2 s at nine in ten: the Jetson shares its cores with the driver).
 # BOX_S, from a touch that felt nothing to the arm home with the lid back on the box. Never flown
 # on the robot (no run on record put a lid back), so it is the sum of its parts as each was flown:
-# back up 1.0-1.4 s; back over the box a carry's line, 0.7-2.2 s at nine in ten (6.0 at most) and
+# back up 1.3-1.7 s; back over the box a carry's line, 0.7-2.2 s at nine in ten (6.0 at most) and
 # down the lift's, 0.3-0.9; the fingers open 0.4-1.6; up off the knob 0.3-0.9; home planned at rest
 # 0.1-2.8 s (14 runs) and flown 3.0 s median, 6.9 at nine in ten, 8.6 at most (the 55 homes since
 # 2026-11-10, slow under MEDIUM); the arm standing still before a goal 0.5 s median (170 waits).
@@ -599,7 +600,7 @@ SETDOWN_SPOTS = 6
 # A further spot is started only with CHOICE_S + SPOT_S + BOX_S + END_S (35 s) left as the one
 # before it is left, and its carry is sent only with SPOT_S + BOX_S + END_S (31 s) left. A clean
 # run on flatbot reaches its first set-down 27-39 s after it starts (2026-11-13, 11-17), so of 90 s
-# some 51-63 are left there: three to five more spots at ~6.5 s each (up 1.2 s, still 0.5, chosen in
+# some 51-63 are left there: three to five more spots at ~6.5 s each (up 1.3 s, still 0.5, chosen in
 # 1, flown 3.5: the medians). A run that had a full line-up inside its budget (node.LINE_UP_S, 35 s)
 # has none to spare, and its first no-table goes to the box.
 # The first set-down itself is never refused for time: it is the run's own plan, merged with the
