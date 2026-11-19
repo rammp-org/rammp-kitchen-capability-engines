@@ -564,7 +564,7 @@ SETDOWN_LEAN_MAX_DEG = float(rp.REACH_TILTS_DEG[0])
 # ---- the lid's other spots (owner 2026-11-19: "it should keep trying spots") ------------------
 #
 # SETDOWN_SPOTS: the most spots one run takes the lid to. The run's time ends the tries first
-# wherever the engine runs it (below: three to five spots in a clean run); this bounds a run started
+# wherever the engine runs it (below: four to six spots in a clean run); this bounds a run started
 # by hand, which nothing times. Never an unbounded loop: each spot left also takes its own footprint
 # out of what is left to try (SpotSearch.aside).
 SETDOWN_SPOTS = 6
@@ -599,8 +599,9 @@ SETDOWN_SPOTS = 6
 # A further spot is started only with CHOICE_S + SPOT_S + BOX_S + END_S (35 s) left as the one
 # before it is left, and its carry is sent only with SPOT_S + BOX_S + END_S (31 s) left. A clean
 # run on flatbot reaches its first set-down 27-39 s after it starts (2026-11-13, 11-17), so of 90 s
-# some 51-63 are left there: two to four more spots at ~6.5 s each. A run that had a full line-up
-# inside its budget (node.LINE_UP_S, 35 s) has none to spare, and its first no-table goes to the box.
+# some 51-63 are left there: three to five more spots at ~6.5 s each (up 1.2 s, still 0.5, chosen in
+# 1, flown 3.5: the medians). A run that had a full line-up inside its budget (node.LINE_UP_S, 35 s)
+# has none to spare, and its first no-table goes to the box.
 # The first set-down itself is never refused for time: it is the run's own plan, merged with the
 # lift where it was chosen ahead.
 SPOT_S = 8.0

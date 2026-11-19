@@ -129,8 +129,8 @@ beside the container, and goes home. It has one action, `open_box`:
      run records a spot takes 8 s to fly and 4 s to choose, and the way back
      to the box, the release and home 20 s, with 3 s to spare: a further spot
      is started only with 35 s left, and its carry sent only with 31 s left.
-     A clean run reaches its first set-down with 51-63 s left, enough for two
-     to four more spots; a run that had a full line-up inside its budget has
+     A clean run reaches its first set-down with 51-63 s left, enough for three
+     to five more spots; a run that had a full line-up inside its budget has
      none, and its first set-down that feels no table goes to the box. A run
      started by hand from the command line is timed by nothing, and the 6
      spots bound it;
