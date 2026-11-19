@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import List, Sequence, Tuple
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -117,13 +117,9 @@ def facing_rotation(
     a, b, c = (v / np.linalg.norm(v) for v in (a, b, c))
     d = np.array([0.0, 0.0, 1.0])  # look along fridge +z, into the wall
     if abs(float(a @ b)) > 1e-6:
-        raise ValueError(
-            "the EE roll reference axis must be perpendicular to the optical axis"
-        )
+        raise ValueError("the EE roll reference axis must be perpendicular to the optical axis")
     if abs(float(c @ d)) > 1e-6:
-        raise ValueError(
-            "the fridge roll reference axis must be the fridge x or y axis"
-        )
+        raise ValueError("the fridge roll reference axis must be the fridge x or y axis")
     m_e = np.column_stack([a, b, np.cross(a, b)])  # EE basis, in EE coordinates
     m_f = np.column_stack([d, c, np.cross(d, c)])  # where those axes go, in F
     return (m_f @ m_e.T) @ axis_angle_matrix(a, roll_rad)
@@ -208,7 +204,7 @@ def clamp_norm(v: np.ndarray, limit: float) -> np.ndarray:
     return v
 
 
-def radial_deadzone(x: float, y: float, deadzone: float) -> Tuple[float, float]:
+def radial_deadzone(x: float, y: float, deadzone: float) -> tuple[float, float]:
     """Circular deadzone on a 2D stick, rescaled so the output still reaches 1."""
     r = math.hypot(x, y)
     if r <= deadzone or r == 0.0:
@@ -253,7 +249,7 @@ def limit_to_workspace(
     lo: np.ndarray,
     hi: np.ndarray,
     slowdown_time_s: float,
-) -> Tuple[np.ndarray, List[bool]]:
+) -> tuple[np.ndarray, list[bool]]:
     """Per-axis soft walls on a box [lo, hi].
 
     Velocity toward a wall is capped at distance / slowdown_time_s, so the point

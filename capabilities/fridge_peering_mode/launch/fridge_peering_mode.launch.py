@@ -1,10 +1,12 @@
 """Launches the capability. The image runs this same file, so a native
 `ros2 launch` and the container start the same thing.
 
-    ros2 launch fridge_peering_mode fridge_peering_mode.launch.py                          # standalone
-    ros2 launch fridge_peering_mode fridge_peering_mode.launch.py use_orchestrator:=true   # with the orchestrator
-    ros2 launch fridge_peering_mode fridge_peering_mode.launch.py mock:=true               # no hardware
-    ros2 launch fridge_peering_mode fridge_peering_mode.launch.py allow_execute:=true      # the arm may move
+    ros2 launch fridge_peering_mode fridge_peering_mode.launch.py [ARG:=VALUE ...]
+
+    (no args)                 # standalone
+    use_orchestrator:=true    # with the orchestrator
+    mock:=true                # no hardware
+    allow_execute:=true       # the arm may move
 
 It does not start joy_node: /joy comes from the robot's joystick node (see docs/interface.md).
 

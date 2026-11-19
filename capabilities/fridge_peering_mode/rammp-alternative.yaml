@@ -26,6 +26,8 @@ container:
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
 params:
+  # the UI bridge node the look_in_fridge panels and the wrist overlay go to
+  ui_bridge_node_name: ui_bridge_node
   # false: every goal is a dry run (the standoff is planned, teleop streams nothing), whatever it
   # asks. true only for attended runs, someone on the e-stop: there is no deadman.
   allow_execute: false

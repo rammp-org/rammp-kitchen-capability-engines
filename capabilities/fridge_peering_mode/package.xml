@@ -8,6 +8,8 @@
   <license>Proprietary</license>
 
   <exec_depend>capability_engine</exec_depend>
+  <!-- the touchscreen's panels (RunUI: Stop on every panel, bounded waits), shared -->
+  <exec_depend>capability_ui</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
@@ -23,9 +25,6 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
-
-  <exec_depend>kinova_gen3_description</exec_depend>
-  <depend>rammp_teleop</depend>
 
   <export>
     <build_type>ament_python</build_type>

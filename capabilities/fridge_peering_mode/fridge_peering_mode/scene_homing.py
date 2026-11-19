@@ -151,8 +151,9 @@ class SceneFridge:
         t = stamp_ns(det.header.stamp)
         with self._lock:
             info = self._info
-            depth_msg = min(self._depths, key=lambda m: abs(stamp_ns(m.header.stamp) - t),
-                            default=None)
+            depth_msg = min(
+                self._depths, key=lambda m: abs(stamp_ns(m.header.stamp) - t), default=None
+            )
         if info is None:
             return None, f"no camera_info on {self.topics[2]}"
         if depth_msg is None:
@@ -191,8 +192,9 @@ class SceneFridge:
         u, v = box_point(box, self.frac)
         half_w = self.window * (box[2] - box[0])
         half_h = self.window * (box[3] - box[1])
-        z, n = sample_depth(depth, labels, obj.mask_id, u, v, half_w, half_h, self.z_range,
-                            self.percentile)
+        z, n = sample_depth(
+            depth, labels, obj.mask_id, u, v, half_w, half_h, self.z_range, self.percentile
+        )
         if z is None or n < self.min_samples:
             return None, (
                 f"only {n} valid depth pixels of the fridge around ({u:.0f}, {v:.0f}) "
