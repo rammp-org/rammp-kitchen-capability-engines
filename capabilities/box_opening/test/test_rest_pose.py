@@ -941,6 +941,11 @@ def test_preflights_canary_fails_a_planner_that_does_not_hold_this_chair(tmp_pat
     far = _flatbot(tmp_path, FAR)
     rows = preflight.planner_canary_rows(Holds(far.body), far.body, far, POSE)
     assert [lvl for lvl, _t in rows] == ["PASS", "WARN"] and "no canary start" in rows[1][1]
+    # ... and the warning says how far the search for one got: draws, inside the limits, deep in a chair box
+    assert (
+        "(of 4000 draws " in rows[1][1]
+        and " 0 of them with the upper arm or the forearm deep in a chair box" in rows[1][1]
+    )
 
 
 class Ready:
@@ -1034,7 +1039,9 @@ def test_preflight_ends_in_failure_on_a_rest_pose_a_mount_or_a_canary_that_fails
     assert out.count("FAIL") == 1 and "FAIL  TF arm_mount -> scene_camera is NOT the mounted robot config's" in out
     monkeypatch.setattr(Ready, "tf", {})
     there = [a + b for a, b in zip(POSE, [0.6, 0.3, 0.0, 0.3, 0.0, 0.0, 0.0], strict=True)]
-    monkeypatch.setattr(preflight, "canary_starts", lambda check, chain, rest_q: [(there, "seat/armrest", 0.05)])
+    monkeypatch.setattr(
+        preflight, "canary_starts", lambda check, chain, rest_q, stats=None: [(there, "seat/armrest", 0.05)]
+    )
     assert _preflight(monkeypatch, argv, world=("", layers)) == 1
     out = capsys.readouterr().out
     assert out.count("FAIL") == 1 and "FAIL  the planner PLANS from a start the mounted chair model puts 50 mm" in out
