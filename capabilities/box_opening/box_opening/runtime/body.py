@@ -25,11 +25,14 @@ fingers at 0, as cuRobo locks the knuckle open); robot.yaml's spheres are
 the planner's, and box_opening adds what they miss of the real hand
 (config/robot_body.yaml `hand_spheres`, robot-body config): the 131 mm
 fingers closed on the tool axis (the stock 2F-85 spheres are locked open:
-the tips were 13 mm outside them) and the wrist OAK and its bracket (12.6
-mm outside them). Each group carries the boxes it stands for and its
-spheres must cover them, or the load stops; a group the robot file's own
-spheres already cover is skipped, never doubled (Body.hand_added /
-hand_skipped).
+the tips were 13 mm outside them), this hand's longer fingertips and the
+wrist OAK and its bracket (12.6 mm outside them). Each group carries the
+boxes it stands for and its spheres must cover them, or the load stops; a
+group the robot file's own spheres already cover is skipped, never doubled
+(Body.hand_added / hand_skipped). A group may give its numbers in another
+link than the one its spheres ride (`frame`, rigid with it): what is known
+from the flange stays where it is on a description that moves the gripper
+(HandGroup.frame).
 
 A file that cannot be read, or that places nothing, is an error: the run
 stops before any motion (never a silent skip). An explicitly empty value
@@ -174,10 +177,29 @@ class HandGroup:
     """Spheres box_opening adds to the robot file's (config/robot_body.yaml `hand_spheres`)."""
 
     name: str
-    link: str
-    centres: np.ndarray  # (k, 3) in `link`
+    link: str  # the link the spheres ride (and are reported on)
+    centres: np.ndarray  # (k, 3) in `frame`
     radii: np.ndarray  # (k,) bare: the robot file's buffer is added where they are placed
-    covers: list  # [(name, centre (3,), half (3,))] in `link`: what the spheres stand for
+    covers: list  # [(name, centre (3,), half (3,))] in `frame`: what the spheres stand for
+    # The link the group's coordinates are given in, rigidly fixed to `link` (None: `link` itself). What is
+    # known from the flange (the real fingertips' ends, constants.PADS_FROM_FLANGE_M) is written from the
+    # flange and placed by the run's own URDF, so it stands where the hand is whatever that description
+    # puts between the flange and the gripper (the sensor puck: the gripper's own link 14 mm further out).
+    frame: str = None
+
+
+def _z_zero(z_from):
+    """Where a hand group's z values are counted from, out of its frame's origin (m): 0.0 (None: the
+    frame's own origin), or, "pads", the shut pads' ends, constants.PADS_FROM_FLANGE_M out of the flange:
+    a group written back from there (negative z toward the wrist) moves with that one number. Read from
+    the module when asked, so the constant's one edit is the group's too. Any other word: ValueError."""
+    if z_from is None:
+        return 0.0
+    if str(z_from) != "pads":
+        raise ValueError("z_from %r (only: pads)" % (z_from,))
+    from box_opening import constants
+
+    return float(constants.PADS_FROM_FLANGE_M)
 
 
 def load_hand(path):
@@ -189,12 +211,18 @@ def load_hand(path):
     for name, g in data.items():
         try:
             link = str(g["link"])
+            frame = g.get("frame")
+            frame = None if frame is None or str(frame) == link else str(frame)
             cs = np.array([[float(v) for v in s["center"]] for s in g["spheres"]], float).reshape(-1, 3)
             rs = np.array([float(s["radius"]) for s in g["spheres"]], float)
             covers = [
                 (str(c.get("name", k)), np.array(c["centre"], float).reshape(3), np.array(c["half"], float).reshape(3))
                 for k, c in enumerate(g.get("covers") or [])
             ]
+            z0 = _z_zero(g.get("z_from"))
+            if z0:  # to the nanometre: -0.011 back from 0.151 is the 0.140 it was written as
+                cs[:, 2] = np.round(cs[:, 2] + z0, 9)
+                covers = [(n, np.array([c[0], c[1], round(float(c[2]) + z0, 9)]), h) for n, c, h in covers]
         except (KeyError, TypeError, ValueError) as e:
             raise BodyModelError("body model: %s's hand group %s is malformed (%s)" % (path, name, e)) from e
         if not len(rs) or not covers:
@@ -206,7 +234,7 @@ def load_hand(path):
                     "body model: %s's hand group %s leaves %s %.1f mm outside its spheres"
                     % (path, name, cname, 1000.0 * worst)
                 )
-        out.append(HandGroup(name=str(name), link=link, centres=cs, radii=rs, covers=covers))
+        out.append(HandGroup(name=str(name), link=link, centres=cs, radii=rs, covers=covers, frame=frame))
     return out
 
 
@@ -271,6 +299,7 @@ class BodyModel:
     self_spheres: dict = None
     self_ignore: frozenset = None
     activation_m: float = ACTIVATION_M  # the planner's collision_activation_distance
+    ee_link: str = None  # the link the planner plans (the robot file's ee_link); None: it names none
 
     def check_for(self, chain, urdf_path, root):
         """This model placed on `chain`'s URDF, rooted at `root`: a Body."""
@@ -376,6 +405,7 @@ def load(planner_yaml, robot_body=None):
         self_spheres=self_spheres,
         self_ignore=self_ignore,
         activation_m=_planner_setting(cfg, "collision_activation_distance", ACTIVATION_M),
+        ee_link=str(kin["ee_link"]) if kin.get("ee_link") else None,
     )
 
 
@@ -454,6 +484,14 @@ class Body:
             raise BodyModelError(
                 "body model: %s's boxes are in %s, the arm's chain in %s" % (model.source, model.base_link, root)
             )
+        # the planner's own word on which link it plans: the chain places that one from the flange, and a pose
+        # handed to the planner, or a plan's end, is taken there (kinematics.ArmChain.use_planner_ee). A link
+        # this arm's URDF does not fix to its flange stops the run here, before anything moves.
+        if model.ee_link and hasattr(chain, "use_planner_ee"):
+            try:
+                chain.use_planner_ee(model.ee_link, "the planner's robot file, %s" % model.source)
+            except RuntimeError as e:
+                raise BodyModelError("body model: %s" % e) from e
         joints = {}
         for j in ET.parse(urdf_path).getroot().findall("joint"):
             o = j.find("origin")
@@ -475,7 +513,8 @@ class Body:
         self.paths = {}
         missing = []
         hand = list(model.hand or [])
-        for link in list(model.spheres) + [g.link for g in hand if g.link not in model.spheres]:
+        hand_links = [link for g in hand for link in (g.link, g.frame) if link and link not in model.spheres]
+        for link in list(model.spheres) + hand_links:
             path, at = [], link
             while at != root:
                 if at not in joints:
@@ -500,8 +539,10 @@ class Body:
                 self.hand_skipped.append(g.name)
                 continue
             cs, rs = self.spheres.get(g.link, (np.zeros((0, 3)), np.zeros(0)))
-            self.spheres[g.link] = (np.vstack([cs, g.centres]), np.concatenate([rs, g.radii + model.buffer_m]))
+            mine = self._in_link(g, joints)
+            self.spheres[g.link] = (np.vstack([cs, mine]), np.concatenate([rs, g.radii + model.buffer_m]))
             self.hand_added.append(g.name)
+        self.robot_hand_reach_m = self._robot_hand_reach(chain)
         self.paths = {link: p for link, p in self.paths.items() if link in self.spheres}
         # the boxes: centre, UNPADDED half extents, padding, rotation (columns: the box's axes in the root)
         lo, hi = np.asarray(model.lo, float).reshape(-1, 3), np.asarray(model.hi, float).reshape(-1, 3)
@@ -582,6 +623,48 @@ class Body:
             out[link] = (R, t)
         return out
 
+    def _robot_hand_reach(self, chain):
+        """How far out of the flange, along the hand, the planner's robot file has the hand reach (m): the
+        furthest point of its own spheres, buffered, on the links the last arm joint carries (the fingers
+        at 0, as cuRobo locks them), from the flange's face. 0.168 with the stock 2F-85 bolted on the
+        flange, 0.182 on a description with the sensor puck under it: what a clearance under the hand
+        (perception/clear_table.counter_top_clear_m) has to follow. None where the chain cannot say where
+        its flange is, or the robot file has no sphere on the hand."""
+        try:
+            q0 = np.zeros((1, len(self.index)))
+            R, t = chain.fk(q0[0])
+            R = np.asarray(R, float)
+            flange = np.asarray(t, float) - R @ np.asarray(chain.tool_from_tip, float)
+        except Exception:  # noqa: BLE001 - a stand-in chain: no figure
+            return None
+        last = len(self.index) - 1
+        hand = [link for link in self.model.spheres if any(k == last for _R, _t, _a, k in self.paths.get(link, ()))]
+        reach = None
+        for link, (Rl, tl) in self._link_frames(q0, hand).items():
+            cs, rs = self.model.spheres[link]  # the robot file's own, the buffer on
+            out = (tl[0] + cs @ Rl[0].T - flange) @ R[:, 2] + rs
+            reach = float(out.max()) if reach is None else max(reach, float(out.max()))
+        return reach
+
+    def _in_link(self, group, joints):
+        """`group`'s sphere centres in its link's own frame: as written where the group gives no `frame`
+        (or the URDF has that frame on the link itself: flatbot's description without the puck, the flange
+        and the gripper's base one frame), else moved from `frame` by this URDF's fixed joints between the
+        two. A `frame` that moves against the link is an error: the spheres could not ride one link."""
+        if not group.frame or group.frame == group.link:
+            return group.centres
+        if self._rigid_root(group.frame, joints) != self._rigid_root(group.link, joints):
+            raise BodyModelError(
+                "body model: hand group %s is given in %s, which this arm's URDF does not fix to its link %s"
+                % (group.name, group.frame, group.link)
+            )
+        frames = self._link_frames(np.zeros((1, len(self.index))), [group.link, group.frame])
+        (Rl, tl), (Rf, tf) = frames[group.link], frames[group.frame]
+        R, t = Rl[0].T @ Rf[0], Rl[0].T @ (tf[0] - tl[0])
+        if np.allclose(R, np.eye(3), atol=1e-12) and np.allclose(t, 0.0, atol=1e-12):
+            return group.centres  # one frame: the numbers as written, to the last bit
+        return group.centres @ R.T + t
+
     def _robot_file_covers(self, group, joints):
         """Whether the robot file's own spheres, on the links fixed to `group`'s, already cover every
         box the group stands for (HAND_COVER_TOL_M): a robot file with the hand's spheres. Judged BARE,
@@ -592,8 +675,9 @@ class Body:
         if not mates:
             return False
         q0 = np.zeros((1, len(self.index)))
-        frames = self._link_frames(q0, mates + [group.link])
-        Rg, tg = frames[group.link]
+        at = group.frame or group.link  # the frame the group's boxes are written in
+        frames = self._link_frames(q0, mates + [at])
+        Rg, tg = frames[at]
         C, r = [], []
         for link in mates:
             R, t = frames[link]

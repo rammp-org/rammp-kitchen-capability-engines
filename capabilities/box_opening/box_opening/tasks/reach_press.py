@@ -226,7 +226,9 @@ AIM_FORWARD_M = 0.01
 # reach attitude's roll (fingers side by side across the line to the box):
 # one fingertip's end, past tool_frame like TCP_OFFSET_M straight down.
 CONTACT_TOOL = (0.0, -0.009, TCP_OFFSET_M)
-TIP_MID_TOOL = (0.0, 0.0, -TIP_TO_TOOL_M)  # the finger-tip links' midpoint (client.contact_xyz)
+# the finger-tip links' midpoint (client.contact_xyz), with the gripper bolted on the flange (contact_from_tips
+# takes the run's own description's)
+TIP_MID_TOOL = (0.0, 0.0, -TIP_TO_TOOL_M)
 # Every guard below judges the gravity-compensated residual. On flatbot's
 # recording (kinematics.GravityModel) it stayed under 0.76 Nm on every wrist
 # joint through 22 s of motion; the reach lines' own model error is ~0.15.
@@ -286,8 +288,12 @@ def tool_for_contact(contact_xyz, quat):
 
 def contact_from_tips(tip_mid_xyz, quat):
     """Where the fingertip's contact point is, from the finger-tip links'
-    midpoint the arm measures at a trip (client.contact_xyz)."""
-    v = _rot(quat) @ (np.asarray(CONTACT_TOOL) - np.asarray(TIP_MID_TOOL))
+    midpoint the arm measures at a trip (client.contact_xyz). The tip links
+    ride the gripper: where the run's description has it further out of the
+    flange (the sensor puck) their midpoint is that much further along the
+    hand than TIP_MID_TOOL has it (fingers.tip_to_tool_m)."""
+    tip_mid = (0.0, 0.0, -fingers.tip_to_tool_m())
+    v = _rot(quat) @ (np.asarray(CONTACT_TOOL) - np.asarray(tip_mid))
     return [float(c) for c in np.asarray(tip_mid_xyz, float) + v]
 
 

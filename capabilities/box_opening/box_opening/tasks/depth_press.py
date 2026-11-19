@@ -157,7 +157,17 @@ KNOB_UP_MM = 6.0  # press_demo.KNOB_UP_MIN_MM
 # uses the same offset, so a wrong mount "converges" anyway, its whole error
 # off the button (20:04: TF's lens y 0.100 against a true ~0.065 — the press
 # 35 mm off, on the lid's edge). CENTRE runs only when TF's lens agrees with
-# the measured one in the camera config (wrist_lens_in_hand_m) ...
+# the grabber's (wrist_lens_in_hand_m: the robot's own calibration from the
+# mounted robot config, else the camera config's figure —
+# perception/d405.wrist_lens_in_hand): a TF tree and a robot config that are
+# not one robot's are caught there, and nothing else, since TF is published
+# from that same file. What is independent of it are the two mounts
+# presses have flown on, kept in the camera config (its own figure, fitted
+# from the 2026-10-22 depth-press run, and wrist_mount_flown, the mount of
+# the 2026-11-12..17 flights): TF's mount must also AIM, lens and axes
+# together at the look's range, within d405.AIM_REF_TOL_M of one of those
+# (10 mm; that comment says what it can and cannot catch: the grabber's
+# aim_refusal) ...
 MOUNT_XY_TOL_M = 0.005
 MOUNT_Z_TOL_M = 0.020
 # ... and the touch must meet the lid where TF's lens says the fingertips
@@ -1368,8 +1378,9 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         final=True,
         slow_z=slow_z,
         # ... and both ends of it stand where this hand's fingers meet a top: they reach FINGERS_PAST_MODEL_M
-        # further than the pads the watch measures (constants: every press since 2026-11-12 met its button 40-45 mm
-        # "above" it, and 2026-11-17 16:44's 56 mm was refused as something in the way)
+        # further than the point the watch measures, the one the heights go by (constants: worked out from
+        # PADS_FROM_FLANGE_M; every press since 2026-11-12 met its button 40-45 mm "above" it, and 2026-11-17
+        # 16:44's 56 mm was refused as something in the way)
         early_m=CONTACT_EARLY_M + corner + FINGERS_PAST_MODEL_M,
         late_m=max(CONTACT_LATE_M - FINGERS_PAST_MODEL_M, 0.0),
         abort_on_failure=True,
@@ -1743,6 +1754,19 @@ def _press_down(
             "the measured wrist_lens_in_hand_m at (%s) mm — fix the mount before centring "
             "on it"
             % (", ".join("%+.0f" % (1000 * v) for v in lens), ", ".join("%+.0f" % (1000 * v) for v in measured)),
+        )
+    # ... and by where TF's mount AIMS (its lens and its axes), against the mounts presses have flown on
+    # (the comment at MOUNT_XY_TOL_M). A run says this before it leaves rest, from the robot's cameras.yaml
+    # (cli_common.hand_or_exit, and a guarded run does not start); here it is TF's own mount that is held
+    refuse = getattr(getattr(watcher, "grab", None), "aim_refusal", None)
+    # (r_hc, lens_in_hand's: the camera's axes in the hand's, its third column the lens's axis)
+    why = None if refuse is None else refuse(lens, r_hc)
+    if why is not None:
+        runner.note("depth_mount_refused", lens_in_hand_mm=[round(1000 * v, 1) for v in lens], why=why)
+        return DepthPress(
+            free=True,
+            why="the wrist camera's mount in TF is one no press has flown near (%s) — check the mount before "
+            "centring on it" % why,
         )
     trusted = s is None and aimed is not None  # no look confirms the button: the aim stands in
     if s is None and aimed is None:

@@ -124,3 +124,37 @@ def pad_corner_below_m(lean_deg):
     import math
 
     return 0.5 * PAD_WIDTH_M * math.sin(math.radians(max(float(lean_deg), 0.0)))
+
+
+GRIPPER_BASE_LINK = "robotiq_85_base_link"  # "arm_robotiq_85_base_link" where the description prefixes its links
+
+
+def gripper_out_m(chain=None):
+    """How far out of the flange, along the hand, the description `chain` was built from has the
+    gripper's base (m): 0 with the 2F-85 bolted on the flange, 0.014 with Kinova's sensor puck under
+    it. `chain` None: the run's own (runtime/approach), where it has one. A chain that cannot say (a
+    test's stand-in, none at all, a URDF without the gripper's link) is taken for the gripper on the
+    flange."""
+    if chain is None:
+        try:
+            from box_opening.runtime import approach
+
+            chain = approach._chain() if approach.chain_ready()[0] else None
+        except Exception:  # noqa: BLE001 - no chain to ask: the gripper on the flange
+            chain = None
+    find = getattr(chain, "fixed_in_flange", None)
+    if find is None:
+        return 0.0
+    pose, _why = find(GRIPPER_BASE_LINK)
+    return 0.0 if pose is None else float(pose[1][2])
+
+
+def tip_to_tool_m(chain=None):
+    """How far ABOVE box opening's tool frame (back toward the flange) the finger-tip links' origins
+    stand, shut (m): what turns a fingertip TF reading (client.contact_xyz) into the frame the heights
+    go by. The tip links ride the gripper, the tool frame the flange: constants.TIP_TO_TOOL_M (8 mm)
+    with the gripper on the flange, 14 mm less with the sensor puck under it (the tips 6 mm PAST the
+    tool frame)."""
+    from box_opening.constants import TIP_TO_TOOL_M
+
+    return TIP_TO_TOOL_M - gripper_out_m(chain)

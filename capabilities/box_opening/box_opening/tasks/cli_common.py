@@ -237,6 +237,16 @@ def load_body_or_exit(args, who):
                 ),
             )
         )
+        chain = approach._CHAIN
+        if check is not None and getattr(chain, "ee_named_by", "").startswith("the planner's robot file"):
+            from box_opening.runtime.kinematics import TOOL_FRAME_LINK
+
+            if chain.ee_link not in (TOOL_FRAME_LINK, "arm_" + TOOL_FRAME_LINK):
+                # said only where it is not the description's usual tool frame (a run's hand line has that one)
+                log.info(
+                    "%s the planner plans %s (its robot file), (%s) mm from box opening's tool frame: poses go to "
+                    "it there" % (who, chain.ee_link, ", ".join("%+.1f" % (1000 * v) for v in chain.ee_in_tool[1]))
+                )
         if nu is not None:
             log.info(
                 "%s near the user (%s): a sphere within %.0f mm moves at most %.2f m/s there, falling to %.2f "
@@ -282,6 +292,169 @@ def load_rest_or_exit(args, who):
     return got.pose
 
 
+def config_mismatch(chain, config_dir):
+    """Why the robot config in `config_dir` (rammp-deployments config/robots/<robot>, as mounted at
+    /config/robot) is not the config of the arm `chain` was built from, or None: its
+    curobo/arm_kinematics.json, the reference the planner itself holds the published URDF against, has a
+    joint of the same name with another parent, child or origin (a config with the sensor puck on a
+    description without it, or the other way round: the tool frame's joint 14 mm apart). None too where
+    there is no such file to compare, or nothing the two share: then nothing is known, and nothing said."""
+    import json
+
+    try:
+        ref = json.loads((Path(config_dir) / "curobo" / "arm_kinematics.json").read_text())
+        mine = {j[0]: (j[2], child, j[3]) for child, j in chain._by_child.items()}  # name -> parent, child, xyz
+    except Exception:  # noqa: BLE001 - no reference here, or a stand-in chain: nothing to compare
+        return None
+    for name in sorted(set(ref) & set(mine)):
+        parent, child, xyz = mine[name]
+        r = ref[name]
+        if str(r.get("parent")) != parent or str(r.get("child")) != child:
+            return "joint %s joins %s -> %s in the arm's description, %s -> %s in the config" % (
+                name,
+                parent,
+                child,
+                r.get("parent"),
+                r.get("child"),
+            )
+        rx = [float(v) for v in (r.get("xyz") or (0.0, 0.0, 0.0))]
+        if max(abs(a - b) for a, b in zip(xyz, rx, strict=True)) > 1e-6:
+            return "joint %s is at (%s) in the arm's description, (%s) in the config" % (
+                name,
+                ", ".join("%g" % v for v in xyz),
+                ", ".join("%g" % v for v in rx),
+            )
+    return None
+
+
+def hand_or_exit(who, camera_cfg_name=None, guarded=False):
+    """Where this run has its hand, said before anything moves, and the run stopped there where it has no
+    hand to plan with.
+
+    STOPS (SystemExit, "Nothing moved"):
+     - the description's tool frame, which the planner plans, is not fixed to the flange
+       (kinematics.ToolFrameError): no pose could be handed to the planner nor a plan's end judged. With
+       the body check off nothing else would have built the chain before the first motion;
+     - `guarded` (a run that centres its press on the wrist camera's mount, tasks/depth_press) and that
+       mount aims where no press has flown (d405.aim_refusal): said here, the arm at rest, where it was
+       said only once the arm stood over the box.
+
+    SAYS, one line: box opening's tool frame and the point its heights go by (the same on every
+    description: where they were flown), where this hand's pads really end
+    (constants.PADS_FROM_FLANGE_M), the link the planner plans and how far along the hand it is from the
+    tool frame, the wrist lens with the file and the robot it was read from, and how far its aim at the
+    look's range lands from the aims of the two mounts presses have flown on. And WARNS, a line each: a
+    description with no tool frame link the planner's frame could be read from, a mount that aims more
+    than d405.AIM_REF_TOL_M from both flown mounts, and a mounted robot config that is not this arm's
+    description (config_mismatch). A run on a description or a robot config it was not flown on shows
+    here. Returns the lines; with no chain to describe (no description heard) says nothing."""
+    import math
+
+    import numpy as np
+
+    from box_opening.constants import FINGERS_PAST_MODEL_M, HEIGHTS_POINT_FROM_FLANGE_M, PADS_FROM_FLANGE_M
+    from box_opening.runtime.kinematics import TOOL_FRAME_LINK, ToolFrameError
+
+    if not approach.chain_ready()[0]:
+        return []
+    try:
+        chain = approach._chain()
+    except ToolFrameError as e:
+        sys.exit("%s not starting: %s. Nothing moved." % (who, e))
+    except Exception as e:  # noqa: BLE001 - a line of the log; whatever else is wrong stops where it always did
+        log.info("%s hand: not described (%s)" % (who, e))
+        return []
+    lines, stop = [], None
+    try:
+        warn = []
+        if chain.ee_link is None:
+            planner = "the planner's frame taken for the tool frame"
+            warn.append(
+                "%s WARNING: the arm's description has no link %s or arm_%s, and the planner's own config was not "
+                "read to name the link it plans (the body check is off): its frame is TAKEN for box opening's "
+                "tool frame. If it is not, a pose handed to the planner is planned that far off; such a plan is "
+                "refused at its end, not flown" % (who, TOOL_FRAME_LINK, TOOL_FRAME_LINK)
+            )
+        elif chain.ee_is_tool:
+            planner = "the planner plans %s (%s), the same frame" % (chain.ee_link, chain.ee_named_by)
+        else:
+            Re, te = chain.ee_in_tool
+            turn = math.degrees(math.acos(max(-1.0, min(1.0, (float(np.trace(Re)) - 1.0) / 2.0))))
+            planner = "the planner plans %s (%s), (%s) mm from the tool frame%s: a pose goes to it there" % (
+                chain.ee_link,
+                chain.ee_named_by,
+                ", ".join("%+.1f" % (1000 * v) for v in te),
+                "" if turn < 1e-6 else " and turned %.1f deg" % turn,
+            )
+        line = (
+            "%s hand: tool frame %.0f mm out of the flange, the point the heights go by %.0f mm out, as "
+            "flown, whatever the description; this hand's pads end %.0f mm out, %.0f mm past it; %s"
+            % (
+                who,
+                1000 * chain.tool_from_flange_m,
+                1000 * HEIGHTS_POINT_FROM_FLANGE_M,
+                1000 * PADS_FROM_FLANGE_M,
+                1000 * FINGERS_PAST_MODEL_M,
+                planner,
+            )
+        )
+        if camera_cfg_name:
+            from box_opening.perception import d405
+
+            cfg = d405.camera_config(camera_cfg_name)
+            lens, optical, where = d405.wrist_camera_in_hand(cfg, chain=chain)
+            if lens is not None:
+                line += "; wrist lens (%s) mm from the tool frame (%s)" % (
+                    ", ".join("%+.1f" % (1000 * v) for v in lens),
+                    where,
+                )
+            mount = d405.robot_mount(cfg.get("robot_mount")) if cfg.get("robot_mount") else None
+            # (only a mount that IS the robot's calibration is held against the flown ones: the fit against
+            # itself says nothing)
+            calibrated = mount is not None and where.startswith("%s in " % cfg.get("robot_mount"))
+            off = d405.aim_off_flown(cfg, lens, optical) if calibrated else []
+            if off:
+                line += "; its aim %.0f mm out lands %s (across the hand: x, y)" % (
+                    1000 * d405.LOOK_RANGE_M,
+                    " and ".join(
+                        # (+ 0.0: a mount held against itself reads +0.0, never -0.0)
+                        "(%+.1f, %+.1f) mm from %s's" % (round(1000 * d[0], 1) + 0.0, round(1000 * d[1], 1) + 0.0, what)
+                        for what, _a, d in off
+                    ),
+                )
+                refusal = d405.aim_refusal(cfg, lens, optical)
+                if refusal is not None:
+                    warn.append(
+                        "%s WARNING: the wrist camera's mount is one no press has flown near: %s. A press a "
+                        "centimetre beside the button's middle still opened the box (2026-11-12..17), further is "
+                        "not known. Watch where the first press lands: along the hand's y is along the line from "
+                        "the arm to the box" % (who, refusal)
+                    )
+                    if guarded:
+                        stop = (
+                            "%s not starting: a guarded run centres its press on the wrist camera's mount, and "
+                            "%s — check the mount (the robot's transforms/cameras.yaml) before a press is centred "
+                            "on it. Nothing moved." % (who, refusal)
+                        )
+            if mount is not None:
+                config_dir = Path(mount.path).parent.parent
+                why = config_mismatch(chain, config_dir)
+                if why is not None:
+                    warn.append(
+                        "%s WARNING: the robot config %s (robot %s by its mount.yaml) is NOT this arm's "
+                        "description: %s. Its camera mounts, its chair and its user may be another robot's"
+                        % (who, config_dir, mount.robot or "not named", why)
+                    )
+        lines = [line, *warn]
+    except Exception as e:  # noqa: BLE001 - a line of the log, never a stop
+        lines = ["%s hand: not described (%s)" % (who, e)]
+    for text in lines:
+        log.info(text)
+    if stop is not None:
+        sys.exit(stop)
+    return lines
+
+
 def planner_body_or_exit(node, model, execute, who):
     """With the body model on, a run that moves the arm starts only where the planner plans around
     the same chair and user (preflight.planner_body_verdict: its config the body model's, world
@@ -323,6 +496,7 @@ def build_ctx(args):
     # the body model, never in `model` (the container's: the Ctx below plans with it)
     body_model = load_body_or_exit(args, "[%s]" % ap_prog())
     load_rest_or_exit(args, "[%s]" % ap_prog())  # HOME is this robot's from here on
+    hand_or_exit("[%s]" % ap_prog(), worlds.wrist_camera_config)
     planner_body_or_exit(node, body_model, bool(getattr(args, "execute", False)), "[%s]" % ap_prog())
     ctx = Ctx(
         model=model,

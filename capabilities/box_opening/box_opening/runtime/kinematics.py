@@ -22,13 +22,27 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from box_opening.constants import GRIPPER_CMD_CLOSED
+from box_opening.constants import GRIPPER_CMD_CLOSED, TOOL_FROM_FLANGE_STOCK_M
 from box_opening.perception.d405 import mat_to_quat_xyzw as _mat_to_quat_xyzw
 from box_opening.perception.d405 import quat_to_mat
 
-# cuRobo's ee_link: 0.120 m beyond end_effector_link along its z
-# (robot_gen3_2f85.yaml); the driver's URDF stops at end_effector_link
-TOOL_FROM_EE_M = 0.120
+# Box opening's own tool frame: 0.120 m beyond the flange (end_effector_link) along its z, with the flange's
+# axes, on EVERY description of the arm. It is the frame every height and offset in the package was tuned in
+# by flight (constants.TCP_OFFSET_M, the contact points, the hover, the grip and set-down heights, the look
+# distances): where cuRobo's ee_link stands with the 2F-85 bolted on the flange (robot_gen3_2f85.yaml), which
+# is what the arm's description said until 2026-11-17. The arm had Kinova's sensor puck under the gripper all
+# that time; its description has it since rammp-deployments #149 (flatbot, gen_1_5), with the gripper and
+# arm_tool_frame 14 mm further out. The hand did not move, and neither does this frame: the flange stands
+# where it stood for every target on either description (2026-11-19, review: a chain that followed the
+# description's tool frame would have flown the flange 14 mm further back along the hand than every run that
+# had flown, the fingertips 3.6-7 mm nearer the arm at 15-30 deg of tilt).
+# The PLANNER plans the description's own tool frame (its config's ee_link). That frame is found in the URDF
+# (ArmChain.use_planner_ee: a link fixed to the flange, through whatever fixed joints) and a pose handed to the
+# planner is moved by the rigid step between the two frames (ArmChain.planner_pose); a plan's end is judged
+# there too (ee_fk). Where the URDF has no such link (the bench's stops at end_effector_link) the planner's
+# frame is taken for this one, as it always was.
+TOOL_FROM_EE_M = TOOL_FROM_FLANGE_STOCK_M
+TOOL_FRAME_LINK = "tool_frame"  # the planner's ee_link by its usual name; "arm_tool_frame" where links are prefixed
 STEP_M = 0.002  # line sampling; the retimer times it
 LIMIT_MARGIN_RAD = 0.02
 CONVERGE_M = 5e-5
@@ -115,10 +129,36 @@ def urdf_path():
     return "%s/urdf/kinova_gen3_7dof.urdf" % get_package_share_directory("kinova_gen3_description")
 
 
+class ToolFrameError(RuntimeError):
+    """The planner's tool frame cannot be placed from the flange by this URDF: no run may start on it."""
+
+
+def fixed_pose(by_child, link, anchor):
+    """((R, t), None): the pose of `link` in `anchor` where only FIXED joints lie between them, walked
+    up from `link` (`by_child`: ArmChain's joints by child link); (None, why) where the URDF has no
+    `link`, the walk meets a joint that moves, or it reaches the top without meeting `anchor`."""
+    if link == anchor:
+        return (np.eye(3), np.zeros(3)), None
+    if link not in by_child:
+        return None, "the URDF has no link %s" % link
+    R, t, at = np.eye(3), np.zeros(3), link
+    while at != anchor:
+        if at not in by_child:
+            return None, "%s is not on %s (its fixed joints end at %s)" % (link, anchor, at)
+        joint, typ, parent, tj, Rj, _axis, _lim = by_child[at]
+        if typ != "fixed":
+            return None, "%s moves against %s (joint %s is %s)" % (link, anchor, joint, typ)
+        # the pose of what was walked so far, in the parent's frame
+        R, t = Rj @ R, tj + Rj @ t
+        at = parent
+    return (R, t), None
+
+
 class ArmChain:
     """base_link -> tool_frame of the Gen3, from its URDF."""
 
     def __init__(self, path=None, tip="end_effector_link", tool_from_tip_m=TOOL_FROM_EE_M, root="base_link"):
+        self.source = str(path or "the installed URDF")
         xml_root = ET.parse(path or urdf_path()).getroot()
         by_child = {}
         for j in xml_root.findall("joint"):
@@ -154,7 +194,17 @@ class ArmChain:
         self.chain = chain[::-1]
         self.joint_names = [c[0] for c in self.chain if c[1] in ("revolute", "continuous")]
         self.limits = [c[5] for c in self.chain if c[1] in ("revolute", "continuous")]
-        self.tool_from_tip = np.array([0.0, 0.0, float(tool_from_tip_m)])
+        # box opening's own tool frame (TOOL_FROM_EE_M's comment): the same on every description
+        self.tool_from_flange_m = float(tool_from_tip_m)
+        self.tool_from_tip = np.array([0.0, 0.0, self.tool_from_flange_m])
+        self.flange = tip
+        self._by_child = by_child
+        # the planner's: the description's own tool frame link, where it has one by its usual name. The
+        # planner's config says which link it plans (use_planner_ee: the body model hands it over)
+        self.ee_link, self.ee_in_tool, self.ee_named_by = None, (np.eye(3), np.zeros(3)), None
+        usual = next((n for n in (TOOL_FRAME_LINK, "arm_" + TOOL_FRAME_LINK) if n in by_child), None)
+        if usual is not None:
+            self.use_planner_ee(usual, "the arm's description")
         # fk() is the IK's inner loop (every 2 mm of a plan-free line, with
         # the arm standing still), so its constants are built once: each
         # moving joint's fixed origin, with any fixed joints before it folded
@@ -177,6 +227,61 @@ class ArmChain:
         # flown without the planner (straight_line, walk) is held out of;
         # None: no check (the bench; runtime/approach attaches it)
         self.body = None
+
+    def fixed_in_flange(self, link):
+        """((R, t), None): the pose of `link` in the flange where the URDF fixes it there (through any
+        number of fixed joints; the flange itself is the identity), "arm_" tried before the name where
+        the URDF prefixes its links; (None, why) else."""
+        names = [link] if (link in self._by_child or link == self.flange) else ["arm_" + link, link]
+        why = None
+        for name in names:
+            pose, why = fixed_pose(self._by_child, name, self.flange)
+            if pose is not None:
+                return pose, None
+        return None, why
+
+    def use_planner_ee(self, link, named_by="the planner's config"):
+        """The link the planner plans (its config's ee_link; the description's tool frame): where it
+        stands from box opening's own tool frame, by the URDF's fixed joints back to the flange.
+        ToolFrameError where the URDF does not fix it to the flange: a pose could not be handed to the
+        planner, nor a plan's end judged, so no run starts."""
+        pose, why = fixed_pose(self._by_child, str(link), self.flange)
+        if pose is None:
+            raise ToolFrameError(
+                "%s: the planner's tool frame %s (%s) cannot be placed from the flange %s: %s"
+                % (self.source, link, named_by, self.flange, why)
+            )
+        R, t = pose
+        t = t - self.tool_from_tip
+        same = np.allclose(R, np.eye(3), atol=1e-9) and np.allclose(t, 0.0, atol=1e-9)
+        # one frame (the description without the puck): exactly so, and a pose goes to the planner as it is
+        self.ee_in_tool = (np.eye(3), np.zeros(3)) if same else (R, t)
+        self.ee_link, self.ee_named_by = str(link), named_by
+        return self.ee_in_tool
+
+    @property
+    def ee_is_tool(self):
+        """Whether the planner's frame is box opening's own (no step between them)."""
+        R, t = self.ee_in_tool
+        return bool(np.array_equal(R, np.eye(3)) and not t.any())
+
+    def planner_pose(self, xyz, quat_xyzw):
+        """(xyz, quat) to hand the planner so that box opening's tool frame comes to (`xyz`,
+        `quat_xyzw`): the planner's ee_link at the rigid step from it (ee_in_tool). The same numbers,
+        untouched, where the two are one frame."""
+        if self.ee_is_tool:
+            return xyz, quat_xyzw
+        Re, te = self.ee_in_tool
+        R = np.asarray(quat_to_mat(*(float(v) for v in quat_xyzw)), float)
+        return [float(v) for v in np.asarray(xyz, float) + R @ te], mat_to_quat_xyzw(R @ Re)
+
+    def ee_fk(self, q):
+        """(R, t) of the planner's ee_link at joints `q`: fk()'s, the step to the planner's frame on."""
+        R, t = self.fk(q)
+        if self.ee_is_tool:
+            return R, t
+        Re, te = self.ee_in_tool
+        return R @ Re, t + R @ te
 
     def body_refusal(self, pts, start_exempt=True):
         """Why the joint path `pts` takes the arm into the chair or its user

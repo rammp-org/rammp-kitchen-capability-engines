@@ -204,7 +204,7 @@ While an action runs (its run subscribes; the node itself reads only
 | Topic                                | Type                                           | Required | Meaning                                                                                                                                                                                                            |
 | ------------------------------------ | ---------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `/joint_states`                      | `sensor_msgs/JointState`                       | yes      | The arm's joints, efforts and gripper knuckle                                                                                                                                                                      |
-| `/arm/robot_description`             | `std_msgs/String`                              | yes      | The arm's URDF, rooted at `arm_mount` (the run's FK chain)                                                                                                                                                         |
+| `/arm/robot_description`             | `std_msgs/String`                              | yes      | The arm's URDF, rooted at `arm_mount`: the run's FK chain, and where the planner's tool frame is (`arm_tool_frame`)                                                                                                |
 | `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | yes      | The aim at the button, the grip's close-up; with `wrist_survey`, the survey for a container the scene camera cannot see                                                                                            |
 | `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Its intrinsics                                                                                                                                                                                                     |
 | `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes      | Depth aligned to colour                                                                                                                                                                                            |
@@ -1182,6 +1182,34 @@ environment), against the versions that took the built-in pose everywhere:
 `home_arm` with a pose from a file and no arm description heard now refuses
 ("cannot be judged") where it used to fly to the built-in pose: a pose that
 cannot be judged is not flown to. `--rest-pose ""` is the old behaviour.
+
+The same mounted robot config and the arm's own description say where the hand is,
+and a run says it in its first line (`... hand: ...`):
+
+- box opening's own tool frame is 0.120 m out of the flange on every description of
+  the arm: the frame its heights were tuned in by flight, so the flange stands for
+  every target where it stood when it flew. The planner plans the description's own
+  tool frame (its config's `ee_link`, `arm_tool_frame`, read from
+  `/arm/robot_description` each start through the fixed joints that hang it on the
+  flange): on a description with Kinova's sensor puck (`mount.yaml`'s
+  `wrist: sensor_puck`) that is 14 mm further along the hand, and a pose handed to
+  the planner is moved by that step. A tool frame the description does not fix to
+  the flange stops the run before anything moves, with the body check on or off;
+- the wrist camera's lens and axes are the robot's calibration, `wrist_camera` in
+  `/config/robot/transforms/cameras.yaml`, its parent link placed from the flange by
+  the description (`BOX_OPENING_ROBOT_CAMERAS` names another file; empty, none).
+  Where no such file is mounted, the figure in `config/camera_oak_wrist.yaml` stands
+  in. That file also keeps the two mounts presses have been flown on (a fit from a
+  2026-10-22 run, and the mount of the 2026-11-12..17 flights): a run says how far
+  its mount's aim, 0.30 m out, lands from theirs, warns where that is more than
+  10 mm from both, or where the mounted robot config is not the description's
+  robot, and goes on. A guarded run, which centres its press on the mount, does not
+  start on such a mount;
+- how far out of the flange the shut fingertips end is one number,
+  `constants.PADS_FROM_FLANGE_M` (robot-body fact, 0.151 m, known to about
+  150-161 mm until someone holds a ruler from the flange's face to the pads'
+  ends). The press's contact band, the fingertips' spheres in
+  `config/robot_body.yaml` and the depth taken for the hand itself follow from it.
 
 `wrist_survey` is off by default: a run whose scene camera finds no container
 has found none (what follows, guidance or `not_found`, is in "A container no

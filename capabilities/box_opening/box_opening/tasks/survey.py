@@ -99,8 +99,8 @@ REST_NEAR_LINKS = ("half_arm",)
 # [-0.5, -0.5, -0.5, 0.5] on arm_end_effector_link, the OAK's images turned 180 deg on the device),
 # looking along the tool, the image's long side along -x of the tool, its top toward +y
 OPTICAL_IN_TOOL = np.diag([-1.0, -1.0, 1.0])
-# the lens from tool_frame, where the camera config gives none (camera_oak_wrist.yaml
-# wrist_lens_in_hand_m: [0, 0.065, -0.105], the fitted mount)
+# the lens from tool_frame, where no camera config is named (camera_oak_wrist.yaml's own figure, the fitted
+# mount). A run's is camera_of's: the robot's own calibration, its axes too
 LENS_IN_TOOL_M = (0.0, 0.065, -0.105)
 # the wrist OAK's colour stream, where the camera has sent none yet: 640 x 400, fy 398 px
 NOMINAL_K = ((398.0, 0.0, 320.0), (0.0, 398.0, 200.0), (0.0, 0.0, 1.0))
@@ -208,31 +208,41 @@ class Camera:
         return R_tool, np.asarray(cam_xyz, float) - R_tool @ self.lens
 
 
-def camera(lens=None, k=None, size=None):
-    """The Camera: the lens from the camera config's wrist_lens_in_hand_m (`lens`), the
+def camera(lens=None, k=None, size=None, optical=None):
+    """The Camera: the lens from the camera config's wrist_lens_in_hand_m (`lens`), its optical axes
+    in the tool frame (`optical`: the robot's calibrated mount's, where it can be read), the
     intrinsics the camera sent (`k`, `size`), each nominal where not given."""
     return Camera(
         lens=np.asarray(LENS_IN_TOOL_M if lens is None else lens, float).reshape(3),
-        optical=OPTICAL_IN_TOOL.copy(),
+        optical=OPTICAL_IN_TOOL.copy() if optical is None else np.asarray(optical, float).reshape(3, 3),
         k=np.asarray(NOMINAL_K if k is None else k, float).reshape(3, 3),
         size=tuple(int(v) for v in (NOMINAL_SIZE if size is None else size)),
     )
 
 
 def camera_of(watcher, camera_cfg_name=None):
-    """The Camera for this run: the camera config's lens, the grabber's newest intrinsics."""
-    lens = None
+    """The Camera for this run: the lens and the optical axes where the robot's own calibration has
+    them (d405.wrist_camera_in_hand: gen_1_5's mount is 1.5 deg off square, 10 px at the frame's
+    edge against VIEW_MARGIN_PX's 8), else the camera config's lens and the square mount; the
+    grabber's newest intrinsics."""
+    lens = optical = None
     try:
-        from box_opening.perception.d405 import camera_config
+        from box_opening.perception.d405 import camera_config, wrist_camera_in_hand
 
-        lens = camera_config(camera_cfg_name).get("wrist_lens_in_hand_m") if camera_cfg_name else None
+        if camera_cfg_name:
+            lens, optical, _where = wrist_camera_in_hand(camera_config(camera_cfg_name))
     except Exception:  # noqa: BLE001 - a config without it: the fitted mount's
-        lens = None
+        lens = optical = None
     g = getattr(watcher, "grab", None)
     k = getattr(g, "k", None)
     color = getattr(g, "color", None)
     size = None if color is None or np.ndim(color) < 2 else np.shape(color)[:2]
-    return camera(lens=lens, k=k if k is not None and size is not None else None, size=size if k is not None else None)
+    return camera(
+        lens=lens,
+        k=k if k is not None and size is not None else None,
+        size=size if k is not None else None,
+        optical=optical,
+    )
 
 
 @dataclass(frozen=True)

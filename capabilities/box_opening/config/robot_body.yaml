@@ -7,7 +7,9 @@
 # OPEN as cuRobo locks the knuckle) misses of the real hand. Each group names its link, the boxes it
 # stands for (`covers`: centre and half extents, m, in that link's frame, with their source) and the
 # spheres that cover them (`spheres`: bare radii; the robot file's collision_sphere_buffer is added to
-# them as to its own). The load refuses a group whose spheres leave any part of its boxes uncovered
+# them as to its own). A group may name a `frame`, a link rigidly fixed to its own: its numbers are
+# then in that frame, and the run's URDF places them on the link; and `z_from: pads`: its z values are
+# then counted back from the shut pads' ends (constants.PADS_FROM_FLANGE_M). The load refuses a group whose spheres leave any part of its boxes uncovered
 # (sampled every 2.5 mm, 1 mm allowed), and skips a group whose boxes the robot file's own spheres
 # (bare, as the group's own are judged, on links rigidly fixed to the group's link) already cover: a
 # robot file that carries the same spheres (rammp-deployments feature/flatbot-hand-spheres) is not
@@ -33,23 +35,34 @@ hand_spheres:
       - {center: [-0.012, 0.0, 0.112], radius: 0.0275}
       - {center: [0.012, 0.0, 0.112], radius: 0.0275}
       - {center: [0.036, 0.0, 0.112], radius: 0.0275}
-  # 2026-11-17: flatbot's fingers were changed between 2026-11-03 and 11-12 and reach ~20 mm further: the closed
-  # tips end ~0.151 m out of the flange (constants.FINGERS_PAST_MODEL_M, from the arm's presses before and after),
-  # and they are wider across the hand: in the wrist's frames the shut tips span 26 mm to one side of the
-  # hand's middle and 22 mm to the other (a wide black tip and a green part beside it; before, two tips
-  # within +-12). Covered beyond the group above: the shut tips out to z 0.151 at that width, and the open
-  # tips' ends the same 20 mm further (x +-0.050). The spheres reach z 0.1675 on the axis (16.5 mm past the
-  # tips, 21.5 with the 5 mm buffer). The thickness (y) is taken as the old pads': not measured.
+  # 2026-11-17: flatbot's fingers were changed between 2026-11-03 and 11-12 and reach further: the closed
+  # tips end constants.PADS_FROM_FLANGE_M (0.151 m) out of the FLANGE, the one statement of it (its evidence
+  # and the ruler that would settle it are there), and they are wider across the hand: in the wrist's frames
+  # the shut tips span 26 mm to one side of the hand's middle and 22 mm to the other (a wide black tip and a
+  # green part beside it; before, two tips within +-12). Covered beyond the group above: the shut tips over
+  # their last 21 mm at that width, and the open tips' ends as far out (x +-0.050). The spheres reach 16.5 mm
+  # past the tips on the axis (21.5 with the 5 mm buffer). The thickness (y) is taken as the old pads': not
+  # measured.
+  # `z_from: pads`: the z values of this group are counted BACK from the pads' ends (negative toward the
+  # wrist), so the group follows that constant: with 0.151 the box below is z 0.130-0.151 and the spheres stand
+  # at z 0.140, as they were written on 2026-11-17 (test_hand.py holds both).
+  # `frame`: and they are from the flange, as the fingertips' reach is known, while the spheres ride the
+  # gripper's base link: on a description without the sensor puck (flatbot's until 2026-11-17) the two are one
+  # frame and nothing moves; on one with it (gen_1_5: the gripper's base 14 mm out) they stand 14 mm nearer
+  # the gripper's base than written, where the tips are. The group above is the stock gripper's own and goes
+  # out with it.
   fingertips_151mm:
     link: arm_robotiq_85_base_link
+    frame: arm_end_effector_link
+    z_from: pads
     covers:
-      - {name: longer_tips, centre: [0.0, 0.0, 0.1405], half: [0.050, 0.0135, 0.0105]}
+      - {name: longer_tips, centre: [0.0, 0.0, -0.0105], half: [0.050, 0.0135, 0.0105]}
     spheres:
-      - {center: [-0.040, 0.0, 0.140], radius: 0.0275}
-      - {center: [-0.020, 0.0, 0.140], radius: 0.0275}
-      - {center: [0.0, 0.0, 0.140], radius: 0.0275}
-      - {center: [0.020, 0.0, 0.140], radius: 0.0275}
-      - {center: [0.040, 0.0, 0.140], radius: 0.0275}
+      - {center: [-0.040, 0.0, -0.011], radius: 0.0275}
+      - {center: [-0.020, 0.0, -0.011], radius: 0.0275}
+      - {center: [0.0, 0.0, -0.011], radius: 0.0275}
+      - {center: [0.020, 0.0, -0.011], radius: 0.0275}
+      - {center: [0.040, 0.0, -0.011], radius: 0.0275}
   # The wrist OAK-D Pro PoE and its bracket, in arm_end_effector_link (the flange: the camera TF's
   # parent; on flatbot's URDF arm_robotiq_85_base_link is the same frame). Two sources disagree by
   # ~29 mm along the tool on where its body is, so both are covered until a calibration settles it:
@@ -64,6 +77,13 @@ hand_spheres:
   #    face, with 7 spheres on arm_robotiq_85_base_link of that branch's URDF, where the puck puts the
   #    gripper 12.7 mm further out. On flatbot's URDF (no puck) they would sit 12.7 mm too close to the
   #    wrist (study/chair README): here they are that branch's 7 spheres, z + 0.0127, unchanged else.
+  # On gen_1_5 (and flatbot since rammp-deployments #149) the planner's robot file carries the camera itself:
+  # 7 spheres on the gripper's base link, the last of the two placements below with the puck at its remeasured
+  # 14 mm (1.3 mm further out than here). This group is not skipped there (its boxes for the fitted lens's
+  # body and the bracket are not inside the robot file's spheres), so the camera is modelled twice, 5 of the
+  # 12 spheres for a lens position gen_1_5's calibration does not have (z 15 mm; calibrated 22.5). Conservative:
+  # every sphere here is within the camera's body or a few mm of it by one of the two sources. Left so until
+  # the lens's calibrated place can be told from the body's (2026-11-19).
   wrist_camera:
     link: arm_end_effector_link
     covers:
