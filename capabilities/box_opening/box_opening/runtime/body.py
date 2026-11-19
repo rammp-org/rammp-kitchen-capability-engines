@@ -167,6 +167,20 @@ class HandGroup:
     frame: str = None
 
 
+def _z_zero(z_from):
+    """Where a hand group's z values are counted from, out of its frame's origin (m): 0.0 (None: the
+    frame's own origin), or, "pads", the shut pads' ends, constants.PADS_FROM_FLANGE_M out of the flange:
+    a group written back from there (negative z toward the wrist) moves with that one number. Read from
+    the module when asked, so the constant's one edit is the group's too. Any other word: ValueError."""
+    if z_from is None:
+        return 0.0
+    if str(z_from) != "pads":
+        raise ValueError("z_from %r (only: pads)" % (z_from,))
+    from box_opening import constants
+
+    return float(constants.PADS_FROM_FLANGE_M)
+
+
 def load_hand(path):
     """The hand groups of robot-body config `path`, each checked to cover its boxes, or BodyModelError."""
     data = _yaml(path).get("hand_spheres") or {}
@@ -184,6 +198,10 @@ def load_hand(path):
                 (str(c.get("name", k)), np.array(c["centre"], float).reshape(3), np.array(c["half"], float).reshape(3))
                 for k, c in enumerate(g.get("covers") or [])
             ]
+            z0 = _z_zero(g.get("z_from"))
+            if z0:  # to the nanometre: -0.011 back from 0.151 is the 0.140 it was written as
+                cs[:, 2] = np.round(cs[:, 2] + z0, 9)
+                covers = [(n, np.array([c[0], c[1], round(float(c[2]) + z0, 9)]), h) for n, c, h in covers]
         except (KeyError, TypeError, ValueError) as e:
             raise BodyModelError("body model: %s's hand group %s is malformed (%s)" % (path, name, e)) from e
         if not len(rs) or not covers:
@@ -253,6 +271,7 @@ class BodyModel:
     hand: list = None  # [HandGroup] from robot-body config, placed (or skipped) by Body
     hand_source: str = None
     near_user: NearUser = None  # the speed near the user, from the same robot-body config
+    ee_link: str = None  # the link the planner plans (the robot file's ee_link); None: it names none
 
     def check_for(self, chain, urdf_path, root):
         """This model placed on `chain`'s URDF, rooted at `root`: a Body."""
@@ -338,6 +357,7 @@ def load(planner_yaml, robot_body=None):
         hand=hand,
         hand_source=None if hand_source is None else str(hand_source),
         near_user=near_user,
+        ee_link=str(kin["ee_link"]) if kin.get("ee_link") else None,
     )
 
 
@@ -416,6 +436,14 @@ class Body:
             raise BodyModelError(
                 "body model: %s's boxes are in %s, the arm's chain in %s" % (model.source, model.base_link, root)
             )
+        # the planner's own word on which link it plans: the chain places that one from the flange, and a pose
+        # handed to the planner, or a plan's end, is taken there (kinematics.ArmChain.use_planner_ee). A link
+        # this arm's URDF does not fix to its flange stops the run here, before anything moves.
+        if model.ee_link and hasattr(chain, "use_planner_ee"):
+            try:
+                chain.use_planner_ee(model.ee_link, "the planner's robot file, %s" % model.source)
+            except RuntimeError as e:
+                raise BodyModelError("body model: %s" % e) from e
         joints = {}
         for j in ET.parse(urdf_path).getroot().findall("joint"):
             o = j.find("origin")

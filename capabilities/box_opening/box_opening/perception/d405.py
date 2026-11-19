@@ -43,14 +43,33 @@ def camera_config(name=CAMERA_CONFIG):
 # another file (an offline tool); set empty, none is read.
 ROBOT_CAMERAS = "/config/robot/transforms/cameras.yaml"
 ROBOT_CAMERAS_ENV = "BOX_OPENING_ROBOT_CAMERAS"
-FLANGE_LINK = "end_effector_link"  # "arm_end_effector_link" where the description prefixes its links
+# The OAK driver's optical frame in its root frame (the mount's child, body axes: x out of the lens, y left,
+# z up): optical x = -y, y = -z, z = +x. With the mount's own turn and the flange's pose it gives TF's optical
+# frame to 1e-4 on a 2026-11-17 capture (wrist-survey-20261117-164104, the lens to 0.04 mm).
+BODY_TO_OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+# Where the wrist's lens may stand from the camera config's own figure (wrist_lens_in_hand_m: the mount fitted
+# from the 2026-10-22 depth-press run, rammp-deployments #128, the one measurement of it on record that no
+# calibration session made) before a run says so and the depth press does not centre on it
+# (tasks/depth_press). Sideways, from what is on record: the hand-eye calibration of 2026-11-09 stands 11.5 mm
+# from the fit and every press on it came down ~1 cm to the right (owner, 2026-11-17); the one of 2026-11-18
+# (gen_1_5) stands 7.0 mm from it, and the two differ by 5.6 mm in x and 8.3 mm in y from each other. So
+# 9 mm: over what two good calibrations differ by, under the one known to be bad. Along the tool, 20 mm, as
+# the depth press always took (the two calibrations stand 7.5 mm from the fit there).
+# WHAT IT CAN CATCH: a mount a centimetre or more aside of the fit (a wrong sign, the hand measurement of
+# 2026-10-19 at 35 mm, the 11-09 calibration), 2 cm along the tool. WHAT IT CANNOT: which of two mounts
+# 5-8 mm apart is right; any error in the fit itself (its x was not observable and is kept 0, its y and z
+# were good to ~15 mm); a turned mount (a degree is 5 mm at the lid and no part of this).
+LENS_REF_XY_TOL_M = 0.009
+LENS_REF_Z_TOL_M = 0.020
 
 
 def robot_mount(name, path=None, env=None):
-    """(parent link, [x, y, z]) of the robot's own mount of camera frame `name` (ROBOT_CAMERAS, or `path`),
-    or None: no such file here (the bench, a test, an offline tool without the robot's config), or no such
-    mount in it. A file that is there and cannot be read as mounts is None too, said in the log: the
-    caller falls back to its own figure, and the depth press's check against TF still stands."""
+    """The robot's own mount of camera frame `name` (ROBOT_CAMERAS, or `path`): a namespace of its
+    `parent` link, `xyz`, `quat` (xyzw, or None where the file gives none), the `path` it was read
+    from and the `robot` that config says it is (the `robot:` of the mount.yaml beside transforms/,
+    None where there is none). None: no such file here (the bench, a test, an offline tool without
+    the robot's config), or no such mount in it. A file that is there and cannot be read as mounts
+    is None too, said in the log: the caller falls back to its own figure."""
     env = os.environ if env is None else env
     if path is None:
         path = env[ROBOT_CAMERAS_ENV].strip() if ROBOT_CAMERAS_ENV in env else ROBOT_CAMERAS
@@ -65,7 +84,11 @@ def robot_mount(name, path=None, env=None):
         xyz = [float(v) for v in m["xyz"]]
         if len(xyz) != 3 or not all(np.isfinite(xyz)):
             raise ValueError("xyz %r" % (m["xyz"],))
-        return str(m["parent"]), xyz
+        quat = m.get("quat_xyzw")
+        quat = None if quat is None else [float(v) for v in quat]
+        if quat is not None and (len(quat) != 4 or not all(np.isfinite(quat)) or not any(quat)):
+            raise ValueError("quat_xyzw %r" % (m["quat_xyzw"],))
+        return SimpleNamespace(parent=str(m["parent"]), xyz=xyz, quat=quat, path=str(path), robot=_robot_of(path))
     except Exception as e:  # noqa: BLE001 - an unreadable calibration is not a reason to stop: the copy stands in
         from box_opening import LOGGER as log
 
@@ -73,34 +96,43 @@ def robot_mount(name, path=None, env=None):
         return None
 
 
-def wrist_lens_in_hand(cfg, chain=None, path=None, env=None):
-    """([x, y, z] or None, where it is from): the wrist lens from the tool frame, in the hand's axes (m).
+def _robot_of(cameras_path):
+    """The robot a config's transforms/cameras.yaml belongs to: the `robot:` of the mount.yaml one
+    folder up (rammp-deployments config/robots/<robot>/), or None."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(cameras_path))), "mount.yaml")) as f:
+            robot = load_yaml(f).get("robot")
+        return None if robot is None else str(robot)
+    except Exception:  # noqa: BLE001 - no mount.yaml beside it: not said
+        return None
 
-    Where the robot's own calibration can be read it is that, not a copy kept here: camera config `cfg`
-    names the mount whose child frame the driver puts AT the colour sensor (`robot_mount`: wrist_camera,
-    the root of the OAK's tree), its parent is the flange, and the tool frame stands straight out of the
-    flange with the flange's axes (kinematics.described_tool_m refuses any other), `chain`'s
-    tool_from_flange_m along z: the lens is the mount's xyz less that (to the nanometre: the team's
-    [0, 0.065, 0.015] on a tool frame 0.120 out is the [0, 0.065, -0.105] this was kept as). A copy written
-    for one tool frame and one mount was wrong on the next of either (the wrong frame once: #105, reverted
-    by #106; on gen_1_5, 2026-11-19: 7 mm sideways of the 11-18 calibration and 6.5 mm along the tool on
-    the puck's tool frame).
 
-    Else `cfg`'s own wrist_lens_in_hand_m: a config that names no mount (the bench's D405, whose mount is
-    in that same file), no robot config here, a mount on another link than the flange, or no chain to say
-    where the tool frame is. `chain`: None is the run's own (runtime/approach), where it has one."""
+def wrist_camera_in_hand(cfg, chain=None, path=None, env=None):
+    """(lens [x, y, z] or None, optical axes (3, 3) or None, where it is from): the wrist camera from
+    box opening's tool frame, in the hand's axes (m; the optical frame's axes as columns).
+
+    Where the robot's own calibration can be read it is that, not a copy kept here: camera config
+    `cfg` names the mount whose child frame the driver puts AT the colour sensor (`robot_mount`:
+    wrist_camera, the root of the OAK's tree). Its parent is whatever link of the hand the robot
+    mounts it on (the flange, the sensor puck's link, the gripper's base, the description's tool
+    frame): `chain` places that link from the flange by its URDF's fixed joints, and the tool frame
+    stands `chain`.tool_from_flange_m out of the flange with the flange's axes, on every description.
+    To the nanometre: the team's [0, 0.065, 0.015] on the flange is the [0, 0.065, -0.105] this was
+    kept as. A copy written for one mount was wrong on the next (and once written in the wrong frame:
+    #105, reverted by #106; on gen_1_5 it stands 7.0 mm aside of the 2026-11-18 calibration).
+
+    Else `cfg`'s own wrist_lens_in_hand_m and no axes: a config that names no mount (the bench's
+    D405, whose mount is in that same file), no robot config here, a parent this arm's URDF does not
+    fix to its flange, or no chain to place it by. `chain`: None is the run's own (runtime/approach),
+    where it has one."""
     lens = cfg.get("wrist_lens_in_hand_m")
     copy = None if lens is None else [float(v) for v in lens]
     name = cfg.get("robot_mount")
     if not name:
-        return copy, "the camera config"
+        return copy, None, "the camera config"
     mount = robot_mount(name, path=path, env=env)
     if mount is None:
-        return copy, "the camera config (no robot calibration of %s here)" % name
-    parent, xyz = mount
-    bare = parent[4:] if parent.startswith("arm_") else parent
-    if bare != FLANGE_LINK:
-        return copy, "the camera config (the robot mounts %s on %s, not the flange)" % (name, parent)
+        return copy, None, "the camera config (no robot calibration of %s here)" % name
     if chain is None:
         try:
             from box_opening.runtime import approach
@@ -108,12 +140,43 @@ def wrist_lens_in_hand(cfg, chain=None, path=None, env=None):
             chain = approach._chain() if approach.chain_ready()[0] else None
         except Exception:  # noqa: BLE001 - no chain (no URDF yet): the copy
             chain = None
-    tool = getattr(chain, "tool_from_flange_m", None)
-    if tool is None:
-        return copy, "the camera config (no arm chain yet to say where the tool frame is)"
-    return [round(xyz[0], 9), round(xyz[1], 9), round(xyz[2] - float(tool), 9)], (
-        "the robot's calibration of %s, the tool frame %.0f mm out of the flange" % (name, 1000.0 * float(tool))
-    )
+    find, tool = getattr(chain, "fixed_in_flange", None), getattr(chain, "tool_from_flange_m", None)
+    if find is None or tool is None:
+        return copy, None, "the camera config (no arm chain yet to place %s's mount by)" % name
+    pose, why = find(mount.parent)
+    if pose is None:
+        return (
+            copy,
+            None,
+            "the camera config (the robot mounts %s on %s, which the arm's URDF does not fix to its flange: %s)"
+            % (
+                name,
+                mount.parent,
+                why,
+            ),
+        )
+    R, t = pose
+    at = R @ np.asarray(mount.xyz, float) + t - np.array([0.0, 0.0, float(tool)])
+    # (+ 0.0: no minus zero in what a square mount turns out; rounded, its axes are exactly square)
+    optical = None if mount.quat is None else np.round(R @ quat_to_mat(*mount.quat) @ BODY_TO_OPTICAL, 12) + 0.0
+    where = "%s in %s (robot %s), on %s" % (name, mount.path, mount.robot or "not named", mount.parent)
+    return [round(float(v), 9) + 0.0 for v in at], optical, where
+
+
+def wrist_lens_in_hand(cfg, chain=None, path=None, env=None):
+    """(lens [x, y, z] or None, where it is from): wrist_camera_in_hand's lens."""
+    lens, _optical, where = wrist_camera_in_hand(cfg, chain=chain, path=path, env=env)
+    return lens, where
+
+
+def lens_off_reference(cfg, lens):
+    """(sideways, along the tool) m: how far `lens` (from the tool frame) stands from the camera config's
+    own figure, the one measurement of the wrist lens no calibration session made (LENS_REF_*_TOL_M's
+    comment says what that is worth), or None where the config keeps none or there is no lens."""
+    ref = cfg.get("wrist_lens_in_hand_m")
+    if ref is None or lens is None:
+        return None
+    return float(np.hypot(lens[0] - float(ref[0]), lens[1] - float(ref[1]))), abs(float(lens[2]) - float(ref[2]))
 
 
 def quat_to_mat(x, y, z, w):
@@ -245,6 +308,14 @@ class D405Grabber:
         this run's tool frame, else the camera config's figure); None: unmeasured, the depth press does
         not centre."""
         return wrist_lens_in_hand(self._cfg)[0]
+
+    @property
+    def wrist_lens_reference_m(self):
+        """The camera config's own figure for the lens from tool_frame: the fit of 2026-10-22, which no
+        calibration session made. What the depth press holds TF's mount against besides the robot's
+        calibration (LENS_REF_XY_TOL_M); None where the config keeps none."""
+        ref = self._cfg.get("wrist_lens_in_hand_m")
+        return None if ref is None else [float(v) for v in ref]
 
     def _subscribe(self):
         from rclpy.qos import qos_profile_sensor_data

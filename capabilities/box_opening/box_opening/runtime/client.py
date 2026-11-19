@@ -901,7 +901,21 @@ class PlannerClient:
             )
         return res
 
+    def _planner_pose(self, xyz, quat_xyzw):
+        """The pose to hand the planner for box opening's tool frame at (xyz, quat_xyzw): its ee_link's
+        (kinematics.ArmChain.planner_pose). The planner plans the description's own tool frame, which a
+        description with the sensor puck has 14 mm further along the hand than the frame every height
+        here was tuned in; where the two are one frame, or there is no chain to say, the pose as it is."""
+        try:
+            from box_opening.runtime.approach import _chain
+
+            return _chain().planner_pose(xyz, quat_xyzw)
+        except Exception:  # noqa: BLE001 - no chain, or a stand-in without the step: the pose as it always went
+            return xyz, quat_xyzw
+
     def _plan_pose_once(self, xyz, quat_xyzw, start_joints):
+        # the planner's frame from here on: asked there, and its plan's end judged there (_checked_pose)
+        xyz, quat_xyzw = self._planner_pose(xyz, quat_xyzw)
         g = PlanToPose.Goal()
         g.target.position.x, g.target.position.y, g.target.position.z = (float(v) for v in xyz)
         (
@@ -916,9 +930,10 @@ class PlannerClient:
         return self._checked_pose(self._call(self._plan_pose, g), xyz, quat_xyzw)
 
     def _checked_pose(self, res, xyz, quat_xyzw):
-        """`res`, the planner's plan to the tool pose (xyz, quat_xyzw), when
-        it ends there: within PLAN_END_M and PLAN_END_DEG by the arm's own
-        FK, which every plan that met cuRobo's success test for this pose
+        """`res`, the planner's plan to the pose (xyz, quat_xyzw) of ITS
+        tool frame (the description's, _planner_pose), when it ends there:
+        within PLAN_END_M and PLAN_END_DEG by the arm's own FK of that
+        frame, which every plan that met cuRobo's success test for this pose
         does. One that ends further off is another goal's plan, and refused,
         as is one with no finite end to measure. With no chain to measure
         by, it goes on as it always did (a kinematics problem never costs
@@ -928,7 +943,7 @@ class PlannerClient:
             return res
         if planner.plan_end(getattr(res, "trajectory", None)) is None:
             return self._refuse(res, "the plan has no finite end to check against its pose — not flown")
-        err = planner.pose_end_error(res.trajectory, xyz, quat_xyzw)
+        err = planner.pose_end_error(res.trajectory, xyz, quat_xyzw, planner_frame=True)
         if err is None:
             return res
         off, turn = err

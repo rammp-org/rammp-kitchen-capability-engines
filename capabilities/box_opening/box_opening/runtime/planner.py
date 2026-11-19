@@ -122,7 +122,7 @@ def joint_end_error(traj, q_goal):
     return float(errs[j]), j
 
 
-def pose_end_error(traj, xyz, quat_xyzw):
+def pose_end_error(traj, xyz, quat_xyzw, planner_frame=False):
     """(m, rad): how far the tool frame at the last point of `traj` stands
     from `xyz` at the attitude `quat_xyzw` — its offset and its turn, by the
     arm's own kinematics (approach._chain: the URDF cuRobo plans with, its
@@ -130,7 +130,9 @@ def pose_end_error(traj, xyz, quat_xyzw):
     None with no finite last point, or no chain to measure with. The turn
     is read off the trace, which holds at half a turn too: a rotation
     vector loses its axis there (kinematics.rotvec reads a flip of exactly
-    pi as none). A measurement only: it never raises."""
+    pi as none). A measurement only: it never raises. `planner_frame`: the
+    pose is the planner's ee_link's (ArmChain.planner_pose), measured there
+    (ee_fk): the planner's own success test is of that frame."""
     end = plan_end(traj)
     if end is None:
         return None
@@ -140,7 +142,9 @@ def pose_end_error(traj, xyz, quat_xyzw):
         from box_opening.perception.d405 import quat_to_mat
         from box_opening.runtime.approach import _chain
 
-        R, t = _chain().fk(end)
+        chain = _chain()
+        # a chain with no planner's frame of its own (a test's stand-in) is measured at its tool frame
+        R, t = (getattr(chain, "ee_fk", None) or chain.fk)(end) if planner_frame else chain.fk(end)
         off = float(np.linalg.norm(np.asarray(xyz, float) - np.asarray(t, float)))
         R_goal = quat_to_mat(*(float(v) for v in quat_xyzw))
         cos_turn = (float(np.trace(R_goal @ np.asarray(R, float).T)) - 1.0) / 2.0

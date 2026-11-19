@@ -29,6 +29,7 @@ from box_opening.constants import (
     TIP_TO_TOOL_M,
     TRANSIT_SPEED,
 )
+from box_opening.runtime.fingers import gripper_out_m
 from box_opening.runtime.guards import (
     GuardSpec,
     in_band,
@@ -397,7 +398,9 @@ class Place:
         def verify(v):
             slipped = self.band is not None and v.gripper_pos is not None and not in_band(v.gripper_pos, self.band)
             if v.outcome == "touch":
-                high = None if v.contact_xyz is None else float(v.contact_xyz[2]) - TIP_TO_TOOL_M - self.target_xyz[2]
+                # (the tip links ride the gripper: gripper_out_m is what the run's description has it out of the flange)
+                tips = None if v.contact_xyz is None else float(v.contact_xyz[2]) + gripper_out_m()
+                high = None if tips is None else tips - TIP_TO_TOOL_M - self.target_xyz[2]
                 if high is not None and high > SETDOWN_HIGH_M:
                     return False, (
                         "struck something %.0f mm above where the lid meets "

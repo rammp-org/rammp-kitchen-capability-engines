@@ -34,6 +34,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from box_opening.constants import WRIST_NEAREST_M
 from box_opening.geometry import ang_diff, yaw_about_world_z
 from box_opening.perception.d405 import quat_to_mat
 from box_opening.perception.planes import fit_plane
@@ -733,12 +734,8 @@ def _clear_spots(
     return picked, why
 
 
-# nearer the wrist lens than this is the hand itself. The fingertips end constants.PADS_FROM_FLANGE_M out of the
-# flange and the lens stands 15-22.5 mm out of it (flatbot's fitted mount, gen_1_5's 2026-11-18 calibration):
-# 128-136 mm of depth, whichever description the run is on (the tool frame is not in it), up to 146 should the
-# fingers be as long as the recorded runs allow (constants). It stood at 0.15 for the fingers before 2026-11-10,
-# whose touches read 123-128 mm; test_hand holds it 25 mm or more over the tips at both mounts
-WRIST_NEAREST_M = 0.17
+# WRIST_NEAREST_M (constants; read here and by wrist_finder under this module's name): nearer the wrist lens
+# than that is the hand itself. Worked out there from how far out of the flange the fingertips end.
 
 
 def depth_points(depth, k, rot_cam, trans_cam, stride=2):

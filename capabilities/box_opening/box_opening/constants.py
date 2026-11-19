@@ -261,21 +261,24 @@ RECOIL_SPEED = 0.5
 # Note the real robot's description does not even define tool_frame once a
 # gripper is attached; it is cuRobo's own frame. Command tool_frame this
 # much HIGHER than where the fingertips should land.
+# 2026-11-19: what this is today is THE POINT THE HEIGHTS WERE TUNED BY, 0.131 m out of the flange
+# (HEIGHTS_POINT_FROM_FLANGE_M below), not where this hand's pads end (PADS_FROM_FLANGE_M): every hover,
+# stroke, grip and set-down height in the package was settled by flight against it, on flatbot, with the
+# real pads further out all the while. It stays where it is on every description of the arm.
 TCP_OFFSET_M = 0.011
 
 # THE HAND, stated once (2026-11-19): how far out of the flange (arm_end_effector_link, the last frame every
 # description of this arm agrees on) the shut pads end. A fact of the robot's body, whatever its description
-# puts between the flange and the gripper. The description a run is on says where its tool frame is
-# (kinematics.ArmChain.tool_from_flange_m: 0.120 with the gripper bolted on the flange, 0.134 with Kinova's
-# sensor puck under it), the pads the heights go by stand TCP_OFFSET_M past that, and what this hand's fingers
-# reach past THOSE follows (runtime/fingers.past_model_m: the press's contact band), as do the fingertips'
-# spheres (config/robot_body.yaml fingertips_151mm, given from the flange) and how near the wrist's lens the
-# hand itself is seen (perception/clear_table.WRIST_NEAREST_M).
+# puts between the flange and the gripper. Everything that is about where the fingers really are is worked out
+# from this one number: what they reach past the point the heights go by (FINGERS_PAST_MODEL_M: the press's
+# contact band), the fingertips' spheres (config/robot_body.yaml fingertips_151mm: written back from the pads'
+# ends, from the flange) and how near the wrist's lens the hand itself is seen (WRIST_NEAREST_M). The heights
+# the arm is FLOWN at are not: they go by a point that stays where it was tuned (TCP_OFFSET_M).
 # The fingers were changed between 2026-11-03 and 11-12 (the wrist's videos: two plain black tips on 11-03,
 # wider black tips with a green part beside them since; the owner: "the green thing is just part the gripper,
 # and yes, they do reach deeper now"), and the arm's description gained the sensor puck it had lacked.
-# 0.151 is 2026-11-17's figure, kept: on the description of that day (no puck, the pads modelled 0.131 out)
-# it is the 20 mm the press band has had since, and on gen_1_5's (the puck, the pads modelled 0.145 out) 6 mm.
+# 0.151 is 2026-11-17's figure, kept until a ruler says otherwise: the 0.131 the heights go by and the 20 mm
+# the press band has had since that day.
 # What the recorded runs say of it, re-read 2026-11-19 against one lens mount (the measurements and their
 # scripts: ~/rammp-wt/night-1116/gen15/hand/NOTES.md):
 #   - the puck was on the arm before the fingers were changed: the scene camera's side view of 2026-11-03's
@@ -293,14 +296,25 @@ TCP_OFFSET_M = 0.011
 # A ruler settles it to the millimetre: the fingers shut, from the flange's face (where the puck's disc meets
 # the arm's last link) to the pads' ends, along the hand. Change this one number then.
 PADS_FROM_FLANGE_M = 0.151
-# With the 2F-85 bolted on the flange its tool frame, cuRobo's ee_link, is this far out (robot_gen3_2f85.yaml;
-# kinematics.TOOL_FROM_EE_M, what a URDF with no tool frame of its own is given)
+# Box opening's own tool frame, this far out of the flange on EVERY description of the arm
+# (kinematics.TOOL_FROM_EE_M, with the why): where cuRobo's ee_link stands with the 2F-85 bolted on the
+# flange (robot_gen3_2f85.yaml), which is what the arm's description said while every height here was tuned.
 TOOL_FROM_FLANGE_STOCK_M = 0.120
-# What this hand's fingers reach past the modelled pads on such a description (flatbot's own until 2026-11-17,
-# and every recorded run): 20 mm, as measured that day. The figure for the description a run is on is
-# fingers.past_model_m(chain); the heights the arm is flown at stay TCP_OFFSET_M past the tool frame (the
-# press finds the button by touch), which a description with the puck puts 14 mm nearer the real pads.
-FINGERS_PAST_MODEL_M = round(PADS_FROM_FLANGE_M - (TOOL_FROM_FLANGE_STOCK_M + TCP_OFFSET_M), 6)
+# The point the heights go by, from the flange: the tool frame and TCP_OFFSET_M. Where the stock pads would end
+# with the gripper bolted on the flange; on this arm, with the puck under the gripper and the fingers it has
+# now, a point 20 mm short of the pads' ends. It is kept for what it is: where it stood through every flown run.
+HEIGHTS_POINT_FROM_FLANGE_M = round(TOOL_FROM_FLANGE_STOCK_M + TCP_OFFSET_M, 6)
+# What this hand's fingers reach past that point: 20 mm (2026-11-17's figure). Read where a contact is JUDGED
+# (the press's band, depth_press.watch_press), never where a height is flown: the press finds the button by touch.
+FINGERS_PAST_MODEL_M = round(PADS_FROM_FLANGE_M - HEIGHTS_POINT_FROM_FLANGE_M, 6)
+# Depth nearer the wrist's lens than this is the hand itself (perception/clear_table, wrist_finder: such points
+# are dropped). The pads' ends are PADS_FROM_FLANGE_M less the lens's own stand-off out of the flange in front
+# of the lens: no mount on record has the lens nearer the flange than 15 mm (the 2026-10-22 fit; the
+# calibrations of 11-09 and 11-18 have it 22.5 mm out), so the pads are at most 136 mm of depth away, and the
+# cutoff keeps 34 mm over that (41.5 on gen_1_5's mount). It was 0.15 for the fingers before 2026-11-10, whose
+# touches read 123-128 mm, and 0.17 since 2026-11-17: this, worked out.
+WRIST_NEAREST_PAST_PADS_M = 0.019
+WRIST_NEAREST_M = round(PADS_FROM_FLANGE_M + WRIST_NEAREST_PAST_PADS_M, 6)
 
 # The fingertip links, for measuring a contact with the arm's own
 # kinematics. These EXIST in the live TF tree (kinova_gen3_description:
@@ -315,9 +329,11 @@ FINGERTIP_FRAMES = (
 # axis (real URDF: tip link at EE + 0.1118 m closed, tool_frame at
 # EE + 0.120; cross-checked on two bench runs where the tip TF at the
 # trip and the replayed tool_frame differed by 8.0-8.3 mm). Converts a
-# fingertip TF reading into the frame the planner is commanded in. Both
-# ride the gripper: on a description with the sensor puck the tip links
-# and the tool frame are 14 mm further out alike, and this stands.
+# fingertip TF reading into the frame the planner is commanded in.
+# The tip links ride the gripper and box opening's tool frame the flange: on a description that
+# puts the gripper further out (the sensor puck: 14 mm) the tip links stand that much further
+# along the hand, 6 mm PAST the tool frame. runtime/fingers.tip_to_tool_m(chain) is the figure
+# for the description a run is on; this one is the gripper on the flange.
 TIP_TO_TOOL_M = 0.008
 
 # Joint-space arc per metre of tool travel along a vertical descent at the

@@ -158,8 +158,14 @@ KNOB_UP_MM = 6.0  # press_demo.KNOB_UP_MIN_MM
 # off the button (20:04: TF's lens y 0.100 against a true ~0.065 — the press
 # 35 mm off, on the lid's edge). CENTRE runs only when TF's lens agrees with
 # the grabber's (wrist_lens_in_hand_m: the robot's own calibration from the
-# mounted robot config, on this run's tool frame, else the camera config's
-# figure — perception/d405.wrist_lens_in_hand) ...
+# mounted robot config, else the camera config's figure —
+# perception/d405.wrist_lens_in_hand): a TF tree and a robot config that are
+# not one robot's are caught there, and nothing else, since TF is published
+# from that same file. What is independent of it is the grabber's
+# wrist_lens_reference_m, the camera config's own figure (the mount fitted
+# from the 2026-10-22 depth-press run): TF's lens must also stand within
+# d405.LENS_REF_XY_TOL_M of that sideways and LENS_REF_Z_TOL_M along the
+# tool (9 and 20 mm; that comment says what it can and cannot catch) ...
 MOUNT_XY_TOL_M = 0.005
 MOUNT_Z_TOL_M = 0.020
 # ... and the touch must meet the lid where TF's lens says the fingertips
@@ -1359,12 +1365,8 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
     # a leaning hand's pads meet the top corner first, their middle (what the watch measures) that much
     # above it: the band above the top is as much wider, so the same top is judged the same at any lean
     corner = fingers.pad_corner_below_m(_lean_deg(stroke.quat)) if stroke.quat is not None else 0.0
-    chain = approach._chain()
-    # ... and what this hand's fingers reach past the pads the watch measures, on the description this run's
-    # chain was built from (20 mm with the gripper on the flange, 6 with the sensor puck under it)
-    past = fingers.past_model_m(chain, FINGERS_PAST_MODEL_M)
     contact = PressContact(
-        chain,
+        approach._chain(),
         ctx.client,
         top_z,
         max(slow_z, start_z - DESCENT_ARM_M),
@@ -1373,12 +1375,12 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         cut=cut,
         final=True,
         slow_z=slow_z,
-        # ... and both ends of it stand where this hand's fingers meet a top: they reach `past` further than
-        # the pads the watch measures (constants.PADS_FROM_FLANGE_M: every press of 2026-11-12 to 11-17, on the
-        # description without the puck, met its button 40-45 mm "above" it, and 11-17 16:44's 56 mm was refused
-        # as something in the way)
-        early_m=CONTACT_EARLY_M + corner + past,
-        late_m=max(CONTACT_LATE_M - past, 0.0),
+        # ... and both ends of it stand where this hand's fingers meet a top: they reach FINGERS_PAST_MODEL_M
+        # further than the point the watch measures, the one the heights go by (constants: worked out from
+        # PADS_FROM_FLANGE_M; every press since 2026-11-12 met its button 40-45 mm "above" it, and 2026-11-17
+        # 16:44's 56 mm was refused as something in the way)
+        early_m=CONTACT_EARLY_M + corner + FINGERS_PAST_MODEL_M,
+        late_m=max(CONTACT_LATE_M - FINGERS_PAST_MODEL_M, 0.0),
         abort_on_failure=True,
     )
     contact.watch_beside(SHADOW_RISE_M, SHADOW_WINDOW_S, SHADOW_SAMPLES)
@@ -1751,6 +1753,26 @@ def _press_down(
             "on it"
             % (", ".join("%+.0f" % (1000 * v) for v in lens), ", ".join("%+.0f" % (1000 * v) for v in measured)),
         )
+    # ... and against the one figure for the lens that no calibration made (the comment at MOUNT_XY_TOL_M)
+    reference = getattr(getattr(watcher, "grab", None), "wrist_lens_reference_m", None)
+    if reference is not None:
+        from box_opening.perception.d405 import LENS_REF_XY_TOL_M, LENS_REF_Z_TOL_M
+
+        aside = math.hypot(lens[0] - float(reference[0]), lens[1] - float(reference[1]))
+        along = abs(lens[2] - float(reference[2]))
+        if aside > LENS_REF_XY_TOL_M or along > LENS_REF_Z_TOL_M:
+            runner.note(
+                "depth_mount_refused",
+                lens_in_hand_mm=[round(1000 * v, 1) for v in lens],
+                reference_mm=[round(1000 * float(v), 1) for v in reference],
+            )
+            return DepthPress(
+                free=True,
+                why="the wrist camera's mount in TF puts the lens %.0f mm aside and %.0f mm along the tool from "
+                "where the 2026-10-22 depth-press fit has it (more than %.0f / %.0f): a calibration that far "
+                "from it pressed a centimetre beside the button (2026-11-09's) — check the mount before "
+                "centring on it" % (1000 * aside, 1000 * along, 1000 * LENS_REF_XY_TOL_M, 1000 * LENS_REF_Z_TOL_M),
+            )
     trusted = s is None and aimed is not None  # no look confirms the button: the aim stands in
     if s is None and aimed is None:
         return DepthPress(
