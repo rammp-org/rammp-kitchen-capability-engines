@@ -76,9 +76,15 @@ def test_the_wrist_lens_is_the_robots_calibration_whichever_description_the_run_
     gen15 = _robot_config(tmp_path, MOUNT_GEN15)
     for chain in both_chains(tmp_path):
         lens, where = d405.wrist_lens_in_hand(cfg, chain=chain, path=flatbot)
-        assert lens == COPY and where == "wrist_camera in %s (robot flatbot_fwd8), on arm_end_effector_link" % flatbot
+        assert (
+            lens == COPY
+            and where == "wrist_camera in %s (robot flatbot_fwd8 by its mount.yaml), on arm_end_effector_link" % flatbot
+        )
         lens, where = d405.wrist_lens_in_hand(cfg, chain=chain, path=gen15)
-        assert lens == LENS_GEN15 and where == "wrist_camera in %s (robot gen_1_5), on arm_end_effector_link" % gen15
+        assert (
+            lens == LENS_GEN15
+            and where == "wrist_camera in %s (robot gen_1_5 by its mount.yaml), on arm_end_effector_link" % gen15
+        )
         q = arm_poses()[0]
         Rf, f = flange_pose(chain, q)
         R, t = chain.fk(q)
@@ -155,7 +161,7 @@ def test_a_run_takes_its_lens_and_its_cameras_axes_from_the_mounted_robot_config
     approach.set_chain_root("arm_mount", puck_urdf(tmp_path))
     g = d405.D405Grabber.__new__(d405.D405Grabber)
     g._cfg = d405.camera_config("camera_oak_wrist.yaml")
-    assert g.wrist_lens_in_hand_m == LENS_GEN15 and g.wrist_lens_reference_m == COPY
+    assert g.wrist_lens_in_hand_m == LENS_GEN15
     cam = sv.camera_of(None, "camera_oak_wrist.yaml")
     assert np.allclose(cam.lens, LENS_GEN15)
     off = math.degrees(math.acos(float(cam.optical[:, 2] @ sv.OPTICAL_IN_TOOL[:, 2])))
@@ -174,47 +180,72 @@ def test_a_run_takes_its_lens_and_its_cameras_axes_from_the_mounted_robot_config
 # ---- what still checks the mount ------------------------------------------------------------------------
 
 
-def test_the_mounts_on_record_against_the_one_figure_no_calibration_made():
-    """The 2026-10-22 fit is the only figure for this lens that did not come out of a calibration
-    session. The calibration of 2026-11-09 stands 11.6 mm aside of it and pressed a centimetre beside
-    the button; gen_1_5's of 2026-11-18 stands 7.0 mm aside; the two are 5.6 and 8.3 mm apart in x and
-    y. The tolerance sits between: over what two calibrations differ by, under the one known bad."""
+def _optical(mount):
+    return d405.quat_to_mat(*mount[1]) @ d405.BODY_TO_OPTICAL
+
+
+def _lens(mount):
+    return [mount[0][0], mount[0][1], mount[0][2] - 0.120]
+
+
+def test_a_mount_is_held_by_where_it_aims_against_the_mounts_presses_have_flown_on():
+    """What a mount does to a press is where it puts the point the look aims at: its lens and its axes
+    together, 0.30 m out. By the lens alone gen_1_5's calibration stands 7.0 mm from the fit and the
+    2026-11-09 one 11.6; by the aimed point it is the other way round, 13.9 and 10.9 mm, and gen_1_5's
+    aims 11.1 mm (4.4 across, 10.2 along the hand's y) from the mount the 11-12..17 flights flew on. An
+    aim more than a centimetre from both flown mounts' is one no press has flown near."""
     cfg = d405.camera_config("camera_oak_wrist.yaml")
-    off = {}
-    for name, (xyz, _quat) in (("fit", MOUNT_FLATBOT), ("1109", MOUNT_1109), ("1118", MOUNT_GEN15)):
-        off[name] = d405.lens_off_reference(cfg, [xyz[0], xyz[1], xyz[2] - 0.120])
-    assert off["fit"] == pytest.approx((0.0, 0.0), abs=1e-12)
-    assert off["1109"] == pytest.approx((0.0116, 0.0075), abs=2e-4) and off["1118"] == pytest.approx(
-        (0.0070, 0.0075), abs=2e-4
+    (fit_what, fit_lens, fit_axes), (flown_what, flown_lens, flown_axes) = d405.flown_mounts(cfg)
+    assert fit_what == "the 2026-10-22 fit" and fit_lens == COPY and np.array_equal(fit_axes, d405.SQUARE_OPTICAL)
+    assert flown_what == "the mount flown 2026-11-12..17" and flown_lens == pytest.approx(_lens(MOUNT_1109))
+    assert np.allclose(flown_axes, _optical(MOUNT_1109))
+    assert np.allclose(d405.aim_point(COPY), [0.0, 0.065, 0.195]) and d405.LOOK_RANGE_M == 0.30
+    off = {
+        name: d405.aim_off_flown(cfg, _lens(m), _optical(m))
+        for name, m in (("1109", MOUNT_1109), ("1118", MOUNT_GEN15))
+    }
+    assert [round(1000 * a, 1) for _w, a, _d in off["1109"]] == [10.9, 0.0]
+    assert [round(1000 * a, 1) for _w, a, _d in off["1118"]] == [13.9, 11.1]
+    assert np.round(1000 * np.asarray(off["1118"][0][2]), 1).tolist() == [-6.3, 12.4, 7.4]  # from the fit's
+    assert np.round(1000 * np.asarray(off["1118"][1][2][:2]), 1).tolist() == [4.4, 10.2]  # from the flown mount's
+    # the lens alone (its axes taken square) would have said 7.0 mm: the mount's turn is the other half
+    assert d405.aim_off_flown(cfg, _lens(MOUNT_GEN15), None)[0][1] == pytest.approx(0.0070, abs=1e-4)
+    # the two flown mounts stand; gen_1_5's is refused, saying both distances; a mount 20 mm along the axis too
+    assert (
+        d405.aim_refusal(cfg, COPY, None) is None
+        and d405.aim_refusal(cfg, _lens(MOUNT_1109), _optical(MOUNT_1109)) is None
     )
-    assert off["1118"][0] < d405.LENS_REF_XY_TOL_M < off["1109"][0]
-    assert max(abs(a - b) for a, b in zip(MOUNT_1109[0][:2], MOUNT_GEN15[0][:2], strict=True)) < d405.LENS_REF_XY_TOL_M
-    assert off["1118"][1] < d405.LENS_REF_Z_TOL_M
-    assert d405.lens_off_reference({}, COPY) is None and d405.lens_off_reference(cfg, None) is None
+    why = d405.aim_refusal(cfg, _lens(MOUNT_GEN15), _optical(MOUNT_GEN15))
+    assert "13.9 mm from the 2026-10-22 fit's and 11.1 mm from the mount flown 2026-11-12..17's" in why
+    assert d405.AIM_REF_TOL_M == 0.010 and d405.aim_refusal(cfg, [0.006, 0.071, -0.105], None) is None  # 8.5 mm
+    assert d405.aim_refusal(cfg, [0.0, 0.065, -0.080], None) is not None  # 25 mm along the axis
+    # a config that keeps no flown mount holds nothing; no lens, nothing
+    assert d405.aim_refusal({}, COPY, None) is None and d405.aim_off_flown(cfg, None) == []
 
 
 @pytest.mark.usefixtures("home_20261021")
-def test_the_depth_press_does_not_centre_on_a_mount_a_centimetre_from_the_fit_though_tf_and_the_config_agree(
-    ctx, monkeypatch, tmp_path
-):
+def test_the_depth_press_does_not_centre_on_a_mount_that_aims_where_no_press_has_flown(ctx, monkeypatch, tmp_path):
     """TF is published from the robot's cameras.yaml, so TF against that file (the grabber's
     wrist_lens_in_hand_m) can only catch a TF tree and a config of two robots. What is independent is
-    the grabber's reference, the fit: the 11-09 calibration, 11.6 mm aside of it, is not centred on;
-    gen_1_5's, 7.0 mm aside, is."""
+    where TF's mount aims against the flown mounts': gen_1_5's, lens and axes, is not centred on, though
+    its lens alone is 7 mm from the fit's; a mount 5 mm from the fit is."""
     from test_depth_press import _press, _seen
 
+    cfg = d405.camera_config("camera_oak_wrist.yaml")
     real = dp.press_down_from_here
 
-    def with_reference(node, ctx_, cfg, runner, watcher, *a, **k):
-        watcher.grab.wrist_lens_reference_m = list(COPY)
-        return real(node, ctx_, cfg, runner, watcher, *a, **k)
+    def with_flown_mounts(node, ctx_, cfg_, runner, watcher, *a, **k):
+        watcher.grab.aim_refusal = lambda lens, optical=None: d405.aim_refusal(cfg, lens, optical)
+        return real(node, ctx_, cfg_, runner, watcher, *a, **k)
 
-    monkeypatch.setattr(dp, "press_down_from_here", with_reference)
-    tf = (MOUNT_1109[0][0], MOUNT_1109[0][1], MOUNT_1109[0][2] - 0.120)
-    result, events, arm, _l, _s = _press(ctx, monkeypatch, tmp_path, [_seen((0.0, 0.0), lens=tf)], lens=tf, measured=tf)
-    assert result.free and "12 mm aside" in result.why and "2026-10-22 depth-press fit" in result.why
+    monkeypatch.setattr(dp, "press_down_from_here", with_flown_mounts)
+    tf, axes = tuple(LENS_GEN15), _optical(MOUNT_GEN15)
+    result, events, arm, _l, _s = _press(
+        ctx, monkeypatch, tmp_path, [_seen((0.0, 0.0), lens=tf, r_hc=axes)], lens=tf, r_hc=axes, measured=tf
+    )
+    assert result.free and "no press has flown near" in result.why and "13.9 mm from the 2026-10-22 fit's" in result.why
     assert events == ["depth:turn", "look:depth-look"] and arm.lines == [] and dp.exit_code(result) == 1
-    tf = tuple(LENS_GEN15)
+    tf = (0.004, COPY[1] + 0.003, COPY[2])
     seen = _seen((0.02, 0.03), lens=tf)
     result, events, _a, _l, _s = _press(ctx, monkeypatch, tmp_path, [seen, seen, seen.after], lens=tf, measured=tf)
     assert dp.exit_code(result) == 0 and events[:3] == ["depth:turn", "look:depth-look", "depth:centre"]
@@ -226,27 +257,39 @@ def test_the_depth_press_does_not_centre_on_a_mount_a_centimetre_from_the_fit_th
 def test_a_run_says_where_it_has_its_hand_before_it_moves(tmp_path, monkeypatch, capsys):
     """One line at the start: the tool frame and the point the heights go by (as flown, on either
     description), where the pads really end, the link the planner plans and the step to it, the lens
-    with the file and the robot it came from and how far that is from the fit."""
+    with the file and the robot it came from, and where its aim lands against the two flown mounts'.
+    On gen_1_5 that is more than a centimetre from both, and said as a warning; a guarded run, which
+    centres its press on the mount, stops there with the arm at rest."""
     approach.set_body(False)
     gen15 = _robot_config(tmp_path, MOUNT_GEN15)
     monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, gen15)
     approach.set_chain_root("arm_mount", puck_urdf(tmp_path))
     capsys.readouterr()
     lines = cli_common.hand_or_exit("[press_demo]", "camera_oak_wrist.yaml")
-    assert (
-        capsys.readouterr().out.splitlines()
-        == lines
-        == [
-            "[press_demo] hand: tool frame 120 mm out of the flange, the point the heights go by 131 mm out, as "
-            "flown, whatever the description; this hand's pads end 151 mm out, 20 mm past it; the planner plans "
-            "arm_tool_frame (the arm's description), (+0.0, +0.0, +14.0) mm from the tool frame: a pose goes to it "
-            "there; wrist lens (-5.4, +69.5, -97.5) mm from the tool frame (wrist_camera in %s (robot gen_1_5), on "
-            "arm_end_effector_link), 7.0 mm aside and 7.5 mm along the tool from the 2026-10-22 fit" % gen15
-        ]
+    assert capsys.readouterr().out.splitlines() == lines and len(lines) == 2
+    assert lines[0] == (
+        "[press_demo] hand: tool frame 120 mm out of the flange, the point the heights go by 131 mm out, as "
+        "flown, whatever the description; this hand's pads end 151 mm out, 20 mm past it; the planner plans "
+        "arm_tool_frame (the arm's description), (+0.0, +0.0, +14.0) mm from the tool frame: a pose goes to it "
+        "there; wrist lens (-5.4, +69.5, -97.5) mm from the tool frame (wrist_camera in %s (robot gen_1_5 by its "
+        "mount.yaml), on arm_end_effector_link); its aim 300 mm out lands (-6.3, +12.4) mm from the 2026-10-22 "
+        "fit's and (+4.4, +10.2) mm from the mount flown 2026-11-12..17's (across the hand: x, y)" % gen15
+    )
+    assert lines[1].startswith("[press_demo] WARNING: the wrist camera's mount is one no press has flown near: its aim")
+    assert "13.9 mm from the 2026-10-22 fit's and 11.1 mm from the mount flown 2026-11-12..17's" in lines[1]
+    with pytest.raises(SystemExit, match=r"\[press_demo\] not starting: a guarded run centres .*Nothing moved"):
+        cli_common.hand_or_exit("[press_demo]", "camera_oak_wrist.yaml", guarded=True)
+    assert "WARNING: the wrist camera's mount is one no press has flown near" in capsys.readouterr().out
+    # the mount the flights flew on: said, no warning, and a guarded run starts
+    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, _robot_config(tmp_path, MOUNT_1109, robot="flatbot_fwd8"))
+    lines = cli_common.hand_or_exit("[press_demo]", "camera_oak_wrist.yaml", guarded=True)
+    assert len(lines) == 1 and lines[0].endswith(
+        "its aim 300 mm out lands (-10.7, +2.2) mm from the 2026-10-22 fit's and (+0.0, +0.0) mm from the mount "
+        "flown 2026-11-12..17's (across the hand: x, y)"
     )
     monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, "")
     approach.set_chain_root("arm_mount", flatbot_urdf())
-    assert cli_common.hand_or_exit("[press_demo]", "camera_oak_wrist.yaml") == [
+    assert cli_common.hand_or_exit("[press_demo]", "camera_oak_wrist.yaml", guarded=True) == [
         "[press_demo] hand: tool frame 120 mm out of the flange, the point the heights go by 131 mm out, as flown, "
         "whatever the description; this hand's pads end 151 mm out, 20 mm past it; the planner plans arm_tool_frame "
         "(the arm's description), the same frame; wrist lens (+0.0, +65.0, -105.0) mm from the tool frame (the "
@@ -258,32 +301,89 @@ def test_a_run_says_where_it_has_its_hand_before_it_moves(tmp_path, monkeypatch,
     assert cli_common.hand_or_exit("[press_demo]", "camera_oak_wrist.yaml") == [] and capsys.readouterr().out == ""
 
 
-def test_a_run_warns_of_a_mount_far_from_the_fit_and_of_a_robot_config_that_is_not_its_arms(tmp_path, monkeypatch):
-    """Two things a run cannot see for itself and says aloud: a calibrated mount further from the fit
-    than the depth press centres on (the 11-09 one), and a robot config mounted at /config/robot whose
-    kinematics reference is another description's (flatbot's config without the puck on the arm described
-    with it: its camera mounts, its chair and its user would be another robot's)."""
+def test_a_run_warns_of_a_planner_frame_it_could_not_read_and_of_a_robot_config_that_is_not_its_arms(
+    tmp_path, monkeypatch
+):
+    """Two more things a run cannot see for itself and says aloud: a description with no tool frame link
+    by its usual name while the planner's own config was not read (the body check off: the planner's
+    frame is only TAKEN for the tool frame), and a robot config mounted at /config/robot whose kinematics
+    reference is another description's (flatbot's config without the puck on the arm described with it:
+    its camera mounts, its chair and its user would be another robot's)."""
+    import xml.etree.ElementTree as ET
+
     approach.set_body(False)
     plain, puck = both_chains(tmp_path)
-    approach.set_chain_root("arm_mount", puck_urdf(tmp_path))
-    # the right robot's config, a mount a centimetre from the fit
-    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, _robot_config(tmp_path, MOUNT_1109, kinematics=_kinematics_of(puck)))
+    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, "")
+    tree = ET.parse(puck_urdf(tmp_path))
+    for j in tree.getroot().findall("joint"):
+        if j.get("name") == "arm_tool_frame_joint":
+            j.find("child").set("link", "arm_tcp")
+    renamed = tmp_path / "tcp.urdf"
+    tree.write(renamed)
+    approach.set_chain_root("arm_mount", str(renamed))
     lines = cli_common.hand_or_exit("[x]", "camera_oak_wrist.yaml")
-    assert len(lines) == 2 and "11.6 mm aside and 7.5 mm along the tool from the 2026-10-22 fit" in lines[0]
-    assert lines[1].startswith("[x] WARNING: the wrist camera's mount stands further from the 2026-10-22 fit than 9 mm")
-    # a good mount, the right robot's config: one line
-    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, _robot_config(tmp_path, MOUNT_GEN15, kinematics=_kinematics_of(puck)))
+    assert len(lines) == 2 and "the planner's frame taken for the tool frame" in lines[0]
+    assert lines[1].startswith("[x] WARNING: the arm's description has no link tool_frame or arm_tool_frame")
+    assert "its frame is TAKEN for box opening's tool frame" in lines[1]
+    approach.set_chain_root("arm_mount", puck_urdf(tmp_path))
+    # the right robot's config, a mount presses have flown on: one line
+    monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, _robot_config(tmp_path, MOUNT_1109, kinematics=_kinematics_of(puck)))
     assert len(cli_common.hand_or_exit("[x]", "camera_oak_wrist.yaml")) == 1
     # another robot's config: the description without the puck's kinematics, on the arm described with it
     other = _robot_config(tmp_path, MOUNT_FLATBOT, robot="flatbot_fwd8", kinematics=_kinematics_of(plain))
     monkeypatch.setenv(d405.ROBOT_CAMERAS_ENV, other)
     lines = cli_common.hand_or_exit("[x]", "camera_oak_wrist.yaml")
-    assert len(lines) == 2 and "(robot flatbot_fwd8)" in lines[0]
+    config_dir = Path(other).parent.parent
+    assert len(lines) == 2 and "(robot flatbot_fwd8 by its mount.yaml)" in lines[0]
     assert (
-        "WARNING: the robot config %s (robot flatbot_fwd8) is NOT this arm's description" % Path(other).parent.parent
-        in lines[1]
+        "WARNING: the robot config %s (robot flatbot_fwd8 by its mount.yaml) is NOT this arm's" % config_dir in lines[1]
     )
     assert "joint arm_robotiq_85_base_joint joins arm_sensor_puck_link -> arm_robotiq_85_base_link" in lines[1]
-    assert cli_common.config_mismatch(puck, Path(other).parent.parent) is not None
-    assert cli_common.config_mismatch(plain, Path(other).parent.parent) is None
+    assert cli_common.config_mismatch(puck, config_dir) is not None
+    assert cli_common.config_mismatch(plain, config_dir) is None
     assert cli_common.config_mismatch(puck, tmp_path / "no_such_config") is None  # nothing to compare: nothing said
+
+
+def test_a_mount_on_a_link_that_is_turned_on_the_flange_is_placed_with_its_turn(tmp_path):
+    """The robot may mount the camera on a bracket link that is itself turned and set aside on the flange.
+    The lens and the axes are taken through that link's own pose (its turn too), as the arm's URDF has it:
+    the same place and the same view as the mount written straight on the flange."""
+    import xml.etree.ElementTree as ET
+
+    from box_opening.runtime.kinematics import ArmChain, _rpy
+
+    cfg = d405.camera_config("camera_oak_wrist.yaml")
+    tree = ET.parse(puck_urdf(tmp_path))
+    root = tree.getroot()
+    # a bracket turned on the flange, and the camera's plate turned on the bracket: two fixed joints, neither square
+    poses = {
+        "arm_bracket_link": ("arm_end_effector_link", (0.01, 0.02, 0.03), (0.3, -0.2, 0.5)),
+        "arm_camera_plate_link": ("arm_bracket_link", (-0.02, 0.04, 0.01), (-0.4, 0.1, 0.25)),
+    }
+    for link, (parent, xyz, rpy) in poses.items():
+        ET.SubElement(root, "link", name=link)
+        j = ET.SubElement(root, "joint", name=link + "_joint", type="fixed")
+        ET.SubElement(j, "origin", xyz="%g %g %g" % xyz, rpy="%g %g %g" % rpy)
+        ET.SubElement(j, "parent", link=parent)
+        ET.SubElement(j, "child", link=link)
+    path = tmp_path / "bracket.urdf"
+    tree.write(path)
+    chain = ArmChain(root="arm_mount", path=str(path))
+    # the plate's pose in the flange, by hand: the bracket's, then the plate's on it
+    Rb, tb = _rpy(*poses["arm_bracket_link"][2]), np.array(poses["arm_bracket_link"][1])
+    Rp, tp = _rpy(*poses["arm_camera_plate_link"][2]), np.array(poses["arm_camera_plate_link"][1])
+    R_plate, t_plate = Rb @ Rp, tb + Rb @ tp
+    (R, t), why = chain.fixed_in_flange("arm_camera_plate_link")
+    assert why is None and np.allclose(R, R_plate, atol=1e-12) and np.allclose(t, t_plate, atol=1e-12)
+    # gen_1_5's mount, written on the plate: the same lens and the same axes as written on the flange
+    xyz, quat = MOUNT_GEN15
+    R_mount = d405.quat_to_mat(*quat)
+    on_plate = (
+        [float(v) for v in R_plate.T @ (np.asarray(xyz) - t_plate)],
+        [float(v) for v in d405.mat_to_quat_xyzw(R_plate.T @ R_mount)],
+    )
+    lens, optical, where = d405.wrist_camera_in_hand(
+        cfg, chain=chain, path=_robot_config(tmp_path, on_plate, parent="arm_camera_plate_link")
+    )
+    assert where.endswith(", on arm_camera_plate_link") and lens == pytest.approx(LENS_GEN15, abs=1e-8)
+    assert np.allclose(optical, R_mount @ d405.BODY_TO_OPTICAL, atol=1e-8)

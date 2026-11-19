@@ -494,6 +494,7 @@ class Body:
             mine = self._in_link(g, joints)
             self.spheres[g.link] = (np.vstack([cs, mine]), np.concatenate([rs, g.radii + model.buffer_m]))
             self.hand_added.append(g.name)
+        self.robot_hand_reach_m = self._robot_hand_reach(chain)
         self.paths = {link: p for link, p in self.paths.items() if link in self.spheres}
         # the boxes: centre, UNPADDED half extents, padding, rotation (columns: the box's axes in the root)
         lo, hi = np.asarray(model.lo, float).reshape(-1, 3), np.asarray(model.hi, float).reshape(-1, 3)
@@ -540,6 +541,29 @@ class Body:
                     R = R @ Rj
             out[link] = (R, t)
         return out
+
+    def _robot_hand_reach(self, chain):
+        """How far out of the flange, along the hand, the planner's robot file has the hand reach (m): the
+        furthest point of its own spheres, buffered, on the links the last arm joint carries (the fingers
+        at 0, as cuRobo locks them), from the flange's face. 0.168 with the stock 2F-85 bolted on the
+        flange, 0.182 on a description with the sensor puck under it: what a clearance under the hand
+        (perception/clear_table.counter_top_clear_m) has to follow. None where the chain cannot say where
+        its flange is, or the robot file has no sphere on the hand."""
+        try:
+            q0 = np.zeros((1, len(self.index)))
+            R, t = chain.fk(q0[0])
+            R = np.asarray(R, float)
+            flange = np.asarray(t, float) - R @ np.asarray(chain.tool_from_tip, float)
+        except Exception:  # noqa: BLE001 - a stand-in chain: no figure
+            return None
+        last = len(self.index) - 1
+        hand = [link for link in self.model.spheres if any(k == last for _R, _t, _a, k in self.paths.get(link, ()))]
+        reach = None
+        for link, (Rl, tl) in self._link_frames(q0, hand).items():
+            cs, rs = self.model.spheres[link]  # the robot file's own, the buffer on
+            out = (tl[0] + cs @ Rl[0].T - flange) @ R[:, 2] + rs
+            reach = float(out.max()) if reach is None else max(reach, float(out.max()))
+        return reach
 
     def _in_link(self, group, joints):
         """`group`'s sphere centres in its link's own frame: as written where the group gives no `frame`

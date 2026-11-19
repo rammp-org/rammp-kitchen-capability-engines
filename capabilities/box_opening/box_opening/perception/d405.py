@@ -47,20 +47,96 @@ ROBOT_CAMERAS_ENV = "BOX_OPENING_ROBOT_CAMERAS"
 # z up): optical x = -y, y = -z, z = +x. With the mount's own turn and the flange's pose it gives TF's optical
 # frame to 1e-4 on a 2026-11-17 capture (wrist-survey-20261117-164104, the lens to 0.04 mm).
 BODY_TO_OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
-# Where the wrist's lens may stand from the camera config's own figure (wrist_lens_in_hand_m: the mount fitted
-# from the 2026-10-22 depth-press run, rammp-deployments #128, the one measurement of it on record that no
-# calibration session made) before a run says so and the depth press does not centre on it
-# (tasks/depth_press). Sideways, from what is on record: the hand-eye calibration of 2026-11-09 stands 11.5 mm
-# from the fit and every press on it came down ~1 cm to the right (owner, 2026-11-17); the one of 2026-11-18
-# (gen_1_5) stands 7.0 mm from it, and the two differ by 5.6 mm in x and 8.3 mm in y from each other. So
-# 9 mm: over what two good calibrations differ by, under the one known to be bad. Along the tool, 20 mm, as
-# the depth press always took (the two calibrations stand 7.5 mm from the fit there).
-# WHAT IT CAN CATCH: a mount a centimetre or more aside of the fit (a wrong sign, the hand measurement of
-# 2026-10-19 at 35 mm, the 11-09 calibration), 2 cm along the tool. WHAT IT CANNOT: which of two mounts
-# 5-8 mm apart is right; any error in the fit itself (its x was not observable and is kept 0, its y and z
-# were good to ~15 mm); a turned mount (a degree is 5 mm at the lid and no part of this).
-LENS_REF_XY_TOL_M = 0.009
-LENS_REF_Z_TOL_M = 0.020
+# WHAT STILL CHECKS THE WRIST MOUNT. TF is published from the robot's cameras.yaml, so TF against that file
+# says nothing of the mount itself. What a mount does to a press is where it puts the point the look aims at:
+# its lens AND its axes together, at the range the look aims from (the reach-out's look pose stands the lens
+# ~0.30 m from the button: REACH_LOOK_RISE_M's note; 0.27-0.31 m on the recorded aims). A degree of turn is
+# 5 mm there, as much as the lens's place. So a mount is held by its AIMED POINT (aim_point), against the two
+# mounts presses have been flown on, both kept in the camera config for this and nothing else:
+#  - wrist_lens_in_hand_m, the mount fitted from the 2026-10-22 depth-press run (rammp-deployments #128), axes
+#    square: TF's from 10-22 to 11-09, the one figure no calibration session made. Its aims fell 6-11 mm short
+#    along the bearing (2026-10-29's looks after the press), which reach_press.AIM_FORWARD_M (10 mm) makes up;
+#  - wrist_mount_flown, the hand-eye calibration of 2026-11-09: TF's on the flights of 2026-11-12..17, the
+#    last clean runs. It aims 10.9 mm from the fit's (10.7 across the hand, 2.2 along its y) and every press
+#    on it came down ~1 cm to the right (owner, 2026-11-17); the box opened on five of them.
+# AIM_REF_TOL_M: an aim further than this, across the hand, from BOTH of those is an aim no press has flown
+# near: 10 mm, the centimetre a press is known to land beside the button's middle and still open it (the
+# button is 44 mm across; 2026-10-22's 35-45 mm off was the lid's edge). Along the axis 20 mm, as the depth
+# press always took. gen_1_5's calibration of 2026-11-18 aims 13.9 mm from the fit's (6.3 across, 12.4 along
+# y) and 11.1 mm from the flown mount's (4.4, 10.2): outside both, mostly along the bearing, where it adds to
+# AIM_FORWARD_M what the fit lacked. A run says the two distances as it starts and warns past the tolerance;
+# the guarded depth press, which centres on the mount, does not start.
+# WHAT IT CAN CATCH: a mount whose aim is a centimetre or more from every aim a press has flown on, a wrong
+# sign, the hand measurement of 2026-10-19 (35 mm). WHAT IT CANNOT: say that a mount inside it is right (the
+# flown mount is inside it and pressed a centimetre aside); tell two mounts under a centimetre apart; see an
+# error both flown mounts share.
+LOOK_RANGE_M = 0.30
+AIM_REF_TOL_M = 0.010
+AIM_REF_ALONG_TOL_M = 0.020
+SQUARE_OPTICAL = np.diag([-1.0, -1.0, 1.0])  # the optical axes in the tool frame with the mount square on the hand
+
+
+def aim_point(lens, optical=None, range_m=LOOK_RANGE_M):
+    """Where a mount (the lens from the tool frame, its optical axes there; None: square) puts the point
+    `range_m` down its optical axis, in the tool frame (m): what the look's aim goes by."""
+    axis = SQUARE_OPTICAL[:, 2] if optical is None else np.asarray(optical, float)[:, 2]
+    return np.asarray(lens, float)[:3] + float(range_m) * axis
+
+
+def flown_mounts(cfg):
+    """[(what it is, lens from the tool frame, optical axes)] the mounts presses have been flown on, as
+    camera config `cfg` keeps them: its own wrist_lens_in_hand_m (the 2026-10-22 fit, square) and its
+    wrist_mount_flown (on the flange: the tool frame is constants.TOOL_FROM_FLANGE_STOCK_M out of it)."""
+    from box_opening.constants import TOOL_FROM_FLANGE_STOCK_M
+
+    out = []
+    fit = cfg.get("wrist_lens_in_hand_m")
+    if fit is not None:
+        out.append(("the 2026-10-22 fit", [float(v) for v in fit], SQUARE_OPTICAL))
+    flown = cfg.get("wrist_mount_flown")
+    if flown:
+        xyz = [float(v) for v in flown["xyz"]]
+        out.append(
+            (
+                "the mount flown %s" % flown.get("when", ""),
+                [xyz[0], xyz[1], xyz[2] - TOOL_FROM_FLANGE_STOCK_M],
+                quat_to_mat(*(float(v) for v in flown["quat_xyzw"])) @ BODY_TO_OPTICAL,
+            )
+        )
+    return out
+
+
+def aim_off_flown(cfg, lens, optical=None):
+    """[(what, across the hand (m), [dx, dy, dz])] how far the aimed point of the mount (`lens`, `optical`)
+    stands from each flown mount's (flown_mounts), in the tool frame; [] where the config keeps none or
+    there is no lens."""
+    if lens is None:
+        return []
+    mine = aim_point(lens, optical)
+    out = []
+    for what, ref_lens, ref_optical in flown_mounts(cfg):
+        d = mine - aim_point(ref_lens, ref_optical)
+        out.append((what, float(np.hypot(d[0], d[1])), [float(v) for v in d]))
+    return out
+
+
+def aim_refusal(cfg, lens, optical=None):
+    """Why a press may not be centred on the mount (`lens`, `optical`), or None: its aimed point is further
+    than AIM_REF_TOL_M across the hand, or AIM_REF_ALONG_TOL_M along the axis, from the aimed point of
+    every mount a press has flown on (the comment above). None too where the config keeps no such mount."""
+    off = aim_off_flown(cfg, lens, optical)
+    if not off or any(aside <= AIM_REF_TOL_M and abs(d[2]) <= AIM_REF_ALONG_TOL_M for _w, aside, d in off):
+        return None
+    return (
+        "its aim %.0f mm out is %s: further than %.0f mm across the hand (or %.0f along the axis) from every aim a "
+        "press has flown on"
+        % (
+            1000 * LOOK_RANGE_M,
+            " and ".join("%.1f mm from %s's" % (1000 * aside, what) for what, aside, _d in off),
+            1000 * AIM_REF_TOL_M,
+            1000 * AIM_REF_ALONG_TOL_M,
+        )
+    )
 
 
 def robot_mount(name, path=None, env=None):
@@ -159,7 +235,8 @@ def wrist_camera_in_hand(cfg, chain=None, path=None, env=None):
     at = R @ np.asarray(mount.xyz, float) + t - np.array([0.0, 0.0, float(tool)])
     # (+ 0.0: no minus zero in what a square mount turns out; rounded, its axes are exactly square)
     optical = None if mount.quat is None else np.round(R @ quat_to_mat(*mount.quat) @ BODY_TO_OPTICAL, 12) + 0.0
-    where = "%s in %s (robot %s), on %s" % (name, mount.path, mount.robot or "not named", mount.parent)
+    robot = "robot %s by its mount.yaml" % mount.robot if mount.robot else "no mount.yaml beside it to name the robot"
+    where = "%s in %s (%s), on %s" % (name, mount.path, robot, mount.parent)
     return [round(float(v), 9) + 0.0 for v in at], optical, where
 
 
@@ -167,16 +244,6 @@ def wrist_lens_in_hand(cfg, chain=None, path=None, env=None):
     """(lens [x, y, z] or None, where it is from): wrist_camera_in_hand's lens."""
     lens, _optical, where = wrist_camera_in_hand(cfg, chain=chain, path=path, env=env)
     return lens, where
-
-
-def lens_off_reference(cfg, lens):
-    """(sideways, along the tool) m: how far `lens` (from the tool frame) stands from the camera config's
-    own figure, the one measurement of the wrist lens no calibration session made (LENS_REF_*_TOL_M's
-    comment says what that is worth), or None where the config keeps none or there is no lens."""
-    ref = cfg.get("wrist_lens_in_hand_m")
-    if ref is None or lens is None:
-        return None
-    return float(np.hypot(lens[0] - float(ref[0]), lens[1] - float(ref[1]))), abs(float(lens[2]) - float(ref[2]))
 
 
 def quat_to_mat(x, y, z, w):
@@ -309,13 +376,10 @@ class D405Grabber:
         not centre."""
         return wrist_lens_in_hand(self._cfg)[0]
 
-    @property
-    def wrist_lens_reference_m(self):
-        """The camera config's own figure for the lens from tool_frame: the fit of 2026-10-22, which no
-        calibration session made. What the depth press holds TF's mount against besides the robot's
-        calibration (LENS_REF_XY_TOL_M); None where the config keeps none."""
-        ref = self._cfg.get("wrist_lens_in_hand_m")
-        return None if ref is None else [float(v) for v in ref]
+    def aim_refusal(self, lens, optical=None):
+        """Why the depth press may not centre on TF's mount (`lens` from the tool frame, its axes), or None:
+        d405.aim_refusal against the mounts this camera's config says presses have flown on."""
+        return aim_refusal(self._cfg, lens, optical)
 
     def _subscribe(self):
         from rclpy.qos import qos_profile_sensor_data

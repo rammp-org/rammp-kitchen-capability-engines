@@ -20,6 +20,7 @@ from conftest import arm_poses, both_chains, flange_pose, flatbot_urdf, puck_urd
 from box_opening import constants
 from box_opening.constants import FINGERS_PAST_MODEL_M, HEIGHTS_POINT_FROM_FLANGE_M, PADS_FROM_FLANGE_M
 from box_opening.perception import clear_table, wrist_finder
+from box_opening.perception import clear_table as ct
 from box_opening.runtime import approach, body
 from box_opening.runtime.kinematics import ArmChain
 
@@ -198,3 +199,46 @@ def test_nearer_the_wrists_lens_than_its_cutoff_is_the_hand_at_either_lens_mount
         assert k.WRIST_NEAREST_M - (pads - LENS_OUT_GEN15) == pytest.approx(0.0415, abs=1e-4)
     for lens_out in (LENS_OUT_FLATBOT, LENS_OUT_GEN15):
         assert constants.WRIST_NEAREST_M - (0.161 - lens_out) >= 0.015
+
+
+def test_the_counters_keep_out_goes_down_by_what_the_robot_files_hand_reaches_further(tmp_path):
+    """The counter's keep-out stands a little under the counter's top so the set-down's touch, which ends
+    8 mm under where the plan has the lid meet the table, is a line the arm may fly: 25 mm, sized for
+    hand spheres reaching 37 mm past the point the heights go by (the stock 2F-85's on the flange). With
+    the puck the planner's spheres are 14 mm further out, the flange where it flew: 51 mm past the point,
+    11 mm into that top. The top follows the robot file's reach: the same -25 mm, to the last bit, on the
+    description without the puck; -39 mm with it, the hand as far from it at the touch's end on both."""
+    from test_body import STOCK_HAND, _model_files
+
+    from box_opening.tasks import reach_lid_off as rlo
+
+    assert ct.COUNTER_TOP_CLEAR_M == -0.025 and ct.COUNTER_TOP_SIZED_REACH_M == 0.037
+    approach.set_body(False)
+    approach.set_chain_root("arm_mount", flatbot_urdf())
+    assert ct.counter_top_clear_m() == ct.COUNTER_TOP_CLEAR_M  # no body model: the figure as it is
+    files = _model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=STOCK_HAND)
+    edge = ct.Edge(point=(0.6, -0.3), along=(1.0, 0.0), out=(0.0, -1.0), length_m=0.4, depth_m=0.3, cells=20)
+    table_z, want = 0.205, {}
+    for name, urdf in (("plain", flatbot_urdf()), ("puck", puck_urdf(tmp_path))):
+        approach.set_body(body.load(files))
+        approach.set_chain_root("arm_mount", urdf)
+        chain = approach._chain()
+        reach = chain.body.robot_hand_reach_m
+        clear = ct.counter_top_clear_m()
+        under = next(b for b in ct.counter_keep_out([edge], table_z) if b["name"].startswith("cabinet/counter"))
+        padded_top = under["centre"][2] + under["half"][2] + 0.02
+        # the touch's end, the hand straight down: the point the heights go by 15 mm over the plan's table
+        point = table_z + 0.025 - rlo.GRIP_BELOW_LID_M - rlo.SETDOWN_PAST_M
+        lowest = point - (reach - HEIGHTS_POINT_FROM_FLANGE_M)  # the robot file's spheres, buffered
+        want[name] = (reach, clear, padded_top - table_z, lowest - padded_top)
+    assert want["plain"][0] == pytest.approx(0.168, abs=1e-9) and want["puck"][0] == pytest.approx(0.182, abs=1e-9)
+    assert want["plain"][1] == ct.COUNTER_TOP_CLEAR_M == -0.025  # exactly: nothing moves where the runs flew
+    assert want["puck"][1] == pytest.approx(-0.039, abs=1e-9)
+    assert want["plain"][2] == pytest.approx(-0.025) and want["puck"][2] == pytest.approx(-0.039)
+    # the robot file's hand 3 mm over the padded top at the touch's end, on both (11 mm INTO it with the puck before)
+    assert want["plain"][3] == pytest.approx(0.003, abs=1e-6) and want["puck"][3] == pytest.approx(0.003, abs=1e-6)
+    # a robot file whose hand reaches less than the figure was sized for does not raise the top
+    short = STOCK_HAND.split("      arm_robotiq_85_base_link:")[0]
+    approach.set_body(body.load(_model_files(tmp_path, [("far", (-1.0, -1.0, -1.0), (0.1, 0.1, 0.1))], robot=short)))
+    approach.set_chain_root("arm_mount", puck_urdf(tmp_path))
+    assert approach._chain().body.robot_hand_reach_m < 0.1 and ct.counter_top_clear_m() == -0.025

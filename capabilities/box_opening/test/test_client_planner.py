@@ -350,13 +350,25 @@ def test_a_pose_plan_ending_with_the_tool_half_a_turn_round_is_refused(chain):
     assert not got.success and "the plan ends 0.00 mm and 180.00 deg from its pose" in got.message
 
 
-def test_a_pose_plan_with_no_chain_to_measure_it_by_flies_as_it_always_did(monkeypatch):
+def test_a_pose_goal_with_no_chain_to_place_the_planners_frame_by_is_not_sent(monkeypatch):
+    """Until 2026-11-19 such a pose went to the planner as it was and its plan flew unmeasured ("as it
+    always did"). The planner plans the description's own tool frame, which a description with the sensor
+    puck has 14 mm along the hand from box opening's: with no chain nothing says where that is, nor
+    could the plan's end be checked, so the goal is refused before it is sent (review, 2026-11-19)."""
+
     def no_chain():
         raise RuntimeError("no arm URDF rooted at arm_mount (is /arm/robot_description published?)")
 
     monkeypatch.setattr(approach, "_chain", no_chain)
-    res = _pose_result([START, Q1])
-    assert _client(lambda kind, g: res)._plan_pose_once([0.4, 0.0, 0.3], [1.0, 0.0, 0.0, 0.0], START) is res
+    c = _client(lambda kind, g: _pose_result([START, Q1]))
+    got = c._plan_pose_once([0.4, 0.0, 0.3], [1.0, 0.0, 0.0, 0.0], START)
+    assert not got.success and c.sent == []
+    assert "no arm chain to hand the planner this pose by" in got.message and "is not sent" in got.message
+    # a stand-in chain that knows no planner's frame of its own: the pose as it is, measured by that chain
+    monkeypatch.setattr(approach, "_chain", lambda: object())
+    assert c._plan_pose_once([0.4, 0.0, 0.3], [1.0, 0.0, 0.0, 0.0], START).success and len(c.sent) == 1
+    p = c.sent[0][1].target.position
+    assert (p.x, p.y, p.z) == (0.4, 0.0, 0.3)
 
 
 def test_a_success_with_nothing_to_fly_is_refused():

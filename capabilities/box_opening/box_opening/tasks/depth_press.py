@@ -161,11 +161,13 @@ KNOB_UP_MM = 6.0  # press_demo.KNOB_UP_MIN_MM
 # mounted robot config, else the camera config's figure —
 # perception/d405.wrist_lens_in_hand): a TF tree and a robot config that are
 # not one robot's are caught there, and nothing else, since TF is published
-# from that same file. What is independent of it is the grabber's
-# wrist_lens_reference_m, the camera config's own figure (the mount fitted
-# from the 2026-10-22 depth-press run): TF's lens must also stand within
-# d405.LENS_REF_XY_TOL_M of that sideways and LENS_REF_Z_TOL_M along the
-# tool (9 and 20 mm; that comment says what it can and cannot catch) ...
+# from that same file. What is independent of it are the two mounts
+# presses have flown on, kept in the camera config (its own figure, fitted
+# from the 2026-10-22 depth-press run, and wrist_mount_flown, the mount of
+# the 2026-11-12..17 flights): TF's mount must also AIM, lens and axes
+# together at the look's range, within d405.AIM_REF_TOL_M of one of those
+# (10 mm; that comment says what it can and cannot catch: the grabber's
+# aim_refusal) ...
 MOUNT_XY_TOL_M = 0.005
 MOUNT_Z_TOL_M = 0.020
 # ... and the touch must meet the lid where TF's lens says the fingertips
@@ -1753,26 +1755,19 @@ def _press_down(
             "on it"
             % (", ".join("%+.0f" % (1000 * v) for v in lens), ", ".join("%+.0f" % (1000 * v) for v in measured)),
         )
-    # ... and against the one figure for the lens that no calibration made (the comment at MOUNT_XY_TOL_M)
-    reference = getattr(getattr(watcher, "grab", None), "wrist_lens_reference_m", None)
-    if reference is not None:
-        from box_opening.perception.d405 import LENS_REF_XY_TOL_M, LENS_REF_Z_TOL_M
-
-        aside = math.hypot(lens[0] - float(reference[0]), lens[1] - float(reference[1]))
-        along = abs(lens[2] - float(reference[2]))
-        if aside > LENS_REF_XY_TOL_M or along > LENS_REF_Z_TOL_M:
-            runner.note(
-                "depth_mount_refused",
-                lens_in_hand_mm=[round(1000 * v, 1) for v in lens],
-                reference_mm=[round(1000 * float(v), 1) for v in reference],
-            )
-            return DepthPress(
-                free=True,
-                why="the wrist camera's mount in TF puts the lens %.0f mm aside and %.0f mm along the tool from "
-                "where the 2026-10-22 depth-press fit has it (more than %.0f / %.0f): a calibration that far "
-                "from it pressed a centimetre beside the button (2026-11-09's) — check the mount before "
-                "centring on it" % (1000 * aside, 1000 * along, 1000 * LENS_REF_XY_TOL_M, 1000 * LENS_REF_Z_TOL_M),
-            )
+    # ... and by where TF's mount AIMS (its lens and its axes), against the mounts presses have flown on
+    # (the comment at MOUNT_XY_TOL_M). A run says this before it leaves rest, from the robot's cameras.yaml
+    # (cli_common.hand_or_exit, and a guarded run does not start); here it is TF's own mount that is held
+    refuse = getattr(getattr(watcher, "grab", None), "aim_refusal", None)
+    # (r_hc, lens_in_hand's: the camera's axes in the hand's, its third column the lens's axis)
+    why = None if refuse is None else refuse(lens, r_hc)
+    if why is not None:
+        runner.note("depth_mount_refused", lens_in_hand_mm=[round(1000 * v, 1) for v in lens], why=why)
+        return DepthPress(
+            free=True,
+            why="the wrist camera's mount in TF is one no press has flown near (%s) — check the mount before "
+            "centring on it" % why,
+        )
     trusted = s is None and aimed is not None  # no look confirms the button: the aim stands in
     if s is None and aimed is None:
         return DepthPress(

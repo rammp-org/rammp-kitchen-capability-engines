@@ -778,9 +778,12 @@ and a run says it in its first line (`... hand: ...`):
   `/config/robot/transforms/cameras.yaml`, its parent link placed from the flange by
   the description (`BOX_OPENING_ROBOT_CAMERAS` names another file; empty, none).
   Where no such file is mounted, the figure in `config/camera_oak_wrist.yaml` stands
-  in. That figure, a fit from a 2026-10-22 run, is also the one check of the mount no
-  calibration made: a run warns of a mount more than 9 mm aside of it, or of a
-  mounted robot config that is not the description's robot, and goes on;
+  in. That file also keeps the two mounts presses have been flown on (a fit from a
+  2026-10-22 run, and the mount of the 2026-11-12..17 flights): a run says how far
+  its mount's aim, 0.30 m out, lands from theirs, warns where that is more than
+  10 mm from both, or where the mounted robot config is not the description's
+  robot, and goes on. A guarded run, which centres its press on the mount, does not
+  start on such a mount;
 - how far out of the flange the shut fingertips end is one number,
   `constants.PADS_FROM_FLANGE_M` (robot-body fact, 0.151 m, known to about
   150-161 mm until someone holds a ruler from the flange's face to the pads'

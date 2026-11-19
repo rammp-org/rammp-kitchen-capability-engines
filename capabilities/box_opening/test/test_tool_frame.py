@@ -339,3 +339,92 @@ def test_the_finger_tip_links_ride_the_gripper_and_are_read_where_the_descriptio
         )
         # (the links' own origins shut are 0.2 mm off the 8 mm the constant has had since 2026-09-03)
         assert np.allclose(rp.contact_from_tips(tips, quat), contact, atol=5e-4)
+
+
+def test_a_frame_hung_on_links_that_are_themselves_turned_is_placed_by_every_joint_in_order(tmp_path):
+    """The planner's frame may hang on the flange through links that are turned and set aside (an
+    adapter, a quick-changer): each fixed joint's own turn and offset count, in order from the flange
+    out. Placed so, the chain's step to the frame is where a walk of the whole URDF has that link, and a
+    pose handed to the planner puts box opening's frame on the pose asked."""
+    from box_opening.runtime.kinematics import _rpy, fixed_pose
+
+    adapters = {
+        "arm_adapter_link": ("arm_end_effector_link", (0.01, -0.02, 0.03), (0.3, -0.2, 0.5)),
+        "arm_changer_link": ("arm_adapter_link", (-0.02, 0.01, 0.04), (-0.4, 0.1, 0.25)),
+    }
+
+    def edit(root, joints):
+        for link, (parent, xyz, rpy) in adapters.items():
+            ET.SubElement(root, "link", name=link)
+            j = ET.SubElement(root, "joint", name=link + "_joint", type="fixed")
+            ET.SubElement(j, "origin", xyz="%g %g %g" % xyz, rpy="%g %g %g" % rpy)
+            ET.SubElement(j, "parent", link=parent)
+            ET.SubElement(j, "child", link=link)
+        tool = joints["arm_tool_frame_joint"]
+        tool.find("parent").set("link", "arm_changer_link")
+        tool.find("origin").set("xyz", "0.005 0 0.06")
+        tool.find("origin").set("rpy", "0 0.15 -0.3")
+
+    path = _edited(tmp_path, "adapters", edit)
+    chain = ArmChain(root="arm_mount", path=path)
+    # by hand: the adapter on the flange, the changer on the adapter, the tool frame on the changer
+    Ra, ta = _rpy(0.3, -0.2, 0.5), np.array([0.01, -0.02, 0.03])
+    Rc, tc = _rpy(-0.4, 0.1, 0.25), np.array([-0.02, 0.01, 0.04])
+    Rt, tt = _rpy(0.0, 0.15, -0.3), np.array([0.005, 0.0, 0.06])
+    R_want, t_want = Ra @ Rc @ Rt, ta + Ra @ (tc + Rc @ tt)
+    (R, t), why = fixed_pose(chain._by_child, "arm_tool_frame", "arm_end_effector_link")
+    assert why is None and np.allclose(R, R_want, atol=1e-12) and np.allclose(t, t_want, atol=1e-12)
+    assert np.allclose(chain.ee_in_tool[0], R_want, atol=1e-12)
+    assert np.allclose(chain.ee_in_tool[1], t_want - [0.0, 0.0, 0.120], atol=1e-12)
+    for q in arm_poses()[:4]:
+        Re, te = _ee_of_the_urdf(path, q)
+        assert np.allclose(chain.ee_fk(q)[0], Re, atol=1e-9) and np.allclose(chain.ee_fk(q)[1], te, atol=1e-9)
+        R0, t0 = chain.fk(q)
+        xyz, quat = chain.planner_pose(t0, mat_to_quat_xyzw(R0))
+        assert np.allclose(xyz, te, atol=1e-9) and np.allclose(quat_to_mat(*quat), Re, atol=1e-6)
+        assert np.array_equal(t0, ArmChain(root="arm_mount", path=flatbot_urdf()).fk(q)[1])  # the flange as flown
+
+
+def test_a_pose_goal_with_no_arm_chain_is_refused_not_sent_short_of_the_planners_frame(tmp_path, monkeypatch):
+    """A CLI started without the arm's description has no chain. A pose it handed the planner then went
+    as it was, 14 mm short along the hand on a description with the puck, and nothing measured the
+    plan's end. It is not sent."""
+    approach.set_chain_root("arm_mount", None)  # no description heard
+    client = PlannerClient.__new__(PlannerClient)
+    client._plan_pose, sent = None, []
+    monkeypatch.setattr(client, "_call", lambda _c, goal: sent.append(goal), raising=False)
+    res = client._plan_pose_once([0.6, -0.2, 0.4], [1.0, 0.0, 0.0, 0.0], list(HOME))
+    assert not res.success and sent == [] and "no arm chain to hand the planner this pose by" in res.message
+    assert "no arm URDF rooted at arm_mount" in res.message and client.refusals[-1] == res.message
+
+
+def test_a_set_downs_touch_is_read_at_the_height_the_finger_tip_links_really_have(ctx, tmp_path, monkeypatch):
+    """The guarded set-down holds a touch to the table's height by the finger-tip links in TF: more than
+    SETDOWN_HIGH_M over where the lid meets the table is "struck something". The tip links are 8 mm
+    short of the tool frame with the gripper on the flange and 6 mm PAST it with the puck: a touch 5 mm
+    under the limit is the table and one 5 mm over it is not, on both descriptions."""
+    from box_opening.primitives.core import SETDOWN_HIGH_M, Place, PlanState
+
+    plain, puck = both_chains(tmp_path)
+    target = [0.45, -0.25, -0.07 + ctx.model.lid_dims[2]]
+    for chain in (plain, puck):
+        monkeypatch.setattr(approach, "_chain", lambda chain=chain: chain)
+        monkeypatch.setattr(approach, "chain_ready", lambda: (True, ""))
+        legs, _state = Place(target, [1.0, 0.0, 0.0, 0.0]).plan(ctx, PlanState(joints=[0.0] * 7, chain=0))
+        descend = legs[1]
+        tips_on_target = target[2] + fingers.tip_to_tool_m(chain)  # the hand straight down: the tips' z in TF
+
+        def touched(over, tips_on_target=tips_on_target, descend=descend):
+            v = SimpleNamespace(
+                outcome="touch",
+                contact_xyz=[0.45, -0.25, tips_on_target + over],
+                gripper_pos=None,
+                progress=0.9,
+                torque_peak=None,
+            )
+            return descend.verify(v)
+
+        assert touched(0.0)[0] and touched(SETDOWN_HIGH_M - 0.005)[0]
+        ok, why = touched(SETDOWN_HIGH_M + 0.005)
+        assert not ok and "struck something 45 mm above where the lid meets the table" in why
+    assert fingers.tip_to_tool_m(plain) - fingers.tip_to_tool_m(puck) == pytest.approx(PUCK_M, abs=1e-12)

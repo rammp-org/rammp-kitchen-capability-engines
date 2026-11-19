@@ -992,6 +992,30 @@ EDGE_BEYOND_FRAC = 0.25
 #    feels the table and stops there.
 COUNTER_SOLID_M = 1.2  # to the floor: a counter stands at most ~1 m tall, and nothing reaches under the floor
 COUNTER_TOP_CLEAR_M = -0.025
+# ... for the hand as flatbot's robot file had it when that was sized: its spheres, buffered, 37 mm past the
+# point the heights go by (0.168 m out of the flange). A description with the sensor puck has the gripper, and
+# the planner's spheres on it, 14 mm further out, the flange where it flew: at the set-down's touch end they
+# reach 36 mm under the plan's table, 11 mm into this top (2026-11-19). So the top goes down by what the run's
+# own robot file reaches further than it was sized for (Body.robot_hand_reach_m), and by nothing where it
+# reaches no further: -25 mm, to the last bit, on the description the runs were flown on.
+COUNTER_TOP_SIZED_REACH_M = 0.037
+
+
+def counter_top_clear_m():
+    """COUNTER_TOP_CLEAR_M for the hand as the run's body model has it (runtime/approach.body_check): lower
+    by how much further past the point the heights go by its robot file's hand spheres reach than
+    COUNTER_TOP_SIZED_REACH_M; COUNTER_TOP_CLEAR_M itself with no body model, or a hand that reaches no
+    further."""
+    from box_opening.constants import HEIGHTS_POINT_FROM_FLANGE_M
+    from box_opening.runtime import approach
+
+    reach = getattr(approach.body_check(), "robot_hand_reach_m", None)
+    if reach is None:
+        return COUNTER_TOP_CLEAR_M
+    further = round(float(reach) - HEIGHTS_POINT_FROM_FLANGE_M - COUNTER_TOP_SIZED_REACH_M, 6)
+    return COUNTER_TOP_CLEAR_M - max(further, 0.0)
+
+
 COUNTER_MAX_DEPTH_M = 0.8  # the solid behind an edge reaches back at most this far (the map's own reach)
 
 
@@ -1183,7 +1207,7 @@ def counter_keep_out(edges, table_z, cell=CELL_M, pad_m=PLANNER_PADDING_M):
         depth = max(float(e.depth_m) - 0.5 * float(cell), 0.0)
         if depth <= 0.0:
             continue
-        under_top = top + COUNTER_TOP_CLEAR_M - float(pad_m)
+        under_top = top + counter_top_clear_m() - float(pad_m)
         c = p - n * (0.5 * float(cell) + 0.5 * depth)
         boxes.append(
             {

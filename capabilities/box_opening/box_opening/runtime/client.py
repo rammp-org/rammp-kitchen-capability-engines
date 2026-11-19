@@ -905,17 +905,26 @@ class PlannerClient:
         """The pose to hand the planner for box opening's tool frame at (xyz, quat_xyzw): its ee_link's
         (kinematics.ArmChain.planner_pose). The planner plans the description's own tool frame, which a
         description with the sensor puck has 14 mm further along the hand than the frame every height
-        here was tuned in; where the two are one frame, or there is no chain to say, the pose as it is."""
-        try:
-            from box_opening.runtime.approach import _chain
+        here was tuned in; where the two are one frame, or the chain is a stand-in that knows no other,
+        the pose as it is. Raises where there is no chain at all: nothing says where the planner's frame
+        is then."""
+        from box_opening.runtime.approach import _chain
 
-            return _chain().planner_pose(xyz, quat_xyzw)
-        except Exception:  # noqa: BLE001 - no chain, or a stand-in without the step: the pose as it always went
-            return xyz, quat_xyzw
+        step = getattr(_chain(), "planner_pose", None)
+        return (xyz, quat_xyzw) if step is None else step(xyz, quat_xyzw)
 
     def _plan_pose_once(self, xyz, quat_xyzw, start_joints):
         # the planner's frame from here on: asked there, and its plan's end judged there (_checked_pose)
-        xyz, quat_xyzw = self._planner_pose(xyz, quat_xyzw)
+        try:
+            xyz, quat_xyzw = self._planner_pose(xyz, quat_xyzw)
+        except Exception as e:  # noqa: BLE001 - whatever keeps the chain from being had: the pose is not sent
+            # (it went as it was, and nothing checked its plan's end: on a description with the sensor puck a
+            # pose 14 mm short along the hand, flown as planned)
+            return self._refuse(
+                None,
+                "no arm chain to hand the planner this pose by (%s): its tool frame may not be box opening's, "
+                "and the plan's end could not be checked — the pose goal is not sent" % e,
+            )
         g = PlanToPose.Goal()
         g.target.position.x, g.target.position.y, g.target.position.z = (float(v) for v in xyz)
         (

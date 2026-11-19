@@ -284,22 +284,27 @@ def config_mismatch(chain, config_dir):
     return None
 
 
-def hand_or_exit(who, camera_cfg_name=None):
-    """Where this run has its hand, said before anything moves, and the run stopped there where the arm's
-    description gives it no hand to plan with.
+def hand_or_exit(who, camera_cfg_name=None, guarded=False):
+    """Where this run has its hand, said before anything moves, and the run stopped there where it has no
+    hand to plan with.
 
-    STOPS (SystemExit, "Nothing moved"): the description's tool frame, which the planner plans, is not
-    fixed to the flange (kinematics.ToolFrameError): no pose could be handed to the planner nor a plan's
-    end judged. With the body check off nothing else would have built the chain before the first motion.
+    STOPS (SystemExit, "Nothing moved"):
+     - the description's tool frame, which the planner plans, is not fixed to the flange
+       (kinematics.ToolFrameError): no pose could be handed to the planner nor a plan's end judged. With
+       the body check off nothing else would have built the chain before the first motion;
+     - `guarded` (a run that centres its press on the wrist camera's mount, tasks/depth_press) and that
+       mount aims where no press has flown (d405.aim_refusal): said here, the arm at rest, where it was
+       said only once the arm stood over the box.
 
     SAYS, one line: box opening's tool frame and the point its heights go by (the same on every
     description: where they were flown), where this hand's pads really end
     (constants.PADS_FROM_FLANGE_M), the link the planner plans and how far along the hand it is from the
-    tool frame, the wrist lens with the file and the robot it was read from, and how far that stands
-    from the one figure no calibration made. And WARNS, a line each: a lens further from that figure
-    than the depth press centres on (d405.LENS_REF_XY_TOL_M), and a mounted robot config that is not
-    this arm's description (config_mismatch). A run on a description or a robot config it was not flown
-    on shows here. Returns the lines; with no chain to describe (no description heard) says nothing."""
+    tool frame, the wrist lens with the file and the robot it was read from, and how far its aim at the
+    look's range lands from the aims of the two mounts presses have flown on. And WARNS, a line each: a
+    description with no tool frame link the planner's frame could be read from, a mount that aims more
+    than d405.AIM_REF_TOL_M from both flown mounts, and a mounted robot config that is not this arm's
+    description (config_mismatch). A run on a description or a robot config it was not flown on shows
+    here. Returns the lines; with no chain to describe (no description heard) says nothing."""
     import math
 
     import numpy as np
@@ -316,11 +321,16 @@ def hand_or_exit(who, camera_cfg_name=None):
     except Exception as e:  # noqa: BLE001 - a line of the log; whatever else is wrong stops where it always did
         log.info("%s hand: not described (%s)" % (who, e))
         return []
-    lines = []
+    lines, stop = [], None
     try:
+        warn = []
         if chain.ee_link is None:
-            planner = "no link %s in the arm's description: the planner's frame is taken for the tool frame" % (
-                TOOL_FRAME_LINK
+            planner = "the planner's frame taken for the tool frame"
+            warn.append(
+                "%s WARNING: the arm's description has no link %s or arm_%s, and the planner's own config was not "
+                "read to name the link it plans (the body check is off): its frame is TAKEN for box opening's "
+                "tool frame. If it is not, a pose handed to the planner is planned that far off; such a plan is "
+                "refused at its end, not flown" % (who, TOOL_FRAME_LINK, TOOL_FRAME_LINK)
             )
         elif chain.ee_is_tool:
             planner = "the planner plans %s (%s), the same frame" % (chain.ee_link, chain.ee_named_by)
@@ -345,38 +355,51 @@ def hand_or_exit(who, camera_cfg_name=None):
                 planner,
             )
         )
-        warn = []
         if camera_cfg_name:
             from box_opening.perception import d405
 
             cfg = d405.camera_config(camera_cfg_name)
-            lens, _optical, where = d405.wrist_camera_in_hand(cfg, chain=chain)
+            lens, optical, where = d405.wrist_camera_in_hand(cfg, chain=chain)
             if lens is not None:
                 line += "; wrist lens (%s) mm from the tool frame (%s)" % (
                     ", ".join("%+.1f" % (1000 * v) for v in lens),
                     where,
                 )
             mount = d405.robot_mount(cfg.get("robot_mount")) if cfg.get("robot_mount") else None
-            off = d405.lens_off_reference(cfg, lens) if mount is not None else None
-            if off is not None:
-                line += ", %.1f mm aside and %.1f mm along the tool from the 2026-10-22 fit" % (
-                    1000 * off[0],
-                    1000 * off[1],
+            # (only a mount that IS the robot's calibration is held against the flown ones: the fit against
+            # itself says nothing)
+            calibrated = mount is not None and where.startswith("%s in " % cfg.get("robot_mount"))
+            off = d405.aim_off_flown(cfg, lens, optical) if calibrated else []
+            if off:
+                line += "; its aim %.0f mm out lands %s (across the hand: x, y)" % (
+                    1000 * d405.LOOK_RANGE_M,
+                    " and ".join(
+                        # (+ 0.0: a mount held against itself reads +0.0, never -0.0)
+                        "(%+.1f, %+.1f) mm from %s's" % (round(1000 * d[0], 1) + 0.0, round(1000 * d[1], 1) + 0.0, what)
+                        for what, _a, d in off
+                    ),
                 )
-                if off[0] > d405.LENS_REF_XY_TOL_M or off[1] > d405.LENS_REF_Z_TOL_M:
+                refusal = d405.aim_refusal(cfg, lens, optical)
+                if refusal is not None:
                     warn.append(
-                        "%s WARNING: the wrist camera's mount stands further from the 2026-10-22 fit than %.0f mm "
-                        "aside / %.0f mm along the tool: the calibration of 2026-11-09, that far from it, pressed "
-                        "a centimetre beside the button. Watch where the first press lands"
-                        % (who, 1000 * d405.LENS_REF_XY_TOL_M, 1000 * d405.LENS_REF_Z_TOL_M)
+                        "%s WARNING: the wrist camera's mount is one no press has flown near: %s. A press a "
+                        "centimetre beside the button's middle still opened the box (2026-11-12..17), further is "
+                        "not known. Watch where the first press lands: along the hand's y is along the line from "
+                        "the arm to the box" % (who, refusal)
                     )
+                    if guarded:
+                        stop = (
+                            "%s not starting: a guarded run centres its press on the wrist camera's mount, and "
+                            "%s — check the mount (the robot's transforms/cameras.yaml) before a press is centred "
+                            "on it. Nothing moved." % (who, refusal)
+                        )
             if mount is not None:
                 config_dir = Path(mount.path).parent.parent
                 why = config_mismatch(chain, config_dir)
                 if why is not None:
                     warn.append(
-                        "%s WARNING: the robot config %s (robot %s) is NOT this arm's description: %s. Its camera "
-                        "mounts, its chair and its user may be another robot's"
+                        "%s WARNING: the robot config %s (robot %s by its mount.yaml) is NOT this arm's "
+                        "description: %s. Its camera mounts, its chair and its user may be another robot's"
                         % (who, config_dir, mount.robot or "not named", why)
                     )
         lines = [line, *warn]
@@ -384,6 +407,8 @@ def hand_or_exit(who, camera_cfg_name=None):
         lines = ["%s hand: not described (%s)" % (who, e)]
     for text in lines:
         log.info(text)
+    if stop is not None:
+        sys.exit(stop)
     return lines
 
 
