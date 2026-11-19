@@ -25,6 +25,8 @@ container:
   # The door geometry and grasp the open saves (the close reads them back) and every run's log:
   # kept on the host, across container restarts.
   volumes:
+    # Active robot config, shared read-only with cuRobo. Native runs set chair_planner_config.
+    - ./config/robots/current:/config/robot:ro
     - /tmp/microwave_data:/microwave_data
   # The GPU, through JetPack's NVIDIA runtime, not --gpus (10-29 on snorlax: "invoking the NVIDIA Container Runtime
   # Hook directly ... is not supported"). It was for the YOLO handle detector, gone 11-09; nothing needs it now.
@@ -37,6 +39,7 @@ params:
   # true only for attended runs, someone on the e-stop.
   allow_execute: false
   data_dir: /microwave_data
+  chair_planner_config: /config/robot/curobo/planner.yaml
   # Wrist camera; depth must be aligned to colour. camera_frame "" = the colour image's frame_id.
   # depth/image_rect_raw is every wrist camera's, and aligned to colour on the D405 and the OAK; the
   # D435i's is not -- with it, override this to /wrist_camera/aligned_depth_to_color/image_raw.

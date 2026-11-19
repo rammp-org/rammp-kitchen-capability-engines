@@ -49,6 +49,8 @@ def configure(data_dir):
     dc.configure_paths(data_dir)
     dc.configure(
         APPLIANCE="microwave",
+        # Free-space plans may detour around the chair; keep collision and endpoint checks.
+        FREE_MOVE_MAX_SWING_RAD=float("inf"),
         PARK_JOINTS=PARK_JOINTS,
         DOOR_T=DOOR_T,
         DOOR_PAST_HANDLE=DOOR_PAST_HANDLE,

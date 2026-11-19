@@ -733,6 +733,34 @@ class Checker:
         False fully open, a number: the fingers at that angle in rad) to every box."""
         return finger_clearance(self.model.rb, q, self.bodies, closed)
 
+    def closest_points(self, q, closed=True):
+        """Closest arm/obstacle contact coordinates in arm_mount, for inspection only."""
+        import pybullet as p
+
+        self.clearance(q, closed=closed)  # Sets the arm and gripper to this sample in the sim.
+        rb = self.model.rb
+        worst = None
+        base = self.model.scene.robot_base_pose
+        inv = Rotation.from_quat(base.orientation).inv()
+        for body, name in self.bodies:
+            for point in p.getClosestPoints(
+                rb.robot_id, body, sim.CLEARANCE_QUERY_M, physicsClientId=rb.physics_client_id
+            ):
+                if worst is None or point[8] < worst["distance_m"]:
+                    link = (
+                        p.getJointInfo(rb.robot_id, point[3], physicsClientId=rb.physics_client_id)[12].decode()
+                        if point[3] >= 0
+                        else "base"
+                    )
+                    worst = dict(
+                        distance_m=float(point[8]),
+                        link=link,
+                        obstacle=name,
+                        point_on_arm=inv.apply(np.asarray(point[5]) - base.position).tolist(),
+                        point_on_obstacle=inv.apply(np.asarray(point[6]) - base.position).tolist(),
+                    )
+        return worst
+
     def close(self):
         import pybullet as p
 

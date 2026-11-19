@@ -69,16 +69,16 @@ def test_partial_or_invalid_outer_bounds_refused(oven, outer):
 
 
 def test_left_door_opens_outward_and_uses_handle_width(oven, door):
-    box = world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905))
+    box = world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905), [-0.28, 0.21, -0.04, 0.25], 0.0286)
     assert box["dims"] == pytest.approx([0.04, 0.40, 0.31])
-    assert box["position"][0] == pytest.approx(-0.20)
-    assert box["position"][1] == pytest.approx(0.15)
-    assert inside(box, [-0.2, 0.15, 0.1])
+    assert box["position"][0] == pytest.approx(-0.2286)
+    assert box["position"][1] == pytest.approx(0.1724)
+    assert inside(box, [-0.2, 0.1724, 0.1])
     assert not inside(box, [0.2, 0.15, 0.1])  # never swing the slab into the oven
 
 
 def test_geometry_rotates_and_translates_with_the_microwave(oven, door):
-    first = world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905))
+    first = world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905), [-0.28, 0.21, -0.04, 0.25], 0.0286)
     R = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
     shift = np.array([0.7, -0.3, 0.2])
     oven.n, oven.w, oven.b0 = R @ oven.n, R @ oven.w, R @ oven.b0 + shift
@@ -88,7 +88,7 @@ def test_geometry_rotates_and_translates_with_the_microwave(oven, door):
     transformed["door_open_deg"] = 90
     transformed["closed_normal"] = (R @ np.asarray(door["closed_normal"])).tolist()
     transformed["door_z"] = (np.asarray(door["door_z"]) + shift[2]).tolist()
-    second = world.door_box(oven, transformed, 90, 0.08, 10, (0.3048, 0.1905))
+    second = world.door_box(oven, transformed, 90, 0.08, 10, (0.3048, 0.1905), [-0.28, 0.21, -0.04, 0.25], 0.0286)
     np.testing.assert_allclose(second["position"], R @ first["position"] + shift)
     assert second["dims"] == pytest.approx(first["dims"])
 
@@ -107,15 +107,18 @@ def test_geometry_rotates_and_translates_with_the_microwave(oven, door):
 def test_stale_or_incomplete_registration_refused(oven, door, key, value):
     door[key] = value
     with pytest.raises(world.InvalidGeometry):
-        world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905))
+        world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905), [-0.28, 0.21, -0.04, 0.25], 0.0286)
 
 
-def test_door_file_must_be_recent_and_not_a_demo_without_geometry(tmp_path):
+def test_old_door_file_is_accepted_without_changing_timestamp(tmp_path):
     path = tmp_path / "door.json"
     path.write_text(json.dumps({"hinge": [0, 0, 0]}))
     os.utime(path, (1, 1))
-    with pytest.raises(world.InvalidGeometry, match="old"):
-        world.read_door(path, 600)
+    assert world.read_door(path) == {"hinge": [0, 0, 0]}
+    assert path.stat().st_mtime == 1
+    path.write_text("[]")
+    with pytest.raises(world.InvalidGeometry, match="object"):
+        world.read_door(path)
 
 
 @pytest.mark.parametrize("fail_at", ["load", "motion", None])
@@ -157,19 +160,95 @@ def test_local_path_refuses_door_contact_before_execution():
     assert checkpoint.call_count == 2
 
 
-def test_outer_rectangle_excludes_open_door_and_interior_points(oven):
-    # Camera looks along world +X: optical (u,v,d) -> world (d,u,v).
-    T = np.eye(4)
-    T[:3, :3] = [[0, 0, 1], [1, 0, 0], [0, 1, 0]]
-    T[:3, 3] = [-1, 0, 0.1]
-    depth = np.full((30, 40), 1 - 0.0286)
-    K = np.array([[70, 0, 20], [0, 70, 15], [0, 0, 1]])
-    depth[:, :3] = 0.7  # open door in front
-    depth[5:25, 8:32] = 1.2  # cavity behind the front
-    shot = dict(depth_m=depth, mask=np.ones_like(depth, bool), K=K, world_T_cam=T)
-    outer = world.outer_bounds(oven, shot, 0.0286)
-    assert outer[0] > -0.25
-    assert outer[1] < 0.3
-    depth[:] = 1.2
-    with pytest.raises(world.InvalidGeometry, match="exterior-front"):
-        world.outer_bounds(oven, shot, 0.0286)
+def test_expected_layers_follow_active_config_not_flatbot(tmp_path):
+    import yaml
+
+    for name, count in [("seat", 17), ("person", 3), ("platform", 16)]:
+        (tmp_path / f"{name}.yaml").write_text(
+            yaml.safe_dump(dict(layer=name, meta=dict(frame="arm_mount"), obstacles=[{}] * count))
+        )
+    config = tmp_path / "planner.yaml"
+    config.write_text(yaml.safe_dump(dict(layers=["seat.yaml", "person.yaml"])))
+    assert world.planner_layers(config) == {"seat": 17, "person": 3}
+    config.write_text("layers: []\n")
+    with pytest.raises(world.InvalidGeometry):
+        world.planner_layers(config)
+
+
+def test_door_registration_ignores_allowed_saved_pose_drift(oven, door):
+    outer = [-0.28, 0.21, -0.04, 0.25]
+    original = world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905), outer, 0.0286)
+    # Move both hinge and grasp without changing the saved door dimensions.
+    for key in ("hinge", "closed_grasp_pos"):
+        door[key] = (np.asarray(door[key]) + [0.04, -0.02, 0.01]).tolist()
+    door["door_z"] = (np.asarray(door["door_z"]) + 0.01).tolist()
+    registered = world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905), outer, 0.0286)
+    np.testing.assert_allclose(original["position"], registered["position"])
+    np.testing.assert_allclose(original["dims"], registered["dims"])
+
+
+def test_submillimetre_wall_fit_is_refused(oven):
+    with pytest.raises(world.InvalidGeometry, match="thinner than 5 mm"):
+        world.shell_boxes(oven, [-0.28, 0.1531, -0.04, 0.25], [0.3048, 0.1905], 0.3048, 0.0286, 0.02)
+
+
+def test_fixed_control_panel_and_borders_preserve_open_cavity(oven):
+    outer = world.fixed_outer_bounds((0.3048, 0.1905), 0.127, 0.0254, 0.02)
+    assert outer == pytest.approx([-0.2794, 0.1724, -0.0254, 0.2159])
+    boxes = world.shell_boxes(oven, outer, (0.3048, 0.1905), 0.3048, 0.0286, 0.02)
+    panel = next(b for b in boxes if b["name"] == "microwave_control_panel")
+    assert panel["dims"][1] == pytest.approx(0.127)
+    assert panel["position"][1] + panel["dims"][1] / 2 == pytest.approx(-0.1524)
+    for name in ("microwave_top", "microwave_bottom"):
+        assert next(b for b in boxes if b["name"] == name)["dims"][2] == pytest.approx(0.0254)
+    for x in [-0.02, 0.1, 0.30]:
+        assert not any(inside(b, [x, 0, 0.1]) for b in boxes)
+
+
+@pytest.mark.parametrize("panel,border,left", [(0, 0.0254, 0.02), (0.127, -1, 0.02), (float("nan"), 0.0254, 0.02)])
+def test_invalid_fixed_dimensions_refused(panel, border, left):
+    with pytest.raises(world.InvalidGeometry):
+        world.fixed_outer_bounds((0.3048, 0.1905), panel, border, left)
+
+
+@pytest.mark.parametrize("distance,passes", [(0.009, True), (0.005, True), (0.004, False), (-0.001, False)])
+def test_five_mm_grab_clearance_threshold(distance, passes):
+    checker = SimpleNamespace(clearance=Mock(return_value=(distance, "forearm vs door")))
+
+    def run():
+        world.check_local_path(checker, [[0] * 7], lambda qs, step: qs, 0.5, 0.005, Mock(), "insertion")
+
+    if passes:
+        run()
+    else:
+        with pytest.raises(world.InvalidGeometry):
+            run()
+
+
+def test_open_door_right_surface_is_cavity_left_edge(oven, door):
+    box = world.door_box(oven, door, 90, 0.08, 10, (0.3048, 0.1905), [-0.2794, 0.1724, -0.0254, 0.2159], 0.0286)
+    yaw = np.radians(box["rpy_deg"][2])
+    normal = np.array([np.cos(yaw), np.sin(yaw), 0])
+    along = np.array([-np.sin(yaw), np.cos(yaw), 0])
+    half_across = abs(normal @ oven.w) * box["dims"][0] / 2 + abs(along @ oven.w) * box["dims"][1] / 2
+    minimum_a = float((np.array(box["position"]) - oven.b0) @ oven.w) - half_across
+    assert minimum_a == pytest.approx(0.3048 / 2)
+    assert not inside(box, [-0.2, 0.15, 0.1])  # immediately inside the cavity's left edge
+
+
+def test_precise_clearance_report_preserves_failed_sample():
+    report = Mock()
+    checker = SimpleNamespace(clearance=Mock(return_value=(0.004876, "forearm vs door")))
+    with pytest.raises(world.InvalidGeometry, match="4.876 mm below 5.000 mm"):
+        world.check_local_path(checker, [[0.1] * 7], lambda qs, step: qs, 0.5, 0.005, Mock(), "insertion", report)
+    diagnostic = report.call_args.args[0]
+    assert diagnostic["distance_mm"] == pytest.approx(4.876)
+    assert diagnostic["joints"] == [0.1] * 7
+    assert diagnostic["required_mm"] == 5
+
+
+def test_successful_path_reports_minimum_clearance():
+    report = Mock()
+    checker = SimpleNamespace(clearance=Mock(side_effect=[(0.012, "arm"), (0.009, "finger")]))
+    world.check_local_path(checker, [[0] * 7], lambda qs, step: qs, 0.5, 0.005, Mock(), "lift", report)
+    assert report.call_args.args[0]["distance_mm"] == pytest.approx(9)

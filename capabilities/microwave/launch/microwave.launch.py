@@ -22,12 +22,20 @@ def generate_launch_description():
         + [
             # arm.mock_urdf: the URDF make_sim() loads in mock runs ("" loads none)
             DeclareLaunchArgument("mock_urdf", default_value=""),
+            DeclareLaunchArgument("chair_planner_config", default_value="/config/robot/curobo/planner.yaml"),
             Node(
                 package="microwave",
                 executable="microwave_node",
                 output="screen",
                 parameters=[{name: ParameterValue(LaunchConfiguration(name), value_type=bool)} for name, _ in args]
-                + [{"arm.mock_urdf": ParameterValue(LaunchConfiguration("mock_urdf"), value_type=str)}],
+                + [{"arm.mock_urdf": ParameterValue(LaunchConfiguration("mock_urdf"), value_type=str)}]
+                + [
+                    {
+                        "chair_planner_config": ParameterValue(
+                            LaunchConfiguration("chair_planner_config"), value_type=str
+                        )
+                    }
+                ],
             ),
         ]
     )

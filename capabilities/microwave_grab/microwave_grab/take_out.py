@@ -85,8 +85,8 @@ def grasp_pose(model, q0, point, reach_in, grasp_depth, grasp_up):
     return dict(heading=h, quat=Rotation.from_matrix(R).as_quat(), target=target, pre=target - reach_in * h)
 
 
-def set_approach_world(arm, world, log):
-    """Load the floor scene and require the planner's persistent flatbot layers.
+def set_approach_world(arm, world, log, expected_layers=None):
+    """Load the floor scene and require the selected robot's persistent layers.
 
     The path is resolved by the planner, not by this capability's container.
     Older planners without layer acknowledgements fail closed.
@@ -96,8 +96,17 @@ def set_approach_world(arm, world, log):
         raise pm.Refused(f"take-out: set_world({world}) failed: {message}")
     config_layers = re.search(r"config layers: ([^|)]*)", message)
     scene_layers = re.search(r"scene layers: ([^|)]*)", message)
-    for name in ("platform", "seat", "person"):
-        if config_layers is None or re.search(rf"\b{name} [1-9]\d*\b", config_layers[1]) is None:
+    if expected_layers is None:  # Legacy direct callers retain the Flatbot contract.
+        expected_layers = {name: None for name in ("platform", "seat", "person")}
+    actual = (
+        dict((name, int(count)) for name, count in re.findall(r"([A-Za-z0-9_]+) (\d+)", config_layers[1]))
+        if config_layers
+        else {}
+    )
+    if set(actual) != set(expected_layers):
+        raise pm.Refused(f"take-out: planner config layers {actual} do not match selected robot {expected_layers}")
+    for name, count in expected_layers.items():
+        if actual.get(name, 0) <= 0 or (count is not None and actual[name] != count):
             raise pm.Refused(f"take-out: planner did not confirm config layer {name}: {message}")
     if scene_layers is None or re.search(r"\bfloor [1-9]\d*\b", scene_layers[1]) is None:
         raise pm.Refused(f"take-out: planner did not confirm the floor scene layer: {message}")
@@ -243,6 +252,7 @@ def plan_take_out(arm, model, q0, cand, cfg):
         raise pm.Refused(f"take-out approach: cuRobo refused: {approach.message}")
     if len(approach.q) < 2:
         raise pm.Refused("take-out approach: cuRobo returned no executable trajectory")
+    check_local(cfg, "approach", approach.q)
     legs = plan_from_pregrasp(model, approach.q[-1], cand, cfg)
     exit_plan = plan_withdrawal(arm, model, legs["lift"][-1], cand["pre"], cfg)
     return dict(approach=approach.q, approach_t=approach.t, approach_qd=approach.qd, **legs, **exit_plan)

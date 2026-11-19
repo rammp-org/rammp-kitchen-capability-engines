@@ -23,7 +23,7 @@ from door_common import close_door
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import open_door, recording, ui_text
+from . import chair_model, open_door, recording, ui_text
 from .perception import WristCamera
 from .tee_logger import TeeLogger
 
@@ -46,6 +46,7 @@ def _schema(default):
 PARAMS = {
     "allow_execute": False,
     "data_dir": "/microwave_data",
+    "chair_planner_config": "/config/robot/curobo/planner.yaml",
     "color_topic": "/wrist_camera/color/image_raw",
     "camera_info_topic": "/wrist_camera/color/camera_info",
     # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
@@ -163,7 +164,15 @@ class Capability(CapabilityEngine):
             k: "" if isinstance(v, str) and v.strip().lower() in ("null", "none") else v for k, v in self.cfg.items()
         }
         open_door.configure(self.cfg["data_dir"])
-        dc.enable_chair_collision()  # the moves PyBullet plans stay out of the chair and user, as cuRobo's do
+        if self.mock:
+            dc.enable_chair_collision()
+        else:
+            boxes, layers = chair_model.load_planner_chair(self.cfg["chair_planner_config"])
+            dc.enable_chair_collision(boxes)
+            self.get_logger().info(
+                f"local chair model: {len(boxes)} boxes from {self.cfg['chair_planner_config']}; "
+                f"layers: {', '.join(layers)}; mesh margin: {dc.CHAIR_SIM_MARGIN_M:g} m"
+            )
         open_door.VIEW_DISTS = tuple(float(v) for v in self.cfg["view_dists"])
         open_door.VIEW_HEIGHTS = tuple(float(v) for v in self.cfg["view_heights"])
         open_door.VIEW_SIDES = tuple(float(v) for v in self.cfg["view_sides"])

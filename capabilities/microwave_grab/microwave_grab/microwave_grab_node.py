@@ -93,11 +93,13 @@ FRIDGE_DOOR_GAP = (
 PARAMS = {
     "allow_execute": False,
     "door_geometry_file": "/microwave_data/door.json",
-    "door_max_age_s": 600.0,
+    "planner_config": "/config/robot/curobo/planner.yaml",
     "door_open_angle_deg": 90.0,
     "door_alignment_m": 0.08,
     "door_alignment_deg": 10.0,
     "microwave_wall_m": 0.02,
+    "microwave_panel_width_m": 0.127,
+    "microwave_border_m": 0.0254,
     "microwave_base_layers": ["/config/robot/curobo/layer_mebot_floor.yaml"],
     "record_bag": True,
     "bag_frame_hz": 1.0,
@@ -145,6 +147,7 @@ PARAMS = {
     "side_shifts_cm": [3.0, -3.0, 6.0, -6.0, 9.0, -9.0],
     # the side shift and the transit: every arm and gripper link at least this far (m) from the microwave box
     "clear_min": 0.01,
+    "take_clear_min": 0.005,  # local grab path clearance, metres
     # the hand's tilt vs the start, anywhere on the transit and the lines (deg)
     "tilt_max_deg": 2.0,
     # cuRobo's world files go here; the planner's container must see this directory at the SAME path
@@ -157,15 +160,15 @@ PARAMS = {
     "take_approach_speed_scale": rammp_arm.GO_TO_SPEED_SCALE,
     "take_exit_speed_scale": rammp_arm.GO_TO_SPEED_SCALE,
     "take_pullback_m": 0.05,
-    # Saved viewing configuration: arm_joint_1..7 in radians, captured 2026-11-11.
+    # Measured stationary pose with successful wrist-camera container detection, 2026-11-18.
     "take_home_joints": [
-        -2.9723690063395423,
-        0.4406113803695808,
-        -0.4320526131268245,
-        -2.4519407240189826,
-        2.8028915598374065,
-        -0.9451441529603253,
-        -1.413206432450548,
+        0.5830700922169674,
+        -0.746675268515478,
+        -1.6893474753519921,
+        -2.0094160288537477,
+        -1.0276813740962787,
+        -1.7364811655886498,
+        -3.0368779584762042,
     ],
     # take_out with site "fridge" (direct goals only; no UI button): its viewing pose, arm_joint_1..7 in radians.
     # Default: the fridge capability's start pose (fridge/constants.py START_JOINTS_DEG, its start_joints_deg,
@@ -480,14 +483,33 @@ class Capability(CapabilityEngine):
                     with self._grab_collision_world(ctx, log) as scene:
                         checker = place_motion.Checker(model, scene["metadata"]["obstacles"])
                         try:
+
+                            def report_clearance(record):
+                                detail = checker.closest_points(record["joints"], record["gripper_closed"])
+                                record = {
+                                    **record,
+                                    "closest_points": detail,
+                                    "obstacles": scene["metadata"]["obstacles"],
+                                }
+                                self._save("last_clearance.json", record)
+                                if record["distance_mm"] < record["required_mm"]:
+                                    self._save("last_clearance_refusal.json", record)
+                                log_message = (
+                                    f"{record['phase']}: minimum checked clearance "
+                                    f"{record['distance_mm']:.3f} mm, required {record['required_mm']:.3f} mm "
+                                    f"({record['pair']})"
+                                )
+                                self.get_logger().info(log_message)
+
                             scene["check_path"] = lambda phase, qs: collision_world.check_local_path(
                                 checker,
                                 qs,
                                 place_motion.dense,
                                 place_motion.LINE_STEP_DEG,
-                                self.cfg["clear_min"],
+                                self.cfg["take_clear_min"],
                                 ctx.checkpoint,
                                 phase,
+                                report_clearance,
                             )
                             return {**self._take_out(model, execute, ctx, log, site, scene), "note": note}
                         finally:
@@ -641,7 +663,8 @@ class Capability(CapabilityEngine):
         ctx.checkpoint()
         ctx.progress("microwave_model", 0.0)
         try:
-            door = collision_world.read_door(c["door_geometry_file"], c["door_max_age_s"])
+            expected_layers = collision_world.planner_layers(c["planner_config"])
+            door = collision_world.read_door(c["door_geometry_file"])
             topics = (c["depth_topic"], c["camera_info_topic"], c["detections_topic"])
             loc = microwave_detection.locate(
                 self,
@@ -652,12 +675,16 @@ class Capability(CapabilityEngine):
                 c["agree_m"],
                 c["agree_deg"],
                 log,
-                extra_prompt=c["microwave_prompt"],
                 checkpoint=ctx.checkpoint,
             )
             ctx.checkpoint()
             oven = place_motion.Oven(loc["fit"])
-            outer = collision_world.outer_bounds(oven, loc["body"], microwave_detection.RECESS)
+            outer = collision_world.fixed_outer_bounds(
+                microwave_detection.OPENING,
+                c["microwave_panel_width_m"],
+                c["microwave_border_m"],
+                c["microwave_wall_m"],
+            )
             boxes = collision_world.shell_boxes(
                 oven,
                 outer,
@@ -674,6 +701,8 @@ class Capability(CapabilityEngine):
                     c["door_alignment_m"],
                     c["door_alignment_deg"],
                     microwave_detection.OPENING,
+                    outer,
+                    microwave_detection.RECESS,
                 )
             )
             metadata = dict(
@@ -682,6 +711,12 @@ class Capability(CapabilityEngine):
                 door_file=c["door_geometry_file"],
                 door_angle_deg=c["door_open_angle_deg"],
                 door_angle_source="configured assumption",
+                door_registration="door right surface aligned to cavity left edge at 90 degrees",
+                exterior_source="configured dimensions: right panel, top/bottom border, left wall",
+                panel_width_m=c["microwave_panel_width_m"],
+                border_m=c["microwave_border_m"],
+                home_source="measured successful tupperware-detection pose, 2026-11-18",
+                expected_config_layers=expected_layers,
                 obstacles=boxes,
             )
             path = collision_world.write_scene(
@@ -693,7 +728,11 @@ class Capability(CapabilityEngine):
         log(f"microwave collision world: {path} (shell, control panel, left door)")
         ctx.checkpoint()
         with collision_world.loaded_world(
-            self.arm, path, c["take_approach_world"], take_out.set_approach_world, log
+            self.arm,
+            path,
+            c["take_approach_world"],
+            lambda arm, world, logger: take_out.set_approach_world(arm, world, logger, expected_layers),
+            log,
         ) as message:
             yield dict(message=message, metadata=metadata)
 

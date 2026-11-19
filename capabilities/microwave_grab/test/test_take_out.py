@@ -405,3 +405,33 @@ def test_fully_closed_gripper_allows_lift_and_retreat(motion):
     arm = Mock()
     arm.gripper_state.return_value = SimpleNamespace(position=1.0)
     assert take.close_on_brim(arm, Mock()) == 1.0
+
+
+def test_gen15_layer_contract_without_platform(motion):
+    take, pm = motion
+    arm = Mock()
+    message = "world: 27 boxes: scene 6 | config layers: seat 17, person 3 | scene layers: floor 1"
+    arm.set_world.return_value = True, message
+    assert take.set_approach_world(arm, "world.yaml", Mock(), {"seat": 17, "person": 3}) == message
+    for expected in ({"seat": 16, "person": 3}, {"seat": 17}, {"seat": 17, "person": 3, "platform": 16}):
+        with pytest.raises(pm.Refused):
+            take.set_approach_world(arm, "world.yaml", Mock(), expected)
+
+
+
+def test_insertion_collision_refuses_without_retrying_approach(motion, monkeypatch):
+    take, pm = motion
+    arm = Mock()
+    arm.plan_to_pose.return_value = SimpleNamespace(success=True, q=[np.zeros(7), np.full(7, 0.1)])
+    monkeypatch.setattr(take, "plan_from_pregrasp", Mock(side_effect=pm.Refused("door collision")))
+    with pytest.raises(pm.Refused, match="door collision"):
+        take.plan_take_out(
+            arm,
+            Mock(),
+            np.zeros(7),
+            dict(pre=[0, 0, 0], quat=[0, 0, 0, 1]),
+            dict(take_exit_speed_scale=0.3, take_approach_speed_scale=0.3),
+        )
+    arm.plan_to_pose.assert_called_once()
+    arm.plan_to_joints.assert_not_called()
+    arm.execute_joint_trajectory.assert_not_called()

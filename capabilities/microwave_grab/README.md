@@ -440,7 +440,7 @@ It uses the same default grasp-to-face offset (6.7 cm), free edge beyond grasp
 model. It does not include a separate protruding door-handle obstacle.
 The slab opens outward at a configured **90 degrees**. That angle is an
 assumption, not a visual measurement; the actual door must match it.
-Missing, malformed, old, or spatially inconsistent geometry refuses before HOME.
+Missing, malformed, or spatially inconsistent geometry refuses before HOME.
 Reopen/re-detect after moving the wheelchair or microwave: the saved coordinates
 are in `arm_mount`, not an appliance-fixed frame.
 
@@ -469,15 +469,56 @@ Mock mode skips geometry acquisition and arm access.
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `door_geometry_file` | `/microwave_data/door.json` | Opener's saved geometry, mounted read-only |
-| `door_max_age_s` | `600.0` | Maximum saved-file age in seconds |
 | `door_open_angle_deg` | `90.0` | Assumed outward opening at the left hinge |
 | `door_alignment_m` | `0.08` | Maximum saved/live front and left-hinge disagreement |
 | `door_alignment_deg` | `10.0` | Maximum saved/live front-normal disagreement |
 | `microwave_wall_m` | `0.02` | Model back-wall thickness, metres |
 | `microwave_base_layers` | `[/config/robot/curobo/layer_mebot_floor.yaml]` | Floor scene layers, resolved inside planner |
 
-`clear_min` (default `0.01` m) also gates the local arm/gripper paths.
+`take_clear_min` (default `0.005` m, 5 mm) gates the local grab arm/gripper paths.
+`clear_min` remains 0.01 m for the copied direct placement behavior.
 New parameter defaults are listed in both deployment fragments.
 
 Validation so far uses offline synthetic geometry and mocked lifecycle/planning
 checks. This model has not been validated on the robot or in a live cuRobo run.
+
+
+### Fixed exterior dimensions for microwave retrieval
+
+Retrieval now uses only the live cavity fit; it does not request an exterior
+microwave segmentation. In the cavity frame, the control panel is 0.127 m
+(5 inches) wide, starting at the cavity's right edge. Top and bottom borders
+are each 0.0254 m (1 inch). The left and back walls retain `microwave_wall_m`
+(default 0.02 m). The known cavity depth and front recess remain unchanged.
+The door is anchored to this fixed surround's left front edge, with saved door
+width/height and assumed 90-degree opening. These dimensions replace the earlier
+live exterior-fit descriptions for retrieval; the copied direct place behavior
+is unchanged.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `microwave_panel_width_m` | `0.127` | Right-side control panel width |
+| `microwave_border_m` | `0.0254` | Top and bottom border thickness |
+
+
+### Door inner edge at the cavity boundary
+
+At the assumed 90-degree opening, the door slab's rightmost surface is aligned
+with the cavity rectangle's left edge. All 4 cm of door thickness extend to the
+left, outside the opening. The slab still extends outward from the exterior
+front plane and keeps the saved width and height. This supersedes the previous
+outer-surround hinge anchor. Local grab clearance remains 5 mm; this is a model
+placement change, not a reduction in collision checking.
+
+
+### Closest-point diagnostics
+
+Each path check records millimetre clearance to three decimal places, the sampled
+joints, gripper extreme, link/obstacle pair and the closest surface points in
+`arm_mount`. `state_dir/last_clearance.json` stores the most recent checked path
+minimum (or the first threshold violation); `last_clearance_refusal.json` retains
+the most recent clearance refusal. The surface
+points can be projected onto the camera image or inspected as a 3D segment. They
+are model-space distances, not measured physical clearances. Insertion/lift/retreat
+remain locally generated paths checked against the microwave boxes; the held
+container is still not modelled.

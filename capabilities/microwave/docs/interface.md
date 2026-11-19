@@ -127,6 +127,7 @@ passes them as a params file.
 | `mock`                    | `false`                              | `true` skips hardware (the mock alternative sets it)                                                                                                                        |
 | `allow_execute`           | `false`                              | `true` lets execute goals move the arm. Attended runs only                                                                                                                  |
 | `data_dir`                | `/microwave_data`                    | Door file, grasp record, run logs, detection frames (a host volume)                                                                                                         |
+| `chair_planner_config` | `/config/robot/curobo/planner.yaml` | Active cuRobo config: its persistent layers supply the local chair/user boxes |
 | `color_topic`             | `/wrist_camera/color/image_raw`      | Wrist colour image                                                                                                                                                          |
 | `camera_info_topic`       | `/wrist_camera/color/camera_info`    | Wrist camera intrinsics                                                                                                                                                     |
 | `depth_topic`             | `/wrist_camera/depth/image_rect_raw` | Wrist depth, aligned to colour (D405, OAK); the D435i needs `/wrist_camera/aligned_depth_to_color/image_raw`                                                                |
@@ -227,3 +228,38 @@ GPU (`runtime: nvidia`, the `rammp-cuda` image), chosen for the YOLO handle dete
 | ---------------- | ---------------------------------------------------------------------------------- |
 | `microwave_real` | The module proper                                                                  |
 | `microwave_mock` | Same interface, no hardware — for developing against this module without owning it |
+
+
+### Active robot collision geometry
+
+Real microwave nodes load the persistent collision layers listed by
+`chair_planner_config` at startup, resolving layer paths relative to that YAML.
+The active robot configuration must be mounted read-only at `/config/robot`,
+the same configuration used by the planner. The real deployment fragment includes
+this mount; when transcribing it into a deployment, keep the mount and parameter.
+Native launches can pass `chair_planner_config:=/path/to/active/curobo/planner.yaml`.
+
+On Gen 1.5 this loads seat and person (20 boxes), with no platform layer.
+It uses the configured `planner.world_padding` (cuRobo default: 2 cm per side),
+checks the layers' certified minimum padding, and retains door_common's additional
+1.5 cm mesh clearance margin. The planner uses arm collision spheres while the
+local checker uses meshes, so the checks may still give different clearances.
+The replaceable scene world, including its floor, is not loaded as a chair layer.
+Existing floor checks remain in place.
+
+Missing files, empty layers, non-finite boxes, wrong coordinate frames and
+unsupported rotated boxes refuse startup; real nodes never silently fall back
+to the bundled Flatbot model. Mock runs keep the bundled fixture and need no
+robot-config mount. Restart both the planner and microwave node after changing
+robot collision files so they load the same revision.
+
+
+### Planned joint detours
+
+The microwave disables door_common's fixed 25-degree extra joint-excursion cap
+for joint-goal and tool-pose plans. This allows the planner to route around the
+chair. The shared default stays unchanged for other capability processes.
+Collision checks, floor checks, exact joint/tool endpoint checks, the existing
+arm-reconfiguration checks, and hardware velocity/acceleration/joint limits remain
+in effect. Removing the detour cap does not make a pose-fallback plan that ends
+at the wrong joint configuration acceptable.

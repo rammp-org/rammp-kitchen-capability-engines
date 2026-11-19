@@ -5,7 +5,6 @@ finite door width and height; live cavity/body detection checks its registration
 """
 
 import json
-import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +36,9 @@ def shell_boxes(oven, outer, opening, depth, recess, wall):
         raise InvalidGeometry("non-finite microwave dimensions")
     if min(width, height, depth, recess, wall) <= 0 or not (a0 < -width / 2 < width / 2 < a1 and z0 < 0 < height < z1):
         raise InvalidGeometry("outer microwave rectangle must surround the cavity")
+    surrounds = [-width / 2 - a0, a1 - width / 2, -z0, z1 - height]
+    if min(surrounds) < 0.005:
+        raise InvalidGeometry("exterior fit leaves a wall thinner than 5 mm; incomplete body segmentation")
     return [
         oven.box("microwave_control_panel", (a0, -width / 2), (-recess, depth + wall), (z0, z1)),
         oven.box("microwave_left_wall", (width / 2, a1), (-recess, depth + wall), (z0, z1)),
@@ -46,12 +48,12 @@ def shell_boxes(oven, outer, opening, depth, recess, wall):
     ]
 
 
-def door_box(oven, door, angle_deg, position_tol, yaw_tol_deg, opening):
-    """Use the opener's detected hinge edge and closed grasp, as door_model_boxes does.
+def door_box(oven, door, angle_deg, position_tol, yaw_tol_deg, opening, outer, recess):
+    """Keep saved door dimensions, registering its inner edge to the live cavity left/front edge.
 
     A left-hinged door opens outward at the configured angle (90 degrees by
     default). The angle is assumed, not newly observed. Stored geometry must
-    still agree with the live cavity plane and its left edge.
+    still pass the saved/live consistency checks before re-registration.
     """
     opening_width, opening_height = opening
     n = _vector(door["closed_normal"], "closed_normal")
@@ -95,11 +97,22 @@ def door_box(oven, door, angle_deg, position_tol, yaw_tol_deg, opening):
     toward_hinge = along / np.linalg.norm(along[:2])
     if toward_hinge @ oven.w < 0.9:
         raise InvalidGeometry("saved geometry is not a left-hinged microwave")
+    # One live frame for the body, cavity and door: the saved hinge locates
+    # no collision box. Its handle-to-hinge span supplies the door width only.
+    a0, a1, z0, z1 = np.asarray(outer, dtype=float)
+    if not np.isfinite([a0, a1, z0, z1, recess]).all() or recess <= 0:
+        raise InvalidGeometry("invalid live exterior bounds")
+    if not a0 < -opening_width / 2 < opening_width / 2 < a1 or not z0 < 0 < opening_height < z1:
+        raise InvalidGeometry("live exterior must surround cavity before registering door")
+    # At 90 degrees, the slab's rightmost surface is exactly the cavity's
+    # left edge. Its whole thickness extends left, away from the opening.
+    hinge = oven.b0 + opening_width / 2 * oven.w - recess * oven.n
+    n, toward_hinge = -oven.n, oven.w
     # A left hinge opens outward with negative yaw about world up.
     a = -np.radians(angle_deg)
     rot = np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]])
-    centre = hinge + rot @ (-toward_hinge * width / 2 - n * thickness / 2)
-    centre[2] = float(heights.mean())
+    centre = hinge + rot @ (-toward_hinge * width / 2 + n * thickness / 2)
+    centre[2] = float(oven.b0[2] + (z0 + z1) / 2)
     normal = rot @ n
     return dict(
         name="microwave_open_door",
@@ -109,13 +122,9 @@ def door_box(oven, door, angle_deg, position_tol, yaw_tol_deg, opening):
     )
 
 
-def read_door(path, max_age_s):
+def read_door(path):
+    """Read saved dimensions; timestamps do not determine geometric validity."""
     path = Path(path)
-    if not np.isfinite(max_age_s) or max_age_s <= 0:
-        raise InvalidGeometry("door_max_age_s must be positive")
-    age = time.time() - path.stat().st_mtime
-    if not -5 <= age <= max_age_s:
-        raise InvalidGeometry(f"saved door is {age:.0f} s old; reopen/re-detect before grabbing")
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise InvalidGeometry("door.json must contain an object")
@@ -145,50 +154,73 @@ def write_scene(directory, frame, layers, boxes, metadata):
     return path
 
 
-def outer_bounds(oven, shot, recess):
-    """Robust outer bounds from body-mask depths at the front, excluding the open door."""
-    depth = np.asarray(shot["depth_m"], dtype=float)
-    mask = np.asarray(shot["mask"], dtype=bool)
-    if mask.shape != depth.shape:
-        raise InvalidGeometry("body mask and depth shapes differ")
-    valid = mask & np.isfinite(depth) & (depth > 0.15) & (depth < 2.5)
-    v, u = np.nonzero(valid)
-    d = depth[v, u]
-    K, T = np.asarray(shot["K"], dtype=float), np.asarray(shot["world_T_cam"], dtype=float)
-    if K.shape != (3, 3) or T.shape != (4, 4) or not np.isfinite(K).all() or not np.isfinite(T).all():
-        raise InvalidGeometry("invalid body camera calibration or transform")
-    if K[0, 0] <= 0 or K[1, 1] <= 0:
-        raise InvalidGeometry("invalid body camera focal length")
-    points = np.column_stack(((u - K[0, 2]) * d / K[0, 0], (v - K[1, 2]) * d / K[1, 1], d))
-    # Explicit small dot products avoid BLAS dispatch for three-coordinate points.
-    relative = np.einsum("ij,kj->ik", points, T[:3, :3]) + T[:3, 3] - oven.b0
-    local = np.column_stack(
-        (np.einsum("ij,j->i", relative, oven.w), np.einsum("ij,j->i", relative, oven.n), relative[:, 2])
-    )
-    # Restrict to the exterior front plane; interior and door depths cannot
-    # enlarge the estimated control panel and front surround.
-    local = local[
-        (np.abs(local[:, 1] + recess) < 0.025)
-        & (np.abs(local[:, 0]) < 0.5)
-        & (local[:, 2] > -0.15)
-        & (local[:, 2] < 0.5)
-    ]
-    if len(local) < 200:
-        raise InvalidGeometry("fewer than 200 exterior-front depth points; cannot model control panel")
-    lo, hi = np.percentile(local[:, [0, 2]], [1, 99], axis=0)
-    return [float(lo[0]), float(hi[0]), float(lo[1]), float(hi[1])]
+def fixed_outer_bounds(opening, panel_width, border, left_wall):
+    """A increases left: the control panel starts at the cavity's right edge."""
+    width, height = opening
+    values = [width, height, panel_width, border, left_wall]
+    if not np.isfinite(values).all() or min(values) <= 0:
+        raise InvalidGeometry("fixed microwave dimensions must be positive and finite")
+    return [-width / 2 - panel_width, width / 2 + left_wall, -border, height + border]
 
 
-def check_local_path(checker, samples, dense, step_deg, clearance_m, checkpoint, phase):
+def check_local_path(checker, samples, dense, step_deg, clearance_m, checkpoint, phase, report=None):
     """Reject local IK routes that touch the same shell/door boxes used by cuRobo.
 
     Check both finger extremes; the held container itself is not represented.
     """
     if not np.isfinite(clearance_m) or clearance_m < 0:
         raise InvalidGeometry("clear_min must be finite and nonnegative")
-    for q in dense(samples, step_deg):
+    worst = None
+    for index, q in enumerate(dense(samples, step_deg)):
         checkpoint()
         for closed in (False, True):
             distance, pair = checker.clearance(q, closed=closed)
+            record = dict(
+                phase=phase,
+                sample=index,
+                joints=np.asarray(q).tolist(),
+                gripper_closed=closed,
+                distance_mm=float(distance) * 1000,
+                required_mm=clearance_m * 1000,
+                pair=pair,
+            )
+            if worst is None or distance * 1000 < worst["distance_mm"]:
+                worst = record
             if not np.isfinite(distance) or distance < clearance_m:
-                raise InvalidGeometry(f"{phase}: {pair} clearance {distance:.3f} m below {clearance_m:.3f} m")
+                if report is not None:
+                    report(record)
+                raise InvalidGeometry(
+                    f"{phase}: {pair} clearance {distance * 1000:.3f} mm below {clearance_m * 1000:.3f} mm"
+                )
+    if report is not None and worst is not None:
+        report(worst)
+
+
+def planner_layers(config_path):
+    """Expected persistent layers/counts from the same active config cuRobo loads."""
+    path = Path(config_path)
+    config = yaml.safe_load(path.read_text())
+    layers = config.get("layers") if isinstance(config, dict) else None
+    if not isinstance(layers, list) or not layers:
+        raise InvalidGeometry("active planner config has no persistent collision layers")
+    expected = {}
+    for ref in layers:
+        if not isinstance(ref, str) or not ref:
+            raise InvalidGeometry("invalid planner collision layer path")
+        layer_path = Path(ref)
+        if not layer_path.is_absolute():
+            layer_path = path.parent / layer_path
+        layer = yaml.safe_load(layer_path.read_text())
+        name, obstacles = layer.get("layer"), layer.get("obstacles")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in expected
+            or not isinstance(obstacles, list)
+            or not obstacles
+        ):
+            raise InvalidGeometry("invalid or empty persistent collision layer")
+        if layer.get("meta", {}).get("frame") != "arm_mount":
+            raise InvalidGeometry("persistent collision layers must use arm_mount")
+        expected[name] = len(obstacles)
+    return expected
