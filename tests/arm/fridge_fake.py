@@ -11,6 +11,7 @@ quat, world)` lets a test say which goals cuRobo finds no arm configuration for.
 reach a real arm.
 """
 
+import copy
 import json
 import types
 from dataclasses import dataclass, field
@@ -21,11 +22,12 @@ import pytest
 import yaml
 from door_common import common as dc
 from door_common import open_door as shared
-from fridge import constants, motion, planning, world
+from fridge import constants, kinematics, motion, open_door, planning, world
 from fridge.kinematics import Chain
 from fridge.planning import Planner
 from fridge.world import PlannerWorld
 
+PLACEMENT_SEARCH_S = open_door.PLACEMENT_SEARCH_S  # the node's own, for the tests that search
 URDF = Path("/fixtures/urdf/flatbot.urdf")  # the 30-deg flatbot arm (rammp-arm-test's fixture)
 FRIDGE_START = np.radians(
     (98.8, 10.2, 179.5, -94.7, 98.7, 100.2, 16.1)
@@ -72,10 +74,73 @@ def door_where_it_stands(obstacles):
     return float(np.linalg.norm(np.subtract(got[:2], want[:2]))) < 1e-3
 
 
+_IK_MEMO = {}  # (inputs) -> Chain.ik's answer, for every FakeCurobo in the session (#52)
+
+
+def _kinematics_settings():
+    """The fridge.kinematics module settings Chain.ik reads besides its arguments: part of the memo
+    key, so a test that changed one would get a fresh solve, not a stale one."""
+    return (
+        kinematics.IK_DAMP,
+        kinematics.IK_MAX_STEP_RAD,
+        kinematics.LIMIT_MARGIN_RAD,
+        kinematics.NS_STEP_RAD,
+        np.asarray(kinematics.NS_WEIGHTS, float).tobytes(),
+        np.asarray(kinematics.NS_ACTIVE_RAD, float).tobytes(),
+    )
+
+
+def memo_ik(chain):
+    """`chain`.ik, remembered for the whole test session. Chain.ik is a pure function of its
+    arguments, the URDF (URDF, the same for every FakeCurobo) and the kinematics settings, so the
+    same exact inputs give the same exact answer: a remembered one changes nothing. The fridge
+    tests plan the same open in the same scene over and over (the side grasp's whole search, and
+    its wheelchair-move search, ~185k solves, in every [side] test that refuses), and this solves
+    each of them once. Keys are the inputs' exact bytes, not rounded."""
+    solve = chain.ik
+
+    def ik(
+        pos,
+        quat,
+        q_seed,
+        iters=kinematics.IK_ITERS,
+        tol_m=kinematics.IK_TOL_M,
+        tol_rad=kinematics.IK_TOL_RAD,
+    ):
+        key = (
+            np.asarray(pos, float).tobytes(),
+            np.asarray(quat, float).tobytes(),
+            np.asarray(q_seed, float).tobytes(),
+            iters,
+            tol_m,
+            tol_rad,
+            _kinematics_settings(),
+        )
+        if key not in _IK_MEMO:
+            _IK_MEMO[key] = solve(pos, quat, q_seed, iters, tol_m, tol_rad)
+        q, why = _IK_MEMO[key]
+        return (None if q is None else q.copy()), why
+
+    chain.ik = ik
+    return chain
+
+
+_WORLD_MEMO = {}  # a pushed world file's text -> its obstacles, parsed once per session (#52)
+
+
+def _obstacles(text):
+    """The obstacles of a world file with this text, as yaml.safe_load gives them: each text parsed
+    once (the same few worlds are pushed tens of thousands of times in a [side] search), a fresh
+    copy returned every time so no test sees another's."""
+    if text not in _WORLD_MEMO:
+        _WORLD_MEMO[text] = yaml.safe_load(text)["obstacles"]
+    return copy.deepcopy(_WORLD_MEMO[text])
+
+
 class FakeCurobo:
     def __init__(self, q0=FRIDGE_START):
         self.urdf = URDF.read_text()
-        self.fk = Chain(self.urdf)
+        self.fk = memo_ik(Chain(self.urdf))
         self.q, self.gripper_pos, self.estopped = np.asarray(q0, float), 0.0, False
         self.worlds = []  # every world pushed: its obstacle dicts (or the name, for a named world)
         self.world_calls = []  # (world, even_if_cancelled)
@@ -168,9 +233,7 @@ class FakeCurobo:
     def set_world(self, name, even_if_cancelled=False):
         self.world_calls.append((name, even_if_cancelled))
         path = Path(name)
-        self.worlds.append(
-            yaml.safe_load(path.read_text())["obstacles"] if path.is_file() else name
-        )
+        self.worlds.append(_obstacles(path.read_text()) if path.is_file() else name)
         return True, ""
 
     # -- the driver --
@@ -204,7 +267,6 @@ def fridge(request, tmp_path, monkeypatch):
     square to the arm, the fake planner and arm at the Fridge pose: (arm, planner, world). Every
     module constant restored afterwards."""
     saved = [dict(vars(m)) for m in (dc, shared, constants, world, motion)]
-    from fridge import open_door
 
     open_door.configure(tmp_path, 30, grasp=request.param)
     shared.configure(HANDLE_SOURCE="depth")
@@ -214,6 +276,11 @@ def fridge(request, tmp_path, monkeypatch):
         lambda: (HANDLE.copy(), HANDLE_QUAT, NORMAL.copy(), None, None, None),
     )
     monkeypatch.setattr(planning, "_timed_events", _events_now)
+    # No wheelchair-placement search after a refused open, unless a test turns it on
+    # (PLACEMENT_SEARCH_S): it only adds advice to a refusal that is raised either way, and a
+    # whole search is up to 24 more full opens (#52: 6-15 min per refusing [side] test). The tests
+    # about the search set it back (test_a_refused_open_searches_the_wheelchair_moves_...).
+    monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", 0.0)
     dc.set_camera(type("NoFrames", (), {"grab": lambda self: None})())
     arm = FakeCurobo()
     planner_world = PlannerWorld(
