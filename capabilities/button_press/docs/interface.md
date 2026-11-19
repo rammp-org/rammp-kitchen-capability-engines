@@ -18,9 +18,12 @@ microwave.
 **The arm moves only with `allow_execute: true`.** Otherwise every action is a dry run: detect,
 plan and gate, nothing commanded, and the result says `dry_run: true`.
 
-A check that refuses a leg before it is sent backs the arm off to its last safe pose (the start,
-or the pre-press spot). A motion the driver fails (an e-stop, control lost, a tracking abort) or a
-cancel leaves the arm holding where it stopped, and the action ends there. The approach, the press
+A run that fails its own checks (a detection, a refused leg, a press that felt nothing) or a cuRobo plan
+refused before anything moved goes back to where it started first: straight out from the panel when
+close to it, then cuRobo to the start joints. A cuRobo move refused because a joint sits at its limit
+turns that joint off it and tries once more. A motion the driver fails (an e-stop, control lost, a
+tracking abort), a cancel, or bad arm state leaves the arm holding where it stopped, and the action
+ends there. The approach, the press
 and the return are not pausable: a cancel during them can leave the fingertip at the panel.
 
 ## Publishes

@@ -29,6 +29,7 @@ of the action stops the motion in flight (self.arm raises Cancelled).
 
 from __future__ import annotations
 
+import re
 import time
 
 import numpy as np
@@ -46,7 +47,10 @@ from button_press.kinematics import MAX_REACH_M, Z_RANGE_M
 # to 0.1 mm. The button press's pre-press spot and fingertip length are in Kinova's tool_frame (= the
 # Kortex tool pose = flange + 0.120 m), so ee_pose() reports that. preflight re-checks it live
 # (TOOL_FRAME_CHECK_M): if the driver's /ee_state ever changes frame, the run refuses.
-TOOL_Z = 0.120
+# 0.134 since the Kinova sensor puck (KR44492) went between the flange and the 2F-85 on flatbot and gen_1_5
+# (rammp-deployments #149): the driver's model has the gripper 0.014 m out on the puck and arm_tool_frame at
+# 0.134 from the flange, and the run's model check refused 0.120 (14.0 mm, 0.0 deg; snorlax 2026-11-17).
+TOOL_Z = 0.134
 TOOL_FRAME_CHECK_M = 0.005
 CONTINUOUS = [0, 2, 4, 6]  # J1/J3/J5/J7 spin freely
 DT = 0.02  # trajectory sample spacing (cuRobo's interpolation_dt)
@@ -59,6 +63,14 @@ MIN_DURATION_S = 1.0
 PATH_TOL_RAD = 0.15  # ~8.6 deg tracking guard per joint (driver-side abort), = sheppy_arm.py
 TRACK_ABORT_M = 0.01  # final tool position this far from the target -> hold (= old arm.py)
 START_DRIFT_DEG = 0.5  # the arm must still be where a leg was planned from when it is sent
+# cuRobo's refusal to plan from a joint inside its limit margin (rammp-curobo's message, 2026-11-18):
+# "start: arm_joint_6 is 0.000 rad from its position limit [-2.090, 2.090], inside joint_limit_margin_rad 0.100"
+# ... and GOAL_IN_LIMIT_MARGIN the same way for a joint goal ("goal: arm_joint_6 is ...").
+LIMIT_MARGIN_RE = re.compile(
+    r"(START|GOAL)_IN_LIMIT_MARGIN.*?(\w+) is [-\d.]+ rad from its position limit "
+    r"\[(-?[\d.]+), (-?[\d.]+)\], inside joint_limit_margin_rad ([\d.]+)"
+)
+LIMIT_CLEAR_RAD = 0.05  # turn_off_limit leaves the joint this far inside the margin (~9 deg off the limit)
 DIAG_LEVELS = {0: "OK", 1: "WARN", 2: "ERROR", 3: "STALE"}
 # ---- long moves through the driver's go_to_ee_pose (staging, back to start, bail): the driver
 # asks RAMMP's cuRobo for a plan from the measured joints and executes it. Its target is the
@@ -223,6 +235,19 @@ def leg_timing(q0, knots, poses, p0, R0, cart_speed=CART_SPEED, joint_speed=JOIN
     joint_travel = float(np.sum([np.max(np.abs(b - a)) for a, b in zip(path[:-1], path[1:], strict=False)]))
     duration = max(MIN_DURATION_S, 1.875 * s_knots[-1] / cart_speed, 1.875 * joint_travel / joint_speed)
     return np.array(path), s_knots, duration
+
+
+def clear_of_limit(q, error, kind):
+    """(q with the joint cuRobo's `kind` ("START" or "GOAL") limit-margin refusal names moved LIMIT_CLEAR_RAD
+    inside the margin, that joint's name), or (None, None) if `error` is not that refusal."""
+    m = LIMIT_MARGIN_RE.search(error)
+    if not m or m.group(1) != kind or m.group(2) not in rammp_arm.JOINTS:
+        return None, None
+    joint, lo, hi, margin = m.group(2), float(m.group(3)), float(m.group(4)), float(m.group(5))
+    q = np.array(q, dtype=float)
+    i = list(rammp_arm.JOINTS).index(joint)
+    q[i] = float(np.clip(q[i], lo + margin + LIMIT_CLEAR_RAD, hi - margin - LIMIT_CLEAR_RAD))
+    return q, joint
 
 
 class PressArm:
@@ -462,6 +487,50 @@ class PressArm:
         if e > track_abort_m:
             raise MotionFailed(f"{name}: ended {e*100:.1f} cm from the target -- HOLDING HERE")
         return fin
+
+    def go_to_joints(self, q, name, log):
+        """Long move to joints `q` (rad, J1..J7): cuRobo plans in joint space and the driver executes
+        at arm.go_to_speed_scale. Raises MotionFailed (arm holds) on a refusal or failure, with the
+        driver's message. Dry run: logs only."""
+        say(f"  {name:16s} go_to_joint_config (path planned by cuRobo in the driver, not previewed)")
+        rec = {"step": name, "planner": "go_to_joint_config", "target_q": [float(x) for x in q], "executed": False}
+        if not self.execute:
+            log(rec)
+            return
+        self.sent_goals += 1
+        ok = self.arm.go_to_joint_config(q, label=name)
+        rec.update(executed=True, ok=ok, error="" if ok else self.arm.last_error, q_after=self.joints().tolist())
+        log(rec)
+        if not ok:
+            raise MotionFailed(f"{name}: go_to_joint_config failed: {self.arm.last_error.strip()} -- HOLDING HERE")
+        say(f"  {name:22s} reached the start joints")
+
+    def turn_off_limit(self, error, name, log):
+        """cuRobo refuses to plan from a joint inside its limit margin (START_IN_LIMIT_MARGIN: the
+        driver's message names the joint, its limits and the margin; the arm was not moved). Turn
+        that joint alone, directly (no planner), LIMIT_CLEAR_RAD clear of the margin. Returns False
+        (nothing sent) if `error` is not that refusal; raises MotionFailed if the turn fails."""
+        if not self.execute:
+            return False
+        q0 = self.raw_joints()[:7]
+        q1, joint = clear_of_limit(q0, error, "START")
+        if q1 is None:
+            return False
+        i = list(rammp_arm.JOINTS).index(joint)
+        say(f"  {name}: {joint} is at its limit -- turning it alone {np.degrees(q1[i] - q0[i]):+.1f} deg first")
+        duration = max(MIN_DURATION_S, 1.875 * abs(q1[i] - q0[i]) / JOINT_SPEED)
+        t, q, qd = min_jerk_samples(np.stack([q0, q1]), [0.0, 1.0], duration)
+        self.sent_goals += 1
+        res = self.arm.execute_joint_trajectory(
+            rammp_arm.JOINTS, list(zip(t, q, qd, strict=True)), path_tolerance=PATH_TOL_RAD, preemption=QUEUE
+        )
+        self._wait_still()
+        rec = {"step": f"{name}: {joint} off its limit", "from": q0.tolist(), "to": q1.tolist()}
+        log({**rec, "returned": res.error_code})
+        if res.error_code != 0:
+            code = rammp_arm.ERRORS.get(res.error_code, res.error_code)
+            raise MotionFailed(f"{name}: turning {joint} off its limit ended {code} {res.error_string} -- HOLDING HERE")
+        return True
 
     def press_contact(self, p_spot, n_out, name, log, push=CONTACT_PUSH_M, stop_nm=CONTACT_STOP_NM):
         """Contact press (ContactPress): on ee_twist, hold still CONTACT_BASELINE_S (the wrist torque
