@@ -124,3 +124,21 @@ def pad_corner_below_m(lean_deg):
     import math
 
     return 0.5 * PAD_WIDTH_M * math.sin(math.radians(max(float(lean_deg), 0.0)))
+
+
+def past_model_m(chain=None, on_flange=None):
+    """How far this hand's shut pads end past the pads the arm's heights go by (the stock 2F-85's,
+    constants.TCP_OFFSET_M past the tool frame), on the description `chain` was built from (m): where
+    the hand is (constants.PADS_FROM_FLANGE_M, from the flange) less where that description has those
+    pads. 20 mm where the gripper is bolted on the flange (constants.FINGERS_PAST_MODEL_M, the tool
+    frame 0.120 out), 6 mm on a description with the sensor puck (0.134: the gripper, its tool frame and
+    the modelled pads 14 mm further out, the real fingers where they were). `on_flange`: the figure for
+    the gripper on the flange, where the caller holds its own (None: the constant). A chain that does
+    not say where its tool frame is (a test's stand-in) is taken for the gripper on the flange."""
+    from box_opening.constants import FINGERS_PAST_MODEL_M, TOOL_FROM_FLANGE_STOCK_M
+
+    past = FINGERS_PAST_MODEL_M if on_flange is None else float(on_flange)
+    tool = getattr(chain, "tool_from_flange_m", None)
+    if tool is None:
+        return past
+    return past - (float(tool) - TOOL_FROM_FLANGE_STOCK_M)

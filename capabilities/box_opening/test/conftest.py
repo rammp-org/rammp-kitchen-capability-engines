@@ -57,6 +57,70 @@ def flatbot_urdf():
     return str(fixture_path("arm_flatbot_20261021.urdf"))
 
 
+SENSOR_PUCK_M = 0.014  # Kinova's sensor puck (KR44492) between the flange and the gripper, remeasured 2026-11-12
+
+
+def puck_urdf(tmp_path, puck_m=SENSOR_PUCK_M):
+    """The same arm described WITH the sensor puck, as a str path (written in `tmp_path`): flatbot's
+    2026-10-21 URDF with the three joints the puck changes, as kinova-gen3-ros2 renders them for
+    mount.yaml's `wrist: sensor_puck` (flatbot and gen_1_5 since rammp-deployments #149). The live
+    description saved from gen_1_5 on 2026-11-19 differs from the 10-21 file in exactly these: a
+    massless arm_sensor_puck_link on the flange, the gripper's base `puck_m` out on it, and
+    arm_tool_frame as much further out (0.134). Skips the test without the 10-21 file."""
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(flatbot_urdf())
+    root = tree.getroot()
+    joints = {j.get("name"): j for j in root.findall("joint")}
+    joints["arm_tool_frame_joint"].find("origin").set("xyz", "0 0 %g" % (0.120 + puck_m))
+    base = joints["arm_robotiq_85_base_joint"]
+    base.find("parent").set("link", "arm_sensor_puck_link")
+    base.find("origin").set("xyz", "0 0 %g" % puck_m)
+    ET.SubElement(root, "link", name="arm_sensor_puck_link")
+    j = ET.SubElement(root, "joint", name="arm_sensor_puck_joint", type="fixed")
+    ET.SubElement(j, "origin", xyz="0 0 0", rpy="0 0 0")
+    ET.SubElement(j, "parent", link="arm_end_effector_link")
+    ET.SubElement(j, "child", link="arm_sensor_puck_link")
+    out = Path(tmp_path) / "arm_flatbot_sensor_puck.urdf"
+    tree.write(out)
+    return str(out)
+
+
+def both_chains(tmp_path):
+    """(the chain a run builds on the description without the puck, on the one with it)."""
+    from box_opening.runtime.kinematics import ArmChain
+
+    return ArmChain(root="arm_mount", path=flatbot_urdf()), ArmChain(root="arm_mount", path=puck_urdf(tmp_path))
+
+
+def flange_pose(chain, q):
+    """(R, t) of the flange at joints `q`, by the chain's own FK with its tool frame taken out."""
+    import numpy as np
+
+    R, t = chain.fk(q)
+    return np.asarray(R, float), np.asarray(t, float) - np.asarray(R, float) @ chain.tool_from_tip
+
+
+def arm_poses(n=12):
+    """`n` joint states scattered a radian round HOME."""
+    import numpy as np
+
+    from box_opening.constants import HOME
+
+    rng = np.random.default_rng(3)
+    return [list(np.asarray(HOME) + rng.uniform(-1.0, 1.0, 7)) for _ in range(n)]
+
+
+@pytest.fixture
+def approach_state():
+    """runtime/approach's chain, root and body model put back after a test that sets them."""
+    from box_opening.runtime import approach
+
+    saved = (approach._ROOT, approach._URDF_PATH, approach._CHAIN, approach._GRAVITY, approach._BODY)
+    yield
+    approach._ROOT, approach._URDF_PATH, approach._CHAIN, approach._GRAVITY, approach._BODY = saved
+
+
 # flatbot's HOME from 2026-10-21 until 2026-11-09, when the arm moved 8 in forward on the chair and
 # constants.HOME became a temporary one clear of the armrest. Every recorded flatbot run these tests
 # replay started here, and the poses many of them are built on were chosen near it: those tests pin it

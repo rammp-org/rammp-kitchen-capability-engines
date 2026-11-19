@@ -1357,8 +1357,12 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
     # a leaning hand's pads meet the top corner first, their middle (what the watch measures) that much
     # above it: the band above the top is as much wider, so the same top is judged the same at any lean
     corner = fingers.pad_corner_below_m(_lean_deg(stroke.quat)) if stroke.quat is not None else 0.0
+    chain = approach._chain()
+    # ... and what this hand's fingers reach past the pads the watch measures, on the description this run's
+    # chain was built from (20 mm with the gripper on the flange, 6 with the sensor puck under it)
+    past = fingers.past_model_m(chain, FINGERS_PAST_MODEL_M)
     contact = PressContact(
-        approach._chain(),
+        chain,
         ctx.client,
         top_z,
         max(slow_z, start_z - DESCENT_ARM_M),
@@ -1367,11 +1371,12 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         cut=cut,
         final=True,
         slow_z=slow_z,
-        # ... and both ends of it stand where this hand's fingers meet a top: they reach FINGERS_PAST_MODEL_M
-        # further than the pads the watch measures (constants: every press since 2026-11-12 met its button 40-45 mm
-        # "above" it, and 2026-11-17 16:44's 56 mm was refused as something in the way)
-        early_m=CONTACT_EARLY_M + corner + FINGERS_PAST_MODEL_M,
-        late_m=max(CONTACT_LATE_M - FINGERS_PAST_MODEL_M, 0.0),
+        # ... and both ends of it stand where this hand's fingers meet a top: they reach `past` further than
+        # the pads the watch measures (constants.PADS_FROM_FLANGE_M: every press of 2026-11-12 to 11-17, on the
+        # description without the puck, met its button 40-45 mm "above" it, and 11-17 16:44's 56 mm was refused
+        # as something in the way)
+        early_m=CONTACT_EARLY_M + corner + past,
+        late_m=max(CONTACT_LATE_M - past, 0.0),
         abort_on_failure=True,
     )
     contact.watch_beside(SHADOW_RISE_M, SHADOW_WINDOW_S, SHADOW_SAMPLES)

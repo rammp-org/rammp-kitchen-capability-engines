@@ -22,13 +22,21 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from box_opening.constants import GRIPPER_CMD_CLOSED
+from box_opening.constants import GRIPPER_CMD_CLOSED, TOOL_FROM_FLANGE_STOCK_M
 from box_opening.perception.d405 import mat_to_quat_xyzw as _mat_to_quat_xyzw
 from box_opening.perception.d405 import quat_to_mat
 
-# cuRobo's ee_link: 0.120 m beyond end_effector_link along its z
-# (robot_gen3_2f85.yaml); the driver's URDF stops at end_effector_link
-TOOL_FROM_EE_M = 0.120
+# cuRobo's ee_link, the frame the planner is commanded in: 0.120 m beyond end_effector_link along its z
+# with the 2F-85 bolted on the flange (robot_gen3_2f85.yaml). The bench's URDF stops at
+# end_effector_link, so there this figure stands in for it. A robot's own description
+# (/arm/robot_description) carries the frame itself, a link TOOL_FRAME_LINK fixed on the flange, and
+# the chain reads it there (ArmChain.tool_from_flange_m): 0.120 on flatbot's description until
+# 2026-11-17, 0.134 where the description has Kinova's sensor puck between the flange and the gripper
+# (flatbot and gen_1_5 since rammp-deployments #149: the gripper and its tool frame 14 mm further out).
+# Read, not assumed: with 0.120 held on the puck description every pose handed to the planner, which
+# plans arm_tool_frame, would mean a point 14 mm from the one this chain solved it for.
+TOOL_FROM_EE_M = TOOL_FROM_FLANGE_STOCK_M
+TOOL_FRAME_LINK = "tool_frame"  # "arm_tool_frame" where the description prefixes its links
 STEP_M = 0.002  # line sampling; the retimer times it
 LIMIT_MARGIN_RAD = 0.02
 CONVERGE_M = 5e-5
@@ -115,10 +123,34 @@ def urdf_path():
     return "%s/urdf/kinova_gen3_7dof.urdf" % get_package_share_directory("kinova_gen3_description")
 
 
+def described_tool_m(by_child, tip, source="the URDF"):
+    """How far past the flange `tip` along its z this URDF puts its own tool frame (m): the link
+    TOOL_FRAME_LINK (or its "arm_" name) where a fixed joint hangs it on `tip`; None where the URDF
+    has none (the bench's). `by_child`: ArmChain's joints by child link. A tool frame that is not
+    straight out of the flange with the flange's own axes is refused (RuntimeError): everything
+    box_opening knows of the hand (constants.TCP_OFFSET_M, the pads, the wrist lens) is laid out
+    along that axis, and a run on a frame turned or set aside would press beside its button."""
+    for name in (TOOL_FRAME_LINK, "arm_" + TOOL_FRAME_LINK):
+        if name not in by_child:
+            continue
+        _joint, typ, parent, t, R, _axis, _lim = by_child[name]
+        if typ != "fixed" or parent != tip:
+            continue
+        if not (np.allclose(R, np.eye(3), atol=1e-9) and abs(t[0]) < 1e-9 and abs(t[1]) < 1e-9 and t[2] > 0.0):
+            raise RuntimeError(
+                "%s: %s is not straight out of %s along its z (xyz %s): box_opening's hand is laid out "
+                "along the flange's axis" % (source, name, tip, " ".join("%g" % v for v in t))
+            )
+        return float(t[2])
+    return None
+
+
 class ArmChain:
     """base_link -> tool_frame of the Gen3, from its URDF."""
 
-    def __init__(self, path=None, tip="end_effector_link", tool_from_tip_m=TOOL_FROM_EE_M, root="base_link"):
+    def __init__(self, path=None, tip="end_effector_link", tool_from_tip_m=None, root="base_link"):
+        """`tool_from_tip_m`: how far past `tip` (the flange) along its z the tool frame is; None:
+        where this URDF's own tool frame link stands (described_tool_m), else TOOL_FROM_EE_M."""
         xml_root = ET.parse(path or urdf_path()).getroot()
         by_child = {}
         for j in xml_root.findall("joint"):
@@ -154,7 +186,14 @@ class ArmChain:
         self.chain = chain[::-1]
         self.joint_names = [c[0] for c in self.chain if c[1] in ("revolute", "continuous")]
         self.limits = [c[5] for c in self.chain if c[1] in ("revolute", "continuous")]
-        self.tool_from_tip = np.array([0.0, 0.0, float(tool_from_tip_m)])
+        # the tool frame: the description's own where it has one (the planner's ee_link), else the
+        # stock gripper's on the flange. tool_described says which, for a run's first lines
+        described = described_tool_m(by_child, tip, path or "the installed URDF")
+        self.tool_described = tool_from_tip_m is None and described is not None
+        if tool_from_tip_m is None:
+            tool_from_tip_m = TOOL_FROM_EE_M if described is None else described
+        self.tool_from_flange_m = float(tool_from_tip_m)
+        self.tool_from_tip = np.array([0.0, 0.0, self.tool_from_flange_m])
         # fk() is the IK's inner loop (every 2 mm of a plan-free line, with
         # the arm standing still), so its constants are built once: each
         # moving joint's fixed origin, with any fixed joints before it folded
@@ -711,7 +750,7 @@ class GravityModel:
                 out.add(link)
                 stack += children.get(link, [])
             self._below[name] = [link for link in out if link in self._mass]
-        # tool_frame: TOOL_FROM_EE_M along the end-effector link's z, as ArmChain
+        # tool_frame: along the end-effector link's z, where ArmChain has it (the description's own)
         self._ee = next(child for child, jt in self._joints.items() if jt[0] == arm.chain[-1][0])
         self._tool = np.array(arm.tool_from_tip, float)
         self._gripper_rad = float(gripper_rad)

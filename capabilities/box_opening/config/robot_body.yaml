@@ -7,7 +7,8 @@
 # OPEN as cuRobo locks the knuckle) misses of the real hand. Each group names its link, the boxes it
 # stands for (`covers`: centre and half extents, m, in that link's frame, with their source) and the
 # spheres that cover them (`spheres`: bare radii; the robot file's collision_sphere_buffer is added to
-# them as to its own). The load refuses a group whose spheres leave any part of its boxes uncovered
+# them as to its own). A group may name a `frame`, a link rigidly fixed to its own: its numbers are
+# then in that frame, and the run's URDF places them on the link. The load refuses a group whose spheres leave any part of its boxes uncovered
 # (sampled every 2.5 mm, 1 mm allowed), and skips a group whose boxes the robot file's own spheres
 # (bare, as the group's own are judged, on links rigidly fixed to the group's link) already cover: a
 # robot file that carries the same spheres (rammp-deployments feature/flatbot-hand-spheres) is not
@@ -33,15 +34,22 @@ hand_spheres:
       - {center: [-0.012, 0.0, 0.112], radius: 0.0275}
       - {center: [0.012, 0.0, 0.112], radius: 0.0275}
       - {center: [0.036, 0.0, 0.112], radius: 0.0275}
-  # 2026-11-17: flatbot's fingers were changed between 2026-11-03 and 11-12 and reach ~20 mm further: the closed
-  # tips end ~0.151 m out of the flange (constants.FINGERS_PAST_MODEL_M, from the arm's presses before and after),
-  # and they are wider across the hand: in the wrist's frames the shut tips span 26 mm to one side of the
-  # hand's middle and 22 mm to the other (a wide black tip and a green part beside it; before, two tips
-  # within +-12). Covered beyond the group above: the shut tips out to z 0.151 at that width, and the open
-  # tips' ends the same 20 mm further (x +-0.050). The spheres reach z 0.1675 on the axis (16.5 mm past the
-  # tips, 21.5 with the 5 mm buffer). The thickness (y) is taken as the old pads': not measured.
+  # 2026-11-17: flatbot's fingers were changed between 2026-11-03 and 11-12 and reach further: the closed
+  # tips end 0.151 m out of the FLANGE (constants.PADS_FROM_FLANGE_M, the one statement of it: its evidence and
+  # the ruler that would settle it are there), and they are wider across the hand: in the wrist's frames the
+  # shut tips span 26 mm to one side of the hand's middle and 22 mm to the other (a wide black tip and a green
+  # part beside it; before, two tips within +-12). Covered beyond the group above: the shut tips out to z
+  # 0.151 at that width, and the open tips' ends as far out (x +-0.050). The spheres reach z 0.1675 on the
+  # axis (16.5 mm past the tips, 21.5 with the 5 mm buffer). The thickness (y) is taken as the old pads': not
+  # measured.
+  # `frame`: these numbers are from the flange, as the fingertips' reach is known, and the spheres ride the
+  # gripper's base link: on a description without the sensor puck (flatbot's until 2026-11-17) the two are one
+  # frame and nothing moves; on one with it (gen_1_5: the gripper's base 14 mm out) they stand 14 mm nearer
+  # the gripper's base than written, where the tips are. The group above is the stock gripper's own and goes
+  # out with it. test_body pins the far end of longer_tips to the constant.
   fingertips_151mm:
     link: arm_robotiq_85_base_link
+    frame: arm_end_effector_link
     covers:
       - {name: longer_tips, centre: [0.0, 0.0, 0.1405], half: [0.050, 0.0135, 0.0105]}
     spheres:
