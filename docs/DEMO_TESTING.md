@@ -35,16 +35,16 @@ KUI_CAPS=microwave_place /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/
 KUI_CAPS="fridge microwave" /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh    # or a few
 ```
 
-| `KUI_CAPS`        | Tap            | Buttons                                                                    |
-| ----------------- | -------------- | -------------------------------------------------------------------------- |
-| `fridge`          | `fridge_1`     | Go to Fridge, Open Fridge Door, Close Fridge Door (+ "wheelchair drives")  |
-| `microwave`       | `microwave_1`  | Open Microwave Door, Close Microwave Door                                  |
-| `microwave_place` | `tupperware_1` | Grab Tupperware                                                            |
-|                   | `microwave_1`  | Place Tupperware in Microwave                                              |
-| `place_container` | `table_1`      | Place Tupperware on Table                                                  |
-| `box_opening`     | `tupperware_1` | Open Container                                                             |
-| `button_press`    | `microwave_1`  | Press Start, Press Power, Press Timer/Clock, Press Defrost, Press Stop/Eco |
-| `grab_container`  | `tupperware_1` | Grab Tupperware by Brim (only when named in `KUI_CAPS`)                    |
+| `KUI_CAPS`        | Tap            | Buttons                                                                   |
+| ----------------- | -------------- | ------------------------------------------------------------------------- |
+| `fridge`          | `fridge_1`     | Go to Fridge, Open Fridge Door, Close Fridge Door (+ "wheelchair drives") |
+| `microwave`       | `microwave_1`  | Open Microwave Door, Close Microwave Door                                 |
+| `microwave_place` | `tupperware_1` | Grab Tupperware                                                           |
+|                   | `microwave_1`  | Place Tupperware in Microwave                                             |
+| `place_container` | `table_1`      | Place Tupperware on Table                                                 |
+| `box_opening`     | `tupperware_1` | Open Container                                                            |
+| `button_press`    | `microwave_1`  | Press Button (then Heat up food, Press 30 sec, +30 sec / Done)            |
+| `grab_container`  | `tupperware_1` | Grab Tupperware by Brim (only when named in `KUI_CAPS`)                   |
 
 Only ever one node per capability: don't also start that capability standalone (N1-N6) while it runs here, or both
 take every goal and both move the arm. `down.sh` stops it all.
@@ -519,15 +519,15 @@ things in, with **Done**. Final messages wait at most 60 s for Done; questions (
 Tap an object, then one of its buttons. The buttons show each action's label (rammp-orchestrator
 `hotfix/execute-timeout-param`; the old build shows the raw action id, e.g. `open_door_ui`):
 
-| Tap          | Buttons                                                                                             | Capability        | Demo step |
-| ------------ | --------------------------------------------------------------------------------------------------- | ----------------- | --------- |
-| `fridge`     | Go to Fridge, Open Fridge Door, Close Fridge Door, and each door's "(wheelchair drives)"            | `fridge`          | 1, 3      |
-| `tupperware` | Grab Tupperware                                                                                     | `microwave_place` | 2, 7      |
-| `tupperware` | Open Container                                                                                      | `box_opening`     | 5         |
-| `table`      | Place Tupperware on Table (tap a spot, then Place here; or Use marked spot)                         | `place_container` | 4         |
-| `microwave`  | Place Tupperware in Microwave                                                                       | `microwave_place` | 8         |
-| `microwave`  | Open Microwave Door, Close Microwave Door                                                           | `microwave`       | 6, 9      |
-| `microwave`  | Press Start, Press Power, Press Timer/Clock, Press Defrost, Press Stop/Eco (then: how many presses) | `button_press`    | 10        |
+| Tap          | Buttons                                                                                  | Capability        | Demo step |
+| ------------ | ---------------------------------------------------------------------------------------- | ----------------- | --------- |
+| `fridge`     | Go to Fridge, Open Fridge Door, Close Fridge Door, and each door's "(wheelchair drives)" | `fridge`          | 1, 3      |
+| `tupperware` | Grab Tupperware                                                                          | `microwave_place` | 2, 7      |
+| `tupperware` | Open Container                                                                           | `box_opening`     | 5         |
+| `table`      | Place Tupperware on Table (tap a spot, then Place here; or Use marked spot)              | `place_container` | 4         |
+| `microwave`  | Place Tupperware in Microwave                                                            | `microwave_place` | 8         |
+| `microwave`  | Open Microwave Door, Close Microwave Door                                                | `microwave`       | 6, 9      |
+| `microwave`  | Press Button (then: Heat up food, Press 30 sec, +30 sec / Done)                          | `button_press`    | 10        |
 
 `tupperware` is the object `tupperware_1`, class `food_container` (the scene segmenter's "food container"). Grab
 Tupperware is the one grab, wherever the tupperware is: it looks from microwave_place's `take_home_joints`.

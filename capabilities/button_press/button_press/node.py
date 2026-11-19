@@ -38,16 +38,11 @@ AT_PANEL_NOTE = (
     "before running anything else."
 )
 DEFAULTS = Args()
-# The UI's buttons (the orchestrator labels them with the raw id): id -> (dome_pattern target, name on the panel).
-# Each asks how many presses (1..UI_MAX_PRESSES), then presses and comes back.
-UI_ACTIONS = {
-    "press_start": ("start_30s", "Start"),
-    "press_power": ("power_level", "Power"),
-    "press_timer_clock": ("timer_clock", "Timer/Clock"),
-    "press_defrost": ("wgt_time_defrost", "Defrost"),
-    "press_stop_eco": ("stop_eco", "Stop/Eco"),
-}
-UI_MAX_PRESSES = 5
+# The UI's button on the microwave: id -> (dome_pattern target, the button's name on the panels, its label).
+# "Heat up food", then the arm holds at Start's pre-press spot: "Press 30 sec", then "+30 sec" or "Done" (_ui_run).
+UI_ACTIONS = {"heat_food": ("start_30s", "Start", "Press Button")}
+UI_TITLE = "Heat up food"
+HOLD_S = float("inf")  # how long the arm holds at the pre-press spot for "Press 30 sec" / "+30 sec" / "Done"
 MOCK_RESULT = {"dry_run": True, "pressed": 0, "returned": False, "moved": False, "log_file": ""}
 # ROS parameter -> its default (the run's settings that are not per action)
 PARAMS = {
@@ -107,8 +102,8 @@ class Capability(CapabilityEngine):
                 },
             },
         ),
-        # the UI's buttons: each asks the count, then presses that button (UI_ACTIONS, _ui_run)
-        *(Action(ui_id, f"Press {name}") for ui_id, (_, name) in UI_ACTIONS.items()),
+        # the UI's button: heat up food (UI_ACTIONS, _ui_run)
+        *(Action(ui_id, label) for ui_id, (_, _, label) in UI_ACTIONS.items()),
     ]
 
     def __init__(self):
@@ -230,26 +225,45 @@ class Capability(CapabilityEngine):
     # -- the UI's one-button actions -------------------------------------------------------------------------------
 
     def _ui_run(self, ui_id, params, ctx):
-        """Ask how many presses, press under a panel with Stop, show the result. A recoverable failure before the
-        fingertip reached the panel (any step before AT_PANEL) offers the same press again; one at or after it, a
-        driver failure, a bug or a Stop is shown and not retried. Every final notice waits (bounded) for Done."""
-        target, name = UI_ACTIONS[ui_id]
-        title = f"Press {name}"
-        ui = RunUI(ctx, title, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+        """Heat up food from the touchscreen. "Heat up food" (and Stop); then the run goes to Start's pre-press spot
+        and the arm HOLDS there while the panel offers "Press 30 sec" (and Stop), for as long as it takes (HOLD_S).
+        Each press goes in, back out to the pre-press spot, and the panel offers "+30 sec" (another press) or "Done";
+        Done sends the arm home and ends the action. Stop on any panel cancels: the arm holds where it is.
+
+        A recoverable failure before the fingertip reached the panel (any step before AT_PANEL) offers the run again;
+        one at or after it, a driver failure, a bug or a Stop is shown and not retried. Standalone (no UI session):
+        no question is asked, the run presses once and comes back."""
+        target, name, _ = UI_ACTIONS[ui_id]
+        ui = RunUI(ctx, UI_TITLE, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
         if not self.mock and not self.settings["allow_execute"]:
             message = (
-                f"{title} is disabled: the button press moves the arm only with allow_execute:=true, with someone "
+                f"{UI_TITLE} is disabled: the button press moves the arm only with allow_execute:=true, with someone "
                 "at the e-stop. Nothing moved."
             )
             ui.refuse(DISABLED)  # the panel's words; the goal's error keeps the log's
             raise EngineError("execution_disabled", message, recoverable=True)
-        presses = self._ui_presses(ui, name, params)
-        args = self._args({"target": target, "presses": presses})
-        count = f"{presses} press{'' if presses == 1 else 'es'}"
+        self._ui_confirm(ui)
+        args = self._args({"target": target, "presses": 1})
         phase = ["preflight"]
 
+        def ask_press(pressed):
+            """At the pre-press spot, after `pressed` presses: True to press once more, False to finish."""
+            if pressed == 0:
+                message = f"The arm is at the microwave's {name} button. Tap Press 30 sec to start heating."
+                buttons = [{"button_id": "press", "label": "Press 30 sec"}]
+            else:
+                total = f"{30 * pressed} sec"
+                message = f"Heating: {total} added. Tap +30 sec to add more, or Done to move the arm away."
+                buttons = [{"button_id": "press", "label": "+30 sec"}, {"button_id": "done", "label": "Done"}]
+            answer = ui.ask(message, buttons, timeout_s=HOLD_S)
+            if answer is None:  # standalone (no UI): one press, then home
+                return pressed == 0
+            return answer == "press"
+
+        args.ask_press = ask_press
+
         def show(step, fraction, pausable=True):
-            ui.moving(f"{TEXT.get(step, step)}: {name}, {count}. The arm is moving.", 100.0 * fraction, step)
+            ui.moving(f"{TEXT.get(step, step)}. The arm is moving.", 100.0 * fraction, step)
 
         def press():
             if self.mock:
@@ -262,7 +276,7 @@ class Capability(CapabilityEngine):
             phase[0] = "preflight"
             try:
                 result = ui.motion(
-                    f"Pressing {name}, {count}. The arm is moving.",
+                    f"Heating up food: moving to the microwave's {name} button.",
                     press,
                     stopped_note=lambda: AT_PANEL_NOTE if phase[0] in AT_PANEL else "",
                 )
@@ -280,9 +294,8 @@ class Capability(CapabilityEngine):
                     at_start=getattr(error, "at_start", None),
                 )
                 if error.recoverable and phase[0] not in AT_PANEL:
-                    # the same press again (same count), on its own button: "<title>" and Stop
-                    retry = [{"button_id": "retry", "label": title}]
-                    if ui.ask(f"{message} Tap {title} to try again.", retry) == "retry":
+                    retry = [{"button_id": "retry", "label": UI_TITLE}]
+                    if ui.ask(f"{message} Tap {UI_TITLE} to try again.", retry) == "retry":
                         continue
                     raise
                 ui.error(message)
@@ -291,22 +304,21 @@ class Capability(CapabilityEngine):
                 self.get_logger().error(f"{ui_id}: {type(error).__name__} during {phase[0]}: {error}")
                 ui.error(bug_message(name, phase[0], error))
                 raise
-            pressed = result.get("pressed", 0)
-            ui.done(f"Pressed {name} {pressed} time{'' if pressed == 1 else 's'}.", mock=self.mock)
-            return result
+            if self.mock:
+                ui.done(f"{UI_TITLE}.", mock=True)
+            return result  # the user's Done ended it; the arm is home
 
-    def _ui_presses(self, ui, name, params):
-        """How many presses, asked on the panel (1..UI_MAX_PRESSES, and Stop). With no UI session (standalone) it is
-        the goal's `presses` param, 1 by default; no answer in time fails the action, nothing moved."""
-        buttons = [{"button_id": f"presses_{n}", "label": str(n)} for n in range(1, UI_MAX_PRESSES + 1)]
-        answer = ui.ask(f"How many presses of {name}?", buttons)
-        if answer is not None:
-            return int(answer.rsplit("_", 1)[1])
-        if ui.connected is False:
-            return params.get("presses", 1)
-        message = "No answer: nothing was pressed."
+    def _ui_confirm(self, ui):
+        """The first panel: "Heat up food" (and Stop). Standalone (no UI session) it goes ahead; no answer in time
+        fails the action, nothing moved."""
+        answer = ui.ask(
+            "Heat up food? The arm moves to the microwave's Start button and waits there.",
+            [{"button_id": "heat", "label": UI_TITLE}],
+        )
+        if answer == "heat" or (answer is None and ui.connected is False):
+            return
         ui.notice(NO_ANSWER)
-        raise EngineError("no_answer", message, recoverable=True)
+        raise EngineError("no_answer", "No answer: nothing was pressed.", recoverable=True)
 
 
 def failure(phase, error):

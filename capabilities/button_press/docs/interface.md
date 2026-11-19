@@ -59,10 +59,10 @@ Served under `/button_press/`, types from `rammp_orchestrator_interfaces`:
 | `/button_press/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/button_press/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action                                                                               | Params                                                                                                                                                                              | Result payload                                            |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `press_button`                                                                       | `target` (`start_30s` default, `timer_clock`, `stop_eco`, `power_level`, `wgt_time_defrost`), `presses` (0–10, default 1; 0 = go to the spot and back), `no_return` (default false) | `{"dry_run", "pressed", "returned", "moved", "log_file"}` |
-| `press_start`, `press_power`, `press_timer_clock`, `press_defrost`, `press_stop_eco` | none from the UI (the count is asked on the panel); standalone, `presses` (default 1)                                                                                               | the same                                                  |
+| Action                             | Params                                                                                                                                                                              | Result payload                                            |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `press_button`                     | `target` (`start_30s` default, `timer_clock`, `stop_eco`, `power_level`, `wgt_time_defrost`), `presses` (0–10, default 1; 0 = go to the spot and back), `no_return` (default false) | `{"dry_run", "pressed", "returned", "moved", "log_file"}` |
+| `heat_food` (label "Press Button") | none: the presses are asked on the panel; standalone, one press of Start                                                                                                            | the same                                                  |
 
 A failed action's `error_code` is `<step>_failed`, the step being `preflight`, `detect`, `stage`,
 `redetect`, `plan`, `approach`, `press` or `return`; the node's log says why ("HOLDING HERE": the
@@ -76,39 +76,37 @@ cancel during those steps. Move the arm clear by hand before the next action.
 make action CAP=button_press ACTION=press_button PARAMS='{"target": "start_30s"}'
 ```
 
-`availability()` offers the UI only the five one-button actions; `press_button` stays callable
+`availability()` offers the UI only `heat_food`; `press_button` stays callable
 directly (`make action`, a goal), unchanged.
 
-### The UI's one-button actions
+### The UI: heat up food (`heat_food`)
 
-Each presses one button, then returns the arm to where it started (`node.py` `UI_ACTIONS`):
+The microwave's one button on the touchscreen, **Press Button** (`node.py` `UI_ACTIONS`, `_ui_run`). It
+presses Start (`start_30s`): every press adds 30 seconds. Panels (`capability_ui.RunUI`,
+`shared/capability_ui`), all with **Stop**:
 
-| Action              | `target`           | Panel name  |
-| ------------------- | ------------------ | ----------- |
-| `press_start`       | `start_30s`        | Start       |
-| `press_power`       | `power_level`      | Power       |
-| `press_timer_clock` | `timer_clock`      | Timer/Clock |
-| `press_defrost`     | `wgt_time_defrost` | Defrost     |
-| `press_stop_eco`    | `stop_eco`         | Stop/Eco    |
-
-Panels (`capability_ui.RunUI`, `shared/capability_ui`), all with **Stop**:
-
-1. With `allow_execute` false it shows "Press <name>: not started" with Done and fails
+1. With `allow_execute` false it shows "Heat up food: not started" with Done and fails
    `execution_disabled` (recoverable). It never dry-runs from the UI.
-1. "How many presses of <name>?" with 1–5. Stop cancels the action, nothing moved. No answer in
-   10 minutes: a notice, then `no_answer` (recoverable). Standalone (no UI session) nothing is
-   asked: the goal's `presses`, 1 by default.
-1. The progress panel: each step in words and a bar. Its **Stop cancels the action as the
-   orchestrator's cancel does**: `self.arm` stops the motion in flight (not only between steps)
-   and the arm holds where it is. A "Stopped" notice follows with Done; stopped in `approach`,
-   `press` or `return` it adds that the fingertip may be at the panel.
-1. "Pressed <name> n times." with Done, or the error with Done.
+1. **"Heat up food"**. Stop cancels the action, nothing moved. No answer in 10 minutes: a notice,
+   then `no_answer` (recoverable).
+1. The progress panel while the run goes to Start's **pre-press spot**: home, the scene camera,
+   staging, the wrist re-detect, planning, the approach. Each step in words and a bar.
+1. **"Press 30 sec"**. The arm **holds at the pre-press spot**, the fingertip ~2 cm from the button,
+   with no time limit (`HOLD_S`), until it is tapped.
+1. One press, back out to the pre-press spot, then **"+30 sec"** (another press, back to the spot,
+   and this panel again) or **"Done"**.
+1. Done: the arm goes home and the action ends.
+
+Stop on any of these cancels the action as the orchestrator's cancel does: `self.arm` stops the
+motion in flight (not only between steps) and the arm holds where it is. A "Stopped" notice
+follows with Done; stopped at the spot or after it, it adds that the fingertip may be at the panel.
+Standalone (no UI session) nothing is asked: it presses once and goes home.
 
 A failure before the fingertip reaches the panel that is `recoverable` (a refused check in
-`preflight` … `plan`) shows its reason with a "Press <name>" button to run the same press again
-(same count) and Stop. A failure in `approach`, `press` or `return`, a driver failure
-(`MotionFailed`, e.g. an e-stop), an `ArmError` or a bug is shown with Done only, never retried. Every
-final notice waits up to 60 s for Done before the action returns.
+`preflight` … `plan`) shows its reason with a "Heat up food" button to run it again, and Stop. A
+failure in `approach`, `press` or `return`, a driver failure (`MotionFailed`, e.g. an e-stop), an
+`ArmError` or a bug is shown with Done only, never retried. Every failure notice waits up to 60 s
+for Done before the action returns.
 
 A failure panel says what happened, where the arm is and what to do (`ui_text.py`). Where the arm is
 comes from the run itself: if the arm is at its start joints (`Run.at_home()`: every joint within

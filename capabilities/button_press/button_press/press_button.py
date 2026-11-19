@@ -219,6 +219,9 @@ class Args:
     # the driver's named pose every run starts and ends at (go_to_start, go_home): "home", the working pose skills start
     # from and return to (kinova-gen3-ros2 docs/guide-goto-actions.md, Presets). "" = wherever the arm is
     start_preset: str = "home"
+    # the touchscreen's heat-up flow: at the pre-press spot, ask_press(presses so far) -> True to press once more (and
+    # come back to the spot), False to go home. The arm holds at the spot while it waits. None: press `presses` times
+    ask_press: object = None
     # cuRobo's collision world (collision.PlannerWorld): written into planner_world_dir (seen by the planner at
     # planner_world_dir_in_planner, "" = the same path), listing planner_base_layers again; planner_restore_world
     # is put back when the action ends
@@ -1183,7 +1186,12 @@ def _press_button(run: Run, a, pub) -> dict:
     say("\n== go to the pre-press spot ==")
     run.move(go, "to pre-press")
 
-    if a.presses:
+    if a.ask_press is not None:  # the touchscreen: hold at the spot, one press each time the user asks for one
+        while a.ask_press(done["pressed"]):
+            run.step("press", 0.7, pausable=False)
+            run.press(p_goal, R_goal, n_out)  # a.presses is 1; back to the spot after it
+            done["pressed"] += 1
+    elif a.presses:
         run.step("press", 0.7, pausable=False)
         run.press(p_goal, R_goal, n_out)  # backs itself out when its own checks stop a press
         done["pressed"] = a.presses

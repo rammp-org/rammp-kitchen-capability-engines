@@ -1,4 +1,4 @@
-"""Offline UI flow tests for the five one-button actions (press_start, ...): node.py's own methods, loaded with `ast`
+"""Offline UI flow tests for the touchscreen's heat-up action (heat_food): node.py's own methods, loaded with `ast`
 without ROS, the press itself faked, on the shared capability_ui.RunUI against a fake ctx that cancels as the engine's
 does. Mock tests: nothing here is robot validation."""
 
@@ -67,14 +67,14 @@ class Base:
 def load():
     """node.py's module constants, failure(), and the Capability class with only its UI methods (base: Base)."""
     tree = ast.parse((PKG / "node.py").read_text())
-    consts = {"MAX_PRESSES", "AT_PANEL", "AT_PANEL_NOTE", "UI_ACTIONS", "UI_MAX_PRESSES", "MOCK_RESULT"}
+    consts = {"MAX_PRESSES", "AT_PANEL", "AT_PANEL_NOTE", "UI_ACTIONS", "UI_TITLE", "HOLD_S", "MOCK_RESULT"}
     body = [
         n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") in consts for t in n.targets)
     ]
     body += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("failure", "arm_at_start")]
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Capability")
     cls.bases = [ast.Name(id="Base", ctx=ast.Load())]
-    keep = {"_ui_run", "_ui_presses", "_press", "availability", "execute"}
+    keep = {"_ui_run", "_ui_confirm", "_press", "availability", "execute"}
     cls.body = [
         n
         for n in cls.body
@@ -109,6 +109,8 @@ def load():
 SCOPE = load()
 Capability, failure, arm_at_start = SCOPE["Capability"], SCOPE["failure"], SCOPE["arm_at_start"]
 AT_PANEL, AT_PANEL_NOTE, UI_ACTIONS = SCOPE["AT_PANEL"], SCOPE["AT_PANEL_NOTE"], SCOPE["UI_ACTIONS"]
+UI_TITLE = SCOPE["UI_TITLE"]
+HEAT = "heat_food"
 
 
 class FakeCtx:
@@ -163,7 +165,9 @@ def wait_until(cond, timeout=2.0):
 
 class FakePress:
     """Node._press: walks `steps` as press_button does (checkpoint, phase, show) then runs `then`; each call takes
-    the next outcome. An outcome: a dict (the result), an exception (raised), or a callable(ctx) (e.g. Stop)."""
+    the next outcome. An outcome: a dict (the result), an exception (raised), or a callable(ctx) (e.g. Stop). A dict
+    outcome reached with "approach" in `steps` holds at the spot as press_button does: args.ask_press(presses so far)
+    until it says no, a press each time, then "return"."""
 
     def __init__(self, ctx, steps, *outcomes):
         self.ctx, self.steps, self.outcomes, self.calls = ctx, steps, list(outcomes), []
@@ -179,6 +183,15 @@ class FakePress:
             return outcome(ctx)
         if isinstance(outcome, BaseException):
             raise outcome
+        if "approach" in self.steps and getattr(args, "ask_press", None) is not None:
+            pressed = 0
+            while args.ask_press(pressed):
+                phase[0] = "press"
+                show("press", 0.7, False)
+                pressed += 1
+            phase[0] = "return"
+            show("return", 0.9, False)
+            return dict(outcome, pressed=pressed)
         return outcome
 
 
@@ -193,7 +206,7 @@ def quiet(*_):
     pass
 
 
-OK = {"dry_run": False, "pressed": 3, "returned": True, "moved": True, "log_file": "/x"}
+OK = {"dry_run": False, "pressed": 0, "returned": True, "moved": True, "log_file": "/x"}
 
 
 @pytest.fixture(autouse=True)
@@ -216,55 +229,84 @@ def make(replies=(), steps=ALL_STEPS, outcomes=(OK,), session=True, allow=True, 
     return node, ctx
 
 
-def test_ui_targets_are_the_detectors_names_and_the_ids_read_as_buttons():
-    assert {t for t, _ in UI_ACTIONS.values()} == set(NAMES)
-    assert list(UI_ACTIONS) == ["press_start", "press_power", "press_timer_clock", "press_defrost", "press_stop_eco"]
-    assert UI_ACTIONS["press_start"][0] == "start_30s" and UI_ACTIONS["press_defrost"][0] == "wgt_time_defrost"
+def test_the_one_ui_action_presses_start_and_reads_press_button():
+    assert UI_ACTIONS == {HEAT: ("start_30s", "Start", "Press Button")}
+    assert UI_ACTIONS[HEAT][0] in NAMES
+    assert SCOPE["HOLD_S"] == float("inf")  # the arm holds at the spot until the user answers
 
 
-def test_availability_offers_only_the_five_ui_actions_and_press_button_stays_an_action():
+def test_availability_offers_only_the_ui_action_and_press_button_stays_an_action():
     node, _ = make()
-    assert [a.action_id for a in node.availability("microwave_1", {})] == list(UI_ACTIONS)
+    assert [a.action_id for a in node.availability("microwave_1", {})] == [HEAT]
+    assert [a.label for a in Capability.actions if a.action_id == HEAT] == ["Press Button"]
     assert "press_button" in [a.action_id for a in Capability.actions]
 
 
-def test_the_count_asked_becomes_the_presses_param():
-    node, ctx = make(replies=["presses_3", "done"])
-    assert node.execute("press_start", {}, ctx) == OK
+def labels(panel):
+    return [b["label"] for b in panel["buttons"]]
+
+
+def test_heat_up_holds_at_the_spot_presses_30_sec_then_plus_30_until_done():
+    node, ctx = make(replies=["heat", "press", "press", "done"])
+    result = node.execute(HEAT, {}, ctx)
+    assert result["pressed"] == 2
     (args,) = node._press.calls
-    assert (args.target, args.presses) == ("start_30s", 3)
-    ask = ctx.sent[0]
-    assert ask["message"] == "How many presses of Start?"
-    assert [b["label"] for b in ask["buttons"]] == ["1", "2", "3", "4", "5", "Stop"]
+    assert (args.target, args.presses) == ("start_30s", 1)
+    asked = [p for p in ctx.sent if labels(p) != ["Stop"]]
+    assert labels(asked[0]) == ["Heat up food", "Stop"] and asked[0]["title"] == UI_TITLE
+    assert labels(asked[1]) == ["Press 30 sec", "Stop"]  # at the pre-press spot, holding
+    assert labels(asked[2]) == ["+30 sec", "Done", "Stop"] and "30 sec added" in asked[2]["message"]
+    assert labels(asked[3]) == ["+30 sec", "Done", "Stop"] and "60 sec added" in asked[3]["message"]
     moving = [p for p in ctx.sent if p.get("progress")]
     assert moving and all(p["buttons"] == [panels.STOP] for p in moving)
-    assert moving[-1]["progress"]["phase"] == "return" and "3 presses" in moving[-1]["message"]
-    assert ctx.sent[-1]["message"] == "Pressed Start 3 times." and ctx.sent[-1]["buttons"] == [panels.DONE]
+    assert moving[-1]["progress"]["phase"] == "return"  # Done: the arm goes home
+    assert ctx.sent[-1] is moving[-1]  # and the action ends: no extra notice after Done
 
 
-@pytest.mark.parametrize("ui_id", list(UI_ACTIONS))
-def test_each_ui_action_presses_its_own_button(ui_id):
-    node, ctx = make(replies=["presses_1", "done"], outcomes=(dict(OK, pressed=1),))
-    node.execute(ui_id, {}, ctx)
-    assert node._press.calls[0].target == UI_ACTIONS[ui_id][0]
-    assert ctx.sent[-1]["message"] == f"Pressed {UI_ACTIONS[ui_id][1]} 1 time."
+def test_done_right_after_the_first_press():
+    node, ctx = make(replies=["heat", "press", "done"])
+    assert node.execute(HEAT, {}, ctx)["pressed"] == 1
 
 
-def test_stop_on_the_count_prompt_cancels_before_anything_runs():
+def test_waiting_at_the_spot_has_no_time_limit(monkeypatch):
+    waits = []
+    real = panels.RunUI.ask
+
+    def ask(self, message, buttons, timeout_s=panels.PROMPT_TIMEOUT_S, **kw):
+        waits.append((buttons[0]["label"], timeout_s))
+        return real(self, message, buttons, timeout_s=timeout_s, **kw)
+
+    monkeypatch.setattr(panels.RunUI, "ask", ask)
+    node, ctx = make(replies=["heat", "press", "done"])
+    node.execute(HEAT, {}, ctx)
+    assert dict(waits)["Press 30 sec"] == float("inf") and dict(waits)["+30 sec"] == float("inf")
+    assert dict(waits)["Heat up food"] == panels.PROMPT_TIMEOUT_S
+
+
+def test_stop_on_the_heat_up_prompt_cancels_before_anything_runs():
     node, ctx = make(replies=["stop"])
     with pytest.raises(Cancelled):
-        node.execute("press_power", {}, ctx)
+        node.execute(HEAT, {}, ctx)
     assert ctx.cancelled() and node._press.calls == []
+
+
+@pytest.mark.parametrize("replies", [["heat", "stop"], ["heat", "press", "stop"]])
+def test_stop_while_holding_at_the_spot_cancels_and_says_the_fingertip_is_at_the_buttons(replies):
+    node, ctx = make(replies=replies)
+    with pytest.raises(Cancelled):
+        node.execute(HEAT, {}, ctx)
+    stopped = ctx.sent[-1]
+    assert stopped["title"] == f"{UI_TITLE}: stopped" and AT_PANEL_NOTE in stopped["message"]
 
 
 @pytest.mark.parametrize("steps,at_panel", [(("preflight", "detect", "stage"), False), (("approach", "press"), True)])
 def test_stop_during_the_motion_cancels_the_motion_in_flight_and_is_not_retried(steps, at_panel):
-    node, ctx = make(replies=["presses_2", "done"], steps=steps, outcomes=(user_stops_mid_motion,))
+    node, ctx = make(replies=["heat", "done"], steps=steps, outcomes=(user_stops_mid_motion,))
     with pytest.raises(Cancelled):
-        node.execute("press_start", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     assert len(node._press.calls) == 1
     stopped = ctx.sent[-1]
-    assert stopped["title"] == "Press Start: stopped" and stopped["buttons"] == [panels.DONE]
+    assert stopped["title"] == f"{UI_TITLE}: stopped" and stopped["buttons"] == [panels.DONE]
     assert stopped["message"].startswith(panels.STOPPED_MESSAGE)
     assert (AT_PANEL_NOTE in stopped["message"]) is at_panel
 
@@ -273,39 +315,38 @@ def test_a_refused_check_before_the_panel_offers_the_same_press_again():
     refused = failure("redetect", Abort("dome detector: nothing in 7 frames"))
     assert refused.recoverable
     node, ctx = make(
-        replies=["presses_2", "retry", "done"],
+        replies=["heat", "retry", "done"],
         steps=("preflight", "detect", "stage", "redetect"),
         outcomes=(refused, dict(OK, pressed=2)),
     )
-    assert node.execute("press_timer_clock", {}, ctx)["pressed"] == 2
-    assert [a.presses for a in node._press.calls] == [2, 2]  # the count is asked once
+    assert node.execute("heat_food", {}, ctx)["pressed"] == 2
+    assert len(node._press.calls) == 2  # "Heat up food" is asked once
     retry = next(p for p in ctx.sent if any(b["button_id"] == "retry" for b in p["buttons"]))
-    assert retry["message"].startswith("Couldn't press Timer/Clock while finding the button.")
+    assert retry["message"].startswith("Couldn't press Start while finding the button.")
     assert "couldn't find the microwave's buttons (7 frames tried)" in retry["message"]
-    assert retry["message"].endswith("Tap Press Timer/Clock to try again.")
-    assert retry["buttons"] == [{"button_id": "retry", "label": "Press Timer/Clock"}, panels.STOP]
-    assert ctx.sent[-1]["message"] == "Pressed Timer/Clock 2 times."
+    assert retry["message"].endswith(f"Tap {UI_TITLE} to try again.")
+    assert retry["buttons"] == [{"button_id": "retry", "label": UI_TITLE}, panels.STOP]
 
 
 def test_stop_on_the_retry_prompt_ends_it_without_pressing_again():
     node, ctx = make(
-        replies=["presses_1", "stop"], steps=("preflight", "detect"), outcomes=(failure("detect", Abort("no panel")),)
+        replies=["heat", "stop"], steps=("preflight", "detect"), outcomes=(failure("detect", Abort("no panel")),)
     )
     with pytest.raises(Cancelled):
-        node.execute("press_start", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     assert len(node._press.calls) == 1
 
 
 @pytest.mark.parametrize("phase", AT_PANEL)
 def test_a_failure_at_the_panel_is_shown_and_never_retried(phase):
     steps = ("preflight", "detect", "plan", *AT_PANEL[: AT_PANEL.index(phase) + 1])
-    node, ctx = make(replies=["presses_1", "done"], steps=steps, outcomes=(failure(phase, Abort("x")), OK))
+    node, ctx = make(replies=["heat", "done"], steps=steps, outcomes=(failure(phase, Abort("x")), OK))
     with pytest.raises(EngineError) as error:
-        node.execute("press_defrost", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     assert error.value.error_code == f"{phase}_failed" and not error.value.recoverable
     assert len(node._press.calls) == 1
     last = ctx.sent[-1]
-    assert last["title"] == "Press Defrost: failed" and last["buttons"] == [panels.DONE]
+    assert last["title"] == f"{UI_TITLE}: failed" and last["buttons"] == [panels.DONE]
     assert ui_text.AT_PANEL_STATE in last["message"] and last["message"].endswith(ui_text.AT_PANEL_TODO)
     assert not any(b["button_id"] == "retry" for p in ctx.sent for b in p["buttons"])
 
@@ -321,9 +362,9 @@ def test_a_failure_at_the_panel_after_the_arm_went_home_says_so_and_is_still_not
     not that the fingertip may be at the buttons."""
     steps = ("preflight", "detect", "plan", *AT_PANEL[: AT_PANEL.index(phase) + 1])
     error = at_start(failure(phase, Abort("press: no touch within 12 mm")), True)
-    node, ctx = make(replies=["presses_1", "done"], steps=steps, outcomes=(error, OK))
+    node, ctx = make(replies=["heat", "done"], steps=steps, outcomes=(error, OK))
     with pytest.raises(EngineError):
-        node.execute("press_defrost", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     assert len(node._press.calls) == 1
     message = ctx.sent[-1]["message"]
     assert ui_text.AT_START_STATE in message
@@ -334,17 +375,17 @@ def test_a_failure_at_the_panel_after_the_arm_went_home_says_so_and_is_still_not
 @pytest.mark.parametrize("value", [False, None])
 def test_a_failure_at_the_panel_not_known_to_be_home_keeps_the_fingertip_warning(value):
     error = at_start(failure("approach", Abort("x")), value)
-    node, ctx = make(replies=["presses_1", "done"], steps=("plan", "approach"), outcomes=(error,))
+    node, ctx = make(replies=["heat", "done"], steps=("plan", "approach"), outcomes=(error,))
     with pytest.raises(EngineError):
-        node.execute("press_start", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     message = ctx.sent[-1]["message"]
     assert ui_text.AT_PANEL_STATE in message and message.endswith(ui_text.AT_PANEL_TODO)
 
 
 def test_a_retry_offer_after_the_arm_went_home_says_it_is_back_at_the_start():
     refused = at_start(failure("redetect", Abort("dome detector: nothing in 7 frames")), True)
-    node, ctx = make(replies=["presses_1", "retry", "done"], steps=("stage", "redetect"), outcomes=(refused, OK))
-    node.execute("press_start", {}, ctx)
+    node, ctx = make(replies=["heat", "retry", "done"], steps=("stage", "redetect"), outcomes=(refused, OK))
+    node.execute("heat_food", {}, ctx)
     retry = next(p for p in ctx.sent if any(b["button_id"] == "retry" for b in p["buttons"]))
     assert ui_text.AT_START_STATE in retry["message"] and ui_text.HOLDING_STATE not in retry["message"]
 
@@ -430,17 +471,15 @@ def test_press_puts_where_the_run_left_the_arm_on_its_error_before_closing_the_r
 
 
 def test_a_recoverable_error_raised_at_the_panel_is_still_not_retried():
-    node, ctx = make(
-        replies=["presses_1", "done"], steps=("plan", "approach"), outcomes=(EngineError("x", "odd", True), OK)
-    )
+    node, ctx = make(replies=["heat", "done"], steps=("plan", "approach"), outcomes=(EngineError("x", "odd", True), OK))
     with pytest.raises(EngineError):
-        node.execute("press_start", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     assert len(node._press.calls) == 1 and ui_text.AT_PANEL_TODO in ctx.sent[-1]["message"]
 
 
 def test_a_driver_failure_before_the_panel_is_shown_and_not_retried():
     node, ctx = make(
-        replies=["presses_1", "done"],
+        replies=["heat", "done"],
         steps=("preflight", "stage"),
         outcomes=(
             failure("stage", MotionFailed("stage: trajectory ended HALTED halted: emergency stop -- HOLDING HERE")),
@@ -448,7 +487,7 @@ def test_a_driver_failure_before_the_panel_is_shown_and_not_retried():
         ),
     )
     with pytest.raises(EngineError):
-        node.execute("press_start", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     assert len(node._press.calls) == 1
     message = ctx.sent[-1]["message"]
     assert "emergency stop is pressed" in message and ui_text.HOLDING_STATE in message
@@ -456,12 +495,12 @@ def test_a_driver_failure_before_the_panel_is_shown_and_not_retried():
 
 
 def test_a_bug_is_shown_too():
-    node, ctx = make(replies=["presses_1", "done"], steps=("preflight",), outcomes=(ValueError("boom"),))
+    node, ctx = make(replies=["heat", "done"], steps=("preflight",), outcomes=(ValueError("boom"),))
     with pytest.raises(ValueError):
-        node.execute("press_start", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     message = ctx.sent[-1]["message"]
     assert "something unexpected went wrong" in message and "(details: Boom)" in message
-    assert "ValueError" not in message and ctx.sent[-1]["title"] == "Press Start: failed"
+    assert "ValueError" not in message and ctx.sent[-1]["title"] == f"{UI_TITLE}: failed"
 
 
 @pytest.mark.parametrize(
@@ -483,27 +522,24 @@ def test_failure_is_recoverable_only_for_a_refused_check_away_from_the_panel(pha
 def test_execution_disabled_refuses_on_the_panel_and_never_runs():
     node, ctx = make(replies=["done"], allow=False)
     with pytest.raises(EngineError) as error:
-        node.execute("press_start", {}, ctx)
+        node.execute("heat_food", {}, ctx)
     assert error.value.error_code == "execution_disabled"
     assert node._press.calls == []
-    (refusal,) = ctx.sent  # no count asked
-    assert refusal["title"] == "Press Start: not started" and refusal["message"] == ui_text.DISABLED
+    (refusal,) = ctx.sent  # nothing asked
+    assert refusal["title"] == f"{UI_TITLE}: not started" and refusal["message"] == ui_text.DISABLED
     assert "allow_execute" in str(error.value)  # the goal's own error keeps the log's words
     assert refusal["buttons"] == [panels.DONE]
 
 
-def test_standalone_without_a_ui_session_uses_the_presses_param_and_waits_for_nothing():
+def test_standalone_without_a_ui_session_presses_start_once_and_waits_for_nothing():
     node, ctx = make(session=False)
-    node.execute("press_stop_eco", {"presses": 2}, ctx)
-    assert (node._press.calls[0].target, node._press.calls[0].presses) == ("stop_eco", 2)
-    node, ctx = make(session=False)
-    node.execute("press_stop_eco", {}, ctx)
-    assert node._press.calls[0].presses == 1
+    assert node.execute(HEAT, {}, ctx)["pressed"] == 1
+    assert (node._press.calls[0].target, node._press.calls[0].presses) == ("start_30s", 1)
 
 
 def test_mock_says_nothing_moved():
-    node, ctx = make(replies=["presses_1", "done"], mock=True)
-    assert node.execute("press_start", {}, ctx)["dry_run"] is True
+    node, ctx = make(replies=["heat", "done"], mock=True)
+    assert node.execute("heat_food", {}, ctx)["dry_run"] is True
     assert node._press.calls == []  # the mock never runs the press
     assert "No arm motion" in ctx.sent[-1]["message"]
 
