@@ -464,10 +464,12 @@ def canary_starts(check, chain, rest_q, stats=None):
     no lower than the rest pose stands (so not in the floor, which every robot's world has). Taken from the
     model, never a constant: drawn (seeded: the same every run) around the rest pose `rest_q`. Of the draws
     that pass, the SHALLOWEST first (the nearest to this chair's own surface is the likeliest to stand
-    outside another chair's box: 2026-11-19, the one nearest the rest pose on gen_1_5's chair stood 44 mm
-    inside flatbot's padding too, and told the two chairs apart no better than the config's path), then the
-    shallowest in every other box, then, of the shallower half, those farthest in joint space from the ones
-    taken. `stats` (a dict): filled with how many draws each rule left."""
+    outside another chair's box), then the shallowest in every other box, then, of the shallower half, those
+    farthest in joint space from the ones taken. `stats` (a dict): filled with how many draws each rule left.
+    What that does NOT buy, measured offline on 2026-11-19 (both chairs' layers on the same arm): gen_1_5's
+    three canaries from its pose C stand 7, 26 and 44 mm inside flatbot's padded armrest too, and flatbot's
+    three 59 to 73 mm inside gen_1_5's. Two chairs with an armrest in the same place are not told apart by
+    a start inside it."""
     import numpy as np
 
     from box_opening.runtime.body import _bare
@@ -543,9 +545,12 @@ def planner_canary_rows(plan, check, chain, rest_q):
     another robot's chair with nothing at that place). Refused for another reason, or no canary in the
     model: WARN (it proves nothing either way).
     What it does not prove: that the planner holds this chair and no other (another chair with a box at
-    the canary's place refuses it too: the test is one-way), nor that the chair's boxes are where the real
-    chair is. NEVER RUN against the real planner as of 2026-11-19 (stand-ins only, test_rest_pose.py): its
-    first attended preflight is the first time the planner's own words for these refusals are seen."""
+    the canary's place refuses it too: the test is one-way, and it does NOT tell flatbot's chair from
+    gen_1_5's, canary_starts), nor that the chair's boxes are where the real chair is. What it does catch
+    of those two: flatbot's files on a planner holding gen_1_5's chair (flatbot's rest pose stands 33 mm
+    inside gen_1_5's padding: the plan from the rest pose is refused). NEVER RUN against the real planner
+    as of 2026-11-19 (stand-ins only, test_rest_pose.py): its first attended preflight is the first time
+    the planner's own words for these refusals are seen."""
     rows = []
     turned = [float(v) for v in rest_q]
     turned[-1] += CANARY_TURN_RAD

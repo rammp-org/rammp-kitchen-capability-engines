@@ -865,7 +865,13 @@ the chair model on:
   a constant) must be refused as a start in the planner's world. A planner that
   plans from the canary does not hold this robot's chair, whatever the path of
   its config says: FAIL. It is a one-way test: another chair with a box at the
-  same place refuses the canary too.
+  same place refuses the canary too. Measured offline (2026-11-19): gen_1_5's
+  canaries all stand inside flatbot's padded armrest as well, and flatbot's
+  inside gen_1_5's, so this check does not tell those two chairs apart. Of the
+  two, it catches flatbot's files on a planner holding gen_1_5's chair (the rest
+  pose is refused there); gen_1_5's files on a planner holding flatbot's chair
+  pass it. The arm's mount in `transforms/world.yaml` differs between them by
+  87 mm, which the first check sees where TF comes from the same stack.
 
 Both were tested with stand-ins only; neither has been run against the robot's
 TF tree or planner.
