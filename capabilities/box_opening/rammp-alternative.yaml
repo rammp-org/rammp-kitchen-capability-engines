@@ -24,7 +24,8 @@ container:
     # the active robot's config, read-only, as the planner (and arm_state_publisher) mount it: the
     # planner config whose chair and user layers and arm spheres every plan-free line is held out of
     # (body_layers below, runtime/body). Without it the node's runs stop before they move ("not
-    # starting: body model: cannot read /config/robot/curobo/planner.yaml ... Nothing moved.")
+    # starting: body model: cannot read /config/robot/curobo/planner.yaml ... Nothing moved."). And the
+    # robot's rest pose, the arm driver's own arm_presets.yaml (rest_pose below, runtime/rest)
     - ./config/robots/current:/config/robot:ro
   # No GPU: nothing in it runs a model. The box comes from the scene segmenter
   # (/perception/object_detections).
@@ -55,6 +56,15 @@ params:
   # before it moves; a run also refuses a planner not started on this same config with world "".
   # "" turns the check off (a bench with no chair)
   body_layers: /config/robot/curobo/planner.yaml
+  # the robot's own rest pose (HOME), where a run starts and ends: a file in the arm driver's presets
+  # format (by default the driver's own, the volume above), whose `presets.home` (7 rad, every one
+  # written as a real number) box opening takes. The default file not there, or with no presets.home:
+  # box opening's built-in pose (flatbot's), said as a warning; "" the built-in pose too. Whatever pose
+  # it is, one inside or within 10 mm of the chair and user's padding (body_layers), touching itself,
+  # or within 0.23 rad of a joint limit is refused before anything moves, in so many words (not_ready),
+  # never flown to. BOX_OPENING_REST_POSE in the container's environment BEATS this value: set it in
+  # every box opening container of a deployment and they all rest at the one pose (docs/interface.md)
+  rest_pose: /config/robot/arm_presets.yaml
   # where the scene camera finds no container, look for it with the wrist camera from one or two
   # poses over the arm's side (a chair parked side-on to a counter the scene camera cannot see);
   # false: such a run has found none: its chair is guided where nothing that could be the container

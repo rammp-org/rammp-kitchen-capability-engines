@@ -77,6 +77,9 @@ ROBOT_BODY_FILE = "robot_body.yaml"
 HAND_COVER_STEP_M = 0.0025
 HAND_COVER_TOL_M = 0.001
 WORLD_PADDING_M = 0.02  # cuRobo's default world_padding, where the planner config names none
+# ... and its collision_activation_distance (RAMMP-CuRobo's default: "soft standoff; default 0.025 grazes"):
+# inside this of a padded box the planner's optimiser already pushes a path away
+ACTIVATION_M = 0.03
 # the arm's first two links: where it is mounted, at every joint state
 EXEMPT_LINKS = ("base_link", "shoulder_link")
 # a joint path is sampled at least this finely for the check (rad of the joint that moves most)
@@ -117,6 +120,24 @@ def _yaml(path):
 
 def _bare(link):
     return link[4:] if link.startswith("arm_") else link
+
+
+def _planner_setting(cfg, key, default):
+    """The planner config's `key` (a number): where RAMMP-CuRobo's schema keeps it, under `planner:`
+    (rammp_curobo/config.py PLANNER_DEFAULTS), or at the top level, as box opening's own test and study
+    configs wrote it; `default`, the planner's own, where the file names none. Two different values in one
+    file: BodyModelError (which one the planner takes is not this file's to say)."""
+    found = [(key, cfg[key])] if key in cfg else []
+    found += [("%s.%s" % (k, key), v[key]) for k, v in cfg.items() if isinstance(v, dict) and key in v]
+    try:
+        values = sorted({float(v) for _k, v in found})
+    except (TypeError, ValueError) as e:
+        raise BodyModelError("body model: %s is not a number (%s)" % (key, e)) from e
+    if len(values) > 1:
+        raise BodyModelError(
+            "body model: %s is given more than once and differs (%s)" % (key, ", ".join("%s %s" % kv for kv in found))
+        )
+    return values[0] if values else float(default)
 
 
 def robot_body_path():
@@ -243,6 +264,13 @@ class BodyModel:
     hand: list = None  # [HandGroup] from robot-body config, placed (or skipped) by Body
     hand_source: str = None
     near_user: NearUser = None  # the speed near the user, from the same robot-body config
+    # the planner's own self-collision check (load): link -> (centres, bare radii + that link's
+    # self_collision_buffer) for EVERY link the robot file gives spheres, the base and the shoulder too, and
+    # the pairs of links it exempts from each other, both ways round. None: the robot file names no
+    # exemptions, and there is no such check (Body.self_gap)
+    self_spheres: dict = None
+    self_ignore: frozenset = None
+    activation_m: float = ACTIVATION_M  # the planner's collision_activation_distance
 
     def check_for(self, chain, urdf_path, root):
         """This model placed on `chain`'s URDF, rooted at `root`: a Body."""
@@ -259,7 +287,7 @@ def load(planner_yaml, robot_body=None):
     layers = cfg.get("layers")
     if not layers:
         raise BodyModelError("body model: %s names no layers" % planner_yaml)
-    pad = float(cfg.get("world_padding", WORLD_PADDING_M))
+    pad = _planner_setting(cfg, "world_padding", WORLD_PADDING_M)
     names, lo, hi, frames = [], [], [], {}
     for name in layers:
         data = _yaml(here / str(name))
@@ -305,6 +333,23 @@ def load(planner_yaml, robot_body=None):
         spheres[str(link)] = (cs, rs)
     if not spheres:
         raise BodyModelError("body model: %s has no spheres off the base and the shoulder" % robot)
+    # cuRobo's self-collision rule, as the planner applies it to a start (2026-11-17: it refused HOME from the
+    # end of a step out, INVALID_START_STATE_SELF_COLLISION, the folded arm's gripper 33 mm into its upper
+    # arm's spheres): two spheres of links not exempt from each other touch where their centres stand closer
+    # than their bare radii and each link's self_collision_buffer (the collision_sphere_buffer is the world's,
+    # not this check's). Only where the robot file names its own exemptions: without them every pair of
+    # neighbouring links would read as touching
+    self_spheres, self_ignore = None, None
+    ignore = kin.get("self_collision_ignore")
+    if isinstance(ignore, dict) and ignore:
+        sbuf = kin.get("self_collision_buffer") or {}
+        self_spheres = {}
+        for link, ss in raw.items():
+            cs = np.array([[float(v) for v in s["center"]] for s in ss], float).reshape(-1, 3)
+            rs = np.array([float(s["radius"]) + float(sbuf.get(link, 0.0) or 0.0) for s in ss], float)
+            self_spheres[str(link)] = (cs, rs)
+        pairs = {(str(a), str(b)) for a, bs in ignore.items() for b in bs or []}
+        self_ignore = frozenset(pairs | {(b, a) for a, b in pairs})
     hand, hand_source = [], None
     if robot_body is not False:
         hand_source = robot_body if robot_body is not None else robot_body_path()
@@ -328,6 +373,9 @@ def load(planner_yaml, robot_body=None):
         hand=hand,
         hand_source=None if hand_source is None else str(hand_source),
         near_user=near_user,
+        self_spheres=self_spheres,
+        self_ignore=self_ignore,
+        activation_m=_planner_setting(cfg, "collision_activation_distance", ACTIVATION_M),
     )
 
 
@@ -466,6 +514,37 @@ class Body:
         self._R = np.broadcast_to(np.eye(3), (len(lo), 3, 3)).copy()
         self._rotated = False
         self._bounds()
+        # the planner's self-collision check (BodyModel.self_spheres): each of its links placed from the root
+        # as the checked ones are, its sphere pairs listed once. None where the model has none, or the URDF
+        # places one of its links on no chain from the root (self_gap: no check)
+        self._self = None
+        own = dict(getattr(model, "self_spheres", None) or {})
+        if own:
+            paths = {}
+            for link in own:
+                path, at = [], link
+                while at != root and at in joints:
+                    name, typ, parent, xyz, rpy, axis = joints[at]
+                    moving = typ in ("revolute", "continuous") and name in index
+                    path.append((_rpy(*rpy), np.array(xyz, float), axis if moving else None, index.get(name)))
+                    at = parent
+                if at != root:
+                    paths = None
+                    break
+                paths[link] = path[::-1]
+            if paths is not None:
+                links = [link for link, (_cs, rs) in own.items() for _ in rs]
+                reach = np.concatenate([rs for _cs, rs in own.values()])
+                exempt = getattr(model, "self_ignore", None) or frozenset()
+                pairs = [
+                    (i, j)
+                    for i in range(len(reach))
+                    for j in range(i + 1, len(reach))
+                    if links[i] != links[j] and (links[i], links[j]) not in exempt
+                ]
+                if pairs:
+                    first, second = (np.array(v, int) for v in zip(*pairs, strict=True))
+                    self._self = (paths, own, links, first, second, reach[first] + reach[second])
 
     def _bounds(self):
         """Each padded box's axis-aligned bounds in the root (the line check's coarse cut)."""
@@ -483,14 +562,16 @@ class Body:
             link = joints[link][2]
         return link
 
-    def _link_frames(self, Q, links):
-        """{link: (R (n, 3, 3), t (n, 3))} in the root at each row of Q."""
+    def _link_frames(self, Q, links, paths=None):
+        """{link: (R (n, 3, 3), t (n, 3))} in the root at each row of Q (each link's path from `paths`; None:
+        the checked spheres' own)."""
+        paths = self.paths if paths is None else paths
         n = len(Q)
         out = {}
         for link in links:
             R = np.broadcast_to(np.eye(3), (n, 3, 3)).copy()
             t = np.zeros((n, 3))
-            for Ro, to, axis, k in self.paths[link]:
+            for Ro, to, axis, k in paths[link]:
                 t = t + R @ to
                 R = R @ Ro
                 if axis is not None:
@@ -535,6 +616,37 @@ class Body:
             radii.append(rs)
             links += [link] * len(rs)
         return np.concatenate(out, axis=1), np.concatenate(radii), links
+
+    def self_gap(self, Q):
+        """How far the arm stands from touching itself at joint state(s) Q, as the planner judges a start
+        (BodyModel.self_spheres: every link's spheres, bare radii and each link's self_collision_buffer, the
+        pairs the robot file exempts left out): a Clearance, m the least gap between two spheres it compares
+        (< 0: touching, by that much), link and box the two links. For Q (7,) floats and strings; for (n, 7)
+        arrays and lists. None where there is no such check (a robot file without exemptions, a URDF that
+        places one of its links on no chain)."""
+        if self._self is None:
+            return None
+        paths, own, links, first, second, reach = self._self
+        Qa = np.atleast_2d(np.asarray(Q, float))
+        m = np.empty(len(Qa))
+        a, b = [None] * len(Qa), [None] * len(Qa)
+        for s in range(0, len(Qa), _CHUNK):
+            frames = self._link_frames(Qa[s : s + _CHUNK], list(own), paths)
+            C = np.concatenate(
+                [
+                    frames[lk][1][:, None, :] + np.einsum("nij,kj->nki", frames[lk][0], cs)
+                    for lk, (cs, _r) in own.items()
+                ],
+                axis=1,
+            )
+            g = np.linalg.norm(C[:, first] - C[:, second], axis=2) - reach[None, :]
+            k = g.argmin(axis=1)
+            m[s : s + len(g)] = g[np.arange(len(g)), k]
+            for i, kk in enumerate(k):
+                a[s + i], b[s + i] = links[first[kk]], links[second[kk]]
+        if np.ndim(Q) == 1:
+            return Clearance(m=float(m[0]), link=a[0], box=b[0])
+        return Clearance(m=m, link=a, box=b)
 
     def spheres_at(self, q):
         """(S, 3) the checked spheres' centres at joint state `q` (the root frame), (S,) their

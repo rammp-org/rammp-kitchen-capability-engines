@@ -64,6 +64,14 @@ def viz_enabled(env=None):
 # boxes; the arm's meshes 49 mm from the armrest and 42 mm from the user. joint_3 is written in
 # (-pi, pi], as the arm reports it (every comparison uses ang_diff).
 HOME = [0.4425, -1.5718, -2.9033, -2.1048, -0.7412, -0.9194, 2.1631]
+# The pose above is the BUILT-IN rest pose: flatbot's. A robot's own comes from its config at a run's start
+# (runtime/rest: the arm driver's presets.home in the robot's arm_presets.yaml) and is written INTO this
+# list, never bound to another one. 2026-11-19: the same arm on the Gen1.5 chair (rammp-deployments
+# gen_1_5) stands 33 mm inside that chair's padded arm-side armrest at the pose above, and the planner
+# plans nothing from there. Every module that imports HOME holds this one list and reads it when it is
+# called, never at import (test_rest_pose holds the package to that), so the look, the wrist's front
+# views, the planner's branch and the reach grids' key all follow the robot's pose.
+HOME_BUILT_IN = tuple(HOME)
 JOINTS = ["joint_%d" % i for i in range(1, 8)]
 
 NODE_NAMESPACE = "/rammp_curobo"  # the planner container's actions and service

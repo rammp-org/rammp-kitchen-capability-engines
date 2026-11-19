@@ -20,8 +20,8 @@ from rclpy.signals import SignalHandlerOptions
 from box_opening import LOGGER as log
 from box_opening.constants import state_dir
 from box_opening.models.container import ContainerModel
-from box_opening.primitives.core import Ctx
-from box_opening.runtime import approach
+from box_opening.primitives.core import Ctx, StepOutStopped
+from box_opening.runtime import approach, rest
 from box_opening.runtime.abort import AbortFlag, install_sigint
 from box_opening.runtime.body import BODY_LAYERS_ENV, DEFAULT_BODY_LAYERS
 from box_opening.runtime.client import PlannerClient
@@ -77,6 +77,20 @@ def make_parser(desc):
         help="the cuRobo planner config whose layers (the chair and its user) and robot spheres every "
         "plan-free line is held out of (default %s; BOX_OPENING_BODY_LAYERS overrides; '' turns the "
         "check off: the bench). Unreadable: nothing moves" % DEFAULT_BODY_LAYERS,
+    )
+    ap.add_argument(
+        "--rest-pose",
+        default=None,
+        help="the robot's own rest pose (HOME): a file in the arm driver's presets format, whose presets.home it "
+        "is (default %s; %s in the environment BEATS this flag; '' the built-in pose). Not there, or with no "
+        "presets.home: the built-in pose, judged as any. Inside or within 10 mm of the chair's padding, "
+        "touching itself or near a joint limit: nothing moves" % (rest.DEFAULT_REST_POSE, rest.REST_POSE_ENV),
+    )
+    ap.add_argument(
+        "--rest-pose-digest",
+        default=None,
+        help="for the engine: the digest of the rest pose the node itself read (runtime/rest.digest). A run "
+        "that reads another pose stops before it moves",
     )
     ap.add_argument(
         "--speed-scale",
@@ -239,6 +253,35 @@ def load_body_or_exit(args, who):
     return model
 
 
+def say_rest_or_exit(args, who):
+    """A command line's FIRST words: which rest pose it will take, the seven numbers and the file they are
+    from (runtime/rest.said: read, not yet judged), so that two box opening processes resting at different
+    poses are seen to. A file named and unreadable, or a pose that is not seven real numbers, stops it here."""
+    try:
+        log.info("%s %s" % (who, rest.said(getattr(args, "rest_pose", None))))
+    except rest.RestPoseError as e:
+        sys.exit("%s not starting: %s. Nothing moved." % (who, e))
+
+
+def load_rest_or_exit(args, who):
+    """The robot's own rest pose (runtime/rest: --rest-pose, BOX_OPENING_REST_POSE over it) read, judged
+    on this run's arm and body model and put in force, before anything moves and before anything reads
+    HOME: after the chain's root and the body model are set (load_body_or_exit). A pose that cannot be
+    read or judged, that is not the one the node read (--rest-pose-digest), or that stands inside or too
+    near the chair and user's padding, touches itself or is too near a joint limit, stops the run here,
+    never a run that flies to it: the built-in pose as any other, wherever a body model is loaded. What is
+    worth more than a line is said as a warning (a rest pose inside the planner's activation distance; the
+    built-in pose taken where a robot's config is mounted). Returns the pose, None for the built-in one."""
+    try:
+        got = rest.configure(getattr(args, "rest_pose", None), expect=getattr(args, "rest_pose_digest", None))
+    except rest.RestPoseError as e:
+        sys.exit("%s not starting: %s. Nothing moved." % (who, e))
+    log.info("%s %s" % (who, got.words))
+    for text in got.warnings:
+        log.warning("%s WARNING %s" % (who, text))
+    return got.pose
+
+
 def planner_body_or_exit(node, model, execute, who):
     """With the body model on, a run that moves the arm starts only where the planner plans around
     the same chair and user (preflight.planner_body_verdict: its config the body model's, world
@@ -265,6 +308,7 @@ def planner_body_or_exit(node, model, execute, who):
 def build_ctx(args):
     """Ctx + Runner for a CLI that has not detected a container (cpose
     None): only pre-detection (bench-world) legs can be planned from it."""
+    say_rest_or_exit(args, "[%s]" % ap_prog())  # first: which rest pose this process takes
     cfg = args.container or default_container_yaml()
     bench = args.bench_world or default_bench_yaml()
     model = ContainerModel.load(cfg)
@@ -278,6 +322,7 @@ def build_ctx(args):
     approach.set_chain_root(worlds.base_frame, urdf_path=_arm_urdf_path(node, worlds.base_frame))
     # the body model, never in `model` (the container's: the Ctx below plans with it)
     body_model = load_body_or_exit(args, "[%s]" % ap_prog())
+    load_rest_or_exit(args, "[%s]" % ap_prog())  # HOME is this robot's from here on
     planner_body_or_exit(node, body_model, bool(getattr(args, "execute", False)), "[%s]" % ap_prog())
     ctx = Ctx(
         model=model,
@@ -298,15 +343,22 @@ def apply_speed_scale(runner, args):
         log.info("[runner] SLOW MODE: every motion dilated by 1/%.2f" % scale)
 
 
-def run_task(args, build_legs):
+def run_task(args, build_legs, with_runner=False):
+    """Build the task's legs and run them. `with_runner`: build_legs(ctx, runner), for a task that flies
+    part of its way as it plans the rest (home_arm's step out of the padding)."""
     ctx, runner = build_ctx(args)
     apply_speed_scale(runner, args)
     try:
-        legs = build_legs(ctx)
+        legs = build_legs(ctx, runner) if with_runner else build_legs(ctx)
+    except StepOutStopped as e:
+        # (home_arm's step out of the padding, flown as it was planned: the arm has moved, and holds)
+        sys.exit("STOP: the step out of the chair and user's padding did not bring the arm clear — %s" % e)
     except RuntimeError as e:
         # a refused plan is an honest line, never a traceback — the arm
         # holds where it is
         sys.exit("plan refused — arm holds: %s" % e)
+    except KeyboardInterrupt:
+        sys.exit(130)  # a Ctrl+C while a part flown as it is planned flew: reported by the abort path
     try:
         results = runner.run(legs, execute=args.execute)
     except KeyboardInterrupt:

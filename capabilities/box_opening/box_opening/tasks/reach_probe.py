@@ -163,19 +163,27 @@ class DryStore:
         return name, name + ".yaml"
 
 
-def setup(urdf, root, body_layers, container):
+def setup(urdf, root, body_layers, container, rest_pose=None, rest_digest=None):
     """The proof's context for the robot whose arm is `urdf` (rooted at `root`) with the chair and user of
-    `body_layers` ('' off; None: the run's default), opening `container` (its config): (ctx, cfg). Raises
-    where any of them cannot be read: nothing is proven on a robot that is not the one named."""
+    `body_layers` ('' off; None: the run's default) and the rest pose of `rest_pose` (runtime/rest: '' the
+    built-in one; None: the run's default file; `rest_digest` the node's own reading of it), opening
+    `container` (its config): (ctx, cfg). Raises where any of them cannot be read, or the rest pose is one
+    a run would refuse: nothing is proven on a robot that is not the one named, nor from a rest pose no run
+    starts at."""
     from box_opening.models.container import ContainerModel, load_press_demo
     from box_opening.primitives.core import Ctx
-    from box_opening.runtime import approach
+    from box_opening.runtime import approach, rest
 
     approach.set_chain_root(root, urdf_path=urdf)
     ok, why = approach.chain_ready()
     if not ok:
         raise RuntimeError(why)
     approach.set_body_layers(body_layers)
+    # before the stand-in below and the grid's key read HOME: the proofs start where the run does
+    got = rest.configure(rest_pose, expect=rest_digest)
+    log.info("reach_probe: %s" % got.words)
+    for text in got.warnings:
+        log.warning("reach_probe: WARNING %s" % text)
     chain = approach._chain()
     ctx = Ctx(
         model=ContainerModel.load(container),
@@ -562,6 +570,12 @@ def main(argv=None):
     ap.add_argument("--urdf", required=True, help="the arm's URDF (the robot's own, as /arm/robot_description has it)")
     ap.add_argument("--root", default="arm_mount", help="the URDF's root, the planning frame")
     ap.add_argument("--body-layers", default=None, help="the planner config with the chair and user; '' off")
+    ap.add_argument(
+        "--rest-pose",
+        default=None,
+        help="the arm driver's presets file whose presets.home is the robot's rest pose; '' the built-in pose",
+    )
+    ap.add_argument("--rest-pose-digest", default=None, help="the digest of the pose the node itself read")
     ap.add_argument("--container", default=None, help="the container's config")
     ap.add_argument("--lid-z", type=float, help="fill the boundary for a lid's top at this height (m)")
     ap.add_argument(
@@ -587,7 +601,20 @@ def main(argv=None):
     # a grid is kept by what it was asked of, never by the bound it was filled under: its cells past a bound
     # are only unasked, and the same file serves a later run under another
     far_m = args.far_m if args.far_m > 0 else None
-    ctx, cfg = setup(args.urdf, args.root, args.body_layers, container)
+    try:
+        from box_opening.runtime import rest
+
+        # first, and on stderr (stdout is the caller's): which rest pose its proofs start from
+        _say("reach_probe: %s" % rest.said(args.rest_pose), sys.stderr)
+        ctx, cfg = setup(args.urdf, args.root, args.body_layers, container, args.rest_pose, args.rest_pose_digest)
+    except Exception as e:  # noqa: BLE001 - an unreadable model or a refused rest pose: one line, never a traceback
+        from box_opening.runtime.body import BodyModelError
+        from box_opening.runtime.rest import RestPoseError
+
+        if not isinstance(e, BodyModelError | RestPoseError):
+            raise
+        _say("reach_probe not starting: %s. Nothing is proven." % e, sys.stderr)
+        return 2
     if args.serve:
         server = Server(ctx, cfg, zone_key(args.urdf, container, root=args.root), args.zone_dir, far_m=far_m)
         end_on_terminate(server)

@@ -86,6 +86,7 @@ def main():
         help="do not wait for Enter (the stub harness only: nobody is placing anything)",
     )
     args = ap.parse_args()
+    cli_common.say_rest_or_exit(args, "[record]")  # first: which rest pose this process takes
 
     import rclpy
 
@@ -108,6 +109,15 @@ def main():
         sys.exit(why)  # before rclpy: nothing started, nothing moved
     node, client = cli_common.init_runtime(args.execute)
     client._base_frame = worlds.base_frame
+    # the arm's chain in the frame the recorder plans in and the chair model, as build_ctx sets them, and
+    # then the robot's own rest pose, judged on them, before anything reads HOME (2026-11-19: without the
+    # first two a rest pose in the robot's config ended the recorder in a traceback, or would have been
+    # judged on the bench arm with no chair)
+    from box_opening.runtime import approach
+
+    approach.set_chain_root(worlds.base_frame, urdf_path=cli_common._arm_urdf_path(node, worlds.base_frame))
+    cli_common.load_body_or_exit(args, "[record]")
+    cli_common.load_rest_or_exit(args, "[record]")
     runner = Runner(client)
     cli_common.apply_speed_scale(runner, args)
     table_z = worlds.table_top_z

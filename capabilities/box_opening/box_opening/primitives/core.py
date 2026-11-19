@@ -727,6 +727,17 @@ ESCAPE_GAINS = GAINS_SOFT
 ESCAPE_TRIES = 48
 ESCAPE_SEED = 20261117
 _ESCAPE_DIRS = {}
+# 2026-11-19, RAMMP 1.5 (the arm parked at the team's rest pose, 58 mm inside the padded arm-side armrest, at
+# the start of every run): the step out ended 13.8 mm outside the padding BY COMMAND, and home was planned from
+# that commanded end before anything flew. With joint_2 0.06 rad short of it the arm stands 1.2 mm outside, at
+# 80 % of the way 2.1 mm inside (the reviewer's a4_c.py on the 1.5 model); a home under MEDIUM has been seen
+# about 0.03 rad off its end, and this step flies SOFT. So where the caller can fly as it plans (home_any's
+# `fly`: a run's first home, home_arm), the step out of the padding is FLOWN before anything after it is
+# planned, and judged where the arm then STANDS, by its measured joints once it stands still:
+ESCAPE_STAND_M = 0.030  # ... it must stand this far outside the padding (the planner's activation distance)
+ESCAPE_SAG_M = 0.010  # the step is asked this much further than that: a hold that sags a little still stands
+ESCAPE_ROUNDS = 3  # short of it, it steps again from where it stands, at most this many steps in all
+ESCAPE_STAND_TOL_M = 1e-6  # (float noise alone: a reading of 29.9 mm is short)
 
 
 def _escape_dirs(n):
@@ -790,12 +801,14 @@ class EscapeBodyFree:
                 why.append("holds the tool %.0f mm over the table" % (1000 * over))
         return " and ".join(why)
 
-    def plan(self, ctx, state, table_z=None, over_m=None):
+    def plan(self, ctx, state, table_z=None, over_m=None, clear_m=None, floor_z=None):
         """(legs, PlanState, info) of the way to the nearest point clear of everything known from `state`, `table_z`
         the table's height (None: none known), the tool `over_m` above it (None: ESCAPE_TABLE_M); no legs where
-        it is clear already. info: {"steps", "largest_rad",
-        "depth_mm" (the start's, > 0 in the padding), "tool_drop_mm", "tool_rise_mm"}. Raises RuntimeError with
-        why where there is none."""
+        it is clear already. `clear_m`: how far outside the padding every sphere is taken (None: ESCAPE_CLEAR_M).
+        `floor_z`: the height the tool is held over (None: ESCAPE_DROP_M under where it stands at `state`): a
+        step taken again after an earlier one keeps the first one's. info: {"steps", "largest_rad",
+        "depth_mm" (the start's, > 0 in the padding), "end_mm" (how far outside the padding it ends, by
+        command), "tool_drop_mm", "tool_rise_mm", "floor_z"}. Raises RuntimeError with why where there is none."""
         import numpy as np
 
         from box_opening.runtime.approach import line_trajectory
@@ -827,14 +840,15 @@ class EscapeBodyFree:
             """(merit, [sphere m, table m, [joint rad ...]]): what the point `q` still lacks (`dp` its depth and
             `tz` its tool's height where already known)."""
             dp = float(depth(q)[0]) if dp is None and body is not None else dp
-            vp = max(0.0, dp + ESCAPE_CLEAR_M) if body is not None else 0.0
+            vp = max(0.0, dp + clear) if body is not None else 0.0
             tz = tool_z(q) if tz is None and table_z is not None else tz
             vt = max(0.0, float(table_z) + over - tz) if table_z is not None else 0.0
             vl = [max(0.0, ESCAPE_ROOM_RAD - min(q[j] - a, b - q[j])) for j, a, b in limited]
             return vp + vt + ESCAPE_M_PER_RAD * sum(vl), (vp, vt, vl)
 
         over = ESCAPE_TABLE_M if over_m is None else float(over_m)
-        z0 = tool_z(q0)
+        clear = ESCAPE_CLEAR_M if clear_m is None else float(clear_m)
+        z0 = tool_z(q0) if floor_z is None else float(floor_z) + ESCAPE_DROP_M
         q, d = q0.copy(), float(depth(q0)[0])
         start_mm = 1000 * d if body is not None else float("-inf")
         pts = [q0.copy()]
@@ -854,7 +868,7 @@ class EscapeBodyFree:
                 dn = float(depth(qn)[0])
                 if (
                     missing(qn)[0] < m - 1e-9
-                    and dn <= max(d, -ESCAPE_CLEAR_M) + 1e-6  # never deeper, nor in from outside
+                    and dn <= max(d, -clear) + 1e-6  # never deeper, nor in from outside
                     and tool_z(qn) >= z0 - ESCAPE_DROP_M
                 ):
                     return qn, dn
@@ -876,7 +890,7 @@ class EscapeBodyFree:
                 Qn = np.clip(q + W[todo], lo, hi)
                 for i, qn, dn in zip(todo, Qn, depth(Qn), strict=True):
                     dn = float(dn)
-                    if dn > max(d, -ESCAPE_CLEAR_M) + 1e-6 or float(np.max(np.abs(qn - q0))) > ESCAPE_MAX_RAD:
+                    if dn > max(d, -clear) + 1e-6 or float(np.max(np.abs(qn - q0))) > ESCAPE_MAX_RAD:
                         continue
                     tz = tool_z(qn)
                     if tz < z0 - ESCAPE_DROP_M:
@@ -944,8 +958,10 @@ class EscapeBodyFree:
             "around": around,  # of them, steps another way where the walk's own was refused (sideways)
             "largest_rad": float(np.max(np.abs(q - q0))),
             "depth_mm": start_mm,
-            "tool_drop_mm": 1000 * max(0.0, z0 - min(z_all)),
-            "tool_rise_mm": 1000 * (z_all[-1] - z0),
+            "end_mm": -1000 * d if body is not None else float("inf"),
+            "tool_drop_mm": 1000 * max(0.0, z_all[0] - min(z_all)),
+            "tool_rise_mm": 1000 * (z_all[-1] - z_all[0]),
+            "floor_z": z0 - ESCAPE_DROP_M,
         }
         if len(pts) == 1:
             return [], state, info
@@ -1160,6 +1176,34 @@ def under_table(chain, body, pts, table_z, extent=None, rest=None):
 PLANNER_START_IN_WORLD = "INVALID_START_STATE"
 
 
+class StepOutStopped(RuntimeError):
+    """The step out of the padding, flown as it was planned (home_any's `fly`), did not leave the arm standing
+    clear by ESCAPE_STAND_M, or a step of it did not fly to its end. Unlike every other refusal of a home,
+    the arm HAS moved, and holds where it stands: a caller says that, not "nothing moved"."""
+
+
+def flown_then_measured(ctx, runner, what="the step out of the padding"):
+    """home_any's `fly` for a caller that flies as it plans: fly(legs) runs `legs` now (runner.run, executing),
+    waits until the arm stands still (runner.wait_still, once more where the first wait ran out) and returns
+    its joints as the arm reports them: where it IS, not where the legs end. StepOutStopped where a leg does
+    not fly to its end: the arm holds where it stopped."""
+
+    def fly(legs):
+        res = runner.run(legs, execute=True)
+        bad = [r for r in res if not r.ok]
+        if bad or not res:
+            said = "; ".join("%s: %s%s" % (r.leg_name, r.outcome, " (%s)" % r.detail if r.detail else "") for r in bad)
+            raise StepOutStopped(
+                "%s did not fly to its end (%s) — the arm holds where it stopped" % (what, said or "?")
+            )
+        still = runner.wait_still(what)
+        if still is not None and still[1]:  # still moving as the wait ran out: the spring settling, once more
+            runner.wait_still(what)
+        return [float(v) for v in ctx.client.joints()]
+
+    return fly
+
+
 def _with_the_table(home):
     """home_any, the planner handed the run's measured table while it plans (owner 2026-11-12; worlds.py): every
     leg planned inside names the table world (WorldStore.home_plans), and the planner's own world is put back
@@ -1226,12 +1270,20 @@ def home_any(
     plan_words="HOME",
     step_tail="",
     ask_again=True,
+    fly=None,
 ):
     """The legs from `state` to the joint goal `goal` (HOME): plan_to(state, name, q) plans one leg (raising
     RuntimeError, or PlanRefused, where the planner or the client refuses). In order:
       1. an arm in or close to an obstacle (inside the body model's padding or within ESCAPE_NEAR_M of it, the
          tool within ESCAPE_TABLE_M of a known table) steps slowly, in the driver's lightest joint impedance, to
-         the nearest point clear of everything known, off the joint limits too (EscapeBodyFree);
+         the nearest point clear of everything known, off the joint limits too (EscapeBodyFree). With `fly`
+         (flown_then_measured: the caller flies as this plans, a run's first home and home_arm), a step out of
+         the PADDING is flown here, at once, and everything after it is planned from where the arm then
+         stands by its measured joints, never from the step's commanded end: it must stand ESCAPE_STAND_M
+         outside the padding, steps again from where it stands while it is short (ESCAPE_ROUNDS steps in
+         all), and where it still is, this raises and the arm holds there. The legs returned are then the ones
+         still to fly. Without `fly` (a preview, or a home planned ahead of the arm's arrival) the step is the
+         first leg returned and the rest is planned from its commanded end, as before;
       2. a joint too near its limit for the planner steps along the joint line first (ClearMarginFree), the
          shortest step the goal plans from, each step's plan asked for once (as since 2026-10-23), or round as in
          4. and 5. from the step's end where that plan swings wide, no further step tried after HOME_LIMIT_S of
@@ -1493,7 +1545,100 @@ def home_any(
             % (goal_words, CLEAR_MARGIN_MAX_STEP_RAD, plan_words, last, JOG)
         )
 
-    why = esc.needed(state.joints if state.joints is not None else ctx.client.joints(), table_z)
+    def stood_clear(st, why):
+        """The step out of the padding flown now (`fly`) and judged where the arm then stands: the PlanState of
+        its measured joints, ESCAPE_STAND_M outside the padding; RuntimeError where it is not after
+        ESCAPE_ROUNDS steps, or no further step plans (the arm holds where it stands)."""
+        import numpy as np
+
+        def outside(q):
+            return -float(tbody.sphere_depths(np.atleast_2d(np.asarray(q, float)))[0].max())
+
+        def short(stands, flown, more):
+            # (with nothing flown yet it is a refusal like any other: nothing moved)
+            return (StepOutStopped if flown else RuntimeError)(
+                "the arm stands %.0f mm %s the chair and user's padding after %d step%s out of it, short of "
+                "the %.0f mm it must stand clear by before a way to %s is planned%s — the arm holds where it "
+                "stands%s"
+                % (
+                    1000 * abs(stands),
+                    "outside" if stands >= 0 else "INSIDE",
+                    flown,
+                    "" if flown == 1 else "s",
+                    1000 * ESCAPE_STAND_M,
+                    goal_words,
+                    "" if not more else ", and %s" % more,
+                    JOG,
+                )
+            )
+
+        asked, floor, flown = ESCAPE_STAND_M + ESCAPE_SAG_M, None, 0
+        stands = outside(st.joints)
+        for _round in range(ESCAPE_ROUNDS):
+            step, last = None, None
+            # the margin and its allowance; where that does not plan (the step's own cap a joint), the margin
+            # alone, then the nearest clear point as before: flown, read, and stepped on from there
+            for target in (asked, ESCAPE_STAND_M, ESCAPE_CLEAR_M):
+                try:
+                    step, end, info = esc.plan(ctx, st, table_z, clear_m=target, floor_z=floor)
+                    break
+                except RuntimeError as e:
+                    last = e if last is None else last
+            if step is None:
+                if not flown:
+                    raise last
+                raise short(stands, flown, "no further step plans (%s)" % _without_jog(last)) from last
+            if not step:  # nothing to fly: it stands clear by what was asked, or no step from here goes further
+                if stands >= ESCAPE_STAND_M - ESCAPE_STAND_TOL_M:
+                    return st
+                raise short(stands, flown, "no step from where it stands takes it further")
+            say(
+                "%s the arm %s: slowly, in the driver's lightest joint impedance (%s), out of it first, to %.0f mm "
+                "outside the padding by command (%d steps, the largest joint %.3f rad, the tool %+.0f mm, down "
+                "%.0f mm at most; it gives way where it meets something) — flown now, and %s is planned from "
+                "where the arm then stands, once it stands still"
+                % (
+                    who,
+                    why,
+                    IMPEDANCE_NAMES.get(ESCAPE_GAINS, ESCAPE_GAINS),
+                    info["end_mm"],
+                    info["steps"],
+                    info["largest_rad"],
+                    info["tool_rise_mm"],
+                    info["tool_drop_mm"],
+                    plan_words,
+                )
+            )
+            q = [float(v) for v in fly(step)]
+            flown += 1
+            floor = info["floor_z"] if floor is None else floor
+            stands = outside(q)
+            off = float(np.max(np.abs(np.subtract(q, end.joints))))
+            say(
+                "%s the arm stands %.0f mm %s the padding (asked %.0f mm outside; its joints %.3f rad at most "
+                "from the step's end)"
+                % (who, 1000 * abs(stands), "outside" if stands >= 0 else "INSIDE", info["end_mm"], off)
+            )
+            st = PlanState(joints=q, chain=end.chain)
+            if stands >= ESCAPE_STAND_M - ESCAPE_STAND_TOL_M:
+                return st
+            # short: again from where it stands, asked further by what it fell short and the allowance again;
+            # the tool held over the first step's floor (or where it now stands, if that is lower)
+            asked = max(asked, info["end_mm"] / 1000.0) + (ESCAPE_STAND_M - stands) + ESCAPE_SAG_M
+            floor = min(floor, float(tchain.fk(q)[1][2]) - 0.001)
+            why = "stands %.0f mm %s the padding, short of the %.0f mm it must stand clear by" % (
+                1000 * abs(stands),
+                "outside" if stands >= 0 else "INSIDE",
+                1000 * ESCAPE_STAND_M,
+            )
+        raise short(stands, flown, None)
+
+    q_now = state.joints if state.joints is not None else ctx.client.joints()
+    why = esc.needed(q_now, table_z)
+    in_padding = tbody is not None and float(tbody.sphere_depths([list(q_now)])[0].max()) > -ESCAPE_NEAR_M
+    if why and fly is not None and in_padding:
+        state = stood_clear(PlanState(joints=list(q_now), chain=state.chain), why)
+        why = esc.needed(state.joints, table_z)  # a table the tool still stands low over: the step for that
     if why:
         step, state = step_clear(state, why)
         legs += step

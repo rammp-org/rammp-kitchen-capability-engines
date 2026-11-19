@@ -59,6 +59,7 @@ from rammp_orchestrator_interfaces.srv import Control
 from . import LOGGER, guide, line_up
 from .constants import AIR_CONTROL_ENV, state_dir
 from .flight_view import FAR_SEEN, FlightView, no_press_reason, not_seen_reason
+from .runtime import rest
 from .runtime.abort import EXIT_HALTED, EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
 from .worlds import PLANNER_WORLDS_AS_ENV, PLANNER_WORLDS_DIR_ENV
 
@@ -81,6 +82,13 @@ PARAMS = {
     # plan-free line is held out of (runtime/body); unreadable, the run stops before it moves;
     # "" turns the check off (the bench). BOX_OPENING_BODY_LAYERS in the node's environment overrides
     "body_layers": "/config/robot/curobo/planner.yaml",
+    # the robot's own rest pose (HOME): a file in the arm driver's presets format, whose `presets.home` is
+    # where a run starts and ends (runtime/rest). Not there, or with no presets.home in it: the built-in pose
+    # (constants.HOME, flatbot's), said as a warning where a robot's config is mounted; "" the built-in pose
+    # too. Whatever pose it is, one inside or within 10 mm of the chair and user's padding, touching itself
+    # or near a joint limit ends a run before it moves. BOX_OPENING_REST_POSE in the node's environment
+    # BEATS this param (one line there gives every box opening process of a deployment the same file)
+    "rest_pose": "/config/robot/arm_presets.yaml",
     # where the scene camera finds no container, look for it with the wrist camera from one or two
     # poses over the arm's side (a chair parked side-on to a counter: tasks/survey). Off, such a run has
     # found none: its chair is guided where nothing that could be the container is in any view, and it
@@ -1610,11 +1618,13 @@ class Capability(CapabilityEngine):
                 watch += ["--instance-id", instance_id]
         layers = self._param("body_layers")
         layers = PARAMS["body_layers"] if layers is None else str(layers)
+        rest_args = self._rest_args()
         far = self._far_m()
 
         def probe(urdf, root):
             argv = [executable("reach_probe"), "--serve", "--urdf", urdf, "--container", container]
-            argv += ["--root", root or "arm_mount", "--body-layers", layers]
+            # the run's own chair model and rest pose: its proofs start where the run does
+            argv += ["--root", root or "arm_mount", "--body-layers", layers, *rest_args]
             # the deployment's bound, for the probe too: its proofs are not spent on cells the line-up will
             # not trust (reach_probe --far-m; none said, it asks as far as the proof plans)
             return argv + (["--far-m", str(far)] if far is not None else [])
@@ -1950,6 +1960,11 @@ class Capability(CapabilityEngine):
         self._air_control()  # a value it cannot be: refused here, before anything runs
         if not self.mock and not self._allowed():  # the mock moves nothing: it is always allowed
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
+        if not self.mock:
+            # a rest pose file that cannot be read: refused here too (not_ready), nothing started; and said, so
+            # that the pose this goal's processes are handed stands in the node's own log beside theirs
+            self._rest_args()
+            self.get_logger().info("this goal's %s" % rest.said(self._rest_param()))
         # whether this goal lines up before its first move, decided once and before anything is started; where
         # it is asked (the UI's panel, or with no UI this node's console and ~/answer) and how long a line-up
         # may take (the orchestrator's goal: what its 120 s leave; one sent by hand: CONSOLE_LINE_UP_S)
@@ -2239,6 +2254,7 @@ class Capability(CapabilityEngine):
         argv += ["--speed-scale", str(float(self._param("speed_scale")))]
         layers = self._param("body_layers")  # only an explicit "" turns the check off; unset is the default
         argv += ["--body-layers", PARAMS["body_layers"] if layers is None else str(layers)]
+        argv += self._rest_args()
         if instance_id:  # the container the orchestrator selected; standalone: any of its class
             argv += ["--instance-id", instance_id]
         if self._param("wrist_survey"):  # the run surveys only without a selection (tasks/survey)
@@ -2248,6 +2264,26 @@ class Capability(CapabilityEngine):
         if self._param("wrist_alone"):  # read by the wrist look alone (--wrist-first), and only with a selection
             argv += ["--wrist-alone"]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
+
+    def _rest_param(self):
+        """rest_pose as it is now: the default file where the param is unset, only an explicit "" the built-in pose."""
+        value = self._param("rest_pose")
+        return PARAMS["rest_pose"] if value is None else str(value)
+
+    def _rest_args(self):
+        """The rest pose as every process this node starts is handed it (the run, the line-up's probe):
+        --rest-pose, the file this node itself resolves (rest_pose, the default one where the param is unset,
+        only an explicit "" the built-in pose; BOX_OPENING_REST_POSE in the node's environment beats the
+        param: runtime/rest.resolve), and --rest-pose-digest, the digest of the seven numbers this node reads
+        there NOW. A process that reads other numbers stops before it moves (rest.configure), so one
+        deployment's processes cannot rest at two poses unseen. A file named that cannot be read, or whose
+        pose is malformed: EngineError not_ready, nothing started."""
+        param = self._rest_param()
+        try:
+            numbers, _source, _why = rest.chosen(param)
+        except rest.RestPoseError as e:
+            raise EngineError("not_ready", f"{e}: nothing ran", recoverable=True) from e
+        return ["--rest-pose", rest.resolve(param), "--rest-pose-digest", rest.digest(numbers)]
 
     def _env(self):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")

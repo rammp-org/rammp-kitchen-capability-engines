@@ -23,10 +23,14 @@ would drop on the way, and obstruction-guarded.
 
 A start inside the chair and user's padded boxes, which the planner refuses
 outright, gets a plan-free step out of them first (primitives.EscapeBodyFree:
-never deeper, the tool held within 5 mm of its height, obstruction-guarded),
+never deeper, the tool held within 5 mm of its height, slow and soft),
 and HOME is asked for up to three times, then through a waypoint along the
 joint line (primitives.home_any, 2026-11-09: the temporary HOME, the arm 8 in
-forward on flatbot's chair).
+forward on flatbot's chair). With --execute that step is flown as soon as it
+is planned, and HOME is planned from where the arm then stands by its
+measured joints, 30 mm or more outside the padding, or not at all (2026-11-19,
+RAMMP 1.5: the arm is parked inside the padding there). Without --execute the
+preview shows the step and a HOME planned from its commanded end.
 
 The band stands on the table, so it exists only where a table is known.
 A world YAML without one (flatbot: the table changes with every place
@@ -51,6 +55,7 @@ from box_opening.primitives.core import (
     PlanState,
     _plan_motion,
     as_home,
+    flown_then_measured,
     home_any,
 )
 from box_opening.tasks import cli_common
@@ -101,14 +106,17 @@ def _plan_home(ctx, state, say=log.info, name="home", goal=None):
     return leg
 
 
-def build_legs(ctx, lift_first_m=0.0):
+def build_legs(ctx, lift_first_m=0.0, fly=None):
     """HOME from live; with lift_first_m > 0, a plan-free straight lift of
     that much FIRST (primitives.LiftFree), and HOME planned from where the
     lift ends. For the pose the planner refuses as a start — fingers at
     the table after an abort or a jog (2026-09-17: refused in both worlds
     40 mm above the table, 23 deg off vertical). A joint too near its limit
     for the planner gets a plan-free step toward HOME first, the shortest
-    one HOME plans from (primitives.ClearMarginFree, 2026-10-23)."""
+    one HOME plans from (primitives.ClearMarginFree, 2026-10-23). `fly`
+    (core.flown_then_measured, with --execute): a step out of the chair and
+    user's padding is flown as it is planned, and HOME planned from where the
+    arm then stands (core.home_any)."""
     state = PlanState(joints=list(ctx.client.joints()), chain=0)
     legs = []
     if lift_first_m > 0:
@@ -133,7 +141,7 @@ def build_legs(ctx, lift_first_m=0.0):
         return _plan_home(ctx, at, name=name, goal=q)
 
     return legs + home_any(
-        ctx, state, HOME, plan_to, who="[home_arm]", step_tail=" — HOME is planned from where it ends"
+        ctx, state, HOME, plan_to, who="[home_arm]", step_tail=" — HOME is planned from where it ends", fly=fly
     )
 
 
@@ -149,4 +157,10 @@ def main():
         "0.08 is usually enough",
     )
     args = ap.parse_args()
-    cli_common.run_task(args, lambda ctx: build_legs(ctx, args.lift_first))
+
+    def legs(ctx, runner):
+        # (a lift first is flown with the rest: the step out is for an arm that stands where it was left)
+        fly = flown_then_measured(ctx, runner) if args.execute and not args.lift_first > 0 else None
+        return build_legs(ctx, args.lift_first, fly=fly)
+
+    cli_common.run_task(args, legs, with_runner=True)

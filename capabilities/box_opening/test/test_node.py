@@ -924,9 +924,10 @@ def test_nothing_runs_unless_the_node_allows_it_and_it_is_not_offered(engine, mo
     assert argv[-2:] == ["--execute", "--guide"]
 
 
-def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
+def test_the_one_action_is_open_box_and_runs_the_whole_run(engine, monkeypatch):
     """Review on #23: exactly one action. Pressing, homing and the readiness check are steps of
     open_box's own run (press_demo checks readiness and homes first), not actions of their own."""
+    monkeypatch.delenv("BOX_OPENING_REST_POSE", raising=False)  # (the tests' own: it beats the param)
     assert [a.action_id for a in engine.actions] == ["open_box"] == list(node.EXECUTABLES) == list(node.MOCK_PHASES)
     real = node.Capability._argv.__get__(engine)
     argv = real("open_box")
@@ -939,6 +940,18 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     engine.set_parameters([Parameter("body_layers", value="")])
     assert real("open_box")[real("open_box").index("--body-layers") + 1] == ""  # off: the bench
     engine.set_parameters([Parameter("body_layers", value="/config/robot/curobo/planner.yaml")])
+    # the robot's own rest pose: the arm driver's presets file, from the same mount (runtime/rest), and the
+    # digest of the numbers this node reads there now (no such file here: the built-in pose's)
+    from box_opening import constants
+    from box_opening.runtime import rest
+
+    built_in = rest.digest(constants.HOME)
+    i = argv.index("--rest-pose")
+    assert argv[i : i + 4] == ["--rest-pose", "/config/robot/arm_presets.yaml", "--rest-pose-digest", built_in]
+    engine.set_parameters([Parameter("rest_pose", value="")])
+    i = real("open_box").index("--rest-pose")
+    assert real("open_box")[i : i + 4] == ["--rest-pose", "", "--rest-pose-digest", built_in]  # the built-in pose
+    engine.set_parameters([Parameter("rest_pose", value="/config/robot/arm_presets.yaml")])
     argv = real("open_box", "food_container_2")  # the selection as the goal came (execute)
     assert argv[argv.index("--instance-id") + 1] == "food_container_2"
 
@@ -1648,7 +1661,13 @@ def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(
             made.append((watch, probe, env, far_m))
 
     monkeypatch.setattr(node.line_up, "BoxSource", Source)
+    monkeypatch.delenv("BOX_OPENING_REST_POSE", raising=False)  # (the tests' own: it beats the param)
     engine.set_parameters([Parameter("line_up_far_m", value=0.8), Parameter("body_layers", value="/cfg/planner.yaml")])
+    pose = [0.4238, -1.1685, -2.8871, -1.8516, -0.856, -1.0008, 2.2684]
+    presets = engine.get_parameter("state_dir").value + "/arm_presets.yaml"
+    with open(presets, "w") as f:
+        f.write("/**:\n  ros__parameters:\n    presets.home: %r\n" % pose)
+    engine.set_parameters([Parameter("rest_pose", value=presets)])
     env = engine._env()
     engine._box_source(env, "food_container_2")
     ((watch, probe, env_, far_m),) = made
@@ -1663,7 +1682,21 @@ def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(
     argv = probe("/state/arm.urdf", "arm_mount")
     assert argv[:6] == ["/lib/reach_probe", "--serve", "--urdf", "/state/arm.urdf", "--container", pink]
     # the deployment's bound goes to the probe too: it asks no cell further out than the line-up trusts
-    assert argv[6:] == ["--root", "arm_mount", "--body-layers", "/cfg/planner.yaml", "--far-m", "0.8"]
+    # ... and the run's own chair model and rest pose: its proofs start where the run does (the file the node
+    # resolves and the digest of the seven numbers the node itself reads there: a probe that reads others stops)
+    from box_opening.runtime import rest
+
+    assert argv[6:14] == [
+        "--root",
+        "arm_mount",
+        "--body-layers",
+        "/cfg/planner.yaml",
+        "--rest-pose",
+        presets,
+        "--rest-pose-digest",
+        rest.digest(pose),
+    ]
+    assert argv[14:] == ["--far-m", "0.8"]
     assert env_ is env and far_m == 0.8
     engine._box_source(env, "")
     assert "--instance-id" not in made[-1][0]
@@ -4000,3 +4033,49 @@ def test_the_panel_watch_is_the_sources_own_but_for_a_ui_gone_too_long():
     watch = node.PanelWatch(source, lambda: True, gone_s=20.0, clock=lambda: clock[0])
     source.unable = "the arm is not at its rest pose"
     assert watch.unable == "the arm is not at its rest pose" and not watch.lost
+
+
+def test_every_process_the_node_starts_is_handed_the_nodes_own_reading_of_the_rest_pose(engine, monkeypatch, tmp_path):
+    """The reviewer's 3 (2026-11-19): the node's children read the rest pose's file for themselves, so a file
+    that changed, or a child started with another, rested at another pose unseen. They are handed the file the
+    node resolves AND the digest of the seven numbers the node reads there; BOX_OPENING_REST_POSE in the node's
+    environment beats the param; a file named that cannot be read fails the goal before anything is started."""
+    from box_opening.runtime import rest
+
+    # with the environment naming a pose (as the tests' own does: ""), the param is not what is handed on
+    engine.set_parameters([Parameter("rest_pose", value="/somewhere/arm_presets.yaml")])
+    assert engine._rest_args()[:2] == ["--rest-pose", ""]
+    monkeypatch.delenv(rest.REST_POSE_ENV)
+    real = node.Capability._argv.__get__(engine)
+    c = [0.4238, -1.1685, -2.8871, -1.8516, -0.856, -1.0008, 2.2684]
+    path = tmp_path / "arm_presets_C.yaml"
+    path.write_text("/**:\n  ros__parameters:\n    presets.home: %r\n" % c)
+    engine.set_parameters([Parameter("rest_pose", value=str(path))])
+    assert engine._rest_args() == ["--rest-pose", str(path), "--rest-pose-digest", rest.digest(c)]
+    argv = real("open_box", "food_container_2")
+    i = argv.index("--rest-pose")
+    assert argv[i : i + 4] == engine._rest_args() and argv[-1] == "--execute"
+    # the numbers are read as each run is started: a file that changed since is handed on as it now reads
+    b = [0.5376, -1.2584, -2.7691, -1.9909, -1.0247, -1.2317, 2.4847]
+    path.write_text("/**:\n  ros__parameters:\n    presets.home: %r\n" % b)
+    assert engine._rest_args()[-1] == rest.digest(b) != rest.digest(c)
+    # the environment beats the param: every box opening container of a deployment is given the one line
+    other = tmp_path / "other.yaml"
+    other.write_text("/**:\n  ros__parameters:\n    presets.home: %r\n" % c)
+    monkeypatch.setenv(rest.REST_POSE_ENV, str(other))
+    assert engine._rest_args() == ["--rest-pose", str(other), "--rest-pose-digest", rest.digest(c)]
+    monkeypatch.delenv(rest.REST_POSE_ENV)
+    # a file named and not there, or with a pose the driver would not start on: not_ready, nothing started
+    engine.set_parameters([Parameter("rest_pose", value=str(tmp_path / "nowhere.yaml"))])
+    with pytest.raises(EngineError) as e:
+        real("open_box")
+    assert e.value.error_code == "not_ready" and e.value.recoverable
+    assert "rest pose: cannot read" in str(e.value) and "nothing ran" in str(e.value)
+    monkeypatch.setattr(node, "Run", lambda *a, **k: pytest.fail("a run was started"))
+    with pytest.raises(EngineError) as e:  # the goal itself: refused before a line-up or a run is started
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "not_ready" and "rest pose: cannot read" in str(e.value)
+    path.write_text("/**:\n  ros__parameters:\n    presets.home: [0, 1, 2, -2, 0, 1, 2]\n")
+    engine.set_parameters([Parameter("rest_pose", value=str(path))])
+    with pytest.raises(EngineError, match="whole number among its angles"):
+        engine._rest_args()
