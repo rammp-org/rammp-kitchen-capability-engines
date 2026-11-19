@@ -23,7 +23,7 @@ from door_common import arm_model, close_door
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import open_door, recording, ui_text
+from . import open_door, recording, ui_text, world
 from .perception import WristCamera
 from .tee_logger import TeeLogger
 
@@ -149,6 +149,8 @@ class Capability(CapabilityEngine):
     display_name = "Microwave"
     perception_classes = ["microwave"]
     required_resources = ["arm", "gripper"]
+    # the door's state and the gripper's: the preconditions read them (world.py)
+    state_reads = ["objects", "doors", "gripper"]
     actions = [
         Action(
             "open",
@@ -322,8 +324,18 @@ class Capability(CapabilityEngine):
 
     def availability(self, instance_id, world_state):
         """The UI is offered only the one-press actions (UI_ACTIONS); `open` / `close` stay callable directly (their
-        params need setting: from the UI they would only dry-run)."""
-        return [a for a in super().availability(instance_id, world_state) if a.action_id in UI_ACTIONS]
+        params need setting: from the UI they would only dry-run). Each is available only where it can run
+        (REVIEW_RULES O1): its world-state preconditions (world.why_not: open needs the door not known open and an
+        empty gripper, close the door not known closed), and allow_execute (the mock
+        moves nothing: always)."""
+        offered = [a for a in super().availability(instance_id, world_state) if a.action_id in UI_ACTIONS]
+        for a in offered:
+            action_id = UI_ACTIONS[a.action_id][0]
+            why = world.why_not(action_id, instance_id, world_state)
+            if not why and not self.mock and not self.cfg["allow_execute"]:
+                why = f"{UI_TITLE[action_id]} is disabled: launch with allow_execute:=true for an attended run"
+            a.available, a.reason = not why, why
+        return offered
 
     def execute(self, action_id, params, ctx):
         if action_id in UI_ACTIONS:
@@ -420,7 +432,7 @@ class Capability(CapabilityEngine):
                 f"the {action_id} stopped short -- the arm holds where it is{held if holding else ''}",
                 recoverable=True,
             )
-        if execute:
+        if execute and not (action_id == "open" and params.get("view_only")):  # a view-pose-only open moved no door
             ctx.update_object(self.instance_id, opened=action_id == "open")
         return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR), "holding_handle": holding}
 
