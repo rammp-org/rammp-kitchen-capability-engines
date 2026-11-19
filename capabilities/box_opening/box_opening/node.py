@@ -116,6 +116,14 @@ PARAMS = {
     # same folder as this node writes it; "" = planner_worlds under state_dir
     "planner_worlds_as": "",
     "planner_worlds_dir": "",
+    # how long a line-up of a goal that came from the UI waits for the person (UI_LINE_UP_S below: the owner's
+    # "5 min", 2026-11-19), the arm at rest with its wrist turned the while. It needs an orchestrator that
+    # restarts its 120 s at every progress item (rammp-orchestrator e17c625 of 2026-11-16 and later: the one in
+    # ~/orch_latest_ws); this node then sends its newest progress again every KEEP_ALIVE_S, and the run has its
+    # whole budget from the person's yes. 0: the orchestrator ends every action 120 s after its goal, and a
+    # line-up has what those leave (LINE_UP_S). On a build whose goal does not bring the UI's token (the
+    # protocol before that orchestrator) it is 0 whatever is set here (goal_brings_token)
+    "ui_line_up_s": 300.0,
     # the line-up before a run (line_up, guide): the user is told which way to move until the container is
     # where the arm opens it, then asked, and the arm moves only on their yes. On: every run lines up before
     # its first move. Off (the default): open_box starts its run at once, as it always has, and lines up
@@ -203,6 +211,112 @@ LINE_UP_FIRST_S = 300.0
 # and the node busy for the afternoon. The time a person takes is no part of such a run's own budget: it
 # has RUN_BUDGET_S from its last go (Capability._follow), so no wait can cut a motion short
 CONSOLE_LINE_UP_S = 600.0
+# A goal from the UI is bound by the orchestrator's 120 s only where the orchestrator counts them from the
+# goal. rammp-orchestrator e17c625 (2026-11-16, the commit after the one that put the token in the goal)
+# counts them from the newest progress item instead: "only a stretch of total silence trips this"
+# (orchestrator_node._drive_remote_execute_action; read in ~/orch_latest_ws, which the owner starts the UI
+# from, 2026-11-19). Under such an orchestrator a line-up waits for the person as one sent by hand does, the
+# run has RUN_BUDGET_S from its go, and no wait can cut a motion short. How long it waits is the owner's word
+# (2026-11-19, asked how long the guidance should wait on the UI: "5 min"), the deployment's to change
+# (`ui_line_up_s`; 0 is the 120 s rule above). First run against the real orchestrator and UI bridge with
+# the app stood in for on 2026-11-19 (night-1116/ui1119/rig); not yet with the app itself
+UI_LINE_UP_S = PARAMS["ui_line_up_s"]
+# What keeps such a goal alive while nothing new is said (a person holding still while the reach is proved,
+# the wait for their answer, a long carry): its newest progress, sent again once this long has passed with
+# none (KeptAlive). A quarter of the orchestrator's 120 s: three may be lost before it would cancel
+KEEP_ALIVE_S = 30.0
+# How the action ended stays on the panel this long before the action itself ends. The orchestrator shows no
+# result of its own: on the rig's first run (2026-11-19) the screen went from "Going home" straight to the
+# orchestrator's "select an action", and a run that failed would have told the person nothing at all. Only
+# under an orchestrator whose clock is kept alive: under the 120 s rule a run stopped at its budget has no
+# seconds left to say it in
+END_SHOW_S = 5.0
+# ... in the person's words, one short message (the panel shows one; the whole reason is the result's and
+# the log's). By the error code the action ends with (error_for, STOP_CODES, and the engine's own)
+END_DONE = "Done. The lid is off, on the table"
+END_NOT_OFF = "Finished. The lid was not taken off"
+END_CANCELLED = "Cancelled. The arm stopped where it is"
+END_FAILED = "The container was not opened"
+END_SAYS = {
+    "not_lined_up": "Not in place in time. Nothing was pressed",
+    "not_found": "The arm could not find the container. Nothing was pressed",
+    "not_home": "The arm is not at its rest position. Nothing moved",
+    "not_ready": "The arm is not ready. Nothing moved",
+    "not_allowed": "Opening is switched off on this robot. Nothing moved",
+    "line_up_unavailable": "The arm could not watch the container. Nothing was pressed",
+    "timeout": "Taking too long. The arm stopped where it is",
+    "lid_put_back": "No place found for the lid. It is back on the container",
+    "contact_early": "Something was in the way of the button. Nothing was pressed",
+    "contact_late": "The container was not where the arm saw it. Nothing was pressed",
+    "box_moved": "The container moved. The arm stopped",
+    "not_popped": "The button did not open the lid",
+    "no_button": "The arm could not find the button. Nothing was pressed",
+    "no_press": "The arm could not reach the button. Nothing was pressed",
+    "lid_dropped": "The lid slipped out of the fingers",
+    "arm_holds": "The arm is holding where it stopped",
+    "arm_halted": "The arm was halted",
+}
+END_RETRY = "You can try again"
+END_HELP = "The arm needs a person before the next try"
+
+
+def goal_brings_token():
+    """Whether this build's execute_action goal brings the UI's token (rammp-interfaces-ros2 2e02b09). The
+    orchestrator that reads such a goal is the one whose 120 s restart at every progress item, bar the one
+    commit between the two changes (8635b80, e17c625: the same afternoon). A build without it talks to the
+    orchestrator before both, which ends every action 120 s after its goal: `ui_line_up_s` is 0 there."""
+    try:
+        from rammp_orchestrator_interfaces.action import ExecuteAction
+
+        return "token" in ExecuteAction.Goal.get_fields_and_field_types()
+    except Exception:  # noqa: BLE001 - no such interface here: nothing to wait longer under
+        return False
+
+
+def end_says(result=None, error=None, cancelled=False):
+    """How the action ended, for the panel: (words, whether it failed)."""
+    if cancelled:
+        return END_CANCELLED, False
+    if error is None:
+        return (END_DONE if (result or {}).get("lid_off") else END_NOT_OFF), False
+    what = END_SAYS.get(getattr(error, "error_code", ""), END_FAILED)
+    return "%s. %s" % (what, END_RETRY if getattr(error, "recoverable", False) else END_HELP), True
+
+
+class KeptAlive:
+    """An action's context under an orchestrator that restarts its 120 s at every progress item: all it is
+    asked goes to the context as it is, and its newest progress is sent again wherever KEEP_ALIVE_S have
+    passed with none. It rides on what every wait of this node already does every POLL_S, reading the cancel
+    and the panel's press (cancelled, poll_ui_event), so no loop has a call to forget; a wait that reads
+    neither is one of the run's own stops, seconds long. It proves that this node follows its run, no more:
+    how long a run or a line-up may take is this node's own to end (RUN_BUDGET_S, Asking.left_s)."""
+
+    def __init__(self, ctx, period_s=None, clock=time.monotonic):
+        self._ctx, self._clock = ctx, clock
+        self._period_s = KEEP_ALIVE_S if period_s is None else float(period_s)
+        self._said, self._at = ("locate", 0.0, "starting", False), clock()
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+    def progress(self, phase, pct, message="", pausable=True):
+        self._said, self._at = (phase, pct, message, pausable), self._clock()
+        return self._ctx.progress(phase, pct, message, pausable=pausable)
+
+    def beat(self):
+        if self._clock() - self._at >= self._period_s:
+            phase, pct, message, pausable = self._said
+            self.progress(phase, pct, message, pausable=pausable)
+
+    def cancelled(self):
+        self.beat()
+        return self._ctx.cancelled()
+
+    def poll_ui_event(self):
+        self.beat()
+        return self._ctx.poll_ui_event()
+
+
 # an instruction whose distance alone changed is said no oftener than this (line_up.LineUp's say_min_s): on
 # the console, in the orchestrator's progress and in the node's log. The UI's panel is sent as it always was
 SAY_MIN_S = 1.0
@@ -520,6 +634,9 @@ class WorldWriter:
 # base class's example); ctx.progress keeps REVIEW_RULES U2's fraction from 0 to 1.
 PANEL_TITLE = "Opening the container"
 PANEL_CANCEL = "cancel"  # the Cancel button's id
+# with its style, as the orchestrator's own progress panel sends its Cancel (engine_node._progress_panel:
+# "warning") and the bridge's schema asks of every button (rammp-UI-bridge docs/USER_INPUT_JSON_SCHEMA.md 6.3)
+PANEL_CANCEL_BUTTON = {"button_id": PANEL_CANCEL, "label": "Cancel", "style": "warning"}
 PANEL_PCT = 100.0
 # an unchanged panel is sent again this often: a goal the bridge ended on its own (its abort, a refusal) is opened
 # again by the next send, and Cancel is back on the screen (the microwave engine's period)
@@ -569,7 +686,7 @@ class Panel:
             "title": PANEL_TITLE,
             "message": text,
             "progress": {"phase": phase, "pct": round(PANEL_PCT * pct, 1), "message": text, "pausable": False},
-            "buttons": [] if self.stopping else [{"button_id": PANEL_CANCEL, "label": "Cancel"}],
+            "buttons": [] if self.stopping else [dict(PANEL_CANCEL_BUTTON)],
         }
 
     def tick(self):
@@ -599,9 +716,11 @@ class Asking:
     `ui`: the goal has the UI (Capability._ui_live): the panel says and asks, Open is the yes. Without it
     the flight view says each line on this node's console and the question is answered y or n on ~/answer
     (the answers are read either way: a y is Open's press, an n is Cancel's).
-    `timed`: the goal came with the orchestrator's token, so the orchestrator cancels it at 120 s and its
-    line-ups must end LINE_UP_S after the goal began, whichever of them it is. Without the token nothing
-    cancels it, and each line-up waits CONSOLE_LINE_UP_S for the person.
+    `timed`: the orchestrator ends the goal 120 s after it came, so its line-ups must end LINE_UP_S after
+    the goal began, whichever of them it is (the orchestrator's goal, where its clock is not kept alive:
+    Capability._ui_wait_s). Not timed, each line-up waits for the person: `wait_s`, the UI's wait for the
+    orchestrator's goal (UI_LINE_UP_S, the deployment's `ui_line_up_s`), and CONSOLE_LINE_UP_S (None) for a
+    goal sent by hand, which nothing cancels.
     `view`: the goal's flight view (None: nothing is written). `find`: whether a find follows a yes on it
     (the mock's does not: it has no flight view of its run). `carried`: this goal lines up first because
     the one before it ended in the middle of a line-up (Capability._lines_up).
@@ -611,15 +730,16 @@ class Asking:
     for that one line-up: a second guidance forgot the first place, and the carried line-up knew none, so
     either could ask "Ready?" on the very spot a run had refused (review of 2026-11-17)."""
 
-    def __init__(self, ui, timed, started, view=None, find=True, carried=False, refused=()):
+    def __init__(self, ui, timed, started, view=None, find=True, carried=False, refused=(), wait_s=None):
         self.ui, self.timed, self.started, self.view, self.find = bool(ui), bool(timed), started, view, find
+        self.wait_s = None if wait_s is None else float(wait_s)
         self.carried = bool(carried)
         self.refused = [list(place) for place in refused or ()]
 
     def left_s(self, now=None):
         """How long a line-up that begins now may take."""
         if not self.timed:
-            return CONSOLE_LINE_UP_S
+            return CONSOLE_LINE_UP_S if self.wait_s is None else self.wait_s
         return LINE_UP_S - ((time.monotonic() if now is None else now) - self.started)
 
 
@@ -890,10 +1010,22 @@ class Capability(CapabilityEngine):
 
     def _timed(self, ui=False):
         """Whether this goal is the orchestrator's: it came with its token (`ui`: it has the UI, which is
-        shown by that token), so the orchestrator cancels it at ORCHESTRATOR_TIMEOUT_S and everything it
-        waits for must fit inside that. A goal with no token (sent by hand) has nothing to cancel it, and
+        shown by that token). The orchestrator cancels it after ORCHESTRATOR_TIMEOUT_S: of the goal, and
+        everything it waits for must fit inside that; or of silence, where its clock restarts at every
+        progress item (_ui_wait_s). A goal with no token (sent by hand) has nothing to cancel it, and
         waits for the person (CONSOLE_LINE_UP_S)."""
         return bool(ui) or self._assigned_token != bytes(16)
+
+    def _ui_wait_s(self):
+        """How long a line-up of the orchestrator's goal waits for the person (`ui_line_up_s`, as it is now),
+        its orchestrator's 120 s kept alive the while (KeptAlive). 0: the orchestrator counts its 120 s from
+        the goal, and line-ups have what those leave. Always 0 on a build whose goal brings no token: the
+        orchestrator it talks to is the one before the restart (goal_brings_token)."""
+        try:
+            wait = float(self._param("ui_line_up_s") or 0.0)
+        except (TypeError, ValueError):
+            wait = 0.0
+        return max(0.0, wait) if goal_brings_token() else 0.0
 
     def _hear_answers(self):
         """From here to this action's end the person's y or n is heard on ~/answer (std_msgs/String): the
@@ -1373,12 +1505,52 @@ class Capability(CapabilityEngine):
         return [ActionAvailability(action_id=a.action_id, available=not why, reason=why) for a in self.actions]
 
     def execute(self, action_id, params, ctx):
+        self._kept = None  # this goal's context where its orchestrator's clock is kept alive (_execute)
+        ended = None  # how it ended, for the panel: (words, failed)
         try:
-            return self._execute(action_id, params, ctx)
+            result = self._execute(action_id, params, ctx)
+            ended = end_says(result=result)
+            return result
+        except Cancelled:
+            ended = end_says(cancelled=True)
+            raise
+        except EngineError as e:
+            ended = end_says(error=e)
+            raise
         finally:
-            lines = getattr(self, "lines", None)
-            if lines is not None:
-                lines.to_console()  # the goal's file closed: this node's lines are the console's again
+            try:
+                if ended is not None:
+                    self._show_end(*ended)
+            finally:
+                lines = getattr(self, "lines", None)
+                if lines is not None:
+                    lines.to_console()  # the goal's file closed: this node's lines are the console's again
+
+    def _show_end(self, said, failed):
+        """How the action ended, on the UI's panel for END_SHOW_S, before the action ends and the orchestrator
+        puts its own panel back. Only for a goal with the UI whose orchestrator's clock is kept alive
+        (self._kept): its progress goes on being sent the while. No button: there is nothing left to ask.
+        Nothing here changes how the action ends: a send that fails is logged and the end goes on."""
+        ctx = self._kept
+        if ctx is None or not said:
+            return
+        panel = {"title": PANEL_TITLE, "message": said, "buttons": []}
+        if failed:
+            panel["style"] = "error"  # the bridge's schema: a panel's own style, absent where it is normal
+        try:
+            until, sent_at = time.monotonic() + END_SHOW_S, None
+            while time.monotonic() < until:
+                if not self._ui_live():
+                    return
+                if ctx.poll_ui_event() is not None:
+                    sent_at = None  # a press on the panel before this one took the bridge's panel down
+                now = time.monotonic()
+                if sent_at is None or now - sent_at >= PANEL_REFRESH_S:
+                    ctx.update_user_panel(panel_json=panel)
+                    sent_at = now
+                time.sleep(POLL_S)
+        except Exception as e:  # noqa: BLE001 - the end is the run's own, whatever the panel does
+            self.get_logger().warning(f"the end was not shown on the panel: {e!r}")
 
     def _lines_to_file(self, runs):
         """This goal's full lines go to runs/console-<stamp>.log from here until it ends (NodeLogHandler); the
@@ -1395,16 +1567,26 @@ class Capability(CapabilityEngine):
             raise Cancelled()  # nothing ran
         check_params(params)
         ui = self._ui_live()  # asked once for this goal: what the log says is what is decided on
-        timed = self._timed(ui)  # ... and whether the orchestrator's 120 s bound it (its token came with it)
+        orchestrated = self._timed(ui)  # ... and whether it is the orchestrator's (its token came with it)
+        # ... and, where it is, whether the orchestrator's 120 s bound it whole (`timed`) or its clock is
+        # kept alive and its line-ups wait for the person (wait_s > 0: _ui_wait_s)
+        wait_s = self._ui_wait_s() if orchestrated else 0.0
+        timed = orchestrated and wait_s <= 0.0
+        if orchestrated and not timed:
+            ctx = self._kept = KeptAlive(ctx)
         # the settings that decide how this goal flies, as they are now: a `ros2 param set` lives only in the
         # running node and a restart puts the deployment's values back, so every goal's are in the log
         self.get_logger().info(
-            "open_box goal: line_up=%s ui=%s orchestrated=%s line_up_far_m=%s air_control=%s wrist_first=%s "
-            "wrist_alone=%s"
+            "open_box goal: line_up=%s ui=%s orchestrated=%s line_up_waits=%s line_up_far_m=%s air_control=%s "
+            "wrist_first=%s wrist_alone=%s"
             % (
                 str(bool(self._param("line_up"))).lower(),
                 "live" if ui else "none",
-                str(timed).lower(),
+                str(orchestrated).lower(),
+                # how long a line-up of this goal may take: what the orchestrator's 120 s leave, or the wait
+                ("%.0fs-of-the-goal" % LINE_UP_S)
+                if timed
+                else "%.0fs" % (wait_s if orchestrated else CONSOLE_LINE_UP_S),
                 float(self._param("line_up_far_m") or 0.0),
                 self._param("air_control") or "impedance",
                 str(bool(self._param("wrist_first"))).lower(),
@@ -1419,7 +1601,7 @@ class Capability(CapabilityEngine):
         # may take (the orchestrator's goal: what its 120 s leave; one sent by hand: CONSOLE_LINE_UP_S)
         lines_up, carried, refused = self._lines_up()
         t0 = time.monotonic()
-        ask = Asking(ui, timed, t0, carried=carried, refused=refused)
+        ask = Asking(ui, timed, t0, carried=carried, refused=refused, wait_s=wait_s if orchestrated else None)
         self._hear_answers()  # the person's y or n, from here to the action's end
         if self.mock:
             return self._mock(action_id, ctx, lines_up, ask)

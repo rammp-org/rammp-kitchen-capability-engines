@@ -255,6 +255,10 @@ def no_ten_minute_waits(monkeypatch):
     line-up that nobody answers ends in seconds here, and the tests that are about that time set their own."""
     assert node.CONSOLE_LINE_UP_S == 600.0  # the limit as it is flown: stated in docs/interface.md
     monkeypatch.setattr(node, "CONSOLE_LINE_UP_S", 20.0)
+    # ... and every test's orchestrator is the one that ends a goal 120 s after it came, whatever interfaces
+    # the image under test has (the token in the goal or not: node.goal_brings_token), unless the test says
+    # it is the one whose clock restarts at every progress (kept_alive below)
+    monkeypatch.setattr(node, "goal_brings_token", lambda: False)
 
 
 @pytest.fixture
@@ -625,7 +629,7 @@ def test_the_panel_says_what_the_run_does_with_a_bar_and_one_button_cancel():
             "title": "Opening the container",
             "message": "Starting",
             "progress": {"phase": "locate", "pct": 0.0, "message": "Starting", "pausable": False},
-            "buttons": [{"button_id": "cancel", "label": "Cancel"}],
+            "buttons": [{"button_id": "cancel", "label": "Cancel", "style": "warning"}],
         }
     ]
     panel.say("press", 0.35, "pressing the button")
@@ -2276,7 +2280,7 @@ def test_with_the_ui_the_guidance_in_the_middle_of_a_run_is_on_its_panel_and_ope
     assert after[0]["message"] == "Opening the container"
     run_phases = {ph for ph, *_ in node.MOCK_PHASES["open_box"]}  # the run's own panel again, Cancel alone on it
     assert after[-1]["progress"]["phase"] in run_phases
-    assert after[-1]["buttons"] == [{"button_id": "cancel", "label": "Cancel"}]
+    assert after[-1]["buttons"] == [{"button_id": "cancel", "label": "Cancel", "style": "warning"}]
     view = capsys.readouterr().out
     assert "             ask   Ready. Open the container?   (Open on the UI)" in view
     assert "LINE UP   ok    Open pressed" in view and node.CONSOLE_HOW not in view
@@ -2788,3 +2792,190 @@ def test_the_engine_says_its_lines_through_the_nodes_log(ros):
 
 def test_fake_run_script_is_python():
     compile(textwrap.dedent(FAKE_RUN), "fake_run.py", "exec")
+
+
+# --- an orchestrator whose 120 s restart at every progress item (rammp-orchestrator e17c625, 2026-11-16) ---
+
+
+def kept_alive(monkeypatch, **params):
+    """The mock, lining up, for a goal of that orchestrator: its goal brings the token."""
+    monkeypatch.setattr(node, "goal_brings_token", lambda: True)
+    monkeypatch.setattr(node, "END_SHOW_S", 0.4)
+    return _mock_lining_up(monkeypatch, **params)
+
+
+OPEN_PRESS = {"type": "button", "button_id": "open"}
+
+
+def test_the_uis_goal_waits_five_minutes_for_its_person_only_where_the_orchestrators_clock_restarts(ros, monkeypatch):
+    """`ui_line_up_s`: the owner's "5 min" (2026-11-19), and only on a build whose goal brings the token (the
+    orchestrator before it ends every action 120 s after its goal, whatever the engine reports)."""
+    assert node.PARAMS["ui_line_up_s"] == node.UI_LINE_UP_S == 300.0  # as docs/interface.md states it
+    handlers = list(LOGGER.handlers)
+    cap = _mock_lining_up(monkeypatch)
+    try:
+        assert cap._ui_wait_s() == 0.0  # no token in this build's goal: the 120 s are the goal's
+        monkeypatch.setattr(node, "goal_brings_token", lambda: True)
+        assert cap._ui_wait_s() == 300.0
+        cap.set_parameters([Parameter("ui_line_up_s", value=0.0)])
+        assert cap._ui_wait_s() == 0.0  # the deployment's word for an orchestrator that does not restart it
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+    t0 = 100.0
+    assert node.Asking(True, False, t0, wait_s=300.0).left_s(t0 + 200.0) == 300.0  # each line-up, whole
+    assert node.Asking(True, True, t0).left_s(t0 + 10.0) == node.LINE_UP_S - 10.0  # the 120 s rule, as it was
+    assert node.Asking(False, False, t0).left_s() == node.CONSOLE_LINE_UP_S  # a goal sent by hand, as it was
+
+
+def test_under_such_an_orchestrator_a_line_up_outlasts_the_120_s_rule_and_the_end_is_said_on_the_panel(
+    ros, monkeypatch
+):
+    """LINE_UP_S (what a goal's 120 s leave a line-up) does not bound it there: the person's Open, well after
+    it, still starts the run. And how the action ended stays on the panel, with no button, before it ends."""
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=0.2)
+    try:
+        monkeypatch.setattr(node, "LINE_UP_S", 0.5)  # under the 120 s rule: over before the box is in reach
+        ctx = FakeCtx()
+        threading.Timer(3.2, ctx.events.append, args=(OPEN_PRESS,)).start()
+        t0 = time.monotonic()
+        out = cap.execute("open_box", {}, ctx)
+        assert out["lid_off"] and ctx.objects == {"c1": {"opened": True}}
+        assert time.monotonic() - t0 >= 3.2 + 0.4  # ... the end's 0.4 s on the panel included
+        assert ctx.panels[-1] == {"title": node.PANEL_TITLE, "message": node.END_DONE, "buttons": []}
+        before = [p for p in ctx.panels if p["message"] != node.END_DONE]
+        assert before[-1]["message"] == "Going home" and ctx.panels.index(ctx.panels[-1]) > ctx.panels.index(before[-1])
+        # the same goal under the 120 s rule: not in place in time, and no panel of the end's (no time for one)
+        monkeypatch.setattr(node, "goal_brings_token", lambda: False)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+        ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up"
+        assert ctx.panels[-1]["message"] == "Press open again when you are in place"
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_a_person_not_in_place_within_the_deployments_wait_is_told_so_and_nothing_runs(ros, monkeypatch):
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=5.0, ui_line_up_s=0.8)  # a 30 s approach, a wait of 0.8 s
+    try:
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+        ctx = FakeCtx()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up" and e.value.recoverable and "within 1 s" in str(e.value)
+        assert ctx.panels[-1] == {
+            "title": node.PANEL_TITLE,
+            "message": "Not in place in time. Nothing was pressed. You can try again",
+            "buttons": [],
+            "style": "error",
+        }
+        assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.objects == {} and ctx.world == []
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_a_cancel_under_such_an_orchestrator_is_said_on_the_panel_as_the_action_ends(ros, monkeypatch):
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=1.0)
+    try:
+        monkeypatch.setattr(cap, "_cancel_from_ui", lambda: None)
+        ctx = FakeCtx()
+        threading.Timer(0.6, ctx.events.append, args=(CANCEL_PRESS,)).start()
+        with pytest.raises(Cancelled):
+            cap.execute("open_box", {}, ctx)
+        assert ctx.panels[-1] == {"title": node.PANEL_TITLE, "message": node.END_CANCELLED, "buttons": []}
+        assert ctx.objects == {} and ctx.world == []
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_while_the_person_takes_their_time_the_orchestrator_is_told_again_and_again(ros, monkeypatch):
+    """The newest progress is sent again every KEEP_ALIVE_S with nothing new said (the orchestrator cancels
+    after 120 s of silence); under the 120 s rule each thing is said once, as it always was."""
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=0.2)
+    try:
+        monkeypatch.setattr(node, "KEEP_ALIVE_S", 0.3)
+        ctx = FakeCtx()
+        threading.Timer(4.6, ctx.events.append, args=(OPEN_PRESS,)).start()  # asked at ~2.5 s: 2 s of waiting
+        assert cap.execute("open_box", {}, ctx)["lid_off"]
+        asked = [m for p, _pct, m, _pausable in ctx.said if p == "line_up" and m == "Ready. Open the container?"]
+        assert len(asked) >= 4
+        monkeypatch.setattr(node, "goal_brings_token", lambda: False)
+        ctx = FakeCtx()
+        threading.Timer(4.6, ctx.events.append, args=(OPEN_PRESS,)).start()
+        assert cap.execute("open_box", {}, ctx)["lid_off"]
+        asked = [m for p, _pct, m, _pausable in ctx.said if p == "line_up" and m == "Ready. Open the container?"]
+        assert len(asked) == 1
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_kept_alive_sends_the_newest_progress_again_only_after_its_period_of_silence():
+    clock = [0.0]
+    ctx = FakeCtx()
+    kept = node.KeptAlive(ctx, period_s=30.0, clock=lambda: clock[0])
+    kept.progress("line_up", 0.0, "Hold still, checking", pausable=False)
+    clock[0] = 29.0
+    assert kept.cancelled() is False and kept.poll_ui_event() is None and len(ctx.said) == 1
+    clock[0] = 30.0
+    assert kept.cancelled() is False
+    assert ctx.said == [("line_up", 0.0, "Hold still, checking", False)] * 2
+    clock[0] = 45.0  # counted from the one sent again
+    kept.poll_ui_event()
+    assert len(ctx.said) == 2
+    clock[0] = 60.0
+    kept.poll_ui_event()
+    assert len(ctx.said) == 3
+    kept.progress("press", 0.35, "Pressing the button", pausable=False)  # something new: the count starts again
+    clock[0] = 89.0
+    kept.cancelled()
+    assert len(ctx.said) == 4
+    clock[0] = 90.0
+    kept.cancelled()
+    assert ctx.said[-1] == ("press", 0.35, "Pressing the button", False) and len(ctx.said) == 5
+    # everything else is the context's own
+    ctx.events.append(CANCEL_PRESS)
+    assert kept.poll_ui_event() == CANCEL_PRESS
+    ctx.cancel = True
+    assert kept.cancelled() is True
+    assert kept.update_user_panel(panel_json={"a": 1}) and ctx.panels == [{"a": 1}]
+    # ... and a goal that has said nothing yet still has something to send
+    ctx = FakeCtx()
+    kept = node.KeptAlive(ctx, period_s=30.0, clock=lambda: clock[0])
+    clock[0] += 30.0
+    kept.cancelled()
+    assert len(ctx.said) == 1 and ctx.said[0][3] is False
+
+
+def test_how_the_action_ended_is_one_short_line_in_the_persons_words():
+    assert node.end_says(result={"lid_off": True}) == (node.END_DONE, False)
+    assert node.end_says(result={"lid_off": False}) == (node.END_NOT_OFF, False)
+    assert node.end_says(cancelled=True) == (node.END_CANCELLED, False)
+    said, failed = node.end_says(error=EngineError("not_lined_up", "many words for the log", recoverable=True))
+    assert failed and said == "Not in place in time. Nothing was pressed. You can try again"
+    # a run stopped at its budget with the lid still in the fingers is not to be tried again
+    said, failed = node.end_says(error=EngineError("timeout", "...", recoverable=False))
+    assert failed and said == "Taking too long. The arm stopped where it is. The arm needs a person before the next try"
+    said, _failed = node.end_says(error=EngineError("a_code_of_tomorrow", "...", recoverable=False))
+    assert said == "The container was not opened. The arm needs a person before the next try"
+    # every way a run's last words are read has a line of its own, bar the one that names a fault inside
+    assert {code for _pattern, code, _recoverable in node.STOP_CODES} - set(node.END_SAYS) == {"watch_failed"}
+    for code in node.END_SAYS:
+        for recoverable in (True, False):
+            said, failed = node.end_says(error=EngineError(code, "", recoverable=recoverable))
+            assert failed and len(said) <= 100 and "\n" not in said

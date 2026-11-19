@@ -61,7 +61,10 @@ def test_a_drive_up_is_told_closer_then_hold_still_then_asked_and_open_flies():
         "title": "Opening the container",
         "message": "Ready. Open the container?",
         "progress": {"phase": "ready", "pct": 100.0, "pausable": False},
-        "buttons": [{"button_id": "open", "label": "Open"}, {"button_id": "cancel", "label": "Cancel"}],
+        "buttons": [
+            {"button_id": "open", "label": "Open", "style": "normal"},
+            {"button_id": "cancel", "label": "Cancel", "style": "warning"},
+        ],
     }
     assert guide.press(g.CANCEL, 4.5) is False and guide.state == g.READY  # Cancel is the caller's
     assert guide.press(g.OPEN, 4.5) is True and guide.state == g.GO

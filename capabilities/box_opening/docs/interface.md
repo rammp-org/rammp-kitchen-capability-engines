@@ -339,7 +339,7 @@ the UI (the base class's `ctx.update_user_panel()`, to the bridge's
   "title": "Opening the container",
   "message": "Pressing the button",
   "progress": {"phase": "press", "pct": 35.0, "message": "Pressing the button", "pausable": false},
-  "buttons": [{"button_id": "cancel", "label": "Cancel"}]
+  "buttons": [{"button_id": "cancel", "label": "Cancel", "style": "warning"}]
 }
 ```
 
@@ -358,9 +358,19 @@ line-up's panel does: below). It is sent as
 the phase changes, and again every second so a panel the bridge took down comes
 back with its Cancel; the base class closes it as the action ends, with the
 token. The node acquires no `ui_control` of its own. Standalone (no token)
-nothing is sent. How a run ended is not shown on a panel of its own: the
-orchestrator's panel returns as the action ends, and the result is in the
-action's result and the node's log.
+nothing is sent. Every button carries its `style` (the bridge's
+`USER_INPUT_JSON_SCHEMA.md`): Cancel `warning`, as on the orchestrator's own
+progress panel, Open `normal`.
+
+How the action ended is said on the panel for 5 s before the action ends
+(`END_SHOW_S`), with no button, in one short line: `Done. The lid is off, on the table`, `Cancelled. The arm stopped where it is`, or for an error what
+happened and whether it can be tried again (`Not in place in time. Nothing was pressed. You can try again`; `... The arm needs a person before the next try`
+for an error that is not recoverable), with the panel's `style` `error`. The
+whole reason stays in the action's result and the node's log. The orchestrator
+shows no result of its own: its panel returns as the action ends. This is done
+only under an orchestrator whose 120 s restart at every progress item (see "How
+long a line-up may take"); under one that counts them from the goal the
+orchestrator's panel returns at once, as before.
 
 #### Lining up first
 
@@ -638,12 +648,28 @@ result).
 
 #### How long a line-up may take
 
-| The goal                                                           | A line-up before the run       | A line-up in the middle of it                                                                                                                                                                           | The run's own budget                              |
-| ------------------------------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| with the orchestrator's token (from the UI, or the UI bridge down) | ends 35 s after the goal began | ends 35 s after the goal began: what the run's look and proof left of them (run 2 of 2026-11-17 said "no press plans" 16 s in: about 19 s). With under 8 s left it is not given: `not_lined_up` at once | 90 s from the goal's start, the line-up inside it |
-| no token (sent by hand, `open_box_terminal`)                       | 10 minutes                     | 10 minutes, each time                                                                                                                                                                                   | 90 s from the last yes                            |
+| The goal                                                                                                     | A line-up before the run       | A line-up in the middle of it                                                                                                                                                                           | The run's own budget                              |
+| ------------------------------------------------------------------------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| with the orchestrator's token (from the UI, or the UI bridge down)                                           | ends 35 s after the goal began | ends 35 s after the goal began: what the run's look and proof left of them (run 2 of 2026-11-17 said "no press plans" 16 s in: about 19 s). With under 8 s left it is not given: `not_lined_up` at once | 90 s from the goal's start, the line-up inside it |
+| no token (sent by hand, `open_box_terminal`)                                                                 | 10 minutes                     | 10 minutes, each time                                                                                                                                                                                   | 90 s from the last yes                            |
+| with the orchestrator's token, its 120 s restarting at every progress item (`ui_line_up_s` 300, the default) | 5 minutes                      | 5 minutes, each time                                                                                                                                                                                    | 90 s from the last yes                            |
 
-Under the orchestrator a line-up is given only where a run of 55 s still fits
+Which of the first two rows a goal from the UI gets is the orchestrator's doing.
+rammp-orchestrator before e17c625 (2026-11-16) ends every action 120 s after its
+goal, whatever the engine reports: the first row. From e17c625 on it counts its
+120 s from the newest progress item, and only 120 s of silence cancel: the
+third row. Box opening then sends its newest progress again every 30 s with
+nothing new to say (`KEEP_ALIVE_S`), a line-up waits `ui_line_up_s` for the
+person (300 s: the owner's "5 min", 2026-11-19), and the run's 90 s start
+again at each yes, so that no wait can cut a motion short. `ui_line_up_s: 0` is
+the first row, for a deployment whose orchestrator is the older one; a build
+whose goal does not bring the UI's token talks to that older orchestrator and
+takes the first row whatever the param says. Each goal's log line says which
+(`line_up_waits=300s`, or `35s-of-the-goal`). Proved against the real
+orchestrator and UI bridge with the app stood in for (2026-11-19); not yet
+with the app.
+
+Under the first row a line-up is given only where a run of 55 s still fits
 after it inside the 90; the orchestrator cancels at 120 s whatever the engine
 does. The 55 s are an estimate, not a measurement of a guided run (run 1 of
 2026-11-17 took 33.5 s and the runs of 2026-11-13 about 40 s from the first row
@@ -682,6 +708,7 @@ passes them as a params file.
 | `ui_bridge_node_name` | `"ui_bridge_node"`     | The UI bridge's node, whose `request_user_input` the base class's panel calls go to (see "The UI")                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `mock_phase_s`        | `0.0`                  | The mock only: how long each of its phases lasts (s); `0` and its run is over at once. A second or two rehearses the UI on it with no arm (the panel, its bar, Cancel)                                                                                                                                                                                                                                                                                                                                           |
 | `line_up`             | `false`                | Line up before a run's first move: the user is told which way to move, asked, and the run goes on only on their yes (**Open** on the UI; `y` on `/box_opening/answer` for a goal with no UI: see "Lining up first"). Off (the default), `open_box` starts its run at once and lines up only where it finds no press from where the chair stands ("Lining up in the middle of a run"). With `wrist_first` the wrist turns to look while the user lines up; without it only the scene camera follows the container |
+| `ui_line_up_s`        | `300.0`                | How long (s) a line-up of a goal from the UI waits for the person, under an orchestrator whose 120 s restart at every progress item (rammp-orchestrator e17c625 and later). `0`: the orchestrator ends every action 120 s after its goal, and a line-up has what those leave (35 s of the goal). Always `0` on a build whose goal brings no token                                                                                                                                                                |
 | `line_up_far_m`       | `0.0`                  | How far from the arm's base (m) the line-up trusts the boundary: a container further out is told to come closer. `0`: as far as the run's proof plans a press (on flatbot about 0.90 m; flown at 0.63 and 0.68 m)                                                                                                                                                                                                                                                                                                |
 | `air_control`         | `"impedance"`          | How the arm flies the free air before the press: `impedance`, every leg in the driver's joint impedance, one motion to under the button (as flown 2026-11-12); `position`, the look and the way in's free-air lines in position control and slower, about a second's stand while the springs come in, then the press on them as ever (see "The free air before the press"). `position` is not flown                                                                                                              |
 | `allow_execute`       | `false`                | `true` only for attended runs; `false`: `open_box` unavailable, nothing runs                                                                                                                                                                                                                                                                                                                                                                                                                                     |

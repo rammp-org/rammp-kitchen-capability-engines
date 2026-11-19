@@ -109,7 +109,12 @@ class Say:
             "title": TITLE,
             "message": self.message,
             "progress": {"phase": self.state, "pct": round(float(self.pct), 1), "pausable": False},
-            "buttons": [{"button_id": b, "label": label} for b, label in self.buttons],
+            # each with its style, as the bridge's schema asks of every button and the orchestrator's own
+            # progress panel sends them (Cancel "warning"): USER_INPUT_JSON_SCHEMA.md 6.3
+            "buttons": [
+                {"button_id": b, "label": label, "style": "warning" if b == CANCEL else "normal"}
+                for b, label in self.buttons
+            ],
         }
 
 
