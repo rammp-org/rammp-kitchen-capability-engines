@@ -2152,6 +2152,62 @@ def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):
     assert e.value.error_code == "timeout" and time.monotonic() - t0 < 5.0
 
 
+def test_the_run_is_told_the_time_it_has_as_it_is_started(engine, monkeypatch, tmp_path):
+    """A run still going at its budget is stopped with a Ctrl+C wherever it is, and one cut with the lid in
+    its fingers is the arm holding it. A lid that feels no table at its spot is taken on to another (owner
+    2026-11-19: "it should keep trying spots"), so the run must know how long it has: each run is started
+    with its budget in its environment (budget_env) — the seconds this node will give it, the time they
+    count from, and whether they start again at each go (a goal sent by hand, whose budget _follow counts
+    from its last go) — exactly as _follow counts it. The run's side reads the same name (RunClock)."""
+    from box_opening.tasks import reach_lid_off as rlo
+
+    assert node.RUN_BUDGET_ENV == rlo.RUN_BUDGET_ENV  # the engine's name for it and the run's are one
+    real, envs = node.Run, []
+
+    class Kept(real):
+        def __init__(self, argv, env, log, talk=False):
+            envs.append(dict(env))
+            super().__init__(argv, env, log, talk=talk)
+
+    monkeypatch.setattr(node, "Run", Kept)
+
+    def run_once():
+        _forget_run_logs(tmp_path)
+        given(monkeypatch, FULL_RUN)
+        t0 = time.time()
+        assert engine.execute("open_box", {}, FakeCtx())["lid_off"]
+        (env,) = envs
+        envs.clear()
+        told = json.loads(env[node.RUN_BUDGET_ENV])
+        assert t0 - 0.01 <= told["from"] <= time.time()  # from the run's start, on this host's clock
+        return told
+
+    # a goal sent by hand: the whole budget, again from each go
+    told = run_once()
+    assert (told["s"], told["go"]) == (node.RUN_BUDGET_S, True) and node.RUN_BUDGET_S == 90.0
+    clock = rlo.RunClock(env={rlo.RUN_BUDGET_ENV: json.dumps(told)}, now=lambda: told["from"] + 30.0)
+    assert clock.left_s() == pytest.approx(60.0)  # the run's own reading of it
+    assert node.RUN_BUDGET_ENV not in engine._env()  # the run's alone: no other child of the goal is started on it
+    # the orchestrator's goal (its token came with it): the budget never moves
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    told = run_once()
+    assert (told["s"], told["go"]) == (node.RUN_BUDGET_S, False)
+    # ... and a line-up made before the run was started took its 20 s of it
+    engine.set_parameters([Parameter("line_up", value=True)])
+    monkeypatch.setattr(engine, "_line_up", lambda ctx, source, ask: 20.0)
+    told = run_once()
+    assert (told["s"], told["go"]) == (node.RUN_BUDGET_S - 20.0, False)
+    # with the wrist look the run is started before its line-up, which is inside its budget
+    engine.set_parameters([Parameter("wrist_first", value=True)])
+    monkeypatch.setattr(engine, "_run_lines_up", lambda ctx, env, run_, *a, **k: run_.send({"go": True}))
+    told = run_once()
+    assert (told["s"], told["go"]) == (node.RUN_BUDGET_S, False)
+    # ... and by hand its budget starts at the line-up's go: the run reads that go in its own record
+    monkeypatch.setattr(engine, "_ui_live", lambda: False)
+    told = run_once()
+    assert (told["s"], told["go"]) == (node.RUN_BUDGET_S, True)
+
+
 # -- no press from where the chair stands: the run is guided, never just ended (2026-11-17, run 2) -----------
 REASON = (
     "no press plans from here (0.79 m out): the slide in swings the arm wide (30 deg); the press stroke would "

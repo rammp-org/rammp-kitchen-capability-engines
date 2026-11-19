@@ -179,6 +179,13 @@ RUN_BUDGET_S = ORCHESTRATOR_TIMEOUT_S - CANCEL_ESCALATE_S - CANCEL_KILL_S - WORL
 # missions with its start, before any of this) left such a run nothing: 55 until a lined-up run is timed
 RUN_LONGEST_S = 55.0
 LINE_UP_S = RUN_BUDGET_S - RUN_LONGEST_S  # 35 s
+# The run is told the time it has, in its environment as it is started (budget_env). Its stop at the budget
+# is a Ctrl+C wherever it is, and a run cut with the lid in its fingers is the arm holding it; a lid that
+# feels no table at its spot is taken on to another (owner 2026-11-19: "it should keep trying spots"), and
+# each further spot is started only where the time left still holds it and the way back to the box after it
+# (tasks/reach_lid_off.RunClock reads this; SPOT_S's note there has the numbers). The same name is written
+# there: that module is the run's, not imported by the engine, and test_node holds the two equal
+RUN_BUDGET_ENV = "BOX_OPENING_RUN_BUDGET"
 # A line-up in the MIDDLE of a run (no press plans from where the chair stands: Capability._follow) has what
 # is left of those same 35 s, counted from the goal's start: the run that goes on at its yes finds the box
 # again and flies as a lined-up run does (RUN_LONGEST_S), and must still end before its own stop at
@@ -329,6 +336,17 @@ def executable(name):
 def config_path(name, *where):
     """A config file by its name in the image's config/<where>, or an absolute path as it is."""
     return name if os.path.isabs(name) else share("config", *where, name)
+
+
+def budget_env(env, budget_s, timed):
+    """`env` with the run's own time in it (RUN_BUDGET_ENV), for the run started now: JSON, "s" the seconds
+    until this node stops it (Capability._follow's budget_s), "from" this host's time.time() they count from
+    (now: the run's start), and "go" whether they start again, whole, at each go the run is given — a goal
+    sent by hand (not `timed`), whose budget _follow counts from its last go; under the orchestrator's 120 s
+    it never moves. The run's side of it is tasks/reach_lid_off.RunClock. A copy: the line-up's other
+    children (reach_probe, the watch) are started on `env` as it was."""
+    told = {"s": round(float(budget_s), 1), "from": round(time.time(), 3), "go": not timed}
+    return dict(env, **{RUN_BUDGET_ENV: json.dumps(told)})
 
 
 class Run:
@@ -1020,7 +1038,8 @@ class Capability(CapabilityEngine):
         go on the user's yes. Until then it only watches (the wrist turned to look, gently, where the arm
         stands at rest)."""
         argv = self._argv(action_id, instance_id) + ["--line-up", "--guide"]
-        run_ = Run(argv, env, ask.view.relay(LOGGER.log), talk=True)
+        # (its time: the whole budget from here, the line-up inside it; by hand, from its go: budget_env)
+        run_ = Run(argv, budget_env(env, RUN_BUDGET_S, ask.timed), ask.view.relay(LOGGER.log), talk=True)
         self._run = run_  # a shutdown stops it (_on_shutdown)
         self._run_lines_up(ctx, env, run_, action_id, instance_id, ask)
         return run_
@@ -1481,7 +1500,11 @@ class Capability(CapabilityEngine):
                 view.start(action_id, track.instance_id)
             # --guide: where it finds no press from where the chair stands it asks to be guided and waits on
             # its stdin, as a run that lines up first does (_follow)
-            run_ = Run(self._argv(action_id, track.instance_id) + ["--guide"], env, view.relay(LOGGER.log), talk=True)
+            # (told the time it has, as it is counted below: what a line-up before it left of the budget)
+            run_env = budget_env(env, RUN_BUDGET_S - lined_up_s if timed else RUN_BUDGET_S, timed)
+            run_ = Run(
+                self._argv(action_id, track.instance_id) + ["--guide"], run_env, view.relay(LOGGER.log), talk=True
+            )
         self._run = run_
         # The run's own time. Under the orchestrator's 120 s: RUN_BUDGET_S from the goal's start, the line-up
         # inside it. A goal sent by hand has no such bound, and the time its person took is none of the run's:
