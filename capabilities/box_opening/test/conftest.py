@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-# box_opening from this checkout, and capability_engine beside it. Run from the repo root (the
+# box_opening from this checkout, and capability_engine and capability_ui beside it. Run from the repo root (the
 # tests' paths are the root's), with ROS 2 Humble, the RAMMP interfaces and a build of this
 # package sourced (its config is read from the install's share/):
 #   python3 -m pytest -q capabilities/box_opening/test
@@ -25,7 +25,11 @@ import pytest
 #     ghcr.io/rammp-org/rammp-kitchen-capability-engines/box_opening:dev \
 #     bash -c "pip install -q pytest && python3 -m pytest -q -p no:cacheprovider capabilities/box_opening/test"
 HERE = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(HERE), str(HERE.parents[1] / "capability_engine")]
+sys.path[:0] = [
+    str(HERE),
+    str(HERE.parents[1] / "capability_engine"),
+    str(HERE.parents[1] / "shared" / "capability_ui"),
+]
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint  # noqa: E402
 
 from box_opening.models.container import ContainerModel, ContainerPose  # noqa: E402

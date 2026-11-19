@@ -9,6 +9,8 @@
   <license>Apache-2.0</license>
 
   <exec_depend>capability_engine</exec_depend>
+  <!-- the run's final notices (Done, failed, Stopped) and the UI's line wrap: shared/capability_ui -->
+  <exec_depend>capability_ui</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>

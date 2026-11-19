@@ -14,7 +14,7 @@ example does (capabilities/example: ctx.update_user_panel / ctx.poll_ui_event).
     LOOKING   no box seen lately                   "Looking for the container"
     MOVE      the box is outside the boundary      "Move closer, about 15 cm"   (or back / left / right)
     HOLD      inside, not yet steady or planned    "Hold still, checking"
-    READY     inside, steady, and the run plans    "Ready. Open the container?"  [Open] [Cancel]
+    READY     inside, steady, and the run plans    "Ready. Open the container?"  [Open] [Stop]
     GO        Open pressed on a fresh READY        the arm flies
     TIMED_OUT the time for lining up ran out       "Press open again when you are in place"
 
@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 LOOKING, MOVE, HOLD, READY, GO, TIMED_OUT = "looking", "move", "hold", "ready", "go", "timed_out"
 
-OPEN, CANCEL = "open", "cancel"  # the panel's button ids
+OPEN, CANCEL = "open", "cancel"  # the panel's button ids (CANCEL's label is Stop, as on every capability's panel)
 TITLE = "Opening the container"
 
 LOST_S = 1.5  # no box seen for this long: looking again
@@ -182,7 +182,7 @@ class Guide:
         self._see(fix)
         if self.budget_s is not None and now - self.started > self.budget_s:
             return self._answer(now, Say(TIMED_OUT, "Press open again when you are in place"), at_once=True)
-        cancel = ((CANCEL, "Cancel"),)
+        cancel = ((CANCEL, "Stop"),)
         seen = self._last_fix
         if seen is None or now - seen.t > LOST_S:
             self._bad_since = None
@@ -215,5 +215,5 @@ class Guide:
             return False
         if self._last_fix is None or float(now) - self._last_fix.t > FRESH_S:
             return False
-        self._answer(float(now), Say(GO, "Opening the container", ((CANCEL, "Cancel"),), 100.0), at_once=True)
+        self._answer(float(now), Say(GO, "Opening the container", ((CANCEL, "Stop"),), 100.0), at_once=True)
         return True
