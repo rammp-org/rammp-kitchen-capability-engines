@@ -450,7 +450,7 @@ CANARY_LIMIT_RAD = 0.25  # ... and every joint this far inside its limits: refus
 CANARY_SPAN_RAD = 1.2  # looked for this far from the rest pose on joints 1-4, the wrist as it rests
 CANARY_DRAWS = 4000
 CANARY_SEED = 20261119
-CANARIES = 2  # in different boxes where the model gives them
+CANARIES = 3  # the shallowest, one in every other box the model gives, and the rest spread far apart
 CANARY_TURN_RAD = 0.2  # the plan asked from the rest pose: its last joint turned this much
 # cuRobo's word for a start that stands in its world, as rammp-curobo passes it on (its other refusals of a
 # start, for the arm touching itself or a joint limit, begin alike and prove nothing about the chair)
@@ -462,8 +462,12 @@ def canary_starts(check, chain, rest_q, stats=None):
     `chain`) puts deep inside a box of the CHAIR itself (not the user's: CANARY_IN_BOX_M inside the unpadded
     box) and nothing else wrong with them: clear of the user's boxes, of itself, inside the joint limits,
     no lower than the rest pose stands (so not in the floor, which every robot's world has). Taken from the
-    model, never a constant: drawn (seeded: the same every run) around the rest pose `rest_q`, the nearest
-    to it first, in different boxes. `stats` (a dict): filled with how many draws each rule left."""
+    model, never a constant: drawn (seeded: the same every run) around the rest pose `rest_q`. Of the draws
+    that pass, the SHALLOWEST first (the nearest to this chair's own surface is the likeliest to stand
+    outside another chair's box: 2026-11-19, the one nearest the rest pose on gen_1_5's chair stood 44 mm
+    inside flatbot's padding too, and told the two chairs apart no better than the config's path), then the
+    shallowest in every other box, then, of the shallower half, those farthest in joint space from the ones
+    taken. `stats` (a dict): filled with how many draws each rule left."""
     import numpy as np
 
     from box_opening.runtime.body import _bare
@@ -508,16 +512,23 @@ def canary_starts(check, chain, rest_q, stats=None):
     low = np.array([float((check.spheres_at(q)[0][:, 2] - r0).min()) for q in Q[ok]]) if ok.any() else np.zeros(0)
     idx = np.flatnonzero(ok)[low >= floor - 0.05]
     stats["high"] = len(idx)
-    order = idx[np.argsort(np.abs(Q[idx] - rest_q).max(axis=1))]
-    out, seen = [], set()
-    for i in order:
-        if near.box[i] in seen:
-            continue
-        seen.add(near.box[i])
-        out.append(([float(v) for v in Q[i]], near.box[i], -float(near.m[i])))
-        if len(out) >= CANARIES:
+    if not len(idx):
+        return []
+    depth = -np.asarray(near.m)[idx]
+    order = idx[np.argsort(depth, kind="stable")]  # the shallowest first
+    taken, boxes = [], set()
+    for i in order:  # the shallowest of each box
+        if near.box[i] not in boxes and len(taken) < CANARIES:
+            boxes.add(near.box[i])
+            taken.append(int(i))
+    shallow = order[: max(1, (len(order) + 1) // 2)]
+    while len(taken) < min(CANARIES, len(shallow)):  # ... and of the shallower half, the farthest from those taken
+        apart = np.array([min(float(np.abs(Q[i] - Q[j]).max()) for j in taken) for i in shallow])
+        best = int(shallow[int(apart.argmax())])
+        if best in taken or apart.max() <= 0.0:
             break
-    return out
+        taken.append(best)
+    return [([float(v) for v in Q[i]], near.box[i], -float(near.m[i])) for i in taken]
 
 
 def planner_canary_rows(plan, check, chain, rest_q):
