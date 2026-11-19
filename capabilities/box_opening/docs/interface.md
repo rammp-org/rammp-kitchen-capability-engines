@@ -364,7 +364,7 @@ progress panel, Open `normal`.
 
 How the action ended is said on the panel for 5 s before the action ends
 (`END_SHOW_S`), with no button, in one short line: `Done. The lid is off, on the table`, `Cancelled. The arm stopped where it is`, or for an error what
-happened and whether it can be tried again (`Not in place in time. Nothing was pressed. You can try again`; `... The arm needs a person before the next try`
+happened and whether it can be tried again (`Not in place in time. Nothing was pressed. You can try again`; `... Ask someone to check the arm`
 for an error that is not recoverable), with the panel's `style` `error`. The
 whole reason stays in the action's result and the node's log. The orchestrator
 shows no result of its own: its panel returns as the action ends. This is done

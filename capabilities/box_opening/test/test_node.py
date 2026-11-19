@@ -2970,9 +2970,9 @@ def test_how_the_action_ended_is_one_short_line_in_the_persons_words():
     assert failed and said == "Not in place in time. Nothing was pressed. You can try again"
     # a run stopped at its budget with the lid still in the fingers is not to be tried again
     said, failed = node.end_says(error=EngineError("timeout", "...", recoverable=False))
-    assert failed and said == "Taking too long. The arm stopped where it is. The arm needs a person before the next try"
+    assert failed and said == "Taking too long. The arm stopped where it is. Ask someone to check the arm"
     said, _failed = node.end_says(error=EngineError("a_code_of_tomorrow", "...", recoverable=False))
-    assert said == "The container was not opened. The arm needs a person before the next try"
+    assert said == "The container was not opened. Ask someone to check the arm"
     # every way a run's last words are read has a line of its own, bar the one that names a fault inside
     assert {code for _pattern, code, _recoverable in node.STOP_CODES} - set(node.END_SAYS) == {"watch_failed"}
     for code in node.END_SAYS:

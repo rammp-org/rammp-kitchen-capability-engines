@@ -113,6 +113,11 @@ params:
   # how far from the arm's base (m) the line-up trusts that boundary: a container further out is told to
   # come closer. 0 (the default): as far as the run's own proof plans a press. A robot's profile sets it
   line_up_far_m: 0.0
+  # how long (s) a line-up of a goal from the UI waits for the person, the arm at rest with its wrist turned
+  # the while: 5 minutes (the owner, 2026-11-19). It needs rammp-orchestrator e17c625 (2026-11-16) or later,
+  # whose 120 s restart at every progress item: box opening then sends its newest progress again every 30 s.
+  # 0: the orchestrator ends every action 120 s after its goal, and a line-up has what those leave (35 s)
+  ui_line_up_s: 300.0
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

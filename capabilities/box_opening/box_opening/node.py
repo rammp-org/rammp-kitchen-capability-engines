@@ -257,7 +257,7 @@ END_SAYS = {
     "arm_halted": "The arm was halted",
 }
 END_RETRY = "You can try again"
-END_HELP = "The arm needs a person before the next try"
+END_HELP = "Ask someone to check the arm"
 
 
 def goal_brings_token():
