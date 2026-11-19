@@ -6,7 +6,7 @@ the owner asked for it — the two runs that took the lid off (20:53) and the on
 
 import pytest
 
-from box_opening.flight_view import FlightView, no_press_reason
+from box_opening.flight_view import FlightView, no_press_reason, not_seen_reason
 
 P = "[press_demo] "
 
@@ -471,6 +471,106 @@ def test_a_line_up_that_ends_without_its_yes_is_the_runs_end_and_says_where_the_
     view.guide_say("Ready. Open the container?", ask="y / n", how="x")
     view.guide_end(True, "yes")
     view.guide_end(False, "cancelled")
+
+
+NOT_SEEN_LINE = (
+    P + "NOT SEEN: no camera sees the container (scene camera: scene segmenter: saw no food container in 14 frames; "
+    "the wrist's look in front: wrist camera: no counter in 4 frames (no level plane wider than a container)); "
+    "nothing was pressed"
+)
+
+
+def test_a_guided_run_whose_cameras_see_no_container_does_not_end_at_its_find_the_chair_is_guided():
+    """Owner 2026-11-19: a box no camera sees at all is guidance too. Until then the view read
+    `1 FIND  FAIL  no box found` and `RESULT  FAILED at step 1 (FIND)`. Guided, the find fails with what was
+    missing in one short line, nothing says the chair is to move until the line-up's own step, and the
+    line-up reads as any other: what the person is told, the question, their yes, and the find again."""
+    out, now = [], [0.0]
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    now[0] = 19.4
+    view.feed(NOT_SEEN_LINE)
+    assert out[1:] == [
+        "   find      ...   looking for the box",
+        " 1 FIND      FAIL  no camera sees the container               19.4 s",
+        "             next  the run does not end here: wait while the arm comes to rest",
+    ]
+    assert not any("move" in line.lower() for line in out)  # the chair's move is the line-up's word
+    view.guide_start("the arm rests and the wrist looks: move the chair as told")
+    for t, say, ask in (
+        (20, "The arm cannot see the container. Move the chair in front of it", None),
+        (31, "Move closer, about 30 cm", None),
+        (36, "Hold still, checking", None),
+        (38, "Ready. Open the container?", "y / n"),
+    ):
+        now[0] = float(t)
+        view.guide_say(say, ask=ask)
+    now[0] = 40.0
+    view.guide_end(True, "yes", again=True)
+    now[0] = 44.0
+    view.feed(P + "WRIST SURVEY: box at [0.640, -0.200] yaw 0.0 deg from 2000 lid points (WRIST 0.60) — reaching out")
+    assert out[4:] == [
+        "   line up   ...   the arm rests and the wrist looks: move the chair as told",
+        "             say   The arm cannot see the container. Move the chair in front of it",
+        "             say   Move closer, about 30 cm",
+        "             say   Hold still, checking",
+        "             ask   Ready. Open the container?   y / n",
+        " 2 LINE UP   ok    yes                                        20.6 s",
+        "   find      ...   looking for the box again",
+        " 3 FIND      ok    box 0.67 m out (wrist camera)               4.0 s",
+    ]
+    # a container that never comes into view: the same end as one that never comes into reach, and the
+    # result names what was missing and where the arm was left
+    out.clear()
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    now[0] = 0.0
+    view.start()
+    view.feed(NOT_SEEN_LINE)
+    view.guide_start("the arm rests and the wrist looks: move the chair as told")
+    view.guide_say("The arm cannot see the container. Move the chair in front of it")
+    now[0] = 600.0
+    view.guide_say("Out of time: the container was never seen. Start open_box again in front of it")
+    view.guide_end(False, "the container never came into view within 600 s")
+    view.arm = "at rest, the wrist turned back"
+    view.finish(5)
+    assert out[-4:] == [
+        " 2 LINE UP   FAIL  the container never came into view within 600 s 600.0 s",
+        "RESULT  FAILED at step 2 (LINE UP)                           600 s",
+        "        why: the container never came into view within 600 s",
+        "        box: not pressed    lid: on the box    arm: at rest, the wrist turned back",
+    ]
+
+
+def test_the_finds_line_says_which_face_of_no_container_it_was_and_by_hand_it_is_the_no_box_it_was():
+    """Two things that could be the container are not "no camera sees the container": the find's line says
+    which it was, from the run's own reason. A run by hand (no --guide) says NO BOX and ends, as ever."""
+    assert not_seen_reason(NOT_SEEN_LINE) == "no camera sees the container"
+    two = (
+        "no camera sees the container (scene camera: scene segmenter: saw no food container in 14 frames; the "
+        "wrist's look in front: wrist camera: two places pass as this container, [0.61, -0.10] and [0.66, 0.14] "
+        "(button unchecked, unchecked): refusing to guess)"
+    )
+    assert not_seen_reason(two) == "more than one thing looks like the container, and nothing says which it is"
+    out, now = [], [0.0]
+    view = FlightView(write=out.append, clock=lambda: now[0])
+    view.start()
+    view.feed(P + "NOT SEEN: " + two + "; nothing was pressed")
+    assert (
+        out[2]
+        == " 1 FIND      FAIL  more than one thing looks like the container, and nothing says which it is   0.0 s"
+    )
+    # by hand: the run's NO BOX, its home and its end, exactly as before
+    lines = [
+        (15, P + "NO BOX — scene camera: scene segmenter: saw no food container in 14 frames — returning home"),
+        (20, "home               motion       1.00 full                   0     0.75    0.25    0.24"),
+    ]
+    assert _view(lines, 2) == [
+        "   find      ...   looking for the box",
+        " 1 FIND      FAIL  no box found                               15.0 s",
+        "RESULT  FAILED at step 1 (FIND)                               25 s",
+        "        why: no box found",
+        "        box: not pressed    lid: on the box    arm: not confirmed home",
+    ]
 
 
 def test_nothing_says_the_chair_is_to_move_before_the_arm_is_at_rest():

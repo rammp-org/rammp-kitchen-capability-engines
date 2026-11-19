@@ -88,10 +88,17 @@ HOME_FIRSTS = []  # the keywords of every home_first call, in order
 REACH_OUTS = []  # the scene fixes handed to the reach-out
 
 
-def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
+# what the scene locator's last look is recorded as having seen (SceneLocator.look_record): the segmenter
+# live, three of the scene camera's frames judged
+LOOKED = {"timing": {"streams_s": 0.1}, "segmenter": {"state": "live", "frames": 3}}
+
+
+def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True, record=None):
     """press_demo.main() with `approach(ctx)` standing in for the reach-out:
     its result's `failed` decides the exit code; `found` False, the scene
-    camera finds no box. Returns (exit code, client, run-log rows)."""
+    camera finds no box (a list: what each look in turn finds, the last for
+    every look after it); `record`: what its look is recorded as having seen
+    (LOOKED). Returns (exit code, client, run-log rows)."""
     import faulthandler
 
     import rclpy.executors
@@ -115,8 +122,10 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
         table_z_scene = table_z
         table_extent = None
 
+    finds = list(found) if isinstance(found, list) else [found]
+
     class _Locator:
-        last_why = None if found else "the OWL's 3 candidates refused"
+        last_why = None if found is True else "the OWL's 3 candidates refused"
         moved_note = None
         last_timing = {}
         grab = None
@@ -129,13 +138,16 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
 
         def locate(self, timeout):
             LOCATES.append(timeout)
-            return _Fix if found else None
+            return _Fix if (finds.pop(0) if len(finds) > 1 else finds[0]) else None
 
         def base_to_link(self):
             return None
 
+        def base_to_color(self):
+            return None  # no TF here: nothing the scene camera saw ties a wrist find to a selection
+
         def look_record(self):
-            return {"timing": {"streams_s": 0.1}, "segmenter": {"state": "live", "frames": 3}}
+            return dict(LOOKED if record is None else record)
 
     class _Rclpy:
         @staticmethod
@@ -431,8 +443,9 @@ def _guided_by(monkeypatch, answer=(True, True)):
 
     calls = []
 
-    def guide(node, ctx, cfg, runner, watcher, args, locator, rest_tol, place, why, n, ear, out=None):
-        calls.append({"place": tuple(place), "why": why, "n": n, "ear": ear, "homes": len(HOME_FIRSTS)})
+    def guide(node, ctx, cfg, runner, watcher, args, locator, rest_tol, place, why, n, ear, out=None, what=None):
+        at = None if place is None else tuple(place)
+        calls.append({"place": at, "why": why, "n": n, "ear": ear, "homes": len(HOME_FIRSTS), "what": what})
         if isinstance(answer, int):
             sys.exit(answer)
         return answer
@@ -538,8 +551,8 @@ def _wrist_sees(monkeypatch, far):
 def test_a_container_the_wrist_sees_out_of_the_arms_reach_is_no_no_box_for_a_guided_run(monkeypatch, tmp_path, capsys):
     """The scene camera has none and the wrist sees a lid-sized top it calls out of the arm's reach: the run
     said NO BOX, went home and ended (not_found). Guided, the chair is moved for it: no NO BOX, no home, and
-    the engine is asked with where that top stands. By hand, and where the wrist saw nothing, it is the NO
-    BOX it was."""
+    the engine is asked with where that top stands. By hand it is the NO BOX it was. (Where the wrist saw
+    nothing lid-sized at all, the guided run ended NO BOX too until 2026-11-19: the tests below.)"""
     from box_opening.runtime.abort import EXIT_NOT_LINED_UP
     from box_opening.tasks import press_demo
 
@@ -553,19 +566,165 @@ def test_a_container_the_wrist_sees_out_of_the_arms_reach_is_no_no_box_for_a_gui
     code, _c, rows = run_main(monkeypatch, tmp_path / "guided", argv, _refused, found=False)
     assert code == EXIT_NOT_LINED_UP and homes == [] and not REACH_OUTS
     assert [c["place"] for c in calls] == [far[0]] and calls[0]["n"] == 1  # the nearest the arm
+    assert calls[0]["what"] == press_demo.GUIDE_FAR == "far"  # said with the request: not a press with no way in
     (refused,) = (r for r in rows if r["leg"] == "reach_refused")
     assert refused["guided"] is True and "out of the arm's reach" in refused["why"] and "NO BOX" not in refused["why"]
+    assert refused["what"] == "far"
     out = capsys.readouterr().out
     assert "OUT OF REACH: the wrist camera sees a lid-sized top at [1.02, -0.20]" in out and "NO BOX" not in out
     # by hand (no --guide): NO BOX and home, as it was
     calls.clear()
     code, _c, rows = run_main(monkeypatch, tmp_path / "by hand", ["--execute", "--wrist-first"], _refused, found=False)
     assert code == 2 and calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX")
-    # guided, and the wrist saw nothing lid-sized at all: nothing says a box is there to move the chair for
+
+
+SCENE_NONE = "scene camera: the OWL's 3 candidates refused"
+
+
+def test_a_container_no_camera_sees_does_not_end_a_guided_run_the_chair_is_guided(monkeypatch, tmp_path, capsys):
+    """Owner 2026-11-19, asked whether a box no camera sees at all should become guidance too ("move so the
+    container is in front of the arm"): yes. Until then the guided run said NO BOX, went home and ended
+    (not_found), as a run by hand does. Now it says what was missing, with no NO BOX and no home, notes it as
+    the far top's is noted (guided, with what the look saw), and has the chair guided with no place to
+    hand on. At the yes it looks again, the long way where the wrist did not hold the box, and goes on."""
+    from box_opening.tasks import press_demo
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    LOCATES.clear(), HOME_FIRSTS.clear(), REACH_OUTS.clear()
+    calls = _guided_by(monkeypatch, (False, False))
+    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute", "--guide"], _at_staging(), found=[False, True])
+    assert code == 0 and len(REACH_OUTS) == 1 and homes == []  # found after the chair moved, and reached out to
+    (call,) = calls
+    assert call["place"] is None and call["what"] == press_demo.GUIDE_UNSEEN == "unseen" and call["n"] == 1
+    assert call["why"] == "no camera sees the container (%s)" % SCENE_NONE and call["ear"] is not None
+    (refused,) = (r for r in rows if r["leg"] == "reach_refused")
+    assert refused["why"] == call["why"] and refused["guided"] is True and refused["what"] == "unseen"
+    assert refused["timing"] == {"streams_s": 0.1} and refused["segmenter"] == {"state": "live", "frames": 3}
+    assert rows.index(refused) < [r["leg"] for r in rows].index("scene_fix")  # then found, from the cameras
+    assert LOCATES == [press_demo.SCENE_FIRST_LOCATE_S] * 2
+    out = capsys.readouterr().out
+    assert "[press_demo] NOT SEEN: no camera sees the container (%s); nothing was pressed" % SCENE_NONE in out
+    assert "NO BOX" not in out
+
+
+def test_after_a_yes_a_fresh_find_that_sees_no_container_is_guided_again_not_ended(monkeypatch, tmp_path, capsys):
+    """Every find of a guided run is the same find: the one after a line-up's yes (--line-up), and the one
+    after a guidance's yes, where the box the watch held is not found by the run's own look. Each ended NO
+    BOX. Each is guided again, and nothing moves toward a box but on another yes; a stop then ends the run
+    as a line-up's stop does."""
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+    from box_opening.tasks import press_demo
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    # found, no press plans, guided; at the yes the fresh find has nothing; guided again; then found
+    REACH_OUTS.clear()
+    approach, _seen = _answers([NO_WAY_IN, 1])
+    calls = _guided_by(monkeypatch, (True, True))
+    code, _c, rows = run_main(
+        monkeypatch, tmp_path / "again", ["--execute", "--guide"], approach, found=[True, False, True]
+    )
+    assert code == 1 and len(REACH_OUTS) == 2 and homes == []  # (the second reach-out's own end)
+    assert [(c["n"], c["what"], c["place"] is None) for c in calls] == [(1, None, False), (2, "unseen", True)]
+    assert [r.get("what") for r in rows if r["leg"] == "reach_refused"] == ["unseen"]  # (NO_WAY_IN's is its own)
+    assert "NO BOX" not in capsys.readouterr().out
+    # after a line-up before the run: the same
+    calls.clear(), REACH_OUTS.clear()
+    _lining_up(monkeypatch, (True, True, True))
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    argv = ["--execute", "--line-up", "--guide"]
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "lined up", argv, _refused, found=False)
+    assert code == EXIT_NOT_LINED_UP and not REACH_OUTS and homes == []
+    assert [(c["n"], c["what"]) for c in calls] == [(1, "unseen")]
+
+
+def test_a_run_by_hand_whose_cameras_see_no_container_ends_no_box_as_it_always_has(monkeypatch, tmp_path, capsys):
+    """Without --guide nothing changed: NO BOX, the row, the home, exit 2 (the node's not_found). Nor for a
+    preview with --guide, which moves nothing and is guided nowhere."""
+    from box_opening.tasks import press_demo
+
+    for i, argv in enumerate((["--execute"], ["--guide"])):
+        homes = []
+        monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why, _h=homes: _h.append(why))
+        calls = _guided_by(monkeypatch)
+        code, _c, rows = run_main(monkeypatch, tmp_path / str(i), argv, _refused, found=False)
+        assert code == 2 and calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX — scene camera:"), argv
+        (refused,) = (r for r in rows if r["leg"] == "reach_refused")
+        assert refused["why"] == homes[0] and "guided" not in refused and "what" not in refused
+        out = capsys.readouterr().out
+        assert "NOT SEEN" not in out
+
+
+def test_cameras_that_show_nothing_at_all_are_a_fault_not_a_container_out_of_view(monkeypatch, tmp_path, capsys):
+    """NO BOX wears the face of several failures (SceneLocator.locate's own note): no container in view, but
+    also streams missing, no TF, the scene segmenter down or silent. No moving of the chair cures those, and
+    telling the person "the arm cannot see the container, move the chair" would not be honest. A guided run
+    is guided for an unseen container only where a camera LOOKED: the segmenter gave the look a frame, or the
+    wrist's finder judged one. Where none did, it ends NO BOX with what was missing, as it always has."""
+    from box_opening.tasks import press_demo
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    down = {"timing": {}, "segmenter": {"state": "absent", "frames": 0}}
+    calls = _guided_by(monkeypatch)
+    code, _c, _rows = run_main(
+        monkeypatch, tmp_path / "down", ["--execute", "--guide"], _refused, found=False, record=down
+    )
+    assert code == 2 and calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX")
+    assert "NOT SEEN" not in capsys.readouterr().out
+    # ... the scene camera down and the wrist's look showing no container: the wrist looked, the chair is guided
     homes.clear()
-    _wrist_sees(monkeypatch, [])
-    code, _c, _rows = run_main(monkeypatch, tmp_path / "nothing", argv, _refused, found=False)
-    assert code == 2 and calls == [] and len(homes) == 1
+
+    def look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
+        ctx.wrist_far, ctx.wrist_looked = [], True
+        said.append("wrist camera: no counter in 4 frames (no level plane wider than a container)")
+        return None, None, None
+
+    monkeypatch.setattr(press_demo, "wrist_look", look)
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    argv = ["--execute", "--guide", "--wrist-first"]
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "wrist", argv, _refused, found=False, record=down)
+    assert code == EXIT_NOT_LINED_UP and homes == [] and [c["what"] for c in calls] == ["unseen"]
+    assert calls[0]["why"].endswith("the wrist's look in front: wrist camera: no counter in 4 frames (no level plane "
+                                    "wider than a container))")  # fmt: skip
+    # what says a camera looked, and what does not
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace()
+    seen = lambda record: press_demo.a_camera_looked(ctx, SimpleNamespace(look_record=lambda: record))  # noqa: E731
+    assert seen(LOOKED) and not seen(down) and not seen({"timing": {}}) and not seen(None)
+    assert not press_demo.a_camera_looked(ctx, None)
+    ctx.wrist_looked = True
+    assert seen(down) and press_demo.a_camera_looked(ctx, None)
+
+
+def test_a_selected_container_nothing_the_cameras_saw_can_be_matched_to_is_guided_too(monkeypatch, tmp_path, capsys):
+    """The UI's selection is one of the scene camera's detections. Where its look holds the selected id in
+    none of its frames and nothing ties a wrist find to it, the wrist is not turned ("not looked for ...")
+    and the run ended NO BOX. Guided, it does not end: the chair is moved until the scene camera has the
+    selected container, and the reason handed on says what could not be matched."""
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+    from box_opening.tasks import press_demo
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    REACH_OUTS.clear()
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    argv = ["--execute", "--guide", "--wrist-first", "--instance-id", "food_container_7"]
+    code, _c, rows = run_main(monkeypatch, tmp_path, argv, _refused, found=False)
+    assert code == EXIT_NOT_LINED_UP and homes == [] and not REACH_OUTS
+    (call,) = calls
+    assert call["what"] == "unseen" and call["place"] is None
+    assert "nothing the scene camera saw says where the selected container food_container_7 is" in call["why"]
+    assert "NO BOX" not in capsys.readouterr().out
+    # by hand the same selection ends NO BOX, as it did
+    calls.clear()
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "by hand", argv[:1] + argv[2:], _refused, found=False)
+    assert code == 2 and calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX")
 
 
 def _side_survey(monkeypatch, finds):
@@ -674,10 +833,16 @@ def test_the_wrist_look_says_which_tops_it_saw_out_of_the_arms_reach(monkeypatch
     said = []
     got = press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None, said=said)
     assert got is None and ctx.wrist_far == [(1.02, -0.20, 0.30)] and said == [why]
+    assert ctx.wrist_looked is True  # its finder judged a frame: what it did not find is not in view
     survey = sv.Survey(fix=None, why="wrist camera: no counter", find=SimpleNamespace(fix=None, places=()))
     monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
     assert press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None) is None
-    assert ctx.wrist_far == []
+    assert ctx.wrist_far == [] and ctx.wrist_looked is True
+    # ... and a look that showed it no frame at all (no view to turn to, no wrist frame) has not looked
+    survey = sv.Survey(fix=None, why="no turn of the wrist shows the table in front (x)", find=None)
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
+    assert press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None) is None
+    assert ctx.wrist_far == [] and ctx.wrist_looked is False
 
 
 def test_a_run_by_hand_is_never_guided(monkeypatch, tmp_path):

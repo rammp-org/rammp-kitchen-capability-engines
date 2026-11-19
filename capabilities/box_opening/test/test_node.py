@@ -48,7 +48,8 @@ import select
 
 def lines_up(mode):
     # press_demo's line-up watch (--line-up before the run; --guide in the middle of it): says where the box
-    # is (`mode`: "in place" | "far" | "unseen", its frames show no container | "dies" | "holds", its
+    # is (`mode`: "in place" | "far" | "unseen", its frames show no container | "comes", they show none for
+    # COMES_S and then the container in place | "dies" | "holds", its
     # wrist's turn to the view stopped part way: 6) until a line on stdin: go and the run goes on, stop (or
     # the pipe closed) and it ends 5, nothing pressed, once its wrist is back at rest (TURN_BACK_S: how long
     # that turn takes; a Ctrl+C stops it there, 130. TURN_BACK: "holds", that turn stopped part way: 6;
@@ -81,11 +82,15 @@ def lines_up(mode):
     if not os.environ.get("NO_VIEW"):  # NO_VIEW: stopped before its turn was done, the view never said
         sys.stdout.write("@@ " + json.dumps({"view": {"joints": [0.0] * 7}}) + "\\n")  # its wrist stands at the view
     heard = None
+    began = time.monotonic()
     try:
         while heard is None:
-            x = 0.65 if mode == "in place" else 1.2
+            x = 0.65 if mode in ("in place", "comes") else 1.2
             fix = {"xyz": [x, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}
-            said = {"none": "wrist camera: no lid-sized top on the table in view"} if mode == "unseen" else {"fix": fix}
+            none = mode == "unseen" or (
+                mode == "comes" and time.monotonic() - began < float(os.environ.get("COMES_S", "1.5"))
+            )
+            said = {"none": "wrist camera: no lid-sized top on the table in view"} if none else {"fix": fix}
             sys.stdout.write("@@ " + json.dumps(said) + "\\n")
             sys.stdout.flush()
             if select.select([sys.stdin], [], [], 0.1)[0]:
@@ -126,7 +131,14 @@ if "--line-up" in sys.argv:
 # the engine's go, from which it "finds the box again" (AGAIN_S: how long that takes, nothing written the
 # while); a stop, and it ends 5 as a line-up does. GUIDE_ROWS: it writes its run log's rows as press_demo
 # does, BEFORE it asks: the box found, the refusal (guided), and with GUIDE_HOME_S the home to rest that
-# takes that long (the aimed button's case: reach_press.no_way_in), then its "guide" row
+# takes that long (the aimed button's case: reach_press.no_way_in), then its "guide" row.
+# GUIDE_WHAT "unseen": what it finds is no container at all (press_demo's NOT SEEN): no box found, no place
+# in its request, and by hand the NO BOX and exit 2 it always was
+SCENE_NONE = "scene camera: scene segmenter: saw no food container in 14 frames"
+NOT_SEEN = (
+    "no camera sees the container (" + SCENE_NONE + "; the wrist's look in front: wrist camera: no counter in 4 "
+    "frames (no level plane wider than a container))"
+)
 WHY = (
     "no reach-out press plans for the scene camera's box (30 deg: the way down (the slide in: trajectory sanity "
     "gate: arm_joint_1 excursion 2.012 rad > |d| + margin 1.632); 40 deg: the way down (the press stroke is not a "
@@ -134,7 +146,12 @@ WHY = (
     "mm), 46% of the way)))"
 )
 for n in range(int(os.environ.get("GUIDE", "0"))):
+    unseen = os.environ.get("GUIDE_WHAT") == "unseen"
     if "--guide" not in sys.argv:  # a run by hand stops there, as it always has
+        if unseen:
+            sys.stdout.write("[press_demo] NO BOX — " + SCENE_NONE + " — returning home\\n")
+            sys.stdout.flush()
+            sys.exit(2)
         sys.stdout.write("[press_demo] STOP: " + WHY + "; nothing moved\\n")
         sys.stdout.flush()
         sys.exit(1)
@@ -142,10 +159,16 @@ for n in range(int(os.environ.get("GUIDE", "0"))):
         time.sleep(float(os.environ.get("GUIDE_AFTER_S", "0")))
     except KeyboardInterrupt:
         sys.exit(130)
-    sys.stdout.write("[press_demo] WRIST SURVEY: box at [0.712, -0.331] yaw 0.0 deg (WRIST 0.60) — reaching out\\n")
     homes = os.environ.get("GUIDE_HOME_S")
-    ends = "; nothing moved" if homes is None else " — nothing was pressed — returning home"
-    sys.stdout.write("[press_demo] NO WAY IN: " + WHY + ends + "\\n")
+    if unseen:
+        sys.stdout.write("[press_demo] NOT SEEN: " + NOT_SEEN + "; nothing was pressed\\n")
+        if homes is not None:  # (a side survey left the arm over its side: press_demo.guide_chair's own home)
+            sys.stdout.write("[press_demo] TO REST: the arm goes to rest before the chair is guided")
+            sys.stdout.write(" — returning home\\n")
+    else:
+        sys.stdout.write("[press_demo] WRIST SURVEY: box at [0.712, -0.331] yaw 0.0 deg (WRIST 0.60) — reaching out\\n")
+        ends = "; nothing moved" if homes is None else " — nothing was pressed — returning home"
+        sys.stdout.write("[press_demo] NO WAY IN: " + WHY + ends + "\\n")
     sys.stdout.flush()
     if os.environ.get("GUIDE_ROWS"):
         def row(**fields):
@@ -153,8 +176,11 @@ for n in range(int(os.environ.get("GUIDE", "0"))):
             runs.mkdir(parents=True, exist_ok=True)
             with open(runs / "run-20261030-140000.jsonl", "a") as f:
                 f.write(json.dumps(fields) + "\\n")
-        row(leg="scene_fix", kind="note", origin_xyz=[0.712, -0.331, 0.2])
-        row(leg="reach_refused", kind="note", why=WHY, guided=True)
+        if unseen:
+            row(leg="reach_refused", kind="note", why=NOT_SEEN, guided=True, what="unseen")
+        else:
+            row(leg="scene_fix", kind="note", origin_xyz=[0.712, -0.331, 0.2])
+            row(leg="reach_refused", kind="note", why=WHY, guided=True)
         if homes is not None:
             try:
                 time.sleep(float(homes))
@@ -164,7 +190,10 @@ for n in range(int(os.environ.get("GUIDE", "0"))):
         row(leg="guide", kind="note", n=n + 1)
     # (each time it stands somewhere else: 5 cm nearer the arm than the time before)
     box = [round(0.712 - 0.05 * n, 3), -0.331, 0.2945]
-    sys.stdout.write("@@ " + json.dumps({"guide": {"n": n + 1, "box": box, "why": WHY}}) + "\\n")
+    asked = {"n": n + 1, "box": box, "why": WHY}
+    if unseen:
+        asked = {"n": n + 1, "box": None, "why": NOT_SEEN, "what": "unseen"}
+    sys.stdout.write("@@ " + json.dumps({"guide": asked}) + "\\n")
     sys.stdout.flush()
     lines_up(os.environ.get("GUIDE_BOX", "in place"))
     try:
@@ -1765,11 +1794,14 @@ def test_a_cancel_while_the_wrist_turns_back_is_the_runs_own_ctrl_c(engine, monk
 
 def test_out_of_time_the_error_says_why_the_run_last_saw_no_container(engine, monkeypatch):
     """The run's own word on why its cameras showed no container ({"none": ...}) is in the not_lined_up
-    error: "press open again in place" is not all the user is told where the box was never seen."""
+    error: "press open again in place" is not all the user is told where the box was never seen. Nor is it
+    what they are told at all (2026-11-19): a container no camera saw was not in the wrong place, it was not
+    in view. The same end, the same code, and the words for what was missing, on the panel while the
+    line-up went as in the error once it is over."""
     given(monkeypatch, FULL_RUN)
     monkeypatch.setenv("LINE_UP", "unseen")
     _wrist_lining_up(engine, monkeypatch, proven=False)
-    monkeypatch.setattr(node, "LINE_UP_S", 1.0)
+    monkeypatch.setattr(node, "LINE_UP_S", 3.0)
     monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
     ctx = FakeCtx()
     with pytest.raises(EngineError) as e:
@@ -1777,7 +1809,14 @@ def test_out_of_time_the_error_says_why_the_run_last_saw_no_container(engine, mo
     assert e.value.error_code == "not_lined_up" and e.value.recoverable
     assert "nothing was pressed" in str(e.value)
     assert str(e.value).endswith("-- wrist camera: no lid-sized top on the table in view")
-    assert "Looking for the container" in [m for _p, _pct, m, _pausable in ctx.said]
+    assert str(e.value).startswith("no camera saw the container within 3 s: nothing was pressed (move the chair so")
+    assert "not where the arm opens it" not in str(e.value)
+    said = [m for _p, _pct, m, _pausable in ctx.said]
+    assert "The arm cannot see the container. Move the chair in front of it" in said
+    assert "Container not seen in time. Press open again in front of it" in said
+    assert "Press open again when you are in place" not in said
+    unseen = [p for p in ctx.panels if p["message"].startswith("The arm cannot see the container")]
+    assert unseen and all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in unseen)
 
 
 def test_a_cancel_while_the_wrist_looks_is_the_runs_own_ctrl_c(engine, monkeypatch):
@@ -2172,9 +2211,9 @@ def _guided(engine, monkeypatch, proven=True):
     with, every line the run was sent, the runs as they started)."""
     real_source, made, told, runs, real_run = engine._box_source, [], [], [], node.Run
 
-    def source(env, instance_id, watch=None, refused=()):
-        got = real_source(env, instance_id, watch=watch, refused=refused)
-        made.append({"watch": watch, "refused": [list(r) for r in refused]})
+    def source(env, instance_id, watch=None, refused=(), **told_it):
+        got = real_source(env, instance_id, watch=watch, refused=refused, **told_it)
+        made.append({"watch": watch, "refused": [list(r) for r in refused], **told_it})
         return (Proven(got), got)[1] if proven else got
 
     class Recorded(real_run):
@@ -2731,6 +2770,289 @@ def test_a_home_before_the_chair_is_guided_is_not_the_way_home_and_the_bar_keeps
     for row in (FULL_RUN[0], {"leg": "reach_refused", "kind": "note", "why": "NO BOX"}):
         track.add(row)
     assert track.add(home) == ("home", 1.0, "going home")
+
+
+# -- a container no camera sees: guided too, never just ended (owner 2026-11-19) -----------------------------
+UNSEEN_SAYS = "The arm cannot see the container. Move the chair in front of it"
+# FAKE_RUN's own two reasons (its NOT_SEEN and its WHY), as the engine hears them
+NOT_SEEN_WHY = (
+    "no camera sees the container (scene camera: scene segmenter: saw no food container in 14 frames; the wrist's "
+    "look in front: wrist camera: no counter in 4 frames (no level plane wider than a container))"
+)
+NO_PRESS_WHY = (
+    "no reach-out press plans for the scene camera's box (30 deg: the way down (the slide in: trajectory sanity "
+    "gate: arm_joint_1 excursion 2.012 rad > |d| + margin 1.632); 40 deg: the way down (the press stroke is not a "
+    "straight line the arm can fly (the chair and user: arm_half_arm_1_link 0 mm into person/lap (padded 20 mm + 5 "
+    "mm), 46% of the way)))"
+)
+
+
+def test_a_container_no_camera_sees_does_not_end_the_run_the_chair_is_guided_on_the_console(
+    engine, monkeypatch, capsys
+):
+    """The owner was asked: "A box no camera sees at all still ends as 'not found'. Should that become
+    guidance too ('move so the container is in front of the arm')?" and answered yes (2026-11-19). The run
+    whose cameras found no container ended FAILED at its find, not_found. Now the SAME process asks to be
+    guided, as for a box out of reach: the person is told at once that the arm cannot see the container and
+    to move the chair (no "Looking for the container" while the wrist turns: the run has looked), then,
+    the moment the watch has it, what the ordinary guidance says, the question, and at the y the run finds
+    the box afresh and opens it. No place is held against the line-up: none was measured."""
+    import threading
+
+    given(
+        monkeypatch,
+        FULL_RUN,
+        [
+            "[press_demo] SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it",
+            "[press_demo] DONE — box open, lid on the table at [0.60, -0.07] (clear), let go where the arm felt "
+            "it, arm home",
+        ],
+    )
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_WHAT", "unseen")
+    monkeypatch.setenv("GUIDE_BOX", "comes")  # its watch sees none for 1.5 s, then the container in place
+    made, told, runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    capsys.readouterr()
+    threading.Timer(5.0, engine._answers.put, args=("y",)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and out["presses"] == 1
+    (run,) = runs  # one process, from the first look to the way home
+    assert run.argv[-2:] == ["--execute", "--guide"] and told == [{"go": True}]
+    assert made == [{"watch": run, "refused": [], "unseen": NOT_SEEN_WHY}]  # no place refused: none was measured
+    said = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+    assert said[0] == "No camera sees the container. Move the chair as told"
+    assert said[1] == UNSEEN_SAYS and "Looking for the container" not in said  # at once: the run has looked
+    assert said[2:] == ["Hold still, checking", "Ready. Open the container?", "Opening the container"]
+    phases = [p for p, *_ in ctx.said]
+    assert phases[-1] == "home" and "line_up" not in phases[phases.index("look") :]  # the run, after its yes
+    assert ctx.panels == []
+    view = capsys.readouterr().out.splitlines()
+    find = view.index("   find      ...   looking for the box")
+    assert view[find + 1].startswith(" 1 FIND      FAIL  no camera sees the container")
+    assert view[find + 2 : find + 6] == [
+        "             next  the run does not end here: wait while the arm comes to rest",
+        "   line up   ...   " + node.GUIDE_DOING,
+        "             say   " + UNSEEN_SAYS,
+        "             say   Hold still, checking",
+    ]
+    assert "             ask   Ready. Open the container?   y / n" in view
+    assert any(ln.startswith(" 2 LINE UP   ok    yes") for ln in view)
+    assert "   find      ...   looking for the box again" in view
+    assert any(ln.startswith("RESULT  DONE — box open, lid on the table, arm home") for ln in view)
+    assert not any("NO BOX" in ln or "no box found" in ln for ln in view)
+
+
+def test_a_run_by_hand_whose_cameras_see_no_container_is_not_found_as_it_always_was(engine, monkeypatch, capsys):
+    """What the guidance replaces (and FAKE_RUN's own check): without --guide the same run says NO BOX and
+    ends with exit 2, and the action fails not_found, recoverable, with the words it had."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_WHAT", "unseen")
+    real_run = node.Run
+    monkeypatch.setattr(node, "Run", lambda argv, env, log, talk=False: real_run(argv[:-1], env, log, talk=talk))
+    capsys.readouterr()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, FakeCtx())
+    assert e.value.error_code == "not_found" and e.value.recoverable
+    assert str(e.value).startswith("[press_demo] NO BOX — scene camera: scene segmenter: saw no food container")
+    view = capsys.readouterr().out
+    assert " 1 FIND      FAIL  no box found" in view and "RESULT  FAILED at step 1 (FIND)" in view
+
+
+def test_with_the_ui_an_unseen_container_is_said_on_the_panel_with_cancel_alone_until_a_camera_has_it(
+    engine, monkeypatch, capsys
+):
+    """On the UI: until the arm is at rest and the run has asked, the panel says what was found and to wait
+    (here the arm homes from a side survey's pose first), never that the chair is to move. Then the line-up's
+    panel: that the arm cannot see the container and that the chair is to move, with Cancel alone; the
+    ordinary guidance once the watch has it; the question with Open; and after Open the run's own panel."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_WHAT", "unseen")
+    monkeypatch.setenv("GUIDE_BOX", "comes")
+    monkeypatch.setenv("GUIDE_ROWS", "1")
+    monkeypatch.setenv("GUIDE_HOME_S", "1.5")  # the home to rest, flown before it asks to be guided
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    _made, told, _runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    seen = _panels_as_sent(ctx)
+    capsys.readouterr()
+    threading.Timer(6.5, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and told == [{"go": True}]
+    # the progress before the line-up's first word: what was found and to wait, then the way to rest
+    phases = [p for p, *_ in ctx.said]
+    before = [m for _p, _pct, m, _pausable in ctx.said[: phases.index("line_up")]]
+    assert before[-2:] == ["no container in view: wait, the arm comes to rest first", "going to rest"]
+    assert not [m for m in before if _tells_to_move(m)], before
+    # the panel, in the order it was shown
+    said = [message for _t, message, _buttons in seen]
+    wait = said.index("No container in view: wait, the arm comes to rest first")
+    assert seen[wait + 1][0] - seen[wait][0] >= 1.2 and said[wait + 1] == "Going to rest"
+    unseen = said.index(UNSEEN_SAYS)
+    assert unseen > wait + 1 and seen[unseen][2] == ["cancel"]
+    assert not [m for m in said[:unseen] if _tells_to_move(m)]
+    assert "Looking for the container" not in said[wait:]  # (the run's own panel said it while it looked)
+    assert said[unseen + 1 : unseen + 4] == [
+        "Hold still, checking",
+        "Ready. Open the container?",
+        "Opening the container",
+    ]
+    assert seen[unseen + 2][2] == ["open", "cancel"]
+    assert seen[unseen + 4][1:] == ("Looking for the container again", ["cancel"])  # the run's own, after Open
+    view = capsys.readouterr().out.splitlines()
+    step = next(i for i, line in enumerate(view) if line.startswith("   line up   ..."))
+    assert view[step - 3 : step - 1] == [
+        "             next  the run does not end here: wait while the arm comes to rest",
+        "   home      ...   going to rest before the chair is guided",
+    ]
+    assert not [line for line in view[:step] if _tells_to_move(line)]
+    assert "             ask   Ready. Open the container?   (Open on the UI)" in view
+
+
+def test_a_container_that_never_comes_into_view_ends_as_one_that_never_comes_into_reach_and_says_which(
+    engine, monkeypatch, capsys
+):
+    """The same end as a person who never gets into reach: out of time the run is told to stop on its stdin
+    (no Ctrl+C), turns its wrist back to rest and ends, the action fails not_lined_up, recoverable, nothing
+    pressed. And the words say what was missing: no camera saw the container, on the console's last line,
+    in the flight view's result and in the error. The next open_box does not line up first on its account:
+    a line-up that never saw the container has nothing to go on from."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_WHAT", "unseen")
+    monkeypatch.setenv("GUIDE_BOX", "unseen")  # its watch never has the container
+    engine.set_parameters([Parameter("wrist_first", value=True)])
+    monkeypatch.setattr(node, "CONSOLE_LINE_UP_S", 2.0)
+    monkeypatch.setattr(node.line_up, "LINGER_S", 0.2)
+    _made, told, runs = _guided(engine, monkeypatch, proven=False)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    capsys.readouterr()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable
+    assert str(e.value).startswith("no camera saw the container within 2 s: nothing was pressed (move the chair so")
+    assert "the chair was guided because the run's own look had found no container" in str(e.value)
+    assert str(e.value).endswith("-- wrist camera: no lid-sized top on the table in view")
+    assert "not where the arm opens it" not in str(e.value) and "no press planned" not in str(e.value)
+    assert told == [{"stop": True}] and sent == [] and engine._run is None
+    assert runs[0].proc.returncode == 5  # press_demo's EXIT_NOT_LINED_UP: the wrist back at rest
+    assert engine._line_up_first is None and ctx.world == [] and ctx.objects == {}
+    said = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+    assert said[1] == UNSEEN_SAYS and node.CONSOLE_AGAIN_UNSEEN in said and node.CONSOLE_AGAIN not in said
+    view = capsys.readouterr().out
+    assert "             say   " + UNSEEN_SAYS in view
+    assert "             say   Out of time: the container was never seen. Start open_box again in front of it" in view
+    assert "LINE UP   FAIL  the container never came into view within 2 s" in view
+    assert "        why: the container never came into view within 2 s" in view
+    assert "        box: not pressed    lid: on the box    arm: at rest, the wrist turned back" in view
+
+
+@pytest.mark.parametrize("by", ["the orchestrator", "n", "the panel"])
+def test_a_cancel_while_the_arm_cannot_see_the_container_is_the_runs_own_ctrl_c(engine, monkeypatch, by):
+    """Cancel, or n, at any moment of it, as of every line-up: the run's Ctrl+C, the action cancelled, the
+    run never told to go."""
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_WHAT", "unseen")
+    monkeypatch.setenv("GUIDE_BOX", "unseen")
+    monkeypatch.setattr(engine, "_ui_live", lambda: by == "the panel")
+    monkeypatch.setattr(engine, "_cancel_from_ui", lambda by="": None)
+    _made, told, runs = _guided(engine, monkeypatch, proven=False)
+    sent = []
+    real = node.Run.interrupt
+    monkeypatch.setattr(node.Run, "interrupt", lambda run: (sent.append(signal.SIGINT), real(run)))
+    ctx = FakeCtx()
+    cancel = {
+        "the orchestrator": lambda: setattr(ctx, "cancel", True),
+        "n": lambda: engine._answers.put("n"),
+        "the panel": lambda: ctx.events.append(CANCEL_PRESS),
+    }
+    threading.Timer(1.5, cancel[by]).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert sent == [signal.SIGINT] and told == [] and engine._run is None
+    assert runs[0].proc.poll() in (130, -signal.SIGINT)
+    assert UNSEEN_SAYS in [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
+    assert ctx.world == [] and ctx.objects == {}
+
+
+def test_under_the_orchestrators_120_s_an_unseen_container_with_no_time_left_ends_recoverable_and_says_so(
+    engine, monkeypatch, capsys
+):
+    """The same limits as a box out of reach, untouched: a line-up may end no later than LINE_UP_S after the
+    goal began, and with under GUIDE_MIN_S of that left nothing is guided. A find that sees no container has
+    spent the scene camera's whole first look and the wrist's views by then, so with the orchestrator's
+    token this is its usual end: not_lined_up at once, recoverable, saying what was missing, and the next
+    open_box lines up first, with its whole time."""
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setenv("GUIDE", "1")
+    monkeypatch.setenv("GUIDE_WHAT", "unseen")
+    monkeypatch.setenv("GUIDE_AFTER_S", "1.0")  # its looks
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "LINE_UP_S", 5.0)  # of which 4 are left: under GUIDE_MIN_S
+    _made, told, runs = _guided(engine, monkeypatch)
+    ctx = FakeCtx()
+    capsys.readouterr()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "not_lined_up" and e.value.recoverable
+    assert str(e.value).startswith("no camera sees the container, and this run had no time left to guide the chair")
+    assert "Press open again: it lines up first" in str(e.value) and "nothing was pressed" in str(e.value)
+    assert told == [{"stop": True}] and runs[0].proc.returncode == 5 and engine._line_up_first is not None
+    assert engine._line_up_first[1] == []  # ... holding no place against it: none was measured
+    view = capsys.readouterr().out
+    assert " 1 FIND      FAIL  no camera sees the container" in view
+    assert "LINE UP   FAIL  no time left to guide the chair" in view
+
+
+def test_what_a_run_is_guided_for_is_said_as_what_it_is():
+    """A run asks to be guided for a press that does not plan, for a container its wrist sees out of reach,
+    or for one no camera sees. Until 2026-11-19 all three were said in the words of the first: the far top's
+    row read "no press plans from here: wait ..." and its reason "no press plans from here: the way in does
+    not plan", of a container no press had been planned for. The names are the run's own (press_demo)."""
+    from box_opening.tasks import press_demo
+
+    assert (node.FAR, node.UNSEEN) == (press_demo.GUIDE_FAR, press_demo.GUIDE_UNSEEN)
+    far_why = "the wrist camera sees a lid-sized top at [1.02, -0.20], out of the arm's reach"
+    assert node.guide_reason({"what": "unseen", "why": NOT_SEEN_WHY}) == "no camera sees the container"
+    two = NOT_SEEN_WHY.replace("no counter in 4 frames", "two places pass as this container, [0.6, 0.0] and [0.7, 0.2]")
+    assert node.guide_reason({"what": "unseen", "why": two}).startswith("more than one thing looks like the container")
+    assert node.guide_reason({"what": "far", "why": far_why}) == "what the wrist camera sees is out of the arm's reach"
+    assert node.guide_reason({"why": NO_PRESS_WHY}) == REASON.replace(" (0.79 m out)", "")  # no way in: as it was
+    assert node.guide_reason({}) == node.no_press_reason("no reason given")
+    # the run's row, from the moment it is written until the run asks: never that the chair is to move
+    for what, says in (
+        ("unseen", "no container in view: wait, the arm comes to rest first"),
+        ("far", "out of reach from here: wait, the arm comes to rest first"),
+        (None, node.NO_WAY_IN_WAIT),
+    ):
+        track = node.Tracker("open_box")
+        row = {"leg": "reach_refused", "kind": "note", "why": "x", "guided": True, **({"what": what} if what else {})}
+        assert track.add(row) == ("locate", 0.0, says) and track.to_rest and not _tells_to_move(says)
+        assert len(says) <= 63  # the run's panel shows it: one short message
+        assert track.add({"leg": "home", "kind": "motion", "ok": True}) == ("locate", 0.0, "going to rest")
+        track.add({"leg": "guide", "kind": "note", "n": 1})
+        assert not track.to_rest
+    # ... and its line is never how the run ended, whatever its cameras' reasons hold (a planner's "IK_FAIL"
+    # in a view that was not flown): the run went on from it. Read as the last word, "nothing was pressed"
+    # made a traceback after it a no_press that may be tried again
+    line = "[press_demo] NOT SEEN: " + NOT_SEEN_WHY.replace("no counter in 4 frames", "not flown: refused (IK_FAIL)")
+    lines = [line + "; nothing was pressed"]
+    died = node.error_for("open_box", 1, lines + ["Traceback (most recent call last):", "ValueError: a bug"])
+    assert died.error_code == "failed" and not died.recoverable and str(died) == "ValueError: a bug"
+    stop = "[press_demo] STOP: the stroke pressed nothing (3 N at its end)"
+    assert node.error_for("open_box", 1, lines + [stop]).error_code == "not_popped"
+    ended = node.error_for("open_box", 5, lines + ["[press_demo] LINE-UP: ended without a go; nothing was pressed"])
+    assert ended.error_code == "not_lined_up" and "NOT SEEN" not in str(ended)
 
 
 def test_the_answer_is_heard_on_the_nodes_own_topic_only_while_an_action_runs(engine):
