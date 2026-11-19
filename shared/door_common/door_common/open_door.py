@@ -778,98 +778,151 @@ def _curobo_grasp_shapes(ai, scene, rb, grasp, q0):
     return shapes
 
 
+def _tilt_candidates(scene, rb, geom, q0, side, pitch, swings, quick, ai_planner, face_pt, explained):
+    """plan_open's search for one grasp tilt (`pitch`) and side angle: every arm configuration, its approach and the
+    largest swing that fits. Prints the tilt's line. Returns (candidates, explained, how many configurations)."""
+    h_raw, orient, n, hinge = geom["h_raw"], geom["orient"], geom["n"], geom["hinge"]
+    cands = []
+    _checkpoint()
+    tag = f"tilt {pitch:2d} deg" + (f", {side} deg from the left" if side else "")
+    try:
+        with quiet():
+            h, g = grasp_pose(h_raw, orient, n, pitch, side)
+    except Refused as e:
+        say(f"  {tag}: {e}")
+        return [], explained, 0
+    g_p, g_q = np.asarray(g.position), np.asarray(g.orientation)
+    configs = []
+    aim = float(np.degrees(np.arctan2(g_p[1], g_p[0])))
+    extra = [] if quick else [np.radians([aim if v is None else v for v in s]) for s in GRASP_EXTRA_SEEDS_DEG]
+    for seed in _config_seeds(q0, quick) + extra:
+        q_g, _ = dc._ik_within_guards(scene, rb, g_p, g_q, seed)
+        if q_g is not None and all(np.degrees(np.max(np.abs(short_delta(c, q_g)))) > SAME_CONFIG_DEG for c in configs):
+            if not side or _fingers_in_front(rb, q_g, face_pt, n) >= GRASP_SIDE_FACE_CLEAR_M:
+                configs.append(q_g)
+    from_curobo = 0
+    if not quick and ai_planner is not None and not configs:  # cuRobo's own IK: where the sim's seeds miss
+        with quiet():
+            for q_c in _curobo_grasp_shapes(ai_planner, scene, rb, g, q0):
+                if side and _fingers_in_front(rb, q_c, face_pt, n) < GRASP_SIDE_FACE_CLEAR_M:
+                    continue
+                if all(np.degrees(np.max(np.abs(short_delta(c, q_c)))) > SAME_CONFIG_DEG for c in configs):
+                    configs.append(q_c)
+                    from_curobo += 1
+    best, why = None, "no grasp configuration within the J4/J6 guards"
+    for q_g in configs:
+        _checkpoint()
+        with quiet():
+            appr = _approach_from(scene, rb, g, q_g)
+        if appr is None:
+            why = "no line-up + straight-in passes"
+            if not explained:  # once, out loud: which standoff, step and check fail
+                say(f"  {tag}: no line-up + straight-in passes -- why, the first configuration's:")
+                _approach_from(scene, rb, g, q_g)
+                explained = True
+            continue
+        standoff, pre_p, q_pre, leg = appr
+        for d in swings:
+            wps = _swing_waypoints(g, hinge, d)
+            ok, q_end, msg, arc = _check_arc(scene, rb, wps, leg[-1])
+            ko = _swing_keep_out(leg[-1], arc) if ok else None
+            if ko is not None:  # every waypoint passed, but the arm would refuse the trajectory between them
+                ok, msg = False, f"the trajectory: {ko}"
+            if ok:
+                c = dict(
+                    pitch=pitch,
+                    side=side,
+                    swing=d,
+                    grasp=g,
+                    h=h,
+                    standoff=standoff,
+                    pre_p=pre_p,
+                    q_pre=q_pre,
+                    leg=leg,
+                    wps=wps,
+                    arc=arc,
+                    margin=_guard_margin([q_pre, *leg, *arc]),
+                    msg=msg,
+                    q_g=q_g,
+                    q0=q0,
+                    in_front=(g_p, n, IN_FRONT_TOL_M),
+                )
+                cands.append(c)
+                if best is None or (c["swing"], c["margin"]) > (best["swing"], best["margin"]):
+                    best = c
+                break
+            why = f"swing: {msg}"
+    say(
+        f"  {tag}: {len(configs)} arm configuration(s)"
+        + (f" ({from_curobo} from cuRobo)" if from_curobo else "")
+        + " -> "
+        + (f"swing {best['swing']} deg fits, {best['margin']:.0f} deg from the J4/J6 guards" if best else why)
+    )
+    return cands, explained, len(configs)
+
+
+PLAN_WORKERS = 1  # plan_open searches its tilts in this many forked processes (each a copy of the sim); 1: in this one
+
+
+def _tilt_in_worker(job):
+    """_tilt_candidates in a forked worker, without cuRobo (only the parent can call the planner) and without the cancel
+    hook (the parent checks it between results): (candidates, configurations, the tilt's say() lines)."""
+    global CHECKPOINT
+    CHECKPOINT = None
+    kw, side, pitch = job
+    lines = []
+    dc.set_output(lines.append)
+    try:
+        cands, _, n_cfg = _tilt_candidates(side=side, pitch=pitch, ai_planner=None, explained=True, **kw)
+    finally:
+        dc.set_output(None)
+    return cands, n_cfg, lines
+
+
+def _search_tilts(tilts, kw, ai_planner, explained):
+    """Every (side, pitch) of `tilts` through _tilt_candidates, in PLAN_WORKERS processes when that's more than one.
+    The candidates come back in `tilts` order either way, so the pick is the same. In parallel, a tilt that finds no
+    configuration with the sim is searched again here when there is a planner (cuRobo's IK fallback), and the full
+    explanation of the first failing approach isn't printed."""
+    cands = []
+    if PLAN_WORKERS <= 1 or len(tilts) < 2:
+        for side, pitch in tilts:
+            found, explained, _ = _tilt_candidates(
+                side=side, pitch=pitch, ai_planner=ai_planner, explained=explained, **kw
+            )
+            cands += found
+        return cands
+    import multiprocessing
+
+    with multiprocessing.get_context("fork").Pool(min(PLAN_WORKERS, len(tilts))) as pool:
+        for (side, pitch), (found, n_cfg, lines) in zip(
+            tilts, pool.imap(_tilt_in_worker, [(kw, sd, pt) for sd, pt in tilts]), strict=True
+        ):
+            _checkpoint()
+            if n_cfg == 0 and ai_planner is not None:
+                found, _, _ = _tilt_candidates(side=side, pitch=pitch, ai_planner=ai_planner, explained=True, **kw)
+            else:
+                for line in lines:
+                    say(line)
+            cands += found
+    return cands
+
+
 def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=False):
     """Plan the whole open before any motion, searching the arm's configurations: for each nose-down tilt
     (GRASP_PITCHES_DEG), each distinct grasp configuration from _config_seeds, its approach and the largest swing that
     fits; then, best first (largest swing, then most margin to the J4/J6 guards over the whole path), what follows the
     swing (`after_swing`). `geom`: the detection (h_raw, orient, n, hinge, hinge_seen, door_z). Prints a
     line per tilt. Returns (plan dict, or None; the reason when None)."""
-    h_raw, orient, n, hinge = geom["h_raw"], geom["orient"], geom["n"], geom["hinge"]
     swings = list(range(max_swing, min(min_swing, max_swing) - 1, -10 if quick else -5))
     if swings[-1] != min(min_swing, max_swing):
         swings.append(min(min_swing, max_swing))
-    cands, explained = [], quick  # explained: the first failing approach has been printed in full
+    explained = quick  # explained: the first failing approach has been printed in full
     ai_planner = getattr(after_swing, "ai", None)  # _CuroboFirst carries the arm; plain AfterSwing has none
     face_pt = geom.get("hinge_seen")  # on the door face (the detected edge): angled grasps need it
     sides = (0,) if quick or face_pt is None else GRASP_SIDES_DEG
-    for side, pitch in [(sd, pt) for sd in sides for pt in GRASP_PITCHES_DEG]:
-        _checkpoint()
-        tag = f"tilt {pitch:2d} deg" + (f", {side} deg from the left" if side else "")
-        try:
-            with quiet():
-                h, g = grasp_pose(h_raw, orient, n, pitch, side)
-        except Refused as e:
-            say(f"  {tag}: {e}")
-            continue
-        g_p, g_q = np.asarray(g.position), np.asarray(g.orientation)
-        configs = []
-        aim = float(np.degrees(np.arctan2(g_p[1], g_p[0])))
-        extra = [] if quick else [np.radians([aim if v is None else v for v in s]) for s in GRASP_EXTRA_SEEDS_DEG]
-        for seed in _config_seeds(q0, quick) + extra:
-            q_g, _ = dc._ik_within_guards(scene, rb, g_p, g_q, seed)
-            if q_g is not None and all(
-                np.degrees(np.max(np.abs(short_delta(c, q_g)))) > SAME_CONFIG_DEG for c in configs
-            ):
-                if not side or _fingers_in_front(rb, q_g, face_pt, n) >= GRASP_SIDE_FACE_CLEAR_M:
-                    configs.append(q_g)
-        from_curobo = 0
-        if not quick and ai_planner is not None and not configs:  # cuRobo's own IK: where the sim's seeds miss
-            with quiet():
-                for q_c in _curobo_grasp_shapes(ai_planner, scene, rb, g, q0):
-                    if side and _fingers_in_front(rb, q_c, face_pt, n) < GRASP_SIDE_FACE_CLEAR_M:
-                        continue
-                    if all(np.degrees(np.max(np.abs(short_delta(c, q_c)))) > SAME_CONFIG_DEG for c in configs):
-                        configs.append(q_c)
-                        from_curobo += 1
-        best, why = None, "no grasp configuration within the J4/J6 guards"
-        for q_g in configs:
-            _checkpoint()
-            with quiet():
-                appr = _approach_from(scene, rb, g, q_g)
-            if appr is None:
-                why = "no line-up + straight-in passes"
-                if not explained:  # once, out loud: which standoff, step and check fail
-                    say(f"  {tag}: no line-up + straight-in passes -- why, the first configuration's:")
-                    _approach_from(scene, rb, g, q_g)
-                    explained = True
-                continue
-            standoff, pre_p, q_pre, leg = appr
-            for d in swings:
-                wps = _swing_waypoints(g, hinge, d)
-                ok, q_end, msg, arc = _check_arc(scene, rb, wps, leg[-1])
-                ko = _swing_keep_out(leg[-1], arc) if ok else None
-                if ko is not None:  # every waypoint passed, but the arm would refuse the trajectory between them
-                    ok, msg = False, f"the trajectory: {ko}"
-                if ok:
-                    c = dict(
-                        pitch=pitch,
-                        side=side,
-                        swing=d,
-                        grasp=g,
-                        h=h,
-                        standoff=standoff,
-                        pre_p=pre_p,
-                        q_pre=q_pre,
-                        leg=leg,
-                        wps=wps,
-                        arc=arc,
-                        margin=_guard_margin([q_pre, *leg, *arc]),
-                        msg=msg,
-                        q_g=q_g,
-                        q0=q0,
-                        in_front=(g_p, n, IN_FRONT_TOL_M),
-                    )
-                    cands.append(c)
-                    if best is None or (c["swing"], c["margin"]) > (best["swing"], best["margin"]):
-                        best = c
-                    break
-                why = f"swing: {msg}"
-        say(
-            f"  {tag}: {len(configs)} arm configuration(s)"
-            + (f" ({from_curobo} from cuRobo)" if from_curobo else "")
-            + " -> "
-            + (f"swing {best['swing']} deg fits, {best['margin']:.0f} deg from the J4/J6 guards" if best else why)
-        )
+    kw = dict(scene=scene, rb=rb, geom=geom, q0=q0, swings=swings, quick=quick, face_pt=face_pt)
+    cands = _search_tilts([(sd, pt) for sd in sides for pt in GRASP_PITCHES_DEG], kw, ai_planner, explained)
     if not cands:
         return None, "no tilt and arm configuration gives a grasp + swing that passes the sim checks"
     if PREFER_NEAR_START:  # largest swing; then least reconfiguration (in NEAR_START_BUCKET_DEG steps); then margin

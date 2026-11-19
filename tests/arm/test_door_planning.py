@@ -76,6 +76,20 @@ def test_microwave_open_plans(door_sim):
     assert plan["after"] == "push-open: not checked (no cuRobo)"
 
 
+def test_microwave_open_plans_the_same_in_parallel(door_sim, monkeypatch):
+    scene, rb = door_sim
+    door = _detection(MICROWAVE_DOOR)
+    args = (scene, rb, door, KINOVA_HOME, 50, 45, microwave_open.PushOpen(None))
+    serial, _ = open_door.plan_open(*args)
+    monkeypatch.setattr(open_door, "PLAN_WORKERS", 4)
+    parallel, why = open_door.plan_open(*args)
+    assert why is None
+    for k in ("pitch", "side", "swing", "standoff", "margin"):
+        assert parallel[k] == serial[k]
+    for k in ("q_pre", "leg", "arc"):
+        np.testing.assert_array_equal(np.asarray(parallel[k]), np.asarray(serial[k]))
+
+
 def test_chair_boxes_are_the_planners_with_its_padding():
     boxes = {name: (centre, half) for name, centre, half in dc.load_chair_boxes()}
     # 16 platform, 10 seat (11-07: the arm-side armrest is no longer carved), 4 person
