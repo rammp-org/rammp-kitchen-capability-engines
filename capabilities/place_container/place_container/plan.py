@@ -7,7 +7,7 @@ up, x forward, y left, origin on the arm base axis. The driver applies the mount
 pitch), so there is no tilt correction here.
 
 Where the container is, along the hand's pointing direction (tool z):
-  flange --TOOL_Z (12 cm)--> tool frame --tip_ahead--> fingertips --BOWL_RADIUS--> container centre
+  flange --TOOL_Z (13.4 cm with the puck)--> tool frame --TIP_PAST_TOOL--> tips --BOWL_RADIUS--> container centre
 The fingers pinch the lip, so the lip is at the tool frame's height and the bottom BOWL_DEPTH below.
 
 The hand holds the container level with the camera on its right (tool x up, tool z = the heading),
@@ -17,8 +17,9 @@ pointed `pitch` deg down so the far side touches the table before the fingers.
 import re
 
 import numpy as np
+import rammp_arm
 from capability_engine import sim
-from rammp_arm import CONTINUOUS, TOOL_Z
+from rammp_arm import CONTINUOUS
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
@@ -26,7 +27,9 @@ from scipy.spatial.transform import Rotation, Slerp
 BOWL_RADIUS = 0.055  # m, centre to the wall the fingertips are pushed in to
 LIP_WIDTH = 0.03175  # m, 1.25 in: the flat lip past BOWL_RADIUS
 BOWL_DEPTH = 0.08  # m, lip (= tool frame height) to the bottom
-FLANGE_TO_TIP = 0.17955  # m, flange face to the closed fingertips (Gen3 + 2F-85; not ruler-measured)
+# m, the closed fingertips past the tool frame (2F-85; not ruler-measured): the gripper alone, so the
+# sensor puck, which moves the tool frame, doesn't change it (was FLANGE_TO_TIP 0.17955 = 0.120 + this)
+TIP_PAST_TOOL = 0.05955
 PLACE_PITCH_DEG = 5.0  # the hand points this many deg down while placing
 # --- the motion ---
 SAFE_HEIGHT = 0.30  # m, tool frame above the table while carrying the container over to the spot
@@ -60,7 +63,7 @@ IK_ROT_TOL_DEG = 1.0
 # which refuses a goal any closer (GOAL_IN_LIMIT_MARGIN), plus 0.02 of slack: the solver pins a joint ON
 # its bound, and at exactly 0.10 the driver refused it (flatbot, 2026-11-12: J6 at the retreat's end).
 # Without any margin a retreat that ran out of elbow room looked complete (2026-11-10: J4 at 2.570).
-LIMIT_MARGIN = 0.12
+LIMIT_MARGIN = sim.JOINT_LIMIT_MARGIN_RAD + 0.02
 MAX_STEP_JUMP_DEG = 120.0  # one joint move
 UP = np.array([0.0, 0.0, 1.0])
 
@@ -78,9 +81,9 @@ def wrap_deg(rad):
     return np.degrees(wrap(rad))
 
 
-def hold_reach(flange_to_tip=FLANGE_TO_TIP):
+def hold_reach(tip_past_tool=TIP_PAST_TOOL):
     """Container centre in front of the tool frame (m)."""
-    return BOWL_RADIUS + flange_to_tip - TOOL_Z
+    return BOWL_RADIUS + tip_past_tool
 
 
 def hand_orientation(heading, camera_left=False, pitch_deg=PLACE_PITCH_DEG):
@@ -132,13 +135,13 @@ class Model:
     model, rooted at arm_mount). fk() gives 4x4 poses in arm_mount of the tool frame (the sim's ee
     link, arm_tool_frame), the flange or the fingertips."""
 
-    def __init__(self, flange_to_tip=FLANGE_TO_TIP, pitch_deg=PLACE_PITCH_DEG):
+    def __init__(self, tip_past_tool=TIP_PAST_TOOL, pitch_deg=PLACE_PITCH_DEG):
         import pybullet as p
 
         self.scene, self.rb = sim.make_sim()
-        self.flange_to_tip = float(flange_to_tip)
+        self.tip_past_tool = float(tip_past_tool)
         self.pitch = float(pitch_deg)
-        self.reach = hold_reach(self.flange_to_tip)
+        self.reach = hold_reach(self.tip_past_tool)
         info = [p.getJointInfo(self.rb.robot_id, j, physicsClientId=self.rb.physics_client_id) for j in sim.ARM]
         # (lower, upper) in rad; continuous joints come back as lower > upper
         self.limits = [(float(i[8]), float(i[9])) for i in info]
@@ -148,7 +151,7 @@ class Model:
         T = np.eye(4)
         T[:3, :3] = Rotation.from_quat(quat).as_matrix()
         T[:3, 3] = pos
-        offset = {"tool": 0.0, "flange": -TOOL_Z, "tip": self.flange_to_tip - TOOL_Z}[link]
+        offset = {"tool": 0.0, "flange": -rammp_arm.TOOL_Z, "tip": self.tip_past_tool}[link]
         T[:3, 3] += offset * T[:3, 2]
         return T
 

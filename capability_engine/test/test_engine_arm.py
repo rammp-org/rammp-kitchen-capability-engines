@@ -52,7 +52,8 @@ POLL_S = 0.01
 # name takes the shared /rosout publisher with it, losing the next engine's log lines.
 ENGINE_IDS = itertools.count()
 TARGET = [0.3] * 7  # the joint target of the tests' moves
-STRUCTURE = {"JOINTS", "CONTINUOUS", "ERRORS", "IMPEDANCE"}  # rammp_arm constants, not tunables
+# rammp_arm constants, not tunables (TOOL_Z comes from the driver's model)
+STRUCTURE = {"JOINTS", "CONTINUOUS", "ERRORS", "IMPEDANCE", "TOOL_Z", "DEFAULT_TOOL_Z"}
 CART_STEP = np.array([0.02, 0.0, 0.0])  # the mock Cartesian move: 2 cm along x
 PRE_STEP = np.array([0.0, 0.05, -0.05])  # the mock go_to_ee_pose: from the start to a line-up
 UNREACHABLE = [5.0, 0.0, 0.0]  # a tool position 5 m out: no IK solution

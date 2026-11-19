@@ -66,18 +66,23 @@ test-arm:
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
 		-v $(CURDIR):/repo $(ARM_TEST_IMAGE) $(ARM_CMD)
 
-# The chair and user boxes PyBullet checks, the same ones cuRobo plans around. Run this whenever
-# rammp-deployments changes them; chair/SOURCE records the commit they came from.
+# The chair and user boxes PyBullet checks, the same ones cuRobo plans around, copied into each
+# package that checks them. Run this whenever rammp-deployments changes them or the demo robot
+# changes (CHAIR_ROBOT=flatbot); chair/SOURCE records where they came from. The copies go away
+# once the planner publishes its world (RAMMP-CuRobo#75).
 CHAIR_REPO = rammp-org/rammp-deployments
-CHAIR_SRC = december_2026/config/robots/flatbot/curobo
-CHAIR_DIR = shared/door_common/door_common/chair
+CHAIR_ROBOT ?= gen_1_5
+CHAIR_SRC = december_2026/config/robots/$(CHAIR_ROBOT)/curobo
+CHAIR_DIRS = shared/door_common/door_common/chair capabilities/place_container/place_container/chair
 CHAIR_REF ?= dev
 sync-chair:
 	@set -e; sha=$$(gh api repos/$(CHAIR_REPO)/commits/$(CHAIR_REF) --jq .sha); \
-	for l in platform seat person; do \
-		gh api -H "Accept: application/vnd.github.raw" \
-			"repos/$(CHAIR_REPO)/contents/$(CHAIR_SRC)/layer_mebot_$$l.yaml?ref=$$sha" \
-			> $(CHAIR_DIR)/layer_mebot_$$l.yaml; \
-	done; \
-	echo "$(CHAIR_REPO)@$$sha:$(CHAIR_SRC)" > $(CHAIR_DIR)/SOURCE; \
-	cat $(CHAIR_DIR)/SOURCE
+	for d in $(CHAIR_DIRS); do \
+		for l in platform seat person; do \
+			gh api -H "Accept: application/vnd.github.raw" \
+				"repos/$(CHAIR_REPO)/contents/$(CHAIR_SRC)/layer_mebot_$$l.yaml?ref=$$sha" \
+				> $$d/layer_mebot_$$l.yaml; \
+		done; \
+		echo "$(CHAIR_REPO)@$$sha:$(CHAIR_SRC)" > $$d/SOURCE; \
+		echo "$$d: $$(cat $$d/SOURCE)"; \
+	done

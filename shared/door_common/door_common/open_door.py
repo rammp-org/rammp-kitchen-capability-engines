@@ -102,7 +102,6 @@ SWING_MIN_DEG = 45
 SWING_MAX_JUMP_DEG = 25.0
 SWING_MAX_REACH = 0.90
 SWING_IK_PROBE_M = 0.01  # 200-iteration IK must get within 1 cm (else Kortex hits SINGULARITY_REGION)
-J6_GUARD_DEG = 115.0  # J6 hard limit is +-119.7
 GRASP_FORCE = 0.25  # gripper current ceiling on the handle (self.arm default 0.5): a looser hold lets the
 # bar turn/shift in the fingers instead of tipping the microwave forward (10-07)
 SWING_FIT_MIN_DEG = 15  # fit a hinge to the measured path only over at least this much arc
@@ -295,8 +294,7 @@ def _check_arc(scene, rb, wps, q0):
             ikerr > SWING_IK_PROBE_M
             or np.linalg.norm(pos) > SWING_MAX_REACH
             or jump > SWING_MAX_JUMP_DEG
-            or abs(j6) > J6_GUARD_DEG
-            or abs(np.degrees(nq[3])) > sim.J4_GUARD_DEG
+            or sim.limit_message(nq)
         ):
             return (
                 False,
@@ -649,9 +647,8 @@ def _config_seeds(q0, quick=False):
 
 
 def _guard_margin(qs):
-    """Smallest distance (deg) of J4 and J6 to their guards over joint configurations `qs`."""
-    d = np.degrees(np.asarray(qs, dtype=float))
-    return float(min(sim.J4_GUARD_DEG - np.abs(d[:, 3]).max(), J6_GUARD_DEG - np.abs(d[:, 5]).max()))
+    """Smallest distance (deg) inside cuRobo's joint-limit band over joint configurations `qs` (< 0: outside)."""
+    return float(np.degrees(min(sim.limit_room(q) for q in qs)))
 
 
 def _approach_from(scene, rb, grasp, q_g, standoffs=PREGRASP_STANDOFFS, q_pre_given=None):
@@ -668,7 +665,7 @@ def _approach_from(scene, rb, grasp, q_g, standoffs=PREGRASP_STANDOFFS, q_pre_gi
             q_pre, why = dc._ik_within_guards(scene, rb, pre_p, g_q, q_g)
         else:
             q_pre = np.asarray(q_pre_given, dtype=float)
-            why = "past the J4/J6 guards" if _guard_margin([q_pre]) < 0 else None
+            why = "too near a joint limit for cuRobo" if _guard_margin([q_pre]) < 0 else None
             q_pre = None if why else q_pre
         if q_pre is None:
             say(f"  to line-up {standoff * 100:.0f} cm out: {why}")

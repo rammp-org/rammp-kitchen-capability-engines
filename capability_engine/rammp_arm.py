@@ -14,7 +14,11 @@ from capability_engine import sim as sim_mod
 
 JOINTS = [f"arm_joint_{i}" for i in range(1, 8)]
 CONTINUOUS = [0, 2, 4, 6]  # J1/J3/J5/J7 spin freely
-TOOL_Z = 0.120  # end_effector_link -> tool_frame (Kinova's 2F-85 tool, robot_controller/urdfs)
+# end_effector_link (the flange, /ee_state) -> tool_frame (m). The driver's model sets it
+# (sim.tool_z: 0.134 with the sensor puck) when self.arm or make_sim() first reads that model;
+# 0.120 (no puck) until then.
+DEFAULT_TOOL_Z = 0.120
+TOOL_Z = DEFAULT_TOOL_Z
 DT = 0.02  # trajectory sample spacing (cuRobo's interpolation_dt)
 # rad/s peak for joint moves (~49 deg/s); was 0.35, 0.5 (10-07), 0.65 then 0.85 (10-24,
 # "everything felt slow")
@@ -142,17 +146,11 @@ def cartesian_knots(sim, ee_start, q_start, traj, *, log=None):
             d = nq - q
             d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
             jump = float(np.degrees(np.max(np.abs(d))))
-            j4, j6 = abs(np.degrees(nq[3])), abs(np.degrees(nq[5]))
-            if (
-                err > sim_mod.MAX_IK_ERR
-                or jump > MAX_KNOT_JUMP_DEG
-                or j4 > sim_mod.J4_GUARD_DEG
-                or j6 > sim_mod.J6_GUARD_DEG
-            ):
+            limit = sim_mod.limit_message(nq)
+            if err > sim_mod.MAX_IK_ERR or jump > MAX_KNOT_JUMP_DEG or limit:
+                why = limit or f"IK err {err * 100:.1f} cm, jump {jump:.1f} deg"
                 (log or logging.getLogger("rammp_arm").warning)(
-                    f"  RammpArm: waypoint {k + 1}/{len(traj)} step {i}/{n}: "
-                    f"IK err {err * 100:.1f} cm, "
-                    f"jump {jump:.1f} deg, J4 {j4:.1f}, J6 {j6:.1f} -- nothing sent."
+                    f"  RammpArm: waypoint {k + 1}/{len(traj)} step {i}/{n}: {why} -- nothing sent."
                 )
                 return None, None
             knots.append(nq)

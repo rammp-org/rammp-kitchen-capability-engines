@@ -97,7 +97,7 @@ PARAMS = {
     "bag_frame_hz": 1.0,
     "bag_state_hz": 25.0,
     # flange face to the closed fingertips (m)
-    "flange_to_tip": place_motion.FLANGE_TO_TIP,
+    "tip_past_tool": place_motion.TIP_PAST_TOOL,
     # contact: vz (m/s, + up) back up to this after moving down; 0.0 came 4.5 s late on the flatbot
     "vz_stop": -0.01,
     # the hold after contact, this far (m) below the contact point, while the gripper opens
@@ -474,7 +474,7 @@ class Capability(CapabilityEngine):
         if site not in SITES:
             raise EngineError("bad_params", f"'site' must be one of {', '.join(SITES)}, not {site!r}", recoverable=True)
         try:
-            model = place_motion.Model(self.cfg["flange_to_tip"])
+            model = place_motion.Model(self.cfg["tip_past_tool"])
             if action_id == "take_out":
                 return {**self._take_out(model, execute, ctx, log, site), "note": note}
             return {**self._place(model, execute, ctx, log), "note": note}

@@ -27,7 +27,7 @@ from capability_engine import sim
 from capability_engine.arm import HOLD_LEVEL, IMPEDANCE, LATEST_WINS, POSITION, SUCCESSFUL
 from capability_engine.driver_state import EStopped
 from capability_engine.driver_state import Refused as ArmRefused
-from rammp_arm import CONTINUOUS, JOINTS, TOOL_Z, _unwrap_from
+from rammp_arm import CONTINUOUS, JOINTS, _unwrap_from
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
@@ -41,12 +41,18 @@ CONTAINER_RADIUS = 0.0843  # m, the brim's outer radius (grab_container RING_RAD
 GRASP_PITCH_DEG = 15.0
 GRASP_DEPTH = 0.008  # m (grab_container GRASP_DEPTH_M, -0.008: short of the edge)
 GRASP_SETBACK = 0.01  # m (grab_container GRASP_SETBACK_M)
-FLANGE_TO_TIP = 0.17955  # m, flange face to the closed fingertips (Gen3 + 2F-85; not ruler-measured)
+# m, the closed fingertips past the tool frame (2F-85; not ruler-measured): the gripper alone, so the
+# sensor puck, which moves the tool frame, doesn't change it (was FLANGE_TO_TIP 0.17955 = 0.120 + this)
+TIP_PAST_TOOL = 0.05955
 # --- the motion ---
 PRESS_BELOW = 0.10  # m, the line down is aimed this far below where the bottom meets the table: in
 # impedance the hand lags its command by a few cm, and the table, not the command, stops it
 MIN_TOOL_HEIGHT = 0.02  # m, the tool frame is never targeted lower than this above the table
 PATH_STEP = 0.002  # m, between the line's joint waypoints
+# rad: IK answers stay this far inside each joint limit -- cuRobo's (and the driver's) margin, which
+# refuses a goal any closer, plus 0.02 of slack: the solver pins a joint ON its bound, and at exactly
+# the margin the driver refused it (place_container, flatbot 2026-11-12).
+LIMIT_MARGIN = sim.JOINT_LIMIT_MARGIN_RAD + 0.02
 RETREAT_STEP = 0.004  # m, plan_line's default step between joint waypoints
 # --- checks ---
 IK_TOL = 0.005  # m
@@ -100,11 +106,11 @@ class Model:
     model, rooted at arm_mount). fk() gives 4x4 poses in arm_mount of the tool frame (the sim's ee
     link, arm_tool_frame), the flange or the fingertips."""
 
-    def __init__(self, flange_to_tip=FLANGE_TO_TIP):
+    def __init__(self, tip_past_tool=TIP_PAST_TOOL):
         import pybullet as p
 
         self.scene, self.rb = sim.make_sim()
-        self.flange_to_tip = float(flange_to_tip)
+        self.tip_past_tool = float(tip_past_tool)
         info = [p.getJointInfo(self.rb.robot_id, j, physicsClientId=self.rb.physics_client_id) for j in sim.ARM]
         # (lower, upper) in rad; continuous joints come back as lower > upper
         self.limits = [(float(i[8]), float(i[9])) for i in info]
@@ -138,15 +144,18 @@ class Model:
         T = np.eye(4)
         T[:3, :3] = Rotation.from_quat(quat).as_matrix()
         T[:3, 3] = pos
-        offset = {"tool": 0.0, "flange": -TOOL_Z, "tip": self.flange_to_tip - TOOL_Z}[link]
+        offset = {"tool": 0.0, "flange": -rammp_arm.TOOL_Z, "tip": self.tip_past_tool}[link]
         T[:3, 3] += offset * T[:3, 2]
         return T
 
     def limit_violations(self, q):
         bad = []
         for i, (v, (lo, hi)) in enumerate(zip(q, self.limits, strict=True)):
-            if lo < hi and not (lo <= v <= hi):
-                bad.append(f"J{i + 1} {np.degrees(v):.0f} deg (limit {np.degrees(lo):.0f}..{np.degrees(hi):.0f})")
+            if lo < hi and not (lo + LIMIT_MARGIN <= v <= hi - LIMIT_MARGIN):
+                bad.append(
+                    f"J{i + 1} {np.degrees(v):.0f} deg (limit {np.degrees(lo):.0f}..{np.degrees(hi):.0f}, "
+                    f"kept {np.degrees(LIMIT_MARGIN):.0f} deg inside)"
+                )
         return bad
 
     def ik(self, pos, quat, seed, restarts=10, rot_weight=0.2, stay=0.0):
@@ -171,8 +180,8 @@ class Model:
             r = (Rotation.from_matrix(T[:3, :3]) * target.inv()).as_rotvec()
             return np.vstack([lin, rot_weight * (_so3_left_jacobian_inv(r) @ ang), stay * np.eye(len(x))])
 
-        lo = np.array([a if a < b else -2 * np.pi for a, b in self.limits])
-        hi = np.array([b if a < b else 2 * np.pi for a, b in self.limits])
+        lo = np.array([a + LIMIT_MARGIN if a < b else -2 * np.pi for a, b in self.limits])
+        hi = np.array([b - LIMIT_MARGIN if a < b else 2 * np.pi for a, b in self.limits])
         rng = np.random.default_rng(0)
         best = None
         for k in range(restarts + 1):

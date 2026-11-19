@@ -53,8 +53,9 @@ def test_missing_collision_mesh_fails(tmp_path):
 def test_solve_ik_flatbot_fk_round_trip():
     sim.reset_for_tests()
     scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
-    target = ([0.55, -0.10, 0.35], [0.0, 0.7071068, 0.0, 0.7071068])
-    q, err = sim.solve_ik(scene, rb, *target, [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57])
+    # the tool pose of cuRobo's retract config. (The pose this used, [0.55, -0.10, 0.35] pointing
+    # down, IK'd to J4 -156 deg from this seed: past the URDF's 147.3, so now LIMIT_ERR.)
+    q, err = _ik_at(scene, rb, [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57])
     assert err < sim.MAX_IK_ERR
     assert [p.getJointInfo(rb.robot_id, j)[1].decode() for j in sim.ARM] == [
         f"arm_joint_{i}" for i in range(1, 8)
@@ -68,6 +69,88 @@ def test_keep_out_hook_reaches_solve_ik():
     _, err = sim.solve_ik(scene, rb, case["pos"], case["quat"], case["seed"])
     assert err == sim.KEEP_OUT_ERR
     sim.set_keep_out(None)
+
+
+def _ik_at(scene, rb, q):
+    """solve_ik for the tool pose joints `q` give, seeded at `q`: the answer is `q` again."""
+    for j, jj in enumerate(sim.ARM):
+        p.resetJointState(rb.robot_id, jj, q[j], physicsClientId=rb.physics_client_id)
+    pos, quat = p.getLinkState(
+        rb.robot_id, rb.end_effector_id, physicsClientId=rb.physics_client_id
+    )[4:6]
+    return sim.solve_ik(scene, rb, pos, quat, q)
+
+
+def test_arm_limits_come_from_the_loaded_model():
+    sim.reset_for_tests()
+    sim.make_sim("/fixtures/urdf/flatbot.urdf")
+    lims = [None, (-2.24, 2.24), None, (-2.57, 2.57), None, (-2.09, 2.09), None]
+    assert sim.ARM_LIMITS == lims
+
+
+@pytest.mark.parametrize("joint", [1, 3, 5])  # J2, J4, J6
+def test_solve_ik_holds_curobos_limit_margin(joint):
+    sim.reset_for_tests()
+    scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
+    upper = sim.ARM_LIMITS[joint][1]
+    q = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+    q[joint] = upper - sim.JOINT_LIMIT_MARGIN_RAD - 0.02  # inside cuRobo's band: planned
+    sol, err = _ik_at(scene, rb, q)
+    assert err < sim.MAX_IK_ERR, sol
+    q[joint] = upper - sim.JOINT_LIMIT_MARGIN_RAD + 0.02  # in the margin cuRobo refuses
+    _, err = _ik_at(scene, rb, q)
+    assert err == sim.LIMIT_ERR
+
+
+def test_limit_message_and_room_use_curobos_band():
+    sim.reset_for_tests()
+    sim.make_sim("/fixtures/urdf/flatbot.urdf")
+    m = sim.JOINT_LIMIT_MARGIN_RAD
+    q = [3.0, 0.26, -3.0, -2.27, 3.0, 0.96, 3.0]  # continuous joints anywhere: no limit
+    assert sim.limit_message(q) is None
+    assert sim.limit_room(q) > 0
+    q[1] = -2.24 + m - 0.01  # J2 just inside cuRobo's margin
+    assert sim.limit_message(q).startswith("J2 ")
+    assert sim.limit_room(q) == pytest.approx(-0.01)
+    # another model's limits (button_press passes its own)
+    assert sim.limit_message(q, [None] * 7) is None
+
+
+def test_tool_z_is_the_models_flange_to_tool():
+    flatbot = Path("/fixtures/urdf/flatbot.urdf").read_text()
+    assert sim.tool_z(flatbot) == pytest.approx(0.120)
+    assert sim.tool_z(flatbot.replace('xyz="0 0 0.120"', 'xyz="0 0 0.134"')) == pytest.approx(0.134)
+    assert sim.tool_z(
+        Path("/fixtures/cornell/robot.urdf").read_text(), "tool_frame"
+    ) == pytest.approx(0.120)
+
+
+def test_make_sim_sets_tool_z_from_its_model(tmp_path):
+    import rammp_arm
+
+    puck = (
+        Path("/fixtures/urdf/flatbot.urdf")
+        .read_text()
+        .replace('xyz="0 0 0.120"', 'xyz="0 0 0.134"')
+    )
+    (tmp_path / "puck.urdf").write_text(puck)
+    sim.reset_for_tests()
+    try:
+        sim.make_sim(str(tmp_path / "puck.urdf"))
+        assert rammp_arm.TOOL_Z == pytest.approx(0.134)
+    finally:
+        sim.reset_for_tests()
+    assert rammp_arm.TOOL_Z == 0.120  # back to the offline default
+
+
+def test_keep_out_is_reported_before_the_limit():
+    sim.reset_for_tests()
+    scene, rb = sim.make_sim("/fixtures/urdf/flatbot.urdf")
+    q = [0.0, 2.2, 3.14, -2.27, 0.0, 0.96, 1.57]  # J2 in the margin
+    sim.set_keep_out(lambda rb, q: "in the zone")
+    _, err = _ik_at(scene, rb, q)
+    sim.set_keep_out(None)
+    assert err == sim.KEEP_OUT_ERR
 
 
 def _tiny_urdf(tmp_path, joint_fmt="joint_{}", mesh=None):

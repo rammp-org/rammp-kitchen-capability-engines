@@ -77,7 +77,6 @@ params:
   wrist_infra2_topic: ""
   wrist_infra2_info_topic: ""
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
-  "arm.tool_z": 0.12
   "arm.dt": 0.02
   "arm.joint_speed": 0.85
   "arm.cart_speed": 0.16
@@ -98,8 +97,6 @@ params:
   "arm.go_to_track_deg": 2.0
   "arm.max_ik_err": 0.02
   "arm.max_step_jump_deg": 20.0
-  "arm.j6_guard_deg": 115.0
-  "arm.j4_guard_deg": 144.0
   "arm.max_continuous_delta_deg": 170.0
   "arm.keep_out_err": 9.0
   "arm.ik_max_iterations": 200

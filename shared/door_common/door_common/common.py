@@ -21,7 +21,7 @@ All gripper motion goes through `execute_command(Open/CloseGripperCommand())` --
 
 The arm sim (make_sim, solve_ik, clearance, the IK guards) is capability_engine.sim, shared with
 self.arm: one PyBullet copy per process, built from the driver's own model. The guards are ROS
-parameters (arm.max_ik_err, arm.j4_guard_deg, ...), so they are read as sim.X at call time.
+parameters (arm.max_ik_err, arm.max_step_jump_deg, ...), so they are read as sim.X at call time.
 
 Each capability is its own process, so module constants are safe: the values that differ per appliance are
 constants here with no default (None), set once at startup with `configure` (and `configure_paths`).
@@ -289,14 +289,8 @@ def plan_straight_line(scene, rb, start_pos, quat, direction, dist, seed_joints,
             f"  {label} {k}/{n} -> {np.round(tgt, 3)}  IK err {err * 100:.2f}cm  jump {jump:.1f}deg  "
             f"J6 {j6:.1f}deg  J7 {j7:.1f}deg"
         )
-        if (
-            err > sim.MAX_IK_ERR
-            or jump > sim.MAX_STEP_JUMP_DEG
-            or abs(j6) > sim.J6_GUARD_DEG
-            or abs(np.degrees(nq[3])) > sim.J4_GUARD_DEG
-            or not continuous_ok(q, nq)
-        ):
-            say(f"  {label}: step {k} fails the IK/jump/J6/wrap gate.")
+        if err > sim.MAX_IK_ERR or jump > sim.MAX_STEP_JUMP_DEG or sim.limit_message(nq) or not continuous_ok(q, nq):
+            say(f"  {label}: step {k} fails the IK/jump/joint-limit/wrap gate.")
             return None
         plan.append(nq)
         q = nq
@@ -340,8 +334,7 @@ def plan_cartesian(
         bad = (
             err > sim.MAX_IK_ERR
             or jump > sim.MAX_STEP_JUMP_DEG
-            or abs(np.degrees(nq[5])) > sim.J6_GUARD_DEG
-            or abs(np.degrees(nq[3])) > sim.J4_GUARD_DEG
+            or sim.limit_message(nq)
             or not continuous_ok(q, nq)
             or (bodies is not None and worst[0] < (min_clear or MIN_CLEAR))
         )
@@ -376,20 +369,19 @@ def _ik_within_guards(scene, rb, pos, quat, seed):
         q, err = solve_ik(scene, rb, pos, quat, q)
     if err >= sim.KEEP_OUT_ERR:  # reached, but the arm is in the chair / user (solve_ik's keep-out code, not a miss)
         return None, f"goal {np.round(pos, 3)}: the arm would be in the keep-out zone ({keep_out_message(rb, q)})"
+    if err == sim.LIMIT_ERR:  # reached, but too near a joint limit for cuRobo (solve_ik's code)
+        return None, f"goal {np.round(pos, 3)}: {sim.limit_message(q)}"
     if err > sim.MAX_IK_ERR:
         return None, f"goal {np.round(pos, 3)} unreachable (IK err {err * 100:.1f} cm)"
-    j4, j6 = abs(np.degrees(q[3])), abs(np.degrees(q[5]))
-    if j4 > sim.J4_GUARD_DEG or j6 > sim.J6_GUARD_DEG:
-        return None, f"goal joints J4 {j4:.1f} / J6 {j6:.1f} deg past the guards"
     return np.asarray(q, float), None
 
 
 def check_curobo_goal(scene, rb, label, q=None, pos=None, quat=None, seed=None, bodies=None, more_seeds=()):
     """Gate the GOAL of a cuRobo move (self.arm.go_to_*): cuRobo plans the path in the driver, which can't be
     previewed, so only where it ends is checked here -- joints `q`, or (pos, quat) IK'd from `seed`: IK, reach,
-    J4/J6 guards, the keep-out zone and, with `bodies`, >= MIN_CLEAR from the door model. For a pose goal
+    cuRobo's joint-limit margin, the keep-out zone and, with `bodies`, >= MIN_CLEAR from the door model. For a pose goal
     cuRobo may end on another joint branch than this IK; the checked branch is the one nearest the seed.
-    `more_seeds`: tried in turn when IK from `seed` misses or lands past a guard -- PyBullet's IK ignores joint
+    `more_seeds`: tried in turn when IK from `seed` misses or lands near a joint limit -- PyBullet's IK ignores joint
     limits and can settle on an impossible elbow (10-30: line-up J4 +160 deg, the grasp's -130) where a seed near
     the goal finds the reachable one. Returns the checked goal joints, or None (refused)."""
     if q is None:
@@ -408,9 +400,9 @@ def check_curobo_goal(scene, rb, label, q=None, pos=None, quat=None, seed=None, 
             say(f"  {label}: {why} -- refusing.")
             return None
     q = np.asarray(q, float)
-    j4, j6 = abs(np.degrees(q[3])), abs(np.degrees(q[5]))
-    if j4 > sim.J4_GUARD_DEG or j6 > sim.J6_GUARD_DEG:
-        say(f"  {label}: goal joints J4 {j4:.1f} / J6 {j6:.1f} deg past the guards -- refusing.")
+    limit = sim.limit_message(q)
+    if limit:
+        say(f"  {label}: goal joints: {limit} -- refusing.")
         return None
     ko = keep_out_message(rb, q)
     if ko is not None:

@@ -178,7 +178,6 @@ afterwards. They are set per robot like any other. The fragment sets
 
 | Name                           | Default                                            | Meaning                                                    |
 | ------------------------------ | -------------------------------------------------- | ---------------------------------------------------------- |
-| `arm.tool_z`                   | `0.12`                                             | Tool frame offset along the flange z (m)                   |
 | `arm.dt`                       | `0.02`                                             | Trajectory sample spacing (s)                              |
 | `arm.joint_speed`              | `0.85`                                             | Peak joint speed of joint moves (rad/s)                    |
 | `arm.cart_speed`               | `0.16`                                             | Peak tool speed of Cartesian paths (m/s)                   |
@@ -200,8 +199,6 @@ afterwards. They are set per robot like any other. The fragment sets
 | `arm.go_to_track_deg`          | `2.0`                                              | go_to_joint_config: largest end joint error (deg)          |
 | `arm.max_ik_err`               | `0.02`                                             | IK position error above which a pose is unreachable (m)    |
 | `arm.max_step_jump_deg`        | `20.0`                                             | Largest joint change of a planned step (deg)               |
-| `arm.j6_guard_deg`             | `115.0`                                            | Largest absolute J6 the sim accepts (deg)                  |
-| `arm.j4_guard_deg`             | `144.0`                                            | Largest absolute J4 the sim accepts (deg)                  |
 | `arm.max_continuous_delta_deg` | `170.0`                                            | Largest short-way step of a free joint (deg)               |
 | `arm.keep_out_err`             | `9.0`                                              | IK error reported for a keep-out solution (m)              |
 | `arm.ik_max_iterations`        | `200`                                              | PyBullet IK iterations per solve                           |

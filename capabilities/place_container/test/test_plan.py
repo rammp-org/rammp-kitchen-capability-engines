@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 from capability_engine import sim
-from rammp_arm import TOOL_Z
 from scipy.spatial.transform import Rotation
 
 from place_container import plan
@@ -44,7 +43,7 @@ def holding_pose(model, spot):
 
 
 def test_container_sits_in_front_of_the_tool_frame():
-    assert plan.hold_reach() == pytest.approx(0.055 + 0.17955 - TOOL_Z)  # radius + tool -> fingertip
+    assert plan.hold_reach() == pytest.approx(0.055 + 0.05955)  # radius + tool -> fingertip
     assert plan.RETREAT > plan.RETREAT_MIN > plan.LIP_WIDTH  # the fingertips clear the lip
 
 
