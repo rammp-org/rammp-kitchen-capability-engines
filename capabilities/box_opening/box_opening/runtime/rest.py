@@ -211,8 +211,8 @@ def configure(param=None, env=None):
     why = refusal(q, chain, check)
     if why is not None:
         raise RestPoseError(
-            "rest pose: %s of %s, %s, is refused: %s. Give the robot a rest pose clear of its chair there (or "
-            "name another file: rest_pose / --rest-pose / %s)" % (REST_POSE_KEY, path, _fmt(q), why, REST_POSE_ENV)
+            "rest pose: %s of %s, %s, is refused: %s. Give the robot a rest pose it can start from there (or name "
+            "another file: rest_pose / --rest-pose / %s)" % (REST_POSE_KEY, path, _fmt(q), why, REST_POSE_ENV)
         )
     use(q)
     return q, "rest pose: %s of %s, %s: %s" % (REST_POSE_KEY, path, _fmt(q), standing(q, chain, check))

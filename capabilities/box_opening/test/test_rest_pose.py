@@ -207,8 +207,10 @@ def test_a_pose_with_a_joint_at_or_past_its_limit_is_refused(tmp_path):
     assert "arm_joint_3 at 6.500 rad is past the planner's bound" in rest.refusal(wound, chain)
     assert "it has 6 joint angles" in rest.refusal(POSE[:6], chain)
     _flatbot(tmp_path)
-    with pytest.raises(rest.RestPoseError, match="is refused: arm_joint_4 at -2.400 rad"):
+    with pytest.raises(rest.RestPoseError, match="is refused: arm_joint_4 at -2.400 rad") as refused:
         rest.configure(_presets(tmp_path, home=[POSE[0], POSE[1], POSE[2], -2.40, POSE[4], POSE[5], POSE[6]]))
+    # what to do about it, in words that hold for a joint limit as for the chair
+    assert "Give the robot a rest pose it can start from there (or name another file" in str(refused.value)
     assert constants.HOME == list(constants.HOME_BUILT_IN)
 
 
