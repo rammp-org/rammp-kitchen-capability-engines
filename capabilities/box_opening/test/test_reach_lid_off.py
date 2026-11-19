@@ -67,6 +67,7 @@ class _Rec(trp._Rec):
         self.planning = 0  # plans in progress now
         self.most_at_once = 0  # ... and the most there ever were
         self.aim_hits = []  # (each aim's tag, the agreeing hits it asked for: None, the reach-out's)
+        self.setdowns = []  # (each set-down's spot, what its watch felt), in order
 
 
 class _Felt:
@@ -143,7 +144,8 @@ def _full_flow(
     and so no table measured for the lid to go on); `setdown` what the
     set-down's watch felt (_Felt: "met", the lid met the table where the
     plan has it; "never", "held", "failed": it did not, and the lid is not
-    let go; a _Felt of the test's own; None: the real watch, which the fake
+    let go; a _Felt of the test's own; a list: each spot's in turn, the last
+    for every one after; None: the real watch, which the fake
     client feeds nothing). The
     table the set-down goes by is the cameras' (the fake chain's fk stands
     still, and its fingers' hold says nothing of the lid's top) unless
@@ -202,9 +204,12 @@ def _full_flow(
     if not touch_table:
         monkeypatch.setattr(rlo, "setdown_table_z", lambda ctx_, table_z, fix_, q_grip=None: (float(table_z), None))
     if setdown is not None:
+        felts = list(setdown) if isinstance(setdown, list | tuple) else [setdown]
 
         def felt(ctx_, legs, carry):
-            carry.contact = setdown if isinstance(setdown, _Felt) else _Felt(setdown)
+            how = felts.pop(0) if len(felts) > 1 else felts[0]
+            carry.contact = how if isinstance(how, _Felt) else _Felt(how)
+            rec.setdowns.append((carry.drop, carry.contact.how))
             return carry.contact
 
         monkeypatch.setattr(rlo, "watch_setdown", felt)
@@ -1688,33 +1693,98 @@ def test_the_set_down_is_cut_where_the_lid_meets_the_table(ctx, monkeypatch, tmp
     assert sd["contact"]["cut_on"] is True and sd["contact"]["watched"] is False and sd["contact"]["met"] is False
     assert sd["credible"] is False and sd["contact"]["verdict"] == "never"
     assert code == 1 and "place:open" not in rec.events
-    assert "the set-down was not watched" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "the set-down was not watched" in out
+    # ... nor is the lid taken on to another spot (owner 2026-11-19: "it should keep trying spots"): a
+    # set-down that was not watched says nothing of its spot, and the next would fly as blind. The box
+    assert (
+        rec.events.count("place:touch") == 1 and "no other spot is tried: a set-down that could not be watched" in out
+    )
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
 
 
-@pytest.mark.parametrize("felt", ["never", "held", "failed"])
-def test_a_set_down_that_felt_no_table_does_not_let_go_and_puts_the_lid_back_on_the_box(
+@pytest.mark.parametrize("felt", ["never", "held"])
+def test_a_set_down_that_felt_no_table_keeps_the_lid_and_takes_it_on_to_another_spot(
     ctx, monkeypatch, tmp_path, capsys, felt
 ):
-    """Owner 2026-11-17: "the first run, the arm dropped the lid off the table": 16:40 carried the lid
-    past the table's edge, its watch reported a contact 64 mm over the plan with nothing under the lid,
-    the fingers opened and the run said DONE. The fingers open only where the watch felt the lid meet
-    the table (SetdownContact.credible). The touch ended and nothing was felt, something held the lid
-    up well above the table, or the watch failed: the lid is NOT let go. Back up with it the way the
-    retreat goes, back over the box, down onto it, the fingers open there, the hand off the knob, home
-    — the one place known to take the lid. Exit 1, and the run says the lid is back on the box."""
-    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown=felt)
+    """Owner 2026-11-17: "the first run, the arm dropped the lid off the table": the fingers open only
+    where the watch felt the lid meet the table (SetdownContact.credible). And 2026-11-19, asked whether
+    a set-down that feels no table should put the lid back on the box or try another spot first: "it
+    should keep trying spots, assume tere will always be a spot for the lid". The touch ended and
+    nothing was felt, or something held the lid up well above the table: the lid is NOT let go and NOT
+    taken back to the box. Up with it the way the retreat goes, the fingers shut; that spot and the
+    lid's own footprint round it set aside; the next spot chosen by the same rules; carried there and
+    set down the same watched way — here that one feels the table, and the run ends as any good run:
+    exit 0, the lid on the table at the second spot, said."""
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=[felt, "met"]
+    )
+    assert code == 0
+    after = rec.events[rec.events.index("place:touch") + 1 :]
+    # never back over the box, never onto it. Where something the map did not show held the lid up, the wrist
+    # looks at the table from over that spot before the next is chosen; where nothing was felt, no look
+    assert after == ["lid:back-up", *(["spot-look"] if felt == "held" else []), *CARRY, *HOME]
+    assert not [r for r in rows if r["leg"] == "lid_put_back"]
+    looks = [r for r in rows if r["leg"] == "lid_look_again"]
+    assert [r["why"] for r in looks] == (
+        ["something the map did not show held the lid up at spot 1"] if felt == "held" else []
+    )
+    # the way back up is the retreat's own line from where the arm stands, the fingers shut: no hold for them
+    assert rec.legs["lid:back-up"].start_hold_s == 0.0 and rec.legs["lid:back-up"].gains == dp.COMPLIANT_GAINS
+    (first, how1), (second, how2) = rec.setdowns
+    assert (how1, how2) == (felt, "met")
+    # off the footprint that was left: the lid's own where nothing was felt; the lid's and the hand's (its
+    # farthest corner 99 mm from the tool, whichever way it turns next) where something held the lid up
+    apart = max(ctx.model.lid_dims[:2]) if felt == "never" else 2 * rlo.HAND_REACH_M
+    assert rlo.HAND_REACH_M == pytest.approx(0.0986, abs=1e-4)
+    assert math.hypot(second.xyz[0] - first.xyz[0], second.xyz[1] - first.xyz[1]) >= apart - 1e-9
+    assert ctx.lid_at is ctx.lid_drop is second  # where the lid lies: the spot that took it
+    sd = [(r["spot"], r["credible"], r["contact"]["verdict"]) for r in rows if r["leg"] == "reach_setdown"]
+    assert sd == [(1, False, felt), (2, True, None)]
+    (left,) = (r for r in rows if r["leg"] == "lid_spot_left")
+    assert (left["spot"], left["verdict"], left["next"], left["why_the_box"]) == (1, felt, "another spot", None)
+    assert left["xyz"] == pytest.approx(list(first.xyz), abs=1e-4) and left["time_left_s"] is None  # nothing times it
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert [r["spot"] for r in spots] == [1, 2] and spots[1]["xyz"] == pytest.approx(list(second.xyz), abs=1e-4)
+    assert [(s["spot"], s["verdict"]) for s in spots[1]["left"]] == [(1, felt)] and spots[1]["searched"] == [
+        "the tiers"
+    ]
+    assert spots[1]["table"]["aside"] >= 1  # the spots within the lid's footprint of the first were passed over
+    out = capsys.readouterr().out
+    assert "SET-DOWN: no table felt at spot 1, [%.2f, %.2f] — " % (first.xyz[0], first.xyz[1]) in out
+    assert "the lid is not let go: up with it and on to another spot" in out and "back onto the box" not in out
+    assert "; spot 2 of this run, after spot 1 at [%.2f, %.2f]: " % (first.xyz[0], first.xyz[1]) in out
+    assert "SPOT 2, ONE MOTION: lid:carry, place:down, place:touch — to [" in out
+    assert out.count("SET-DOWN CONTACT") == 1 and out.count("RELEASE as the retreat starts") == 1
+    assert "DONE — box open, lid on the table at [%.2f, %.2f]" % (second.xyz[0], second.xyz[1]) in out
+    assert "spot 2 of this run (no table was felt at the 1 before it)" in out and out.rstrip().endswith("arm home")
+
+
+def test_a_set_down_that_could_not_be_watched_is_not_tried_elsewhere_and_the_lid_goes_back_on_the_box(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The watch failed: that says nothing of the spot, and a set-down at the next would fly as blind —
+    its touch to its planned end, 8 mm under the plan, with nothing watching for the table. No other
+    spot is tried: the lid is NOT let go; back up with it the way the retreat goes, back over the box,
+    down onto it, the fingers open there, the hand off the knob, home — the one place known to take
+    the lid. Exit 1, and the run says the lid is back on the box, and why no other spot was tried."""
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown="failed")
     assert code == 1 and "place:open" not in rec.events and "place:retreat" not in rec.events
     after = rec.events[rec.events.index("place:touch") + 1 :]
     assert after == ["lid:back-up", "lid:back-over", "lid:put-back", "lid:release", "lid:rise-off", "home"]
     # the way back up is the retreat's own line from where the arm stands, the fingers shut: no hold for them
     assert rec.legs["lid:back-up"].start_hold_s == 0.0 and rec.legs["lid:back-up"].gains == dp.COMPLIANT_GAINS
     (sd,) = (r for r in rows if r["leg"] == "reach_setdown")
-    assert sd["credible"] is False and sd["kept"] is True and sd["contact"]["verdict"] == felt
+    assert sd["credible"] is False and sd["kept"] is True and sd["contact"]["verdict"] == "failed"
     (back,) = (r for r in rows if r["leg"] == "lid_put_back")
     assert back["ok"] is True and back["why"].startswith("the set-down felt no table (")
+    assert not [r for r in rows if r["leg"] == "lid_spot_left"]
     assert ctx.lid_lifted is None and ctx.lid_at is None  # out of the fingers, on the box: no lid lies at the spot
     out = capsys.readouterr().out
-    assert "SET-DOWN: no table felt — " in out and "the lid is not let go" in out
+    assert (
+        "SET-DOWN: no table felt — " in out and "the lid is not let go: back up with it, and back onto the box" in out
+    )
+    assert "(no other spot is tried: a set-down that could not be watched says nothing of this spot" in out
     assert "SET-DOWN CONTACT" not in out and "DONE" not in out and "RELEASE as the retreat starts" not in out
     assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
 
@@ -1758,7 +1828,7 @@ def test_the_way_back_over_the_box_turns_the_hand_back_where_no_line_holds_the_g
 
     monkeypatch.setattr(rlo, "put_lid_back", back)
     code, rec, _chain, rows = _full_flow(
-        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], chain=chain, setdown="never"
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], chain=chain, setdown="failed"
     )
     assert code == 1 and "place:open" not in rec.events
     after = rec.events[rec.events.index("place:touch") + 1 :]
@@ -1788,11 +1858,12 @@ def test_a_set_down_that_felt_no_table_and_cannot_fly_back_up_holds_the_lid(ctx,
     """No line back up solves from where the arm stands: nothing is let go, the arm holds the lid
     where it is, and says so (a person clears it)."""
     monkeypatch.setattr(rlo, "retreat_from_live", lambda ctx_, carry, world: (None, "IK did not converge"))
-    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown="never")
-    assert code == 1 and rec.events[-1] == "place:touch" and "place:open" not in rec.events
-    assert "no way back up solves from where the arm stands (IK did not converge) — the arm holds the lid" in (
-        capsys.readouterr().out
-    )
+    for felt in ("never", "failed"):  # on to another spot, or back onto the box: both begin with the way up
+        code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], setdown=felt)
+        assert code == 1 and rec.events[-1] == "place:touch" and "place:open" not in rec.events
+        assert "no way back up solves from where the arm stands (IK did not converge) — the arm holds the lid" in (
+            capsys.readouterr().out
+        )
 
 
 def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_table(monkeypatch):
@@ -2310,9 +2381,13 @@ def test_with_nothing_but_what_stands_round_the_box_the_lid_goes_back_on_the_box
     assert (
         spot["xyz"] is None and spot["table"]["off_table"] > 0 and "on what stands there" in spot["table"]["first_off"]
     )
+    # ... having looked wider first (owner 2026-11-19): the table past the wall is bare and measured, but
+    # the wall, taller than the lid is carried, stands in the lid's way to every place on it
+    assert spot["searched"] == ["the tiers", "wider"] and spot["table"]["blocked"] > 0
     out = capsys.readouterr().out
+    assert "looking wider — the whole of the table the cameras measured" in out
     assert "PUT BACK: no carry plans to a spot on the table the cameras measured (of the spots looked at, " in out
-    assert "not on the table the cameras measured" in out
+    assert "not on the table the cameras measured" in out and "with something standing in the lid's way there" in out
     assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
 
 
@@ -2543,7 +2618,8 @@ def test_the_carry_search_in_two_parts_finds_what_carry_ahead_does_and_plans_onl
 
 
 def test_no_carry_that_plans_puts_the_lid_back_on_the_box_and_goes_home(ctx, monkeypatch, tmp_path, capsys):
-    """Every spot the hand reaches refused by the planner (CARRY_TRIES): the
+    """Every spot the hand reaches refused by the planner (CARRY_TRIES of the
+    tiers', then as many of the whole table's): the
     arm stands holding the lid over the box. It does not stay there: the lid
     goes back where it came from, back over the box and straight down to
     where the knob was held, the fingers open, the hand rises off the knob
@@ -2553,7 +2629,9 @@ def test_no_carry_that_plans_puts_the_lid_back_on_the_box_and_goes_home(ctx, mon
     )
     assert code == 1 and "lid:carry" not in rec.events and "place:open" not in rec.events
     (spot,) = (r for r in rows if r["leg"] == "lid_spot")
-    assert spot["xyz"] is None and spot["refused"].count("IK_FAIL") == rlo.CARRY_TRIES
+    # ... CARRY_TRIES of the tiers' spots, and as many more of the wider search's (owner 2026-11-19)
+    assert spot["xyz"] is None and spot["refused"].count("IK_FAIL") == 2 * rlo.CARRY_TRIES
+    assert spot["searched"] == ["the tiers", "wider"]
     after = rec.events[rec.events.index("spot-look") + 1 :]
     assert after[:4] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off"] and after[-1] == "home"
     (back,) = (r for r in rows if r["leg"] == "lid_put_back")
@@ -2739,9 +2817,9 @@ def test_the_lid_s_spot_is_mapped_and_its_carry_planned_from_where_the_arm_stood
         ctx.client.live = list(stood)  # the arm came to rest while the spot look waited
         return None
 
-    def candidates(ctx_, tmap, table_z, q, seeds=(), reach=None, spot_z=None, passed=None):
+    def candidates(ctx_, tmap, table_z, q, seeds=(), reach=None, spot_z=None, passed=None, **more):
         seen.append(("spot_candidates", list(q)))
-        yield SimpleNamespace(xyz=(0.45, -0.25, -0.027)), "beside the box", "beside the box"
+        yield ContainerPose(xyz=(0.45, -0.25, -0.027), yaw=0.0), "beside the box", "beside the box"
 
     monkeypatch.setattr(rlo, "spot_look", look)
     monkeypatch.setattr(rlo, "spot_map", lambda ctx_, wrist, q, *rest: seen.append(("spot_map", list(q))))
@@ -5314,3 +5392,1924 @@ def test_the_set_downs_flown_onto_the_table_are_felt_as_the_table_before_the_tou
     assert _older("20261029-144545", past=0.012)[1] is None
     det, at = _older("20261029-144545", past=0.016)
     assert det.credible() and at == pytest.approx(-0.014, abs=0.001)
+
+
+# ---- spot after spot (owner 2026-11-19: "it should keep trying spots, assume tere will always be a spot for the
+# lid") ---------------------------------------------------------------------------------------------------------
+
+
+def _lid_wide(ctx):
+    return max(ctx.model.lid_dims[:2])
+
+
+def _after_first_touch(rec):
+    return rec.events[rec.events.index("place:touch") + 1 :]
+
+
+def test_spot_after_spot_no_table_felt_at_any_ends_on_the_box_after_as_many_spots_as_a_run_tries(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """No spot's set-down feels the table (a run by hand: nothing times it). The lid goes on from spot
+    to spot — each chosen by the same rules, each a lid's width or more from every spot left before it,
+    each on table the cameras measured — and never an unbounded number of them: after SETDOWN_SPOTS the
+    lid goes back on the box, the last resort, and the run says how it ended. It is never let go."""
+    monkeypatch.delenv(rlo.RUN_BUDGET_ENV, raising=False)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown="never"
+    )
+    assert code == 1 and "place:open" not in rec.events
+    assert rec.events.count("place:touch") == rlo.SETDOWN_SPOTS == len(rec.setdowns) == 6
+    assert rec.events.count("lid:back-up") == rlo.SETDOWN_SPOTS  # up from each; from the last, on to the box
+    assert rec.events[-5:] == ["lid:back-over", "lid:put-back", "lid:release", "lid:rise-off", "home"]
+    spots = [d for d, _how in rec.setdowns]
+    for i, a in enumerate(spots):
+        assert rlo.box_clearance(ctx, a) >= 0.0
+        for b in spots[:i]:
+            assert math.hypot(a.xyz[0] - b.xyz[0], a.xyz[1] - b.xyz[1]) >= _lid_wide(ctx)
+    left = [r for r in rows if r["leg"] == "lid_spot_left"]
+    assert [r["spot"] for r in left] == [1, 2, 3, 4, 5, 6]
+    assert [r["next"] for r in left] == ["another spot"] * 5 + ["the box"]
+    assert left[-1]["why_the_box"] == "6 spots is as many as a run tries (SETDOWN_SPOTS)"
+    (back,) = (r for r in rows if r["leg"] == "lid_put_back")
+    assert back["ok"] is True and "no other spot is tried: 6 spots is as many as a run tries" in back["why"]
+    out = capsys.readouterr().out
+    assert out.count("the lid is not let go: up with it and on to another spot") == 5
+    assert "back onto the box (no other spot is tried: 6 spots is as many as a run tries (SETDOWN_SPOTS))" in out
+    # what the line before each set-down promises is what follows one that feels no table: the last spot's, the box
+    flies = {int(t.split()[2].rstrip(",")): t for t in out.splitlines() if t.startswith("[press_demo] SPOT ")}
+    assert sorted(flies) == [2, 3, 4, 5, 6]
+    assert all(flies[n].endswith("felt nowhere, up again with it and on to another spot") for n in (2, 3, 4, 5))
+    assert flies[6].endswith("felt nowhere, back onto the box (the last of the 6 spots a run tries)")
+    assert "SET-DOWN CONTACT" not in out and "DONE" not in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+def _budget(monkeypatch, left_s, go=False, s=90.0):
+    """The engine's hand-over (node.budget_env), as if the run had `left_s` of its `s` seconds left."""
+    import time
+
+    told = {"s": s, "from": time.monotonic() - (s - left_s), "go": go}
+    monkeypatch.setenv(rlo.RUN_BUDGET_ENV, json.dumps(told))
+
+
+@pytest.mark.parametrize("left_s, goes_on", [(60.0, True), (45.0, True), (25.0, False), (5.0, False)])
+def test_no_further_spot_is_started_that_the_runs_time_does_not_hold_with_the_way_back_to_the_box(
+    ctx, monkeypatch, tmp_path, capsys, left_s, goes_on
+):
+    """The engine stops a run at its budget with a Ctrl+C wherever it is (node.RUN_BUDGET_S), and a run
+    cut with the lid in its fingers is the arm holding it. A further spot is started only where the
+    run's time still holds it and, should it feel no table either, the way back to the box, the release
+    and home after it: 35 s by the records (CHOICE_S + SPOT_S + BOX_S + END_S). With less left, the lid
+    goes back on the box at once — even where that is less than the way back takes: the box is still
+    the best there is — and the run says how much time was left."""
+    assert rlo.CHOICE_S + rlo.SPOT_S + rlo.BOX_S + rlo.END_S == pytest.approx(35.0)
+    _budget(monkeypatch, left_s)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    (left,) = (r for r in rows if r["leg"] == "lid_spot_left")
+    assert left["time_left_s"] == pytest.approx(left_s, abs=5.0)  # (less what the run took up to there)
+    out = capsys.readouterr().out
+    if goes_on:
+        assert (
+            code == 0 and _after_first_touch(rec) == ["lid:back-up", *CARRY, *HOME] and left["next"] == "another spot"
+        )
+        assert "s of the run's time left)" in out
+        return
+    assert code == 1 and "place:open" not in rec.events and left["next"] == "the box"
+    assert _after_first_touch(rec) == [
+        "lid:back-up",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    assert "s of the run's time are left: another spot and, should it feel no table either, the way back" in out
+    assert "take 35 (12 and 23, on record)" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+def _later_reach(monkeypatch, says, on_check=lambda: None):
+    """Every reach check of a spot after the first (it is asked with the lid's own joints) answers
+    `says`, `on_check()` called at each; the first spot's are the real ones. Returns the checks made."""
+    real, made = rlo.drop_reachable, []
+
+    def reach(ctx_, drop, q, seeds=(), held=None, stands=None):
+        if held is None:
+            return real(ctx_, drop, q, seeds)
+        on_check()
+        made.append(drop)
+        return says
+
+    monkeypatch.setattr(rlo, "drop_reachable", reach)
+    return made
+
+
+def _later_plans(monkeypatch):
+    """rlo.plan_carry, the plans asked for a spot after the first kept ((spot, kwargs)); all planned as ever."""
+    real, asked = rlo.plan_carry, []
+
+    def plan(ctx_, cfg_, q, drop, **kw):
+        if kw:
+            asked.append((drop, kw))
+        return real(ctx_, cfg_, q, drop, **kw)
+
+    monkeypatch.setattr(rlo, "plan_carry", plan)
+    return asked
+
+
+def test_the_clock_is_asked_all_through_the_choice_and_the_box_is_taken_with_its_time_still_in_hand(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The choice of the next spot is bounded by the run's clock, not only its beginning: where the hand
+    reaches spot after spot of the table no better than the last (each reach check 0.4 s of the run's time
+    here), the clock is asked before every one of them, and the moment what is left no longer holds a spot
+    and the way back to the box after it (31 s) the choosing stops and the box is taken — with the box's
+    own 23 s still in hand. As first written the tiers were gone through with no clock at all (~100 reach
+    checks, 4 plans: ~17 s at the robot's rates) and the put-back began with whatever was left: the test
+    that stood here pinned one begun with 20 s (the review of 2026-11-19)."""
+    clock = {"left": 40.0}
+    monkeypatch.setattr(rlo.RunClock, "left_s", lambda self: clock["left"])
+    checks = _later_reach(monkeypatch, "no hand reaches it", lambda: clock.update(left=clock["left"] - 0.4))
+    plans = _later_plans(monkeypatch)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and "place:open" not in rec.events and len(rec.setdowns) == 1
+    assert _after_first_touch(rec) == [
+        "lid:back-up",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    gate = rlo.SPOT_S + rlo.BOX_S + rlo.END_S
+    assert gate == pytest.approx(31.0) and len(checks) == 23 and plans == []  # 40 s down to under 31, 0.4 s a check
+    assert gate - 0.4 - 1e-9 <= clock["left"] < gate  # stopped at the first check the clock said no to
+    assert clock["left"] >= rlo.BOX_S + rlo.END_S  # the put-back begins with what it needs, and its margin
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert spots[1]["xyz"] is None and spots[1]["timed_out"] is True and spots[1]["time_left_s"] < gate
+    out = capsys.readouterr().out
+    assert "and no other spot is tried: the run's time ran out while one was looked for (31 s are left;" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+    view = _flight_view(out, code)  # the flight view says why the box was taken
+    i = _view_line(view, r" *\d+ SET DOWN  FAIL  spot 1: no table felt, lid kept")
+    assert view[i + 1] == "             next  putting the lid back on the box (no time left for another spot)"
+    assert view[i + 2].endswith("PUT BACK  ok    lid back on the box, arm home")
+
+
+def test_a_choice_the_clock_has_no_time_for_asks_no_reach_and_no_plan(ctx, monkeypatch, tmp_path, capsys):
+    """The time left as the spot is left holds another (40 s), and by the time the arm stands over it the
+    clock says 5: not one reach check is begun and not one plan asked (98 reach checks were, in the review's
+    probe of the code before it) — the box at once, since nothing else is possible."""
+    left = iter([40.0, 40.0, 40.0])  # before the set-down flies, as the spot is left, and for its row
+    monkeypatch.setattr(rlo.RunClock, "left_s", lambda self: next(left, 5.0))
+    checks = _later_reach(monkeypatch, None)
+    plans = _later_plans(monkeypatch)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and checks == [] and plans == [] and "spot-look" not in rec.events
+    assert _after_first_touch(rec) == [
+        "lid:back-up",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert spots[1]["timed_out"] is True and spots[1]["searched"] == []
+    assert "the run's time ran out while one was looked for (5 s are left;" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("gone_in, plans", [("a reach check", 0), ("a plan", 1)])
+def test_the_time_is_asked_before_each_plan_too(ctx, monkeypatch, tmp_path, gone_in, plans):
+    """A reach check is an IK walk and a plan can take a second and more. The time runs out during the
+    reach check that passes a later spot: its carry is not planned. It runs out during a plan the planner
+    refuses: no second spot is looked at, no second plan asked."""
+    clock = {"left": 40.0}
+    monkeypatch.setattr(rlo.RunClock, "left_s", lambda self: clock["left"])
+    if gone_in == "a reach check":
+        _later_reach(monkeypatch, None, lambda: clock.update(left=30.0))
+    real, asked = rlo.plan_carry, []
+
+    def plan(ctx_, cfg_, q, drop, **kw):
+        if not kw:
+            return real(ctx_, cfg_, q, drop)
+        asked.append(drop)
+        clock["left"] = 30.0
+        return None, "the carry (walked: no; planned: no)"
+
+    monkeypatch.setattr(rlo, "plan_carry", plan)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and len(asked) == plans and len(rec.setdowns) == 1
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert spots[1]["timed_out"] is True and spots[1]["searched"] == ["the tiers"]
+
+
+@pytest.mark.parametrize("flight, goes_on", [(3.0, True), (12.0, True), (20.2, False)])
+def test_the_time_before_a_carry_is_sent_is_asked_for_that_carrys_own_flight(
+    ctx, monkeypatch, tmp_path, capsys, flight, goes_on
+):
+    """The time is asked once more before the chosen spot's carry is sent — for the flight this carry is
+    as the runner will fly it (flight_s) and the way back up after it (SPOT_UP_S), not for the 8 s a spot
+    takes on record: with 45 s left a carry of 3 s goes (5.5 and the box's 23), one of 20 s does not (it
+    and the way back to the box need 45.7), and the lid goes back on the box from over the spot it was
+    left at. The same flight decides what the line before the set-down promises (_touch_says): after a
+    carry of 3 s another spot would still be begun (42 s left, 35 needed); after one of 12 s it would not
+    (33), and the line says the box follows — it said "on to another spot" of every set-down (the review
+    of 2026-11-19)."""
+    monkeypatch.setattr(rlo.RunClock, "left_s", lambda self: 45.0)
+    monkeypatch.setattr(rlo, "flight_s", lambda runner, legs: flight if len(legs) == 3 else 1.0)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert spots[1]["flight_s"] == pytest.approx(flight) and spots[1]["tier"] is not None
+    out = capsys.readouterr().out
+    if goes_on:
+        assert code == 0 and spots[1]["xyz"] is not None and len(rec.setdowns) == 2
+        (line,) = (text for text in out.splitlines() if text.startswith("[press_demo] SPOT 2, ONE MOTION:"))
+        assert line.endswith(
+            "felt nowhere, up again with it and on to another spot"
+            if flight == 3.0
+            else "felt nowhere, back onto the box (the run's time will hold no further spot: 45 s are left now)"
+        )
+        return
+    assert code == 1 and spots[1]["xyz"] is None and len(rec.setdowns) == 1
+    assert _after_first_touch(rec) == [
+        "lid:back-up",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    assert (
+        "and no other spot is tried: 45 s of the run's time are left" in out
+        and "take 46 (23 by this spot's own carry and 23, on record)" in out
+    )
+    assert "SPOT 2, ONE MOTION:" not in out
+
+
+def test_the_runner_says_how_long_a_carry_flies_before_it_is_sent(ctx, monkeypatch, tmp_path):
+    """flight_s: the carry's legs as the runner will re-time them (its preview's own sum), None where
+    that cannot be told."""
+    from conftest import leg as make_leg
+
+    from box_opening.runtime.runner import Runner
+
+    runner = Runner(ctx.client, log_dir=tmp_path)
+    a = make_leg("lid:carry", start=[0.0] * 7, end=[0.3] * 7, speed=1.0)
+    b = make_leg("place:down", start=[0.3] * 7, end=[0.35] * 7, speed=0.55)
+    one, both = rlo.flight_s(runner, [a]), rlo.flight_s(runner, [a, b])
+    assert one is not None and 0.0 < one < both < 30.0
+    assert rlo.flight_s(runner, [SimpleNamespace(kind=a.kind, traj=None, guard=None)]) is None
+
+
+def test_the_run_reads_its_time_from_what_the_engine_handed_it_and_from_its_own_go(tmp_path, capsys):
+    """RunClock: the engine's hand-over (node.budget_env) is the seconds the run has, the time they count
+    from on the host's monotonic clock (the engine and the run are two processes on one host: no step of
+    the wall clock moves it), and whether they start again at each go (a goal sent by hand:
+    node.Capability._follow counts such a run's budget from its last go). The go's time is the run's own
+    record's — the 'line_up' row of stage 'go' press_demo.line_up_watch writes as it hears one, stamped by
+    the wall clock and put on the engine's clock by what the two differ by; never later than now, never
+    before the budget's own start. Nothing handed: nothing times the run."""
+    now, wall = [1000.0], [5000.0]
+
+    def clock(env, runner=None):
+        return rlo.RunClock(runner, env=env, now=lambda: now[0], wall=lambda: wall[0])
+
+    nothing = clock({})
+    assert nothing.left_s() is None and nothing.unreadable is None
+    told = {"s": 90.0, "from": 940.0, "go": False}
+    assert clock({rlo.RUN_BUDGET_ENV: json.dumps(told)}).left_s() == pytest.approx(30.0)
+    now[0], wall[0] = 1040.0, 5040.0
+    assert clock({rlo.RUN_BUDGET_ENV: json.dumps(told)}).left_s() == pytest.approx(-10.0)  # past it: said as it is
+    wall[0] = 9999.0  # the wall clock stepped: nothing of the budget moves with it
+    assert clock({rlo.RUN_BUDGET_ENV: json.dumps(told)}).left_s() == pytest.approx(-10.0)
+    # a goal sent by hand: from its last go, where the run has had one
+    now[0], wall[0] = 1000.0, 5000.0
+    record = tmp_path / "run-x.jsonl"
+    runner = SimpleNamespace(_log_path=record)
+    by_hand = {rlo.RUN_BUDGET_ENV: json.dumps(dict(told, go=True))}
+    assert clock(by_hand, SimpleNamespace(_log_path=None)).left_s() == pytest.approx(30.0)  # no record yet
+    assert clock(by_hand, runner).left_s() == pytest.approx(30.0)  # ... or none that can be read: from its start
+
+    def rows(*stamps):
+        record.write_text("".join(json.dumps(r) + "\n" for r in stamps) + "not json\n")
+
+    rows(
+        {"t": 4950.0, "leg": "line_up", "kind": "note", "stage": "go"},
+        {"t": 4960.0, "leg": "scene_fix", "kind": "note"},
+        {"t": 4985.0, "leg": "line_up", "kind": "note", "stage": "go"},  # guided in the middle of the run: its last
+        {"t": 4990.0, "leg": "line_up", "kind": "note", "stage": "stop"},
+    )
+    by_hand_clock = clock(by_hand, runner)
+    assert by_hand_clock.left_s() == pytest.approx(75.0)  # the go 15 s ago on either clock
+    # ... which moves nothing under the orchestrator's 120 s
+    assert clock({rlo.RUN_BUDGET_ENV: json.dumps(told)}, runner).left_s() == pytest.approx(30.0)
+    # a row written since is read (the record is read again only when it has grown: every reach check asks)
+    now[0], wall[0] = 1010.0, 5010.0
+    assert by_hand_clock.left_s() == pytest.approx(65.0)
+    rows({"t": 5008.0, "leg": "line_up", "kind": "note", "stage": "go"}, {"t": 5009.0, "leg": "still", "kind": "note"})
+    assert by_hand_clock.left_s() == pytest.approx(88.0)
+    # a go dated after now (the wall clock stepped back since) is now; one before the budget began is its start
+    rows({"t": 5030.0, "leg": "line_up", "kind": "note", "stage": "go"})
+    assert clock(by_hand, runner).left_s() == pytest.approx(90.0)
+    rows({"t": 4000.0, "leg": "line_up", "kind": "note", "stage": "go"})
+    assert clock(by_hand, runner).left_s() == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize(
+    "handed",
+    [
+        "",
+        "ninety",
+        "null",
+        "0",
+        "true",
+        '"x"',
+        "[90]",
+        "{}",
+        '{"s": 90.0}',
+        '{"s": "90", "from": "1"}',
+        '{"s": true, "from": 1}',
+        '{"s": NaN, "from": 1}',
+        '{"s": 1e999, "from": 1}',
+        '{"s": 90, "from": null}',
+        '{"s": 90, "from": 1, "go": "no"}',
+    ],
+)
+def test_a_budget_that_is_there_and_cannot_be_read_fails_closed(handed, capsys):
+    """Only an absent budget means nothing times the run (the command line's). One that is there and does
+    not read as one means an engine IS timing this run and the run does not know by how much: its clock
+    says nothing is left, so no further spot is ever started on it, and it says what it was handed. As
+    first written every one of these read as "nothing handed", and such a run would have gone from spot to
+    spot with the engine's Ctrl+C due (the review of 2026-11-19)."""
+    clock = rlo.RunClock(env={rlo.RUN_BUDGET_ENV: handed}, now=lambda: 10.0)
+    assert clock.left_s() == 0.0 and clock.unreadable is not None and repr(handed) in clock.unreadable
+    assert "cannot be read" in capsys.readouterr().out
+    search = rlo.SpotSearch(SimpleNamespace(), None, None, None, None, 0.0, 0.0)
+    search.clock = clock
+    assert "cannot be read" in search.no_more(0.0) and search.out_of_time() and search.after_this() is not None
+    # ... while a budget that reads, however little it leaves, is a budget
+    assert rlo.RunClock(env={rlo.RUN_BUDGET_ENV: '{"s": -5, "from": 0}'}, now=lambda: 10.0).left_s() == -15.0
+    assert rlo.RunClock(env={rlo.RUN_BUDGET_ENV: '{"s": 90, "from": 1}'}, now=lambda: 10.0).from_go is False
+
+
+def test_a_run_whose_budget_cannot_be_read_takes_the_lid_to_no_second_spot(ctx, monkeypatch, tmp_path, capsys):
+    """The same, in the run: its first set-down feels no table, and the lid goes back on the box."""
+    monkeypatch.setenv(rlo.RUN_BUDGET_ENV, "ninety")
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and len(rec.setdowns) == 1 and "place:open" not in rec.events
+    assert _after_first_touch(rec) == [
+        "lid:back-up",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    (left,) = (r for r in rows if r["leg"] == "lid_spot_left")
+    assert left["next"] == "the box" and "cannot be read" in left["why_the_box"] and left["time_left_s"] == 0.0
+    out = capsys.readouterr().out
+    # said before the set-down flew, too: no "on to another spot" promised of a run that will try none
+    assert "felt nowhere, back onto the box (the run's time cannot be read)" in out
+    assert "on to another spot" not in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+    view = _flight_view(out, code)
+    i = _view_line(view, r" *\d+ SET DOWN  FAIL  spot 1: no table felt, lid kept")
+    assert view[i + 1] == "             next  carrying the lid back to the box (the run's time cannot be read)"
+
+
+def test_the_runs_own_line_up_writes_the_go_row_its_clock_reads():
+    """The clock's go is press_demo.line_up_watch's own note: this pins the row it reads to the line
+    that writes it (a renamed stage would silently count every by-hand run from its start)."""
+    import inspect
+
+    from box_opening.tasks import press_demo as pd
+
+    assert 'runner.note("line_up", stage="go"' in inspect.getsource(pd.line_up_watch)
+
+
+def test_a_spot_the_lid_was_left_at_is_set_aside_with_the_lids_own_footprint_round_it(ctx, monkeypatch):
+    """SpotSearch.aside: a spot whose lid would lie on any of the place the lid was held over at a spot
+    it was left at (their centres nearer than the lid is wide) is set aside for the run; spot_candidates
+    passes such spots over, counted, never a try. Nothing left: nothing set aside."""
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(approach, "_chain", lambda: _Chain())
+    bare = _bare(monkeypatch, ctx)
+    search = rlo.SpotSearch(ctx, None, None, None, bare, -0.07, -0.07)
+    offered = [d for d, _t, _s in rlo.spot_candidates(ctx, bare, -0.07, [0.0] * 7, reach=lambda *a: None)]
+    first = offered[0]
+    assert not search.aside(first)
+    was = search.leave(first, "beside the box", "never", "the touch ended ...")
+    assert (was.n, was.drop, was.verdict) == (1, first, "never") and "spot 1 at [" in was.says()
+    wide = _lid_wide(ctx)
+    near = ContainerPose(xyz=(first.xyz[0] + wide - 0.001, first.xyz[1], -0.07), yaw=0.0)
+    far = ContainerPose(xyz=(first.xyz[0] + wide + 0.001, first.xyz[1], -0.07), yaw=0.0)
+    assert search.aside(first) and search.aside(near) and not search.aside(far)
+    passed = rlo.SpotsPassed()
+    again = [
+        d
+        for d, _t, _s in rlo.spot_candidates(
+            ctx, bare, -0.07, [0.0] * 7, reach=lambda *a: None, aside=search.aside, passed=passed
+        )
+    ]
+    assert again and passed.aside >= 2  # straight down and leaning, at the least
+    for d in again:
+        assert math.hypot(d.xyz[0] - first.xyz[0], d.xyz[1] - first.xyz[1]) >= wide
+    assert "within the footprint left at a spot where no table was felt" in passed.says()
+    # the same rules in the same order, less what is set aside: every spot offered before and not set aside
+    # is offered again, in the order it had (a tier that lost spots goes further down its own list)
+    keys = [rlo._spot_key(d) for d in offered]
+    now = [rlo._spot_key(d) for d in again]
+    assert [k for k in now if k in keys] == [k for k, d in zip(keys, offered, strict=True) if not search.aside(d)]
+
+
+def test_past_every_tier_the_whole_measured_table_is_gone_through_nearest_the_hand_first(ctx, monkeypatch):
+    """wider_candidates, for where no tier's spot has a carry that plans: every place on the table the
+    cameras measured — not only round the box, not only the first few of a tier — SPOT_APART_M apart,
+    the nearest where the hand holds the lid first, each through what every spot must pass (the
+    no-land radius, the measured table under the whole lid and the hand, what is set aside), straight
+    down first, then leaning. The reach of every place that passes is asked; where those are more than
+    WHOLE_TABLE_TRIES, of that many of them evenly from the nearest to the farthest: the whole of the
+    table, not the corner of it nearest the hand."""
+    from box_opening.runtime import approach
+
+    chain = _Chain()  # its hand stands at [0.5, -0.4]
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    hand = (0.5, -0.4)
+    bare = _bare(monkeypatch, ctx)  # 1.2 m across, all of it seen bare
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    tiers = [d for d, _t, _s in rlo.spot_candidates(ctx, bare, -0.07, [0.0] * 7, reach=lambda *a: None)]
+    far_tier = max(math.hypot(d.xyz[0] - bx, d.xyz[1] - by) for d in tiers)
+    assert far_tier < 0.46  # the tiers look no further from the box than this (NEAREST_MAX_M)
+    passed = rlo.SpotsPassed()
+    wide = list(rlo.wider_candidates(ctx, bare, -0.07, [0.0] * 7, reach=lambda *a: None, passed=passed))
+    assert {tier for _d, tier, _s in wide} == {"the whole table"} == {rlo.WHOLE_TABLE}
+    assert "anywhere on the table the cameras measured" in wide[0][2]
+    straight = [d for d, _t, _s in wide if rlo._spot_lean(d) == 0.0]
+    assert len(straight) == rlo.WHOLE_TABLE_TRIES == 48 and [d for d, _t, _s in wide[:48]] == straight
+    out = [math.hypot(d.xyz[0] - hand[0], d.xyz[1] - hand[1]) for d in straight]
+    assert out == sorted(out)  # the nearest the hand first
+    # the whole table: from one side of what the map saw to the other, far past where the tiers look
+    x0, x1, y0, y1 = rlo.clear_table.table_bounds(bare)
+    xs, ys = [d.xyz[0] for d in straight], [d.xyz[1] for d in straight]
+    assert min(xs) < x0 + 0.3 and max(xs) > x1 - 0.3 and min(ys) < y0 + 0.3 and max(ys) > y1 - 0.3
+    assert max(math.hypot(d.xyz[0] - bx, d.xyz[1] - by) for d in straight) > far_tier
+    every = rlo._table_points(ctx, bare, -0.07, near=hand)
+    assert len(every) > 10 * 48 and passed.no_land > 0  # of some 700 places, the box's own among them, passed over
+    for i, d in enumerate(straight):
+        assert type(d) is ContainerPose and rlo.box_clearance(ctx, d) >= 0.0
+        assert rlo.spot_off_table(ctx, bare, d, [0.0] * 7) is None
+        for e in straight[:i]:
+            assert math.hypot(d.xyz[0] - e.xyz[0], d.xyz[1] - e.xyz[1]) >= rlo.clear_table.SPOT_APART_M - 1e-9
+    # then the same table with the hand leaning SETDOWN_LEAN_DEG; the fake chain's hand does not hold the
+    # lid level, so nothing past that lean lands as it must (landing_tilt_deg): none of those is offered
+    leaning = [d for d, _t, _s in wide[48:]]
+    assert len(leaning) == 48 and all(
+        isinstance(d, rlo.LeanSpot) and d.lean_deg == rlo.SETDOWN_LEAN_DEG for d in leaning
+    )
+    assert "past every spot straight down: the hand leaning 20 deg" in wide[48][2] and passed.tilted > 0
+    # a table with no more places than a pass asks the reach of: every one of them that passes, in order
+    small = _standing_ring((bx, by), 5.0, 6.0)
+    X, Y = small.centres()
+    seen = (np.abs(X - (bx + 0.35)) < 0.18) & (np.abs(Y - by) < 0.18)  # a patch of table 0.36 m across
+    small = type(small)(small.x0, small.y0, small.cell, small.tall, seen, small.off, small.box_xy)
+    pts = rlo._table_points(ctx, small, -0.07, near=hand)
+    roomless = rlo.SpotsPassed()
+    few = rlo.wider_candidates(ctx, small, -0.07, [0.0] * 7, reach=lambda *a: None, passed=roomless)
+    few = [d for d, _t, _s in few if rlo._spot_lean(d) == 0.0]
+    assert 4 < len(few) < len(pts) < rlo.WHOLE_TABLE_TRIES  # (near the patch's edge the hand would hang past it)
+
+    def fits(d):
+        """On the measured table, the whole lid and the hand; and with a clear spot's room there."""
+        lid_r, lid_h = 0.5 * max(ctx.model.lid_dims[:2]), ctx.model.lid_dims[2]
+        room = rlo.clear_table.clearance(small, d.xyz[:2], rlo.setdown_poses(ctx, d)[0], lid_r, lid_h)[0]
+        return rlo.spot_off_table(ctx, small, d, [0.0] * 7) is None and room >= 0.0
+
+    assert [d.xyz for d in few] == [d.xyz for d in pts if fits(d)]
+    # ... the room a 'clear' spot has, which the whole table's places were not asked at all (the review of
+    # 2026-11-19): on the measured table by the gate, and nearer what was not seen than the lid or the hand
+    # may come — passed over, counted, said
+    gated = [d for d in pts if rlo.spot_off_table(ctx, small, d, [0.0] * 7) is None]
+    assert roomless.tight == len(gated) - len(few) > 0
+    assert "%d with less room for the lid and the hand than a spot must have" % roomless.tight in roomless.says()
+    assert rlo._thinned(list(range(10)), 48) == list(range(10))
+    assert rlo._thinned(list(range(96)), 48) == list(range(0, 96, 2))
+    # a spot offered before is not offered again, and what is set aside is passed over here too
+    skip = {rlo._spot_key(straight[0])}
+    aside = lambda d: d.xyz[:2] == straight[1].xyz[:2]  # noqa: E731
+    got = [
+        d
+        for d, _t, _s in rlo.wider_candidates(
+            ctx, bare, -0.07, [0.0] * 7, reach=lambda *a: None, skip=skip, aside=aside
+        )
+    ]
+    assert straight[0].xyz not in [d.xyz for d in got if rlo._spot_lean(d) == 0.0]
+    assert straight[1].xyz not in [d.xyz for d in got]
+    # the run's time, asked before each reach check, ends the search
+    asked = []
+    stop = lambda: len(asked) >= 3  # noqa: E731
+    reach = lambda c, d, q, seeds=(): asked.append(d) or "no"  # noqa: E731
+    assert list(rlo.wider_candidates(ctx, bare, -0.07, [0.0] * 7, reach=reach, stop=stop)) == [] and len(asked) == 3
+    # no map: no place on any table
+    assert list(rlo.wider_candidates(ctx, None, -0.07, [0.0] * 7, reach=lambda *a: None)) == []
+
+
+def test_a_place_with_something_standing_in_the_lids_way_to_it_is_passed_over(ctx, monkeypatch):
+    """The lid's way to a wider spot, and to any spot from one it was left at, is the straight line
+    from where the hand holds it, asked against what the map shows standing taller than the lid is
+    carried: the planner is told nothing of what stands on the table, and a 'clear' spot's room holds
+    the way from the box only. A wall between the hand and a place: passed over, counted, never a try."""
+    from box_opening.perception.clear_table import TableMap
+    from box_opening.runtime import approach
+
+    chain = _Chain()  # its hand stands at [0.5, -0.4]
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    monkeypatch.setattr(rlo, "lid_spots", lambda *a, **k: ([], "none judged"))
+    hand = (0.5, -0.4)
+    wall_y = hand[1] + 0.25
+    ctx.cpose = ContainerPose(xyz=(hand[0], hand[1] + 0.45, ctx.cpose.xyz[2]), yaw=0.0)  # the box past the wall
+    # a table seen bare 1.2 m across round the hand, a wall 0.30 m tall right across it
+    bare = _standing_ring(hand, 5.0, 6.0)
+    _X, Y = bare.centres()
+    tall = np.where(np.abs(Y - wall_y) < 0.021, 0.30, np.nan)
+    walled = TableMap(bare.x0, bare.y0, bare.cell, tall, bare.seen, bare.off, bare.box_xy)
+
+    def behind(d):
+        return d.xyz[1] > wall_y
+
+    passed = rlo.SpotsPassed()
+    wide = [
+        d for d, _t, _s in rlo.wider_candidates(ctx, walled, -0.07, [0.0] * 7, reach=lambda *a: None, passed=passed)
+    ]
+    assert wide and passed.blocked > 0 and not any(behind(d) for d in wide)
+    assert "with something standing in the lid's way there" in passed.says()
+    # the tiers ask it only of a carry that starts from a spot the lid was left at (`way`)
+    tiers = [d for d, _t, _s in rlo.spot_candidates(ctx, walled, -0.07, [0.0] * 7, reach=lambda *a: None)]
+    asked = [d for d, _t, _s in rlo.spot_candidates(ctx, walled, -0.07, [0.0] * 7, reach=lambda *a: None, way=True)]
+    assert any(behind(d) for d in tiers) and asked and not any(behind(d) for d in asked)
+
+
+def _leaning_grip(ctx, at_xy, lean_deg):
+    """A chain whose hand holds the lid leaning `lean_deg` back toward the arm, facing `at_xy`."""
+    from box_opening.perception.d405 import quat_to_mat
+
+    return _HandAt(0.45, R=np.asarray(quat_to_mat(*rp.reach_quat(ctx.model, at_xy, lean_deg)), float))
+
+
+@pytest.mark.parametrize("grip_lean, offered", [(0.0, False), (9.0, False), (11.0, True), (30.0, True)])
+def test_the_hand_leans_past_20_deg_only_last_and_only_where_the_lid_still_lands_as_at_20(
+    ctx, monkeypatch, grip_lean, offered
+):
+    """SETDOWN_LEAN_MAX_DEG: past every spot straight down and at SETDOWN_LEAN_DEG the hand leans as far
+    as the press's own look pose does (reach_press.REACH_TILTS_DEG's first, 30 deg). 20 was chosen for
+    how the lid lands — tilted 20 deg at most, its far edge falling 36 mm — and that is kept: a hand
+    leaning 30 deg is offered only where the lid, level as the grip took it, lands tilted no more than
+    20 (landing_tilt_deg): where the grip itself leaned 10 deg or more the same way, as it does over
+    the far boxes that need this."""
+    from box_opening.runtime import approach
+
+    assert rlo.SETDOWN_LEAN_MAX_DEG == 30.0 == rp.REACH_TILTS_DEG[0] and rlo.SETDOWN_LEAN_DEG == 20.0
+    bare = _bare(monkeypatch, ctx)
+    spot = rlo._table_points(ctx, bare, -0.07)[0]
+    chain = _leaning_grip(ctx, spot.xyz[:2], grip_lean)
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    deep = rlo.LeanSpot(xyz=spot.xyz, yaw=0.0, lean_deg=rlo.SETDOWN_LEAN_MAX_DEG)
+    assert rlo.landing_tilt_deg(ctx, deep, [0.0] * 7) == pytest.approx(30.0 - grip_lean, abs=1e-3)
+    asked = []
+
+    def only_past_20(ctx_, d, q, seeds=()):
+        asked.append(rlo._spot_lean(d))
+        return None if rlo._spot_lean(d) > rlo.SETDOWN_LEAN_DEG else "no hand reaches its carry height"
+
+    passed = rlo.SpotsPassed()
+    got = next(rlo.wider_candidates(ctx, bare, -0.07, [0.0] * 7, reach=only_past_20, passed=passed), None)
+    assert asked[0] == 0.0 and 20.0 in asked and asked == sorted(asked)  # straight down, then 20, and only then 30
+    if not offered:
+        assert got is None and 30.0 not in asked and passed.tilted > 0
+        assert "where the hand leaning 30 deg would land the lid tilted more than 20" in passed.says()
+        return
+    drop, tier, says = got
+    assert isinstance(drop, rlo.LeanSpot) and drop.lean_deg == 30.0
+    assert rlo.landing_tilt_deg(ctx, drop, [0.0] * 7) <= 20.5
+    assert "past every spot at 20 deg too: the hand leaning 30 deg" in says
+    # ... and no tier of spot_candidates ever leans past 20
+    assert all(
+        rlo._spot_lean(d) <= 20.0
+        for d, _t, _s in rlo.spot_candidates(ctx, bare, -0.07, [0.0] * 7, reach=lambda *a: None)
+    )
+
+
+class _HandAtQ(_Chain):
+    """A chain whose tool stands at its first three joints' values (x, y, z), the hand leaning the
+    fourth's degrees back toward the arm, facing `facing` (reach_press.reach_quat)."""
+
+    def __init__(self, model, facing):
+        super().__init__()
+        self.model, self.facing = model, facing
+
+    def fk(self, q):
+        from box_opening.perception.d405 import quat_to_mat
+
+        R = np.asarray(quat_to_mat(*rp.reach_quat(self.model, self.facing, float(q[3]))), float)
+        return R, np.array([float(q[0]), float(q[1]), float(q[2])])
+
+
+def test_a_carry_that_would_bring_the_lid_under_the_top_it_came_off_over_the_canister_is_refused(ctx, monkeypatch):
+    """lid_low_over_box: leaning 30 deg the chair study's carry "put the lid below the rim over the
+    canister" in 6 rows (SETDOWN_LEAN_DEG's note: why 20 was chosen), and a carry from one spot to the
+    next may cross the box, which stands open by then. Anywhere on such a carry's way where the lid's
+    disc stands over the box, its lowest point stays over the top it came off, or the carry is refused
+    (plan_carry: asked of every carry to a hand leaning past 20 deg, and wherever `over_box` says)."""
+    from conftest import leg as make_leg
+
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_contact import pads_z
+    from box_opening.tasks.press_demo import container_half
+
+    m = ctx.model
+    bx, by = float(ctx.cpose.xyz[0]), float(ctx.cpose.xyz[1])
+    chain = _HandAtQ(m, (bx, by))
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    top = float(ctx.cpose.xyz[2]) + float(m.dims[2])
+    lid_r, lid_h = 0.5 * max(m.lid_dims[:2]), float(m.lid_dims[2])
+    held = [bx, by, 0.5, 0.0, 0.0, 0.0, 0.0]  # the lid hangs level in a hand straight down
+    tool_over_pads = 0.5 - pads_z(chain, held)
+
+    def at(x, y, low):
+        """Joints with the level lid's lowest point `low` over the box's top, its centre at (x, y)."""
+        return [x, y, top + low + lid_h - rlo.GRIP_BELOW_LID_M + tool_over_pads, 0.0, 0.0, 0.0, 0.0]
+
+    # the lid hangs LID_HANG_M lower than the model's cap puts it (the 19 set-downs flown to their end met the
+    # table 13 mm over the plan in the mean): every height here is asked of the lid that much lower. The
+    # check had no margin at all (the review of 2026-11-19)
+    hang = rlo.LID_HANG_M
+    assert hang == pytest.approx(0.013)
+    assert rlo.lid_low_over_box(ctx, [at(bx, by, 0.04), at(bx + 0.3, by, 0.04)], held) is None  # as a hover holds it
+    assert rlo.lid_low_over_box(ctx, [at(bx, by, hang + 0.001)], held) is None
+    assert "would pass 12 mm under the top it came off" in rlo.lid_low_over_box(ctx, [at(bx, by, 0.001)], held)
+    why = rlo.lid_low_over_box(ctx, [at(bx + 0.3, by, 0.04), at(bx, by, hang - 0.010), at(bx - 0.3, by, 0.04)], held)
+    assert why == "the lid's lowest point would pass 10 mm under the top it came off, over the open canister"
+    # between its waypoints too: two of them clear of the box either side, the straight joint line between them over it
+    low = hang - 0.010
+    assert rlo.lid_low_over_box(ctx, [at(bx - 0.3, by, low), at(bx + 0.3, by, low)], held) == why
+    edge = container_half(m) + lid_r
+    assert rlo.lid_low_over_box(ctx, [at(bx + edge - 0.005, by, low)], held) is not None  # its rim over the box's
+    assert rlo.lid_low_over_box(ctx, [at(bx + edge + 0.005, by, low)], held) is None  # beside the box: not asked
+    # the lid's top as the fingers took it, where that stands higher than the cameras' top of the box
+    ctx.lid_lifted = SimpleNamespace(q_grip=at(bx, by, 0.030 - lid_h))  # gripped with its top 30 mm over theirs
+    assert rlo.lid_low_over_box(ctx, [at(bx, by, hang + 0.020)], held) is not None
+    assert rlo.lid_low_over_box(ctx, [at(bx, by, hang + 0.031)], held) is None
+    ctx.lid_lifted = None
+    # a hand leaning 30 deg: the lid, level as gripped, hangs its low edge lower. Where a leaning set-down
+    # has the lid's lowest point meet a table at the height of the box's top (setdown_poses' own answer for
+    # such a spot, over the box), that is exactly where this draws the line
+    over = rlo.LeanSpot(xyz=(bx, by, top), yaw=0.0, lean_deg=30.0)
+    _quat, contact, _hover = rlo.setdown_poses(ctx, over, held=held)
+    assert rlo.lid_low_over_box(ctx, [[contact[0], contact[1], contact[2] + hang, 30.0, 0.0, 0.0, 0.0]], held) is None
+    lower = [contact[0], contact[1], contact[2] + hang - 0.005, 30.0, 0.0, 0.0, 0.0]
+    assert "would pass 5 mm under the top it came off" in rlo.lid_low_over_box(ctx, [lower], held)
+    # plan_carry asks it of a hand leaning past 20 deg and wherever over_box says, and of no other carry
+    monkeypatch.setattr(approach, "_chain", lambda: _Chain())
+    cfg = load_press_demo(PINK)
+    asked = []
+    monkeypatch.setattr(rlo, "lid_low_over_box", lambda ctx_, pts, held_: asked.append(list(held_)) or "too low")
+
+    def plan(ctx_, state, name, target, world, speed):
+        lg = make_leg(name, start=list(state.joints), end=[v + 0.05 for v in state.joints], speed=speed, world=world[0])
+        lg.target = target
+        return lg, state
+
+    monkeypatch.setattr(rp, "_plan_motion", plan)
+    drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
+    q = [0.1] * 7
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop)
+    assert carry is not None and why is None and asked == []  # the first spot's carry: as it was
+    carry, why = rlo.plan_carry(ctx, cfg, q, rlo.LeanSpot(xyz=drop.xyz, yaw=0.0, lean_deg=20.0))
+    assert carry is not None and asked == []
+    # ... and where the planner's path is refused for it, the arm's own walk is tried before the spot is
+    # refused (this chain has none)
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, over_box=True)
+    assert carry is None and why == "the carry (too low; walked: no turning walk modelled)" and asked == [[0.2] * 7]
+    carry, why = rlo.plan_carry(ctx, cfg, q, rlo.LeanSpot(xyz=drop.xyz, yaw=0.0, lean_deg=30.0))
+    assert carry is None and why == "the carry (too low; walked: no turning walk modelled)"
+    assert asked[-1] == q  # held: where the carry starts
+
+
+def test_from_a_spot_left_the_next_is_chosen_with_the_lid_as_the_grip_took_it_and_kept_off_the_canister(
+    ctx, monkeypatch, tmp_path
+):
+    """The first carry begins where the clear ends, the hand as the grip had it: the lid hangs level
+    there, and setdown_poses takes the carry's start for that. A carry from a spot the lid was left at
+    begins with the hand as that set-down had it (turned to the spot, leaning): the joints the lid hangs
+    level at are still the first carry's start (SpotSearch.held), handed to the reach checks and to
+    plan_carry, with over_box: such a carry's way may cross the open canister."""
+    real_plan, real_reach, plans, reaches = rlo.plan_carry, rlo.drop_reachable, [], []
+
+    def plan(ctx_, cfg_, q, drop, **kw):
+        plans.append((list(q), kw))
+        return real_plan(ctx_, cfg_, q, drop, **kw)
+
+    def reach(ctx_, drop, q, seeds=(), held=None, stands=None):
+        reaches.append((list(q), held, stands))
+        return real_reach(ctx_, drop, q, seeds, held=held, stands=stands)
+
+    monkeypatch.setattr(rlo, "plan_carry", plan)
+    monkeypatch.setattr(rlo, "drop_reachable", reach)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 0 and len(plans) == 2
+    clear_end = rec.legs["lid:clear"].goal_joints
+    (q1, kw1), (q2, kw2) = plans
+    assert q1 == pytest.approx(clear_end) and kw1 == {}  # the first spot's: planned as it always was
+    assert q2 != pytest.approx(q1) and kw2["over_box"] is True and kw2["held"] == pytest.approx(clear_end)
+    # ... and asked what a later carry is asked (its own path's height and what stands under it, a leaning
+    # hand's way down), the lid as the grip took it there too, over the table the set-down goes by
+    way = kw2["way"]
+    assert (
+        isinstance(way, rlo.LaterWay) and way.held == pytest.approx(clear_end) and way.table_z == pytest.approx(TABLE_Z)
+    )
+    first = [(held, stands) for q, held, stands in reaches if q == pytest.approx(q1)]
+    later = [(held, stands) for q, held, stands in reaches if q == pytest.approx(q2)]
+    assert first and all(h is None and st is None for h, st in first)
+    assert later and all(h == pytest.approx(clear_end) and st is not None for h, st in later)
+
+
+def _no_other_spot_on_the_first_map(monkeypatch):
+    """The tiers and the wider search give nothing for a carry from a spot left, on the first map they
+    are asked about: the map in hand has no other spot. Returns the maps asked about, in order."""
+    real, maps = rlo.spot_candidates, []
+
+    def tiers(ctx_, tmap, *a, **k):
+        if k.get("aside") is not None:
+            if not any(tmap is seen for seen in maps):
+                maps.append(tmap)
+            if tmap is maps[0]:
+                return iter(())
+        return real(ctx_, tmap, *a, **k)
+
+    real_wider = rlo.wider_candidates
+    monkeypatch.setattr(rlo, "spot_candidates", tiers)
+    monkeypatch.setattr(
+        rlo,
+        "wider_candidates",
+        lambda ctx_, tmap, *a, **k: iter(()) if maps and tmap is maps[0] else real_wider(ctx_, tmap, *a, **k),
+    )
+    return maps
+
+
+def test_where_the_map_in_hand_has_no_other_spot_the_wrist_looks_from_where_the_arm_stands_and_the_search_goes_again(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The spot chosen ahead was chosen on the scene camera's map alone, made before the press from 14 cm
+    over the table. Its set-down felt no table, and that map has no other spot for the lid: before the
+    box, the wrist looks at the table from where the arm stands with the lid (the map may be stale, and
+    from above the wrist sees table the scene camera does not), its frame is pooled in, and the search
+    goes again on that map. Here it shows a spot, and the lid goes there."""
+    maps = _no_other_spot_on_the_first_map(monkeypatch)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, wrist=_table(), setdown=["never", "met"]
+    )
+    assert code == 0 and _after_first_touch(rec) == ["lid:back-up", "spot-look", *CARRY, *HOME]
+    assert len(maps) == 2 and maps[1] is not maps[0]
+    (look,) = (r for r in rows if r["leg"] == "lid_look_again")
+    assert look["wrist_points"] > 0 and look["mapped"] is True and look["looks"] == 1
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert spots[1]["looked_again"] is True and spots[1]["searched"] == ["the tiers", "wider", "the tiers"]
+    out = capsys.readouterr().out
+    assert "no spot on the map in hand, which was made before the arm stood here: the wrist looks" in out
+
+
+def test_a_wrist_look_that_adds_nothing_leaves_the_box_and_the_arm_looks_once_a_stand(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """No other spot on the map in hand, and the wrist's look from where the arm stands gives no points:
+    no spot is left to try, and the lid goes back on the box from over the spot it was left at — said
+    with every spot it was taken to. And a map made with the wrist's frame from where the arm stands is
+    not looked at again from there (the spot look after the lift: choose_and_carry's)."""
+    _no_other_spot_on_the_first_map(monkeypatch)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, setdown=["never", "met"]
+    )
+    assert code == 1 and "place:open" not in rec.events and len(rec.setdowns) == 1
+    assert _after_first_touch(rec) == [
+        "lid:back-up",
+        "spot-look",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    (look,) = (r for r in rows if r["leg"] == "lid_look_again")
+    assert look["wrist_points"] == 0 and look["mapped"] is False
+    out = capsys.readouterr().out
+    assert "PUT BACK: no table was felt under the lid (spot 1 at [" in out
+    assert "and no other spot on the table the cameras measured has a carry that plans" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+    # the spot look after the lift made the map where the arm stands: no second look from there
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, refuse_carry=True, one_motion=False
+    )
+    assert code == 1 and rec.events.count("spot-look") == 1
+
+
+def test_on_run_1s_map_the_spots_after_the_first_are_all_on_the_measured_table_and_off_what_was_left(
+    monkeypatch, capsys
+):
+    """Flatbot 2026-11-17 16:40 once more (its map, its extent, flatbot's bare arm from the joints the
+    carry began at): where the first spot's set-down feels no table, what follows is never the spot
+    that run let the lid go at, in front of the table's edge — every spot the tiers and the wider search
+    offer has the whole lid on table the cameras measured, a lid's width from the spot left. Which
+    spots there are at each lean is printed for the record: at 20 deg the hand reaches two, 4 cm apart,
+    so the second spot is one the hand leans 30 deg to. (No body model here, and so no leaning hand's
+    body asked of what stands: the run asks it, and three of these six are then no spot —
+    test_on_run_1s_map_the_carry_to_every_further_spot_is_the_walk_where_the_joint_space_way_is_refused.)"""
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(root="arm_mount", path=flatbot_urdf())
+    ctx, tmap = _run1(monkeypatch, chain)
+    monkeypatch.setattr(approach, "body_check", lambda: None, raising=False)
+    q = flown.RUN1_Q_CLEAR
+    first = next(rlo.spot_candidates(ctx, tmap, flown.RUN1_TABLE_Z, q))[0]
+    search = rlo.SpotSearch(ctx, None, None, None, tmap, flown.RUN1_TABLE_Z, flown.RUN1_TABLE_Z, held=q)
+    search.leave(first, "clear", "never", "the touch ended ...")
+    common = dict(aside=search.aside, held=q)
+    tiers = list(rlo.spot_candidates(ctx, tmap, flown.RUN1_TABLE_Z, q, way=True, **common))
+    passed = rlo.SpotsPassed()
+    wider = list(rlo.wider_candidates(ctx, tmap, flown.RUN1_TABLE_Z, q, passed=passed, **common))
+    old = ContainerPose(xyz=(*flown.RUN1_SPOT, flown.RUN1_TABLE_Z), yaw=0.0)
+    wide = max(ctx.model.lid_dims[:2])
+    for d, _tier, _says in tiers + wider:
+        assert rlo.spot_off_table(ctx, tmap, d, q) is None
+        assert math.hypot(d.xyz[0] - first.xyz[0], d.xyz[1] - first.xyz[1]) >= wide
+        assert math.hypot(d.xyz[0] - old.xyz[0], d.xyz[1] - old.xyz[1]) > 0.15
+        assert rlo._spot_lean(d) <= 20.0 or rlo.landing_tilt_deg(ctx, d, q) <= 20.5
+    with capsys.disabled():
+        sys.stdout.write(
+            "\nrun 1 replayed on flatbot's BARE arm, the first spot [%.2f, %.2f] (lean %.0f) left: the tiers then "
+            "offer %d spot(s); the wider search %s (%s)\n"
+            % (
+                first.xyz[0],
+                first.xyz[1],
+                rlo._spot_lean(first),
+                len(tiers),
+                ", ".join(
+                    "[%.2f, %.2f] %s lean %.0f" % (d.xyz[0], d.xyz[1], t, rlo._spot_lean(d)) for d, t, _s in wider
+                )
+                or "none",
+                passed.says(),
+            )
+        )
+
+
+def test_the_wider_search_and_the_second_look_never_take_the_time_the_way_back_to_the_box_needs(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The first spot's tiers are gone through whatever the run's clock says, as they always were. The
+    wider search and the wrist's second look are work a run did not do before 2026-11-19, and with less
+    left than a spot and the way back to the box take (31 s) they are not begun: the lid goes back on
+    the box as it did, with the time that takes still in hand. The clock is asked before the wider
+    search's own work, too: going through the table's places took 1-3 s before the first reach check
+    asked it (the review of 2026-11-19)."""
+    _budget(monkeypatch, 25.0)
+    real, went = rlo._table_points, []
+    monkeypatch.setattr(rlo, "_table_points", lambda *a, **k: went.append(1) or real(*a, **k))
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, refuse_carry=True
+    )
+    assert code == 1 and "lid:carry" not in rec.events and rec.events.count("spot-look") == 1
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["refused"].count("IK_FAIL") == rlo.CARRY_TRIES  # the tiers' alone: no wider spot was asked for
+    assert went == [] and spot["searched"] == ["the tiers"]  # ... and none of the table's places gone through
+    out = capsys.readouterr().out
+    assert "and no more of the table is looked at: the run's time holds no spot found later" in out  # why, said
+    assert " s are left, they take 31)" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+def test_the_wrists_second_look_is_not_begun_where_the_runs_time_does_not_hold_a_spot_after_it(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """No other spot on the map in hand, and by then less of the run's time than a spot and the way back
+    to the box take: the wrist does not look again (a second or two with the arm standing, and a map to
+    judge), and the lid goes back on the box from over the spot it was left at."""
+    _no_other_spot_on_the_first_map(monkeypatch)
+    left = iter([40.0, 40.0] + [20.0] * 10)
+    monkeypatch.setattr(rlo.RunClock, "left_s", lambda self: next(left))
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, wrist=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and "spot-look" not in rec.events and len(rec.setdowns) == 1
+    assert _after_first_touch(rec) == [
+        "lid:back-up",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    assert not [r for r in rows if r["leg"] == "lid_look_again"]
+    assert capsys.readouterr().out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+def test_a_spot_search_plans_to_no_spot_twice_and_each_search_has_its_own_carry_tries(ctx, monkeypatch, tmp_path):
+    """SpotSearch.pick: the tiers' spots, CARRY_TRIES carries refused at most; then the wider search's,
+    as many again (kept off the canister: plan_carry's over_box); then, where the map in hand was not
+    made with the wrist's frame from where the arm stands, the wrist's look and both once more on the
+    new map — and no spot a carry was refused to is planned to a second time: the planner's answer
+    from the same joints stands."""
+    from box_opening.runtime.runner import Runner
+    from box_opening.tasks import press_demo as pd
+
+    cfg = load_press_demo(PINK)
+    ctx.model = ContainerModel.load(PINK)
+    spots = [ContainerPose(xyz=(0.40 + 0.01 * k, -0.30, -0.07), yaw=0.0) for k in range(14)]
+    planned, maps = [], []
+    monkeypatch.setattr(rlo, "plan_carry", lambda ctx_, cfg_, q, d, **kw: (planned.append((d, kw)), (None, "no"))[1])
+
+    def tiers(ctx_, tmap, *a, **k):
+        maps.append(("the tiers", tmap))
+        return iter([(d, "clear", "clear") for d in spots[:6]])
+
+    def wider(ctx_, tmap, *a, **k):
+        maps.append(("wider", tmap))
+        return iter([(d, rlo.WHOLE_TABLE, "anywhere") for d in spots[4:]])
+
+    monkeypatch.setattr(rlo, "spot_candidates", tiers)
+    monkeypatch.setattr(rlo, "wider_candidates", wider)
+    q = [float(v) for v in ctx.client.joints()]
+    runner = Runner(ctx.client, log_dir=tmp_path)
+    # the map made where the arm stands (the spot look after the lift): the tiers, then wider, and no second look
+    search = rlo.SpotSearch(ctx, cfg, (None, None, None, None), runner, "map 1", -0.07, -0.07, looked_from=q)
+    got = search.pick(runner, q)
+    assert got.carry is None and got.chosen is None and len(got.refused) == 2 * rlo.CARRY_TRIES == 8
+    assert (got.searched, got.looked) == (["the tiers", "wider"], False)
+    assert [d for d, _kw in planned] == spots[:8]  # four of the tiers', then the next four: none twice
+    assert [kw for _d, kw in planned[:4]] == [{}] * 4  # the first spot's tiers: planned as they always were
+    for _d, kw in planned[4:]:  # the wider search's: off the canister, and asked what a later carry is
+        assert kw["held"] is None and kw["over_box"] is True and isinstance(kw["way"], rlo.LaterWay)
+    # a map not made from here (the scene camera's alone): the wrist looks, and both go once more on its map
+    planned.clear()
+    maps.clear()
+    monkeypatch.setattr(rlo, "spot_look", lambda node, watcher, runner_: np.zeros((5, 3)))
+    monkeypatch.setattr(rlo, "spot_map", lambda *a, **k: (maps.append(("spot_map", len(k["more"]))), "map 2")[1])
+    monkeypatch.setattr(pd, "keep_out_counter", lambda *a, **k: None)
+    search = rlo.SpotSearch(ctx, cfg, (None, SimpleNamespace(grab=None), None, None), runner, "map 1", -0.07, -0.07)
+    got = search.pick(runner, q)
+    assert got.carry is None and got.looked is True and search.tmap == "map 2" and search.looked_from == q
+    assert got.searched == ["the tiers", "wider", "the tiers", "wider"]
+    assert maps == [
+        ("the tiers", "map 1"),
+        ("wider", "map 1"),
+        ("spot_map", 1),
+        ("the tiers", "map 2"),
+        ("wider", "map 2"),
+    ]
+    assert [d for d, _kw in planned] == spots[:12] and len(got.refused) == 12  # ... and still none twice
+    # a carry that plans ends the search there
+    monkeypatch.setattr(rlo, "plan_carry", lambda ctx_, cfg_, q_, d, **kw: ("the carry", None))
+    got = rlo.SpotSearch(ctx, cfg, (None, None, None, None), runner, "map 1", -0.07, -0.07, looked_from=q).pick(
+        runner, q
+    )
+    assert (got.carry, got.chosen, got.searched) == ("the carry", (spots[0], "clear", "clear"), ["the tiers"])
+
+
+def test_a_spots_reach_is_judged_once_from_the_same_joints(ctx, monkeypatch):
+    """_Reach keeps its own verdicts too: a spot asked about again in the same search (the tiers gone
+    through once more after the wrist's look) is not solved again, and the lid's own joints (`held`)
+    go to each check."""
+    calls = []
+    monkeypatch.setattr(
+        rlo, "drop_reachable", lambda ctx_, d, q, seeds=(), held=None: calls.append((d, held)) or "no hand reaches it"
+    )
+    reach = rlo._Reach(held=[0.3] * 7)
+    d = ContainerPose(xyz=(0.4, -0.3, -0.07), yaw=0.0)
+    assert reach(ctx, d, [0.0] * 7) == "no hand reaches it" == reach(ctx, d, [0.0] * 7)
+    assert calls == [(d, [0.3] * 7)] and len(reach.found) == 1
+
+
+# ---- the fix round of 2026-11-19: what a carry after the first is asked, the leaning hand, "held" --------------
+
+
+class _Dips(_HandAtQ):
+    """_HandAtQ whose tool also sinks 0.2 m times the sine of pi times its fifth joint: between two
+    waypoints at one height with that joint at 0 and 1, the straight joint line dips 0.2 m."""
+
+    def fk(self, q):
+        R, t = super().fk(q)
+        return R, t - np.array([0.0, 0.0, 0.2 * math.sin(math.pi * float(q[4]))])
+
+
+def _block(tmap, xy, tall, half=0.03):
+    """`tmap` with a thing `tall` standing on the square of half-width `half` round `xy`."""
+    from box_opening.perception.clear_table import TableMap
+
+    X, Y = tmap.centres()
+    on = (np.abs(X - xy[0]) <= half) & (np.abs(Y - xy[1]) <= half)
+    return TableMap(
+        tmap.x0, tmap.y0, tmap.cell, np.where(on, tall, tmap.tall), tmap.seen | on, tmap.off & ~on, tmap.box_xy
+    )
+
+
+def test_a_carry_after_the_first_is_asked_its_own_path_at_carry_height_over_the_table_and_what_stands_on_it(
+    ctx, monkeypatch
+):
+    """lid_way_refusal (the review of 2026-11-19): the carry from one spot to the next crosses the table
+    from a set-down's attitude, the planner's world holds no table, and a joint-space line between two
+    hovers left the straight chord by 36-174 mm and sank up to 117 mm, to 80 mm over the table, on
+    flatbot's URDF. Along the path as the arm flies it, between its waypoints too: the lid's lowest point
+    never more than CARRY_SAG_M under the lower of its two ends, and nothing the map shows standing under
+    the path it sweeps taller than the lid passes there (the lid LID_HANG_M lower than the model's cap)."""
+    from box_opening.runtime import approach
+    from box_opening.tasks.press_contact import pads_z
+
+    m = ctx.model
+    chain = _Dips(m, (0.6, 0.0))
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    table = -0.07
+    lid_h = float(m.lid_dims[2])
+    held = [0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0]
+    tool_over_pads = 0.5 - pads_z(chain, held)
+
+    def at(x, y, over, dip=0.0):
+        """Joints with the level lid's lowest point (the model's) `over` the table, its centre at (x, y)."""
+        return [x, y, table + over + lid_h - rlo.GRIP_BELOW_LID_M + tool_over_pads, 0.0, dip, 0.0, 0.0]
+
+    bare = _standing_ring((0.5, 0.0), 5.0, 6.0)
+    a, b = (0.3, -0.3), (0.7, 0.3)
+    # a straight line at carry height, as the arm's own walk between two hovers flies it
+    level = [at(*a, 0.15), at(0.5, 0.0, 0.15), at(*b, 0.15)]
+    assert rlo.lid_way_refusal(ctx, bare, level, held, table) is None
+    # ... sinking no more than CARRY_SAG_M under its lower end on the way is still that carry
+    assert rlo.CARRY_SAG_M == pytest.approx(0.010)
+    assert rlo.lid_way_refusal(ctx, bare, [at(*a, 0.15), at(0.5, 0.0, 0.142), at(*b, 0.17)], held, table) is None
+    why = rlo.lid_way_refusal(ctx, bare, [at(*a, 0.15), at(0.5, 0.0, 0.10), at(*b, 0.17)], held, table)
+    assert why == "the lid would sink 50 mm under the height it is carried at on the way, to 87 mm over the table"
+    # between its waypoints too: both at carry height, the joint line between them dipping 0.2 m
+    why = rlo.lid_way_refusal(ctx, bare, [at(*a, 0.15), at(*b, 0.15, dip=1.0)], held, table)
+    assert why is not None and why.startswith("the lid would sink 200 mm under the height it is carried at")
+    assert len(rlo._path_states([at(*a, 0.15), at(*b, 0.15, dip=1.0)])) == 51  # no joint more than 0.02 rad a state
+    # what stands under the path: taller than the lid passes there (it hangs 13 mm lower than the model's cap;
+    # the map's own slack, 20 mm, on top), and only under the path it sweeps
+    low_thing, tall_thing = _block(bare, (0.5, 0.0), 0.10), _block(bare, (0.5, 0.0), 0.13)
+    assert rlo.lid_way_refusal(ctx, low_thing, level, held, table) is None  # 137 mm over the table, 37 over the thing
+    why = rlo.lid_way_refusal(ctx, tall_thing, level, held, table)
+    assert why is not None and "the lid would pass" in why and "the lid 137 mm over the table there" in why
+    assert rlo.lid_way_refusal(ctx, _block(bare, (0.7, -0.3), 0.30), level, held, table) is None  # off the path
+    # the hand over the lid too: something its camera would meet, far taller than the lid passes
+    why = rlo.lid_way_refusal(ctx, _block(bare, (0.5, 0.12), 0.40), level, held, table)
+    assert why is not None and "the wrist camera would pass" in why
+    # the table the set-down goes by, where that stands higher than the cameras': less room over the thing
+    assert rlo.lid_way_refusal(ctx, low_thing, level, held, table + 0.03) is not None
+    assert rlo.lid_way_refusal(ctx, None, level, held, table) is None  # no map: the height alone
+
+
+class _Walks(_Chain):
+    """The fake chain with a walk that flies (straight to its end)."""
+
+    def __init__(self):
+        super().__init__()
+        self.walks = []
+
+    def walk(self, q0, xyz, quat, step_m=None, step_rad=None, max_step_rad=None):
+        self.walks.append(list(xyz))
+        return [list(q0), [v + 0.01 for v in q0]], None
+
+
+def test_a_carry_after_the_first_is_the_arms_own_walk_first_and_the_planners_only_where_it_passes_the_same(
+    ctx, monkeypatch, capsys
+):
+    """plan_carry with a LaterWay: the walk first — a straight line from hover to hover at their height —
+    and the planner's path only where no walk flies, each asked the same (the canister, the carry's height,
+    what stands under it); a spot neither is a way to is refused with both reasons; a leaning set-down's
+    way down is asked too. And with no LaterWay, a planned carry refused for the canister is flown as the
+    walk where that clears it, before the spot is refused: on 2026-11-17 16:40's map the joint-space way to
+    every further spot brought the lid under the canister's top and the walk to each cleared it, and the
+    refusal returned without trying it (the review of 2026-11-19)."""
+    from conftest import leg as make_leg
+
+    from box_opening.runtime import approach
+
+    cfg = load_press_demo(PINK)
+    chain = _Walks()
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    planned, paths, descents = [], [], []
+
+    def plan(ctx_, state, name, target, world, speed):
+        planned.append(name)
+        lg = make_leg(name, start=list(state.joints), end=[v + 0.05 for v in state.joints], speed=speed, world=world[0])
+        lg.target = target
+        return lg, state
+
+    monkeypatch.setattr(rp, "_plan_motion", plan)
+    drop = ContainerPose(xyz=(0.40, -0.30, -0.07), yaw=0.0)
+    q = [0.1] * 7
+
+    class Way:
+        refuse = {}  # how many points a refused path has -> why
+
+        def path(self, pts):
+            paths.append(len(pts))
+            return self.refuse.get(len(pts))
+
+        def descent(self, d, pts):
+            descents.append((d, len(pts)))
+            return self.refuse.get("descent")
+
+    way = Way()
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, way=way)
+    assert (
+        why is None and carry.legs[0].plan_free and planned == [] and len(chain.walks) == 1
+    )  # the walk: no plan asked
+    assert paths == [2] and descents == [(drop, 4)]  # its own path asked; the way down and the touch, 2 points each
+    assert "the lid's way to [0.40, -0.30] is the arm's own walk, a straight line at the height it is carried at" in (
+        capsys.readouterr().out
+    )
+    # the walk's path refused: the planner's, asked the same
+    way.refuse = {2: "the lid would sink 40 mm"}
+    paths.clear()
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, way=way)
+    assert carry is None and planned == ["lid:carry"] and paths == [2, 2]
+    assert why == "the carry (walked: the lid would sink 40 mm; planned: the lid would sink 40 mm)"
+    # ... and taken where it passes (this planner's path has as many points: told apart by the walk failing)
+    way.refuse = {}
+    monkeypatch.setattr(chain, "walk", lambda *a, **k: (None, "IK did not converge 40% of the way"))
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, way=way)
+    assert why is None and not carry.legs[0].plan_free
+    assert "is the planner's (no walk flies: IK did not converge 40% of the way)" in capsys.readouterr().out
+    # a planner that refuses: both said
+    monkeypatch.setattr(
+        rp, "_plan_motion", lambda *a: (_ for _ in ()).throw(RuntimeError("x: MotionGenStatus.IK_FAIL"))
+    )
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, way=way)
+    assert (
+        carry is None
+        and why == "the carry (walked: IK did not converge 40% of the way; planned: MotionGenStatus.IK_FAIL)"
+    )
+    # a leaning set-down's way down refused
+    monkeypatch.setattr(rp, "_plan_motion", plan)
+    way.refuse = {"descent": "the hand leaning there would come 12 mm into what stands 150 mm tall"}
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, way=way)
+    assert (
+        carry is None and why == "the set-down (the hand leaning there would come 12 mm into what stands 150 mm tall)"
+    )
+    # no LaterWay (a hand leaning past 20 deg; over_box): the planner's carry first, and where the canister
+    # refuses it the walk before the spot is refused
+    chain = _Walks()
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    asked = []
+    monkeypatch.setattr(
+        rlo, "lid_low_over_box", lambda ctx_, pts, held_: asked.append(1) or (None if len(asked) > 1 else "too low")
+    )
+    carry, why = rlo.plan_carry(ctx, cfg, q, drop, held=[0.2] * 7, over_box=True)
+    assert why is None and carry.legs[0].plan_free and len(asked) == 2 and len(chain.walks) == 1
+    assert "the planner's carry is no way for the lid (too low): the arm's own walk instead" in capsys.readouterr().out
+
+
+# flatbot's own robot file from the forearm out: the collision spheres of the forearm, the wrist's two links,
+# the bracelet and the 2F-85, copied 2026-11-19 from the file its planner and its body check read on the robot
+# (config/robots/flatbot_fwd8_cams1117/curobo/robot.yaml of its deployment). The tests of what the hand's own
+# body is asked stood on test_body's STOCK_HAND, which has no sphere on either wrist link, and so pinned an
+# accept/refuse line the robot does not have: the wrist is most of what leans arm-side (the review of 2026-11-19).
+FLATBOT_ARM_END = """robot_cfg:
+  kinematics:
+    base_link: arm_mount
+    collision_sphere_buffer: 0.005
+    collision_spheres:
+      arm_forearm_link:
+      - {center: [0.0, 0.0, 0.0], radius: 0.06}
+      - {center: [0.0, -0.06, 0.0], radius: 0.058}
+      - {center: [0.0, -0.12, 0.0], radius: 0.058}
+      - {center: [0.0, -0.17, 0.0], radius: 0.055}
+      arm_spherical_wrist_1_link:
+      - {center: [0.0, 0.0, 0.0], radius: 0.06}
+      - {center: [0.0, 0.0, -0.085], radius: 0.06}
+      arm_spherical_wrist_2_link:
+      - {center: [0.0, 0.0, 0.0], radius: 0.055}
+      - {center: [0.0, -0.085, 0.0], radius: 0.055}
+      arm_bracelet_link:
+      - {center: [0.0, 0.0, -0.045], radius: 0.045}
+      - {center: [0.0, -0.05, -0.045], radius: 0.045}
+      - {center: [0.045, 0.0, -0.05], radius: 0.036}
+      arm_robotiq_85_base_link:
+      - {center: [0.0, 0.0, 0.04], radius: 0.04}
+      - {center: [0.0, 0.0, 0.055], radius: 0.042}
+      - {center: [3.2e-05, 0.04, 0.06], radius: 0.032}
+      - {center: [-3.2e-05, -0.04, 0.06], radius: 0.032}
+      - {center: [-0.04, 3.2e-05, 0.06], radius: 0.032}
+      - {center: [0.04, -3.2e-05, 0.06], radius: 0.032}
+      - {center: [0.0, 0.0, 0.078], radius: 0.035}
+      - {center: [3.6e-05, 0.045, 0.1], radius: 0.026}
+      - {center: [-3.6e-05, -0.045, 0.1], radius: 0.026}
+      - {center: [-0.045, 3.6e-05, 0.1], radius: 0.026}
+      - {center: [0.045, -3.6e-05, 0.1], radius: 0.026}
+      - {center: [3.6e-05, 0.045, 0.13], radius: 0.022}
+      - {center: [-3.6e-05, -0.045, 0.13], radius: 0.022}
+      - {center: [-0.045, 3.6e-05, 0.13], radius: 0.022}
+      - {center: [0.045, -3.6e-05, 0.13], radius: 0.022}
+      - {center: [3.6e-05, 0.045, 0.145], radius: 0.018}
+      - {center: [-3.6e-05, -0.045, 0.145], radius: 0.018}
+      - {center: [-0.045, 3.6e-05, 0.145], radius: 0.018}
+      - {center: [0.045, -3.6e-05, 0.145], radius: 0.018}
+      arm_robotiq_85_left_finger_link:
+      - {center: [-0.010026, -4.3e-05, 0.019663], radius: 0.03}
+      arm_robotiq_85_left_finger_tip_link:
+      - {center: [-0.021578, -3.8e-05, 0.031998], radius: 0.02}
+      arm_robotiq_85_right_finger_link:
+      - {center: [0.010026, 4.1e-05, 0.019663], radius: 0.03}
+      arm_robotiq_85_right_finger_tip_link:
+      - {center: [0.021578, 3.7e-05, 0.031998], radius: 0.02}
+"""
+
+
+def _body_on(chain, tmp_path, monkeypatch, robot=FLATBOT_ARM_END):
+    """flatbot's body model on `chain` (`robot`: its robot file's spheres, flatbot's own from the forearm
+    out; this checkout's hand spheres), no chair: what approach.body_check() hands the run on the robot."""
+    from pathlib import Path
+
+    import test_body as tb
+
+    from box_opening.runtime import approach, body
+
+    pkg = Path(__file__).resolve().parents[1]
+    model = body.load(
+        tb._model_files(tmp_path, [("far", (5.0, 5.0, 5.0), (0.1, 0.1, 0.1))], robot=robot),
+        robot_body=pkg / "config" / "robot_body.yaml",
+    )
+    bd = model.check_for(chain, flatbot_urdf(), "arm_mount")
+    monkeypatch.setattr(approach, "body_check", lambda: bd, raising=False)
+    monkeypatch.setattr(rlo, "_HAND_MODEL_SAID", set())  # (what a run says once of its body model: each test's own)
+    return bd
+
+
+def _leaning_down(ctx, chain, lean, xy):
+    """A leaning set-down where run 1's box and table stood: (the spot, the joint line down to its touch's
+    end from the hover, the unit vector from the arm to the spot)."""
+    q, table = list(flown.RUN1_Q_CLEAR), flown.RUN1_TABLE_Z
+    d = rlo.LeanSpot(xyz=(xy[0], xy[1], table), yaw=0.0, lean_deg=lean)
+    quat, contact, hover = rlo.setdown_poses(ctx, d, held=q)
+    qh = chain.nearest_solution(q, hover, quat, seeds=())
+    down, _why = chain.straight_line(qh, [contact[0], contact[1], contact[2] - rlo.SETDOWN_PAST_M], quat)
+    assert down is not None
+    return d, down, np.array(xy) / math.hypot(*xy)
+
+
+@pytest.mark.parametrize(
+    "lean, xy, back_mm, tall, link",
+    [
+        (30.0, (0.87, 0.03), 120, 0.20, "arm_spherical_wrist_2_link"),
+        (30.0, (0.87, 0.03), 250, 0.30, "arm_spherical_wrist_1_link"),  # only the wrist's first link reaches it
+        (20.0, (0.74, -0.338), 110, 0.20, "arm_spherical_wrist_2_link"),
+        (20.0, (0.74, -0.338), 250, 0.30, "arm_spherical_wrist_1_link"),
+    ],
+)
+def test_a_leaning_hand_is_held_out_of_what_stands_arm_side_of_its_spot_by_its_own_body(
+    monkeypatch, tmp_path, lean, xy, back_mm, tall, link
+):
+    """The gate's hand (clear_table.HAND_PARTS) is a hand straight down: two rectangles over the spot.
+    Leaning back toward the arm the hand's body stands arm-side of the spot, and the rectangles stay where
+    they were. Where the box and the table of 2026-11-17 16:40 stood, with flatbot's arm and flatbot's own
+    spheres of the wrist and hand (the reviews of 2026-11-19, measured again): a thing 6 cm square standing
+    11-25 cm arm-side of the lid's middle — the gate takes the spot, and the wrist comes 28-53 mm into it
+    (20 cm tall 110-120 mm back: the wrist's second link, 38 mm at 20 deg and 48 at 30; 30 cm tall 250 mm
+    back, which nothing but the wrist's first link reaches: 28 and 53). hand_into_standing asks the body
+    model's spheres of the hand and wrist at the set-down's own joints, all the way down: that spot is
+    refused; the same spot with nothing standing there, or with a 12 cm thing 200 mm back, is not; and with
+    no body model nothing can tell, which is itself the refusal."""
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(root="arm_mount", path=flatbot_urdf())
+    ctx, _map = _run1(monkeypatch, chain)
+    tmap = _standing_ring(flown.RUN1_BOX_XY, 5.0, 6.0)  # that run's box and table, seen bare 1.2 m across
+    bd = _body_on(chain, tmp_path, monkeypatch)
+    links, missing = rlo._hand_links(bd)
+    assert missing == [] and "arm_forearm_link" not in links
+    assert links >= {
+        "arm_spherical_wrist_1_link",
+        "arm_spherical_wrist_2_link",
+        "arm_bracelet_link",
+        "arm_robotiq_85_base_link",
+        "arm_end_effector_link",
+    }
+    q, table = list(flown.RUN1_Q_CLEAR), flown.RUN1_TABLE_Z
+    d, down, u = _leaning_down(ctx, chain, lean, xy)
+    thing = _block(tmap, tuple(np.array(xy) - 0.001 * back_mm * u), tall)
+    assert rlo.spot_off_table(ctx, thing, d, q) is None  # the gate, a hand straight down: it takes the spot
+    why = rlo.hand_into_standing(ctx, thing, down, table)
+    assert why is not None and why.startswith("the hand leaning there would come ")
+    assert " mm into what stands %d mm tall" % (1000 * tall) in why and "(%s; 20 mm is kept)" % link in why
+    assert rlo.hand_into_standing(ctx, tmap, down, table) is None  # nothing standing there: the spot is taken
+    low = _block(tmap, tuple(np.array(xy) - 0.200 * u), 0.12)  # ... nor with a 12 cm thing 200 mm arm-side
+    assert rlo.spot_off_table(ctx, low, d, q) is None and rlo.hand_into_standing(ctx, low, down, table) is None
+    way = rlo.LaterWay(ctx, thing, table, q)
+    assert way.descent(d, down) == why
+    assert way.descent(ContainerPose(xyz=d.xyz, yaw=0.0), down) is None  # a hand straight down is the gate's own
+    # the reach check of a later spot asks it (drop_reachable's `stands`), and plan_carry of the lines it flies
+    assert rlo.drop_reachable(ctx, d, q, stands=way.descent) == why
+    assert rlo.drop_reachable(ctx, d, q) is None
+    monkeypatch.setattr(approach, "body_check", lambda: None, raising=False)
+    assert rlo.hand_into_standing(ctx, tmap, down, table) == (
+        "no body model of the hand to hold it, leaning, out of what stands by the spot"
+    )
+
+
+def test_a_body_model_with_no_spheres_on_the_wrist_is_no_model_of_the_hand_for_the_lids_further_spots(
+    monkeypatch, tmp_path, capsys
+):
+    """A Body knows only the links its sphere file names. With a file that gives the wrist's two links no
+    sphere (test_body's STOCK_HAND: the forearm, the bracelet, the 2F-85) the check of a leaning hand asked
+    the bracelet and the gripper and passed whatever the wrist came into: a 30 cm thing 250 mm arm-side of a
+    30 deg spot was taken with the wrist's centre line 3 mm from it — the same thing flatbot's own file
+    refuses by 53 mm (the second review of 2026-11-19). Such a model is no body model for what is asked of
+    the hand past the first spot: no leaning set-down is taken (the refusal says what the file lacks), a
+    later carry is asked of the lid and a top-down hand alone, and the run says so, once."""
+    import test_body as tb
+
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(root="arm_mount", path=flatbot_urdf())
+    ctx, _map = _run1(monkeypatch, chain)
+    bare = _standing_ring(flown.RUN1_BOX_XY, 5.0, 6.0)
+    q, table = list(flown.RUN1_Q_CLEAR), flown.RUN1_TABLE_Z
+    d, down, u = _leaning_down(ctx, chain, 30.0, (0.87, 0.03))
+    thing = _block(bare, tuple(np.array((0.87, 0.03)) - 0.250 * u), 0.30)
+    (tmp_path / "own").mkdir()
+    (tmp_path / "stock").mkdir()
+    _body_on(chain, tmp_path / "own", monkeypatch)
+    assert " mm into what stands 300 mm tall" in rlo.hand_into_standing(ctx, thing, down, table)
+    capsys.readouterr()
+    bd = _body_on(chain, tmp_path / "stock", monkeypatch, robot=tb.STOCK_HAND)
+    links, missing = rlo._hand_links(bd)
+    assert missing == ["the wrist's first link", "the wrist's second link"]
+    assert "arm_bracelet_link" in links and "arm_spherical_wrist_1_link" not in links
+    lacks = "the body model has no spheres on the wrist's first link or the wrist's second link"
+    refusal = lacks + ": no model of the hand to hold it, leaning, out of what stands by the spot"
+    assert rlo.hand_into_standing(ctx, thing, down, table) == refusal
+    assert rlo.hand_into_standing(ctx, bare, down, table) == refusal  # nothing standing: still no model of it
+    way = rlo.LaterWay(ctx, thing, table, q)
+    assert way.descent(d, down) == refusal and rlo.drop_reachable(ctx, d, q, stands=way.descent) == refusal
+    # a carry is asked by the checks that need no model of the hand: this one of the hand's body is not made
+    assert rlo.hand_way_refusal(ctx, thing, down, table) is None
+    out = capsys.readouterr().out
+    assert out.count(lacks) == 1  # said once, however often it was asked
+    assert "no leaning set-down is taken past the first spot's own" in out
+    # a body that does not say what moves its links, or on an arm of fewer joints than a wrist has: none of it
+    assert rlo._hand_links(SimpleNamespace()) == (
+        set(),
+        ["the wrist's first link", "the wrist's second link", "the hand"],
+    )
+    paths = {"hand": [(None, None, 0, 0), (None, None, 1, 1)]}
+    assert rlo._hand_links(SimpleNamespace(paths=paths, index={"a": 0, "b": 1}))[1] == [
+        "the wrist's first link",
+        "the wrist's second link",
+        "the hand",
+    ]
+
+
+def test_on_run_1s_map_the_carry_to_every_further_spot_is_the_walk_where_the_joint_space_way_is_refused(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Flatbot 2026-11-17 16:40's map, its arm, the lid as gripped there, from the hover over the first
+    spot once it is left. The planner is stood in for by a joint-space line to the next hover (no planner
+    offline). To every further spot the search offers, that line brings the lid 23-26 mm under the top it
+    came off, over the open canister, and under the height it is carried at; the arm's own walk to each
+    clears both, the lid 150 mm over the table all the way and the hand's own body clear of what stands.
+    plan_carry flies the walk — it returned the canister's refusal without trying it, and the run would
+    have stood 15-20 s with the lid and then put it back on the box (the review of 2026-11-19). And the
+    further spots are fewer than they were: three of the six the first version offered had the leaning
+    hand come down within a finger of what stands 55-65 mm tall beside them."""
+    from conftest import leg as make_leg
+
+    from box_opening.runtime import approach
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(root="arm_mount", path=flatbot_urdf())
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    _body_on(chain, tmp_path, monkeypatch)
+    ctx.model = ContainerModel.load(PINK)
+    ctx.cpose = ContainerPose(xyz=(*flown.RUN1_BOX_XY, flown.RUN1_TABLE_Z), yaw=0.0)
+    ctx.worlds.table_extent = flown.RUN1_EXTENT
+    ctx.held_xy = None
+    ctx.lid_lifted = SimpleNamespace(q_grip=flown.RUN1_Q_GRIP)
+    tmap, table, q = flown.run1_map(), flown.RUN1_TABLE_Z, list(flown.RUN1_Q_CLEAR)
+    cfg = load_press_demo(PINK)
+    first = next(rlo.spot_candidates(ctx, tmap, table, q))[0]
+    quat1, _contact1, hover1 = rlo.setdown_poses(ctx, first, held=q)
+    q1 = [float(v) for v in chain.nearest_solution(q, hover1, quat1, seeds=())]
+    search = rlo.SpotSearch(ctx, cfg, None, None, tmap, table, table, held=q)
+    search.leave(first, "clear", "never", "the touch ended ...")
+    way = search.way(q)
+    reach = rlo._Reach(held=q, stands=way.descent)
+    common = dict(aside=search.aside, held=q, reach=reach)
+    spots = list(rlo.spot_candidates(ctx, tmap, table, q1, way=True, **common))
+    spots += list(rlo.wider_candidates(ctx, tmap, table, q1, **common))
+    assert 1 <= len(spots) <= 5 and all(rlo._spot_lean(d) == 30.0 for d, _t, _s in spots)
+    assert sum("the hand leaning there would come" in (why or "") for why, _took in reach.found.values()) >= 1
+    lines = []
+
+    def joint_line(ctx_, state, name, target, world, speed):
+        """The planner's stand-in: the straight joint line to the nearest solution of the goal pose."""
+        goal = chain.nearest_solution(list(state.joints), target[1], target[2], seeds=())
+        lg = make_leg(name, start=list(state.joints), end=[float(v) for v in goal], speed=speed, world=world[0])
+        lg.target = target
+        lines.append([list(state.joints), [float(v) for v in goal]])
+        return lg, state
+
+    monkeypatch.setattr(rp, "_plan_motion", joint_line)
+    said = []
+    for d, tier, _says in spots:
+        # the joint-space way, asked alone: refused for the canister and for the height it sinks to
+        carry, why = rlo.plan_carry(ctx, cfg, q1, d, held=q)
+        assert lines and rlo.lid_low_over_box(ctx, lines[-1], q) is not None
+        assert rlo.lid_way_refusal(ctx, tmap, lines[-1], q, table) is not None
+        # ... a hand leaning past 20 deg is asked the canister of it even so, and the walk is flown instead
+        assert why is None and carry.legs[0].plan_free
+        # the carry a later spot is planned with: the walk first, the planner not asked at all
+        n = len(lines)
+        carry, why = rlo.plan_carry(ctx, cfg, q1, d, held=q, over_box=True, way=way)
+        assert why is None and carry.legs[0].plan_free and len(lines) == n
+        walked = [list(p.positions) for p in carry.legs[0].traj.points]
+        assert rlo.lid_low_over_box(ctx, walked, q) is None and rlo.lid_way_refusal(ctx, tmap, walked, q, table) is None
+        assert rlo.hand_way_refusal(ctx, tmap, walked, table) is None  # the hand's own body, all along it
+        _xy, low = rlo._lid_along(ctx, rlo._path_states(walked), q)
+        said.append(
+            "[%.2f, %.2f] %s lean %.0f: walked, the lid %.0f mm over the table at the least (the joint-space way: %s)"
+            % (
+                d.xyz[0],
+                d.xyz[1],
+                tier,
+                rlo._spot_lean(d),
+                1000 * (low.min() - table),
+                rlo.lid_low_over_box(ctx, lines[-1], q),
+            )
+        )
+    with capsys.disabled():
+        sys.stdout.write(
+            "\nrun 1 replayed on flatbot's BARE arm with its hand's body, from over the first spot: %s\n"
+            % "; ".join(said)
+        )
+
+
+# ---- after "held": the wrist's look, the hand's footprint, the same height twice ------------------------------
+
+
+class _HeldAt(_Felt):
+    """A set-down's watch that felt something hold the lid up `above_mm` over where the plan has the table."""
+
+    def __init__(self, above_mm):
+        super().__init__("held")
+        self.above_mm = float(above_mm)
+
+    def refusal(self):
+        return ("held", "something held the lid up %.0f mm over where the plan has it meet the table" % self.above_mm)
+
+    def record(self):
+        return dict(super().record(), above_top_mm=self.above_mm)
+
+
+def test_where_something_held_the_lid_up_the_hands_footprint_is_set_aside_with_the_lids(ctx, monkeypatch):
+    """SpotSearch.aside after a "held": something stands at that spot which the map did not show, and no
+    part of the next lid or hand may come down over the footprint that was left there — the lid's disc
+    and the hand's (HAND_REACH_M round where its tool stood: the wrist camera's corner, 99 mm, whichever
+    way the hand is turned next). The lid's width alone let the next spot lie rim to rim with whatever
+    held the lid, 108 mm away for a 105 mm lid (the review of 2026-11-19). After a "never" the lid's own
+    footprint is what is set aside, as it was. A leaning hand stands arm-side of the lid's middle, and
+    its footprint with it."""
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(approach, "_chain", lambda: _Chain())
+    wide, reach = _lid_wide(ctx), rlo.HAND_REACH_M
+    lid_r = 0.5 * wide
+    assert reach == pytest.approx(0.0986, abs=1e-4) and 0.10 <= wide <= 0.105
+
+    def at(x, y=0.0, lean=0.0):
+        d = ContainerPose(xyz=(0.5 + x, y, -0.07), yaw=0.0)
+        return d if not lean else rlo.LeanSpot(xyz=d.xyz, yaw=0.0, lean_deg=lean)
+
+    never = rlo.SpotSearch(ctx, None, None, None, None, -0.07, -0.07)
+    never.leave(at(0.0), "clear", "never", "nothing felt")
+    assert never.left[0].hand_xy == pytest.approx((0.5, 0.0))  # a hand straight down: over the lid's middle
+    assert never.aside(at(wide - 0.001)) and not never.aside(at(wide + 0.001))  # the lid's own width, as before
+    held = rlo.SpotSearch(ctx, None, None, None, None, -0.07, -0.07)
+    held.leave(at(0.0), "clear", "held", "something held the lid up", above_m=0.06)
+    # two hands straight down: neither's farthest corner over the other's footprint
+    assert held.aside(at(wide + 0.003))  # rim to rim with what held the lid: where the next spot lay before
+    assert held.aside(at(2 * reach - 0.002)) and not held.aside(at(2 * reach + 0.002))
+    assert held.aside(at(0.0, 2 * reach - 0.002)) and not held.aside(at(0.0, -2 * reach - 0.002))
+    # a leaning hand stands arm-side of its lid (here 60 mm toward -x): the footprint left goes with it, and
+    # the next spot's own hand is where ITS tool will stand
+    real = rlo.setdown_poses
+
+    def poses(ctx_, d, held=None):
+        if rlo._spot_lean(d):
+            return None, (d.xyz[0] - 0.06, d.xyz[1], 0.2), None
+        return real(ctx_, d, held=held)
+
+    monkeypatch.setattr(rlo, "setdown_poses", poses)
+    lean = rlo.SpotSearch(ctx, None, None, None, None, -0.07, -0.07, held=[0.0] * 7)
+    lean.leave(at(0.0, lean=20.0), "clear", "held", "something held the lid up", above_m=0.06)
+    assert lean.left[0].hand_xy == pytest.approx((0.44, 0.0))
+    far, arm_side = 2 * reach + 0.002, -(0.06 + 2 * reach)
+    assert not lean.aside(at(far - 0.04))  # past the lid's far rim: 159 mm from the lid, 219 from where the hand stood
+    assert lean.aside(at(arm_side + 0.002)) and not lean.aside(at(arm_side - 0.002))  # arm-side: from the hand
+    # ... a next spot the hand leans to, its tool 60 mm arm-side of it: that hand's disc off the lid's that was left
+    edge = lid_r + reach + 0.06
+    assert lean.aside(at(edge - 0.002, lean=20.0)) and not lean.aside(at(edge + 0.002, lean=20.0))
+
+
+def test_two_set_downs_held_up_at_the_same_height_are_the_table_itself_and_no_third_spot_is_pressed_on(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Something the map did not show held the lid up at one spot, and at the next, a hand's width away
+    and looked at by the wrist in between, something held it up at the same height (within SAME_HELD_M,
+    15 mm): that is probably the table itself, standing higher than the run has it. Each such set-down
+    presses 12-16 mm into what it met before it is told from the table, and going on would press on it
+    spot after spot, up to SETDOWN_SPOTS times (the review of 2026-11-19): the run does not. It says so
+    — on the console, in the run's record (lid_spot_left.same_height_as) — and takes the lid back to the
+    box. The lid is not let go on what held it: nothing the run has says where the table is but the plan
+    that put it 60 mm lower."""
+    assert rlo.SAME_HELD_M == pytest.approx(0.015)
+    code, rec, _chain, rows = _full_flow(
+        ctx,
+        monkeypatch,
+        tmp_path,
+        [(BUTTON, 0.4), (UP, 9.0)],
+        extent=ROOMY,
+        scene=_table(),
+        wrist=_table(),
+        setdown=[_HeldAt(60.0), _HeldAt(72.0), "met"],
+    )
+    assert code == 1 and "place:open" not in rec.events and [how for _d, how in rec.setdowns] == ["held", "held"]
+    after = _after_first_touch(rec)
+    second = after.index("place:touch")
+    assert after[:second] == ["lid:back-up", "spot-look", "lid:carry", "place:down"]  # the look before spot 2
+    # from the second touch's end straight back: up, over the box, down onto it, and home — no third spot
+    assert after[second + 1 :] == [
+        "lid:back-up",
+        "lid:back-over",
+        "lid:put-back",
+        "lid:release",
+        "lid:rise-off",
+        "home",
+    ]
+    one, two = (r for r in rows if r["leg"] == "lid_spot_left")
+    assert (one["verdict"], one["above_mm"], one["same_height_as"], one["next"]) == ("held", 60.0, None, "another spot")
+    assert (two["verdict"], two["above_mm"], two["same_height_as"], two["next"]) == ("held", 72.0, 1, "the box")
+    assert "probably the table itself, standing higher than the run has it" in two["why_the_box"]
+    out = capsys.readouterr().out
+    assert (
+        "no other spot is tried: something held the lid up at the same height at two spots, +60 mm from where the "
+        "plan has the table at spot 1 and +72 mm at spot 2: that is probably the table itself"
+    ) in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+    # the flight view reads those lines of the run's own
+    view = _flight_view(out, code)
+    i = _view_line(view, r" *\d+ SET DOWN  FAIL  spot 2 \(\d+ cm from the box\): something held the lid up, lid kept")
+    assert view[i - 1].endswith("SET DOWN  FAIL  spot 1: something held the lid up, lid kept")
+    assert view[i + 1] == (
+        "             next  carrying the lid back to the box (held up at the same height twice: probably the "
+        "table, higher than planned)"
+    )
+    assert view[i + 2] == "             next  putting the lid back on the box"
+    assert view[i + 3].endswith("PUT BACK  ok    lid back on the box, arm home")
+    assert "lid: on the box" in view[-1]
+
+
+def test_set_downs_held_up_at_different_heights_are_different_things_and_the_lid_goes_on(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Held up 60 mm over the plan at one spot and 90 mm at the next: two things the map did not show,
+    not the table. The wrist looks after each, and the lid goes on to a third spot, a hand's width from
+    both, where it meets the table and is let go."""
+    code, rec, _chain, rows = _full_flow(
+        ctx,
+        monkeypatch,
+        tmp_path,
+        [(BUTTON, 0.4), (UP, 9.0)],
+        extent=ROOMY,
+        scene=_table(),
+        wrist=_table(),
+        setdown=[_HeldAt(60.0), _HeldAt(90.0), "met"],
+    )
+    assert code == 0 and [how for _d, how in rec.setdowns] == ["held", "held", "met"]
+    assert _after_first_touch(rec) == ["lid:back-up", "spot-look", *CARRY, "lid:back-up", "spot-look", *CARRY, *HOME]
+    looks = [r for r in rows if r["leg"] == "lid_look_again"]
+    assert [r["why"] for r in looks] == [
+        "something the map did not show held the lid up at spot 1",
+        "something the map did not show held the lid up at spot 2",
+    ]
+    assert [r["same_height_as"] for r in rows if r["leg"] == "lid_spot_left"] == [None, None]
+    (a, _), (b, _), (c, _) = rec.setdowns
+    for p, q in ((a, b), (a, c), (b, c)):
+        assert math.hypot(p.xyz[0] - q.xyz[0], p.xyz[1] - q.xyz[1]) >= 2 * rlo.HAND_REACH_M - 1e-9
+    out = capsys.readouterr().out
+    assert out.count("something the map did not show held the lid up at spot") == 2
+    view = _flight_view(out, code)
+    i = _view_line(view, r" *\d+ SET DOWN  ok    spot 3 \(\d+ cm from the box\): let go where the lid met the table")
+    assert "SET DOWN  FAIL  spot 2 (" in view[i - 1] and "SET DOWN  FAIL  spot 1: " in view[i - 2]
+    assert view[-1].startswith(
+        "RESULT  DONE — box open, lid on the table (spot 3: no table felt at 2 before), arm home"
+    )
+
+
+# ---- the run's own console lines, read by the flight view ------------------------------------------------------
+
+
+def _flight_view(out, code, **how):
+    """The flight view's lines (box_opening/flight_view.py) for a run whose console said `out`, ended `code`."""
+    from box_opening.flight_view import FlightView
+
+    lines = []
+    view = FlightView(write=lines.append, clock=lambda: 0.0)
+    view.start()
+    for text in out.splitlines():
+        view.feed(text)
+    view.finish(code, **how)
+    return lines
+
+
+def _view_line(view, pattern):
+    """Which of the flight view's lines is the one that reads `pattern` (a regular expression of the whole line)."""
+    import re
+
+    (i,) = (k for k, line in enumerate(view) if re.fullmatch(pattern, line))
+    return i
+
+
+# ---- what a carry after the first is asked, in the run ---------------------------------------------------------
+
+
+def _once_a_spot_is_left(monkeypatch, then=lambda: None):
+    """A list that is empty until the run's first spot is left (another_spot entered; `then()` called there)."""
+    later, real = [], rlo.another_spot
+
+    def another(*a, **k):
+        later.append(1)
+        then()
+        return real(*a, **k)
+
+    monkeypatch.setattr(rlo, "another_spot", another)
+    return later
+
+
+def test_in_the_run_the_lids_straight_way_from_a_spot_left_is_asked_of_every_next_spot(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """From a spot the lid was left at, something the map shows standing in the lid's straight way to
+    every other spot: each is passed over before its reach is asked or a carry planned (_offers' `way`,
+    which SpotSearch.pick hands the tiers of every spot after the first — nothing but a unit test of
+    _offers held that, and the run asking nothing of the way passed every test: the review of
+    2026-11-19), the run says so, and the lid goes back on the box. The first spot's own way is the
+    room's, judged from the box, as it was."""
+    real = rlo.clear_table.carry_clearance_fast
+    later = _once_a_spot_is_left(monkeypatch)
+
+    def way(tmap, a, b, *rest):
+        if later:
+            return -0.05, "the lid", (float(b[0]), float(b[1]))
+        return real(tmap, a, b, *rest)
+
+    monkeypatch.setattr(rlo.clear_table, "carry_clearance_fast", way)
+    checks = _later_reach(monkeypatch, None)
+    plans = _later_plans(monkeypatch)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and len(rec.setdowns) == 1 and "place:open" not in rec.events
+    assert checks == [] and plans == []  # no spot was a try
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert spots[0]["table"]["blocked"] in (None, 0) and spots[1]["table"]["blocked"] > 0
+    out = capsys.readouterr().out
+    assert "%d with something standing in the lid's way there" % spots[1]["table"]["blocked"] in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+def test_in_the_run_every_carry_after_the_first_is_asked_the_canister_and_its_own_path_and_the_first_is_not(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """What plan_carry asks of a carry's own path — the canister under it (lid_low_over_box), its height
+    all the way and what stands under it (lid_way_refusal) — is asked of every carry the run plans once a
+    spot is left, and of none before: the first spot's carry is planned as it was flown before
+    2026-11-19 (of 22 recorded first carries 4 would not pass, the report's numbers). Here every later
+    carry's path would sink: none is flown, each spot's refusal says so, and the lid goes back on the box."""
+    later = _once_a_spot_is_left(monkeypatch)
+    asked = {"first": 0, "box": 0, "way": 0}
+
+    def low(ctx_, pts, held):
+        asked["box" if later else "first"] += 1
+        return None
+
+    def sinks(ctx_, tmap, pts, held, table_z):
+        asked["way" if later else "first"] += 1
+        return "the lid would sink 40 mm under the height it is carried at on the way, to 110 mm over the table"
+
+    monkeypatch.setattr(rlo, "lid_low_over_box", low)
+    monkeypatch.setattr(rlo, "lid_way_refusal", sinks)
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 1 and len(rec.setdowns) == 1 and "place:open" not in rec.events
+    assert asked["first"] == 0 and asked["box"] >= 1 and asked["way"] == asked["box"]
+    spots = [r for r in rows if r["leg"] == "lid_spot"]
+    assert spots[1]["xyz"] is None
+    # this arm has no walk: said, with why the planner's own path is no way either
+    assert (
+        "the carry (walked: no turning walk modelled; planned: the lid would sink 40 mm under the height it is "
+        "carried at on the way, to 110 mm over the table)"
+    ) in spots[1]["refused"]
+    out = capsys.readouterr().out
+    assert "and no other spot on the table the cameras measured has a carry that plans" in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+def test_in_the_run_the_lid_goes_from_spot_to_spot_by_the_arms_own_walk_where_one_flies(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """From a spot the lid was left at, the carry to the next is the arm's own walk — a straight line
+    from hover to hover at their height, in the carry walk's steps — where one flies: the planner, which
+    knows no table, is not asked for a carry again. Where none flies (every other run of these tests: the
+    fake arm has no walk) the planner's path is taken only once it has passed the same checks, and the
+    run says which it was."""
+    chain = _WalksBack()
+    _once_a_spot_is_left(monkeypatch, then=lambda: setattr(chain, "walk_ok", True))
+    code, rec, _chain, rows = _full_flow(
+        ctx,
+        monkeypatch,
+        tmp_path,
+        [(BUTTON, 0.4), (UP, 9.0)],
+        chain=chain,
+        extent=ROOMY,
+        scene=_table(),
+        setdown=["never", "met"],
+    )
+    assert code == 0 and len(rec.setdowns) == 2
+    assert _after_first_touch(rec) == ["lid:back-up", *CARRY, *HOME]
+    touch = rec.events.index("place:touch")
+    carries = [before for name, before in rec.plans if name == "lid:carry"]
+    assert carries and all(before <= touch for before in carries)  # the first spot's alone: none planned after it
+    ((_quat, step_m, step_rad),) = chain.walked
+    assert (step_m, step_rad) == (rlo.CARRY_WALK_STEP_M, rlo.CARRY_WALK_STEP_RAD)
+    second = rec.setdowns[1][0]
+    out = capsys.readouterr().out
+    assert (
+        "the lid's way to [%.2f, %.2f] is the arm's own walk, a straight line at the height it is carried at"
+        % (second.xyz[0], second.xyz[1])
+    ) in out
+    # ... and with no walk, the planner's, said so
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    assert code == 0
+    assert "is the planner's (no walk flies: no turning walk modelled): it keeps the carry's height" in (
+        capsys.readouterr().out
+    )
+
+
+def test_the_flight_view_reads_the_runs_own_lines_from_spot_to_spot(ctx, monkeypatch, tmp_path, capsys):
+    """The flight view reads the run's console by pattern (flight_view.py), and its tests feed it lines
+    typed into them: a word changed in the run's line and the view goes quiet with every test green (the
+    review of 2026-11-19). Here the lines are the run's own, as _full_flow's run prints them: a first
+    spot that feels no table, a second that takes the lid; and the same run cut by the engine's budget —
+    with the lid on its way to spot 2, and while the next spot was still being chosen."""
+    code, rec, _chain, _rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    view = _flight_view(out, code)
+    i = _view_line(view, r" *\d+ SET DOWN  FAIL  spot 1: no table felt, lid kept")
+    assert (
+        _view_line(view, r" *\d+ SET DOWN  ok    spot 2 \(\d+ cm from the box\): let go where the lid met the table")
+        == i + 1
+    )
+    assert view[-1].startswith(
+        "RESULT  DONE — box open, lid on the table (spot 2: no table felt at 1 before), arm home"
+    )
+    # cut by the budget with the carry to spot 2 in flight: the console as far as that carry's own line
+    lines = out.splitlines()
+    (flies,) = (k for k, line in enumerate(lines) if line.startswith("[press_demo] SPOT 2, ONE MOTION: "))
+    cut = _flight_view("\n".join(lines[: flies + 1]), 130, timed_out=True, held=True)
+    j = _view_line(cut, r" *\d+ CARRY     FAIL  stopped: the run took too long, the lid on its way to spot 2")
+    assert cut[j - 1].endswith("SET DOWN  FAIL  spot 1: no table felt, lid kept")
+    assert cut[j + 1].startswith("RESULT  FAILED at step") and "(CARRY)" in cut[j + 1]
+    assert "lid: in the hand" in cut[-1]
+    # ... and cut while the next spot was being chosen: as far as the line that left spot 1
+    (left,) = (k for k, line in enumerate(lines) if line.startswith("[press_demo] SET-DOWN: no table felt at spot 1"))
+    cut = _flight_view("\n".join(lines[: left + 1]), 130, timed_out=True, held=True)
+    j = _view_line(cut, r" *\d+ SET DOWN  FAIL  stopped: the run took too long, the next spot for the lid being chosen")
+    assert cut[j - 1].endswith("SET DOWN  FAIL  spot 1: no table felt, lid kept") and "lid: in the hand" in cut[-1]
+
+
+class _OneSphereBody:
+    """A body model with one sphere on a hand link, where joints (x, y, z, ...) put it; one on each link of
+    the wrist, half a metre over it; and one on the forearm, under the table (runtime/body.Body's
+    spheres_at, paths and index, as reach_lid_off asks them)."""
+
+    index = {"joint_%d" % k: k for k in range(7)}
+    paths = {
+        "hand": [(None, None, k, k) for k in range(7)],
+        "wrist_2": [(None, None, k, k) for k in range(6)],
+        "wrist_1": [(None, None, k, k) for k in range(5)],
+        "forearm": [(None, None, k, k) for k in range(4)],
+    }
+
+    def __init__(self, radius=0.05):
+        self.radius = radius
+
+    def spheres_at(self, q):
+        x, y, z = float(q[0]), float(q[1]), float(q[2])
+        centres = np.array([[x, y, z], [x, y, z + 0.5], [x, y, z + 0.6], [x, y, -1.0]])
+        return centres, np.array([self.radius, 0.01, 0.01, 0.5]), ["hand", "wrist_2", "wrist_1", "forearm"]
+
+
+def test_a_carry_after_the_first_keeps_the_hands_own_body_out_of_what_stands_along_its_way(ctx, monkeypatch):
+    """lid_way_refusal asks the lid's disc and a hand straight down over it. From one set-down's attitude
+    to the next the hand leans and turns on the way, and its body is not over the lid: hand_way_refusal
+    asks the body model's own spheres of the hand and wrist, all along the path as the arm flies it
+    (between its waypoints too), by the margin a leaning set-down's hand keeps. A LaterWay asks both of
+    every carry (path). Only the hand's and the wrist's links are asked (the forearm's sphere here stands
+    under the table all the way); with no body model the lid's own check stands alone."""
+    from box_opening.runtime import approach
+
+    body = _OneSphereBody()
+    monkeypatch.setattr(approach, "body_check", lambda: body, raising=False)
+    monkeypatch.setattr(approach, "_chain", lambda: _HandAtQ(ctx.model, (0.6, 0.0)))
+    assert rlo._hand_links(body) == ({"hand", "wrist_1", "wrist_2"}, [])
+    table = -0.07
+    bare = _standing_ring((0.5, 0.0), 5.0, 6.0)
+    post = _block(bare, (0.5, 0.0), 0.30, half=0.011)  # 4 cm square, 0.30 m tall
+    a, b = [0.2, 0.2, table + 0.40, 0, 0, 0, 0], [0.8, 0.2, table + 0.40, 0, 0, 0, 0]
+    assert rlo.hand_way_refusal(ctx, bare, [a, b], table) is None  # nothing stands
+    assert rlo.hand_way_refusal(ctx, post, [a, b], table) is None  # 0.19 m beside the post all the way
+    # both ends clear of it and the straight joint line between them through it: asked between the waypoints
+    a, b = [0.2, 0.0, table + 0.25, 0, 0, 0, 0], [0.8, 0.0, table + 0.25, 0, 0, 0, 0]
+    why = rlo.hand_way_refusal(ctx, post, [a, b], table)
+    assert why is not None and why.startswith("the hand would pass 50 mm into what stands 300 mm tall at [0.")
+    assert why.endswith("(hand; 20 mm is kept) on the way")
+
+    # over its top by less than is kept, and by more
+    def over(mm):
+        z = table + 0.35 + 0.001 * mm
+        return [[0.2, 0.0, z, 0, 0, 0, 0], [0.8, 0.0, z, 0, 0, 0, 0]]
+
+    assert "would pass within 10 mm of what stands 300 mm tall" in rlo.hand_way_refusal(ctx, post, over(10), table)
+    assert rlo.hand_way_refusal(ctx, post, over(25), table) is None
+    # a LaterWay's path asks the lid's way first, then the hand's
+    way = rlo.LaterWay(ctx, post, table, [0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0])
+    monkeypatch.setattr(rlo, "lid_way_refusal", lambda *a_: None)
+    assert way.path([a, b]) == why
+    monkeypatch.setattr(rlo, "lid_way_refusal", lambda *a_: "the lid would sink")
+    assert way.path([a, b]) == "the lid would sink"
+    monkeypatch.setattr(approach, "body_check", lambda: None, raising=False)
+    assert rlo.hand_way_refusal(ctx, post, [a, b], table) is None
+
+
+def test_the_clock_is_asked_before_a_searchs_own_work_and_of_every_place_it_looks_at(ctx, monkeypatch):
+    """spot_candidates' and wider_candidates' `stop` (the run's clock: SpotSearch.out_of_time). It was
+    asked only before a reach check, of a place that had passed everything else: judging the room on the
+    map, going through the table's places and passing over hundreds of them (off the table, set aside)
+    went by without the clock — 1-3 s on a bare table, far more where little of it passes (the review of
+    2026-11-19). It is asked before any of that work, and of every place looked at."""
+    from box_opening.runtime import approach
+
+    monkeypatch.setattr(approach, "_chain", lambda: _Chain())
+    bare = _bare(monkeypatch, ctx)
+    work = []
+    for name in ("_spot_tiers", "_table_points"):
+        real = getattr(rlo, name)
+        monkeypatch.setattr(rlo, name, lambda *a, _real=real, _name=name, **k: work.append(_name) or _real(*a, **k))
+    q, no = [0.0] * 7, lambda: True
+    assert list(rlo.spot_candidates(ctx, bare, -0.07, q, reach=lambda *a: None, stop=no)) == []
+    assert list(rlo.wider_candidates(ctx, bare, -0.07, q, reach=lambda *a: None, stop=no)) == []
+    assert work == []
+    # every place set aside, none a try: the clock is still asked of each, and ends it
+    asked, reaches, passed = [], [], rlo.SpotsPassed()
+
+    def stop():
+        asked.append(1)
+        return len(asked) > 20
+
+    got = rlo.wider_candidates(
+        ctx, bare, -0.07, q, reach=lambda *a: reaches.append(1), stop=stop, aside=lambda d: True, passed=passed
+    )
+    assert list(got) == [] and reaches == [] and len(asked) == 21
+    assert 0 < passed.aside + passed.no_land <= 19  # (the first ask is before the work; of some 700 places)
+    asked.clear()
+    got = rlo.spot_candidates(ctx, bare, -0.07, q, reach=lambda *a: reaches.append(1), stop=stop, aside=lambda d: True)
+    assert list(got) == [] and reaches == [] and len(asked) == 21

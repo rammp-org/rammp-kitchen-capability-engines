@@ -596,3 +596,76 @@ def test_the_measured_table_reaches_as_far_as_the_map_saw_it():
     assert x0 == pytest.approx(0.64, abs=0.021) and x1 == pytest.approx(1.15, abs=0.021)
     assert y0 == pytest.approx(-0.64, abs=0.021) and y1 == pytest.approx(0.21, abs=0.021)
     assert ct.table_bounds(None) is None
+
+
+def test_the_places_of_the_measured_table_are_its_own_bare_cells_a_step_apart_and_inside_it():
+    """table_places, where a lid is looked for once the spots round the box are used up (owner
+    2026-11-19: "it should keep trying spots, assume tere will always be a spot for the lid"): the whole
+    of the table the map measured, not only round the box — a lattice on the map's own cells, `step`
+    apart, `inset` inside what it saw (and inside a given zone); never in front of the edge, where
+    nothing was seen, or on what stands. None with no map."""
+    tmap, box = _edge_map()
+    lid_r = 0.0525
+    inset = lid_r + ct.LID_CLEAR_M
+    places = ct.table_places(tmap, ct.SPOT_APART_M, inset)
+    assert len(places) > 100 and len(set(places)) == len(places)
+    xs, ys = sorted({x for x, _y in places}), sorted({y for _x, y in places})
+    assert min(b - a for a, b in zip(xs, xs[1:], strict=False)) == pytest.approx(ct.SPOT_APART_M)
+    assert min(b - a for a, b in zip(ys, ys[1:], strict=False)) == pytest.approx(ct.SPOT_APART_M)
+    x0, x1, y0, y1 = ct.table_bounds(tmap)
+    for x, y in places:
+        assert x0 + inset - 1e-9 <= x <= x1 - inset + 1e-9 and y0 + inset - 1e-9 <= y <= y1 - inset + 1e-9
+        assert x > 0.64  # never in front of the table's near edge (the floor), nor where nothing was seen
+        assert not (0.70 < x < 1.00 and -0.60 < y < -0.48)  # nor on the block
+        i, j = int((x - tmap.x0) / tmap.cell), int((y - tmap.y0) / tmap.cell)
+        assert tmap.seen[i, j] and not tmap.off[i, j] and not np.isfinite(tmap.tall[i, j])
+    # the whole table: far past the ring round the box that clear_spots searches (SPOT_REACH_M)
+    assert max(math.hypot(x - box[0], y - box[1]) for x, y in places) > 0.19 + ct.SPOT_REACH_M
+    # inside a zone, where one is given (the extent the fix measured, inset)
+    zone = (0.80, 1.00, -0.30, 0.10)
+    inside = ct.table_places(tmap, ct.SPOT_APART_M, inset, within=zone)
+    assert inside and set(inside) < set(places)
+    assert all(zone[0] <= x <= zone[1] and zone[2] <= y <= zone[3] for x, y in inside)
+    # a coarser step: fewer places, of the same lattice
+    assert set(ct.table_places(tmap, 2 * ct.SPOT_APART_M, inset)) < set(places)
+    assert ct.table_places(None, ct.SPOT_APART_M, inset) == []
+
+
+def test_a_bodys_spheres_are_asked_of_what_stands_as_columns_from_the_table_up():
+    """spheres_clearance: the least room any sphere of a body has from what the map shows standing —
+    each standing cell a column, its whole cell from the table up to its height — negative inside one,
+    with where that thing stands, how tall it is and which sphere. What a leaning hand is asked
+    (reach_lid_off.hand_into_standing): HAND_PARTS' rectangles are a hand straight down, and a hand
+    leaning 30 deg stood with its wrist through a 15 cm thing they did not reach (the review of
+    2026-11-19)."""
+    n, cell, table = 20, 0.02, -0.07
+    bare = ct.TableMap(0.0, 0.0, cell, np.full((n, n), np.nan), np.ones((n, n), bool), np.zeros((n, n), bool), (0, 0))
+    tall = bare.tall.copy()
+    tall[10, 10] = 0.10  # one cell, 0.20-0.22 m each way, 100 mm tall
+    tmap = dataclasses.replace(bare, tall=tall)
+    at = lambda x, y, over: [[x, y, table + over]]  # noqa: E731
+    assert ct.spheres_clearance(bare, at(0.21, 0.21, 0.05), [0.03], table) is None  # nothing stands
+    assert ct.spheres_clearance(tmap, np.zeros((0, 3)), [], table) is None  # no sphere
+    # beside it, under its top: from the cell's side, less the sphere
+    room, where, how_tall, k = ct.spheres_clearance(tmap, at(0.30, 0.21, 0.05), [0.03], table)
+    assert room == pytest.approx(0.08 - 0.03) and where == pytest.approx((0.21, 0.21))
+    assert how_tall == pytest.approx(0.10) and k == 0
+    # inside the column: negative by the sphere's radius; anywhere over the cell, not only its middle
+    assert ct.spheres_clearance(tmap, at(0.21, 0.21, 0.05), [0.03], table)[0] == pytest.approx(-0.03)
+    assert ct.spheres_clearance(tmap, at(0.219, 0.201, 0.099), [0.03], table)[0] == pytest.approx(-0.03)
+    # over its top: straight up from it
+    assert ct.spheres_clearance(tmap, at(0.21, 0.21, 0.16), [0.03], table)[0] == pytest.approx(0.06 - 0.03)
+    # past its corner and over it: the distance to the top's corner
+    room = ct.spheres_clearance(tmap, at(0.25, 0.25, 0.14), [0.01], table)[0]
+    assert room == pytest.approx(math.sqrt(0.03**2 + 0.03**2 + 0.04**2) - 0.01)
+    # the table the heights stand on: a table 30 mm higher, and the thing's top is 30 mm nearer
+    assert ct.spheres_clearance(tmap, at(0.21, 0.21, 0.16), [0.03], table + 0.03)[0] == pytest.approx(0.0)
+    # of several spheres and things the least, and which sphere it was
+    tall[2, 2] = 0.30
+    tmap = dataclasses.replace(bare, tall=tall)
+    centres = at(0.30, 0.21, 0.05) + at(0.05, 0.09, 0.20) + at(0.35, 0.35, 0.40)
+    room, where, how_tall, k = ct.spheres_clearance(tmap, centres, [0.03, 0.02, 0.05], table)
+    assert (
+        room == pytest.approx(0.03 - 0.02) and where == pytest.approx((0.05, 0.05)) and how_tall == pytest.approx(0.30)
+    )
+    assert k == 1
