@@ -786,3 +786,158 @@ def test_a_lid_that_slipped_out_on_the_way_is_never_on_the_table_whatever_the_se
         "        box: open (knob up)    lid: slipped out of the fingers on the way (where it lies is not known)    "
         "arm: home",
     ]
+
+
+# ---- spot after spot (owner 2026-11-19: "it should keep trying spots") ---------------------------------------
+
+NEVER = "the touch ended 8 mm under where the plan has the lid meet the table and the arm felt no table"
+HELD = (
+    "something held the lid up 60 mm over where the plan has it meet the table (more than 35): that is not the "
+    "table, and the descent was stopped there"
+)
+ON = (
+    "; the lid is not let go: up with it and on to another spot (this one, and what lies within the lid's own "
+    "footprint of it, set aside for this run; 52 s of the run's time left)"
+)
+SPOT_2 = [
+    (36, P + "SET-DOWN: no table felt at spot 1, [0.65, 0.05] — " + NEVER + ON),
+    (
+        38,
+        P + "lid goes to [0.55, -0.20, 0.259] — 310 mm from the box (155 mm outside its no-land radius), where the "
+        "cameras see room for it and the hand (20 mm to spare; the hand turns +0 deg); spot 2 of this run, after "
+        "spot 1 at [0.65, 0.05]: no table felt by the touch's end",
+    ),
+    (38, P + "SPOT 2, ONE MOTION: lid:carry, place:down, place:touch — to [0.55, -0.20] and down onto the table"),
+]
+SPOT_3 = [
+    (42, P + "SET-DOWN: no table felt at spot 2, [0.55, -0.20] — " + HELD + ON),
+    (
+        44,
+        P + "lid goes to [0.60, 0.30, 0.259] — 250 mm from the box (95 mm outside its no-land radius), where the "
+        "cameras see room for it and the hand (20 mm to spare; the hand turns +0 deg); spot 3 of this run, after "
+        "spot 1 at [0.65, 0.05]: no table felt by the touch's end; spot 2 at [0.55, -0.20]: something held the "
+        "lid up above where the table can be",
+    ),
+    (44, P + "SPOT 3, ONE MOTION: lid:carry, place:down, place:touch — to [0.60, 0.30] and down onto the table"),
+]
+
+
+def test_a_lid_taken_on_from_spot_to_spot_is_one_short_line_a_spot_and_the_result_says_where_it_ended():
+    """Owner 2026-11-19: a set-down that feels no table does not put the lid back on the box, "it should
+    keep trying spots". Each spot the lid is taken to is one numbered line: which spot, how far from the
+    box (the first one's carry said that), and what the arm felt there — a failed step where it felt no
+    table and kept the lid, never the run's own failure while another spot may take it. The lift and
+    the carry are said once. The spot that takes the lid ends as any set-down, and the result says the
+    lid is on the table, at which spot, after how many where none was felt."""
+    met = [
+        (48, P + "SET-DOWN CONTACT: the lid met the table +12 mm from where the plan put it; the touch stopped there"),
+        (48, P + "RELEASE as the retreat starts (place:retreat), then HOME, slow, in MEDIUM impedance"),
+        (
+            53,
+            P + "DONE — box open, lid on the table at [0.60, 0.30] (clear), spot 3 of this run (no table was felt at "
+            "the 2 before it), let go where the arm felt it meet the table, arm home",
+        ),
+    ]
+    out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + SPOT_3 + met, 0)
+    assert out[8:] == [
+        " 4 GRIP      ok    knob held                                   8.0 s",
+        " 5 LIFT      ok",
+        " 6 CARRY     ok    lid to 20 cm from the box",
+        " 7 SET DOWN  FAIL  spot 1: no table felt, lid kept",
+        " 8 SET DOWN  FAIL  spot 2 (31 cm from the box): something held the lid up, lid kept",
+        " 9 SET DOWN  ok    spot 3 (25 cm from the box): let go where the lid met the table",
+        "   home      ...   letting go and going home",
+        "10 HOME      ok                                                5.0 s",
+        "RESULT  DONE — box open, lid on the table (spot 3: no table felt at 2 before), arm home  58 s",
+    ]
+    # the second spot takes it
+    met2 = [
+        (42, met[0][1]),
+        (42, met[1][1]),
+        (47, met[2][1].replace("spot 3", "spot 2").replace("the 2 before", "the 1")),
+    ]
+    out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + met2, 0)
+    assert out[11:14] == [
+        " 7 SET DOWN  FAIL  spot 1: no table felt, lid kept",
+        " 8 SET DOWN  ok    spot 2 (31 cm from the box): let go where the lid met the table",
+        "   home      ...   letting go and going home",
+    ]
+    assert out[-1].startswith("RESULT  DONE — box open, lid on the table (spot 2: no table felt at 1 before), arm home")
+
+
+def test_where_no_other_spot_is_tried_the_lid_goes_back_on_the_box_and_the_view_says_why():
+    """The box is the last resort, and the view says which it was: the run's time leaves none for
+    another spot, as many spots as a run tries, a set-down that could not be watched, or no spot left
+    on the table. The set-down that ended the tries is the step the run failed at; the put-back ends
+    well, and the result says the lid is on the box and the arm home — never "on the table"."""
+    back = "; the lid is not let go: back up with it, and back onto the box"
+    time_up = (
+        " (no other spot is tried: 28 s of the run's time are left: another spot and, should it feel no table "
+        "either, the way back to the box take 35 (12 and 23, on record))"
+    )
+    why_stop = "the set-down felt no table (%s), and no other spot is tried: 28 s of the run's time are left" % NEVER
+    ended = [
+        (42, P + "SET-DOWN: no table felt — " + NEVER + back + time_up),
+        (43, P + "PUT BACK: %s — the lid back on the box where it was gripped, then home" % why_stop),
+        (55, P + "STOP: %s — the lid is back on the box, and the arm is home" % why_stop),
+    ]
+    out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + ended, 1)
+    assert out[11:] == [
+        " 7 SET DOWN  FAIL  spot 1: no table felt, lid kept",
+        " 8 SET DOWN  FAIL  spot 2 (31 cm from the box): no table felt, lid kept",
+        "             next  carrying the lid back to the box (no time left for another spot)",
+        "             next  putting the lid back on the box",
+        " 9 PUT BACK  ok    lid back on the box, arm home",
+        "RESULT  FAILED at step 8 (SET DOWN)                           60 s",
+        "        why: spot 2 (31 cm from the box): no table felt, lid kept",
+        "        box: open (knob up)    lid: on the box    arm: home",
+    ]
+    # as many spots as a run tries; and a set-down that could not be watched, at the first spot
+    spots = " (no other spot is tried: 6 spots is as many as a run tries (SETDOWN_SPOTS))"
+    out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + [(42, P + "SET-DOWN: no table felt — " + NEVER + back + spots)], 1)
+    assert "             next  carrying the lid back to the box (as many spots as a run tries)" in out
+    blind = (
+        " (no other spot is tried: a set-down that could not be watched says nothing of this spot, and the next "
+        "would fly as blind)"
+    )
+    failed = "the set-down's watch failed (boom) and the descent was stopped there"
+    out = _view(FOUND + PRESSED + CARRIED + [(36, P + "SET-DOWN: no table felt — " + failed + back + blind)], 1)
+    assert out[11:13] == [
+        " 7 SET DOWN  FAIL  spot 1: the set-down's watch failed, lid kept",
+        "             next  carrying the lid back to the box (a set-down that cannot be watched is tried nowhere else)",
+    ]
+    # no spot left on the table: put back from over the spot the lid was left at (no line of a carry back)
+    none = (
+        "no table was felt under the lid (spot 1 at [0.65, 0.05]: no table felt by the touch's end; spot 2 at "
+        "[0.55, -0.20]: something held the lid up above where the table can be), and no other spot on the table "
+        "the cameras measured has a carry that plans (of the spots looked at, 57 not on the table the cameras measured)"
+    )
+    ended = [
+        (42, P + "SET-DOWN: no table felt at spot 2, [0.55, -0.20] — " + HELD + ON),
+        (45, P + "PUT BACK: %s — the lid back on the box where it was gripped, then home" % none),
+        (57, P + "STOP: %s — the lid is back on the box, and the arm is home" % none),
+    ]
+    out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + ended, 1)
+    assert out[11:] == [
+        " 7 SET DOWN  FAIL  spot 1: no table felt, lid kept",
+        " 8 SET DOWN  FAIL  spot 2 (31 cm from the box): something held the lid up, lid kept",
+        "             next  putting the lid back on the box",
+        " 9 PUT BACK  ok    lid back on the box, arm home",
+        "RESULT  FAILED at step 8 (SET DOWN)                           62 s",
+        "        why: spot 2 (31 cm from the box): something held the lid up, lid kept",
+        "        box: open (knob up)    lid: on the box    arm: home",
+    ]
+
+
+def test_a_carry_that_stops_on_the_way_to_another_spot_is_the_runs_failure_not_the_set_down_before_it():
+    """A spot left is a failed step, not the run's failure: where what follows stops the run (the carry to
+    the next spot stopped part way, the arm holding the lid), the result names that, and where the lid is."""
+    stop = "STOP: the lid's way to the table stopped during lid:carry (aborted) — the arm holds the lid"
+    out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + [(40, P + stop)], 1)
+    assert out[11:] == [
+        " 7 SET DOWN  FAIL  spot 1: no table felt, lid kept",
+        " 8 CARRY     FAIL  stopped part way (aborted)",
+        "RESULT  FAILED at step 8 (CARRY)                              45 s",
+        "        why: stopped part way (aborted)",
+        "        box: open (knob up)    lid: in the hand    arm: holding where it stopped",
+    ]
