@@ -67,6 +67,25 @@ beside the container, and goes home. It has one action, `open_box`:
    container stands, no longer only inside the bench's reach band (x
    0.28-0.65 m). With no map of the table (no camera's points show one) there
    is no spot.
+   Where none of those spots has a carry that plans, more are looked for before
+   anything else (owner 2026-11-19: "it should keep trying spots, assume tere
+   will always be a spot for the lid"), every one through the same checks:
+   the whole of the table the cameras measured (places 4 cm apart, the nearest
+   where the hand holds the lid first; on a table with more than 48 such
+   places, 48 of them evenly from the nearest to the farthest; the hand
+   straight down and then leaning 20 deg; the spots round the container each
+   stop after a few tries and none lies further than 0.45 m from it), then
+   every spot once more with the hand leaning 30 deg, as
+   far as the press's own look pose leans. 20 deg was the most a set-down
+   leaned, for how the lid lands and for the canister under the carry, and
+   both are kept: a hand leaning 30 deg is taken only where the lid still
+   lands tilted 20 deg at most (where the grip itself leaned), and its carry
+   is refused where the lid's lowest point would pass under the top it came
+   off, over the canister. The lid's way to any of these further spots is
+   asked too: none with something the cameras saw standing in the way, taller
+   than the lid is carried. Still none, and the map was not made with the
+   wrist's frame from where the arm stands: the wrist looks at the table from
+   there, its frame is pooled into the map, and the search goes once more.
 1. **Set down:** fast to 80 mm over where the run has the lid meet the table,
    then slowly, to 8 mm under it at most. That height is the cameras' table
    moved by what the fingers found: the table is taken as far under the lid's
@@ -75,26 +94,61 @@ beside the container, and goes home. It has one action, `open_box`:
    46-55 mm low). The arm feels for the table on the slow stretch, from 0.6 s
    after it begins (the arm is still catching up with its reference until then,
    which reads as a contact): the descent stops where the lid meets the table.
-   A rise met more than 35 mm over where the table should be is not the table,
-   and the descent goes on, the arm settling again for 0.6 s; a rise that goes
-   on for 15 mm of the descent is the lid held up, and stops it. Held up no
-   more than those 35 mm over where the table should be, it is the table (met
-   while the arm settled); held up higher, it is not, and the lid is not let
-   go. Nothing is planned while the set-down flies, so every sample of it is
+   A rise that began more than 35 mm over where the table should be is not the
+   table, and the descent goes on, the arm settling again for 0.6 s. Where a
+   rise began is where the pads last came freely down; what holds them up from
+   there on is one thing. The lid is held up, whatever the settle says, where
+   the pads come down less than 2 mm while their reference comes down 12, or
+   stand 15 mm over where they last came freely down: that stops the descent.
+   It is the table only where the pads had come freely down to within those
+   35 mm of where the table should be; met higher, it is something else, and
+   the lid is not let go. Nothing is planned while the set-down flies, so every sample of it is
    read as it comes; what was not read by its end is read then. With the spot
    chosen after the lift, the way home is planned while the arm rises off the
    lid.
+1. **No table felt: another spot.** A set-down that ends without the arm
+   feeling the lid meet the table (nothing met down to its end, or something
+   holding the lid up well above where the table can be) does not let the lid
+   go, and does not take it back to the box either (owner 2026-11-19: "it
+   should keep trying spots, assume tere will always be a spot for the lid").
+   The arm rises with the lid to the carry's height; that spot, and what lies
+   within the lid's own footprint of it (any spot whose centre is nearer than
+   the lid is wide), are set aside for the run; the next spot is chosen by
+   the same rules in the same order, the lid's way there asked against what
+   stands on the table and kept off the open canister; and the lid is carried
+   there and set down the same watched way. Spot after spot, each said on the
+   console and in the run record (`lid_spot_left`, and a `lid_spot` row a
+   spot with the spots left before it), but never without end:
+   - at most 6 spots a run;
+   - only while the run's time holds a further spot and the way back to the
+     box after it. The engine stops a run at its budget with a Ctrl+C
+     wherever it is (90 s; see "How long a line-up may take"), so it tells
+     each run its budget as it starts it (`BOX_OPENING_RUN_BUDGET` in the
+     run's environment: the seconds, the time they count from, and whether
+     they start again at each go, as they do for a goal sent by hand). By the
+     run records a spot takes 8 s to fly and 4 s to choose, and the way back
+     to the box, the release and home 20 s, with 3 s to spare: a further spot
+     is started only with 35 s left, and its carry sent only with 31 s left.
+     A clean run reaches its first set-down with 51-63 s left, enough for two
+     to four more spots; a run that had a full line-up inside its budget has
+     none, and its first set-down that feels no table goes to the box. A run
+     started by hand from the command line is timed by nothing, and the 6
+     spots bound it;
+   - not after a set-down that could not be watched (its watch failed, which
+     stops the descent where it failed, or where the slow stretch begins if
+     it failed before that, and never the lift or the carry; or none of its
+     stretch was fed): that says nothing of the spot, and the next would fly
+     as blind.
 1. **Release and home:** the fingers open, as the arm rises off the lid, only
    where the set-down felt the lid meet the table at about that height; then
    the arm goes home. The lid is never let go anywhere else.
 
-If the run has to stop with the lid in the fingers and the arm standing (no
-spot on the table the cameras measured that the hand reaches and a carry plans
-to, the run's own checks refuse the carry before it starts, or the set-down
-ended without the arm feeling the lid meet the table: nothing met down to its
-end, something holding the lid up well above the table, or its watch failed,
-which stops the descent where it failed, or where the slow stretch begins if it
-failed before that, and never the lift or the carry),
+The box is the last resort. If the run has to stop with the lid in the fingers
+and the arm standing (no spot on the table the cameras measured that the hand
+reaches and a carry plans to, the wider search and the wrist's fresh look
+included; the run's own checks refuse the carry before it starts; or a
+set-down felt no table and no other spot is tried: none is left, 6 were tried,
+the run's time holds no other, or the set-down could not be watched),
 it puts the lid back on the box first: back up to the carry's height where it
 had come down, back over the box and straight down to where the knob was
 gripped, the fingers open, the hand rises off the knob, and the arm goes home.
@@ -136,8 +190,20 @@ The node writes a flight view of each run to its stdout: one short line a step a
 it starts and as it ends (`ok`, `FAIL`, or `??` where the run could not tell and
 went on), a `note` for what worked but looked off, a `next` for what follows a
 failure, and a result that says where the box, the lid and the arm were left.
-It says `lid on the table` only of a set-down the run felt meet the table; a
-set-down that felt none reads `7 SET DOWN  FAIL  the arm felt no table under the lid; the lid was not let go`, then `8 PUT BACK  ok`, and the result's `lid: on the box`.
+It says `lid on the table` only of a set-down the run felt meet the table. A
+set-down that felt none is a failed step with the lid kept, one line a spot as
+the lid is taken on:
+
+```text
+ 7 SET DOWN  FAIL  spot 1: no table felt, lid kept
+ 8 SET DOWN  FAIL  spot 2 (31 cm from the box): something held the lid up, lid kept
+ 9 SET DOWN  ok    spot 3 (25 cm from the box): let go where the lid met the table
+```
+
+and the result then reads `lid on the table (spot 3: no table felt at 2 before)`.
+Where no other spot is tried, a `next` line says the lid is carried back to
+the box and why (`no time left for another spot`, `as many spots as a run tries`, `a set-down that cannot be watched is tried nowhere else`), then `PUT BACK  ok`,
+and the result's `lid: on the box`.
 A lid that slipped out of the fingers on the way is never `on the table`
 either, whatever the set-down felt: `5 CARRY  FAIL  the lid slipped out of the fingers on the way`,
 and the result's `lid: slipped out of the fingers on the way (where it lies is not known)`.
@@ -248,7 +314,8 @@ a run stopped with the lid in the fingers leaves set).
 | ---------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `open_box` | none   | `{"executed", "lid_off", "lid_xyz", "presses", "grips", "duration_s", "video", "run_log"}`, and `world_state` when the lid came off |
 
-`lid_xyz` is where the lid was set down, in `arm_mount` (m), its height the
+`lid_xyz` is where the lid was set down and let go, in `arm_mount` (m): the
+spot that took it, not one it was taken to and left again. Its height is the
 table's as the set-down went by it (the cameras' moved by the fingers' hold of
 the lid's top). `video` is the MP4
 of both cameras from the grip to the set-down, where one was recorded. As the
@@ -308,7 +375,7 @@ still in the fingers, no code is recoverable.
 | `not_popped`          | yes         | Pressed, but the knob did not come up (or the stroke pressed nothing); the arm went home                                                                                                                                                                                                                                                                                                                                       |
 | `no_button`           | yes         | The look found no button; nothing was pressed                                                                                                                                                                                                                                                                                                                                                                                  |
 | `no_press`            | yes         | A stop before the press that names no other code (the container's config has no reach-out press, the fingers did not shut, the knob's height unread): nothing was pressed. A container no press plans to from where the chair stands is not this: the chair is guided (see "Lining up in the middle of a run")                                                                                                                 |
-| `lid_put_back`        | yes         | No spot for the lid on the table the cameras measured (or no carry to one), or a set-down that did not feel the table: the lid was not let go there, it is back on the box and the arm home                                                                                                                                                                                                                                    |
+| `lid_put_back`        | yes         | No spot for the lid on the table the cameras measured (or no carry to one), or no table felt at the spots it was taken to and no other tried (none left, 6 tried, no time for another, or a set-down that could not be watched): the lid was let go nowhere, it is back on the box and the arm home                                                                                                                            |
 | `lid_dropped`         | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                                                                                                                                                                                                            |
 | `arm_holds`           | no          | A motion stopped part of the way: the arm holds there until cleared                                                                                                                                                                                                                                                                                                                                                            |
 | `arm_halted`          | no          | The driver halted a motion (the e-stop) or took control away: the run sent nothing after it                                                                                                                                                                                                                                                                                                                                    |
@@ -420,7 +487,9 @@ The 35 s are what the orchestrator's 120 s leave: the run's 90 s budget less
 a long run after its go (55 s: about 37 s clean by the two runs of 2026-11-12
 and the pacing since, more where a press or a grip is made twice), so a run
 started on the last second still ends its own way and is not stopped part way.
-A run's own budget is shortened by what its line-up took. After the go of a
+A run's own budget is shortened by what its line-up took, and the run is told
+it as it is started (`BOX_OPENING_RUN_BUDGET`: it takes the lid on to a further
+spot only while that budget holds the spot and the way back to the box). After the go of a
 line-up whose wrist held the container, the run's first scene look is 2 s, not
 its usual 15: on both runs of 2026-11-12 that look found nothing in front of
 the arm, and the arm would stand through it with the wrist turned.
