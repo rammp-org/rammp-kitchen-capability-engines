@@ -15,11 +15,6 @@ import pybullet as p
 
 MAX_IK_ERR = 0.02  # IK position error (m) above which a solution counts as unreachable
 MAX_STEP_JUMP_DEG = 20.0
-J6_GUARD_DEG = 115.0
-# J4's configured soft limit is +-147.8 deg (09-07: a command past it fails METHOD_FAILED; 09-28:
-# a Cartesian grasp path drove J4 from -145 into it and Kortex aborted). PyBullet only knows the
-# URDF's wider limit, so every sim check gates J4 with a margin.
-J4_GUARD_DEG = 144.0
 # J1/J3/J5/J7 spin freely; every commanded angle is wrapped to [-180, 180). 09-29 hardware
 # test (tools/wrap_test.py, J7 and J3): a JointCommand across +-180 takes the SHORT way, so a
 # step is judged (and interpolated for clearance checks) by its short-way change -- 179 -> -179
@@ -27,6 +22,14 @@ J4_GUARD_DEG = 144.0
 CONTINUOUS = [0, 2, 4, 6]
 MAX_CONTINUOUS_DELTA_DEG = 170.0
 KEEP_OUT_ERR = 9.0  # solve_ik's error for a solution in the keep-out zone: fails every IK gate
+# cuRobo plans this far inside every URDF position limit and refuses a goal or start closer
+# (rammp-curobo's joint_limit_margin_rad; 0.1 in the planner on gen_1_5, 2026-11-19). solve_ik
+# holds its answers to the same band (the limits are the loaded model's: on the robot, the
+# driver's), so the sim passes nothing cuRobo would refuse. This replaces the J4/J6 guards (144
+# and 115 deg), which were looser than cuRobo and left J2 unchecked.
+JOINT_LIMIT_MARGIN_RAD = 0.1
+# solve_ik's error for a solution in that margin: fails every IK gate, and is < KEEP_OUT_ERR
+LIMIT_ERR = 5.0
 IK_MAX_ITERATIONS = 200  # PyBullet IK iterations per solve
 CLEARANCE_QUERY_M = 0.5  # clearance() ignores bodies farther than this from every link
 FINGERTIP_OPEN_RAD = 0.0  # finger joint angle with the gripper open
@@ -50,6 +53,7 @@ FINGER_CLOSE_SIGN_BY_NAME = {
 FINGER_CLOSED_RAD = 0.7  # a little short of the 0.8 full close -> slightly wide, i.e. conservative
 
 ARM: list = []  # arm joint indices in the loaded model (filled by make_sim)
+ARM_LIMITS: list = []  # per arm joint: URDF (lower, upper) rad, None if continuous (make_sim)
 FINGER_JOINTS: list = []  # gripper joint indices in the loaded model (filled by make_sim)
 FINGER_CLOSE_SIGN: dict = {}  # finger joint index -> sign of its closing angle (filled by make_sim)
 
@@ -113,7 +117,11 @@ def reset_for_tests():
     if _SIM is not None:
         p.disconnect(physicsClientId=_SIM[1].physics_client_id)
     _SIM, _SIM_ARGS, _MODEL_PROVIDER, _KEEP_OUT = None, None, None, None
+    import rammp_arm  # noqa: PLC0415 -- rammp_arm imports this module
+
+    rammp_arm.TOOL_Z = rammp_arm.DEFAULT_TOOL_Z
     ARM.clear()
+    ARM_LIMITS.clear()
     FINGER_JOINTS.clear()
     FINGER_CLOSE_SIGN.clear()
 
@@ -306,6 +314,12 @@ def make_sim(urdf_path=None, base_pose=None, ee_link=DEFAULT_EE_LINK, initial_jo
         p.disconnect(physicsClientId=client)
         raise
     ARM[:] = arm
+    ARM_LIMITS[:] = arm_limits(urdf_text)
+    offset = tool_z(urdf_text, ee_link)
+    if offset is not None:  # the tool point self.arm and the capabilities use is the model's
+        import rammp_arm  # noqa: PLC0415 -- rammp_arm imports this module
+
+        rammp_arm.TOOL_Z = offset
     FINGER_JOINTS[:] = fingers
     FINGER_CLOSE_SIGN.clear()
     FINGER_CLOSE_SIGN.update({j: FINGER_CLOSE_SIGN_BY_NAME[names[j]] for j in fingers})
@@ -345,11 +359,87 @@ def keep_out_message(rb, q):
     return None if _KEEP_OUT is None else _KEEP_OUT(rb, q)
 
 
+FLANGE_LINKS = ("arm_end_effector_link", "end_effector_link")  # the flange: what /ee_state reports
+
+
+def tool_z(urdf_text, tool_link=DEFAULT_EE_LINK):
+    """How far `tool_link` is past the flange along the flange's z (m), in the model: the fixed
+    joints from end_effector_link to it. On the robot the text is the driver's model, so this is
+    the tool point cuRobo plans for (0.134 with the sensor puck, 0.120 without). None when no
+    flange link is fixed above `tool_link`; SimModelError when the tool is not straight out
+    along the flange's z."""
+    joint_to = {j.find("child").get("link"): j for j in ET.fromstring(urdf_text).iter("joint")}
+    pos, rot, link = np.zeros(3), np.eye(3), tool_link
+    while link not in FLANGE_LINKS:
+        j = joint_to.get(link)
+        if j is None:
+            return None
+        if j.get("type") != "fixed":  # a moving joint before any flange: not a tool on a flange
+            return None
+        o = j.find("origin")
+        xyz = np.array(
+            [float(v) for v in (o.get("xyz", "0 0 0") if o is not None else "0 0 0").split()]
+        )
+        rpy = [float(v) for v in (o.get("rpy", "0 0 0") if o is not None else "0 0 0").split()]
+        r = np.array(p.getMatrixFromQuaternion(p.getQuaternionFromEuler(rpy))).reshape(3, 3)
+        pos, rot = xyz + r @ pos, r @ rot  # this joint's transform, then the chain below it
+        link = j.find("parent").get("link")
+    if not (np.allclose(pos[:2], 0.0, atol=1e-6) and np.allclose(rot, np.eye(3), atol=1e-6)):
+        raise SimModelError(f"{tool_link} is not straight out along the flange's z: at {pos}")
+    return float(pos[2])
+
+
+def arm_limits(urdf_text):
+    """Each arm joint's URDF (lower, upper) in rad, J1..J7 (arm_joint_N or joint_N), None for a
+    continuous joint. On the robot the text is the driver's model: its limits, not a copy."""
+    joints = {j.get("name"): j for j in ET.fromstring(urdf_text).iter("joint")}
+    for fmt in ("arm_joint_{}", "joint_{}"):
+        names = [fmt.format(i) for i in range(1, 8)]
+        if all(n in joints for n in names):
+            break
+    else:
+        raise SimModelError("model has no arm_joint_1..7 (or joint_1..7)")
+    limits = []
+    for n in names:
+        lim = joints[n].find("limit")
+        if joints[n].get("type") == "continuous" or lim is None or lim.get("lower") is None:
+            limits.append(None)
+        else:
+            limits.append((float(lim.get("lower")), float(lim.get("upper"))))
+    return limits
+
+
+def limit_room(q, limits=None):
+    """How far (rad) the arm joints `q` are inside cuRobo's band (each limit narrowed by
+    JOINT_LIMIT_MARGIN_RAD), the smallest over the limited joints: < 0 means cuRobo refuses them.
+    `limits`: arm_limits()'s list, default the sim's model (ARM_LIMITS)."""
+    m = JOINT_LIMIT_MARGIN_RAD
+    room = [
+        min(v - lim[0] - m, lim[1] - m - v)
+        for v, lim in zip(q, ARM_LIMITS if limits is None else limits, strict=False)
+        if lim
+    ]
+    return min(room, default=np.inf)
+
+
+def limit_message(q, limits=None):
+    """Which arm joint of `q` is outside cuRobo's band, in words, or None (limit_room's args)."""
+    m = JOINT_LIMIT_MARGIN_RAD
+    for i, (v, lim) in enumerate(zip(q, ARM_LIMITS if limits is None else limits, strict=False)):
+        if lim and not lim[0] + m <= v <= lim[1] - m:
+            edge = lim[1] if v > 0 else lim[0]
+            return (
+                f"J{i + 1} {np.degrees(v):.1f} deg is within {np.degrees(m):.1f} deg of its "
+                f"limit {np.degrees(edge):.1f} (cuRobo's margin)"
+            )
+    return None
+
+
 def solve_ik(scene, rb, pos, quat, seed_joints):
     """PyBullet IK seeded from `seed_joints`; returns (joints, position error in m).
 
     A solution in the keep-out zone (when one is set, set_keep_out) returns KEEP_OUT_ERR as its
-    error.
+    error; one within JOINT_LIMIT_MARGIN_RAD of a joint limit (or past it), LIMIT_ERR.
     """
     for j, jj in enumerate(ARM):
         p.resetJointState(
@@ -371,6 +461,8 @@ def solve_ik(scene, rb, pos, quat, seed_joints):
     err = float(np.linalg.norm(np.asarray(ls[4]) - np.asarray(wpose.position)))
     if _KEEP_OUT is not None and _KEEP_OUT(rb, joints) is not None:
         return joints, KEEP_OUT_ERR
+    if limit_room(joints) < 0:
+        return joints, LIMIT_ERR
     return joints, err
 
 

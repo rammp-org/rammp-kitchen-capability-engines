@@ -332,8 +332,7 @@ def _plan_close(scene, rb, df, st, args, deg0, behind=False, stop_deg=0.0, held=
             bad = (
                 err > sim.MAX_IK_ERR
                 or jump > sim.MAX_STEP_JUMP_DEG
-                or abs(j6) > sim.J6_GUARD_DEG
-                or abs(np.degrees(nq[3])) > sim.J4_GUARD_DEG
+                or sim.limit_message(nq)
                 or not continuous_ok(qq, nq)
                 or c_body[0] < MIN_CLEAR
             )

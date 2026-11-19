@@ -78,8 +78,8 @@ def test_microwave_open_plans(door_sim):
 
 def test_chair_boxes_are_the_planners_with_its_padding():
     boxes = {name: (centre, half) for name, centre, half in dc.load_chair_boxes()}
-    # 16 platform, 10 seat (11-07: the arm-side armrest is no longer carved), 4 person
-    assert len(boxes) == 30
+    # gen_1_5's (11-18, from its 3D scan): 16 platform, 17 seat, 3 person
+    assert len(boxes) == 36
     centre, half = boxes["person/torso"]
     # 11-07: 0.2032 m back, the arm moved 8 in forward on the chair
     assert centre == (-0.31900, -0.35075, 0.70485)

@@ -32,7 +32,7 @@ params:
   # true only for attended runs, someone on the e-stop.
   allow_execute: false
   # Flange face to the closed fingertips (m): where the container centre lands. Not ruler-measured yet.
-  flange_to_tip: 0.17955
+  tip_past_tool: 0.05955
   # The hand points this many deg down while placing, so the container touches before the fingers.
   pitch_deg: 5.0
   # Contact: the hand's z velocity (m/s, + up) back up to this after moving down.
@@ -149,7 +149,6 @@ params:
   # Where a table may be (m, arm_mount z), for the plane fit without the segmenter's table mask.
   table_z_range: [-0.10, 0.50]
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
-  "arm.tool_z": 0.12
   "arm.dt": 0.02
   "arm.joint_speed": 0.85
   "arm.cart_speed": 0.16
@@ -170,8 +169,6 @@ params:
   "arm.go_to_track_deg": 2.0
   "arm.max_ik_err": 0.02
   "arm.max_step_jump_deg": 20.0
-  "arm.j6_guard_deg": 115.0
-  "arm.j4_guard_deg": 144.0
   "arm.max_continuous_delta_deg": 170.0
   "arm.keep_out_err": 9.0
   "arm.ik_max_iterations": 200

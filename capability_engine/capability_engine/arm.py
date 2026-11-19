@@ -366,6 +366,7 @@ class ArmInterface:
         self._stream = None  # the open Stream: end_action() zeroes and closes it
         self._mock_q = np.array(MOCK_JOINTS, float)  # mock mode: the last commanded joints
         self._mock_gripper = 0.0  # mock mode: the last commanded gripper position (0 = open)
+        self._tool_z_read = False  # rammp_arm.TOOL_Z set from the driver's model (_read_tool_z)
 
     # -- lifecycle ----------------------------------------------------------------------------
 
@@ -685,6 +686,7 @@ class ArmInterface:
         """RammpArm's state dict: joints wrapped to +-pi, `ee_pos` the tool frame (flange +
         TOOL_Z along the flange z) as [x, y, z, qx, qy, qz, qw]. Like RammpArm, the latest
         values however old: only the driver-API reads (joint_states(), ...) refuse stale state."""
+        self._read_tool_z()
         js, ee, grip = (self._read(topic) for topic in MOTION_STATE)
         tool = _tool_position(ee)
         return {
@@ -745,6 +747,17 @@ class ArmInterface:
         finally:
             scope.close()
         return received["urdf"]
+
+    def _read_tool_z(self):
+        """Once per process: rammp_arm.TOOL_Z (flange -> tool, what turns /ee_state into the tool
+        point) from the driver's model, so it is the arm_tool_frame cuRobo plans for (0.134 m
+        with the sensor puck). Mock mode without arm.mock_urdf keeps the default."""
+        if self._tool_z_read or (self._mock and not MOCK_URDF):
+            return
+        offset = sim.tool_z(self.robot_description())
+        if offset is not None:
+            rammp_arm.TOOL_Z = offset
+        self._tool_z_read = True
 
     # -- motions (RammpArm's, rammp_arm.py@7bc328ae:260-458) -------------------------------
 
@@ -963,6 +976,7 @@ class ArmInterface:
 
     def _tool_reached(self, label, pos):
         """True when the tool ended within GO_TO_TRACK_M of `pos` (logged); Refused if not."""
+        self._read_tool_z()
         tool = _tool_position(self._read("/ee_state"))
         e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
         message = f"  {label}: tool {e * 100:.1f} cm from the goal"
@@ -1062,6 +1076,8 @@ class ArmInterface:
         its result as _goal_result() does; a goal HALTED under the token then raises ControlTaken
         (unless the arm e-stopped). `feedback`: called with each GoalFeedback, on the executor (it
         must not block)."""
+        if path:
+            self._read_tool_z()  # the /ee_state callback records the tool path with it
         g.sender_id = rammp_arm.SENDER_ID
         token = self._driver.token
         if token is not None:

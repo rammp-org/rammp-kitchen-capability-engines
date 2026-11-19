@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import rammp_arm
 from fake_driver import FakeCtx, counts
 
 from capability_engine import arm as arm_module
@@ -44,6 +45,22 @@ def test_get_state_shape_and_tool_offset(arm_env):
     assert set(s) == {"position", "velocity", "effort", "ee_pos", "gripper_pos"}
     np.testing.assert_allclose(s["position"][[2, 6]], [3.3 - 2 * np.pi, -3.2 + 2 * np.pi])
     np.testing.assert_allclose(s["ee_pos"][:3], [0.5, 0.0, 0.4 + 0.120])
+
+
+def test_the_tool_offset_is_the_driver_models(arm_env):
+    """With the sensor puck the model puts arm_tool_frame 0.134 past the flange: ee_pos too."""
+    from std_msgs.msg import String
+
+    arm, _, fake = arm_env
+    puck = Path("/fixtures/urdf/flatbot.urdf").read_text()
+    assert puck.count('xyz="0 0 0.120"') == 1  # the fixture's tool_frame_joint (no puck)
+    fake._description_pub.publish(String(data=puck.replace('xyz="0 0 0.120"', 'xyz="0 0 0.134"')))
+    fake.set_flange(pos=[0.5, 0.0, 0.4], quat=[0, 0, 0, 1])
+    arm.begin_action(FakeCtx(), None)
+    try:
+        np.testing.assert_allclose(arm.get_state()["ee_pos"][:3], [0.5, 0.0, 0.4 + 0.134])
+    finally:
+        rammp_arm.TOOL_Z = 0.120  # process-wide: as the other tests expect it
 
 
 def test_state_cleared_between_actions(arm_env):

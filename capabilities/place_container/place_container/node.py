@@ -58,7 +58,7 @@ from .scene import SceneCamera
 
 # The arm moved 8 in (0.2032 m) forward on the flatbot's chair (rammp-deployments #156, merged
 # 2026-11-07 17:56 UTC). Everything here is in arm_mount, which moved with the arm: the arm's own
-# geometry (flange_to_tip, pitch, reach as kinematics) still holds, but a spot or start position saved
+# geometry (tip_past_tool, pitch, reach as kinematics) still holds, but a spot or start position saved
 # before then was saved relative to a chair and table that are now 0.2032 m nearer in x.
 ARM_MOVED = 1794074180.0  # 2026-11-07T17:56:20Z
 # deg: after the carry, the planned line down is used if the arm is within this of its first joints
@@ -73,7 +73,7 @@ BACK_OUT_UP_M = 0.03
 PARAMS = {
     "allow_execute": False,
     # flange face to the closed fingertips (m): sets where the container centre lands
-    "flange_to_tip": plan.FLANGE_TO_TIP,
+    "tip_past_tool": plan.TIP_PAST_TOOL,
     # the hand points this many deg down while placing, so the container touches first
     "pitch_deg": plan.PLACE_PITCH_DEG,
     # contact: vz (m/s, + up) back up to this after moving down; 0.0 came 4.5 s late on the flatbot
@@ -601,7 +601,7 @@ class Capability(CapabilityEngine):
             return self._mock(action_id, params, ctx)
         log = self.get_logger().info
         try:
-            model = plan.Model(self.cfg["flange_to_tip"], self.cfg["pitch_deg"])
+            model = plan.Model(self.cfg["tip_past_tool"], self.cfg["pitch_deg"])
             if action_id == "mark":
                 return self._mark(model, log)
             if action_id == "place_here":
@@ -1239,7 +1239,7 @@ class Capability(CapabilityEngine):
                 f"the arm reports its tool frame at {np.round(reported, 3).tolist()} m, the model at "
                 f"{np.round(modelled, 3).tolist()}: {off * 100:.1f} cm apart (tool_frame_tol "
                 f"{self.cfg['tool_frame_tol'] * 100:.1f} cm). Next: check the driver's tool configuration (Robotiq "
-                "2F-85, arm.tool_z 0.12 m) and that the driver's URDF is flatbot's"
+                "2F-85) and that /arm/robot_description is this robot's"
             )
 
     def _spot(self, params, log):

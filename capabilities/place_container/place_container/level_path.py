@@ -328,7 +328,7 @@ def carry(model, chair, q_from, spot, table_z, heading, step=CARRY_KNOT_M):
     shortest). (tool height over the table, knots); Refused when no height plans."""
     T0 = model.fk(q_from)
     R_to = turned_to(T0[:3, :3], heading)
-    tip = R_to @ np.array([0.0, 0.0, model.flange_to_tip - rammp_arm.TOOL_Z])  # tool frame -> fingertips
+    tip = R_to @ np.array([0.0, 0.0, model.tip_past_tool])  # tool frame -> fingertips
     centre = tip + plan.BOWL_RADIUS * np.asarray(heading)  # tool frame -> container centre (at the lip)
     low = MIN_BOTTOM_ABOVE_TABLE + plan.BOWL_DEPTH - tip[2]  # tool height over the table: bottom 10 cm up
     high = max(low, T0[2, 3] - table_z)
