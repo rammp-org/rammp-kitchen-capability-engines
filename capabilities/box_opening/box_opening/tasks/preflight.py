@@ -7,7 +7,9 @@ actions unreachable; the planner unable to load a world this repo writes
 at the same path); the body model on (body_layers) and unreadable, or the
 planner not planning around its same chair and user (its config and world
 "": an empty-world planner would fly the look, the carry and home through
-them); no TF for the finger tips, or for the wrist camera's
+them); the robot's rest pose (rest_pose: the arm driver's presets.home)
+unreadable, inside the chair and user's padding or at a joint limit; no TF
+for the finger tips, or for the wrist camera's
 parent frame; another program that moves this arm on the graph (both of
 which press_demo --execute refuses on); no gripper reported; a wrist
 camera stream the mission reads silent (colour, camera_info, and the
@@ -326,6 +328,23 @@ def body_source_verdict(body_layers):
     return "PASS", "body model %s: %d boxes (%s)" % (path, len(model.names), layers), path
 
 
+def rest_pose_verdict(rest_pose, urdf_path, base_frame, body_layers):
+    """(level, text): the rest pose a run would start and end at (runtime/rest.configure of `rest_pose`,
+    the CLI's --rest-pose), judged as a run judges it: on this arm (`urdf_path`, its description rooted
+    at `base_frame`; None on the bench: the installed one) and the body model of `body_layers` ('' off).
+    PASS with where the pose comes from and how it stands; FAIL where a run would stop on it (a pose
+    inside the chair and user's padding or at a joint limit, a file that cannot be read)."""
+    from box_opening.runtime import approach, rest
+
+    approach.set_chain_root(base_frame, urdf_path=urdf_path)
+    try:
+        approach.set_body_layers(body_layers)
+        _q, words = rest.configure(rest_pose)
+    except RuntimeError as e:  # rest.RestPoseError, body.BodyModelError: a run stops on either
+        return "FAIL", "%s — a run stops there before it moves" % e
+    return "PASS", words
+
+
 def main():
     args = cli_common.make_parser(__doc__).parse_args()
     why = rmw_refusal(os.environ)
@@ -384,6 +403,18 @@ def main():
     log.info("%-4s  %s" % (level, text))
     failures += level == "FAIL"
     level, text = planner_world_verdict(*planner_world(node, with_config=True), body_source=source)
+    log.info("%-4s  %s" % (level, text))
+    failures += level == "FAIL"
+
+    # 4b. the robot's rest pose, where a run starts and ends (runtime/rest: the arm driver's
+    #     presets.home): one inside the chair and user's padding or at a joint limit ends every run
+    #     before it moves, so it is said here first
+    level, text = rest_pose_verdict(
+        getattr(args, "rest_pose", None),
+        cli_common._arm_urdf_path(node, store.base_frame),
+        store.base_frame,
+        source or "",
+    )
     log.info("%-4s  %s" % (level, text))
     failures += level == "FAIL"
 

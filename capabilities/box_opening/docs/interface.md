@@ -693,6 +693,7 @@ passes them as a params file.
 | `mission_frames`      | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps                                                                                                                                                                                                                                                                                                                                                                                        |
 | `speed_scale`         | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `body_layers`         | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `rest_pose`           | see below              | The arm driver's presets file whose `presets.home` is the robot's rest pose, where a run starts and ends; `""` or no such file: the built-in pose                                                                                                                                                                                                                                                                                                                                                                |
 | `planner_worlds_as`   | `""`                   | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world")                                                                                                                                                                                                                                                                                                                                                                 |
 | `planner_worlds_dir`  | `""`                   | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -761,6 +762,38 @@ in it) and its arm spheres, with the hand's own in `config/robot_body.yaml`, hol
 every plan-free line and every planner goal out of the chair and the user, and the
 same file slows the arm near the user. Unreadable, a run stops before it moves; on,
 a run starts only on a planner started with that same config and `world ""`.
+
+### The rest pose
+
+A run starts and ends at the arm's rest pose, and everything it derives from it
+follows: the wrist's front views (the rest pose with only the wrist turned), the
+look the first-run observation flies, the side of the wrap the planner is handed
+its joints on, the goal a home is planned to, and the key the line-up's reach
+grids are kept under. The pose is the robot's own. `rest_pose` names the file the
+arm's driver reads its named poses from, by default
+`/config/robot/arm_presets.yaml` (the robot's `config/robots/current`, which the
+fragment mounts): ROS parameters, and box opening takes its `presets.home`, seven
+angles in rad for `arm_joint_1`..`7`, the pose the driver's `go_to_preset` `home`
+flies to. Where everyone parks the arm is where a run starts.
+
+- The default file not there, or with no `presets.home` in it: the built-in pose,
+  flatbot's (`constants.HOME`), and the run's log says so. `rest_pose: ""` is the
+  built-in pose too.
+- A file named by the parameter (not the default) that is not there or gives no
+  pose, a `presets.home` that is not seven numbers, or two nodes' blocks in the
+  file that disagree: the run stops before it moves.
+- A pose that would rest the arm inside the chair and user's padding
+  (`body_layers`: the planner plans nothing from a start in it), or with a joint
+  within 0.18 rad of its limit (no way back to it is planned from beside the
+  limit): refused before anything moves, with the link, the box and the depth, or
+  the joint and its room. `open_box` then fails `not_ready` with those words.
+  Such a pose is never flown to. The built-in pose is not judged: it is as it
+  always was.
+
+`home_arm`, `preflight` (a row of its own) and the line-up's reach proof read the
+same file the same way, so a robot's rest pose is changed in one place: its
+`arm_presets.yaml`. `BOX_OPENING_REST_POSE` in the node's environment overrides
+the parameter.
 
 `wrist_survey` is off by default: a run whose scene camera finds no container
 stops with `not_found` before anything moves. On, such a run surveys with the

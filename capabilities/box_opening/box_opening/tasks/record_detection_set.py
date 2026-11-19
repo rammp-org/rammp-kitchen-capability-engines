@@ -108,6 +108,7 @@ def main():
         sys.exit(why)  # before rclpy: nothing started, nothing moved
     node, client = cli_common.init_runtime(args.execute)
     client._base_frame = worlds.base_frame
+    cli_common.load_rest_or_exit(args, "[record]")  # the robot's own rest pose, before anything reads HOME
     runner = Runner(client)
     cli_common.apply_speed_scale(runner, args)
     table_z = worlds.table_top_z

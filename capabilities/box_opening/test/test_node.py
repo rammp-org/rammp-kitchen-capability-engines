@@ -873,6 +873,11 @@ def test_the_one_action_is_open_box_and_runs_the_whole_run(engine):
     engine.set_parameters([Parameter("body_layers", value="")])
     assert real("open_box")[real("open_box").index("--body-layers") + 1] == ""  # off: the bench
     engine.set_parameters([Parameter("body_layers", value="/config/robot/curobo/planner.yaml")])
+    # the robot's own rest pose: the arm driver's presets file, from the same mount (runtime/rest)
+    assert argv[argv.index("--rest-pose") + 1] == "/config/robot/arm_presets.yaml"
+    engine.set_parameters([Parameter("rest_pose", value="")])
+    assert real("open_box")[real("open_box").index("--rest-pose") + 1] == ""  # the built-in pose
+    engine.set_parameters([Parameter("rest_pose", value="/config/robot/arm_presets.yaml")])
     argv = real("open_box", "food_container_2")  # the selection as the goal came (execute)
     assert argv[argv.index("--instance-id") + 1] == "food_container_2"
 
@@ -1583,6 +1588,7 @@ def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(
 
     monkeypatch.setattr(node.line_up, "BoxSource", Source)
     engine.set_parameters([Parameter("line_up_far_m", value=0.8), Parameter("body_layers", value="/cfg/planner.yaml")])
+    engine.set_parameters([Parameter("rest_pose", value="/cfg/arm_presets.yaml")])
     env = engine._env()
     engine._box_source(env, "food_container_2")
     ((watch, probe, env_, far_m),) = made
@@ -1597,7 +1603,16 @@ def test_the_line_ups_children_are_the_watch_and_the_probe_on_this_goals_params(
     argv = probe("/state/arm.urdf", "arm_mount")
     assert argv[:6] == ["/lib/reach_probe", "--serve", "--urdf", "/state/arm.urdf", "--container", pink]
     # the deployment's bound goes to the probe too: it asks no cell further out than the line-up trusts
-    assert argv[6:] == ["--root", "arm_mount", "--body-layers", "/cfg/planner.yaml", "--far-m", "0.8"]
+    # ... and the run's own chair model and rest pose: its proofs start where the run does
+    assert argv[6:12] == [
+        "--root",
+        "arm_mount",
+        "--body-layers",
+        "/cfg/planner.yaml",
+        "--rest-pose",
+        "/cfg/arm_presets.yaml",
+    ]
+    assert argv[12:] == ["--far-m", "0.8"]
     assert env_ is env and far_m == 0.8
     engine._box_source(env, "")
     assert "--instance-id" not in made[-1][0]

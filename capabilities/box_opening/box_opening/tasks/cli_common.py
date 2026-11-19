@@ -21,7 +21,7 @@ from box_opening import LOGGER as log
 from box_opening.constants import state_dir
 from box_opening.models.container import ContainerModel
 from box_opening.primitives.core import Ctx
-from box_opening.runtime import approach
+from box_opening.runtime import approach, rest
 from box_opening.runtime.abort import AbortFlag, install_sigint
 from box_opening.runtime.body import BODY_LAYERS_ENV, DEFAULT_BODY_LAYERS
 from box_opening.runtime.client import PlannerClient
@@ -77,6 +77,13 @@ def make_parser(desc):
         help="the cuRobo planner config whose layers (the chair and its user) and robot spheres every "
         "plan-free line is held out of (default %s; BOX_OPENING_BODY_LAYERS overrides; '' turns the "
         "check off: the bench). Unreadable: nothing moves" % DEFAULT_BODY_LAYERS,
+    )
+    ap.add_argument(
+        "--rest-pose",
+        default=None,
+        help="the robot's own rest pose (HOME): the arm driver's presets file, whose presets.home it is (default "
+        "%s; %s overrides; '' the built-in pose). Not there, or with no presets.home: the built-in pose. Inside "
+        "the chair's padding or at a joint limit: nothing moves" % (rest.DEFAULT_REST_POSE, rest.REST_POSE_ENV),
     )
     ap.add_argument(
         "--speed-scale",
@@ -239,6 +246,20 @@ def load_body_or_exit(args, who):
     return model
 
 
+def load_rest_or_exit(args, who):
+    """The robot's own rest pose (runtime/rest: --rest-pose, BOX_OPENING_REST_POSE over it) read, judged
+    on this run's arm and body model and put in force, before anything moves and before anything reads
+    HOME: after the chain's root and the body model are set (load_body_or_exit). A pose that cannot be
+    read or judged, or that stands inside the chair and user's padding or at a joint limit, stops the run
+    here, never a run that flies to it. Returns the pose, None for the built-in one."""
+    try:
+        q, words = rest.configure(getattr(args, "rest_pose", None))
+    except rest.RestPoseError as e:
+        sys.exit("%s not starting: %s. Nothing moved." % (who, e))
+    log.info("%s %s" % (who, words))
+    return q
+
+
 def planner_body_or_exit(node, model, execute, who):
     """With the body model on, a run that moves the arm starts only where the planner plans around
     the same chair and user (preflight.planner_body_verdict: its config the body model's, world
@@ -278,6 +299,7 @@ def build_ctx(args):
     approach.set_chain_root(worlds.base_frame, urdf_path=_arm_urdf_path(node, worlds.base_frame))
     # the body model, never in `model` (the container's: the Ctx below plans with it)
     body_model = load_body_or_exit(args, "[%s]" % ap_prog())
+    load_rest_or_exit(args, "[%s]" % ap_prog())  # HOME is this robot's from here on
     planner_body_or_exit(node, body_model, bool(getattr(args, "execute", False)), "[%s]" % ap_prog())
     ctx = Ctx(
         model=model,

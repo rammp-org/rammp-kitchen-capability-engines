@@ -81,6 +81,11 @@ PARAMS = {
     # plan-free line is held out of (runtime/body); unreadable, the run stops before it moves;
     # "" turns the check off (the bench). BOX_OPENING_BODY_LAYERS in the node's environment overrides
     "body_layers": "/config/robot/curobo/planner.yaml",
+    # the robot's own rest pose (HOME): the arm driver's presets file, whose `presets.home` is where a run
+    # starts and ends (runtime/rest). Not there, or with no presets.home in it: the built-in pose
+    # (constants.HOME, flatbot's); "" the built-in pose too. A pose inside the chair and user's padding or at
+    # a joint limit ends a run before it moves. BOX_OPENING_REST_POSE in the node's environment overrides
+    "rest_pose": "/config/robot/arm_presets.yaml",
     # where the scene camera finds no container, look for it with the wrist camera from one or two
     # poses over the arm's side (a chair parked side-on to a counter: tasks/survey); off, such a
     # run stops with NO BOX before anything moves, as the owner had it (2026-10-22). Never with the
@@ -1208,11 +1213,13 @@ class Capability(CapabilityEngine):
                 watch += ["--instance-id", instance_id]
         layers = self._param("body_layers")
         layers = PARAMS["body_layers"] if layers is None else str(layers)
+        rest = self._rest_pose()
         far = self._far_m()
 
         def probe(urdf, root):
             argv = [executable("reach_probe"), "--serve", "--urdf", urdf, "--container", container]
-            argv += ["--root", root or "arm_mount", "--body-layers", layers]
+            # the run's own chair model and rest pose: its proofs start where the run does
+            argv += ["--root", root or "arm_mount", "--body-layers", layers, "--rest-pose", rest]
             # the deployment's bound, for the probe too: its proofs are not spent on cells the line-up will
             # not trust (reach_probe --far-m; none said, it asks as far as the proof plans)
             return argv + (["--far-m", str(far)] if far is not None else [])
@@ -1694,6 +1701,7 @@ class Capability(CapabilityEngine):
         argv += ["--speed-scale", str(float(self._param("speed_scale")))]
         layers = self._param("body_layers")  # only an explicit "" turns the check off; unset is the default
         argv += ["--body-layers", PARAMS["body_layers"] if layers is None else str(layers)]
+        argv += ["--rest-pose", self._rest_pose()]
         if instance_id:  # the container the orchestrator selected; standalone: any of its class
             argv += ["--instance-id", instance_id]
         if self._param("wrist_survey"):  # the run surveys only without a selection (tasks/survey)
@@ -1703,6 +1711,12 @@ class Capability(CapabilityEngine):
         if self._param("wrist_alone"):  # read by the wrist look alone (--wrist-first), and only with a selection
             argv += ["--wrist-alone"]
         return argv + ["--execute"]  # only ever run where allow_execute is on (execute())
+
+    def _rest_pose(self):
+        """rest_pose as the run and the line-up's probe are handed it (--rest-pose): the file named, the
+        default one where the param is unset; only an explicit "" means the built-in pose."""
+        value = self._param("rest_pose")
+        return PARAMS["rest_pose"] if value is None else str(value)
 
     def _env(self):
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")

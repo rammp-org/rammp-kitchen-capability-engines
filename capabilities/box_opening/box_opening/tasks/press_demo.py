@@ -2380,8 +2380,11 @@ def main():
         )
     # the chair and its user, every plan-free line held out of them (runtime/body)
     body_model = cli_common.load_body_or_exit(args, "[press_demo]")
-    # the goals the body check lets through: the rest this run starts and ends at (flatbot's HOME
-    # stands inside the chair model's armrest today; every goal the run chooses is held to it)
+    # the robot's own rest pose, before anything reads HOME (runtime/rest: one inside the chair's padding
+    # or at a joint limit ends the run here)
+    cli_common.load_rest_or_exit(args, "[press_demo]")
+    # the goals the body check lets through: the rest this run starts and ends at (the built-in HOME
+    # stands inside some chair models' armrest; every goal the run chooses is held to it)
     set_rest_goals([list(HOME), rest_joints(cfg)])
     runner = Runner(client)
     cli_common.apply_speed_scale(runner, args)
