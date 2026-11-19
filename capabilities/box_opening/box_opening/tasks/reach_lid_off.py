@@ -653,6 +653,14 @@ HAND_STANDS_CLEAR_M = clear_table.UP_SLACK_M
 # SPOT_S that is not the carry's own flight (the retreat's line 1.3-1.7 s, 0.1-0.5 s between goals).
 # Once a carry is planned its own flight is known (flight_s), and the time is asked for that and this
 SPOT_UP_S = 2.5
+# A budget's "from" that this run cannot have been started at on this host's monotonic clock is no
+# budget read (RunClock; the review of 2026-11-19): one stamped by time.time() read as 1.8e9 s left,
+# one 60 s ahead as 150 s left of 90 — both valid, both failing open. Later than now by more than
+# RUN_FROM_AHEAD_S (the engine rounds it to a millisecond, and the run reads it seconds on), or
+# older than the run's own seconds and RUN_FROM_OLD_S more (no run with a line-up in it lasts an
+# hour): unreadable, and so no further spot.
+RUN_FROM_AHEAD_S = 1.0
+RUN_FROM_OLD_S = 3600.0
 # Two spots where something held the lid up at heights no further apart than this are one thing: the
 # table itself, standing higher than the run has it (the plan is the same at both; the 19 flown met
 # the table within 27 mm of each other across runs whose plans stood up to 24 mm apart). No further
@@ -4461,7 +4469,7 @@ def _close_and_carry(ctx, cfg, runner, eyes, ahead, quat, attempt, room, back_ou
                 1000 * lift.back_m,
                 drop.xyz[0],
                 drop.xyz[1],
-                _touch_says(carry, search.after_this(flight_s(runner, flying))),
+                _touch_says(carry, search.after_this()),
             )
         )
         _video(
@@ -4953,10 +4961,13 @@ class RunClock:
       nothing handed (a run from the command line): no engine times it, left_s() is None, and
         SETDOWN_SPOTS alone bounds its spots;
       a budget handed: left_s() seconds, negative past it;
-      something handed that does not read as one (`unreadable` says what): an engine IS timing
+      something handed that does not read as one (`unreadable` says what; a "from" this run
+        cannot have been started at among them: RUN_FROM_AHEAD_S's note): an engine IS timing
         this run and the run does not know by how much — left_s() is 0.0, so no further spot is
         ever started on it (the first review of 2026-11-19: it was taken for "nothing handed", and
         an unreadable budget would have let a run try every spot with the engine's Ctrl+C due).
+        That 0.0 is the rule's, not a time: what is said and recorded of the time left is
+        known_s(), which has none then.
     `runner`: the run's, for its record; `env`, `now`, `wall`: the tests'."""
 
     def __init__(self, runner=None, env=None, now=time.monotonic, wall=time.time):
@@ -4978,6 +4989,16 @@ class RunClock:
                     raise ValueError("%r is not a number of seconds" % (v,))
             if not isinstance(go, bool):
                 raise ValueError("go is %r, not true or false" % (go,))
+            ago = float(self._now()) - float(since)
+            if ago < -RUN_FROM_AHEAD_S:
+                raise ValueError(
+                    "it counts from %.0f s after now on this host's monotonic clock: stamped on another clock, "
+                    "or not this run's" % -ago
+                )
+            if ago > max(float(s), 0.0) + RUN_FROM_OLD_S:
+                raise ValueError(
+                    "it counts from %.0f s ago, more than its own %.0f s and an hour: no run is that old" % (ago, s)
+                )
             self.s, self.since, self.from_go = float(s), float(since), go
         except (KeyError, TypeError, ValueError) as e:
             self.unreadable = "%s=%r: %s" % (RUN_BUDGET_ENV, raw, e if not isinstance(e, KeyError) else "no %s" % e)
@@ -5017,6 +5038,11 @@ class RunClock:
             if go is not None:
                 since = go
         return since + self.s - float(self._now())
+
+    def known_s(self):
+        """The seconds this run is known to have: left_s() where a budget reads; None where nothing
+        times the run and where what times it cannot be read (said as that, never as "0 s left")."""
+        return None if self.unreadable is not None else self.left_s()
 
 
 def flight_s(runner, legs):
@@ -5236,22 +5262,21 @@ class SpotSearch:
             )
         return None
 
-    def after_this(self, flight=None):
-        """Why a set-down about to fly (`flight` s: its carry's own time, None: SPOT_S's) will be
-        followed by the box and not by another spot should it feel no table, or None: it is the
-        last of SETDOWN_SPOTS, or by its end the run's clock will not hold another (no_more, asked
-        of the time there will be then). What the line before a set-down promises is this."""
+    def after_this(self):
+        """What will follow a set-down about to fly should it feel no table, as far as is known
+        now: None — another spot (nothing times the run, and spots are left); ("box", why) — the
+        box, and that is certain: the last of SETDOWN_SPOTS, or a time that cannot be read;
+        ("time", the seconds left now) — another spot only where the run's clock still holds one
+        then. What the clock will say then is not known now: this predicted it from the planned
+        flight, and a set-down that something stops early ends sooner than its plan, so the line
+        said "back onto the box" of set-downs that went on to another spot (the review of
+        2026-11-19). The line before a set-down says this (_touch_says)."""
         if self.spots >= SETDOWN_SPOTS:
-            return "the last of the %d spots a run tries" % SETDOWN_SPOTS
+            return "box", "the last of the %d spots a run tries" % SETDOWN_SPOTS
         if self.clock.unreadable is not None:
-            return "the run's time cannot be read"
+            return "box", "the run's time cannot be read"
         left = self.clock.left_s()
-        if left is None:
-            return None
-        then = left - (SPOT_S - SPOT_UP_S if flight is None else float(flight))
-        if then < CHOICE_S + SPOT_S + BOX_S + END_S:
-            return "the run's time will hold no further spot: %.0f s are left now" % max(left, 0.0)
-        return None
+        return None if left is None else ("time", left)
 
     def out_of_time(self):
         """Whether the run's clock leaves no time for a spot still being looked for (SPOT_S) and the
@@ -5502,21 +5527,23 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
             )
         )
     if carry is None:
-        left_s = search.clock.left_s()
+        # (said, where the clock and not the table ended the looking: the tiers were gone through — and said
+        # as what is known: a time that cannot be read is not "0 s left")
+        ended = ""
+        if got.timed_out and search.clock.unreadable is not None:
+            ended = ", and no more of the table is looked at: the run's time cannot be read"
+        elif got.timed_out:
+            ended = (
+                ", and no more of the table is looked at: the run's time holds no spot found later and the way back "
+                "to the box after it (%.0f s are left, they take %.0f)"
+                % (max(search.clock.left_s() or 0.0, 0.0), SPOT_S + BOX_S + END_S)
+            )
         return put_lid_back(
             ctx,
             cfg,
             runner,
             "no carry plans to a spot on the table the cameras measured (%s)%s"
-            % (
-                "; ".join(refused) or passed.says(),
-                # (said, where the clock and not the table ended the looking: the tiers were gone through)
-                ""
-                if not got.timed_out
-                else ", and no more of the table is looked at: the run's time holds no spot found later and the way "
-                "back to the box after it (%.0f s are left, they take %.0f)"
-                % (max(left_s or 0.0, 0.0), SPOT_S + BOX_S + END_S),
-            ),
+            % ("; ".join(refused) or passed.says(), ended),
         )
     drop, tier, says = chosen
     _say_spot(ctx, eyes, chosen, refused, search.tmap, table_z)
@@ -5530,7 +5557,7 @@ def choose_and_carry(ctx, cfg, runner, eyes, ahead=None):
             ", ".join(lg.name for lg in carry.legs),
             drop.xyz[0],
             drop.xyz[1],
-            _touch_says(carry, search.after_this(flight_s(runner, carry.legs))),
+            _touch_says(carry, search.after_this()),
         )
     )
     return _fly_carry(ctx, cfg, runner, carry, drop, tier, search)
@@ -5604,21 +5631,24 @@ def _say_spot(ctx, eyes, chosen, refused, tmap, table_z):
     _video_spot(ctx, eyes, drop)
 
 
-def _touch_says(carry, box=None):
-    """Where `carry`'s set-down lets the lid go, and what follows where it does not. `box`: why a
-    set-down that feels no table will be followed by the box and not by another spot
-    (SpotSearch.after_this: the run's time, the last of its spots), None where another spot will
-    be tried — said as it will be: the line promised "on to another spot" of set-downs whose clock
-    then sent them to the box (the review of 2026-11-19)."""
+def _touch_says(carry, after=None):
+    """Where `carry`'s set-down lets the lid go, and what follows where it does not, as far as that
+    is known as it is said (`after`: SpotSearch.after_this): another spot; the box, where that is
+    certain; or, of a run that is timed, another spot only where its time then still holds one."""
+    if after is None:
+        then = "up again with it and on to another spot"
+    elif after[0] == "box":
+        then = "back onto the box (%s)" % after[1]
+    else:
+        then = (
+            "up again with it, and on to another spot only where the run's time then still holds one and the way "
+            "back to the box after it (%.0f s are left now, %.0f are asked then), else back onto the box"
+            % (max(after[1], 0.0), CHOICE_S + SPOT_S + BOX_S + END_S)
+        )
     return (
         "slowly from %.0f mm over where the plan has the lid meet it to %.0f mm under that, let go only where the "
         "arm feels it meet the table (no more than %.0f mm over the plan); felt nowhere, %s"
-        % (
-            1000 * SETDOWN_SLOW_M,
-            1000 * (carry.over_m or 0.0),
-            1000 * SETDOWN_CREDIBLE_M,
-            "up again with it and on to another spot" if box is None else "back onto the box (%s)" % box,
-        )
+        % (1000 * SETDOWN_SLOW_M, 1000 * (carry.over_m or 0.0), 1000 * SETDOWN_CREDIBLE_M, then)
     )
 
 
@@ -5807,7 +5837,11 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
        aside for the run (the lid's; the lid's and the hand's where something held the lid up);
      - the arm rises with the lid to the carry's height over it (_back_up);
      - where something the map did not show held the lid up, the wrist looks at the table from
-       there before anything is chosen (SpotSearch.look_again): the map was wrong of that place;
+       there before anything is chosen (SpotSearch.look_again): the map was wrong of that place.
+       What held the lid the look does not show — it stands under the lid in the fingers, inside
+       the column the wrist's frame leaves out (wrist_table: the lid's radius and HELD_LID_CLEAR_M
+       round the pads) — only the table round it; what keeps the next lid and hand off it is the
+       footprint set aside;
      - the next spot is chosen from there by the same rules in the same order (SpotSearch.pick:
        every spot still on table the cameras measured, outside the no-land radius, reached by the
        hand, its carry held out of the chair, its user and the open canister, at carry height
@@ -5834,7 +5868,7 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
         )
     else:
         stop = search.no_more(CHOICE_S + SPOT_S)
-    left_s = search.clock.left_s()
+    left_s = search.clock.known_s()  # (None where the run's time cannot be read: that is not "0 s left")
     runner.note(
         "lid_spot_left",
         spot=was.n,
@@ -5871,6 +5905,7 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
     looked = False
     if verdict == "held":
         # something stood there that the map did not show: the wrist looks before the next spot is chosen
+        # (at the table round it: what held the lid is under the lid, which the wrist's frame leaves out)
         looked = search.look_again(runner, q, why="something the map did not show held the lid up at spot %d" % was.n)
         q = [float(v) for v in ctx.client.joints()]
     got = search.pick(runner, q)
@@ -5882,7 +5917,7 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
         if got.carry is None
         else search.no_more((SPOT_S - SPOT_UP_S if flight is None else flight) + SPOT_UP_S, own=flight is not None)
     )
-    left_s = search.clock.left_s()
+    left_s = search.clock.known_s()
     runner.note(
         "lid_spot",
         xyz=None if chosen is None or stop is not None else [round(v, 4) for v in chosen[0].xyz],
@@ -5911,9 +5946,14 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
             ctx,
             cfg,
             runner,
-            "no table was felt under the lid (%s), and no other spot is tried: the run's time ran out while one "
-            "was looked for (%.0f s are left; a spot and the way back to the box after it take %.0f)"
-            % (tried, max(left_s or 0.0, 0.0), SPOT_S + BOX_S + END_S),
+            "no table was felt under the lid (%s), and no other spot is tried: the run's time %s"
+            % (
+                tried,
+                "cannot be read"
+                if left_s is None
+                else "ran out while one was looked for (%.0f s are left; a spot and the way back to the box after "
+                "it take %.0f)" % (max(left_s, 0.0), SPOT_S + BOX_S + END_S),
+            ),
         )
     if got.carry is None:
         return put_lid_back(
@@ -5949,7 +5989,7 @@ def another_spot(ctx, cfg, runner, search, carry, drop, tier, refused, above_m=N
             ", ".join(lg.name for lg in got.carry.legs),
             nxt.xyz[0],
             nxt.xyz[1],
-            _touch_says(got.carry, search.after_this(flight)),
+            _touch_says(got.carry, search.after_this()),
         )
     )
     return _fly_carry(ctx, cfg, runner, got.carry, nxt, tier2, search)

@@ -149,7 +149,11 @@ beside the container, and goes home. It has one action, `open_box`:
    something stands there that the map did not show: the wrist looks at the
    table from where the arm stands before anything is chosen, and no part of
    the next lid or hand comes down over where this lid or hand did (two
-   hands straight down stand 20 cm apart at the least). The next spot is
+   hands straight down stand 20 cm apart at the least). That look cannot
+   show what held the lid: it stands under the lid in the fingers, and the
+   wrist's frame leaves out everything within the lid's radius and 30 mm of
+   the pads. It shows the table round it; what keeps the next spot off what
+   held this lid is the footprint set aside, not the map. The next spot is
    chosen by the same rules in the same order, its carry asked what every
    carry after the first is (above: the walk first, at the carry's height
    over the table and what stands on it, off the open canister); and the lid
@@ -179,15 +183,20 @@ beside the container, and goes home. It has one action, `open_box`:
      the choosing stops and the lid goes back on the box, with the 23 s that
      takes still in hand. The carry chosen is sent only if the time left
      holds its own flight as the runner will fly it, 2.5 s back up, and those
-     23 s. What the run says before each set-down is what will follow one
-     that feels no table: another spot, or the box and why.
+     23 s. What the run says before each set-down is what is known then of
+     what follows one that feels no table: another spot; the box, where that
+     is certain (the last of the 6, a time that cannot be read); or, of a
+     timed run, another spot only where its time then still holds one.
      A clean run reaches its first set-down with 51-63 s left, enough for three
      to five more spots; a run that had a full line-up inside its budget has
      none, and its first set-down that feels no table goes to the box. A run
      started by hand from the command line is handed no budget, is timed by
      nothing, and the 6 spots bound it. A budget that is there and cannot be
      read is not that: an engine is timing the run, the run does not know
-     for how long, and no further spot is started;
+     for how long, and no further spot is started. A budget that counts from
+     later than now on the host's monotonic clock, or from more than its own
+     seconds and an hour ago, is one that cannot be read: it was stamped on
+     another clock, or is not this run's;
    - not after a set-down that could not be watched (its watch failed, which
      stops the descent where it failed, or where the slow stretch begins if
      it failed before that, and never the lift or the carry; or none of its
