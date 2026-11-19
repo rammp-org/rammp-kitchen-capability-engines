@@ -298,6 +298,7 @@ END_SAYS = {
 # carries them: its `says`)
 END_NO_ANSWER = "No answer in time. Nothing was pressed"
 END_UI_GONE = "The screen lost the arm's panel. Nothing was pressed"
+END_NOT_SEEN = "The arm never saw the container. Nothing was pressed"
 END_RETRY = "You can try again"
 END_HELP = "Ask someone to check the arm"
 
@@ -1678,6 +1679,8 @@ class Capability(CapabilityEngine):
             error = EngineError("not_lined_up", message + (f" -- {why}" if why else ""), recoverable=True)
             # the person was in place and asked, and did not answer: not "not in place" (the panel's end)
             asked_last = [st for st in states if st != guide.TIMED_OUT][-1:] == [guide.READY]
+            if not lining.guide.saw_box:
+                raise saying(error, END_NOT_SEEN)  # ... nor one no camera ever saw
             raise saying(error, END_NO_ANSWER) if asked_last else error
         if outcome == line_up.UNABLE and getattr(source, "lost", False):
             # the UI went, not the arm: ended as a line-up out of time is, the wrist turned back (the caller)

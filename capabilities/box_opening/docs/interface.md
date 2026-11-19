@@ -373,15 +373,16 @@ progress panel, Open `normal`.
 How the action ended is said on the panel for 5 s before the action ends
 (`END_SHOW_S`), with no button, in one short line:
 
-| The end                                      | The panel says                                                                                       |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| the lid off and set down                     | `Done. The lid is off, on the table`                                                                 |
-| ended clean with the lid not off             | `Finished. The lid was not taken off`                                                                |
-| the person's Cancel (or `n`)                 | `Cancelled`                                                                                          |
-| an error                                     | what its code always means, then `You can try again` (recoverable) or `Ask someone to check the arm` |
-| a line-up nobody answered at `Ready`         | `No answer in time. Nothing was pressed. You can try again`                                          |
-| a line-up whose panel the UI stopped showing | `The screen lost the arm's panel. Nothing was pressed. You can try again`                            |
-| any end with the lid still in the fingers    | `Cancelled.` or `Stopped.` then `The lid is still in the fingers. Ask someone to check the arm`      |
+| The end                                             | The panel says                                                                                       |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| the lid off and set down                            | `Done. The lid is off, on the table`                                                                 |
+| ended clean with the lid not off                    | `Finished. The lid was not taken off`                                                                |
+| the person's Cancel (or `n`)                        | `Cancelled`                                                                                          |
+| an error                                            | what its code always means, then `You can try again` (recoverable) or `Ask someone to check the arm` |
+| a line-up nobody answered at `Ready`                | `No answer in time. Nothing was pressed. You can try again`                                          |
+| a line-up in which no camera ever saw the container | `The arm never saw the container. Nothing was pressed. You can try again`                            |
+| a line-up whose panel the UI stopped showing        | `The screen lost the arm's panel. Nothing was pressed. You can try again`                            |
+| any end with the lid still in the fingers           | `Cancelled.` or `Stopped.` then `The lid is still in the fingers. Ask someone to check the arm`      |
 
 An error's line (`END_SAYS` in `node.py`) says only what its code always means:
 `timeout` is `Taking too long. The run was stopped`, never that the arm stands
