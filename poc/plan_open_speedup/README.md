@@ -51,7 +51,7 @@ parallel, the one-time detailed printout of the first failing approach is skippe
   `MultiThreadedExecutor` with two busy timers: no hang, the same plan every time, the executor
   kept running.
 
-## PoC 2: batched cuRobo IK (`plan_open_batched.py`)
+## PoC 2: batched cuRobo IK (`door_common/curobo_ik.py`)
 
 The same candidates, gates and pick as `plan_open`, but the IK comes from cuRobo's
 `IKSolver.solve_batch` (`curobo_ik_server.py`, flatbot's own `config/robots/flatbot/curobo/robot.yaml`,
@@ -78,7 +78,14 @@ Settings that matter (`run_curobo.sh <seeds> <regularization> <particle> <grad_i
 cuRobo v0.7.8 quirks hit: its kernels assert on non-C-contiguous tensors (`np.ascontiguousarray`),
 and `use_particle_opt=False` crashed in the line search before that fix (not retried since).
 
-## Running
+## On flatbot
+
+`snorlax/TEST_PLAN.md` is the side-by-side test on the arm: the microwave `open` action takes
+`"planner": "serial" | "pool" | "curobo"` (and `plan_workers`, `compare_planners`: every planner
+on the same detection), each run logs its planning time, plan and the executed swing, and
+`snorlax/analyze.sh` tabulates them.
+
+## Running the benchmarks
 
 On abra, from `~/flatbot-bot-poc/repo/poc/plan_open_speedup` (`/data` = `~/flatbot-bot-poc/data`):
 

@@ -1,5 +1,8 @@
-# ruff: noqa: E501, T201  -- PoC benchmark code, not capability code
-"""PoC 2: plan_open's search with its IK solved by cuRobo in batches instead of ~5,000 PyBullet solves one by one.
+"""Batched cuRobo IK for plan_open (open_door.PLANNER = "curobo"): a PROOF OF CONCEPT for side-by-side tests, not
+for merge. The IK comes from a standalone cuRobo process over a Unix socket (poc/plan_open_speedup/curobo_ik_server.py),
+standing in for a batched IK service the planner doesn't have yet.
+
+plan_open's search with its IK solved by cuRobo in batches instead of ~5,000 PyBullet solves one by one.
 
 Same candidates, same gates, same pick as door_common.open_door.plan_open; only where the joints come from changes.
 PyBullet chains each straight-in step and swing waypoint from the one before, and that seeding matters (seeding a
@@ -17,14 +20,52 @@ keep-out), then the trajectory keep-out checks run on the survivors, all in plan
 """
 
 import time
+from multiprocessing.connection import Client
 
 import numpy as np
+from capability_engine import sim
 from capability_engine.sim import CONTINUOUS, continuous_ok, short_delta, wrap_joints
+
 from door_common import common as dc
 from door_common import open_door as od
 from door_common.common import Refused, keep_out_message, quiet
 
-from capability_engine import sim
+
+class CuroboIK:
+    """The IK server's client: ik() batched IK, fk(), self_collision(); counts calls and time."""
+
+    def __init__(self, sock, wait_s=300):
+        t0 = time.time()
+        while True:
+            try:
+                self.conn = Client(sock, family="AF_UNIX")
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.time() - t0 > wait_s:
+                    raise Refused(
+                        f"no cuRobo IK server at {sock} (poc/plan_open_speedup/snorlax/run_ik_server.sh)"
+                    ) from None
+                time.sleep(1)
+        self.calls, self.gpu_ms, self.wall_ms, self.problems = 0, 0.0, 0.0, 0
+
+    def _ask(self, *req):
+        self.conn.send(req)
+        return self.conn.recv()
+
+    def ik(self, pos, quat, seeds):
+        t0 = time.perf_counter()
+        r = self._ask("ik", np.asarray(pos, float), np.asarray(quat, float), np.asarray(seeds, float))
+        self.calls += 1
+        self.problems += len(pos)
+        self.gpu_ms += r["ms"]
+        self.wall_ms += (time.perf_counter() - t0) * 1e3
+        return r
+
+    def fk(self, q):
+        return self._ask("fk", np.asarray(q, float))
+
+    def self_collision(self, q):
+        return self._ask("self", np.asarray(q, float))["d"]
 
 
 def _near_seed(q, seed):
@@ -40,9 +81,7 @@ def _solve(ik, pos, quat, seeds):
     if not pos:
         return np.zeros((0, 7)), np.zeros(0)
     r = ik.ik(np.array(pos, float), np.array(quat, float), np.array(seeds, float))
-    return np.array([_near_seed(q, s) for q, s in zip(r["q"], seeds, strict=True)]), np.asarray(
-        r["pos_err"]
-    )
+    return np.array([_near_seed(q, s) for q, s in zip(r["q"], seeds, strict=True)]), np.asarray(r["pos_err"])
 
 
 def _chain(ik, starts, paths, gate):
@@ -91,12 +130,7 @@ def _leg_step(q, nq, err, pos):
     """plan_cartesian's gates on one straight-in step."""
     nq = wrap_joints(nq)
     jump = float(np.degrees(np.max(np.abs((nq - q + np.pi) % (2 * np.pi) - np.pi))))
-    if (
-        err > sim.MAX_IK_ERR
-        or jump > sim.MAX_STEP_JUMP_DEG
-        or not _guards_ok(nq)
-        or not continuous_ok(q, nq)
-    ):
+    if err > sim.MAX_IK_ERR or jump > sim.MAX_STEP_JUMP_DEG or not _guards_ok(nq) or not continuous_ok(q, nq):
         return None
     return np.asarray(nq, float)
 
@@ -119,7 +153,7 @@ def _make_arc_step(rb):
     return step
 
 
-def plan_open_batched(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik, stats=None):
+def plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik, stats=None):
     """plan_open (not `quick`) with batched cuRobo IK (`ik`: ik_client.CuroboIK). Returns (plan, why)."""
     st = stats if stats is not None else {}
     t_all = time.perf_counter()
@@ -162,13 +196,9 @@ def plan_open_batched(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik
         t = tilts[ti]
         q_g = _grasp_ok(rb, q, float(err))
         if q_g is not None and all(
-            np.degrees(np.max(np.abs(short_delta(c, q_g)))) > od.SAME_CONFIG_DEG
-            for c in t["configs"]
+            np.degrees(np.max(np.abs(short_delta(c, q_g)))) > od.SAME_CONFIG_DEG for c in t["configs"]
         ):
-            if (
-                not t["side"]
-                or od._fingers_in_front(rb, q_g, face_pt, n) >= od.GRASP_SIDE_FACE_CLEAR_M
-            ):
+            if not t["side"] or od._fingers_in_front(rb, q_g, face_pt, n) >= od.GRASP_SIDE_FACE_CLEAR_M:
                 t["configs"].append(q_g)
     jobs = [dict(t=t, q_g=q_g) for t in tilts for q_g in t["configs"]]
     st["a_s"] = time.perf_counter() - t0
@@ -184,15 +214,12 @@ def plan_open_batched(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik
                 k_n = max(1, int(np.ceil(np.linalg.norm(t["g_p"] - pre_p) / dc.STEP_M)))
                 tgts = [(pre_p + (t["g_p"] - pre_p) * k / k_n, t["g_q"]) for k in range(1, k_n + 1)]
                 tries.append((job, standoff, pre_p, tgts))
-    qp, ep = _solve(
-        ik, [x[2] for x in tries], [x[0]["t"]["g_q"] for x in tries], [x[0]["q_g"] for x in tries]
-    )
+    qp, ep = _solve(ik, [x[2] for x in tries], [x[0]["t"]["g_q"] for x in tries], [x[0]["q_g"] for x in tries])
     q_pres = []
     for q, err in zip(qp, ep, strict=True):
         q_pre = _grasp_ok(rb, q, float(err))
         if q_pre is not None and (
-            keep_out_message(rb, q_pre) is not None
-            or od._near_limit(rb, q_pre, od.CUROBO_LIMIT_MARGIN_DEG)
+            keep_out_message(rb, q_pre) is not None or od._near_limit(rb, q_pre, od.CUROBO_LIMIT_MARGIN_DEG)
         ):
             q_pre = None
         q_pres.append(q_pre)
@@ -206,9 +233,7 @@ def plan_open_batched(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik
     )
     for job in jobs:
         job["appr"] = None
-    for i, (job, standoff, pre_p, _) in enumerate(
-        tries
-    ):  # in standoff order: the first that passes, as plan_open
+    for i, (job, standoff, pre_p, _) in enumerate(tries):  # in standoff order: the first that passes, as plan_open
         leg = legs.get(i)
         if job["appr"] is not None or leg is None:
             continue
@@ -225,12 +250,7 @@ def plan_open_batched(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik
 
     # S: every swing of every configuration with an approach, chained
     t0 = time.perf_counter()
-    arcs = [
-        (job, d, od._swing_waypoints(job["t"]["g"], hinge, d))
-        for job in jobs
-        if job["appr"]
-        for d in swings
-    ]
+    arcs = [(job, d, od._swing_waypoints(job["t"]["g"], hinge, d)) for job in jobs if job["appr"] for d in swings]
     sols = _chain(
         ik,
         [job["appr"][3][-1] for job, _, _ in arcs],
@@ -287,6 +307,7 @@ def plan_open_batched(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik
     else:
         cands.sort(key=lambda c: (c["swing"], -c["side"], c["margin"]), reverse=True)
     st["candidates"] = [(c["side"], c["pitch"], c["swing"], round(c["margin"], 1)) for c in cands]
+    st["search_s"] = time.perf_counter() - t_all
     reason = None
     for c in cands[: od.SEARCH_AFTER_SWING_MAX]:
         ok, m = after_swing.check(scene, rb, geom, c, reason is None)
@@ -297,3 +318,11 @@ def plan_open_batched(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik
         reason = reason or f"tilt {c['pitch']} deg, swing {c['swing']} deg fits but {m}"
     st["total_s"] = time.perf_counter() - t_all
     return None, reason
+
+
+def check_arc_curobo(rb, wps, q0, ik):
+    """open_door._check_arc with the waypoints' IK from cuRobo, chained: (ok, q_end, msg, arc)."""
+    arc = _chain(ik, [np.asarray(q0, float)], [[(w[:3], w[3:]) for w in wps]], _make_arc_step(rb))[0]
+    if arc is None:
+        return False, np.asarray(q0, float), "a waypoint fails a gate (cuRobo IK)", []
+    return True, arc[-1], f"all {len(wps)} waypoints OK (cuRobo IK), final J6 {np.degrees(arc[-1][5]):.1f}deg", arc

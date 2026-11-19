@@ -10,13 +10,13 @@ import time
 import numpy as np
 from capability_engine.sim import tool_pose
 from door_common import open_door as od
-from ik_client import CuroboIK
-from plan_open_batched import plan_open_batched
+from door_common.curobo_ik import CuroboIK
+from door_common.curobo_ik import plan_open_curobo as plan_open_batched
 from scipy.spatial.transform import Rotation as R
 from setup_case import GEOM, MAX_SWING, MIN_SWING, Q0, after_swing, make
 
 scene, rb = make(sys.argv[1])
-ik = CuroboIK()
+ik = CuroboIK("/data/ik.sock")
 
 seen = {}
 search = od._search_tilts

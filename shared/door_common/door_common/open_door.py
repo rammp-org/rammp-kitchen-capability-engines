@@ -862,6 +862,15 @@ def _tilt_candidates(scene, rb, geom, q0, side, pitch, swings, quick, ai_planner
 
 
 PLAN_WORKERS = 1  # plan_open searches its tilts in this many forked processes (each a copy of the sim); 1: in this one
+PLANNER = "pybullet"  # where plan_open's IK comes from: "pybullet", or "curobo" (curobo_ik: a proof of concept)
+IK_SOCKET = "/poc/ik.sock"  # PLANNER "curobo": the cuRobo IK server's socket (poc/plan_open_speedup/snorlax)
+COMPARE_PLANNERS = (
+    False  # True: open_task first plans with every planner on the same detection, each noted in the run log
+)
+PLAN_LOG = (
+    None  # (kind, **fields) -> None: the run's log (RunLog.event) for the planners' timings and plans; None: not noted
+)
+PLAN_TIMES = {}  # the last plan_open's search time (s), before what follows the swing is checked
 
 
 def _tilt_in_worker(job):
@@ -914,6 +923,14 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
     fits; then, best first (largest swing, then most margin to the J4/J6 guards over the whole path), what follows the
     swing (`after_swing`). `geom`: the detection (h_raw, orient, n, hinge, hinge_seen, door_z). Prints a
     line per tilt. Returns (plan dict, or None; the reason when None)."""
+    t0 = time.perf_counter()
+    if PLANNER == "curobo" and not quick:
+        from .curobo_ik import CuroboIK, plan_open_curobo
+
+        st = {}
+        out = plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, CuroboIK(IK_SOCKET, 5), st)
+        PLAN_TIMES.update(search_s=st.get("search_s"))
+        return out
     swings = list(range(max_swing, min(min_swing, max_swing) - 1, -10 if quick else -5))
     if swings[-1] != min(min_swing, max_swing):
         swings.append(min(min_swing, max_swing))
@@ -936,6 +953,7 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
         )
     else:
         cands.sort(key=lambda c: (c["swing"], -c["side"], c["margin"]), reverse=True)  # the least turn wins a tie
+    PLAN_TIMES.update(search_s=time.perf_counter() - t0)
     reason = None
     for c in cands[: 3 if quick else SEARCH_AFTER_SWING_MAX]:
         ok, m = after_swing.check(scene, rb, geom, c, reason is None and not quick)
@@ -973,6 +991,82 @@ def _placement_advice(scene, rb, geom, q0, max_swing, min_swing, after_swing):
     if not works:
         return f"\nNo shift of the {dc.APPLIANCE} tried (up to 10 cm) makes it work from here."
     return f"\nWould work with the {dc.APPLIANCE} moved: " + "; or ".join(works) + "."
+
+
+def _note(kind, **fields):
+    if PLAN_LOG is not None:
+        PLAN_LOG(kind, **fields)
+
+
+def planner_name():
+    """The planner in use: "serial" or "pool" (PyBullet, PLAN_WORKERS processes), or "curobo"."""
+    return "curobo" if PLANNER == "curobo" else ("pool" if PLAN_WORKERS > 1 else "serial")
+
+
+COMPARE_WORKERS = 8  # COMPARE_PLANNERS: the pool's workers
+
+
+def _plan_summary(plan):
+    """What a plan is, for the run log: the candidate and its joint paths (deg)."""
+    if plan is None:
+        return None
+    deg = lambda qs: np.round(np.degrees(np.asarray(qs, dtype=float)), 3).tolist()  # noqa: E731
+    return dict(
+        pitch=plan["pitch"],
+        side=plan.get("side", 0),
+        swing=plan["swing"],
+        standoff=plan["standoff"],
+        margin_deg=round(float(plan["margin"]), 2),
+        q_pre_deg=deg(plan["q_pre"]),
+        leg_deg=deg(plan["leg"]),
+        arc_deg=deg(plan["arc"]),
+        wps=np.round(np.asarray(plan["wps"], dtype=float), 5).tolist(),
+        after=plan.get("after"),
+    )
+
+
+def _timed_plan(scene, rb, geom, q0, max_swing, min_swing, after_swing):
+    """plan_open, timed and noted in the run log ("plan"). With COMPARE_PLANNERS, first every planner on this same
+    detection, each noted ("plan_compare"); the run then goes on with the planner set."""
+    global PLANNER, PLAN_WORKERS
+    if COMPARE_PLANNERS:
+        saved = PLANNER, PLAN_WORKERS
+        try:
+            for planner, workers in (("pybullet", 1), ("pybullet", COMPARE_WORKERS), ("curobo", 1)):
+                PLANNER, PLAN_WORKERS = planner, workers
+                name = planner_name()
+                say(f"\n--- comparing planners: {name} ---")
+                t0 = time.perf_counter()
+                try:
+                    plan, why = plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing)
+                except Refused as e:
+                    plan, why = None, str(e)
+                total = time.perf_counter() - t0
+                say(f"--- {name}: {total:.2f} s, {'swing ' + str(plan['swing']) if plan else why} ---")
+                _note(
+                    "plan_compare", planner=name, total_s=round(total, 3), **_times(), why=why, plan=_plan_summary(plan)
+                )
+        finally:
+            PLANNER, PLAN_WORKERS = saved
+    t0 = time.perf_counter()
+    plan, why = plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing)
+    total = time.perf_counter() - t0
+    say(f"planned with {planner_name()} in {total:.2f} s")
+    _note("plan", planner=planner_name(), total_s=round(total, 3), **_times(), why=why, plan=_plan_summary(plan))
+    return plan, why
+
+
+def _times():
+    return {"search_s": round(PLAN_TIMES["search_s"], 3) if PLAN_TIMES.get("search_s") is not None else None}
+
+
+def _replan_arc(scene, rb, wps, q0):
+    """_check_arc with the planner in use (cuRobo's chained IK when PLANNER is "curobo")."""
+    if PLANNER == "curobo":
+        from .curobo_ik import CuroboIK, check_arc_curobo
+
+        return check_arc_curobo(rb, wps, q0, CuroboIK(IK_SOCKET, 5))
+    return _check_arc(scene, rb, wps, q0)
 
 
 def open_task(
@@ -1025,7 +1119,7 @@ def open_task(
 
     # --- plan everything before any motion: tilts x arm configurations x swings, then what follows the swing ---
     geom = dict(h_raw=h_raw, orient=orient, n=n, hinge=hinge, hinge_seen=hinge_seen, door_z=door_z)
-    plan, why = plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing)
+    plan, why = _timed_plan(scene, rb, geom, q0, max_swing, min_swing, after_swing)
     if plan is None:
         say(f"  (refused -- looking for a {dc.APPLIANCE} placement that works ...)")
         advice += _placement_advice(scene, rb, geom, q0, max_swing, min_swing, plain_after_swing)
@@ -1119,7 +1213,15 @@ def open_task(
     else:
         say(f"  the grasp joints are {off:.1f} deg off the plan's -- re-planning the swing from them")
         wps = _swing_waypoints(Pose(tuple(ee[:3]), tuple(ee[3:7])), hinge, deg)
-        ok, _, msg, arc = _check_arc(scene, rb, wps, st["position"])
+        ok, _, msg, arc = _replan_arc(scene, rb, wps, st["position"])
+        _note(
+            "swing_replanned",
+            planner=planner_name(),
+            off_deg=round(off, 2),
+            ok=ok,
+            msg=msg,
+            arc_deg=np.round(np.degrees(np.asarray(arc, dtype=float)), 3).tolist(),
+        )
         ko = _swing_keep_out(st["position"], arc) if ok else None
         if ko is not None:
             ok, msg = False, f"the trajectory: {ko}"
@@ -1130,6 +1232,7 @@ def open_task(
             raise Refused(f"{why} -- stopping, still holding the handle.")
     after_swing.recheck(scene, rb, geom, {**plan, "wps": wps, "arc": arc}, advice)
     save_door_geometry(**hinge_fields)
+    _note("swing_start", planner=planner_name(), waypoints=len(arc))
     if CUROBO_PATHS and not SWING_EXACT and hasattr(ai, "go_to_joint_configs"):  # checked joints as cuRobo targets
         say(f"swing {deg} deg: cuRobo through {len(curobo_knots(arc))} of the {len(arc)} checked waypoints' joints ...")
         moved = through_curobo(
@@ -1167,12 +1270,27 @@ def open_task(
         c, r, rms = fit_circle_xy(path[:, :2])
         cmd = np.array([w[:3] for w in wps])
         dev = np.max(np.linalg.norm(path[:, None, :2] - cmd[None, :, :2], axis=2).min(axis=1))
+        _note(
+            "swing_path",
+            planner=planner_name(),
+            samples=len(path),
+            max_off_arc_m=round(float(dev), 4),
+            fit_radius_m=round(float(r), 4),
+            fit_rms_m=round(float(rms), 5),
+        )
         say(
             f"  measured hand path: {len(path)} samples, max {dev * 100:.1f} cm off the commanded arc; circle fit "
             f"hinge {np.round(c, 4)} r {r * 100:.1f} cm (rms {rms * 1000:.1f} mm) vs detected hinge "
             f"{np.round(hinge[:2], 4)} r {np.linalg.norm(np.asarray(ee[:2]) - hinge[:2]) * 100:.1f} cm -- "
             f"off by {np.linalg.norm(c - hinge[:2]) * 100:.1f} cm"
         )
+    _note(
+        "swing_done",
+        planner=planner_name(),
+        ok=bool(ok),
+        end_err_m=round(float(err), 4),
+        arc_measured_deg=round(arc_deg, 2),
+    )
     say(
         f"SWING {'DONE' if ok else 'STOPPED SHORT'}: EE {np.round(final['ee_pos'][:3], 4)} "
         f"({err * 100:.1f} cm from the last waypoint)"

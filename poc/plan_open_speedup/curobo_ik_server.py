@@ -11,6 +11,7 @@ usage: curobo_ik_server.py <urdf> <socket> [num_seeds] [regularization 0/1] [par
 `batch` > 0: every call padded (or split) to that many problems, so cuRobo can replay CUDA graphs.
 """
 
+import os
 import sys
 import tempfile
 import time
@@ -36,7 +37,8 @@ grad_iters = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] != "-" else N
 batch = int(sys.argv[7]) if len(sys.argv) > 7 else 0
 
 t = TensorDeviceType()
-robot_file = "/data/flatbot_curobo/robot.yaml"  # flatbot's own (rammp-deployments config/robots/flatbot/curobo)
+# flatbot's own robot file (rammp-deployments config/robots/flatbot/curobo)
+robot_file = os.environ.get("ROBOT_FILE", "/data/flatbot_curobo/robot.yaml")
 urdf = write_urdf(
     prepare_urdf(open(urdf_src).read(), load_robot_spec(robot_file)), tempfile.mkdtemp()
 )  # as the node

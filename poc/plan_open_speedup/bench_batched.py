@@ -5,12 +5,12 @@ import json
 import sys
 import time
 
-from ik_client import CuroboIK
-from plan_open_batched import plan_open_batched
+from door_common.curobo_ik import CuroboIK
+from door_common.curobo_ik import plan_open_curobo as plan_open_batched
 from setup_case import GEOM, MAX_SWING, MIN_SWING, Q0, after_swing, make, summary
 
 scene, rb = make(sys.argv[1])
-ik = CuroboIK()
+ik = CuroboIK("/data/ik.sock")
 runs = []
 for _ in range(int(sys.argv[3]) if len(sys.argv) > 3 else 1):
     ik.calls, ik.gpu_ms, ik.wall_ms, ik.problems = 0, 0.0, 0.0, 0

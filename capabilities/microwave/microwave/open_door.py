@@ -980,13 +980,27 @@ def push_open(ai, execute, on_release=None):
     return True
 
 
-def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_only=False, on_hold=None):
+def run(
+    ai,
+    execute,
+    swing_deg=None,
+    push=True,
+    speed=1.0,
+    log_args=None,
+    view_only=False,
+    on_hold=None,
+    planner="serial",
+    plan_workers=8,
+    compare_planners=False,
+):
     """The open task as the node runs it (was door_task.py `open`): to the view pose, grasp + swing, then
     (`push`) let go and push the door further open, all logged to RUNS_DIR/<time>_open (RunLog), with what the
     node logs in its console.log and (recording.BAG) a rosbag in its bag/. `speed` (0..1] scales every arm motion
     for this run only. `view_only`: stop at the view pose. `on_hold(True)` once the gripper
-    closes on the handle, `on_hold(False)` once the push-open has let go of it. Returns True when it finished
-    (or the dry run passed); raises Refused."""
+    closes on the handle, `on_hold(False)` once the push-open has let go of it. `planner` (proof of concept, for
+    side-by-side tests): "serial" (PyBullet), "pool" (PyBullet in `plan_workers` processes) or "curobo" (batched
+    cuRobo IK, its server running); `compare_planners`: first plan with all three on the same detection (run log
+    "plan_compare"). Returns True when it finished (or the dry run passed); raises Refused."""
     import rammp_arm
 
     saved = (rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE)
@@ -994,6 +1008,10 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_o
     rammp_arm.JOINT_SPEED *= speed
     rammp_arm.GO_TO_SPEED_SCALE = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)
     log = RunLog("open", log_args or {}, ai)
+    saved_planning = (shared.PLANNER, shared.PLAN_WORKERS, shared.COMPARE_PLANNERS, shared.PLAN_LOG)
+    shared.PLANNER = "curobo" if planner == "curobo" else "pybullet"
+    shared.PLAN_WORKERS = int(plan_workers) if planner == "pool" else 1
+    shared.COMPARE_PLANNERS, shared.PLAN_LOG = bool(compare_planners), log.event
     recording.set_console(log.dir / "console.log")
     recording.to_console("INFO", f"run log: {log.dir}")
     bag = recording.start_bag(log.dir)
@@ -1027,6 +1045,7 @@ def run(ai, execute, swing_deg=None, push=True, speed=1.0, log_args=None, view_o
         recording.stop_bag(bag)
         recording.set_console(None)
         rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
+        shared.PLANNER, shared.PLAN_WORKERS, shared.COMPARE_PLANNERS, shared.PLAN_LOG = saved_planning
 
 
 def main():
