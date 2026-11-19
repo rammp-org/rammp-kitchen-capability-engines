@@ -231,6 +231,19 @@ KEEP_ALIVE_S = 30.0
 # under an orchestrator whose clock is kept alive: under the 120 s rule a run stopped at its budget has no
 # seconds left to say it in
 END_SHOW_S = 5.0
+# A line-up that waits minutes for its person must not wait them out on a screen that no longer shows it. On
+# the rig (2026-11-19, bridge_restart: the real orchestrator and UI bridge, the bridge stopped and started
+# again while the chair was being guided) the new bridge refused this goal's token from then on ("token
+# doesn't match the current ui_control grant"), the orchestrator pushed no new one, the app went on showing
+# the last "Move closer" with a Cancel that reached nobody, and the node asked "Ready?" of no one until the
+# line-up's time was up: 35 s under the 120 s rule, but five minutes now, the wrist turned all the while.
+# So: a line-up of a goal with the UI whose panel the bridge has not held for this long ends, not_lined_up
+# and recoverable, and its wrist turns back as at any line-up's end. Twenty seconds: a press takes the
+# bridge's panel down for under a second (the next send opens it again), and a bridge that restarted does
+# not come back for this goal however long it is given
+UI_GONE_S = 20.0
+UI_GONE = "The screen is not showing this any more"  # the panel's words for it, should anything show them
+UI_WENT = "the UI stopped showing the line-up's panel (none on it for %.0f s): nothing was pressed (start again)"
 # ... in the person's words, one short message (the panel shows one; the whole reason is the result's and
 # the log's). By the error code the action ends with (error_for, STOP_CODES, and the engine's own)
 END_DONE = "Done. The lid is off, on the table"
@@ -281,6 +294,35 @@ def end_says(result=None, error=None, cancelled=False):
         return (END_DONE if (result or {}).get("lid_off") else END_NOT_OFF), False
     what = END_SAYS.get(getattr(error, "error_code", ""), END_FAILED)
     return "%s. %s" % (what, END_RETRY if getattr(error, "recoverable", False) else END_HELP), True
+
+
+class PanelWatch:
+    """A line-up's source for a goal with the UI, which also says when the UI has gone: everything is the
+    source's own, but `unable`, which the line-up reads on every tick and ends on (line_up.UNABLE), is also
+    set once `shown()` (the bridge holds this goal's panel: Capability._shown) has been false for `gone_s`.
+    `lost` then tells the engine which of the two it was."""
+
+    def __init__(self, source, shown, gone_s=None, clock=time.monotonic):
+        self._source, self._shown, self._clock = source, shown, clock
+        self._gone_s = UI_GONE_S if gone_s is None else float(gone_s)
+        self._since = clock()  # when the panel was last seen up (from the start: its first send is still to come)
+        self.lost = False
+
+    def __getattr__(self, name):
+        return getattr(self._source, name)
+
+    @property
+    def unable(self):
+        why = getattr(self._source, "unable", "")
+        if why:
+            return why
+        if not self.lost:
+            now = self._clock()
+            if self._shown():
+                self._since = now
+            elif now - self._since >= self._gone_s:
+                self.lost = True
+        return UI_GONE if self.lost else ""
 
 
 class KeptAlive:
@@ -1001,6 +1043,18 @@ class Capability(CapabilityEngine):
         panel again (its ui_opening stays set)."""
         return self._assigned_token != bytes(16) and self._ui_request_client.server_is_ready()
 
+    def _shown(self, ctx):
+        """Whether the bridge holds this goal's panel now: the UI is there (_ui_live) and the base class has a
+        goal of this run's accepted on it (its run's `ui_goal_handle`: None from a refusal, or a press, until
+        the next send is taken). Where the base class cannot be asked (a context that is not its own), the
+        UI being there is the answer."""
+        if not self._ui_live():
+            return False
+        run_ = getattr(ctx, "_run", None)
+        if run_ is None or not hasattr(run_, "ui_goal_handle"):
+            return True
+        return run_.ui_goal_handle is not None
+
     def _cancel_from_ui(self, by="Cancel pressed on the UI"):
         """The panel's Cancel is the orchestrator's: the base class's own Control.CANCEL, so the run ends the
         one way a cancel ends it (its Ctrl+C, the result cancelled, no world-state write after it). `by`:
@@ -1417,6 +1471,10 @@ class Capability(CapabilityEngine):
             raise EngineError(
                 "line_up_unavailable", f"the line-up could not start ({e}): nothing moved", recoverable=False
             ) from e
+        if ask.ui and not ask.timed:
+            # minutes of waiting are not waited out on a screen that no longer shows them (UI_GONE_S). Under
+            # the 120 s rule the line-up's own 35 s are the bound, as they always were
+            source = PanelWatch(source, lambda: self._shown(ctx))
         went = False
         try:
             lining = line_up.LineUp(
@@ -1476,6 +1534,10 @@ class Capability(CapabilityEngine):
                     str(asked.get("why") or "no reason given")
                 )
             raise EngineError("not_lined_up", message + (f" -- {why}" if why else ""), recoverable=True)
+        if outcome == line_up.UNABLE and getattr(source, "lost", False):
+            # the UI went, not the arm: ended as a line-up out of time is, the wrist turned back (the caller)
+            ended("the UI stopped showing it")
+            raise EngineError("not_lined_up", UI_WENT % UI_GONE_S, recoverable=True)
         if outcome == line_up.UNABLE:
             # what no waiting and no driving the chair cures (the arm not at its rest pose: a line-up moves
             # nothing but the wrist of an arm at rest). Said on the panel, and ended at once: the user is not

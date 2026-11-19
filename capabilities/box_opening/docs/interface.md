@@ -669,6 +669,14 @@ takes the first row whatever the param says. Each goal's log line says which
 orchestrator and UI bridge with the app stood in for (2026-11-19); not yet
 with the app.
 
+A line-up that waits minutes is not waited out on a screen that stopped showing
+it: under the third row, a line-up whose panel the bridge has not held for 20 s
+(`UI_GONE_S`: the bridge gone, or restarted and refusing this goal's token)
+ends `not_lined_up`, recoverable, its wrist turned back as at any line-up's
+end. (Seen on the rig: a bridge restarted in the middle of a line-up refuses
+the goal's token from then on, and the app goes on showing the last panel with
+a Cancel that reaches nobody.)
+
 Under the first row a line-up is given only where a run of 55 s still fits
 after it inside the 90; the orchestrator cancels at 120 s whatever the engine
 does. The 55 s are an estimate, not a measurement of a guided run (run 1 of

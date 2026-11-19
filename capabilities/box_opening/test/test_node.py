@@ -2979,3 +2979,78 @@ def test_how_the_action_ended_is_one_short_line_in_the_persons_words():
         for recoverable in (True, False):
             said, failed = node.end_says(error=EngineError(code, "", recoverable=recoverable))
             assert failed and len(said) <= 100 and "\n" not in said
+
+
+class _RunOf:
+    """The base class's own run, as far as the engine reads it: the goal the bridge holds for the panel."""
+
+    def __init__(self, held=True):
+        self.ui_goal_handle = object() if held else None
+
+
+def test_a_line_up_whose_panel_the_ui_stopped_showing_ends_in_seconds_not_after_its_five_minutes(ros, monkeypatch):
+    """The rig's bridge_restart (2026-11-19): the bridge came back refusing the goal's token, and the line-up
+    asked "Ready?" of no one for the rest of its time. Twenty seconds without the panel on the bridge, and it
+    ends recoverable; a panel the bridge holds, or one a press took down for a moment, never ends it."""
+    import threading
+
+    handlers = list(LOGGER.handlers)
+    cap = kept_alive(monkeypatch, mock_phase_s=0.2)
+    try:
+        assert node.UI_GONE_S == 20.0
+        monkeypatch.setattr(node, "UI_GONE_S", 0.6)
+        monkeypatch.setattr(node.line_up, "LINGER_S", 0.3)
+        ctx = FakeCtx()
+        ctx._run = _RunOf(held=False)  # every send refused: the bridge holds no goal of this run
+        t0 = time.monotonic()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up" and e.value.recoverable
+        assert "the UI stopped showing" in str(e.value) and "nothing was pressed" in str(e.value)
+        assert 0.6 <= time.monotonic() - t0 < 0.6 + 0.3 + 0.4 + 2.0  # the wait, the linger, the end's panel
+        assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.objects == {} and ctx.world == []
+        # held: the line-up goes on to its question and runs on Open, though the panel was down for a moment
+        ctx = FakeCtx()
+        ctx._run = _RunOf(held=True)
+        threading.Timer(1.0, setattr, args=(ctx._run, "ui_goal_handle", None)).start()
+        threading.Timer(1.3, setattr, args=(ctx._run, "ui_goal_handle", object())).start()
+        threading.Timer(3.2, ctx.events.append, args=(OPEN_PRESS,)).start()
+        assert cap.execute("open_box", {}, ctx)["lid_off"]
+        # ... and the UI itself going (the bridge's server no longer there) is the same end
+        live = [True]
+        monkeypatch.setattr(cap, "_ui_live", lambda: live[0])
+        ctx = FakeCtx()
+        threading.Timer(0.5, live.__setitem__, args=(0, False)).start()
+        with pytest.raises(EngineError) as e:
+            cap.execute("open_box", {}, ctx)
+        assert e.value.error_code == "not_lined_up" and "the UI stopped showing" in str(e.value)
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_the_panel_watch_is_the_sources_own_but_for_a_ui_gone_too_long():
+    class Source:
+        unable = ""
+        why_none = "no container seen"
+
+        def look(self, now):
+            return ("fix", "reach")
+
+    clock, shown, source = [0.0], [True], Source()
+    watch = node.PanelWatch(source, lambda: shown[0], gone_s=20.0, clock=lambda: clock[0])
+    assert watch.unable == "" and watch.look(0.0) == ("fix", "reach") and watch.why_none == "no container seen"
+    shown[0], clock[0] = False, 19.9
+    assert watch.unable == "" and not watch.lost
+    shown[0], clock[0] = True, 25.0  # back in time: counted afresh from here
+    assert watch.unable == ""
+    shown[0], clock[0] = False, 44.9
+    assert watch.unable == "" and not watch.lost
+    clock[0] = 45.0
+    assert watch.unable == node.UI_GONE and watch.lost
+    shown[0] = True  # once lost, lost: the line-up is ending
+    assert watch.unable == node.UI_GONE
+    # the source's own word comes first, and is not the UI's going
+    watch = node.PanelWatch(source, lambda: True, gone_s=20.0, clock=lambda: clock[0])
+    source.unable = "the arm is not at its rest pose"
+    assert watch.unable == "the arm is not at its rest pose" and not watch.lost
