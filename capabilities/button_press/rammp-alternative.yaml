@@ -69,6 +69,9 @@ params:
   planner_world_dir_in_planner: ""
   planner_base_layers: [/config/robot/curobo/layer_mebot_floor.yaml]
   planner_restore_world: world.yaml
+  # Every run starts and ends at this driver preset (go_to_preset: "home", the working pose skills start from and
+  # return to; its joints are the driver's, per robot). "" = start and end wherever the arm is.
+  start_preset: home
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

@@ -68,6 +68,7 @@ PARAMS = {
     "planner_world_dir_in_planner": DEFAULTS.planner_world_dir_in_planner,
     "planner_base_layers": list(DEFAULTS.planner_base_layers),
     "planner_restore_world": DEFAULTS.planner_restore_world,
+    "start_preset": DEFAULTS.start_preset,
 }
 
 
@@ -164,6 +165,7 @@ class Capability(CapabilityEngine):
             planner_world_dir_in_planner=s["planner_world_dir_in_planner"],
             planner_base_layers=tuple(s["planner_base_layers"]),
             planner_restore_world=s["planner_restore_world"],
+            start_preset=str(s["start_preset"]).strip(),
         )
 
     def availability(self, instance_id, world_state):

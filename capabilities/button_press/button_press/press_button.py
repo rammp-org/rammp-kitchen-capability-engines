@@ -216,6 +216,9 @@ class Args:
     lead_in: float = STAGE_LEAD_IN_M  # cuRobo only to a point this much further out than staging
     stage_out: float | None = None  # scene estimate: stage this far out (None = SCENE_STAGE_OUT_M)
     prepress_aim_mm: tuple = (0.0, 0.0)  # the pre-press spot this far off the button's centre, x right / y up
+    # the driver's named pose every run starts and ends at (go_to_start, go_home): "home", the working pose skills start
+    # from and return to (kinova-gen3-ros2 docs/guide-goto-actions.md, Presets). "" = wherever the arm is
+    start_preset: str = "home"
     # cuRobo's collision world (collision.PlannerWorld): written into planner_world_dir (seen by the planner at
     # planner_world_dir_in_planner, "" = the same path), listing planner_base_layers again; planner_restore_world
     # is put back when the action ends
@@ -459,6 +462,24 @@ class Run:
         if collide:
             self.check_leg(name, start[0], knots)
         self.arm.smooth_poses(path, knots, start, name, self.log, track_abort_m=track_abort_m, cart_speed=cart_speed)
+
+    def go_to_start(self):
+        """With start_preset set: the arm to the driver's named pose ("home") before detecting (cuRobo in joint space,
+        against the robot's own world: the microwave isn't detected yet), and the joints it lands on become q0, so
+        go_home ends the run there too. A dry run doesn't move: it plans from where the arm is. Raises MotionFailed
+        (the arm holds, and keeps its old start) if the driver refuses or the move fails."""
+        name = self.args.start_preset
+        if not name:
+            return
+        if not self.args.execute:
+            say(f"  dry run: an execute run goes to the '{name}' preset first; planning from where the arm is")
+            self.log({"stage": "start_preset", "preset": name, "executed": False})
+            return
+        say(f"  to the '{name}' preset first")
+        self.limit_retry(lambda: self.arm.go_to_preset(name, f"to {name}", self.log), f"to {name}")
+        self.q0 = self.arm.joints()
+        self.seed_posture = self.q0
+        self.log({"stage": "start_preset", "preset": name, "executed": True, "q0": self.q0.tolist()})
 
     def at_home(self):
         """True if the arm is at its start joints (within HOME_TOL_DEG on every joint)."""
@@ -1105,6 +1126,9 @@ def _press_button(run: Run, a, pub) -> dict:
     run.per.start_scene()  # now, so the scene camera's frames are arriving by the first look
     run.step("preflight", 0.0)
     run.preflight()
+    if a.start_preset:
+        run.step("start", 0.05)
+        run.go_to_start()
     p0, R0 = arm.ee_pose()
     done = {"dry_run": not a.execute, "pressed": 0, "returned": False}
 

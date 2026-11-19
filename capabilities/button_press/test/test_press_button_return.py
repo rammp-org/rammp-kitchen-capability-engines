@@ -357,3 +357,73 @@ def test_a_long_move_is_refused_until_curobo_has_the_microwave():
     run.world.loaded = [{"name": "microwave"}]
     run.long_move(HOME, np.eye(3), "to staging")
     assert len(sent) == 1
+
+
+# ---- the shared start pose (Run.go_to_start, start_preset)
+Q_PRESET = np.array([0.0, 0.262, 3.142, -2.269, 0.0, 0.96, 1.571])  # the driver's default "home"
+
+
+def start_run(execute=True, preset="home"):
+    run = run_at(BUTTON + 0.30 * N_OUT, execute=execute)
+    run.args.start_preset = preset
+
+    def go_to_preset(name, label, log):
+        if run.arm.refuse:
+            raise MotionFailed(run.arm.refuse.pop(0))
+        run.sent.append(("preset", label, name))
+        run.arm.p, run.arm.q = HOME, Q_PRESET.copy()
+
+    run.arm.go_to_preset = go_to_preset
+    run.q0 = run.arm.q.copy()  # preflight's: where the arm happened to be
+    return run
+
+
+def test_go_to_start_goes_to_the_preset_and_makes_it_home():
+    run = start_run()
+    run.go_to_start()
+    assert run.sent == [("preset", "to home", "home")]
+    assert np.allclose(run.q0, Q_PRESET)  # the joints it reached: go_home ends the run there
+    assert np.allclose(run.seed_posture, Q_PRESET)
+
+
+def test_go_to_start_unset_keeps_the_arm_and_its_start():
+    run = start_run(preset="")
+    q_before = run.q0.copy()
+    run.go_to_start()
+    assert run.sent == [] and np.allclose(run.q0, q_before)
+
+
+def test_go_to_start_in_a_dry_run_moves_nothing():
+    run = start_run(execute=False)
+    q_before = run.q0.copy()
+    run.go_to_start()
+    assert run.sent == [] and np.allclose(run.q0, q_before)
+
+
+def test_go_to_start_refused_holds_and_keeps_the_old_start():
+    run = start_run()
+    q_before = run.q0.copy()
+    run.arm.refuse = ["to home: go_to_preset home failed: PLANNING_FAILED START_STATE_IN_COLLISION"]
+    with pytest.raises(MotionFailed):
+        run.go_to_start()
+    assert run.sent == [] and np.allclose(run.q0, q_before)  # go_home after it: already there, nothing moves
+
+
+def test_go_to_start_turns_a_joint_off_its_limit_and_tries_again():
+    run = start_run()
+    run.arm.refuse = [LIMIT_REFUSAL]
+    run.go_to_start()
+    assert [k for k, _, _ in run.sent] == ["turn off limit", "preset"]
+
+
+def test_go_home_after_go_to_start_returns_to_the_preset_joints():
+    run = start_run()
+    run.go_to_start()
+    run.arm.p, run.arm.q = SPOT, Q_PRESET + 0.4  # pressed, at the panel
+    run.sent.clear()
+    run.go_home()
+    assert [(k, n) for k, n, _ in run.sent] == [
+        ("straight", "back out from the panel"),
+        ("curobo joints", "back to start"),
+    ]
+    assert np.allclose(run.sent[1][2], Q_PRESET)
