@@ -645,14 +645,20 @@ scene camera's frames or that no wrist find can be tied to.
   does not line up first: a line-up that never saw the container has nothing to
   go on from.
 
-Under the orchestrator's 120 s this guidance is seldom given in the goal that
-found no container: that find has spent the scene camera's whole first look
-(15 s) and the wrist's views by then, which leaves under the 8 s a guidance
-needs of the 35. The action then fails at once, `not_lined_up`, recoverable
-(`no camera sees the container, and this run had no time left to guide the chair ...`),
-and the next `open_box` lines up first with its whole 35 s, which is where the
-user is told. A goal sent by hand is guided in the goal itself, for up to 10
-minutes.
+Under the orchestrator's 120 s, and with `wrist_first` on, this guidance is
+seldom given in the goal that found no container: that find has spent the scene
+camera's whole first look (15 s) and the wrist's views (up to about 15 s more,
+an estimate) by then, which leaves under the 8 s a guidance needs of the 35.
+The action then fails at once, `not_lined_up`, recoverable
+(`no camera sees the container, and this run had no time left to guide the chair ...`).
+On the UI the user sees `Looking for the container` while the run looks, then
+(after an instant of `No container in view: wait, the arm comes to rest first`)
+`The wrist is turning back to rest`, and not yet that the chair is to move: the
+next `open_box` lines up first with its whole 35 s, and that is where they are
+told that the arm cannot see the container. With `wrist_first` off about 18 s
+of the 35 are left, and the user is guided in the goal itself by the scene
+camera alone. A goal sent by hand is guided in the goal itself, for up to 10
+minutes each time. None of these times is changed by this.
 
 What still ends `not_found`: cameras that could not look at all. A guided run
 is guided for an unseen container only where a camera did look: the scene

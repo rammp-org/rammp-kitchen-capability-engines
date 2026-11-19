@@ -2823,7 +2823,9 @@ def test_a_container_no_camera_sees_does_not_end_the_run_the_chair_is_guided_on_
     said = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
     assert said[0] == "No camera sees the container. Move the chair as told"
     assert said[1] == UNSEEN_SAYS and "Looking for the container" not in said  # at once: the run has looked
-    assert said[2:] == ["Hold still, checking", "Ready. Open the container?", "Opening the container"]
+    # ... then, the moment its watch has the container, the ordinary guidance, to the question and the yes
+    assert said[2] == "Hold still, checking" and said[-2:] == ["Ready. Open the container?", "Opening the container"]
+    assert UNSEEN_SAYS not in said[2:]
     phases = [p for p, *_ in ctx.said]
     assert phases[-1] == "home" and "line_up" not in phases[phases.index("look") :]  # the run, after its yes
     assert ctx.panels == []
@@ -2896,13 +2898,11 @@ def test_with_the_ui_an_unseen_container_is_said_on_the_panel_with_cancel_alone_
     assert unseen > wait + 1 and seen[unseen][2] == ["cancel"]
     assert not [m for m in said[:unseen] if _tells_to_move(m)]
     assert "Looking for the container" not in said[wait:]  # (the run's own panel said it while it looked)
-    assert said[unseen + 1 : unseen + 4] == [
-        "Hold still, checking",
-        "Ready. Open the container?",
-        "Opening the container",
-    ]
-    assert seen[unseen + 2][2] == ["open", "cancel"]
-    assert seen[unseen + 4][1:] == ("Looking for the container again", ["cancel"])  # the run's own, after Open
+    # ... then, the moment its watch has the container, the ordinary guidance, to the question and Open
+    assert said[unseen + 1] == "Hold still, checking" and UNSEEN_SAYS not in said[unseen + 1 :]
+    opened = said.index("Opening the container")
+    assert seen[opened - 1][1:] == ("Ready. Open the container?", ["open", "cancel"])
+    assert seen[opened + 1][1:] == ("Looking for the container again", ["cancel"])  # the run's own, after Open
     view = capsys.readouterr().out.splitlines()
     step = next(i for i, line in enumerate(view) if line.startswith("   line up   ..."))
     assert view[step - 3 : step - 1] == [
