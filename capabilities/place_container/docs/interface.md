@@ -98,7 +98,11 @@ every panel; Stop cancels the engine's own run, as the orchestrator's cancel doe
    `state_valid_after`, younger than `max_spot_age_min`), Stop. A tap highlights the spot
    (`selected_instance_id`); Place here without a tap asks again. No spots: why (camera not ready, no
    table, nothing free in reach, the camera disagrees with the arm, below), **Look again**, Use marked
-   spot.
+   spot. Before the scene camera is calibrated (no tf from it to `arm_mount`, or a placeholder one
+   that shows the table tilted or at the wrong height) the panel says the robot doesn't know where the
+   camera is or that its calibration is off, and offers Use marked spot; with no marked spot it says to
+   press Stop and have the operator `mark` one with the arm, then tap the table again (the engine runs
+   one action at a time; `ui.no_spot_message`).
 1. **Place.** At the tapped spot's x, y and `table_z` = a plane fitted to the table's depth within
    10 cm of it, plus `table_z_bias` (1 cm). Erring high is safe: the approach ends `lower_from` above
    that height, and the impedance descent goes on to 6 cm below where the container should meet it

@@ -2,7 +2,7 @@
 # One capability's node for the kitchen UI (up.sh): domain 0, on the orchestrator, flatbot's settings
 # (docs/DEMO_TESTING.md N1-N6 with use_orchestrator:=true). Idle until its button is pressed.
 #
-#   scripts/kitchen-ui/node.sh <fridge|microwave|microwave_place|button_press|place_container|box_opening>
+#   scripts/kitchen-ui/node.sh <fridge|microwave|microwave_place|button_press|place_container|box_opening|grab_container>
 #
 # KUI_TAG, ALLOW_EXECUTE, MOCK as up.sh; FRIDGE_GRASP=front|side for the fridge (default front).
 C=${1:?capability}
@@ -51,5 +51,10 @@ case "$C" in
       -v "${DEPLOY:-$HOME/rammp-deployments/december_2026}/config/robots/current:/config/robot:ro" "$IMG" \
       /module_ws/install/box_opening/lib/box_opening/box_opening_node --ros-args "${COMMON[@]}" \
       -p state_dir:=/state -p container:=ankou_pink.yaml -p world:=world_flatbot.yaml ;;
+  grab_container)
+    # Not in up.sh's default set (microwave_place's Grab Tupperware is the demo's grab): KUI_CAPS=grab_container.
+    # The ring detector's weights (model_path, /models/best.pt) and its GPU, as the real fragment.
+    run "$DDS" --gpus all -v /home/snorlax/oxo:/models:ro "$IMG" \
+      ros2 run grab_container grab_container_node --ros-args "${COMMON[@]}" ;;
   *) echo "kitchenui: unknown capability $C"; exit 2 ;;
 esac

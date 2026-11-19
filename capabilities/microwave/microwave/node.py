@@ -115,6 +115,28 @@ UI_TITLE = {"open": "Open microwave", "close": "Close microwave"}
 UI_DONE = {"open": "Microwave door opened.", "close": "Microwave door closed."}
 
 
+class _PanelCtx:
+    """A UI run's ctx for execute(): everything passes through to the run's own ctx; a ctx.progress() message the UI
+    has words for (ui_text.moving: the open's grasp and release) also updates the Stop panel's text, unless the run
+    has been stopped or cancelled. The update runs inside the open (on_hold, between the grasp and the swing), so it
+    never raises: a panel that fails to update is logged, and the open goes on."""
+
+    def __init__(self, ctx, ui, label, logger):
+        self._ctx, self._ui, self._label, self._log = ctx, ui, label, logger
+
+    def progress(self, phase, pct, message="", pausable=True):
+        self._ctx.progress(phase, pct, message, pausable)
+        text = ui_text.moving(self._label, message)
+        if text and not (self._ui.user_stopped or self._ctx.cancelled()):
+            try:
+                self._ui.moving(text)
+            except Exception as error:  # the panel's text must never stop the arm with the hand on the handle
+                self._log.warning(f"UI: panel update failed: {error!r}")
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+
 class Capability(CapabilityEngine):
     display_name = "Microwave"
     perception_classes = ["microwave"]
@@ -206,7 +228,8 @@ class Capability(CapabilityEngine):
         check refused, nothing past it moved) shows its reason and offers the same button again, with Stop, waiting
         for an explicit tap; one with the hand still on the handle, or any other, is shown with Done only and not
         retried. Every wait is bounded: Done at most NOTICE_TIMEOUT_S, a retry at most PROMPT_TIMEOUT_S (then the
-        refusal is returned as it is)."""
+        refusal is returned as it is). The Stop panel's text follows the open's grasp and release (_PanelCtx); an
+        orchestrator cancel shows nothing more."""
         action_id, label, params = UI_ACTIONS[ui_id]
         title = UI_TITLE[action_id]
         ui = RunUI(ctx, title, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
@@ -222,11 +245,12 @@ class Capability(CapabilityEngine):
             try:
                 result = ui.motion(
                     f"{label}: the arm is moving.",
-                    lambda: self.execute(action_id, dict(params), ctx),
+                    lambda: self.execute(action_id, dict(params), _PanelCtx(ctx, ui, label, self.get_logger())),
                     stopped_note=lambda: self._ui_stopped_note(action_id),
                 )
             except EngineError as error:
-                if ui.user_stopped:  # stopped on the UI: the "Stopped" notice has said so
+                # stopped on the UI: the "Stopped" notice has said so; an orchestrator cancel has taken the UI back
+                if ui.user_stopped or ctx.cancelled():
                     raise
                 holding = "holding the handle" in str(error) or error.error_code == "holding_handle"
                 self.get_logger().error(f"{ui_id}: {error}")

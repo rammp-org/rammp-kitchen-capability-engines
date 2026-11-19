@@ -15,7 +15,7 @@ import rclpy
 from capability_engine.engine import Cancelled, EngineError
 from rclpy.parameter import Parameter
 
-from box_opening import LOGGER, node
+from box_opening import LOGGER, node, ui_text
 
 FRAGMENT_MOCK = Path(__file__).resolve().parents[1] / "rammp-alternative.mock.yaml"
 
@@ -141,6 +141,12 @@ class NowWriter:
         ok = write()
         if done is not None:
             done(ok)
+
+
+@pytest.fixture(autouse=True)
+def no_notice_wait(monkeypatch):
+    """A final notice is shown and not waited on for its Done (NOTICE_S 60 s), unless a test asks."""
+    monkeypatch.setattr(node, "NOTICE_S", 0.0)
 
 
 @pytest.fixture(scope="module")
@@ -518,7 +524,7 @@ def test_the_panel_says_what_the_run_does_with_a_bar_and_one_button_cancel():
             "title": "Opening the container",
             "message": "Starting",
             "progress": {"phase": "locate", "pct": 0.0, "message": "Starting", "pausable": False},
-            "buttons": [{"button_id": "cancel", "label": "Cancel"}],
+            "buttons": [{"button_id": "cancel", "label": "Stop"}],
         }
     ]
     panel.say("press", 0.35, "pressing the button")
@@ -549,7 +555,7 @@ def test_cancel_pressed_on_the_panel_is_said_once_and_leaves_no_button():
     ctx.events.append(CANCEL_PRESS)
     assert panel.tick() is True and panel.pressed
     # the press took the bridge's panel down: it is sent again at once, saying the arm is stopping, no button
-    assert ctx.panels[-1]["message"] == node.PANEL_CANCELLED and ctx.panels[-1]["buttons"] == []
+    assert ctx.panels[-1]["message"] == node.wrap(node.PANEL_CANCELLED) and ctx.panels[-1]["buttons"] == []
     assert ctx.panels[-1]["progress"]["pausable"] is False and ctx.panels[-1]["progress"]["pct"] == 35.0
     ctx.events.append(CANCEL_PRESS)  # a second one (a stale panel's): not a second cancel
     assert panel.tick() is False and panel.pressed
@@ -601,8 +607,8 @@ def test_a_run_from_the_ui_shows_its_panel_and_cancel_on_it_is_the_runs_own_ctrl
     assert sent == [signal.SIGINT] and base == [1] and time.monotonic() - t0 < 6.0
     messages = [p["message"] for p in ctx.panels]
     assert messages[0] == "Starting" and "Pressing the button" in messages
-    assert messages[-1] == node.PANEL_CANCELLED and ctx.panels[-1]["buttons"] == []
-    running = [p for p in ctx.panels if p["message"] != node.PANEL_CANCELLED]
+    assert messages[-1] == node.wrap(node.PANEL_CANCELLED) and ctx.panels[-1]["buttons"] == []
+    running = [p for p in ctx.panels if p["message"] != node.wrap(node.PANEL_CANCELLED)]
     assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in running)
     pcts = [p["progress"]["pct"] for p in ctx.panels]
     assert pcts == sorted(pcts) and pcts[-1] == 35.0  # the bar's 0-100, never backwards
@@ -993,11 +999,14 @@ def test_the_paced_mock_rehearses_the_ui_its_panel_and_cancel(ros, monkeypatch):
         phases = node.MOCK_PHASES["open_box"]
         assert len(phases) * 0.3 <= time.monotonic() - t0 < len(phases) * 0.3 + 2.0
         assert out["lid_off"] and ctx.objects == {"c1": {"opened": True}}
-        shown = [p["message"] for p in ctx.panels]
+        run = [p for p in ctx.panels if "progress" in p]  # the run's panels, then its Done notice
+        shown = [p["message"] for p in run]
         assert [m for m in dict.fromkeys(shown) if m != "Starting"] == [d[:1].upper() + d[1:] for _, _, d in phases]
-        assert [p["progress"]["pct"] for p in ctx.panels] == sorted(p["progress"]["pct"] for p in ctx.panels)
-        assert ctx.panels[-1]["progress"]["pct"] == 100.0
-        assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in ctx.panels)
+        assert [p["progress"]["pct"] for p in run] == sorted(p["progress"]["pct"] for p in run)
+        assert run[-1]["progress"]["pct"] == 100.0
+        assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in run)
+        assert ctx.panels[-1]["message"] == node.wrap("Mock: " + ui_text.DONE + " No arm motion.")
+        assert [b["button_id"] for b in ctx.panels[-1]["buttons"]] == ["done"]
         # Cancel pressed while it "presses": cancelled, nothing held, nothing opened
         ctx = FakeCtx()
         import threading
@@ -1007,7 +1016,8 @@ def test_the_paced_mock_rehearses_the_ui_its_panel_and_cancel(ros, monkeypatch):
             cap.execute("open_box", {}, ctx)
         assert [p for p, *_ in ctx.said] == ["locate", "look", "press"]
         assert ctx.objects == {} and ctx.world == []
-        assert ctx.panels[-1]["message"] == node.PANEL_CANCELLED and ctx.panels[-1]["buttons"] == []
+        assert ctx.panels[-2]["message"] == node.wrap(node.PANEL_CANCELLED) and ctx.panels[-2]["buttons"] == []
+        assert ctx.panels[-1]["title"] == "Opening the container: stopped"  # then the Stopped notice
     finally:
         cap.destroy_node()
         LOGGER.handlers[:] = handlers
@@ -1045,7 +1055,8 @@ def test_the_mock_lines_up_first_and_runs_only_on_open(ros, monkeypatch):
         assert asked and [b["button_id"] for b in asked[0]["buttons"]] == ["open", "cancel"]
         first_run_panel = next(i for i, p in enumerate(ctx.panels) if p["progress"]["phase"] == "locate")
         assert all(
-            p["progress"]["phase"] not in ("looking", "move", "hold", "ready") for p in ctx.panels[first_run_panel:]
+            p.get("progress", {}).get("phase") not in ("looking", "move", "hold", "ready")
+            for p in ctx.panels[first_run_panel:]
         )
     finally:
         cap.destroy_node()
@@ -1086,7 +1097,8 @@ def test_a_user_not_in_place_in_time_is_told_to_press_open_again_and_nothing_run
         with pytest.raises(EngineError) as e:
             cap.execute("open_box", {}, ctx)
         assert e.value.error_code == "not_lined_up" and e.value.recoverable and "nothing moved" in str(e.value)
-        assert ctx.panels[-1]["message"] == "Press open again when you are in place"
+        assert ctx.panels[-2]["message"] == "Press open again when you are in place"
+        assert ctx.panels[-1]["title"] == "Opening the container: failed"  # then the failed notice
         assert {p for p, *_ in ctx.said} == {"line_up"} and ctx.objects == {} and ctx.world == []
     finally:
         cap.destroy_node()
@@ -1415,3 +1427,136 @@ def test_the_engine_says_its_lines_through_the_nodes_log(ros):
 
 def test_fake_run_script_is_python():
     compile(textwrap.dedent(FAKE_RUN), "fake_run.py", "exec")
+
+
+# -- how a run ends on the UI: a final notice with Done (capability_ui.RunUI, ui_text's words) ----------------
+DONE_PRESS = {"type": "button", "button_id": "done"}
+
+
+def _notices(ctx):
+    """The final notices sent: the panels with a Done button."""
+    return [p for p in ctx.panels if [b["button_id"] for b in p["buttons"]] == ["done"]]
+
+
+def test_a_run_from_the_ui_ends_on_a_done_notice_waited_on_until_done(engine, monkeypatch):
+    import threading
+
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "NOTICE_S", 30.0)
+    engine.instance_id = "food_container_1"
+    ctx = FakeCtx()
+    threading.Timer(1.5, ctx.events.append, args=(DONE_PRESS,)).start()
+    t0 = time.monotonic()
+    out = engine.execute("open_box", {}, ctx)
+    assert out["lid_off"] and 1.5 <= time.monotonic() - t0 < 10.0  # held on the notice until Done, no longer
+    (notice,) = _notices(ctx)
+    assert notice is ctx.panels[-1] and notice["title"] == "Opening the container"
+    assert notice["message"] == node.wrap(ui_text.DONE) and "style" not in notice
+
+
+def test_a_failed_run_says_what_happened_and_where_the_arm_is_in_plain_words(engine, monkeypatch):
+    given(monkeypatch, FULL_RUN[:5], ["[press_demo] STOP: the slide in stopped before the button — the arm holds"], 1)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "arm_holds" and "STOP" in str(e.value)  # the result keeps the run's own words
+    (notice,) = _notices(ctx)
+    assert notice["title"] == "Opening the container: failed" and notice["style"] == "error"
+    text = notice["message"]
+    assert "holding still where" in text and "clear it" in text
+    assert "STOP" not in text and "press_demo" not in text and "_" not in text
+
+
+def test_stop_on_the_panel_ends_on_a_stopped_notice_and_an_orchestrator_cancel_on_none(engine, monkeypatch):
+    import threading
+
+    given(monkeypatch, FULL_RUN[:5], wait=True)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    ctx = FakeCtx()
+    threading.Timer(1.0, ctx.events.append, args=(CANCEL_PRESS,)).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    (notice,) = _notices(ctx)
+    assert notice["title"] == "Opening the container: stopped" and notice["style"] == "warning"
+    assert notice["message"] == node.wrap(ui_text.stopped())
+    # the orchestrator's cancel: it has taken the UI back, so nothing more is shown
+    ctx = FakeCtx()
+    threading.Timer(1.0, setattr, args=(ctx, "cancel", True)).start()
+    with pytest.raises(Cancelled):
+        engine.execute("open_box", {}, ctx)
+    assert _notices(ctx) == []
+
+
+def test_without_the_ui_a_run_shows_no_notice(engine, monkeypatch):
+    given(
+        monkeypatch, FULL_RUN[:5], ["[press_demo] STOP: no button from the look pose (none) — nothing was pressed"], 1
+    )
+    ctx = FakeCtx()  # standalone: no token, _ui_live() False
+    with pytest.raises(EngineError):
+        engine.execute("open_box", {}, ctx)
+    assert ctx.panels == []
+
+
+def test_a_notice_never_waits_past_the_orchestrators_budget(engine, monkeypatch):
+    given(monkeypatch, FULL_RUN)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    monkeypatch.setattr(node, "NOTICE_S", 60.0)
+    monkeypatch.setattr(node, "ORCHESTRATOR_TIMEOUT_S", node.NOTICE_MARGIN_S + 2.0)  # 2 s left of the budget
+    ctx = FakeCtx()
+    t0 = time.monotonic()
+    engine.execute("open_box", {}, ctx)
+    assert time.monotonic() - t0 < 4.0 and len(_notices(ctx)) == 1  # shown, never tapped, not waited 60 s
+
+
+def test_the_panels_long_lines_are_wrapped_for_the_ui():
+    ctx = FakeCtx()
+    panel = node.Panel(ctx, lambda: True)
+    panel.say("locate", 0.03, "looking for the container with the wrist camera")
+    panel.stopping = node.PANEL_TIMED_OUT
+    panel.tick()
+    lines = ctx.panels[-1]["message"].split("\n")
+    assert len(lines) > 1 and all(len(ln.replace("</>", "").replace("<body-sm-light>", "")) <= 40 for ln in lines)
+    assert ctx.panels[-1]["progress"]["message"] == node.PANEL_TIMED_OUT  # the orchestrator's copy is as said
+
+
+@pytest.mark.parametrize(
+    "code", sorted({c for _p, c, _r in node.STOP_CODES} | set(ui_text.WORDS) | {"failed", "something_new"})
+)
+def test_every_error_has_plain_words_on_the_ui(code):
+    text = ui_text.failure(code, "[press_demo] STOP: reach:slide-in stopped (CONTACT_STOP) -- the arm holds")
+    assert text and "STOP:" not in text and "press_demo" not in text and "slide-in" not in text
+    held = ui_text.failure(code, "something -- the lid is still in the fingers")
+    assert ui_text.HELD in held
+
+
+def test_a_notice_says_where_the_arm_is_only_where_the_run_said_it():
+    # said once the arm is home (tasks/reach_lid_off's STOP lines)
+    assert "The arm is home." in ui_text.failure("lid_dropped", "STOP: the arm is home, but the lid slipped out")
+    assert "The arm is home." in ui_text.failure(
+        "lid_put_back", "STOP: x — the lid is back on the box, and the arm is home"
+    )
+    # said before the way home, which may not get there: no state, and no "went back"
+    for code in ("contact_early", "contact_late", "box_moved", "not_popped", "watch_failed"):
+        text = ui_text.failure(code, "STOP: x")
+        assert "home" not in text and "went back" not in text and "holding still" not in text
+    # the lid in the fingers keeps where the arm is beside it
+    held = ui_text.failure("arm_holds", "STOP: x — the arm holds -- the lid is still in the fingers")
+    assert "holding still where it stopped" in held and ui_text.HELD in held
+    # a run that had to be killed says no arm state, after a Stop or its budget
+    for text in (ui_text.stopped(killed=True), ui_text.failure("timeout", "the run took longer", killed=True)):
+        assert "holding still" not in text and ui_text.KILLED in text and ui_text.CHECK_ARM in text
+    assert ui_text.failure("stopped", "signal 9", killed=True).count(ui_text.KILLED) == 1
+
+
+def test_a_killed_run_says_no_arm_state_on_its_notice(engine, monkeypatch):
+    given(monkeypatch, FULL_RUN[:5], ["[press_demo] STOP: the slide in stopped — the arm holds"], -9)
+    monkeypatch.setattr(engine, "_ui_live", lambda: True)
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "stopped" and engine._ui_killed
+    (notice,) = _notices(ctx)
+    said = ui_text.failure("stopped", "", killed=True)
+    assert notice["message"] == node.wrap(said) and ui_text.CHECK_ARM in said and "holding still" not in said
