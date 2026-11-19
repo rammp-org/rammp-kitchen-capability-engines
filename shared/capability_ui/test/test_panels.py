@@ -22,12 +22,22 @@ class FakeCtx:
     def __init__(self, session=True):
         self.session = session
         self.sent = []
+        self.overlay_images = []
+        self.overlay_visible_calls = []
         self._event = None
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
 
     def update_user_panel(self, panel_json=None, objects=None, selected_instance_id=None):
         self.sent.append({"panel": panel_json, "objects": objects, "selected": selected_instance_id})
+        return self.session
+
+    def publish_overlay_image(self, image):
+        self.overlay_images.append(image)
+        return self.session
+
+    def set_overlay_visible(self, visible):
+        self.overlay_visible_calls.append(visible)
         return self.session
 
     def poll_ui_event(self):
@@ -116,6 +126,36 @@ def test_moving_panel_has_stop_and_stop_cancels_the_motion():
     assert stopped["message"].startswith(panels.STOPPED_MESSAGE)
     assert stopped["message"].endswith("The hand is still on the handle.")
     assert stopped["buttons"] == [panels.DONE]
+
+
+def test_motion_waits_for_a_fresh_goal_to_finish_opening_before_running_fn():
+    ui, ctx, clock = make()
+
+    class Run:
+        ui_goal_handle = None
+        ui_opening = True
+        ui_lock = threading.Lock()
+
+    ctx._run = Run()
+    clock.script = [(1.5, lambda: setattr(Run, "ui_opening", False))]
+    started_at = []
+    assert ui.motion("Counting.", lambda: started_at.append(ui._clock()) or "ok") == "ok"
+    assert started_at == [pytest.approx(1.5, abs=0.2)]
+
+
+def test_motion_gives_up_waiting_for_the_goal_after_a_bound_and_runs_fn_anyway():
+    ui, ctx, clock = make()
+
+    class Run:
+        ui_goal_handle = None
+        ui_opening = True  # never flips: as if the bridge never accepts or rejects
+        ui_lock = threading.Lock()
+
+    ctx._run = Run()
+    ran = []
+    assert ui.motion("Counting.", lambda: ran.append(True) or "ok") == "ok"
+    assert ran == [True]
+    assert clock.t == pytest.approx(panels.GOAL_OPEN_WAIT_S, abs=0.2)
 
 
 def test_stopped_notice_stays_up_until_done_although_the_run_is_cancelled():
@@ -259,6 +299,31 @@ def test_object_taps_go_to_on_tap_and_do_not_end_the_question():
     assert ctx.sent[-1]["objects"] == objects
 
 
+def test_select_object_highlights_and_updates_the_message_without_changing_buttons_or_objects():
+    ui, ctx, clock = make()
+    objects = [{"instance_id": "spot_3", "perception_class": "spot", "box": [0, 0, 1, 1], "source": "scene"}]
+    ui.send("Tap a spot.", [{"button_id": "place", "label": "Place here"}, panels.STOP], objects=objects)
+    assert ui.select_object("spot_3", message="Selected spot_3.") is True
+    sent = ctx.sent[-1]
+    assert sent["selected"] == "spot_3"
+    assert sent["panel"]["message"] == "Selected spot_3."
+    assert sent["panel"]["buttons"] == [{"button_id": "place", "label": "Place here"}, panels.STOP]
+    assert sent["objects"] == objects
+
+
+def test_select_object_can_also_update_the_buttons():
+    ui, ctx, clock = make()
+    ui.send("Tap a spot.", [{"button_id": "place", "label": "Place here"}, panels.STOP])
+    ui.select_object("spot_3", buttons=[{"button_id": "place", "label": "Place at spot 3"}])
+    assert ctx.sent[-1]["panel"]["buttons"] == [{"button_id": "place", "label": "Place at spot 3"}, panels.STOP]
+
+
+def test_select_object_before_any_panel_just_forwards_the_highlight():
+    ui, ctx, clock = make()
+    assert ui.select_object("spot_3") is True
+    assert ctx.sent == [{"panel": None, "objects": None, "selected": "spot_3"}]
+
+
 def test_standalone_never_waits():
     ui, ctx, clock = make(session=False)
     assert ui.motion("Moving.", lambda: 7) == 7
@@ -327,3 +392,37 @@ def test_wrap_keeps_paragraphs_and_long_words():
     assert panels.wrap("a\n\nb") == f"a{sep}{sep}b"
     word = "x" * 60
     assert panels.wrap(word) == word
+
+
+def test_publish_overlay_image_forwards_to_ctx_and_reflects_session():
+    ui, ctx, _ = make()
+    assert ui.publish_overlay_image("frame-1") is True
+    assert ctx.overlay_images == ["frame-1"]
+
+    ui_standalone, ctx_standalone, _ = make(session=False)
+    assert ui_standalone.publish_overlay_image("frame-2") is False
+    assert ctx_standalone.overlay_images == ["frame-2"]  # still forwarded; ctx itself no-ops standalone
+
+
+def test_show_and_hide_overlay_forward_to_ctx():
+    ui, ctx, _ = make()
+    assert ui.show_overlay() is True
+    assert ui.hide_overlay() is True
+    assert ctx.overlay_visible_calls == [True, False]
+
+
+def test_overlay_shown_brackets_with_show_then_hide():
+    ui, ctx, _ = make()
+    with ui.overlay_shown():
+        ui.publish_overlay_image("frame")
+        assert ctx.overlay_visible_calls == [True]
+    assert ctx.overlay_visible_calls == [True, False]
+    assert ctx.overlay_images == ["frame"]
+
+
+def test_overlay_shown_hides_even_when_the_block_raises():
+    ui, ctx, _ = make()
+    with pytest.raises(RuntimeError):
+        with ui.overlay_shown():
+            raise RuntimeError("boom")
+    assert ctx.overlay_visible_calls == [True, False]

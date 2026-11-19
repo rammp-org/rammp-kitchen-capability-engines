@@ -9,17 +9,29 @@
 
 ## What it does
 
-The reference capability. It offers two actions: `count`, which counts up to
-`to` with progress feedback and honours pause and cancel, and
-`count_with_panel`, the same but also driving a live progress panel (with a
-Stop button) directly on the UI bridge, and showing/hiding its overlay
-camera feed (`ctx.set_overlay_visible()`) for the duration of the run —
-shown before the loop starts, hidden in a `finally` on every exit path.
-While shown, it also republishes one static diagonal-stripe test frame
-(`ctx.publish_overlay_image()`) every tick as a placeholder for a real
-capability's own camera. It is activated when the user selects a
-`counter`. Replace this paragraph with what your capability does and what
-would break without it.
+The reference capability. It offers three actions: `count`, which counts up to
+`to` with progress feedback and honours pause and cancel; `count_with_panel`,
+the same but also driving a live progress panel (with a Stop button) directly
+on the UI bridge, and showing/hiding its overlay camera feed
+(`ctx.set_overlay_visible()`) for the duration of the run — shown before the
+loop starts, hidden in a `finally` on every exit path; and
+`count_with_runui_panel`, the same again but built on `capability_ui.RunUI`'s
+reusable panel helpers (`RunUI.ask()`, `RunUI.motion()`, `RunUI.overlay_shown()`,
+`RunUI.done()`) instead of calling `ctx` directly: it first asks for
+confirmation (a plain "Start" button, `_ask_to_start`), then asks the user to
+tap one of two markers overlaid on the camera feed to pick where counting
+starts from — 1, or 5 if `marker_high` is tapped (`_ask_start_marker`,
+demonstrating `RunUI.ask()`'s `objects=`/`on_tap=` and the
+selected-highlight-follows-the-tap pattern from `docs/UI_JSON_SCHEMA.md`) —
+before counting from there to `to` under the progress-with-Stop panel. Its
+Stop button cancels the action (showing a "Stopped" notice) rather than
+returning a normal result, unlike `count_with_panel`'s own hand-rolled Stop
+handling. While shown, both panel actions also republish one static
+diagonal-stripe test frame (`ctx.publish_overlay_image()`/
+`RunUI.publish_overlay_image()`) every tick as a placeholder for a real
+capability's own camera. It is activated when the user selects a `counter`.
+Replace this paragraph with what your capability does and what would break
+without it.
 
 ## Publishes
 
@@ -44,10 +56,11 @@ Served under `/example/`, types from `rammp_orchestrator_interfaces`:
 | `/example/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/example/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action             | Params                                                | Result payload                                |
-| ------------------ | ----------------------------------------------------- | --------------------------------------------- |
-| `count`            | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
-| `count_with_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |
+| Action                   | Params                                                 | Result payload                                                                                                                                                                      |
+| ------------------------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `count`                  | `to` (int ≥ 1, default 10), `interval_s` (default 1.0) | `{"counted_to": n}`                                                                                                                                                                 |
+| `count_with_panel`       | `to` (int ≥ 1, default 10), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}`                                                                                                                                       |
+| `count_with_runui_panel` | `to` (int ≥ 1, default 10), `interval_s` (default 1.0) | `{"counted_to": n, "started_at": 1\|5}` (Stop cancels the action instead; `to` is bumped up to at least the picked start, e.g. 10 stays 10 but a smaller `to` would be raised to 5) |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.

@@ -20,9 +20,20 @@ Typical use, in `execute()`:
     ui.done("Microwave door opened.")
     return result
 
+A capability with its own camera (e.g. a wrist cam) can also show it alongside the panels above, via
+`publish_overlay_image`/`show_overlay`/`hide_overlay` (thin wrappers over `ctx.publish_overlay_image`/
+`ctx.set_overlay_visible` -- see `capability_engine.engine.Context` for the underlying contract), or the
+`overlay_shown()` bracket below for the common show-then-hide-on-every-exit-path shape:
+
+    with ui.overlay_shown():
+        for frame in frames:
+            ui.publish_overlay_image(frame)
+            ...
+
 Nothing here imports ROS: the tests drive it with a fake ctx.
 """
 
+import contextlib
 import textwrap
 import threading
 import time
@@ -39,6 +50,16 @@ PROMPT_TIMEOUT_S = 600.0
 # is never re-sent: re-sending one every second redrew it on the UI, which flashed (microwave, 11-12).
 REFRESH_S = 1.0
 POLL_S = 0.1
+
+# How long `motion()` waits, right after opening a fresh UI goal, for that goal's accept round-trip to finish before
+# starting the caller's `fn()`. Opening a goal (e.g. the first panel of a new motion, after a prior question's goal
+# ended on its button press) is asynchronous: a call to update_user_panel() made while it's still *opening* (not yet
+# accepted) only merges its content locally and sends nothing over the network (capability_engine.Context's own
+# "opening" branch) -- so a fast-moving loop (e.g. counting once a second) can silently overwrite step 1's content
+# with step 2's, step 2's with step 3's, and so on, before the goal ever actually opens, and the first steps the user
+# was meant to see on screen never reach it. Bounded so a bridge that's down or slow to accept never stalls the
+# capability's real work indefinitely -- best effort only, same as every other wait in this module.
+GOAL_OPEN_WAIT_S = 3.0
 
 STOPPED_MESSAGE = "Stopped. The arm is holding still where it was."
 
@@ -137,6 +158,82 @@ class RunUI:
                 kwargs["objects"] = objects
             self.ctx.update_user_panel(**kwargs)
 
+    def _wait_while_opening(self, timeout_s):
+        """Blocks (bounded by `timeout_s`) while this run's UI goal is mid-open (accepted or
+        rejected yet, not either) -- see GOAL_OPEN_WAIT_S's own comment for why `motion()` calls
+        this right after its first panel. A no-op wherever `ctx` has no such concept (e.g. the
+        tests' simpler fakes, or no UI session at all)."""
+        run = getattr(self.ctx, "_run", None)
+        if run is None or not hasattr(run, "ui_opening"):
+            return
+        deadline = self._clock() + timeout_s
+        while getattr(run, "ui_opening", False) and self._clock() < deadline:
+            self._sleep(POLL_S)
+
+    def select_object(self, instance_id, message=None, buttons=None):
+        """Highlight `instance_id` (the selected-instance-id-follows-the-tap pattern) on the
+        currently shown panel, optionally updating its message and/or `buttons` too (e.g. a confirm
+        button's label changing to reflect what got selected) -- title/objects/style stay as last
+        sent, and anything left as None (the default) is kept unchanged too. `buttons` is filtered
+        and Stop appended exactly like `ask()` does, so pass just the non-Stop buttons. Call this
+        from `on_tap` (see `ask()`) so the user sees their tap took effect, instead of a panel that
+        looks unchanged after tapping an object."""
+        with self._lock:
+            panel, objects = self._panel if self._panel else (None, None)
+        if panel is None:
+            return bool(self.ctx.update_user_panel(selected_instance_id=instance_id))
+        panel = dict(panel)
+        if message is not None:
+            panel["message"] = wrap(message)
+        if buttons is not None:
+            panel["buttons"] = [b for b in buttons if b["button_id"] != STOP["button_id"]] + [STOP]
+        with self._lock:
+            self._panel = (panel, objects)
+        kwargs = {"panel_json": panel, "selected_instance_id": instance_id}
+        if objects is not None:
+            kwargs["objects"] = objects
+        return bool(self.ctx.update_user_panel(**kwargs))
+
+    # -- this run's own camera overlay (e.g. a wrist cam), alongside the panels above -----------------------------
+
+    def publish_overlay_image(self, image) -> bool:
+        """Publish one frame of this run's own camera (`ctx.publish_overlay_image`) to the UI bridge's
+        shared overlay topic, stamped with this run's session token. `image` is a `sensor_msgs/Image`.
+        Returns False (no-op, logged by the engine) if this run holds no session token -- same as
+        `send()` above, there is nothing more to do standalone."""
+        return bool(self.ctx.publish_overlay_image(image))
+
+    def show_overlay(self) -> bool:
+        """Show this run's overlay camera feed in UE (`ctx.set_overlay_visible(True)`) -- UE's `Open
+        Camera Feed` Remote Control call. Not a gate on `publish_overlay_image()` above: keep
+        publishing frames regardless of visibility, so the feed is already live the moment it's
+        shown."""
+        return bool(self.ctx.set_overlay_visible(True))
+
+    def hide_overlay(self) -> bool:
+        """Hide this run's overlay camera feed in UE (`ctx.set_overlay_visible(False)`) -- UE's `Close
+        Camera Feed` Remote Control call. The orchestrator's own end-of-execution cleanup also
+        unconditionally hides the overlay, so calling this explicitly is redundant by the time
+        `execute()` returns -- use it (or `overlay_shown()` below) when the feed should hide the
+        instant this run's own loop ends, rather than wait on that later cleanup."""
+        return bool(self.ctx.set_overlay_visible(False))
+
+    @contextlib.contextmanager
+    def overlay_shown(self):
+        """Brackets a block with `show_overlay()`/`hide_overlay()`, hiding on every exit path --
+        normal completion, an exception, or Stop/Cancelled -- not just the happy path:
+
+            with ui.overlay_shown():
+                for frame in frames:
+                    ui.publish_overlay_image(frame)
+                    ...
+        """
+        self.show_overlay()
+        try:
+            yield
+        finally:
+            self.hide_overlay()
+
     # -- while the arm moves: a panel with Stop, watched from a thread -------------------------------------------
 
     def moving(self, message, pct=None, phase=""):
@@ -178,8 +275,13 @@ class RunUI:
     def motion(self, message, fn, stopped_note=None):
         """Run `fn()` (the moving part) under the Stop panel. If the user presses Stop, the cancel stops the motion
         and whatever `fn` raises is re-raised after a "Stopped" notice; `stopped_note()` can add what state the
-        arm was left in (e.g. "The hand is still on the handle.")."""
+        arm was left in (e.g. "The hand is still on the handle.").
+
+        Waits (bounded, GOAL_OPEN_WAIT_S) for this panel's own UI goal-open to finish before running `fn()`, so a
+        fast-moving `fn` (e.g. counting once a second) doesn't outrun the goal's accept round-trip and silently lose
+        its first few updates -- see GOAL_OPEN_WAIT_S's own comment."""
         self.moving(message)
+        self._wait_while_opening(GOAL_OPEN_WAIT_S)
         try:
             return fn()
         except BaseException:
@@ -238,7 +340,9 @@ class RunUI:
 
     def ask(self, message, buttons, timeout_s=PROMPT_TIMEOUT_S, title=None, objects=None, on_tap=None, style=None):
         """A question with `buttons` plus Stop. Returns the tapped button's id, or None when there is no UI
-        (standalone) or no answer within `timeout_s`. Stop cancels the action (raises `Cancelled`)."""
+        (standalone) or no answer within `timeout_s`. Stop cancels the action (raises `Cancelled`). With `objects`:
+        `on_tap(instance_id)` runs on every object tap (the user may tap several before deciding) -- call
+        `select_object()` from it so the panel visibly reflects the tap, not just a tap the UI bridge accepted."""
         buttons = [b for b in buttons if b["button_id"] != STOP["button_id"]] + [STOP]
         if not self.send(message, buttons, title=title, objects=objects, style=style):
             return None
