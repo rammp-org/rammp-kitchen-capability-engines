@@ -51,6 +51,7 @@ from scipy.spatial.transform import Rotation as R
 from . import constants as F
 from . import planning as pl
 from . import push_open as P
+from . import relocalize
 from . import side_grasp as S
 from .motion import load_door, logged_run, opened
 from .push_open import PushOpen, back_off_goals, push_after_chair_move
@@ -903,6 +904,7 @@ def execute_open(ai, planner, plan):
         raise Refused(f"Tracking {e * 100:.1f} cm at the grasp -- ABORT, gripper untouched.")
     # the closed door, for the close (door_mid written even when None, so a stale one can't linger)
     dc.DOOR_FILE.unlink(missing_ok=True)
+    relocalize.ref_file().unlink(missing_ok=True)  # the close's reference was of the last door file
     save_door_geometry(**plan["door"], door_mid=plan.get("door_mid"))
     if not F.GRIP_DURING_SWING:
         _close_gripper(ai)

@@ -42,7 +42,7 @@ from capability_ui import RunUI, cancel_own_run
 from door_common import common as dc
 from door_common import open_door as shared_open
 
-from . import base_drive, close_door, constants, motion, open_door, push_open, ui_text
+from . import base_drive, close_door, constants, motion, open_door, push_open, relocalize, ui_text
 from .kinematics import Chain
 from .perception import WristCamera
 from .planning import Planner
@@ -652,6 +652,8 @@ class Capability(CapabilityEngine):
                     drive_chair=drive_chair,
                     base_moves=bool(params.get("base_moves", True)),
                 )
+                if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
+                    relocalize.capture_reference(self.arm)
                 if ok and push_open.NEXT_STEP:  # the wheelchair move it asks for, where the goal was sent
                     ctx.progress(action_id, 100.0, push_open.NEXT_STEP)
                     note = f"{note}. {push_open.NEXT_STEP}" if note else push_open.NEXT_STEP

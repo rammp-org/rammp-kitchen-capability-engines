@@ -38,6 +38,7 @@ from scipy.spatial.transform import Rotation as R
 
 from . import constants as F
 from . import planning as pl
+from . import relocalize
 from .motion import load_door, logged_run, opened, shifted_by
 from .world import FridgeModel
 
@@ -50,6 +51,9 @@ GOAL_SETTINGS = {
     "chair_back": None,  # how far the chair is moved back (m, - forward); 0: not moved; None: the plan picks it
     "close_to_deg": F.CLOSE_TO_DEG,  # swing the door shut until it is open this far (deg)
     "chair_moved": False,  # the chair has been moved as the plan asked: required to execute with a move
+    # re-detect the fridge first (relocalize.py): the door file carried by the wheelchair's move since the open, as the
+    # wrist camera measures it. False: the door file as the open left it, shifted only by the move the plan asked for
+    "relocalize": True,
 }
 TRIED = []  # the last close's push starts planned by cuRobo: [(move, radius, z, yaw, via, outcome)] -- for the logs
 GEOMETRY_CACHE = {}  # CloseGeometry.push's results this close (run clears it): the same for every wheelchair move
@@ -717,6 +721,9 @@ def run(
         door = load_door()
         if "open_sign" not in door or door.get("door_open_deg") is None:
             raise Refused(f"{dc.DOOR_FILE} has no opened door: the swing writes it.")
+        # where the fridge is now: the wheelchair may have been moved by hand since the open. In memory only (the door
+        # file and the open's reference frame stay a pair); None: no reference, the door file as before
+        door, measured = relocalize.relocalize(ai, door) if settings.get("relocalize", True) else (door, None)
         st = ai.get_state()
         settings["container"] = gripper_holds(st)  # the gripper closed: it holds the container, carried with the hand
         say(
@@ -731,14 +738,18 @@ def run(
             if door.get("close_chair_back") is None:
                 raise Refused("chair_moved, but no close has planned a wheelchair move: send a dry run first.")
             chair_back = float(door["close_chair_back"])
-            say(f"the wheelchair was moved {how_moved(chair_back)}, as the last close plan asked")
+            say(
+                f"the wheelchair was moved {how_moved(chair_back)}, as the last close plan asked"
+                + (" (where it really went: re-detected above)" if measured is not None else "")
+            )
         moves = F.CLOSE_CHAIR_MOVES_M if chair_back is None else (float(chair_back),)
         # with the chair already moved (chair_moved), the door is where the move put it: no move left to make
         moved_already = bool(chair_moved)
         why = ""
         planner.search()
         for move in moves:
-            shift = np.asarray(chair_back_dir, float) * move
+            # re-detected after the move: the measured move is in the door already, the planned one isn't added
+            shift = np.zeros(2) if moved_already and measured is not None else np.asarray(chair_back_dir, float) * move
             try:
                 if moved_already:
                     motion, info = _plan_after_move(

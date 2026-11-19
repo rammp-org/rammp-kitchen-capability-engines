@@ -20,9 +20,9 @@ MEASURED = {
     "pin_behind_face_m": 1.25 * INCH + 0.015,
     # handle bar centre line -> hinge pin axis, along the door at handle height (measured 09-20)
     "hinge_along_door_m": 14.5 * INCH,
-    # the door's full width, hinge-side edge to free edge (~18 in, at the top of the door). Too small = the plans pass
-    # closer to the real free edge than they think
-    "door_width_m": 18 * INCH,
+    # the door's full width, hinge-side edge to free edge (the new fridge: 17.7 in, measured 11-19; the old one ~18 in,
+    # at the top of the door). Too small = the plans pass closer to the real free edge than they think
+    "door_width_m": 17.7 * INCH,
     # front face to the innermost point of its inside, bins / shelves included (~4.2 in by hand, may be slightly off).
     # Modelled as a slab this deep across the whole door: it sets the room behind the open door for the push-open
     "door_depth_m": 4.2 * INCH,
@@ -264,6 +264,23 @@ CLOSE_CHAIR_MOVES_M = tuple(
 CHAIR_BACK_DIR = (1.0, 0.0)  # ... which moves the recorded fridge this way in the arm's frame (arm-base x = the
 # chair's forward): the node's chair_back_dir parameter. The plan uses the door from the open, shifted by this
 CLOSE_TO_DEG = 45.0  # swing the door shut until it is open this far, then back out (no torque push)
+
+# --- re-detecting the fridge before the close (relocalize.py): the wheelchair is moved by hand between the open and
+# the close, so the door file (true when the open ended) is carried by the move the wrist camera measures. Tuned
+# offline on the 11-13 close-start frames (depth only) ---
+RELOC_SAM3_PROMPTS = ("refrigerator",)  # SAM 3's mask of these keeps only the fridge's pixels (untested: on the robot)
+RELOC_DEPTH_M = (0.25, 2.5)  # depth used, from the camera
+RELOC_HAND_CLEAR_M = 0.30  # points this close to the tool point are the hand or the container it holds: left out
+RELOC_VOXEL_M = 0.01  # one point per this cube
+RELOC_REF_MARGIN_M = 0.10  # the reference: the points within this of the door file's cabinet, door and handle
+RELOC_SEARCH_M = (0.60, 0.35)  # the move searched: up to this along the arm's x (back / forward), y (sideways) ...
+RELOC_SEARCH_YAW_DEG = 12.0  # ... and turned up to this
+RELOC_STARTS = 5  # the best distinct moves of that search refined
+RELOC_INLIER_M = 0.02  # a point lines up when within this of the points seen now ...
+RELOC_MIN_INLIER_FRAC = 0.35  # ... and the fit is trusted with at least this many lined up (11-13: 41-80% when
+# right, 21% for the one wrong fit) ...
+RELOC_MAX_MEDIAN_M = 0.035  # ... the median gap at most this (6-29 mm when right, 109 wrong) ...
+RELOC_MIN_POINTS = 1500  # ... and at least this many points on the fridge in each view (11-13: 6000-9000)
 CLOSE_PLAN_ATTEMPTS = 3  # the after-move close is planned afresh up to this many times before it refuses: cuRobo's
 # routes are random and it doesn't see the held container (11-12: identical dry runs, one refused, one planned)
 CLOSE_SPEED = 0.7  # the close goal's default speed: slower, the swing doesn't carry the door shut from CLOSE_TO_DEG

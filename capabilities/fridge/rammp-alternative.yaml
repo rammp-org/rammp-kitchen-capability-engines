@@ -63,7 +63,7 @@ params:
   handle_centre_to_face_m: 0.070
   pin_behind_face_m: 0.04675
   hinge_along_door_m: 0.3683
-  door_width_m: 0.4572
+  door_width_m: 0.44958
   door_depth_m: 0.10668
   door_above_handle_m: 0.381
   door_below_handle_m: 0.3937
