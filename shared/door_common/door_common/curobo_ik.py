@@ -35,22 +35,32 @@ class CuroboIK:
     """The IK server's client: ik() batched IK, fk(), self_collision(); counts calls and time."""
 
     def __init__(self, sock, wait_s=300):
+        self.sock, self.wait_s = sock, wait_s
+        self._connect()
+        self.calls, self.gpu_ms, self.wall_ms, self.problems = 0, 0.0, 0.0, 0
+
+    def _connect(self):
         t0 = time.time()
         while True:
             try:
-                self.conn = Client(sock, family="AF_UNIX")
-                break
+                self.conn = Client(self.sock, family="AF_UNIX")
+                return
             except (FileNotFoundError, ConnectionRefusedError):
-                if time.time() - t0 > wait_s:
+                if time.time() - t0 > self.wait_s:
                     raise Refused(
-                        f"no cuRobo IK server at {sock} (poc/plan_open_speedup/snorlax/run_ik_server.sh)"
+                        f"no cuRobo IK server at {self.sock} (poc/plan_open_speedup/snorlax/run_ik_server.sh)"
                     ) from None
                 time.sleep(1)
-        self.calls, self.gpu_ms, self.wall_ms, self.problems = 0, 0.0, 0.0, 0
 
     def _ask(self, *req):
-        self.conn.send(req)
-        return self.conn.recv()
+        """One request; once more on a fresh connection if the server restarted since the last."""
+        try:
+            self.conn.send(req)
+            return self.conn.recv()
+        except (EOFError, OSError):
+            self._connect()
+            self.conn.send(req)
+            return self.conn.recv()
 
     def ik(self, pos, quat, seeds):
         t0 = time.perf_counter()
@@ -118,10 +128,11 @@ def _guards_ok(q):
     return abs(np.degrees(q[3])) <= sim.J4_GUARD_DEG and abs(np.degrees(q[5])) <= sim.J6_GUARD_DEG
 
 
-def _grasp_ok(rb, q, err):
-    """_ik_within_guards' gates: the wrapped joints, or None."""
+def _grasp_ok(rb, q, err, keep_out=True):
+    """_ik_within_guards' gates: the wrapped joints, or None. `keep_out` False leaves the chair check (the costly
+    one) to the caller."""
     q = wrap_joints(q)
-    if err > sim.MAX_IK_ERR or keep_out_message(rb, q) is not None or not _guards_ok(q):
+    if err > sim.MAX_IK_ERR or not _guards_ok(q) or (keep_out and keep_out_message(rb, q) is not None):
         return None
     return np.asarray(q, float)
 
@@ -135,9 +146,10 @@ def _leg_step(q, nq, err, pos):
     return np.asarray(nq, float)
 
 
-def _make_arc_step(rb):
+def _make_arc_step(rb, keep_out=True):
     def step(q, nq, err, pos):
-        """_check_arc's gates on one swing waypoint (its joints raw, as PyBullet's: not wrapped)."""
+        """_check_arc's gates on one swing waypoint (its joints raw, as PyBullet's: not wrapped). `keep_out` False
+        leaves the chair check to the caller."""
         nq = _near_seed(nq, q)
         if (
             err > od.SWING_IK_PROBE_M
@@ -145,7 +157,7 @@ def _make_arc_step(rb):
             or float(np.max(np.degrees(np.abs(nq - q)))) > od.SWING_MAX_JUMP_DEG
             or abs(np.degrees(nq[5])) > od.J6_GUARD_DEG
             or abs(np.degrees(nq[3])) > sim.J4_GUARD_DEG
-            or keep_out_message(rb, nq) is not None
+            or (keep_out and keep_out_message(rb, nq) is not None)
         ):
             return None
         return nq
@@ -217,10 +229,8 @@ def plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik,
     qp, ep = _solve(ik, [x[2] for x in tries], [x[0]["t"]["g_q"] for x in tries], [x[0]["q_g"] for x in tries])
     q_pres = []
     for q, err in zip(qp, ep, strict=True):
-        q_pre = _grasp_ok(rb, q, float(err))
-        if q_pre is not None and (
-            keep_out_message(rb, q_pre) is not None or od._near_limit(rb, q_pre, od.CUROBO_LIMIT_MARGIN_DEG)
-        ):
+        q_pre = _grasp_ok(rb, q, float(err), keep_out=False)  # the chair check below, only where it decides
+        if q_pre is not None and od._near_limit(rb, q_pre, od.CUROBO_LIMIT_MARGIN_DEG):
             q_pre = None
         q_pres.append(q_pre)
     live = [i for i, q in enumerate(q_pres) if q is not None]
@@ -235,7 +245,7 @@ def plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik,
         job["appr"] = None
     for i, (job, standoff, pre_p, _) in enumerate(tries):  # in standoff order: the first that passes, as plan_open
         leg = legs.get(i)
-        if job["appr"] is not None or leg is None:
+        if job["appr"] is not None or leg is None or keep_out_message(rb, q_pres[i]) is not None:
             continue
         g_p = job["t"]["g_p"]
         lengths = od._approach_lengths(g_p, pre_p, leg)
@@ -255,7 +265,7 @@ def plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik,
         ik,
         [job["appr"][3][-1] for job, _, _ in arcs],
         [[(w[:3], w[3:]) for w in wps] for _, _, wps in arcs],
-        _make_arc_step(rb),
+        _make_arc_step(rb, keep_out=False),  # the chair check below, only on the swings that decide
     )
     st["s_s"] = time.perf_counter() - t0
 
@@ -266,7 +276,12 @@ def plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, ik,
         standoff, pre_p, q_pre, leg = job["appr"]
         t = job["t"]
         for (j2, d, wps), arc in zip(arcs, sols, strict=True):
-            if j2 is not job or arc is None or od._swing_keep_out(leg[-1], arc) is not None:
+            if (
+                j2 is not job
+                or arc is None
+                or any(keep_out_message(rb, q) is not None for q in arc)
+                or od._swing_keep_out(leg[-1], arc) is not None
+            ):
                 continue
             cands.append(
                 dict(

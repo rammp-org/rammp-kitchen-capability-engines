@@ -722,7 +722,7 @@ def _with_approach(scene, rb, cand, appr):
     """Candidate `cand` with approach `appr` (_approach_from) and its swing re-planned from the new grasp joints, or
     None when that swing fails the sim gates."""
     standoff, pre_p, q_pre, leg = appr
-    ok, _, msg, arc = _check_arc(scene, rb, cand["wps"], leg[-1])
+    ok, _, msg, arc = _replan_arc(scene, rb, cand["wps"], leg[-1])  # with the planner in use
     if not ok or _swing_keep_out(leg[-1], arc) is not None:
         return None
     margin = _guard_margin([q_pre, *leg, *arc])
@@ -925,10 +925,10 @@ def plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing, quick=Fals
     line per tilt. Returns (plan dict, or None; the reason when None)."""
     t0 = time.perf_counter()
     if PLANNER == "curobo" and not quick:
-        from .curobo_ik import CuroboIK, plan_open_curobo
+        from .curobo_ik import plan_open_curobo
 
         st = {}
-        out = plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, CuroboIK(IK_SOCKET, 5), st)
+        out = plan_open_curobo(scene, rb, geom, q0, max_swing, min_swing, after_swing, _curobo_ik(), st)
         PLAN_TIMES.update(search_s=st.get("search_s"))
         return out
     swings = list(range(max_swing, min(min_swing, max_swing) - 1, -10 if quick else -5))
@@ -1060,12 +1060,24 @@ def _times():
     return {"search_s": round(PLAN_TIMES["search_s"], 3) if PLAN_TIMES.get("search_s") is not None else None}
 
 
+_IK = None  # the cuRobo IK server's client, kept: the server serves one connection at a time
+
+
+def _curobo_ik():
+    global _IK
+    if _IK is None or _IK.sock != IK_SOCKET:
+        from .curobo_ik import CuroboIK
+
+        _IK = CuroboIK(IK_SOCKET, 5)
+    return _IK
+
+
 def _replan_arc(scene, rb, wps, q0):
     """_check_arc with the planner in use (cuRobo's chained IK when PLANNER is "curobo")."""
     if PLANNER == "curobo":
-        from .curobo_ik import CuroboIK, check_arc_curobo
+        from .curobo_ik import check_arc_curobo
 
-        return check_arc_curobo(rb, wps, q0, CuroboIK(IK_SOCKET, 5))
+        return check_arc_curobo(rb, wps, q0, _curobo_ik())
     return _check_arc(scene, rb, wps, q0)
 
 
