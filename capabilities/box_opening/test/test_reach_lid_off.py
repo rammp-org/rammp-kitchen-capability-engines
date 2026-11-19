@@ -5612,7 +5612,7 @@ def test_the_time_is_asked_before_each_plan_too(ctx, monkeypatch, tmp_path, gone
     assert spots[1]["timed_out"] is True and spots[1]["searched"] == ["the tiers"]
 
 
-@pytest.mark.parametrize("flight, goes_on", [(3.0, True), (12.0, True), (20.2, False)])
+@pytest.mark.parametrize("flight, goes_on", [(3.0, True), (20.2, False)])
 def test_the_time_before_a_carry_is_sent_is_asked_for_that_carrys_own_flight(
     ctx, monkeypatch, tmp_path, capsys, flight, goes_on
 ):
@@ -5620,10 +5620,8 @@ def test_the_time_before_a_carry_is_sent_is_asked_for_that_carrys_own_flight(
     as the runner will fly it (flight_s) and the way back up after it (SPOT_UP_S), not for the 8 s a spot
     takes on record: with 45 s left a carry of 3 s goes (5.5 and the box's 23), one of 20 s does not (it
     and the way back to the box need 45.7), and the lid goes back on the box from over the spot it was
-    left at. The same flight decides what the line before the set-down promises (_touch_says): after a
-    carry of 3 s another spot would still be begun (42 s left, 35 needed); after one of 12 s it would not
-    (33), and the line says the box follows — it said "on to another spot" of every set-down (the review
-    of 2026-11-19)."""
+    left at. The line before the set-down that does fly says what is known as it is said: the run is
+    timed, 45 s are left now, and another spot follows only where the time then still holds one."""
     monkeypatch.setattr(rlo.RunClock, "left_s", lambda self: 45.0)
     monkeypatch.setattr(rlo, "flight_s", lambda runner, legs: flight if len(legs) == 3 else 1.0)
     code, rec, _chain, rows = _full_flow(
@@ -5636,9 +5634,8 @@ def test_the_time_before_a_carry_is_sent_is_asked_for_that_carrys_own_flight(
         assert code == 0 and spots[1]["xyz"] is not None and len(rec.setdowns) == 2
         (line,) = (text for text in out.splitlines() if text.startswith("[press_demo] SPOT 2, ONE MOTION:"))
         assert line.endswith(
-            "felt nowhere, up again with it and on to another spot"
-            if flight == 3.0
-            else "felt nowhere, back onto the box (the run's time will hold no further spot: 45 s are left now)"
+            "felt nowhere, up again with it, and on to another spot only where the run's time then still holds "
+            "one and the way back to the box after it (45 s are left now, 35 are asked then), else back onto the box"
         )
         return
     assert code == 1 and spots[1]["xyz"] is None and len(rec.setdowns) == 1
@@ -5757,14 +5754,17 @@ def test_a_budget_that_is_there_and_cannot_be_read_fails_closed(handed, capsys):
     assert "cannot be read" in capsys.readouterr().out
     search = rlo.SpotSearch(SimpleNamespace(), None, None, None, None, 0.0, 0.0)
     search.clock = clock
-    assert "cannot be read" in search.no_more(0.0) and search.out_of_time() and search.after_this() is not None
+    assert "cannot be read" in search.no_more(0.0) and search.out_of_time()
+    assert search.after_this() == ("box", "the run's time cannot be read")
+    assert clock.known_s() is None  # the 0.0 is the rule's, not a time: never said or recorded as one
     # ... while a budget that reads, however little it leaves, is a budget
     assert rlo.RunClock(env={rlo.RUN_BUDGET_ENV: '{"s": -5, "from": 0}'}, now=lambda: 10.0).left_s() == -15.0
     assert rlo.RunClock(env={rlo.RUN_BUDGET_ENV: '{"s": 90, "from": 1}'}, now=lambda: 10.0).from_go is False
 
 
 def test_a_run_whose_budget_cannot_be_read_takes_the_lid_to_no_second_spot(ctx, monkeypatch, tmp_path, capsys):
-    """The same, in the run: its first set-down feels no table, and the lid goes back on the box."""
+    """The same, in the run: its first set-down feels no table, and the lid goes back on the box. Nothing
+    the run says or records gives a time it does not know: not "0 s left"."""
     monkeypatch.setenv(rlo.RUN_BUDGET_ENV, "ninety")
     code, rec, _chain, rows = _full_flow(
         ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["never", "met"]
@@ -5779,15 +5779,69 @@ def test_a_run_whose_budget_cannot_be_read_takes_the_lid_to_no_second_spot(ctx, 
         "home",
     ]
     (left,) = (r for r in rows if r["leg"] == "lid_spot_left")
-    assert left["next"] == "the box" and "cannot be read" in left["why_the_box"] and left["time_left_s"] == 0.0
+    assert left["next"] == "the box" and "cannot be read" in left["why_the_box"] and left["time_left_s"] is None
     out = capsys.readouterr().out
     # said before the set-down flew, too: no "on to another spot" promised of a run that will try none
     assert "felt nowhere, back onto the box (the run's time cannot be read)" in out
-    assert "on to another spot" not in out
+    assert "on to another spot" not in out and "0 s are left" not in out and "0 s of the run's time" not in out
     assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
     view = _flight_view(out, code)
     i = _view_line(view, r" *\d+ SET DOWN  FAIL  spot 1: no table felt, lid kept")
     assert view[i + 1] == "             next  carrying the lid back to the box (the run's time cannot be read)"
+
+
+def test_a_first_choice_ended_by_a_time_that_cannot_be_read_says_that_and_no_seconds(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """No spot of the tiers has a carry that plans, and the run's time cannot be read: the wider search
+    is not begun (nothing says the box's own time is in hand), the lid goes back on the box, and the
+    put-back says why as it is known — the time cannot be read. It said "0 s are left", the rule's
+    fail-closed answer taken for a time (the second review of 2026-11-19)."""
+    monkeypatch.setenv(rlo.RUN_BUDGET_ENV, "ninety")
+    code, rec, _chain, rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, refuse_carry=True
+    )
+    assert code == 1 and "lid:carry" not in rec.events
+    (spot,) = (r for r in rows if r["leg"] == "lid_spot")
+    assert spot["searched"] == ["the tiers"]
+    out = capsys.readouterr().out
+    assert "and no more of the table is looked at: the run's time cannot be read" in out
+    assert "s are left" not in out
+    assert out.rstrip().endswith("the lid is back on the box, and the arm is home")
+
+
+def test_the_line_before_a_set_down_says_only_what_is_known_as_it_is_said(ctx, monkeypatch, tmp_path, capsys):
+    """What follows a set-down that feels no table depends on the run's clock THEN, which is not known as
+    the set-down is sent: the line predicted it from the planned flight, and a set-down that something
+    stops early ends sooner than planned — with 36 s left it said "back onto the box" and the run, 36 s
+    still in hand as the spot was left, went on to another (the second review of 2026-11-19). The line
+    says the box only where that is certain (the last spot, a time that cannot be read); of a timed run,
+    another spot only where the time then still holds one; of a run nothing times, another spot."""
+    search = rlo.SpotSearch(SimpleNamespace(), None, None, None, None, 0.0, 0.0)
+    search.clock = SimpleNamespace(unreadable=None, left_s=lambda: None)
+    assert search.after_this() is None
+    search.clock = SimpleNamespace(unreadable=None, left_s=lambda: 12.0)
+    assert search.after_this() == ("time", 12.0)  # however little: what the clock says then is then's
+    search.spots = rlo.SETDOWN_SPOTS
+    assert search.after_this() == ("box", "the last of the 6 spots a run tries")
+    carry = SimpleNamespace(over_m=0.008)
+    assert rlo._touch_says(carry).endswith("felt nowhere, up again with it and on to another spot")
+    assert rlo._touch_says(carry, ("box", "why")).endswith("felt nowhere, back onto the box (why)")
+    timed = rlo._touch_says(carry, ("time", 36.4))
+    assert timed.endswith(
+        "felt nowhere, up again with it, and on to another spot only where the run's time then still holds one "
+        "and the way back to the box after it (36 s are left now, 35 are asked then), else back onto the box"
+    )
+    # in the run: 36 s left all along, something holds the lid up at the first spot, and the lid goes on
+    monkeypatch.setattr(rlo.RunClock, "left_s", lambda self: 36.0)
+    code, rec, _chain, _rows = _full_flow(
+        ctx, monkeypatch, tmp_path, [(BUTTON, 0.4), (UP, 9.0)], extent=ROOMY, scene=_table(), setdown=["held", "met"]
+    )
+    assert code == 0 and [how for _d, how in rec.setdowns] == ["held", "met"]
+    out = capsys.readouterr().out
+    said = [text for text in out.splitlines() if "ONE MOTION" in text and "felt nowhere" in text]
+    assert len(said) == 2 and all(text.endswith(timed.split("felt nowhere, ")[1]) for text in said)
+    assert "back onto the box (the run's time" not in out
 
 
 def test_the_runs_own_line_up_writes_the_go_row_its_clock_reads():
