@@ -17,6 +17,7 @@ from fridge.kinematics import Chain
 from fridge.world import FridgeModel, PlannerWorld, chair_stand_in, hand_reach
 from fridge_fake import (  # noqa: F401 -- fridge: the fixture
     HANDLE,
+    PLACEMENT_SEARCH_S,
     URDF,
     FakeCurobo,
     Plan,
@@ -870,6 +871,8 @@ def test_a_refused_open_searches_the_wheelchair_moves_that_make_it_plan(fridge, 
         return real_ik(self, goal, q_start, start_pose, from_arm)
 
     monkeypatch.setattr(planning.Planner, "leg", leg)
+    # the fixture turns the search off; this test is about it: the node's own time limit
+    monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", PLACEMENT_SEARCH_S)
     budget = planner.budget_s
     with pytest.raises(dc.Refused) as e:
         open_door.run(arm, planner, False)

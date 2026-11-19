@@ -66,6 +66,11 @@ RUN . /ws/install/setup.sh && fetch-commit rammp-org/rammp-deployments ${DEPLOYM
     done \
     && rm -rf /tmp/dep
 
+# Single-threaded BLAS. The fridge's local IK (fridge.kinematics.Chain.ik) inverts a 6x6
+# matrix per iteration, hundreds of thousands of times in the fake-planner tests; OpenBLAS's
+# thread pool makes each np.linalg.inv about 16x slower on 14 cores, and about 67x slower under
+# a 4-CPU limit, than one thread (#52). Nothing in these tests multiplies large matrices.
+ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 # Sources come from the mounted repo, so there is nothing to rebuild when they change.
 ENV PYTHONPATH=/repo/capability_engine:/repo/shared/door_common:/repo/shared/capability_ui:/repo/capabilities/microwave:/repo/capabilities/fridge
 RUN printf '%s\n' '#!/bin/bash' \
