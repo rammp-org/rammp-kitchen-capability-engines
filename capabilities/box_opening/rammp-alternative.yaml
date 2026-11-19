@@ -57,8 +57,10 @@ params:
   body_layers: /config/robot/curobo/planner.yaml
   # where the scene camera finds no container, look for it with the wrist camera from one or two
   # poses over the arm's side (a chair parked side-on to a counter the scene camera cannot see);
-  # false: such a run stops with not_found before anything moves. Never for the orchestrator's
-  # selection, which is the scene camera's (docs/interface.md)
+  # false: such a run has found none: its chair is guided where nothing that could be the container
+  # is in any camera's view, and it ends not_found where that is nothing the chair's move cures
+  # (docs/interface.md, "A container no camera sees"). Never for the orchestrator's selection, which
+  # is the scene camera's
   wrist_survey: false
   # the wrist camera finds the container: the wrist turns where the arm rests so its camera sees
   # the table in front of the arm (up to four views of the wrist's three joints, first where the
@@ -71,9 +73,11 @@ params:
   # in none of its frames (the UI's object list typed by hand, orchestrator's interactive_perception_node).
   # true: the wrist looks from its own views, tied to nothing, and what it finds is taken only where
   # it is the ONE container the wrist sees (two or more: not_found). The arm then opens whichever
-  # single container stands in front of it, under the selected id. false (the default): such a run
-  # ends not_found without turning the wrist. A selection the scene camera does hold is tied to it
-  # either way (docs/interface.md)
+  # single container stands in front of it, under the selected id. false (the default): the wrist
+  # turns only to tell whether anything that could be the container stands in front of the arm, and
+  # takes nothing: where something does the run ends not_found (the person is told to choose it
+  # again), and where nothing does the chair is guided. A selection the scene camera does hold is
+  # tied to it either way (docs/interface.md)
   wrist_alone: false
   # a run's full lines on the node's console too, between the flight view's (off: kept in
   # runs/console-<stamp>.log of the state folder, and the console is the flight view)

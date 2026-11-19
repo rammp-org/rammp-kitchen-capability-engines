@@ -178,12 +178,15 @@ def test_a_container_no_camera_sees_is_told_to_the_person_with_the_chair_to_move
     source = Unseen("wrist camera: no counter in 1 frame (no level plane wider than a container)")
     outcome, ctx, said, lining = lined_up(source, presses=[(3.0, OPEN_PRESS)], budget_s=8.0)
     assert outcome == TIMED_OUT and not lining.guide.saw_box
-    assert ctx.messages() == [guide.UNSEEN, guide.AGAIN_UNSEEN]
-    assert ctx.messages()[0] == "The arm cannot see the container. Move the chair in front of it"
-    unseen = [p for _t, p in ctx.panels if p["message"] == guide.UNSEEN]
-    assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in unseen)
-    assert all(p["progress"] == {"phase": "looking", "pct": 0.0, "pausable": False} for p in unseen)
-    assert [s.message for s in said] == [guide.UNSEEN, guide.AGAIN_UNSEEN]  # one line each, for the console too
+    # (it is still looking until its watch has had none for as long as a lost container is given)
+    assert ctx.messages() == [guide.SEARCHING, guide.UNSEEN, guide.AGAIN_UNSEEN]
+    assert ctx.messages()[1] == "The arm cannot see the container. Move the chair in front of it"
+    unseen = [(t, p) for t, p in ctx.panels if p["message"] == guide.UNSEEN]
+    assert unseen[0][0] == pytest.approx(guide.LOST_S, abs=0.06)
+    assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for _t, p in unseen)
+    assert all(p["progress"] == {"phase": "looking", "pct": 0.0, "pausable": False} for _t, p in unseen)
+    # one line each, for the console too
+    assert [s.message for s in said] == [guide.SEARCHING, guide.UNSEEN, guide.AGAIN_UNSEEN]
     # ... Cancel ends it as it ends any line-up, and so does the orchestrator's cancel
     outcome, _ctx, _said, lining = lined_up(source, presses=[(2.0, CANCEL_PRESS)])
     assert outcome == CANCELLED and lining.cancel_pressed
@@ -195,7 +198,7 @@ def test_the_ordinary_guidance_takes_over_the_moment_a_camera_sees_it_and_gives_
     source = Unseen("scene segmenter: saw no food container in 12 frames", seen_at=2.0, lost_at=4.0)
     outcome, ctx, _said, lining = lined_up(source, budget_s=8.0)
     assert outcome == TIMED_OUT and lining.guide.saw_box
-    assert ctx.messages() == [guide.UNSEEN, "Move closer, about 30 cm", guide.AGAIN]
+    assert ctx.messages() == [guide.SEARCHING, guide.UNSEEN, "Move closer, about 30 cm", guide.AGAIN]
     first = {m: t for t, m in reversed([(t, p["message"]) for t, p in ctx.panels])}
     assert first["Move closer, about 30 cm"] == pytest.approx(2.0, abs=0.06)  # at once, at the first sighting
     # lost at 4 s: unseen again once it has not been seen for LOST_S (one frame without it is not that)
@@ -211,9 +214,9 @@ def test_with_no_ui_the_unseen_container_is_one_line_and_an_n_is_the_cancel():
         source, typed=[(1.0, "y")], budget_s=6.0, say_min_s=1.0, again="Out of time", again_unseen="Never seen"
     )
     assert outcome == TIMED_OUT and unasked == pytest.approx([1.0], abs=0.06) and not lining.said_yes
-    assert [m for _t, m in said] == [guide.UNSEEN, "Never seen"]
+    assert [m for _t, m in said] == [guide.SEARCHING, guide.UNSEEN, "Never seen"]
     outcome, said, lining, _unasked = answered(source, typed=[(2.0, "n")], say_min_s=1.0)
-    assert outcome == CANCELLED and lining.said_no and [m for _t, m in said] == [guide.UNSEEN]
+    assert outcome == CANCELLED and lining.said_no and [m for _t, m in said] == [guide.SEARCHING, guide.UNSEEN]
 
 
 def test_a_place_the_boundary_cannot_judge_yet_is_being_checked_not_refused():
@@ -566,25 +569,260 @@ def test_a_line_up_that_begins_because_the_run_saw_no_container_says_so_before_i
     FakeChild.made = []
     why = "no camera sees the container (scene camera: scene segmenter: saw no food container in 14 frames)"
     source = BoxSource(["box_watch"], lambda urdf, root: ["reach_probe", urdf, root], {}, spawn=FakeChild, unseen=why)
-    assert source.why_none == why and source.look(0.0) == (None, None)
+    assert source.why_none == why and source.none_kind == guide.K_UNSEEN and source.looked
+    assert source.look(0.0) == (None, None)
     source.watch.says(0.1, {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}})
-    assert source.look(0.2) == (None, None) and source.probe.sent == [] and source.why_none == why
+    assert source.look(0.2) == (None, None) and source.why_none == why
     clock = Clock()
     ctx = Ctx(clock)
     lining = LineUp(ctx, lambda: True, source, 2.0, clock=clock, sleep=clock.sleep)
     assert lining.run() == TIMED_OUT
-    assert ctx.panels[0] == (0.0, guide.Say(guide.LOOKING, guide.UNSEEN, ((guide.CANCEL, "Cancel"),)).panel())
+    assert ctx.panels[0][0] == 0.0 and ctx.panels[0][1]["message"] == guide.UNSEEN  # its first panel
+    assert [b["button_id"] for b in ctx.panels[0][1]["buttons"]] == ["cancel"]
     assert ctx.messages() == [guide.UNSEEN, guide.AGAIN_UNSEEN]
     # the watch's own word takes its place, and a sighting takes that back: seen since, it is no longer why
     source.watch.says(3.0, {"none": "wrist camera: no counter in 1 frame"})
     source.look(3.1)
-    assert source.why_none == "wrist camera: no counter in 1 frame"
+    assert source.why_none == "wrist camera: no counter in 1 frame" and source.none_kind == guide.K_UNSEEN
     source.watch.says(3.5, _fix((1.05, 0.0, 0.315), by="wrist"))
     fix, _reach = source.look(3.6)
-    assert fix.xy == (1.05, 0.0) and source.why_none == ""
+    assert fix.xy == (1.05, 0.0) and source.why_none == "" and source.none_kind == "" and not source.looked
     assert source.probe.sent == [{"box": [1.05, 0.0, 0.315], "table_z": 0.22, "prove": False}]  # its first box
     # a source that begins for any other reason says nothing until its watch has
-    assert _source()[0].why_none == ""
+    plain = _source()[0]
+    assert plain.why_none == "" and plain.none_kind == "" and not plain.looked
+
+
+def test_reach_probe_is_started_at_the_first_sighting_where_the_line_up_began_with_no_container_seen():
+    """reach_probe does nothing before a sighting: the lid's height names its grid. A line-up that begins
+    because the run saw no container may never have one, and as first written its reach_probe was started at
+    the watch's first word all the same: one that could not start, or died, ended the action
+    line_up_unavailable, NOT recoverable, of a run that at 21aa7cc ended a recoverable not_found (review of
+    2026-11-19). For such a line-up it is started at the first sighting. Every other line-up starts it at
+    the watch's first word, as before: its start-up runs beside the wrist's turn."""
+    robot = {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}}
+
+    def spawn(argv, env, log=None, clock=None):
+        if argv[0] == "reach_probe":
+            raise OSError("reach_probe is not there to start")
+        return FakeChild(argv, env, log, clock)
+
+    probe = lambda urdf, root: ["reach_probe", urdf, root]  # noqa: E731
+    unseen = BoxSource(["box_watch"], probe, {}, spawn=spawn, unseen="no camera sees the container (x)")
+    unseen.watch.says(0.0, robot)
+    for t in (0.1, 5.0, 60.0):  # the whole wait, with no container in view: nothing started, nothing gone
+        unseen.watch.says(t, {"none": "wrist camera: no counter in 1 frame"})
+        assert unseen.look(t + 0.05) == (None, None) and unseen.probe is None and not unseen.gone()
+    unseen.watch.says(61.0, _fix((1.05, 0.0, 0.315), by="wrist"))
+    with pytest.raises(OSError):  # the first sighting: only now is what judges its place needed, and missing
+        unseen.look(61.1)
+    plain = BoxSource(["box_watch"], probe, {}, spawn=spawn)
+    plain.watch.says(0.0, robot)
+    with pytest.raises(OSError):  # as before: at the watch's first word
+        plain.look(0.1)
+    # ... and one that starts is told the first sighting, as any probe is told every sighting
+    FakeChild.made = []
+    started = BoxSource(["box_watch"], probe, {}, spawn=FakeChild, unseen="no camera sees the container (x)")
+    started.watch.says(0.0, robot)
+    started.look(0.1)
+    assert started.probe is None and len(FakeChild.made) == 1
+    started.watch.says(2.0, _fix((1.05, 0.0, 0.315), by="wrist"))
+    started.look(2.1)
+    assert started.probe.argv == ["reach_probe", "/state/arm.urdf", "arm_mount"]
+    assert started.probe.sent == [{"box": [1.05, 0.0, 0.315], "table_z": 0.22, "prove": False}]
+    # ... the same of an unseen container's line-up after a yes of its goal (`looked` False: below)
+    after = BoxSource(["box_watch"], probe, {}, spawn=spawn, unseen="no camera sees the container (x)", looked=False)
+    after.watch.says(0.0, robot)
+    assert after.look(0.1) == (None, None) and after.probe is None and not after.gone()
+
+
+def test_after_a_yes_the_runs_look_that_found_no_container_is_not_said_before_the_watch_has_looked():
+    """The first guidance of a goal for a container no camera saw says so from its first panel: the run has
+    looked (`unseen`). After a yes of that goal it is otherwise (`looked` False, the engine's): the watch
+    HAD the container a moment ago where the person now stands, and "The arm cannot see the container. Move
+    the chair in front of it" from the first panel would tell a person who is in place to move. There the
+    watch looks first, as at any line-up's start, and says so only once it has had none for guide.LOST_S."""
+    why = "no camera sees the container (scene camera: x)"
+    first = BoxSource(["box_watch"], lambda urdf, root: ["reach_probe"], {}, spawn=FakeChild, unseen=why)
+    assert (first.looked, first.why_none, first.none_kind) == (True, why, guide.K_UNSEEN)
+    after = BoxSource(["box_watch"], lambda urdf, root: ["reach_probe"], {}, spawn=FakeChild, unseen=why, looked=False)
+    assert (after.looked, after.why_none, after.none_kind) == (False, "", "")
+    for source, begins in ((first, guide.UNSEEN), (after, guide.SEARCHING)):
+        clock = Clock()
+        ctx = Ctx(clock)
+        said = iter([{"none": "wrist camera: no counter in 1 frame"}] * 2 + [WRIST_FIX] * 200)
+
+        def look(now, source=source, real=source.look, said=said):
+            source.watch.says(now, next(said))
+            return real(now)
+
+        source.look = look
+        LineUp(ctx, lambda: True, source, 3.0, clock=clock, sleep=clock.sleep).run()
+        assert ctx.messages()[0] == begins and guide.UNSEEN not in ctx.messages()[1:]
+
+
+ROBOT = {"robot": {"urdf": "/state/arm.urdf", "root": "arm_mount"}}
+WRIST_FIX = {"fix": {"xyz": [0.65, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "by": "wrist"}}
+
+
+def watched(lines, budget_s=20.0, unseen="", step_s=0.2, then=None, far_m=None):
+    """A line-up on the real BoxSource, Guide and LineUp whose watch says `lines`, one every `step_s`, and
+    then goes on saying `then` at that pace (None: the last of `lines`; False: nothing more): (outcome, the
+    panel's messages in order, the source, [(seconds in, message)] as each was first shown, the LineUp)."""
+    FakeChild.made = []
+    source = BoxSource(
+        ["box_watch"], lambda urdf, root: ["reach_probe", urdf, root], {}, spawn=FakeChild, unseen=unseen, far_m=far_m
+    )
+    clock = Clock()
+    ctx = Ctx(clock)
+    pending = [(clock.t + step_s * i, ln) for i, ln in enumerate(lines)]
+    again = [pending[-1][0], lines[-1] if then is None else then]
+    real_look = source.look
+
+    def look(now):
+        while pending and pending[0][0] <= now:
+            t, msg = pending.pop(0)
+            source.watch.says(t, msg)
+        if not pending and again[1] and now - again[0] >= step_s:
+            again[0] = now
+            source.watch.says(now, again[1])
+        return real_look(now)
+
+    source.look = look
+    lining = LineUp(ctx, lambda: True, source, budget_s, clock=clock, sleep=clock.sleep)
+    outcome = lining.run()
+    first = {}
+    for t, panel in ctx.panels:
+        first.setdefault(panel["message"], t)
+    return outcome, ctx.messages(), source, sorted((t, m) for m, t in first.items()), lining
+
+
+@pytest.mark.parametrize(
+    "none",
+    [
+        "wrist camera: no new wrist frame",
+        "wrist camera: no camera pose for the frame (TF)",
+        "scene camera streams missing: color, depth",
+        "the scene segmenter cannot be read: no such topic",
+        "scene segmenter: no frame newer than the look in 1.0 s",
+    ],
+)
+def test_a_camera_that_delivers_nothing_is_said_as_that_and_ends_the_line_up_never_as_move_the_chair(none):
+    """The review of 2026-11-19: every "none" a watch says, a fault among them, read "The arm cannot see the
+    container. Move the chair in front of it" for the whole line-up, of every line-up (before a run,
+    carried, in the middle of one): five minutes of a person driving a wheelchair at a camera that is not
+    working. Now it is said as what it is, with no word of moving, and standing guide.NO_CURE_S it ends the
+    line-up (UNABLE, as an arm that is not at rest ends it: its last LINGER_S with no button)."""
+    outcome, messages, source, first, _lining = watched([ROBOT, {"none": none}], budget_s=60.0)
+    assert outcome == line_up.UNABLE and source.uncured == guide.K_FAULT
+    assert source.unable == guide.NO_CURE[guide.K_FAULT] == "The arm's camera is not working"
+    assert messages == [guide.SEARCHING, "The arm's camera is not working"]  # never the cannot-see sentence
+    (t_said,) = (t for t, m in first if m == "The arm's camera is not working")
+    assert t_said == pytest.approx(0.2 + guide.LOST_S, abs=0.11)  # once it has stood, not on its first word
+    ended = _lining._clock() - 100.0
+    assert ended == pytest.approx(0.2 + guide.NO_CURE_S, abs=0.3) and ended < 15.0  # ten seconds, not the wait
+
+
+def test_a_line_up_whose_time_runs_out_first_ends_on_the_cameras_sentence_not_on_press_open_again():
+    """A line-up with fewer seconds than guide.NO_CURE_S (the orchestrator's 120 s): its last panel is what
+    stood on it, with no button, and its guide says which state that was (`uncured`) for the engine's end.
+    One whose watch simply has no container ends in the words it always had."""
+    outcome, messages, source, _first, lining = watched(
+        [ROBOT, {"none": "wrist camera: no new wrist frame"}], budget_s=4.0
+    )
+    assert outcome == TIMED_OUT and lining.guide.uncured == guide.K_FAULT and source.uncured == ""
+    assert messages == [guide.SEARCHING, "The arm's camera is not working"]
+    outcome, messages, _source, _first, lining = watched(
+        [ROBOT, {"none": "wrist camera: no counter in 1 frame"}], budget_s=4.0
+    )
+    assert outcome == TIMED_OUT and lining.guide.uncured == ""
+    assert messages == [guide.SEARCHING, guide.UNSEEN, guide.AGAIN_UNSEEN]
+
+
+def test_a_container_nothing_ties_to_the_selection_is_said_as_that_and_ends_the_line_up():
+    """The review's worst case: a selected id that is in none of the scene camera's detections, the watch's
+    wrist with a lid in every frame and taking none of them, and the panel on "The arm cannot see the
+    container. Move the chair in front of it" until the time was out. No place of the chair cures it. The
+    run's watch says what its "none" is of (kind), and the line-up says that and ends."""
+    untied = {
+        "none": "the selected container fc_9 is in none of the scene camera's detections: nothing says that what "
+        "the wrist sees is the one selected, and the run would not take it",
+        "kind": guide.K_NOT_CHOSEN,
+    }
+    outcome, messages, source, _first, lining = watched([ROBOT, untied], budget_s=300.0)
+    assert outcome == line_up.UNABLE and source.uncured == guide.K_NOT_CHOSEN
+    assert messages == [guide.SEARCHING, "The arm cannot tell which container you chose"]
+    assert lining._clock() - 100.0 == pytest.approx(0.2 + guide.NO_CURE_S, abs=0.3)
+    assert not lining.guide.saw_box and source.probe is not None and source.probe.sent == []
+    # the same from the words alone, where what watches says no kind (tasks/box_watch: the scene camera's own)
+    alone = {"none": "scene segmenter: the selected container (fc_9) was in none of its 70 frames"}
+    outcome, messages, source, _first, _lining = watched([ROBOT, alone], budget_s=300.0, step_s=1.0)
+    assert outcome == line_up.UNABLE and source.uncured == guide.K_NOT_CHOSEN
+    assert messages == [guide.SEARCHING, "The arm cannot tell which container you chose"]
+    # ... and a run that asked to be guided for a container no camera saw, whose watch then has one it
+    # cannot tie (the chair brought it into view; the track that was selected is gone): said, and ended
+    seen_none = {"none": "wrist camera: no counter in 1 frame (no level plane wider than a container)"}
+    outcome, messages, source, first, _lining = watched(
+        [ROBOT, *[seen_none] * 20, untied], budget_s=300.0, unseen="no camera sees the container (x)"
+    )
+    assert outcome == line_up.UNABLE and source.uncured == guide.K_NOT_CHOSEN
+    assert messages == [guide.UNSEEN, "The arm cannot tell which container you chose"]
+    assert first[0] == (0.0, guide.UNSEEN) and first[1][0] == pytest.approx(4.2 + guide.LOST_S, abs=0.11)
+
+
+def test_two_things_that_could_be_the_container_side_by_side_end_the_line_up_where_they_stand():
+    """Two lid-sized tops within the arm's reach are not parted by where the chair stands, and the second
+    may be no container at all: it is said as two THINGS, with no "move in front of only one", and where
+    it stands it ends the line-up. One frame of it (a second lid passing through the view while the chair
+    turns) ends nothing and is not even said."""
+    two = {"none": "wrist camera: two places pass as this container, [0.61, -0.10] and [0.66, 0.14]: refusing to guess"}
+    outcome, messages, source, _first, _lining = watched([ROBOT, two], budget_s=60.0)
+    assert outcome == line_up.UNABLE and source.uncured == guide.K_SEVERAL
+    assert messages == [guide.SEARCHING, "The arm sees two things that could be the container"]
+    none = {"none": "wrist camera: nothing on the counter is the container (1 thing at lid height)"}
+    lines = [ROBOT] + [two if i % 8 == 0 else none for i in range(120)]  # one frame in eight, for 24 s
+    outcome, messages, source, _first, _lining = watched(lines, budget_s=20.0, then=none)
+    assert outcome == TIMED_OUT and source.uncured == "" and source.unable == ""
+    assert messages == [guide.SEARCHING, guide.UNSEEN, guide.AGAIN_UNSEEN]
+
+
+def test_what_no_chair_move_cures_ends_a_line_up_only_while_it_stands_and_is_still_said():
+    """Standing means said without a break, and still being said. A sighting starts it again (the scene
+    camera has the container while the wrist camera gives no frame: the line-up goes on by what is seen); so
+    does a word of another kind; and a watch that has fallen silent has not said it for ten seconds."""
+    fault = {"none": "wrist camera: no new wrist frame"}
+    scene = {"fix": {"xyz": [1.05, 0.0, 0.315], "table_z": 0.216, "age_s": 0.05, "rough": False, "score": 0.9}}
+    lines = [ROBOT] + [scene if i % 5 == 0 else fault for i in range(150)]  # a scene sighting every second
+    outcome, messages, source, _first, lining = watched(lines, budget_s=20.0, then=fault, far_m=0.8)
+    assert outcome == TIMED_OUT and source.uncured == "" and lining.guide.saw_box
+    assert messages[:2] == [guide.SEARCHING, "Move closer, about 25 cm"]
+    assert "The arm's camera is not working" not in messages and guide.UNSEEN not in messages
+    # a watch that says it once and then nothing more: it is not known to stand
+    outcome, messages, source, _first, _lining = watched([ROBOT, fault], budget_s=20.0, then=False)
+    assert outcome == TIMED_OUT and source.uncured == ""
+    # ... and what is said of it while it is the watch's word is not that the arm cannot see the container
+    assert guide.UNSEEN not in messages and messages[0] == guide.SEARCHING
+
+
+def test_an_arm_that_is_not_at_rest_is_never_first_said_to_be_a_container_the_arm_cannot_see():
+    """The watch's word for an arm off rest is a "none" too. The tick that heard it handed it to the guide
+    before the loop read `unable`: one panel, one console line and one progress of "The arm cannot see the
+    container. Move the chair in front of it" before "The arm is not at its rest pose" (review of
+    2026-11-19). It is the arm's word, of no kind, and is said as what it is on the tick that hears it."""
+    outcome, messages, source, _first, _lining = watched([ROBOT, {"none": guide.ARM_NOT_AT_REST}], budget_s=20.0)
+    assert outcome == line_up.UNABLE and source.unable == guide.ARM_NOT_AT_REST and source.uncured == ""
+    assert messages == [guide.SEARCHING, guide.unable(guide.ARM_NOT_AT_REST).message]
+    assert source.none_kind == ""
+
+
+def test_one_frame_without_the_container_is_not_shown_to_a_person_who_is_in_place():
+    """A line-up of any kind whose watch's first frame shows no container (one frame alone, a late TF) and
+    the next ones show it: the panel and the console went Looking -> cannot see, move the chair -> Hold
+    still (review of 2026-11-19). The person was in place, and was told to move."""
+    lines = [ROBOT, {"none": "wrist camera: no new wrist frame"}, {"none": "wrist camera: no counter in 1 frame"}]
+    outcome, messages, _source, _first, lining = watched([*lines, WRIST_FIX], budget_s=3.0)
+    assert lining.guide.saw_box and messages[:2] == [guide.SEARCHING, "Hold still, checking"]
+    assert guide.UNSEEN not in messages and "The arm's camera is not working" not in messages
 
 
 def test_the_joints_the_wrist_looks_from_go_to_the_probe_with_every_box_from_then_on():

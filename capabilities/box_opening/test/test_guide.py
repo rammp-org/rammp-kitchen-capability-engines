@@ -207,25 +207,54 @@ def test_out_of_time_it_says_its_own_words_and_keeps_the_newest_instruction_it_g
 
 LOOKED = "wrist camera: no counter in 1 frame (no level plane wider than a container)"
 TWO = "wrist camera: two places pass as this container, [0.61, -0.10] and [0.66, 0.14]: refusing to guess"
+UNSEEN, SEVERAL, NOT_CHOSEN, FAULT = g.K_UNSEEN, g.K_SEVERAL, g.K_NOT_CHOSEN, g.K_FAULT
 
 
 def test_a_container_no_camera_sees_is_said_and_the_chair_is_what_is_to_move():
     """Owner 2026-11-19, asked whether a box no camera sees at all should become guidance ("move so the
     container is in front of the arm"): yes. Until then the panel stood on "Looking for the container" for the
-    whole line-up, which tells the person nothing to do. Once what watches has looked and says it has none,
-    the person is told the arm cannot see the container and to move the CHAIR. No direction and no distance:
-    none is known. Nothing is asked, and Open is no yes."""
+    whole line-up, which tells the person nothing to do. Once what watches has looked and had none for as
+    long as a lost container is given, the person is told the arm cannot see the container and to move the
+    CHAIR. No direction and no distance: none is known. Nothing is asked, and Open is no yes."""
     guide = g.Guide()
     say = guide.update(0.0, None, None)
     assert (say.state, say.message) == (g.LOOKING, "Looking for the container")  # nothing has looked yet
-    say = guide.update(0.2, None, None, none=LOOKED)
+    assert guide.update(0.2, None, None, none=UNSEEN).message == g.SEARCHING  # its first word: still looking
+    say = guide.update(0.2 + g.LOST_S, None, None, none=UNSEEN)
     assert say.state == g.LOOKING and say.message == g.UNSEEN
     assert say.message == "The arm cannot see the container. Move the chair in front of it"
     assert say.buttons == ((g.CANCEL, "Cancel"),) and say.hint is None and say.pct == 0.0
-    assert guide.press(g.OPEN, 0.3) is False and not guide.saw_box and guide.instruction is None
-    # it stands for as long as nothing is seen, whatever the watch's reason reads from frame to frame
-    for i, why in enumerate((LOOKED, "wrist camera: too little depth in 1 frame", "scene segmenter: saw none")):
-        assert guide.update(0.4 + 0.2 * i, None, None, none=why).message == g.UNSEEN
+    assert guide.press(g.OPEN, 2.0) is False and not guide.saw_box and guide.instruction is None
+    # it stands for as long as nothing that could be the container is seen
+    for i in range(3):
+        assert guide.update(2.0 + 0.2 * i, None, None, none=UNSEEN).message == g.UNSEEN
+
+
+def test_one_frame_without_the_container_does_not_tell_a_person_who_is_in_place_that_the_arm_cannot_see_it():
+    """The review of 2026-11-19: LOST_S held the sentence back only after a first sighting. At the start of
+    any line-up the watch's first frame alone, or a late TF, showed "The arm cannot see the container. Move
+    the chair in front of it" to a person who was in place, and they were told to move. Until what watches
+    has had none for LOST_S, as long as a lost container is given, it is still looking; and a watch whose
+    word comes and goes starts that time again."""
+    guide = g.Guide()
+    assert guide.update(0.0, None, None).message == g.SEARCHING
+    assert guide.update(0.1, None, None, none=UNSEEN).message == g.SEARCHING
+    say = guide.update(0.3, g.Fix(0.3, (0.65, 0.0)), None)  # the next frame shows it: never "cannot see"
+    assert (say.state, say.message) == (g.HOLD, "Hold still, checking")
+    guide = g.Guide()
+    for t, none, told in (
+        (0.0, UNSEEN, g.SEARCHING),
+        (1.0, UNSEEN, g.SEARCHING),
+        (1.2, "", g.SEARCHING),  # (it has no word again: not yet said to have none)
+        (1.4, UNSEEN, g.SEARCHING),
+        (2.8, UNSEEN, g.SEARCHING),
+        (1.4 + g.LOST_S, UNSEEN, g.UNSEEN),
+    ):
+        assert guide.update(t, None, None, none=none).message == told, t
+    # a run whose own look found none HAD looked, for longer than that, before the line-up began: its word
+    # is said from the first panel (the wrist's turn to its view is not seconds of "Looking")
+    guide = g.Guide()
+    assert guide.update(0.0, None, None, none=UNSEEN, looked=True).message == g.UNSEEN
 
 
 def test_the_moment_a_camera_sees_the_container_the_way_and_the_distance_are_said_and_lost_it_is_unseen_again():
@@ -233,7 +262,7 @@ def test_the_moment_a_camera_sees_the_container_the_way_and_the_distance_are_sai
     boundary knows them. A container that goes out of view again is not "looked for": the arm cannot see
     it, and the person is told so again, whether or not what watches has yet said why."""
     guide = g.Guide()
-    assert guide.update(0.0, None, None, none=LOOKED).message == g.UNSEEN
+    assert guide.update(0.0, None, None, none=UNSEEN, looked=True).message == g.UNSEEN
     say = guide.update(0.2, g.Fix(0.2, (1.05, 0.0), "scene"), g.Reach(False, (-0.30, 0.0)), none="")
     assert (say.state, say.message) == (g.MOVE, "Move closer, about 30 cm") and guide.saw_box
     # a sighting the boundary cannot judge yet says no distance it does not have
@@ -243,37 +272,200 @@ def test_the_moment_a_camera_sees_the_container_the_way_and_the_distance_are_sai
     assert guide.update(lost - 0.2, None, None, none="").state == g.MOVE  # (not yet: one frame without it)
     say = guide.update(lost, None, None, none="")
     assert (say.state, say.message) == (g.LOOKING, g.UNSEEN)
-    say = guide.update(lost + 0.2, g.Fix(lost + 0.2, (0.95, 0.0)), g.Reach(False, (-0.20, 0.0)), none=LOOKED)
+    say = guide.update(lost + 0.2, g.Fix(lost + 0.2, (0.95, 0.0)), g.Reach(False, (-0.20, 0.0)), none=UNSEEN)
     assert say.message == "Move closer, about 20 cm"  # seen again: its sighting is newer than that word
 
 
-def test_two_things_that_could_be_the_container_are_not_said_to_be_unseen():
-    """A run's NO BOX has two faces (docs/interface.md: "nothing found, or two places that could be it"). Of
-    a container that stands in front of the arm beside a second lid-sized top, "the arm cannot see the
-    container" is not true. Each word by which a run or its watch says it sees more than one is read."""
-    for why in (
-        TWO,
-        "scene segmenter: two places pass as this container, [0.80, -0.20] and [1.10, 0.30]: select which",
-        "a container at [0.650, 0.000], 12 mm to the side of the scene camera's line of sight to it, and another "
-        "lid-sized top at [0.700, 0.100] in the same direction: not taken for the selected container fc_1",
-        "a container at [0.650, 0.000] and another lid-sized top at [0.700, 0.200]: two containers, and the "
-        "selected one (fc_1) is in none of the scene camera's detections, so nothing says which it is",
-        "wrist camera: the lid-sized tops at [1.02, -0.20] and [1.04, 0.25] stand out of the arm's reach, and "
-        "none is nearest the arm alone: refusing to guess",
-    ):
-        assert g.several(why) and g.unseen(why) == g.SEVERAL, why
-    for why in ("", None, LOOKED, "wrist camera: nothing on the counter is the container (2 things at lid height)"):
-        assert not g.several(why) and g.unseen(why) == g.UNSEEN, why
-    assert g.SEVERAL == "The arm sees two possible containers. Move in front of only one"
+def test_what_no_moving_of_the_chair_cures_is_never_said_as_a_container_the_arm_cannot_see():
+    """Guidance is for what moving the chair can cure (review of 2026-11-19). A camera that delivers nothing,
+    two things that could be the container, and a container nothing ties to the one the person chose all
+    wore "The arm cannot see the container. Move the chair in front of it" (or "Move in front of only one",
+    which no chair can do for two tops side by side). Each is said as what it is, with no word of moving."""
+    assert g.NO_CURE == {
+        SEVERAL: "The arm sees two things that could be the container",
+        NOT_CHOSEN: "The arm cannot tell which container you chose",
+        FAULT: "The arm's camera is not working",
+    }
+    for kind, told in g.NO_CURE.items():
+        assert g.says(kind) == told and "move" not in told.lower() and told != g.UNSEEN
+        guide = g.Guide()
+        assert guide.update(0.0, None, None, none=kind).message == g.SEARCHING  # (not on its first word)
+        assert guide.update(g.LOST_S, None, None, none=kind).message == told
+        assert guide.press(g.OPEN, g.LOST_S + 0.1) is False
+    assert g.says(UNSEEN) == g.says("") == g.UNSEEN
+    # "two" is two THINGS: the second may be any lid-sized top (a bowl, a roll of tape), not a container
+    assert "containers" not in g.NO_CURE[SEVERAL]
+    # ... a container that was seen and is lost to one of these: looked for until that has stood, then said.
+    # Never, in between, that the arm cannot see the container
     guide = g.Guide()
-    assert guide.update(0.0, None, None, none=TWO).message == g.SEVERAL
-    # frame by frame the watch's word may change: one sentence stands long enough to be read before the other
-    assert guide.update(1.0, None, None, none=LOOKED).message == g.SEVERAL
-    assert guide.update(g.UNSEEN_STANDS_S + 0.1, None, None, none=LOOKED).message == g.UNSEEN
-    assert guide.update(g.UNSEEN_STANDS_S + 0.3, None, None, none=TWO).message == g.UNSEEN
-    # ... and a container seen takes either's place at once
-    say = guide.update(g.UNSEEN_STANDS_S + 0.5, g.Fix(g.UNSEEN_STANDS_S + 0.5, (1.0, 0.0)), g.Reach(False, (-0.2, 0.0)))
-    assert say.state == g.MOVE
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), g.Reach(False, (-0.2, 0.0)))
+    assert guide.update(g.LOST_S + 0.1, None, None, none=FAULT).message == g.SEARCHING
+    assert guide.update(2 * g.LOST_S + 0.1, None, None, none=FAULT).message == g.NO_CURE[FAULT]
+    # frame by frame the watch's word may change: one sentence stands long enough to be read before another
+    guide = g.Guide()
+    t0 = g.LOST_S
+    assert guide.update(0.0, None, None, none=SEVERAL).message == g.SEARCHING
+    assert guide.update(t0, None, None, none=SEVERAL).message == g.NO_CURE[SEVERAL]
+    assert guide.update(t0 + 1.0, None, None, none=UNSEEN).message == g.NO_CURE[SEVERAL]
+    assert guide.update(t0 + g.UNSEEN_STANDS_S + 0.1, None, None, none=UNSEEN).message == g.UNSEEN
+    assert guide.update(t0 + g.UNSEEN_STANDS_S + 0.3, None, None, none=SEVERAL).message == g.UNSEEN
+    # ... and a container seen takes any of them away at once
+    at = t0 + g.UNSEEN_STANDS_S + 0.5
+    assert guide.update(at, g.Fix(at, (1.0, 0.0)), g.Reach(False, (-0.2, 0.0))).state == g.MOVE
+
+
+def test_the_time_running_out_on_what_no_chair_move_cures_ends_in_its_own_words():
+    """A line-up may have fewer seconds than such a state must stand to end it (under the orchestrator's
+    120 s). Its time then runs out with that state's sentence on the panel, and the last word is the same
+    sentence: "Container not seen in time. Press open again in front of it" is not true of a camera that is
+    not working. `uncured` tells the engine which state it was, for the end it reports."""
+    for kind, told in g.NO_CURE.items():
+        guide = g.Guide(budget_s=4.0)
+        guide.update(0.0, None, None, none=kind)
+        assert guide.update(2.0, None, None, none=kind).message == told and guide.uncured == ""
+        last = guide.update(4.1, None, None, none=kind)
+        assert (last.state, last.message, last.buttons) == (g.TIMED_OUT, told, ()) and guide.uncured == kind
+    # a container that is simply not in view, and one that was seen and is out of reach: as they were
+    guide = g.Guide(budget_s=4.0)
+    guide.update(0.0, None, None, none=UNSEEN)
+    assert guide.update(4.1, None, None, none=UNSEEN).message == g.AGAIN_UNSEEN and guide.uncured == ""
+    guide = g.Guide(budget_s=4.0)
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), g.Reach(False, (-0.2, 0.0)))
+    assert guide.update(4.1, None, None).message == g.AGAIN and guide.uncured == ""
+    # ... nor one whose word had not yet stood long enough to be said (the panel still said it was looking)
+    guide = g.Guide(budget_s=4.0)
+    guide.update(0.0, None, None)
+    guide.update(3.0, None, None, none=UNSEEN)
+    assert guide.update(3.9, None, None, none=FAULT).message == g.SEARCHING
+    assert guide.update(4.1, None, None, none=FAULT).message == g.AGAIN_UNSEEN and guide.uncured == ""
+
+
+SAID_BY = {
+    # (what each camera's word on having no container is of) -> the words, as the module that says them has them
+    FAULT: {
+        "tasks/survey.py": (
+            "wrist camera: no wrist camera",
+            "wrist camera: no new wrist frame",
+            "no wrist frame at survey:angle-1 (no new wrist frame)",
+            "wrist camera: no camera pose for the frame (TF)",
+        ),
+        "perception/depth_source.py": (
+            "wrist camera: no depth stamp yet",
+            "wrist camera: depth not new",
+            "wrist camera: depth not paired with colour (dt 180 ms)",
+        ),
+        "perception/scene_source.py": (
+            "scene camera streams missing: color, depth",
+            "no TF between the scene camera's depth and colour frames",
+            "no TF from arm_mount to the scene camera (oak_scene_link) — is sheppy's static_tf node up?",
+            "no TF from the scene camera's link to its colour frame",
+            "the scene segmenter cannot be read: no such topic",
+            "no scene segmenter for this container (its config names no scene_detect.segmenter_classes)",
+            "TF has the scene camera's frames upside down — its detectors need them upright",
+            "no scene depth cloud",
+            "scene segmenter: no frame newer than the look in 1.0 s",
+        ),
+        "perception/segmenter_source.py": (
+            "scene segmenter: ABSENT: nothing publishes /perception/object_detections; select scene_segmenter",
+            "scene segmenter: SILENT: no /perception/object_detections in 3.0 s",
+            "scene segmenter: it watches 'wrist_color', not the scene camera ('scene_color')",
+            "scene segmenter: its frames are 640x480, the scene camera's 1280x720",
+            "scene segmenter: its newest frame is 4.2 s older than the scene camera's",
+        ),
+        "tasks/box_watch.py": ("no scene camera calibration, and the robot's TF does not carry its mount",),
+    },
+    SEVERAL: {
+        "perception/wrist_finder.py": (TWO,),
+        "perception/scene_source.py": (
+            "scene segmenter: two places pass as this container, [0.80, -0.20] and [1.10, 0.30]: select which",
+        ),
+        "tasks/press_demo.py": (
+            "a container at [0.650, 0.000], 12 mm to the side of the scene camera's line of sight to it, and "
+            "another lid-sized top at [0.700, 0.100] in the same direction: not taken for the selected container x",
+            "a container at [0.650, 0.000] and another lid-sized top at [0.700, 0.200]: two containers, and the "
+            "selected one (fc_1) is in none of the scene camera's detections, so nothing says which it is",
+        ),
+    },
+    NOT_CHOSEN: {
+        "perception/scene_source.py": ("scene segmenter: the selected container (fc_1) was in none of its 70 frames",),
+        "tasks/press_demo.py": (
+            "the selected container fc_1 is in none of the scene camera's detections: nothing says that what the "
+            "wrist sees is the one selected, and the run would not take it",
+        ),
+    },
+    UNSEEN: {
+        # a camera that DELIVERS and finds nothing that could be the container: not in view, a lid a view
+        # cuts, a mount that is off, depth with holes. From what it says none of these can be told from
+        # the others, and the chair is what the person is told to move for all of them
+        "perception/wrist_finder.py": (
+            LOOKED,
+            "wrist camera: too little depth in 1 frame",
+            "wrist camera: nothing on the counter is the container (2 things at lid height)",
+            "wrist camera: the container may stand at [0.70, 0.30], cut off by the view (x): look again",
+            "wrist camera: the lid-sized tops at [1.02, -0.20] and [1.04, 0.25] stand out of the arm's reach, and "
+            "none is nearest the arm alone: refusing to guess",
+        ),
+        "perception/scene_source.py": (
+            "scene segmenter: saw no food container in 14 frames",
+            "scene segmenter: none of its 12 boxes is this container: the top is not at lid height",
+            "scene segmenter: one of its boxes passed in 9 frames, and a fix needs two that agree",
+        ),
+        "tasks/press_demo.py": (
+            "a container at [0.650, 0.000], 212 mm to the side of the scene camera's line of sight to it: not "
+            "taken for the selected container fc_1",
+        ),
+    },
+}
+
+
+def test_what_a_cameras_word_on_having_no_container_is_of_is_read_from_the_words_other_modules_say():
+    """kind_of reads words that tasks/survey, perception/scene_source and the like say, which are not this
+    module's to keep. Each mark is held to the source it is said to come from: reworded there, this fails
+    and says where, in the place of a camera fault that would quietly read as "move the chair"."""
+    from pathlib import Path
+
+    import box_opening
+
+    assert g.kind_of("") == g.kind_of(None) == ""
+    for kind, modules in SAID_BY.items():
+        for words in modules.values():
+            for why in words:
+                assert g.kind_of(why) == kind, why
+    root = Path(box_opening.__file__).parent
+    sources = {name: (root / name).read_text() for name in set().union(*SAID_BY.values())}
+    said_in = {
+        "no wrist camera": "tasks/survey.py",
+        "no new wrist frame": "tasks/survey.py",
+        "no wrist frame at": "tasks/survey.py",
+        "no camera pose for the frame": "tasks/survey.py",
+        "no depth stamp yet": "perception/depth_source.py",
+        "depth not new": "perception/depth_source.py",
+        "depth not paired with colour": "perception/depth_source.py",
+        "scene camera streams missing": "perception/scene_source.py",
+        "no TF between the scene camera": "perception/scene_source.py",
+        "to the scene camera (": "perception/scene_source.py",
+        "no TF from the scene camera": "perception/scene_source.py",
+        "the scene segmenter cannot be read": "perception/scene_source.py",
+        "no scene segmenter for this container": "perception/scene_source.py",
+        "frames upside down": "perception/scene_source.py",
+        "no scene depth cloud": "perception/scene_source.py",
+        "no frame newer than the look": "perception/scene_source.py",
+        "ABSENT: nothing publishes": "perception/segmenter_source.py",
+        "SILENT: no ": "perception/segmenter_source.py",
+        "not the scene camera (": "perception/segmenter_source.py",
+        "its frames are ": "perception/segmenter_source.py",
+        "older than the scene camera's": "perception/segmenter_source.py",
+        "no scene camera calibration": "tasks/box_watch.py",
+        "two places pass": "perception/wrist_finder.py",
+        "another lid-sized top": "tasks/press_demo.py",
+        "two containers": "tasks/press_demo.py",
+        "was in none of its": "perception/scene_source.py",
+        "in none of the scene camera's detections": "tasks/press_demo.py",
+    }
+    assert set(said_in) == set(g.FAULT_MARKS + g.SEVERAL_MARKS + g.NOT_CHOSEN_MARKS)
+    for mark, name in said_in.items():
+        assert mark in sources[name], "%r is no longer said in %s" % (mark, name)
+    assert "two places pass" in sources["perception/scene_source.py"]  # (the scene locator's too)
 
 
 def test_out_of_time_with_the_container_never_seen_the_last_words_say_that_was_what_was_missing():
@@ -288,8 +480,8 @@ def test_out_of_time_with_the_container_never_seen_the_last_words_say_that_was_w
     # seen once and lost again by the end: it was seen, and what was missing is its place
     seen = g.Guide(budget_s=4.0)
     _drive(seen, [((0.95, 0.0), g.Reach(False, (-0.25, 0.0)))] * 3)
-    assert seen.update(3.0, None, None, none=LOOKED).message == g.UNSEEN
-    assert seen.update(4.5, None, None, none=LOOKED).message == g.AGAIN
+    assert seen.update(3.0, None, None, none=UNSEEN).message == g.UNSEEN
+    assert seen.update(4.5, None, None, none=UNSEEN).message == g.AGAIN
 
 
 def test_what_the_panel_is_given_to_show_is_one_short_message_and_never_tells_the_person_to_move_the_container():
@@ -298,8 +490,9 @@ def test_what_the_panel_is_given_to_show_is_one_short_message_and_never_tells_th
     (2026-11-11): the scene is never changed, only where the robot stands: the chair is what moves."""
     longest = len(g.unable(g.ARM_NOT_AT_REST).message)
     assert longest == 63
-    for words in (g.UNSEEN, g.SEVERAL, g.AGAIN_UNSEEN, g.SEARCHING):
+    for words in (g.UNSEEN, *g.NO_CURE.values(), g.AGAIN_UNSEEN, g.SEARCHING):
         assert len(words) <= longest, words
+        assert g.unable(words).message == words  # (as the line-up's last panel says it: a sentence as it is)
         low = words.lower()
         assert not any(bad in low for bad in ("move the container", "move the box", "bring", "put the", "table"))
     assert "chair" in g.UNSEEN.lower()

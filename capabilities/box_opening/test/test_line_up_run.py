@@ -273,10 +273,12 @@ class Ear:
 
 
 class Scene:
-    """SceneLocator's part: a look tells one sighting where it has one."""
+    """SceneLocator's part: a look tells one sighting where it has one. `frames`: how many of the scene
+    camera's frames the segmenter gave each look (its record), None where its record does not say."""
 
-    def __init__(self, tops=()):
-        self.tops, self.on_sighting, self.last_why, self.looks = list(tops), None, "scene segmenter: saw none", 0
+    def __init__(self, tops=(), frames=1, why="scene segmenter: saw none"):
+        self.tops, self.on_sighting, self.last_why, self.looks = list(tops), None, why, 0
+        self.frames = frames
 
     def locate(self, timeout_s):
         self.looks += 1
@@ -284,6 +286,9 @@ class Scene:
             top = self.tops.pop(0)
             self.on_sighting(SimpleNamespace(top=top, table_z=0.216, lift="side", score=0.9), 0.1)
         return None
+
+    def look_record(self):
+        return {"timing": {}} if self.frames is None else {"timing": {}, "segmenter": {"frames": self.frames}}
 
 
 @pytest.fixture
@@ -388,7 +393,9 @@ def test_an_arm_that_is_not_at_rest_is_not_moved_before_the_go(lined):
     (went, turned), lines, runner = _line_up(lined, Ear(3, go=True), locator=scene)
     assert (went, turned) == (True, False) and lined.watched == [] and runner.gripper == []
     assert lines[1] == {"fix": {"xyz": [0.9, 0.0, 0.315], "table_z": 0.216, "age_s": 0.1, "rough": False, "score": 0.9}}
-    assert {"none": "scene segmenter: saw none"} in lines and scene.on_sighting is None  # unhooked as it ends
+    # (what its "none" is of goes with it: the scene camera delivers, and has nothing that could be it)
+    assert {"none": "scene segmenter: saw none", "kind": "unseen"} in lines
+    assert scene.on_sighting is None  # unhooked as it ends
     # ... and the engine is told why the wrist does not look, as the last word on why there is no container
     nones = [ln for ln in lines if "none" in ln]
     assert nones[-1] == {"none": "the arm is not at its rest pose: home it, then press open again"}
@@ -451,7 +458,8 @@ def test_a_wrist_turn_that_was_never_sent_leaves_the_arm_where_it_stood_and_the_
     scene = Scene()
     (went, turned), lines, _runner = _line_up(lined, Ear(3, go=True), locator=scene)
     assert (went, turned) == (True, False) and lined.held is False and lined.rested == []
-    assert {"none": "wrist camera: failed (no fresh /joint_states)"} in lines and scene.looks >= 1
+    # (why the wrist does not look is no camera's word on a container: the scene camera's looks follow)
+    assert {"none": "wrist camera: failed (no fresh /joint_states)", "kind": "unseen"} in lines and scene.looks >= 1
 
 
 def test_a_wrist_that_does_not_turn_back_after_a_stop_ends_the_line_up_the_arm_holding(lined, monkeypatch):
@@ -467,7 +475,8 @@ def test_a_wrist_that_cannot_look_leaves_the_scene_camera_and_says_why(lined):
     lined.watch = ("refused", "its way there: the knees")
     scene = Scene()
     (went, turned), lines, _runner = _line_up(lined, Ear(3, go=True), locator=scene)
-    assert (went, turned) == (True, False) and {"none": "wrist camera: its way there: the knees"} in lines
+    assert (went, turned) == (True, False)
+    assert {"none": "wrist camera: its way there: the knees", "kind": "unseen"} in lines
     assert scene.looks >= 1
 
 
@@ -550,7 +559,10 @@ def test_with_a_selection_a_wrist_fix_is_said_only_where_the_run_would_look_for_
     from test_survey import MODEL, SELECTED, _along
 
     lined.ctx.model = MODEL
-    why = "the selected container %s is in none of the scene camera's detections: the run would not look for it"
+    # ... and what that "none" is of: a find nothing can tie to the selection, which no moving of the chair
+    # makes the selected one (the engine says that, and ends the line-up on it: line_up.BoxSource)
+    untied = {"none": press_demo.UNTIED % SELECTED, "kind": "not_chosen"}
+    assert "in none of the scene camera's detections" in untied["none"] and len(untied["none"]) <= 300
     box = (380.0, 150.0, 440.0, 230.0)
     for kw, said in (
         ({"locator": _selecting(mine=None, held=0)}, False),  # the selection in none of its frames
@@ -566,7 +578,7 @@ def test_with_a_selection_a_wrist_fix_is_said_only_where_the_run_would_look_for_
         _got, lines, _runner = _line_up(lined, Ear(3, go=False), instance_id=SELECTED, **kw)
         fixes = [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
         assert bool(fixes) is said, kw
-        assert ({"none": why % SELECTED} in lines) is not said, kw
+        assert (untied in lines) is not said, kw
     # no selection: every fix is said, as before
     _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=_selecting(mine=None, held=0))
     assert len([ln for ln in lines if "fix" in ln]) == 3
@@ -585,7 +597,9 @@ def test_with_a_selection_a_wrist_fix_the_run_would_not_take_is_not_said_either(
     lined.at = (*_along(tie, 0.6, side=0.5), 0.315)  # half a metre to the side of where the selected one is seen
     _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=scene, instance_id=SELECTED)
     assert not [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
-    assert any("not taken for the selected container %s" % SELECTED in ln.get("none", "") for ln in lines)
+    elsewhere = [ln for ln in lines if "not taken for the selected container %s" % SELECTED in ln.get("none", "")]
+    # (the selected one stands where the wrist does not see it: the chair cures that, and it is guided for)
+    assert elsewhere and {ln["kind"] for ln in elsewhere} == {"unseen"}
     # --wrist-alone, the selection in none of the scene camera's frames: a second lid-sized top in the frames
     lined.at = (0.65, 0.0, 0.315)
     tops = [SimpleNamespace(xy=xy, button="unchecked") for xy in ((0.65, 0.0), (1.08, -0.23))]
@@ -594,13 +608,45 @@ def test_with_a_selection_a_wrist_fix_the_run_would_not_take_is_not_said_either(
     monkeypatch.setattr(sv, "_within_reach", lambda model: lambda top: True)  # both within the arm's reach
     _got, lines, _runner = _line_up(lined, Ear(3, go=False), **kw)
     assert not [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
-    assert any("two containers" in ln.get("none", "") for ln in lines)
+    two = [ln for ln in lines if "two containers" in ln.get("none", "")]
+    assert two and {ln["kind"] for ln in two} == {"several"}  # two that could be it: no chair move parts them
     # ... but a top the arm cannot reach is no second container to choose between (2026-11-12: one 1.08 m out
     # stood in the wrist's frame on both runs that opened the box)
     monkeypatch.setattr(sv, "_within_reach", lambda model: lambda top: math.hypot(top[0], top[1]) < 0.9)
     kw["locator"] = _selecting(mine=None, held=0)
     _got, lines, _runner = _line_up(lined, Ear(3, go=False), **kw)
     assert len([ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]) == 3
+
+
+def test_the_scene_cameras_watch_says_what_its_none_is_of_a_camera_that_delivers_nothing_among_them(lined):
+    """The review of 2026-11-19: a scene camera whose streams are missing, or whose segmenter is silent, read
+    on the panel as "The arm cannot see the container. Move the chair in front of it". The run's own watch
+    knows more than its words: how many of the scene camera's frames the segmenter gave its looks. None in
+    a second of looks is a camera that delivers nothing, whatever the newest look says. One or more, and
+    "no frame newer than the look" of ONE look of a third of a second is a message that came late, not a
+    camera that is not working. And a selected id in none of its frames is, to the scene camera alone, a
+    container it cannot tell from one it never knew."""
+    for scene, kind in (
+        (Scene(frames=0, why="scene camera streams missing: color, depth"), "fault"),
+        (Scene(frames=0, why="scene segmenter: SILENT: no /perception/object_detections in 1.0 s"), "fault"),
+        (Scene(frames=0, why="scene segmenter: saw none"), "fault"),  # (whatever it says: no frame was judged)
+        (Scene(frames=2, why="scene segmenter: no frame newer than the look in 0.3 s"), "unseen"),
+        (Scene(frames=2, why="scene segmenter: saw no food container in 2 frames"), "unseen"),
+        (
+            Scene(frames=2, why="scene segmenter: two places pass as this container, [0.8, -0.2] and [1.1, 0.3]"),
+            "several",
+        ),
+        (
+            Scene(frames=2, why="scene segmenter: the selected container (fc_1) was in none of its 2 frames"),
+            "not_chosen",
+        ),
+        # a record that does not say how many: the words alone
+        (Scene(frames=None, why="scene segmenter: no frame newer than the look in 0.3 s"), "fault"),
+        (Scene(frames=None, why="scene segmenter: saw none"), "unseen"),
+    ):
+        _got, lines, _runner = _line_up(lined, Ear(3, go=False), wrist_first=False, locator=scene)
+        nones = [ln for ln in lines if "none" in ln]
+        assert nones and all(ln == {"none": scene.last_why, "kind": kind} for ln in nones), scene.last_why
 
 
 # -- in the middle of a run: no press plans from where the chair stands (--guide) -----------------------
@@ -746,7 +792,7 @@ def test_a_run_whose_cameras_saw_no_container_asks_to_be_guided_with_no_place_an
     assert ("guide", {"n": 1, "box": None, "why": NOT_SEEN, "what": "unseen"}) in runner.notes
     ctx = guided.ctx
     assert ctx.cpose is None and ctx.worlds.table_top_z is None and ctx.worlds.table_extent is None
-    assert ctx.wrist_looked is False and guided.obstacles == [[]]
+    assert ctx.wrist_seen is None and ctx.side_seen is None and guided.obstacles == [[]]
     # a stop ends it as it ends every guidance: the wrist back to rest, nothing pressed
     from box_opening.runtime.abort import EXIT_NOT_LINED_UP
 

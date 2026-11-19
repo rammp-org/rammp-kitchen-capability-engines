@@ -1384,6 +1384,13 @@ AT_REST_RAD = 0.01
 # log), and the engine answers on stdin with one JSON line.
 LINE_UP_MARK = "@@ "
 LINE_UP_LOOK_S = 0.3  # the scene camera's own look, each time round (its sightings said as they are made)
+# what the watch says of a find where NOTHING ties any find to the selected container (the selected id is in
+# none of the scene camera's detections, and --wrist-alone is off): it is not said, and it is of the kind no
+# moving of the chair cures (line_up_watch's judge)
+UNTIED = (
+    "the selected container %s is in none of the scene camera's detections: nothing says that what the wrist "
+    "sees is the one selected, and the run would not take it"
+)
 # what the engine is told where the arm stands off rest by more than its wrist's own turn: nothing of a line-up
 # homes it (the wrist's turn is the one motion made before the go). The engine's line-up ends on these words
 # at once and its panel says them (guide.ARM_NOT_AT_REST: the one sentence, both sides')
@@ -1479,10 +1486,15 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
 
     out = sys.stdout if out is None else out
     held_at = [None]  # when the wrist's own watch last said a fix: its camera held the container then
+    refused = {}  # the newest find this watch would not say, as its "none" reads -> what that is of (judge)
 
     def say(msg):
         if msg.get("fix", {}).get("by") == "wrist":
             held_at[0] = time.monotonic()
+        if "none" in msg and "kind" not in msg and msg["none"] in refused:
+            # what the "none" is of, where this watch knows it better than its words tell (guide.K_*): the
+            # engine says a state no moving of the chair cures as what it is, and ends on it (line_up.BoxSource)
+            msg = dict(msg, kind=refused[msg["none"]])
         out.write(LINE_UP_MARK + json.dumps(msg) + "\n")
         out.flush()
 
@@ -1497,6 +1509,28 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
         fix = None if locator is None else locator.locate(LINE_UP_LOOK_S)
         return fix, (str(locator.last_why) if locator is not None and fix is None and locator.last_why else None)
 
+    def scene_frames():
+        """How many of the scene camera's frames the segmenter gave the look that just ended (its record's
+        own count), or None where the record does not say."""
+        try:
+            return int((locator.look_record() or {})["segmenter"]["frames"])
+        except Exception:  # noqa: BLE001 - a record that cannot be read says nothing: the look's words do
+            return None
+
+    def scene_kind(why, frames):
+        """What the scene camera's word on having no container is of (guide.K_*), by `frames`, how many of
+        its frames the segmenter gave the looks since this was last said (a second of them; None: not
+        known, and the word alone says). None at all, and the camera delivers nothing, whatever the newest
+        look says (guide.K_FAULT). One or more, and it delivers: "no frame newer than the look" of ONE look
+        of LINE_UP_LOOK_S, a third of a second, is a segmenter message that came a moment late, not a
+        camera that is not working."""
+        kind = guide.kind_of(why)
+        if frames is None:
+            return kind
+        if not frames:
+            return guide.K_FAULT
+        return guide.K_UNSEEN if kind == guide.K_FAULT else kind
+
     if locator is not None:
 
         def told(sighting, age_s):
@@ -1510,18 +1544,25 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
     if selected:
 
         def judge(fix, find):
-            """Why the run after the go would not take this find for the selected container, or None: it
-            would not turn its wrist for it at all (selection_look), or would and not take what stands here
-            (tie_refusal, alone_refusal: wrist_first's own tests)."""
+            """Why the run after the go would not take this find for the selected container, or None: nothing
+            ties any find to it (selection_look: the id is in none of the scene camera's detections), or
+            something does and what stands here is not it (tie_refusal, alone_refusal: wrist_first's own
+            tests). What that is of goes with it (`refused`, for say): a find nothing can tie to the
+            selection is one no moving of the chair makes the selected one (guide.K_NOT_CHOSEN), and so are
+            two that could be it (K_SEVERAL); one that stands where the selected one does not is the
+            selected one not in front of the arm (K_UNSEEN), which the chair cures."""
             tie, alone = selection_look(locator, None, ctx.model, selected, getattr(args, "wrist_alone", False))
             if tie is not None:
-                return tie_refusal(tie, find, fix.top_xyz)[0]
-            if alone:
-                return alone_refusal(alone, find, fix.top_xyz, ctx.model)
-            return (
-                "the selected container %s is in none of the scene camera's detections: the run would not look "
-                "for it" % selected
-            )
+                why = tie_refusal(tie, find, fix.top_xyz)[0]
+                kind = guide.K_SEVERAL if why is not None and guide.kind_of(why) == guide.K_SEVERAL else guide.K_UNSEEN
+            elif alone:
+                why, kind = alone_refusal(alone, find, fix.top_xyz, ctx.model), guide.K_SEVERAL
+            else:
+                why, kind = UNTIED % selected, guide.K_NOT_CHOSEN
+            if why is not None:
+                refused.clear()
+                refused[str(why)[:300]] = kind  # (as watch_front cuts it for its "none")
+            return why
 
     asked = bool(getattr(args, "wrist_first", False)) and bool(args.execute)
     wrist = asked and wrist_looks_from(ctx.client.joints(), rest, rest_tol)
@@ -1565,10 +1606,11 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 sys.exit(EXIT_LINE_UP_HOLDS)
             if state != "watched":
                 log.info("[press_demo] LINE-UP: the wrist does not look (%s): the scene camera alone" % why)
-                say({"none": "wrist camera: %s" % str(why)[:260]})
+                # (no camera's word on a container: the scene camera's own looks follow, and say what they see)
+                say({"none": "wrist camera: %s" % str(why)[:260], "kind": guide.K_UNSEEN})
         elif not_at_rest:
             log.info("[press_demo] LINE-UP: the arm is not at rest: the wrist does not look before the go")
-        last_none = 0.0
+        last_none, frames = 0.0, 0
         while not ear.heard():  # the scene camera alone
             # this watch only sleeps and reads, so a Ctrl+C that did not arrive as an exception (it came out
             # as another error under the planner's wait, taken for a refusal) would never end it
@@ -1576,12 +1618,15 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
                 raise KeyboardInterrupt
             t_look = time.monotonic()
             fix, why = scene_look()
+            got = None if locator is None else scene_frames()
+            frames = None if got is None or frames is None else frames + got
             if (why is not None or not_at_rest) and time.monotonic() - last_none >= sv.LINE_UP_NONE_S:
                 last_none = time.monotonic()
                 if why is not None:
-                    say({"none": why[:300]})
+                    say({"none": why[:300], "kind": scene_kind(why, frames)})
                 if not_at_rest:  # said last: the engine's end reason is the last word it heard
                     say({"none": LINE_UP_NOT_AT_REST})
+                frames = 0
             # a pass with no fix lasts the look's period: with no scene camera, or one whose look answers at
             # once (no segmenter to read), the rest of it is slept out, and the loop never spins beside the
             # arm's driver. A look that ends early with its fix is followed by the next at once, as ever.
@@ -1644,21 +1689,50 @@ def far_tops(find, model):
         return []
 
 
-def a_camera_looked(ctx, locator):
-    """Whether any camera LOOKED for the container in the find that just ended with none: the scene
-    segmenter gave the look at least one frame of the scene camera's to judge (SceneLocator.look_record:
-    its `frames`), or the wrist's finder judged a frame of its own (wrist_first, the side survey:
-    ctx.wrist_looked). With --guide that is the difference between a container that is not in view, which
-    the chair is moved for (main's NOT SEEN), and cameras that show nothing at all (streams missing, no
-    TF, the segmenter down or silent, no wrist frame): a fault, where no moving of the chair brings the
-    container into view and the run ends NO BOX with what was missing, as it always has. False where
-    nothing says."""
+def looked_kind(survey):
+    """What a wrist look that ended with no container saw (guide.K_*), or None where it did not look at
+    all: no view to turn to, a view that was not flown, the body model off. Its camera delivering nothing
+    at a view it stood at ("no wrist frame at ...": tasks/survey.run_survey) is the camera's fault,
+    guide.K_FAULT; else, what its finder said of the frames it judged: two that could be the container
+    (K_SEVERAL), or nothing that could (K_UNSEEN)."""
+    kind = guide.kind_of(getattr(survey, "why", ""))
+    if getattr(survey, "find", None) is None:
+        return guide.K_FAULT if kind == guide.K_FAULT else None
+    return guide.K_UNSEEN if kind == guide.K_FAULT else kind  # (its finder judged a frame: the camera delivers)
+
+
+def no_container_kind(ctx, args, locator, scene_said=None):
+    """What a find that ended with no container is OF (guide.K_*), for a run the engine can guide. Guidance
+    is for what moving the chair cures: K_UNSEEN, nothing that could be the container in any view, and
+    that alone is guided (main's NOT SEEN). The rest end the run as they did at 21aa7cc (NO BOX), each
+    with what it was in its record for the engine's own words (review of 2026-11-19: all of them were
+    guided with "The arm cannot see the container. Move the chair in front of it", for a wait that is five
+    minutes on the UI):
+
+    K_NOT_CHOSEN  a look saw something that could be the container and nothing ties it to the selection;
+    K_SEVERAL     a look saw two that could be it, and nothing says which;
+    K_FAULT       the camera the guidance would watch with delivered nothing.
+
+    Which camera that is: the wrist's, where the wrist look is on (--wrist-first) and it looked from a
+    view. It is then the wrist's word that counts, however alive or dead the scene segmenter is: a wrist
+    camera with no frame is a fault whatever the scene camera gave, and a wrist that looked and saw
+    nothing is a container not in view whatever the scene camera made of something further off. Else the
+    scene camera's: a look the segmenter gave no frame of, a selected id in none of its frames (it cannot
+    tell a container that is out of its view from an id no detection ever had: "was in none of its
+    frames" is all it knows, and without the wrist nothing can say more), two places that pass."""
+    wrist, side = getattr(ctx, "wrist_seen", None), getattr(ctx, "side_seen", None)
+    for ends in (guide.K_NOT_CHOSEN, guide.K_SEVERAL):
+        if ends in (wrist, side):
+            return ends
+    if getattr(args, "wrist_first", False) and wrist is not None:
+        return wrist
     try:
-        record = locator.look_record() if locator is not None else None
-        frames = ((record or {}).get("segmenter") or {}).get("frames")
-        return bool(frames) or bool(getattr(ctx, "wrist_looked", False))
-    except Exception:  # noqa: BLE001 - a record it cannot read is no camera that looked
-        return bool(getattr(ctx, "wrist_looked", False))
+        frames = ((locator.look_record() or {}).get("segmenter") or {}).get("frames")
+    except Exception:  # noqa: BLE001 - a record that cannot be read is no frame known of
+        frames = None
+    if not frames:
+        return guide.K_FAULT
+    return guide.kind_of(scene_said or getattr(locator, "last_why", "")) or guide.K_UNSEEN
 
 
 def forget_scene(ctx, worlds, watcher):
@@ -1674,7 +1748,7 @@ def forget_scene(ctx, worlds, watcher):
     approach.set_obstacles([])
     ctx.survey_clouds = None
     ctx.wrist_far = None
-    ctx.wrist_looked = False
+    ctx.wrist_seen = ctx.side_seen = None
     ctx.home_ahead = None
     worlds.table_top_z = None  # the world file's own again, where it names a table; else none until measured
     worlds.table_extent = None
@@ -2060,7 +2134,7 @@ def alone_refusal(alone, find, at, model):
     )
 
 
-def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie=None, alone=None):
+def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie=None, alone=None, untied=None):
     """--wrist-first: the wrist turned where the arm rests (tasks/survey.run_survey, front) and
     the container its camera finds in front of the arm: the fix (a SceneFix, source "wrist"), its
     frames' points kept on ctx — or None where it finds none, the run going on with the scene
@@ -2073,7 +2147,13 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
     top does; else it is not taken (None), and said.
     `alone` (the selected id, --wrist-alone: a selection the scene camera's detections do not hold,
     so nothing ties a find to it): what the wrist finds is taken only where it is the ONE container
-    its frames hold; a second lid-sized top anywhere in them, and it is not taken (None), and said."""
+    its frames hold; a second lid-sized top anywhere in them, and it is not taken (None), and said.
+    `untied` (the selected id, of a run the engine can guide, where nothing ties a find to it and
+    --wrist-alone is off): the wrist looks only to tell whether anything that could be the container
+    stands in front of the arm. What it finds is never taken (None), and said.
+    What the look saw where it took no container is left on ctx.wrist_seen (looked_kind; of a find
+    it would not take: guide.K_NOT_CHOSEN, K_SEVERAL, or K_UNSEEN where the selected one stands
+    elsewhere), for main's word on what the find was (no_container_kind)."""
     from box_opening.tasks import survey as sv
 
     survey = sv.run_survey(
@@ -2095,13 +2175,39 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         sys.exit(0)
     # lid-sized tops it saw that all stand out of the arm's reach: with --guide the chair is moved for them
     ctx.wrist_far = far_tops(survey.find, getattr(ctx, "model", None))
-    # ... and whether its camera showed it anything to judge at all (the finder answered for a frame): a
-    # container it then did not find is one that is not in view, not a camera that gave nothing
-    ctx.wrist_looked = survey.find is not None
+    # ... and what it saw where it finds no container, or none it takes: a camera that delivered nothing,
+    # two that could be the container, or nothing that could (looked_kind)
+    ctx.wrist_seen = None if survey.fix is not None else looked_kind(survey)
+    if untied:
+        # it looked only to tell what stands in front of the arm. Anything that could be the container
+        # (a find, two the finder cannot choose between, a lid-sized top out of the arm's reach) is
+        # something nothing ties to the selection: the chair is not guided to it, near or far, for no
+        # place of the chair makes it the one selected
+        far = ctx.wrist_far
+        if survey.fix is not None or ctx.wrist_seen == guide.K_SEVERAL or far:
+            if survey.fix is not None:
+                seen = "a container at [%.3f, %.3f]" % tuple(survey.fix.top_xyz[:2])
+            elif far:
+                seen = "a lid-sized top at [%.2f, %.2f], out of the arm's reach" % tuple(far[0][:2])
+            else:
+                seen = "two places that could be a container"
+            why = (
+                "%s, and the selected container %s is in none of the scene camera's detections: nothing says "
+                "it is the one selected" % (seen, untied)
+            )
+            ctx.wrist_seen, ctx.wrist_far = guide.K_NOT_CHOSEN, None
+            log.info("[press_demo] WRIST LOOK: %s" % why)
+            runner.note("wrist_first", found=survey.fix is not None, tied=False, untied=True, why=why, scene=False)
+            if said is not None:
+                said.append(why)
+            return None
     if survey.fix is not None and tie is not None:
         at = survey.fix.top_xyz
         why, how = tie_refusal(tie, survey.find, at)
         if why is not None:
+            # (a second top in the selection's direction: two that could be it; else the selected one
+            # stands where the wrist does not see it, which moving the chair cures)
+            ctx.wrist_seen = guide.K_SEVERAL if guide.kind_of(why) == guide.K_SEVERAL else guide.K_UNSEEN
             log.info("[press_demo] WRIST LOOK: %s" % why)
             runner.note("wrist_first", found=True, tied=False, why=why, scene=scene_fix is not None)
             if said is not None:
@@ -2114,6 +2220,7 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         at = survey.fix.top_xyz
         why = alone_refusal(alone, survey.find, at, ctx.model)
         if why is not None:
+            ctx.wrist_seen = guide.K_SEVERAL
             log.info("[press_demo] WRIST LOOK: %s" % why)
             runner.note("wrist_first", found=True, alone=True, taken=False, why=why, scene=False)
             if said is not None:
@@ -2167,7 +2274,9 @@ def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
     finds none, or none tied, the run goes on with the scene camera's fix of the selected
     container, unless that fix is a rough one (a box its frame cut): that is no place to open a
     container on by itself, and the run ends NO BOX. Where nothing the scene camera saw says where
-    the selected container is, the wrist is not turned at all: it could not tell which container
+    the selected container is, a run by hand does not turn the wrist at all, and one the engine can
+    guide (--guide) turns it only to tell whether anything that could be the container stands in
+    front of the arm (wrist_first's `untied`: nothing it finds is taken): it could not tell which container
     it found.
 
     --wrist-alone (off unless a deployment sets it) is for a selection that is no detection of the
@@ -2176,7 +2285,7 @@ def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
     only where it is the one container its frames hold (wrist_first's `alone`); two, and NO BOX. A
     selection the scene camera did hold is tied as above, with or without it."""
     selected = getattr(args, "instance_id", None) or None
-    tie, alone = None, None
+    tie, alone, untied = None, None, None
     if selected:
         tie, alone = selection_look(locator, scene_fix, ctx.model, selected, getattr(args, "wrist_alone", False))
         if alone:
@@ -2185,14 +2294,31 @@ def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
                 "wrist looks from its own views, and what it finds is taken only where it is the one container it "
                 "sees (--wrist-alone)" % selected
             )
+        elif tie is None and getattr(args, "guide", False):
+            # A run the engine can guide. Nothing the wrist finds can be taken for this selection, and the
+            # run still has to know which of two things this is: a container that stands in no camera's
+            # view, which moving the chair cures and the engine guides for (owner 2026-11-19), or a
+            # container in front of the arm that nothing ties to the one selected, which no moving of the
+            # chair cures. The scene camera cannot say (the id "was in none of its frames" either way), so
+            # the wrist looks, as it looks for every other find, and takes nothing (wrist_first's `untied`).
+            # As first guided (e16c35c) this find went straight into "The arm cannot see the container.
+            # Move the chair in front of it" with a lid in every frame of the watch (review of 2026-11-19)
+            untied = selected
+            log.info(
+                "[press_demo] WRIST LOOK: the selected container %s is in none of the scene camera's detections: "
+                "the wrist looks only to tell whether anything that could be it stands in front of the arm (what "
+                "it finds is not taken)" % selected
+            )
         elif tie is None:
             said.append(
                 "not looked for: nothing the scene camera saw says where the selected container %s is, and the "
                 "wrist cannot tell which container was selected" % selected
             )
             log.info("[press_demo] WRIST LOOK: %s" % said[-1])
-    if not selected or tie is not None or alone:
-        wrist_fix = wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=said, tie=tie, alone=alone)
+    if not selected or tie is not None or alone or untied:
+        wrist_fix = wrist_first(
+            node, ctx, cfg, runner, watcher, args, scene_fix, said=said, tie=tie, alone=alone, untied=untied
+        )
         if wrist_fix is not None:
             return wrist_fix, None, None
     if selected and scene_fix is not None and getattr(scene_fix, "rough", False):
@@ -2227,10 +2353,12 @@ def wrist_survey_or_exit(
     `or_none` (a guided run whose wrist saw a lid-sized top in front, out of the arm's reach): a survey
     that finds no container is not the run's end; None is returned, the survey's word said, and the caller
     has the chair guided to that top (main).
-    `unseen` (a list, of a guided run: --guide): where NO camera has the container and a camera did look
-    (a_camera_looked), that is not the run's end either (owner 2026-11-19): why is added to it, None is
-    returned with no NO BOX and no home, and the caller has the chair guided (main's NOT SEEN). Where no
-    camera could look at all it is the NO BOX it was, with or without it."""
+    `unseen` (a list, of a run the engine can guide: --guide): where nothing that could be the container
+    is in any view (no_container_kind: guide.K_UNSEEN), that is not the run's end either (owner
+    2026-11-19): why is added to it, None is returned with no NO BOX and no home, and the caller has the
+    chair guided (main's NOT SEEN). What no moving of the chair cures (a camera that delivered nothing, a
+    container nothing ties to the selection, two that could be it) is the NO BOX it was, in the same
+    words, with what it was in its row (`what`) for the engine's own sentence."""
     from box_opening.tasks import survey as sv
 
     why = "scene camera: %s" % (scene_said or locator.last_why)
@@ -2263,19 +2391,22 @@ def wrist_survey_or_exit(
             ctx.survey_clouds = survey.clouds
             return survey.fix
         why += "; wrist survey: %s" % survey.why
-        # (its finder judged a frame over the arm's side: a camera that looked, as the front look's is)
-        ctx.wrist_looked = bool(getattr(ctx, "wrist_looked", False)) or getattr(survey, "find", None) is not None
+        ctx.side_seen = looked_kind(survey)  # what the look over the arm's side saw (no_container_kind)
         if or_none:
             log.info(
                 "[press_demo] WRIST SURVEY: no container beside the arm either (%s): the chair is guided to the "
                 "lid-sized top the wrist saw in front" % survey.why
             )
             return None
-    if unseen is not None and a_camera_looked(ctx, locator):
-        unseen.append(why)
-        return None
+    what = {}
+    if unseen is not None:
+        kind = no_container_kind(ctx, args, locator, scene_said)
+        if kind == guide.K_UNSEEN:
+            unseen.append(why)
+            return None
+        what = {"what": kind}  # (a run by hand says none: its row is as it always was)
     # the look's seconds and the segmenter's verdict: what a NO BOX was
-    runner.note("reach_refused", why="NO BOX — %s" % why, **locator.look_record())
+    runner.note("reach_refused", why="NO BOX — %s" % why, **what, **locator.look_record())
     try_home(ctx, runner, args.execute, "NO BOX — %s" % why)
     sys.exit(2)
 
@@ -2641,7 +2772,7 @@ def main():
             reach_locator = locator
             wrist_said, scene_said = [], None
             ctx.wrist_far = None  # (wrist_first says what it saw out of the arm's reach)
-            ctx.wrist_looked = False  # (... and whether its camera showed it anything to judge)
+            ctx.wrist_seen = ctx.side_seen = None  # (... and each wrist look, what it saw where it found none)
             if getattr(args, "wrist_first", False):
                 # THE WRIST CAMERA FINDS THE BOX (--wrist-first; owner, 2026-11-11: "having the wrist
                 # cam just find the box ... the arm would just need to angle itself so it can see the
@@ -2660,9 +2791,9 @@ def main():
                 # side BEFORE anything else is made of it, as it did before there was any guidance: the
                 # container may stand beside the chair, and a lid-sized top far off in front is then not
                 # it. As first written the guidance below came first, and with both flags on the side
-                # survey was never tried (review of 2026-11-17). By hand (no --guide), and where no camera
-                # could look at all, this is the run's end where the survey finds none (NO BOX); guided,
-                # its None comes back here
+                # survey was never tried (review of 2026-11-17). By hand (no --guide), and where what the
+                # find was is nothing the chair's move cures, this is the run's end where the survey finds
+                # none (NO BOX); guided, its None comes back here
                 scene_fix = wrist_survey_or_exit(
                     node,
                     ctx,
@@ -2695,13 +2826,13 @@ def main():
                 )
                 continue
             if scene_fix is None:
-                # NO CAMERA SEES THE CONTAINER (--guide), and a camera did look: no NO BOX and no end either
-                # (owner 2026-11-19, asked whether a box no camera sees at all should become guidance too,
-                # "move so the container is in front of the arm": yes). Until then such a run said NO BOX,
-                # went home and ended not_found. The chair is moved for it as for a box out of reach: the
-                # arm at rest with only its wrist turned to look, the person told that the arm cannot see
-                # the container until a camera does, and nothing moves toward a box but on their yes. No
-                # place is handed to the engine: none was measured
+                # NOTHING THAT COULD BE THE CONTAINER IS IN ANY CAMERA'S VIEW (--guide; no_container_kind): no
+                # NO BOX and no end either (owner 2026-11-19, asked whether a box no camera sees at all
+                # should become guidance too, "move so the container is in front of the arm": yes). Until
+                # then such a run said NO BOX, went home and ended not_found. The chair is moved for it as
+                # for a box out of reach: the arm at rest with only its wrist turned to look, the person
+                # told that the arm cannot see the container until a camera does, and nothing moves toward
+                # a box but on their yes. No place is handed to the engine: none was measured
                 why = "no camera sees the container (%s)" % not_seen[-1]
                 log.info("[press_demo] NOT SEEN: %s; nothing was pressed" % why)
                 runner.note("reach_refused", why=why, guided=True, what=GUIDE_UNSEEN, **locator.look_record())

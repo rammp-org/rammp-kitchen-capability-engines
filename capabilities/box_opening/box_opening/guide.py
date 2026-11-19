@@ -13,6 +13,7 @@ example does (capabilities/example: ctx.update_user_panel / ctx.poll_ui_event).
 
     LOOKING   nothing has looked yet               "Looking for the container"
               no camera sees the container         "The arm cannot see the container. Move the chair in front of it"
+              ... what no chair move cures         "The arm's camera is not working" and the like (NO_CURE)
     MOVE      the box is outside the boundary      "Move closer, about 15 cm"   (or back / left / right)
     HOLD      inside, not yet steady or planned    "Hold still, checking"
     READY     inside, steady, and the run plans    "Ready. Open the container?"  [Open] [Cancel]
@@ -42,6 +43,14 @@ is told so and what to do about it: move the CHAIR (UNSEEN). Never the container
 table: the scene is not changed, only where the robot stands (the owner's rule of 2026-11-11). No
 direction and no distance are said then, because none is known; the moment a camera sees the container
 they are (MOVE), as ever.
+
+Guidance is for what moving the chair can cure (review of 2026-11-19). Three states it cannot cure wore
+the same sentence: a camera that delivers nothing, two things that could be the container side by side,
+and a container in view that nothing ties to the one the person chose (a selection the scene camera's
+detections do not hold). Under a five-minute wait each was five minutes of a person driving a wheelchair
+for nothing. Each is now told as what it is (kind_of, NO_CURE) and, where it stands, ends the line-up
+(line_up.BoxSource: NO_CURE_S). And the sentence does not flash: until what watches has had no container
+for LOST_S, as long as a lost one is given, the panel still says "Looking for the container".
 """
 
 import math
@@ -62,24 +71,75 @@ AGAIN = "Press open again when you are in place"
 # ... and where no camera saw the container in all that time: what was missing is that it never came into
 # view, not that it stood out of reach (Guide.again_unseen)
 AGAIN_UNSEEN = "Container not seen in time. Press open again in front of it"
-# What is said while no container is seen (state LOOKING). SEARCHING only until what watches has looked:
-# while the wrist turns to its view, before the scene camera's first look ends. Then the person is told
-# that the arm cannot see it and what to do: UNSEEN. Each is one short message on the UI's panel, no longer
-# than the longest it showed before these (ARM_NOT_AT_REST's sentence, 63 characters)
+# What is said while no container is seen (state LOOKING). SEARCHING until what watches has looked and had
+# none for LOST_S: while the wrist turns to its view, before the scene camera's first look ends, and through
+# a first frame or two that show nothing to a person who is in place. Then the person is told what it is.
+# Each is one short message on the UI's panel, no longer than the longest it showed before these
+# (ARM_NOT_AT_REST's sentence, 63 characters)
 SEARCHING = "Looking for the container"
+# WHAT a watch's word on having no container is of (kind_of; a run says the same of its own find:
+# press_demo.no_container_kind). K_UNSEEN: nothing that could be the container is in any view, which moving
+# the chair cures: the one state that is guided
+K_UNSEEN, K_SEVERAL, K_NOT_CHOSEN, K_FAULT = "unseen", "several", "not_chosen", "fault"
 UNSEEN = "The arm cannot see the container. Move the chair in front of it"
-# ... and where what watches says it sees MORE than one thing that could be the container and cannot tell
-# which is meant (SEVERAL_MARKS): "cannot see the container" would not be true of a container that stands
-# in front of the arm beside a second lid-sized top. A top out of the arm's reach is no rival of one within
-# it (the finder's rule, perception/wrist_finder), so the chair's place can settle which is meant
-SEVERAL = "The arm sees two possible containers. Move in front of only one"
-# The words by which a run and its watch say that: the wrist finder's and the scene locator's "two places
-# pass as this container", the selection's "another lid-sized top ... in the same direction" and "two
-# containers, and the selected one ... is in none of the scene camera's detections" (press_demo.tie_refusal,
-# alone_refusal), and of tops that all stand out of reach "none is nearest the arm alone"
-SEVERAL_MARKS = ("two places pass", "another lid-sized top", "two containers", "none is nearest the arm alone")
-# one of those two sentences stands this long before the other takes its place (anything else replaces it
-# at once: a container seen, the time out). What watches judges each frame alone, a word a second
+# ... and the three that no moving of the chair cures, each in words that are true of it (review of
+# 2026-11-19: all three wore UNSEEN's sentence, or a "Move in front of only one" that no chair can do):
+#  K_SEVERAL     two things that could be the container, and nothing says which is meant. The second may be
+#                any lid-sized top (a bowl, a roll of tape: flatbot 2026-11-12), so it is not called a
+#                container; and two tops side by side within the arm's reach are not parted by where the
+#                chair stands
+#  K_NOT_CHOSEN  something that could be the container is seen, and nothing ties it to the one the person
+#                chose: the selected id is in none of the scene camera's detections (typed by hand, or a
+#                track perception has dropped), so no find can be taken for it. The cure is to choose again
+#  K_FAULT       the camera the watch looks with delivers nothing (no frame, no pose for it, no segmenter)
+NO_CURE = {
+    K_SEVERAL: "The arm sees two things that could be the container",
+    K_NOT_CHOSEN: "The arm cannot tell which container you chose",
+    K_FAULT: "The arm's camera is not working",
+}
+# such a state ends the line-up once it has stood this long (line_up.BoxSource): said the while, its last
+# line_up.LINGER_S with no button, as an arm that is not at rest is said. Ten seconds: a frame late, a
+# segmenter message lost or a second lid passing through the view while the chair turns are over in one or
+# two, and a person is not left to drive for minutes at what no driving cures
+NO_CURE_S = 10.0
+# The words by which what watches says each, where it says no kind itself (the run's own watch does:
+# press_demo.line_up_watch; tasks/box_watch and the scene locator say words alone). They are other
+# modules' words, held to them by test_guide (each mark is in the source it is said to come from):
+#  a camera that delivers nothing: tasks/survey.grab_frame and run_survey, perception/depth_source,
+#  perception/scene_source (locate, _unplaced_why), perception/segmenter_source.describe, tasks/box_watch
+FAULT_MARKS = (
+    "no wrist camera",
+    "no new wrist frame",
+    "no wrist frame at",
+    "no depth stamp yet",
+    "depth not new",
+    "depth not paired with colour",
+    "no camera pose for the frame",
+    "scene camera streams missing",
+    "no TF between the scene camera",
+    "to the scene camera (",
+    "no TF from the scene camera",
+    "the scene segmenter cannot be read",
+    "no scene segmenter for this container",
+    "frames upside down",
+    "no scene depth cloud",
+    "no frame newer than the look",
+    "ABSENT: nothing publishes",
+    "SILENT: no ",
+    "not the scene camera (",
+    "its frames are ",
+    "older than the scene camera's",
+    "no scene camera calibration",
+)
+#  two that could be it: the wrist finder's and the scene locator's "two places pass as this container";
+#  the selection's "another lid-sized top ... in the same direction" and "two containers, and the selected
+#  one ..." (press_demo.tie_refusal, alone_refusal)
+SEVERAL_MARKS = ("two places pass", "another lid-sized top", "two containers")
+#  not tied to the selection: the scene locator's "the selected container (id) was in none of its N
+#  frames", the watch's "... is in none of the scene camera's detections" (press_demo.line_up_watch)
+NOT_CHOSEN_MARKS = ("was in none of its", "in none of the scene camera's detections")
+# one of those sentences stands this long before another of them takes its place (anything else replaces
+# it at once: a container seen, the time out). What watches judges each frame alone, a word a second
 # (survey.LINE_UP_NONE_S), and where one frame shows two lid-sized tops and the next shows one cut by the
 # view, the panel would change between two sentences of a dozen words faster than either is read
 UNSEEN_STANDS_S = 3.0
@@ -158,15 +218,25 @@ def unable(why):
     return Say(UNABLE, why[:1].upper() + why[1:])
 
 
-def several(why):
-    """Whether `why` (a run's or its watch's word on why it has no container) says that more than one thing
-    it sees could be the container."""
-    return any(mark in str(why or "") for mark in SEVERAL_MARKS)
+def kind_of(why):
+    """What ONE camera's word on having no container is of: K_FAULT (it delivers nothing), K_SEVERAL (two
+    things that could be the container), K_NOT_CHOSEN (nothing ties what it sees to the selection), else
+    K_UNSEEN (it looked and has nothing that could be it); "" for no word at all. A fault first: of a
+    camera that delivers nothing, nothing else it says is known. The words of a whole find, both cameras'
+    joined, are not for this: which camera a guidance depends on decides there (press_demo)."""
+    why = str(why or "")
+    if not why:
+        return ""
+    for kind, marks in ((K_FAULT, FAULT_MARKS), (K_SEVERAL, SEVERAL_MARKS), (K_NOT_CHOSEN, NOT_CHOSEN_MARKS)):
+        if any(mark in why for mark in marks):
+            return kind
+    return K_UNSEEN
 
 
-def unseen(why=""):
-    """What the person is told where no camera has the container, `why` the watch's own word on it."""
-    return SEVERAL if several(why) else UNSEEN
+def says(kind):
+    """What the person is told where no camera has the container, by what that is of (K_*; "": not said
+    yet, which of a container that WAS seen is that the arm no longer sees it)."""
+    return NO_CURE.get(kind, UNSEEN)
 
 
 def instruction(to_zone, axis=None):
@@ -206,6 +276,10 @@ class Guide:
     again: str = AGAIN
     again_unseen: str = AGAIN_UNSEEN
     instruction: str = None
+    _none_since: float = None  # with no container ever seen: since when what watches has said it has none
+    _kind: str = ""  # what its newest word on having none is of ...
+    _kind_since: float = None  # ... and since when without a break
+    uncured: str = ""  # the kind no chair move cures whose sentence the time ran out on (update), else ""
     state: str = LOOKING
     started: float = None
     _track: list = field(default_factory=list)  # (t, x, y) of the fixes of the last STEADY_S
@@ -226,6 +300,7 @@ class Guide:
         if fix is None or (self._last_fix is not None and fix.t <= self._last_fix.t):
             return
         self._last_fix = fix
+        self._kind, self._kind_since = "", None  # (seen: whatever was said of having none starts anew)
         self._track.append((fix.t, float(fix.xy[0]), float(fix.xy[1])))
         while self._track and fix.t - self._track[0][0] > STEADY_S + 0.5:
             self._track.pop(0)
@@ -270,10 +345,12 @@ class Guide:
                 return self._said
         return self._answer(now, say, at_once=at_once)
 
-    def update(self, now, fix, reach, none=""):
+    def update(self, now, fix, reach, none="", looked=False):
         """The tick: the newest Fix (or None: nothing new) and the Reach of the newest box seen (None: not
-        judged yet). `none`: where no container is seen, what watches' own word on why ("": it has not
-        said, as while its wrist still turns to look). Returns what to show."""
+        judged yet). `none`: where no container is seen, what that is of by what watches' own word (K_*;
+        "": it has not said, as while its wrist still turns to look). `looked`: what watches had looked,
+        and found none, before this line-up began (a run that asks to be guided because its own look found
+        no container): its word is said from the first tick. Returns what to show."""
         now = float(now)
         if self.started is None:
             self.started = now
@@ -281,20 +358,42 @@ class Guide:
             return self._said
         self._see(fix)
         if self.budget_s is not None and now - self.started > self.budget_s:
+            last, kinds = self._said, {text: kind for kind, text in NO_CURE.items()}
+            if last is not None and last.state == LOOKING and last.message in kinds:
+                # the time ran out on a state no moving of the chair cures (a line-up the 120 s rule gave
+                # less than NO_CURE_S). Its own sentence is the last word, and `uncured` tells the engine
+                # which it was: "Press open again in front of it" is not true of a camera that is not working
+                self.uncured = kinds[last.message]
+                return self._answer(now, Say(TIMED_OUT, last.message), at_once=True)
             # what was missing, in its last words: the container in reach, or the container in view at all
             return self._answer(now, Say(TIMED_OUT, self.again if self.saw_box else self.again_unseen), at_once=True)
         cancel = ((CANCEL, "Cancel"),)
         seen = self._last_fix
         if seen is None or now - seen.t > LOST_S:
             self._bad_since = self._hold_since = None
-            # no camera has it: lost (it was seen, and has not been for LOST_S), or what watches has looked
-            # and says it has none. Only before that is it still "looking": nothing is known yet
-            told = SEARCHING if seen is None and not none else unseen(none)
+            # no camera has it: lost (it was seen, and has not been for LOST_S), or what watches has had
+            # none for as long. Before that it is still "looking": one frame without the container, the
+            # first of a line-up or a late one, is not the arm unable to see what stands in front of it
+            # (review of 2026-11-19: it showed "The arm cannot see the container. Move the chair in front
+            # of it" to a person who was in place)
             prev = self._said
+            if none != self._kind or self._kind_since is None:
+                self._kind, self._kind_since = none, now
+            if seen is None:
+                self._none_since = None if not none else now if self._none_since is None else self._none_since
+            waited = seen is not None or looked or (self._none_since is not None and now - self._none_since >= LOST_S)
+            if none in NO_CURE and now - self._kind_since < LOST_S:
+                # ... nor is one word of a camera that delivers nothing, or of a second lid in the frame,
+                # that state: until it has stood LOST_S what was said of having none stands, and where
+                # nothing was, it is still looking (never, meanwhile, that the arm cannot see the container)
+                told = prev.message if prev is not None and prev.state == LOOKING else SEARCHING
+            else:
+                told = says(none) if (none or seen is not None) and waited else SEARCHING
             if (
                 prev is not None
                 and prev.state == LOOKING
-                and {prev.message, told} == {UNSEEN, SEVERAL}
+                and SEARCHING not in (prev.message, told)
+                and prev.message != told
                 and now - self._said_at < UNSEEN_STANDS_S
             ):
                 return prev

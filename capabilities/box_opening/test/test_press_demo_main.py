@@ -93,12 +93,13 @@ REACH_OUTS = []  # the scene fixes handed to the reach-out
 LOOKED = {"timing": {"streams_s": 0.1}, "segmenter": {"state": "live", "frames": 3}}
 
 
-def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True, record=None):
+def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True, record=None, why=None):
     """press_demo.main() with `approach(ctx)` standing in for the reach-out:
     its result's `failed` decides the exit code; `found` False, the scene
     camera finds no box (a list: what each look in turn finds, the last for
     every look after it); `record`: what its look is recorded as having seen
-    (LOOKED). Returns (exit code, client, run-log rows)."""
+    (LOOKED), `why`: its word on having found none (the OWL's). Returns
+    (exit code, client, run-log rows)."""
     import faulthandler
 
     import rclpy.executors
@@ -125,7 +126,7 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True, rec
     finds = list(found) if isinstance(found, list) else [found]
 
     class _Locator:
-        last_why = None if found is True else "the OWL's 3 candidates refused"
+        last_why = None if found is True else (why or "the OWL's 3 candidates refused")
         moved_note = None
         last_timing = {}
         grab = None
@@ -436,6 +437,9 @@ def _answers(codes):
     return approach, seen
 
 
+GUIDED_AT_MOST = 6  # more rounds than any test here means, and few enough to end at once
+
+
 def _guided_by(monkeypatch, answer=(True, True)):
     """press_demo.guide_chair stood in for: it answers (wrist_turned, wrist_held), or exits with a code;
     returns its calls."""
@@ -448,6 +452,11 @@ def _guided_by(monkeypatch, answer=(True, True)):
         calls.append({"place": at, "why": why, "n": n, "ear": ear, "homes": len(HOME_FIRSTS), "what": what})
         if isinstance(answer, int):
             sys.exit(answer)
+        if len(calls) > GUIDED_AT_MOST:
+            # a stand-in that always says "go" guides for ever where the run goes round again without end:
+            # a test that expected none ran a full core for minutes and 2.3 GB of these calls before it was
+            # killed (review of 2026-11-19). It ends loudly here
+            sys.exit("guided %d times: the run goes round without end" % len(calls))
         return answer
 
     monkeypatch.setattr(press_demo, "guide_chair", guide)
@@ -541,7 +550,7 @@ def _wrist_sees(monkeypatch, far):
     from box_opening.tasks import press_demo
 
     def look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
-        ctx.wrist_far = list(far)
+        ctx.wrist_far, ctx.wrist_seen = list(far), "unseen"  # (its finder judged a frame: nothing in reach)
         said.append("wrist camera: the lid-sized top at [1.020, -0.200] stands out of the arm's reach")
         return None, None, None
 
@@ -657,74 +666,246 @@ def test_a_run_by_hand_whose_cameras_see_no_container_ends_no_box_as_it_always_h
         assert "NOT SEEN" not in out
 
 
-def test_cameras_that_show_nothing_at_all_are_a_fault_not_a_container_out_of_view(monkeypatch, tmp_path, capsys):
-    """NO BOX wears the face of several failures (SceneLocator.locate's own note): no container in view, but
-    also streams missing, no TF, the scene segmenter down or silent. No moving of the chair cures those, and
-    telling the person "the arm cannot see the container, move the chair" would not be honest. A guided run
-    is guided for an unseen container only where a camera LOOKED: the segmenter gave the look a frame, or the
-    wrist's finder judged one. Where none did, it ends NO BOX with what was missing, as it always has."""
-    from box_opening.tasks import press_demo
+def _wrist_look_says(monkeypatch, survey):
+    """tasks/survey.run_survey stood in for, the run's own wrist_look and wrist_first real: what the wrist's
+    look in front comes back with. Returns the keywords of each look asked for."""
+    from box_opening.tasks import survey as sv
 
-    homes = []
-    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
-    down = {"timing": {}, "segmenter": {"state": "absent", "frames": 0}}
-    calls = _guided_by(monkeypatch)
-    code, _c, _rows = run_main(
-        monkeypatch, tmp_path / "down", ["--execute", "--guide"], _refused, found=False, record=down
-    )
-    assert code == 2 and calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX")
-    assert "NOT SEEN" not in capsys.readouterr().out
-    # ... the scene camera down and the wrist's look showing no container: the wrist looked, the chair is guided
-    homes.clear()
+    asked = []
+    monkeypatch.setattr(sv, "run_survey", lambda *a, **k: asked.append(k) or survey)
+    return asked
 
-    def look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
-        ctx.wrist_far, ctx.wrist_looked = [], True
-        said.append("wrist camera: no counter in 4 frames (no level plane wider than a container)")
-        return None, None, None
 
-    monkeypatch.setattr(press_demo, "wrist_look", look)
-    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
-
-    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
-    argv = ["--execute", "--guide", "--wrist-first"]
-    code, _c, _rows = run_main(monkeypatch, tmp_path / "wrist", argv, _refused, found=False, record=down)
-    assert code == EXIT_NOT_LINED_UP and homes == [] and [c["what"] for c in calls] == ["unseen"]
-    assert calls[0]["why"].endswith("the wrist's look in front: wrist camera: no counter in 4 frames (no level plane "
-                                    "wider than a container))")  # fmt: skip
-    # what says a camera looked, and what does not
+def _found_by_the_wrist(xy=(0.62, 0.04)):
     from types import SimpleNamespace
 
-    ctx = SimpleNamespace()
-    seen = lambda record: press_demo.a_camera_looked(ctx, SimpleNamespace(look_record=lambda: record))  # noqa: E731
-    assert seen(LOOKED) and not seen(down) and not seen({"timing": {}}) and not seen(None)
-    assert not press_demo.a_camera_looked(ctx, None)
-    ctx.wrist_looked = True
-    assert seen(down) and press_demo.a_camera_looked(ctx, None)
+    from box_opening.tasks import survey as sv
+
+    fix = SimpleNamespace(top_xyz=(xy[0], xy[1], 0.276), table_z_scene=0.185, partial="")
+    return sv.Survey(fix=fix, find=SimpleNamespace(fix=fix, places=(), patches=()), clouds=["its points"])
 
 
-def test_a_selected_container_nothing_the_cameras_saw_can_be_matched_to_is_guided_too(monkeypatch, tmp_path, capsys):
-    """The UI's selection is one of the scene camera's detections. Where its look holds the selected id in
-    none of its frames and nothing ties a wrist find to it, the wrist is not turned ("not looked for ...")
-    and the run ended NO BOX. Guided, it does not end: the chair is moved until the scene camera has the
-    selected container, and the reason handed on says what could not be matched."""
+NOTHING_THERE = "wrist camera: no counter in 4 frames (no level plane wider than a container)"
+DOWN = {"timing": {}, "segmenter": {"state": "absent", "frames": 0}}  # the scene segmenter gave the look no frame
+
+
+def test_a_camera_that_delivers_nothing_is_a_fault_not_a_container_out_of_view(monkeypatch, tmp_path, capsys):
+    """NO BOX wears the face of several failures (SceneLocator.locate's own note): no container in view, but
+    also streams missing, no TF, the scene segmenter down or silent, a wrist camera with no frame. No moving
+    of the chair cures those, and "the arm cannot see the container, move the chair" is not true of them.
+    A run is guided only where the camera its guidance would watch with DELIVERED and had nothing that could
+    be the container; else it ends NO BOX with what was missing, as it always has, and its row says what
+    that was. Which camera: the wrist's where the wrist look is on (review of 2026-11-19: as first written
+    a wrist camera with no frame was "a camera that looked" because the scene segmenter had given one)."""
+    from types import SimpleNamespace
+
     from box_opening.runtime.abort import EXIT_NOT_LINED_UP
     from box_opening.tasks import press_demo
+    from box_opening.tasks import survey as sv
 
     homes = []
     monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
-    REACH_OUTS.clear()
-    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+
+    def ends(name, argv, **kw):
+        homes.clear()
+        calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+        code, _c, rows = run_main(
+            monkeypatch, tmp_path / name, ["--execute", "--guide", *argv], _refused, found=False, **kw
+        )
+        out = capsys.readouterr().out
+        refused = [r for r in rows if r["leg"] == "reach_refused"]
+        if code == 2:  # NO BOX: said, homed, never guided, and what it was in its row
+            assert calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX") and "NOT SEEN" not in out
+            return refused[-1].get("what")
+        assert code == EXIT_NOT_LINED_UP and homes == [] and "NO BOX" not in out, name
+        assert [c["what"] for c in calls] == ["unseen"] and refused[-1]["what"] == "unseen"
+        return "guided"
+
+    # the scene camera alone, and its segmenter gave the look no frame
+    assert ends("scene down", [], record=DOWN) == "fault"
+    assert ends("scene up", []) == "guided"
+    # the wrist look on: it is the wrist's camera the guidance watches with
+    no_frame = sv.Survey(fix=None, why="no wrist frame at survey:angle-1 (no new wrist frame)", find=None)
+    _wrist_look_says(monkeypatch, no_frame)
+    assert ends("wrist dead, scene up", ["--wrist-first"]) == "fault"  # however alive the scene segmenter is
+    looked = sv.Survey(fix=None, why=NOTHING_THERE, find=SimpleNamespace(fix=None, places=(), patches=()))
+    _wrist_look_says(monkeypatch, looked)
+    assert ends("wrist up, scene down", ["--wrist-first"], record=DOWN) == "guided"  # ... or dead
+    # a wrist that cannot look from any view (none to turn to) is no camera fault: the scene camera's word
+    blind = sv.Survey(fix=None, why="no turn of the wrist shows the table in front (x)", find=None)
+    _wrist_look_says(monkeypatch, blind)
+    assert ends("wrist blind, scene up", ["--wrist-first"]) == "guided"
+    assert ends("wrist blind, scene down", ["--wrist-first"], record=DOWN) == "fault"
+    # by hand none of it is asked: NO BOX, and its row as it always was
+    homes.clear()
+    code, _c, rows = run_main(monkeypatch, tmp_path / "by hand", ["--execute"], _refused, found=False, record=DOWN)
+    assert code == 2 and "what" not in [r for r in rows if r["leg"] == "reach_refused"][-1]
+
+
+def test_what_a_find_with_no_container_is_of_decides_whether_the_chair_is_guided(monkeypatch):
+    """no_container_kind: what each look saw, and which camera a guidance would depend on."""
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from box_opening import guide
+    from box_opening.tasks import press_demo
+    from box_opening.tasks import survey as sv
+
+    def kind(wrist_first=True, wrist=None, side=None, record=LOOKED, why="scene segmenter: saw no food container"):
+        ctx = SimpleNamespace(wrist_seen=wrist, side_seen=side)
+        locator = SimpleNamespace(look_record=lambda: record, last_why=why)
+        return press_demo.no_container_kind(ctx, Namespace(wrist_first=wrist_first), locator)
+
+    two = "scene segmenter: two places pass as this container, [0.80, -0.20] and [1.10, 0.30]: select which"
+    gone = "scene segmenter: the selected container (fc_1) was in none of its 70 frames"
+    assert kind(wrist="unseen") == kind(wrist="unseen", record=DOWN) == kind(wrist="unseen", why=two) == "unseen"
+    assert kind(wrist="unseen", why=gone) == "unseen"  # the wrist looked and has nothing: the chair cures that
+    assert kind(wrist="fault") == "fault" and kind(wrist="several") == "several"
+    assert kind(wrist="not_chosen") == kind(wrist="unseen", side="not_chosen") == "not_chosen"
+    assert kind(wrist="unseen", side="several") == kind(wrist_first=False, side="several") == "several"
+    # the scene camera alone (no wrist look, or a wrist that could not look from any view): its own word
+    for wrist_first in (False, True):
+        assert kind(wrist_first=wrist_first) == "unseen" and kind(wrist_first=wrist_first, record=DOWN) == "fault"
+        assert kind(wrist_first=wrist_first, why=two) == "several"
+        assert kind(wrist_first=wrist_first, why=gone) == "not_chosen"  # it cannot tell it from an id it never had
+        assert kind(wrist_first=wrist_first, record={"timing": {}}) == "fault"
+    assert kind(wrist_first=False, wrist="fault") == "unseen"  # (a wrist the guidance would not watch with)
+    assert press_demo.no_container_kind(SimpleNamespace(), Namespace(wrist_first=False), None) == "fault"
+    # what a wrist look saw (looked_kind): by its finder's word where it judged a frame, a fault where its
+    # camera gave none at a view it stood at, None where it never looked from a view at all
+    find = SimpleNamespace(fix=None, places=(), patches=())
+    for why, judged, saw in (
+        (NOTHING_THERE, True, "unseen"),
+        (
+            "wrist camera: two places pass as this container, [0.61, -0.10] and [0.66, 0.14]: refusing to guess",
+            True,
+            "several",
+        ),
+        ("no wrist frame at survey:angle-1 (no new wrist frame)", False, "fault"),
+        ("no wrist frame at survey:angle-2 (no camera pose for the frame (TF))", False, "fault"),
+        ("no turn of the wrist shows the table in front (x)", False, None),
+        ("the survey keeps its poses clear of the chair by the body model, and it is off (body_layers)", False, None),
+        ("survey:angle-1 (the wrist turned to look at [0.60, 0.00]) not flown: refused (IK_FAIL)", False, None),
+    ):
+        assert press_demo.looked_kind(sv.Survey(fix=None, why=why, find=find if judged else None)) == saw, why
+    assert guide.K_UNSEEN == press_demo.GUIDE_UNSEEN  # (one word for it, the run's and the guide's)
+
+
+def test_a_selection_the_scene_camera_does_not_hold_is_guided_only_where_nothing_that_could_be_it_is_seen(
+    monkeypatch, tmp_path, capsys
+):
+    """The review's worst case (2026-11-19). The UI's selection whose id is in none of the scene camera's
+    frames (typed by hand, or a track perception dropped), wrist_alone off: nothing ties any find to it.
+    As first guided, that run went into "The arm cannot see the container. Move the chair in front of it"
+    with a lid in every frame of its watch, which took none of them: no place of the chair could bring its
+    Ready, for a wait that is five minutes on the UI. Two things were one: a container in no camera's view,
+    which the chair cures, and a container in front of the arm that nothing ties to the one chosen, which
+    it does not. The scene camera cannot tell them apart ("was in none of its frames" either way), so a
+    run the engine can guide turns its wrist to look, and takes nothing it finds:
+      something that could be the container stands in front: NO BOX as at 21aa7cc, its row saying what;
+      nothing does: the chair is guided, as for any container no camera sees."""
+    from types import SimpleNamespace
+
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+    from box_opening.tasks import press_demo
+    from box_opening.tasks import survey as sv
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    gone = "scene segmenter: the selected container (food_container_7) was in none of its 70 frames"
     argv = ["--execute", "--guide", "--wrist-first", "--instance-id", "food_container_7"]
-    code, _c, rows = run_main(monkeypatch, tmp_path, argv, _refused, found=False)
-    assert code == EXIT_NOT_LINED_UP and homes == [] and not REACH_OUTS
-    (call,) = calls
-    assert call["what"] == "unseen" and call["place"] is None
-    assert "nothing the scene camera saw says where the selected container food_container_7 is" in call["why"]
-    assert "NO BOX" not in capsys.readouterr().out
-    # by hand the same selection ends NO BOX, as it did
+    # a container in front of the arm, and the selected id in none of the scene camera's detections
+    REACH_OUTS.clear()
+    asked = _wrist_look_says(monkeypatch, _found_by_the_wrist())
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    code, _c, rows = run_main(monkeypatch, tmp_path / "in front", argv, _refused, found=False, why=gone)
+    assert code == 2 and calls == [] and not REACH_OUTS  # never guided, and never reached out to
+    assert len(asked) == 1 and asked[0]["front"] is True and asked[0]["hint"] is None  # the wrist did look
+    assert len(homes) == 1 and homes[0].startswith("NO BOX — scene camera: scene segmenter: the selected container")
+    assert "a container at [0.620, 0.040], and the selected container food_container_7 is in none of" in homes[0]
+    (refused,) = (r for r in rows if r["leg"] == "reach_refused")
+    assert refused["what"] == "not_chosen" and refused["why"] == homes[0] and "guided" not in refused
+    (noted,) = (r for r in rows if r["leg"] == "wrist_first")
+    assert noted["found"] is True and noted["tied"] is False and noted["untied"] is True
+    out = capsys.readouterr().out
+    assert "the wrist looks only to tell whether anything that could be it stands in front of the arm" in out
+    assert "NOT SEEN" not in out
+    # ... two that could be it, the finder unable to choose: something is there, and nothing ties it either
+    two = "wrist camera: two places pass as this container, [0.61, -0.10] and [0.66, 0.14]: refusing to guess"
+    homes.clear()
+    _wrist_look_says(monkeypatch, sv.Survey(fix=None, why=two, find=SimpleNamespace(fix=None, places=(), patches=())))
+    code, _c, rows = run_main(monkeypatch, tmp_path / "two", argv, _refused, found=False, why=gone)
+    assert code == 2 and calls == [] and [r["what"] for r in rows if r["leg"] == "reach_refused"] == ["not_chosen"]
+    # ... a lid-sized top out of the arm's reach: something that could be it, and no place of the chair makes
+    # it the one selected, so the chair is not guided to it either (as it is where there is no selection)
+    homes.clear()
+    far_why = "wrist camera: the lid-sized top at [1.020, -0.200] stands out of the arm's reach"
+    monkeypatch.setattr(press_demo, "far_tops", lambda find, model: [(1.02, -0.20, 0.30)])
+    _wrist_look_says(
+        monkeypatch, sv.Survey(fix=None, why=far_why, find=SimpleNamespace(fix=None, places=(), patches=()))
+    )
+    code, _c, rows = run_main(monkeypatch, tmp_path / "far", argv, _refused, found=False, why=gone)
+    assert code == 2 and calls == [] and [r["what"] for r in rows if r["leg"] == "reach_refused"] == ["not_chosen"]
+    assert "a lid-sized top at [1.02, -0.20], out of the arm's reach, and the selected container" in homes[0]
+    code, _c, rows = run_main(monkeypatch, tmp_path / "far, none chosen", argv[:3], _refused, found=False)
+    assert code == EXIT_NOT_LINED_UP and [c["what"] for c in calls] == ["far"]  # (no selection: guided to it)
     calls.clear()
-    code, _c, _rows = run_main(monkeypatch, tmp_path / "by hand", argv[:1] + argv[2:], _refused, found=False)
+    monkeypatch.setattr(press_demo, "far_tops", lambda find, model: [])
+    # nothing that could be the container in front of the arm: no camera sees it, and the chair is guided
+    homes.clear()
+    nothing = sv.Survey(fix=None, why=NOTHING_THERE, find=SimpleNamespace(fix=None, places=(), patches=()))
+    _wrist_look_says(monkeypatch, nothing)
+    code, _c, rows = run_main(monkeypatch, tmp_path / "nowhere", argv, _refused, found=False, why=gone)
+    assert code == EXIT_NOT_LINED_UP and homes == [] and [c["what"] for c in calls] == ["unseen"]
+    assert calls[0]["place"] is None and NOTHING_THERE in calls[0]["why"]
+    assert "NO BOX" not in capsys.readouterr().out
+    # the scene camera alone (no wrist look): it cannot tell the two apart, so it is not guided for
+    calls.clear()
+    code, _c, rows = run_main(monkeypatch, tmp_path / "scene", argv[:2] + argv[3:], _refused, found=False, why=gone)
+    assert code == 2 and calls == [] and [r["what"] for r in rows if r["leg"] == "reach_refused"] == ["not_chosen"]
+    # by hand the wrist is not turned for it and the run ends NO BOX, as it did, with nothing new in its row
+    calls.clear(), asked.clear(), homes.clear()
+    asked = _wrist_look_says(monkeypatch, _found_by_the_wrist())
+    code, _c, rows = run_main(monkeypatch, tmp_path / "by hand", argv[:1] + argv[2:], _refused, found=False, why=gone)
+    assert code == 2 and calls == [] and asked == [] and len(homes) == 1
+    assert "not looked for: nothing the scene camera saw says where the selected container" in homes[0]
+    assert "what" not in [r for r in rows if r["leg"] == "reach_refused"][-1]
+
+
+def test_two_things_that_could_be_the_container_end_a_guided_run_as_they_always_ended_a_run(
+    monkeypatch, tmp_path, capsys
+):
+    """ "Nothing found, or two places that could be it, is not_found" (docs/interface.md, since the side
+    survey). Two lid-sized tops side by side within the arm's reach are not parted by where the chair
+    stands, so a run is not guided for them: NO BOX, as ever, its row saying it was two. But what the SCENE
+    camera makes of two things further off does not make a find "two" where the wrist looked in front of
+    the arm and saw nothing: that is a container not in view, and guided (review of 2026-11-19: the words
+    of the whole find were searched for "two", the scene camera's part included)."""
+    from types import SimpleNamespace
+
+    from box_opening.runtime.abort import EXIT_NOT_LINED_UP
+    from box_opening.tasks import press_demo
+    from box_opening.tasks import survey as sv
+
+    homes = []
+    monkeypatch.setattr(press_demo, "try_home", lambda ctx, runner, execute, why: homes.append(why))
+    two = "wrist camera: two places pass as this container, [0.61, -0.10] and [0.66, 0.14]: refusing to guess"
+    scene_two = "scene segmenter: two places pass as this container, [0.80, -0.20] and [1.10, 0.30]: select which"
+    find = SimpleNamespace(fix=None, places=(), patches=())
+    argv = ["--execute", "--guide", "--wrist-first"]
+    _wrist_look_says(monkeypatch, sv.Survey(fix=None, why=two, find=find))
+    calls = _guided_by(monkeypatch, EXIT_NOT_LINED_UP)
+    code, _c, rows = run_main(monkeypatch, tmp_path / "wrist two", argv, _refused, found=False)
     assert code == 2 and calls == [] and len(homes) == 1 and homes[0].startswith("NO BOX")
+    assert [r["what"] for r in rows if r["leg"] == "reach_refused"] == ["several"]
+    homes.clear()
+    _wrist_look_says(monkeypatch, sv.Survey(fix=None, why=NOTHING_THERE, find=find))
+    code, _c, rows = run_main(monkeypatch, tmp_path / "scene two", argv, _refused, found=False, why=scene_two)
+    assert code == EXIT_NOT_LINED_UP and homes == [] and [c["what"] for c in calls] == ["unseen"]
+    # ... and the scene camera alone, with two it cannot choose between: its own word, and no guidance
+    calls.clear()
+    code, _c, rows = run_main(monkeypatch, tmp_path / "alone", argv[:2], _refused, found=False, why=scene_two)
+    assert code == 2 and calls == [] and [r["what"] for r in rows if r["leg"] == "reach_refused"] == ["several"]
 
 
 def _side_survey(monkeypatch, finds):
@@ -833,16 +1014,16 @@ def test_the_wrist_look_says_which_tops_it_saw_out_of_the_arms_reach(monkeypatch
     said = []
     got = press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None, said=said)
     assert got is None and ctx.wrist_far == [(1.02, -0.20, 0.30)] and said == [why]
-    assert ctx.wrist_looked is True  # its finder judged a frame: what it did not find is not in view
+    assert ctx.wrist_seen == "unseen"  # its finder judged a frame: what it did not find is not in view
     survey = sv.Survey(fix=None, why="wrist camera: no counter", find=SimpleNamespace(fix=None, places=()))
     monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
     assert press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None) is None
-    assert ctx.wrist_far == [] and ctx.wrist_looked is True
-    # ... and a look that showed it no frame at all (no view to turn to, no wrist frame) has not looked
+    assert ctx.wrist_far == [] and ctx.wrist_seen == "unseen"
+    # ... and a look that never stood at a view (none to turn to) has not looked at all
     survey = sv.Survey(fix=None, why="no turn of the wrist shows the table in front (x)", find=None)
     monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
     assert press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None) is None
-    assert ctx.wrist_far == [] and ctx.wrist_looked is False
+    assert ctx.wrist_far == [] and ctx.wrist_seen is None
 
 
 def test_a_run_by_hand_is_never_guided(monkeypatch, tmp_path):

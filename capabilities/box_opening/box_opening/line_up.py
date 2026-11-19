@@ -11,6 +11,11 @@ where the box was last seen and what the boundary says of that place, is a `sour
                                                          no container, "" while it has not looked or sees it:
                                                          the guide then says the arm cannot see it (owner
                                                          2026-11-19), and to move the chair
+    source.none_kind                                     ... and what that is of (guide.K_*; a source without
+                                                         it: guide.kind_of its word). What no chair move
+                                                         cures is said as what it is, and where it stands
+                                                         the source ends the line-up on it (`unable`,
+                                                         `uncured`: BoxSource)
 
 It ends one of five ways: GO (Open pressed on a fresh "Ready. Open the container?"), CANCELLED (the
 panel's Cancel, or the orchestrator's), TIMED_OUT (the time for lining up ran out: the panel says to press
@@ -230,8 +235,18 @@ class LineUp:
                 if answered and self._on_unasked is not None:
                     self._on_unasked()  # a y with nothing asked (or asked of a box no longer seen): no yes
             fix, reach = (None, None) if timed_out_at is not None else self._source.look(now)
+            if timed_out_at is None and getattr(self._source, "unable", ""):
+                # heard on this tick (the arm is not at its rest pose; a state no chair move cures has
+                # stood its time): said as what it is, at the top, and never first as a container the arm
+                # cannot see. As first written the tick that heard the arm's word showed one panel and one
+                # console line of "The arm cannot see the container. Move the chair in front of it" before
+                # "The arm is not at its rest pose" (review of 2026-11-19)
+                continue
             # (read after look(): what the source heard this tick is in it)
-            say = self.guide.update(now, fix, reach, none=str(getattr(self._source, "why_none", "") or ""))
+            kind = getattr(self._source, "none_kind", None)
+            if kind is None:
+                kind = guide.kind_of(getattr(self._source, "why_none", ""))
+            say = self.guide.update(now, fix, reach, none=kind, looked=bool(getattr(self._source, "looked", False)))
             self._show(say, now)
             if say.state == guide.TIMED_OUT:
                 timed_out_at = now if timed_out_at is None else timed_out_at
@@ -308,6 +323,9 @@ PROBE_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREA
 # last frame and its exception ...
 TAIL_LINES = 4
 TAIL_WAIT_S = 0.5  # ... and its reader is given this long to read what it wrote as it died
+# a watch's word on having no container still stands where its newest saying is no older than this: it says
+# one a second (survey.LINE_UP_NONE_S, box_watch.LOOK_S), and a watch that has fallen silent says nothing
+NONE_FRESH_S = 3.0
 
 
 class Child:
@@ -408,13 +426,29 @@ class BoxSource:
     height), and as first written a refused place counted only within 15 mm of the run's own lid height and
     in that height's grid (review of 2026-11-17). `unseen`: where the line-up begins because the run's own
     look found NO container (press_demo's "NOT SEEN"), that look's word on why: the watch's word on why it
-    sees none (why_none) until the watch says its own or sees one, so that the person is told at once that
-    the arm cannot see the container, not "Looking for the container" through the seconds the wrist takes
-    to turn to its view. Nothing else of a line-up starts from a container having been seen: the wrist's
-    view is chosen by the arm's own reach (tasks/survey.angled_views), and reach_probe waits, idle, for
-    the first sighting, whose lid height names its grid (tasks/reach_probe.Server.step). close() ends the
-    children that are this source's own, the probe by its own quit so that it keeps its grid; it can take
-    PROBE_QUIT_S, so what must not wait is done before it."""
+    sees none (why_none, `looked`) until the watch says its own or sees one, so that the person is told at
+    once that the arm cannot see the container, not "Looking for the container" through the seconds the
+    wrist takes to turn to its view. `looked` False: that look is not to be said (the engine's, after a
+    yes of the same goal: the watch had the container a moment ago where the person now stands, and it
+    looks first, as at any line-up's start). Nothing else of a line-up starts from a container having been seen:
+    the wrist's view is chosen by the arm's own reach (tasks/survey.angled_views), and reach_probe does
+    nothing before the first sighting, whose lid height names its grid (tasks/reach_probe.Server.step).
+    So for such a line-up reach_probe is STARTED at the first sighting, not at the watch's first word: one
+    that cannot start, or dies, ended the action line_up_unavailable, not recoverable, of a run that at
+    21aa7cc ended a recoverable not_found and of a container that may never come into view (review of
+    2026-11-19). The cost is the probe's own start-up after that sighting, before the first direction.
+
+    What a "none" is OF (`none_kind`: the watch's own "kind" where it says one, the run's; else
+    guide.kind_of its word) decides what the person is told, and whether moving the chair can cure it. A
+    kind that cannot (guide.NO_CURE: a camera that delivers nothing, two things that could be the
+    container, a container nothing ties to the selection) ends the line-up once it has been the watch's
+    word without a break for guide.NO_CURE_S, that word still fresh (NONE_FRESH_S): `unable` (its
+    sentence, said for the last LINGER_S of that with no button) and `uncured` (which it was). A word of
+    another kind, or a sighting, starts that time again: a segmenter message late for one look, or a
+    second lid passing through the view while the chair turns, does not end a guidance.
+
+    close() ends the children that are this source's own, the probe by its own quit so that it keeps its
+    grid; it can take PROBE_QUIT_S, so what must not wait is done before it."""
 
     def __init__(
         self,
@@ -427,6 +461,7 @@ class BoxSource:
         spawn=Child,
         refused=(),
         unseen="",
+        looked=True,
     ):
         self._probe_argv, self._env, self._far_m = probe_argv, env, far_m
         self._refused_at = [(float(xy[0]), float(xy[1])) for xy in refused or () if len(xy) >= 2]
@@ -441,8 +476,17 @@ class BoxSource:
         self._proof = None  # the newest proof: ((x, y, z), ok)
         self._refuted = set()  # (lid z of the grid, i, j): cells a proof for the box itself refused this line-up
         # the watch's newest word on why it sees no box; none once it has seen it since. Until its first word,
-        # the run's own where its look found none (`unseen`)
-        self.why_none = str(unseen or "")
+        # the run's own where its look found none (`unseen`) and that look is to be said (`looked`)
+        self.looked = bool(unseen) and bool(looked)  # the run HAD looked: its word is said from the first tick
+        self.why_none = str(unseen or "") if self.looked else ""
+        # what that is of, as the guide is told it (guide.K_*, "" while the watch has said nothing): the
+        # run's own look's none is a container that is not in view
+        self.none_kind = guide.K_UNSEEN if self.looked else ""
+        self._lazy_probe = bool(unseen)  # reach_probe is started at the first sighting, not before
+        self._robot = None  # which robot this is, as the watch said it, until the probe is started on it
+        # since when the watch's "none" has been of the kind it is now, without a break, and when last said
+        self._said_since = self._said_at = None
+        self.uncured = ""  # the kind no chair move cures that this line-up ended on (`unable` says it)
         self.why_gone = ""  # where it is the probe that ended (gone): that, and the end of its log
         self.unable = ""  # what the watch said that no waiting cures (guide.ARM_NOT_AT_REST): the line-up ends
         self.viewed = False  # the run said its wrist stands at the line-up's view: it has turned
@@ -452,12 +496,9 @@ class BoxSource:
         new = False
         for t, msg in self.watch.messages():
             if "robot" in msg and self.probe is None:
-                robot = msg["robot"]
-                if robot.get("urdf"):
-                    env = dict(os.environ if self._env is None else self._env, **PROBE_ENV)
-                    self.probe = self._spawn(self._probe_argv(robot["urdf"], robot.get("root")), env, self._log)
-                elif self._log is not None:
-                    self._log("the robot's URDF was not heard: no boundary can be worked out")
+                self._robot = msg["robot"]
+                if not self._lazy_probe:
+                    self._start_probe()
             elif "fix" in msg:
                 f = msg["fix"]
                 by_wrist = f.get("by") == "wrist"
@@ -473,11 +514,20 @@ class BoxSource:
                     self._wrist_at = fix.t
                 self._fix = (fix, xyz[2], f.get("table_z"), bool(f.get("rough")))
                 self.why_none = ""  # it is seen: whatever it said before is no longer why
+                self.none_kind = ""
+                self._said_since = self._said_at = None
+                self.looked = False
+                self._start_probe()  # (where it waited for this: a line-up that began with no container seen)
                 new = True
             elif "none" in msg:
                 self.why_none = str(msg["none"])
                 if self.why_none == guide.ARM_NOT_AT_REST:
                     self.unable = self.why_none  # what no waiting cures: the line-up ends on it (LineUp.run)
+                    continue  # (the arm's word, not a camera's on a container: it is of no kind)
+                kind = str(msg.get("kind") or "") or guide.kind_of(self.why_none)
+                if kind != self.none_kind or self._said_since is None:
+                    self._said_since = t
+                self.none_kind, self._said_at = kind, t
             elif "view" in msg:
                 self.viewed = True
                 # said once, as the wrist stands at the line-up's view: the run starts its reach from these
@@ -518,6 +568,28 @@ class BoxSource:
                         self._refuted.add((zone.lid_z, *zone.index(p["xyz"])))
                         self._refute()
         return new
+
+    def _start_probe(self):
+        """reach_probe, on the robot the watch named: at the watch's first word, or at the first sighting
+        where this line-up began with no container seen (`unseen`). Once."""
+        robot, self._robot = self._robot, None
+        if self.probe is not None or robot is None:
+            return
+        if robot.get("urdf"):
+            env = dict(os.environ if self._env is None else self._env, **PROBE_ENV)
+            self.probe = self._spawn(self._probe_argv(robot["urdf"], robot.get("root")), env, self._log)
+        elif self._log is not None:
+            self._log("the robot's URDF was not heard: no boundary can be worked out")
+
+    def _stands(self, now):
+        """Whether what the watch says of having no container is a state no chair move cures that has stood
+        its time: the line-up then ends on it (`unable`, `uncured`), as on an arm that is not at rest."""
+        kind = self.none_kind
+        if self.unable or kind not in guide.NO_CURE or self._said_since is None:
+            return
+        fresh = now - self._said_at <= NONE_FRESH_S
+        if fresh and now - self._said_since >= guide.NO_CURE_S - LINGER_S:
+            self.uncured, self.unable = kind, guide.NO_CURE[kind]
 
     def _refute(self):
         """The grid in hand without the cells that do not work for this line-up: those a proof for the box
@@ -569,6 +641,7 @@ class BoxSource:
 
     def look(self, now):
         new = self._hear()
+        self._stands(now)
         if self._fix is None:
             return None, None
         fix, z, table_z, rough = self._fix

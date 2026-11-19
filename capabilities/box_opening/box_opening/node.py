@@ -82,9 +82,11 @@ PARAMS = {
     # "" turns the check off (the bench). BOX_OPENING_BODY_LAYERS in the node's environment overrides
     "body_layers": "/config/robot/curobo/planner.yaml",
     # where the scene camera finds no container, look for it with the wrist camera from one or two
-    # poses over the arm's side (a chair parked side-on to a counter: tasks/survey); off, such a
-    # run stops with NO BOX before anything moves, as the owner had it (2026-10-22). Never with the
-    # orchestrator's selection: that is the scene camera's detection
+    # poses over the arm's side (a chair parked side-on to a counter: tasks/survey). Off, such a run has
+    # found none: its chair is guided where nothing that could be the container is in any view, and it
+    # stops with NO BOX where that is nothing the chair's move cures (press_demo.no_container_kind; a run
+    # by hand always stops, as the owner had it on 2026-10-22). Never with the orchestrator's selection:
+    # that is the scene camera's detection
     "wrist_survey": False,
     # the wrist camera finds the container: the wrist turns where the arm rests so its camera sees
     # the table in front (up to four views, first where the scene camera has the box; a lid a view
@@ -92,13 +94,17 @@ PARAMS = {
     # the wrist finds none (a table faced from the front: the scene camera sees no lid whole where
     # the arm presses, tasks/survey). With the orchestrator's selection too: the wrist's box is
     # taken only where it stands in the direction the scene camera has the selected container
-    # (press_demo.SelectionTie); the instance marked opened is the selected one either way
+    # (press_demo.SelectionTie); the instance marked opened is the selected one either way. For a selected
+    # id that is in none of the scene camera's frames the wrist turns too (since 2026-11-19), only to tell
+    # whether anything that could be the container stands in front of the arm, and takes nothing
     "wrist_first": False,
     # with wrist_first, for a selection that is NO detection of the scene camera's (the selected id in none of
     # its frames: the UI's object list typed by hand): the wrist looks from its own views, tied to nothing, and
     # what it finds is taken only where it is the ONE container it sees; two or more, NO BOX. Off (the default):
-    # such a run ends NO BOX without turning the wrist. On, the arm opens whichever single container stands in
-    # front of it under the selected id: the owner's to turn on (press_demo.wrist_look)
+    # nothing the wrist finds is taken for such a selection: where its look shows something that could be the
+    # container the run ends NO BOX (the person is told to choose it again), and where it shows nothing the
+    # chair is guided. On, the arm opens whichever single container stands in front of it under the selected
+    # id: the owner's to turn on (press_demo.wrist_look)
     "wrist_alone": False,
     # a run's full lines ("[press_demo] ...") on this node's console too, between the flight view's, as before
     # 2026-11-17. Off (the default): they are kept in runs/console-<stamp>.log, and the console is the flight view
@@ -299,6 +305,17 @@ END_SAYS = {
 END_NO_ANSWER = "No answer in time. Nothing was pressed"
 END_UI_GONE = "The screen lost the arm's panel. Nothing was pressed"
 END_NOT_SEEN = "The arm never saw the container. Nothing was pressed"
+# ... the three ends of a find or a line-up on what no moving of the chair cures (not_found; by guide.K_*),
+# each true of every case that shows it: the first of a selected id the scene camera's detections do not
+# hold, whether or not a camera sees a container (it may be the very one the person chose, so it is not
+# said to be another); the second of two lid-sized tops, the second of which may be no container at all
+END_NO_CURE = {
+    guide.K_NOT_CHOSEN: "The arm cannot tell which container you chose. Choose it again",
+    guide.K_SEVERAL: "The arm cannot choose between two things that could be the container",
+    guide.K_FAULT: "The arm's camera is not working. Nothing was pressed",
+}
+# ... and of a goal whose run asked to be guided once more than GUIDES_MAX (not_lined_up)
+END_DISAGREE = "Ready three times, and the arm could not go on. Nothing was pressed"
 END_RETRY = "You can try again"
 END_HELP = "Ask someone to check the arm"
 
@@ -448,9 +465,12 @@ LOOKING_AGAIN = "looking for the container again"
 # far top's row read NO_WAY_IN_WAIT too, and its reason went through the words for a press that does not
 # plan ("no press plans from here: the way in does not plan")
 FAR, UNSEEN = "far", "unseen"
+# (no "wait, the arm comes to rest first" in these two: after a wrist look that found nothing the arm stands
+# where it stood, at rest but for its wrist, and under the 120 s rule the run may be about to end: review of
+# 2026-11-19. Where a side survey left the arm over its side, its home says TO_REST as it ends)
 WAITS = {
-    FAR: "out of reach from here: wait, the arm comes to rest first",
-    UNSEEN: "no container in view: wait, the arm comes to rest first",
+    FAR: "out of reach from here",
+    UNSEEN: "no container in view",
 }
 # ... what this node's own log line calls each as the chair is guided for it (_follow)
 ASKED_FOR = {
@@ -470,6 +490,22 @@ NOT_SEEN = (
     "in front of the arm, then press open again)"
 )
 CONSOLE_AGAIN_UNSEEN = "Out of time: the container was never seen. Start open_box again in front of it"
+# Guidance is for what moving the chair can cure. What it cannot, a find or a line-up's watch says as what it
+# is (guide.K_*: press_demo.no_container_kind, line_up.BoxSource), and the action ends on it, recoverable,
+# with the code such a find always had (not_found) and a sentence of its own for the panel (review of
+# 2026-11-19: each was guided with "The arm cannot see the container. Move the chair in front of it", for a
+# wait that is five minutes on the UI). The reason for the log and the result, by kind ...
+NO_CURE_WHY = {
+    guide.K_NOT_CHOSEN: "a camera sees something that could be the container, and nothing ties it to the selected one",
+    guide.K_SEVERAL: "a camera sees two things that could be the container, and nothing says which is meant",
+    guide.K_FAULT: "the camera the line-up watches with delivers nothing",
+}
+# How often one goal's run may ask to be guided. Each guidance ends on the person's yes to "Ready", which
+# the WATCH asks (one frame's find, reach_probe's proof); the run then looks for itself (its own views, the
+# planner) and may find no container, or no press, again. Nothing held the two to agreeing, and on the UI's
+# five-minute wait nothing ended the round either (review of 2026-11-19). After this many the next request
+# ends the action, recoverable, saying that the two did not agree. Three: the integrator's number
+GUIDES_MAX = 3
 # what is said of an arm that holds where it stopped (error_for's arm_holds)
 ARM_HOLDS = "the arm holds where it stopped: clear it, attended, before the next run"
 LINE_UP_LATE = (
@@ -839,13 +875,15 @@ class Asking:
     guided, for as long as the goal lasts and into the goal a line-up is carried to: each line-up's source
     is told them all (line_up.BoxSource). As first written only the place of the request in hand was held,
     for that one line-up: a second guidance forgot the first place, and the carried line-up knew none, so
-    either could ask "Ready?" on the very spot a run had refused (review of 2026-11-17)."""
+    either could ask "Ready?" on the very spot a run had refused (review of 2026-11-17).
+    `yeses`: how many of the goal's line-ups have ended on the person's yes so far (_line_up)."""
 
     def __init__(self, ui, timed, started, view=None, find=True, carried=False, refused=(), wait_s=None):
         self.ui, self.timed, self.started, self.view, self.find = bool(ui), bool(timed), started, view, find
         self.wait_s = None if wait_s is None else float(wait_s)
         self.carried = bool(carried)
         self.refused = [list(place) for place in refused or ()]
+        self.yeses = 0
 
     def left_s(self, now=None):
         """How long a line-up that begins now may take."""
@@ -880,6 +918,9 @@ class Tracker:
         self.held = False  # the lid in the fingers: from the grip that held it to its release or put-back
         self.held_said = False  # ... as the world state was last told (Capability._sync_held)
         self.opened = None  # the object record's `opened`: None not asked, then the orchestrator's answer
+        # what the run's NO BOX was, where its row says (guide.K_*: press_demo.no_container_kind), for the
+        # panel's own sentence on how the action ended (END_NO_CURE)
+        self.no_box = None
 
     def add(self, row):
         """The (phase, %, message) this row says, or None."""
@@ -970,6 +1011,7 @@ class Tracker:
             self.held = self.held or bool(row.get("ok"))
             return "grip", self.pct, "holding the lid" if row.get("ok") else "the grip missed the lid"
         if leg == "reach_refused":
+            self.no_box = row.get("what") if row.get("what") in END_NO_CURE else self.no_box
             return "locate", self.pct, "stopping: the run refused to go on"
         return None
 
@@ -981,6 +1023,7 @@ class Tracker:
         return self.action_id == "open_box" and code == 0 and self.lid_down()
 
 
+NO_BUTTON = re.compile(r"no button")  # the look found the container and no button on it (error_for)
 # The run's last STOP line -> (error code, recoverable), first match wins (REVIEW_RULES U4).
 # Recoverable only where the run says nothing moved, or that the arm got home with nothing
 # held: a retry may then succeed. A STOP no rule names, and an exit with none (a traceback),
@@ -999,7 +1042,7 @@ STOP_CODES = (
     (re.compile(r"slipped out of the fingers"), "lid_dropped", False),
     (re.compile(r"the lid is back on the box"), "lid_put_back", True),
     (re.compile(r"did not pop|the knob is not up|pressed nothing"), "not_popped", True),
-    (re.compile(r"no button"), "no_button", True),
+    (NO_BUTTON, "no_button", True),
     (re.compile(r"nothing was pressed|nothing moved"), "no_press", True),
 )
 
@@ -1017,10 +1060,19 @@ def guide_reason(asked, default="no reason given"):
     request gives none)."""
     what, why = asked.get("what"), str(asked.get("why") or "")
     if what == UNSEEN:
-        return not_seen_reason(why)
+        return not_seen_reason(why)  # (one thing only, since 2026-11-19: nothing that could be it is in view)
     if what == FAR:
         return FAR_SEEN
     return no_press_reason(why or default)
+
+
+def guide_rounds(asked):
+    """Which of its goal's guidances a run's request is for (its "n": 1 for the first), 0 where it does not
+    say."""
+    try:
+        return int((asked or {}).get("n") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def error_for(action_id, code, lines):
@@ -1034,6 +1086,12 @@ def error_for(action_id, code, lines):
         # the e-stop, or control lost: the run sent nothing after it (REVIEW_RULES C5)
         return EngineError("arm_halted", why, recoverable=False)
     if code == 2:
+        # two ends share this exit: no container found (NO BOX), and, from the look pose, no button on the
+        # one that was found (reach_press: "STOP: no button from the look pose"). The last word says which.
+        # Until 2026-11-19 every exit 2 was not_found before the words were read, and no_button could not
+        # be reached by a real run at all (the test fed its line with exit 1)
+        if "NO BOX" not in why and NO_BUTTON.search(why):
+            return EngineError("no_button", why, recoverable=True)
         return EngineError("not_found", why, recoverable=True)
     if code == 3:
         return EngineError("not_home", why, recoverable=True)
@@ -1371,10 +1429,17 @@ class Capability(CapabilityEngine):
         refused = [list(place) for place in ask.refused]
 
         # where the run asks because its own look found no container, that look's word on why: the line-up
-        # says at once that the arm cannot see it, before its watch has said a word of its own (BoxSource)
+        # says at once that the arm cannot see it, before its watch has said a word of its own, and what
+        # judges the boundary is started only at the first sighting (BoxSource).
+        # The word is not said after a yes of this goal (`looked` False): the watch HAD the container a
+        # moment ago where the person now stands, and "The arm cannot see the container. Move the chair in
+        # front of it" would tell a person who is in place to move. There the watch looks first, as at any
+        # line-up's start (review of 2026-11-19)
         unseen = {}
         if asked is not None and asked.get("what") == UNSEEN:
             unseen = {"unseen": str(asked.get("why") or "no camera sees the container")}
+            if ask.yeses:
+                unseen["looked"] = False
 
         def source():
             made.append(self._box_source(env, instance_id, watch=run_, refused=refused, **unseen))
@@ -1382,6 +1447,26 @@ class Capability(CapabilityEngine):
 
         try:
             left = ask.left_s()
+            rounds = guide_rounds(asked)
+            if rounds > GUIDES_MAX:
+                # the watch said "Ready" and the person said yes GUIDES_MAX times, and each time the run's
+                # own look found no container, or no press, where the watch had one: the two do not agree,
+                # and another round would be the same round. The run is told to stop (below: its wrist
+                # back to rest), and the next open_box does not line up first: it would ask the same watch
+                why = guide_reason(asked, "no press plans from where the chair stands")
+                if view is not None:
+                    view.guide_end(False, "guided %d times already, and the run cannot go on (%s)" % (GUIDES_MAX, why))
+                raise saying(
+                    EngineError(
+                        "not_lined_up",
+                        "the run asked to be guided a %s time in one goal (%s): %d times its watch had the "
+                        "container where the arm opens it and the person said yes, and each time the run's own "
+                        "look could not go on from there. Nothing was pressed"
+                        % ({4: "fourth"}.get(rounds, "%dth" % rounds), why, GUIDES_MAX),
+                        recoverable=True,
+                    ),
+                    END_DISAGREE,
+                )
             if asked is not None and ask.timed and left < GUIDE_MIN_S:
                 why = guide_reason(asked, "no press plans from where the chair stands")
                 self._line_up_again(ask)  # the next open_box lines up first, with its whole time
@@ -1509,13 +1594,14 @@ class Capability(CapabilityEngine):
             time.sleep(line_up.POLL_S)
         return cancelled, late
 
-    def _box_source(self, env, instance_id, watch=None, refused=(), unseen=""):
+    def _box_source(self, env, instance_id, watch=None, refused=(), unseen="", looked=True):
         """A real run's line-up source (line_up.BoxSource): a watch follows the container and reach_probe judges
         where it stands, for as long as the panel is up. `watch`: the run itself, started with --line-up (its
         wrist looks; _lined_up_run); None, and box_watch is run for it, which reads the scene camera alone and
         holds no client for the arm. reach_probe never can move it. `refused`: places where the run itself has
         just found no press (a line-up in the middle of it), which do not work for this line-up. `unseen`:
-        the run's own word on why its look found no container, where that is why it asked (BoxSource)."""
+        the run's own word on why its look found no container, where that is why it asked, and `looked`,
+        whether the person is told that from the first panel (BoxSource)."""
         container = config_path(self._param("container"), "containers")
         if watch is None:
             watch = [executable("box_watch"), "--container", container]
@@ -1540,7 +1626,8 @@ class Capability(CapabilityEngine):
             far_m=far,
             log=lambda text: LOGGER.log(logging.INFO, f"line-up: {text}"),
             refused=refused,
-            **({"unseen": unseen} if unseen else {}),  # (said only of a run that saw none: every other as it was)
+            # (said only of a run that saw none: every other as it was)
+            **({"unseen": unseen, "looked": looked} if unseen else {}),
         )
 
     def _line_up(self, ctx, make_source, ask, on_cancel=None, asked=None):
@@ -1657,10 +1744,44 @@ class Capability(CapabilityEngine):
                 else "what watched the container ended while lining up: nothing ran",
                 recoverable=False,
             )
+        uncured = ""
+        if outcome == line_up.UNABLE and not getattr(source, "lost", False):
+            uncured = getattr(source, "uncured", "")
+        elif outcome == line_up.TIMED_OUT:
+            uncured = getattr(lining.guide, "uncured", "")
+        if uncured in END_NO_CURE:
+            # what no moving of the chair cures stood for guide.NO_CURE_S (BoxSource), or was what the panel
+            # said as the line-up's time ran out (Guide.uncured: a line-up the 120 s rule gave less): a
+            # camera that delivers nothing, two things that could be the container, a container nothing ties
+            # to the selection. Said on the panel as what it is, and ended as the find that meets it ends
+            # (not_found, recoverable; the wrist turned back by the caller), with the panel's own sentence
+            # for it. Nothing is carried to the next open_box: a line-up first would meet the same
+            why = getattr(source, "why_none", "")
+            if outcome == line_up.UNABLE:
+                when = "for %.0f s of the line-up" % guide.NO_CURE_S
+            else:
+                when = "as the line-up's %.0f s ran out" % budget_s
+            ended("%s (%s)" % (NO_CURE_WHY[uncured], when))
+            raise saying(
+                EngineError(
+                    "not_found",
+                    "%s, %s: nothing was pressed%s" % (NO_CURE_WHY[uncured], when, f" -- {why}" if why else ""),
+                    recoverable=True,
+                ),
+                END_NO_CURE[uncured],
+            )
         if outcome == line_up.TIMED_OUT:
             why = getattr(source, "why_none", "")
             told = lining.guide.instruction  # the newest "Move ...", where one was given
-            if (asked is not None or getattr(ask, "carried", False)) and lining.guide.saw_box:
+            # the 120 s rule cut short the guidance of a run whose own look had found no container: the next
+            # open_box lines up first whether or not the watch saw the container in those few seconds, as it
+            # does where there was no time to guide at all (_run_lines_up). Its look took most of the
+            # line-up's time, and another whole look would leave the next goal as little (review of
+            # 2026-11-19: one of the two ends carried and the other did not). Once: a carried line-up that
+            # sees nothing does not carry again. A wait that was the person's own (minutes, on the UI or by
+            # hand) carries nothing for a container never seen: nothing was cut short
+            unseen_cut = asked is not None and asked.get("what") == UNSEEN and ask.timed
+            if ((asked is not None or getattr(ask, "carried", False)) and lining.guide.saw_box) or unseen_cut:
                 # "press open again" goes on from the line-up, with its whole time (_lines_up)
                 self._line_up_again(ask)
             if lining.guide.saw_box:
@@ -1697,6 +1818,7 @@ class Capability(CapabilityEngine):
         if outcome != line_up.GO:  # nothing but the user's yes lets a run start
             ended(f"ended {outcome!r}")
             raise EngineError("line_up_unavailable", f"the line-up ended {outcome!r}: nothing ran", recoverable=False)
+        ask.yeses += 1
         if view is not None:
             view.guide_end(True, "yes" if lining.said_yes else "Open pressed", again=asked is not None, find=ask.find)
         return time.monotonic() - t0
@@ -1948,6 +2070,10 @@ class Capability(CapabilityEngine):
             )
         elif code != 0:
             error = error_for(action_id, code, run_.lines)
+            if error.error_code == "not_found" and track.no_box in END_NO_CURE:
+                # the find ended on what no moving of the chair cures, and its row says which: the panel
+                # says that, not "The arm could not find the container" (end_says)
+                saying(error, END_NO_CURE[track.no_box])
         if error is not None:
             if track.held:
                 self._ends_holding = True
@@ -2011,8 +2137,10 @@ class Capability(CapabilityEngine):
                 )
                 # why, to whoever follows the action's progress: a person at the terminal program has no
                 # console to read it on. The run asks only once its arm is at rest (press_demo.guide_chair),
-                # so this is the first word that the chair is to move
-                ctx.progress(line_up.PHASE, 0.0, why[:1].upper() + why[1:] + GUIDE_SAYS, pausable=False)
+                # so this is the first word that the chair is to move. (Not of a request past GUIDES_MAX:
+                # that one ends the action, and nothing is to be moved for it)
+                if guide_rounds(asked) <= GUIDES_MAX:
+                    ctx.progress(line_up.PHASE, 0.0, why[:1].upper() + why[1:] + GUIDE_SAYS, pausable=False)
                 self._run_lines_up(ctx, env, run_, action_id, track.instance_id, ask, asked=asked)
                 # the person's yes, and the run has its go. The line-up had the screen: the run's panel is
                 # sent again at once, and what it and the progress say is where the run is NOW (Tracker.went),

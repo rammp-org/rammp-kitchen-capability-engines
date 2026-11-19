@@ -53,7 +53,7 @@ A guided run whose cameras see no container does not end at its find (owner 2026
 what was missing, and the line-up says it to the person until a camera has the container:
 
      1 FIND      FAIL  no camera sees the container                         19.4 s
-                 next  the run does not end here: wait while the arm comes to rest
+                 next  the run asks for the chair to be guided
        line up   ...   the arm rests and the wrist looks: move the chair as told
                  say   The arm cannot see the container. Move the chair in front of it
                  say   Move closer, about 30 cm
@@ -68,8 +68,6 @@ import re
 import sys
 import threading
 import time
-
-from box_opening import guide
 
 WIDTH = 68  # the column a step's seconds end at
 PREFIX = re.compile(r"^\[press_demo\] ")
@@ -128,7 +126,6 @@ NOT_SEEN = re.compile(r"^NOT SEEN: (.*)$")
 # the find's words for it, and for a box the wrist sees out of the arm's reach (the engine says them too,
 # of a run that asked to be guided for either: node.guide_reason)
 NONE_SEEN = "no camera sees the container"
-SEVERAL_SEEN = "more than one thing looks like the container, and nothing says which it is"
 FAR_SEEN = "what the wrist camera sees is out of the arm's reach"
 # ... and the arm brought to rest for the chair's move, where the run's look left it anywhere else
 # (press_demo.guide_chair's own home): a way to rest, not a second refusal. Its line began "NO WAY IN:" until
@@ -140,6 +137,12 @@ TO_REST = re.compile(r"^TO REST: ")
 # line-up's own, which begins only once the arm is there (review of 2026-11-17: this read "the chair is to
 # move: the run does not end here", written before the home began)
 NOT_THE_END = "the run does not end here: wait while the arm comes to rest"
+# ... and what follows a find with no container in reach, or none in view (OUT OF REACH, NOT SEEN). Not "wait
+# while the arm comes to rest": after a wrist look the arm stands where it stood, at rest but for its wrist
+# (where a side survey left it over its side, its way to rest is said as it begins: TO_REST). And not that
+# the run does not end: under the orchestrator's 120 s the engine may have no time left to guide, and ends it
+# (review of 2026-11-19: both were said, of an arm that did not move and a run about to end)
+ASKS_TO_BE_GUIDED = "the run asks for the chair to be guided"
 REST_DOING = "going to rest before the chair is guided"
 RUNNER_STOP = re.compile(r"^STOP: leg \S+ -> ")  # the runner's own word on one leg: the task's line says what it means
 
@@ -218,12 +221,15 @@ def no_press_reason(stop, out_m=None):
 
 
 def not_seen_reason(why):
-    """What a find that ended with no container was missing, from the run's own line ("no camera sees the
-    container (scene camera: ...; the wrist's look in front: ...)"), in a few plain words: nothing in view
-    that could be it, or more than one thing that could and nothing to say which (guide.several: two
-    places pass, a second lid-sized top beside the selected container). The cameras' own reasons stay in
-    the run's full line and its record."""
-    return SEVERAL_SEEN if guide.several(why) else NONE_SEEN
+    """What a find the chair is guided for was missing ("NOT SEEN: no camera sees the container (scene
+    camera: ...; the wrist's look in front: ...)"), in a few plain words: nothing in view that could be
+    it. That is the one thing such a find is since 2026-11-19 (press_demo.no_container_kind): a find that
+    saw two things that could be the container, one nothing ties to the selection, or a camera that
+    delivered nothing ends NO BOX, as ever, and is not read here. As first written the line was searched
+    for words of "two", the scene camera's part included, and a container the wrist did not see was said to
+    be "more than one thing" for what the scene camera made of something further off. The cameras' own
+    reasons stay in the run's full line and its record."""
+    return NONE_SEEN
 
 
 def _plain(stop, out_m):
@@ -643,16 +649,16 @@ class FlightView:
             self._fail(FAR_SEEN, "FIND")
         else:
             self._fail(no_press_reason(why, self.out_m), "PRESS")
-        self._note(NOT_THE_END, "next")
+        self._note(ASKS_TO_BE_GUIDED if far else NOT_THE_END, "next")
         if "returning home" in why:
             self._to_rest()
 
     def _not_seen(self, why):
         """No camera sees the container, and the guided run does not end on it: the find fails with what
-        was missing. What follows is as after a press with no way in: the arm comes to rest where its look
-        left it anywhere else, and the engine's line-up then says what the person is to do (guide_start)."""
+        was missing, and the run asks to be guided (the arm brought to rest first where a side survey left
+        it anywhere else). The engine's line-up then says what the person is to do (guide_start)."""
         self._fail(not_seen_reason(why), "FIND")
-        self._note(NOT_THE_END, "next")
+        self._note(ASKS_TO_BE_GUIDED, "next")
 
     def _to_rest(self):
         """The arm goes to rest for the chair's move: a home that is not the run's way home (guide_end)."""
