@@ -89,79 +89,60 @@ The hand keeps the tilt it has at the start until the release.
 **Conditional execution validation (2026-11-17):** ordinary dry runs remain available for perception, IK planning
 and trajectory generation. A dry goal with `validate_collision: true` additionally runs the same six-phase
 full-assembly validator without moving. A non-mock `place` execution is authorized only when
-`collision_geometry_file` loads a
-non-synthetic v1 geometry, the active URDF contains every configured flange/gripper collision link, fresh synchronized
+the repository geometry resolver produces a non-synthetic v1 geometry, the active URDF contains collision shapes for
+all nine `arm_robotiq_85_*` gripper links, fresh synchronized
 joint/flange state matches the trajectory start, and sampled PyBullet clearance passes for side shift, cuRobo transit,
 insertion, lowering, release and retreat. The planned container/turntable contact is the only permitted contact.
 Empty, missing, invalid or synthetic geometry refuses before motion.
 The full validator reuses the depth-derived solid outer box for the robot and tool attachments only during the
 side shift and transit, while everything is outside the cavity. From insertion onward it removes that solid box and
-uses the configured rim, walls, floor, turntable, ceiling, back wall and open-door surfaces.
+uses rim, walls, floor, turntable, ceiling, back wall and open-door surfaces.
 Before planning, the driver's flange pose is compared with FK from the same active driver URDF, and
 the joint and flange messages must have valid timestamps within 10 ms.
-The Snorlax deployment points at the packaged `config/snorlax_collision_geometry.yaml` inventory. It remains
-fail-closed because that file explicitly lists the physical measurements still missing. The depth-derived
-outer box is used for the side shift and
-cuRobo transit; it does not establish insertion clearance for the held container, all gripper links, the
-wrist camera, the opening rim, open door, turntable glass, side walls, ceiling or back wall. The
-flange/tool, gripper and held-container geometry have not been verified against the physical assembly.
-Do not treat the reported modeled container-bottom height as physical clearance. Re-enable placement
-only after those geometries and offsets are measured, represented conservatively, and reviewed, then
-collision-check the complete assembly over the full approach and insertion path.
+The Snorlax deployment points at the packaged `config/snorlax_collision_geometry.yaml` optional override and mounts
+the door record written by `microwave/open` at `/microwave_data/door.json`. The resolver reuses the measured opening,
+depth, glass height and panel recess from `microwave_detection.py`; the container dimensions and dynamic
+`container_in_hand` pose; all active-URDF robot collision shapes; and the four conservative wrist-camera/mount boxes
+from `box_opening/config/robot_body.yaml`. `arm_end_effector_link` is only the camera attachment frame: it has no
+collision shape, and the resolver does not invent one. Placement uses only the scene-camera streams; wrist-camera
+images and depth are not inputs to placement or its checker.
 `insertion_bottom_clearance_cm`, when present in a saved plan, is only the modeled box-bottom estimate;
 it is not a full-assembly or glass-contact clearance check.
 
-The currently documented tape measurements (30.48 cm opening width and depth, 19.05 cm opening height,
-1.59 cm glass height above the opening bottom, 17.46 cm glass-to-ceiling height, and 2.86 cm panel-to-frame
-recess) do not define a collision model: they omit the glass footprint/center, rim profile, door pose, and
-measurement uncertainty. The shortest route to a reviewed collision check is:
+The numerical cavity sheets are 2 mm thick and lie entirely outside the measured free-space boundaries; that is a
+representation thickness, not a physical measurement or clearance allowance. No additive uncertainty is guessed:
+the optional YAML defaults every additive uncertainty to zero, while the existing mandatory `clear_min` remains the
+required non-contact clearance. Nominal turntable contact defaults to zero gap and zero penetration. A deployment may
+add reviewed conservative overrides, but an absent optional YAML is not itself a blocker.
 
-1. Save the active `/arm/robot_description` and every referenced collision mesh from the Jetson. Confirm
-   the physical flange/tool transforms and that the Robotiq links and wrist-camera mount/shape agree with it.
-1. With the robot stationary and microwave door in its intended open pose, measure or obtain verified CAD
-   for the complete cavity (glass footprint and top, rim, floor, side walls, ceiling and back wall) and door
-   (panel, thickness, hinge axis and open pose). Register this geometry to `arm_mount`; record measurement
-   and registration uncertainty. The existing tape dimensions may constrain this model but must not be used
-   to infer unmeasured surfaces.
-1. Measure or obtain verified CAD for the actual container, including lid/handle, and its pose relative to
-   the tool when grasped. Bound grasp repeatability, perception/TF calibration error, and trajectory tracking
-   error for this setup.
-1. Build the conservative full-assembly scene and check the exact saved plan's swept volume through approach,
-   insertion, lowering, release and retreat, including the measured uncertainty bounds. Record the minimum
-   uncertainty-adjusted clearance and its link/object pair; require a robotics review before changing the hold.
-
-The supplied `plan_20261117_203139.json` was not present in this workspace, and the active Jetson URDF,
-collision meshes, cavity/door model and calibration/uncertainty records were not available here. Therefore
-no minimum full-scene clearance or worst-case collision pair can be reported from this environment.
+The only external geometry input required by the resolver is a valid current door record containing
+`closed_normal`, `closed_grasp_pos`, `hinge`, `door_z`, `door_open_deg`, and `open_sign`. Preflight reports
+`NOT VALIDATED` with that exact requirement when the record is absent or invalid. Before supervised execution,
+physically confirm that the persisted door pose, active URDF/gripper hardware, wrist-camera housing/mount, microwave
+dimensions, and 18 x 18 x 10 cm held-container bound match the installed assembly. This offline checkout cannot make
+that physical confirmation.
 
 ### Collision geometry v1
 
-The YAML is deliberately limited to conservative boxes. Surface `center_m` / `size_m` are `[across-left, depth-into-cavity, up-from-opening-bottom]` in the detected oven frame. Attachment coordinates are XYZ in
-`arm_tool_frame`. `rpy_deg` is optional. Values must be measurements (or conservative CAD bounds), in metres:
+The optional YAML is deliberately limited to conservative box overrides. Surface `center_m` / `size_m` are
+`[across-left, depth-into-cavity, up-from-opening-bottom]` in the freshly detected oven frame. `rpy_deg` is optional.
+Omitting it uses the repository-derived geometry:
 
 ```yaml
 version: 1
-uncertainty: {registration_m: null, perception_m: null, grasp_m: null, tracking_m: null}
-turntable_contact: {max_gap_m: null, max_penetration_m: null}
-robot_collision_links:
-  flange: []       # allowed only when attachments contains a measured role: flange primitive
-  gripper: []
-surfaces:           # box: center_m, size_m; every listed role is required
-  # roles: rim, floor, left_wall, right_wall, ceiling, back_wall, turntable, open_door
-attachments:        # roles container and wrist_camera are required; box pose is tool-relative
-  # - {name: held_container, role: container, type: box, center_m: [...], size_m: [...]}
+uncertainty: {}
+turntable_contact: {}
+robot_collision_links: {}
+surfaces: []
+attachments: []
 ```
 
-`null` and empty geometry lists above are placeholders, not defaults: validation rejects them. A flange link list may
-be empty because `arm_end_effector_link` has no active-URDF collision shape, but then a measured tool-relative
-`attachments` primitive with role `flange` is mandatory. `robot_collision_links` asserts that named links really have
-PyBullet collision shapes; it does not restrict the existing whole-robot clearance check. Synthetic unit-test files must
-set `synthetic: true`; that marker is always rejected by the robot execution path. The four uncertainty bounds are
-summed with `clear_min`. Supply the measured cavity surface boxes (including rim and glass footprint), open-door box,
-container and wrist-camera tool-relative boxes, real active-URDF flange/gripper link names, and contact tolerances.
-The direct `preflight` action saves the active URDF's declared collision shapes and compares every configured robot
-link against them in `state_dir/preflight/preflight_*.json`; when the schema is complete it also requires PyBullet to
-have loaded those configured shapes.
+Non-empty values override same-named derived primitives or add conservative primitives. `robot_collision_links` may
+assert additional named active-URDF shapes but does not restrict the existing whole-robot clearance check. Synthetic
+unit-test files must set `synthetic: true`; robot execution always rejects them. The four optional uncertainty bounds
+are summed with `clear_min`. Preflight saves the active-URDF inventory and resolved geometry sources in
+`state_dir/preflight/preflight_*.json`, then constructs the real PyBullet model to verify the nine gripper links and
+the camera attachment frame.
 
 1. **Locate** the opening (above). Nothing is checked before it: not the arm's state, the gripper or
    the tool frame.

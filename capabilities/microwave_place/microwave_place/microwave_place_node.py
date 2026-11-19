@@ -81,9 +81,10 @@ from pathlib import Path
 
 import numpy as np
 import rammp_arm
-from capability_engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.driver_state import Refused as ArmRefused
 from capability_ui import RunUI, cancel_own_run
+
+from capability_engine import Action, CapabilityEngine, EngineError, run
 
 from . import microwave_detection, place_motion, preflight, rim_detection, smoothness_test, take_out, ui_text
 
@@ -150,8 +151,10 @@ PARAMS = {
     "side_shifts_cm": [3.0, -3.0, 6.0, -6.0, 9.0, -9.0],
     # the side shift and the transit: every arm and gripper link at least this far (m) from the microwave box
     "clear_min": 0.01,
-    # Measured v1 primitive geometry. Empty/missing/synthetic files keep physical place execution disabled.
+    # Optional measured v1 overrides; repository facts are used when this is empty.
     "collision_geometry_file": "",
+    # Persisted by microwave/open; physical door geometry only, never a camera stream.
+    "door_geometry_file": "/microwave_data/door.json",
     # Maximum age of the joint and flange samples bound to collision authorization.
     "collision_state_max_age_s": 0.25,
     # the hand's tilt vs the start, anywhere on the transit and the lines (deg)
@@ -612,9 +615,11 @@ class Capability(CapabilityEngine):
 
         def collision_configuration():
             urdf = self.arm.robot_description()
-            report = preflight.collision_configuration_report(c["collision_geometry_file"], urdf)
+            report = preflight.collision_configuration_report(
+                c["collision_geometry_file"], urdf, c["door_geometry_file"]
+            )
             if report["complete"]:
-                geometry = place_motion.load_collision_geometry(c["collision_geometry_file"])
+                geometry = place_motion.load_collision_geometry(c["collision_geometry_file"], c["door_geometry_file"])
                 model = place_motion.Model(c["flange_to_tip"])
                 report["pybullet_collision_links"] = place_motion.validate_robot_collision_links(model, geometry)
             return report
@@ -741,7 +746,8 @@ class Capability(CapabilityEngine):
             )
             validation = None
             if execute or validate_collision:
-                geometry = place_motion.load_collision_geometry(c["collision_geometry_file"])
+                geometry = place_motion.load_collision_geometry(c["collision_geometry_file"], c["door_geometry_file"])
+                log(f"collision geometry sources: {geometry['sources']}")
                 # The solid depth outer box is valid only before cavity entry. The full checker uses it for
                 # side-shift/transit attachments, then switches to the measured cavity surfaces for insertion on.
                 assembly_checker = place_motion.Checker(model, boxes, geometry, oven)

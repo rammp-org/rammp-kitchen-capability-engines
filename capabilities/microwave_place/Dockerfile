@@ -38,6 +38,8 @@ COPY capability_engine/ src/capability_engine/
 COPY shared/capability_ui/package.xml src/capability_ui/package.xml
 COPY shared/capability_ui/ src/capability_ui/
 COPY capabilities/microwave_place/ src/microwave_place/
+# Reuse the documented conservative wrist-camera CAD/mount covers at runtime.
+COPY capabilities/box_opening/config/robot_body.yaml src/microwave_place/config/robot_body.yaml
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
 # base's entrypoint sources its install/ automatically. The base ships

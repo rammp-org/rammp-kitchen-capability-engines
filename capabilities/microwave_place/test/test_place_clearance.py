@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import rammp_arm
-
 from microwave_place import place_motion
 
 
@@ -44,6 +43,21 @@ def synthetic_geometry():
         "surfaces": surfaces,
         "attachments": attachments,
     }
+
+
+def door_file(tmp_path):
+    path = tmp_path / "door.json"
+    path.write_text(
+        """{
+          "closed_normal": [-1.0, 0.0, 0.0],
+          "closed_grasp_pos": [0.72, -0.37, 0.38],
+          "hinge": [0.76, -0.05, 0.36],
+          "door_z": [0.29, 0.47],
+          "door_open_deg": 90.0,
+          "open_sign": -1.0
+        }"""
+    )
+    return path
 
 
 class SyntheticChecker:
@@ -98,58 +112,57 @@ def test_gripper_interior_wall_collision_is_rejected():
 
 
 def test_invalid_or_missing_geometry_fails_closed(tmp_path):
-    with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="not configured"):
+    with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="door_geometry_file"):
         place_motion.load_collision_geometry("")
     with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="does not exist"):
-        place_motion.load_collision_geometry(tmp_path / "missing.yaml")
+        place_motion.load_collision_geometry(tmp_path / "missing.yaml", door_file(tmp_path))
     with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="marked synthetic"):
         place_motion.validate_collision_geometry(synthetic_geometry())
     assert place_motion.validate_collision_geometry(synthetic_geometry(), allow_synthetic=True)["synthetic"]
 
 
-def test_real_snorlax_inventory_names_verified_links_and_precise_missing_measurements():
-    import yaml
-
+def test_real_snorlax_config_resolves_existing_geometry_without_guessed_measurements(tmp_path):
     path = Path(__file__).parents[1] / "config/snorlax_collision_geometry.yaml"
-    geometry = yaml.safe_load(path.read_text())
+    geometry = place_motion.load_collision_geometry(path, door_file(tmp_path))
 
-    assert geometry["robot_collision_links"]["flange"] == []
-    assert geometry["robot_collision_links"]["gripper"] == [
-        "arm_robotiq_85_base_link",
-        "arm_robotiq_85_left_knuckle_link",
-        "arm_robotiq_85_right_knuckle_link",
-        "arm_robotiq_85_left_finger_link",
-        "arm_robotiq_85_right_finger_link",
-        "arm_robotiq_85_left_inner_knuckle_link",
-        "arm_robotiq_85_right_inner_knuckle_link",
-        "arm_robotiq_85_left_finger_tip_link",
-        "arm_robotiq_85_right_finger_tip_link",
-    ]
-    with pytest.raises(place_motion.InsertionCollisionModelUnavailable) as error:
-        place_motion.load_collision_geometry(path)
-    for field in geometry["missing_measurements"]:
-        assert field in str(error.value)
+    assert geometry["robot_collision_links"] == {}
+    assert geometry["uncertainty"] == {name: 0.0 for name in place_motion.UNCERTAINTY_FIELDS}
+    assert geometry["turntable_contact"] == {"max_gap_m": 0.0, "max_penetration_m": 0.0}
+    assert {item["role"] for item in geometry["surfaces"]} == place_motion.REQUIRED_SURFACE_ROLES
+    container = next(item for item in geometry["attachments"] if item["role"] == "container")
+    assert container["pose_source"] == "container_in_hand"
+    cameras = [item for item in geometry["attachments"] if item["role"] == "wrist_camera"]
+    assert len(cameras) == 4
+    assert {item["link"] for item in cameras} == {"arm_end_effector_link"}
+    assert "images" not in str(geometry).lower()
 
 
-def test_empty_urdf_flange_list_requires_measured_attachment():
-    geometry = synthetic_geometry()
-    geometry["robot_collision_links"]["flange"] = []
-    with pytest.raises(place_motion.InsertionCollisionModelUnavailable, match="measured primitive with role 'flange'"):
-        place_motion.validate_collision_geometry(geometry, allow_synthetic=True)
+def test_repository_cavity_uses_measured_free_space_boundaries():
+    surfaces = place_motion.repository_cavity_surfaces()
+    by_name = {item["name"]: item for item in surfaces}
 
-    geometry["attachments"].append(
-        {
-            "name": "measured_flange",
-            "role": "flange",
-            "type": "box",
-            "center_m": [0, 0, 0],
-            "size_m": [0.1, 0.1, 0.1],
-        }
+    assert by_name["cavity_left"]["center_m"][0] - by_name["cavity_left"]["size_m"][0] / 2 == pytest.approx(
+        place_motion.microwave_detection.OPENING[0] / 2
     )
-    assert (
-        place_motion.validate_collision_geometry(geometry, allow_synthetic=True)["robot_collision_links"]["flange"]
-        == []
+    assert by_name["cavity_ceiling"]["center_m"][2] - by_name["cavity_ceiling"]["size_m"][2] / 2 == pytest.approx(
+        place_motion.microwave_detection.OPENING[1]
     )
+    assert by_name["cavity_back"]["center_m"][1] - by_name["cavity_back"]["size_m"][1] / 2 == pytest.approx(
+        place_motion.microwave_detection.DEPTH
+    )
+    turntable = by_name["turntable_glass"]
+    assert turntable["center_m"][2] + turntable["size_m"][2] / 2 == pytest.approx(
+        place_motion.microwave_detection.FLOOR
+    )
+
+
+def test_missing_current_door_is_the_only_repository_geometry_blocker(tmp_path):
+    path = Path(__file__).parents[1] / "config/snorlax_collision_geometry.yaml"
+    geometry, missing = place_motion.build_collision_geometry(path, tmp_path / "missing-door.json")
+
+    assert len(missing) == 1
+    assert "door_geometry_file" in missing[0]
+    assert "open_door" not in {item["role"] for item in geometry["surfaces"]}
 
 
 def _validation_inputs(stamp_ns=1_000_000_000):

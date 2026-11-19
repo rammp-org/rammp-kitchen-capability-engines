@@ -28,13 +28,14 @@ from pathlib import Path
 
 import numpy as np
 import rammp_arm
-from capability_engine import sim
 from capability_engine.arm import HOLD_LEVEL, IMPEDANCE, LATEST_WINS, POSITION, SUCCESSFUL
 from capability_engine.driver_state import EStopped
 from capability_engine.driver_state import Refused as ArmRefused
 from rammp_arm import CONTINUOUS, JOINTS, _unwrap_from
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
+
+from capability_engine import sim
 
 from . import microwave_detection
 
@@ -89,8 +90,14 @@ REQUIRED_SURFACE_ROLES = {
     "open_door",
 }
 REQUIRED_ATTACHMENT_ROLES = {"container", "wrist_camera"}
-REQUIRED_ROBOT_LINK_ROLES = {"flange", "gripper"}
 UNCERTAINTY_FIELDS = {"registration_m", "perception_m", "grasp_m", "tracking_m"}
+GRIPPER_LINK_PREFIX = "arm_robotiq_85_"
+GRIPPER_COLLISION_LINK_COUNT = 9
+SURFACE_THICKNESS_M = 0.002  # numerical boundary thickness, placed outside the measured free cavity
+DOOR_T_M = 0.04  # microwave/constants.py DOOR_T
+DOOR_PAST_HANDLE_M = 0.06  # microwave/constants.py DOOR_PAST_HANDLE
+DOOR_FACE_BEHIND_GRASP_M = 0.067  # door_common FINGERTIP_PAST_TOOL + 5 mm
+DOOR_Z_MARGIN_M = 0.02  # door_common DOOR_Z_MARGIN
 
 
 @dataclass(frozen=True)
@@ -111,14 +118,19 @@ def _geometry_error(message):
     raise InsertionCollisionModelUnavailable(f"place execution is disabled: collision_geometry_file {message}")
 
 
-def load_collision_geometry(path):
-    """Load and validate the measured microwave/assembly primitive schema. Empty values fail closed."""
-    return validate_collision_geometry(read_collision_geometry(path))
+def load_collision_geometry(path="", door_geometry_file="", robot_body_file=""):
+    """Resolve repository geometry plus optional overrides, then validate the complete schema."""
+    geometry, missing = build_collision_geometry(path, door_geometry_file, robot_body_file)
+    if missing:
+        _geometry_error("is NOT VALIDATED; missing essentials: " + ", ".join(missing))
+    return validate_collision_geometry(geometry)
 
 
-def read_collision_geometry(path):
-    """Load the v1 YAML without accepting it, for preflight inventories and actionable error reports."""
+def read_collision_geometry(path, *, optional=False):
+    """Load the v1 YAML. An omitted optional override is an empty mapping; a bad path is still an error."""
     if not str(path).strip():
+        if optional:
+            return {}
         _geometry_error("is not configured")
     path = Path(path)
     if not path.is_file():
@@ -132,6 +144,154 @@ def read_collision_geometry(path):
     if not isinstance(data, dict):
         _geometry_error("must be a mapping")
     return data
+
+
+def _primitive(name, role, center, size, **extra):
+    return {
+        "name": name,
+        "role": role,
+        "type": "box",
+        "center_m": [float(value) for value in center],
+        "size_m": [float(value) for value in size],
+        **extra,
+    }
+
+
+def repository_cavity_surfaces():
+    """Empty-cavity boundary boxes from microwave_detection's measured opening/depth/floor constants."""
+    width, height = microwave_detection.OPENING
+    depth, glass_z, t = microwave_detection.DEPTH, microwave_detection.FLOOR, SURFACE_THICKNESS_M
+    recess = microwave_detection.RECESS
+    surfaces = [
+        _primitive("cavity_floor", "floor", [0, depth / 2, -t / 2], [width, depth, t]),
+        _primitive("turntable_glass", "turntable", [0, depth / 2, glass_z - t / 2], [width, depth, t]),
+        _primitive("cavity_left", "left_wall", [width / 2 + t / 2, depth / 2, height / 2], [t, depth, height]),
+        _primitive("cavity_right", "right_wall", [-width / 2 - t / 2, depth / 2, height / 2], [t, depth, height]),
+        _primitive("cavity_ceiling", "ceiling", [0, depth / 2, height + t / 2], [width, depth, t]),
+        _primitive("cavity_back", "back_wall", [0, depth + t / 2, height / 2], [width, t, height]),
+        _primitive("rim_left", "rim", [width / 2 + t / 2, -recess / 2, height / 2], [t, recess, height]),
+        _primitive("rim_right", "rim", [-width / 2 - t / 2, -recess / 2, height / 2], [t, recess, height]),
+        _primitive("rim_bottom", "rim", [0, -recess / 2, -t / 2], [width + 2 * t, recess, t]),
+        _primitive("rim_top", "rim", [0, -recess / 2, height + t / 2], [width + 2 * t, recess, t]),
+    ]
+    return surfaces
+
+
+def _yaw_about(center, point, angle):
+    delta = np.asarray(point, dtype=float) - np.asarray(center, dtype=float)
+    c, s = np.cos(angle), np.sin(angle)
+    return np.asarray(center, dtype=float) + np.array([c * delta[0] - s * delta[1], s * delta[0] + c * delta[1]])
+
+
+def repository_open_door(path):
+    """Door slab using the persisted open-microwave measurement and door_common's existing model constants."""
+    if not str(path).strip() or not Path(path).is_file():
+        raise ValueError(f"door_geometry_file does not exist: {path or '<not configured>'}")
+    door = json.loads(Path(path).read_text())
+    required = {"closed_normal", "closed_grasp_pos", "hinge", "door_z", "door_open_deg", "open_sign"}
+    missing = sorted(required - set(door))
+    if missing:
+        raise ValueError(f"door_geometry_file is missing {missing}")
+    normal = np.asarray(door["closed_normal"], dtype=float)
+    normal[2] = 0
+    if not np.isfinite(normal).all() or np.linalg.norm(normal) < 1e-6:
+        raise ValueError("door_geometry_file closed_normal is invalid")
+    normal /= np.linalg.norm(normal)
+    grasp, hinge = np.asarray(door["closed_grasp_pos"], dtype=float), np.asarray(door["hinge"], dtype=float)
+    tangent = np.cross([0.0, 0.0, 1.0], normal)
+    if np.dot(tangent, hinge - grasp) < 0:
+        tangent = -tangent
+    face = grasp[:2] - normal[:2] * float(door.get("face_behind_grasp", DOOR_FACE_BEHIND_GRASP_M))
+    lo = float(np.dot(grasp[:2] - face, tangent[:2])) - float(door.get("door_past_handle", DOOR_PAST_HANDLE_M))
+    hi = float(np.dot(hinge[:2] - face, tangent[:2]))
+    angle = np.radians(float(door["open_sign"]) * float(door["door_open_deg"]))
+    thickness = float(door.get("door_t", DOOR_T_M))
+    center_closed = face + tangent[:2] * ((lo + hi) / 2) - normal[:2] * thickness / 2
+    center_xy = _yaw_about(hinge[:2], center_closed, angle)
+    z0, z1 = np.asarray(door["door_z"], dtype=float) + np.array([-DOOR_Z_MARGIN_M, DOOR_Z_MARGIN_M])
+    if not np.isfinite([*grasp, *hinge, z0, z1, angle, thickness]).all() or hi <= lo or z1 <= z0 or thickness <= 0:
+        raise ValueError("door_geometry_file contains invalid door dimensions")
+    yaw = float(np.arctan2(normal[1], normal[0]) + angle)
+    return _primitive(
+        "open_microwave_door",
+        "open_door",
+        [center_xy[0], center_xy[1], (z0 + z1) / 2],
+        [thickness, hi - lo, z1 - z0],
+        rpy_deg=[0.0, 0.0, float(np.degrees(yaw))],
+        frame="arm_mount",
+    )
+
+
+def _default_robot_body_path():
+    installed = Path(__file__).resolve().parents[1] / "config/robot_body.yaml"
+    source = Path(__file__).resolve().parents[2] / "box_opening/config/robot_body.yaml"
+    return installed if installed.is_file() else source
+
+
+def repository_wrist_camera_attachments(path=""):
+    """Convert box_opening's documented wrist-camera covers to checker boxes on their named URDF link."""
+    import yaml
+
+    body_path = Path(path) if str(path).strip() else _default_robot_body_path()
+    data = yaml.safe_load(body_path.read_text())
+    group = data["hand_spheres"]["wrist_camera"]
+    link = group["link"]
+    return [
+        _primitive(
+            f"wrist_camera_{cover['name']}",
+            "wrist_camera",
+            cover["centre"],
+            (2 * np.asarray(cover["half"], dtype=float)).tolist(),
+            link=link,
+        )
+        for cover in group["covers"]
+    ]
+
+
+def build_collision_geometry(path="", door_geometry_file="", robot_body_file=""):
+    """Build deployable geometry from existing facts; return (schema, genuinely missing essentials)."""
+    override = read_collision_geometry(path, optional=True)
+    geometry = {
+        "version": 1,
+        "verified_measurements": override.get("verified_measurements", {}),
+        "missing_measurements": list(override.get("missing_measurements", [])),
+        "uncertainty": {name: 0.0 for name in UNCERTAINTY_FIELDS},
+        "turntable_contact": {"max_gap_m": 0.0, "max_penetration_m": 0.0},
+        "robot_collision_links": override.get("robot_collision_links", {}),
+        "surfaces": repository_cavity_surfaces(),
+        "attachments": [
+            _primitive(
+                "held_container",
+                "container",
+                [0.0, 0.0, 0.0],
+                [BOX_SIDE, BOX_SIDE, BOX_BELOW + BOX_ABOVE],
+                pose_source="container_in_hand",
+            ),
+            *repository_wrist_camera_attachments(robot_body_file),
+        ],
+        "sources": {
+            "cavity": "microwave_detection.py measured constants; registered to each detected opening pose",
+            "container": "place_motion.container_in_hand and grab_container brim radius",
+            "wrist_camera": str(Path(robot_body_file) if str(robot_body_file).strip() else _default_robot_body_path()),
+            "uncertainty": "no additive margin configured; clear_min remains mandatory",
+            "turntable_contact": "nominal zero-gap/zero-penetration contact",
+            "flange": "active URDF only; arm_end_effector_link has no invented primitive",
+        },
+    }
+    geometry["uncertainty"].update(override.get("uncertainty") or {})
+    geometry["turntable_contact"].update(override.get("turntable_contact") or {})
+    missing = list(geometry["missing_measurements"])
+    try:
+        geometry["surfaces"].append(repository_open_door(door_geometry_file))
+        geometry["sources"]["open_door"] = str(door_geometry_file)
+    except (OSError, TypeError, ValueError, IndexError, KeyError, json.JSONDecodeError) as error:
+        missing.append(str(error))
+    for key in ("surfaces", "attachments"):
+        if override.get(key):
+            by_name = {item["name"]: item for item in geometry[key]}
+            by_name.update({item["name"]: item for item in override[key]})
+            geometry[key] = list(by_name.values())
+    return geometry, sorted(set(missing))
 
 
 def _validate_primitives(items, where, required_roles):
@@ -193,20 +353,17 @@ def validate_collision_geometry(data, *, allow_synthetic=False):
     _validate_primitives(data.get("surfaces"), "surfaces", REQUIRED_SURFACE_ROLES)
     attachments = data.get("attachments")
     _validate_primitives(attachments, "attachments", REQUIRED_ATTACHMENT_ROLES)
-    robot_links = data.get("robot_collision_links")
-    if not isinstance(robot_links, dict) or REQUIRED_ROBOT_LINK_ROLES - set(robot_links):
-        _geometry_error(f"robot_collision_links must define {sorted(REQUIRED_ROBOT_LINK_ROLES)}")
+    robot_links = data.get("robot_collision_links", {})
+    if not isinstance(robot_links, dict):
+        _geometry_error("robot_collision_links must be a mapping when supplied")
     for role, names in robot_links.items():
         if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
             _geometry_error(f"robot_collision_links.{role} must be a list of link names")
-        if role != "flange" and not names:
-            _geometry_error(f"robot_collision_links.{role} must not be empty")
-    attachment_roles = {primitive["role"] for primitive in attachments}
-    if not robot_links["flange"] and "flange" not in attachment_roles:
-        _geometry_error(
-            "robot_collision_links.flange is empty because the URDF flange has no collision shape; "
-            "attachments must include a measured primitive with role 'flange'"
-        )
+    for primitive in attachments:
+        if "link" in primitive and (not isinstance(primitive["link"], str) or not primitive["link"]):
+            _geometry_error(f"attachments {primitive['name']!r} link must be a non-empty URDF link name")
+        if "pose_source" in primitive and primitive["pose_source"] != "container_in_hand":
+            _geometry_error(f"attachments {primitive['name']!r} has unknown pose_source")
     return data
 
 
@@ -912,6 +1069,20 @@ def _oven_box(oven, primitive):
     return box
 
 
+def _surface_box(oven, primitive):
+    if primitive.get("frame", "oven") == "oven":
+        return _oven_box(oven, primitive)
+    if primitive["frame"] != "arm_mount":
+        _geometry_error(f"surface {primitive['name']!r} has unknown frame {primitive['frame']!r}")
+    return {
+        "name": primitive["name"],
+        "role": primitive["role"],
+        "position": primitive["center_m"],
+        "rpy_deg": primitive.get("rpy_deg", [0.0, 0.0, 0.0]),
+        "dims": primitive["size_m"],
+    }
+
+
 def _tool_box_body(model, primitive):
     """Create a movable box whose configured pose is relative to arm_tool_frame."""
     import pybullet as p
@@ -939,13 +1110,40 @@ def _link_collision_names(model):
     return names
 
 
+def _link_names(model):
+    import pybullet as p
+
+    cid, rid = model.rb.physics_client_id, model.rb.robot_id
+    names = {p.getBodyInfo(rid, physicsClientId=cid)[0].decode(): -1}
+    for index in range(p.getNumJoints(rid, physicsClientId=cid)):
+        names[p.getJointInfo(rid, index, physicsClientId=cid)[12].decode()] = index
+    return names
+
+
 def validate_robot_collision_links(model, geometry):
-    """Require every configured robot link to have a shape loaded from the active driver URDF."""
+    """Verify overrides and all nine gripper shapes; the checker itself evaluates the whole active URDF."""
     available = _link_collision_names(model)
-    missing = {name for names in geometry["robot_collision_links"].values() for name in names if name not in available}
+    configured = geometry.get("robot_collision_links", {})
+    missing = {name for names in configured.values() for name in names if name not in available}
     if missing:
         _geometry_error(f"names URDF links without collision geometry: {sorted(missing)}")
-    return sorted(available)
+    gripper = sorted(name for name in available if name.startswith(GRIPPER_LINK_PREFIX))
+    if len(gripper) != GRIPPER_COLLISION_LINK_COUNT:
+        _geometry_error(
+            f"active URDF must provide collision shapes for all {GRIPPER_COLLISION_LINK_COUNT} "
+            f"{GRIPPER_LINK_PREFIX}* links; found {len(gripper)}: {gripper}"
+        )
+    links = _link_names(model)
+    missing_attachment_links = sorted(
+        {
+            primitive["link"]
+            for primitive in geometry["attachments"]
+            if primitive.get("link") and primitive["link"] not in links
+        }
+    )
+    if missing_attachment_links:
+        _geometry_error(f"attachments name missing active-URDF links: {missing_attachment_links}")
+    return {"all_collision_links": sorted(available), "gripper_collision_links": gripper}
 
 
 def finger_clearance(rb, q, bodies, closed):
@@ -983,10 +1181,11 @@ class Checker:
                 if oven is None:
                     _geometry_error("requires a located oven frame")
                 for primitive in self.geometry["surfaces"]:
-                    box = _oven_box(oven, primitive)
+                    box = _surface_box(oven, primitive)
                     self.surface_bodies.append((_box_body(model, box), primitive["name"], primitive["role"]))
                 for primitive in self.geometry["attachments"]:
                     self.attachments.append((_tool_box_body(model, primitive), primitive))
+                self.attachment_links = _link_names(model)
                 if not self.geometry.get("synthetic", False):
                     validate_robot_collision_links(model, self.geometry)
         except BaseException:
@@ -1003,11 +1202,23 @@ class Checker:
 
         cid = self.model.rb.physics_client_id
         T = self.model.fk(q)
-        world_pos, world_quat = _world_pose(self.model, T[:3, 3], Rotation.from_matrix(T[:3, :3]).as_quat())
         placed = []
         for body, primitive in self.attachments:
             if primitive["role"] == "container" and not include_container:
                 continue
+            if primitive.get("pose_source") == "container_in_hand":
+                offset, _up, _heading = container_in_hand(T[:3, :3])
+                pos, quat = _world_pose(self.model, T[:3, 3] + offset)
+                p.resetBasePositionAndOrientation(body, pos, quat, physicsClientId=cid)
+                placed.append((body, primitive["name"], primitive["role"]))
+                continue
+            if primitive.get("link"):
+                link_pos, link_quat = sim.link_pose(
+                    self.model.scene, self.model.rb, q, self.attachment_links[primitive["link"]]
+                )
+                world_pos, world_quat = _world_pose(self.model, link_pos, link_quat)
+            else:
+                world_pos, world_quat = _world_pose(self.model, T[:3, 3], Rotation.from_matrix(T[:3, :3]).as_quat())
             pos, quat = p.multiplyTransforms(
                 world_pos,
                 world_quat,

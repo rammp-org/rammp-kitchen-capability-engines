@@ -59,9 +59,9 @@ def urdf_collision_inventory(urdf_text):
     return inventory
 
 
-def collision_configuration_report(path, urdf_text):
-    """Audit a geometry YAML against its schema and the active URDF without creating collision bodies."""
-    data = pm.read_collision_geometry(path)
+def collision_configuration_report(path, urdf_text, door_geometry_file="", robot_body_file=""):
+    """Resolve repository geometry and report only genuine remaining authorization blockers."""
+    data, missing_essentials = pm.build_collision_geometry(path, door_geometry_file, robot_body_file)
     inventory = urdf_collision_inventory(urdf_text)
     available = {item["link"] for item in inventory}
     links = data.get("robot_collision_links", {})
@@ -75,6 +75,8 @@ def collision_configuration_report(path, urdf_text):
     missing_links = sorted(set(configured) - available)
     validation_error = ""
     try:
+        if missing_essentials:
+            raise pm.InsertionCollisionModelUnavailable("NOT VALIDATED: " + "; ".join(missing_essentials))
         pm.validate_collision_geometry(data)
     except pm.InsertionCollisionModelUnavailable as error:
         validation_error = str(error)
@@ -82,13 +84,15 @@ def collision_configuration_report(path, urdf_text):
         "path": str(path),
         "complete": not validation_error and not missing_links,
         "validation_error": validation_error,
-        "missing_measurements": (
-            list(data.get("missing_measurements", [])) if isinstance(data.get("missing_measurements", []), list) else []
-        ),
+        "missing_measurements": missing_essentials,
         "configured_robot_links": configured,
         "configured_links_missing_from_active_urdf": missing_links,
         "active_urdf_collision_inventory": inventory,
         "verified_measurements": data.get("verified_measurements", {}),
+        "geometry_sources": data.get("sources", {}),
+        "auto_gripper_collision_links": sorted(
+            item["link"] for item in inventory if item["link"].startswith(pm.GRIPPER_LINK_PREFIX)
+        ),
     }
 
 

@@ -1,6 +1,6 @@
-# Snorlax's real microwave-place measurement inventory. This is deliberately
-# non-synthetic and deliberately incomplete: the validator reports every item
-# below before it can authorize motion. Never replace nulls with estimates.
+# Optional Snorlax overrides. The nominal model is assembled from existing
+# repository measurements, the active URDF, and the current microwave door record.
+# Do not add guessed uncertainty or contact tolerances here.
 version: 1
 
 verified_measurements:
@@ -20,48 +20,12 @@ verified_measurements:
     modeled_container_bottom_clearance_m: 0.005
     status: dry-run kinematics only
 
-robot_collision_links:
-  # arm_end_effector_link has no collision shape in the active URDF. Do not list it.
-  # A measured flange primitive is still required under attachments before validation can pass.
-  flange: []
-  gripper:
-    - arm_robotiq_85_base_link
-    - arm_robotiq_85_left_knuckle_link
-    - arm_robotiq_85_right_knuckle_link
-    - arm_robotiq_85_left_finger_link
-    - arm_robotiq_85_right_finger_link
-    - arm_robotiq_85_left_inner_knuckle_link
-    - arm_robotiq_85_right_inner_knuckle_link
-    - arm_robotiq_85_left_finger_tip_link
-    - arm_robotiq_85_right_finger_tip_link
-
-missing_measurements:
-  - surfaces.rim.center_m/size_m
-  - surfaces.floor.center_m/size_m
-  - surfaces.left_wall.center_m/size_m
-  - surfaces.right_wall.center_m/size_m
-  - surfaces.ceiling.center_m/size_m
-  - surfaces.back_wall.center_m/size_m
-  - surfaces.turntable.center_m/size_m
-  - surfaces.open_door.center_m/size_m/rpy_deg
-  - attachments.flange.center_m/size_m/rpy_deg
-  - attachments.wrist_camera.center_m/size_m/rpy_deg
-  - attachments.container.center_m/size_m/rpy_deg
-  - uncertainty.registration_m
-  - uncertainty.perception_m
-  - uncertainty.grasp_m
-  - uncertainty.tracking_m
-  - turntable_contact.max_gap_m
-  - turntable_contact.max_penetration_m
-
-# Schema placeholders. They are unreachable while missing_measurements is non-empty.
-uncertainty:
-  registration_m: null
-  perception_m: null
-  grasp_m: null
-  tracking_m: null
-turntable_contact:
-  max_gap_m: null
-  max_penetration_m: null
+# Runtime discovers shapes from the active URDF and requires all nine
+# arm_robotiq_85_* gripper links. arm_end_effector_link has no invented shape;
+# it is only the existing mount frame for the wrist-camera cover boxes.
+robot_collision_links: {}
+missing_measurements: []
+uncertainty: {}
+turntable_contact: {}
 surfaces: []
 attachments: []
