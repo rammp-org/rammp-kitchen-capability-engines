@@ -13,6 +13,8 @@ mounted. It is not sheppy's microwave node, and nothing in `~/rammp-deployments`
 
 ## Before you start
 
+0. Staged: `poc/plan_open_speedup/snorlax/stage.sh` from a machine with this branch and RAMMP-CuRobo
+   checked out copies both to `~/flatbot-bot-poc` on snorlax and runs `setup.sh` (step 2) there.
 1. Sheppy up with the daily profile's nodes the microwave needs (arm, arm_state_publisher,
    planner, static_tf, both cameras, scene_segmenter), but **stop sheppy's microwave node** in
    the TUI. Two microwave nodes would both take every goal; `run_microwave.sh` refuses if it sees
