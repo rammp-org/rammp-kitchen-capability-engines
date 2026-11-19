@@ -330,6 +330,7 @@ def _plan_push_open(ai, door, ee, q, loud=False):
     Returns (P, [(label, Plan)], None) or (None, None, why)."""
     global PUSH_LAST_VARIANT
     whys = []
+    asked = {}  # a move asked once per call: "back off the handle" is the same for every variant (11-19: 6 asks)
     variants = [(t, c) for t in PUSH_TILT_TRY_DEG for c in PUSH_CLEAR_TRY_M]
     if PUSH_LAST_VARIANT in variants:
         variants.remove(PUSH_LAST_VARIANT)
@@ -340,9 +341,12 @@ def _plan_push_open(ai, door, ee, q, loud=False):
             return None, None, "push-open: the hinge's y is on the door's closing side of the hand -- refusing"
         start, plans = np.asarray(q, dtype=float), []
         for label, pos, quat, hold, keep_shape in _push_moves(P):
-            pl, why = dc.pose_plan_problem(
-                ai, start, pos, quat, hold, keep_shape, PUSH_PLAN_TRIES, PUSH_MAX_JOINT_DEG if keep_shape else None
-            )
+            key = (label, hold, keep_shape, *np.round(np.concatenate([start, pos, quat]), 6))
+            if key not in asked:
+                asked[key] = dc.pose_plan_problem(
+                    ai, start, pos, quat, hold, keep_shape, PUSH_PLAN_TRIES, PUSH_MAX_JOINT_DEG if keep_shape else None
+                )
+            pl, why = asked[key]
             if why:
                 whys.append(f"{P.how}: '{label}': {why}")
                 if loud:

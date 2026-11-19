@@ -215,3 +215,36 @@ def test_a_missing_capability_value_fails_rather_than_borrowing_the_microwaves()
     assert dc.PARK_JOINTS is None
     with pytest.raises(dc.Refused, match="PARK_JOINTS"):
         dc.load_park()
+
+
+class _Refusing:
+    """plan_to_pose answering each ask with the next of `messages` (the last repeats)."""
+
+    def __init__(self, *messages):
+        self.messages, self.asks = list(messages), 0
+
+    def plan_to_pose(self, pos, quat, start, hold=0):
+        self.asks += 1
+        return Plan(False, self.messages[min(self.asks, len(self.messages)) - 1])
+
+
+OVER = (
+    "LIBRARY_VALIDATION_FAILED: plan rejected by post-validation: "
+    "arm_joint_1 acceleration {} > limit 25.000 rad/s^2"
+)
+IK_FAIL = "MotionGenStatus.IK_FAIL: no collision-free joint solution AT the goal"
+
+
+@pytest.mark.parametrize(
+    ("messages", "asks"),
+    [
+        ([IK_FAIL], 1),  # not re-asked
+        ([OVER.format("28.463")], 2),  # the same over-limit refusal twice: no more asks
+        ([OVER.format(f"{26 + k / 10:.3f}") for k in range(6)], 6),  # plans that vary: every ask
+    ],
+)
+def test_pose_plan_problem_stops_re_asking_what_wont_change(messages, asks):
+    ai = _Refusing(*messages)
+    pl, why = dc.pose_plan_problem(ai, np.zeros(7), [0.5, 0.0, 0.4], [0, 0, 0, 1], tries=2)
+    assert not pl.success and why.startswith("cuRobo can't plan it")
+    assert ai.asks == asks

@@ -712,13 +712,22 @@ def pose_plan_problem(ai, start, pos, quat, hold=0, keep_shape=True, tries=1, ma
     start = np.asarray(start, dtype=float)
     pl, why = None, ""
     for _ in range(max(1, int(tries))):
-        pl = ai.plan_to_pose(pos, quat, start, hold)
+        pl, repeat = ai.plan_to_pose(pos, quat, start, hold), False
         for _ in range(CUROBO_RETRIES):
             if pl.success or _over_limit(pl.message) is None:
                 break
-            pl = ai.plan_to_pose(pos, quat, start, hold)
+            again = ai.plan_to_pose(pos, quat, start, hold)
+            repeat = not again.success and again.message == pl.message
+            pl = again
+            if repeat:  # the same refusal, number for number (11-19: six in a row): asking again won't change it
+                break
         if not pl.success or len(pl.q) == 0:
-            why = f"cuRobo can't plan it ({pl.message})"
+            failed = f"cuRobo can't plan it ({pl.message})"
+            if repeat or failed == why or "IK_FAIL" in str(pl.message):
+                # IK_FAIL: no collision-free joints at the goal from any of cuRobo's IK seeds; 11-19 none of the
+                # re-asks passed (a run asked 10, each ~0.2 s). The same refusal twice: the same answer again.
+                return pl, failed
+            why = failed
             continue
         qs = np.asarray(pl.q, dtype=float)
         why = (reconfiguration(start, qs[-1], max_joint_deg) if keep_shape else "") or path_below_floor(qs)
