@@ -710,6 +710,21 @@ class PlannerClient:
                 return False
             rclpy.spin_once(self.node, timeout_sec=0.05)
 
+    def tf_lookup(self, target, source, timeout_s=2.0):
+        """(xyz, quat_xyzw) of frame `source` in frame `target` as TF has it now (the latest), or None where
+        TF cannot give it within `timeout_s`: what preflight puts beside the mounted robot config's fixed
+        mounts (tasks/preflight.mount_rows)."""
+        from rclpy.time import Time
+
+        if not self.tf_ready(target, source, timeout_s):
+            return None
+        try:
+            t = self._tf.lookup_transform(target, source, Time()).transform
+        except Exception:  # noqa: BLE001 - it could a moment ago: no answer is an answer
+            return None
+        tr, r = t.translation, t.rotation
+        return [float(tr.x), float(tr.y), float(tr.z)], [float(r.x), float(r.y), float(r.z), float(r.w)]
+
     # Programs that move this arm on their own: one of these running beside a
     # mission is two controllers on one arm.
     OTHER_ARM_CLIENTS = ("rammp_adl_runtime",)

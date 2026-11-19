@@ -88,10 +88,11 @@ HOME_FIRSTS = []  # the keywords of every home_first call, in order
 REACH_OUTS = []  # the scene fixes handed to the reach-out
 
 
-def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
+def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True, home_first=None):
     """press_demo.main() with `approach(ctx)` standing in for the reach-out:
     its result's `failed` decides the exit code; `found` False, the scene
-    camera finds no box. Returns (exit code, client, run-log rows)."""
+    camera finds no box; `home_first` in place of the run's first home (the
+    default: at rest already). Returns (exit code, client, run-log rows)."""
     import faulthandler
 
     import rclpy.executors
@@ -157,7 +158,7 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True):
     monkeypatch.setattr(scene_source, "SceneLocator", _Locator)
     monkeypatch.setattr(scene_calib, "scene_tag_px", lambda p: None)
     monkeypatch.setattr(press_demo, "readiness_refusal", lambda *a, **k: None)
-    monkeypatch.setattr(press_demo, "home_first", lambda *a, **k: HOME_FIRSTS.append(k) or True)
+    monkeypatch.setattr(press_demo, "home_first", home_first or (lambda *a, **k: HOME_FIRSTS.append(k) or True))
     monkeypatch.setattr(press_demo, "MissionFrames", lambda *a, **k: None)
     monkeypatch.setattr(press_demo, "CAPTURES_DIR", tmp_path / "captures")
     monkeypatch.setattr(press_demo, "residuals_path_for", lambda p: tmp_path / "residuals.jsonl")
@@ -225,6 +226,25 @@ def test_the_first_look_for_the_box_keeps_at_it_longer_than_a_re_check(monkeypat
     run_main(monkeypatch, tmp_path, ["--execute", "--press-only"], _at_staging(), client=client)
     assert LOCATES[0] == press_demo.SCENE_FIRST_LOCATE_S > press_demo.SCENE_LOCATE_S
     assert len(REACH_OUTS) == 1  # a box within the straight-down staging reach goes to the reach-out too
+
+
+def test_a_step_out_of_the_padding_that_stops_short_ends_the_run_as_an_arm_that_holds(monkeypatch, tmp_path):
+    """RAMMP 1.5, 2026-11-19: the arm is parked inside the chair's padding, and a run's first motion is the step
+    out of it, flown and judged where the arm stands (core.home_any's `fly`). Where that leaves it short of
+    clear the arm HAS moved: the run ends with exit 1 (the node: arm_holds, from its STOP line), not with exit
+    3, which says the start was refused and nothing moved (not_home, recoverable)."""
+    from box_opening.primitives.core import StepOutStopped
+
+    def stopped(*a, **k):
+        raise StepOutStopped(
+            "the arm stands 12 mm outside the chair and user's padding — the arm holds where it stands"
+        )
+
+    REACH_OUTS.clear()
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute"], _at_staging(), home_first=stopped)
+    assert code == 1 and REACH_OUTS == []  # nothing of the run followed
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute"], _at_staging(), home_first=lambda *a, **k: False)
+    assert code == 3  # a first home refused before anything moved: as before
 
 
 def test_a_run_whose_scene_camera_finds_no_box_says_so_in_its_record(monkeypatch, tmp_path):

@@ -12,7 +12,8 @@ beside the container, and goes home. It has one action, `open_box`:
 
 1. **Ready:** the run checks the robot is ready (driver, planner, TF, gripper,
    both cameras) and refuses before anything moves if not; an arm away from its
-   rest pose is brought there first.
+   rest pose is brought there first (one parked inside the chair's padding steps
+   out of it first, slowly: "The rest pose" below).
 1. **Locate:** the scene camera finds the container before the arm moves: the
    scene segmenter's box of the selected container (its `instance_id` on
    `/perception/object_detections`, and a lid box stacked on it), with its lid's
@@ -693,7 +694,7 @@ passes them as a params file.
 | `mission_frames`      | `false`                | Debug: each executed run keeps its camera frames (~10 MB, the newest 20), and its run record's flight files and room maps                                                                                                                                                                                                                                                                                                                                                                                        |
 | `speed_scale`         | `1.0`                  | Every motion slowed to this fraction of its speed (0 \< x \<= 1)                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `body_layers`         | see below              | The planner config whose chair and user the arm is held out of; `""` turns the check off (a bench with no chair)                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `rest_pose`           | see below              | The arm driver's presets file whose `presets.home` is the robot's rest pose, where a run starts and ends; `""` or no such file: the built-in pose                                                                                                                                                                                                                                                                                                                                                                |
+| `rest_pose`           | see below              | A file in the arm driver's presets format whose `presets.home` is the robot's rest pose, where a run starts and ends; `""`: the built-in pose; `BOX_OPENING_REST_POSE` in the environment beats it                                                                                                                                                                                                                                                                                                               |
 | `planner_worlds_as`   | `""`                   | The folder the planner's container mounts for box opening's worlds, as the planner names it; `""` = no world is sent (see "The planner's world")                                                                                                                                                                                                                                                                                                                                                                 |
 | `planner_worlds_dir`  | `""`                   | The same folder as this node writes it; `""` = `planner_worlds` under `state_dir`                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -769,31 +770,120 @@ A run starts and ends at the arm's rest pose, and everything it derives from it
 follows: the wrist's front views (the rest pose with only the wrist turned), the
 look the first-run observation flies, the side of the wrap the planner is handed
 its joints on, the goal a home is planned to, and the key the line-up's reach
-grids are kept under. The pose is the robot's own. `rest_pose` names the file the
-arm's driver reads its named poses from, by default
+grids are kept under. The pose is the robot's own. `rest_pose` names a file in
+the format the arm's driver reads its named poses from, by default
 `/config/robot/arm_presets.yaml` (the robot's `config/robots/current`, which the
 fragment mounts): ROS parameters, and box opening takes its `presets.home`, seven
 angles in rad for `arm_joint_1`..`7`, the pose the driver's `go_to_preset` `home`
-flies to. Where everyone parks the arm is where a run starts.
+flies to. Box opening never calls that preset: it only reads the file.
 
-- The default file not there, or with no `presets.home` in it: the built-in pose,
-  flatbot's (`constants.HOME`), and the run's log says so. `rest_pose: ""` is the
-  built-in pose too.
-- A file named by the parameter (not the default) that is not there or gives no
-  pose, a `presets.home` that is not seven numbers, or two nodes' blocks in the
-  file that disagree: the run stops before it moves.
-- A pose that would rest the arm inside the chair and user's padding
-  (`body_layers`: the planner plans nothing from a start in it), or with a joint
-  within 0.18 rad of its limit (no way back to it is planned from beside the
-  limit): refused before anything moves, with the link, the box and the depth, or
-  the joint and its room. `open_box` then fails `not_ready` with those words.
-  Such a pose is never flown to. The built-in pose is not judged: it is as it
-  always was.
+**Which file.** `BOX_OPENING_REST_POSE` in a process's environment beats the
+`rest_pose` parameter and every command line's `--rest-pose`, even empty. One
+line in a deployment's box opening containers gives the node, its runs,
+`home_arm`, `preflight` and the recorder the same file, whatever each was started
+with. Without it: the parameter (the flag), and without that the default file.
+`""` means the built-in pose (`constants.HOME`, flatbot's).
 
-`home_arm`, `preflight` (a row of its own) and the line-up's reach proof read the
-same file the same way, so a robot's rest pose is changed in one place: its
-`arm_presets.yaml`. `BOX_OPENING_REST_POSE` in the node's environment overrides
-the parameter.
+**What counts as the pose in the file.** Only the blocks the arm's driver would
+take: `/**` and the driver's own node (`kinova_gen3_node`, under any namespace).
+Another node's block is not the pose. Seven finite numbers, every one written as
+a real (`0.0`, not `0`): ROS refuses a list that mixes whole numbers and reals,
+so the driver does not start on such a file, and box opening refuses it too. Two
+blocks that give different poses: neither is taken.
+
+**Where there is none.**
+
+- The default file not there, or with no `presets.home` the driver would take:
+  the built-in pose. Where a robot's config is mounted (`/config/robot` exists)
+  that is said as a WARNING with the numbers and the reason: the built-in pose
+  was made for another robot.
+- A file named (by the parameter, the flag or the environment, not the default)
+  that is not there or gives no pose, and any `presets.home` that is malformed:
+  the run stops before it moves. `open_box` fails `not_ready` before a line-up or
+  a run is started.
+
+**Every pose is judged before anything moves**, the built-in one included,
+wherever a chair model is loaded (`body_layers`). Refused, with the link, the
+box and the depth, or the joint and its room (`open_box`: `not_ready`), and never
+flown to:
+
+| Rule                                           | Margin   | Why that much                                                                                                                                           |
+| ---------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every limited joint inside its limits          | 0.23 rad | 0.18 is what the planner needs of a start beside a limit; 0.05 more is how far a hold may stand off its rest pose and still be where a run starts       |
+| Every turning joint inside the planner's bound | none     | The planner's own bound on a joint that turns without end                                                                                               |
+| Outside the chair and user's padding           | 10 mm    | Nearer than 10 mm, every way home begins with a step clear of the padding: such a pose would be stepped away from at the start of every run             |
+| Clear of itself, by the planner's own rule     | 10 mm    | The planner plans nothing from a start that touches itself (the robot file's spheres, each link's `self_collision_buffer`, its `self_collision_ignore`) |
+
+A pose that passes but stands inside the planner's `collision_activation_distance`
+of the padding (30 mm) is taken with a WARNING: plans from it start under the
+planner's push, and a hold that sags stands nearer still. With `body_layers ""`
+there is no chair to judge against: a configured pose is judged on its joints
+alone and the run's log says "NOT judged against any chair, nor against itself";
+the built-in pose is then left as it always was. A configured pose with no arm
+description to judge it by (`/arm/robot_description` not heard) is refused.
+
+**One pose for every process.** Every command line says first which pose it
+reads: `rest pose: [seven numbers], presets.home of <file> (digest <12 hex>)`, or
+`the built-in one (<why>)`. The node hands every process it starts (the run, the
+line-up's reach proof) the file it resolves itself and the digest of the seven
+numbers it reads there (`--rest-pose`, `--rest-pose-digest`); a process that
+reads other numbers stops before it moves ("the node that started it read
+another"). Two box opening processes of one deployment cannot rest at two poses
+unseen.
+
+**An arm parked inside the padding** (RAMMP 1.5: the team's `presets.home` is
+58 mm inside the padded armrest, and box opening rests at a pose of its own in a
+private file) starts every run with a step out of it: slow, in the driver's
+softest joint impedance, never deeper, the tool held within 5 mm of its height.
+A run and `home_arm --execute` fly that step as soon as it is planned, asked
+40 mm outside the padding, then wait until the arm stands still and read its
+joints. It must stand 30 mm outside the padding by those measured joints; short
+of that it steps again from where it stands (3 steps at most), and the way to
+the rest pose is planned from the measured joints, never from the step's
+commanded end. Where the arm cannot be brought clear by 30 mm the run stops
+there: `STOP: the step out of the chair and user's padding did not bring the arm clear ... the arm holds where it stands`, `open_box` fails `arm_holds`. A preview
+(`home_arm` without `--execute`) shows the step and a home planned from its
+commanded end. So does the home at a run's end, which is planned from where
+the run leaves the arm (in front of the chair, over the table), often while the
+arm still flies: where that start is inside or within 10 mm of the padding its
+step out still ends 10 mm outside by command, and home is planned from that
+end.
+
+**`preflight`** has a row for the rest pose (FAIL where a run would refuse it,
+WARN for each warning) and two checks of what the rest of the stack holds, with
+the chair model on:
+
+- the TF tree's fixed mounts against the mounted robot config's own
+  (`transforms/cameras.yaml`, `transforms/world.yaml`): FAIL where a mount in TF
+  is more than 2 mm or 0.5 deg from the file's. It proves that the stack
+  publishing TF was started on a config with these mounts. It does not prove a
+  mount is right, and two robots whose files hold the same mounts are not told
+  apart by it;
+- the planner's canary, plans only, nothing flown: a plan from the rest pose
+  must be taken, and a plan from a start the mounted chair model puts 20 mm or
+  more inside one of the chair's boxes (drawn from the model on each run, never
+  a constant) must be refused as a start in the planner's world. A planner that
+  plans from the canary does not hold this robot's chair, whatever the path of
+  its config says: FAIL. It is a one-way test: another chair with a box at the
+  same place refuses the canary too.
+
+Both were tested with stand-ins only; neither has been run against the robot's
+TF tree or planner.
+
+**What changed for a robot with nothing configured** (no `rest_pose`, no
+environment), against the versions that took the built-in pose everywhere:
+
+| Mounted at `/config/robot`                                    | Before            | Now                                                                                                                                                            |
+| ------------------------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| nothing (a bench, the tests)                                  | the built-in pose | the same; not judged without a chair model                                                                                                                     |
+| a config with no `arm_presets.yaml`, or none the driver takes | the built-in pose | the built-in pose, judged against the chair model, with a WARNING; refused where it stands inside that chair's padding                                         |
+| flatbot's (its `presets.home` is the built-in pose's numbers) | the built-in pose | the same numbers, read from the file and judged against flatbot's chair: taken, with the warning (11 mm outside its padding, inside the planner's 30 mm)       |
+| dojo's (its `presets.home` is the arm's factory Home)         | the built-in pose | the factory Home, judged on its joints alone with `body_layers ""` (dojo's planner config names no chair layers); `rest_pose: ""` gives the built-in pose back |
+| gen_1_5's (its `presets.home` is inside the chair's padding)  | the built-in pose | refused, `not_ready`, until `rest_pose` names a pose clear of the chair; the built-in pose (`""`) is refused there too                                         |
+
+`home_arm` with a pose from a file and no arm description heard now refuses
+("cannot be judged") where it used to fly to the built-in pose: a pose that
+cannot be judged is not flown to. `--rest-pose ""` is the old behaviour.
 
 `wrist_survey` is off by default: a run whose scene camera finds no container
 stops with `not_found` before anything moves. On, such a run surveys with the

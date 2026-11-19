@@ -56,11 +56,14 @@ params:
   # before it moves; a run also refuses a planner not started on this same config with world "".
   # "" turns the check off (a bench with no chair)
   body_layers: /config/robot/curobo/planner.yaml
-  # the robot's own rest pose (HOME), where a run starts and ends: the arm driver's presets file (the
-  # volume above), whose `presets.home` (7 rad, what its go_to_preset `home` flies to) box opening
-  # takes. The file not there, or with no presets.home: box opening's built-in pose (flatbot's). ""
-  # the built-in pose too. A pose inside the chair and user's padding (body_layers) or at a joint limit
-  # is refused before anything moves, in so many words (not_ready), never flown to
+  # the robot's own rest pose (HOME), where a run starts and ends: a file in the arm driver's presets
+  # format (by default the driver's own, the volume above), whose `presets.home` (7 rad, every one
+  # written as a real number) box opening takes. The default file not there, or with no presets.home:
+  # box opening's built-in pose (flatbot's), said as a warning; "" the built-in pose too. Whatever pose
+  # it is, one inside or within 10 mm of the chair and user's padding (body_layers), touching itself,
+  # or within 0.23 rad of a joint limit is refused before anything moves, in so many words (not_ready),
+  # never flown to. BOX_OPENING_REST_POSE in the container's environment BEATS this value: set it in
+  # every box opening container of a deployment and they all rest at the one pose (docs/interface.md)
   rest_pose: /config/robot/arm_presets.yaml
   # where the scene camera finds no container, look for it with the wrist camera from one or two
   # poses over the arm's side (a chair parked side-on to a counter the scene camera cannot see);

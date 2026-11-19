@@ -94,10 +94,12 @@ from box_opening.primitives.core import (
     ClearMarginFree,
     Ctx,
     PlanState,
+    StepOutStopped,
     _full_world,
     _interaction_world,
     _plan_motion,
     as_home,
+    flown_then_measured,
     home_any,
 )
 from box_opening.primitives.look import look_joints, sweep_targets
@@ -1742,7 +1744,11 @@ def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
     may stand. Returns False — nothing moved — when that is refused, with
     the recovery named: an arm that far down (holding at the table after an
     abort) is home_arm's case, whose bare-world and lift-first fallbacks
-    want the operator's eye on the bench, not an automatic start.
+    want the operator's eye on the bench, not an automatic start. An arm
+    parked inside the chair and user's padding steps out of it first, and
+    with `execute` that step is flown here and judged where the arm then
+    stands (core.home_any's `fly`); where it cannot be brought clear by the
+    margin, StepOutStopped is raised after its STOP line: the arm has moved.
 
     main passes tol=REST_TOL_RAD for a compliant run, which relaxes "the
     same place" from 0.01 to 0.05 rad for that run alone. An impedance hold
@@ -1781,8 +1787,21 @@ def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
         return True
     log.info("[press_demo] HOME FIRST: the arm is %.2f rad from its rest pose — going there before anything else" % off)
     world = ctx.worlds.push_name("bench", model=ctx.model)
+    # an arm parked inside the chair and user's padding (RAMMP 1.5, 2026-11-19: where the team's rest pose
+    # leaves it, at the start of every run) steps out of it first, and that step is flown as soon as it is
+    # planned: home is then planned from where the arm stands, by its measured joints (core.home_any's `fly`)
+    fly = flown_then_measured(ctx, runner) if execute else None
     try:
-        legs = _home_first_legs(ctx, live, rest, world)
+        legs = _home_first_legs(ctx, live, rest, world, fly=fly)
+    except StepOutStopped as e:
+        # the arm has moved and is not clear by the margin: no "not starting", no "nothing moved". It holds,
+        # and main ends the run as any stop with the arm holding (exit 1: the node's arm_holds), not as a
+        # start that was refused (exit 3: not_home, which a caller may simply ask for again)
+        log.info(
+            "[press_demo] STOP: the step out of the chair and user's padding did not bring the arm clear — %s. "
+            "No way to the rest pose was planned and nothing else moves in this run." % e
+        )
+        raise
     except RuntimeError as e:
         log.info(
             "[press_demo] not starting: the move home was refused in the bench world (%s) — the arm is "
@@ -1794,7 +1813,7 @@ def home_first(ctx, runner, execute, rest, tol=AT_REST_RAD):
     return all(r.ok for r in res)
 
 
-def _home_first_legs(ctx, live, rest, world):
+def _home_first_legs(ctx, live, rest, world, fly=None):
     """home_first's move from the live joints `live`: HOME (`rest`) planned
     in `world` — after home_arm's plan-free step along the joint line toward
     it, the shortest one HOME plans from (primitives.ClearMarginFree, as
@@ -1810,7 +1829,9 @@ def _home_first_legs(ctx, live, rest, world):
     def plan_to(at, name, q):
         return as_home(_plan_motion(ctx, at, name, ("joints", list(q)), world, HOME_SPEED)[0])
 
-    return home_any(ctx, _state(live), rest, plan_to, who="[press_demo]", goal_words="the rest pose", plan_words="home")
+    return home_any(
+        ctx, _state(live), rest, plan_to, who="[press_demo]", goal_words="the rest pose", plan_words="home", fly=fly
+    )
 
 
 # The orchestrator's selection (--instance-id) is one of the SCENE camera's detections, and the
@@ -2351,6 +2372,7 @@ def main():
         "over the arm's side (a chair parked side-on to a counter; tasks/survey); not with --instance-id",
     )
     args = ap.parse_args()
+    cli_common.say_rest_or_exit(args, "[press_demo]")  # first: which rest pose this run takes
     # the reach-out reads it (reach_press.run_reach_press): its depth press
     # is the run (owner 2026-10-28), whatever the command line said
     args.depth_press = True
@@ -2514,8 +2536,13 @@ def main():
                 sys.exit(EXIT_NOT_LINED_UP)
         # (a line-up that turned the wrist started from rest, or from rest but for its wrist, and the run's own
         # look goes on from its view)
-        if not wrist_turned and not home_first(ctx, runner, args.execute, rest_joints(cfg), tol=start_tol):
-            sys.exit(3)
+        if not wrist_turned:
+            try:
+                homed = home_first(ctx, runner, args.execute, rest_joints(cfg), tol=start_tol)
+            except StepOutStopped:
+                sys.exit(1)  # said by home_first (STOP ... the arm holds where it stands): it has moved
+            if not homed:
+                sys.exit(3)
         if args.wrist_detect:
             # the calibration observation parks at the look pose and stays
             # there: a sighting must not cut its motion short

@@ -241,10 +241,10 @@ def test_a_refusals_advice_to_jog_is_said_once():
     assert core._without_jog("planning failed for home") == "planning failed for home"
 
 
-def _body_ctx(monkeypatch, tmp_path, boxes, robot=ROBOT):
+def _body_ctx(monkeypatch, tmp_path, boxes, robot=ROBOT, client=None):
     """flatbot's ctx (bench world, FakeClient) with a body model of `boxes` attached to its chain, the arm's
     spheres from `robot` (a robot.yaml's text)."""
-    client = FakeClient()
+    client = FakeClient() if client is None else client
     monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), client))
     monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
     ctx, _runner = cli_common.build_ctx(Namespace(container=CONTAINER, bench_world=FLATBOT_WORLD, execute=False))
@@ -746,3 +746,219 @@ def test_where_the_only_ways_out_go_into_the_user_it_still_refuses_and_says_to_j
     assert float(chain.body.sphere_depths([q])[0].max()) > 0.0
     with pytest.raises(RuntimeError, match="jog the arm clear by hand$"):
         core.EscapeBodyFree().plan(ctx, core.PlanState(joints=q, chain=0))
+
+
+# -- the step out of the padding, flown as it is planned and judged where the arm stands -----------------------
+# (RAMMP 1.5, 2026-11-19: the arm is parked inside the padding at the start of every run, the step out ended
+# 13.8 mm outside it by command, and home was planned from that commanded end)
+SLAB = [("slab", (0.6, 0.0, 0.40), (0.30, 0.30, 0.06))]
+
+
+def _in_the_slab(monkeypatch, tmp_path, client=None):
+    """(ctx, chain, client, q): the arm standing with its hand in the slab's padding."""
+    ctx, chain, client = _body_ctx(monkeypatch, tmp_path, SLAB, client=client)
+    q = [float(v) for v in chain.nearest_solution([0.0, 0.3, 0.0, 1.8, 0.0, 1.0, 1.57], [0.6, 0.0, 0.45], DOWN)]
+    client.live = list(q)
+    assert float(chain.body.sphere_depths([q])[0].max()) > 0.0
+    return ctx, chain, client, q
+
+
+def _outside(chain, q):
+    return -float(chain.body.sphere_depths([list(q)])[0].max())
+
+
+class Hangs:
+    """home_any's `fly`, standing in for an arm that gets `part` of the way along each step it is flown and
+    stands there: (the legs flown, where it stood after each)."""
+
+    def __init__(self, part):
+        self.part, self.flown, self.stood = part, [], []
+
+    def __call__(self, legs):
+        a = np.array(legs[0].traj.points[0].positions, float)
+        b = np.array(legs[-1].traj.points[-1].positions, float)
+        self.flown.append(legs)
+        self.stood.append([float(v) for v in a + self.part * (b - a)])
+        return list(self.stood[-1])
+
+
+def test_a_step_out_that_is_flown_is_asked_past_the_margin_and_home_is_planned_from_where_the_arm_stands(
+    monkeypatch, tmp_path
+):
+    ctx, chain, _client, q = _in_the_slab(monkeypatch, tmp_path)
+    plan, hangs, said = Planner(), Hangs(0.97), []
+    legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append, fly=hangs)
+    assert [leg.name for leg in legs] == ["home"]  # the step is flown already: what is left to fly
+    assert len(hangs.flown) == 1 and [leg.name for leg in hangs.flown[0]] == ["escape-body"]
+    end = hangs.flown[0][-1].traj.points[-1].positions
+    # asked for the margin and its allowance, by command (40 mm, where the old step stopped at 10)
+    assert _outside(chain, end) >= core.ESCAPE_STAND_M + core.ESCAPE_SAG_M - 1e-6
+    assert core.ESCAPE_STAND_M == 0.030 and core.ESCAPE_SAG_M == 0.010
+    stood = hangs.stood[0]
+    assert not np.allclose(stood, end) and _outside(chain, stood) >= core.ESCAPE_STAND_M
+    # home is planned from the MEASURED joints, never from the step's commanded end
+    assert plan.asked == [("home", stood, list(HOME))]
+    assert any("flown now, and HOME is planned from where the arm then stands" in s for s in said)
+    assert any("the arm stands" in s and "mm outside the padding (asked" in s for s in said)
+
+
+def test_an_arm_that_hangs_short_of_the_steps_end_steps_again_from_where_it_stands(monkeypatch, tmp_path):
+    ctx, chain, _client, q = _in_the_slab(monkeypatch, tmp_path)
+    plan, hangs, said = Planner(), Hangs(0.6), []
+    legs = core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=said.append, fly=hangs)
+    assert [leg.name for leg in legs] == ["home"]
+    assert 2 <= len(hangs.flown) <= core.ESCAPE_ROUNDS
+    assert 0.0 < _outside(chain, hangs.stood[0]) < core.ESCAPE_STAND_M  # out of the padding, short of the margin
+    # the next step starts where the arm stands (its measured joints), and is asked further than the first was
+    assert list(hangs.flown[1][0].traj.points[0].positions) == pytest.approx(hangs.stood[0])
+    ends = [_outside(chain, f[-1].traj.points[-1].positions) for f in hangs.flown]
+    assert ends[1] > ends[0] + 0.005
+    assert _outside(chain, hangs.stood[-1]) >= core.ESCAPE_STAND_M - 1e-6
+    assert plan.asked == [("home", hangs.stood[-1], list(HOME))]
+    assert any("short of the 30 mm it must stand clear by" in s for s in said)
+    # the tool held over the first step's floor through every step
+    z0 = chain.fk(q)[1][2]
+    for flown in hangs.flown:
+        z = [chain.fk(list(p.positions))[1][2] for p in flown[0].traj.points]
+        assert min(z) >= z0 - core.ESCAPE_DROP_M - 1e-9
+
+
+def test_an_arm_that_cannot_be_brought_clear_by_the_margin_stops_there_and_no_home_is_planned(monkeypatch, tmp_path):
+    ctx, chain, _client, q = _in_the_slab(monkeypatch, tmp_path)
+    for part, where in ((0.0, "INSIDE"), (0.1, "outside|INSIDE")):  # it does not move at all; it barely does
+        plan, hangs = Planner(), Hangs(part)
+        with pytest.raises(core.StepOutStopped) as stop:
+            core.home_any(ctx, core.PlanState(joints=list(q), chain=0), HOME, plan, say=lambda s: None, fly=hangs)
+        said = str(stop.value)
+        assert len(hangs.flown) == core.ESCAPE_ROUNDS == 3
+        assert plan.asked == []  # no way home was planned from an arm that is not clear
+        assert "the chair and user's padding after 3 steps out of it, short of the 30 mm it must stand clear by" in said
+        assert "the arm holds where it stands" in said and said.endswith("jog the arm clear by hand")
+        assert _outside(chain, hangs.stood[-1]) < core.ESCAPE_STAND_M
+        import re
+
+        assert re.search(r"the arm stands \d+ mm (%s) the chair" % where, said)
+
+
+def test_a_step_out_that_does_not_fly_to_its_end_stops_there(monkeypatch, tmp_path):
+    from conftest import runner as make_runner
+
+    ctx, _chain, client, q = _in_the_slab(monkeypatch, tmp_path)
+    fly = core.flown_then_measured(ctx, make_runner(client, tmp_path))
+    step, _end, _info = core.EscapeBodyFree().plan(ctx, core.PlanState(joints=list(q), chain=0))
+    client.live = list(q)
+    stills = len(client.stills)
+    assert fly(step) == pytest.approx(list(step[-1].goal_joints))  # flown, still, and read from the arm
+    assert len(client.executed) == 1 and len(client.stills) == stills + 1
+    client.live = list(q)
+    client.exec_script = [("failed", {"message": "driver fault", "progress": 0.4, "torque_peak": 0.0})]
+    with pytest.raises(core.StepOutStopped, match="did not fly to its end .* the arm holds where it stopped"):
+        fly(step)
+
+
+class HangsClient(FakeClient):
+    """An arm that gets `part` of the way along every soft step (the step out of the padding) and stands
+    there; every other motion arrives."""
+
+    part = 0.6
+
+    def execute(self, traj_, speed, **kw):
+        a = np.array(traj_.points[0].positions, float)
+        b = np.array(traj_.points[-1].positions, float)
+        out = super().execute(traj_, speed, **kw)
+        if kw.get("gains") == core.GAINS_SOFT:
+            self.live = [float(v) for v in a + self.part * (b - a)]
+            self.stood = getattr(self, "stood", []) + [list(self.live)]
+        return out
+
+
+def test_a_runs_first_home_flies_the_step_out_reads_the_arm_and_plans_home_from_there(monkeypatch, tmp_path, capsys):
+    """press_demo.home_first with the arm parked inside the padding (RAMMP 1.5: every run's first motion)."""
+    from conftest import runner as make_runner
+
+    from box_opening.tasks import press_demo
+
+    ctx, chain, client, q = _in_the_slab(monkeypatch, tmp_path, client=HangsClient())
+    assert press_demo.home_first(ctx, make_runner(client, tmp_path), True, list(HOME))
+    assert len(client.stood) >= 2  # short after the first step: stepped again
+    assert _outside(chain, client.stood[0]) < core.ESCAPE_STAND_M <= _outside(chain, client.stood[-1]) + 1e-3
+    # home was asked of the planner once, from where the arm stood after its last step, by its own joints
+    assert client.joint_starts == [pytest.approx(client.stood[-1])]
+    assert client.joint_targets[-1] == pytest.approx(list(HOME))
+    assert client.exec_starts[-1] == pytest.approx(client.stood[-1]) and client.live == pytest.approx(list(HOME))
+    assert len(client.stills) >= len(client.stood)  # it stood still before each reading
+    out = capsys.readouterr().out
+    assert "flown now, and home is planned from where the arm then stands" in out
+    # a preview flies nothing: the step is shown, and home planned from its commanded end as before
+    client.live = list(q)
+    client.joint_starts.clear()
+    flown = len(client.executed)
+    assert press_demo.home_first(ctx, make_runner(client, tmp_path), False, list(HOME))
+    assert len(client.executed) == flown and len(client.joint_starts) == 1
+
+
+def test_a_runs_first_home_stops_with_the_arm_holding_where_the_step_out_cannot_bring_it_clear(
+    monkeypatch, tmp_path, capsys
+):
+    from conftest import runner as make_runner
+
+    from box_opening.tasks import press_demo
+
+    client = HangsClient()
+    client.part = 0.0  # the arm does not give: it stands where it stood
+    ctx, _chain, client, q = _in_the_slab(monkeypatch, tmp_path, client=client)
+    with pytest.raises(core.StepOutStopped):  # said, then raised: main ends the run as an arm that holds
+        press_demo.home_first(ctx, make_runner(client, tmp_path), True, list(HOME))
+    assert client.joint_starts == []  # no home was planned, so none flew
+    assert len(client.executed) == core.ESCAPE_ROUNDS and client.live == pytest.approx(q)
+    out = capsys.readouterr().out
+    last = [ln for ln in out.splitlines() if "STOP" in ln][-1]
+    assert "[press_demo] STOP: the step out of the chair and user's padding did not bring the arm clear" in last
+    assert "the arm holds where it stands" in last and "No way to the rest pose was planned" in last
+    assert "not starting" not in last and "nothing moved" not in last.lower()
+    # the run ends with exit 1 on it (test_press_demo_main), which the node reads from that line as an arm
+    # that holds: never as exit 3's not_home, a start that may simply be asked for again
+    from box_opening import node
+
+    err = node.error_for("open_box", 1, out.splitlines())
+    assert err.error_code == "arm_holds" and err.recoverable is False
+    assert node.error_for("open_box", 3, out.splitlines()).error_code == "not_home"
+
+
+def test_home_arm_flies_the_step_out_as_it_plans_only_when_it_executes(monkeypatch, tmp_path):
+    import sys
+
+    from box_opening.tasks import home_arm
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_common, "init_runtime", lambda execute: (object(), client))
+    monkeypatch.setattr(cli_common, "_arm_urdf_path", lambda node, frame: flatbot_urdf())
+    seen = []
+    monkeypatch.setattr(home_arm, "home_any", lambda ctx, state, goal, plan_to, **kw: seen.append(kw.get("fly")) or [])
+    argv = [
+        "home_arm",
+        "--container",
+        CONTAINER,
+        "--bench-world",
+        FLATBOT_WORLD,
+        "--body-layers",
+        "",
+        "--rest-pose",
+        "",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    home_arm.main()
+    monkeypatch.setattr(sys, "argv", [*argv, "--execute"])
+    home_arm.main()
+    assert seen[0] is None and callable(seen[1])
+
+    def stopped(ctx, state, goal, plan_to, **kw):
+        raise core.StepOutStopped(
+            "the arm stands 4 mm outside the chair and user's padding — the arm holds where it stands"
+        )
+
+    monkeypatch.setattr(home_arm, "home_any", stopped)
+    with pytest.raises(SystemExit) as stop:
+        home_arm.main()
+    assert str(stop.value).startswith("STOP: the step out of the chair and user's padding did not bring the arm clear")
+    assert "plan refused" not in str(stop.value)
