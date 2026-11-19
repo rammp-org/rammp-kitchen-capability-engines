@@ -6581,9 +6581,65 @@ def test_a_carry_after_the_first_is_the_arms_own_walk_first_and_the_planners_onl
     assert "the planner's carry is no way for the lid (too low): the arm's own walk instead" in capsys.readouterr().out
 
 
-def _body_on(chain, tmp_path, monkeypatch):
-    """flatbot's body model on `chain` (test_body's robot file: the bracelet's and the stock 2F-85's spheres;
-    this checkout's hand spheres), no chair: what approach.body_check() hands the run on the robot."""
+# flatbot's own robot file from the forearm out: the collision spheres of the forearm, the wrist's two links,
+# the bracelet and the 2F-85, copied 2026-11-19 from the file its planner and its body check read on the robot
+# (config/robots/flatbot_fwd8_cams1117/curobo/robot.yaml of its deployment). The tests of what the hand's own
+# body is asked stood on test_body's STOCK_HAND, which has no sphere on either wrist link, and so pinned an
+# accept/refuse line the robot does not have: the wrist is most of what leans arm-side (the review of 2026-11-19).
+FLATBOT_ARM_END = """robot_cfg:
+  kinematics:
+    base_link: arm_mount
+    collision_sphere_buffer: 0.005
+    collision_spheres:
+      arm_forearm_link:
+      - {center: [0.0, 0.0, 0.0], radius: 0.06}
+      - {center: [0.0, -0.06, 0.0], radius: 0.058}
+      - {center: [0.0, -0.12, 0.0], radius: 0.058}
+      - {center: [0.0, -0.17, 0.0], radius: 0.055}
+      arm_spherical_wrist_1_link:
+      - {center: [0.0, 0.0, 0.0], radius: 0.06}
+      - {center: [0.0, 0.0, -0.085], radius: 0.06}
+      arm_spherical_wrist_2_link:
+      - {center: [0.0, 0.0, 0.0], radius: 0.055}
+      - {center: [0.0, -0.085, 0.0], radius: 0.055}
+      arm_bracelet_link:
+      - {center: [0.0, 0.0, -0.045], radius: 0.045}
+      - {center: [0.0, -0.05, -0.045], radius: 0.045}
+      - {center: [0.045, 0.0, -0.05], radius: 0.036}
+      arm_robotiq_85_base_link:
+      - {center: [0.0, 0.0, 0.04], radius: 0.04}
+      - {center: [0.0, 0.0, 0.055], radius: 0.042}
+      - {center: [3.2e-05, 0.04, 0.06], radius: 0.032}
+      - {center: [-3.2e-05, -0.04, 0.06], radius: 0.032}
+      - {center: [-0.04, 3.2e-05, 0.06], radius: 0.032}
+      - {center: [0.04, -3.2e-05, 0.06], radius: 0.032}
+      - {center: [0.0, 0.0, 0.078], radius: 0.035}
+      - {center: [3.6e-05, 0.045, 0.1], radius: 0.026}
+      - {center: [-3.6e-05, -0.045, 0.1], radius: 0.026}
+      - {center: [-0.045, 3.6e-05, 0.1], radius: 0.026}
+      - {center: [0.045, -3.6e-05, 0.1], radius: 0.026}
+      - {center: [3.6e-05, 0.045, 0.13], radius: 0.022}
+      - {center: [-3.6e-05, -0.045, 0.13], radius: 0.022}
+      - {center: [-0.045, 3.6e-05, 0.13], radius: 0.022}
+      - {center: [0.045, -3.6e-05, 0.13], radius: 0.022}
+      - {center: [3.6e-05, 0.045, 0.145], radius: 0.018}
+      - {center: [-3.6e-05, -0.045, 0.145], radius: 0.018}
+      - {center: [-0.045, 3.6e-05, 0.145], radius: 0.018}
+      - {center: [0.045, -3.6e-05, 0.145], radius: 0.018}
+      arm_robotiq_85_left_finger_link:
+      - {center: [-0.010026, -4.3e-05, 0.019663], radius: 0.03}
+      arm_robotiq_85_left_finger_tip_link:
+      - {center: [-0.021578, -3.8e-05, 0.031998], radius: 0.02}
+      arm_robotiq_85_right_finger_link:
+      - {center: [0.010026, 4.1e-05, 0.019663], radius: 0.03}
+      arm_robotiq_85_right_finger_tip_link:
+      - {center: [0.021578, 3.7e-05, 0.031998], radius: 0.02}
+"""
+
+
+def _body_on(chain, tmp_path, monkeypatch, robot=FLATBOT_ARM_END):
+    """flatbot's body model on `chain` (`robot`: its robot file's spheres, flatbot's own from the forearm
+    out; this checkout's hand spheres), no chair: what approach.body_check() hands the run on the robot."""
     from pathlib import Path
 
     import test_body as tb
@@ -6592,29 +6648,49 @@ def _body_on(chain, tmp_path, monkeypatch):
 
     pkg = Path(__file__).resolve().parents[1]
     model = body.load(
-        tb._model_files(tmp_path, [("far", (5.0, 5.0, 5.0), (0.1, 0.1, 0.1))], robot=tb.STOCK_HAND),
+        tb._model_files(tmp_path, [("far", (5.0, 5.0, 5.0), (0.1, 0.1, 0.1))], robot=robot),
         robot_body=pkg / "config" / "robot_body.yaml",
     )
     bd = model.check_for(chain, flatbot_urdf(), "arm_mount")
     monkeypatch.setattr(approach, "body_check", lambda: bd, raising=False)
+    monkeypatch.setattr(rlo, "_HAND_MODEL_SAID", set())  # (what a run says once of its body model: each test's own)
     return bd
 
 
+def _leaning_down(ctx, chain, lean, xy):
+    """A leaning set-down where run 1's box and table stood: (the spot, the joint line down to its touch's
+    end from the hover, the unit vector from the arm to the spot)."""
+    q, table = list(flown.RUN1_Q_CLEAR), flown.RUN1_TABLE_Z
+    d = rlo.LeanSpot(xyz=(xy[0], xy[1], table), yaw=0.0, lean_deg=lean)
+    quat, contact, hover = rlo.setdown_poses(ctx, d, held=q)
+    qh = chain.nearest_solution(q, hover, quat, seeds=())
+    down, _why = chain.straight_line(qh, [contact[0], contact[1], contact[2] - rlo.SETDOWN_PAST_M], quat)
+    assert down is not None
+    return d, down, np.array(xy) / math.hypot(*xy)
+
+
 @pytest.mark.parametrize(
-    "lean, xy, back_mm, tall", [(30.0, (0.87, 0.03), 120, 0.20), (20.0, (0.74, -0.338), 110, 0.20)]
+    "lean, xy, back_mm, tall, link",
+    [
+        (30.0, (0.87, 0.03), 120, 0.20, "arm_spherical_wrist_2_link"),
+        (30.0, (0.87, 0.03), 250, 0.30, "arm_spherical_wrist_1_link"),  # only the wrist's first link reaches it
+        (20.0, (0.74, -0.338), 110, 0.20, "arm_spherical_wrist_2_link"),
+        (20.0, (0.74, -0.338), 250, 0.30, "arm_spherical_wrist_1_link"),
+    ],
 )
 def test_a_leaning_hand_is_held_out_of_what_stands_arm_side_of_its_spot_by_its_own_body(
-    monkeypatch, tmp_path, lean, xy, back_mm, tall
+    monkeypatch, tmp_path, lean, xy, back_mm, tall, link
 ):
     """The gate's hand (clear_table.HAND_PARTS) is a hand straight down: two rectangles over the spot.
     Leaning back toward the arm the hand's body stands arm-side of the spot, and the rectangles stay where
-    they were. Where the box and the table of 2026-11-17 16:40 stood, with flatbot's arm (the review of
-    2026-11-19, measured again): a thing 6 cm square standing 10-15 cm arm-side of the lid's middle — the
-    gate takes the spot, and
-    the bracelet comes 9-50 mm into it (at 20 deg with the thing 110 mm back, 29 mm; at 30 deg 120 mm back,
-    31 mm). hand_into_standing asks the body model's spheres of the hand and wrist at the set-down's own
-    joints, all the way down: that spot is refused, the same spot with nothing standing there is not; and
-    with no body model nothing can tell, which is itself the refusal."""
+    they were. Where the box and the table of 2026-11-17 16:40 stood, with flatbot's arm and flatbot's own
+    spheres of the wrist and hand (the reviews of 2026-11-19, measured again): a thing 6 cm square standing
+    11-25 cm arm-side of the lid's middle — the gate takes the spot, and the wrist comes 28-53 mm into it
+    (20 cm tall 110-120 mm back: the wrist's second link, 38 mm at 20 deg and 48 at 30; 30 cm tall 250 mm
+    back, which nothing but the wrist's first link reaches: 28 and 53). hand_into_standing asks the body
+    model's spheres of the hand and wrist at the set-down's own joints, all the way down: that spot is
+    refused; the same spot with nothing standing there, or with a 12 cm thing 200 mm back, is not; and with
+    no body model nothing can tell, which is itself the refusal."""
     from box_opening.runtime import approach
     from box_opening.runtime.kinematics import ArmChain
 
@@ -6622,36 +6698,88 @@ def test_a_leaning_hand_is_held_out_of_what_stands_arm_side_of_its_spot_by_its_o
     ctx, _map = _run1(monkeypatch, chain)
     tmap = _standing_ring(flown.RUN1_BOX_XY, 5.0, 6.0)  # that run's box and table, seen bare 1.2 m across
     bd = _body_on(chain, tmp_path, monkeypatch)
-    assert rlo._hand_links(bd) >= {"arm_bracelet_link", "arm_robotiq_85_base_link", "arm_end_effector_link"}
-    assert "arm_forearm_link" not in rlo._hand_links(bd)
+    links, missing = rlo._hand_links(bd)
+    assert missing == [] and "arm_forearm_link" not in links
+    assert links >= {
+        "arm_spherical_wrist_1_link",
+        "arm_spherical_wrist_2_link",
+        "arm_bracelet_link",
+        "arm_robotiq_85_base_link",
+        "arm_end_effector_link",
+    }
     q, table = list(flown.RUN1_Q_CLEAR), flown.RUN1_TABLE_Z
-    d = rlo.LeanSpot(xyz=(xy[0], xy[1], table), yaw=0.0, lean_deg=lean)
-    quat, contact, hover = rlo.setdown_poses(ctx, d, held=q)
-    qh = chain.nearest_solution(q, hover, quat, seeds=())
-    down, _why = chain.straight_line(qh, [contact[0], contact[1], contact[2] - rlo.SETDOWN_PAST_M], quat)
-    assert down is not None
-    u = np.array(xy) / math.hypot(*xy)
+    d, down, u = _leaning_down(ctx, chain, lean, xy)
     thing = _block(tmap, tuple(np.array(xy) - 0.001 * back_mm * u), tall)
     assert rlo.spot_off_table(ctx, thing, d, q) is None  # the gate, a hand straight down: it takes the spot
     why = rlo.hand_into_standing(ctx, thing, down, table)
-    assert (
-        why is not None
-        and "the hand leaning there would come" in why
-        and " mm into what stands %d mm tall" % (1000 * tall) in why
-    )
+    assert why is not None and why.startswith("the hand leaning there would come ")
+    assert " mm into what stands %d mm tall" % (1000 * tall) in why and "(%s; 20 mm is kept)" % link in why
     assert rlo.hand_into_standing(ctx, tmap, down, table) is None  # nothing standing there: the spot is taken
+    low = _block(tmap, tuple(np.array(xy) - 0.200 * u), 0.12)  # ... nor with a 12 cm thing 200 mm arm-side
+    assert rlo.spot_off_table(ctx, low, d, q) is None and rlo.hand_into_standing(ctx, low, down, table) is None
     way = rlo.LaterWay(ctx, thing, table, q)
     assert way.descent(d, down) == why
     assert way.descent(ContainerPose(xyz=d.xyz, yaw=0.0), down) is None  # a hand straight down is the gate's own
     # the reach check of a later spot asks it (drop_reachable's `stands`), and plan_carry of the lines it flies
-    assert rlo.drop_reachable(ctx, d, q, stands=way.descent) == rlo.hand_into_standing(
-        ctx, thing, chain.straight_line(qh, [contact[0], contact[1], contact[2] - rlo.SETDOWN_PAST_M], quat)[0], table
-    )
+    assert rlo.drop_reachable(ctx, d, q, stands=way.descent) == why
     assert rlo.drop_reachable(ctx, d, q) is None
     monkeypatch.setattr(approach, "body_check", lambda: None, raising=False)
     assert rlo.hand_into_standing(ctx, tmap, down, table) == (
         "no body model of the hand to hold it, leaning, out of what stands by the spot"
     )
+
+
+def test_a_body_model_with_no_spheres_on_the_wrist_is_no_model_of_the_hand_for_the_lids_further_spots(
+    monkeypatch, tmp_path, capsys
+):
+    """A Body knows only the links its sphere file names. With a file that gives the wrist's two links no
+    sphere (test_body's STOCK_HAND: the forearm, the bracelet, the 2F-85) the check of a leaning hand asked
+    the bracelet and the gripper and passed whatever the wrist came into: a 30 cm thing 250 mm arm-side of a
+    30 deg spot was taken with the wrist's centre line 3 mm from it — the same thing flatbot's own file
+    refuses by 53 mm (the second review of 2026-11-19). Such a model is no body model for what is asked of
+    the hand past the first spot: no leaning set-down is taken (the refusal says what the file lacks), a
+    later carry is asked of the lid and a top-down hand alone, and the run says so, once."""
+    import test_body as tb
+
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain(root="arm_mount", path=flatbot_urdf())
+    ctx, _map = _run1(monkeypatch, chain)
+    bare = _standing_ring(flown.RUN1_BOX_XY, 5.0, 6.0)
+    q, table = list(flown.RUN1_Q_CLEAR), flown.RUN1_TABLE_Z
+    d, down, u = _leaning_down(ctx, chain, 30.0, (0.87, 0.03))
+    thing = _block(bare, tuple(np.array((0.87, 0.03)) - 0.250 * u), 0.30)
+    (tmp_path / "own").mkdir()
+    (tmp_path / "stock").mkdir()
+    _body_on(chain, tmp_path / "own", monkeypatch)
+    assert " mm into what stands 300 mm tall" in rlo.hand_into_standing(ctx, thing, down, table)
+    capsys.readouterr()
+    bd = _body_on(chain, tmp_path / "stock", monkeypatch, robot=tb.STOCK_HAND)
+    links, missing = rlo._hand_links(bd)
+    assert missing == ["the wrist's first link", "the wrist's second link"]
+    assert "arm_bracelet_link" in links and "arm_spherical_wrist_1_link" not in links
+    lacks = "the body model has no spheres on the wrist's first link or the wrist's second link"
+    refusal = lacks + ": no model of the hand to hold it, leaning, out of what stands by the spot"
+    assert rlo.hand_into_standing(ctx, thing, down, table) == refusal
+    assert rlo.hand_into_standing(ctx, bare, down, table) == refusal  # nothing standing: still no model of it
+    way = rlo.LaterWay(ctx, thing, table, q)
+    assert way.descent(d, down) == refusal and rlo.drop_reachable(ctx, d, q, stands=way.descent) == refusal
+    # a carry is asked by the checks that need no model of the hand: this one of the hand's body is not made
+    assert rlo.hand_way_refusal(ctx, thing, down, table) is None
+    out = capsys.readouterr().out
+    assert out.count(lacks) == 1  # said once, however often it was asked
+    assert "no leaning set-down is taken past the first spot's own" in out
+    # a body that does not say what moves its links, or on an arm of fewer joints than a wrist has: none of it
+    assert rlo._hand_links(SimpleNamespace()) == (
+        set(),
+        ["the wrist's first link", "the wrist's second link", "the hand"],
+    )
+    paths = {"hand": [(None, None, 0, 0), (None, None, 1, 1)]}
+    assert rlo._hand_links(SimpleNamespace(paths=paths, index={"a": 0, "b": 1}))[1] == [
+        "the wrist's first link",
+        "the wrist's second link",
+        "the hand",
+    ]
 
 
 def test_on_run_1s_map_the_carry_to_every_further_spot_is_the_walk_where_the_joint_space_way_is_refused(
@@ -7089,17 +7217,25 @@ def test_the_flight_view_reads_the_runs_own_lines_from_spot_to_spot(ctx, monkeyp
 
 
 class _OneSphereBody:
-    """A body model of one sphere on a hand link: where joints (x, y, z, ...) put it (runtime/body.Body's
-    spheres_at and paths, as reach_lid_off asks them)."""
+    """A body model with one sphere on a hand link, where joints (x, y, z, ...) put it; one on each link of
+    the wrist, half a metre over it; and one on the forearm, under the table (runtime/body.Body's
+    spheres_at, paths and index, as reach_lid_off asks them)."""
 
-    paths = {"hand": [(None, None, k) for k in range(7)], "forearm": [(None, None, k) for k in range(3)]}
+    index = {"joint_%d" % k: k for k in range(7)}
+    paths = {
+        "hand": [(None, None, k, k) for k in range(7)],
+        "wrist_2": [(None, None, k, k) for k in range(6)],
+        "wrist_1": [(None, None, k, k) for k in range(5)],
+        "forearm": [(None, None, k, k) for k in range(4)],
+    }
 
     def __init__(self, radius=0.05):
         self.radius = radius
 
     def spheres_at(self, q):
-        hand = [float(q[0]), float(q[1]), float(q[2])]
-        return np.array([hand, [hand[0], hand[1], -1.0]]), np.array([self.radius, 0.5]), ["hand", "forearm"]
+        x, y, z = float(q[0]), float(q[1]), float(q[2])
+        centres = np.array([[x, y, z], [x, y, z + 0.5], [x, y, z + 0.6], [x, y, -1.0]])
+        return centres, np.array([self.radius, 0.01, 0.01, 0.5]), ["hand", "wrist_2", "wrist_1", "forearm"]
 
 
 def test_a_carry_after_the_first_keeps_the_hands_own_body_out_of_what_stands_along_its_way(ctx, monkeypatch):
@@ -7114,7 +7250,7 @@ def test_a_carry_after_the_first_keeps_the_hands_own_body_out_of_what_stands_alo
     body = _OneSphereBody()
     monkeypatch.setattr(approach, "body_check", lambda: body, raising=False)
     monkeypatch.setattr(approach, "_chain", lambda: _HandAtQ(ctx.model, (0.6, 0.0)))
-    assert rlo._hand_links(body) == {"hand"}
+    assert rlo._hand_links(body) == ({"hand", "wrist_1", "wrist_2"}, [])
     table = -0.07
     bare = _standing_ring((0.5, 0.0), 5.0, 6.0)
     post = _block(bare, (0.5, 0.0), 0.30, half=0.011)  # 4 cm square, 0.30 m tall

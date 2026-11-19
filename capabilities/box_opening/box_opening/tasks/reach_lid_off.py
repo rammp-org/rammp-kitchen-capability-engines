@@ -933,35 +933,69 @@ def lid_way_refusal(ctx, tmap, pts, held, table_z):
 
 
 def _hand_links(body):
-    """The links of `body` (runtime/body.Body) that are the hand and the wrist: every link five or
-    more of the arm's joints move (the wrist's two links, the bracelet, the gripper and the camera
-    on it). None: a body that does not say (every sphere it has is asked)."""
-    paths = getattr(body, "paths", None)
-    if not paths:
-        return None
-    return {link for link, path in paths.items() if sum(1 for step in path if step[2] is not None) >= 5}
+    """(links, missing): the links of `body` (runtime/body.Body) that are the hand and the wrist — every
+    link the arm's last three joints move: the wrist's two links, and the bracelet with the gripper and
+    the camera on it — and which of those three the model gives NO sphere to (`missing`, in words; all
+    three for a body that does not say what moves its links). A Body knows only the links its sphere
+    file names, and a file with none on the wrist is no model of the wrist: asked as it stood, the check
+    of a leaning hand passed whatever the wrist's own links came into (the tests' stand-in file had
+    none, and a 30 cm thing 250 mm arm-side of a 30 deg spot was taken with the wrist's centre line 3 mm
+    from it; flatbot's own robot file, which has them, refused it — the review of 2026-11-19)."""
+    paths, n = getattr(body, "paths", None) or {}, len(getattr(body, "index", None) or ())
+    moved = {link: sum(1 for step in path if step[2] is not None) for link, path in paths.items()}
+    parts = ((n - 2, "the wrist's first link"), (n - 1, "the wrist's second link"), (n, "the hand"))
+    if n < 3:
+        return set(), [name for _k, name in parts]
+    links = {link for link, k in moved.items() if k >= n - 2}
+    return links, [name for k, name in parts if k not in moved.values()]
 
 
-def _hand_room(body, tmap, pts, table_z, most):
-    """The least room the hand's and the wrist's spheres of `body` (_hand_links) have from what `tmap`
-    shows standing over the table at `table_z`, at no more than `most` states evenly along the joint
-    states `pts`, its ends among them: (metres, (x, y) of the thing, its height, the link), or None
-    where nothing stands (clear_table.spheres_clearance)."""
-    hand = _hand_links(body)
+_HAND_MODEL_SAID = set()  # what was said of a body model that is none of the hand and wrist: once a run
+
+
+def _hand_model():
+    """(the body model, its hand and wrist links) for what is asked of the hand's own body past the
+    first spot — a leaning set-down's way down, a later carry's path — or (None, why there is none
+    for them): no body model at all (the bench, body_layers off), or one whose sphere file gives the
+    hand, or either link of the wrist, no sphere (_hand_links). The second is said once in the run's
+    lines: its other checks (the chair, the user) still stand, and nothing else would tell that these
+    do not."""
+    from box_opening.runtime import approach
+
+    body = approach.body_check()
+    if body is None:
+        return None, "no body model"
+    links, missing = _hand_links(body)
+    if not missing:
+        return body, links
+    why = "the body model has no spheres on %s" % " or ".join(missing)
+    if why not in _HAND_MODEL_SAID:
+        _HAND_MODEL_SAID.add(why)
+        log.info(
+            "[press_demo] %s: it is no model of the hand and wrist for the lid's further spots — no leaning "
+            "set-down is taken past the first spot's own, and a carry after the first is asked of the lid and "
+            "a hand straight down over it alone" % why
+        )
+    return None, why
+
+
+def _hand_room(body, links, tmap, pts, table_z, most):
+    """The least room the spheres of `body` on `links` (the hand's and the wrist's: _hand_model) have
+    from what `tmap` shows standing over the table at `table_z`, at no more than `most` states evenly
+    along the joint states `pts`, its ends among them: (metres, (x, y) of the thing, its height, the
+    link), or None where nothing stands (clear_table.spheres_clearance)."""
     pts = [[float(v) for v in p] for p in pts]
     every = max(1, int(math.ceil((len(pts) - 1) / max(1, most - 1))))
     states = pts[::every] + ([pts[-1]] if (len(pts) - 1) % every else [])
     worst = None
     for q in states:
-        centres, radii, links = body.spheres_at(q)
-        keep = np.array([hand is None or link in hand for link in links], bool)
-        if not keep.any():
-            continue
+        centres, radii, at = body.spheres_at(q)
+        keep = np.array([link in links for link in at], bool)
         got = clear_table.spheres_clearance(
             tmap, np.asarray(centres, float)[keep], np.asarray(radii, float)[keep], table_z
         )
         if got is not None and (worst is None or got[0] < worst[0]):
-            worst = (got[0], got[1], got[2], [link for link, k in zip(links, keep, strict=True) if k][got[3]])
+            worst = (got[0], got[1], got[2], [link for link, k in zip(at, keep, strict=True) if k][got[3]])
     return worst
 
 
@@ -981,19 +1015,20 @@ def _into_what_stands(worst):
 def hand_into_standing(ctx, tmap, pts, table_z):
     """Why the hand, coming down the joint line `pts` to a leaning set-down, would come into what
     the map shows standing on the table, or None (HAND_STANDS_CLEAR_M's note): the body model's
-    spheres of the hand and wrist (approach.body_check, _hand_links) at states all the way down the
-    line, each HAND_STANDS_CLEAR_M clear of every standing thing's column over the table at `table_z`
-    (clear_table.spheres_clearance). No body model (the bench, body_layers off): nothing tells the
-    leaning hand's body from what stands there, and that is why — a leaning set-down is then not
-    taken past the first spot's own."""
-    from box_opening.runtime import approach
-
-    body = approach.body_check()
-    if body is None:
-        return "no body model of the hand to hold it, leaning, out of what stands by the spot"
+    spheres of the hand and wrist (_hand_model) at states all the way down the line, each
+    HAND_STANDS_CLEAR_M clear of every standing thing's column over the table at `table_z`
+    (clear_table.spheres_clearance). No body model of them (none at all: the bench, body_layers off;
+    or one with no spheres on the hand or on a link of the wrist): nothing tells the leaning hand's
+    body from what stands there, and that is why — a leaning set-down is then not taken past the
+    first spot's own."""
+    body, links = _hand_model()
+    if body is None:  # (`links` then says why: none at all, or what its sphere file lacks)
+        return "%s of the hand to hold it, leaning, out of what stands by the spot" % (
+            links if links == "no body model" else "%s: no model" % links
+        )
     if tmap is None or not len(tmap.standing()):
         return None
-    worst = _hand_room(body, tmap, pts, table_z, 9)
+    worst = _hand_room(body, links, tmap, pts, table_z, 9)
     if worst is None or worst[0] >= HAND_STANDS_CLEAR_M:
         return None
     return "the hand leaning there would come %s" % _into_what_stands(worst)
@@ -1005,13 +1040,12 @@ def hand_way_refusal(ctx, tmap, pts, table_z):
     states all along the path as the arm flies it (_path_states). lid_way_refusal asks the lid's
     disc and a hand straight down over it (HAND_PARTS); from a set-down's attitude to the next the
     hand leans and turns on the way, and its body is not over the lid. None too where there is no
-    body model: the lid's own check then stands alone, as for a hand straight down it may."""
-    from box_opening.runtime import approach
-
-    body = approach.body_check()
+    body model of the hand and wrist (_hand_model): the lid's own check then stands alone, as for a
+    hand straight down it may — and no leaning set-down is taken on such a run (hand_into_standing)."""
+    body, links = _hand_model()
     if body is None or tmap is None or not len(tmap.standing()):
         return None
-    worst = _hand_room(body, tmap, _path_states(pts), table_z, 40)
+    worst = _hand_room(body, links, tmap, _path_states(pts), table_z, 40)
     if worst is None or worst[0] >= HAND_STANDS_CLEAR_M:
         return None
     return "the hand would pass %s on the way" % _into_what_stands(worst)

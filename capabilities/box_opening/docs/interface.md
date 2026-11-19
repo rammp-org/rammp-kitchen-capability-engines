@@ -103,9 +103,10 @@ beside the container, and goes home. It has one action, `open_box`:
    path, 20 mm clear of everything the map shows standing. A hand that leans
    to such a spot is taken only where those same spheres, at the set-down's
    own joints all the way down, stay 20 mm clear of everything standing; the
-   on-table check above knows only a hand straight down. With no body model
-   no such leaning set-down is taken, and a carry is asked of the lid and a
-   hand straight down over it alone. The first spot's own carry and set-down are
+   on-table check above knows only a hand straight down. With no body model,
+   or one whose sphere file gives the hand or either link of the wrist no
+   sphere (the run says so once), no such leaning set-down is taken, and a
+   carry is asked of the lid and a hand straight down over it alone. The first spot's own carry and set-down are
    planned as they have been flown: of the 22 first carries on record 18
    pass the path check and 4 do not (three sank 12-59 mm on the way, one
    passed its wrist camera by something standing), and the one recorded
