@@ -26,6 +26,8 @@ too far to the left is "Move left" (toward it). One instruction at a time, the l
 no flicker: an instruction stands MIN_SAY_S, the axis it names changes only where the other miss is
 AXIS_SWITCH_M larger, "Hold still" takes an instruction's place only once the box has read inside the
 boundary for HOLD_AFTER_MOVE_S, and READY is left only once the box has been out, or moving, for LEAVE_S.
+Its opposite ("back" after "closer") by a few centimetres is said only once it has stood REVERSE_S, and
+an instruction stands through a container out of view for up to OUT_STANDS_S (2026-11-20).
 
 Open is taken only from READY and only on a box seen within FRESH_S: a press on anything older is not
 a yes to what is there now.
@@ -158,6 +160,17 @@ NOT_CHOSEN_MARKS = ("in none of the scene camera's detections", "not taken for t
 UNSEEN_STANDS_S = 3.0
 
 LOST_S = 1.5  # no box seen for this long: looking again
+# ... and an instruction that is up ("Move ...", "Hold still, checking") stands through a container that has
+# been out of every view for no longer than this; only then is the person told the arm cannot see it (or what
+# else it is). 2026-11-20 13:40, RAMMP 1.5: sightings came 1.9 s and 5.1 s apart (the wrist's find sat on the
+# edge of what ties it to the selection, with the scene camera's mount 14 deg off), and with LOST_S alone the
+# panel read "Move closer, about 10 cm", "The arm cannot see the container. Move the chair in front of it",
+# "Move closer, about 10 cm", "The arm cannot see ..." within 3.4 s: two sentences of a dozen words changing
+# faster than either is read, of a container that stood in front of the arm throughout. Twice LOST_S: a gap
+# of two seconds no longer shows, and one of five still does, once, after three (a container that has really
+# gone out of view is said to have within that). Nothing is asked the while: the question needs a sighting
+# within FRESH_S, and Open is taken on nothing older
+OUT_STANDS_S = 3.0
 FRESH_S = 1.0  # Open counts only on a box seen this recently
 STEADY_S = 1.0  # the box has stood still this long ...
 STEADY_M = 0.015  # ... within this much: the chair is not moving
@@ -172,6 +185,16 @@ LEAVE_S = 0.5  # READY is left once the box has been outside, moving, or not jud
 HOLD_AFTER_MOVE_S = 0.5
 MIN_SAY_S = 0.7  # an instruction stands at least this long before another replaces it
 AXIS_SWITCH_M = 0.03  # the other axis is named only where its miss is this much the larger
+# The OPPOSITE of the instruction last said ("back" after "closer", "right" after "left") by less than
+# REVERSE_M is said only once it has been the answer for REVERSE_S without a break; "Hold still, checking"
+# the while. The same 13:40: "Move closer, about 5 cm", 0.8 s later "Move back a little", a second later
+# "Hold still, checking" and then the question, of a chair that had rolled 5 cm: the box read a centimetre or
+# two past the boundary's far side for a moment (two cameras' sightings centimetres apart took each other's
+# place), and the person was sent back out of where the arm opens it. A box that is really past the boundary
+# by less than REVERSE_M is told so a second later; one further past is told at once, as ever
+REVERSE_M = 0.05
+REVERSE_S = 1.0
+OPPOSITE = {"closer": "back", "back": "closer", "left": "right", "right": "left"}
 ROUND_M = 0.05  # distances are said to the nearest 5 cm ...
 LITTLE_M = 0.04  # ... and under this, "a little"
 FAR_M = 0.5  # the progress bar is empty this far from the boundary, full inside it
@@ -302,6 +325,8 @@ class Guide:
     _said_at: float = None
     _bad_since: float = None  # in READY: since when the box has been outside, moving, or not judged
     _hold_since: float = None  # with a "Move ..." up: since when the box has read inside without a break
+    _word: str = None  # the instruction last said ("closer"), until the question is asked
+    _turn_since: float = None  # since when the answer has been its opposite, by less than REVERSE_M
 
     # -- the box's own motion ------------------------------------------------------
     @property
@@ -358,6 +383,15 @@ class Guide:
                 return self._said
         return self._answer(now, say, at_once=at_once)
 
+    def _reverses(self, now, word, metres):
+        """Whether the instruction `word` is the opposite of the one last said, by less than REVERSE_M,
+        and has not yet been the answer for REVERSE_S without a break: not said yet."""
+        if self._word is None or OPPOSITE.get(self._word) != word or metres >= REVERSE_M:
+            self._turn_since = None
+            return False
+        self._turn_since = now if self._turn_since is None else self._turn_since
+        return now - self._turn_since < REVERSE_S
+
     def update(self, now, fix, reach, none="", looked=False, stands=False):
         """The tick: the newest Fix (or None: nothing new) and the Reach of the newest box seen (None: not
         judged yet). `none`: where no container is seen, what that is of by what watches' own word (K_*;
@@ -401,6 +435,15 @@ class Guide:
                 self._kind_since = min(self._kind_since, now - LOST_S)  # (it has stood, by its source's count)
             if seen is None:
                 self._none_since = None if not none else now if self._none_since is None else self._none_since
+            up = prev is not None and seen is not None and not stands
+            if up and now - seen.t <= OUT_STANDS_S:
+                # an instruction is up and the container has only just gone out of view: it stands (the
+                # question does not: it is taken back to "Hold still, checking", nothing to press on a box
+                # that is not seen)
+                if prev.state in (MOVE, HOLD):
+                    return prev
+                if prev.state == READY:
+                    return self._answer(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=True)
             waited = (
                 stands
                 or seen is not None
@@ -411,6 +454,8 @@ class Guide:
                 # ... nor is one word of a camera that delivers nothing, or of a second lid in the frame,
                 # that state: until it has stood LOST_S what was said of having none stands, and where
                 # nothing was, it is still looking (never, meanwhile, that the arm cannot see the container)
+                if up and prev.state in (MOVE, HOLD):
+                    return prev  # (... and a container that WAS seen is not "looked for" again: the instruction)
                 told = prev.message if prev is not None and prev.state == LOOKING else SEARCHING
             else:
                 told = says(none) if (none or seen is not None) and waited else SEARCHING
@@ -420,6 +465,7 @@ class Guide:
                 and SEARCHING not in (prev.message, told)
                 and prev.message != told
                 and now - self._said_at < UNSEEN_STANDS_S
+                and not stands  # (a state of the watch's own has stood by its source's count: said now)
             ):
                 return prev
             return self._answer(now, Say(LOOKING, told, cancel), at_once=True)
@@ -435,18 +481,24 @@ class Guide:
         if reach is None:
             return self._hold(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=self.state != READY)
         if good:
-            self._hold_since = None
+            self._hold_since = self._word = self._turn_since = None  # (in place: what follows is another approach)
             ready = Say(READY, ASK, ((OPEN, "Open"),) + cancel, 100.0)
             return self._answer(now, ready, at_once=True)
         if reach.inside and reach.planned is not False:
             return self._hold(now, Say(HOLD, "Hold still, checking", cancel, 100.0), at_once=True)
-        self._hold_since = None
         if reach.to_zone is None:
+            self._hold_since = None
             return self._answer(now, Say(MOVE, "The arm cannot open it from here", cancel, 0.0), at_once=True)
-        word, metres, self._axis = instruction(reach.to_zone, self._axis)
+        word, metres, axis = instruction(reach.to_zone, self._axis)
         pct = 100.0 * max(0.0, 1.0 - math.hypot(*reach.to_zone) / FAR_M)
+        if self._reverses(now, word, metres):
+            # the box reads just past the boundary's other side: not yet a move the other way (REVERSE_S)
+            return self._hold(now, Say(HOLD, "Hold still, checking", cancel, pct), at_once=True)
+        self._hold_since, self._axis = None, axis
         said = self._answer(now, Say(MOVE, words(word, metres), cancel, pct, (word, metres)))
         self.instruction = said.message
+        if said.hint is not None:
+            self._word = said.hint[0]
         return said
 
     def press(self, button_id, now):

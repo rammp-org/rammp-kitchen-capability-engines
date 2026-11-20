@@ -201,9 +201,9 @@ def test_the_ordinary_guidance_takes_over_the_moment_a_camera_sees_it_and_gives_
     assert ctx.messages() == [guide.SEARCHING, guide.UNSEEN, "Move closer, about 30 cm", guide.AGAIN]
     first = {m: t for t, m in reversed([(t, p["message"]) for t, p in ctx.panels])}
     assert first["Move closer, about 30 cm"] == pytest.approx(2.0, abs=0.06)  # at once, at the first sighting
-    # lost at 4 s: unseen again once it has not been seen for LOST_S (one frame without it is not that)
+    # lost at 4 s: unseen again once it has not been seen for OUT_STANDS_S (the instruction stands the while)
     back = [t for t, p in ctx.panels if p["message"] == guide.UNSEEN and t > 2.0]
-    assert back and back[0] == pytest.approx(4.0 - line_up.POLL_S + guide.LOST_S, abs=0.11)
+    assert back and back[0] == pytest.approx(4.0 - line_up.POLL_S + guide.OUT_STANDS_S, abs=0.11)
 
 
 def test_with_no_ui_the_unseen_container_is_one_line_and_an_n_is_the_cancel():
