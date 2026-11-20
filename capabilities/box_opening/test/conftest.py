@@ -42,9 +42,6 @@ os.environ.setdefault("BOX_OPENING_REST_POSE", "")
 # nor reads a robot's own camera mounts (perception/d405.robot_mount) unless it asks: a robot config
 # mounted where the tests run must not change what they measure
 os.environ.setdefault("BOX_OPENING_ROBOT_CAMERAS", "")
-# nor checks the scene camera against the wrist's (perception/camera_check) unless it asks: no test's scene
-# numbers are turned by a guess some run left in a state folder, and none writes one there
-os.environ.setdefault("BOX_OPENING_CAMERA_CHECK", "none")
 
 # The recorded fixtures (camera frames, flatbot's arm URDF and joint states, grip close-ups) are
 # kept out of this repo: no data files in git. Point BOX_OPENING_TEST_DATA at a copy, or put one

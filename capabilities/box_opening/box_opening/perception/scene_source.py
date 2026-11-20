@@ -1362,7 +1362,7 @@ class SceneLocator:
         # no two agree (tasks/box_watch). None, as in every run: nothing is told
         self.on_sighting = None
         # this camera checked against the wrist's (perception/camera_check): the turn about the vertical
-        # through its lens that base_to_color places it with, none until a guess or a measure is in force
+        # through its lens that base_to_color places it with, none until this run's own pair is measured
         from box_opening.perception.camera_check import CameraCheck
 
         self.check = CameraCheck()
@@ -1380,7 +1380,11 @@ class SceneLocator:
                 age = max(0.0, (seg_args[3] - m_seg.stamp_ns) / 1e9)  # its frame against the camera's newest
             else:
                 age = self._clock() - float(m_seg.recv_s)  # no stamps to compare: since it came
-            told(sighting, age)
+            # (placed as the fix made of it would be, the check against the wrist camera in force: a
+            # line-up's proof and the run's plan are then of one place: camera_check.own_sighting)
+            from box_opening.perception.camera_check import own_sighting
+
+            told(own_sighting(self, sighting), age)
         except Exception as e:  # noqa: BLE001 - a listener's problem is not the look's
             log.info("[scene] on_sighting raised %s: %s (the look goes on)" % (type(e).__name__, e))
 
@@ -1408,12 +1412,9 @@ class SceneLocator:
     def _turn(self, T_bl, T_lc):
         """The check's turn as a 4x4 on the arm's frame (camera_check.rotation about the lens), or None:
         no check on this locator (one built bare, a test's), the check off, no lens yet, or no turn in
-        force. The first call that knows the mount lets the check read its guess (CameraCheck.settle)."""
+        force (none until this run's own pair is measured: camera_check.adopt)."""
         check = getattr(self, "check", None)
-        if check is None or not check.active or T_bl is None or T_lc is None:
-            return None
-        check.settle(T_bl)
-        if not check.turn_rad:
+        if check is None or not check.active or T_bl is None or T_lc is None or not check.turn_rad:
             return None
         from box_opening.perception.camera_check import rotation
 
@@ -1462,7 +1463,7 @@ class SceneLocator:
         rec = {"timing": dict(self.last_timing)}
         check = getattr(self, "check", None)
         if check is not None and check.by:
-            # the turn its numbers were lifted with (perception/camera_check): a guess, or this run's measure
+            # the turn its numbers were lifted with (perception/camera_check): this run's own measure
             rec["camera_check"] = check.row()
         look = getattr(self, "_look", None)
         if look is None:

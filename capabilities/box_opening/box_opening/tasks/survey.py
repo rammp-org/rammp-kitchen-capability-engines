@@ -1355,6 +1355,18 @@ def fly_view(ctx, runner, view, band, execute):
 
 
 def run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=None, front=False, hint=None):
+    """The survey (_run_survey), and its finder's last answer left on ctx.wrist_find (None where it judged
+    no frame): what else the wrist's frames held beside a find is asked of it afterwards (whether the wrist's
+    find and the scene camera's fix are one container: press_demo.cameras_paired)."""
+    out = _run_survey(node, ctx, runner, watcher, execute, rest, camera_cfg_name, front, hint)
+    try:
+        ctx.wrist_find = out.find
+    except Exception:  # noqa: BLE001 - a context that cannot hold it: nothing is then known of other tops
+        pass
+    return out
+
+
+def _run_survey(node, ctx, runner, watcher, execute, rest=None, camera_cfg_name=None, front=False, hint=None):
     """The survey (the module's note) from where the arm stands, its rest pose `rest`: a Survey.
     Each step is noted ('wrist_survey'): the views chosen, and per view where it looked from and
     what the finder said.

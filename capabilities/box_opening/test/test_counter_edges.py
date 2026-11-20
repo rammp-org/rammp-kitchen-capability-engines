@@ -245,6 +245,58 @@ def test_each_map_keeps_its_own_edges_a_map_without_one_keeps_nothing_out_and_sa
     assert press_demo.keep_out_counter(ctx, tmap, 0.20, "off") is None  # no body check: nothing to hold
 
 
+def test_boxes_the_scene_camera_placed_before_the_cameras_were_measured_do_not_stand_on_unsaid(tmp_path, capsys):
+    """The cameras' check turns box opening's reading of the scene camera part way through a run
+    (camera_check.adopt, which tells the context: ctx.cameras_in_force). Boxes a map of the SCENE camera's points
+    gave before that stand where the old reading put the counter's edges, and keep_out_counter kept a key's last
+    boxes wherever a later map was missing (a wrist fix with no counter points: tmap None): 15 cm from the edge,
+    in force, and unsaid (review of 2026-11-20). They are dropped, and it is said; what the wrist's own frames
+    gave stays."""
+    chain = _model(tmp_path)
+    ctx = type("C", (), {"counter_boxes": None, "cpose": ContainerPose(xyz=(0.6, 0.15, 0.2), yaw=0.0)})()
+    tmap = ct.table_map([(_side_counter(face_y=-0.10, x=(0.30, 0.90), back=0.40, top=0.20), 0.20)], (0.60, 0.15))
+    press_demo.keep_out_counter(ctx, tmap, 0.20, "the scene camera", key="look")
+    press_demo.keep_out_counter(ctx, tmap, 0.20, "the lid's spot map", key="spot")  # (pools the scene's cloud here)
+    press_demo.keep_out_counter(ctx, tmap, 0.20, "the wrist at the look", key="aim")
+    assert len(chain.body.box_names) == 1 + 6 and press_demo.counter_after_adopt(ctx) == []  # nothing measured yet
+    capsys.readouterr()
+    ctx.cameras_in_force = (math.radians(-14.0), -0.030)  # the two cameras measured against each other
+    # the look's next map is missing: its last boxes were the scene camera's under the old reading
+    assert press_demo.keep_out_counter(ctx, None, 0.20, "the wrist survey", key="look") == []
+    out = capsys.readouterr().out
+    assert (
+        "COUNTER: 4 boxes placed by the scene camera's points before the two cameras were measured against each "
+        "other (look, spot) are dropped" in out
+    )
+    assert "Nothing is kept out there until the next map of the counter (2 boxes of the wrist's own frames stay" in out
+    assert (
+        "no map of the table — nothing more is kept out (0 boxes its last map kept out stay in force; 2 in all)" in out
+    )
+    assert ctx.counter_boxes["look"] == [] and ctx.counter_boxes["spot"] == [] and len(ctx.counter_boxes["aim"]) == 2
+    assert len(chain.body.box_names) == 1 + 2
+    # boxes placed under the reading in force are kept as ever where a later map is missing
+    press_demo.keep_out_counter(ctx, tmap, 0.20, "the scene camera and the wrist at the look", key="look")
+    assert press_demo.keep_out_counter(ctx, None, 0.20, "the scene camera", key="look") == []
+    assert len(ctx.counter_boxes["look"]) == 2 and len(chain.body.box_names) == 1 + 4
+    assert "dropped" not in capsys.readouterr().out
+    # ... and whoever calls adopt can have them dropped at once, before any map is read
+    rows = []
+    runner = type("R", (), {"note": lambda self, kind, **kw: rows.append((kind, kw))})()
+    ctx.cameras_in_force = (math.radians(-15.0), -0.030)
+    assert press_demo.counter_after_adopt(ctx, runner) == ["look"]
+    assert len(chain.body.box_names) == 1 + 2 and rows[0][0] == "counter_edges" and rows[0][1]["dropped"] == ["look"]
+    assert rows[0][1]["dropped_boxes"] == 2 and rows[0][1]["in_force"] == 2 and rows[0][1]["turn_deg"] == -15.0
+    # a run whose look's map was the wrist's has no scene camera's points in its spot map: nothing of it is dropped
+    wrist = type("C", (), {"counter_boxes": None, "cpose": ContainerPose(xyz=(0.6, 0.15, 0.2), yaw=0.0)})()
+    press_demo.keep_out_counter(wrist, tmap, 0.20, "the wrist survey", key="look")
+    press_demo.keep_out_counter(wrist, tmap, 0.20, "the lid's spot map", key="spot")
+    wrist.cameras_in_force = (math.radians(-14.0), -0.030)
+    assert press_demo.counter_after_adopt(wrist) == [] and len(wrist.counter_boxes["spot"]) == 2
+    # the chair moved: what was placed, and under which reading, is forgotten together
+    press_demo.forget_scene(wrist, type("W", (), {"table_top_z": None, "table_extent": None})(), type("X", (), {})())
+    assert wrist.counter_boxes is None and wrist.counter_made is None
+
+
 def test_the_bench_maps_grooves_are_no_edge_and_its_side_edge_is(tmp_path):
     """Flatbot's bench as its 2026-11-03 runs saw it (their room maps' past-the-edge cells): a line of
     them across the table 0.44 m out, the table going on in front of it (16:32), and the table's

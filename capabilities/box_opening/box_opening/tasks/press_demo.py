@@ -1027,6 +1027,9 @@ def keep_out_counter(ctx, tmap, table_z, source, runner=None, key=None):
         log.info("[press_demo] COUNTER (%s): the body check is off — the counter's edges are not kept out" % source)
         return None
     key = source if key is None else key
+    # boxes a map of the scene camera's points gave under another reading of that camera (the cameras'
+    # check has measured since: camera_check.adopt) are not what "its last map showed" any more
+    counter_after_adopt(ctx, runner)
     kept = dict(getattr(ctx, "counter_boxes", None) or {})
     before = list(kept.get(key) or [])
     if tmap is None:
@@ -1041,6 +1044,11 @@ def keep_out_counter(ctx, tmap, table_z, source, runner=None, key=None):
                 "is kept out (%d boxes its last map kept out stay in force)" % (source, e, len(before))
             )
             return []
+        # which reading of the scene camera this key's boxes were placed under, and whether any of them
+        # can be the scene camera's at all (counter_after_adopt)
+        made = dict(getattr(ctx, "counter_made", None) or {})
+        made[key] = (_cameras_in_force(ctx), _scene_made(source, key, made))
+        ctx.counter_made = made
     kept[key] = boxes
     ctx.counter_boxes = kept
     every = [b for bs in kept.values() for b in bs]
@@ -1085,6 +1093,77 @@ def keep_out_counter(ctx, tmap, table_z, source, runner=None, key=None):
             in_force=len(every),
         )
     return edges
+
+
+def _cameras_in_force(ctx):
+    """(turn_rad, along_m) of the cameras' check as its last measure left it on `ctx` (camera_check.adopt),
+    (0.0, 0.0) with none."""
+    got = getattr(ctx, "cameras_in_force", None)
+    try:
+        return (float(got[0]), float(got[1])) if got is not None else (0.0, 0.0)
+    except (TypeError, ValueError, IndexError):
+        return 0.0, 0.0
+
+
+def _scene_made(source, key, made):
+    """Whether the boxes a map called `source` gives can hold the SCENE camera's points: its name says the
+    scene camera, or it is the lid's spot map (key "spot", which pools the cloud of the fix the run flies)
+    of a run whose look's map was the scene camera's. A map of the wrist's frames alone is not: the cameras'
+    check moves nothing the wrist saw."""
+    words = str(source).lower()
+    if "scene" in words:
+        return True
+    return key == "spot" and bool((made.get("look") or (None, False))[1])
+
+
+def counter_after_adopt(ctx, runner=None):
+    """Drop the counter's keep-out boxes that were placed by the scene camera's points under ANOTHER reading
+    of that camera than the one in force now, and say so. camera_check.adopt turns box opening's reading of
+    the scene camera for the rest of the run; boxes its points gave before that stand where the old reading
+    put them (15 cm from where the new one does, on RAMMP 1.5 on 2026-11-20), and keep_out_counter keeps a
+    key's last boxes wherever a later map is missing (a wrist fix with no counter points: tmap None). They
+    are not turned here: a spot map pools both cameras' points, and which box came from which is not kept.
+    Dropped, the next map of that key puts the counter back where the reading in force has it; until then
+    nothing is kept out THERE, which is said, and the boxes the wrist's own frames gave stay. Called by
+    keep_out_counter before it reads a key's last boxes, and by whoever calls adopt. Returns the keys
+    dropped."""
+    from box_opening.runtime import approach
+
+    kept = dict(getattr(ctx, "counter_boxes", None) or {})
+    made = dict(getattr(ctx, "counter_made", None) or {})
+    now = _cameras_in_force(ctx)
+    stale = [
+        key
+        for key, (under, scene) in made.items()
+        if scene and kept.get(key) and (abs(under[0] - now[0]) > 1e-9 or abs(under[1] - now[1]) > 1e-9)
+    ]
+    if not stale:
+        return []
+    n = sum(len(kept[key]) for key in stale)
+    for key in stale:
+        kept[key] = []
+        made.pop(key, None)
+    ctx.counter_boxes, ctx.counter_made = kept, made
+    every = [b for bs in kept.values() for b in bs]
+    approach.set_obstacles(every)
+    log.info(
+        "[press_demo] COUNTER: %d box%s placed by the scene camera's points before the two cameras were measured "
+        "against each other (%s) %s dropped: they stand where the old reading of that camera put the counter's "
+        "edges. Nothing is kept out there until the next map of the counter (%d boxes of the wrist's own frames "
+        "stay in force)" % (n, "" if n == 1 else "es", ", ".join(stale), "is" if n == 1 else "are", len(every))
+    )
+    if runner is not None and hasattr(runner, "note"):
+        runner.note(
+            "counter_edges",
+            source="the cameras' check",
+            mapped=False,
+            dropped=stale,
+            dropped_boxes=n,
+            in_force=len(every),
+            turn_deg=round(math.degrees(now[0]), 2),
+            along_mm=round(1000 * now[1], 1),
+        )
+    return stale
 
 
 def container_half(m):
@@ -1766,6 +1845,7 @@ def forget_scene(ctx, worlds, watcher):
 
     ctx.cpose = None
     ctx.counter_boxes = None
+    ctx.counter_made = None  # (... and which reading of the scene camera each was placed under)
     approach.set_obstacles([])
     ctx.survey_clouds = None
     ctx.wrist_far = None
@@ -2474,7 +2554,7 @@ def adopt_scene_table(ctx, worlds, watcher, scene_fix):
 TABLES_WARN_M = TABLE_OFFSET_WARN_M
 
 
-def say_tables(runner, scene_seen, fix, run_table_z=None):
+def say_tables(runner, scene_seen, fix, run_table_z=None, ctx=None):
     """Which camera's table and lid height the run goes by, said where both read one (owner 2026-11-20:
     the heights from the wrist camera where it has them). The run's heights are its fix's own, one
     camera's throughout: the wrist's where its find was taken (`fix`, source "wrist": the lid's top
@@ -2488,7 +2568,9 @@ def say_tables(runner, scene_seen, fix, run_table_z=None):
     on four runs' saved frames: its table 31-50 mm and its lid 39-58 mm under the scene camera's),
     which every run on a wrist find has flown with: the press and the set-down go down by touch.
     Which camera is right in height on a given chair only that touch says. `run_table_z`: the table the run
-    plans by (the watcher's), which is the fix's own unless the world file names one. Returns the
+    plans by (the watcher's), which is the fix's own unless the world file names one. Past
+    TABLES_WARN_M apart a WARNING, once a run (`ctx` remembers it; None: every time): on a robot whose
+    two mounts differ so, it is a standing fact of the mounts and not news of each look. Returns the
     wrist's table less the scene camera's (m), or None where one of them read none."""
     if scene_seen is None or fix is None or getattr(fix, "source", "") != "wrist":
         return None
@@ -2517,11 +2599,14 @@ def say_tables(runner, scene_seen, fix, run_table_z=None):
             else "The run's table is the world file's, %.3f" % float(run_table_z),
         )
     )
-    if abs(off) > TABLES_WARN_M + 1e-9:
+    if abs(off) > TABLES_WARN_M + 1e-9 and not getattr(ctx, "heights_warned", False):
+        if ctx is not None:
+            ctx.heights_warned = True
         log.info(
-            "[press_demo] WARNING: the two cameras read the table %.0f mm apart (more than %.0f): one of their "
-            "mounts is off in height or tilt. The press and the set-down find the lid and the table by touch"
-            % (1000 * abs(off), 1000 * TABLES_WARN_M)
+            "[press_demo] WARNING: on this robot the two cameras read heights %.0f mm apart (the wrist's %s; "
+            "more than %.0f): a standing difference of their mounts, in height or tilt, not of this run. "
+            "Which is right only a touch says: the press and the set-down find the lid and the table by touch"
+            % (1000 * abs(off), "lower" if off < 0 else "higher", 1000 * TABLES_WARN_M)
         )
     if runner is not None and hasattr(runner, "note"):
         runner.note(
@@ -2536,6 +2621,29 @@ def say_tables(runner, scene_seen, fix, run_table_z=None):
             lid_off_mm=round(1000 * lid, 1),
         )
     return off
+
+
+def cameras_paired(ctx, args, locator, wrist_fix):
+    """(what establishes that the wrist's find `wrist_fix`, just taken, and the scene camera's fix are ONE
+    container, "") or ("", why nothing does): camera_check.corroborated, told what the run knows. With the
+    orchestrator's selection the wrist's find is taken only by its tie to the selected container as the
+    scene camera has it (wrist_look), and that is the pairing. Without one the wrist's find is taken
+    whatever the scene camera has (any box of the container's classes): the two are one container only
+    where the scene camera holds exactly one of the kind (its locator's only_one) and the wrist's frames
+    no other lid-sized top (the look's own finder's answer, ctx.wrist_find, which tasks/survey.run_survey
+    leaves: other_tops). As first written (2026-11-20) every wrist find of an unselected run was measured
+    against the scene camera's box: a lid 15 cm beside a healthy camera's box read as a mount 12 deg
+    off (the review of the same day)."""
+    if getattr(args, "instance_id", None):
+        return camera_check.corroborated(locator, None, tied=True)
+    find, others = getattr(ctx, "wrist_find", None), None
+    if find is not None:
+        try:
+            lid_m = float(max(ctx.model.lid_dims[0], ctx.model.lid_dims[1]))
+            others = other_tops(find, wrist_fix.top_xyz[:2], lid_m)
+        except Exception:  # noqa: BLE001 - a find that cannot be read is not "no other top"
+            others = None
+    return camera_check.corroborated(locator, others)
 
 
 def runner_stamp(runner):
@@ -2892,13 +3000,18 @@ def main():
             # where it is taken for the same container (camera_check.adopt, below)
             scene_seen = scene_fix
             if ctx.mission_frames is not None:
+                # what is kept is the camera as its MOUNT has it and the scene camera's OWN fix, with the
+                # correction that was in force beside them under its own name: a refit from these frames
+                # (how the pairs of 2026-11-20 were read) must see the mount's whole error, not what a
+                # correction left of it
                 ctx.mission_frames.scene(
-                    scene_frame(locator.grab, locator.base_to_link()),
-                    fix_xyz=None if scene_fix is None else scene_fix.top_xyz,
+                    scene_frame(locator.grab, camera_check.raw_mount(locator)),
+                    fix_xyz=None if scene_fix is None else camera_check.raw_xyz(locator, scene_fix.top_xyz),
                     score=None if scene_fix is None else scene_fix.score,
                     why=locator.last_why if scene_fix is None else None,
                     source=None if scene_fix is None else getattr(scene_fix, "source", "segmenter"),
                     boxes=getattr(locator, "last_boxes", None),
+                    check=camera_check.kept_row(locator, None if scene_fix is None else scene_fix.top_xyz),
                 )
             if locator.moved_note and scene_fix is not None:
                 log.info("[press_demo] scene camera: %s" % locator.moved_note)  # e.g. the tag was not in view
@@ -2920,11 +3033,24 @@ def main():
                     node, ctx, cfg, runner, watcher, args, locator, scene_fix, wrist_said
                 )
                 if scene_seen is not None and getattr(scene_fix, "source", "") == "wrist":
-                    # THE TWO CAMERAS HAVE THE SAME CONTAINER (the wrist's find was taken for the one the
-                    # scene camera fixed): how far apart they have it is measured, and the scene camera's
+                    # BOTH CAMERAS HAVE A CONTAINER, and the run goes on with the wrist's. Where the two are
+                    # known to be ONE container (cameras_paired: the selection's tie, or one container in
+                    # each camera's view), how far apart they have it is measured and the scene camera's
                     # numbers are turned by it for the rest of this run (perception/camera_check; RAMMP 1.5,
-                    # 2026-11-20: 155-215 mm apart, a steady 14 deg about the scene lens)
-                    camera_check.adopt(ctx, locator, scene_seen, scene_fix, runner, by=runner_stamp(runner))
+                    # 2026-11-20: 155-215 mm apart, about 14 deg about the scene lens). Where they are not,
+                    # nothing is measured, and why is said
+                    paired, why_not = cameras_paired(ctx, args, locator, scene_fix)
+                    camera_check.adopt(
+                        ctx,
+                        locator,
+                        scene_seen,
+                        scene_fix,
+                        runner,
+                        by=runner_stamp(runner),
+                        paired=paired,
+                        why_not=why_not,
+                    )
+                    counter_after_adopt(ctx, runner)  # (nothing the old reading placed stands on unsaid)
             far = (getattr(ctx, "wrist_far", None) or []) if args.guide else []
             not_seen = [] if args.guide else None  # why no camera has it, where the run does not end on that
             if scene_fix is None and (not far or side_survey_has_a_turn(args)):
@@ -2993,7 +3119,7 @@ def main():
                     )
             sp = scene_fix.pose
             adopt_scene_table(ctx, worlds, watcher, scene_fix)
-            say_tables(runner, scene_seen, scene_fix, watcher.table_z)
+            say_tables(runner, scene_seen, scene_fix, watcher.table_z, ctx=ctx)
             surveyed = watcher.table_z
             log.info(
                 "[press_demo] %s: box at [%.3f, %.3f] yaw %.1f deg from %d lid points%s "

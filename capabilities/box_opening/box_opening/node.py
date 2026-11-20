@@ -125,11 +125,12 @@ PARAMS = {
     # not give way to what it meets in the air. Not flown
     "air_control": "impedance",
     # the scene camera checked against the wrist camera (constants.CAMERA_CHECK_ENV, perception/camera_check):
-    # "keep" (the default), wherever both cameras have the container the run measures how far apart they have
-    # it, turns its own reading of the scene camera by that for the rest of the run, and keeps the measure in
-    # the state folder as the next run's starting guess; "run", the same with no guess read or kept; "none",
-    # the scene camera as its mount has it, as before 2026-11-20. The team's TF and files are never touched
-    "camera_check": "keep",
+    # "run" (the default), wherever both cameras are known to have the same container the run measures how
+    # far apart they have it and turns its own reading of the scene camera by that for the rest of the run;
+    # "none", the scene camera as its mount has it, as before 2026-11-20. Nothing is read from or kept in the
+    # state folder, and the team's TF and files are never touched. "keep" (the measure carried to the next
+    # run) is refused: withdrawn in review, it can confirm itself on the wrong container
+    "camera_check": "run",
     # the folder box opening hands the planner worlds from (worlds.PlannerTable): the run's measured table,
     # while a way HOME is planned. `planner_worlds_as` is that folder as the PLANNER's container mounts it
     # (read-only); "" (the default) and box opening sends the planner no world. `planner_worlds_dir` is the
@@ -171,8 +172,8 @@ NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set f
 # what `air_control` may be. The run reads anything but "position" as impedance (tasks/reach_press), so a
 # misspelt value would fly as impedance without a word: the node refuses it instead (Capability._air_control)
 AIR_CONTROLS = ("impedance", "position")
-# ... and `camera_check` (perception/camera_check.MODES): the run reads anything it does not know as "keep"
-CAMERA_CHECKS = ("keep", "run", "none")
+# ... and `camera_check` (perception/camera_check.MODES): the run reads anything it does not know as "run"
+CAMERA_CHECKS = ("run", "none")
 
 
 def check_params(params):
@@ -1390,13 +1391,18 @@ class Capability(CapabilityEngine):
         return value
 
     def _camera_check(self):
-        """camera_check as it is now: "keep" (unset too), "run" or "none". Any other value is refused,
-        EngineError("bad_config"), before anything runs, as an air_control that is neither of its two is."""
-        value = str(self._param("camera_check") or "keep")
+        """camera_check as it is now: "run" (unset too) or "none". Any other value is refused,
+        EngineError("bad_config"), before anything runs, as an air_control that is neither of its two is;
+        "keep" with why it is not offered (camera_check.NO_KEEP)."""
+        from .perception.camera_check import KEEP, NO_KEEP
+
+        value = str(self._param("camera_check") or "run")
         if value not in CAMERA_CHECKS:
             raise EngineError(
                 "bad_config",
-                f'camera_check is {value!r}: it must be "keep", "run" or "none". Nothing ran',
+                f'camera_check is {value!r}: it must be "run" or "none"'
+                + (f" ({NO_KEEP})" if value == KEEP else "")
+                + ". Nothing ran",
                 recoverable=False,
             )
         return value

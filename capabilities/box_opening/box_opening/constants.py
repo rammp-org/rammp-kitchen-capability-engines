@@ -27,11 +27,11 @@ def load_yaml(f):
 VIZ_ENV = "BOX_OPENING_VIZ"  # 1 (or on, true, yes): a Foxglove view of the run (perception/viz)
 # 1 (or on, true, yes): each --execute mission keeps its camera frames (detection_set.MissionFrames)
 MISSION_FRAMES_ENV = "BOX_OPENING_MISSION_FRAMES"
-# The scene camera checked against the wrist camera each run (perception/camera_check; the node's
-# camera_check): "keep" (unset too), the two cameras' disagreement about where the container is is measured
-# wherever both have it, box opening's own reading of the scene camera is turned by it for the rest of the
-# run, and the measure is kept as the next run's starting guess; "run", measured and applied in the run,
-# no guess read or kept; "none", the scene camera as its mount has it, as before 2026-11-20.
+# The scene camera checked against the wrist camera within a run (perception/camera_check; the node's
+# camera_check): "run" (unset and any unknown word too), the two cameras' disagreement about where the
+# container is is measured wherever both are known to have the same one, and box opening's own reading of
+# the scene camera is turned by it for the rest of that run; "none", the scene camera as its mount has it,
+# as before 2026-11-20. Nothing is carried from one run to the next.
 CAMERA_CHECK_ENV = "BOX_OPENING_CAMERA_CHECK"
 
 

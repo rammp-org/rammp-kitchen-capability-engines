@@ -64,7 +64,9 @@ def write_manifest(set_dir):
 def scene_frame(scene, T_base_link):
     """The scene camera's capture as the scene locator uses it, raw: colour
     (BGR), the median depth of the kept frames, both intrinsics, the depth
-    -> colour extrinsic, link -> colour, and the calibration in force — for
+    -> colour extrinsic, link -> colour, and its mount `T_base_link` (a
+    mission hands the mount as TF or the calibration file has it, nothing of
+    the check against the wrist camera in it: camera_check.raw_mount) — for
     write_frame. None when a stream or a transform is missing.
 
     Nothing is copied or computed here: the grabber's frames are held (it
@@ -168,13 +170,18 @@ class MissionFrames:
             "popped": None,
         }
 
-    def scene(self, arrays, fix_xyz=None, score=None, why=None, source=None, boxes=None):
+    def scene(self, arrays, fix_xyz=None, score=None, why=None, source=None, boxes=None, check=None):
         """The scene camera's capture at the locate, and its answer (the
         box's top) or why it had none; which detector the fix came from
         ("segmenter") and, per detector, the raw boxes of the last
         message the locate gated (SceneLocator.last_boxes) — so a live run
         replays exactly. `scene_owl` stays the score behind the fix, for the
-        evaluator."""
+        evaluator. The frame's T_base_link and `fix_xyz` are the camera as
+        its MOUNT has it and the scene camera's own fix; `check`
+        (camera_check.kept_row) is the correction against the wrist camera
+        that was in force for the run, kept beside them under its own name
+        (scene_camera_check; None: none was), with the fix as the run went
+        by it."""
         if arrays is not None:
             self.frames.append(("scene_%d" % sum(n.startswith("scene_") for n, _ in self.frames), arrays))
         self.doc.update(
@@ -183,6 +190,7 @@ class MissionFrames:
             scene_why=why,
             scene_source=source,
             scene_boxes={str(k): [list(b) for b in v] for k, v in (boxes or {}).items()},
+            scene_camera_check=check,
         )
 
     def wrist(self, pose, arrays):

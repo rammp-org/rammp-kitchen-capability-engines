@@ -1,4 +1,4 @@
-"""The scene camera checked against the wrist camera, each run.
+"""The scene camera checked against the wrist camera, within a run.
 
 Both cameras place the container in the arm's frame: the scene camera by its mount (the robot's TF, or
 the calibration file), the wrist camera by the arm that carries it. The arm goes where the wrist camera
@@ -14,61 +14,77 @@ lens at [0.151, -0.572]):
     scene [0.540, -0.049]  wrist [0.635, -0.188]   168 mm         -14.9 deg, -34 mm
     scene [0.559, -0.078]  wrist [0.643, -0.208]   155 mm         -14.0 deg, -29 mm
 
-The distance between them changes with how far the container stands; the ANGLE about the scene camera's
-lens does not. That is a camera turned on its mount, and a shift fitted to one place (scene_refine's
-translation) would be wrong at the next. So the disagreement is measured as what one pair gives without
-assuming more: the turn about the vertical through the scene lens that brings the scene camera's
-direction to the container onto the wrist's, how much nearer or farther along that line the wrist has
-it, and how much higher. One pair cannot tell a turn about the vertical from a tilt, and does not try:
-the turn is about the vertical (as scene_refine's correction is horizontal), and what a tilt would add
-shows in the heights, which are said and not corrected.
+The distance between them changes with how far the container stands; the angle about the scene camera's
+lens changes much less. So the disagreement is measured as what ONE pair gives without assuming more:
+the turn about the vertical through the scene lens that brings the scene camera's direction to the
+container onto the wrist's, how much nearer or farther along that line the wrist has it, and how much
+higher.
 
-What is done with it (the owner's rules: nothing recalibrated, the team's TF and files untouched, the
-scene measured each run):
+WHAT THAT IS AND IS NOT. It is not a calibration. One pair cannot tell a turn about the vertical from a
+tilt or a shift, and the five pairs do not say the mount is only turned: a free rigid fit to them is
+-10.4 deg about a point 294 mm behind the lens, and the scene camera's table reads 0.155 m higher per
+metre of range, so the mount is tilted too (the review of 2026-11-20). What the five pairs establish:
+with one pair's measure applied to the other four, the container itself comes out within 31 mm of where
+the wrist has it (48 mm with the turn alone); with the other four's median applied to the fifth, 5-17 mm
+(28-39 mm with the turn alone). Untouched it was 155-215 mm off. A thing elsewhere on the table comes
+out 3-6 cm off (the turn about the lens and the free fit differ 25-67 mm across it). Better than 15 cm,
+not exact, and none of it is flown.
 
-  for the rest of the run   the scene camera's placement as box opening reads it (SceneLocator
-                            .base_to_color, and everything lifted through it: its fixes, its sightings
-                            in a line-up, the line of sight a selection is tied by, the points a later
-                            look or the lid's room map takes) is turned by that angle about the vertical
-                            through its lens. The along-line difference is applied to that container's
-                            own fix only (own_fix): the scene camera sees the lid from its side, and
-                            what that does to its range is the lid's, not the table's. Heights are never
-                            moved by it.
-  for the next run's start  the measure is kept in box opening's state folder (camera_check.json, the
-                            newest GUESS_KEPT under one mount) as a GUESS: the next run's scene numbers
-                            start turned by their median, said with its age each time, until that run's
-                            own pair replaces it. A guess belongs to the mount it was measured against
-                            (the numbers TF or the calibration file gave): another mount, and it is
-                            dropped. A run that measures more than GUESS_FAR_DEG from the guess says so
-                            and keeps only its own.
+WHEN A PAIR IS MEASURED. Only where the two fixes are known to be of ONE container (adopt's `paired`,
+which the caller fills: corroborated): a selection's tie took the wrist's find, or the scene camera
+holds exactly one container of the kind and the wrist's frames no second lid-sized top. A lid 15 cm to
+the side of a healthy camera's box would otherwise measure as -12 deg: a wrong warning and a wrong turn.
 
-Set by BOX_OPENING_CAMERA_CHECK (constants.CAMERA_CHECK_ENV; the node's camera_check): "keep" (the
-default), "run" (measured and applied in the run, no guess read or kept), "none" (nothing measured,
-nothing turned: the scene camera as its mount has it). Words a YAML file does not read as true or false.
+WHAT IS DONE WITH IT, for the rest of the run only (the owner's rules: nothing recalibrated, the team's
+TF and files untouched, the scene measured each run): the scene camera's placement as box opening reads
+it (SceneLocator.base_to_color, and everything lifted through it afterwards: its fixes and its
+sightings in a line-up, the line of sight a selection is tied by, the points a later look takes) is
+turned by that angle about the vertical through its lens, and the container's own place (a fix, a
+sighting: own_xyz) is moved along the line by the along-line difference. Heights are never moved.
 
-Pure numpy and a small JSON file; the ROS side is the locator's.
+WHAT A RUN SEES OF IT. A run reads its scene camera again after the wrist's find only where the chair is
+guided and it looks a second time, or where a look again pools what the scene camera saw. In an ordinary
+run what this gives is the CAMERAS line, the WARNING to tell the team (the flight view shows both), and
+a second round that starts corrected.
+
+NOTHING IS CARRIED FROM RUN TO RUN. A measure kept as the next run's starting guess was built and
+withdrawn in review (2026-11-20): a guess that outlives the camera's being put right puts the scene
+camera's fix of one container onto its neighbour, the arm opens the neighbour, and the pair that then
+measures "confirms" the guess. No rule on the file's age or on its rows' agreement makes that sound, so
+"keep" is not a mode: every run starts from the mount as it is, and nothing is read from or written to
+the state folder.
+
+Set by BOX_OPENING_CAMERA_CHECK (constants.CAMERA_CHECK_ENV; the node's camera_check): "run" (the
+default, and what an unset or unknown word is read as), or "none" (nothing measured, nothing turned).
+
+Pure numpy; the ROS side is the locator's.
 """
 
-import json
 import math
 import os
 import time
 from dataclasses import dataclass, replace
-from pathlib import Path
 
 import numpy as np
 
 from box_opening import LOGGER as log
-from box_opening.constants import CAMERA_CHECK_ENV, state_dir
+from box_opening.constants import CAMERA_CHECK_ENV
 
-KEEP, RUN, NONE = "keep", "run", "none"
-MODES = (KEEP, RUN, NONE)
-FILE_NAME = "camera_check.json"
+RUN, NONE = "run", "none"
+MODES = (RUN, NONE)
+# asked for by name and not given: a correction carried from one run to the next (the module's note)
+KEEP = "keep"
+NO_KEEP = (
+    '"keep" (a correction carried from one run to the next) is not available: it can confirm itself on the '
+    "wrong container"
+)
+# what "none" is also spelled as by hand; every other word, and none at all, is RUN
+NONE_WORDS = (NONE, "off", "0", "false", "no", "disabled")
 
 # A pair is one container seen by both cameras only where the two directions from the scene lens are no
 # further apart than this. 2026-11-20 measured 13-15 deg and the camera was found turned ~15 deg once
 # before (flatbot, 2026-11-17); at 25 deg the scene camera would have the box 0.3 m off at 0.7 m, which
-# is no camera to correct in silence, and two things that far apart are as likely two things.
+# is no camera to correct in silence.
 TURN_MAX_DEG = 25.0
 # ... and no further apart along that line than the range error a selection is tied within
 # (press_demo.SELECTED_ALONG_M): what was seen was 28-36 mm (above) and 80 mm (2026-11-11).
@@ -79,28 +95,18 @@ NEAR_LENS_M = 0.25
 # A turn past this is said as a WARNING, once a run: at 0.7 m it is 37 mm, half of what ties a wrist find
 # to a selection (press_demo.SELECTED_ACROSS_M, 75 mm) and most of what scene_trust distrusts (50 mm).
 TURN_WARN_DEG = 3.0
-GUESS_KEPT = 5  # the newest measures kept under one mount; the guess is their median
-# A run's own measure this far from the guess: the camera has moved since, or one of the two paired two
-# different things. Said, and the older measures are dropped (they describe a camera that no longer is).
-# The five pairs above spread 1.9 deg.
-GUESS_FAR_DEG = 3.0
-# The mount a guess was measured against is still the mount where it reads within these: a static TF
-# and a calibration file give the same numbers every time, so anything past rounding is another mount.
-MOUNT_XYZ_TOL_M = 0.002
-MOUNT_TURN_TOL_DEG = 0.2
+
+# What establishes that a wrist find and the scene camera's fix are one container (corroborated)
+BY_TIE = "the selection's tie took the wrist's find"
+BY_ONE = "the scene camera holds one container of the kind and the wrist's frames one lid-sized top"
 
 
 def mode_of(env=None):
-    """KEEP, RUN or NONE by $BOX_OPENING_CAMERA_CHECK: unset or anything else, KEEP (the node refuses a
-    value it does not know before a run starts: node.Capability._camera_check)."""
+    """RUN or NONE by $BOX_OPENING_CAMERA_CHECK: NONE for "none" and the words that mean it by hand
+    (NONE_WORDS), RUN for everything else, unset and "keep" included (the node refuses "keep" and any
+    word it does not know before a run starts: node.Capability._camera_check)."""
     word = str((os.environ if env is None else env).get(CAMERA_CHECK_ENV, "")).strip().lower()
-    if word in (NONE, "off", "0", "false", "no"):
-        return NONE
-    return RUN if word == RUN else KEEP
-
-
-def file_path(env=None):
-    return state_dir(env) / "scene_calib" / FILE_NAME
+    return NONE if word in NONE_WORDS else RUN
 
 
 @dataclass(frozen=True)
@@ -211,7 +217,7 @@ def turn_xyz(lens_xy, turn_rad, xyz, along_m=0.0):
 def turned_fix(fix, lens_xy, turn_rad, along_m=0.0):
     """A scene_source.SceneFix made BEFORE a correction was known, as the correction has it: its lid's
     top and its pose turned about the lens and moved along the line (turn_xyz), its yaw turned, its
-    table points and the extent they were seen over turned (not moved along: own_fix's note). Heights,
+    table points and the extent they were seen over turned (not moved along: own_xyz's note). Heights,
     and everything else of it, as they were."""
     if fix is None or (not turn_rad and not along_m):
         return fix
@@ -236,168 +242,29 @@ def turned_fix(fix, lens_xy, turn_rad, along_m=0.0):
     return replace(fix, top_xyz=top, pose=pose, table_points=points, table_extent=extent)
 
 
-# ------------------------------------------------------------------------------------------- the guess
-def mount_key(T_base_link):
-    """A mount as the guess is keyed on it: T(arm <- the scene camera's link) as TF or the calibration
-    file gave it, xyz and the rotation's rows."""
-    T = np.asarray(T_base_link, float)
-    return [round(float(v), 5) for v in T[:3, 3]] + [round(float(v), 6) for v in T[:3, :3].ravel()]
-
-
-def same_mount(a, b):
-    """Whether two mount_keys are one mount: within MOUNT_XYZ_TOL_M and MOUNT_TURN_TOL_DEG."""
-    try:
-        a, b = np.asarray(a, float), np.asarray(b, float)
-        if a.shape != (12,) or b.shape != (12,):
-            return False
-        if float(np.abs(a[:3] - b[:3]).max()) > MOUNT_XYZ_TOL_M:
-            return False
-        R = a[3:].reshape(3, 3).T @ b[3:].reshape(3, 3)
-        angle = math.degrees(math.acos(max(-1.0, min(1.0, (float(np.trace(R)) - 1.0) / 2.0))))
-        return angle <= MOUNT_TURN_TOL_DEG
-    except (TypeError, ValueError):
-        return False
-
-
-@dataclass(frozen=True)
-class Guess:
-    """What the runs before measured under this mount: the median of the newest `n` (turn, along), and
-    when the newest was made."""
-
-    turn_rad: float
-    along_m: float
-    n: int
-    t: float
-
-    def words(self, now=None):
-        age = max(0.0, (time.time() if now is None else float(now)) - self.t)
-        if age < 5400:
-            ago = "%.0f min ago" % (age / 60.0)
-        elif age < 2 * 86400:
-            ago = "%.0f h ago" % (age / 3600.0)
-        else:
-            ago = "%.0f days ago" % (age / 86400.0)
-        return "%+.1f deg about its lens, %.0f mm %s along it: what %s measured against the wrist camera, %s" % (
-            math.degrees(self.turn_rad),
-            1000 * abs(self.along_m),
-            "nearer" if self.along_m < 0 else "farther",
-            "the last run" if self.n == 1 else "the last %d runs" % self.n,
-            ago if self.n == 1 else "the newest " + ago,
-        )
-
-
-def _read(path):
-    try:
-        with open(path) as f:
-            doc = json.load(f)
-        return doc if isinstance(doc, dict) else None
-    except (OSError, ValueError):
-        return None
-
-
-def load_guess(path, key):
-    """(Guess, None) from `path` for the mount `key`, or (None, why there is none): no file, a file that
-    cannot be read, measures made under another mount (dropped: said, the file left for the next
-    measure to replace), or none in it."""
-    doc = _read(path)
-    if doc is None:
-        return None, None
-    rows = [r for r in doc.get("measures") or [] if isinstance(r, dict)]
-    if not rows:
-        return None, None
-    if not same_mount(doc.get("mount"), key):
-        return None, (
-            "the scene camera's mount is not the one the last runs' measure against the wrist camera was made "
-            "under (%d kept): dropped, the scene camera as its mount has it" % len(rows)
-        )
-    try:
-        rows = rows[-GUESS_KEPT:]
-        turn = float(np.median([float(r["turn_deg"]) for r in rows]))
-        along = float(np.median([float(r["along_mm"]) for r in rows]))
-        newest = max(float(r.get("t") or 0.0) for r in rows)
-    except (KeyError, TypeError, ValueError):
-        return None, "the last runs' measure against the wrist camera cannot be read: not used"
-    if abs(turn) > TURN_MAX_DEG or abs(along) > 1000 * ALONG_MAX_M:
-        return None, "the last runs' measure against the wrist camera is past what a pair may be: not used"
-    return Guess(math.radians(turn), along / 1000.0, len(rows), newest), None
-
-
-def save_measure(path, key, d, fresh=False, by=""):
-    """`d` (a Disagreement, the scene camera's own placement against the wrist's) added to the measures
-    kept under the mount `key`, the newest GUESS_KEPT of them; `fresh`: the older ones are dropped
-    first (they describe a camera that no longer is). A file of another mount is replaced. A file that
-    cannot be written is a line in the log, never the run's end."""
-    path = Path(path)
-    doc = _read(path) or {}
-    rows = [r for r in doc.get("measures") or [] if isinstance(r, dict)]
-    if fresh or not same_mount(doc.get("mount"), key):
-        rows = []
-    rows = (rows + [dict(d.row(), by=str(by))])[-GUESS_KEPT:]
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"format": 1, "mount": list(key), "measures": rows}, indent=1) + "\n")
-        tmp.replace(path)
-    except OSError as e:
-        log.info("[scene] (the cameras' disagreement was not kept for the next run: %s)" % e)
-        return False
-    return True
-
-
 # ------------------------------------------------------------------------------------- what a locator holds
 class CameraCheck:
-    """The correction in force for one scene locator: `turn_rad` about the vertical through the lens
-    (what SceneLocator.base_to_color turns its placement by), `along_m` (own_fix), and where they came
-    from, `by`: "" (none), "guess" (the runs before, until this one measures) or "run" (this run's own
-    pair). settle() reads the guess once, when the mount is first known; adopt() takes a run's
-    measure."""
+    """The correction in force for one scene locator, for one run: `turn_rad` about the vertical through
+    the lens (what SceneLocator.base_to_color turns its placement by) and `along_m` (own_xyz), none
+    until the run's own pair is measured (adopt); `by`: "" (none) or "run"."""
 
-    def __init__(self, mode=None, path=None, clock=time.time):
-        self.mode = mode_of() if mode is None else mode
-        self.path = Path(path) if path is not None else file_path()
+    def __init__(self, mode=None, clock=time.time):
+        self.mode = mode_of() if mode is None else (NONE if mode == NONE else RUN)
         self._clock = clock
         self.turn_rad = 0.0
         self.along_m = 0.0
         self.by = ""
-        self.guess = None  # the Guess read at the start, kept for the word on how far the run's own is from it
-        self.key = None  # the mount it is all keyed on
-        self.measured = None  # this run's own Disagreement (the scene camera's own placement against the wrist's)
+        self.measured = None  # this run's newest Disagreement (the scene camera's own placement against the wrist's)
         self.warned = False
-        self._settled = False
 
     @property
     def active(self):
         return self.mode != NONE
 
-    def settle(self, T_base_link):
-        """Once, with the mount as TF or the calibration file gives it: the guess of the runs before,
-        where there is one for this mount (mode KEEP), in force and said."""
-        if self._settled or T_base_link is None:
-            return
-        self._settled = True
-        self.key = mount_key(T_base_link)
-        if self.mode != KEEP:
-            return
-        guess, why = load_guess(self.path, self.key)
-        if why:
-            log.info("[scene] %s" % why)
-        if guess is None:
-            return
-        self.guess, self.turn_rad, self.along_m, self.by = guess, guess.turn_rad, guess.along_m, "guess"
-        log.info(
-            "[scene] the scene camera's numbers start turned %s. A guess, until this run's wrist camera has the "
-            "container too" % guess.words(self._clock())
-        )
-
-    def adopt(self, d, by=""):
+    def adopt(self, d):
         """This run's own measure `d` (the scene camera's own placement against the wrist's) in force
-        from here on, and kept for the next run's start (mode KEEP). Returns how far it is from the guess
-        it replaces (deg), or None where there was none."""
-        far = None if self.guess is None else abs(d.turn_deg - math.degrees(self.guess.turn_rad))
-        self.measured, self.turn_rad, self.along_m, self.by = d, d.turn_rad, d.along_m, "run"
-        if self.mode == KEEP and self.key is not None:
-            save_measure(self.path, self.key, d, fresh=far is not None and far > GUESS_FAR_DEG, by=by)
-        return far
+        from here on."""
+        self.measured, self.turn_rad, self.along_m, self.by = d, float(d.turn_rad), float(d.along_m), "run"
 
     def row(self):
         """For the run's record."""
@@ -416,35 +283,98 @@ def lens_xy(locator):
     return None if T is None else (float(T[0, 3]), float(T[1, 3]))
 
 
-def own_fix(locator, fix):
-    """The scene camera's fix of the container as the correction in force has the container itself:
-    moved along the line from the lens by the along-line difference (CameraCheck.along_m). The turn is
-    already in it (the locator lifted it through base_to_color). Only this container's own place is
-    moved: the scene camera sees a lid from its side, and what that does to its range says nothing of
-    the table round it. Heights as they were. `fix` itself where nothing is in force, the fix is the
-    wrist's, or a rough one (its place is its own fit's). SceneLocator.locate returns every fix through
-    this."""
-    check = getattr(locator, "check", None)
-    if fix is None or check is None or not check.active or not check.along_m:
-        return fix
-    if getattr(fix, "source", "") == "wrist" or getattr(fix, "rough", False):
-        return fix
-    lens = lens_xy(locator)
-    if lens is None:
-        return fix
-    top = turn_xyz(lens, 0.0, fix.top_xyz, check.along_m)
-    pose = fix.pose
-    if pose is not None:
-        pose = replace(pose, xyz=turn_xyz(lens, 0.0, pose.xyz, check.along_m))
-    return replace(fix, top_xyz=top, pose=pose)
-
-
 def in_force(locator):
     """(turn_rad, along_m) of the correction `locator` places its fixes with now; (0.0, 0.0) with none."""
     check = getattr(locator, "check", None)
     if check is None or not check.active:
         return 0.0, 0.0
     return float(check.turn_rad), float(check.along_m)
+
+
+def raw_mount(locator):
+    """T(arm <- the scene camera's link) as the MOUNT has it (TF, or the calibration file), nothing of a
+    correction in it; a stand-in locator that knows no such thing is asked for the one it has. None
+    where it cannot place its camera."""
+    try:
+        return locator.base_to_link(raw=True)
+    except TypeError:
+        return locator.base_to_link()
+
+
+def own_xyz(locator, xyz):
+    """A place the scene camera gave for THE CONTAINER (lifted through the locator's placement, so the
+    turn is in it), as the correction in force has the container itself: moved along the line from the
+    lens by the along-line difference. Only the container's own place is moved so: the scene camera sees
+    a lid from its side, and what that does to its range says nothing of the table round it. Its height
+    as it was. `xyz` itself where nothing is in force or the camera cannot be placed."""
+    _turn, along = in_force(locator)
+    if not along:
+        return xyz
+    lens = lens_xy(locator)
+    return xyz if lens is None else turn_xyz(lens, 0.0, xyz, along)
+
+
+def raw_xyz(locator, xyz):
+    """A container's place as SceneLocator.locate (or a told sighting) gave it, as the MOUNT itself has
+    it: the along-line move and the turn in force taken out again. For measuring the camera against the
+    wrist (adopt), and for what is kept of a run for work on the camera's mount (a mission's saved
+    frames): a later refit must see the camera's whole error, not what a correction left of it. `xyz`
+    itself where nothing is in force."""
+    turn, along = in_force(locator)
+    if not turn and not along:
+        return xyz
+    lens = lens_xy(locator)
+    if lens is None:
+        return xyz
+    return turn_xyz(lens, -turn, turn_xyz(lens, 0.0, xyz, -along))
+
+
+def kept_row(locator, fix_xyz=None):
+    """The correction in force as it is kept beside what a run saves of its scene camera (a mission's
+    frames: the mount and the fix are saved as the mount has them, raw_mount and raw_xyz), under its own
+    name: its turn and along-line move, and the container's place as the run itself went by it
+    (`fix_xyz`, as locate() returned it). None where nothing is in force."""
+    turn, along = in_force(locator)
+    if not turn and not along:
+        return None
+    return {
+        "turn_deg": round(math.degrees(turn), 3),
+        "along_mm": round(1000 * along, 1),
+        "by": str(getattr(getattr(locator, "check", None), "by", "")),
+        "fix_xyz_run": None if fix_xyz is None else [round(float(v), 5) for v in fix_xyz],
+    }
+
+
+def own_fix(locator, fix):
+    """The scene camera's fix of the container as the correction in force has the container itself
+    (own_xyz: its top and its pose moved along the line of sight; the turn is already in what the look
+    lifted). `fix` itself where nothing is in force, the fix is the wrist's, or a rough one (its place is
+    its own fit's). SceneLocator.locate returns every fix through this, and tells every sighting the
+    same way (own_sighting): a line-up's proof and the run's plan are of one place."""
+    if fix is None or getattr(fix, "source", "") == "wrist" or getattr(fix, "rough", False):
+        return fix
+    top = own_xyz(locator, fix.top_xyz)
+    if top is fix.top_xyz:
+        return fix
+    pose = fix.pose
+    if pose is not None:
+        pose = replace(pose, xyz=own_xyz(locator, pose.xyz))
+    return replace(fix, top_xyz=top, pose=pose)
+
+
+def own_sighting(locator, sighting):
+    """A scene_source.Sighting as it is TOLD (SceneLocator.on_sighting: a line-up's watch), placed as the
+    fix made of it would be (own_fix): one placement for both. A rough one as it is. The sightings the
+    look itself votes on are not these: it votes on what it lifted, and its fix is moved once."""
+    if sighting is None or getattr(sighting, "lift", "") == "rough":
+        return sighting
+    top = own_xyz(locator, sighting.top)
+    if top is sighting.top:
+        return sighting
+    pose = sighting.pose
+    if pose is not None:
+        pose = replace(pose, xyz=own_xyz(locator, pose.xyz))
+    return replace(sighting, top=tuple(top), pose=pose)
 
 
 def refix(locator, fix, was):
@@ -458,91 +388,110 @@ def refix(locator, fix, was):
     return turned_fix(fix, lens, now[0] - float(was[0]), now[1] - float(was[1]))
 
 
-def adopt(ctx, locator, scene_fix, wrist_fix, runner=None, by=""):
+def corroborated(locator, others, tied=False):
+    """What establishes that a wrist find and the scene camera's fix are ONE container: (its words, "")
+    or ("", why nothing does). `tied`: a selection's tie took the wrist's find (the run's own test of
+    exactly that). Else, with no selection: the scene camera holds exactly one container of the kind
+    (the locator's only_one(), asked with getattr: a locator that cannot say is no corroboration) AND
+    the wrist's frames hold no second lid-sized top (`others`: the tops besides the find, [] for none;
+    None: not known, which is no corroboration either). Without one of the two a pair is two cameras
+    each seeing something, and a lid 15 cm beside a healthy camera's box would be measured as a mount
+    12 deg off."""
+    if tied:
+        return BY_TIE, ""
+    no_tie = "no selection ties the wrist's find to the scene camera's box, and "
+    one = getattr(locator, "only_one", None)
+    try:
+        alone = bool(one()) if callable(one) else None
+    except Exception:  # noqa: BLE001 - what cannot be counted is not "only one"
+        alone = None
+    if alone is None:
+        return "", no_tie + "the scene camera cannot say it holds only one container of the kind"
+    if not alone:
+        return "", no_tie + "the scene camera does not hold exactly one container of the kind"
+    if others is None:
+        return "", no_tie + "what else the wrist's frames hold is not known"
+    if len(others):
+        return "", no_tie + "the wrist's frames hold another lid-sized top at [%.3f, %.3f]" % (
+            float(others[0][0]),
+            float(others[0][1]),
+        )
+    return BY_ONE, ""
+
+
+def adopt(ctx, locator, scene_fix, wrist_fix, runner=None, by="", paired="", why_not=""):
     """A wrist find was just taken for the container the scene camera has at `scene_fix` (a fix as
     `locator`.locate() returned it, with the correction that is in force NOW: nothing may have changed
     the check between that look and this call): measure the two against each other and put the result
-    in force (the module's note).
-    `wrist_fix`: the wrist's fix, or its (x, y, z). Returns the Disagreement now in force, or None
-    where nothing was measured (the check off, no scene fix or a rough one, a pair that is no measure:
-    said). Never raises and never ends a run: what it cannot do is a line in the log."""
+    in force for the rest of the run (the module's note). `paired`: what establishes that the two ARE
+    one container (corroborated's words, or the caller's own); empty, and nothing is measured,
+    `why_not` said. `wrist_fix`: the wrist's fix, or its (x, y, z). `by`: the run, for its record.
+    Returns the Disagreement now in force, or None where nothing was measured (the check off, no scene
+    fix or a rough one, a pair nothing establishes, a pair that is no measure: said). `ctx` is told the
+    correction in force (ctx.cameras_in_force), for what was placed by the scene camera's numbers
+    before it (press_demo.keep_out_counter, counter_after_adopt). Never raises and never ends a run:
+    what it cannot do is a line in the log."""
     try:
-        return _adopt(ctx, locator, scene_fix, wrist_fix, runner, by)
+        return _adopt(ctx, locator, scene_fix, wrist_fix, runner, by, paired, why_not)
     except Exception as e:  # noqa: BLE001 - a check that failed is no reason to stop a run
         log.info("[press_demo] CAMERAS: not checked against each other (%s: %s)" % (type(e).__name__, e))
         return None
 
 
-def _adopt(ctx, locator, scene_fix, wrist_fix, runner, by):
+def _adopt(ctx, locator, scene_fix, wrist_fix, runner, by, paired, why_not):
     check = getattr(locator, "check", None)
     if check is None or not check.active or scene_fix is None or wrist_fix is None:
         return None
     if getattr(scene_fix, "source", "") == "wrist" or getattr(scene_fix, "rough", False):
         return None  # (no scene camera's fix, or one placed roughly from a box its frame cut: no measure)
+    note = getattr(runner, "note", None)
+    if not paired:
+        why = str(why_not or "the caller does not say what makes the two one container")
+        log.info("[press_demo] CAMERAS: the two cameras' places are not measured against each other: %s" % why)
+        if note is not None:
+            note("camera_check", measured=False, why=why, run=str(by), **check.row())
+        return None
     lens = lens_xy(locator)
     if lens is None:
         return None
     w = tuple(float(v) for v in getattr(wrist_fix, "top_xyz", wrist_fix))
-    # the scene camera's OWN placement of it: what its look moved it along the line by (own_fix) and the
-    # turn it was lifted with, taken out again
-    s = turn_xyz(lens, 0.0, tuple(float(v) for v in scene_fix.top_xyz), -check.along_m)
-    s = turn_xyz(lens, -check.turn_rad, s)
+    # the scene camera's OWN placement of it: what its look moved it along the line by and the turn it was
+    # lifted with, taken out again
+    s = raw_xyz(locator, tuple(float(v) for v in scene_fix.top_xyz))
     d, why = measure(lens, s, w, t=check._clock())
-    note = getattr(runner, "note", None)
     if d is None:
         log.info("[press_demo] CAMERAS: no measure of the scene camera against the wrist's: %s" % why)
         if note is not None:
-            note("camera_check", measured=False, why=why, **check.row())
+            note("camera_check", measured=False, why=why, run=str(by), **check.row())
         return None
-    had, guess = check.by, check.guess
-    far = check.adopt(d, by=by)
+    check.adopt(d)
+    if ctx is not None:
+        try:
+            ctx.cameras_in_force = in_force(locator)
+        except Exception:  # noqa: BLE001 - a context that cannot hold it: the keep-out then drops nothing
+            pass
     log.info(
         "[press_demo] CAMERAS: the scene camera has the container at [%.3f, %.3f] and the wrist camera at [%.3f, "
-        "%.3f]: they disagree by %s. The scene camera's numbers are turned %+.1f deg about its lens for the rest "
-        "of this run%s"
-        % (
-            s[0],
-            s[1],
-            w[0],
-            w[1],
-            d.words(),
-            d.turn_deg,
-            ""
-            if check.mode != KEEP
-            else ", and the next starts from that"
-            if check.key is not None
-            else " (not kept: the mount it was measured under is not known)",
-        )
+        "%.3f] (one container: %s): they disagree by %s. The scene camera's numbers are turned %+.1f deg about "
+        "its lens for the rest of this run" % (s[0], s[1], w[0], w[1], paired, d.words(), d.turn_deg)
     )
-    if had == "guess" and far is not None:
-        log.info(
-            "[press_demo] CAMERAS: the guess this run started from (%+.1f deg) was %.1f deg from what it measures%s"
-            % (
-                math.degrees(guess.turn_rad),
-                far,
-                ""
-                if far <= GUESS_FAR_DEG
-                else ": more than %.0f. The camera has moved since, or one of the two paired two different things; "
-                "this run's own is used and the older ones are dropped" % GUESS_FAR_DEG,
-            )
-        )
     if abs(d.turn_deg) > TURN_WARN_DEG and not check.warned:
         check.warned = True
         log.info(
             "[press_demo] WARNING: the scene camera's mount looks %.0f deg off (it puts the container %.0f mm from "
             "where the wrist camera, which the arm follows, has it): tell the team. Box opening turns its own "
-            "reading of it; everything else that uses the scene camera's positions is off by as much"
+            "reading of it for this run; everything else that uses the scene camera's positions is off by as much"
             % (abs(d.turn_deg), 1000 * d.apart_m)
         )
     if note is not None:
         note(
             "camera_check",
             measured=True,
+            paired=str(paired),
+            run=str(by),
             scene_xy=[round(s[0], 4), round(s[1], 4)],
             wrist_xy=[round(w[0], 4), round(w[1], 4)],
             lens_xy=[round(lens[0], 4), round(lens[1], 4)],
-            guess_deg=None if guess is None else round(math.degrees(guess.turn_rad), 2),
-            from_guess_deg=None if far is None else round(far, 2),
             **d.row(),
             **{k: v for k, v in check.row().items() if k in ("mode", "by")},
         )

@@ -2070,3 +2070,72 @@ def test_a_rival_out_of_the_arms_reach_does_not_make_a_container_within_it_ambig
     assert within_reach_rivals(top, (far,), None) == (far,)  # no word on reach: every rival counts
     assert within_reach_rivals(far, (top,), reach) == (top,)  # the top itself out of reach: nothing is settled by reach
     assert within_reach_rivals(top, (), reach) == ()
+
+
+def test_a_real_look_lifts_through_the_placement_the_cameras_check_has_in_force():
+    """The cameras' check (perception/camera_check) turns the placement a look lifts its cloud through. A real look
+    (the cloud, the gate, the vote: nothing stood in for but the camera and the segmenter's boxes) of the canister
+    through a mount that TF has 14 deg off about its lens, its link frame not its colour frame: the fix lands
+    14 deg round the lens from where the canister stands, 12 cm off. With the wrist's place for it measured
+    against that (adopt), the next look's fix lands on the canister, its sightings are told where that fix is,
+    its height is what it was, and the mount itself is as TF has it."""
+    import math
+
+    from box_opening.perception import camera_check as cc
+    from box_opening.perception import scene_source as ss
+
+    model = ContainerModel.load(PINK)
+    pts, uv, canister, _tall = _side_scene(
+        np.random.default_rng(4)
+    )  # the world as it is: the canister at (0.70, -0.55)
+    box = _pixel_box(_project(canister[canister[:, 2] > SIDE_TABLE + model.dims[2] - 0.025]))
+    seen = (uv[:, 0] >= 0) & (uv[:, 0] < 640) & (uv[:, 1] >= 0) & (uv[:, 1] < 400)
+    R_true = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])  # the camera as it stands: level, along +x
+    T_true = np.eye(4)
+    T_true[:3, :3], T_true[:3, 3] = R_true, SIDE_CAM
+    pc = (pts - SIDE_CAM) @ R_true  # its cloud, in its colour frame
+    T_lc = np.array([[0.0, 0.0, 1.0, 0.01], [-1.0, 0.0, 0.0, 0.02], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
+    off = math.radians(14.0)
+    T_mount = cc.rotation(SIDE_CAM[:2], off) @ T_true @ np.linalg.inv(T_lc)  # arm <- its link, as TF has it: 14 deg off
+    world = _World(seg_msgs=_every(0.1, 30.0, [("food container", 0.88, box)]))
+    world.grab.cloud_in_color_frame = lambda depth=None, stride=1: (pc[seen], uv[seen])
+    world.grab.link_frame = "scene_camera"
+    world.grab.lookup = lambda parent, child: T_mount
+    world.grab.link_to_color = lambda: T_lc
+    world.grab.depth_to_color = lambda: np.eye(4)
+    loc = ss.SceneLocator.__new__(ss.SceneLocator)
+    loc.spins, loc.model, loc.table_z, loc.base_frame, loc.tag_px, loc.T_base_link = (
+        False,
+        model,
+        None,
+        "arm",
+        None,
+        None,
+    )
+    loc.last_why, loc.last_timing, loc.last_boxes, loc.last_seg_state, loc.moved_note = None, {}, {}, None, None
+    loc.seg_box, loc.instance_id, loc.on_sighting = "as_is", None, None
+    loc.grab, loc.seg, loc._clock, loc._sleep = world.grab, world.rung, world.clock, world.sleep
+    loc.check = cc.CameraCheck(mode="run")
+    assert np.allclose(loc.base_to_color(), cc.rotation(SIDE_CAM[:2], off) @ T_true)  # (through the link frame)
+    stands = np.array([0.70, -0.55])
+    fix = loc.locate(3.0)
+    assert fix is not None, loc.last_why
+    wrong = np.array(cc.turn_xyz(SIDE_CAM[:2], off, (*stands, 0.0))[:2])  # 14 deg round the lens
+    assert np.hypot(*(np.array(fix.top_xyz[:2]) - wrong)) < 0.015
+    assert np.hypot(*(np.array(fix.top_xyz[:2]) - stands)) > 0.10
+    d = cc.adopt(None, loc, fix, (*stands, fix.top_xyz[2] - 0.04), paired=cc.BY_TIE)  # the wrist has it where it stands
+    assert d.turn_deg == pytest.approx(-14.0, abs=1.5) and cc.in_force(loc) == (d.turn_rad, d.along_m)
+    told = []
+    loc.on_sighting = lambda sighting, age_s: told.append(sighting)
+    again = loc.locate(3.0)
+    assert again is not None, loc.last_why
+    assert np.hypot(*(np.array(again.top_xyz[:2]) - stands)) < 0.015  # on the canister
+    assert again.top_xyz[2] == pytest.approx(fix.top_xyz[2], abs=0.003)  # heights are not moved
+    assert again.table_z_scene == pytest.approx(fix.table_z_scene, abs=0.003)
+    assert told and all(
+        np.hypot(*(np.array(s.top[:2]) - np.array(again.top_xyz[:2]))) < ss.VOTE_TOL_M for s in told[-2:]
+    )
+    assert np.allclose(loc.base_to_link(raw=True), T_mount)  # the mount itself: as TF has it
+    assert np.allclose(loc.base_to_link(), cc.rotation(SIDE_CAM[:2], off + d.turn_rad) @ T_true @ np.linalg.inv(T_lc))
+    assert loc.look_record()["camera_check"]["by"] == "run"
+    assert np.hypot(*(np.array(cc.raw_xyz(loc, again.top_xyz)[:2]) - wrong)) < 0.015  # what is kept for a refit
