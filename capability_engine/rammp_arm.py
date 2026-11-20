@@ -162,11 +162,11 @@ def cartesian_knots(sim, ee_start, q_start, traj, *, log=None):
     return knots, lengths
 
 
-def joint_trajectory(q0, knots, cart_lengths=None, speed_scale=1.0):
+def joint_trajectory(q0, knots, cart_lengths=None, speed_scale=1.0, stop_at=()):
     """(t, q, qd) samples for a move from joints `q0` through joint `knots` (wrapped or not), or
     None when the path is too short to move. `cart_lengths`: the Cartesian distance of each
     segment -- given, the path is timed in metres at CART_SPEED, otherwise in joint-space radians
-    at JOINT_SPEED."""
+    at JOINT_SPEED. `stop_at`: 1-based indices into `knots` where the path must come to a stop."""
     path = [np.asarray(q0, dtype=float)] + _unwrap_from(q0, knots)
     seg = (
         np.asarray(cart_lengths, dtype=float)
@@ -176,18 +176,55 @@ def joint_trajectory(q0, knots, cart_lengths=None, speed_scale=1.0):
     s_knots = np.concatenate([[0.0], np.cumsum(seg)])
     if s_knots[-1] < 1e-6:
         return None
-    # min-jerk peak speed is 1.875 x the average
     speed = (CART_SPEED if cart_lengths is not None else JOINT_SPEED) * speed_scale
-    # never faster than JOINT_SPEED on any joint either, whatever the Cartesian length says
-    joint_travel = float(
-        np.sum([np.max(np.abs(b - a)) for a, b in zip(path[:-1], path[1:], strict=False)])
-    )
-    duration = max(
-        MIN_DURATION_S,
-        1.875 * s_knots[-1] / speed,
-        1.875 * joint_travel / (JOINT_SPEED * speed_scale),
-    )
-    return _min_jerk_samples(path, s_knots, duration)
+    stops = tuple(stop_at)
+    if not stops:
+        # min-jerk peak speed is 1.875 x the average
+        # never faster than JOINT_SPEED on any joint either, whatever the Cartesian length says
+        joint_travel = float(
+            np.sum([np.max(np.abs(b - a)) for a, b in zip(path[:-1], path[1:], strict=False)])
+        )
+        duration = max(
+            MIN_DURATION_S,
+            1.875 * s_knots[-1] / speed,
+            1.875 * joint_travel / (JOINT_SPEED * speed_scale),
+        )
+        return _min_jerk_samples(path, s_knots, duration)
+
+    if any(not isinstance(i, int | np.integer) or isinstance(i, bool) for i in stops):
+        raise ValueError("stop_at must contain integer knot indices")
+    if tuple(sorted(set(stops))) != stops or any(i < 1 or i >= len(path) - 1 for i in stops):
+        raise ValueError("stop_at indices must be unique, increasing, and refer to interior knots")
+
+    samples = []
+    elapsed = 0.0
+    boundaries = (0, *stops, len(path) - 1)
+    for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
+        local_s = s_knots[start : end + 1] - s_knots[start]
+        length = float(local_s[-1])
+        if length < 1e-6:
+            raise ValueError("stop_at divides the trajectory at a zero-length segment")
+        joint_travel = float(
+            np.sum(
+                [
+                    np.max(np.abs(b - a))
+                    for a, b in zip(path[start:end], path[start + 1 : end + 1], strict=True)
+                ]
+            )
+        )
+        duration = max(
+            MIN_DURATION_S,
+            1.875 * length / speed,
+            1.875 * joint_travel / (JOINT_SPEED * speed_scale),
+        )
+        t, q, qd = _min_jerk_samples(path[start : end + 1], local_s, duration)
+        if samples:
+            t, q, qd = t[1:] + elapsed, q[1:], qd[1:]
+        else:
+            t = t + elapsed
+        samples.append((t, q, qd))
+        elapsed = float(t[-1])
+    return tuple(np.concatenate([part[i] for part in samples]) for i in range(3))
 
 
 class _StandaloneCtx:

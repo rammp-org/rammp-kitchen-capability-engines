@@ -9,7 +9,8 @@
 #   FRIDGE_GRASP=front      the fridge's handle grasp: front (straight in) or side
 #   KUI_CAPS="fridge microwave ..."  only these capabilities (default: all six)
 #   KUI_TAG=ui-4d916ca      the capability images' tag ($KCE/<capability>:$KUI_TAG; build them first)
-#   ALLOW_EXECUTE=true      false: every button refuses to move the arm (and says so on the UI)
+#   KUI_MICROWAVE_PLACE_TAG=sha-<commit>  published revision tag for microwave_place
+#   ALLOW_EXECUTE=false     true: allow motion only for attended runs, with someone on the e-stop
 #   MOCK=false              true: every capability runs its mock (nothing detected or moved)
 #   ROS_WS=~/ros2_ws        rammp-UI-bridge and rammp-orchestrator built natively (and their interfaces)
 #   ORCH_WS=~/orch_hotfix_ws  rammp-orchestrator hotfix/execute-timeout-param (no 120 s limit, action labels),
@@ -22,12 +23,15 @@ set -u
 GRASP=${FRIDGE_GRASP:-front}
 case "$GRASP" in front|side) ;; *) echo "kitchenui: FRIDGE_GRASP must be front or side, not '$GRASP'"; exit 2;; esac
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export KUI_TAG=${KUI_TAG:-ui-4d916ca} ALLOW_EXECUTE=${ALLOW_EXECUTE:-true} MOCK=${MOCK:-false} GRASP
+export KUI_TAG=${KUI_TAG:-ui-4d916ca} ALLOW_EXECUTE=${ALLOW_EXECUTE:-false} MOCK=${MOCK:-false} GRASP
 ROS_WS=${ROS_WS:-$HOME/ros2_ws}
 ORCH_WS=${ORCH_WS-$HOME/orch_hotfix_ws}
 KCE=ghcr.io/rammp-org/rammp-kitchen-capability-engines
 S=kitchenui
 CAPS=${KUI_CAPS:-fridge microwave microwave_place button_press place_container box_opening}
+if [[ " $CAPS " == *" microwave_place "* ]]; then
+  export KUI_MICROWAVE_PLACE_TAG=${KUI_MICROWAVE_PLACE_TAG:?set KUI_MICROWAVE_PLACE_TAG to its published sha-<commit> image tag}
+fi
 # one object per capability to tap, each in its own place in the scene camera's 640 x 400 image (the default box is the
 # same centred one for all: on the screen they lay on top of each other, 11-12). The UI draws each one's label just
 # above its box's centre, and the image's top edge sits under the screen's status banner: centres at y 200 and 330
@@ -40,7 +44,9 @@ ORCHENV=$ROSENV
 [ -n "$ORCH_WS" ] && ORCHENV="$ROSENV && source $ORCH_WS/install/setup.bash"
 
 for c in $CAPS; do
-  docker image inspect "$KCE/$c:$KUI_TAG" >/dev/null 2>&1 || { echo "kitchenui: no image $c:$KUI_TAG -- build it first"; exit 1; }
+  tag=$KUI_TAG
+  [ "$c" != microwave_place ] || tag=${KUI_MICROWAVE_PLACE_TAG:?set KUI_MICROWAVE_PLACE_TAG to its published sha-<commit> image tag}
+  docker image inspect "$KCE/$c:$tag" >/dev/null 2>&1 || { echo "kitchenui: no image $c:$tag -- build it first"; exit 1; }
 done
 "$HERE/down.sh" quiet
 

@@ -57,6 +57,36 @@ def reason(raw, where="microwave"):
     rules = (
         # before anything moved: setup, perception, planning
         (
+            r"place execution is disabled: collision_geometry_file (.*)",
+            lambda m: (
+                "The microwave's collision model isn't complete, so the arm didn't move.",
+                "An operator must verify the installed microwave geometry, measured open-door record, and robot "
+                "collision model. Do not bypass this check.",
+            ),
+        ),
+        (
+            r"collision validation robot state is stale .*",
+            lambda m: (
+                "The robot state changed or stopped updating during the safety check, so the arm didn't move.",
+                "Keep the arm still and check its joint-state and flange-pose updates, then make a new plan.",
+            ),
+        ),
+        (
+            r"collision validation trajectory/state mismatch (.*)",
+            lambda m: (
+                f"The arm moved after planning ({m[1]}), so the safety check refused the motion.",
+                "Keep the arm still and make a new plan; do not bypass the check.",
+            ),
+        ),
+        (
+            r"collision validation: (.*)",
+            lambda m: (
+                f"The planned motion failed its collision check ({m[1]}), so the arm didn't move.",
+                "Clear the obstruction or correct the scene and measured geometry, then make a new plan. Do not "
+                "bypass the check.",
+            ),
+        ),
+        (
             r"rosbag|run bag|RecordingError",
             lambda m: (
                 "The run recording couldn't start, so the action didn't run.",

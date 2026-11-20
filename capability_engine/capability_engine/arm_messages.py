@@ -51,6 +51,7 @@ class JointStates:
     velocity: np.ndarray
     effort: np.ndarray
     age_s: float = 0.0
+    stamp_ns: int = 0
 
 
 @dataclass
@@ -65,6 +66,7 @@ class EeState:
     force: np.ndarray
     torque: np.ndarray
     age_s: float = 0.0
+    stamp_ns: int = 0
 
 
 @dataclass
@@ -328,6 +330,10 @@ def _vec(v):
     return np.array([v.x, v.y, v.z])
 
 
+def _stamp_ns(header):
+    return int(header.stamp.sec) * 1_000_000_000 + int(header.stamp.nanosec)
+
+
 def _joint_states(m):
     if not set(JOINTS) <= set(m.name):
         return None
@@ -336,6 +342,7 @@ def _joint_states(m):
         np.array([m.position[i] for i in idx]),
         np.array([m.velocity[i] for i in idx]),
         np.array([m.effort[i] for i in idx]),
+        stamp_ns=_stamp_ns(m.header),
     )
 
 
@@ -349,6 +356,7 @@ def _ee_state(m):
         _vec(m.twist.angular),
         _vec(m.wrench.force),
         _vec(m.wrench.torque),
+        stamp_ns=_stamp_ns(m.header),
     )
 
 

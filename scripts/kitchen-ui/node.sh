@@ -4,13 +4,16 @@
 #
 #   scripts/kitchen-ui/node.sh <fridge|microwave|microwave_place|button_press|place_container|box_opening>
 #
-# KUI_TAG, ALLOW_EXECUTE, MOCK as up.sh; FRIDGE_GRASP=front|side for the fridge (default front).
+# KUI_TAG, ALLOW_EXECUTE, MOCK as up.sh; microwave_place uses KUI_MICROWAVE_PLACE_TAG, a published SHA tag.
+# FRIDGE_GRASP=front|side for the fridge (default front).
 C=${1:?capability}
-IMG=ghcr.io/rammp-org/rammp-kitchen-capability-engines/$C:${KUI_TAG:-ui-4d916ca}
+TAG=${KUI_TAG:-ui-4d916ca}
+[ "$C" != microwave_place ] || TAG=${KUI_MICROWAVE_PLACE_TAG:?set KUI_MICROWAVE_PLACE_TAG to its published sha-<commit> image tag}
+IMG=ghcr.io/rammp-org/rammp-kitchen-capability-engines/$C:$TAG
 DDS='file:///etc/cyclonedds/config.xml,<Discovery><ParticipantIndex>none</ParticipantIndex></Discovery>'
 # the fridge's Cyclone on eno1: the MIB's network, for /base/odom (the wheelchair-drives buttons)
 ENO1='<CycloneDDS><Domain id="any"><General><Interfaces><NetworkInterface name="eno1"/></Interfaces></General><Discovery><ParticipantIndex>none</ParticipantIndex></Discovery></Domain></CycloneDDS>'
-COMMON=(-p use_orchestrator:=true -p "allow_execute:=${ALLOW_EXECUTE:-true}" -p "mock:=${MOCK:-false}")
+COMMON=(-p use_orchestrator:=true -p "allow_execute:=${ALLOW_EXECUTE:-false}" -p "mock:=${MOCK:-false}")
 run() {  # run <cyclone uri> <docker args...> -- <command...>
   local uri=$1
   shift
@@ -29,9 +32,13 @@ case "$C" in
   microwave_place)
     # take_home_joints: the microwave's viewing pose (its default). Retrieve from Fridge refuses until
     # -p fridge_accept_unmodeled_door:=true (the open fridge door isn't in its collision world).
-    run "$DDS" -v /tmp/microwave_place_data:/config/microwave_place -v curobo_kernel_cache:/root/.cache "$IMG" \
-      ros2 run microwave_place microwave_place_node --ros-args "${COMMON[@]}" \
-      -p worlds_dir:=/root/.cache/rammp_planner_worlds -p arm.service_call_s:=30.0 ;;
+    run "$DDS" -v /tmp/microwave_place_data:/config/microwave_place \
+      -v /home/snorlax/daily/data/microwave:/microwave_data:ro \
+      -v curobo_kernel_cache:/root/.cache "$IMG" \
+      /module_ws/install/microwave_place/lib/microwave_place/microwave_place_node --ros-args "${COMMON[@]}" \
+      -p worlds_dir:=/root/.cache/rammp_planner_worlds \
+      -p collision_geometry_file:=/module_ws/install/microwave_place/share/microwave_place/config/snorlax_collision_geometry.yaml \
+      -p door_geometry_file:=/microwave_data/door.json -p arm.service_call_s:=30.0 ;;
   button_press)
     run "$DDS" -v /tmp/button_press_data:/button_press_data -v curobo_kernel_cache:/planner_cache "$IMG" \
       ros2 run button_press button_press_node --ros-args "${COMMON[@]}" \

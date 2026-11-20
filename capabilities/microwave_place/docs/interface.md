@@ -6,15 +6,26 @@
 
 ## What it does
 
-Puts the container the gripper is already holding (after `grab_container`) into the open microwave. It
-finds the microwave's opening with the scene camera (the known-size opening fitted to SAM3's cavity mask,
-checked with depth), models the microwave's body as one obstacle box, tries side shifts and hand headings
-until one the arm can reach passes, plans a side shift and cuRobo's level transit to in front of the
-opening (both checked against the box on the arm model) and a straight line in, and runs the three as one
-position-control motion. It lowers the container onto the turntable glass in impedance until the glass
-stops it, opens the gripper part way in place, pitches the hand 10 deg nose-down so the container slides
-off the fingers, and backs out level with the hand tilted. Nothing from the line in on is
-collision-checked. Without it the microwave demo has no way to put the food in.
+Puts the container the gripper is already holding (after `grab_container`) into the open microwave. The
+intended sequence locates the opening from the scene camera, plans a side shift and cuRobo transit, inserts,
+lowers in impedance until contact, releases, and backs out.
+
+**Conditional safety hold (2026-11-17):** non-mock dry runs remain available for perception, IK planning and
+trajectory generation. By default they report `kinematic_status: FEASIBLE` separately from
+`insertion_collision_status: UNVALIDATED`; no motion is commanded. `validate_collision: true` makes a dry goal
+run the complete six-phase validator. Non-mock execute requests fail closed before arm motion unless that same
+validator passes for fresh state and the exact plan. The packaged Snorlax inventory is currently incomplete; its
+available planning model is only a depth-derived outer
+box used for the side shift and cuRobo transit; it does not validate the held container, insertion path, all
+gripper links, wrist camera, open door, rim, turntable glass, side walls, ceiling or back wall. The flange/tool,
+gripper and held-container geometry are not verified against the physical assembly. The
+`insertion_bottom_clearance_cm` field is only the modeled box-bottom estimate, not physical clearance.
+Placement execution remains unauthorized until these measurements and a conservative full-scene collision
+model are supplied and reviewed.
+
+During complete validation, the depth-derived solid outer box applies to the robot, held container and tool
+attachments only for side shift and transit outside the cavity. Insertion through retreat uses the configured
+interior/open-door surfaces instead, so the empty cavity is never represented as a solid obstacle.
 
 It also takes the container out (`take_out`). SAM3 finds the whole tupperware mask on the wrist
 image, with no rim query. It averages the 50 nearest locally consistent masked depths per frame, then the
@@ -70,8 +81,32 @@ The capability's `perception_classes` is `["microwave", "food_container", "food 
 is the scene segmenter's class; "food_container" the same without its space, for a selection typed by hand). Each
 UI action's own `perception_classes` picks where it is offered: a fridge tap offers nothing from this capability.
 The grab runs `take_out` from `take_home_joints`, wherever that viewing pose looks (the microwave by default).
-`place` and `take_out` (including `"site": "fridge"`) stay callable directly (dry runs, CLI) but are not offered
-to the UI.
+`preflight`, `place`, `take_out` (including `"site": "fridge"`) and `test_stop_joins` stay callable directly
+(dry runs, CLI) but are not offered to the UI.
+
+### Placement preflight
+
+The read-only `preflight` action reports PASS/FAIL independently for ROS topic connectivity, fresh scene-camera
+color/depth/info and timestamped TF, current arm/flange/gripper state, driver diagnostics/control readiness,
+cuRobo plus its configured chair/user/floor layers, collision-file completeness against the active URDF, and
+the `allow_execute` gate. It saves `state_dir/preflight/preflight_*.json`. Its active-URDF inventory includes each
+declared collision shape; configured links are compared with that inventory, and a complete configuration is also
+checked against the collision shapes PyBullet actually loaded. Preflight never commands the arm or gripper.
+
+For the supervised session: run `preflight`, then `place {"validate_collision":true}` for a fresh no-motion plan,
+then—only after reviewing both—send `place {"execute":true}`. Execution performs fresh perception, planning and
+collision authorization again rather than trusting stale dry-run state.
+
+### Non-contact stop-at-joins commissioning action
+
+`test_stop_joins` accepts exactly three seven-joint waypoints in degrees plus `speed_scale` (default 0.1,
+maximum 0.2) and `execute` (default false). It is separate from microwave placement: it neither runs perception
+nor enters the cavity, and it does not weaken or invoke the insertion guard. In the configured
+`take_approach_world`, cuRobo must plan all three legs; each requested leg is limited to 20 degrees on every joint.
+The action then uses the place approach's existing knot assembly and stop indices, producing zero commanded
+velocity at both joins. Dry-run writes `state_dir/plans/smoothness_*.json`. An attended execution additionally
+writes `state_dir/smoothness/smoothness_*.csv` with commanded/measured joint position and velocity, tracking error
+and observed controller faults. The normal run bag records `/joint_states`, `/diagnostics` and `/rosout` as well.
 
 Every UI action, in `execute()`:
 
@@ -138,8 +173,11 @@ Served under `/microwave_place/`, types from `rammp_orchestrator_interfaces`:
 | `side_shifts_cm`                                           | `[3, -3, 6, -6, 9, -9]`                       | The hand moved this far level to its left (- = right) before the transit, tried in order                                            |
 | `heading_offsets_deg`                                      | `[0.0]`                                       | The hand's headings off the oven's axis (+ = left), tried in order with each side shift                                             |
 | `clear_min`                                                | `0.01`                                        | The side shift and the transit: every arm and gripper link from the microwave box (m)                                               |
+| `collision_geometry_file`                                  | `""`                                          | Optional measured v1 primitive overrides; repository geometry is used when absent                                                   |
+| `door_geometry_file`                                       | `/microwave_data/door.json`                   | Current open-door record written by microwave/open; required for full collision validation                                          |
+| `collision_state_max_age_s`                                | `0.25`                                        | Maximum age of synchronized joint/flange samples used to authorize the exact trajectory (s)                                         |
 | `tilt_max_deg`                                             | `2.0`                                         | The hand's tilt vs the start, on the transit and the lines                                                                          |
-| `insert_speed`                                             | `0.16`                                        | Peak speed of the approach (side shift + transit + line in, one motion) and the back-out (m/s)                                      |
+| `insert_speed`                                             | `0.16`                                        | Peak speed of each approach leg (stops at both joins) and the back-out (m/s)                                                        |
 | `lower_speed`                                              | `0.12`                                        | The lowering's speed where the glass should be (m/s; contact tuned at it)                                                           |
 | `vz_stop`, `hold_press`, `settle_s`, `early_stop`          | `-0.01`, `0.003`, `0.2`, `0.03`               | The lowering's contact test and hold                                                                                                |
 | `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`            | Joint impedance for the lowering, the gripper opening and the release tilt                                                          |
@@ -203,7 +241,7 @@ The explicit `allow_execute` and goal `execute` gates apply to this move too.
 
 ## Per-run recording
 
-`record_bag` defaults to `true` for place, take-out, dry runs and mock runs. Each
+`record_bag` defaults to `true` for preflight, place, take-out, dry runs and mock runs. Each
 accepted action creates `state_dir/runs/<action>_<UTC timestamp>_<unique id>/bag`
 (sqlite3 ROS 2 bag) and a sibling `run.json`. The existing `state_dir` volume keeps
 these across container restarts. A successful result includes `bag_path` and
@@ -229,7 +267,9 @@ without blocking the run. Static-topic QoS is stored for replay. Recorder
 subscriptions belong to the action and do not remain active while idle.
 
 The bag-only `/microwave_place/run_event` topic stores start settings and the final
-result or exception. `run.json` also stores message counts and any recording I/O
+result or exception. A successful result includes its bag path. Executing `place` additionally writes
+`state_dir/evidence/approach_*.csv` and returns its path, maximum tracking error, measured velocity at both
+full-stop joins and controller faults. `run.json` also stores message counts and any recording I/O
 errors. Failures include a synchronous error log and traceback; cancellation and
 exceptions close the bag just like success. Startup recording errors refuse the
 action; later recording errors are reported without interrupting arm cleanup.

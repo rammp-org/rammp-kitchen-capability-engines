@@ -34,9 +34,10 @@ def unwrap(message):
 
 
 GLOBALS = {
-    "EXECUTE",
     "PLACE",
+    "PREFLIGHT",
     "TAKE_OUT",
+    "SMOOTHNESS_TEST",
     "FRIDGE_TAKE",
     "SITES",
     "FRIDGE_DOOR_GAP",
@@ -108,6 +109,8 @@ def load(**extra):
         "RunUI": RunUI,
         "cancel_own_run": lambda engine: engine.fake_ctx.cancel(),  # the engine's cancel: sets the run's flag
         "place_motion": SimpleNamespace(Refused=Refused),
+        "smoothness_test": SimpleNamespace(MAX_SPEED_SCALE=0.2, WAYPOINTS=3),
+        "rammp_arm": SimpleNamespace(JOINTS=[f"arm_joint_{i}" for i in range(1, 8)]),
         "ArmRefused": type("ArmRefused", (Exception,), {}),
         "ui_text": UI_TEXT,
         **extra,
@@ -437,7 +440,7 @@ def test_availability_offers_only_the_ui_actions_on_their_class(scope, tapped, o
 def test_direct_actions_stay_declared_and_the_tupperware_activates_the_engine(scope):
     cap = scope["Capability"]
     ids = {a.action_id for a in cap.actions}
-    assert ids == {"place", "take_out", "retrieve", "place_in_microwave"}
+    assert ids == {"preflight", "place", "take_out", "test_stop_joins", "retrieve", "place_in_microwave"}
     assert set(cap.perception_classes) == {"microwave", "food_container", "food container"}
     labels = {a.action_id: a.label for a in cap.actions}
     assert labels["retrieve"] == "Grab Tupperware"

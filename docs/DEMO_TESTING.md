@@ -9,7 +9,8 @@ each check means); this page is the order, the commands and the hand-offs betwee
 Run on **snorlax** (the touchscreen is its own screen):
 
 ```bash
-/home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh      # bring it all up
+KUI_MICROWAVE_PLACE_TAG=sha-<published-source-commit> \
+  /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh    # bring it all up
 /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/down.sh    # bring it all down
 ```
 
@@ -27,11 +28,18 @@ it (then rebuild the images, below, after code changes). In any other checkout t
 1. The arm isn't e-stopped (`/control_status`'s `estopped`). If it is: [How to stop the robot](#how-to-stop-the-robot)
    has the release, then `/clear_faults`.
 
+**Sheppy-managed microwave-place touchscreen deployment:** use the dedicated profile
+`flatbot_microwave_place_ui` in `rammp-deployments/december_2026/profiles/` instead of starting
+`scripts/kitchen-ui/up.sh` or a standalone `microwave_place` node. It starts one orchestrator, the touchscreen
+stack, `microwave`, and `microwave_place` from the revision-pinned image, with motion disabled by default.
+Do not run both UI stacks or a second microwave-place node on the same ROS domain.
+
 **One capability at a time:** name it in `KUI_CAPS`. The UI comes up the same, with only that capability's
 buttons; the other objects stay off the screen.
 
 ```bash
-KUI_CAPS=microwave_place /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh
+KUI_MICROWAVE_PLACE_TAG=sha-<published-source-commit> \
+  KUI_CAPS=microwave_place /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh
 KUI_CAPS="fridge microwave" /home/snorlax/rammp-wt/kce-ui-check/scripts/kitchen-ui/up.sh    # or a few
 ```
 
@@ -53,14 +61,18 @@ right order (about a minute). If an action was moving the arm, the arm now holds
 (on the handle? holding the container?) before pressing anything. A button that still refuses after a restart is
 the arm (e-stopped) or sheppy, not the UI.
 
-Options: `FRIDGE_GRASP=side scripts/kitchen-ui/up.sh` (the fridge's side grasp; front is the default),
-`ALLOW_EXECUTE=false ...` (every button refuses to move the arm), `MOCK=true ...` (every capability's mock).
+Motion is disabled by default. For the standalone script only, set `ALLOW_EXECUTE=true` for a supervised run with
+someone at the e-stop; otherwise every button refuses to move the arm. Options: `FRIDGE_GRASP=side
+scripts/kitchen-ui/up.sh` (the fridge's side grasp; front is the default), `MOCK=true ...` (every capability's mock).
+The standalone script requires `KUI_MICROWAVE_PLACE_TAG` to name a published, revision-pinned image when
+`microwave_place` is selected; use the tag from the Sheppy deployment profile.
 One node alone, without the UI stack: `scripts/kitchen-ui/node.sh <capability>`. Watch the nodes:
 `tmux attach -t kitchenui`. By design, tap-to-place offers no spots until the scene camera is calibrated ("Use marked spot" works).
 
-**Set up once** (snorlax has all of it): the images, built from this branch,
-`for c in fridge microwave microwave_place button_press place_container box_opening; do docker build --network host -f capabilities/$c/Dockerfile -t $KCE/$c:ui-4d916ca . || break; done`
-(another tag: `KUI_TAG=...`); `~/ros2_ws` with rammp-UI-bridge and rammp-orchestrator; rammp-orchestrator
+**Set up once** (snorlax has all of it): the other capability images, built from this branch,
+`for c in fridge microwave button_press place_container box_opening; do docker build --network host -f capabilities/$c/Dockerfile -t $KCE/$c:ui-4d916ca . || break; done`
+(another tag: `KUI_TAG=...`); the `microwave_place` image is built and published by its source-commit workflow; `~/ros2_ws`
+with rammp-UI-bridge and rammp-orchestrator; rammp-orchestrator
 `hotfix/execute-timeout-param` built in `~/orch_hotfix_ws` (no 120 s limit, readable button labels); the Unreal app
 and its Vulkan loader (`scripts/kitchen-ui/unreal.sh`). How the UI works and why order matters: "With the UI", below.
 

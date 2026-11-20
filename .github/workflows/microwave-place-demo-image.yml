@@ -1,0 +1,40 @@
+name: Microwave place demo image
+
+on:
+  push:
+    branches: [feature/microwave-place-dec-demo-prep]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the revision-pinned image
+        run: docker build -f capabilities/microwave_place/Dockerfile -t microwave-place:ci .
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Smoke-test the Sheppy mock interface and shutdown
+        run: |
+          pip install pyyaml
+          python3 scripts/smoke.py microwave_place microwave-place:ci
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the tested image under its source commit SHA
+        env:
+          IMAGE: ghcr.io/rammp-org/rammp-kitchen-capability-engines/microwave_place:sha-${{ github.sha }}
+        run: |
+          docker tag microwave-place:ci "$IMAGE"
+          docker push "$IMAGE"

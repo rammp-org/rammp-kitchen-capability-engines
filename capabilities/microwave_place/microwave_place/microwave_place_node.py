@@ -11,20 +11,30 @@
 Everything is in arm_mount (x forward, y left, z up).
 
 Action:
+  preflight
+           read-only PASS/FAIL checks for ROS, scene camera/TF, arm/gripper state, driver faults,
+           cuRobo, collision geometry against the active URDF, and both execution gates.
+
+  test_stop_joins
+           direct-only, non-contact test: cuRobo plans three short joint legs in the configured flatbot
+           world and the existing approach retimer executes them with zero velocity at both joins. The
+           goal supplies three operator-verified clear-workspace waypoints. Dry-run is the default.
+
   place    the tupperware, gripped by its side (after grab_container), into the open microwave:
              1. locate (microwave_detection.locate): the opening's known size fitted to SAM3's cavity mask,
                 frame after frame until `frames` consecutive detected frames agree (agree_m / agree_deg);
-             2. obstacle (place_motion.microwave_obstacles): the microwave as one box, from the depth of SAM3's
-                "microwave" mask; only the first motion (side shift, transit to in front of the door) avoids it,
-                nothing after it is collision-checked;
+             2. obstacle (place_motion.microwave_obstacles): the microwave outer body as one box, from the depth of
+                SAM3's "microwave" mask, for the side shift and transit; configured cavity surfaces replace the
+                solid outer box from insertion onward when full collision validation is requested;
              3. plan (place_motion.search_place): for each of side_shifts_cm (the hand moved level to its
                 left first) and each of heading_offsets_deg: the side shift, the target and pre-insert pose
                 reachable, the straight line in, cuRobo's level transit to the pre-insert pose (refused if it
                 swings any joint more than TRANSIT_TRAVEL_MAX_DEG), then on the arm model: the side shift and
                 the transit clear_min from the microwave box, the tilt within tilt_max_deg everywhere, the line
-                in ending on the target, the line down, the release tilt and the back-out planned (none of
-                them collision-checked). The first that passes wins. A dry run stops here and returns the plan
-                (also written to state_dir/plans);
+                in ending on the target, the line down, the release tilt and the back-out planned. The first that
+                passes wins. A plain dry run stops here and returns the kinematic plan (also written to
+                state_dir/plans); validate_collision additionally checks all six phases against the configured
+                robot, attachment and cavity geometry;
              4. with execute (place_motion.run_place): the side shift, cuRobo's transit and the line in as ONE
                 motion (insert_speed peak), the impedance lowering until the glass stops it, the gripper opened
                 to RELEASE_OPEN in place (still in impedance), the hand pitched RELEASE_TILT_DEG nose-down
@@ -41,11 +51,12 @@ Action:
              first; a dry run stops there and returns the plan (also written to state_dir/plans).
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`.
-Otherwise every goal is a dry run that locates, plans and checks, and returns the plan. Someone stands at
+Otherwise every goal is a dry run that locates, plans and checks, and returns the plan. A place dry run with
+`validate_collision` also checks the complete configured assembly without moving. Someone stands at
 the e-stop whenever allow_execute is on. Take-out checks the cuRobo approach and exit against flatbot layers;
-insertion and lift remain local IK.
-For place, only the first motion (side shift, transit) is checked against the
-microwave; from the line in on nothing is collision-checked. Any check that fails refuses with the reason.
+insertion and lift remain local IK. For an executing place, side shift and transit are checked against the detected
+outer microwave and configured cavity surfaces; insertion through retreat are checked against the configured cavity
+surfaces. Any missing geometry, stale/mismatched state or collision refuses execution with the reason.
 
   take_out with `"site": "fridge"`: the same take-out with the fridge's settings (fridge_take_home_joints,
              fridge_take_approach_world, fridge_grasp_up, fridge_reach_in). Its approach world has no fridge, shelves
@@ -70,11 +81,12 @@ from pathlib import Path
 
 import numpy as np
 import rammp_arm
-from capability_engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.driver_state import Refused as ArmRefused
 from capability_ui import RunUI, cancel_own_run
 
-from . import microwave_detection, place_motion, rim_detection, take_out, ui_text
+from capability_engine import Action, CapabilityEngine, EngineError, run
+
+from . import microwave_detection, place_motion, preflight, rim_detection, smoothness_test, take_out, ui_text
 
 # the fridge take-out's own settings: take_out's setting <- this node's parameter
 FRIDGE_TAKE = {
@@ -139,6 +151,12 @@ PARAMS = {
     "side_shifts_cm": [3.0, -3.0, 6.0, -6.0, 9.0, -9.0],
     # the side shift and the transit: every arm and gripper link at least this far (m) from the microwave box
     "clear_min": 0.01,
+    # Optional measured v1 overrides; repository facts are used when this is empty.
+    "collision_geometry_file": "",
+    # Persisted by microwave/open; physical door geometry only, never a camera stream.
+    "door_geometry_file": "/microwave_data/door.json",
+    # Maximum age of the joint and flange samples bound to collision authorization.
+    "collision_state_max_age_s": 0.25,
     # the hand's tilt vs the start, anywhere on the transit and the lines (deg)
     "tilt_max_deg": 2.0,
     # cuRobo's world files go here; the planner's container must see this directory at the SAME path
@@ -217,14 +235,39 @@ PARAMS = {
     # after closing: straight up this far (m), then the place's level retract
     "take_lift": 0.03,
 }
-EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
-PLACE = EXECUTE
+PLACE = {
+    "type": "object",
+    "properties": {
+        "execute": {"type": "boolean", "default": False},
+        "validate_collision": {"type": "boolean", "default": False},
+    },
+}
+PREFLIGHT = {"type": "object", "properties": {}}
 TAKE_OUT = {
     "type": "object",
     "properties": {
         "execute": {"type": "boolean", "default": False},
         # where from: the microwave's settings, or the fridge's (FRIDGE_TAKE)
         "site": {"type": "string", "enum": list(SITES), "default": "microwave"},
+    },
+}
+SMOOTHNESS_TEST = {
+    "type": "object",
+    "required": ["joint_waypoints_deg"],
+    "properties": {
+        "execute": {"type": "boolean", "default": False},
+        "speed_scale": {"type": "number", "minimum": 0.01, "maximum": smoothness_test.MAX_SPEED_SCALE, "default": 0.1},
+        "joint_waypoints_deg": {
+            "type": "array",
+            "minItems": smoothness_test.WAYPOINTS,
+            "maxItems": smoothness_test.WAYPOINTS,
+            "items": {
+                "type": "array",
+                "minItems": len(rammp_arm.JOINTS),
+                "maxItems": len(rammp_arm.JOINTS),
+                "items": {"type": "number"},
+            },
+        },
     },
 }
 
@@ -339,8 +382,14 @@ class Capability(CapabilityEngine):
     perception_classes = ["microwave", *CONTAINER_CLASSES]
     required_resources = ["arm", "gripper"]
     actions = [
+        Action("preflight", "Check microwave placement readiness", params_schema=PREFLIGHT),
         Action("place", "Place the held container in the open microwave", params_schema=PLACE),
         Action("take_out", "Take the container out of the open microwave (or the fridge)", params_schema=TAKE_OUT),
+        Action(
+            "test_stop_joins",
+            "Test both approach stops in a clear workspace",
+            params_schema=SMOOTHNESS_TEST,
+        ),
         *(
             Action(ui_id, label, perception_classes=list(classes))
             for ui_id, (_, label, _, classes) in UI_ACTIONS.items()
@@ -409,8 +458,9 @@ class Capability(CapabilityEngine):
         with recorder:
             self.get_logger().info(f"run bag: {recorder.path}")
             result = self._execute_behavior(action_id, params, ctx)
+            result = {**result, "bag_path": str(recorder.path)}
             recorder.result = json.loads(json.dumps(result, default=_json_default))
-        return {**result, "bag_path": str(recorder.path), "recording_errors": list(recorder.errors)}
+        return {**result, "recording_errors": list(recorder.errors)}
 
     def _ui_run(self, ui_id, ctx):
         """One UI press runs the whole action (UI_ACTIONS) with its fixed params, under capability_ui.RunUI: a progress
@@ -474,6 +524,13 @@ class Capability(CapabilityEngine):
             ctx.progress(action_id, 100.0, "mock: nothing planned or moved")
             return {"executed": False, "mock": True}
         log = self.get_logger().info
+        if action_id == "preflight":
+            return self._preflight(ctx, log)
+        if action_id == "test_stop_joins":
+            try:
+                return {**self._smoothness_test(params, execute, ctx, log), "note": note}
+            except place_motion.Refused as e:
+                raise EngineError("refused", str(e), recoverable=True) from e
         site = params.get("site", "microwave") if action_id == "take_out" else "microwave"
         if site not in SITES:
             raise EngineError("bad_params", f"'site' must be one of {', '.join(SITES)}, not {site!r}", recoverable=True)
@@ -481,13 +538,203 @@ class Capability(CapabilityEngine):
             model = place_motion.Model(self.cfg["flange_to_tip"])
             if action_id == "take_out":
                 return {**self._take_out(model, execute, ctx, log, site), "note": note}
-            return {**self._place(model, execute, ctx, log), "note": note}
+            return {
+                **self._place(model, execute, ctx, log, bool(params.get("validate_collision", False))),
+                "note": note,
+            }
+        except place_motion.InsertionCollisionModelUnavailable as e:
+            raise EngineError("safety_model_unavailable", str(e), recoverable=False) from e
         except (place_motion.Refused, microwave_detection.NotLocated, rim_detection.NotDetected) as e:
             raise EngineError("refused", _site_words(str(e), site), recoverable=True) from e
 
-    def _place(self, model, execute, ctx, log):
+    def _preflight(self, ctx, log):
+        """Report every commissioning prerequisite independently; never command arm or gripper motion."""
+        c, checks = self.cfg, {}
+        topics = {
+            c["depth_topic"],
+            c["camera_info_topic"],
+            microwave_detection.SAM3_IMAGE_TOPIC,
+            "/tf",
+            "/tf_static",
+            "/joint_states",
+            "/ee_state",
+            "/gripper_state",
+            "/diagnostics",
+            "/arm/robot_description",
+        }
+
+        def ros_graph():
+            visible = {name for name, _types in self.get_topic_names_and_types()}
+            missing = sorted(topics - visible)
+            if missing:
+                raise RuntimeError(f"ROS graph is missing topics: {missing}")
+            return {"required_topics": sorted(topics), "visible_topic_count": len(visible)}
+
+        checks["ros_connectivity"] = preflight.check(ros_graph)
+        probe = None
+        try:
+            probe = preflight.SceneProbe(
+                self,
+                rammp_arm.FRAME,
+                microwave_detection.SAM3_IMAGE_TOPIC,
+                c["depth_topic"],
+                c["camera_info_topic"],
+            )
+        except Exception as error:  # noqa: BLE001 -- report remaining independent checks
+            checks["camera_tf_freshness"] = {
+                "status": preflight.FAIL,
+                "detail": str(error),
+                "error_type": type(error).__name__,
+            }
+
+        def live_state():
+            joints, flange, gripper = self.arm.joint_states(), self.arm.ee_state(), self.arm.gripper_state()
+            if not gripper.present:
+                raise RuntimeError("gripper_state reports present=false")
+            return preflight.state_detail(joints, flange, gripper)
+
+        checks["arm_and_gripper_state"] = preflight.check(live_state)
+
+        def driver_health():
+            diagnostics = self.arm.diagnostics()
+            faults = preflight.diagnostic_faults(diagnostics)
+            refusal = self.arm.not_ready()
+            if faults or refusal:
+                raise RuntimeError("; ".join([*faults, *(filter(None, [refusal]))]))
+            return {"diagnostic_age_s": round(float(diagnostics.age_s), 3), "faults": []}
+
+        checks["driver_faults"] = preflight.check(driver_health)
+        if probe is not None:
+            checks["camera_tf_freshness"] = preflight.check(lambda: probe.wait(ctx.checkpoint))
+        checks["curobo"] = preflight.check(
+            lambda: {
+                "world": c["take_approach_world"],
+                "message": take_out.set_approach_world(self.arm, c["take_approach_world"], log),
+            }
+        )
+
+        def collision_configuration():
+            urdf = self.arm.robot_description()
+            report = preflight.collision_configuration_report(
+                c["collision_geometry_file"], urdf, c["door_geometry_file"]
+            )
+            if report["complete"]:
+                geometry = place_motion.load_collision_geometry(c["collision_geometry_file"], c["door_geometry_file"])
+                model = place_motion.Model(c["flange_to_tip"])
+                report["pybullet_collision_links"] = place_motion.validate_robot_collision_links(model, geometry)
+            return report
+
+        collision = preflight.check(collision_configuration)
+        if collision["status"] == preflight.PASS and not collision["detail"]["complete"]:
+            collision["status"] = preflight.FAIL
+        checks["collision_configuration"] = collision
+        checks["execution_permitted"] = {
+            "status": preflight.PASS if c["allow_execute"] else preflight.FAIL,
+            "detail": {
+                "allow_execute": bool(c["allow_execute"]),
+                "goal_must_set_execute": True,
+                "message": (
+                    "node permits an explicitly executing goal"
+                    if c["allow_execute"]
+                    else "launch with allow_execute:=true only for the attended session"
+                ),
+            },
+        }
+        path = preflight.save_report(self.state_dir, checks)
+        ready = all(item["status"] == preflight.PASS for item in checks.values())
+        for name, item in checks.items():
+            log(f"PREFLIGHT {item['status']} {name}: {item['detail']}")
+        log(f"PREFLIGHT {'PASS' if ready else 'FAIL'} overall -> {path}")
+        return {"executed": False, "ready": ready, "checks": checks, "preflight_file": str(path)}
+
+    def _smoothness_test(self, params, execute, ctx, log):
+        """Plan three short cuRobo legs and optionally replay them with zero velocity at both joins."""
         c = self.cfg
-        q0 = np.asarray(self.arm.raw_joints(), dtype=float)
+        ctx.checkpoint()
+        world_message = take_out.set_approach_world(self.arm, c["take_approach_world"], log)
+        joint_state = self.arm.joint_states()
+        q0 = np.asarray(joint_state.position, dtype=float)
+        waypoints = params.get("joint_waypoints_deg", [])
+        legs, speed_scale = smoothness_test.plan_test(self.arm, q0, waypoints, params.get("speed_scale", 0.1))
+        trajectory = smoothness_test.test_trajectory(q0, legs, speed_scale)
+        plan_path = smoothness_test.save_plan(self.state_dir, q0, waypoints, legs, trajectory, world_message)
+        summary = {
+            "kind": "non_contact_stop_at_joins",
+            "world": world_message,
+            "plan_file": str(plan_path),
+            "duration_s": round(trajectory["duration_s"], 3),
+            "join_times_s": [round(value, 3) for value in trajectory["join_times"]],
+            "stop_at": list(trajectory["stop_at"]),
+            "speed_scale": speed_scale,
+            "max_leg_deg": smoothness_test.MAX_LEG_DEG,
+        }
+        log(
+            f"non-contact stop-at-joins plan: {len(trajectory['knots'])} knots, "
+            f"stops {trajectory['stop_at']} at {summary['join_times_s']} s, "
+            f"duration {trajectory['duration_s']:.1f} s -> {plan_path}"
+        )
+        if not execute:
+            log("DRY RUN -- three cuRobo legs planned in the clear-workspace world; nothing commanded")
+            return {"executed": False, "test": summary}
+
+        place_motion.ready(self.arm)
+        q_now = np.asarray(self.arm.joint_states().position, dtype=float)
+        mismatch = float(np.max(np.abs(place_motion.wrap_deg(q_now - q0))))
+        if mismatch > smoothness_test.START_TOL_DEG:
+            raise place_motion.Refused(
+                f"smoothness test start moved {mismatch:.2f} deg while planning "
+                f"(maximum {smoothness_test.START_TOL_DEG:.1f} deg)"
+            )
+        ctx.checkpoint()
+        recorder = smoothness_test.Recorder(self)
+        csv_path = self.state_dir / "smoothness" / f"{plan_path.stem}.csv"
+        recorder.start()
+        ctx.progress("smoothness-test", 0.0)
+        ok, evidence, motion_error = False, None, None
+        try:
+            ok = self.arm.move_joints(
+                trajectory["knots"],
+                speed_scale=speed_scale,
+                stop_at=trajectory["stop_at"],
+                monitor=recorder.monitor,
+            )
+        except Exception as error:
+            motion_error = error
+        finally:
+            try:
+                evidence = recorder.finish(csv_path, trajectory)
+            except place_motion.Refused:
+                if motion_error is None:
+                    raise
+        if motion_error is not None:
+            raise motion_error
+        if self.arm.monitor_stopped or evidence["controller_faults"]:
+            raise place_motion.Refused(
+                "STOPPED during non-contact smoothness test: controller fault: "
+                + "; ".join(evidence["controller_faults"])
+            )
+        if not ok:
+            raise place_motion.Refused(f"STOPPED during non-contact smoothness test: {self.arm.last_error}")
+        q_end = np.asarray(self.arm.joint_states().position, dtype=float)
+        end_error = float(np.max(np.abs(place_motion.wrap_deg(q_end - legs[-1][-1]))))
+        if end_error > smoothness_test.END_TOL_DEG:
+            raise place_motion.Refused(
+                f"STOPPED after non-contact smoothness test: endpoint error {end_error:.2f} deg "
+                f"> {smoothness_test.END_TOL_DEG:.1f} deg"
+            )
+        ctx.progress("smoothness-test", 100.0)
+        log(
+            f"non-contact stop-at-joins evidence: max tracking error "
+            f"{evidence['max_tracking_error_deg']:.2f} deg, measured join velocities "
+            f"{np.round(evidence['measured_join_velocity_deg_s'], 2).tolist()} deg/s -> {csv_path}"
+        )
+        return {"executed": True, "test": {**summary, "csv_file": str(csv_path), **evidence}}
+
+    def _place(self, model, execute, ctx, log, validate_collision=False):
+        c = self.cfg
+        joint_state = self.arm.joint_states()
+        q0 = np.asarray(joint_state.position, dtype=float)
+        place_motion.check_flange_model(model, joint_state, self.arm.ee_state())
         oven, loc, boxes, world, world_info, stamp = self._oven_world(ctx, log)
         checker = place_motion.Checker(model, boxes)
         try:
@@ -497,19 +744,62 @@ class Capability(CapabilityEngine):
             summary, record = place_motion.summarize(
                 model, q0, loc, oven, world, world_info, boxes, cand, plan, res, attempts, c
             )
+            validation = None
+            if execute or validate_collision:
+                geometry = place_motion.load_collision_geometry(c["collision_geometry_file"], c["door_geometry_file"])
+                log(f"collision geometry sources: {geometry['sources']}")
+                # The solid depth outer box is valid only before cavity entry. The full checker uses it for
+                # side-shift/transit attachments, then switches to the measured cavity surfaces for insertion on.
+                assembly_checker = place_motion.Checker(model, boxes, geometry, oven)
+                try:
+                    joint_state = self.arm.joint_states()
+                    flange_state = self.arm.ee_state()
+                    validation = place_motion.validate_place_collision(
+                        model,
+                        assembly_checker,
+                        q0,
+                        cand,
+                        plan,
+                        res,
+                        c,
+                        joint_state,
+                        flange_state,
+                        self.get_clock().now().nanoseconds,
+                    )
+                finally:
+                    assembly_checker.close()
+                summary.update(
+                    insertion_collision_status=validation.status,
+                    insertion_collision_missing_geometry=[],
+                    full_path_clearance_cm={
+                        phase: [place_motion.cm(distance), pair]
+                        for phase, (distance, pair) in validation.phase_clearance.items()
+                    },
+                    collision_required_clearance_cm=place_motion.cm(validation.required_clearance_m),
+                    collision_plan_token=validation.plan_token,
+                )
+                record["summary"] = summary
             path = self._save_plan(record, stamp)
             summary["plan_file"] = str(path)
             log(
-                f"plan: side shift {cand['shift_cm']:+.0f} cm, heading {cand['offset_deg']:+.0f} deg, clearance "
-                + ", ".join(f"{k} {v[0]:.1f} cm" for k, v in summary["clearance_cm"].items())
-                + f", container bottom {summary['insertion_bottom_clearance_cm']:+.1f} cm over glass at line-in"
+                f"plan: kinematics {summary['kinematic_status']}, insertion collision "
+                f"{summary['insertion_collision_status']}; side shift {cand['shift_cm']:+.0f} cm, "
+                f"heading {cand['offset_deg']:+.0f} deg, transit outer-box clearance "
+                + ", ".join(f"{k} {v[0]:.1f} cm" for k, v in summary["transit_outer_box_clearance_cm"].items())
+                + f", modeled container-bottom estimate {summary['insertion_bottom_clearance_cm']:+.1f} cm "
+                "over glass (not physical assembly clearance)"
                 + f", tilt {summary['max_tilt_deg']:.1f} deg, approach (shift + transit + line in "
                 f"{cand['insert_m'] * 100:.0f} cm) in {summary['duration_s']['approach']:.1f} s -> {path}"
             )
             if not execute:
-                log("DRY RUN -- all checks passed, nothing commanded")
+                if validation is None:
+                    log("DRY RUN -- kinematic plan only; collision safety UNVALIDATED; nothing commanded")
+                else:
+                    log("DRY RUN -- full six-phase collision validation PASSED; nothing commanded")
                 return {"executed": False, "plan": summary}
-            # 6. execute
+            # 6. execute the exact trajectory authorized against fresh state and measured geometry
+            evidence = smoothness_test.Recorder(self)
+            evidence_path = self.state_dir / "evidence" / f"approach_{stamp}.csv"
             with _started("place"):
                 result = place_motion.run_place(
                     self.arm,
@@ -523,6 +813,8 @@ class Capability(CapabilityEngine):
                     log,
                     self.state_dir / "descents",
                     res,
+                    validation,
+                    approach_evidence=(evidence, evidence_path),
                 )
             return {**result, "plan": summary}
         finally:

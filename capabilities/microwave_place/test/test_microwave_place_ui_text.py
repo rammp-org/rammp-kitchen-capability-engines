@@ -51,6 +51,24 @@ spec.loader.exec_module(T)
             "door fully open",
         ),
         (
+            "collision validation: transit: gripper vs microwave wall",
+            "microwave",
+            "failed its collision check",
+            "Clear the obstruction",
+        ),
+        (
+            "collision validation robot state is stale (ages [0.3, 0.3] ms)",
+            "microwave",
+            "robot state changed or stopped updating",
+            "joint-state",
+        ),
+        (
+            "place execution is disabled: collision_geometry_file is NOT VALIDATED; missing essentials: door",
+            "microwave",
+            "collision model isn't complete",
+            "Do not bypass",
+        ),
+        (
             "STOPPED: the hand stopped at tool z=0.210, 4 cm above where the bottom meets the table -- it hit "
             "something else; NOT letting go (holding in impedance)",
             "microwave",

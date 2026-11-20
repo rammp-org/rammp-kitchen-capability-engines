@@ -1,0 +1,31 @@
+# Optional Snorlax overrides. The nominal model is assembled from existing
+# repository measurements, the active URDF, and the current microwave door record.
+# Do not add guessed uncertainty or contact tolerances here.
+version: 1
+
+verified_measurements:
+  source: microwave_detection.py tape measurements and plan_20261117_203139.json dry-run summary
+  opening_width_m: 0.3048
+  opening_height_m: 0.1905
+  cavity_depth_m: 0.3048
+  turntable_top_above_opening_bottom_m: 0.0159
+  turntable_to_ceiling_m: 0.1746
+  control_panel_face_to_opening_plane_m: 0.0286
+  container_brim_radius_m: 0.0843
+  latest_plan:
+    file: plan_20261117_203139.json
+    side_shift_m: 0.03
+    approach_duration_s: 7.1
+    transit_outer_box_clearance_m: 0.177
+    modeled_container_bottom_clearance_m: 0.005
+    status: dry-run kinematics only
+
+# Runtime discovers shapes from the active URDF and requires all nine
+# arm_robotiq_85_* gripper links. arm_end_effector_link has no invented shape;
+# it is only the existing mount frame for the wrist-camera cover boxes.
+robot_collision_links: {}
+missing_measurements: []
+uncertainty: {}
+turntable_contact: {}
+surfaces: []
+attachments: []

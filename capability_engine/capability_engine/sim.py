@@ -76,6 +76,7 @@ class SimRobot(NamedTuple):
 _SIM: tuple | None = None  # (Scene, SimRobot): the one copy per process
 _SIM_ARGS: dict | None = None  # the make_sim arguments the copy was built with
 _MODEL_PROVIDER: Callable[[], str] | None = None
+_SIM_FROM_PROVIDER = False
 _KEEP_OUT: Callable | None = None
 
 
@@ -88,8 +89,12 @@ def set_model_provider(fn):
     global _MODEL_PROVIDER
     if fn is not None and _SIM_ARGS is not None and _SIM_ARGS["urdf_path"] is not None:
         raise SimModelError(
-            f"the sim was already built from {_SIM_ARGS['urdf_path']}: a model provider "
-            "needs make_sim() called with no path"
+            "the sim was already built from "
+            f"{_SIM_ARGS['urdf_path']}: a model provider needs make_sim() called with no path"
+        )
+    if fn is not None and _SIM is not None and not _SIM_FROM_PROVIDER:
+        raise SimModelError(
+            "the sim was built from a local URDF before the driver model provider was set"
         )
     _MODEL_PROVIDER = fn
 
@@ -97,6 +102,11 @@ def set_model_provider(fn):
 def has_model_provider() -> bool:
     """Whether a driver model is registered (set_model_provider)."""
     return _MODEL_PROVIDER is not None
+
+
+def uses_model_provider() -> bool:
+    """Whether the process's loaded PyBullet model came from the registered driver provider."""
+    return _SIM is not None and _SIM_FROM_PROVIDER
 
 
 def set_keep_out(fn):
@@ -109,10 +119,10 @@ def set_keep_out(fn):
 
 
 def reset_for_tests():
-    global _SIM, _SIM_ARGS, _MODEL_PROVIDER, _KEEP_OUT
+    global _SIM, _SIM_ARGS, _MODEL_PROVIDER, _SIM_FROM_PROVIDER, _KEEP_OUT
     if _SIM is not None:
         p.disconnect(physicsClientId=_SIM[1].physics_client_id)
-    _SIM, _SIM_ARGS, _MODEL_PROVIDER, _KEEP_OUT = None, None, None, None
+    _SIM, _SIM_ARGS, _MODEL_PROVIDER, _SIM_FROM_PROVIDER, _KEEP_OUT = None, None, None, False, None
     ARM.clear()
     FINGER_JOINTS.clear()
     FINGER_CLOSE_SIGN.clear()
@@ -215,7 +225,7 @@ def make_sim(urdf_path=None, base_pose=None, ee_link=DEFAULT_EE_LINK, initial_jo
     `base_pose` (its mount). `initial_joints` (movable joints, in index order) sets the starting
     state; default is the arm at zeros with the gripper open.
     """
-    global _SIM, _SIM_ARGS
+    global _SIM, _SIM_ARGS, _SIM_FROM_PROVIDER
     if urdf_path is not None and _MODEL_PROVIDER is not None:
         raise SimModelError(
             "make_sim() loads the provided model (the driver's URDF, or arm.mock_urdf in mock "
@@ -244,6 +254,7 @@ def make_sim(urdf_path=None, base_pose=None, ee_link=DEFAULT_EE_LINK, initial_jo
         return _SIM
     if urdf_path is None and _MODEL_PROVIDER is None:
         raise SimModelError("no model: give a URDF path offline")
+    from_provider = urdf_path is None and _MODEL_PROVIDER is not None
     if urdf_path is not None:
         urdf_text = _resolve_meshes(Path(urdf_path).read_text(), Path(urdf_path).resolve().parent)
     else:
@@ -311,6 +322,7 @@ def make_sim(urdf_path=None, base_pose=None, ee_link=DEFAULT_EE_LINK, initial_jo
     FINGER_CLOSE_SIGN.update({j: FINGER_CLOSE_SIGN_BY_NAME[names[j]] for j in fingers})
     _SIM_ARGS = {**args, "base_pose": base_pose}
     _SIM = (Scene(base_pose), SimRobot(robot_id, link_index[ee_link], client))
+    _SIM_FROM_PROVIDER = from_provider
     return _SIM
 
 
@@ -374,17 +386,21 @@ def solve_ik(scene, rb, pos, quat, seed_joints):
     return joints, err
 
 
-def tool_pose(scene, rb, q):
-    """Forward kinematics: the ee link's (position, quaternion xyzw) in the arm's base frame (the
-    frame solve_ik takes poses in) at arm joints `q`."""
+def link_pose(scene, rb, q, link_id):
+    """Forward kinematics of link `link_id` in the arm base frame at arm joints `q`."""
     c = rb.physics_client_id
     for j, jj in enumerate(ARM):
         p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
-    ls = p.getLinkState(rb.robot_id, rb.end_effector_id, physicsClientId=c)
+    ls = p.getLinkState(rb.robot_id, link_id, physicsClientId=c)
     base = scene.robot_base_pose
     inv_pos, inv_orn = p.invertTransform(base.position, base.orientation)
     pos, orn = p.multiplyTransforms(inv_pos, inv_orn, ls[4], ls[5])
     return np.array(pos), np.array(orn)
+
+
+def tool_pose(scene, rb, q):
+    """Forward kinematics of the configured ee link in the arm base frame at arm joints `q`."""
+    return link_pose(scene, rb, q, rb.end_effector_id)
 
 
 def clearance(rb, q, bodies, closed=False):

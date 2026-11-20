@@ -299,6 +299,7 @@ def test_sim_provider_uses_robot_description(env):
     engine = env.make(body)
     assert env.run(engine).status == Result.STATUS_SUCCESS
     assert seen["robot"].decode() == ET.parse(FLATBOT_URDF).getroot().get("name")
+    assert sim.uses_model_provider()
     assert "call it with no path" in str(seen["explicit"])
 
 
