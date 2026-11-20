@@ -39,8 +39,8 @@ params:
   # The arm moves only with this true AND `execute` in the goal; otherwise every goal is a dry run.
   # true only for attended runs, someone on the e-stop.
   allow_execute: false
-  # flange face to the closed fingertips (m)
-  flange_to_tip: 0.17955
+  # flange face to the closed fingertips with the 14 mm sensor puck (m)
+  flange_to_tip: 0.19355
   # contact: vz (m/s, + up) back up to this after moving down; 0.0 came 4.5 s late on the flatbot
   vz_stop: -0.01
   # the hold after contact, this far (m) below the contact point, while the gripper opens

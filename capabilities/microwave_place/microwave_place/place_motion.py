@@ -41,7 +41,7 @@ CONTAINER_RADIUS = 0.0843  # m, the brim's outer radius (grab_container RING_RAD
 GRASP_PITCH_DEG = 15.0
 GRASP_DEPTH = 0.008  # m (grab_container GRASP_DEPTH_M, -0.008: short of the edge)
 GRASP_SETBACK = 0.01  # m (grab_container GRASP_SETBACK_M)
-FLANGE_TO_TIP = 0.17955  # m, flange face to the closed fingertips (Gen3 + 2F-85; not ruler-measured)
+FLANGE_TO_TIP = 0.19355  # m, flange -> closed fingertips: 0.134 tool frame + 0.05955 tool-to-tip
 # --- the motion ---
 PRESS_BELOW = 0.10  # m, the line down is aimed this far below where the bottom meets the table: in
 # impedance the hand lags its command by a few cm, and the table, not the command, stops it

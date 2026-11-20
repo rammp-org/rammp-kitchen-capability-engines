@@ -14,7 +14,7 @@ from capability_engine import sim as sim_mod
 
 JOINTS = [f"arm_joint_{i}" for i in range(1, 8)]
 CONTINUOUS = [0, 2, 4, 6]  # J1/J3/J5/J7 spin freely
-TOOL_Z = 0.120  # end_effector_link -> tool_frame (Kinova's 2F-85 tool, robot_controller/urdfs)
+TOOL_Z = 0.134  # end_effector_link -> tool_frame with the 14 mm sensor puck
 DT = 0.02  # trajectory sample spacing (cuRobo's interpolation_dt)
 # rad/s peak for joint moves (~49 deg/s); was 0.35, 0.5 (10-07), 0.65 then 0.85 (10-24,
 # "everything felt slow")

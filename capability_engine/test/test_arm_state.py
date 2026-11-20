@@ -43,7 +43,7 @@ def test_get_state_shape_and_tool_offset(arm_env):
     s = arm.get_state()
     assert set(s) == {"position", "velocity", "effort", "ee_pos", "gripper_pos"}
     np.testing.assert_allclose(s["position"][[2, 6]], [3.3 - 2 * np.pi, -3.2 + 2 * np.pi])
-    np.testing.assert_allclose(s["ee_pos"][:3], [0.5, 0.0, 0.4 + 0.120])
+    np.testing.assert_allclose(s["ee_pos"][:3], [0.5, 0.0, 0.4 + 0.134])
 
 
 def test_state_cleared_between_actions(arm_env):
