@@ -125,7 +125,9 @@ VIEW_SIDES = (0.08, 0.04, 0.12, 0.0)  # ... and this far sideways along the face
 # 11-10: hand-placed -- the camera 0.61 m up, square to the door, 27 deg down, J4 44 deg from its limit; the placed
 # ones folded J4 to within 7-11 deg, and the scene camera reads the door 13 cm short. For the microwave where it
 # stood then (door face ~0.69 m out, handle ~26 cm to the user's side)
-VIEW_JOINTS_DEG = (21.4, -43.8, -92.2, -110.6, -58.8, -93.8, -165.7)  # 11-11: teleoped to the view the user chose
+VIEW_JOINTS_DEG = (20.7, -76.7, 177.9, -105.6, 3.4, -57.9, 88.6)  # 11-19: hand-placed on snorlax for the microwave
+# ~0.585 m out (door face) and the chair's gen_1_5 layers, where cuRobo refused the earlier poses; the open's view and
+# the close's (close_view_step) share it. Was (21.4, -43.8, -92.2, -110.6, -58.8, -93.8, -165.7), teleoped 11-11
 VIEW_SEED_DEG = (0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0)  # IK seed: Kinova's Home, the elbow the usual way
 # (a start with J1 ~180 / J4 > 0 used to carry its flipped elbow into every plan, 10-29)
 # ... and these when IK from it misses, lands past a guard or in the keep-out: PyBullet's IK ignores joint limits and
