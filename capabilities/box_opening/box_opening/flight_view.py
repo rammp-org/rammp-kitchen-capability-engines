@@ -106,6 +106,17 @@ LOOK_AGAIN = re.compile(
 AIM = re.compile(r"^AIM: button circle at pixel .*?, (\d+) mm across")
 AIMED = re.compile(r"^AIMED from the look pose: button at \[%s, %s, %s\]" % (NUM, NUM, NUM))
 TABLE_WARN = re.compile(r"^WARNING: the wrist reads its table ([-+]?\d+) mm from the scene camera's")
+# The two cameras measured against each other (perception/camera_check.adopt's lines): how far apart they have
+# one container AS THE SCENE CAMERA'S MOUNT HAS IT, and the warning to tell the team. WRIST_VS_SCENE's number
+# is the wrist look's own, taken from the scene camera's fix as the run reads it: with a correction in force
+# (a second round) that is only what the correction left, and says nothing of a mount that is 18 cm off
+CAMERAS_APART = re.compile(
+    r"^CAMERAS: the scene camera has the container at .*?: they disagree by %s deg about its lens .*?\((\d+) mm apart"
+    % NUM
+)
+CAMERAS_WARN = re.compile(r"^WARNING: the scene camera's mount looks (\d+) deg off \(it puts the container (\d+) mm")
+CAMERAS_UNPAIRED = re.compile(r"^CAMERAS: the two cameras' places are not measured against each other: ")
+HEIGHTS_WARN = re.compile(r"^WARNING: on this robot the two cameras read heights (\d+) mm apart \(the wrist's (\w+)")
 TURN = re.compile(r"^TURN: (\d+) deg short")
 PRESS_START = re.compile(r"^(?:PRESS (\d+) of \d+: )?ONE MOTION from the look pose to below the button")
 PRESS_LEAN = re.compile(r"^PRESS \(compliant\), the hand leaning (\d+) deg")
@@ -339,6 +350,7 @@ class FlightView:
         self.source = None
         self.views = 0
         self.rivals = self.far = False
+        self.apart_mm = None  # what this find's "scene camera puts it N mm away" said, where it said it
         self.aim_mm = None
         self.relooked = None  # the look went again over the lid the wrist saw: said with the button found
         self.tilt = None
@@ -455,6 +467,7 @@ class FlightView:
                     self.lined_up += 1
                     self.views = 0  # the find that follows counts its own
                     self.relooked = None  # (... and looks again from its own first look)
+                    self.apart_mm = None
                     self.going_home = False  # (a home before the line-up is not the way home of what follows)
                     # ... nor is the press that had no way in the failure of a run that goes on from here
                     self.last_fail = None
@@ -493,8 +506,34 @@ class FlightView:
             return
         m = WRIST_VS_SCENE.match(s)
         if m:
+            self.apart_mm = None
             if int(m.group(1)) >= 50:
+                self.apart_mm = int(m.group(1))
                 self._note("scene camera puts it %s mm away; using the wrist's" % m.group(1))
+            return
+        m = CAMERAS_APART.match(s)
+        if m:
+            # the cameras' whole disagreement, as the mount has it. Said unless the wrist look's own line has
+            # just said the same distance (a first round, nothing in force yet)
+            mm, said = int(m.group(2)), self.apart_mm
+            self.apart_mm = None
+            if mm >= 50 and (said is None or abs(said - mm) > 20):
+                self._note(
+                    "scene camera's mount puts it %d mm from the wrist's (%s deg about its lens); its numbers "
+                    "are turned for this run" % (mm, m.group(1).lstrip("+"))
+                )
+            return
+        m = CAMERAS_WARN.match(s)
+        if m:
+            self._note(
+                "WARNING: the scene camera's mount looks %s deg off (%s mm at the box): tell the team" % m.groups()
+            )
+            return
+        if CAMERAS_UNPAIRED.match(s):
+            return  # (nothing was measured: the run's full lines say why)
+        m = HEIGHTS_WARN.match(s)
+        if m:
+            self._note("the two cameras read heights %s mm apart on this robot (the wrist's %s)" % m.groups())
             return
         if NO_CONTAINER.match(s):
             self._note("wrist camera found no box; using the scene camera's")

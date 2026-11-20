@@ -128,6 +128,24 @@ def test_a_mission_keeps_its_frames_and_scores_its_truth_only_when_the_press_lan
     assert man["placements"][0]["container"] == "ankou_pink.yaml"
 
 
+def test_a_mission_keeps_the_correction_that_was_in_force_beside_the_scene_cameras_own_numbers(tmp_path):
+    """The frame's T_base_link and scene_fix_xyz are the camera as its mount has it and its own fix (what a later
+    refit from the frames needs); the check against the wrist camera that was in force for the run is kept under
+    its own name, with the fix as the run went by it. None where none was in force."""
+    from box_opening.detection_set import MissionFrames
+
+    rec = MissionFrames(tmp_path / "missions", "ankou_pink.yaml", 0.05, now=0)
+    check = {"turn_deg": -13.94, "along_mm": -28.2, "by": "run", "fix_xyz_run": [0.77, -0.192, 0.443]}
+    rec.scene(scene_frame_arrays(), fix_xyz=[0.68, -0.034, 0.443], score=0.76, check=check)
+    rec.located([0.77, -0.19, 0.39], "aim")
+    doc = json.loads((rec.close(exit_code=0) / "truth.json").read_text())
+    assert doc["scene_fix_xyz"] == [0.68, -0.034, 0.443] and doc["scene_camera_check"] == check
+    plain = MissionFrames(tmp_path / "plain", "ankou_pink.yaml", 0.05, now=0)
+    plain.scene(scene_frame_arrays(), fix_xyz=[0.68, -0.034, 0.443], score=0.76)
+    plain.located([0.68, -0.03, 0.44], "aim")
+    assert json.loads((plain.close(exit_code=0) / "truth.json").read_text())["scene_camera_check"] is None
+
+
 def scene_frame_arrays():
     from box_opening.detection_set import scene_frame
 

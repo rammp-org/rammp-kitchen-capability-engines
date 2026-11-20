@@ -7509,7 +7509,7 @@ def test_a_look_again_from_the_scene_cameras_place_measures_the_two_cameras_once
     _lids(monkeypatch, (a, None), (b, None))
     pairs = []
 
-    def adopt(c, locator, scene_fix, wrist_fix, runner=None, by=""):
+    def adopt(c, locator, scene_fix, wrist_fix, runner=None, by="", **told):
         pairs.append((getattr(scene_fix, "source", "scene"), wrist_fix, locator is not None, by))
 
     monkeypatch.setattr(camera_check, "adopt", adopt)

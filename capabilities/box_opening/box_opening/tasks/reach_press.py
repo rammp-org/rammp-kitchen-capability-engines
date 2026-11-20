@@ -3041,6 +3041,17 @@ def lid_from_here(node, ctx, runner, watcher, args, locator, scene_fix, aimed_xy
     rest = SimpleNamespace(
         places=tuple(tops), patches=tuple(p for p in find.patches if not aimed_at(p.xy)), fix=None, why=find.why
     )
+    under_look = [q for q in find.places if q.button != "none" and aimed_at(q.xy)]
+    if under_look and tops:
+        # a lid-sized top stands where the look was aimed: the look stood over something lid-sized, and the aim
+        # merely found no button on it. Looking at another top from here could take a neighbour for the
+        # container (review of 2026-11-20); the STOP stands, as it did before the look again existed
+        return (
+            None,
+            "%s has a lid-sized top at [%.3f, %.3f], where the look was aimed: the look stood over it, and no "
+            "other is looked at" % (here, under_look[0].xy[0], under_look[0].xy[1]),
+            None,
+        )
     if not tops:
         under = [q for q in find.places if q.button != "none"]
         if under:
@@ -3209,7 +3220,22 @@ def look_again(node, ctx, cfg, runner, watcher, args, locator, scene_fix, aimed,
         # HOW THIS PAIR WAS ESTABLISHED is `how` (press_demo.BY_*), known here and nowhere else in this reach:
         # what camera_check.adopt is to be told of it. (The run's own row has it: look_again's `by`.)
         was = camera_check.in_force(locator)
-        camera_check.adopt(ctx, locator, scene_fix, fix, runner, by=pd.runner_stamp(runner))
+        if how in (pd.BY_TIE, pd.BY_TIE_ONE):
+            # the selection's tie took the lid for the container the scene camera has: the pairing itself
+            paired, why_not = camera_check.corroborated(locator, None, tied=True)
+        elif how == pd.BY_ONLY:
+            # no selection: lid_from_here took the one whole top its frame holds, but tops its view cut are not
+            # counted there, so "no other top" is not established: nothing is measured (the run still goes on
+            # with the wrist's lid)
+            paired, why_not = camera_check.corroborated(locator, None)
+        else:
+            paired, why_not = "", "--wrist-alone's one container is in none of the scene camera's detections"
+        camera_check.adopt(
+            ctx, locator, scene_fix, fix, runner, by=pd.runner_stamp(runner), paired=paired, why_not=why_not
+        )
+        counter_after = getattr(pd, "counter_after_adopt", None)
+        if counter_after is not None:
+            counter_after(ctx, runner)  # (keep-out boxes the old reading placed are not left standing unsaid)
 
         def as_now(f):
             try:
@@ -3750,7 +3776,12 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         if way is None:
             # from the look pose, in free air: nothing slid into the box's
             # padded volume, so no clear and no back-off before home
-            return no_way_in(ctx, cfg, runner, args, "no press reaches the aimed button (%s)" % why_way, home=True)
+            # after a look again the run's box is the wrist's lid, not the place main handed the reach: the
+            # guidance is told where the press did not plan (review of 2026-11-20)
+            at = tuple(float(v) for v in scene_fix.top_xyz) if relooks else None
+            return no_way_in(
+                ctx, cfg, runner, args, "no press reaches the aimed button (%s)" % why_way, home=True, at=at
+            )
         move, plan2 = way.move, way.plan
         runner.note(
             "reach_way_in",

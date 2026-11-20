@@ -1,7 +1,6 @@
-"""The scene camera checked against the wrist camera (perception/camera_check): what one pair measures, what
-is turned by it, and the guess the next run starts from."""
+"""The scene camera checked against the wrist camera (perception/camera_check): what one pair measures, when a
+pair is one, and what is turned by it for the rest of a run."""
 
-import json
 import math
 from types import SimpleNamespace
 
@@ -107,12 +106,16 @@ def test_the_turn_is_about_the_lens_so_the_camera_stays_where_its_mount_has_it()
     assert np.allclose((T @ p)[:3], cc.turn_xyz(LENS, math.radians(-14.0), (T_MOUNT @ p)[:3]))
 
 
-def _locator(tmp_path, mode=cc.KEEP, T=T_MOUNT):
-    """A scene locator as built bare, placed by TF at `T` (its link the colour frame), with a check of its own."""
+def _locator(mode=cc.RUN, T=T_MOUNT, only_one=None):
+    """A scene locator as built bare, placed by TF at `T` (its link the colour frame), with a check of its own.
+    `only_one`: what it answers where asked whether it holds one container of the kind (None: it cannot be asked,
+    as a locator of this branch cannot)."""
     loc = SceneLocator.__new__(SceneLocator)
     loc.grab = SimpleNamespace(link_frame="scene", lookup=lambda parent, child: T, link_to_color=lambda: np.eye(4))
     loc.T_base_link, loc.base_frame = None, "arm_mount"
-    loc.check = cc.CameraCheck(mode=mode, path=tmp_path / "scene_calib" / cc.FILE_NAME, clock=lambda: 5000.0)
+    loc.check = cc.CameraCheck(mode=mode, clock=lambda: 5000.0)
+    if only_one is not None:
+        loc.only_one = lambda: only_one
     return loc
 
 
@@ -139,169 +142,135 @@ class _Notes:
         self.rows.append((kind, kw))
 
 
-def test_a_wrist_find_taken_for_the_scene_cameras_container_turns_the_scene_camera_for_the_rest_of_the_run(
-    tmp_path, capsys
-):
-    """adopt(): measured, said, noted, warned of once, in force on the locator (every later number it lifts),
-    and kept for the next run. The team's mount itself is what it was (raw)."""
-    loc, notes = _locator(tmp_path), _Notes()
+def _seen(loc, xy):
+    """The scene camera's fix of a container its mount has at `xy`, as loc.locate() returns it NOW: lifted
+    through the placement in force (the turn) and moved along its line (own_fix)."""
+    return cc.own_fix(loc, _fix(cc.turn_xyz(LENS, loc.check.turn_rad, (*xy, 0.443))[:2]))
+
+
+def test_a_wrist_find_taken_for_the_scene_cameras_container_turns_the_scene_camera_for_the_rest_of_the_run(capsys):
+    """adopt(): measured, said, noted, warned of once, in force on the locator (every later number it lifts) and
+    told to the run's context. The team's mount itself is what it was (raw)."""
+    loc, notes, ctx = _locator(), _Notes(), SimpleNamespace()
     assert np.allclose(loc.base_to_color(), T_MOUNT)  # nothing in force: as its mount has it
-    wrist = _fix(PAIRS[1][1], z=0.405, table=0.313, source="wrist")
-    d = cc.adopt(None, loc, _fix(PAIRS[1][0]), wrist, notes, "r1")
-    assert d.turn_deg == pytest.approx(-13.94, abs=0.01) and loc.check.by == "run"
+    wrist = _fix(PAIRS[1][1], z=0.385, table=0.293, source="wrist")
+    d = cc.adopt(ctx, loc, _fix(PAIRS[1][0]), wrist, notes, "r1", paired=cc.BY_TIE)
+    assert d.turn_deg == pytest.approx(-13.94, abs=0.01) and loc.check.by == "run" and loc.check.measured is d
+    assert ctx.cameras_in_force == cc.in_force(loc) == (d.turn_rad, d.along_m)
     T = loc.base_to_color()
     assert np.allclose(T, cc.rotation(LENS, loc.check.turn_rad) @ T_MOUNT) and np.allclose(T[:3, 3], T_MOUNT[:3, 3])
     assert np.allclose(loc.base_to_color(raw=True), T_MOUNT) and np.allclose(loc.base_to_link(raw=True), T_MOUNT)
-    assert np.allclose(loc.base_to_link(), T)  # (its link is its colour frame here)
-    # the same container again later in the run, as the turned locator lifts it: no second warning
-    seen = cc.own_fix(loc, _fix(cc.turn_xyz(LENS, loc.check.turn_rad, (*PAIRS[4][0], 0.443))[:2]))
-    assert cc.adopt(None, loc, seen, (*PAIRS[4][1], 0.40), notes, by="r1") is not None
+    assert np.allclose(cc.raw_mount(loc), T_MOUNT) and np.allclose(
+        loc.base_to_link(), T
+    )  # (its link is its colour frame)
+    # the same container again later in the run, as the turned locator returns it: no second warning
+    assert (
+        cc.adopt(ctx, loc, _seen(loc, PAIRS[4][0]), (*PAIRS[4][1], 0.38), notes, by="r1", paired=cc.BY_ONE) is not None
+    )
     said = [m for m in capsys.readouterr().out.splitlines() if "CAMERAS" in m or "WARNING" in m]
     assert "the scene camera has the container at [0.680, -0.034] and the wrist camera at [0.770, -0.192]" in said[0]
-    assert "turned -13.9 deg about its lens for the rest of this run, and the next starts from that" in said[0]
-    assert "WARNING: the scene camera's mount looks 14 deg off" in said[1] and "tell the team" in said[1]
-    assert sum("WARNING" in m for m in said) == 1  # once a run
+    assert "(one container: the selection's tie took the wrist's find)" in said[0]
+    assert "the wrist's lid 58 mm lower" in said[0]
+    assert said[0].endswith("turned -13.9 deg about its lens for the rest of this run")
+    assert "WARNING: the scene camera's mount looks 14 deg off (it puts the container 182 mm" in said[1]
+    assert "tell the team" in said[1] and sum("WARNING" in m for m in said) == 1  # once a run
+    assert "the scene camera has the container at [0.559, -0.078]" in said[2]  # as the MOUNT has it, not what is left
     kind, row = notes.rows[0]
     assert kind == "camera_check" and row["measured"] and row["turn_deg"] == -13.94 and row["by"] == "run"
-    assert row["scene_xy"] == [0.68, -0.034] and row["wrist_xy"] == [0.77, -0.192] and row["guess_deg"] is None
-    # what the next run reads: both measures, under this mount
-    doc = json.loads((tmp_path / "scene_calib" / cc.FILE_NAME).read_text())
-    assert [r["by"] for r in doc["measures"]] == ["r1", "r1"] and doc["mount"] == cc.mount_key(T_MOUNT)
+    assert row["scene_xy"] == [0.68, -0.034] and row["wrist_xy"] == [0.77, -0.192] and row["run"] == "r1"
+    assert row["paired"] == cc.BY_TIE and notes.rows[1][1]["paired"] == cc.BY_ONE
     # the run's record of a later scene look names the turn its numbers were lifted with
     loc._look, loc.last_timing, loc.instance_id = None, {}, None
-    assert loc.look_record()["camera_check"]["by"] == "run"
+    assert loc.look_record()["camera_check"] == {"mode": "run", "by": "run", "turn_deg": -13.96, "along_mm": -28.7}
 
 
-def test_a_fix_lifted_with_a_turn_in_force_is_measured_as_the_mount_itself_has_it(tmp_path):
-    """The run's second look is lifted through the turned placement. Measured against the wrist again, what
-    is in force afterwards is the scene camera's OWN disagreement, not the remainder added to nothing."""
-    loc = _locator(tmp_path)
-    first = cc.adopt(None, loc, _fix(PAIRS[1][0]), (*PAIRS[1][1], 0.40))
-    # the same container at the next chair place, as the turned locator now lifts it
-    seen = cc.own_fix(loc, _fix(cc.turn_xyz(LENS, loc.check.turn_rad, (*PAIRS[3][0], 0.443))[:2]))
-    second = cc.adopt(None, loc, seen, (*PAIRS[3][1], 0.40))
+def test_a_fix_returned_with_a_turn_in_force_is_measured_as_the_mount_itself_has_it():
+    """The run's second look is lifted through the turned placement and moved along its line. Measured against the
+    wrist again, what is in force afterwards is the scene camera's OWN disagreement, not what the first left."""
+    loc = _locator()
+    first = cc.adopt(None, loc, _fix(PAIRS[1][0]), (*PAIRS[1][1], 0.40), paired=cc.BY_TIE)
+    second = cc.adopt(None, loc, _seen(loc, PAIRS[3][0]), (*PAIRS[3][1], 0.40), paired=cc.BY_TIE)
     assert first.turn_deg == pytest.approx(-13.94, abs=0.01) and second.turn_deg == pytest.approx(-14.94, abs=0.01)
-    assert loc.check.turn_rad == second.turn_rad
+    assert second.along_m == pytest.approx(-0.034, abs=0.001) and loc.check.turn_rad == second.turn_rad
 
 
-def test_the_next_run_starts_from_the_last_ones_measure_as_a_guess_and_its_own_replaces_it(tmp_path):
-    first = _locator(tmp_path)
-    for (s, w), t in zip(PAIRS[:3], (100.0, 200.0, 300.0), strict=True):
-        first.check._clock = lambda t=t: t
-        seen = cc.own_fix(first, _fix(cc.turn_xyz(LENS, first.check.turn_rad, (*s, 0.443))[:2]))
-        cc.adopt(None, first, seen, (*w, 0.40), by="a")
-    nxt = _locator(tmp_path)
-    T = nxt.base_to_color()  # the first number it lifts: the guess is read, with the mount it is keyed on
-    g = nxt.check.guess
-    assert nxt.check.by == "guess" and g.n == 3 and math.degrees(g.turn_rad) == pytest.approx(-13.9, abs=0.01)
-    assert np.allclose(T, cc.rotation(LENS, g.turn_rad) @ T_MOUNT)
-    assert g.words(now=300.0 + 12 * 60).startswith("-13.9 deg about its lens, 29 mm nearer along it")
-    assert g.words(now=300.0 + 12 * 60).endswith(
-        "the last 3 runs measured against the wrist camera, the newest 12 min ago"
+def test_a_pair_is_measured_only_where_something_establishes_that_it_is_one_container(capsys):
+    """The review of 2026-11-20: an unselected run takes any wrist find, and a lid 15 cm beside a healthy camera's
+    box then measured as a mount 12 deg off: a wrong warning and a wrong turn. adopt measures only what its
+    caller says is one container, and says why where it does not."""
+    loc, notes = _locator(), _Notes()
+    beside = (PAIRS[1][0][0] + 0.02, PAIRS[1][0][1] - 0.15, 0.40)  # another lid, 15 cm to the side
+    # what it would read as: a mount some 10 deg off (the review's own case, -12.0), from a camera that is right
+    assert cc.measure(LENS, (*PAIRS[1][0], 0.44), beside)[0].turn_deg == pytest.approx(-10.2, abs=0.3)
+    assert cc.adopt(None, loc, _fix(PAIRS[1][0]), beside, notes, by="r") is None  # (the caller did not say)
+    paired, why = cc.corroborated(loc, [])
+    assert cc.adopt(None, loc, _fix(PAIRS[1][0]), beside, notes, by="r", paired=paired, why_not=why) is None
+    out = capsys.readouterr().out
+    assert "CAMERAS: the two cameras' places are not measured against each other: the caller does not say" in out
+    assert "not measured against each other: no selection ties the wrist's find to the scene camera's box, and" in out
+    assert "WARNING" not in out and loc.check.by == "" and np.allclose(loc.base_to_color(), T_MOUNT)
+    assert [r[1]["measured"] for r in notes.rows] == [False, False] and "no selection" in notes.rows[1][1]["why"]
+    # what establishes it: a selection's tie that took the find ...
+    assert cc.corroborated(loc, None, tied=True) == (cc.BY_TIE, "")
+    # ... or, with no selection, ONE container of the kind in the scene camera's view AND no second lid-sized top
+    # in the wrist's frames. A locator that cannot be asked, or a bare one with no segmenter (which answers that it
+    # does not hold exactly one), is no corroboration
+    paired, why = cc.corroborated(_locator(), [])
+    assert paired == "" and why.endswith(
+        (
+            "the scene camera cannot say it holds only one container of the kind",
+            "does not hold exactly one container of the kind",
+        )
     )
-    # the scene camera's own fix of the container is moved along its line by the guess; a wrist's or a rough one not
-    fix = _fix(cc.turn_xyz(LENS, g.turn_rad, (*PAIRS[4][0], 0.443))[:2])
-    own = cc.own_fix(nxt, fix)
-    assert math.hypot(own.top_xyz[0] - PAIRS[4][1][0], own.top_xyz[1] - PAIRS[4][1][1]) < 0.01
-    assert own.top_xyz[2] == fix.top_xyz[2] and own.table_z_scene == fix.table_z_scene and own.pose.xyz[2] == 0.343
-    assert np.array_equal(own.table_points, fix.table_points)  # (the table round it is not moved along)
-    assert cc.own_fix(nxt, _fix((0.6, 0.0), source="wrist")).top_xyz[:2] == (0.6, 0.0)
-    assert cc.own_fix(nxt, _fix((0.6, 0.0), rough=True)).top_xyz[:2] == (0.6, 0.0)
-    # its own pair (the fix as its look returned it): in force, kept beside the others (4 now), near the guess
-    cc.adopt(None, nxt, own, (*PAIRS[4][1], 0.40), by="b")
-    assert nxt.check.by == "run" and math.degrees(nxt.check.turn_rad) == pytest.approx(-14.0, abs=0.1)
-    doc = json.loads(nxt.check.path.read_text())
-    assert [r["by"] for r in doc["measures"]] == ["a", "a", "a", "b"]
-
-
-def test_a_run_that_measures_far_from_the_guess_says_so_and_keeps_only_its_own(tmp_path):
-    """The camera was moved again (or put right) between two runs: the older measures describe a camera that
-    no longer is."""
-    first = _locator(tmp_path)
-    cc.adopt(None, first, _fix(PAIRS[1][0]), (*PAIRS[1][1], 0.40), by="old")
-    nxt = _locator(tmp_path)
-    nxt.base_to_color()
-    assert nxt.check.by == "guess"
-    # the camera now agrees with the wrist: its own placement is the wrist's, returned with the guess in it
-    seen = cc.own_fix(nxt, _fix(cc.turn_xyz(LENS, nxt.check.turn_rad, (0.70, -0.10, 0.44))[:2]))
-    notes = _Notes()
-    d = cc.adopt(None, nxt, seen, (0.70, -0.10, 0.40), notes, by="new")
-    assert abs(d.turn_deg) < 0.01 and nxt.check.turn_rad == d.turn_rad
-    assert notes.rows[0][1]["from_guess_deg"] == pytest.approx(13.94, abs=0.01)
-    assert [r["by"] for r in json.loads(nxt.check.path.read_text())["measures"]] == ["new"]
-
-
-def test_a_guess_belongs_to_the_mount_it_was_measured_under(tmp_path):
-    """The team puts the mount right, or the stack is another robot's: the guess is dropped, not carried over."""
-    first = _locator(tmp_path)
-    cc.adopt(None, first, _fix(PAIRS[1][0]), (*PAIRS[1][1], 0.40))
-    moved = cc.rotation(LENS, math.radians(-14.0)) @ T_MOUNT  # the mount as a recalibration would write it
-    other = _locator(tmp_path, T=moved)
-    assert np.allclose(other.base_to_color(), moved) and other.check.by == "" and other.check.guess is None
-    assert cc.load_guess(other.check.path, cc.mount_key(moved))[1].startswith(
-        "the scene camera's mount is not the one the last runs' measure against the wrist camera was made under"
+    assert cc.corroborated(_locator(only_one=False), [])[1].endswith("does not hold exactly one container of the kind")
+    assert cc.corroborated(_locator(only_one=True), None)[1].endswith("what else the wrist's frames hold is not known")
+    assert cc.corroborated(_locator(only_one=True), [(0.81, 0.02)])[1].endswith(
+        "the wrist's frames hold another lid-sized top at [0.810, 0.020]"
     )
-    assert cc.same_mount(cc.mount_key(T_MOUNT), cc.mount_key(T_MOUNT))
-    shifted = T_MOUNT.copy()
-    shifted[0, 3] += 0.005
-    assert not cc.same_mount(cc.mount_key(T_MOUNT), cc.mount_key(shifted))
-    assert not cc.same_mount(cc.mount_key(T_MOUNT), None) and not cc.same_mount([1, 2], cc.mount_key(T_MOUNT))
-    # a file that is not one, or whose numbers no pair could give: no guess, and no error
-    path = tmp_path / "bad.json"
-    path.write_text("{not json")
-    assert cc.load_guess(path, cc.mount_key(T_MOUNT)) == (None, None)
-    path.write_text(json.dumps({"mount": cc.mount_key(T_MOUNT), "measures": [{"turn_deg": 60.0, "along_mm": 0.0}]}))
-    assert cc.load_guess(path, cc.mount_key(T_MOUNT))[0] is None
-    assert cc.load_guess(tmp_path / "none.json", cc.mount_key(T_MOUNT)) == (None, None)
+    assert cc.corroborated(_locator(only_one=True), []) == (cc.BY_ONE, "")
+    broken = _locator()
+    broken.only_one = lambda: 1 / 0
+    assert cc.corroborated(broken, [])[0] == ""  # what cannot be counted is not "only one"
 
 
-def test_only_the_newest_five_measures_are_kept_and_the_guess_is_their_median(tmp_path):
-    path, key = tmp_path / "c.json", cc.mount_key(T_MOUNT)
-    for i, deg in enumerate((-10.0, -14.0, -14.2, -13.8, -30.0 / 3, -14.1, -13.9)):
-        cc.save_measure(path, key, cc.Disagreement(math.radians(deg), -0.03, t=float(i)), by=str(i))
-    doc = json.loads(path.read_text())
-    assert [r["by"] for r in doc["measures"]] == ["2", "3", "4", "5", "6"] and cc.GUESS_KEPT == 5
-    g, why = cc.load_guess(path, key)
-    assert why is None and g.n == 5 and math.degrees(g.turn_rad) == pytest.approx(-13.9) and g.t == 6.0
-
-
-def test_the_check_can_be_run_without_the_guess_or_not_at_all(tmp_path, monkeypatch):
-    """camera_check: "run" measures and turns within the run and reads and keeps nothing; "none" leaves the
-    scene camera as its mount has it, as before 2026-11-20."""
-    seeded = _locator(tmp_path)
-    cc.adopt(None, seeded, _fix(PAIRS[1][0]), (*PAIRS[1][1], 0.40), by="seed")
-    kept = seeded.check.path.read_text()
-    run = _locator(tmp_path, mode=cc.RUN)
-    assert np.allclose(run.base_to_color(), T_MOUNT) and run.check.guess is None  # no guess read
-    d = cc.adopt(None, run, _fix(PAIRS[3][0]), (*PAIRS[3][1], 0.40))
+def test_nothing_is_carried_from_run_to_run_and_keep_is_no_mode(tmp_path, monkeypatch):
+    """camera_check: "run" (the default: unset, and any word it does not know) measures and turns within the run;
+    "none" leaves the scene camera as its mount has it. Nothing is read from or written to the state folder in
+    either, and "keep" (the measure carried to the next run) is not a mode: withdrawn in review."""
+    monkeypatch.setenv("BOX_OPENING_STATE", str(tmp_path))
+    for word in ("", "run", "keep", "true", "1", "on", "whatever"):
+        assert cc.mode_of({"BOX_OPENING_CAMERA_CHECK": word}) == cc.RUN, word
+    for word in ("none", "None", " off ", "0", "false", "no", "disabled"):
+        assert cc.mode_of({"BOX_OPENING_CAMERA_CHECK": word}) == cc.NONE, word
+    assert cc.mode_of({}) == cc.RUN and cc.MODES == ("run", "none") and "not available" in cc.NO_KEEP
+    monkeypatch.delenv("BOX_OPENING_CAMERA_CHECK", raising=False)
+    assert cc.CameraCheck().mode == cc.RUN and cc.CameraCheck(mode="keep").mode == cc.RUN
+    run = _locator()
+    d = cc.adopt(None, run, _fix(PAIRS[3][0]), (*PAIRS[3][1], 0.40), by="a", paired=cc.BY_TIE)
     assert d is not None and np.allclose(run.base_to_color(), cc.rotation(LENS, d.turn_rad) @ T_MOUNT)
-    assert run.check.path.read_text() == kept  # ... and none kept
-    off = _locator(tmp_path, mode=cc.NONE)
-    assert cc.adopt(None, off, _fix(PAIRS[3][0]), (*PAIRS[3][1], 0.40)) is None
-    assert np.allclose(off.base_to_color(), T_MOUNT) and off.check.path.read_text() == kept
-    assert cc.own_fix(off, _fix((0.6, 0.0))).top_xyz[:2] == (0.6, 0.0)
-    for word, mode in (("", cc.KEEP), ("keep", cc.KEEP), ("run", cc.RUN), ("none", cc.NONE), ("off", cc.NONE)):
-        assert cc.mode_of({"BOX_OPENING_CAMERA_CHECK": word}) == mode
-    assert cc.mode_of({}) == cc.KEEP and cc.MODES == ("keep", "run", "none")
-    monkeypatch.setenv("BOX_OPENING_STATE", str(tmp_path / "state"))
-    monkeypatch.setenv("BOX_OPENING_CAMERA_CHECK", "run")
-    fresh = cc.CameraCheck()
-    assert fresh.mode == cc.RUN and fresh.path == tmp_path / "state" / "scene_calib" / "camera_check.json"
+    nxt = _locator()  # the next run: from the mount as it is
+    assert np.allclose(nxt.base_to_color(), T_MOUNT) and cc.in_force(nxt) == (0.0, 0.0) and nxt.check.by == ""
+    off = _locator(mode=cc.NONE)
+    assert cc.adopt(None, off, _fix(PAIRS[3][0]), (*PAIRS[3][1], 0.40), paired=cc.BY_TIE) is None
+    assert np.allclose(off.base_to_color(), T_MOUNT) and cc.own_fix(off, _fix((0.6, 0.0))).top_xyz[:2] == (0.6, 0.0)
+    assert list(tmp_path.rglob("*")) == []  # nothing was written anywhere under the state folder
 
 
-def test_what_is_no_measure_changes_nothing_and_never_ends_a_run(tmp_path):
-    loc, notes = _locator(tmp_path), _Notes()
-    assert cc.adopt(None, loc, None, (0.7, 0.0, 0.4)) is None  # the scene camera had no fix
-    assert cc.adopt(None, loc, _fix((0.7, 0.0), rough=True), (0.75, -0.1, 0.4)) is None  # a rough one: no measure
-    assert cc.adopt(None, loc, _fix((0.7, 0.0), source="wrist"), (0.75, -0.1, 0.4)) is None  # not the scene camera's
-    assert cc.adopt(None, loc, _fix((0.70, 0.30)), (0.70, -0.25, 0.4), notes) is None  # two things, not one twice
-    assert notes.rows == [("camera_check", {"measured": False, "why": notes.rows[0][1]["why"], **loc.check.row()})]
-    assert cc.adopt(None, SimpleNamespace(), _fix((0.7, 0.0)), (0.75, -0.1, 0.4)) is None  # a locator with no check
-    assert cc.adopt(None, None, _fix((0.7, 0.0)), (0.75, -0.1, 0.4)) is None
-    broken = _locator(tmp_path)
+def test_what_is_no_measure_changes_nothing_and_never_ends_a_run():
+    loc, notes, tie = _locator(), _Notes(), {"paired": cc.BY_TIE}
+    assert cc.adopt(None, loc, None, (0.7, 0.0, 0.4), **tie) is None  # the scene camera had no fix
+    assert cc.adopt(None, loc, _fix((0.7, 0.0), rough=True), (0.75, -0.1, 0.4), **tie) is None  # a rough one
+    assert cc.adopt(None, loc, _fix((0.7, 0.0), source="wrist"), (0.75, -0.1, 0.4), **tie) is None  # not the scene's
+    assert cc.adopt(None, loc, _fix((0.70, 0.30)), (0.70, -0.25, 0.4), notes, **tie) is None  # 37 deg apart
+    assert cc.adopt(None, loc, _fix((0.70, 0.30)), (float("nan"), 0.0, 0.4), notes, **tie) is None  # not a place
+    assert [r[1]["measured"] for r in notes.rows] == [False, False] and "more than 25 deg" in notes.rows[0][1]["why"]
+    assert cc.adopt(None, SimpleNamespace(), _fix((0.7, 0.0)), (0.75, -0.1, 0.4), **tie) is None  # no check on it
+    assert cc.adopt(None, None, _fix((0.7, 0.0)), (0.75, -0.1, 0.4), **tie) is None
+    broken = _locator()
     broken.grab = SimpleNamespace(link_frame="scene", lookup=lambda *_: 1 / 0, link_to_color=lambda: np.eye(4))
-    assert cc.adopt(None, broken, _fix((0.7, 0.0)), (0.75, -0.1, 0.4)) is None  # said, never raised
-    assert loc.check.by == "" and not loc.check.path.exists() and np.allclose(loc.base_to_color(), T_MOUNT)
+    assert cc.adopt(None, broken, _fix((0.7, 0.0)), (0.75, -0.1, 0.4), **tie) is None  # said, never raised
+    frozen = cc.adopt(object(), loc, _fix(PAIRS[1][0]), (*PAIRS[1][1], 0.4), **tie)  # a context that holds nothing
+    assert frozen is not None and loc.check.by == "run"
 
 
 def test_a_fix_made_before_the_correction_was_known_can_be_put_where_the_correction_has_it():
@@ -320,10 +289,15 @@ def test_a_fix_made_before_the_correction_was_known_can_be_put_where_the_correct
     assert cc.turned_fix(fix, LENS, 0.0) is fix and cc.turned_fix(None, LENS, 0.1) is None
 
 
-def test_every_fix_the_locator_returns_is_placed_by_the_check_in_force(tmp_path):
-    """SceneLocator.locate returns its look's fix through own_fix: the fix before a press and the one after it
-    are placed alike, whatever is in force, and a locator with nothing in force returns it untouched."""
-    loc = _locator(tmp_path)
+def test_every_fix_and_every_sighting_the_locator_gives_is_placed_alike(capsys):
+    """SceneLocator.locate returns its look's fix through own_fix, and tells each sighting the same way: the fix
+    before a press and the one after it are placed alike, and a line-up's proof (of a sighting) and the run's plan
+    (of the fix) are of one place. As first written a sighting was told 28-36 mm from where the fix then stood,
+    and a proof speaks for a box within 15 mm (line_up.PROOF_NEAR_M)."""
+    from box_opening import line_up
+    from box_opening.perception.scene_source import Sighting
+
+    loc = _locator()
     raw = _fix((0.68, -0.03))
     loc._locate = lambda timeout_s: raw
     assert loc.locate(1.0) is raw  # nothing in force
@@ -336,27 +310,52 @@ def test_every_fix_the_locator_returns_is_placed_by_the_check_in_force(tmp_path)
         math.atan2(raw.top_xyz[1] - LENS[1], raw.top_xyz[0] - LENS[0])
     )  # (along its own line: the turn is in what the look lifts, not added here)
     assert got.pose.xyz[:2] == pytest.approx(got.top_xyz[:2]) and got.table_z_scene == raw.table_z_scene
+    # ... and a sighting of the same lift, as it is told
+    told = []
+    loc.on_sighting, loc._clock = lambda s, age: told.append(s), lambda: 10.0
+    sight = Sighting("segmenter", 0.8, raw.top_xyz, raw.pose, 190, (), 0.343, "side", (1, 2, 3, 4), (1, 2, 3, 4))
+    msg = SimpleNamespace(stamp_ns=None, recv_s=9.9)
+    loc._tell(sight, msg, (10.0, "f", (640, 400), None))
+    assert told[0].top == pytest.approx(got.top_xyz) and told[0].pose.xyz == pytest.approx(got.pose.xyz)
+    assert math.hypot(told[0].top[0] - got.top_xyz[0], told[0].top[1] - got.top_xyz[1]) < line_up.PROOF_NEAR_M / 100
+    rough = Sighting("segmenter", 0.8, raw.top_xyz, raw.pose, 30, ("left",), 0.343, "rough", (1, 2, 3, 4), None)
+    loc._tell(rough, msg, (10.0, "f", (640, 400), None))
+    assert told[1] is rough  # (a rough one's place is its own fit's, as a rough fix's is)
+    # what it was BEFORE the correction, for measuring and for what is kept of the run
+    assert cc.raw_xyz(loc, got.top_xyz) == pytest.approx(cc.turn_xyz(LENS, math.radians(14.0), raw.top_xyz))
+    assert cc.kept_row(loc, got.top_xyz) == {
+        "turn_deg": -14.0,
+        "along_mm": -30.0,
+        "by": "run",
+        "fix_xyz_run": [round(v, 5) for v in got.top_xyz],
+    }
     loc._locate = lambda timeout_s: None
     assert loc.locate(1.0) is None
     bare = SceneLocator.__new__(SceneLocator)  # one built with no check at all (a test's): as it always was
     bare._locate = lambda timeout_s: raw
-    assert bare.locate(1.0) is raw
+    assert (
+        bare.locate(1.0) is raw and cc.kept_row(bare) is None and cc.raw_xyz(bare, (1.0, 2.0, 3.0)) == (1.0, 2.0, 3.0)
+    )
+    stand_in = SimpleNamespace(base_to_link=lambda: "its own")  # a stand-in that knows no raw mount: the one it has
+    assert cc.raw_mount(stand_in) == "its own"
+    assert capsys.readouterr().out == ""
 
 
-def test_a_scene_fix_held_across_a_measure_can_be_put_where_the_new_correction_has_it(tmp_path):
+def test_a_scene_fix_held_across_a_measure_can_be_put_where_the_new_correction_has_it():
     """refix: a caller that flies the scene camera's fix, has the wrist find the same lid part way (the look
-    pose), and goes on comparing later scene looks with the fix it holds."""
-    loc = _locator(tmp_path)
+    pose), and goes on using the fix it holds (the look again's pooled counter)."""
+    loc = _locator()
     assert cc.in_force(loc) == (0.0, 0.0) and cc.in_force(SimpleNamespace()) == (0.0, 0.0)
     held = _fix(PAIRS[1][0])  # returned with nothing in force
     was = cc.in_force(loc)
-    d = cc.adopt(None, loc, held, (*PAIRS[1][1], 0.40))
+    d = cc.adopt(None, loc, held, (*PAIRS[1][1], 0.40), paired=cc.BY_TIE)
     assert cc.in_force(loc) == (d.turn_rad, d.along_m)
     now = cc.refix(loc, held, was)
     assert now.top_xyz[:2] == pytest.approx(PAIRS[1][1]) and now.top_xyz[2] == held.top_xyz[2]
+    want = np.array([cc.turn_xyz(LENS, d.turn_rad, p) for p in held.table_points])
+    assert np.allclose(now.table_points, want, atol=1e-6)  # its table points turned with it (not moved along)
     # ... which is where a look made now puts the same container: turned by the locator, moved along by own_fix
-    again = cc.own_fix(loc, _fix(cc.turn_xyz(LENS, d.turn_rad, (*PAIRS[1][0], 0.443))[:2]))
-    assert again.top_xyz[:2] == pytest.approx(now.top_xyz[:2])
+    assert _seen(loc, PAIRS[1][0]).top_xyz[:2] == pytest.approx(now.top_xyz[:2])
     assert cc.refix(loc, held, cc.in_force(loc)) is held  # nothing changed since: as it is
     wrist = _fix((0.6, 0.0), source="wrist")
     assert cc.refix(loc, wrist, was) is wrist and cc.refix(loc, None, was) is None

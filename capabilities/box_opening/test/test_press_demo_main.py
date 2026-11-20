@@ -93,14 +93,17 @@ REACH_OUTS = []  # the scene fixes handed to the reach-out
 LOOKED = {"timing": {"streams_s": 0.1}, "segmenter": {"state": "live", "frames": 3}}
 
 
-def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True, record=None, why=None, home_first=None):
+def run_main(
+    monkeypatch, tmp_path, argv, approach, client=None, found=True, record=None, why=None, home_first=None, tweak=None
+):
     """press_demo.main() with `approach(ctx)` standing in for the reach-out:
     its result's `failed` decides the exit code; `found` False, the scene
     camera finds no box (a list: what each look in turn finds, the last for
     every look after it); `record`: what its look is recorded as having seen
     (LOOKED), `why`: its word on having found none (the OWL's); `home_first` in
-    place of the run's first home (the default: at rest already). Returns
-    (exit code, client, run-log rows)."""
+    place of the run's first home (the default: at rest already); `tweak`
+    (monkeypatch, the stand-in locator's class): a test's own changes to the
+    stand-ins, made last. Returns (exit code, client, run-log rows)."""
     import faulthandler
 
     import rclpy.executors
@@ -196,6 +199,8 @@ def run_main(monkeypatch, tmp_path, argv, approach, client=None, found=True, rec
         lambda self, path, out_dir=None: real_init(self, path, out_dir=tmp_path / "worlds"),
     )
     monkeypatch.setenv("BOX_OPENING_STATE", str(tmp_path))  # the Runner's log, the gripper file
+    if tweak is not None:
+        tweak(monkeypatch, _Locator)
     with pytest.raises(SystemExit) as e:
         press_demo.main()
     rows = []
@@ -1262,6 +1267,41 @@ def test_no_frames_to_keep_is_a_no_op():
 
 
 # ------------------------------------------------- the two cameras checked against each other (2026-11-20)
+SCENE_LENS = (0.15, -0.57, 0.39)  # where the stand-in scene camera stands, the arm's frame
+WRIST_AT = (0.54, -0.258)  # where the wrist has the container the scene camera's mount puts at BOX_XY
+
+
+def _wrist_at(taken, others=(), at=WRIST_AT, d_top=-0.038, d_table=-0.030):
+    """A stand-in for press_demo.wrist_look whose wrist finds the container at `at`, its lid `d_top` and its table
+    `d_table` from the scene camera's, and whose find is taken; its frames hold `others` beside it (lid-sized
+    tops, [(x, y)]), which it leaves on the run's context as the real look's survey does (ctx.wrist_find)."""
+    from types import SimpleNamespace
+
+    from box_opening.models.container import ContainerPose
+
+    def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
+        s = scene_fix.top_xyz
+        table = float(scene_fix.table_z_scene) + d_table
+        wrist = SimpleNamespace(
+            pose=ContainerPose(xyz=(at[0], at[1], table), yaw=0.0),
+            top_xyz=(at[0], at[1], s[2] + d_top),
+            n_points=250,
+            score=0.7,
+            table_z_scene=table,
+            table_extent=None,
+            source="wrist",
+        )
+        ctx.wrist_find = SimpleNamespace(
+            places=[SimpleNamespace(xy=at, button="unchecked")]
+            + [SimpleNamespace(xy=o, button="unchecked") for o in others],
+            patches=(),
+        )
+        taken.append((scene_fix, wrist))
+        return wrist, None, None
+
+    return wrist_look
+
+
 def _wrist_taken(taken, d_xy=(0.090, -0.158), d_top=-0.038, d_table=-0.030):
     """A stand-in for press_demo.wrist_look whose wrist finds the container `d_xy` from where the scene camera
     has it, its lid `d_top` and its table `d_table` from the scene camera's, and whose find is taken."""
@@ -1287,55 +1327,224 @@ def _wrist_taken(taken, d_xy=(0.090, -0.158), d_top=-0.038, d_table=-0.030):
     return wrist_look
 
 
-def test_a_wrist_find_taken_for_the_scene_cameras_box_is_measured_against_it(monkeypatch, tmp_path, capsys):
-    """RAMMP 1.5, 2026-11-20: the two cameras had the one container 155-215 mm apart in five looks and the run
-    went on with the scene camera's, 17 cm from the box. Where the wrist's find is the one the run goes on
-    with, the scene camera's own fix of it (as its look lifted it) and the wrist's are handed to the check
-    (camera_check.adopt), the reach-out gets the wrist's, and the two cameras' heights are said."""
-    from box_opening.perception import camera_check
+def _checked_locator(only_one=None, frames=None):
+    """run_main's `tweak`: the stand-in locator with a check of its own (perception/camera_check), placed at
+    SCENE_LENS, returning its fix as a real locator does: lifted through the placement in force (the turn) and
+    moved along its line (own_fix). `only_one`: its answer on holding one container of the kind (None: it cannot
+    be asked). `frames`: a list that takes what the mission's frames were handed of each look (and turns them on)."""
+    import numpy as np
+
+    from box_opening.models.container import ContainerModel, ContainerPose
+    from box_opening.perception import camera_check as cc
+    from box_opening.perception.scene_source import SceneFix
     from box_opening.tasks import press_demo
 
-    taken, adopted = [], []
-    monkeypatch.setattr(press_demo, "wrist_look", _wrist_taken(taken))
-    monkeypatch.setattr(
-        camera_check, "adopt", lambda ctx, loc, scene, wrist, runner=None, by="": adopted.append((scene, wrist, by))
-    )
+    def tweak(monkeypatch, locator):
+        monkeypatch.setenv("BOX_OPENING_CAMERA_CHECK", "run")
+        T = np.eye(4)
+        T[:3, 3] = SCENE_LENS
+        model = ContainerModel.load(PINK)
+        table = -0.057 + 0.03
+        check = cc.CameraCheck()
+
+        def base_to_color(self, raw=False):
+            return T if raw or not check.turn_rad else cc.rotation(SCENE_LENS[:2], check.turn_rad) @ T
+
+        def locate(self, timeout):
+            LOCATES.append(timeout)
+            own = SceneFix(
+                pose=ContainerPose(xyz=(*BOX_XY, table), yaw=0.0),
+                top_xyz=(*BOX_XY, table + model.dims[2]),
+                n_points=300,
+                score=0.6,
+                table_z_scene=table,
+            )
+            return cc.own_fix(self, cc.turned_fix(own, SCENE_LENS[:2], check.turn_rad))
+
+        locator.check, locator.base_to_color, locator.base_to_link, locator.locate = (
+            check,
+            base_to_color,
+            base_to_color,
+            locate,
+        )
+        if only_one is not None:
+            locator.only_one = lambda self: only_one
+        if frames is not None:
+            monkeypatch.setenv("BOX_OPENING_MISSION_FRAMES", "1")
+
+            class Frames:
+                def __init__(self, *a, **k):
+                    pass
+
+                def scene(self, arrays, **kw):
+                    frames.append((arrays, kw))
+
+                def note(self, **kw):
+                    pass
+
+                def close(self, exit_code=None):
+                    return None
+
+            monkeypatch.setattr(press_demo, "MissionFrames", Frames)
+            monkeypatch.setattr(press_demo, "scene_frame", lambda grab, T_base_link: {"T_base_link": T_base_link})
+        locator.the_check = check
+
+    return tweak
+
+
+def test_a_selected_wrist_find_is_measured_against_the_scene_cameras_fix_and_the_check_is_real(
+    monkeypatch, tmp_path, capsys
+):
+    """RAMMP 1.5, 2026-11-20: the two cameras had the one container 155-215 mm apart in five looks and the run
+    went on with the scene camera's, 17 cm from the box. With a selection the wrist's find is taken only by its
+    tie to the selected container, and that is what makes the pair one container: the scene camera's own fix
+    and the wrist's are measured against each other (the real camera_check.adopt, nothing stood in for), the
+    reach-out gets the wrist's, and nothing is read from or kept in the state folder."""
+    from box_opening.tasks import press_demo
+
+    taken = []
+    monkeypatch.setattr(press_demo, "wrist_look", _wrist_at(taken))
     REACH_OUTS.clear()
-    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute", "--wrist-first"], _at_staging())
-    assert code == 0 and len(taken) == 1
-    scene_fix, wrist = taken[0]
-    assert [(s, w) for s, w, _by in adopted] == [(scene_fix, wrist)]  # the scene camera's own fix, and the wrist's
-    assert adopted[0][2].startswith("run-")  # (which run measured it, for what is kept of it)
-    assert REACH_OUTS == [wrist]
+    argv = ["--execute", "--wrist-first", "--instance-id", "food_container_2"]
+    code, _c, rows = run_main(monkeypatch, tmp_path, argv, _at_staging(), tweak=_checked_locator())
+    assert code == 0 and len(taken) == 1 and REACH_OUTS == [taken[0][1]]
     out = capsys.readouterr().out
-    (line,) = (ln for ln in out.splitlines() if "HEIGHTS:" in ln)
-    assert "the scene camera read them at -0.027 (+30 mm) and 0.094 (+38 mm)" in line, line
-    assert "The run's table is the world file's, -0.027" in line  # (the bench's world file names its table)
-    (noted,) = (r for r in rows if r["leg"] == "heights")
-    assert noted["by"] == "world" and noted["table_off_mm"] == -30.0 and noted["lid_off_mm"] == -38.0
+    (line,) = (ln for ln in out.splitlines() if "CAMERAS:" in ln)
+    assert "the scene camera has the container at [0.450, -0.100] and the wrist camera at [0.540, -0.258]" in line
+    assert "(one container: the selection's tie took the wrist's find)" in line and "182 mm apart" in line
+    assert "turned -18.8 deg about its lens for the rest of this run" in line
+    assert "WARNING: the scene camera's mount looks 19 deg off" in out and "tell the team" in out
+    (noted,) = (r for r in rows if r["leg"] == "camera_check")
+    assert noted["measured"] and noted["turn_deg"] == -18.79 and noted["paired"].startswith("the selection's tie")
+    assert noted["run"].startswith("run-") and noted["scene_xy"] == [0.45, -0.1] and noted["by"] == "run"
+    (heights,) = (r for r in rows if r["leg"] == "heights")
+    assert heights["by"] == "world" and heights["table_off_mm"] == -30.0 and heights["lid_off_mm"] == -38.0
+    assert "the scene camera read them at -0.027 (+30 mm) and 0.094 (+38 mm)" in out
+    assert not (tmp_path / "scene_calib").exists()  # nothing kept for another run
+
+
+def test_an_unselected_wrist_find_is_measured_only_where_both_cameras_hold_one_container(monkeypatch, tmp_path, capsys):
+    """By hand (no selection) the wrist's find is taken whatever the scene camera has: any box of the container's
+    classes. The review's case: a lid 15 cm beside a healthy camera's box was measured as a mount 12 deg off, a
+    wrong WARNING and a wrong turn. Measured only where the scene camera holds exactly one container of the kind
+    and the wrist's frames no second lid-sized top; else not, and why is said. The run flies the wrist's find
+    either way."""
+    from box_opening.tasks import press_demo
+
+    def run(name, others=(), only_one=None):
+        taken = []
+        monkeypatch.setattr(press_demo, "wrist_look", _wrist_at(taken, others=others))
+        tweak = _checked_locator(only_one=only_one)
+        code, _c, rows = run_main(
+            monkeypatch, tmp_path / name, ["--execute", "--wrist-first"], _at_staging(), tweak=tweak
+        )
+        assert code == 0 and len(taken) == 1
+        (noted,) = (r for r in rows if r["leg"] == "camera_check")
+        return noted, capsys.readouterr().out
+
+    noted, out = run("one each", only_one=True)
+    assert noted["measured"] and noted["paired"].startswith("the scene camera holds one container of the kind")
+    assert "turned -18.8 deg" in out and "WARNING: the scene camera's mount" in out
+    for name, kw, why in (
+        ("cannot say", {}, "the scene camera cannot say it holds only one container of the kind"),
+        ("two in the scene", {"only_one": False}, "the scene camera does not hold exactly one container of the kind"),
+        ("two in the wrist", {"only_one": True, "others": [(0.62, 0.05)]}, "another lid-sized top at [0.620, 0.050]"),
+    ):
+        noted, out = run(name, **kw)
+        assert not noted["measured"] and noted["why"].endswith(why), (name, noted)
+        assert noted["turn_deg"] == 0.0 and noted["by"] == ""  # nothing in force
+        assert "CAMERAS: the two cameras' places are not measured against each other: no selection ties" in out
+        assert "WARNING: the scene camera's mount" not in out and "turned" not in out
+
+
+def test_a_guided_second_round_starts_from_the_scene_camera_as_the_first_measured_it(monkeypatch, tmp_path, capsys):
+    """What a run sees of the check: its scene camera is read again only where the chair is guided and it looks a
+    second time. That look's fix comes out where the wrist has the container (the turn in every number it lifts,
+    its own place moved along the line), the pair is measured again as the MOUNT has it, and the mount's warning
+    is said once."""
+    from types import SimpleNamespace
+
+    from box_opening.tasks import press_demo, reach_press
+
+    taken, guided = [], []
+    monkeypatch.setattr(press_demo, "wrist_look", _wrist_at(taken))
+    monkeypatch.setattr(press_demo, "guide_chair", lambda *a, **k: guided.append(a[8]) or (False, False))
+    answers = iter([reach_press.NO_WAY_IN, 0])
+    argv = ["--execute", "--wrist-first", "--guide", "--instance-id", "food_container_2"]
+    tweak = _checked_locator()
+    code, _c, rows = run_main(monkeypatch, tmp_path, argv, lambda ctx: SimpleNamespace(code=next(answers)), tweak=tweak)
+    assert code == 0 and len(guided) == 1 and len(taken) == 2
+    first, second = (scene.top_xyz for scene, _wrist in taken)
+    assert first[:2] == pytest.approx(BOX_XY)  # the first round: as the mount has it, 182 mm from the wrist's
+    assert (
+        second[:2] == pytest.approx(WRIST_AT, abs=1e-6) and second[2] == first[2]
+    )  # the second: where the wrist has it
+    measured = [r for r in rows if r["leg"] == "camera_check"]
+    assert [r["turn_deg"] for r in measured] == [-18.79, -18.79]  # (the mount's own, both times: not what was left)
+    assert [r["scene_xy"] for r in measured] == [[0.45, -0.1], [0.45, -0.1]]
+    out = capsys.readouterr().out
+    assert out.count("CAMERAS: the scene camera has the container at [0.450, -0.100]") == 2
+    assert out.count("WARNING: the scene camera's mount looks") == 1
+
+
+def test_a_missions_frames_keep_the_mount_and_the_scene_cameras_own_fix_with_the_correction_beside_them(
+    monkeypatch, tmp_path
+):
+    """What is kept of a run for work on the camera's mount (how the pairs of 2026-11-20 were read) is the mount
+    as TF has it and the scene camera's OWN fix; the correction in force is beside them under its own name. Saved
+    turned and moved, a later refit from the frames would see a mount that is right."""
+    from types import SimpleNamespace
+
+    from box_opening.tasks import press_demo, reach_press
+
+    taken, frames = [], []
+    monkeypatch.setattr(press_demo, "wrist_look", _wrist_at(taken))
+    monkeypatch.setattr(press_demo, "guide_chair", lambda *a, **k: (False, False))
+    answers = iter([reach_press.NO_WAY_IN, 0])
+    argv = ["--execute", "--wrist-first", "--guide", "--instance-id", "food_container_2"]
+    code, _c, _rows = run_main(
+        monkeypatch,
+        tmp_path,
+        argv,
+        lambda ctx: SimpleNamespace(code=next(answers)),
+        tweak=_checked_locator(frames=frames),
+    )
+    assert code == 0 and len(frames) == 2
+    (first, kw1), (second, kw2) = frames
+    for arrays in (first, second):
+        assert (
+            arrays["T_base_link"][:3, 3] == pytest.approx(SCENE_LENS)
+            and (arrays["T_base_link"][:3, :3] == 0).sum() == 6
+        )
+    assert kw1["fix_xyz"][:2] == pytest.approx(BOX_XY) and kw1["check"] is None  # nothing in force at the first look
+    assert kw2["fix_xyz"][:2] == pytest.approx(BOX_XY)  # the scene camera's own, with the turn in force too
+    assert kw2["check"]["turn_deg"] == pytest.approx(-18.79, abs=0.01) and kw2["check"]["by"] == "run"
+    assert kw2["check"]["fix_xyz_run"][:2] == pytest.approx(WRIST_AT, abs=1e-4)  # ... and what the run went by
 
 
 def test_where_the_wrist_finds_none_the_scene_cameras_fix_flies_and_nothing_is_measured(monkeypatch, tmp_path, capsys):
-    from box_opening.perception import camera_check
     from box_opening.tasks import press_demo
 
-    adopted, flown = [], []
+    flown = []
     monkeypatch.setattr(
         press_demo,
         "wrist_look",
         lambda n, c, cfg, r, w, a, locator, fix, said: flown.append(fix) or (fix, locator, None),
     )
-    monkeypatch.setattr(camera_check, "adopt", lambda *a, **k: adopted.append(a))
     REACH_OUTS.clear()
-    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute", "--wrist-first"], _at_staging())
-    assert code == 0 and adopted == [] and len(flown) == 1 and REACH_OUTS == flown  # the scene camera's own, as it was
-    assert "HEIGHTS:" not in capsys.readouterr().out and not [r for r in rows if r["leg"] == "heights"]
+    argv = ["--execute", "--wrist-first", "--instance-id", "food_container_2"]
+    code, _c, rows = run_main(monkeypatch, tmp_path, argv, _at_staging(), tweak=_checked_locator())
+    assert code == 0 and len(flown) == 1 and REACH_OUTS == flown  # the scene camera's own, as it was
+    out = capsys.readouterr().out
+    assert "HEIGHTS:" not in out and "CAMERAS:" not in out
+    assert not [r for r in rows if r["leg"] in ("heights", "camera_check")]
 
 
 def test_which_cameras_heights_a_run_goes_by_is_said_where_both_read_them(capsys):
     """say_tables: one camera's table and lid throughout a run, the wrist's where its find was taken. The scene
     camera's are said beside them, and only the press's start height takes the higher of the two lid tops
-    (reach_press); more than 30 mm apart is a warning."""
+    (reach_press); more than 30 mm apart is a warning, once a run, as the standing fact of the two mounts that
+    it is (on RAMMP 1.5 it would otherwise be said at every look)."""
     from types import SimpleNamespace
 
     from box_opening.tasks import press_demo
@@ -1369,8 +1578,14 @@ def test_which_cameras_heights_a_run_goes_by_is_said_where_both_read_them(capsys
         )
     ]
     low = SimpleNamespace(top_xyz=(0.77, -0.19, 0.385), table_z_scene=0.293, source="wrist")
-    assert press_demo.say_tables(None, scene, low, 0.293) == pytest.approx(-0.050)
-    assert "WARNING: the two cameras read the table 50 mm apart (more than 30)" in capsys.readouterr().out
+    ctx = SimpleNamespace()
+    assert press_demo.say_tables(None, scene, low, 0.293, ctx=ctx) == pytest.approx(-0.050)
+    out = capsys.readouterr().out
+    assert "WARNING: on this robot the two cameras read heights 50 mm apart (the wrist's lower; more than 30)" in out
+    assert "a standing difference of their mounts" in out and ctx.heights_warned
+    assert press_demo.say_tables(None, scene, low, 0.293, ctx=ctx) == pytest.approx(-0.050)  # the next look
+    out = capsys.readouterr().out
+    assert "HEIGHTS:" in out and "WARNING" not in out  # ... says the heights, and not the warning again
     # nothing to say: the scene camera's own fix flies, one of them read no table, or a fix that does not say
     assert press_demo.say_tables(runner, scene, scene, 0.343) is None
     assert press_demo.say_tables(runner, None, wrist, 0.313) is None

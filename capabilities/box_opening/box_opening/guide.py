@@ -168,8 +168,10 @@ LOST_S = 1.5  # no box seen for this long: looking again
 # "Move closer, about 10 cm", "The arm cannot see ..." within 3.4 s: two sentences of a dozen words changing
 # faster than either is read, of a container that stood in front of the arm throughout. Twice LOST_S: a gap
 # of two seconds no longer shows, and one of five still does, once, after three (a container that has really
-# gone out of view is said to have within that). Nothing is asked the while: the question needs a sighting
-# within FRESH_S, and Open is taken on nothing older
+# gone out of view is said to have within that). It ends that long after the LAST SIGHTING, whatever the
+# watch's words do meanwhile, and sooner where the watch delivers nothing: its "vision is not working" is
+# said once that has stood LOST_S. Nothing is asked the while: the question needs a sighting within
+# FRESH_S, and Open is taken on nothing older
 OUT_STANDS_S = 3.0
 FRESH_S = 1.0  # Open counts only on a box seen this recently
 STEADY_S = 1.0  # the box has stood still this long ...
@@ -186,12 +188,15 @@ HOLD_AFTER_MOVE_S = 0.5
 MIN_SAY_S = 0.7  # an instruction stands at least this long before another replaces it
 AXIS_SWITCH_M = 0.03  # the other axis is named only where its miss is this much the larger
 # The OPPOSITE of the instruction last said ("back" after "closer", "right" after "left") by less than
-# REVERSE_M is said only once it has been the answer for REVERSE_S without a break; "Hold still, checking"
-# the while. The same 13:40: "Move closer, about 5 cm", 0.8 s later "Move back a little", a second later
-# "Hold still, checking" and then the question, of a chair that had rolled 5 cm: the box read a centimetre or
-# two past the boundary's far side for a moment (two cameras' sightings centimetres apart took each other's
-# place), and the person was sent back out of where the arm opens it. A box that is really past the boundary
-# by less than REVERSE_M is told so a second later; one further past is told at once, as ever
+# REVERSE_M is not said at once: "Hold still, checking" takes the old instruction's place at once (a reading
+# on the other side is never answered with the old direction), and from then on every small instruction is
+# held back until one side has been the answer for REVERSE_S without a break; that one is then said. The
+# same 13:40: "Move closer, about 5 cm", 0.8 s later "Move back a little", a second later "Hold still,
+# checking" and then the question, of a chair that had rolled 5 cm: the box read a centimetre or two past the
+# boundary's far side for a moment (two cameras' sightings centimetres apart took each other's place), and
+# the person was sent back out of where the arm opens it. A box that reads either side by turns is told to
+# hold still, not to move a little one way throughout. A miss of REVERSE_M or more the other way is said at
+# once, MIN_SAY_S or not
 REVERSE_M = 0.05
 REVERSE_S = 1.0
 OPPOSITE = {"closer": "back", "back": "closer", "left": "right", "right": "left"}
@@ -326,7 +331,9 @@ class Guide:
     _bad_since: float = None  # in READY: since when the box has been outside, moving, or not judged
     _hold_since: float = None  # with a "Move ..." up: since when the box has read inside without a break
     _word: str = None  # the instruction last said ("closer"), until the question is asked
-    _turn_since: float = None  # since when the answer has been its opposite, by less than REVERSE_M
+    _band: bool = False  # the box has read just past the boundary's other side: small instructions are held back
+    _side: str = None  # ... the small instruction that is the answer now, and since when without a break
+    _side_since: float = None
 
     # -- the box's own motion ------------------------------------------------------
     @property
@@ -383,14 +390,26 @@ class Guide:
                 return self._said
         return self._answer(now, say, at_once=at_once)
 
-    def _reverses(self, now, word, metres):
-        """Whether the instruction `word` is the opposite of the one last said, by less than REVERSE_M,
-        and has not yet been the answer for REVERSE_S without a break: not said yet."""
-        if self._word is None or OPPOSITE.get(self._word) != word or metres >= REVERSE_M:
-            self._turn_since = None
+    def _held_back(self, now, word, metres):
+        """Whether the instruction `word` (a miss of `metres`) is not said yet, "Hold still, checking" in
+        its place. The band opens where the box reads on the OTHER side of the boundary from the instruction
+        last said, by less than REVERSE_M; while it is open every small instruction (either way: a box
+        that reads a centimetre or two either side on alternate frames) is held back, until one side has
+        been the answer for REVERSE_S without a break, which is then said. A miss of REVERSE_M or more is
+        said at once and closes it; so does the question (update)."""
+        if metres >= REVERSE_M or self._word is None:
+            self._band, self._side, self._side_since = False, None, None
             return False
-        self._turn_since = now if self._turn_since is None else self._turn_since
-        return now - self._turn_since < REVERSE_S
+        if not self._band:
+            if OPPOSITE.get(self._word) != word:
+                return False
+            self._band = True
+        if word != self._side or self._side_since is None:
+            self._side, self._side_since = word, now
+        if now - self._side_since >= REVERSE_S:
+            self._band, self._side, self._side_since = False, None, None
+            return False
+        return True
 
     def update(self, now, fix, reach, none="", looked=False, stands=False):
         """The tick: the newest Fix (or None: nothing new) and the Reach of the newest box seen (None: not
@@ -407,39 +426,55 @@ class Guide:
         if self.state in (GO, TIMED_OUT):
             return self._said
         self._see(fix)
+        seen = self._last_fix
+        stands = bool(stands) and none in NO_CURE
+        if fix is None:
+            # what the watch's word on having none is of, and since when without a break: counted from the
+            # first tick after a sighting, not from when the sighting is given up as lost, so that a word
+            # that began with the loss has stood its LOST_S by the time the loss is said
+            if none != self._kind or self._kind_since is None:
+                self._kind, self._kind_since = none, now
+            if stands:
+                self._kind_since = min(self._kind_since, now - LOST_S)  # (it has stood, by its source's count)
+        lost = seen is None or now - seen.t > LOST_S or stands
+        stood = none in NO_CURE and self._kind_since is not None and now - self._kind_since >= LOST_S
         if self.budget_s is not None and now - self.started > self.budget_s:
             last, kinds = self._said, {NO_CURE[kind]: kind for kind in ENDS}
+            ends = ""
             if last is not None and last.state == LOOKING and last.message in kinds:
                 # the time ran out on a state that ends a line-up (one the 120 s rule gave less than
                 # NO_CURE_S). Its own sentence is the last word, and `uncured` tells the engine which it
                 # was: "Press open again in front of it" is not true of vision that is not working. (Two
                 # tops in view are not such a state: the time ran out, and that is what is said)
-                self.uncured = kinds[last.message]
-                return self._answer(now, Say(TIMED_OUT, last.message), at_once=True)
+                ends = kinds[last.message]
+            elif lost and none in ENDS and stood and last is not None and last.state in (MOVE, HOLD):
+                # ... or on one whose sentence was due while an instruction still stood in its place
+                # (OUT_STANDS_S): the same end, whatever the panel happened to show
+                ends = none
+            if ends:
+                self.uncured = ends
+                return self._answer(now, Say(TIMED_OUT, NO_CURE[ends]), at_once=True)
             # what was missing, in its last words: the container in reach, or the container in view at all
             return self._answer(now, Say(TIMED_OUT, self.again if self.saw_box else self.again_unseen), at_once=True)
         cancel = ((CANCEL, "Cancel"),)
-        seen = self._last_fix
-        stands = bool(stands) and none in NO_CURE
-        if seen is None or now - seen.t > LOST_S or stands:
+        if lost:
             self._bad_since = self._hold_since = None
+            self._side = self._side_since = None
             # no camera has it: lost (it was seen, and has not been for LOST_S), or what watches has had
             # none for as long. Before that it is still "looking": one frame without the container, the
             # first of a line-up or a late one, is not the arm unable to see what stands in front of it
             # (review of 2026-11-19: it showed "The arm cannot see the container. Move the chair in front
             # of it" to a person who was in place)
             prev = self._said
-            if none != self._kind or self._kind_since is None:
-                self._kind, self._kind_since = none, now
-            if stands:
-                self._kind_since = min(self._kind_since, now - LOST_S)  # (it has stood, by its source's count)
             if seen is None:
                 self._none_since = None if not none else now if self._none_since is None else self._none_since
             up = prev is not None and seen is not None and not stands
-            if up and now - seen.t <= OUT_STANDS_S:
+            if up and now - seen.t <= OUT_STANDS_S and not (none == K_FAULT and stood):
                 # an instruction is up and the container has only just gone out of view: it stands (the
                 # question does not: it is taken back to "Hold still, checking", nothing to press on a box
-                # that is not seen)
+                # that is not seen). Not against what watches delivering NOTHING once that has stood LOST_S:
+                # the container is then not "out of view for a moment", and the instruction is of a place
+                # nothing reads any more
                 if prev.state in (MOVE, HOLD):
                     return prev
                 if prev.state == READY:
@@ -450,12 +485,22 @@ class Guide:
                 or looked
                 or (self._none_since is not None and now - self._none_since >= LOST_S)
             )
-            if none in NO_CURE and now - self._kind_since < LOST_S:
+            if up and now - seen.t > OUT_STANDS_S:
+                # a container that WAS seen and has been out past the hold: said as what the watch has now,
+                # whatever its words have been doing meanwhile. Never "Looking for the container" again, and
+                # never the instruction: two words of the watch taking each other's place once a second
+                # (two tops in a frame, a lid nothing ties) started each other's LOST_S again for ever, and
+                # the instruction stood for as long as they did (review of 2026-11-20)
+                told = says(none)
+                if none == K_FAULT and not stood and prev.state == LOOKING:
+                    # ... but once the panel has moved past the hold to what the watch has, one late frame is
+                    # not "the arm's vision is not working" until it has stood LOST_S (re-check of 2026-11-20):
+                    # what was said meanwhile stands
+                    told = prev.message
+            elif none in NO_CURE and not stood:
                 # ... nor is one word of a camera that delivers nothing, or of a second lid in the frame,
                 # that state: until it has stood LOST_S what was said of having none stands, and where
                 # nothing was, it is still looking (never, meanwhile, that the arm cannot see the container)
-                if up and prev.state in (MOVE, HOLD):
-                    return prev  # (... and a container that WAS seen is not "looked for" again: the instruction)
                 told = prev.message if prev is not None and prev.state == LOOKING else SEARCHING
             else:
                 told = says(none) if (none or seen is not None) and waited else SEARCHING
@@ -479,23 +524,31 @@ class Guide:
         else:
             self._bad_since = None
         if reach is None:
+            self._side = self._side_since = None
             return self._hold(now, Say(HOLD, "Hold still, checking", cancel, 50.0), at_once=self.state != READY)
         if good:
-            self._hold_since = self._word = self._turn_since = None  # (in place: what follows is another approach)
+            # (in place: what follows is another approach, and no word of this one is held against it)
+            self._hold_since = self._word = self._side = self._side_since = None
+            self._band = False
             ready = Say(READY, ASK, ((OPEN, "Open"),) + cancel, 100.0)
             return self._answer(now, ready, at_once=True)
         if reach.inside and reach.planned is not False:
+            self._side = self._side_since = None
             return self._hold(now, Say(HOLD, "Hold still, checking", cancel, 100.0), at_once=True)
         if reach.to_zone is None:
             self._hold_since = None
             return self._answer(now, Say(MOVE, "The arm cannot open it from here", cancel, 0.0), at_once=True)
         word, metres, axis = instruction(reach.to_zone, self._axis)
         pct = 100.0 * max(0.0, 1.0 - math.hypot(*reach.to_zone) / FAR_M)
-        if self._reverses(now, word, metres):
-            # the box reads just past the boundary's other side: not yet a move the other way (REVERSE_S)
-            return self._hold(now, Say(HOLD, "Hold still, checking", cancel, pct), at_once=True)
+        if self._held_back(now, word, metres):
+            # the box reads just past the boundary's other side, or either side by turns: no instruction
+            # yet, and never the old one (a reading on the other side is not answered with "closer")
+            return self._answer(now, Say(HOLD, "Hold still, checking", cancel, pct), at_once=True)
         self._hold_since, self._axis = None, axis
-        said = self._answer(now, Say(MOVE, words(word, metres), cancel, pct, (word, metres)))
+        # the opposite of the instruction that is up is said at once: MIN_SAY_S would leave the old
+        # direction standing over a box that reads on the other side
+        turned = OPPOSITE.get(self._word) == word
+        said = self._answer(now, Say(MOVE, words(word, metres), cancel, pct, (word, metres)), at_once=turned)
         self.instruction = said.message
         if said.hint is not None:
             self._word = said.hint[0]

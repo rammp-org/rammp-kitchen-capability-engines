@@ -607,14 +607,22 @@ An instruction that is up (`Move ...`, `Hold still, checking`) stands through
 a container that has been out of every view for up to 3 s (`OUT_STANDS_S`),
 and only then is the user told the arm cannot see it, or what else it is; a
 container that has been seen is never `Looking for the container` again. The
-question does not stand that long: it is taken back to `Hold still, checking`
-once the container has not been seen for 1.5 s, and **Open** counts only on a
-container seen within the last second, as before. And the opposite of the
-instruction last given (`Move back a little` after `Move closer, about 5 cm`),
-by less than 5 cm, is said only once it has been the answer for 1 s without a
-break, `Hold still, checking` the while: a container that reads a centimetre
-or two past the boundary's far side for a moment does not send the user back
-out. One that is further past it is told so at once.
+3 s count from the last sighting of the container, whatever what watches says
+meanwhile; and where what watches delivers nothing at all, its
+`The arm's vision is not working` is said as soon as that has stood 1.5 s,
+instruction or not. The question does not stand that long: it is taken back
+to `Hold still, checking` once the container has not been seen for 1.5 s, and
+**Open** counts only on a container seen within the last second, as before.
+Where the line-up's time ends while an instruction still stands over a state
+that ends a line-up, the end is that state's (`not_found`), as if its
+sentence had been up. And a container that reads on the OTHER side of the
+boundary from the instruction last given, by less than 5 cm, is answered with
+`Hold still, checking` at once (never with the old direction); from then on
+small instructions either way are held back until one side has been the
+answer for 1 s without a break, which is then said. So a container that
+reads a centimetre or two past the far side for a moment does not send the
+user back out, and one that reads either side by turns is told to hold still.
+A miss of 5 cm or more the other way is said at once.
 The run starts only on **Open**, and only where it is pressed on a `Ready`
 panel whose container was seen within the last second; then the panel is the
 run's. `Ready` is kept through half a second of frames that cannot be judged or
@@ -1194,7 +1202,7 @@ passes them as a params file.
 | `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                                                                                                                                                                                                                                                                                                                                                                |
 | `wrist_first`         | `false`                | Facing a table: the wrist camera finds the container in front of the arm, the wrist turned where the arm rests (see below)                                                                                                                                                                                                                                                                                                                                                                                       |
 | `wrist_alone`         | `false`                | With `wrist_first`: a selection the scene camera's detections do not hold (a list typed by hand) is looked for by the wrist alone, taken only where it sees one container (see below)                                                                                                                                                                                                                                                                                                                            |
-| `camera_check`        | `"keep"`               | The scene camera checked against the wrist camera each run: `"keep"` (measured, the run's own reading of the scene camera turned by it, the measure kept as the next run's starting guess), `"run"` (no guess read or kept), `"none"` (off). See "The two cameras checked against each other"                                                                                                                                                                                                                    |
+| `camera_check`        | `"run"`                | The scene camera checked against the wrist camera within a run: `"run"` (measured where both are known to have the same container, the run's own reading of the scene camera turned by it for the rest of that run; nothing kept from run to run), `"none"` (off). `"keep"` is refused. See "The two cameras checked against each other"                                                                                                                                                                         |
 | `full_console`        | `false`                | A run's full lines on the node's console too, between the flight view's. Off: they are kept in `runs/console-<stamp>.log` of the state folder (the result's last line names it), and the console is the flight view                                                                                                                                                                                                                                                                                              |
 
 ### The free air before the press
@@ -1642,54 +1650,68 @@ how far apart they have it is the scene camera's error as the arm meets it.
 On RAMMP 1.5 on 2026-11-20 that was 155 to 215 mm in five looks, the chair at
 four places, and every run that went on with the scene camera's fix looked 17
 cm beside the box and found no button. The distance changed with how far the
-container stood; the angle about the scene camera's lens did not (13 to 15
-deg): a camera turned on its mount.
+container stood; the angle about the scene camera's lens changed much less (13
+to 15 deg).
 
-With `camera_check` on (`"keep"`, the default, or `"run"`), a run measures
-this wherever the wrist's find is taken for the container the scene camera
-fixed (`perception/camera_check.py`):
+With `camera_check: "run"` (the default), a run measures this
+(`perception/camera_check.py`):
 
-- **What is measured**, from that one pair: the turn about the vertical through
-  the scene lens that brings the scene camera's direction to the container onto
-  the wrist's, how much nearer or farther along that line the wrist has it, and
+- **When.** Only where the two fixes are known to be of one container: the
+  wrist's find was taken by the selection's tie, or, with no selection, the
+  scene camera holds exactly one container of the kind and the wrist's frames
+  no second lid-sized top. Anywhere else nothing is measured, and the log says
+  why (`CAMERAS: the two cameras' places are not measured against each other: ...`). A lid 15 cm beside a healthy camera's box would otherwise read as a
+  mount 10 deg off.
+- **What**, from that one pair: the turn about the vertical through the scene
+  lens that brings the scene camera's direction to the container onto the
+  wrist's, how much nearer or farther along that line the wrist has it, and
   how much higher. A pair more than 25 deg or 0.20 m apart about the lens is
   not taken for one container seen twice, and measures nothing.
-- **What is done with it, for the rest of the run**: box opening's own reading
-  of the scene camera's placement is turned by that angle about the vertical
-  through its lens. Everything the run lifts through it afterwards comes out
-  where the wrist would have it: the scene camera's fixes and its sightings in
-  a line-up, the line of sight a selection is tied by, the points a later look
-  takes. The difference along the line is applied to that container's own fix
-  only (the scene camera sees a lid from its side, which says nothing of the
-  table round it). **Heights are never moved by it.**
-- **What is kept**: with `"keep"`, the measure goes into the state folder
-  (`scene_calib/camera_check.json`, the newest five under one mount), and the
-  next run's scene numbers start turned by their median, as a guess, until
-  that run's own pair replaces it. The log says so, with its age, when it is
-  first used. A guess belongs to the mount it was measured under (the numbers
-  TF gave): another mount, and it is dropped. A run that measures more than
-  3 deg from the guess says so and keeps only its own.
-- **What is said**: one `CAMERAS:` line with both places and the disagreement;
-  a `camera_check` row in the run log; and, past 3 deg, once a run,
-  `WARNING: the scene camera's mount looks N deg off ...: tell the team`.
+- **What is done with it, for the rest of that run**: box opening's own
+  reading of the scene camera's placement is turned by that angle about the
+  vertical through its lens, and the container's own place (a fix, and a
+  sighting told to a line-up: one placement for both) is moved along the line
+  by the along-line difference. **Heights are never moved by it.** Keep-out
+  boxes that the scene camera's points placed before the measure are dropped,
+  and the log says so (`COUNTER: N boxes placed by the scene camera's points before the two cameras were measured against each other ... dropped`): the
+  next map of the counter puts them back where the reading in force has them.
+- **What is said**: one `CAMERAS:` line with both places as the mount has
+  them and the disagreement; a `camera_check` row in the run log; and, past
+  3 deg, once a run, `WARNING: the scene camera's mount looks N deg off ...: tell the team`. The flight view shows the distance and the warning.
+- **What is kept**: nothing, from one run to the next. Every run starts from
+  the mount as it is. (A measure carried over as the next run's starting
+  guess was built and withdrawn in review: a guess that outlives the camera's
+  being put right puts the scene camera's fix of one container onto its
+  neighbour, the arm opens the neighbour, and the pair that then measures
+  confirms the guess. `camera_check: "keep"` is refused.) A mission's saved
+  frames keep the mount as TF has it and the scene camera's own fix, with the
+  correction that was in force beside them under its own name
+  (`scene_camera_check`).
 
-Nothing of the robot is changed by it: not TF, not the team's files. It is a
-correction inside box opening's own reading, and everything else that uses
-the scene camera's positions is as far off as before. Replaying the five pairs
-of 2026-11-20, one pair's measure puts the other four within 31 mm of the
-wrist's (48 mm with the turn alone); untouched they were 155 to 215 mm apart.
-Not flown.
+**What a run sees of it.** A run reads its scene camera again after the
+wrist's find only where the chair is guided and it looks a second time, or
+where a look again pools what the scene camera saw. In an ordinary run the
+check gives the `CAMERAS:` line, the warning to tell the team, and a second
+round that starts corrected: nothing else changes.
 
-What it cannot do: a turn about the vertical is all one pair gives. A camera
-that is also tilted shows in the heights, which are said and left as they
-are. And a first run under a new mount has no guess: until its wrist has the
-container too, its scene numbers are the mount's own.
+**What it is not.** It is not a calibration, and nothing of the robot is
+changed by it: not TF, not the team's files; everything else that uses the
+scene camera's positions is as far off as before. One pair cannot tell a turn
+about the vertical from a tilt or a shift, and the five pairs do not say the
+mount is only turned: a free rigid fit to them is -10.4 deg about a point
+294 mm behind the lens, and the scene camera's table reads 0.155 m higher per
+metre of range, so the mount is tilted too. What the five pairs establish:
+with one pair's measure applied to the other four the container itself comes
+out within 31 mm of where the wrist has it (48 mm with the turn alone); with
+the other four's median applied to the fifth, 5 to 17 mm (28 to 39 mm with the
+turn alone). Untouched it was 155 to 215 mm off. A thing elsewhere on the
+table comes out 3 to 6 cm off. Better than 15 cm, not exact. Not flown.
 
 **Heights.** A run's heights are one camera's throughout: the wrist's where
 its find was taken (the lid's top and the counter under it, read in one
 frame), the scene camera's where the wrist found none. Where both read them
 the run says so (`HEIGHTS:`, and a `heights` row; past 30 mm apart a
-WARNING), and the other camera's are not used but in one place: on a wrist
+WARNING, once a run: a standing difference of the two mounts on this robot), and the other camera's are not used but in one place: on a wrist
 find, the press starts from the higher of the two cameras' lid tops (see "The
 press's start height where both cameras have the lid"). The table and the lid
 over it are never mixed, and neither camera's table is put under the other's

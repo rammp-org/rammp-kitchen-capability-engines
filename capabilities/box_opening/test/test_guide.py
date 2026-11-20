@@ -308,6 +308,16 @@ def test_what_no_moving_of_the_chair_cures_is_never_said_as_a_container_the_arm_
     guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), g.Reach(False, (-0.2, 0.0)))
     assert guide.update(g.LOST_S + 0.1, None, None, none=FAULT).message == "Move closer, about 20 cm"
     assert guide.update(g.OUT_STANDS_S + 0.1, None, None, none=FAULT).message == g.NO_CURE[FAULT]
+    # ... but past the hold, ONE late frame ("no new wrist frame") is not "the arm's vision is not working": the
+    # container's being out of view stands until the fault has stood LOST_S (re-check of 2026-11-20)
+    guide = g.Guide()
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), g.Reach(False, (-0.2, 0.0)))
+    assert guide.update(g.OUT_STANDS_S + 0.05, None, None, none=UNSEEN).message == g.UNSEEN
+    late = 6.2
+    assert guide.update(late, None, None, none=FAULT).message == g.UNSEEN
+    assert guide.update(late + 0.5, None, None, none=UNSEEN).message == g.UNSEEN
+    assert guide.update(late + 0.6, None, None, none=FAULT).message == g.UNSEEN
+    assert guide.update(late + 0.6 + g.LOST_S, None, None, none=FAULT).message == g.NO_CURE[FAULT]
     # frame by frame the watch's word may change: one sentence stands long enough to be read before another
     guide = g.Guide()
     t0 = g.LOST_S
@@ -583,15 +593,77 @@ def test_a_container_seen_every_two_seconds_or_so_is_not_lost_and_found_by_turns
 def test_a_container_that_was_seen_is_never_looked_for_again_whatever_the_watch_says_next():
     """Once a sighting has come the panel does not go back to "Looking for the container": its instruction
     stands, then what the watch has is said as what it is. (What no chair move cures took "Looking" for its
-    first LOST_S after every sighting.)"""
-    for kind, told in ((UNSEEN, g.UNSEEN), (FAULT, g.NO_CURE[FAULT]), (NOT_CHOSEN, g.NO_CURE[NOT_CHOSEN])):
+    first LOST_S after every sighting.) A container that is merely out of the frames, or something in view
+    that is not it, leaves the instruction up for OUT_STANDS_S from the last sighting; what watches delivering
+    NOTHING is said as soon as that has stood LOST_S, and the instruction of a place nothing reads any more
+    does not stand 3 to 4.4 s over it (review of 2026-11-20)."""
+    for kind, told, after in (
+        (UNSEEN, g.UNSEEN, g.OUT_STANDS_S),
+        (NOT_CHOSEN, g.NO_CURE[NOT_CHOSEN], g.OUT_STANDS_S),
+        (SEVERAL, g.NO_CURE[SEVERAL], g.OUT_STANDS_S),
+        (FAULT, g.NO_CURE[FAULT], g.LOST_S + 0.05),  # (its word began a tick after the last sighting)
+    ):
         said = _play(g.Guide(), [1.0, 1.2], until=9.0, none=kind)
         assert [m for _t, m in said] == [g.SEARCHING, "Move closer, about 10 cm", told], (kind, said)
-        assert said[2][0] == pytest.approx(1.2 + g.OUT_STANDS_S, abs=0.06)
+        assert said[2][0] == pytest.approx(1.2 + after, abs=0.06), (kind, said)
+    # a fault whose word comes late (the watch said "none" of another kind first) is said once IT has stood
+    # LOST_S, and never later than OUT_STANDS_S after the last sighting
+    guide = g.Guide()
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), TEN_OUT)
+    assert guide.update(1.0, None, TEN_OUT, none=UNSEEN).message == "Move closer, about 10 cm"
+    assert guide.update(2.0, None, TEN_OUT, none=FAULT).message == "Move closer, about 10 cm"  # (stood 0 s)
+    assert guide.update(2.9, None, TEN_OUT, none=FAULT).message == "Move closer, about 10 cm"  # (0.9 s)
+    assert guide.update(3.05, None, TEN_OUT, none=FAULT).message == g.NO_CURE[FAULT]  # 3 s after the sighting
     # a state of the watch's own (its camera at fault, the watch silent) is said at once, as it was: no hold
     guide = g.Guide()
     guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), g.Reach(False, (-0.1, 0.0)))
     assert guide.update(0.5, None, None, none=FAULT, stands=True).message == g.NO_CURE[FAULT]
+
+
+def test_the_instruction_ends_three_seconds_after_the_last_sighting_whatever_the_watchs_words_do():
+    """The review of 2026-11-20, on the first round of this hold: with an instruction up, "two things" and
+    "cannot tell which" taking each other's place once a second started each other's LOST_S again every time,
+    and "Move closer, about 10 cm" stood for 40 s over a container nothing had seen since. The hold ends
+    OUT_STANDS_S after the last sighting of THE container; then the watch's words are said as they are, each
+    for UNSEEN_STANDS_S before the other takes its place."""
+    guide, said = g.Guide(), []
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), TEN_OUT)
+    for i in range(1, 801):
+        t = i * 0.05
+        kind = SEVERAL if int(t) % 2 == 0 else NOT_CHOSEN  # one word a second, by turns
+        say = guide.update(t, None, TEN_OUT, none=kind)
+        if not said or said[-1][1] != say.message:
+            said.append((round(t, 2), say.message))
+    assert said[0] == (0.05, "Move closer, about 10 cm")
+    assert said[1][0] == pytest.approx(g.OUT_STANDS_S, abs=0.06) and said[1][1] in g.NO_CURE.values()
+    assert all(m in (g.NO_CURE[SEVERAL], g.NO_CURE[NOT_CHOSEN]) for _t, m in said[1:])
+    assert g.SEARCHING not in [m for _t, m in said]
+    gaps = [b[0] - a[0] for a, b in zip(said[1:], said[2:], strict=False)]
+    assert gaps and min(gaps) >= g.UNSEEN_STANDS_S - 0.06  # no sentence is replaced before it can be read
+
+
+def test_time_that_runs_out_while_an_instruction_stands_over_what_ends_a_line_up_ends_as_that():
+    """... and the end is the one the watch's state has: with "cannot tell which container you chose" due and
+    the instruction still standing in its place, a budget that ended there said "Press open again when you are
+    in place" with no `uncured`, which the engine ends not_lined_up where it is not_found (the same review)."""
+    guide = g.Guide(budget_s=2.5)
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), TEN_OUT)
+    for t in (0.5, 1.0, 1.6, 2.0, 2.4):
+        assert guide.update(t, None, TEN_OUT, none=NOT_CHOSEN).message == "Move closer, about 10 cm"
+    end = guide.update(2.6, None, TEN_OUT, none=NOT_CHOSEN)
+    assert (end.state, end.message, end.buttons) == (g.TIMED_OUT, g.NO_CURE[NOT_CHOSEN], ())
+    assert guide.uncured == NOT_CHOSEN
+    # two tops in a frame end nothing, as ever: the time ran out, and that is what is said
+    guide = g.Guide(budget_s=2.5)
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), TEN_OUT)
+    guide.update(1.0, None, TEN_OUT, none=SEVERAL)
+    end = guide.update(2.6, None, TEN_OUT, none=SEVERAL)
+    assert (end.state, end.message) == (g.TIMED_OUT, g.AGAIN) and guide.uncured == ""
+    # nor a container that is still seen, or a word that has not stood LOST_S
+    guide = g.Guide(budget_s=2.5)
+    guide.update(0.0, g.Fix(0.0, (0.9, 0.0)), TEN_OUT)
+    guide.update(2.3, None, TEN_OUT, none=NOT_CHOSEN)
+    assert guide.update(2.6, None, TEN_OUT, none=NOT_CHOSEN).message == g.AGAIN and guide.uncured == ""
 
 
 def test_the_question_is_taken_back_at_once_when_the_container_goes_from_view_and_open_is_no_yes():
@@ -607,36 +679,58 @@ def test_the_question_is_taken_back_at_once_when_the_container_goes_from_view_an
     assert back[-1][1].state == g.READY
 
 
-def test_a_few_centimetres_past_the_other_side_is_hold_still_first_and_the_other_way_only_if_it_stays():
+def test_a_few_centimetres_past_the_other_side_is_hold_still_at_once_and_the_other_way_only_if_it_stays():
     """13:40:13.9 "Move closer, about 5 cm", 14.7 "Move back a little", 15.7 "Hold still, checking", then the
     question: the box read a centimetre or two past the boundary's far side for a moment and the person was
-    sent back out. The opposite of the instruction last said, by less than REVERSE_M, is said only once it has
-    stood REVERSE_S; "Hold still, checking" the while."""
-    closer, back, far_back = g.Reach(False, (-0.05, 0.0)), g.Reach(False, (0.02, 0.0)), g.Reach(False, (0.12, 0.0))
+    sent back out. A reading on the other side, by less than REVERSE_M, is answered with "Hold still, checking"
+    AT ONCE (never with the old direction: the first round of this left "Move closer, about 5 cm" up for half a
+    second over a box 3 cm past the far side), and the other way is said only once it has stood REVERSE_S."""
+    closer, back, far_back = g.Reach(False, (-0.05, 0.0)), g.Reach(False, (0.03, 0.0)), g.Reach(False, (0.12, 0.0))
 
     def said_of(track, dt=0.1):
         guide, out = g.Guide(), []
-        for _t, say in _drive(guide, track, dt=dt):
-            if not out or out[-1] != say.message:
-                out.append(say.message)
+        for t, say in _drive(guide, track, dt=dt):
+            if not out or out[-1][1] != say.message:
+                out.append((round(t, 2), say.message))
         return out, guide
 
     # 13:40 itself: closer, a moment past the far side, then in place
     out, guide = said_of([((0.85, 0.0), closer)] * 5 + [((0.78, 0.0), back)] * 8 + [((0.80, 0.0), IN)] * 14)
-    assert out == ["Move closer, about 5 cm", "Hold still, checking", g.ASK] and guide.state == g.READY
+    assert [m for _t, m in out] == ["Move closer, about 5 cm", "Hold still, checking", g.ASK]
+    assert out[1][0] == 0.5 and guide.state == g.READY  # on the very tick it read on the other side
     # a box that STAYS a little past the far side is told so, a second later
     out, guide = said_of([((0.85, 0.0), closer)] * 5 + [((0.78, 0.0), back)] * 20)
-    assert out == ["Move closer, about 5 cm", "Hold still, checking", "Move back a little"]
-    # ... and one well past it (the chair overshot) at once, as ever (an instruction stands MIN_SAY_S)
-    out, _guide = said_of([((0.85, 0.0), closer)] * 8 + [((0.66, 0.0), far_back)] * 3)
-    assert out == ["Move closer, about 5 cm", "Move back, about 10 cm"]
-    # the same on the other axis, and back to the first word at once where the reading returns to it
+    assert out == [(0.0, "Move closer, about 5 cm"), (0.5, "Hold still, checking"), (1.5, "Move back a little")]
+    # ... and one well past it (the chair overshot) on that tick too, MIN_SAY_S or not: never the old direction
+    out, _guide = said_of([((0.85, 0.0), closer)] * 3 + [((0.66, 0.0), far_back)] * 3)
+    assert out == [(0.0, "Move closer, about 5 cm"), (0.3, "Move back, about 10 cm")]
+    # the same on the other axis; a miss of REVERSE_M or more the first way again is said at once
     left, right = g.Reach(False, (0.0, -0.06)), g.Reach(False, (0.0, 0.03))
     out, _guide = said_of([((0.7, 0.3), left)] * 5 + [((0.7, 0.2), right)] * 7 + [((0.7, 0.3), left)] * 3)
-    assert out == ["Move left, about 5 cm", "Hold still, checking", "Move left, about 5 cm"]
+    assert [m for _t, m in out] == ["Move left, about 5 cm", "Hold still, checking", "Move left, about 5 cm"]
     # once the question has been asked, what follows is another approach: no word is held against it
     track = [((0.85, 0.0), closer)] * 3 + [((0.80, 0.0), IN)] * 14 + [((0.78, 0.0), back)] * 8
     out, _guide = said_of(track)
-    assert out[-2:] == [g.ASK, "Move back a little"]
+    assert [m for _t, m in out][-2:] == [g.ASK, "Move back a little"]
     assert g.OPPOSITE == {"closer": "back", "back": "closer", "left": "right", "right": "left"}
     assert g.REVERSE_M == g.ROUND_M and g.REVERSE_S == 1.0
+
+
+def test_a_box_that_reads_a_little_either_side_by_turns_is_told_to_hold_still_not_to_move_one_way():
+    """The same review: a box reading 2 cm either side of the boundary on alternate frames read "Move closer a
+    little" throughout (each return to the first side was said at once, and the other side never). From the
+    first reading on the other side every small instruction is held back until one side has stood REVERSE_S."""
+    closer, back = g.Reach(False, (-0.02, 0.0)), g.Reach(False, (0.02, 0.0))
+    guide, out = g.Guide(), []
+    track = [((0.81, 0.0), closer)] * 3 + [
+        ((0.79 + 0.02 * (i % 2), 0.0), back if i % 2 == 0 else closer) for i in range(40)
+    ]
+    for t, say in _drive(guide, track, dt=0.2):
+        if not out or out[-1][1] != say.message:
+            out.append((round(t, 2), say.message))
+    assert out == [(0.0, "Move closer a little"), (0.6, "Hold still, checking")]
+    # ... until it settles on one side: said a second after it last changed (its last reading, at 8.4, was "closer")
+    for t, say in _drive(guide, [((0.81, 0.0), closer)] * 8, t0=8.6, dt=0.2):
+        if out[-1][1] != say.message:
+            out.append((round(t, 2), say.message))
+    assert out[-1] == (9.4, "Move closer a little")

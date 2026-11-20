@@ -1474,3 +1474,18 @@ def test_the_wrists_find_is_taken_where_the_cameras_disagree_and_how_far_is_kept
     other = sv.Survey(fix=_wrist_fix((0.60, 0.30)), clouds=_clouds(), find=SimpleNamespace(places=(), patches=()))
     (fix, *_), _said, _a, _n, ctx, _l = _look(monkeypatch, other, scene_fix=scene, locator=_gen15())
     assert fix is scene and ctx.wrist_taken_by is None
+
+
+def test_a_look_leaves_its_finders_last_answer_for_the_run(monkeypatch):
+    """Whether the wrist's find and the scene camera's fix are one container is asked after the look
+    (press_demo.cameras_paired): the look's own finder knows what else its frames held, and run_survey leaves its
+    last answer on the run's context. No frame judged: None, and nothing is then known of other tops."""
+    find = SimpleNamespace(places=[SimpleNamespace(xy=(0.7, -0.1), button="unchecked")], patches=())
+    monkeypatch.setattr(sv, "_run_survey", lambda *a: sv.Survey(find=find, fix="a fix"))
+    ctx = SimpleNamespace(wrist_find="the look before's")
+    out = sv.run_survey(None, ctx, None, None, True, front=True)
+    assert out.fix == "a fix" and ctx.wrist_find is find
+    assert press_demo.other_tops(ctx.wrist_find, (0.7, -0.1), 0.105) == []
+    monkeypatch.setattr(sv, "_run_survey", lambda *a: sv.Survey(why="no survey view was looked from"))
+    assert sv.run_survey(None, ctx, None, None, True).find is None and ctx.wrist_find is None
+    assert sv.run_survey(None, object(), None, None, True).why  # a context that holds nothing: the look is the look

@@ -3100,9 +3100,24 @@ def test_what_stands_where_the_look_was_aimed_is_left_out_and_the_lid_elsewhere_
 
     lid, tin = (0.776, -0.200), (0.700, -0.020)  # the tin 24 mm from where the look was aimed
     sel = ("food_container_2", _gen15_tie(), None, _one())
-    named = _tops(monkeypatch, tin, lid)
+    named = _tops(monkeypatch, lid)
     (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
     assert why is None and fix.top_xyz[:2] == lid and how == press_demo.BY_TIE_ONE and named == [lid]
+    # ... but a lid-sized top WHERE the look was aimed may be the container itself, its button merely not found
+    # (re-check of 2026-11-20): another top is then not looked at, whatever the tie says of it, and the STOP stands
+    named = _tops(monkeypatch, tin, lid)
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert (
+        fix is None
+        and named == []
+        and why
+        == (
+            "the wrist's frame from the look pose has a lid-sized top at [0.700, -0.020], where the look was "
+            "aimed: the look stood over it, and no other is looked at"
+        )
+    )
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object())
+    assert fix is None and "where the look was aimed: the look stood over it" in why
     # two tops the tie takes (both in the cone, away from the aimed place): nothing says which, none is taken
     named = _tops(monkeypatch, lid, (0.830, -0.060))
     (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
@@ -3124,7 +3139,7 @@ def test_what_stands_where_the_look_was_aimed_is_left_out_and_the_lid_elsewhere_
     (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
     assert fix is None and why.endswith(": not taken for the selected container food_container_2")
     # by hand (no selection): the one top there is, and two are not guessed between
-    named = _tops(monkeypatch, tin, lid)
+    named = _tops(monkeypatch, lid)
     (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object())
     assert why is None and fix.top_xyz[:2] == lid and how == press_demo.BY_ONLY
     named = _tops(monkeypatch, lid, (0.520, -0.330))
@@ -3133,7 +3148,7 @@ def test_what_stands_where_the_look_was_aimed_is_left_out_and_the_lid_elsewhere_
     # the finder, named the lid, places another top (two too near each other to name one): no lid
     from box_opening.perception import wrist_finder as wf
 
-    _tops(monkeypatch, tin, lid)
+    _tops(monkeypatch, lid)
     scripted = wf.find_container
     monkeypatch.setattr(
         wf,
@@ -3243,7 +3258,7 @@ def test_a_look_again_measures_the_cameras_first_pools_what_was_seen_and_keeps_t
 
     scene = tcc._fix(tcc.PAIRS[1][0])  # [0.680, -0.034], top 0.443 on a table at 0.343
     lid = tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
-    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    loc = tcc._locator(mode=cc.RUN)
     (again, code, why), got = _again(ctx, monkeypatch, scene, lid, loc)
     assert code is None and why is None and again.fix is lid and got.flown == [["the look"]]
     # measured before the plan: the check is this run's own as the look is planned, with the box where the lid is
@@ -3291,7 +3306,7 @@ def test_a_lid_whose_look_does_not_plan_keeps_the_pair_and_hands_the_guidance_th
     from box_opening.perception import camera_check as cc
 
     scene, lid = tcc._fix(tcc.PAIRS[1][0]), tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
-    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    loc = tcc._locator(mode=cc.RUN)
     (again, code, why), got = _again(ctx, monkeypatch, scene, lid, loc, plans=False)
     assert again is None and code == reach_press.NO_WAY_IN and got.flown == []
     assert loc.check.by == "run"  # the pair was not lost with the plan
@@ -3299,7 +3314,7 @@ def test_a_lid_whose_look_does_not_plan_keeps_the_pair_and_hands_the_guidance_th
     assert why.startswith("no reach-out press plans for the lid the wrist sees from the look pose, at [0.770, -0.192]")
     assert len(got.homes) == 1 and got.homes[0].startswith("NO WAY IN: no reach-out press plans for the lid")
     # by hand: its STOP, the arm home, exit 1; the place is still the lid's
-    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    loc = tcc._locator(mode=cc.RUN)
     (again, code, why), got = _again(ctx, monkeypatch, scene, lid, loc, plans=False, guide=False)
     assert code == 1 and ctx.no_way_in_at == pytest.approx(lid.top_xyz) and got.homes[0].startswith("STOP: ")
     # a refusal with no place of its own (every other no_way_in) leaves none behind
@@ -3315,7 +3330,7 @@ def test_a_ctrl_c_while_the_look_agains_plan_is_waited_on_is_the_cancel_it_was(c
 
     scene, lid = tcc._fix(tcc.PAIRS[1][0]), tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
     with pytest.raises(KeyboardInterrupt):
-        _again(ctx, monkeypatch, scene, lid, tcc._locator(tmp_path, mode="run"), plans=False, aborts=True)
+        _again(ctx, monkeypatch, scene, lid, tcc._locator(mode="run"), plans=False, aborts=True)
     ctx.client._abort = SimpleNamespace(requested=False)
 
 
@@ -3329,7 +3344,7 @@ def test_a_look_again_from_a_rough_fix_a_wrist_fix_or_a_world_files_table_takes_
     lid = tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
     # a ROUGH scene fix (a box its frame cut): its top is no measure and the pair none (camera_check's own rule)
     rough = tcc._fix(tcc.PAIRS[1][0], rough=True)
-    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    loc = tcc._locator(mode=cc.RUN)
     (again, _code, _why), got = _again(ctx, monkeypatch, rough, lid, loc)
     assert again is not None and ctx.scene_top_z is None and loc.check.by == ""
     assert got.maps[0][2][0][0] is rough  # nothing measured: its points as they were (moved at the box, as ever)
@@ -3341,9 +3356,7 @@ def test_a_look_again_from_a_rough_fix_a_wrist_fix_or_a_world_files_table_takes_
     assert got.rows[-1][1]["had"] == "the wrist's own look"
     # a table the world file names (not the fix's own) stays, extent and all
     scene = tcc._fix(tcc.PAIRS[1][0])
-    (again, _code, _why), got = _again(
-        ctx, monkeypatch, scene, lid, tcc._locator(tmp_path, mode=cc.RUN), watcher_z=0.20
-    )
+    (again, _code, _why), got = _again(ctx, monkeypatch, scene, lid, tcc._locator(mode=cc.RUN), watcher_z=0.20)
     assert got.watcher.table_z == 0.20 and ctx.worlds.table_top_z == scene.table_z_scene
     assert ctx.worlds.table_extent == scene.table_extent and got.kept[0][1] == 0.20
     # a second look again pools the first's frame too, each camera named once
