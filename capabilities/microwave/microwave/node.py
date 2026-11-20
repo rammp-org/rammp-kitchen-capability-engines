@@ -165,6 +165,9 @@ class Capability(CapabilityEngine):
                     "push_open": {"type": "boolean", "default": True},
                     # stop at the view pose (the open always goes there first, to detect the handle from it)
                     "view_only": {"type": "boolean", "default": False},
+                    # this goal's view pose (deg, J1..J7); [] places it from the scene camera's door instead
+                    # (view_dists / view_heights / view_sides, each pose asked of cuRobo). Default: VIEW_JOINTS_DEG
+                    "view_joints_deg": {"type": "array", "items": {"type": "number"}},
                 },
             },
         ),
@@ -343,6 +346,9 @@ class Capability(CapabilityEngine):
         speed = float(params.get("speed", 1.0))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
+        view = params.get("view_joints_deg")
+        if view is not None and (not isinstance(view, list) or len(view) not in (0, 7)):
+            raise EngineError("bad_params", "'view_joints_deg' must be 7 joint angles (deg), or [] to place it", True)
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
@@ -390,16 +396,22 @@ class Capability(CapabilityEngine):
         held = " -- still holding the handle" if action_id == "open" else ""
         try:
             if action_id == "open":
-                ok = open_door.run(
-                    self.arm,
-                    execute,
-                    swing_deg=params.get("swing_deg"),
-                    push=bool(params.get("push_open", True)),
-                    speed=speed,
-                    log_args=log_args,
-                    view_only=bool(params.get("view_only", False)),
-                    on_hold=on_hold,
-                )
+                saved_view = open_door.VIEW_JOINTS_DEG
+                if view is not None:  # this goal's view pose only
+                    open_door.VIEW_JOINTS_DEG = tuple(float(v) for v in view) if view else None
+                try:
+                    ok = open_door.run(
+                        self.arm,
+                        execute,
+                        swing_deg=params.get("swing_deg"),
+                        push=bool(params.get("push_open", True)),
+                        speed=speed,
+                        log_args=log_args,
+                        view_only=bool(params.get("view_only", False)),
+                        on_hold=on_hold,
+                    )
+                finally:
+                    open_door.VIEW_JOINTS_DEG = saved_view
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
                 stop = open_door.close_view_step(self.arm, execute) if bool(params.get("from_view_pose", True)) else ""
