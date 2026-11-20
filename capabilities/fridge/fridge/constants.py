@@ -166,7 +166,14 @@ PULL_GAINS = {  # joint impedance (kinova-gen3-driver gains.h: kq <= 400 N m/rad
     "zeta": 1.0,
     "torque_limit": (39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0),
 }
-PULL_PATH_TOL_RAD = 0.15  # the swing's tracking limit (rad, per joint)
+# the swing's tracking limit (rad, per joint, j1..j7): past it the driver stops the swing PATH_TOLERANCE_VIOLATED. The
+# shoulder and elbow (j1-j4, kq 400, carrying the door) at 0.15: lag there is a jam. The wrist (j5-j7) at 0.30: at kq 60
+# and its 9 N m torque_limit it reaches the cap at 0.15 rad (60 x 0.15 = 9), so at 0.15 it stopped whenever the door
+# twisted the hand harder than 9 N m. 11-20 (runs/20261120_231922_open, speed 0.52): stopped at 36 deg with j5 9.6 N m
+# off its torque before the swing (~0.16 rad behind), rising with the door's angle, not the swing's speed; j1-j4 under
+# 0.05 rad. More room adds no force (the cap holds): the hand twists with the door instead of stopping. What follows
+# the swing is planned again from where the arm ends
+PULL_PATH_TOL_RAD = (0.15, 0.15, 0.15, 0.15, 0.30, 0.30, 0.30)
 # The swing's end is the door's, not the plan's: the hand is clamped on a handle that the door holds to its own arc,
 # and under impedance the arm gives to it. 11-13 morning (fridge_data/runs/*_open, all kq 400): both executed swings
 # ran to the end (no driver stop) and opened the door 61.6 and 62.4 deg of a 60 deg pull, but the hand ended 1.7 and
