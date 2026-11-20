@@ -35,6 +35,11 @@ IK_TOL_M, IK_TOL_RAD = 1e-4, 1e-3  # converged
 IK_DAMP = 0.02  # damped least squares
 IK_MAX_STEP_RAD = 0.1  # per iteration, per joint
 ROT_ERR_EQUIV_M = 0.1  # ik's error: position error + this x orientation error (rad) -- 1 deg off counts 1.7 mm
+# a solve that has stalled stops: every IK_STALL_ITERS iterations its error must fall below IK_STALL_RATIO of what it
+# was. A target out of reach (or past a limit) otherwise spends all IK_ITERS -- 11-19 on the arm, the microwave
+# ~0.585 m out, misses were ~28 of the open's 64 s of planning; one converging never stalls like that
+IK_STALL_ITERS = 20
+IK_STALL_RATIO = 0.99
 
 # --- the arm's shape, for clearance ---
 ARM_RADIUS_M = 0.06  # each link J1 -> J7 a capsule this thick (the fridge's CLOSE_ARM_RADIUS_M): the Gen3's
@@ -205,11 +210,17 @@ class ArmModel:
         q = np.clip(np.asarray(seed, float).copy(), self.lo, self.hi)
         target, pos = R.from_quat(quat).as_matrix(), np.asarray(pos, float)
         lam = IK_DAMP**2 * np.eye(6)
-        for _ in range(IK_ITERS + 1):  # the last pass only measures the last step's result
+        before = np.inf  # the error IK_STALL_ITERS iterations ago
+        for it in range(IK_ITERS + 1):  # the last pass only measures the last step's result
             p, rot, J = self._fk_jac(q)
             e = np.r_[pos - p, _rotvec(target @ rot.T)]
             if np.linalg.norm(e[:3]) < IK_TOL_M and np.linalg.norm(e[3:]) < IK_TOL_RAD:
                 break
+            if it % IK_STALL_ITERS == 0:
+                now = float(np.linalg.norm(e))
+                if now > IK_STALL_RATIO * before:  # stalled: out of reach, or held at a limit
+                    break
+                before = now
             dq = J.T @ np.linalg.solve(J @ J.T + lam, e)
             q = np.clip(q + np.clip(dq, -IK_MAX_STEP_RAD, IK_MAX_STEP_RAD), self.lo, self.hi)
         err = float(np.linalg.norm(e[:3]) + ROT_ERR_EQUIV_M * np.linalg.norm(e[3:]))
