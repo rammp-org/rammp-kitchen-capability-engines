@@ -601,10 +601,12 @@ def test_with_a_selection_a_wrist_fix_the_run_would_not_take_is_not_said_either(
     _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=scene, instance_id=SELECTED)
     assert not [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
     elsewhere = [ln for ln in lines if "not taken for the selected container %s" % SELECTED in ln.get("none", "")]
-    # (the wrist HAS a lid in view, and it cannot be tied to the selected one: that is not a container the arm
-    # cannot see. As a626985 had it this was "unseen": with the scene camera's mount off, the cannot-see
-    # sentence for the whole wait with a lid in every frame)
-    assert elsewhere and {ln["kind"] for ln in elsewhere} == {"not_chosen"}
+    # (the scene camera holds the selected container and the wrist's lid stands off its line to it: another
+    # thing, and the chosen one is not in the wrist's view: "unseen", which moving the chair cures and which
+    # never ends a guidance. For one round, 2026-11-19, this was "not_chosen", and a bowl nearer the arm ended
+    # a healthy guided approach in 10 s with "Choose it again" (review of 2026-11-20). The price is the scene
+    # mount that is off: the cannot-see sentence for the whole wait with a lid in every frame)
+    assert elsewhere and {ln["kind"] for ln in elsewhere} == {"unseen"}
     # --wrist-alone, the selection in none of the scene camera's frames: a second lid-sized top in the frames
     lined.at = (0.65, 0.0, 0.315)
     tops = [SimpleNamespace(xy=xy, button="unchecked") for xy in ((0.65, 0.0), (1.08, -0.23))]

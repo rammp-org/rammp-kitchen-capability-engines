@@ -1563,7 +1563,16 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             tie, alone = selection_look(locator, None, ctx.model, selected, getattr(args, "wrist_alone", False))
             if tie is not None:
                 why = tie_refusal(tie, find, fix.top_xyz)[0]
-                kind = guide.K_NOT_CHOSEN if why is None else guide.kind_of(why)  # (its words: tie_refusal)
+                kind = guide.K_UNSEEN if why is None else guide.kind_of(why)  # (its words: tie_refusal)
+                if kind == guide.K_NOT_CHOSEN:
+                    # The scene camera HOLDS the selected container here, and the lid the wrist has stands
+                    # off its line to it: another thing (a bowl nearer the arm, a second container), and the
+                    # chosen one is not in the wrist's view: a container the arm cannot see, which moving the
+                    # chair cures and which never ends a guidance. As K_NOT_CHOSEN (the round before, for a
+                    # scene mount that is off) it ended a healthy guided approach in 10 s with "Choose it
+                    # again", which could not help (review of 2026-11-20). The price: with the scene mount
+                    # off, the cannot-see sentence for the whole wait, a lid in every frame
+                    kind = guide.K_UNSEEN
             elif alone:
                 why, kind = alone_refusal(alone, find, fix.top_xyz, ctx.model), guide.K_SEVERAL
             else:
@@ -2239,6 +2248,10 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
             # (a second top in the selection's direction: two that could be it; else a lid in view that
             # stands off the scene camera's line to the selected one: something in view nothing ties to it)
             ctx.wrist_seen = guide.kind_of(why)
+            if ctx.wrist_seen == guide.K_NOT_CHOSEN:
+                # (a lid off the scene camera's line to the selected container is another thing, and the
+                # chosen one is not in the wrist's view: as line_up_watch's judge has it, 2026-11-20)
+                ctx.wrist_seen = guide.K_UNSEEN
             log.info("[press_demo] WRIST LOOK: %s" % why)
             runner.note("wrist_first", found=True, tied=False, why=why, scene=scene_fix is not None)
             if said is not None:

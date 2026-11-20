@@ -1051,14 +1051,15 @@ def test_the_wrist_look_says_which_tops_it_saw_out_of_the_arms_reach(monkeypatch
     assert press_demo.wrist_first(None, ctx, cfg, runner, object(), Namespace(execute=True), None) is None
     assert ctx.wrist_far == [] and ctx.wrist_seen is None
     # a lid it HAS in view that the selection's tie does not take: off the scene camera's line to the selected
-    # container, it is something in view that nothing ties to it, not a container the arm cannot see (with
-    # the scene camera's mount off, as on 2026-11-17, that is the selected container itself); with a second
-    # top in the selection's direction, two that could be it
+    # container, which the scene camera holds, it is another thing (a bowl nearer the arm) and the chosen one
+    # is not in the wrist's view: a container the arm cannot see, guided for. As "not_chosen" (2026-11-19's
+    # last round) it ended a healthy guidance in 10 s with "Choose it again" (review of 2026-11-20). With a
+    # second top in the selection's direction, two that could be it
     fix = SimpleNamespace(top_xyz=(0.65, 0.0, 0.30), table_z_scene=0.2, partial="")
     survey = sv.Survey(fix=fix, why="", find=SimpleNamespace(fix=fix, places=(), patches=()), clouds=["c"])
     monkeypatch.setattr(sv, "run_survey", lambda *a, **k: survey)
     off = "212 mm to the side of the scene camera's line of sight to it"
-    for judged, rival, seen in (((False, off), None, "not_chosen"), ((True, "on its line"), (0.70, 0.10), "several")):
+    for judged, rival, seen in (((False, off), None, "unseen"), ((True, "on its line"), (0.70, 0.10), "several")):
         tie = SimpleNamespace(instance_id="fc_1", judge=lambda xy, j=judged: j, rival=lambda find, xy, r=rival: r)
         said = []
         got = press_demo.wrist_first(
