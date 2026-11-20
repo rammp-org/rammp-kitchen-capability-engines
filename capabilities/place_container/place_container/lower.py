@@ -8,7 +8,8 @@ go, the retreat, and leaving impedance. Ported from RAMMP-table's kinova_arm.py 
    used for the hold is then measured there, as the hand's height against the command's.
 2. descent: the planned straight line down, self.arm.move_joints in impedance. Its monitor records
    every new /ee_state message (pose, twist, wrench, phase) for plot_descent.py and stops on
-   contact (plan.VzContact): move_joints CANCELS the goal, and the hold goes out right after.
+   contact: the hand's speed (plan.VzContact) or the wrist force rising (plan.FzContact, from the line's
+   start); move_joints CANCELS the goal, and the hold goes out right after.
    move_joints times the whole line minimum-jerk (slow at both ends), so contact only counts while
    the commanded speed is up (plan.contact_gate); the speed is chosen so the hand passes the
    marked table at ~lower_speed (plan.descent_speed_scale).
@@ -37,6 +38,7 @@ from rammp_arm import JOINTS, _unwrap_from
 
 from .plan import (
     RETURN_BLEND,
+    FzContact,
     Refused,
     VzContact,
     arm_distance,
@@ -181,6 +183,7 @@ def lower(arm, model, descent, cfg, rec, log):
     duration, length = float(samples[0][-1]), float(np.sum(lengths))
     # "moving" scales with lower_speed (0.01 at the tuned 0.02), as the speed gate does
     contact = VzContact(stop=cfg["vz_stop"], moving=0.5 * cfg["lower_speed"])
+    pushed = FzContact(rise=cfg["contact_fz_rise"])  # free air taken once the sag is over; no speed needed
     state = dict(t0=None, z=None, lag=lag)
     arm_m = arm_distance(length, cfg["contact_ignore_m"], meet)
 
@@ -195,11 +198,18 @@ def lower(arm, model, descent, cfg, rec, log):
             state["lag"] = min(float(ee.position[2]) - commanded_z(line_z, u), 0.0)
             log(f"contact armed {arm_m * 100:.1f} cm down; impedance lag {state['lag'] * 100:+.1f} cm")
         hit = new and contact.update(float(ee.linear[2]), armed)
-        if hit and contact_gate(u, length, duration, cfg["lower_speed"]):
+        by_speed = hit and contact_gate(u, length, duration, cfg["lower_speed"])
+        by_force = new and pushed.update(float(ee.force[2]), float(ee.linear[2]), time.monotonic() - state["t0"])
+        if by_speed or by_force:
             state["z"] = float(ee.position[2])
             rec.phase = "contact"
+            how = (
+                f"vz {ee.linear[2] * 100:+.2f} cm/s"
+                if by_speed
+                else f"wrist fz {ee.force[2]:+.1f} N, {ee.force[2] - pushed.baseline:+.1f} N over free air"
+            )
             log(
-                f"contact at flange z={state['z']:.3f}: vz {ee.linear[2] * 100:+.2f} cm/s, "
+                f"contact at flange z={state['z']:.3f}: {how}, "
                 f"{min(u, 1.0) * 100:.0f}% of the move -> stop, hold {cfg['hold_press'] * 1000:.0f} mm below it"
             )
             return True
@@ -211,6 +221,11 @@ def lower(arm, model, descent, cfg, rec, log):
         f"where the table should be ({meet * 100:.0f}% down); "
         f"contact = vz back up to {cfg['vz_stop'] * 100:+.1f} cm/s, "
         f"not in the first {arm_m * 100:.1f} cm"
+        + (
+            f"; or the wrist force up {cfg['contact_fz_rise']:.1f} N over free air"
+            if cfg["contact_fz_rise"] > 0
+            else ""
+        )
     )
     ok = arm.move_joints(line[1:], cart_lengths=lengths, speed_scale=scale, impedance=compliant(gains), monitor=monitor)
     if state["z"] is None:

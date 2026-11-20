@@ -44,6 +44,7 @@ import contextlib
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import rammp_arm
@@ -64,10 +65,6 @@ ARM_MOVED = 1794074180.0  # 2026-11-07T17:56:20Z
 # deg: after the carry, the planned line down is used if the arm is within this of its first joints
 # (lower() starts the line from the measured joints, so this much is a smooth start, not a jump)
 REPLAN_DEG = 1.0
-# the level place's scripted back-out, right after the gripper opens: this far back along the hand's
-# horizontal heading and this far up, one straight line (position control, retreat_speed peak)
-BACK_OUT_M = 0.08
-BACK_OUT_UP_M = 0.03
 
 # ROS parameter -> default: the flatbot's values (2026-10-26, unless noted).
 PARAMS = {
@@ -87,11 +84,18 @@ PARAMS = {
     # held in impedance at the start this long (s) before going down; must end still. 0 = no pause:
     # the arm goes compliant as the descent starts (contact_ignore_m covers its sag)
     "settle_s": 0.0,  # flatbot 2026-11-10: contact_ignore_m covers the sag; 3.0 added ~4 s
+    # contact also when the wrist force (fz, + up) rises this many N over its free-air value, taken once the sag at
+    # the start of the line down is over (plan.FzContact): it catches a touch before the speed test is armed or a
+    # hand lagging too much for it (gen_1_5 2026-11-20: a table 2.5 cm higher than marked pressed to +20 N unseen).
+    # 0 = off (speed only)
+    "contact_fz_rise": 5.0,
     # contact is ignored until the descent's command has gone this far down (m): the sag when the arm
     # goes compliant must not read as moving down and being stopped
     "contact_ignore_m": 0.08,  # 0.03 armed mid catch-up: a false contact (flatbot 2026-11-10)
-    # contact more than this (m) above where the bottom meets the table = not the table
-    "early_stop": 0.03,
+    # contact more than this (m) above where the bottom meets the table = not the table: held, not let go. 6 cm (was
+    # 3): on gen_1_5 the arm's frame is tilted ~4-6 deg from level (its mount, 2026-11-20), so one marked table_z is
+    # up to ~4 cm off across the table; the far-left corner's real touch was refused at 3
+    "early_stop": 0.06,
     # joint impedance for the settle, lowering, hold, retreat and reset, one set so the stiffness never
     # changes mid-place (move_joints takes custom gains, not the driver's named profiles). Default: the
     # driver's documented starting point (rammp_arm.IMPEDANCE), NOT the "medium" profile RAMMP-table
@@ -127,6 +131,19 @@ PARAMS = {
     # -- on 2026-11-10 it chose another posture at the spot (J1 +101, J3 -147 deg from the start)
     "carry_targets": "level",
     # the retreat's peak speed (m/s; was 0.03)
+    # the level place's scripted back-out, right after the gripper opens: this far straight back along the hand's
+    # horizontal heading (the open fingertips slide off the lip; lifting first dragged the container, flatbot
+    # 2026-11-10), then this far straight up (m; position control, retreat_speed peak). It was 8 cm back and 3 up in
+    # one line: backing toward the arm's base folds the elbow, and spots closer than ~0.87 m ran J4 into its limit
+    # (gen_1_5, 2026-11-19)
+    # the level place's hand directions over the spot, tried in this order (deg about vertical in arm_mount: 0 =
+    # straight forward, - = toward the arm's right, the person's side), then straight out from the arm's base (the
+    # old way); the first whose whole place plans is used. Coming in from the arm's side angled to its right backs
+    # out sideways, not toward the base (gen_1_5 offline model, 2026-11-19: 77 -> ~174 of 195 spots on the table
+    # 0.50-0.92 m out, 10 cm right to 50 cm left of the arm). [] = only straight out, as before
+    "hand_angles_deg": [-30.0, -15.0, -45.0, 0.0, -60.0, -75.0, -90.0, 15.0],
+    "back_out_back_m": 0.03,
+    "back_out_up_m": 0.05,
     "retreat_speed": 0.128,  # 80% of arm.cart_speed (flatbot 2026-11-12; was 0.10, 0.06 on 2026-11-10)
     # speed_scale of reset's joint moves with reset_mode legacy (move_joints; was ~0.5)
     "reset_speed_scale": 1.0,
@@ -773,8 +790,8 @@ class Capability(CapabilityEngine):
                 q = np.asarray(self.arm.raw_joints(), dtype=float)
                 back, _ = self._plan_back_out(model, q, table_z)
                 log(
-                    f"-> back-out: {BACK_OUT_M * 100:.0f} cm back, {BACK_OUT_UP_M * 100:.0f} cm up "
-                    f"(position control, {back[0][-1]:.1f} s)"
+                    f"-> back-out: {self.cfg['back_out_back_m'] * 100:.0f} cm back, then "
+                    f"{self.cfg['back_out_up_m'] * 100:.0f} cm up (position control, {back[0][-1]:.1f} s)"
                 )
                 res = self.arm.execute_joint_trajectory(
                     rammp_arm.JOINTS, list(zip(*back, strict=True)), path_tolerance=rammp_arm.PATH_TOL_RAD
@@ -969,9 +986,10 @@ class Capability(CapabilityEngine):
 
     def _plan_back_out(self, model, q, table_z):
         """The scripted back-out from joints q (the hand on the lip, the gripper open): the tool straight back
-        BACK_OUT_M along the hand's horizontal heading and BACK_OUT_UP_M up (one straight line), orientation
-        kept, searched and timed like the carry (retreat_speed peak) and every sample checked against the chair
-        and user boxes (the hand is empty: no container). ((t, q, qd), summary)."""
+        back_out_back_m along the hand's horizontal heading, then straight up back_out_up_m, orientation kept, each
+        leg searched like the carry, the two timed as one trajectory (retreat_speed peak) and every sample checked
+        against the chair and user boxes and the driver's joint limits (the hand is empty: no container).
+        ((t, q, qd), summary)."""
         chair = self._chair(model)
         chair.set_container(None)
         try:
@@ -979,10 +997,24 @@ class Capability(CapabilityEngine):
             h = T[:3, 2].copy()
             h[2] = 0.0
             h /= np.linalg.norm(h)
-            p_to = T[:3, 3] - BACK_OUT_M * h + np.array([0.0, 0.0, BACK_OUT_UP_M])
-            knots = level_path.search_line(
-                model, chair, q, p_to, T[:3, :3], level_path.LINE_KNOT_M, "back-out", level_path.LINE_NULL_STEPS
-            )
+            back = T[:3, 3] - self.cfg["back_out_back_m"] * h
+            up = back + np.array([0.0, 0.0, self.cfg["back_out_up_m"]])
+            knots = []
+            for name, p_to in (("back-out (back)", back), ("back-out (up)", up)):
+                if np.linalg.norm(p_to - model.fk(knots[-1] if knots else q)[:3, 3]) < 1e-4:
+                    continue  # a leg of 0 m (a param set to 0)
+                knots += level_path.search_line(
+                    model,
+                    chair,
+                    knots[-1] if knots else q,
+                    p_to,
+                    T[:3, :3],
+                    level_path.LINE_KNOT_M,
+                    name,
+                    level_path.LINE_NULL_STEPS,
+                )
+            if not knots:
+                raise plan.Refused("back-out: back_out_back_m and back_out_up_m are both 0 -- nothing moved")
             scale = min(1.0, self.cfg["retreat_speed"] / rammp_arm.CART_SPEED)
             samples, _ = level_path.timed(q, knots, model, scale)
             summary = level_path.check_samples(
@@ -1011,45 +1043,29 @@ class Capability(CapabilityEngine):
         T0 = model.fk(q0)
         up = level_path.up_in_tool(T0[:3, :3])
         chair.set_container(up)  # the held container is checked against the chair and user too
-        heading = plan.approach_direction(spot)
         speed = self.cfg["go_to_speed_scale"]
         t_plan = time.monotonic()
-        height, knots = level_path.carry(model, chair, q0, spot, table_z, heading)
-        (t, q, qd), _ = level_path.timed(q0, knots, model, speed)
-        s_carry = level_path.check_samples(model, chair, (t, q, qd), up, table_z, "carry", speed)
-        # The lip is at the fingertips, below the tool frame by the hand's pitch: the tool-frame heights the
-        # line down and the lowering use (table_z + BOWL_DEPTH where the bottom meets the table) move up by it
-        table_tool = table_z + level_path.tip_drop(model, knots[-1])
-        floor_z = table_tool + max(plan.BOWL_DEPTH - plan.PRESS_BELOW, plan.MIN_TOOL_HEIGHT)
-        line = level_path.descent_line(model, chair, knots[-1], floor_z)
-        if not plan.reaches(line, table_tool):
-            raise plan.Refused(plan.reach_refusal(line, table_tool, spot) + " -- nothing moved")
-        approach, descent = plan.split_approach(line, table_tool, self.cfg["lower_from"])
-        if approach:  # through every point of the searched line, not only split_approach's 4 cm waypoints
-            k = len(line[0]) - len(descent[0])
-            approach = [("approach'", qq) for qq in line[1][1:k]] + [("approach", line[1][k])]
-            appr = level_path.timed(knots[-1], [qq for _, qq in approach], model, speed)[0]
-            s_appr = level_path.check_samples(
-                model,
-                chair,
-                appr,
-                up,
-                table_z,
-                "approach",
-                speed,
-                min_bottom=None,
-                vertical=True,
-            )
-        slow = (None, descent[1], np.zeros_like(descent[1]))  # the lowering is slow (lower_speed): no speed check
-        s_line = level_path.check_samples(
-            model, chair, slow, up, table_z, "line down", speed, min_bottom=None, vertical=True
-        )
-        q_meet = plan.hold_point(descent[1], descent[0], table_tool + plan.BOWL_DEPTH)
-        q_meet = np.asarray(descent[1][-1] if q_meet is None else q_meet, dtype=float)
-        back, s_back = self._plan_back_out(model, q_meet, table_z)
-        self._check_contact_zone(
-            model, descent, table_tool, log, q_approach=knots[-1] if approach else None, q_retreat=back[1][-1]
-        )
+        # The hand's direction over the spot (about vertical; the container is round, so any works): each of
+        # hand_angles_deg in turn, then straight out from the arm's base (as before), the first whose whole
+        # place plans. Coming in from the arm's side, angled toward its right, backs out sideways instead of
+        # toward the base, which folds the elbow far less (gen_1_5 offline model, 2026-11-19: 77 -> ~174 of 195
+        # spots on the table 0.50-0.92 m out, 10 cm right to 50 cm left of the arm).
+        tried = []
+        for name, heading in self._hand_headings(spot):
+            ctx.checkpoint()
+            try:
+                p = self._plan_level_at(model, chair, q0, up, spot, table_z, heading, speed, log)
+            except plan.Refused as e:
+                tried.append(f"{name}: {e}")
+                log(f"hand {name}: refused ({e})")
+                continue
+            break
+        else:
+            raise plan.Refused("no hand angle plans -- " + " | ".join(tried))
+        log(f"hand {name}: plans" + (f" (after {len(tried)} other angle(s) refused)" if tried else ""))
+        height, knots, (t, q, qd), s_carry = p.height, p.knots, p.carry, p.s_carry
+        table_tool, floor_z, line, approach, descent = p.table_tool, p.floor_z, p.line, p.approach, p.descent
+        appr, s_appr, s_line, back, s_back = p.appr, p.s_appr, p.s_line, p.back, p.s_back
         top = model.fk(knots[-1])[:3, 3]
         log(
             f"carry: straight to above the spot at {height * 100:.0f} cm (tool {np.round(top, 3).tolist()}), "
@@ -1077,8 +1093,8 @@ class Capability(CapabilityEngine):
             "The table and what is on it are NOT modelled: keep the way to the spot clear"
         )
         log(
-            f"back-out: as soon as the gripper is open, {BACK_OUT_M * 100:.0f} cm back and "
-            f"{BACK_OUT_UP_M * 100:.0f} cm up along the hand, one straight line "
+            f"back-out: as soon as the gripper is open, {self.cfg['back_out_back_m'] * 100:.0f} cm straight back, "
+            f"then {self.cfg['back_out_up_m'] * 100:.0f} cm straight up "
             f"(position control, {back[0][-1]:.1f} s, no sink, no pause); >= {s_back['clear_m'] * 100:.1f} cm from the "
             "boxes from where the container should touch the table (planned again from where it does)"
         )
@@ -1088,7 +1104,7 @@ class Capability(CapabilityEngine):
         ]
         if not execute:
             log("DRY RUN -- all checks passed, nothing commanded")
-            return {"executed": False, "plan": steps}
+            return {"executed": False, "plan": steps, "hand": name}
 
         self._ready()
         off = float(np.degrees(np.max(np.abs(plan.wrap(np.asarray(self.arm.raw_joints()) - q0)))))
@@ -1122,6 +1138,70 @@ class Capability(CapabilityEngine):
                 )
         info = {"floor_z": floor_z}
         return self._lower_and_let_go(model, spot, table_tool, q_now, descent, info, ctx, log, up_tool=up)
+
+    def _hand_headings(self, spot):
+        """[(name, unit horizontal heading)]: hand_angles_deg in order (deg about vertical in arm_mount, 0 =
+        straight forward, - = toward the arm's right), then straight out from the arm's base unless a listed angle
+        is within 5 deg of it."""
+        radial = plan.approach_direction(spot)
+        radial_deg = float(np.degrees(np.arctan2(radial[1], radial[0])))
+        out = []
+        for a in self.cfg["hand_angles_deg"]:
+            a = float(a)
+            out.append((f"{a:+.0f} deg", np.array([np.cos(np.radians(a)), np.sin(np.radians(a)), 0.0])))
+        if all(abs(plan.wrap_deg(np.radians(float(a) - radial_deg))) > 5.0 for a in self.cfg["hand_angles_deg"]):
+            out.append((f"{radial_deg:+.0f} deg (straight out from the base)", radial))
+        return out
+
+    def _plan_level_at(self, model, chair, q0, up, spot, table_z, heading, speed, log):
+        """The level place's whole plan with the hand pointing `heading` over the spot: the carry, the line down,
+        the approach, the back-out, every sample checked, and cuRobo's check of the contact zone. Refused with the
+        reason if any part doesn't plan. A namespace of the pieces _place_level logs and runs."""
+        height, knots = level_path.carry(model, chair, q0, spot, table_z, heading)
+        carry = level_path.timed(q0, knots, model, speed)[0]
+        s_carry = level_path.check_samples(model, chair, carry, up, table_z, "carry", speed)
+        # The lip is at the fingertips, below the tool frame by the hand's pitch: the tool-frame heights the
+        # line down and the lowering use (table_z + BOWL_DEPTH where the bottom meets the table) move up by it
+        table_tool = table_z + level_path.tip_drop(model, knots[-1])
+        floor_z = table_tool + max(plan.BOWL_DEPTH - plan.PRESS_BELOW, plan.MIN_TOOL_HEIGHT)
+        line = level_path.descent_line(model, chair, knots[-1], floor_z)
+        if not plan.reaches(line, table_tool):
+            raise plan.Refused(plan.reach_refusal(line, table_tool, spot) + " -- nothing moved")
+        approach, descent = plan.split_approach(line, table_tool, self.cfg["lower_from"])
+        appr, s_appr = None, None
+        if approach:  # through every point of the searched line, not only split_approach's 4 cm waypoints
+            k = len(line[0]) - len(descent[0])
+            approach = [("approach'", qq) for qq in line[1][1:k]] + [("approach", line[1][k])]
+            appr = level_path.timed(knots[-1], [qq for _, qq in approach], model, speed)[0]
+            s_appr = level_path.check_samples(
+                model, chair, appr, up, table_z, "approach", speed, min_bottom=None, vertical=True
+            )
+        slow = (None, descent[1], np.zeros_like(descent[1]))  # the lowering is slow (lower_speed): no speed check
+        s_line = level_path.check_samples(
+            model, chair, slow, up, table_z, "line down", speed, min_bottom=None, vertical=True
+        )
+        q_meet = plan.hold_point(descent[1], descent[0], table_tool + plan.BOWL_DEPTH)
+        q_meet = np.asarray(descent[1][-1] if q_meet is None else q_meet, dtype=float)
+        back, s_back = self._plan_back_out(model, q_meet, table_z)
+        self._check_contact_zone(
+            model, descent, table_tool, log, q_approach=knots[-1] if approach else None, q_retreat=back[1][-1]
+        )
+        return SimpleNamespace(
+            height=height,
+            knots=knots,
+            carry=carry,
+            s_carry=s_carry,
+            table_tool=table_tool,
+            floor_z=floor_z,
+            line=line,
+            approach=approach,
+            descent=descent,
+            appr=appr,
+            s_appr=s_appr,
+            s_line=s_line,
+            back=back,
+            s_back=s_back,
+        )
 
     def _check_carry_joints(self, moves, log):
         """Dry run: cuRobo plans each joint leg of the carrying motion (nothing moves), from the
