@@ -557,6 +557,13 @@ class HandleDetector:
             say("  no door-face points at its far edge -- a miss")
             return None
         hinge_cam = strip[int(np.argmin(np.linalg.norm(strip - handle_cam, axis=1)))]
+        if getattr(self, "hinge_at_handle_height", False):
+            # Intersect the far edge, fitted door plane and handle-height plane.
+            # Unlike a sampled nearest point, this cannot drift down the edge.
+            hinge_cam = np.linalg.solve(
+                np.stack([normal, up_cam, axis]),
+                np.array([-offset, float(handle_cam @ up_cam), edge]),
+            )
         if abs(float(hinge_cam @ axis) - h_proj) < 0.5 * max(abs(h_proj - lo), abs(h_proj - hi)):
             say("  far door edge is on the handle's side -- plane includes background")
             return None

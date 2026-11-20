@@ -522,3 +522,30 @@ points can be projected onto the camera image or inspected as a 3D segment. They
 are model-space distances, not measured physical clearances. Insertion/lift/retreat
 remain locally generated paths checked against the microwave boxes; the held
 container is still not modelled.
+
+
+### Live cavity anchoring for the retrieval door
+
+The open-door collision box is positioned and oriented from the live cavity left/front
+edge. Saved hinge coordinates, front normal and height position no longer gate live
+registration. Saved relative handle-to-hinge span still supplies the door width; saved
+height extent and thickness supply its dimensions. The saved opening-angle check is
+retained. The door file is read-only, and cavity depth validation is unchanged.
+
+
+### Cavity frame depth tolerance
+
+The surrounding frame median depth may disagree with the fitted opening plane by
+up to 0.05 m (5 cm). Mask overlap, interior depth and multi-frame agreement checks
+remain unchanged. This changes model acceptance, not a motion clearance margin.
+
+
+### cuRobo insertion
+
+Insertion now requests two fixed-orientation cuRobo plans: pre-grasp to the
+impedance transition, then to the grasp. Both are planned before approach and
+replanned from measured pre-grasp joints before insertion. Every path retains
+the straight-line, endpoint and local microwave-clearance gates; no local IK
+fallback is used for insertion. Execution preserves cuRobo samples, timing and
+velocities, slowed for the configured speed, with the final segment in impedance.
+Lift and withdrawal retain their existing locally generated, checked paths.

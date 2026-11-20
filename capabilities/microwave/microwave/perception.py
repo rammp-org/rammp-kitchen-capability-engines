@@ -26,6 +26,8 @@ BOX_MIN_POINTS = 500
 
 
 class HandleDetector(door_common.perception.HandleDetector):
+    hinge_at_handle_height = True  # opposite door edge at the handle height in arm_mount
+
     def __init__(self, whole_image=False):
         self.region_2d = None  # (x1, y1, x2, y2) from another detector (the scene segmenter)
         self.whole_image = whole_image  # no box: fit the whole image (the replay tool) instead of refusing

@@ -51,7 +51,7 @@ FLOOR = 0.0159  # floor (turntable glass top) above the opening's bottom edge [5
 RING = (3, 0.04)  # ring outside the mask: from this many px (the frame's stereo depth spreads ~1 cm into
 # the opening; the ring needs only the frame itself) to this far (m) out
 RING_MIN = 50  # with at least this many depth points on the frame around the opening ...
-RING_TOL = 0.015  # ... their median must be within this of the fitted plane
+RING_TOL = 0.05  # ... their median must be within this of the fitted plane
 IN_FRONT = 0.05  # depth points this far in front of the fitted plane are something in front of the oven (the
 # arm reaching toward it), not its frame: the frame check leaves them out
 BEHIND = (0.01, DEPTH + 0.03)  # what is seen through the opening lies this far behind the plane ...

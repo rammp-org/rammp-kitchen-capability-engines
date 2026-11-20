@@ -52,8 +52,8 @@ def door_box(oven, door, angle_deg, position_tol, yaw_tol_deg, opening, outer, r
     """Keep saved door dimensions, registering its inner edge to the live cavity left/front edge.
 
     A left-hinged door opens outward at the configured angle (90 degrees by
-    default). The angle is assumed, not newly observed. Stored geometry must
-    still pass the saved/live consistency checks before re-registration.
+    default). The angle is assumed, not newly observed. Saved coordinates
+    supply dimensions only; placement and heading come from the live cavity.
     """
     opening_width, opening_height = opening
     n = _vector(door["closed_normal"], "closed_normal")
@@ -74,18 +74,9 @@ def door_box(oven, door, angle_deg, position_tol, yaw_tol_deg, opening, outer, r
         raise InvalidGeometry("invalid door dimensions or opening angle")
     if position_tol <= 0 or not 0 < yaw_tol_deg < 45:
         raise InvalidGeometry("invalid saved-door alignment tolerances")
-    yaw_error = np.degrees(np.arccos(np.clip(n @ -oven.n, -1, 1)))
-    h_local = oven.to_oven([hinge])[0]
-    # The closed door lies in front of the recessed cavity frame.
+    # Use the saved relative span only to size the door. Its absolute hinge,
+    # normal and heights are not registration constraints on the live cavity.
     face = grasp - n * face_off
-    plane_error = abs(float((face - hinge) @ n))
-    if yaw_error > yaw_tol_deg or plane_error > position_tol or abs(h_local[1]) > position_tol:
-        raise InvalidGeometry("saved door no longer agrees with the live microwave front; reopen/re-detect the door")
-    if abs(h_local[0] - opening_width / 2) > position_tol:
-        raise InvalidGeometry("saved hinge does not match the live cavity left edge; reopen/re-detect the door")
-    live_mid_z = oven.b0[2] + opening_height / 2
-    if abs(float(heights.mean()) - live_mid_z) > position_tol:
-        raise InvalidGeometry("saved door height no longer agrees with the live cavity")
     saved_angle = float(door["door_open_deg"])
     if not np.isfinite(saved_angle) or abs(saved_angle - angle_deg) > 10:
         raise InvalidGeometry("saved door opening does not match configured angle; finish opening/re-detect")
@@ -94,9 +85,6 @@ def door_box(oven, door, angle_deg, position_tol, yaw_tol_deg, opening, outer, r
     width = float(np.linalg.norm(along[:2])) + past
     if not 0.2 < width < 0.7:
         raise InvalidGeometry("implausible handle-to-hinge door width")
-    toward_hinge = along / np.linalg.norm(along[:2])
-    if toward_hinge @ oven.w < 0.9:
-        raise InvalidGeometry("saved geometry is not a left-hinged microwave")
     # One live frame for the body, cavity and door: the saved hinge locates
     # no collision box. Its handle-to-hinge span supplies the door width only.
     a0, a1, z0, z1 = np.asarray(outer, dtype=float)

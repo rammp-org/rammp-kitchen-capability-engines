@@ -807,7 +807,8 @@ def _pose_move(ai, pos, quat, label, hold, speed=None, held=False, keep_shape=Tr
 # The push-open's moves run blended (one cuRobo motion through the checked plans' joints) in these groups; the
 # others -- backing off the handle and off the door (the pull-backs) and "up and back" -- run exactly as checked.
 PUSH_BLENDED = (("over the door", "down inside the door", "push open"), ("back up", "back over the door"))
-PUSH_END_AT_VIEW = True  # after the push-open, on to the view pose in the same blended motion (11-12: the user)
+PUSH_END_AT_VIEW = True  # after push-open, return to the saved final pose
+PUSH_END_JOINTS_DEG = (21.550383, -43.031677, -91.725433, -110.418961, -59.293488, -94.634583, -169.504547)  # 11-20: captured current arm position
 
 
 def _run_push_exact(ai, P, label, pl, speed, held):
@@ -890,8 +891,8 @@ def _run_push_plans(ai, P, plans, gains, on_release):
     _run_push_exact(ai, P, "back off the door", by["back off the door"], None, held)
     save_door_geometry(door_open_deg=PUSH_OPEN_DOOR_DEG)
     say(f"door file: open {PUSH_OPEN_DOOR_DEG:.0f} deg after the push (taken, not measured)")
-    end = np.radians(VIEW_JOINTS_DEG) if PUSH_END_AT_VIEW and VIEW_JOINTS_DEG is not None else None
-    _run_push_blended(ai, P, plans, PUSH_BLENDED[1], {}, held, end=end, end_label="to the view pose")
+    end = np.radians(PUSH_END_JOINTS_DEG) if PUSH_END_AT_VIEW else None
+    _run_push_blended(ai, P, plans, PUSH_BLENDED[1], {}, held, end=end, end_label="to the saved opening end pose")
     return True
 
 
