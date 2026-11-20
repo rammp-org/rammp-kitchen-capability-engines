@@ -626,3 +626,36 @@ def _no_ui_wrap(monkeypatch):
     from capability_ui import panels as ui_panels
 
     monkeypatch.setattr(ui_panels, "WRAP_CHARS", 10**6)
+
+
+# -- the door's pre-condition (availability) --------------------------------------------------------------------------
+
+DOOR = load(NODE, {"UI_DRIVE", "UI_ACTIONS", "UI_DOOR_NEEDS"}, {"_ui_unavailable"})
+
+
+def _world(opened=None):
+    record = {"perception_class": "fridge"} if opened is None else {"perception_class": "fridge", "opened": opened}
+    return {"objects": {"fridge_1": record}}
+
+
+@pytest.mark.parametrize(
+    "opened, offered",
+    [
+        (False, {"go_to_start_ui", "open_door_ui", "open_door_drive_ui"}),  # closed: open, not close
+        (True, {"go_to_start_ui", "close_door_ui", "close_door_drive_ui"}),  # open: close, not open again
+        (None, set(DOOR["UI_ACTIONS"])),  # no record yet: everything
+    ],
+)
+def test_each_button_needs_the_door_its_action_starts_from(opened, offered):
+    node = DOOR["Capability"]()
+    why = {a: node._ui_unavailable(a, "fridge_1", _world(opened)) for a in DOOR["UI_ACTIONS"]}
+    assert {a for a, w in why.items() if not w} == offered
+    for a, w in why.items():
+        if w:
+            assert w == ("The fridge door is already open." if opened else "The fridge door is already closed.")
+
+
+def test_no_object_record_or_a_non_bool_opened_is_no_objection():
+    node = DOOR["Capability"]()
+    for world in ({}, {"objects": {}}, {"objects": {"fridge_1": None}}, _world("yes")):
+        assert all(not node._ui_unavailable(a, "fridge_1", world) for a in DOOR["UI_ACTIONS"])

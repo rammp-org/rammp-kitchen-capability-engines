@@ -149,6 +149,16 @@ the shared `capability_ui.RunUI`.
 | `close_door_ui`       | Close Fridge Door                     | `close`, speed 0.7; a wheelchair move is asked for |
 | `close_door_drive_ui` | Close Fridge Door (wheelchair drives) | `close`, speed 0.7, `drive_base` at 0.03 m/s       |
 
+Pre- and post-conditions on the door, kept in the orchestrator's object state for the fridge (`opened`):
+
+- **Pre:** the open buttons are available only while the door is closed (`opened` false), the close buttons only while
+  it is open (`opened` true); otherwise they are offered unavailable with the reason ("The fridge door is already
+  open." / "... closed."). With no record yet (no executed open or close since the orchestrator started) both are
+  available. Go to Fridge has no condition. The direct actions (`open`, `close`) are not checked.
+- **Post:** an executed open or close that finished writes `opened` true or false. A dry run, a refusal, a stop, a
+  failure or an open still waiting on its push writes nothing, so a run that stopped part way leaves the record as it
+  was.
+
 Panels, in order:
 
 - While it runs: what it is doing, with **Stop**. Stop cancels the goal as the orchestrator's cancel does: the arm

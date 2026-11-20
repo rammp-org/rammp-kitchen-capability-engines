@@ -153,6 +153,12 @@ UI_ACTIONS = {
     "close_door_ui": ("close", "Close Fridge Door", {"execute": True}),
     "close_door_drive_ui": ("close", "Close Fridge Door (wheelchair drives)", {"execute": True, **UI_DRIVE}),
 }
+# The door's pre- and post-conditions, on the orchestrator's record of this fridge (`opened` in its object state).
+# Pre: the UI offers an open only while the door is closed and a close only while it is open (availability); with no
+# record yet (no executed open or close since the orchestrator started) both are offered. Post: an executed open or
+# close that finished writes `opened` true or false (_execute); a dry run, a refusal, a stop or an open still waiting
+# on its push write nothing. go_to_start has neither.
+UI_DOOR_NEEDS = {"open": False, "close": True}  # the `opened` each action needs
 UI_TITLE = {"go_to_start": "Go to fridge", "open": "Open fridge", "close": "Close fridge"}
 UI_MOVING = {
     "go_to_start": "Moving the arm to the fridge.",
@@ -335,9 +341,27 @@ class Capability(CapabilityEngine):
         )
 
     def availability(self, instance_id, world_state):
-        """The UI is offered only its buttons (UI_ACTIONS); go_to_start / open / close stay callable directly (their
-        settings need choosing: from the UI, with none, they would only dry-run)."""
-        return [a for a in super().availability(instance_id, world_state) if a.action_id in UI_ACTIONS]
+        """The UI is offered only its buttons (UI_ACTIONS), each available only while the door meets its
+        pre-condition (_ui_unavailable); go_to_start / open / close stay callable directly, unchecked (their settings
+        need choosing: from the UI, with none, they would only dry-run)."""
+        offered = []
+        for a in super().availability(instance_id, world_state):
+            if a.action_id not in UI_ACTIONS:
+                continue
+            why = self._ui_unavailable(a.action_id, instance_id, world_state)
+            if why:
+                a.available, a.reason = False, why
+            offered.append(a)
+        return offered
+
+    def _ui_unavailable(self, action_id, instance_id, world_state):
+        """Why the UI button `action_id` can't run on the door as the world state has it ("" when it can): an open
+        needs the door closed, a close needs it open (UI_DOOR_NEEDS). No record of the door: no objection."""
+        need = UI_DOOR_NEEDS.get(UI_ACTIONS[action_id][0])
+        opened = ((world_state.get("objects") or {}).get(instance_id) or {}).get("opened")
+        if need is None or not isinstance(opened, bool) or opened == need:
+            return ""
+        return "The fridge door is already open." if opened else "The fridge door is already closed."
 
     def execute(self, action_id, params, ctx):
         if action_id in UI_ACTIONS:
@@ -704,8 +728,9 @@ class Capability(CapabilityEngine):
             raise EngineError(
                 "stopped", f"the {action_id} stopped short -- the arm holds where it is", recoverable=True
             )
-        # an open that stopped for a wheelchair move left the door part way, the push still to come: not opened yet (the
-        # chair_moved goal that pushes it reports that)
+        # the post-condition (UI_DOOR_NEEDS): the door open after an open, closed after a close. An open that stopped
+        # for a wheelchair move left the door part way, the push still to come: not opened yet (the chair_moved goal
+        # that pushes it reports that)
         if execute and not (action_id == "open" and push_open.NEXT_STEP):
             ctx.update_object(self.instance_id, opened=action_id == "open")
         return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
