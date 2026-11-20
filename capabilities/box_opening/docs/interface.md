@@ -1546,14 +1546,19 @@ frame), the scene camera's where the wrist found none. Where both read them
 the run says so (`HEIGHTS:`, and a `heights` row; past 30 mm apart a
 WARNING), and the other camera's are not used. The two are never mixed, and
 neither is put under the other's lid. Each camera reads every height its own
-way: the wrist's have stood 18 to 30 mm under the scene camera's since its
-repair (flatbot 2026-10-27; RAMMP 1.5 2026-11-20, 17 to 30 mm), the press met
-the lid 40 to 45 mm over the wrist's top on the runs that opened the box, and
-the press and the set-down go down by touch for that reason. Where the scene
-camera's fix flies, the aim from the look pose still judges the lid against
-the table its own frame shows and still never lowers the press point to the
-wrist's reading (`ButtonAimer.fix`): that bound is what keeps the press from
-starting below the lid, and it is as it flew.
+way: the wrist's have stood under the scene camera's since its repair (flatbot
+2026-10-27: its table 18 to 22 mm under at the aim, and the press met the lid
+40 to 45 mm over the wrist's top on the runs that opened the box), and the
+press and the set-down go down by touch for that reason. On RAMMP 1.5 the gap
+is wider: on the saved frames of 2026-11-20 the wrist's own finder reads the
+table 31 to 50 mm and the lid's top 39 to 58 mm under the scene camera's (the
+lid 92 to 94 mm over its table by the wrist, 100 mm by the scene camera).
+Which of the two is right in height on this chair is not known: the first
+press's `CONTACT` line (how far over the cameras' top the pads met the lid)
+says. Where the scene camera's fix flies, the aim from the look pose still
+judges the lid against the table its own frame shows and still never lowers
+the press point to the wrist's reading (`ButtonAimer.fix`): that bound is what
+keeps the press from starting below the lid, and it is as it flew.
 
 ### The side survey and the orchestrator's selection: an interface gap
 

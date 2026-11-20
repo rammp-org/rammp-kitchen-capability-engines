@@ -2484,8 +2484,10 @@ def say_tables(runner, scene_seen, fix, run_table_z=None):
     way, and what a run needs of them is the lid's top over the table it stands on, which one camera's
     frame gives (reach_lid_off.setdown_table_z). The wrist's stand lower than the scene camera's
     (flatbot since 2026-10-27: its table 18-22 mm under the scene's, button_aim's note; the press met
-    the lid 40-45 mm over the wrist's top on 2026-11-13 and 11-17), which every run on a wrist find
-    has flown with: the press and the set-down go down by touch. `run_table_z`: the table the run
+    the lid 40-45 mm over the wrist's top on 2026-11-13 and 11-17; RAMMP 1.5 2026-11-20, the finder
+    on four runs' saved frames: its table 31-50 mm and its lid 39-58 mm under the scene camera's),
+    which every run on a wrist find has flown with: the press and the set-down go down by touch.
+    Which camera is right in height on a given chair only that touch says. `run_table_z`: the table the run
     plans by (the watcher's), which is the fix's own unless the world file names one. Returns the
     wrist's table less the scene camera's (m), or None where one of them read none."""
     if scene_seen is None or fix is None or getattr(fix, "source", "") != "wrist":

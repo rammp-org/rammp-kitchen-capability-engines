@@ -439,6 +439,25 @@ def own_fix(locator, fix):
     return replace(fix, top_xyz=top, pose=pose)
 
 
+def in_force(locator):
+    """(turn_rad, along_m) of the correction `locator` places its fixes with now; (0.0, 0.0) with none."""
+    check = getattr(locator, "check", None)
+    if check is None or not check.active:
+        return 0.0, 0.0
+    return float(check.turn_rad), float(check.along_m)
+
+
+def refix(locator, fix, was):
+    """A scene fix that `locator`.locate() returned while the correction `was` was in force (in_force's
+    answer then), as the correction in force NOW has it: for a caller that holds such a fix across an
+    adopt() and goes on using it (turned_fix by what changed). `fix` itself where nothing changed, it
+    is not the scene camera's, or the camera cannot be placed."""
+    now, lens = in_force(locator), lens_xy(locator)
+    if fix is None or lens is None or getattr(fix, "source", "") == "wrist":
+        return fix
+    return turned_fix(fix, lens, now[0] - float(was[0]), now[1] - float(was[1]))
+
+
 def adopt(ctx, locator, scene_fix, wrist_fix, runner=None, by=""):
     """A wrist find was just taken for the container the scene camera has at `scene_fix` (a fix as
     `locator`.locate() returned it, with the correction that is in force NOW: nothing may have changed

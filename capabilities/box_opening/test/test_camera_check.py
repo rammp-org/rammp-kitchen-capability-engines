@@ -341,3 +341,22 @@ def test_every_fix_the_locator_returns_is_placed_by_the_check_in_force(tmp_path)
     bare = SceneLocator.__new__(SceneLocator)  # one built with no check at all (a test's): as it always was
     bare._locate = lambda timeout_s: raw
     assert bare.locate(1.0) is raw
+
+
+def test_a_scene_fix_held_across_a_measure_can_be_put_where_the_new_correction_has_it(tmp_path):
+    """refix: a caller that flies the scene camera's fix, has the wrist find the same lid part way (the look
+    pose), and goes on comparing later scene looks with the fix it holds."""
+    loc = _locator(tmp_path)
+    assert cc.in_force(loc) == (0.0, 0.0) and cc.in_force(SimpleNamespace()) == (0.0, 0.0)
+    held = _fix(PAIRS[1][0])  # returned with nothing in force
+    was = cc.in_force(loc)
+    d = cc.adopt(None, loc, held, (*PAIRS[1][1], 0.40))
+    assert cc.in_force(loc) == (d.turn_rad, d.along_m)
+    now = cc.refix(loc, held, was)
+    assert now.top_xyz[:2] == pytest.approx(PAIRS[1][1]) and now.top_xyz[2] == held.top_xyz[2]
+    # ... which is where a look made now puts the same container: turned by the locator, moved along by own_fix
+    again = cc.own_fix(loc, _fix(cc.turn_xyz(LENS, d.turn_rad, (*PAIRS[1][0], 0.443))[:2]))
+    assert again.top_xyz[:2] == pytest.approx(now.top_xyz[:2])
+    assert cc.refix(loc, held, cc.in_force(loc)) is held  # nothing changed since: as it is
+    wrist = _fix((0.6, 0.0), source="wrist")
+    assert cc.refix(loc, wrist, was) is wrist and cc.refix(loc, None, was) is None
