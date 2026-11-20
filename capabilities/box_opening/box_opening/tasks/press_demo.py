@@ -2374,7 +2374,8 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         log.info(
             "[press_demo] WRIST LOOK: the container it finds is the selected one (%s): %s" % (tie.instance_id, how)
         )
-        apart = tie.cameras_apart(at[:2])
+        asked = getattr(tie, "cameras_apart", None)  # (a tie that does not measure it says nothing of it)
+        apart = asked(at[:2]) if callable(asked) else None
         if apart is not None:
             # taken by the one-container rule alone (SELECTED_WIDE_DEG): how far the two cameras put one
             # container apart, kept for the record and for what goes by the scene camera's numbers after this

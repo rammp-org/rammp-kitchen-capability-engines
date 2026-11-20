@@ -89,6 +89,12 @@ SURVEY_VIEW = re.compile(r"^WRIST SURVEY (survey:\S+) \(.*?\): (.*)$")
 FIX = re.compile(r"^(WRIST SURVEY|SCENE): box at \[%s, %s\].*— reaching out" % (NUM, NUM))
 WRIST_VS_SCENE = re.compile(r"^WRIST LOOK: the box at \[.*?\]; the scene camera had it at \[.*?\].*?, (\d+) mm away")
 NO_CONTAINER = re.compile(r"^WRIST LOOK: no container .*— the scene camera's box is taken")
+# a selected id the scene camera no longer has, and the one container of its kind read for it (the scene
+# locator's line: perception/scene_source.locate, once a run)
+ID_ADOPTED = re.compile(
+    r"^\[scene\] the selected container \((.*?)\) is in none of the segmenter's frames, and they hold one container "
+    r"of its kind, (.*?): that one is read as the selected one"
+)
 HOME_FIRST = re.compile(r"^HOME FIRST: ")
 LOOK_START = re.compile(r"^REACH-OUT: hand tilted (\d+) deg; looking")
 # a look that found no button where the find had the box, and the look flown over the lid the wrist's own
@@ -494,6 +500,13 @@ class FlightView:
             return
         if HOME_FIRST.match(s):
             self._note("the arm was not at its rest pose; going there first")
+            return
+        m = ID_ADOPTED.match(s)
+        if m:
+            self._note(
+                "%s is no longer in the scene camera's list; the one container in view (%s) is taken for it"
+                % m.groups()
+            )
             return
         m = FIX.match(s)
         if m:

@@ -1160,3 +1160,19 @@ def test_a_look_that_goes_again_over_the_lid_the_wrist_sees_is_a_step_of_its_own
         ["PRESS", "FAIL"],
     ]
     assert "no button from the look pose, nor from 2 looks again" in steps[4]
+
+
+def test_a_selected_id_the_scene_camera_no_longer_has_is_said_with_the_one_taken_for_it():
+    """2026-11-20 13:42: the goal's id was in none of the detections. Where the one container in view is read for
+    it (perception/segmenter_source), the view says so once, with both ids."""
+    said = (
+        2,
+        "[scene] the selected container (food_container_2) is in none of the segmenter's frames, and they hold one "
+        "container of its kind, food_container_5: that one is read as the selected one (its tracker gave it a new "
+        "number)",
+    )
+    out = [" ".join(line.split()) for line in _view([said], 2)]
+    assert out[1] == (
+        "note food_container_2 is no longer in the scene camera's list; the one container in view "
+        "(food_container_5) is taken for it"
+    )

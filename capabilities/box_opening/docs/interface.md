@@ -1523,8 +1523,8 @@ container on the table). Before the run's first fix of the container, where the
 selected id is in none of the segmenter's frames and they hold one container of
 its kind under one other id, for five frames over at least a second, that one is
 read as the selected container from then on. The scene camera's line says it
-once with both ids, and the look's record has the id it read (`segmenter`
-`adopted`). With two or more containers of the kind and the selected id gone,
+once with both ids, the console notes it (`<id> is no longer in the scene camera's list; the one container in view (<id>) is taken for it`), and the
+look's record has the id it read (`segmenter` `adopted`). With two or more containers of the kind and the selected id gone,
 nothing says which was selected, and everything is as below. The look's record
 also keeps the most containers of the kind any one of its frames held
 (`containers`). Not flown.
