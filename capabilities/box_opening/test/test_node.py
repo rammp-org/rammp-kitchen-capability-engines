@@ -2247,6 +2247,34 @@ def test_an_air_control_that_is_neither_impedance_nor_position_is_refused_before
         assert engine.execute("open_box", {}, FakeCtx())["executed"]
 
 
+def test_the_check_of_the_scene_camera_against_the_wrists_is_the_deployments_and_kept_by_default(engine, monkeypatch):
+    """camera_check goes to every process the node starts, in its environment (the run, the line-up's watch:
+    whatever builds a scene locator reads it there). A value that is none of the three is refused before
+    anything runs: the run would read it as "keep" while whoever set it meant it off."""
+    from box_opening.constants import CAMERA_CHECK_ENV
+    from box_opening.perception import camera_check
+
+    assert node.PARAMS["camera_check"] == "keep" and node.CAMERA_CHECKS == camera_check.MODES
+    assert engine._env()[CAMERA_CHECK_ENV] == "keep"
+    for value in ("run", "none"):
+        engine.set_parameters([Parameter("camera_check", value=value)])
+        assert engine._env()[CAMERA_CHECK_ENV] == value and camera_check.mode_of(engine._env()) == value
+    engine.set_parameters([Parameter("camera_check", value="")])  # unset: kept
+    assert engine._env()[CAMERA_CHECK_ENV] == "keep"
+    given(monkeypatch, FULL_RUN)
+    lines = []
+    monkeypatch.setattr(LOGGER, "log", lambda level, msg, *a: lines.append(msg))
+    engine.set_parameters([Parameter("camera_check", value="of")])
+    ctx = FakeCtx()
+    with pytest.raises(EngineError) as e:
+        engine.execute("open_box", {}, ctx)
+    assert e.value.error_code == "bad_config" and not e.value.recoverable
+    assert "'of'" in str(e.value) and '"keep", "run" or "none"' in str(e.value)
+    assert ctx.said == [] and not any(ln.startswith("ARGV ") for ln in lines)  # no run was started
+    engine.set_parameters([Parameter("camera_check", value="none")])
+    assert engine.execute("open_box", {}, FakeCtx())["executed"]
+
+
 def test_a_runs_budget_is_what_its_line_up_left(engine, monkeypatch):
     """The orchestrator's 120 s cover the line-up and the run: a run started late is stopped its own way
     that much sooner, and the longest run logged still fits after the longest line-up."""
