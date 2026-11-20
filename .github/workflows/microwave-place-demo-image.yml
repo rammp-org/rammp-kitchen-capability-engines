@@ -9,7 +9,16 @@ permissions:
   packages: write
 
 jobs:
+  tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run microwave_place tests in the ROS 2 test image
+        run: make test-arm ARGS=capabilities/microwave_place/test
+
   publish:
+    needs: tests
     runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4

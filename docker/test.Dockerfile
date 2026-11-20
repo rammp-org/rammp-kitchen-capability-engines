@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # numpy, scipy and pybullet are pinned to the versions the SheppyArm goldens were recorded with
 # (pybullet 3.2.7 from PyPI reproduces the recorded pybullet-arm64 3.2.8 output exactly).
 # hadolint ignore=DL3013
-RUN pip install --no-cache-dir numpy==1.26.4 scipy==1.14.0 pybullet==3.2.7 pytest
+RUN pip install --no-cache-dir numpy==1.26.4 scipy==1.14.0 pybullet==3.2.7 pytest pyyaml==6.0.2
 
 # Fetch commit $2 of GitHub repo $1 into dir $3 (a full SHA or a tag: a shallow fetch needs one).
 # hadolint ignore=SC2016
@@ -67,7 +67,7 @@ RUN . /ws/install/setup.sh && fetch-commit rammp-org/rammp-deployments ${DEPLOYM
     && rm -rf /tmp/dep
 
 # Sources come from the mounted repo, so there is nothing to rebuild when they change.
-ENV PYTHONPATH=/repo/capability_engine:/repo/shared/door_common:/repo/shared/capability_ui:/repo/capabilities/microwave:/repo/capabilities/fridge
+ENV PYTHONPATH=/repo/capability_engine:/repo/shared/door_common:/repo/shared/capability_ui:/repo/capabilities/microwave:/repo/capabilities/fridge:/repo/capabilities/microwave_place
 RUN printf '%s\n' '#!/bin/bash' \
         '. /opt/ros/humble/setup.bash' '. /ws/install/setup.bash' 'exec "$@"' \
         > /entrypoint.sh \
