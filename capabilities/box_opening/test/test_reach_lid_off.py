@@ -7439,7 +7439,8 @@ def _lids(monkeypatch, *finds):
 
     def lid_from_here(node, ctx_, runner_, watcher, args, locator, scene_fix, aimed_xy):
         asked.append((tuple(aimed_xy), getattr(scene_fix, "source", "scene"), locator is not None))
-        return left.pop(0) if left else (None, "the wrist's frame from the look pose: no counter")
+        fix, why = left.pop(0) if left else (None, "the wrist's frame from the look pose: no counter")
+        return fix, why, None if fix is None else press_demo.BY_ONLY
 
     monkeypatch.setattr(rp, "lid_from_here", lid_from_here)
     return asked
@@ -7489,7 +7490,11 @@ def test_a_look_that_finds_no_button_looks_again_over_the_lid_the_wrist_sees(ctx
         "LOOK AGAIN 1 of 2: no button where the scene camera had the box; the wrist sees the lid at [0.750, -0.730, "
         "0.370], 184 mm from there — the look moves over it" in out
     )
-    assert "the wrist at the look" in out  # the counter's edges read again, on the wrist's own points
+    # the counter's edges read again on everything the run has seen of it, each camera named once
+    assert "COUNTER (the scene camera and the wrist from a look pose)" in out
+    assert "COUNTER (the scene camera, the wrist from a look pose and the wrist at the look)" in out
+    assert "the wrist at the look and the wrist at the look" not in out
+    assert "from the wrist's own find" in out and "from the scene camera's" not in out  # (the AIMED line's prior)
     assert out.rstrip().endswith("arm home")
 
 
@@ -7587,6 +7592,7 @@ def test_a_lid_whose_look_does_not_plan_is_no_way_in_from_the_look_pose(ctx, mon
             "the look pose (IK_FAIL)) — nothing was pressed — returning home" % word in out
         )
         assert ctx.no_way_in.startswith("no reach-out press plans for the lid the wrist sees")
+        assert ctx.no_way_in_at == pytest.approx(_wrist_lid().top_xyz)  # the place the guidance is handed
 
 
 def test_a_look_again_is_flown_only_where_the_runs_time_still_holds_it(ctx, monkeypatch, tmp_path, capsys):
@@ -7612,3 +7618,69 @@ def test_a_look_again_that_stops_part_way_ends_the_run_there(ctx, monkeypatch, t
     code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [None, (BUTTON, 0.4)], ends=ends)
     assert code == 1 and rec.events == ["reach:look", "aim:reach-aim", "reach:look"]
     assert ctx.client.lets_go  # a compliant leg stopped part way is let go of there
+
+
+def test_after_a_look_again_the_press_starts_from_the_higher_of_the_two_cameras_lid_tops(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """Review of 2026-11-20: after a look again the "higher top" guard compared the wrist's top with the wrist's
+    aim and the scene camera's top of the same lid was dropped (the wrist read the lid 39-58 mm under the scene
+    camera's that day, and reads low on flatbot). The scene camera's top of the lid the look again took goes
+    with it, and the press starts from the higher; the counter map after the aim is the last look's own, from
+    the joints its frame was shot at."""
+    lid = _wrist_lid()  # its top 30 mm under the scene camera's (BUTTON's z)
+    _lids(monkeypatch, (lid, None))
+    maps = []
+    real = rlo.counter_map
+    monkeypatch.setattr(
+        rlo,
+        "counter_map",
+        lambda c, w, fix, q, tz, aim=False, more=(): maps.append((fix, list(q), aim, [f for f, _q in more]))
+        or real(c, w, fix, q, tz, aim=aim, more=more),
+    )
+    low = (BUTTON[0], BUTTON[1], BUTTON[2] - 0.05)  # the aim's own height for the button, 50 mm under the scene's
+    up = (low[0], low[1], low[2] + 0.009)  # ... and for the popped knob after the press, by the same camera
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [None, (low, 0.4), (up, 9.0)])
+    assert code == 0 and ctx.scene_top_z == pytest.approx(BUTTON[2])
+    out = capsys.readouterr().out
+    assert "the scene camera puts the lid 50 mm higher than the wrist's aim: pressing from that height" in out
+    assert "the wrist's own find puts the lid" not in out
+    # the three maps: the first look's (the scene camera's fix), the look again's, and the aim's after it
+    assert [(m[2], len(m[3])) for m in maps] == [(False, 0), (False, 1), (True, 1)]
+    assert maps[1][0] is lid and maps[2][0] is lid and maps[1][1] == maps[2][1] != maps[0][1]  # shot from the look pose
+    assert maps[1][3][0].top_xyz == pytest.approx(BUTTON)  # ... pooled with the scene camera's
+
+
+def test_a_wrist_fix_presses_from_the_scene_cameras_top_only_where_main_handed_it_one(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The run's own fix the wrist's (its look from rest): with the scene camera's top of the same lid
+    (ctx.scene_top_z: main, after the wrist's look) the press starts from the higher of the three; without one,
+    from the higher of the wrist's find and its aim, as before, and said as what it is."""
+    real = rp.run_reach_press
+    low = (BUTTON[0], BUTTON[1], BUTTON[2] - 0.05)
+    up = (low[0], low[1], low[2] + 0.009)  # the popped knob after the press, as the same camera reads it
+    for find_dz, scene_top, said in (
+        # the wrist's find 30 mm under the scene camera's top of the same lid: the scene camera's is the higher
+        (-0.03, BUTTON[2], "the scene camera puts the lid 50 mm higher than the wrist's aim"),
+        (0.0, None, "the wrist's own find puts the lid 50 mm higher than the wrist's aim"),
+        (0.0, BUTTON[2] - 0.10, "the wrist's own find puts the lid 50 mm higher than the wrist's aim"),
+    ):
+
+        def by_the_wrist(node, ctx_, cfg, runner, watcher, args, fix, locator, _dz=find_dz, _top=scene_top, _real=real):
+            fix.source, ctx_.scene_top_z = "wrist", _top
+            fix.top_xyz = (BUTTON[0], BUTTON[1], BUTTON[2] + _dz)
+            return _real(node, ctx_, cfg, runner, watcher, args, fix, None)
+
+        monkeypatch.setattr(rp, "run_reach_press", by_the_wrist)
+        where = tmp_path / ("%s-%s" % (find_dz, scene_top))
+        code, _rec, _chain, _rows = _full_flow(ctx, monkeypatch, where, [(low, 0.4), (up, 9.0)])
+        monkeypatch.setattr(rp, "run_reach_press", real)
+        out = capsys.readouterr().out
+        assert code == 0 and said + ": pressing from that height" in out, (scene_top, out[-1500:])
+        assert "from the wrist's own find" in out  # the AIMED line names the prior it measured from
+    # a scene fix flown and aimed, as ever: its own top, said as the scene camera's
+    code, _rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path / "scene", [(low, 0.4), (up, 9.0)])
+    out = capsys.readouterr().out
+    assert code == 0 and "the scene camera puts the lid 50 mm higher than the wrist's aim" in out
+    assert "0 mm from the scene camera's" in out and "from the wrist's own find" not in out

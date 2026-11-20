@@ -496,7 +496,7 @@ LOOK_PAST_REACH_M = 0.04
 PRESS_PAST_REACH_M = -0.025
 
 
-def no_way_in(ctx, cfg, runner, args, why, home=False):
+def no_way_in(ctx, cfg, runner, args, why, home=False, at=None):
     """No press plans from where the chair stands (`why`, with each tilt's reason): what the run says and
     answers. Flatbot 2026-11-17 16:43: a box 0.79 m out, the slide in swinging the arm wide at two tilts
     and the stroke crossing the user's padding at the two others, and the run "just ended" with the arm
@@ -507,10 +507,16 @@ def no_way_in(ctx, cfg, runner, args, why, home=False):
     the chair and looks again. `home`: the arm stands at the look pose (the aimed button's press did not
     plan): it goes home first, as it always has there, and only an arm that got home is guided from; one
     that did not holds, which is the STOP it was. Without the guidance (a run by hand) everything is as
-    it was: the STOP line, the row, exit 1."""
+    it was: the STOP line, the row, exit 1.
+    `at`: the lid's top (x, y, z) no press planned for, where that is NOT the place the run's find handed
+    this reach (a look again's lid: the wrist's, 16-19 cm from the scene camera's on 2026-11-20). Left
+    on ctx.no_way_in_at for press_demo, which hands the engine THAT place: the engine bars the cell
+    of the place it is handed, and handed the find's own it barred a cell the lid does not stand in
+    and asked "Ready?" with the chair unmoved (review of 2026-11-20). None: the find's own place."""
     guided = bool(getattr(args, "guide", False))
     word = "NO WAY IN" if guided else "STOP"
     ctx.no_way_in = why  # press_demo hands the engine the reason with its request to guide
+    ctx.no_way_in_at = None if at is None else tuple(float(v) for v in at)
     if not home:
         log.info("[press_demo] %s: %s; nothing moved" % (word, why))
         runner.note("reach_refused", why=why, **({"guided": True} if guided else {}))
@@ -2927,11 +2933,12 @@ def _way_home(ctx, cfg, runner, stroke, held, q_held, ahead, scene_fix, locator)
 # four looks stood short and left of the box with the lid whole in the frame's corner, the aim's one
 # circle was "190 mm from the prior", and four runs ended "no button from the look pose". Where the aim
 # finds no button, the wrist's own container finder (the survey's: perception/wrist_finder, by the lid's
-# geometry) is asked of a frame from the look pose; a lid it finds, that is the selected container by the
-# run's own rule (press_demo.tie_refusal, alone_refusal) and stands elsewhere than the look was aimed at,
-# becomes the run's box: the look for IT is planned as every look is (plan_reach: the press proven from
-# it, the planner's full world with the box there, the counter's edges) and flown, and the aim asked
-# again with its prior there.
+# geometry) is asked of a frame from the look pose. What stands where the look was aimed is left out (no
+# button was found there); of the lid-sized tops elsewhere, the one the run's own rule takes for the
+# selected container, alone (press_demo.tie_refusal, alone_refusal; a run by hand: the one top there
+# is), becomes the run's box: the look for IT is planned as every look is (plan_reach: the press proven
+# from it, the planner's plan, the run's own checks with the counter's edges kept out) and flown, and the
+# aim asked again with its prior there.
 RELOOKS_MAX = 2  # looks again in one reach: the first over the lid, a second where that view placed it better
 # A look again is flown only where the run's time (reach_lid_off.RunClock; None: no engine times it)
 # still holds it and all a run does after its look. RELOOK_S: the frame, the finder, the proof and the
@@ -2941,6 +2948,8 @@ RELOOKS_MAX = 2  # looks again in one reach: the first over the lid, a second wh
 RELOOK_S = 8.0
 RELOOK_REST_S = 40.0
 RELOOK_TAG = "reach-look-again"
+# What a run has seen of the counter, by which camera from where: how each is named in the keep-out's line
+SEEN_SCENE, SEEN_SURVEY, SEEN_LOOK = "the scene camera", "the wrist survey", "the wrist from a look pose"
 
 
 @dataclass
@@ -2948,7 +2957,9 @@ class LookAgain:
     """A look flown over the lid the wrist found from the look before it: `fix` the wrist's (a SceneFix,
     source "wrist"), the run's box from here on; `plan` its look's (plan_reach); `button` the aim's prior
     there; `counter_z` the table the counter's edges were read on; `q_from` where the arm stood as the
-    frame was shot; `moved_m` how far the lid stands from where the look before was aimed."""
+    frame was shot; `moved_m` how far the lid stands from where the look before was aimed; `seen` what
+    the run has seen of the counter up to and with this look ([(fix, the arm's joints then, which camera
+    from where)]: _seen), the newest last."""
 
     fix: object
     plan: object
@@ -2956,12 +2967,16 @@ class LookAgain:
     counter_z: float
     q_from: list
     moved_m: float
+    seen: list
 
 
 def _selection(ctx, args, locator, scene_fix):
     """(the selected id or None, its SelectionTie or None, the id where --wrist-alone takes the one
     container or None): what a find of the wrist's is judged by, as the run's own look had it
-    (press_demo.wrist_look leaves it on ctx.selection), else asked now of the scene camera's `locator`."""
+    (press_demo.wrist_look leaves it on ctx.selection, with the scene locator it asked), else asked now
+    of the scene camera's `locator`. A tie that has the one-container rule (SelectionTie.wide_deg) was
+    made when the scene camera held ONE container of the kind: where it holds two now, or cannot say,
+    the find is judged by the 75 mm alone."""
     from box_opening.tasks import press_demo as pd
 
     selected = getattr(args, "instance_id", None) or None
@@ -2969,22 +2984,37 @@ def _selection(ctx, args, locator, scene_fix):
         return None, None, None
     kept = getattr(ctx, "selection", None)
     if kept is not None and kept[0] == selected:
-        return kept
-    if locator is None:
+        tie, alone = kept[1], kept[2]
+        asked = kept[3] if len(kept) > 3 and kept[3] is not None else locator
+    elif locator is None:
         return selected, None, None
-    by_scene = scene_fix if getattr(scene_fix, "source", None) != "wrist" else None
-    tie, alone = pd.selection_look(locator, by_scene, ctx.model, selected, getattr(args, "wrist_alone", False))
+    else:
+        by_scene = scene_fix if getattr(scene_fix, "source", None) != "wrist" else None
+        tie, alone = pd.selection_look(locator, by_scene, ctx.model, selected, getattr(args, "wrist_alone", False))
+        asked = locator
+    if tie is not None and getattr(tie, "wide_deg", 0.0) > 0.0:
+        one = getattr(asked, "only_one", None)
+        if not (callable(one) and one()):
+            tie = dataclasses.replace(tie, wide_deg=0.0)
     return selected, tie, alone
 
 
 def lid_from_here(node, ctx, runner, watcher, args, locator, scene_fix, aimed_xy):
     """The container the wrist's finder has in a frame shot from where the arm stands (the look pose, the
-    aim having found no button near `aimed_xy`): (its fix, None), or (None, why there is no lid to look
-    at again). Geometry alone (no button asked of this frame: the aim that follows the look again asks).
-    Of several lid-sized tops the selection's tie names one where it takes exactly one of them; a find
-    the run's own rule does not take for the selected container is none (press_demo.tie_refusal,
-    alone_refusal; a selection nothing ties a find to takes none), and so is one within half a lid of
-    `aimed_xy`: the look already stood over it."""
+    aim having found no button near `aimed_xy`): (its fix, None, how it was taken: press_demo.BY_*), or (None, why
+    there is no lid to look at again, None). Geometry alone (no button asked of this frame: the aim that
+    follows the look again asks).
+
+    A lid-sized top within half a lid of `aimed_xy` is left out of everything here: the look stood over
+    it and the aim found no button on it, so it is not the container and no rival of one. (The finder
+    is NOT told where the look was aimed: told, it named whatever lid-sized top stood nearest that place,
+    and the lid, in view elsewhere, was never looked at; review of 2026-11-20.) Of the tops elsewhere,
+    the lid is the one the run's own rule takes, alone: with a selection the one its tie takes
+    (press_demo.tie_refusal: two that it takes, a second top in its direction, or none, and there is
+    no lid), with --wrist-alone the one container in the frame, by hand (no selection) the one top
+    there is. A selection nothing ties a find to takes none."""
+    from types import SimpleNamespace
+
     from box_opening.perception import wrist_finder as wf
     from box_opening.tasks import press_demo as pd
     from box_opening.tasks import survey as sv
@@ -2992,55 +3022,151 @@ def lid_from_here(node, ctx, runner, watcher, args, locator, scene_fix, aimed_xy
     m = ctx.model
     frame, snap, pose, why = sv.grab_frame(node, watcher, runner, RELOOK_TAG)
     if frame is None:
-        return None, "no wrist frame from the look pose (%s)" % why
-    within = sv._within_reach(m)
+        return None, "no wrist frame from the look pose (%s)" % why, None
     lid_m = float(max(m.lid_dims[0], m.lid_dims[1]))
     selected, tie, alone = _selection(ctx, args, locator, scene_fix)
-    find = wf.find_container([frame], m, check_buttons=False, reachable=within, seen_at=tuple(aimed_xy))
-    if find.fix is None and tie is not None:
-        # two or more places pass and the finder will not guess: the one the tie takes alone is named to it
-        live = [q for q in find.places if q.button != "none" and within((q.xy[0], q.xy[1], q.top_z))]
-        named = [q for q in live if tie.judge(q.xy)[0]]
-        if len(live) > 1 and len(named) == 1:
-            find = wf.find_container([frame], m, check_buttons=False, reachable=within, seen_at=tuple(named[0].xy))
+
+    def aimed_at(xy):
+        return math.hypot(float(xy[0]) - float(aimed_xy[0]), float(xy[1]) - float(aimed_xy[1])) < 0.5 * lid_m
+
+    find = wf.find_container([frame], m, check_buttons=False)
     try:
         sv.save_frame(watcher, snap, pose, frame, find.why)
     except Exception as e:  # noqa: BLE001 - a frame kept for inspection only
         log.info("[press_demo] (the look pose's frame was not kept: %s)" % e)
-    fix = find.fix
-    if fix is None:
-        return None, "the wrist's frame from the look pose: %s" % find.why
-    at = fix.top_xyz
+    here = "the wrist's frame from the look pose"
+    tops = [q for q in find.places if q.button != "none" and not aimed_at(q.xy)]
+    # what the tie's rival test and --wrist-alone's count read: the frame's tops but for what stands where
+    # the look was aimed
+    rest = SimpleNamespace(
+        places=tuple(tops), patches=tuple(p for p in find.patches if not aimed_at(p.xy)), fix=None, why=find.why
+    )
+    if not tops:
+        under = [q for q in find.places if q.button != "none"]
+        if under:
+            return (
+                None,
+                "%s shows no lid but the lid-sized top at [%.3f, %.3f], where the look was aimed and the aim found "
+                "no button" % (here, under[0].xy[0], under[0].xy[1]),
+                None,
+            )
+        return None, "%s: %s" % (here, find.why), None
     if tie is not None:
-        refused, _how = pd.tie_refusal(tie, find, at)
+        taken = [q for q in tops if tie.judge(q.xy)[0]]
+        if len(taken) != 1:
+            if not taken:
+                q = tops[0]
+                return (
+                    None,
+                    "%s: a container at [%.3f, %.3f], %s: not taken for the selected container %s"
+                    % (here, q.xy[0], q.xy[1], tie.judge(q.xy)[1], tie.instance_id),
+                    None,
+                )
+            return (
+                None,
+                "%s: lid-sized tops at [%.3f, %.3f] and [%.3f, %.3f], both where the scene camera has the selected "
+                "container %s: nothing says which it is"
+                % (here, taken[0].xy[0], taken[0].xy[1], taken[1].xy[0], taken[1].xy[1], tie.instance_id),
+                None,
+            )
+        lid = taken[0]
+        refused, _how = pd.tie_refusal(tie, rest, (lid.xy[0], lid.xy[1], lid.top_z))
+        asked = getattr(tie, "cameras_apart", None)
+        how = pd.BY_TIE_ONE if callable(asked) and asked(lid.xy) is not None else pd.BY_TIE
     elif alone:
-        refused = pd.alone_refusal(alone, find, at, m)
+        lid = tops[0]
+        refused = (
+            pd.alone_refusal(alone, rest, (lid.xy[0], lid.xy[1], lid.top_z), m)
+            if len(tops) == 1
+            else (
+                "lid-sized tops at [%.3f, %.3f] and [%.3f, %.3f]: two containers, and the selected one (%s) is in none "
+                "of the scene camera's detections, so nothing says which it is"
+                % (tops[0].xy[0], tops[0].xy[1], tops[1].xy[0], tops[1].xy[1], alone)
+            )
+        )
+        how = pd.BY_ALONE
     elif selected:
+        lid, how = tops[0], None
         refused = (
             "a container at [%.3f, %.3f], and nothing the scene camera saw ties it to the selected container %s"
-            % (at[0], at[1], selected)
+            % (
+                lid.xy[0],
+                lid.xy[1],
+                selected,
+            )
         )
     else:
-        refused = None
-    if refused is not None:
-        return None, "the wrist's frame from the look pose: %s" % refused
-    moved = math.hypot(float(at[0]) - float(aimed_xy[0]), float(at[1]) - float(aimed_xy[1]))
-    if moved < 0.5 * lid_m:
-        return None, (
-            "the wrist's frame from the look pose has the lid at [%.3f, %.3f], %.0f mm from where the look was "
-            "aimed: the look stood over it" % (at[0], at[1], 1000 * moved)
+        lid, how = tops[0], pd.BY_ONLY
+        refused = (
+            None
+            if len(tops) == 1
+            else (
+                "lid-sized tops at [%.3f, %.3f] and [%.3f, %.3f]: refusing to guess"
+                % (tops[0].xy[0], tops[0].xy[1], tops[1].xy[0], tops[1].xy[1])
+            )
         )
-    return fix, None
+    if refused is not None:
+        return None, "%s: %s" % (here, refused), None
+    # the finder's own fix of THAT top (its points, its counter): named to it, as another camera's detector
+    # names one of several (wrist_finder's `seen_at`), and taken only where it is the one it then places
+    named = wf.find_container([frame], m, check_buttons=False, seen_at=(float(lid.xy[0]), float(lid.xy[1])))
+    fix = named.fix
+    if fix is None or math.hypot(fix.top_xyz[0] - lid.xy[0], fix.top_xyz[1] - lid.xy[1]) >= 0.5 * lid_m:
+        return (
+            None,
+            "%s: the lid-sized top at [%.3f, %.3f] is not placed (%s)" % (here, lid.xy[0], lid.xy[1], named.why),
+            None,
+        )
+    # this frame's points, kept with the wrist's others (what ctx.survey_clouds holds of a wrist look's frames)
+    try:
+        ctx.survey_clouds = [*(getattr(ctx, "survey_clouds", None) or ()), sv._cloud(frame)]
+    except Exception as e:  # noqa: BLE001 - kept for what else reads the counter: never the look's end
+        log.info("[press_demo] (the look pose's points were not kept: %s)" % e)
+    return fix, None, how
 
 
-def look_again(node, ctx, cfg, runner, watcher, args, locator, scene_fix, aimed, proof, n, clock=None):
+def _seen(scene_fix):
+    """Which camera, from where, a run's first fix is of (SEEN_*): how its points are named."""
+    return SEEN_SURVEY if getattr(scene_fix, "source", None) == "wrist" else SEEN_SCENE
+
+
+def _seen_words(seen, aim=False):
+    """'the scene camera, the wrist from a look pose and the wrist at the look': whose points a counter
+    map pools, each named once, in the order they were seen."""
+    names = list(dict.fromkeys(label for _fix, _q, label in seen))
+    if aim:
+        names.append("the wrist at the look")
+    return names[0] if len(names) == 1 else "%s and %s" % (", ".join(names[:-1]), names[-1])
+
+
+def _pooled_extent(*extents):
+    """The table as far as any of `extents` ((x0, x1, y0, y1) or None) shows it, or None where none does."""
+    got = [tuple(float(v) for v in e) for e in extents if e is not None]
+    if not got:
+        return None
+    return (min(e[0] for e in got), max(e[1] for e in got), min(e[2] for e in got), max(e[3] for e in got))
+
+
+def look_again(node, ctx, cfg, runner, watcher, args, locator, scene_fix, aimed, proof, n, clock=None, seen=()):
     """One look again (the note above), the aim having found no button near `aimed` (the look's prior
     button) from where the arm stands: (a LookAgain, None, None) with the arm at the new look pose; or
     (None, the run's answer, why) where the run ends or is guided from here (the lid's look does not plan:
-    no_way_in from the look pose, home first; the look stopped part way: 1); or (None, None, why) where
-    there is no look again to fly and the aim's own STOP stands. `n`: looks again flown before this one.
-    `clock`: the run's (reach_lid_off.RunClock)."""
+    no_way_in from the look pose, home first, the lid's own place handed on; the look stopped part way:
+    1); or (None, None, why) where there is no look again to fly and the aim's own STOP stands. `n`:
+    looks again flown before this one. `clock`: the run's (reach_lid_off.RunClock). `seen`: what the run
+    has seen of the counter so far ([(fix, the arm's joints then, SEEN_*)], the look before's fix last).
+
+    Where the look before was aimed by the SCENE camera's fix, the two cameras' places of one container
+    are measured against each other here, as soon as the lid is taken and whatever becomes of its look
+    (perception/camera_check.adopt). What the run goes on with: the wrist's lid as its box and the
+    wrist's own counter as its table (where the table is a fix's at all and not the world file's), as
+    for a box the wrist's look found before the reach; the scene camera's lid top kept for the press's
+    start height (ctx.scene_top_z); and the counter's edges and the table's extent POOLED from all the
+    run has seen: `seen`, a scene fix among it as the check now in force has it (camera_check.refix),
+    and this look's frame. One look-pose frame alone shows one to three edges and none of the near one
+    (the four frames of 2026-11-20), where the scene camera's cloud gave 14-20 boxes."""
     from box_opening.models.container import from_container
+    from box_opening.perception import camera_check
     from box_opening.tasks import press_demo as pd
     from box_opening.tasks import reach_lid_off as rlo
 
@@ -3057,13 +3183,14 @@ def look_again(node, ctx, cfg, runner, watcher, args, locator, scene_fix, aimed,
                 RELOOK_S + RELOOK_REST_S,
             ),
         )
-    fix, why = lid_from_here(node, ctx, runner, watcher, args, locator, scene_fix, aimed[:2])
+    fix, why, how = lid_from_here(node, ctx, runner, watcher, args, locator, scene_fix, aimed[:2])
     if fix is None:
         return None, None, why
     m = ctx.model
     at = fix.top_xyz
     moved = math.hypot(float(at[0]) - float(aimed[0]), float(at[1]) - float(aimed[1]))
-    had = "the wrist's own look" if getattr(scene_fix, "source", None) == "wrist" else "the scene camera"
+    by_scene = getattr(scene_fix, "source", None) != "wrist"
+    had = "the scene camera" if by_scene else "the wrist's own look"
     prior = from_container(fix.pose, m.button_offset)
     button = (float(prior[0]), float(prior[1]), float(at[2]))
     log.info(
@@ -3071,27 +3198,70 @@ def look_again(node, ctx, cfg, runner, watcher, args, locator, scene_fix, aimed,
         "%.3f], %.0f mm from there — the look moves over it"
         % (n + 1, RELOOKS_MAX, had, at[0], at[1], at[2], 1000 * moved)
     )
-    # the wrist's lid is the run's box from here: every world is built around it, and its own table is the one
-    # the counter's edges are read on (as for a box the wrist's look found before the reach: main)
     q_from = list(ctx.client.joints())
+    seen = list(seen)
+    if by_scene and locator is not None:
+        # THE TWO CAMERAS' PLACES OF ONE CONTAINER: the scene camera's fix the look before was aimed by, and
+        # the wrist's lid, taken for the same container by `how` (the selection's tie, by its 75 mm or by
+        # the one-container rule; --wrist-alone's one container; by hand the one top in the frame). Measured
+        # here, before the lid's look is planned: a look that does not plan must not lose the pair, and
+        # what is pooled below is the scene camera's as the check now in force has it.
+        # HOW THIS PAIR WAS ESTABLISHED is `how` (press_demo.BY_*), known here and nowhere else in this reach:
+        # what camera_check.adopt is to be told of it. (The run's own row has it: look_again's `by`.)
+        was = camera_check.in_force(locator)
+        camera_check.adopt(ctx, locator, scene_fix, fix, runner, by=pd.runner_stamp(runner))
+
+        def as_now(f):
+            try:
+                return camera_check.refix(locator, f, was)
+            except Exception as e:  # noqa: BLE001 - what cannot be re-expressed stays as it was measured
+                log.info("[press_demo] (the scene camera's points are pooled as it measured them: %s)" % e)
+                return f
+
+        seen = [(as_now(f), q, label) if label == SEEN_SCENE else (f, q, label) for f, q, label in seen]
+        if not getattr(scene_fix, "rough", False):
+            # the scene camera's own top of this lid: the press starts from the higher of the two cameras'
+            ctx.scene_top_z = float(scene_fix.top_xyz[2])
+    # the wrist's lid is the run's box from here, and its own counter the table, where the table is a fix's
+    # (as for a box the wrist's look found before the reach: main's adopt_scene_table); a table the world
+    # file names stays
+    before_z = getattr(scene_fix, "table_z_scene", None)
+    own_table = (
+        before_z is not None
+        and getattr(watcher, "table_z", None) is not None
+        and abs(float(watcher.table_z) - float(before_z)) < 1e-6
+    )
     ctx.cpose = fix.pose
     tz = getattr(fix, "table_z_scene", None)
-    if tz is not None and math.isfinite(float(tz)):
-        ctx.worlds.table_top_z, ctx.worlds.table_extent = float(tz), getattr(fix, "table_extent", None)
-        watcher.table_z = float(tz)
+    if own_table and tz is not None and math.isfinite(float(tz)):
+        ctx.worlds.table_top_z = watcher.table_z = float(tz)
+        ctx.worlds.table_extent = _pooled_extent(
+            *(getattr(f, "table_extent", None) for f, _q, _label in seen), getattr(fix, "table_extent", None)
+        )
         if ctx.mission_frames is not None:
             ctx.mission_frames.note(table_z=float(tz))
     counter_z = rlo._table_z(watcher, fix, ctx.cpose)
+    pooled = [*seen, (fix, q_from, SEEN_LOOK)]
     pd.keep_out_counter(
-        ctx, rlo.counter_map(ctx, watcher, fix, q_from, counter_z), counter_z, "the wrist at the look", runner, "look"
+        ctx,
+        rlo.counter_map(ctx, watcher, fix, q_from, counter_z, more=[(f, q) for f, q, _label in seen]),
+        counter_z,
+        _seen_words(pooled),
+        runner,
+        "look",
     )
     plan, why = plan_reach(ctx, cfg, button, q_from, depth=proof)
+    if plan is None and getattr(getattr(ctx.client, "_abort", None), "requested", False):
+        # a Ctrl+C asked for while the plan was waited on comes out as a refusal (survey.fly_view's note):
+        # the cancel it was, never a lid no press plans for, a home and a guided chair
+        raise KeyboardInterrupt
     runner.note(
         "look_again",
         n=n + 1,
         lid_xyz=[round(float(v), 4) for v in at],
         from_aimed_mm=round(1000 * moved),
         had=had,
+        by=how,
         planned=plan is not None,
         why=None if plan is not None else str(why)[:300],
         tilt_deg=None if plan is None else plan.tilt_deg,
@@ -3102,12 +3272,12 @@ def look_again(node, ctx, cfg, runner, watcher, args, locator, scene_fix, aimed,
             at[1],
             why,
         )
-        return None, no_way_in(ctx, cfg, runner, args, stop, home=True), stop
+        return None, no_way_in(ctx, cfg, runner, args, stop, home=True, at=at), stop
     res = runner.run([plan.look_leg], execute=True)
     if any(not r.ok for r in res):
         let_go_part_way(ctx, res)
         return None, 1, "the look again stopped part way"
-    return LookAgain(fix, plan, button, counter_z, q_from, moved), None, None
+    return LookAgain(fix, plan, button, counter_z, q_from, moved, pooled), None, None
 
 
 def run_reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
@@ -3253,12 +3423,14 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     from box_opening.tasks import reach_lid_off as rlo
 
     counter_z = rlo._table_z(watcher, scene_fix, ctx.cpose)
-    seen_by = "the wrist survey" if getattr(scene_fix, "source", None) == "wrist" else "the scene camera"
+    # what this reach has seen of the counter, by which camera from where the arm stood: the fix it starts
+    # from, and each look again's frame after it (look_again pools them)
+    seen = [(scene_fix, list(q0), _seen(scene_fix))]
     pd.keep_out_counter(
         ctx,
         rlo.counter_map(ctx, watcher, scene_fix, list(q0), counter_z),
         counter_z,
-        seen_by,
+        _seen_words(seen),
         runner,
         "look",
     )
@@ -3373,27 +3545,18 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     while got is None and soft:
         dump_wrist_frame(watcher, "reach-look")
         again, code, no_more = look_again(
-            node, ctx, cfg, runner, watcher, args, locator, scene_fix, prior_button, proof, relooks, clock
+            node, ctx, cfg, runner, watcher, args, locator, scene_fix, prior_button, proof, relooks, clock, seen
         )
         if code is not None:
             return code  # the lid's look did not plan (the chair is guided, or the run ends), or stopped part way
         if again is None:
             break
         relooks += 1
-        if locator is not None and getattr(scene_fix, "source", None) != "wrist":
-            # the look before was aimed where the SCENE camera had the box, and the wrist has that container
-            # elsewhere (lid_from_here took it by the run's own rule): the two cameras' places of one
-            # container, measured against each other as after the wrist's own look (press_demo.main). The
-            # scene camera's numbers are turned by it for whatever of this run still reads them, and the
-            # next run starts from it, so its first look stands over the lid (perception/camera_check)
-            from box_opening.perception import camera_check
-            from box_opening.tasks import press_demo as pd
-
-            camera_check.adopt(ctx, locator, scene_fix, again.fix, runner, by=pd.runner_stamp(runner))
         # the wrist's lid is the run's box now: what follows goes by it, as for a box the wrist's look found
-        # before the reach. The scene camera, which has the box elsewhere, does not judge it after the press
+        # before the reach. The scene camera, which had the box elsewhere, does not judge it after the press
+        # (the lid video still shows its view: ctx.scene_locator, its placement turned by the cameras' check)
         scene_fix, plan, prior_button, locator = again.fix, again.plan, again.button, None
-        yaw, counter_z, seen_by = scene_fix.pose.yaw, again.counter_z, "the wrist at the look"
+        yaw, counter_z, seen = scene_fix.pose.yaw, again.counter_z, again.seen
         eyes = (node, watcher, scene_fix, list(again.q_from))
         got, status, up_mm, measured = _aim(node, watcher, yaw, prior_button[2], prior_button[:2], runner, "reach-aim")
     if got is None:
@@ -3476,24 +3639,39 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     button = tuple(float(v) for v in got[0])
     measured = tuple(float(v) for v in measured)  # the wrist's own (_aim)
     lid_before = _lid_z(measured[2], up_mm)
+    by_wrist = getattr(scene_fix, "source", None) == "wrist"  # the find the look went by was the wrist's own
     log.info(
-        "[press_demo] AIMED from the look pose: button at [%.3f, %.3f, %.3f], %.0f mm from the scene camera's%s"
+        "[press_demo] AIMED from the look pose: button at [%.3f, %.3f, %.3f], %.0f mm from %s%s"
         % (
             button[0],
             button[1],
             button[2],
             1000 * judge_box_moved(prior_button, button),
+            "the wrist's own find" if by_wrist else "the scene camera's",
             " rough fix" if getattr(scene_fix, "rough", False) else "",
         )
     )
     rough = bool(getattr(scene_fix, "rough", False))  # a box the frame cut, placed roughly: its top is no measure
-    if soft and not rough and float(prior_button[2]) > button[2]:
-        # the press goes by the higher top, the stroke reaching on past it
+    # THE PRESS GOES BY THE HIGHER TOP, the stroke reaching on past it: the aim's, the top of the find the
+    # look went by, and, where that find was the wrist's and the scene camera had the same container
+    # (ctx.scene_top_z: press_demo.main after the wrist's look, look_again), the scene camera's too. The
+    # wrist camera is the one known to read low (flatbot: the press met the lid 40-45 mm over its top;
+    # RAMMP 1.5, 2026-11-20: its lid 39-58 mm under the scene camera's): with the wrist's find alone the
+    # guard compared the wrist with itself, and had the scene camera been right the way in would have
+    # ended 2-21 mm over the real lid (review of 2026-11-20). Nothing else goes by the scene camera's top.
+    tops = []
+    if not rough:
+        tops.append((float(prior_button[2]), "the wrist's own find" if by_wrist else "the scene camera"))
+    scene_top = getattr(ctx, "scene_top_z", None)
+    if by_wrist and scene_top is not None and math.isfinite(float(scene_top)):
+        tops.append((float(scene_top), "the scene camera"))
+    if soft and tops and max(tops)[0] > button[2]:
+        top_z, whose = max(tops)
         log.info(
-            "[press_demo] the scene camera puts the lid %.0f mm higher than the wrist's aim: pressing from that "
-            "height" % (1000 * (float(prior_button[2]) - button[2]))
+            "[press_demo] %s puts the lid %.0f mm higher than the wrist's aim: pressing from that height"
+            % (whose, 1000 * (top_z - button[2]))
         )
-        button = (button[0], button[1], float(prior_button[2]))
+        button = (button[0], button[1], top_z)
     # the box is where its button is, not where the scene camera put it: every
     # world from here on holds its cuboid there
     ctx.cpose = cpose_for_button(button, yaw, m.button_offset)
@@ -3501,9 +3679,11 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
     # frame pooled in: every line of the way in is held out of the cabinet below them
     pd.keep_out_counter(
         ctx,
-        rlo.counter_map(ctx, watcher, scene_fix, list(q0), counter_z, aim=True),
+        rlo.counter_map(
+            ctx, watcher, seen[-1][0], seen[-1][1], counter_z, aim=True, more=[(f, q) for f, q, _label in seen[:-1]]
+        ),
         counter_z,
-        "%s and the wrist at the look" % seen_by,
+        _seen_words(seen, aim=True),
         runner,
         "look",
     )
@@ -3517,9 +3697,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
 
         # the lid by the higher of the scene camera's top and the aim's knob
         # less its height: an estimate the grip errs low from (grip_lid_z)
-        lid_z = float(got[0][2]) - float(up_mm) / 1000.0
-        if not rough:
-            lid_z = max(float(prior_button[2]), lid_z)
+        lid_z = max([float(got[0][2]) - float(up_mm) / 1000.0] + [z for z, _whose in tops])
         try:
             return reach_lid_off.take_lid_off(
                 ctx, cfg, runner, eyes, button, plan.tilt_deg, lid_z, "the open box's lid at %.3f" % lid_z, yaw=yaw

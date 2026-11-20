@@ -3001,20 +3001,24 @@ def _gen15_tie(wide=True):
 
 def _from_the_look(monkeypatch, ctx, frame, selection=None, instance_id=None, aimed=GEN15_SCENE, locator=None):
     """reach_press.lid_from_here on `frame` (a WristFrame, or None with why), the run's selection as its own look
-    left it: ((fix, why), the captions its frame was kept with)."""
+    left it: ((fix, why, how it was taken), the captions its frame was kept with)."""
     from box_opening.tasks import survey as sv
 
     kept = []
     got = (frame, "snap", "pose", None) if not isinstance(frame, str) else (None, None, None, frame)
     monkeypatch.setattr(sv, "grab_frame", lambda node, watcher, runner, tag: got)
     monkeypatch.setattr(sv, "save_frame", lambda watcher, snap, pose, f, caption: kept.append(caption))
-    # (the arm's reach is the finder's own matter, tested with it: this harness's arm is not gen_1_5's)
-    monkeypatch.setattr(sv, "_within_reach", lambda model: lambda top_xyz: True)
+    monkeypatch.setattr(sv, "_cloud", lambda f: {"tag": "look"})
     ctx.model = ContainerModel.load(PINK)
-    ctx.selection = selection
+    ctx.selection, ctx.survey_clouds = selection, None
     args = SimpleNamespace(instance_id=instance_id, wrist_alone=False)
     scene_fix = SimpleNamespace(top_xyz=(*GEN15_SCENE, 0.443), source="segmenter")
     return reach_press.lid_from_here(None, ctx, None, SimpleNamespace(), args, locator, scene_fix, aimed), kept
+
+
+def _one(only=True):
+    """A scene locator that holds one container of the kind (or two), as a tie's wide cone is asked of it again."""
+    return SimpleNamespace(only_one=lambda: only)
 
 
 def test_the_wrists_finder_has_the_lid_in_the_frame_the_look_of_2026_11_20_ended_on(ctx, monkeypatch):
@@ -3025,66 +3029,121 @@ def test_the_wrists_finder_has_the_lid_in_the_frame_the_look_of_2026_11_20_ended
     from conftest import fixture_path
 
     from box_opening.perception import wrist_finder as wf
+    from box_opening.tasks import press_demo
 
     frame = wf.frame_from_capture(fixture_path(GEN15_LOOK))
-    sel = ("food_container_2", _gen15_tie(), None)
-    (fix, why), kept = _from_the_look(monkeypatch, ctx, frame, selection=sel, instance_id="food_container_2")
-    assert why is None and fix.source == "wrist"
-    assert fix.top_xyz[:2] == pytest.approx((0.776, -0.200), abs=0.003) and fix.top_xyz[2] == pytest.approx(
-        0.392, abs=0.003
-    )
+    sel = ("food_container_2", _gen15_tie(), None, _one())
+    (fix, why, how), kept = _from_the_look(monkeypatch, ctx, frame, selection=sel, instance_id="food_container_2")
+    assert why is None and fix.source == "wrist" and how == press_demo.BY_TIE_ONE
+    assert fix.top_xyz[:2] == pytest.approx((0.776, -0.200), abs=0.003)
+    assert fix.top_xyz[2] == pytest.approx(0.392, abs=0.003)
     assert np.hypot(fix.top_xyz[0] - 0.770, fix.top_xyz[1] + 0.193) < 0.010
     assert fix.table_z_scene == pytest.approx(0.301, abs=0.003)  # its own counter, 92 mm under the lid's top
     assert len(kept) == 1 and kept[0].startswith("the container at [0.776, -0.200], its top 92 mm above the counter")
-    # with a second container of the kind in the scene camera's view the 75 mm stands, and no look again is flown
-    sel = ("food_container_2", _gen15_tie(wide=False), None)
-    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame, selection=sel, instance_id="food_container_2")
-    assert fix is None and why.startswith("the wrist's frame from the look pose: a container at [0.776, -0.200], ")
-    assert why.endswith(": not taken for the selected container food_container_2")
-    # no selection (a run by hand): the one container in view
-    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame)
-    assert why is None and fix.top_xyz[:2] == pytest.approx((0.776, -0.200), abs=0.003)
+    assert ctx.survey_clouds == [{"tag": "look"}]  # its points kept with the wrist's others
+    # with a second container of the kind in the scene camera's view the 75 mm stands, and no look again is flown:
+    # by a tie made that way, and by one made with one container where the scene camera holds two NOW
+    for sel in (
+        ("food_container_2", _gen15_tie(wide=False), None, _one()),
+        ("food_container_2", _gen15_tie(), None, _one(False)),
+    ):
+        (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, frame, selection=sel, instance_id="food_container_2")
+        assert fix is None and how is None
+        assert why.startswith("the wrist's frame from the look pose: a container at [0.776, -0.200], 1")
+        assert why.endswith(": not taken for the selected container food_container_2")
+        assert ctx.survey_clouds is None
+    # no selection (a run by hand): the one top in view
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, frame)
+    assert why is None and how == press_demo.BY_ONLY
+    assert fix.top_xyz[:2] == pytest.approx((0.776, -0.200), abs=0.003)
     # a selection nothing ties a find to takes none
-    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame, instance_id="food_container_2")
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, frame, instance_id="food_container_2")
     assert fix is None and "nothing the scene camera saw ties it to the selected container food_container_2" in why
-    # a lid where the look was aimed already: the look stood over it, and looking again changes nothing
-    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame, aimed=(0.790, -0.180))
-    assert fix is None and "from where the look was aimed: the look stood over it" in why
+    # the lid where the look was aimed already: no button was found on it, and there is no other
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, frame, aimed=(0.790, -0.180))
+    assert fix is None and why == (
+        "the wrist's frame from the look pose shows no lid but the lid-sized top at [0.776, -0.200], where the look "
+        "was aimed and the aim found no button"
+    )
     # no frame from the look pose
-    (fix, why), kept = _from_the_look(monkeypatch, ctx, "no new wrist frame")
+    (fix, why, how), kept = _from_the_look(monkeypatch, ctx, "no new wrist frame")
     assert fix is None and why == "no wrist frame from the look pose (no new wrist frame)" and not kept
 
 
-def test_of_several_lid_sized_tops_the_selections_tie_names_the_one_it_takes(ctx, monkeypatch):
-    """A table with more than the container on it: where two places pass and the finder will not guess, the one
-    the selection's tie takes alone is named to it (as another camera's detector names one: `seen_at`). Two that
-    the tie takes, or none, and there is no lid to look at again."""
+def _tops(monkeypatch, *tops):
+    """wrist_finder.find_container scripted for a frame that shows the lid-sized tops `tops` [(x, y)]: unasked it
+    will not guess between two; named one (`seen_at`), it places that one. Returns what it was named."""
     from box_opening.perception import wrist_finder as wf
 
-    lid = SimpleNamespace(xy=(0.776, -0.200), top_z=0.392, button="unchecked")  # 14 deg about the scene lens
-    roll = SimpleNamespace(xy=(0.520, -0.330), top_z=0.392, button="unchecked")  # a roll of tape, well off the cone
-    fix = SimpleNamespace(top_xyz=(0.776, -0.200, 0.392), source="wrist")
-    asked = []
+    places = tuple(SimpleNamespace(xy=t, top_z=0.392, button="unchecked") for t in tops)
+    named = []
 
     def find_container(frames, model, check_buttons=True, reachable=None, seen_at=None, far_nearest=False):
-        asked.append(tuple(round(float(v), 3) for v in seen_at))
-        named = asked[-1] == lid.xy
-        return SimpleNamespace(
-            fix=fix if named else None,
-            why="the container at [0.776, -0.200]" if named else "wrist camera: two places pass: refusing to guess",
-            places=(lid, roll),
-            patches=(),
-        )
+        assert check_buttons is False and reachable is None  # geometry alone, and no top left out for its reach
+        if seen_at is None:
+            fix = SimpleNamespace(top_xyz=(*tops[0], 0.392), source="wrist") if len(tops) == 1 else None
+            return SimpleNamespace(fix=fix, why="wrist camera: %d places" % len(tops), places=places, patches=())
+        named.append(tuple(round(float(v), 3) for v in seen_at))
+        fix = SimpleNamespace(top_xyz=(*named[-1], 0.392), source="wrist")
+        return SimpleNamespace(fix=fix, why="the container at %s" % (named[-1],), places=places, patches=())
 
     monkeypatch.setattr(wf, "find_container", find_container)
-    sel = ("food_container_2", _gen15_tie(), None)
-    (got, why), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
-    assert got is fix and why is None and asked == [GEN15_SCENE, lid.xy]
-    # a second top in the cone: nothing names one, and the finder's own refusal stands
-    asked.clear()
-    roll.xy = (0.830, -0.060)
-    (got, why), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
-    assert got is None and asked == [GEN15_SCENE] and why.endswith("two places pass: refusing to guess")
+    return named
+
+
+def test_what_stands_where_the_look_was_aimed_is_left_out_and_the_lid_elsewhere_is_looked_at(ctx, monkeypatch):
+    """Review of 2026-11-20: the finder was told where the look was aimed, the place the aim had just found NO
+    button at. A lid-sized top 10-60 mm from there was named, the 75 mm tied it, and the answer was "the look
+    stood over it" with the lid in view, in the cone, never looked at. What stands within half a lid of the
+    aimed place is left out; of the rest the one the tie takes, alone, is the lid."""
+    from box_opening.tasks import press_demo
+
+    lid, tin = (0.776, -0.200), (0.700, -0.020)  # the tin 24 mm from where the look was aimed
+    sel = ("food_container_2", _gen15_tie(), None, _one())
+    named = _tops(monkeypatch, tin, lid)
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert why is None and fix.top_xyz[:2] == lid and how == press_demo.BY_TIE_ONE and named == [lid]
+    # two tops the tie takes (both in the cone, away from the aimed place): nothing says which, none is taken
+    named = _tops(monkeypatch, lid, (0.830, -0.060))
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert (
+        fix is None
+        and named == []
+        and why
+        == (
+            "the wrist's frame from the look pose: lid-sized tops at [0.776, -0.200] and [0.830, -0.060], both where "
+            "the scene camera has the selected container food_container_2: nothing says which it is"
+        )
+    )
+    # a top off the cone is no rival of the one in it
+    named = _tops(monkeypatch, lid, (0.520, -0.330))
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert why is None and fix.top_xyz[:2] == lid and named == [lid]
+    # none the tie takes: the nearest is said, as the refusal it is
+    named = _tops(monkeypatch, (0.520, -0.330))
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert fix is None and why.endswith(": not taken for the selected container food_container_2")
+    # by hand (no selection): the one top there is, and two are not guessed between
+    named = _tops(monkeypatch, tin, lid)
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object())
+    assert why is None and fix.top_xyz[:2] == lid and how == press_demo.BY_ONLY
+    named = _tops(monkeypatch, lid, (0.520, -0.330))
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object())
+    assert fix is None and why.endswith("refusing to guess")
+    # the finder, named the lid, places another top (two too near each other to name one): no lid
+    from box_opening.perception import wrist_finder as wf
+
+    _tops(monkeypatch, tin, lid)
+    scripted = wf.find_container
+    monkeypatch.setattr(
+        wf,
+        "find_container",
+        lambda frames, model, seen_at=None, **k: scripted(
+            frames, model, seen_at=None if seen_at is None else (0.900, 0.100), **k
+        ),
+    )
+    (fix, why, how), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert fix is None and how is None and "the lid-sized top at [0.776, -0.200] is not placed" in why
 
 
 def test_the_selection_a_look_again_is_judged_by_is_the_runs_own_looks_or_asked_of_the_scene_camera(ctx, monkeypatch):
@@ -3093,19 +3152,205 @@ def test_the_selection_a_look_again_is_judged_by_is_the_runs_own_looks_or_asked_
     ctx.model = ContainerModel.load(PINK)
     args = SimpleNamespace(instance_id="food_container_2", wrist_alone=False)
     tie = _gen15_tie()
-    ctx.selection = ("food_container_2", tie, None)
+    ctx.selection = ("food_container_2", tie, None, _one())
     assert reach_press._selection(ctx, args, None, None) == ("food_container_2", tie, None)
     assert reach_press._selection(ctx, SimpleNamespace(instance_id=None), None, None) == (None, None, None)
+    # the tie was made with ONE container of the kind in the scene camera's view. Where it holds two now, or
+    # cannot say, the find from the look pose is judged by the 75 mm alone (review of 2026-11-20)
+    for asked in (_one(False), SimpleNamespace(), None):
+        ctx.selection = ("food_container_2", tie, None, asked)
+        _sel, now, _alone = reach_press._selection(ctx, args, None, None)
+        assert now.wide_deg == 0.0 and now.at_xy == tie.at_xy and tie.wide_deg == press_demo.SELECTED_WIDE_DEG
+    # ... asked of the reach's own locator where the look left none
+    ctx.selection = ("food_container_2", tie, None, None)
+    assert reach_press._selection(ctx, args, _one(), None)[1].wide_deg == press_demo.SELECTED_WIDE_DEG
+    narrow = _gen15_tie(wide=False)
+    ctx.selection = ("food_container_2", narrow, None, _one())
+    assert reach_press._selection(ctx, args, None, None)[1] is narrow  # (nothing to ask again of the 75 mm)
     # a run whose own look left none (no --wrist-first): asked of the scene camera's locator, by its fix
     ctx.selection = None
     asked = []
     monkeypatch.setattr(
         press_demo,
         "selection_look",
-        lambda loc, fix, model, sel, alone: (asked.append((loc, fix, sel)), (tie, None))[1],
+        lambda loc, fix, model, sel, alone: (asked.append((loc, fix, sel)), (narrow, None))[1],
     )
     scene_fix = SimpleNamespace(source="segmenter")
-    assert reach_press._selection(ctx, args, "locator", scene_fix) == ("food_container_2", tie, None)
+    assert reach_press._selection(ctx, args, "locator", scene_fix) == ("food_container_2", narrow, None)
     assert asked == [("locator", scene_fix, "food_container_2")]
     # ... and with no scene camera to ask (the wrist's own box), nothing ties
     assert reach_press._selection(ctx, args, None, scene_fix) == ("food_container_2", None, None)
+
+
+# --- the look again itself: the pair measured first, the counter pooled, the lid's place handed on --------------
+def _again(ctx, monkeypatch, scene_fix, lid, locator, plans=True, guide=True, aborts=False, seen=None, watcher_z=None):
+    """reach_press.look_again with the frame's finder answering `lid`, the plan and the maps stood in: (its
+    answer, what was seen as each thing was asked: the plans, the counter maps, the keep-outs, the homes)."""
+    from box_opening.tasks import press_demo
+    from box_opening.tasks import reach_lid_off as rlo
+
+    got = SimpleNamespace(plans=[], maps=[], kept=[], homes=[], rows=[], flown=[])
+    monkeypatch.setattr(reach_press, "lid_from_here", lambda *a: (lid, None, press_demo.BY_TIE_ONE))
+
+    def plan_reach(c, cfg, button, q, **kw):
+        check = getattr(locator, "check", None)
+        got.plans.append((tuple(button), c.cpose, None if check is None else check.by, kw))
+        if aborts:
+            c.client._abort = SimpleNamespace(requested=True)  # a Ctrl+C asked for while the plan was waited on
+        return (SimpleNamespace(tilt_deg=30, look_leg="the look"), None) if plans else (None, "30 deg: IK_FAIL")
+
+    def counter_map(c, w, fix, q, table_z, aim=False, more=()):
+        got.maps.append((fix, list(q), [(f, list(mq)) for f, mq in more]))
+        return "a map"
+
+    monkeypatch.setattr(reach_press, "plan_reach", plan_reach)
+    monkeypatch.setattr(rlo, "counter_map", counter_map)
+    monkeypatch.setattr(
+        press_demo, "keep_out_counter", lambda c, tmap, tz, source, runner, key: got.kept.append((tmap, tz, source))
+    )
+    monkeypatch.setattr(reach_press, "_go_home", lambda c, cfg, runner, why, **k: got.homes.append(why) or True)
+    runner = SimpleNamespace(
+        note=lambda kind, **kw: got.rows.append((kind, kw)),
+        run=lambda legs, execute: got.flown.append(list(legs)) or [SimpleNamespace(ok=True)],
+        _log_path=None,
+    )
+    ctx.model, ctx.mission_frames = ContainerModel.load(PINK), None
+    ctx.scene_top_z = ctx.no_way_in_at = None
+    ctx.worlds.table_top_z, ctx.worlds.table_extent = scene_fix.table_z_scene, scene_fix.table_extent
+    watcher = SimpleNamespace(table_z=scene_fix.table_z_scene if watcher_z is None else watcher_z)
+    q0 = [0.1] * 7
+    seen = [(scene_fix, q0, reach_press._seen(scene_fix))] if seen is None else seen
+    args = SimpleNamespace(guide=guide)
+    aimed = scene_fix.top_xyz
+    answer = reach_press.look_again(
+        None, ctx, None, runner, watcher, args, locator, scene_fix, aimed, True, 0, None, seen
+    )
+    got.watcher = watcher
+    return answer, got
+
+
+def test_a_look_again_measures_the_cameras_first_pools_what_was_seen_and_keeps_the_scene_cameras_top(
+    ctx, monkeypatch, tmp_path
+):
+    """The scene camera's fix the look was aimed by and the wrist's lid are one container: measured against each
+    other BEFORE the lid's look is planned (a look that does not plan must not lose the pair), the scene camera's
+    points pooled as the check then in force has them with the look's own frame (one look-pose frame alone
+    showed 1-3 edges on 2026-11-20, the scene camera's 14-20 boxes), the table's extent pooled as well, and the
+    scene camera's lid top kept for the press's start height."""
+    import test_camera_check as tcc
+
+    from box_opening.perception import camera_check as cc
+
+    scene = tcc._fix(tcc.PAIRS[1][0])  # [0.680, -0.034], top 0.443 on a table at 0.343
+    lid = tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
+    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    (again, code, why), got = _again(ctx, monkeypatch, scene, lid, loc)
+    assert code is None and why is None and again.fix is lid and got.flown == [["the look"]]
+    # measured before the plan: the check is this run's own as the look is planned, with the box where the lid is
+    assert loc.check.by == "run" and math.degrees(loc.check.turn_rad) == pytest.approx(-13.94, abs=0.01)
+    assert got.plans == [((0.770, -0.192, 0.385), lid.pose, "run", {"depth": True})]
+    # what the counter is read from: the look's own frame and the scene camera's points, turned onto the lid
+    ((fix, q, more),) = got.maps
+    assert fix is lid and q == list(ctx.client.joints()) and len(more) == 1 and more[0][1] == [0.1] * 7
+    turned = more[0][0]
+    assert turned is not scene and turned.source == "segmenter"
+    assert turned.top_xyz[:2] == pytest.approx(lid.top_xyz[:2], abs=1e-6) and turned.top_xyz[2] == scene.top_xyz[2]
+    assert np.allclose(
+        turned.table_points[:, :2], [cc.turn_xyz(tcc.LENS, loc.check.turn_rad, p)[:2] for p in scene.table_points]
+    )
+    assert got.kept == [("a map", 0.293, "the scene camera and the wrist from a look pose")]
+    assert [label for _f, _q, label in again.seen] == [reach_press.SEEN_SCENE, reach_press.SEEN_LOOK]
+    assert again.seen[0][0] is turned and again.seen[1][:2] == (lid, again.q_from)
+    # the run goes on with the wrist's lid and the wrist's own table; the table as far as either camera showed it
+    assert ctx.cpose is lid.pose and ctx.worlds.table_top_z == got.watcher.table_z == 0.293
+    x0, x1, y0, y1 = ctx.worlds.table_extent
+    tx = turned.table_extent
+    assert (x0, x1, y0, y1) == pytest.approx(
+        (
+            min(tx[0], lid.table_extent[0]),
+            max(tx[1], lid.table_extent[1]),
+            min(tx[2], lid.table_extent[2]),
+            max(tx[3], lid.table_extent[3]),
+        )
+    )
+    assert ctx.scene_top_z == 0.443  # the scene camera's top of this lid, for the press's start height
+    kinds = [kind for kind, _row in got.rows]
+    assert kinds == ["camera_check", "look_again"] and got.rows[1][1]["by"] == "tie-one-container"
+    assert got.rows[1][1]["planned"] is True and got.rows[1][1]["from_aimed_mm"] == 182
+
+
+def test_a_lid_whose_look_does_not_plan_keeps_the_pair_and_hands_the_guidance_the_lids_own_place(
+    ctx, monkeypatch, tmp_path
+):
+    """Review of 2026-11-20: the lid's look did not plan, the run returned before the two cameras were measured
+    against each other, and main handed the guidance its ORIGINAL scene fix, 18 cm from the lid: the engine
+    barred a cell the lid did not stand in and asked "Ready?" with the chair unmoved. The pair is measured as
+    soon as the lid is taken, and the place handed on is the lid's."""
+    import test_camera_check as tcc
+
+    from box_opening.perception import camera_check as cc
+
+    scene, lid = tcc._fix(tcc.PAIRS[1][0]), tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
+    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    (again, code, why), got = _again(ctx, monkeypatch, scene, lid, loc, plans=False)
+    assert again is None and code == reach_press.NO_WAY_IN and got.flown == []
+    assert loc.check.by == "run"  # the pair was not lost with the plan
+    assert ctx.no_way_in_at == pytest.approx(lid.top_xyz) and ctx.no_way_in == why
+    assert why.startswith("no reach-out press plans for the lid the wrist sees from the look pose, at [0.770, -0.192]")
+    assert len(got.homes) == 1 and got.homes[0].startswith("NO WAY IN: no reach-out press plans for the lid")
+    # by hand: its STOP, the arm home, exit 1; the place is still the lid's
+    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    (again, code, why), got = _again(ctx, monkeypatch, scene, lid, loc, plans=False, guide=False)
+    assert code == 1 and ctx.no_way_in_at == pytest.approx(lid.top_xyz) and got.homes[0].startswith("STOP: ")
+    # a refusal with no place of its own (every other no_way_in) leaves none behind
+    reach_press.no_way_in(ctx, None, SimpleNamespace(note=lambda *a, **k: None), SimpleNamespace(guide=True), "x")
+    assert ctx.no_way_in_at is None
+
+
+def test_a_ctrl_c_while_the_look_agains_plan_is_waited_on_is_the_cancel_it_was(ctx, monkeypatch, tmp_path):
+    """A Ctrl+C asked for while a plan is waited on comes out of the planner's wait as a refusal (survey.fly_view's
+    note). Read as one, the look again answered "no press plans for the lid", went home and had the chair guided
+    (rows reach_refused and home_refused, exit 1): the cancel it was instead."""
+    import test_camera_check as tcc
+
+    scene, lid = tcc._fix(tcc.PAIRS[1][0]), tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
+    with pytest.raises(KeyboardInterrupt):
+        _again(ctx, monkeypatch, scene, lid, tcc._locator(tmp_path, mode="run"), plans=False, aborts=True)
+    ctx.client._abort = SimpleNamespace(requested=False)
+
+
+def test_a_look_again_from_a_rough_fix_a_wrist_fix_or_a_world_files_table_takes_only_what_it_may(
+    ctx, monkeypatch, tmp_path
+):
+    import test_camera_check as tcc
+
+    from box_opening.perception import camera_check as cc
+
+    lid = tcc._fix(tcc.PAIRS[1][1], z=0.385, table=0.293, source="wrist")
+    # a ROUGH scene fix (a box its frame cut): its top is no measure and the pair none (camera_check's own rule)
+    rough = tcc._fix(tcc.PAIRS[1][0], rough=True)
+    loc = tcc._locator(tmp_path, mode=cc.RUN)
+    (again, _code, _why), got = _again(ctx, monkeypatch, rough, lid, loc)
+    assert again is not None and ctx.scene_top_z is None and loc.check.by == ""
+    assert got.maps[0][2][0][0] is rough  # nothing measured: its points as they were (moved at the box, as ever)
+    # the look before went by the wrist's own find (its look from rest): no scene camera in it at all
+    survey = tcc._fix((0.700, -0.150), z=0.385, table=0.293, source="wrist")
+    (again, _code, _why), got = _again(ctx, monkeypatch, survey, lid, None)
+    assert again is not None and ctx.scene_top_z is None
+    assert got.kept[0][2] == "the wrist survey and the wrist from a look pose" and got.maps[0][2][0][0] is survey
+    assert got.rows[-1][1]["had"] == "the wrist's own look"
+    # a table the world file names (not the fix's own) stays, extent and all
+    scene = tcc._fix(tcc.PAIRS[1][0])
+    (again, _code, _why), got = _again(
+        ctx, monkeypatch, scene, lid, tcc._locator(tmp_path, mode=cc.RUN), watcher_z=0.20
+    )
+    assert got.watcher.table_z == 0.20 and ctx.worlds.table_top_z == scene.table_z_scene
+    assert ctx.worlds.table_extent == scene.table_extent and got.kept[0][1] == 0.20
+    # a second look again pools the first's frame too, each camera named once
+    first = tcc._fix((0.760, -0.180), z=0.385, table=0.293, source="wrist")
+    seen = [(scene, [0.1] * 7, reach_press.SEEN_SCENE), (first, [0.2] * 7, reach_press.SEEN_LOOK)]
+    (again, _code, _why), got = _again(ctx, monkeypatch, first, lid, None, seen=seen)
+    assert got.kept[0][2] == "the scene camera and the wrist from a look pose" and len(got.maps[0][2]) == 2
+    assert reach_press._seen_words(again.seen, aim=True) == (
+        "the scene camera, the wrist from a look pose and the wrist at the look"
+    )

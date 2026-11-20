@@ -1418,16 +1418,23 @@ def spot_map(ctx, wrist, q, scene_fix, scene_q, table_z, lens_in_hand=None, more
     return tmap
 
 
-def counter_map(ctx, watcher, scene_fix, scene_q, table_z, aim=False):
+def counter_map(ctx, watcher, scene_fix, scene_q, table_z, aim=False, more=()):
     """The table map the counter's edges are read from before the lid is off
     (press_demo.keep_out_counter): the scene camera's cloud as spot_map takes
     it (moved by its error at the box, the arm when it looked left out) and,
     `aim`, the wrist's frame at the look pose (aim_cloud): parked side-on to
-    a cabinet, the scene camera may not see the counter at all. A cloud that
-    cannot be read is left out (said), the other still maps; None where
-    neither shows a table, or where the map cannot be made (said: no map is
-    no news of the counter, never the run's end)."""
+    a cabinet, the scene camera may not see the counter at all. `more`:
+    [(fix, the arm's joints when it was made)], what the run saw of the
+    counter before `scene_fix` (a look again's: reach_press.look_again),
+    each pooled in as that one is. A cloud that cannot be read is left out
+    (said), the others still map; None where none shows a table, or where
+    the map cannot be made (said: no map is no news of the counter, never
+    the run's end)."""
     reads = [("the scene camera's cloud", lambda: _scene_cloud(ctx, scene_fix, scene_q, table_z))]
+    for i, (fix, q) in enumerate(more):
+        reads.append(
+            ("an earlier look's cloud (%d)" % (i + 1), lambda fix=fix, q=q: _scene_cloud(ctx, fix, q, table_z))
+        )
     if aim:
         reads.append(("the wrist's frame at the look", lambda: aim_cloud(ctx, watcher, table_z)[0]))
     clouds = []
