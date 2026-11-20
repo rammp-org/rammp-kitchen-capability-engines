@@ -48,7 +48,13 @@ beside the container, and goes home. It has one action, `open_box`:
    camera sees"); in a run by hand it is `not_found`, nothing pressed, the arm
    home.
 1. **Look:** the arm moves to a pose looking down at the lid at 45 degrees, and
-   the wrist camera aims at the button.
+   the wrist camera aims at the button. Where it finds no button there, the
+   wrist's own container finder is asked of a frame from that pose: a lid it
+   finds elsewhere than the look was aimed (half a lid or more away), which is
+   the selected container by the run's own rule, becomes the run's box; the
+   look is planned again over it, as every look is, and flown, and the aim
+   asked there (see "The look again"). At most two looks again; with no lid in
+   that frame, or no button from them either, `no_button`.
 1. **Press:** the fingers, closed, press the button in joint impedance. The arm
    feels where the pads meet the lid, watching its whole way down, and the
    stroke ends the button's travel past that. A press that meets something
@@ -455,7 +461,7 @@ still in the fingers, no code is recoverable.
 | `watch_failed`        | no          | The press's contact watch failed: the press stopped there                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `box_moved`           | yes         | The press moved the container                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `not_popped`          | yes         | Pressed, but the knob did not come up (or the stroke pressed nothing); the arm went home                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `no_button`           | yes         | The container was found and the look from above it found no button on its lid; nothing was pressed, the arm went home. (The run ends this with exit 2, as it ends a find with no container: until 2026-11-19 the engine read every exit 2 as `not_found`, and this code was never reported)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `no_button`           | yes         | The container was found and the look from above it found no button on its lid, nor did a look again over a lid the wrist's own frame showed elsewhere (at most two; see "The look again"); nothing was pressed, the arm went home. (The run ends this with exit 2, as it ends a find with no container: until 2026-11-19 the engine read every exit 2 as `not_found`, and this code was never reported)                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `no_press`            | yes         | A stop before the press that names no other code (the container's config has no reach-out press, the fingers did not shut, the knob's height unread): nothing was pressed. A container no press plans to from where the chair stands is not this: the chair is guided (see "Lining up in the middle of a run")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `lid_put_back`        | yes         | No spot for the lid on the table the cameras measured (or no carry to one), or no table felt at the spots it was taken to and no other tried (none left, 6 tried, no time for another, held up at the same height twice, or a set-down that could not be watched): the lid was let go nowhere, it is back on the box and the arm home                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `lid_dropped`         | no          | The arm got home, but the lid slipped out of the fingers on the way                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -1438,10 +1444,91 @@ past a side the frame cuts it at). A camera has a thing's direction right and
 its range wrong (the two cameras' fixes of one box differed 80 mm along that
 line and 8 mm across it), and two containers cannot stand nearer than 152 mm
 centre to centre, so a lid within 75 mm of the line is the selected one and not
-a neighbour beside it. A second lid-sized top in the same direction, a find that
+a neighbour beside it.
+
+**One container in each camera's view is the same container.** The 75 mm takes
+the scene camera's direction for right. On RAMMP 1.5 (2026-11-20, five sightings
+of one container, the chair at four places) it was not: the wrist's lid stood
+148-206 mm to the side of the scene camera's line and 47-60 mm nearer along it, a
+steady 13-15 degrees about the scene lens, every find was refused for the
+selected container, and every run reached for the scene camera's place, 16-19 cm
+from the lid. Where the scene camera holds one container of the selected one's
+kind and no other (every frame of its segmenter's last 2 s, three or more of
+them, held at most one; a lid boxed on its holder counts with it), there is no
+neighbour to tell it from, and what the wrist finds is the selected container
+within 20 degrees about the scene lens of that line, and within 0.20 m of the
+range the scene camera placed it at. The run's line then gives the millimetres
+and the degrees and says that the cameras disagree, its record has them
+(`wrist_first`, `wide`, `across_mm`, `about_lens_deg`, `nearer_mm`, both
+cameras' places and the scene lens), and the console says `scene camera puts it N mm away; using the wrist's`. A second lid-sized top in that wider cone and
+neither is taken, with two exceptions that are the finder's own rules: a top the
+arm cannot reach is no rival of a find it can, and of two out of reach the one a
+lid's width or more farther from the arm is not the one being brought to it. A
+top within the 75 mm of the line is a rival of every find, as before. With two
+or more containers of the kind in the scene camera's view the 75 mm stands
+alone. Not flown.
+
+A second lid-sized top in the same direction, a find that
 is not tied, or no find: the run goes on with the scene camera's own fix of the
 selected container where that is a careful one, and has found no container
 where it is only a rough one or there is none, saying what each camera said.
+
+### The look again
+
+The look goes where the find put the container, and the aim takes a button only
+within 150 mm of there. On RAMMP 1.5 (2026-11-20 13:40-13:44) the scene
+camera's place was 16-19 cm from the lid: four looks stood short and left of
+the container with the lid whole in the corner of the wrist's frame, and four
+runs ended `no_button`. Replayed on those four frames, the wrist's finder has
+the container in each, within 12 mm of where the wrist's look from rest had put
+it.
+
+Where the aim finds no button (a compliant run, which every run is by default):
+
+- The wrist's finder (the survey's, by the lid's geometry; no button is asked
+  of this frame) is asked of a still frame from the look pose, kept as a
+  capture (`captures/wrist-survey-*`). Of several lid-sized tops it takes the
+  one the selection's tie takes alone.
+- What it finds is taken by the rule the wrist's look before the reach goes by:
+  tied to the selected container (the 75 mm, or the one-container rule above),
+  or with `wrist_alone` the one container in view, or with no selection the
+  container it finds. A selection nothing ties a find to takes none.
+- A lid within half a lid of where the look was aimed is not looked at again:
+  the look stood over it.
+- The lid it takes becomes the run's box, as a box the wrist found before the
+  reach is: the planner's world has the box there, its own counter is the
+  table (the counter's edges are read again on the wrist's points), and the
+  scene camera, which has the box elsewhere, is not asked about it after the
+  press. Its look is planned from where the arm stands, the press proven from
+  it first, and flown; then the aim is asked with its prior there.
+- At most two looks again in one reach (`RELOOKS_MAX`). One is flown only where
+  the run's time still holds it and the rest of a run (`RELOOK_S` 8 s and
+  `RELOOK_REST_S` 40 s left of the engine's budget; a run by hand has no
+  budget).
+- Where the lid's look does not plan, the arm goes home and the run says there
+  is no press from where the chair stands for the lid the wrist sees: guided as
+  any such run is ("Lining up in the middle of a run"), a stop in a run by
+  hand. A look again that stops part way holds the arm (`arm_holds`).
+
+The run says `LOOK AGAIN n of 2: no button where the scene camera had the box; the wrist sees the lid at [...], N mm from there`, its record has a `look_again`
+row a look (`n`, `lid_xyz`, `from_aimed_mm`, `planned`, `tilt_deg`), and the
+console shows the first look as `LOOK ??  no button where the scene camera had the box` and the next as a step of its own. A run that ends with no button
+after them says how many it flew and why no further one. Not flown.
+
+**A selected id the scene camera no longer has.** Perception gives a container
+it loses and finds again a new id, and a goal may come with the old one
+(2026-11-20 13:42: `food_container_2` was in none of the detections, and the goal
+ended in 10 s with `The arm cannot tell which container you chose`, one
+container on the table). Before the run's first fix of the container, where the
+selected id is in none of the segmenter's frames and they hold one container of
+its kind under one other id, for five frames over at least a second, that one is
+read as the selected container from then on. The scene camera's line says it
+once with both ids, and the look's record has the id it read (`segmenter`
+`adopted`). With two or more containers of the kind and the selected id gone,
+nothing says which was selected, and everything is as below. The look's record
+also keeps the most containers of the kind any one of its frames held
+(`containers`). Not flown.
+
 Where the selected container was in none of the scene camera's frames nothing
 would tie a wrist find to the selection: a run by hand does not turn the wrist,
 and a run the engine started turns it only to tell whether anything that could
