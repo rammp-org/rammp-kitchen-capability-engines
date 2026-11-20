@@ -963,7 +963,10 @@ def open_task(
 
     # --- plan everything before any motion: tilts x arm configurations x swings, then what follows the swing ---
     geom = dict(h_raw=h_raw, orient=orient, n=n, hinge=hinge, hinge_seen=hinge_seen, door_z=door_z)
+    t_plan = time.perf_counter()
     plan, why = plan_open(scene, rb, geom, q0, max_swing, min_swing, after_swing)
+    # as poc/plan-open-speedup logs it, so the two compare line for line
+    say(f"planned with numpy in {time.perf_counter() - t_plan:.2f} s")
     if plan is None:
         say(f"  (refused -- looking for a {dc.APPLIANCE} placement that works ...)")
         advice += _placement_advice(scene, rb, geom, q0, max_swing, min_swing, plain_after_swing)

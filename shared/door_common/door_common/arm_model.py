@@ -104,6 +104,23 @@ def _overlap(c1, r1, h1, box):
     return best
 
 
+def _rodrigues(axis, angle):
+    """The rotation matrix turning `angle` (rad) about unit `axis`."""
+    x, y, z = axis
+    k = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
+    return np.eye(3) + np.sin(angle) * k + (1.0 - np.cos(angle)) * (k @ k)
+
+
+def _rotvec(m):
+    """The rotation vector of rotation matrix `m` (the log map); scipy's near a half turn, where it is ill-posed."""
+    c = (np.trace(m) - 1.0) / 2.0
+    if c < -0.99:
+        return R.from_matrix(m).as_rotvec()
+    angle = np.arccos(min(1.0, c))
+    w = np.array([m[2, 1] - m[1, 2], m[0, 2] - m[2, 0], m[1, 0] - m[0, 1]]) / 2.0
+    return w if angle < 1e-9 else w * (angle / np.sin(angle))
+
+
 class ArmModel:
     """The arm's kinematics and shape from its URDF (see the module's docstring)."""
 
@@ -112,6 +129,8 @@ class ArmModel:
         self._fingers = self._finger_chains(urdf_xml, chain_kw.get("root", ROOT), chain_kw.get("joints", JOINTS))
         self.lo = np.where(self.chain.limited, self.chain.lower, -np.inf)
         self.hi = np.where(self.chain.limited, self.chain.upper, np.inf)
+        # the chain as numpy steps for the IK's one-pass FK + Jacobian (no scipy in the loop)
+        self._steps = [(T[:3, :3].copy(), T[:3, 3].copy(), axis, k) for T, axis, k in self.chain.steps]
         self._hand = _hand_grid(HAND_BOX_TOOL_M, HAND_SAMPLE_M)
         self._hand_c = np.array([(lo + hi) / 2 for lo, hi in HAND_BOX_TOOL_M])
         self._hand_h = np.array([(hi - lo) / 2 for lo, hi in HAND_BOX_TOOL_M])
@@ -147,28 +166,53 @@ class ArmModel:
         q_full = np.r_[np.asarray(q, float), np.zeros(n_extra)]
         return np.array([c.pose(q_full)[0] for c in chains])
 
+    def _fk_jac(self, q):
+        """The tool's position and rotation matrix at joints `q`, and its 6x7 Jacobian (linear, then angular, in
+        arm_mount), in one pass down the chain -- kinematics.Chain.pose and .jacobian together, the same numbers."""
+        rot, pos = np.eye(3), np.zeros(3)
+        axes, points, cols = [], [], []
+        for r0, t0, axis, k in self._steps:
+            pos = pos + rot @ t0
+            rot = rot @ r0
+            if axis is not None:
+                axes.append(rot @ axis)
+                points.append(pos)
+                cols.append(k)
+                rot = rot @ _rodrigues(axis, q[k])
+        z, r = np.array(axes), pos - np.array(points)  # each joint's axis, and the lever arm to the tool
+        J = np.zeros((6, len(q)))
+        np.add.at(
+            J[:3].T,
+            cols,
+            np.c_[
+                z[:, 1] * r[:, 2] - z[:, 2] * r[:, 1],
+                z[:, 2] * r[:, 0] - z[:, 0] * r[:, 2],
+                z[:, 0] * r[:, 1] - z[:, 1] * r[:, 0],
+            ],
+        )
+        np.add.at(J[3:].T, cols, z)
+        return pos, rot, J
+
     def pose(self, q):
         """(position, quaternion xyzw) of the tool at joints `q`, in arm_mount."""
-        pos, quat = self.chain.pose(q)
-        return np.asarray(pos, float), np.asarray(quat, float)
+        pos, rot, _ = self._fk_jac(np.asarray(q, float))
+        return pos, R.from_matrix(rot).as_quat()
 
     def ik(self, pos, quat, seed, wrap=True):
         """Joints putting the tool at (`pos`, `quat`), continued from `seed` (its branch kept), the hard joint limits
         held: (joints, error in m -- position plus ROT_ERR_EQUIV_M per radian of orientation). `wrap`: the free joints
         wrapped to [-180, 180) as commanded (sim.wrap_joints); False keeps them continuous from the seed."""
         q = np.clip(np.asarray(seed, float).copy(), self.lo, self.hi)
-        target, pos = R.from_quat(quat), np.asarray(pos, float)
+        target, pos = R.from_quat(quat).as_matrix(), np.asarray(pos, float)
         lam = IK_DAMP**2 * np.eye(6)
-        for _ in range(IK_ITERS):
-            p, qt = self.chain.pose(q)
-            e = np.r_[pos - p, (target * R.from_quat(qt).inv()).as_rotvec()]
+        for _ in range(IK_ITERS + 1):  # the last pass only measures the last step's result
+            p, rot, J = self._fk_jac(q)
+            e = np.r_[pos - p, _rotvec(target @ rot.T)]
             if np.linalg.norm(e[:3]) < IK_TOL_M and np.linalg.norm(e[3:]) < IK_TOL_RAD:
                 break
-            J = self.chain.jacobian(q)
             dq = J.T @ np.linalg.solve(J @ J.T + lam, e)
             q = np.clip(q + np.clip(dq, -IK_MAX_STEP_RAD, IK_MAX_STEP_RAD), self.lo, self.hi)
-        p, qt = self.chain.pose(q)
-        err = float(np.linalg.norm(pos - p) + ROT_ERR_EQUIV_M * (target * R.from_quat(qt).inv()).magnitude())
+        err = float(np.linalg.norm(e[:3]) + ROT_ERR_EQUIV_M * np.linalg.norm(e[3:]))
         return (sim.wrap_joints(q) if wrap else q), err
 
     def joint_points(self, q):

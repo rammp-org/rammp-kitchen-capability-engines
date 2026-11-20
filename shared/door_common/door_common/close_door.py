@@ -902,7 +902,9 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
         if behind or max_tilt_deg is not None:
             say("curobo_ik: not with behind / max_tilt_deg (yet) -- refusing, arm untouched.")
             return False
+        t_plan = time.perf_counter()
         cplan = _plan_close_curobo(ai, scene, rb, df, st, args, deg0, stop_deg=stop_deg, held=held)
+        say(f"planned the close (curobo_ik) in {time.perf_counter() - t_plan:.2f} s")
         if cplan is None:
             say("\nno plan passes every check -- refusing, arm untouched.")
             return False
@@ -910,7 +912,9 @@ def push_close(ai, args, door_file=None, door_shift=None, behind=False, stop_deg
             say(f"\nDRY RUN (push-close from {deg0:.0f} deg, cuRobo's joints) -- nothing commanded.")
             return True
         return _run_close_curobo(ai, scene, rb, df, args, cplan, stop_deg, door_file)
+    t_plan = time.perf_counter()
     plan = _plan_close(scene, rb, df, st, args, deg0, behind=behind, stop_deg=stop_deg, held=held)
+    say(f"planned the close in {time.perf_counter() - t_plan:.2f} s")
     if plan is None:
         say("\nno plan passes every gate -- refusing, arm untouched.")
         return False
