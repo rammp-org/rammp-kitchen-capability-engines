@@ -61,8 +61,10 @@ params:
   # Measured on the fridge being opened (m); see Before a run in docs/interface.md.
   # The STL's bar middle; set from the 11-06 measurements once the camera's handle point is measured (TESTING.md).
   handle_centre_to_face_m: 0.070
-  pin_behind_face_m: 0.04675
-  hinge_along_door_m: 0.3683
+  # The new fridge's hinge from the swing's arc fit (11-19): 0.049 m into the door from the handle point
+  # (handle_centre_to_face_m + pin_behind_face_m), 0.374 m along it. See constants.py.
+  pin_behind_face_m: -0.021
+  hinge_along_door_m: 0.374
   door_width_m: 0.44958
   door_depth_m: 0.10668
   door_above_handle_m: 0.381

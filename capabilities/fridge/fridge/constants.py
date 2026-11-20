@@ -15,11 +15,16 @@ MEASURED = {
     # ~0.5 in deep (front ~3.0 in). Still 0.070 (the STL's bar middle) until the camera's handle point is measured
     # against the bar's real front (docs/TESTING.md, "Before the next run")
     "handle_centre_to_face_m": 0.070,
-    # door's front surface -> hinge pin axis: door thickness 1.25 in (measured 09-20, pin assumed at the back face) +
-    # 1.5 cm (hinge side crept forward). If the pin depth is measured directly, use it alone.
-    "pin_behind_face_m": 1.25 * INCH + 0.015,
-    # handle bar centre line -> hinge pin axis, along the door at handle height (measured 09-20)
-    "hinge_along_door_m": 14.5 * INCH,
+    # door's front surface -> hinge pin axis. The open only uses it added to handle_centre_to_face_m: the hinge is
+    # that sum into the door from the detected handle point. The new fridge, from the swing's arc fit 11-19
+    # (runs/20261120_002726_open: 3.7 mm RMS over 66 deg) -- the hinge 0.049 m into the door from the handle, so
+    # 0.049 - 0.070. Negative because it also absorbs where the camera's handle point sits on the bar, not because
+    # the pin is in front of the face; replace both with tape measurements when they're taken. (Old fridge: 1.25 in +
+    # 1.5 cm, which put the hinge 6.8 cm off on the new one and stopped the swing PATH_TOLERANCE_VIOLATED.)
+    "pin_behind_face_m": -0.021,
+    # handle bar centre line -> hinge pin axis, along the door at handle height. The new fridge, from the same fit
+    # 11-19 (0.374 m; old fridge 14.5 in, measured 09-20)
+    "hinge_along_door_m": 0.374,
     # the door's full width, hinge-side edge to free edge (the new fridge: 17.7 in, measured 11-19; the old one ~18 in,
     # at the top of the door). Too small = the plans pass closer to the real free edge than they think
     "door_width_m": 17.7 * INCH,

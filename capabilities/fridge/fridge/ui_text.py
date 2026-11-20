@@ -254,6 +254,12 @@ _REFUSALS = (
         "Check nothing is near the arm, then try again. If it keeps failing, move the arm "
         "closer to the start position (teleop) first.",
     ),
+    (  # with the planner's own reason (world.py's PlannerWorld.push), up to the run's " -- ..." tail
+        r"planner refused the fridge's collision world \(.*?\): (?P<why>[^\n]*?\S)\.?(?= -- |\n|\Z)",
+        "The motion planner didn't accept the fridge's model. The planner said: {why}.",
+        None,
+        "Check the planner is running, then try again.",
+    ),
     (
         r"planner refused the fridge's collision world",
         "The motion planner didn't accept the fridge's model.",

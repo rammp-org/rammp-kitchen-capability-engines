@@ -153,6 +153,22 @@ def test_the_wheelchair_drive_says_what_it_did(raw, words):
     assert text.count("Check where the wheelchair is") == 1
 
 
+def test_a_refused_world_shows_the_planners_reason():
+    raw = (
+        "the cuRobo planner refused the fridge's collision world (approach (hold)): "
+        "could not read /rammp_planner_worlds/fridge_world.yaml."
+    )
+    text = T.failure("open", Err("refused", raw + TAIL))
+    assert text.startswith(
+        "The motion planner didn't accept the fridge's model. The planner said: could not read "
+        "/rammp_planner_worlds/fridge_world.yaml."
+    )
+    assert "the arm holds where it is" not in text.split("The planner said:")[1].split(".yaml")[0]
+    bare = T.failure("open", Err("refused", "the cuRobo planner refused the fridge's collision world (approach): "))
+    assert bare.startswith("The motion planner didn't accept the fridge's model.")
+    assert "The planner said" not in bare
+
+
 def test_anything_else_shows_its_own_reason_not_a_generic_sentence():
     text = T.failure("open", Err("refused", "the gripper reports 0.9 closed with nothing in it" + TAIL))
     assert "The gripper reports 0.9 closed with nothing in it." in text
