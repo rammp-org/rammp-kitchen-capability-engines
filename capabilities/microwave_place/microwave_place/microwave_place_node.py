@@ -94,6 +94,8 @@ FRIDGE_DOOR_GAP = (
 # ROS parameter -> default.
 PARAMS = {
     "allow_execute": False,
+    # Routes the touchscreen's place action to a test-only result without planning or commanding hardware.
+    "ui_test_mode": False,
     "record_bag": True,
     "bag_frame_hz": 1.0,
     "bag_state_hz": 25.0,
@@ -250,10 +252,12 @@ UI_MOVING = {
     "retrieve": "Grabbing the tupperware: the arm is moving.",
     "place_in_microwave": "Placing the tupperware in the microwave: the arm is moving.",
 }
+UI_TEST_MOVING = "Touchscreen route test running. No robot motion will be commanded."
 UI_DONE = {
     "retrieve": "Holding the tupperware.",
     "place_in_microwave": "Tupperware placed in the microwave.",
 }
+UI_TEST_DONE = "Touchscreen test passed: request reached microwave_place. No placement was performed."
 UI_RETRY = {"retrieve": "Grab Tupperware", "place_in_microwave": "Place"}
 # error codes a UI action offers again (when not "STOPPED ..."): checks that refused before the arm started
 UI_RETRYABLE = ("refused", "home_failed", "recording")
@@ -408,6 +412,18 @@ class Capability(CapabilityEngine):
         )
 
     def execute(self, action_id, params, ctx):
+        if self.cfg.get("ui_test_mode", False):
+            if action_id in UI_ACTIONS:
+                return self._ui_run(action_id, ctx)
+            if action_id != "place":
+                raise EngineError(
+                    "ui_test_only",
+                    f"{action_id} is disabled in ui_test_mode; only the no-motion place UI test is available.",
+                    recoverable=True,
+                )
+            message = "UI test only: place handler reached; no robot motion commanded and no placement performed."
+            ctx.progress("ui_test", 100.0, message, pausable=False)
+            return {"executed": False, "placed": False, "ui_test_only": True, "message": message}
         if action_id in UI_ACTIONS:
             return self._ui_run(action_id, ctx)
         if not self.cfg["record_bag"]:
@@ -454,7 +470,12 @@ class Capability(CapabilityEngine):
         site = params.get("site", "any" if action_id == "take_out" else "microwave")
         title = UI_TITLE[ui_id]
         ui = RunUI(ctx, title, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
-        if not self.mock and not self.cfg["allow_execute"]:
+        test_place_route = self.cfg.get("ui_test_mode", False) and ui_id == "place_in_microwave"
+        if self.cfg.get("ui_test_mode", False) and not test_place_route:
+            message = "UI test mode only supports the Place Tupperware in Microwave no-motion test."
+            ui.refuse(message)
+            raise EngineError("ui_test_only", message, recoverable=True)
+        if not self.mock and not self.cfg["allow_execute"] and not test_place_route:
             message = f"{title} is disabled: launch with allow_execute:=true for an attended run."
             ui.refuse(ui_text.disabled(title))
             raise EngineError("execution_disabled", message, recoverable=True)
@@ -467,7 +488,9 @@ class Capability(CapabilityEngine):
             run_ctx = _PhaseCtx(ctx)
             try:
                 result = ui.motion(
-                    UI_MOVING[ui_id],
+                    UI_TEST_MOVING
+                    if self.cfg.get("ui_test_mode", False) and ui_id == "place_in_microwave"
+                    else UI_MOVING[ui_id],
                     lambda run_ctx=run_ctx: self.execute(action_id, dict(params), run_ctx),
                     stopped_note=lambda run_ctx=run_ctx: _hand_note(action_id, run_ctx.phase, site),
                 )
@@ -488,7 +511,8 @@ class Capability(CapabilityEngine):
                 if not (ui.user_stopped or ctx.cancelled()):
                     ui.error(ui_text.unexpected(error, _hand_note(action_id, run_ctx.phase, site)))
                 raise
-            ui.done(UI_DONE[ui_id], mock=bool(result.get("mock")))
+            done_message = UI_TEST_DONE if result.get("ui_test_only") else UI_DONE[ui_id]
+            ui.done(done_message, mock=bool(result.get("mock")))
             return result
 
     def availability(self, instance_id, world_state):

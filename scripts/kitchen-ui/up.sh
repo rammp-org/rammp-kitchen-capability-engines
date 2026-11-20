@@ -8,8 +8,10 @@
 # Environment (defaults are snorlax's):
 #   FRIDGE_GRASP=front      the fridge's handle grasp: front (straight in) or side
 #   KUI_CAPS="fridge microwave ..."  only these capabilities (default: all six)
-#   KUI_TAG=ui-4d916ca      the capability images' tag ($KCE/<capability>:$KUI_TAG; build them first)
-#   ALLOW_EXECUTE=true      false: every button refuses to move the arm (and says so on the UI)
+#   KUI_TAG=<git-sha>       the capability images' tag (defaults to this checkout's short SHA; build them first)
+#   ALLOW_EXECUTE=true      false: physical actions are refused; UI_TEST_MODE permits only its no-motion place test
+#   UI_TEST_MODE=true       microwave placement UI route test; requires ALLOW_EXECUTE=false, never moves the arm
+#   MICROWAVE_WORLD_DIR     shared planner/door world path (default: ~/.ros/rammp_box_opening/worlds)
 #   MOCK=false              true: every capability runs its mock (nothing detected or moved)
 #   ROS_WS=~/ros2_ws        rammp-UI-bridge and rammp-orchestrator built natively (and their interfaces)
 #   ORCH_WS=~/orch_hotfix_ws  rammp-orchestrator hotfix/execute-timeout-param (no 120 s limit, action labels),
@@ -22,7 +24,14 @@ set -u
 GRASP=${FRIDGE_GRASP:-front}
 case "$GRASP" in front|side) ;; *) echo "kitchenui: FRIDGE_GRASP must be front or side, not '$GRASP'"; exit 2;; esac
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export KUI_TAG=${KUI_TAG:-ui-4d916ca} ALLOW_EXECUTE=${ALLOW_EXECUTE:-true} MOCK=${MOCK:-false} GRASP
+ROOT=$(cd "$HERE/../.." && pwd)
+UI_TEST_MODE=${UI_TEST_MODE:-false}
+ALLOW_EXECUTE=${ALLOW_EXECUTE:-true}
+MICROWAVE_WORLD_DIR=${MICROWAVE_WORLD_DIR:-$HOME/.ros/rammp_box_opening/worlds}
+if [ "$UI_TEST_MODE" = true ] && [ "$ALLOW_EXECUTE" != false ]; then
+  echo "kitchenui: UI_TEST_MODE=true requires ALLOW_EXECUTE=false"; exit 2
+fi
+export KUI_TAG=${KUI_TAG:-$(git -C "$ROOT" rev-parse --short HEAD)} ALLOW_EXECUTE MOCK=${MOCK:-false} GRASP UI_TEST_MODE
 ROS_WS=${ROS_WS:-$HOME/ros2_ws}
 ORCH_WS=${ORCH_WS-$HOME/orch_hotfix_ws}
 KCE=ghcr.io/rammp-org/rammp-kitchen-capability-engines
@@ -67,7 +76,9 @@ for obj in "${OBJECTS[@]}"; do
   tmux send-keys -t "$S:perc" "add $obj" Enter
   sleep 1
 done
-for c in $CAPS; do win "$c" "$HERE/node.sh $c"; done
+for c in $CAPS; do
+  win "$c" "KUI_TAG=$KUI_TAG ALLOW_EXECUTE=$ALLOW_EXECUTE UI_TEST_MODE=$UI_TEST_MODE MOCK=$MOCK MICROWAVE_WORLD_DIR=$MICROWAVE_WORLD_DIR $HERE/node.sh $c"
+done
 for c in $CAPS; do wait_for "$c" "registered" 120 && echo "kitchenui: $c registered"; done
 echo "kitchenui: up: $CAPS (fridge grasp $GRASP, images $KUI_TAG, allow_execute $ALLOW_EXECUTE, mock $MOCK)."
 echo "Tap an object on the touchscreen. Watch: tmux attach -t $S. Stop it all: $HERE/down.sh"

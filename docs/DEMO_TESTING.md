@@ -20,6 +20,39 @@ it (then rebuild the images, below, after code changes). In any other checkout t
 `up.sh` starts the touchscreen app and every capability, and puts `fridge_1`, `microwave_1`, `table_1` and
 `tupperware_1` on the screen: tap one for its buttons. Nothing moves until a button is pressed.
 
+### No-motion `microwave_place` touchscreen test
+
+Use a separate checkout of `feature/microwave-place-puck-fix`; do not update the `integration/dec-demo` worktree.
+Build the capability image from that checkout's exact commit, then start only its UI node with execution disabled and
+the explicit handler-test mode enabled:
+
+```bash
+git clone --branch feature/microwave-place-puck-fix \
+  https://github.com/rammp-org/rammp-kitchen-capability-engines.git \
+  ~/rammp-wt/kce-puck-fix
+cd ~/rammp-wt/kce-puck-fix
+TAG=$(git rev-parse --short HEAD)
+KCE=ghcr.io/rammp-org/rammp-kitchen-capability-engines
+docker build --network host -f capabilities/microwave_place/Dockerfile \
+  -t "$KCE/microwave_place:$TAG" .
+UI_TEST_MODE=true ALLOW_EXECUTE=false MOCK=false KUI_TAG="$TAG" KUI_CAPS=microwave_place \
+  scripts/kitchen-ui/up.sh
+```
+
+Sheppy should already be running with the December demo robot services; `up.sh` brings up the touchscreen, bridge,
+orchestrator and interactive perception. On the touchscreen, tap `microwave_1`, then **Place Tupperware in
+Microwave**. Expect a test-only progress panel followed by “Touchscreen test passed: request reached microwave_place.
+No placement was performed.” The capability returns `executed: false`, `placed: false`, and `ui_test_only: true`;
+this confirms routing only and does not claim successful placement. Stop the stack with:
+
+```bash
+scripts/kitchen-ui/down.sh
+```
+
+For an existing checkout of this branch, fetch and fast-forward it before rebuilding; do not use the integration
+worktree. `UI_TEST_MODE=true` is rejected unless `ALLOW_EXECUTE=false`, and the handler exits before rosbag, perception,
+planning, or any arm/gripper/base command.
+
 **Before `up.sh`:**
 
 1. Sheppy is up: `cd ~/rammp-deployments && sheppy up flatbot --manifest december_2026/sheppy-manifest.yaml`.
@@ -54,7 +87,8 @@ right order (about a minute). If an action was moving the arm, the arm now holds
 the arm (e-stopped) or sheppy, not the UI.
 
 Options: `FRIDGE_GRASP=side scripts/kitchen-ui/up.sh` (the fridge's side grasp; front is the default),
-`ALLOW_EXECUTE=false ...` (every button refuses to move the arm), `MOCK=true ...` (every capability's mock).
+`ALLOW_EXECUTE=false ...` (physical actions are refused except the explicit no-motion test mode),
+`MOCK=true ...` (every capability's mock).
 One node alone, without the UI stack: `scripts/kitchen-ui/node.sh <capability>`. Watch the nodes:
 `tmux attach -t kitchenui`. By design, tap-to-place offers no spots until the scene camera is calibrated ("Use marked spot" works).
 

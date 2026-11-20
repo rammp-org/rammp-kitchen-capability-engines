@@ -44,12 +44,14 @@ GLOBALS = {
     "UI_ACTIONS",
     "UI_TITLE",
     "UI_MOVING",
+    "UI_TEST_MOVING",
     "UI_DONE",
+    "UI_TEST_DONE",
     "UI_RETRY",
     "UI_RETRYABLE",
 }
 FUNCTIONS = {"_site_words", "_hand_note", "_started", "_PhaseCtx"}
-METHODS = {"_ui_run", "availability", "_take_out"}
+METHODS = {"_ui_run", "availability", "_take_out", "execute"}
 
 
 class Cancelled(Exception):
@@ -125,6 +127,7 @@ class FakeCtx:
         self.answers = list(answers)
         self.sent = []
         self.phases = []
+        self.feedback = []
         self._event = None
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
@@ -159,6 +162,7 @@ class FakeCtx:
 
     def progress(self, phase, pct, message="", pausable=True):
         self.phases.append(phase)
+        self.feedback.append((phase, pct, message, pausable))
 
 
 @pytest.fixture(autouse=True)
@@ -220,6 +224,58 @@ def test_one_press_runs_the_action_executing_then_done(scope, ui_id):
     assert moving["message"] == scope["UI_MOVING"][ui_id]
     assert final["message"] == done
     assert final["buttons"] == [{"button_id": "done", "label": "Done"}]
+
+
+def test_place_in_microwave_ui_test_routes_to_handler_without_motion(scope):
+    ctx = FakeCtx()
+    node = scope["Capability"]()
+    node.mock = False
+    node.cfg = {
+        "allow_execute": False,
+        "ui_test_mode": True,
+        "fridge_accept_unmodeled_door": False,
+    }
+    node.get_logger = Mock(return_value=Mock())
+    node.arm = Mock()
+    node.base = Mock()
+    node._execute_behavior = Mock()
+    node.fake_ctx = ctx
+
+    result = node.execute("place_in_microwave", {}, ctx)
+
+    assert result == {
+        "executed": False,
+        "placed": False,
+        "ui_test_only": True,
+        "message": "UI test only: place handler reached; no robot motion commanded and no placement performed.",
+    }
+    assert ctx.feedback == [
+        (
+            "ui_test",
+            100.0,
+            "UI test only: place handler reached; no robot motion commanded and no placement performed.",
+            False,
+        )
+    ]
+    assert ctx.sent[0]["message"] == scope["UI_TEST_MOVING"]
+    assert ctx.sent[-1]["message"] == scope["UI_TEST_DONE"]
+    assert "Tupperware placed" not in ctx.sent[-1]["message"]
+    node.arm.assert_not_called()
+    node.base.assert_not_called()
+    node._execute_behavior.assert_not_called()
+
+
+def test_ui_test_mode_does_not_enable_tupperware_retrieval(scope):
+    ctx = FakeCtx()
+    node = make(scope, ctx, allow_execute=False, ui_test_mode=True)
+
+    with pytest.raises(EngineError) as error:
+        node._ui_run("retrieve", ctx)
+
+    assert error.value.error_code == "ui_test_only"
+    node.execute.assert_not_called()
+    assert len(ctx.sent) == 1
+    assert "test mode" in unwrap(ctx.sent[0]["message"])
 
 
 @pytest.mark.parametrize(

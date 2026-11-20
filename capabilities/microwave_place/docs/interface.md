@@ -75,6 +75,12 @@ The grab runs `take_out` from `take_home_joints`, wherever that viewing pose loo
 `place` and `take_out` (including `"site": "fridge"`) stay callable directly (dry runs, CLI) but are not offered
 to the UI.
 
+`ui_test_mode` is an explicit no-motion test switch, not a placement dry-run. It permits only the mapped
+`place_in_microwave` UI action when `allow_execute` is false, and that action returns before recording, detection,
+planning or hardware commands with `executed: false`, `placed: false`, and `ui_test_only: true`. The UI shows
+test-only progress and completion text. Other UI actions, including retrieval, remain disabled; never use this mode
+for placement.
+
 Every UI action, in `execute()`:
 
 - `allow_execute` false (not mock): a "not started" notice with Done, then `execution_disabled` (recoverable).
@@ -129,6 +135,7 @@ Served under `/microwave_place/`, types from `rammp_orchestrator_interfaces`:
 | Name                                                       | Default                                       | Meaning                                                                                                                             |
 | ---------------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `allow_execute`                                            | `false`                                       | `true` lets `execute` goals move the arm (attended runs only)                                                                       |
+| `ui_test_mode`                                             | `false`                                       | Only tests the `place_in_microwave` UI route; reports no placement and sends no hardware commands                                   |
 | `state_dir`                                                | `/config/microwave_place`                     | Plans and the descent recordings                                                                                                    |
 | `worlds_dir`                                               | `/home/snorlax/.ros/rammp_box_opening/worlds` | cuRobo's world files; the planner's container sees it at the same path                                                              |
 | `frames`                                                   | `3`                                           | Locate: this many consecutive detected frames must agree                                                                            |
