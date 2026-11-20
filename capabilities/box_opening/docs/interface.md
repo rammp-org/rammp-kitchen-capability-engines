@@ -50,8 +50,8 @@ beside the container, and goes home. It has one action, `open_box`:
 1. **Look:** the arm moves to a pose looking down at the lid at 45 degrees, and
    the wrist camera aims at the button. Where it finds no button there, the
    wrist's own container finder is asked of a frame from that pose: a lid it
-   finds elsewhere than the look was aimed (half a lid or more away), which is
-   the selected container by the run's own rule, becomes the run's box; the
+   finds elsewhere than the look was aimed (half a lid or more away), which
+   alone is the selected container by the run's own rule, becomes the run's box; the
    look is planned again over it, as every look is, and flown, and the aim
    asked there (see "The look again"). At most two looks again; with no lid in
    that frame, or no button from them either, `no_button`.
@@ -1473,19 +1473,43 @@ steady 13-15 degrees about the scene lens, every find was refused for the
 selected container, and every run reached for the scene camera's place, 16-19 cm
 from the lid. Where the scene camera holds one container of the selected one's
 kind and no other (every frame of its segmenter's last 2 s, three or more of
-them, held at most one; a lid boxed on its holder counts with it), there is no
-neighbour to tell it from, and what the wrist finds is the selected container
-within 20 degrees about the scene lens of that line, and within 0.20 m of the
-range the scene camera placed it at. The run's line then gives the millimetres
-and the degrees and says that the cameras disagree, its record has them
-(`wrist_first`, `wide`, `across_mm`, `about_lens_deg`, `nearer_mm`, both
-cameras' places and the scene lens), and the console says `scene camera puts it N mm away; using the wrist's`. A second lid-sized top in that wider cone and
-neither is taken, with two exceptions that are the finder's own rules: a top the
-arm cannot reach is no rival of a find it can, and of two out of reach the one a
-lid's width or more farther from the arm is not the one being brought to it. A
-top within the 75 mm of the line is a rival of every find, as before. With two
-or more containers of the kind in the scene camera's view the 75 mm stands
-alone. Not flown.
+them, held at most one; a lid boxed on its holder counts with it) and has placed
+it (a fix: the rule needs its range), there is no neighbour to tell it from, and
+what the wrist finds is the selected container within 20 degrees about the scene
+lens of that line and within 0.20 m of the range the scene camera placed it at.
+Without a range (only the selected instance's box in the scene image) the rule
+does not apply and the 75 mm stands: a cone with no depth would take any lone
+lid-sized top across the table. The run's line gives the millimetres and the
+degrees and, where the find is taken, says that the cameras disagree; its record
+has them (`wrist_first`, `wide`, `across_mm`, `about_lens_deg`, `nearer_mm`,
+both cameras' places and the scene lens), and the console says `scene camera puts it N mm away; using the wrist's`. A second lid-sized top anywhere in
+that cone, within the arm's reach or not, and neither is taken. A top within the
+75 mm of the line is a rival of every find, as before. With two or more
+containers of the kind in the scene camera's view the 75 mm stands alone, and on
+a chair whose scene camera is turned on its mount that run finds nothing to tie:
+it reaches for the scene camera's place, and a look again from there is judged
+by the 75 mm too. Not flown.
+
+What this rule cannot tell, and takes (the owner's rule as given, 2026-11-20):
+two different containers 16-25 cm apart, the selected one in the scene camera's
+view and hidden from the wrist, the other in the wrist's view and hidden from
+the scene camera. The other is opened under the selected id.
+
+A guidance's watch ties by the same rule. Its judge asks where the scene camera
+itself has the selected container now (a sighting of its own look no older than
+1.5 s; where that has aged it looks once more, at most once in 1.5 s, and what
+it sights then is kept and not said beside the wrist's find) and ties the
+wrist's find by that place, as the run after the yes ties by its fix. Where the
+scene camera places nothing and only its box of the selection is known, the
+watch has the 75 mm alone. On a chair whose scene camera is turned ~14 degrees
+on its mount, with `camera_check` at `run` (nothing kept between runs), every
+guidance starts with the two cameras that far apart: while the scene camera
+places the one container, the wrist's find is tied by the wider rule and the
+person is guided by the wrist's place; while it does not (the container at its
+frame's edge, too few points for a fix), the wrist's find stands 10 cm off the
+box's line of sight, is not tied, and the panel says `The arm cannot see the container. Move the chair in front of it` until the scene camera places it
+again or the wait ends. Nothing in a guidance measures the two cameras against
+each other: that happens in the run, at the wrist's look or a look again.
 
 A second lid-sized top in the same direction, a find that
 is not tied, or no find: the run goes on with the scene camera's own fix of the
@@ -1506,19 +1530,31 @@ Where the aim finds no button (a compliant run, which every run is by default):
 
 - The wrist's finder (the survey's, by the lid's geometry; no button is asked
   of this frame) is asked of a still frame from the look pose, kept as a
-  capture (`captures/wrist-survey-*`). Of several lid-sized tops it takes the
-  one the selection's tie takes alone.
-- What it finds is taken by the rule the wrist's look before the reach goes by:
-  tied to the selected container (the 75 mm, or the one-container rule above),
-  or with `wrist_alone` the one container in view, or with no selection the
-  container it finds. A selection nothing ties a find to takes none.
-- A lid within half a lid of where the look was aimed is not looked at again:
-  the look stood over it.
+  capture (`captures/wrist-survey-*`). It is not told where the look was aimed.
+- A lid-sized top within half a lid of where the look was aimed is left out of
+  everything: the look stood over it and the aim found no button on it. Of the
+  tops elsewhere, the lid is the one the run's own rule takes, alone: with a
+  selection the one its tie takes (the 75 mm, or the one-container rule above,
+  asked again of the scene camera: where it holds two of the kind by now, the
+  75 mm), with `wrist_alone` the one container in the frame, with no selection
+  the one top there is. Two that the tie takes, a second top in its direction,
+  or none: no look again. A selection nothing ties a find to takes none.
+- Where the look before was aimed by the scene camera's fix, that fix and the
+  wrist's lid are the two cameras' places of one container: they are measured
+  against each other at once (`camera_check`), before the lid's look is
+  planned, so a look that does not plan does not lose the pair.
 - The lid it takes becomes the run's box, as a box the wrist found before the
-  reach is: the planner's world has the box there, its own counter is the
-  table (the counter's edges are read again on the wrist's points), and the
-  scene camera, which has the box elsewhere, is not asked about it after the
-  press. Its look is planned from where the arm stands, the press proven from
+  reach is: its place, and its own counter as the table (a table the world file
+  names stays). The planner's world holds no box and no table; the run's own
+  checks hold the arm out of the counter's edges, and those and the table's
+  extent are pooled from everything the run has seen: the scene camera's points
+  as the check now in force has them, the wrist's frames from rest where the
+  run's find was the wrist's, and the look's own frame. (One look-pose frame
+  alone showed one to three edges and not the near one.) The scene camera,
+  which had the box elsewhere, is not asked about it after the press.
+- The press starts from the higher of the lid tops the run has of this lid:
+  the aim's, the wrist's find, and the scene camera's (see below).
+- The lid's look is planned from where the arm stands, the press proven from
   it first, and flown; then the aim is asked with its prior there.
 - At most two looks again in one reach (`RELOOKS_MAX`). One is flown only where
   the run's time still holds it and the rest of a run (`RELOOK_S` 8 s and
@@ -1526,13 +1562,29 @@ Where the aim finds no button (a compliant run, which every run is by default):
   budget).
 - Where the lid's look does not plan, the arm goes home and the run says there
   is no press from where the chair stands for the lid the wrist sees: guided as
-  any such run is ("Lining up in the middle of a run"), a stop in a run by
-  hand. A look again that stops part way holds the arm (`arm_holds`).
+  any such run is ("Lining up in the middle of a run"), with the LID's place
+  handed to the guidance as the place that did not plan, not the scene camera's;
+  a stop in a run by hand. A look again that stops part way holds the arm
+  (`arm_holds`). A Ctrl+C while its plan is waited on is the cancel it is.
 
 The run says `LOOK AGAIN n of 2: no button where the scene camera had the box; the wrist sees the lid at [...], N mm from there`, its record has a `look_again`
-row a look (`n`, `lid_xyz`, `from_aimed_mm`, `planned`, `tilt_deg`), and the
-console shows the first look as `LOOK ??  no button where the scene camera had the box` and the next as a step of its own. A run that ends with no button
+row a look (`n`, `lid_xyz`, `from_aimed_mm`, `by`: how the lid was taken,
+`planned`, `tilt_deg`), and the console shows a look that found no button as
+`LOOK ??` and the next as a step of its own. A run that ends with no button
 after them says how many it flew and why no further one. Not flown.
+
+**The press's start height where both cameras have the lid.** Wherever the
+wrist's find is taken for a container the scene camera fixed (at the wrist's
+look before the reach, or at a look again), the run goes by the wrist's place
+and the wrist's table, as every run on a wrist find has flown. One thing takes
+the scene camera's top of that lid: the height the press starts from, which is
+the highest of the aim's, the find's and the scene camera's (not a rough fix's:
+its top is no measure). The wrist reads low (flatbot: the press met the lid
+40-45 mm over its top; RAMMP 1.5, 2026-11-20: its lid 39-58 mm under the scene
+camera's): a press that starts from the wrist's top alone, had the scene camera
+been right, would start inside the lid. The stroke reaches on past the top it
+starts from, as it does for a scene fix. The run says which camera's top it
+presses from. Not flown.
 
 **A selected id the scene camera no longer has.** Perception gives a container
 it loses and finds again a new id, and a goal may come with the old one
@@ -1540,13 +1592,19 @@ it loses and finds again a new id, and a goal may come with the old one
 ended in 10 s with `The arm cannot tell which container you chose`, one
 container on the table). Before the run's first fix of the container, where the
 selected id is in none of the segmenter's frames and they hold one container of
-its kind under one other id, for five frames over at least a second, that one is
-read as the selected container from then on. The scene camera's line says it
-once with both ids, the console notes it (`<id> is no longer in the scene camera's list; the one container in view (<id>) is taken for it`), and the
-look's record has the id it read (`segmenter` `adopted`). With two or more containers of the kind and the selected id gone,
-nothing says which was selected, and everything is as below. The look's record
-also keeps the most containers of the kind any one of its frames held
-(`containers`). Not flown.
+its kind under one other id, for five frames over at least a second (no more
+than a second between one and the next), that one is read for the selected
+container. What that establishes is only that it is the one container of its
+kind in view: so it is read only in a frame that holds that one and no other; a
+frame with two of the kind, or with the selected id back, ends it, and it must
+be established again from nothing; from a fix on, the container is followed by
+where it was boxed first, and no other id is taken up; and it is forgotten at a
+guidance's end with where the container was boxed (the chair moved since). The
+scene camera's line says it once with both ids, the console notes it (`<id> is not in the scene camera's list; the only container in view (<id>) is read for it`), and the look's record has the id it read (`segmenter` `adopted`).
+With two or more containers of the kind and the selected id gone, nothing says
+which was selected, and everything is as below. The look's record also keeps the
+most containers of the kind any one of its frames held (`containers`). Not
+flown.
 
 Where the selected container was in none of the scene camera's frames nothing
 would tie a wrist find to the selection: a run by hand does not turn the wrist,
@@ -1631,8 +1689,11 @@ container too, its scene numbers are the mount's own.
 its find was taken (the lid's top and the counter under it, read in one
 frame), the scene camera's where the wrist found none. Where both read them
 the run says so (`HEIGHTS:`, and a `heights` row; past 30 mm apart a
-WARNING), and the other camera's are not used. The two are never mixed, and
-neither is put under the other's lid. Each camera reads every height its own
+WARNING), and the other camera's are not used but in one place: on a wrist
+find, the press starts from the higher of the two cameras' lid tops (see "The
+press's start height where both cameras have the lid"). The table and the lid
+over it are never mixed, and neither camera's table is put under the other's
+lid. Each camera reads every height its own
 way: the wrist's have stood under the scene camera's since its repair (flatbot
 2026-10-27: its table 18 to 22 mm under at the aim, and the press met the lid
 40 to 45 mm over the wrist's top on the runs that opened the box), and the
