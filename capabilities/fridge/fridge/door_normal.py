@@ -321,7 +321,10 @@ def _footprint(P, R, t, model):
 def _icp(P, cam, R, t, model, iters, footprint_from):
     """4-DoF (x, y, z, yaw) point-to-plane ICP of the model onto data P from the pose (R, t) (arm = R @ model + t).
     From iteration `footprint_from` on, only data on the model's footprint (_footprint) is used. Returns
-    (R, t, cost, footprint mask)."""
+    (R, t, cost, footprint mask over every point of P). A fit that loses the data (under 10 points on the footprint or
+    matched) returns cost inf and an all-False mask the size of P, not of the ICP_MAX_POINTS subset the steps use: the
+    caller indexes all of P with it (11-19 and 11-20: a warm start that lost the handle raised IndexError, e.g. 2224
+    vs 1200)."""
     from scipy.spatial import cKDTree
 
     pts, nrm = model[0], model[1]
@@ -333,7 +336,7 @@ def _icp(P, cam, R, t, model, iters, footprint_from):
         if FOOTPRINT_FIT and i >= footprint_from:
             on = _footprint(P, R, t, model)
             if on.sum() < 10:
-                return R, t, np.inf, on
+                return R, t, np.inf, np.zeros(len(full), bool)
         X = pts @ R.T + t
         Nw = nrm @ R.T
         vis = np.einsum("ij,ij->i", Nw, cam - X) > 0  # faces turned toward the camera
@@ -341,7 +344,7 @@ def _icp(P, cam, R, t, model, iters, footprint_from):
         dist, idx = cKDTree(X).query(P[on])
         use = dist < ICP_MATCH_M
         if use.sum() < 10:
-            return R, t, np.inf, on
+            return R, t, np.inf, np.zeros(len(full), bool)
         q, m, p = X[idx[use]], Nw[idx[use]], P[on][use]
         r = np.einsum("ij,ij->i", m, p - q)
         c = np.array([*(R @ model[3] + t)[:2], 0.0])  # rotate about the vertical through the model's centre
