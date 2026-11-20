@@ -2103,8 +2103,10 @@ def test_on_flatbot_1623s_scene_button_is_proven_turning_short_after_the_slide(c
     assert plan.stroke.q0 == pytest.approx([float(v) for v in plan.down.pts[-1]])
     assert [name for name, _pts, _speed in plan.stroke.legs] == ["depth:approach", "depth:press"]
     assert plan.stroke.k == pytest.approx(1270.0, abs=20.0) and plan.stroke.end_z < SCENE_1623[2] - cfg.button_travel_m
-    assert plan.stroke.over == pytest.approx(dp.COMPLIANT_OVERSHOOT_M[0], abs=0.0005)
-    assert plan.stroke.bent and plan.stroke.bend_m == pytest.approx(0.006, abs=0.001)
+    # the springs' reference 10 N / k past the bottom (the ceiling, under the 15 mm floor), bent ~3 mm aside
+    assert plan.stroke.k * plan.stroke.over == pytest.approx(dp.COMPLIANT_PRESS_MAX_N, abs=0.1)
+    assert plan.stroke.over < dp.COMPLIANT_OVERSHOOT_M[0]
+    assert plan.stroke.bent and 0.0 < plan.stroke.bend_m < 0.006
     plan, why = reach_press.plan_reach(ctx, cfg, AIMED_1519, home, depth=True)
     assert why is None and plan.tilt_deg == 30 and plan.down.walked and plan.down.short_deg == 0.0
     # a box the guarded leans reached only 30 mm off (r 0.766 m, az -15 deg) is reached as it stands

@@ -2070,7 +2070,8 @@ def test_a_bend_is_no_bend_where_the_pads_do_not_move_with_the_joints(monkeypatc
     cfg = load_press_demo(PINK)
     stroke, why = dp.compliant_stroke(trp._Chain(), cfg, [0.0] * 7, TURNED_DOWN, 0.40)
     assert why is None and not stroke.bent and stroke.bend_why == "the pads do not move with the joints here"
-    assert stroke.k == float("inf") and stroke.end_z == pytest.approx(0.40 - cfg.button_travel_m - 0.015)
+    # ... and no overshoot: the 10 N ceiling (COMPLIANT_PRESS_MAX_N) over an infinite spring is none
+    assert stroke.k == float("inf") and stroke.end_z == pytest.approx(0.40 - cfg.button_travel_m)
     q_end, aside, why = dp.stroke_bend(trp._Chain(), [0.0] * 7)
     assert q_end is None and aside == 0.0 and why == stroke.bend_why
 
@@ -2163,9 +2164,10 @@ def test_a_compliant_reach_out_reads_nothing_at_rest_and_no_leg_can_stop_it(ctx,
     assert out["legs"] == ["depth:clear", "home"]  # the fake fk stands still: nothing to rise
     assert not [r for r in rows if r.get("leg") == "depth_clear"]  # no clear solved after the hold
     assert got["client_compliant"] and got["top_z"] == pytest.approx(trp.BUTTON[2])
-    # the stroke solved for that top: the fake chain's pads infinitely stiff, the least overshoot past its bottom
+    # the stroke solved for that top: the fake chain's pads infinitely stiff, so no overshoot past its bottom (the
+    # 10 N ceiling over an infinite spring)
     cfg = load_press_demo(PINK)
-    assert got["stroke"].end_z == pytest.approx(trp.BUTTON[2] - cfg.button_travel_m - dp.COMPLIANT_OVERSHOOT_M[0])
+    assert got["stroke"].end_z == pytest.approx(trp.BUTTON[2] - cfg.button_travel_m)
     assert not ctx.client.compliant  # the client is as it was once the run is over
 
 
@@ -2352,9 +2354,9 @@ def test_a_compliant_press_is_proven_for_the_scene_button_and_again_for_the_aime
     assert plan["proof"] == "scene" and plan["down"] == {"walked": walk_in, "short_deg": 0.0}
     (way,) = (r for r in rows if r["leg"] == "reach_way_in")
     assert (way["tilt_deg"], way["walked"], way["short_deg"]) == (rp.REACH_TILTS_DEG[0], walk_in, 0.0)
-    # the fake chain's pads are infinitely stiff: the stroke ends the least overshoot below the button's bottom
+    # the fake chain's pads are infinitely stiff: the stroke ends at the button's bottom (the 10 N ceiling)
     cfg = load_press_demo(PINK)
-    assert way["end_z"] == pytest.approx(0.40 - cfg.button_travel_m - dp.COMPLIANT_OVERSHOOT_M[0], abs=1e-4)
+    assert way["end_z"] == pytest.approx(0.40 - cfg.button_travel_m, abs=1e-4)
     # ... and the stroke that flew and was held is that proof's: not solved again
     assert got["stroke"].end_z == pytest.approx(way["end_z"], abs=1e-4) and got["stroke"].k == way["k"]
     assert list(rec.legs["depth:press"].traj.points[-1].positions) == pytest.approx(
@@ -2935,6 +2937,7 @@ def test_on_flatbot_1623s_aimed_button_is_pressed_turning_12_deg_short_after_the
     straight down to the button's bottom, RIGID's spring ~1320 N/m at the
     pads there (~1150 at the turn's end; STIFF's 523 and 457), then bent
     on."""
+    _at_15_n(monkeypatch)
     from box_opening.constants import HOME
     from box_opening.primitives.look import look_joints
     from box_opening.runtime import approach
@@ -3337,6 +3340,43 @@ def test_the_held_arm_is_written_on_the_strokes_side_of_the_wrap():
     assert np.asarray(rise) == pytest.approx(np.asarray(dp.rise_back_up(_PadsChain(), stroke, HELD)))
 
 
+def test_a_press_never_pushes_past_its_10_n_ceiling():
+    """Owner 2026-11-20: "it honestly shouldn't go past 10 N". RAMMP 1.5's first press pushed 29 N (the driver's
+    reading): the 15 N target asked 8 mm past the button's bottom on its 1845 N/m pads, and COMPLIANT_OVERSHOOT_M's
+    15 mm floor made it 28. 15:19's press on flatbot's URDF (1166 N/m at the bottom, where the floor made 17.5 N):
+    now the springs' reference stands 10 N / k past the bottom, under the floor, and the pads held at the bottom
+    push 10 N straight down, nothing sideways."""
+    import test_reach_press as trp
+
+    chain, _model, cfg, turn, down = _flatbot_turned_down(trp.SCENE_1519, trp.AIMED_1519)
+    stroke, why = dp.compliant_stroke(chain, cfg, turn[-1], down, trp.AIMED_1519[2])
+    assert why is None and stroke.bent, why
+    assert stroke.k == pytest.approx(1166.0, abs=5.0)
+    assert stroke.over < dp.COMPLIANT_OVERSHOOT_M[0] and stroke.k * stroke.over == pytest.approx(10.0, abs=0.1)
+    bottom = trp.AIMED_1519[2] - cfg.button_travel_m
+    _held, f = _held_at(chain, stroke.q_end, [stroke.pad0[0], stroke.pad0[1], bottom])
+    assert (
+        f[2] == pytest.approx(10.0, abs=0.2) and np.hypot(*f[:2]) < 0.05
+    )  # (f: the pads' push down, as _held_at has it)
+    # the straight stroke's end, as it is solved where no bend flies: never deeper than the ceiling's
+    for k in (467.0, 1166.0, 1845.0, float("inf")):
+        over = min(
+            max(dp.COMPLIANT_PRESS_N / k, dp.COMPLIANT_OVERSHOOT_M[0]),
+            dp.COMPLIANT_OVERSHOOT_M[1],
+            dp.COMPLIANT_PRESS_MAX_N / k,
+        )
+        assert k * over <= dp.COMPLIANT_PRESS_MAX_N + 1e-9 or over == 0.0
+    assert dp.COMPLIANT_PRESS_N <= dp.COMPLIANT_PRESS_MAX_N == 10.0
+
+
+def _at_15_n(monkeypatch):
+    """The bend and rise mechanics pinned below were measured with the 15 N press flown 2026-10-27..11-20, whose
+    overshoot floor (COMPLIANT_OVERSHOOT_M) could push it to 28 N. They are kept at that force: what they test is
+    how a stroke bends and rises back, not the force (test_a_press_never_pushes_past_its_10_n_ceiling: the force)."""
+    monkeypatch.setattr(dp, "COMPLIANT_PRESS_N", 15.0)
+    monkeypatch.setattr(dp, "COMPLIANT_PRESS_MAX_N", float("inf"))
+
+
 def _flatbot_turned_down(scene, aimed):
     """A compliant reach-out on flatbot's URDF as 10-27's flew: the look the
     planner took for the scene camera's button `scene`, the re-aim and the
@@ -3377,6 +3417,7 @@ def test_on_flatbot_a_bent_press_pushes_straight_down_where_a_straight_one_shove
     and the springs push 17.5 N. The bend moves the pads' reference 5 mm
     aside (STIFF: 11 mm, 32 mm below), its end 0.022 rad off the bottom's
     joints (STIFF: 0.046)."""
+    _at_15_n(monkeypatch)
     import test_reach_press as trp
 
     chain, _model, cfg, turn, down = _flatbot_turned_down(trp.SCENE_1519, trp.AIMED_1519)
@@ -3454,6 +3495,7 @@ def test_on_flatbot_the_way_back_up_from_1623s_hold_only_rises(monkeypatch, bent
     press. Either way the way back up joins the stroke 15-17 mm above them,
     its step there well inside RISE_FIRST_STEP_MAX_RAD, the pads never
     lower than held on it."""
+    _at_15_n(monkeypatch)
     from box_opening.constants import DRIFT_REPLAN_RAD
 
     if spring == "STIFF":
@@ -3512,6 +3554,7 @@ def test_on_flatbot_a_compliant_press_rises_back_up_its_bent_stroke(ctx, monkeyp
     stood, nothing let go. Pinned by the button's bottom (_held_at), where
     the straight line flies, it goes the same way, joined 16 mm up, its
     first step under 0.07 rad."""
+    _at_15_n(monkeypatch)
     import test_reach_press as trp
 
     from box_opening.runtime import approach

@@ -203,7 +203,15 @@ SLIDE_OK_M = 0.015
 # back up. No close-up look, no stop at contact, no check: the arm yields.
 # 15:19's touch tripped at 3.4 Nm on joint 4, ~13.5 N at the pads, and the
 # button went.
-COMPLIANT_PRESS_N = 15.0
+COMPLIANT_PRESS_N = 10.0
+# ... and never more, whatever the overshoot's floor below asks (owner 2026-11-20: "it honestly shouldn't go past
+# 10 N"). RAMMP 1.5's first press (17:07) pushed 29 N: the pads there are 1845 N/m straight down, where the
+# 15 N target asked 8 mm past the button's bottom, and COMPLIANT_OVERSHOOT_M's 15 mm floor made it 28; the
+# box slid 62 mm under it. The floor ("never a graze") gives way to this ceiling: the spring's reference
+# goes no deeper than COMPLIANT_PRESS_MAX_N / k past the bottom
+COMPLIANT_PRESS_MAX_N = 10.0
+# a press felt (the driver's peak, or the spring's own) this far past the ceiling is said as a WARNING
+PRESS_OVER_SAID_N = 3.0
 # The compliant stroke's approach and press fly at this fraction of
 # cfg.press_speed and TOUCH_SPEED: 0.175 and 0.075 for the pink box (owner
 # 2026-10-28: "make the arm press down half as slow as it is now", half the
@@ -1161,6 +1169,8 @@ def stroke_bend(chain, q_b, kq=COMPLIANT_KQ):
     bound = min(max(drop, COMPLIANT_OVERSHOOT_M[0]), COMPLIANT_OVERSHOOT_M[1])
     if bound != drop:
         force *= bound / drop
+    force = min(force, COMPLIANT_PRESS_MAX_N)  # (the floor never pushes harder than the ceiling)
+    if force != COMPLIANT_PRESS_N or bound != drop:
         q_end, drop = end(force)
     aside = float(np.hypot(*(_pads(chain, q_end) - pad_b)[:2]))
     if aside > BEND_MAX_M:
@@ -1234,7 +1244,11 @@ def compliant_stroke(chain, cfg, q0, quat, top_z, kq=COMPLIANT_KQ):
         end_z = float(_pads(chain, q_end)[2])
         over = bottom - end_z
     else:
-        over = min(max(COMPLIANT_PRESS_N / k, COMPLIANT_OVERSHOOT_M[0]), COMPLIANT_OVERSHOOT_M[1])
+        over = min(
+            max(COMPLIANT_PRESS_N / k, COMPLIANT_OVERSHOOT_M[0]),
+            COMPLIANT_OVERSHOOT_M[1],
+            COMPLIANT_PRESS_MAX_N / k,  # (the floor never pushes harder than the ceiling)
+        )
         end_z = bottom - over
         if pad0[2] <= end_z:
             return None, "the pads already stand %.0f mm below where the press would end" % (1000 * (end_z - pad0[2]))
@@ -1468,6 +1482,14 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
         else:
             log.info("[press_demo] CONTACT: none seen on the way down; the stroke flew as planned")
     runner.note("depth_compliant_press", **facts)
+    pushed = max(float(force), float((driver_force or {}).get("peak_n") or 0.0))
+    if pushed > COMPLIANT_PRESS_MAX_N + PRESS_OVER_SAID_N:
+        # the ceiling is the spring's as the arm's model has it; the driver's own reading is what was felt
+        log.info(
+            "[press_demo] WARNING: the press pushed ~%.0f N, past its %.0f N ceiling (the spring at the pads is "
+            "stiffer than the model has it, or the button stood higher): bring this run back"
+            % (pushed, COMPLIANT_PRESS_MAX_N)
+        )
     log.info(
         "[press_demo] %s, %.0f N sideways: the pads held %.0f mm above the stroke's %send, %.0f mm %s the button's "
         "top, %.0f mm from the aim"
