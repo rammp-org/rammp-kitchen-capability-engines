@@ -7493,6 +7493,27 @@ def test_a_look_that_finds_no_button_looks_again_over_the_lid_the_wrist_sees(ctx
     assert out.rstrip().endswith("arm home")
 
 
+def test_a_look_again_from_the_scene_cameras_place_measures_the_two_cameras_once(ctx, monkeypatch, tmp_path):
+    """The look before was aimed where the scene camera had the box and the wrist has that lid elsewhere: one
+    container by both cameras, handed to the check of the two (perception/camera_check.adopt) with the scene
+    camera's fix and the wrist's, before the wrist's lid becomes the run's box. A second look again starts from
+    the wrist's own place: no pair of the two cameras, nothing measured."""
+    from box_opening.perception import camera_check
+
+    a, b = _wrist_lid(), _wrist_lid(dx=0.16, dy=-0.10)
+    _lids(monkeypatch, (a, None), (b, None))
+    pairs = []
+
+    def adopt(c, locator, scene_fix, wrist_fix, runner=None, by=""):
+        pairs.append((getattr(scene_fix, "source", "scene"), wrist_fix, locator is not None, by))
+
+    monkeypatch.setattr(camera_check, "adopt", adopt)
+    code, _rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [None, None, None])
+    assert code == 2 and [r["n"] for r in rows if r["leg"] == "look_again"] == [1, 2]
+    ((source, wrist, had_locator, by),) = pairs
+    assert source != "wrist" and wrist is a and had_locator and by
+
+
 def test_two_looks_again_at_most_and_the_stop_says_so(ctx, monkeypatch, tmp_path, capsys):
     """A lid the wrist's finder has and the aim finds no button on is no container this run opens: after two
     looks again the STOP it was, the arm home, the looks counted in its words."""

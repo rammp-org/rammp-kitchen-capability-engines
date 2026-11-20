@@ -1362,6 +1362,11 @@ class SceneLocator:
         # (lift "rough"), before any vote: the line-up follows the box by them while the chair moves, when
         # no two agree (tasks/box_watch). None, as in every run: nothing is told
         self.on_sighting = None
+        # this camera checked against the wrist's (perception/camera_check): the turn about the vertical
+        # through its lens that base_to_color places it with, none until a guess or a measure is in force
+        from box_opening.perception.camera_check import CameraCheck
+
+        self.check = CameraCheck()
         if self.seg is not None and not self.seg.available:
             log.info("[scene] the scene segmenter cannot be read (%s): no look can find the box" % self.seg.why)
 
@@ -1380,15 +1385,40 @@ class SceneLocator:
         except Exception as e:  # noqa: BLE001 - a listener's problem is not the look's
             log.info("[scene] on_sighting raised %s: %s (the look goes on)" % (type(e).__name__, e))
 
-    def base_to_link(self):
-        """T(base <- the camera's link): the calibration's, or TF's."""
-        if self.T_base_link is not None:
-            return self.T_base_link
-        return self.grab.lookup(self.base_frame, self.grab.link_frame)
+    def base_to_link(self, raw=False):
+        """T(base <- the camera's link): the calibration's, or TF's, turned by the check against the wrist
+        camera where one is in force (perception/camera_check: about the vertical through the lens, so
+        the camera stays where its mount has it). `raw`: as the mount gives it, nothing turned."""
+        T = (
+            self.T_base_link
+            if self.T_base_link is not None
+            else self.grab.lookup(self.base_frame, self.grab.link_frame)
+        )
+        if raw or T is None:
+            return T
+        D = self._turn(T, self.grab.link_to_color())
+        return T if D is None else D @ T
 
-    def base_to_color(self):
-        T_bl, T_lc = self.base_to_link(), self.grab.link_to_color()
-        return None if T_bl is None or T_lc is None else T_bl @ T_lc
+    def base_to_color(self, raw=False):
+        T_bl, T_lc = self.base_to_link(raw=True), self.grab.link_to_color()
+        if T_bl is None or T_lc is None:
+            return None
+        D = None if raw else self._turn(T_bl, T_lc)
+        return T_bl @ T_lc if D is None else D @ T_bl @ T_lc
+
+    def _turn(self, T_bl, T_lc):
+        """The check's turn as a 4x4 on the arm's frame (camera_check.rotation about the lens), or None:
+        no check on this locator (one built bare, a test's), the check off, no lens yet, or no turn in
+        force. The first call that knows the mount lets the check read its guess (CameraCheck.settle)."""
+        check = getattr(self, "check", None)
+        if check is None or not check.active or T_bl is None or T_lc is None:
+            return None
+        check.settle(T_bl)
+        if not check.turn_rad:
+            return None
+        from box_opening.perception.camera_check import rotation
+
+        return rotation((T_bl @ T_lc)[:2, 3], check.turn_rad)
 
     def ready(self):
         return not self.grab.missing() and self.grab.depth_to_color() is not None and self.base_to_color() is not None
@@ -1431,6 +1461,10 @@ class SceneLocator:
         newest frame (what SEG_FRESH_S bounds) and how long ago it had
         arrived (SEG_SILENT_S's), as [min, median, max] s."""
         rec = {"timing": dict(self.last_timing)}
+        check = getattr(self, "check", None)
+        if check is not None and check.by:
+            # the turn its numbers were lifted with (perception/camera_check): a guess, or this run's measure
+            rec["camera_check"] = check.row()
         look = getattr(self, "_look", None)
         if look is None:
             return rec
@@ -1470,6 +1504,15 @@ class SceneLocator:
             return False
 
     def locate(self, timeout_s):
+        """The box (_locate), as the check against the wrist camera has the container itself where one is
+        in force (camera_check.own_fix: moved along the line of sight by what the two cameras differ by
+        there; the turn is already in every number _locate lifts). Every fix this locator returns is
+        placed the same way, so two of them (before and after a press) compare as they did."""
+        from box_opening.perception.camera_check import own_fix
+
+        return own_fix(self, self._locate(timeout_s))
+
+    def _locate(self, timeout_s):
         """The box, from the scene frames that arrive from now on. Each new
         segmenter message's boxes (the band above the holder) go through the
         gate (scene_fix_from_boxes) as they come. A fix commits when the two

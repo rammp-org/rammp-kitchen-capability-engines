@@ -3380,6 +3380,16 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         if again is None:
             break
         relooks += 1
+        if locator is not None and getattr(scene_fix, "source", None) != "wrist":
+            # the look before was aimed where the SCENE camera had the box, and the wrist has that container
+            # elsewhere (lid_from_here took it by the run's own rule): the two cameras' places of one
+            # container, measured against each other as after the wrist's own look (press_demo.main). The
+            # scene camera's numbers are turned by it for whatever of this run still reads them, and the
+            # next run starts from it, so its first look stands over the lid (perception/camera_check)
+            from box_opening.perception import camera_check
+            from box_opening.tasks import press_demo as pd
+
+            camera_check.adopt(ctx, locator, scene_fix, again.fix, runner, by=pd.runner_stamp(runner))
         # the wrist's lid is the run's box now: what follows goes by it, as for a box the wrist's look found
         # before the reach. The scene camera, which has the box elsewhere, does not judge it after the press
         scene_fix, plan, prior_button, locator = again.fix, again.plan, again.button, None

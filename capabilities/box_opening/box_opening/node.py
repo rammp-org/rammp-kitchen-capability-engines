@@ -57,7 +57,7 @@ from rammp_orchestrator_interfaces.msg import ActionAvailability
 from rammp_orchestrator_interfaces.srv import Control
 
 from . import LOGGER, guide, line_up
-from .constants import AIR_CONTROL_ENV, state_dir
+from .constants import AIR_CONTROL_ENV, CAMERA_CHECK_ENV, state_dir
 from .flight_view import FAR_SEEN, FlightView, no_press_reason, not_seen_reason
 from .runtime import rest
 from .runtime.abort import EXIT_HALTED, EXIT_LINE_UP_HOLDS, EXIT_NOT_LINED_UP
@@ -124,6 +124,12 @@ PARAMS = {
     # the arm "a little floppy" on its way to the button). In position it follows its path closely and does
     # not give way to what it meets in the air. Not flown
     "air_control": "impedance",
+    # the scene camera checked against the wrist camera (constants.CAMERA_CHECK_ENV, perception/camera_check):
+    # "keep" (the default), wherever both cameras have the container the run measures how far apart they have
+    # it, turns its own reading of the scene camera by that for the rest of the run, and keeps the measure in
+    # the state folder as the next run's starting guess; "run", the same with no guess read or kept; "none",
+    # the scene camera as its mount has it, as before 2026-11-20. The team's TF and files are never touched
+    "camera_check": "keep",
     # the folder box opening hands the planner worlds from (worlds.PlannerTable): the run's measured table,
     # while a way HOME is planned. `planner_worlds_as` is that folder as the PLANNER's container mounts it
     # (read-only); "" (the default) and box opening sends the planner no world. `planner_worlds_dir` is the
@@ -165,6 +171,8 @@ NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set f
 # what `air_control` may be. The run reads anything but "position" as impedance (tasks/reach_press), so a
 # misspelt value would fly as impedance without a word: the node refuses it instead (Capability._air_control)
 AIR_CONTROLS = ("impedance", "position")
+# ... and `camera_check` (perception/camera_check.MODES): the run reads anything it does not know as "keep"
+CAMERA_CHECKS = ("keep", "run", "none")
 
 
 def check_params(params):
@@ -1381,6 +1389,18 @@ class Capability(CapabilityEngine):
             )
         return value
 
+    def _camera_check(self):
+        """camera_check as it is now: "keep" (unset too), "run" or "none". Any other value is refused,
+        EngineError("bad_config"), before anything runs, as an air_control that is neither of its two is."""
+        value = str(self._param("camera_check") or "keep")
+        if value not in CAMERA_CHECKS:
+            raise EngineError(
+                "bad_config",
+                f'camera_check is {value!r}: it must be "keep", "run" or "none". Nothing ran',
+                recoverable=False,
+            )
+        return value
+
     def _lines_up(self):
         """(whether this execution lines up before its first move, whether that is carried over, the places
         carried with it): the `line_up` param as its goal comes; or, carried, the open_box before it ended
@@ -1987,6 +2007,7 @@ class Capability(CapabilityEngine):
             )
         )
         self._air_control()  # a value it cannot be: refused here, before anything runs
+        self._camera_check()  # ... and this one
         if not self.mock and not self._allowed():  # the mock moves nothing: it is always allowed
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
         if not self.mock:
@@ -2326,6 +2347,7 @@ class Capability(CapabilityEngine):
         if self._param("state_dir"):
             env["BOX_OPENING_STATE"] = self._param("state_dir")
         env[AIR_CONTROL_ENV] = self._air_control()
+        env[CAMERA_CHECK_ENV] = self._camera_check()
         for name, var in (("planner_worlds_as", PLANNER_WORLDS_AS_ENV), ("planner_worlds_dir", PLANNER_WORLDS_DIR_ENV)):
             if self._param(name):  # unset: whatever the node's own environment says, as BOX_OPENING_BODY_LAYERS
                 env[var] = str(self._param(name))

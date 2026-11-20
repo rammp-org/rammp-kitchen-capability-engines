@@ -88,7 +88,7 @@ from box_opening.models.container import (
     from_container,
     load_press_demo,
 )
-from box_opening.perception import clear_table
+from box_opening.perception import camera_check, clear_table
 from box_opening.perception.depth_source import BoxTopWatcher
 from box_opening.primitives.core import (
     CARRY_CLEAR_M,
@@ -2600,6 +2600,82 @@ def adopt_scene_table(ctx, worlds, watcher, scene_fix):
         ctx.mission_frames.note(table_z=float(scene_fix.table_z_scene))
 
 
+# The two cameras' tables this far apart are said as a warning (the aim's own bound on the wrist's table
+# against the one it is given: table_offset_warning).
+TABLES_WARN_M = TABLE_OFFSET_WARN_M
+
+
+def say_tables(runner, scene_seen, fix, run_table_z=None):
+    """Which camera's table and lid height the run goes by, said where both read one (owner 2026-11-20:
+    the heights from the wrist camera where it has them). The run's heights are its fix's own, one
+    camera's throughout: the wrist's where its find was taken (`fix`, source "wrist": the lid's top
+    and the counter under it, read in one frame), the scene camera's where the wrist found none
+    (`scene_seen`, its own fix: also `fix` then, and nothing is said). They are never mixed, and the
+    scene camera's table is never put under the wrist's lid: each camera reads every height its own
+    way, and what a run needs of them is the lid's top over the table it stands on, which one camera's
+    frame gives (reach_lid_off.setdown_table_z). The wrist's stand lower than the scene camera's
+    (flatbot since 2026-10-27: its table 18-22 mm under the scene's, button_aim's note; the press met
+    the lid 40-45 mm over the wrist's top on 2026-11-13 and 11-17; RAMMP 1.5 2026-11-20, the finder
+    on four runs' saved frames: its table 31-50 mm and its lid 39-58 mm under the scene camera's),
+    which every run on a wrist find has flown with: the press and the set-down go down by touch.
+    Which camera is right in height on a given chair only that touch says. `run_table_z`: the table the run
+    plans by (the watcher's), which is the fix's own unless the world file names one. Returns the
+    wrist's table less the scene camera's (m), or None where one of them read none."""
+    if scene_seen is None or fix is None or getattr(fix, "source", "") != "wrist":
+        return None
+    try:
+        wrist, scene = float(fix.table_z_scene), float(scene_seen.table_z_scene)
+        top, lid = float(fix.top_xyz[2]), float(fix.top_xyz[2]) - float(scene_seen.top_xyz[2])
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return None  # (a fix that does not say: nothing to compare)
+    if not (math.isfinite(wrist) and math.isfinite(scene) and math.isfinite(lid)):
+        return None
+    off = wrist - scene
+    own = run_table_z is None or abs(float(run_table_z) - wrist) < 1e-6
+    log.info(
+        "[press_demo] HEIGHTS: the wrist camera, which found the box, reads the table at %.3f and the lid's top "
+        "at %.3f, %.0f mm over it; the scene camera read them at %.3f (%+.0f mm) and %.3f (%+.0f mm). %s"
+        % (
+            wrist,
+            top,
+            1000 * (top - wrist),
+            scene,
+            -1000 * off,
+            float(scene_seen.top_xyz[2]),
+            -1000 * lid,
+            "The run goes by the wrist's: one camera's heights throughout, the lid found by touch"
+            if own
+            else "The run's table is the world file's, %.3f" % float(run_table_z),
+        )
+    )
+    if abs(off) > TABLES_WARN_M + 1e-9:
+        log.info(
+            "[press_demo] WARNING: the two cameras read the table %.0f mm apart (more than %.0f): one of their "
+            "mounts is off in height or tilt. The press and the set-down find the lid and the table by touch"
+            % (1000 * abs(off), 1000 * TABLES_WARN_M)
+        )
+    if runner is not None and hasattr(runner, "note"):
+        runner.note(
+            "heights",
+            by="wrist" if own else "world",
+            table_z=round(wrist if own else float(run_table_z), 4),
+            lid_z=round(top, 4),
+            wrist_table_z=round(wrist, 4),
+            scene_table_z=round(scene, 4),
+            scene_lid_z=round(float(scene_seen.top_xyz[2]), 4),
+            table_off_mm=round(1000 * off, 1),
+            lid_off_mm=round(1000 * lid, 1),
+        )
+    return off
+
+
+def runner_stamp(runner):
+    """The run's own name, for what is kept of it beyond the run: its record's file name where it has
+    written a row, else the time now in the same form."""
+    path = getattr(runner, "_log_path", None)
+    return time.strftime("run-%Y%m%d-%H%M%S") if path is None else Path(str(path)).stem
+
+
 def keep_mission_frames(frames, exc):
     """Write this run's detection record (ctx.mission_frames), with how the
     run ended (`exc`: the SystemExit in flight, or None), and say where it
@@ -2943,6 +3019,9 @@ def main():
             t_scene = time.monotonic()
             scene_fix = locator.locate(SCENE_LINED_UP_LOCATE_S if wrist_held else SCENE_FIRST_LOCATE_S)
             viz_hook("scene", locator, scene_fix)  # what it judged, drawn off this thread (perception/viz)
+            # the scene camera's own fix, as its look returned it: what the wrist's find is measured against
+            # where it is taken for the same container (camera_check.adopt, below)
+            scene_seen = scene_fix
             if ctx.mission_frames is not None:
                 ctx.mission_frames.scene(
                     scene_frame(locator.grab, locator.base_to_link()),
@@ -2971,6 +3050,12 @@ def main():
                 scene_fix, reach_locator, scene_said = wrist_look(
                     node, ctx, cfg, runner, watcher, args, locator, scene_fix, wrist_said
                 )
+                if scene_seen is not None and getattr(scene_fix, "source", "") == "wrist":
+                    # THE TWO CAMERAS HAVE THE SAME CONTAINER (the wrist's find was taken for the one the
+                    # scene camera fixed): how far apart they have it is measured, and the scene camera's
+                    # numbers are turned by it for the rest of this run (perception/camera_check; RAMMP 1.5,
+                    # 2026-11-20: 155-215 mm apart, a steady 14 deg about the scene lens)
+                    camera_check.adopt(ctx, locator, scene_seen, scene_fix, runner, by=runner_stamp(runner))
             far = (getattr(ctx, "wrist_far", None) or []) if args.guide else []
             not_seen = [] if args.guide else None  # why no camera has it, where the run does not end on that
             if scene_fix is None and (not far or side_survey_has_a_turn(args)):
@@ -3039,6 +3124,7 @@ def main():
                     )
             sp = scene_fix.pose
             adopt_scene_table(ctx, worlds, watcher, scene_fix)
+            say_tables(runner, scene_seen, scene_fix, watcher.table_z)
             surveyed = watcher.table_z
             log.info(
                 "[press_demo] %s: box at [%.3f, %.3f] yaw %.1f deg from %d lid points%s "

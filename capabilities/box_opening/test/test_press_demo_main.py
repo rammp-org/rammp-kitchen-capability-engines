@@ -1259,3 +1259,118 @@ def test_a_cancelled_run_keeps_no_mission_frames(monkeypatch, tmp_path):
 def test_no_frames_to_keep_is_a_no_op():
     assert press_demo.keep_mission_frames(None, SystemExit(2)) is None
     assert press_demo.keep_mission_frames(getattr(None, "mission_frames", None), None) is None
+
+
+# ------------------------------------------------- the two cameras checked against each other (2026-11-20)
+def _wrist_taken(taken, d_xy=(0.090, -0.158), d_top=-0.038, d_table=-0.030):
+    """A stand-in for press_demo.wrist_look whose wrist finds the container `d_xy` from where the scene camera
+    has it, its lid `d_top` and its table `d_table` from the scene camera's, and whose find is taken."""
+    from types import SimpleNamespace
+
+    from box_opening.models.container import ContainerPose
+
+    def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
+        s = scene_fix.top_xyz
+        table = float(scene_fix.table_z_scene) + d_table
+        wrist = SimpleNamespace(
+            pose=ContainerPose(xyz=(s[0] + d_xy[0], s[1] + d_xy[1], table), yaw=0.0),
+            top_xyz=(s[0] + d_xy[0], s[1] + d_xy[1], s[2] + d_top),
+            n_points=250,
+            score=0.7,
+            table_z_scene=table,
+            table_extent=None,
+            source="wrist",
+        )
+        taken.append((scene_fix, wrist))
+        return wrist, None, None
+
+    return wrist_look
+
+
+def test_a_wrist_find_taken_for_the_scene_cameras_box_is_measured_against_it(monkeypatch, tmp_path, capsys):
+    """RAMMP 1.5, 2026-11-20: the two cameras had the one container 155-215 mm apart in five looks and the run
+    went on with the scene camera's, 17 cm from the box. Where the wrist's find is the one the run goes on
+    with, the scene camera's own fix of it (as its look lifted it) and the wrist's are handed to the check
+    (camera_check.adopt), the reach-out gets the wrist's, and the two cameras' heights are said."""
+    from box_opening.perception import camera_check
+    from box_opening.tasks import press_demo
+
+    taken, adopted = [], []
+    monkeypatch.setattr(press_demo, "wrist_look", _wrist_taken(taken))
+    monkeypatch.setattr(
+        camera_check, "adopt", lambda ctx, loc, scene, wrist, runner=None, by="": adopted.append((scene, wrist, by))
+    )
+    REACH_OUTS.clear()
+    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute", "--wrist-first"], _at_staging())
+    assert code == 0 and len(taken) == 1
+    scene_fix, wrist = taken[0]
+    assert [(s, w) for s, w, _by in adopted] == [(scene_fix, wrist)]  # the scene camera's own fix, and the wrist's
+    assert adopted[0][2].startswith("run-")  # (which run measured it, for what is kept of it)
+    assert REACH_OUTS == [wrist]
+    out = capsys.readouterr().out
+    (line,) = (ln for ln in out.splitlines() if "HEIGHTS:" in ln)
+    assert "the scene camera read them at -0.027 (+30 mm) and 0.094 (+38 mm)" in line, line
+    assert "The run's table is the world file's, -0.027" in line  # (the bench's world file names its table)
+    (noted,) = (r for r in rows if r["leg"] == "heights")
+    assert noted["by"] == "world" and noted["table_off_mm"] == -30.0 and noted["lid_off_mm"] == -38.0
+
+
+def test_where_the_wrist_finds_none_the_scene_cameras_fix_flies_and_nothing_is_measured(monkeypatch, tmp_path, capsys):
+    from box_opening.perception import camera_check
+    from box_opening.tasks import press_demo
+
+    adopted, flown = [], []
+    monkeypatch.setattr(
+        press_demo,
+        "wrist_look",
+        lambda n, c, cfg, r, w, a, locator, fix, said: flown.append(fix) or (fix, locator, None),
+    )
+    monkeypatch.setattr(camera_check, "adopt", lambda *a, **k: adopted.append(a))
+    REACH_OUTS.clear()
+    code, _c, rows = run_main(monkeypatch, tmp_path, ["--execute", "--wrist-first"], _at_staging())
+    assert code == 0 and adopted == [] and len(flown) == 1 and REACH_OUTS == flown  # the scene camera's own, as it was
+    assert "HEIGHTS:" not in capsys.readouterr().out and not [r for r in rows if r["leg"] == "heights"]
+
+
+def test_which_cameras_heights_a_run_goes_by_is_said_where_both_read_them(capsys):
+    """say_tables: one camera's heights throughout a run, the wrist's where its find was taken. The scene
+    camera's are said beside them and not used; more than 30 mm apart is a warning."""
+    from types import SimpleNamespace
+
+    from box_opening.tasks import press_demo
+
+    rows = []
+    runner = SimpleNamespace(note=lambda kind, **kw: rows.append((kind, kw)))
+    scene = SimpleNamespace(top_xyz=(0.68, -0.03, 0.443), table_z_scene=0.343, source="segmenter")
+    wrist = SimpleNamespace(top_xyz=(0.77, -0.19, 0.405), table_z_scene=0.313, source="wrist")
+    assert press_demo.say_tables(runner, scene, wrist, 0.313) == pytest.approx(-0.030)
+    out = capsys.readouterr().out
+    assert "reads the table at 0.313 and the lid's top at 0.405, 92 mm over it" in out
+    assert "the scene camera read them at 0.343 (+30 mm) and 0.443 (+38 mm)" in out
+    assert "The run goes by the wrist's: one camera's heights throughout, the lid found by touch" in out
+    assert "WARNING" not in out  # (30 mm: at the bound, not past it)
+    assert rows == [
+        (
+            "heights",
+            {
+                "by": "wrist",
+                "table_z": 0.313,
+                "lid_z": 0.405,
+                "wrist_table_z": 0.313,
+                "scene_table_z": 0.343,
+                "scene_lid_z": 0.443,
+                "table_off_mm": -30.0,
+                "lid_off_mm": -38.0,
+            },
+        )
+    ]
+    low = SimpleNamespace(top_xyz=(0.77, -0.19, 0.385), table_z_scene=0.293, source="wrist")
+    assert press_demo.say_tables(None, scene, low, 0.293) == pytest.approx(-0.050)
+    assert "WARNING: the two cameras read the table 50 mm apart (more than 30)" in capsys.readouterr().out
+    # nothing to say: the scene camera's own fix flies, one of them read no table, or a fix that does not say
+    assert press_demo.say_tables(runner, scene, scene, 0.343) is None
+    assert press_demo.say_tables(runner, None, wrist, 0.313) is None
+    nan = SimpleNamespace(top_xyz=(0.68, -0.03, 0.443), table_z_scene=float("nan"))
+    assert press_demo.say_tables(runner, nan, wrist, 0.313) is None
+    assert press_demo.say_tables(runner, SimpleNamespace(), wrist, 0.313) is None
+    assert capsys.readouterr().out == "" and len(rows) == 1

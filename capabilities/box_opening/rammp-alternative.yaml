@@ -89,6 +89,12 @@ params:
   # again), and where nothing does the chair is guided. A selection the scene camera does hold is
   # tied to it either way (docs/interface.md)
   wrist_alone: false
+  # the scene camera checked against the wrist camera (docs/interface.md, "The two cameras checked
+  # against each other"). "keep": wherever both have the container, the run measures how far apart
+  # they have it, turns ITS OWN reading of the scene camera by that for the rest of the run, and
+  # keeps the measure in its state folder as the next run's starting guess. "run": the same, no
+  # guess read or kept. "none": the scene camera as its mount has it. The robot's TF is never changed
+  camera_check: "keep"
   # a run's full lines on the node's console too, between the flight view's (off: kept in
   # runs/console-<stamp>.log of the state folder, and the console is the flight view)
   full_console: false
