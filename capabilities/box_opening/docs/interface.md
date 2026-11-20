@@ -564,11 +564,11 @@ the deployment's values back.
 | Panel message                                                     | Buttons           | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ----------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Looking for the container`                                       | Cancel            | Nothing has looked yet (the wrist is turning to its view, the scene camera's first look has not ended), or what watches has had no container for less than 1.5 s: one frame without it is not said as a container the arm cannot see                                                                                                                                                                                                                                                                                     |
-| `The arm cannot see the container. Move the chair in front of it` | Cancel            | What watches delivers frames and has had nothing in them that could be the container for 1.5 s, or one that was seen has not been for 1.5 s. From the first panel where the run's own look had found none before it asked (and no yes was given yet in this goal). No direction, no distance: none is known. It never ends a line-up: only the line-up's time does                                                                                                                                                       |
+| `The arm cannot see the container. Move the chair in front of it` | Cancel            | What watches delivers frames and has had nothing in them that could be the container for 1.5 s, or one that was seen has not been for 3 s (an instruction that is up stands until then: see below). From the first panel where the run's own look had found none before it asked (and no yes was given yet in this goal). No direction, no distance: none is known. It never ends a line-up: only the line-up's time does                                                                                                |
 | `The arm's vision is not working`                                 | Cancel, then none | What the line-up watches with has delivered nothing for 1.5 s: a camera with no frame, no pose or calibration for its frames, the scene segmenter down or not for this container; or the watch itself has said nothing for 5 s. No word of moving: no move cures it. Standing 10 s, its last 3 s with no button, the action fails `not_found`. Where the line-up watches with the wrist, the scene camera's sightings neither hide the wrist camera's fault nor start its 10 s again                                     |
 | `The arm cannot tell which container you chose`                   | Cancel, then none | What watches HAS something that could be the container in view, and nothing ties it to the selected one: the wrist has a lid and the selected id is in none of the scene camera's detections (`wrist_alone` off). The same 10 s and end. (A lid that stands off the scene camera's line to a selected container the scene camera DOES hold is another thing on the table: the cannot-see sentence, which never ends.) Never of a selected id that is merely absent with nothing in view: that is the cannot-see sentence |
 | `The arm sees two things that could be the container`             | Cancel            | What watches sees two lid-sized tops it cannot choose between (the second may be no container at all). Said while they stand, and it ends nothing: the line-up goes on reading sightings to its own time. Each of these sentences stands 3 s before another of them replaces it                                                                                                                                                                                                                                          |
-| `Move closer, about 15 cm`                                        | Cancel            | Outside the boundary: closer, back, left or right, the larger miss                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `Move closer, about 15 cm`                                        | Cancel            | Outside the boundary: closer, back, left or right, the larger miss. The opposite of the instruction last given, by under 5 cm, only once it has stood 1 s                                                                                                                                                                                                                                                                                                                                                                |
 | `Hold still, checking`                                            | Cancel            | Inside, not yet still for 1 s, or not yet judged                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `Ready. Open the container?`                                      | Open, Cancel      | Inside, still, and the run plans for it there                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `Press open again when you are in place`                          | none              | The line-up's time passed (see "How long a line-up may take": 35 s from the goal's start, or `ui_line_up_s`; for a goal sent by hand, `Out of time. Start open_box again when you are in place` after 10 minutes): shown 3 s, then the action fails `not_lined_up`                                                                                                                                                                                                                                                       |
@@ -593,6 +593,22 @@ next: the instruction (`Move closer a little`) then stands, on the panel too,
 and `Hold still, checking` takes its place only once the container has read
 inside for half a second without a break. The question is not held back by
 that: it is asked the moment the container is inside, still and planned for.
+Two more things keep the words steady (2026-11-20, after the first line-ups
+on RAMMP 1.5, where sightings came two to five seconds apart and the panel
+read `Move closer, about 10 cm` and
+`The arm cannot see the container. Move the chair in front of it` by turns).
+An instruction that is up (`Move ...`, `Hold still, checking`) stands through
+a container that has been out of every view for up to 3 s (`OUT_STANDS_S`),
+and only then is the user told the arm cannot see it, or what else it is; a
+container that has been seen is never `Looking for the container` again. The
+question does not stand that long: it is taken back to `Hold still, checking`
+once the container has not been seen for 1.5 s, and **Open** counts only on a
+container seen within the last second, as before. And the opposite of the
+instruction last given (`Move back a little` after `Move closer, about 5 cm`),
+by less than 5 cm, is said only once it has been the answer for 1 s without a
+break, `Hold still, checking` the while: a container that reads a centimetre
+or two past the boundary's far side for a moment does not send the user back
+out. One that is further past it is told so at once.
 The run starts only on **Open**, and only where it is pressed on a `Ready`
 panel whose container was seen within the last second; then the panel is the
 run's. `Ready` is kept through half a second of frames that cannot be judged or
@@ -893,8 +909,8 @@ The guidance itself:
   over: which way and how far, `Hold still, checking`, `Ready. Open the container?`.
   Only what is known is said: a sighting the boundary cannot judge yet says
   `Hold still, checking`, and one with no known way in says
-  `The arm cannot open it from here`. Lost again for 1.5 s, the user is told
-  again that the arm cannot see it.
+  `The arm cannot open it from here`. Lost again, the instruction that is up
+  stands for 3 s; then the user is told again that the arm cannot see it.
 - What judges the boundary (`reach_probe`) is started at that first sighting,
   not when the line-up starts: it does nothing before a sighting (the lid's
   height names its grid), and one that could not start, or died, ended the
@@ -905,7 +921,9 @@ The guidance itself:
 - Where the watch comes to a state no moving of the chair cures, that is said
   as what it is, with **Cancel** and no word of moving, once it has stood 1.5 s
   (until then `Looking for the container`, or the sentence that stood before
-  it; never, for these, that the arm cannot see the container):
+  it, or, of a container that had been seen, the instruction that was up, for
+  3 s from its last sighting; never, for these, that the arm cannot see the
+  container):
   `The arm's vision is not working` (what watches delivers nothing),
   `The arm cannot tell which container you chose` (something in view that
   nothing ties to the selected container),
@@ -1170,6 +1188,7 @@ passes them as a params file.
 | `wrist_survey`        | `false`                | Where the scene camera finds no container, look for it with the wrist camera (see below); needs the body model on                                                                                                                                                                                                                                                                                                                                                                                                |
 | `wrist_first`         | `false`                | Facing a table: the wrist camera finds the container in front of the arm, the wrist turned where the arm rests (see below)                                                                                                                                                                                                                                                                                                                                                                                       |
 | `wrist_alone`         | `false`                | With `wrist_first`: a selection the scene camera's detections do not hold (a list typed by hand) is looked for by the wrist alone, taken only where it sees one container (see below)                                                                                                                                                                                                                                                                                                                            |
+| `camera_check`        | `"keep"`               | The scene camera checked against the wrist camera each run: `"keep"` (measured, the run's own reading of the scene camera turned by it, the measure kept as the next run's starting guess), `"run"` (no guess read or kept), `"none"` (off). See "The two cameras checked against each other"                                                                                                                                                                                                                    |
 | `full_console`        | `false`                | A run's full lines on the node's console too, between the flight view's. Off: they are kept in `runs/console-<stamp>.log` of the state folder (the result's last line names it), and the console is the flight view                                                                                                                                                                                                                                                                                              |
 
 ### The free air before the press
@@ -1468,6 +1487,73 @@ then, not on the whole table. With it on the arm opens whichever single
 container stands in front of it, under the selected id: nothing checks that it
 is the one the user meant. A selection the scene camera does hold is tied as
 above, with or without it.
+
+### The two cameras checked against each other
+
+Both cameras place the container in the arm's frame: the scene camera by its
+mount (the robot's TF), the wrist camera by the arm that carries it. The arm
+goes where the wrist camera sees, so wherever both have the same container,
+how far apart they have it is the scene camera's error as the arm meets it.
+On RAMMP 1.5 on 2026-11-20 that was 155 to 215 mm in five looks, the chair at
+four places, and every run that went on with the scene camera's fix looked 17
+cm beside the box and found no button. The distance changed with how far the
+container stood; the angle about the scene camera's lens did not (13 to 15
+deg): a camera turned on its mount.
+
+With `camera_check` on (`"keep"`, the default, or `"run"`), a run measures
+this wherever the wrist's find is taken for the container the scene camera
+fixed (`perception/camera_check.py`):
+
+- **What is measured**, from that one pair: the turn about the vertical through
+  the scene lens that brings the scene camera's direction to the container onto
+  the wrist's, how much nearer or farther along that line the wrist has it, and
+  how much higher. A pair more than 25 deg or 0.20 m apart about the lens is
+  not taken for one container seen twice, and measures nothing.
+- **What is done with it, for the rest of the run**: box opening's own reading
+  of the scene camera's placement is turned by that angle about the vertical
+  through its lens. Everything the run lifts through it afterwards comes out
+  where the wrist would have it: the scene camera's fixes and its sightings in
+  a line-up, the line of sight a selection is tied by, the points a later look
+  takes. The difference along the line is applied to that container's own fix
+  only (the scene camera sees a lid from its side, which says nothing of the
+  table round it). **Heights are never moved by it.**
+- **What is kept**: with `"keep"`, the measure goes into the state folder
+  (`scene_calib/camera_check.json`, the newest five under one mount), and the
+  next run's scene numbers start turned by their median, as a guess, until
+  that run's own pair replaces it. The log says so, with its age, when it is
+  first used. A guess belongs to the mount it was measured under (the numbers
+  TF gave): another mount, and it is dropped. A run that measures more than
+  3 deg from the guess says so and keeps only its own.
+- **What is said**: one `CAMERAS:` line with both places and the disagreement;
+  a `camera_check` row in the run log; and, past 3 deg, once a run,
+  `WARNING: the scene camera's mount looks N deg off ...: tell the team`.
+
+Nothing of the robot is changed by it: not TF, not the team's files. It is a
+correction inside box opening's own reading, and everything else that uses
+the scene camera's positions is as far off as before. Replaying the five pairs
+of 2026-11-20, one pair's measure puts the other four within 31 mm of the
+wrist's (48 mm with the turn alone); untouched they were 155 to 215 mm apart.
+Not flown.
+
+What it cannot do: a turn about the vertical is all one pair gives. A camera
+that is also tilted shows in the heights, which are said and left as they
+are. And a first run under a new mount has no guess: until its wrist has the
+container too, its scene numbers are the mount's own.
+
+**Heights.** A run's heights are one camera's throughout: the wrist's where
+its find was taken (the lid's top and the counter under it, read in one
+frame), the scene camera's where the wrist found none. Where both read them
+the run says so (`HEIGHTS:`, and a `heights` row; past 30 mm apart a
+WARNING), and the other camera's are not used. The two are never mixed, and
+neither is put under the other's lid. Each camera reads every height its own
+way: the wrist's have stood 18 to 30 mm under the scene camera's since its
+repair (flatbot 2026-10-27; RAMMP 1.5 2026-11-20, 17 to 30 mm), the press met
+the lid 40 to 45 mm over the wrist's top on the runs that opened the box, and
+the press and the set-down go down by touch for that reason. Where the scene
+camera's fix flies, the aim from the look pose still judges the lid against
+the table its own frame shows and still never lowers the press point to the
+wrist's reading (`ButtonAimer.fix`): that bound is what keeps the press from
+starting below the lid, and it is as it flew.
 
 ### The side survey and the orchestrator's selection: an interface gap
 
