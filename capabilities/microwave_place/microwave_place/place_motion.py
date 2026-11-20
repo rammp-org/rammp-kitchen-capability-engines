@@ -954,11 +954,13 @@ def line_floor(floor_z):
     return floor_z + max(BOX_BELOW - PRESS_BELOW, MIN_TOOL_HEIGHT)
 
 
-def plan_down(model, q, floor_z, log=None):
+def plan_down(model, q, floor_z, log=None, length=0.0):
     """The straight line down from q (plan_descent), required to reach DESCENT_BELOW_MEET below where the
     box's bottom meets the glass; and its part above that meeting point (what the check covers: the lower
-    finger touches the glass ~1.3 cm before the box does on the arm model)."""
-    zs, qs = _stage("descent", plan_descent, model, q, line_floor(floor_z), log=log)
+    finger touches the glass ~1.3 cm before the box does on the arm model). `length` > 0 aims the line that far
+    below q's tool (descent_m) instead of at line_floor: the contact stop, not the line's end, ends it."""
+    end_z = float(model.fk(np.asarray(q, dtype=float))[2, 3]) - length if length > 0 else line_floor(floor_z)
+    zs, qs = _stage("descent", plan_descent, model, q, end_z, log=log)
     meet = floor_z + BOX_BELOW
     if zs[-1] > meet - DESCENT_BELOW_MEET:
         raise StageFailed(
@@ -989,7 +991,7 @@ def plan_place_in(model, checker, q0, cand, Qs, floor_z, cfg, log=None):
     end_off, end_turn = end_pose_error(model, line[-1], target, h)
     if end_off > END_TOL or end_turn > END_TOL_DEG:
         raise StageFailed("check", f"the line in ends {end_off * 100:.1f} cm / {end_turn:.1f} deg off the target")
-    descent, upper, _ = plan_down(model, line[-1], floor_z, log)
+    descent, upper, _ = plan_down(model, line[-1], floor_z, log, cfg.get("descent_m", 0.0))
     check_tilt(model, [("descent", upper, LINE_STEP_DEG)], R0, tilt_max)
     # the release and back-out, from where the model has the lowering stop
     i_hold = contact_index(descent, floor_z)
@@ -1282,7 +1284,7 @@ def run_place(arm, model, q0, oven, cand, plan, cfg, ctx, log, descents_dir, res
             descent = res["descent"]
             log(f"line down: as checked (the arm within {REUSE_TOL_DEG:g} deg of its start)")
         else:
-            descent, upper, _ = plan_down(model, q_in, floor_z, log)
+            descent, upper, _ = plan_down(model, q_in, floor_z, log, c.get("descent_m", 0.0))
             check_tilt(model, [("descent", upper, LINE_STEP_DEG)], R0, c["tilt_max_deg"])
     except Refused as e:
         raise Refused(f"STOPPED in the oven, holding the container, not lowering: {e}") from e

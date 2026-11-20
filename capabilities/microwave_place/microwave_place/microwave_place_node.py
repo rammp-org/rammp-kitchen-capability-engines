@@ -133,8 +133,11 @@ PARAMS = {
     # SAM3's prompt for the whole oven (its outside, for the obstacles)
     "microwave_prompt": "microwave",
     # the tool this far (m) over the turntable glass at the end of the line in (the box's bottom
-    # place_motion.BOX_ABOVE lower), then lowered from there
-    "above": 0.055,
+    # place_motion.BOX_ABOVE lower), then lowered from there; 0.075 keeps the box 2.5 cm over the
+    # glass on the way in
+    "above": 0.075,
+    # the line down is aimed this far (m) below the target; the contact stop ends it (0: down to line_floor, ~5 cm)
+    "descent_m": 0.20,
     # the container's spot this far (m) back from the turntable's middle toward the opening, along the oven's axis
     "closer": 0.02,
     # the hand's heading off the oven's axis (deg, + = left), tried in this order; the first that passes wins
