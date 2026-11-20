@@ -1113,3 +1113,65 @@ def test_a_run_cut_between_two_spots_says_the_cut_and_where_the_lid_was():
     ]
     out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + met, 130, timed_out=True, held=False)
     assert not any("on its way to spot" in line or "being chosen" in line for line in out)
+
+
+def test_the_person_at_the_e_stop_is_shown_how_far_apart_the_two_cameras_are_and_the_mounts_warning():
+    """The cameras' check (perception/camera_check) said its findings in the run's full lines only, which the
+    flight view does not show: the person at the e-stop was not told that the scene camera's mount is 18 cm off.
+    And the view's own "scene camera puts it N mm away" is read from the wrist look's line, whose number is taken
+    from the scene camera's fix as the run reads it: in a second round, the correction in force, that is only
+    what the correction left, and the view went quiet (review of 2026-11-20). The check's own line gives the
+    disagreement as the MOUNT has it: shown, with the warning to tell the team."""
+    tie = "(one container: the selection's tie took the wrist's find)"
+    cameras = (
+        P
+        + "CAMERAS: the scene camera has the container at [0.680, -0.034] and the wrist camera at [0.770, -0.192] "
+        + tie
+        + ": they disagree by -13.9 deg about its lens and 28 mm nearer along it (182 mm apart at 0.75 m), the "
+        "wrist's lid 58 mm lower. The scene camera's numbers are turned -13.9 deg about its lens for the rest of "
+        "this run"
+    )
+    warning = (
+        P + "WARNING: the scene camera's mount looks 14 deg off (it puts the container 182 mm from where the wrist "
+        "camera, which the arm follows, has it): tell the team. Box opening turns its own reading of it for this "
+        "run; everything else that uses the scene camera's positions is off by as much"
+    )
+    heights = (
+        P + "WARNING: on this robot the two cameras read heights 50 mm apart (the wrist's lower; more than 30): a "
+        "standing difference of their mounts, in height or tilt, not of this run. Which is right only a touch says"
+    )
+    fix = P + "WRIST SURVEY: box at [0.770, -0.192] yaw 0.0 deg from 250 lid points (WRIST 0.70) — reaching out"
+
+    def look(apart_mm):
+        return (
+            P + "WRIST LOOK: the box at [0.770, -0.192, 0.385]; the scene camera had it at [0.680, -0.034, 0.443], "
+            "%d mm away — the wrist's is taken" % apart_mm
+        )
+
+    # a first round: nothing in force, the wrist look's own line has the whole distance, and the check's is the same
+    out = _view([(1, look(182)), (1, cameras), (1, warning), (2, heights), (3, fix)], 1)
+    assert out[:5] == [
+        "   find      ...   looking for the box",
+        "             note  scene camera puts it 182 mm away; using the wrist's",
+        "             note  WARNING: the scene camera's mount looks 14 deg off (182 mm at the box): tell the team",
+        "             note  the two cameras read heights 50 mm apart on this robot (the wrist's lower)",
+        " 1 FIND      ok    box 0.79 m out (wrist camera)               3.0 s",
+    ]
+    # a second round, the correction in force: the wrist look's line has 12 mm (nothing is said of that), and the
+    # check's line has the mount's 182 mm: shown, so the view does not go quiet over a mount that is 18 cm off
+    out = _view([(1, look(12)), (1, cameras), (3, fix)], 1)
+    assert out[:3] == [
+        "   find      ...   looking for the box",
+        "             note  scene camera's mount puts it 182 mm from the wrist's (-13.9 deg about its lens); its "
+        "numbers are turned for this run",
+        " 1 FIND      ok    box 0.79 m out (wrist camera)               3.0 s",
+    ]
+    # a pair nothing establishes is not measured: the full lines say why, and the view says nothing it does not know
+    unpaired = (
+        P + "CAMERAS: the two cameras' places are not measured against each other: no selection ties the wrist's "
+        "find to the scene camera's box, and the scene camera does not hold exactly one container of the kind"
+    )
+    out = _view([(1, look(182)), (1, unpaired), (3, fix)], 1)
+    assert [ln for ln in out[:3] if "note" in ln] == [
+        "             note  scene camera puts it 182 mm away; using the wrist's"
+    ]
