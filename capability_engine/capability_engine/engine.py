@@ -80,6 +80,8 @@ INTENT_TIMEOUT_S = 120.0
 STOP_MARGIN_S = 1.0  # on a stop, past self.arm's and self.base's worst settle: the action's code
 START_WAIT_S = 1.0  # an accepted goal not handed to execute within this was lost by rclpy
 SPIN_STEP_S = 0.1  # run() spins in steps this long, to notice a stop between them
+UI_UPDATE_RETRY_S = 0.05  # a panel update the bridge refused while its goal is open: resend after
+UI_UPDATE_RETRIES = 40  # ... this many times (2 s), then cancel that goal and open a new one
 
 
 @dataclass
@@ -629,16 +631,28 @@ class CapabilityEngine(Node):
             return False
         return self._ui_open_goal(run, token)
 
-    def _ui_on_update_response(self, run: "_Run", token: bytes, goal_handle, future) -> None:
+    def _ui_on_update_response(
+        self, run: "_Run", token: bytes, goal_handle, future, attempt: int = 0
+    ) -> None:
         """Done-callback for the UpdateUserInputPanel call `_ui_update_panel`
-        fires without waiting for. Reopens a fresh goal in the background if
-        the update was refused -- most likely the previous goal just ended (a
-        button press, or the bridge force-aborted it) since we last checked --
-        same as if this were the first call. Guarded against `goal_handle`
-        (the goal this particular update was sent against) having already
-        been replaced by a newer one: a delayed refusal callback must not
-        clear a newer goal's handle or trigger a redundant reopen on top of
-        it."""
+        fires without waiting for.
+
+        A refusal while `goal_handle` is still this run's open goal (its result
+        has not arrived) does not mean the goal is gone: the bridge accepts a
+        goal before it records it as the active one, so an update sent right
+        after acceptance is refused ("no active RequestUserInput goal") while
+        the goal is in fact open. Dropping the handle and reopening then fails
+        for good: every new goal is rejected because the first one is active.
+        So the update is resent (the run's merged state) every
+        UI_UPDATE_RETRY_S. If the goal really ended (a button press, a
+        bridge-forced abort), its result arrives and clears the handle, and the
+        retry opens a fresh goal instead. A refusal that lasts UI_UPDATE_RETRIES
+        tries is logged as an error, the goal is cancelled (freeing the
+        bridge's slot) and a fresh one opened.
+
+        Guarded against `goal_handle` (the goal this update was sent against)
+        having been replaced by a newer one: a delayed refusal must not clear a
+        newer goal's handle or reopen on top of it."""
         try:
             response = future.result()
         except Exception as error:
@@ -650,13 +664,66 @@ class CapabilityEngine(Node):
             return
         with run.ui_lock:
             if run.ui_closed or run.ui_goal_handle is not goal_handle:
-                # The run ended, or a newer goal has already replaced this
-                # one (e.g. an earlier refusal already reopened it) -- this
-                # stale refusal has nothing left to do.
+                # The run ended, or the goal ended or was replaced since this
+                # update was sent: the retry below sorts out which.
+                stale = True
+            else:
+                stale = False
+                give_up = attempt + 1 >= UI_UPDATE_RETRIES
+                if give_up:
+                    run.ui_goal_handle = None
+        if stale:
+            self._ui_after_refusal(run, token, goal_handle, attempt)
+            return
+        if give_up:
+            self.get_logger().error(
+                f"update_user_panel: the bridge refused {attempt + 1} updates to an open goal "
+                f"({response.message}); cancelling it and opening a new one"
+            )
+            goal_handle.cancel_goal_async()
+            self._ui_open_goal(run, token)
+            return
+        if attempt == 0:
+            self.get_logger().info(
+                f"update_user_panel update refused, retrying: {response.message}"
+            )
+        self._ui_later(
+            UI_UPDATE_RETRY_S, lambda: self._ui_after_refusal(run, token, goal_handle, attempt + 1)
+        )
+
+    def _ui_after_refusal(self, run: "_Run", token: bytes, goal_handle, attempt: int) -> None:
+        """After a refused update: resend it if `goal_handle` is still the open
+        goal; open a fresh goal (carrying the merged state) if that goal has
+        ended and no other is open or opening; else nothing."""
+        with run.ui_lock:
+            if run.ui_closed:
                 return
-            run.ui_goal_handle = None
-        self.get_logger().info(f"update_user_panel update refused, reopening: {response.message}")
-        self._ui_open_goal(run, token)
+            current = run.ui_goal_handle
+            payload = dict(run.ui_desired_state)
+            reopen = current is None and not run.ui_opening
+            if reopen:
+                run.ui_opening = True
+        if current is goal_handle:
+            if not self._ui_update_client.service_is_ready():
+                self.get_logger().warning(
+                    "ui_bridge_node's ~/request_user_input/update unavailable"
+                )
+                return
+            future = self._ui_update_client.call_async(
+                UpdateUserInputPanel.Request(token=list(token), request_json=json.dumps(payload))
+            )
+            future.add_done_callback(
+                lambda f: self._ui_on_update_response(run, token, goal_handle, f, attempt)
+            )
+        elif reopen:
+            self.get_logger().info("update_user_panel: the panel's goal ended; opening a new one")
+            self._ui_open_goal(run, token)
+
+    def _ui_later(self, delay_s: float, callback) -> None:
+        """Run `callback` once, `delay_s` from now, off the executor's threads."""
+        timer = threading.Timer(delay_s, callback)
+        timer.daemon = True
+        timer.start()
 
     def _ui_open_goal(self, run: "_Run", token: bytes) -> bool:
         if not self._ui_request_client.server_is_ready():
