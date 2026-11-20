@@ -6,9 +6,10 @@ lines, the straight line down in the driver's joint impedance mode with the cont
 recording. Added for the microwave:
 
   plan_line / check_line: a straight line of joint waypoints, and the check that every pose is on it;
-  "Into the microwave": the microwave as one obstacle box, the hand's heading into the oven, the checks on
-    the arm model (clearance per link against that box for the side shift and cuRobo's transit only; tilt and
-    joint travel), the straight lines, the release tilt and the level back-out (not collision-checked);
+  "Into the microwave": the scene-derived body box and shared open-door/body boxes, the hand's heading into
+    the oven, the checks on the arm model (clearance per link against the boxes for the side shift and cuRobo's
+    transit only; tilt and joint travel), the straight lines, the release tilt and the level back-out
+    (not collision-checked);
   "The place on the arm": the side-shift and heading search, the plan's summary, and running the plan
     (run_place).
 

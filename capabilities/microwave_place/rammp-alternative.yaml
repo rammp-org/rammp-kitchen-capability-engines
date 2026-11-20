@@ -27,7 +27,12 @@ container:
   # mounted at the SAME path here and in the planner's container.
   volumes:
     - /config/microwave_place:/config/microwave_place
+    - /tmp/microwave_data:/microwave_data
     - /home/snorlax/.ros/rammp_box_opening/worlds:/home/snorlax/.ros/rammp_box_opening/worlds
+  # door_common writes the temporary door world here; the planner must see the same directory.
+  environment:
+    RAMMP_DOOR_WORLD_DIR: /home/snorlax/.ros/rammp_box_opening/worlds
+    RAMMP_DOOR_WORLD_PLANNER_DIR: /home/snorlax/.ros/rammp_box_opening/worlds
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
@@ -58,6 +63,8 @@ params:
   lower_speed: 0.12
   # the plans (plans/, last_plan.json), the start position and the descent recordings (descents/)
   state_dir: /config/microwave_place
+  # Must match the microwave capability's data_dir so door_common reads its door.json.
+  door_data_dir: /microwave_data
   # locate: the scene camera's depth and intrinsics (the 3D detections are not used)
   depth_topic: /scene_camera/depth/image_rect_raw
   camera_info_topic: /scene_camera/color/camera_info

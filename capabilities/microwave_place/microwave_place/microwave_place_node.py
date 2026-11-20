@@ -14,9 +14,8 @@ Action:
   place    the tupperware, gripped by its side (after grab_container), into the open microwave:
              1. locate (microwave_detection.locate): the opening's known size fitted to SAM3's cavity mask,
                 frame after frame until `frames` consecutive detected frames agree (agree_m / agree_deg);
-             2. obstacle (place_motion.microwave_obstacles): the microwave as one box, from the depth of SAM3's
-                "microwave" mask; only the first motion (side shift, transit to in front of the door) avoids it,
-                nothing after it is collision-checked;
+             2. obstacles: the microwave box from SAM3's "microwave" mask and the shared open-door/body model
+                from the microwave's door.json; only the side shift and transit are collision-checked;
              3. plan (place_motion.search_place): for each of side_shifts_cm (the hand moved level to its
                 left first) and each of heading_offsets_deg: the side shift, the target and pre-insert pose
                 reachable, the straight line in, cuRobo's level transit to the pre-insert pose (refused if it
@@ -73,6 +72,8 @@ import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.driver_state import Refused as ArmRefused
 from capability_ui import RunUI, cancel_own_run
+from door_common import common as door_common
+from microwave import constants as microwave_constants
 
 from . import microwave_detection, place_motion, rim_detection, take_out, ui_text
 
@@ -115,6 +116,8 @@ PARAMS = {
     "lower_speed": 0.12,
     # the plans (plans/, last_plan.json) and the descent recordings (descents/)
     "state_dir": "/config/microwave_place",
+    # microwave/open_door's shared door.json; must use the same persistent directory.
+    "door_data_dir": "/microwave_data",
     # locate: the scene camera's depth and intrinsics (the 3D detections are not used)
     "depth_topic": "/scene_camera/depth/image_rect_raw",
     "camera_info_topic": "/scene_camera/color/camera_info",
@@ -256,6 +259,36 @@ UI_RETRY = {"retrieve": "Grab Tupperware", "place_in_microwave": "Place"}
 UI_RETRYABLE = ("refused", "home_failed", "recording")
 
 
+def _shared_door_model(door_file, common):
+    """The recorded microwave door's shared collision boxes at its recorded open angle."""
+    try:
+        door = json.loads(door_file.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise place_motion.Refused(f"can't read microwave door record {door_file}: {error}") from error
+    if not isinstance(door, dict) or "door_open_deg" not in door:
+        raise place_motion.Refused(f"microwave door record {door_file} has no door_open_deg")
+    try:
+        frame = common.DoorFrame(door, float(door.get("open_sign", 1.0)))
+        open_grasp_pos = frame.bodies_point(float(door["door_open_deg"]))
+        boxes, info = common.door_model_boxes(door, open_grasp_pos)
+    except (KeyError, TypeError, ValueError) as error:
+        raise place_motion.Refused(f"microwave door record {door_file} is invalid: {error}") from error
+    return door, open_grasp_pos, boxes, info
+
+
+def _shared_curobo_boxes(scene_boxes, door_boxes):
+    """Convert the existing scene boxes to door_common's box format and append its door model."""
+    return [
+        (
+            box["name"],
+            box["position"],
+            [float(dimension) / 2 for dimension in box["dims"]],
+            np.radians(float(box["rpy_deg"][2])),
+        )
+        for box in scene_boxes
+    ] + list(door_boxes)
+
+
 def _site_words(text, site):
     """take_out's messages name the oven; on the fridge they name the fridge; for the UI's one grab (site "any",
     wherever the tupperware is) they name no place."""
@@ -357,6 +390,7 @@ class Capability(CapabilityEngine):
             Image, rim_detection.OVERLAY_TOPIC, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         )
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
+        microwave_constants.configure(self.cfg["door_data_dir"])
         self.cfg["gains"] = {
             "kq": [float(v) for v in self.cfg["impedance_kq"]],
             "zeta": float(self.cfg["impedance_zeta"]),
@@ -485,11 +519,21 @@ class Capability(CapabilityEngine):
         c = self.cfg
         q0 = np.asarray(self.arm.raw_joints(), dtype=float)
         oven, loc, boxes, world, world_info, stamp = self._oven_world(ctx, log)
+        door, open_grasp_pos, door_boxes, door_info = _shared_door_model(door_common.DOOR_FILE, door_common)
+        world_info["door_open_deg"] = door_info["open_deg"]
+        world_info["door_boxes"] = [box[0] for box in door_boxes]
         checker = place_motion.Checker(model, boxes)
         try:
+            bodies, _ = door_common.add_door_model(model.scene, model.rb, door, open_grasp_pos)
+            checker.bodies.extend(bodies)
             # 4-5. the first heading that passes every stage
             ctx.progress("plan", 0.0)
-            cand, plan, res, attempts = place_motion.search_place(self.arm, model, checker, q0, oven, c, log)
+            with door_common.door_in_curobo(
+                self.arm, _shared_curobo_boxes(boxes, door_boxes), "microwave place transit"
+            ) as door_world_loaded:
+                if not door_world_loaded:
+                    raise place_motion.Refused("the shared microwave door model could not be loaded into cuRobo")
+                cand, plan, res, attempts = place_motion.search_place(self.arm, model, checker, q0, oven, c, log)
             summary, record = place_motion.summarize(
                 model, q0, loc, oven, world, world_info, boxes, cand, plan, res, attempts, c
             )

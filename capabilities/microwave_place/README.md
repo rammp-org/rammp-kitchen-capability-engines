@@ -85,13 +85,15 @@ tilt it has at the start until the release.
 
 1. **Locate** the opening (above). Nothing is checked before it: not the arm's state, the gripper or
    the tool frame.
-1. **Obstacle**: the microwave's body as one box, aligned with the oven, from the "microwave" mask's
+1. **Obstacles**: the microwave's body as one box, aligned with the oven, from the "microwave" mask's
    depth: from its outer front (the control panel's face) back, spanning the 2nd to 98th percentile of
    the mask's depth points at or behind that front and near the located opening (within 50 cm across
    its middle, 70 cm behind its plane, 15 cm below and 50 cm above its bottom edge; at least 200
-   points). The open door, in front of the front, is not in the box. cuRobo gets the same box (written
-   to `worlds_dir`, loaded with `set_world`). Only the side shift and cuRobo's transit to the
-   pre-insert pose are checked against it; from the line in on, nothing is collision-checked.
+   points). The shared `door_common` model adds the recorded open door and microwave body from
+   `door.json`. PyBullet and cuRobo use these models with the scene-derived box for the side shift and
+   cuRobo transit to the pre-insert pose. The solid body box is not used to collision-check the line
+   into the cavity; neither the shared model nor the scene box describes turntable/interior clearance.
+   From the line in on, nothing is collision-checked.
 1. **Search**: each of `side_shifts_cm` in turn (3, -3, 6, -6, 9, -9 cm), each with every offset of
    `heading_offsets_deg` (default only 0). The side shift moves the hand straight and level to its
    left (- = right), orientation kept. The hand's heading is the oven's axis turned by the offset (+ to
@@ -305,6 +307,7 @@ All are ROS parameters, with their defaults in `rammp-alternative.yaml`:
 | `vz_stop`, `hold_press`, `settle_s`, `early_stop`          | -0.01, 0.003, 0.2, 0.03                     | the lowering's contact test and hold                                                                         |
 | `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`          | joint impedance for the lowering, the gripper opening and the release tilt                                   |
 | `flange_to_tip`                                            | 0.19355                                     | flange face to the closed fingertips with the 14 mm sensor puck (m)                                           |
+| `door_data_dir`                                            | `/microwave_data`                           | Shared with the microwave capability; contains its `door.json` record                                        |
 | `state_dir`                                                | /config/microwave_place                     | plans and the descent recordings                                                                             |
 | `take_approach_world`                                      | `/config/robot/curobo/world.yaml`           | take_out: scene loaded by the planner; requires platform, seat, person and floor layers                      |
 | `take_approach_speed_scale`                                | `0.3`                                       | take_out: fraction of cuRobo approach speed, finite and in (0, 1\]                                           |

@@ -8,10 +8,12 @@
 
 Puts the container the gripper is already holding (after `grab_container`) into the open microwave. It
 finds the microwave's opening with the scene camera (the known-size opening fitted to SAM3's cavity mask,
-checked with depth), models the microwave's body as one obstacle box, tries side shifts and hand headings
-until one the arm can reach passes, plans a side shift and cuRobo's level transit to in front of the
-opening (both checked against the box on the arm model) and a straight line in, and runs the three as one
-position-control motion. It lowers the container onto the turntable glass in impedance until the glass
+checked with depth), models its body from the scene mask and uses the shared `door_common` collision model
+from the microwave's `door.json` for its open door and body. It tries side shifts and hand headings until
+one the arm can reach passes, plans a side shift and cuRobo's level transit to in front of the opening
+(checked against those boxes) and a straight line in, and runs the three as one position-control motion.
+The solid body box is not used to check the cavity insertion, and this model does not check the turntable or
+interior clearance. It lowers the container onto the turntable glass in impedance until the glass
 stops it, opens the gripper part way in place, pitches the hand 10 deg nose-down so the container slides
 off the fingers, and backs out level with the hand tilted. Nothing from the line in on is
 collision-checked. Without it the microwave demo has no way to put the food in.
@@ -144,6 +146,7 @@ Served under `/microwave_place/`, types from `rammp_orchestrator_interfaces`:
 | `vz_stop`, `hold_press`, `settle_s`, `early_stop`          | `-0.01`, `0.003`, `0.2`, `0.03`               | The lowering's contact test and hold                                                                                                |
 | `impedance_kq`, `impedance_zeta`, `impedance_torque_limit` | the driver's `rammp_arm.IMPEDANCE`            | Joint impedance for the lowering, the gripper opening and the release tilt                                                          |
 | `flange_to_tip`                                            | `0.19355`                                     | Flange face to the closed fingertips with the 14 mm sensor puck (m)                                                                  |
+| `door_data_dir`                                            | `/microwave_data`                             | Shared with the microwave capability; contains its `door.json` record                                                              |
 | `depth_topic`, `camera_info_topic`, `detections_topic`     | the scene camera's                            | Locate's topics (the 3D detections are not used)                                                                                    |
 | `take_approach_world`                                      | `/config/robot/curobo/world.yaml`             | take_out: world path inside the planner container; must confirm flatbot layers and floor                                            |
 | `take_approach_speed_scale`                                | `0.3`                                         | take_out: fraction of planned approach speed, finite and in (0, 1\]                                                                 |

@@ -37,6 +37,8 @@ COPY capability_engine/ src/capability_engine/
 # capability_ui: the UI actions' panels (RunUI: Stop on every panel, bounded waits), shared with the other capabilities
 COPY shared/capability_ui/package.xml src/capability_ui/package.xml
 COPY shared/capability_ui/ src/capability_ui/
+COPY shared/door_common/ src/door_common/
+COPY capabilities/microwave/ src/microwave/
 COPY capabilities/microwave_place/ src/microwave_place/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
