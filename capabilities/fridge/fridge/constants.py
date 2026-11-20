@@ -133,7 +133,16 @@ PREGRASP_STANDOFF_M = (0.12, 0.08)  # line up this far straight out from the gra
 ALT_CONFIG_SEEDS = (("J3", -60.0), ("J3", 60.0), ("wrist", 0.0))  # if no grasp's swing plans from the configuration
 # cuRobo picks from the start joints, these: the start joints with the elbow (J3) turned, or the wrist flipped (J5+180,
 # -J6, J7+180), as cuRobo's start for planning the line-up pose -- other arm configurations at the same grasp
-SWING_CANDIDATES = 3  # what follows the swing is planned for at most this many grasps whose approach + swing plan
+# Grasps that planned in the test logs, tried first (proven.py; with the record of what planned and ran since, in
+# proven_opens.json next to the door file). The search takes the first grasp whose whole open plans, so this is only
+# an order: every other grasp still follows.
+PROVEN_SEEDS = (
+    # 11-12 night and 11-19: the side grasp that planned (11-19 its approach and grasp ran on the arm; the swing then
+    # stopped on the old fridge's hinge, not the grasp)
+    dict(grasp="side", pitch=-10.0, flip=False, lag=30.0, standoff=0.15, source="seed"),
+    # 11-12 night and 11-13: every front-grasp open that planned (7 of them)
+    dict(grasp="front", pitch=25.0, flip=False, lag=0.0, standoff=0.12, source="seed"),
+)
 PLAN_BUDGET_S = 240.0  # the time one search may take (the whole plan, or a re-plan after the arm or the base moved:
 # the time spent moving never counts); past it the search refuses. 120 until 11-09: a whole push-open search that ends
 # in a real refusal took 117 s in sim (11-09 detections, the Jetson's GPU), one that planned 98 s: twice that, so a

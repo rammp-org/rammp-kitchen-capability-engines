@@ -59,6 +59,12 @@ to `<data_dir>/runs/<time>_open/` (events, every trajectory sent, arm state at 2
 frames, everything the node logged during it in `console.log`, and a rosbag in `bag/` unless
 `record_bag` is off) and every detection frame to `<data_dir>/detections/`.
 
+The open's planning tries the grasps that worked before first and uses the first whole open that plans
+(`fridge/proven.py`): each grasp whose open planned, and again once its swing finished on the arm, is recorded in
+`<data_dir>/proven_opens.json` (its tilt, line-up, hand lag, and where the handle was), and the grasps that planned in
+the test logs (`PROVEN_SEEDS` in `constants.py`) follow those. Every other grasp is still tried after them. Delete the
+file to start the order afresh (a new fridge or mount).
+
 ## Publishes
 
 | Topic            | Type              | Rate | Meaning                                                                                                   |

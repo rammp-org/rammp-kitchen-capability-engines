@@ -19,9 +19,10 @@ GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs onl
    (`door_normal: handle_model`, door_normal.py, the side grasp's method). The hinge is measured from the handle
    (hinge_along_door_m, ...). The grasp is at the middle of the bar, or `grasp_offset_m` above it (below if
    negative), within the measured bar (`set_grasp_offset`).
-2. Plan everything before anything moves (planning.py) -- for each grasp in turn (GRASP_PITCHES_DEG tilts, + nose-down
-   and - nose-up, each with the hand either way up), up to SWING_CANDIDATES whose approach and swing plan, then what
-   follows the swing on those:
+2. Plan everything before anything moves (planning.py) -- for each grasp in turn, the grasps that worked before first
+   (proven.py: what planned and ran on the arm, then constants.PROVEN_SEEDS), then the rest (GRASP_PITCHES_DEG tilts,
+   + nose-down and - nose-up, each with the hand either way up); the first whose approach, swing and what follows all
+   plan is used:
    - the approach: cuRobo to a line-up point PREGRASP_STANDOFF_M straight out from the grasp (the closed door, its
      handle and the cabinet in its world), then straight in (local IK). If no grasp's swing plans from the arm
      configuration cuRobo chose, the line-up is planned again from others (ALT_CONFIG_SEEDS: elbow turned, wrist
@@ -51,7 +52,7 @@ from scipy.spatial.transform import Rotation as R
 from . import constants as F
 from . import planning as pl
 from . import push_open as P
-from . import relocalize
+from . import proven, relocalize
 from . import side_grasp as S
 from .motion import load_door, logged_run, opened
 from .push_open import PushOpen, back_off_goals, push_after_chair_move
@@ -515,8 +516,30 @@ def approach_goals(model, cand, standoff, q_lineup=None):
 
 
 def standoffs(cand):
-    """The line-up distances tried for grasp `cand`, in order."""
-    return F.SIDE_SLIDE_M if cand.get("side") else F.PREGRASP_STANDOFF_M
+    """The line-up distances tried for grasp `cand`, in order: the one that worked before first (cand["proven"])."""
+    return proven.first(
+        (cand.get("proven") or {}).get("standoff"), F.SIDE_SLIDE_M if cand.get("side") else F.PREGRASP_STANDOFF_M
+    )
+
+
+def hand_lags(cand):
+    """The side grasp's hand lags tried for grasp `cand`, in order: the one that worked before first; (0,) for the
+    front grasp."""
+    if not cand.get("side"):
+        return [0.0]
+    return proven.first((cand.get("proven") or {}).get("lag"), F.SIDE_HAND_LAGS_DEG)
+
+
+def proven_file():
+    """The record of the grasps that planned and ran (proven.py), next to the door file."""
+    return dc.DOOR_FILE.parent / proven.FILE_NAME
+
+
+def record_proven(plan, geom, source):
+    """Record `plan`'s grasp as one that worked (`source`: "plan" or "arm"), for the next search to try first."""
+    err = proven.record(proven_file(), proven.make_record(F.GRASP, plan, geom["h_raw"], geom["n"], source))
+    if err:
+        say(f"  (could not record the grasp that worked: {err})")
 
 
 def hand_world(model, deg):
@@ -585,6 +608,12 @@ def plan_open(planner, geom, q0, swing, after):
         raise Infeasible("no grasp: every tilt's grasp is out of reach")
     # the door model is the same for every grasp (the face is placed from the handle); the file keeps the chosen one's
     model = FridgeModel(closed_door(geom, cands[0]["h"], cands[0].get("ref", cands[0]["pos"]), cands[0]))
+    # the grasps that worked before first (proven.py), each with its line-up and lag first; the rest in their order
+    prefs = proven.preferred(proven.load(proven_file()) + list(F.PROVEN_SEEDS), F.GRASP, geom["h_raw"], geom["n"])
+    cands = proven.order(cands, prefs)
+    first_tried = [c["proven"] for c in cands if c.get("proven")]
+    if first_tried:
+        say(f"  tried first (worked before): {'; '.join(proven.describe(r) for r in first_tried)}")
     tried = []
 
     def fail(what):
@@ -622,11 +651,17 @@ def plan_open(planner, geom, q0, swing, after):
             fail(f"{name}: {why}")
             return None
         sw, lag = None, 0.0
-        for lag in F.SIDE_HAND_LAGS_DEG if cand.get("side") else (0.0,):
+        lags = hand_lags(cand)
+        for k, lag in enumerate(lags):
             if cand.get("side"):  # the joints alone first (local IK, no cuRobo): a swing or a slide off the bar
                 # that runs a joint into its limit is dropped before it costs a world load and a check per stretch
                 why = side_joints_why(planner, model, cand, swing, lag, approach.q_end)
-                if why and "of its limit" in why and lag < F.SIDE_HAND_LAGS_DEG[0]:
+                if (
+                    why
+                    and "of its limit" in why
+                    and lag < F.SIDE_HAND_LAGS_DEG[0]
+                    and all(later < lag for later in lags[k + 1 :])
+                ):
                     break  # the turns left are smaller: the hand turns further with the door, the wrist bends more
                 if why:
                     continue
@@ -711,18 +746,20 @@ def side_configs(fk, cand, q0):
 
 
 def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
-    # 1. the grasps whose approach and swing plan, with cuRobo's own arm configuration (then, only if none does,
-    # from the other configurations), up to SWING_CANDIDATES of them; 2. what follows the swing, on those in order.
-    # The side grasp (`configs`: side_configs): if nothing gives a whole open, every grasp again from its own other
-    # configurations, each one's whole open planned as soon as its swing plans
-    swung = []
+    """The first whole open that plans: for each grasp in `cands`' order (proven.order: what worked before first), its
+    approach and swing, then at once what follows the swing -- the first grasp where all of it plans is used, the rest
+    are never tried. 1. with cuRobo's own arm configuration; 2. only if no grasp's swing planned at all, from the other
+    configurations (seeds), the first that swings per grasp; 3. the side grasp (`configs`: side_configs), if nothing
+    gave a whole open, every grasp again from its own other configurations."""
+    any_swung = False
     for cand in cands:
         found = grasp_and_swing(cand)
         if found:
-            swung.append(found)
-            if len(swung) >= F.SWING_CANDIDATES:
-                break
-    if not swung:
+            any_swung = True
+            done = after_swing(found)
+            if done:
+                return done
+    if not any_swung:
         say(
             f"  no grasp's approach + swing plans with the arm configurations cuRobo chose ({len(tried)} tried); "
             "trying others"
@@ -731,14 +768,10 @@ def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
             for hint_name, seed in seeds(q0):
                 found = grasp_and_swing(cand, hint_name, seed)
                 if found:
-                    swung.append(found)
+                    done = after_swing(found)
+                    if done:
+                        return done
                     break
-            if len(swung) >= F.SWING_CANDIDATES:
-                break
-    for found in swung:
-        done = after_swing(found)
-        if done:
-            return done
     if configs is not None and any(c.get("side") for c in cands):
         say(
             f"  no whole open with the arm configurations tried ({len(tried)} attempts); the side grasp's others "
@@ -1187,6 +1220,7 @@ def run(
         plan.update(after=after, hinge_fields=geom["hinge_fields"], door_mid=geom["door_mid"])
         LAST_PLAN = dict(plan, geom=geom, q0=q0)
         say(f"  planning: {planner.summary()}")
+        record_proven(plan, geom, "plan")  # the next search tries this grasp first (proven.py)
         if not execute:
             say(f"\nDRY RUN -- would grasp, then swing {swing} deg. Nothing commanded.")
             after.dry_run(drive_chair)
@@ -1205,6 +1239,7 @@ def run(
                 )
             )
             return False
+        record_proven(plan, geom, "arm")  # the swing finished on the arm: tried before ones that only planned
         return after.execute(ai, planner, drive_chair)
 
     ok = logged_run("open", ai, log_args or {}, speed, task)
