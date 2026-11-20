@@ -400,3 +400,156 @@ def test_the_installed_interfaces_are_read_as_the_running_node_publishes_them():
     assert rung.count == 1 and f.n_objects == 4 and f.wh == WH and f.frame_id == "scene_camera_color_optical_frame"
     assert [o[0] for o in f.objects] == ["food container"] and f.objects[0][2] == pytest.approx(HOLDER_162417)
     assert f.stamp_ns == 1761582257 * 1_000_000_000 + 5
+
+
+# --- how many containers the scene camera has, and a selected id it no longer has (2026-11-20) ---------------
+_LID = (HOLDER_162417[0] + 15.0, HOLDER_162417[1] - 30.0, HOLDER_162417[2] - 15.0, HOLDER_162417[1] + 5.0)
+_OTHER = (420.0, 216.0, 500.0, 260.0)
+
+
+def test_a_frame_says_how_many_containers_of_the_classes_it_holds():
+    """A lid boxed as a second bowl on its holder is one container with it; a second container beside it is two;
+    the microwave and the table are none. The count is of the whole frame, whichever container is selected."""
+    one = _msg(
+        [
+            _obj(box=HOLDER_162417, instance_id="food_container_5"),
+            _obj(box=_LID, score=0.5, instance_id="food_container_7"),
+            _obj(cls="microwave", box=(201.0, 112.19, 418.75, 244.5), instance_id="microwave_1"),
+        ]
+    )
+    assert sg.stacked_on(_LID, [HOLDER_162417])
+    f = sg.frame_of(one, FOOD, now_s=0.0)
+    assert f.containers == 1 and f.lone == "food_container_5"
+    f = sg.frame_of(one, FOOD, now_s=0.0, instance_id="food_container_2")  # the selected id is not in it
+    assert f.containers == 1 and f.lone == "food_container_5" and f.selected is False and f.adopted is None
+    two = _msg(
+        [_obj(box=HOLDER_162417, instance_id="food_container_5"), _obj(box=_OTHER, instance_id="food_container_3")]
+    )
+    f = sg.frame_of(two, FOOD, now_s=0.0, instance_id="food_container_5")
+    assert f.containers == 2 and f.lone is None and f.selected is True
+    none = _msg([_obj(cls="microwave", box=(201.0, 112.19, 418.75, 244.5), instance_id="microwave_1")])
+    f = sg.frame_of(none, FOOD, now_s=0.0, instance_id="food_container_5")
+    assert f.containers == 0 and f.lone is None
+
+
+def _lone_rung(selected="food_container_2"):
+    rung, _node = _rung()
+    rung.instance_id = selected
+    return rung
+
+
+def _feed(rung, objects, t):
+    """One segmenter message of `objects`, arriving at `t` s: read as the rung's callback reads it."""
+    rung.take(sg.frame_of(_msg(objects), FOOD, t, rung.instance_id, rung.near, rung.holder_id, rung.alias))
+    return rung.latest
+
+
+def test_a_selected_id_no_frame_holds_takes_the_one_container_of_its_classes():
+    """RAMMP 1.5, 2026-11-20 13:42: the goal came with food_container_2, that id was in none of the scene
+    camera's detections, and the run ended in 10 s with one container on the table. The one container the
+    frames hold, under one other id for LONE_FRAMES frames over LONE_S, is read as the selected one."""
+    rung = _lone_rung()
+    one = [
+        _obj(box=HOLDER_162417, instance_id="food_container_5"),
+        _obj(box=_LID, score=0.5, instance_id="food_container_7"),
+    ]
+    for i in range(sg.LONE_FRAMES - 1):
+        f = _feed(rung, one, 10.0 + 0.3 * i)
+        assert f.selected is False and rung.alias is None
+    f = _feed(rung, one, 10.0 + 0.3 * (sg.LONE_FRAMES - 1))  # the fifth, 1.2 s after the first
+    assert rung.alias == "food_container_5" and f.selected is False  # read as it from the next frame on
+    f = _feed(rung, one, 11.5)
+    assert f.selected is True and f.adopted == "food_container_5" and f.mine == pytest.approx(HOLDER_162417)
+    assert [o[2] for o in f.objects] == [pytest.approx(HOLDER_162417), pytest.approx(_LID)]  # its lid with it
+    # the selected id itself, back in a frame, is read first
+    back = [_obj(box=HOLDER_162417, instance_id="food_container_2")]
+    f = _feed(rung, back, 11.6)
+    assert f.selected is True and f.adopted is None
+
+
+def test_enough_frames_in_too_short_a_time_are_not_yet_a_stale_id():
+    """Five frames at 15 Hz are a third of a second: a detection missed that long is back within the second."""
+    rung = _lone_rung()
+    one = [_obj(box=HOLDER_162417, instance_id="food_container_5")]
+    for i in range(sg.LONE_FRAMES + 3):
+        _feed(rung, one, 10.0 + i / 15.0)
+    assert rung.alias is None
+    _feed(rung, one, 10.0 + sg.LONE_S)
+    assert rung.alias == "food_container_5"
+
+
+def test_two_containers_or_a_selected_one_in_view_or_a_fix_before_take_no_other_id():
+    """Two containers of the classes and the selected id gone: nothing says which was selected. The selected one
+    in a frame ends the row. And from a fix on, the selected container is followed by where it was boxed: a
+    neighbour left alone in view while the arm hides the selected one is not it."""
+    one = [_obj(box=HOLDER_162417, instance_id="food_container_5")]
+    two = one + [_obj(box=_OTHER, instance_id="food_container_3")]
+    rung = _lone_rung()
+    for i in range(12):
+        _feed(rung, two, 10.0 + 0.3 * i)
+    assert rung.alias is None
+    # a row of the one container, broken by a frame that holds two, starts again
+    rung = _lone_rung()
+    for i in range(sg.LONE_FRAMES - 1):
+        _feed(rung, one, 10.0 + 0.3 * i)
+    _feed(rung, two, 11.3)
+    _feed(rung, one, 11.6)
+    assert rung.alias is None
+    # ... and by a frame with the selected id in it
+    rung = _lone_rung()
+    for i in range(sg.LONE_FRAMES - 1):
+        _feed(rung, one, 10.0 + 0.3 * i)
+    _feed(rung, [_obj(box=HOLDER_162417, instance_id="food_container_2")], 11.3)
+    _feed(rung, one, 11.6)
+    assert rung.alias is None
+    # a frame with none of the classes neither counts nor ends the row
+    rung = _lone_rung()
+    for i in range(sg.LONE_FRAMES - 1):
+        _feed(rung, one, 10.0 + 0.3 * i)
+    _feed(rung, [], 11.3)
+    _feed(rung, one, 11.6)
+    assert rung.alias == "food_container_5"
+    # another id alone in view starts its own row
+    rung = _lone_rung()
+    for i in range(sg.LONE_FRAMES - 1):
+        _feed(rung, one, 10.0 + 0.3 * i)
+    _feed(rung, [_obj(box=_OTHER, instance_id="food_container_3")], 11.3)
+    assert rung.alias is None
+    # from a fix on, nothing is taken this way
+    rung = _lone_rung()
+    rung.follow(_OTHER)
+    for i in range(12):
+        _feed(rung, one, 10.0 + 0.3 * i)
+    assert rung.alias is None and rung.latest.selected is False
+    # without a selection there is nothing to take for it
+    rung = _lone_rung(selected=None)
+    for i in range(12):
+        _feed(rung, one, 10.0 + 0.3 * i)
+    assert rung.alias is None
+
+
+def test_only_one_container_is_the_most_any_frame_of_the_last_two_seconds_held():
+    """Where the scene camera has one container of the classes, no neighbour can be taken for it. The most any
+    frame of the window held, not the newest: a neighbour missed in one frame is still a neighbour."""
+    one = [_obj(box=HOLDER_162417, instance_id="food_container_5")]
+    two = one + [_obj(box=_OTHER, instance_id="food_container_3")]
+    rung = _lone_rung("food_container_5")
+    assert rung.containers_seen(10.0) == (0, 0) and not rung.only_one(10.0)
+    _feed(rung, one, 10.0)
+    _feed(rung, one, 10.2)
+    assert not rung.only_one(10.3)  # two frames: too few to say
+    _feed(rung, [], 10.4)  # (a frame that missed it does not make it none, nor two)
+    assert rung.containers_seen(10.5) == (3, 1) and rung.only_one(10.5)
+    _feed(rung, two, 10.6)
+    _feed(rung, one, 10.8)
+    assert rung.containers_seen(10.9) == (5, 2) and not rung.only_one(10.9)
+    # ... until that frame is older than the window
+    for i in range(4):
+        _feed(rung, one, 11.0 + 0.5 * i)
+    assert not rung.only_one(12.55) and rung.only_one(10.6 + sg.ONE_WINDOW_S + 0.05)
+    assert not rung.only_one(20.0)  # nothing heard for long: not said
+    # a rung that reads no selection counts the same way
+    free = _lone_rung(selected=None)
+    for i in range(3):
+        _feed(free, two, 10.0 + 0.2 * i)
+    assert free.containers_seen(10.5) == (3, 2)

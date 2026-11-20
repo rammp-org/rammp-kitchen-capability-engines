@@ -2070,3 +2070,64 @@ def test_a_rival_out_of_the_arms_reach_does_not_make_a_container_within_it_ambig
     assert within_reach_rivals(top, (far,), None) == (far,)  # no word on reach: every rival counts
     assert within_reach_rivals(far, (top,), reach) == (top,)  # the top itself out of reach: nothing is settled by reach
     assert within_reach_rivals(top, (), reach) == ()
+
+
+class _LiveWorld(_World):
+    """_World whose segmenter messages go through the rung as its callback takes them (frame_of, take):
+    seg_msgs are (arrival t, [(perception_class, score, box, instance_id), ...])."""
+
+    def deliver(self):
+        from test_segmenter_source import _msg, _obj
+
+        from box_opening.perception.segmenter_source import frame_of, stamp_ns
+
+        self.grab.color_stamp, self.grab.color_frame_id = _stamp(self.t), self.frame_id
+        while self.seg_msgs and self.seg_msgs[0][0] <= self.t:
+            t, objects = self.seg_msgs.pop(0)
+            r = self.rung
+            msg = _msg([_obj(cls=c, score=s, box=b, instance_id=i) for c, s, b, i in objects], frame_id=SCENE_FRAME)
+            frame = frame_of(msg, r.classes, t, r.instance_id, r.near, r.holder_id, r.alias)
+            r.take(frame._replace(stamp_ns=stamp_ns(_stamp(t - 0.075))))
+
+
+def test_a_selected_id_the_frames_no_longer_hold_is_found_as_the_one_container_of_its_kind(monkeypatch):
+    """RAMMP 1.5, 2026-11-20 13:42: the goal's food_container_2 was in none of the detections and the run ended
+    in 10 s. One container of the kind in every frame, under another id: after a second of that it is read as
+    the selected one, said once with both ids, and the look finds it."""
+    from box_opening.perception import scene_source as ss
+
+    holder = _holder()
+    one = [("food container", 0.88, holder, "food_container_5")]
+    world = _LiveWorld(seg_msgs=[(t, one) for t in np.arange(0.1, 6.0, 0.2)])
+    world.rung.instance_id = "food_container_2"
+    loc, gated = _locator(monkeypatch, world, {_band(holder): SEG_TOP}, instance_id="food_container_2")
+    said = []
+    monkeypatch.setattr(ss, "log", SimpleNamespace(info=said.append))
+    fix = loc.locate(3.0)
+    assert fix is not None, loc.last_why
+    assert world.rung.alias == "food_container_5" and gated[0][0] >= 1.3  # nothing is gated before it is read as it
+    seg = loc.look_record()["segmenter"]
+    assert seg["adopted"] == "food_container_5" and seg["containers"] == 1 and seg["selected"] == 2
+    told = [s for s in said if "read as the selected one" in s]
+    assert told == [
+        "[scene] the selected container (food_container_2) is in none of the segmenter's frames, and they hold "
+        "one container of its kind, food_container_5: that one is read as the selected one (its tracker gave it a "
+        "new number)"
+    ]
+    assert loc.only_one() is True
+    world.rung.near = None  # (as a line-up's end forgets where it was boxed)
+    assert loc.locate(1.0) is not None and len([s for s in said if "read as the selected one" in s]) == 1  # once
+    json.dumps(loc.look_record())
+    # two containers of the kind and the selected id in none: nothing says which, as before
+    two = one + [("food container", 0.9, (420.0, 216.0, 500.0, 260.0), "food_container_3")]
+    world = _LiveWorld(seg_msgs=[(t, two) for t in np.arange(0.1, 6.0, 0.2)])
+    world.rung.instance_id = "food_container_2"
+    loc, gated = _locator(monkeypatch, world, {_band(holder): SEG_TOP}, instance_id="food_container_2")
+    assert loc.locate(3.0) is None and gated == [] and world.rung.alias is None
+    assert loc.last_why.startswith("scene segmenter: the selected container (food_container_2) was in none of its")
+    seg = loc.look_record()["segmenter"]
+    assert seg["selected"] == 0 and seg["containers"] == 2 and "adopted" not in seg
+    assert loc.only_one() is False
+    # a locator with no segmenter, or a stand-in that cannot count, never says "only one"
+    loc.seg = None
+    assert loc.only_one() is False

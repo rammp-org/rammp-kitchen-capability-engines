@@ -24,6 +24,19 @@ only that object's boxes are read, with a box stacked on it (its lid), never
 another container's on the table. Without one (a standalone run), every box
 of the container's classes is a candidate.
 
+An id the scene camera no longer has (RAMMP 1.5, 2026-11-20 13:42: the UI's goal came with
+food_container_2, the id was in none of the detections for the whole look, and the run ended in 10 s
+"The arm cannot tell which container you chose" with one container on the table): before any fix, where
+the selected id is in none of the frames and the frames hold ONE container of the classes, every one
+under the same other id, for LONE_FRAMES frames over LONE_S or more, that one is read as the selected
+container from then on (SegmenterRung.alias, SegFrame.adopted: the tracker gave it a new number). Two
+containers of the classes, or none, and nothing is taken: nothing says which was selected.
+
+How many containers of the classes the scene camera has is kept too (SegFrame.containers, a lid boxed
+on its holder counted with it; SegmenterRung.containers_seen over the last ONE_WINDOW_S): where it has
+only one, no neighbour can be taken for the selected one, and what the wrist finds is tied to it by a
+wider rule (tasks/press_demo.SelectionTie).
+
 The id is how it is found at the first look, not after (review round 2):
 perception drops a track it has not seen for track_buffer_frames (10, ~2 s
 at flatbot's 5 Hz), and the box it acquires again gets a new id, as when
@@ -81,6 +94,22 @@ STATE_VISIBLE = 0  # rammp_perception_interfaces/DetectedObject.STATE_VISIBLE
 # 0.19 or less: 3/7 lies midway.
 FOLLOW_IOU = 3 / 7
 
+# A selected id that is in none of the frames, and ONE container of the classes in them under one other
+# id: taken for the selected one (SegmenterRung.alias) once that has stood for this many frames in a row
+# (a frame with none of the classes neither counts nor breaks the row; one with two, or with the selected
+# id, ends it) over at least this long. A detection missed for a frame or two is back within the second
+# (perception keeps a track it has not seen for 10 frames), and the 13:42 goal's panel gave the person
+# ten seconds of "cannot tell which" before it ended: one second is in time and past a flicker.
+LONE_FRAMES = 5
+LONE_S = 1.0
+# How many containers of the classes the scene camera has NOW: the most that any one frame of the last
+# ONE_WINDOW_S held, of at least ONE_MIN_FRAMES frames (containers_seen). The most, not the newest: a
+# neighbour missed in one frame is still a neighbour. Two seconds is what perception itself keeps a
+# track it has lost for (track_buffer_frames at flatbot's 5 Hz).
+ONE_WINDOW_S = 2.0
+ONE_MIN_FRAMES = 3
+SEEN_KEEP = 64  # frames of that window kept (15 Hz over 2 s is 30)
+
 _LATEST = object()  # state()/describe(): read the rung's newest frame
 
 
@@ -104,6 +133,9 @@ class SegFrame(NamedTuple):
     mine: object = None  # ... and its own box (x0, y0, x1, y1), as read: what the rung follows from a fix
     followed: object = None  # the id it took by where the selected one was (its own id not in it), else None
     resolved: object = None  # the holder's id where the selected box is the lid stacked on it, else None
+    containers: object = None  # how many containers of the classes it held (a lid boxed on its holder is one with it)
+    lone: object = None  # the id of that container where it held exactly one, else None
+    adopted: object = None  # the id it read as the selected one, the selected id itself gone (SegmenterRung.alias)
 
 
 class SceneCand(NamedTuple):
@@ -200,7 +232,7 @@ def box_iou(a, b):
     return inter / union if union > 0.0 else 0.0
 
 
-def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None):
+def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None, alias=None):
     """A rammp_perception_interfaces/ObjectDetections message as a SegFrame:
     only the VISIBLE objects of `classes` with a finite, non-empty box, a
     score in [0, 1] and (when it sent masks) a box inside its label image
@@ -211,7 +243,12 @@ def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None):
     `holder_id` (a holder resolved before) is read first. With `near` too
     (where it was boxed at the last fix: SegmenterRung.follow), a frame
     without either id takes the box that overlaps `near` most, FOLLOW_IOU or
-    more, as the selected one."""
+    more, as the selected one. `alias` (SegmenterRung.alias: the one container
+    of the classes the frames held while the selected id was in none of them):
+    read where neither the selected id nor a holder's is in the frame, before
+    `near` is asked. Whatever is selected, the frame says how many containers
+    of the classes it held (`containers`: the boxes that stand on no other of
+    them) and, of exactly one, its id (`lone`)."""
     li = getattr(msg, "label_image", None)
     wh = (int(li.width), int(li.height)) if li is not None else (0, 0)
     kept = []
@@ -229,7 +266,10 @@ def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None):
         if wh != (0, 0) and (box[0] < -1.0 or box[1] < -1.0 or box[2] > wh[0] + 1.0 or box[3] > wh[1] + 1.0):
             continue
         kept.append((str(o.perception_class), score, box, str(getattr(o, "instance_id", ""))))
-    selected = mine_box = followed = resolved = None
+    boxes = [k[2] for k in kept]
+    holders = [k for i, k in enumerate(kept) if not stacked_on(k[2], boxes[:i] + boxes[i + 1 :])]
+    lone = holders[0][3] if len(holders) == 1 and holders[0][3] else None
+    selected = mine_box = followed = resolved = adopted = None
     if instance_id:
         mine = [k for k in kept if holder_id and k[3] == holder_id]  # the holder a selected lid resolved to
         if mine:
@@ -242,6 +282,9 @@ def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None):
                 resolved = mine[0][3]
             elif holder_id:
                 mine = []  # known to be the lid, here with no holder under it: never taken for one
+        if not mine and alias and not holder_id:
+            mine = [k for k in kept if k[3] == alias][:1]  # the one container the frames held, its own id gone
+            adopted = alias if mine else None
         if not mine and near is not None and kept:
             best = max(kept, key=lambda k: box_iou(k[2], near))
             if box_iou(best[2], near) >= FOLLOW_IOU:
@@ -262,6 +305,9 @@ def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None):
         mine_box,
         followed,
         resolved,
+        len(holders),
+        lone,
+        adopted,
     )
 
 
@@ -292,6 +338,9 @@ class SegmenterRung:
         self.instance_id = instance_id or None
         self.near = None  # where the selected container was boxed at the last fix (follow); None before one
         self.holder_id = None  # the holder's id, where the selected id turned out to be its lid's (frame_of)
+        self.alias = None  # the one container of the classes read as the selected one, its own id gone (_adopt)
+        self._lone = None  # (id, when first, frames): the row of frames that held that one container alone
+        self._seen = ()  # ((recv_s, containers), ...) of the newest frames, replaced whole (containers_seen)
         self.latest = None  # SegFrame, replaced whole by the callback (one attribute store)
         self.count = 0
         self.available = False
@@ -327,14 +376,53 @@ class SegmenterRung:
         # serves. A message it cannot read keeps the frame before, which goes
         # silent in SEG_SILENT_S: the look then says the segmenter is silent.
         try:
-            frame = frame_of(msg, self.classes, time.monotonic(), self.instance_id, self.near, self.holder_id)
+            frame = frame_of(
+                msg, self.classes, time.monotonic(), self.instance_id, self.near, self.holder_id, self.alias
+            )
         except Exception as e:  # noqa: BLE001 -- someone else's node publishes this
             self.cb_error = repr(e)
             return
+        self.take(frame)
+
+    def take(self, frame):
+        """`frame` is the newest (the callback's own second half; a test hands it frames it made)."""
         if frame.resolved and frame.resolved != self.holder_id:
             self.holder_id = frame.resolved  # the holder's id from here on (one attribute store)
+        if frame.containers is not None:
+            self._seen = (self._seen + ((float(frame.recv_s), int(frame.containers)),))[-SEEN_KEEP:]
+        self._adopt(frame)
         self.latest = frame
         self.count += 1
+
+    def _adopt(self, frame):
+        """The row of frames that hold ONE container of the classes while the selected id is in none
+        (LONE_FRAMES over LONE_S): that container's id becomes `alias`, read as the selected one from the
+        next frame on. Only before a fix: from one on the selected container is followed by where it was
+        boxed (follow), and a neighbour left alone in view while the arm hides the selected one is not it."""
+        if not self.instance_id or self.near is not None or frame.selected or (frame.containers or 0) > 1:
+            self._lone = None  # the selected one is in it (by an id it is read by), or two are: nothing to take
+            return
+        if not frame.lone:
+            return  # none of the classes in this frame: the row neither grows nor ends
+        row = self._lone
+        if row is None or row[0] != frame.lone:
+            row = (frame.lone, float(frame.recv_s), 0)
+        row = (row[0], row[1], row[2] + 1)
+        self._lone = row
+        if row[2] >= LONE_FRAMES and float(frame.recv_s) - row[1] >= LONE_S:
+            self.alias, self._lone = row[0], None  # (one attribute store: the callback's next frame reads it)
+
+    def containers_seen(self, now_s, window_s=ONE_WINDOW_S):
+        """(frames, the most containers of the classes any one of them held) over the last `window_s`: how
+        many containers the scene camera has now. (0, 0) where no frame came in that time."""
+        got = [n for t, n in self._seen if now_s - t <= window_s]
+        return len(got), (max(got) if got else 0)
+
+    def only_one(self, now_s):
+        """Whether the scene camera has ONE container of the classes and no other: every frame of the last
+        ONE_WINDOW_S (ONE_MIN_FRAMES of them or more) held at most one, and one of them did hold it."""
+        frames, most = self.containers_seen(now_s)
+        return frames >= ONE_MIN_FRAMES and most == 1
 
     def follow(self, box):
         """From a fix on, follow the selected container by where it was boxed then (`box`, its own

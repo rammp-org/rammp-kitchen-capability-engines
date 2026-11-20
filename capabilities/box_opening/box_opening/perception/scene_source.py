@@ -1352,6 +1352,7 @@ class SceneLocator:
         self.last_judged = {}  # source -> (its candidates, SceneBoxFix, colour frame, T_base_color): what viz draws
         self.last_seg_state = None  # the segmenter's state when locate() or prime() last looked
         self._look = None  # what the last locate() saw of the segmenter (look_record)
+        self._adopted_said = None  # the id last said to be read for the selected one (once a run, not once a look)
         self._clock, self._sleep = time.monotonic, time.sleep  # tests drive them
         # where the calibration saw the cabinet's tag (scene_calib.scene_tag_px):
         # checked once per locate, before any fix is trusted
@@ -1450,8 +1451,23 @@ class SceneLocator:
             seg["selected"] = look["selected"]  # frames the selected container was in
             seg["followed"] = look.get("followed")  # ... by where it was, under that id (its own lost)
             seg["resolved"] = look.get("resolved")  # ... the holder under it, the selected box its lid
+            if look.get("adopted"):
+                # ... under another id, the one container of its classes in view (the selected id in no frame)
+                seg["adopted"] = look["adopted"]
+        if look.get("containers") is not None:
+            seg["containers"] = look["containers"]  # the most containers of its classes any one frame held
         rec["segmenter"] = seg
         return rec
+
+    def only_one(self):
+        """Whether the scene camera holds ONE container of this container's classes and no other, by its
+        segmenter's newest frames (SegmenterRung.only_one); False where that cannot be said (no segmenter, a
+        stand-in without the count, too few frames)."""
+        ask = getattr(getattr(self, "seg", None), "only_one", None)
+        try:
+            return bool(ask(self._clock())) if callable(ask) else False
+        except Exception:  # noqa: BLE001 - what cannot be counted is not "only one"
+            return False
 
     def locate(self, timeout_s):
         """The box, from the scene frames that arrive from now on. Each new
@@ -1567,6 +1583,19 @@ class SceneLocator:
                     "[scene] the selected container (%s) is boxed as the lid on %s's holder: the holder is read, "
                     "its lid on it" % (self.instance_id, resolved)
                 )
+            adopted = getattr(m_seg, "adopted", None)
+            if adopted and look.get("adopted") != adopted:
+                look["adopted"] = adopted
+                if getattr(self, "_adopted_said", None) != adopted:
+                    self._adopted_said = adopted
+                    log.info(
+                        "[scene] the selected container (%s) is in none of the segmenter's frames, and they hold one "
+                        "container of its kind, %s: that one is read as the selected one (its tracker gave it a new "
+                        "number)" % (self.instance_id, adopted)
+                    )
+            held = getattr(m_seg, "containers", None)
+            if held is not None:
+                look["containers"] = max(int(held), look.get("containers") or 0)
             followed = getattr(m_seg, "followed", None)
             if followed and look.get("followed") != followed:
                 look["followed"] = followed
