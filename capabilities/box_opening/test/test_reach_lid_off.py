@@ -7406,3 +7406,188 @@ def test_the_clock_is_asked_before_a_searchs_own_work_and_of_every_place_it_look
     asked.clear()
     got = rlo.spot_candidates(ctx, bare, -0.07, q, reach=lambda *a: reaches.append(1), stop=stop, aside=lambda d: True)
     assert list(got) == [] and reaches == [] and len(asked) == 21
+
+
+# --- the look again, over the lid the wrist sees (RAMMP 1.5, 2026-11-20) -------------------------------------
+def _wrist_lid(dx=0.09, dy=-0.16, dz=-0.03):
+    """The wrist's own find from the look pose: the lid `dx`, `dy` from where the look was aimed (the scene
+    camera's place), its own table under it."""
+    top = (BUTTON[0] + dx, BUTTON[1] + dy, BUTTON[2] + dz)
+    table = top[2] - 0.093
+    return SimpleNamespace(
+        pose=ContainerPose(xyz=(top[0], top[1], table), yaw=0.0),
+        top_xyz=top,
+        table_points=_table(xy=top[:2], r=0.3, z=table),
+        table_z_scene=table,
+        table_extent=None,
+        source="wrist",
+        rough=False,
+    )
+
+
+LOOK_FRAMES = []  # each look's frame kept as its aim found no button (press_demo.dump_wrist_frame's tags)
+
+
+def _lids(monkeypatch, *finds):
+    """rp.lid_from_here scripted: each call's (fix, why) in turn; what it was asked with. The frame a look
+    that found no button is kept as (press_demo.dump_wrist_frame) is counted in LOOK_FRAMES, not written."""
+    from box_opening.tasks import press_demo
+
+    asked, left = [], list(finds)
+    LOOK_FRAMES.clear()
+    monkeypatch.setattr(press_demo, "dump_wrist_frame", lambda watcher, tag: LOOK_FRAMES.append(tag))
+
+    def lid_from_here(node, ctx_, runner_, watcher, args, locator, scene_fix, aimed_xy):
+        asked.append((tuple(aimed_xy), getattr(scene_fix, "source", "scene"), locator is not None))
+        return left.pop(0) if left else (None, "the wrist's frame from the look pose: no counter")
+
+    monkeypatch.setattr(rp, "lid_from_here", lid_from_here)
+    return asked
+
+
+def test_a_look_that_finds_no_button_looks_again_over_the_lid_the_wrist_sees(ctx, monkeypatch, tmp_path, capsys):
+    """RAMMP 1.5, 2026-11-20 13:40-13:44: the scene camera's place 16-19 cm from the lid, the look short of it,
+    the lid whole in the frame's corner, and four runs ended "no button from the look pose". The wrist's own
+    finder has the lid in that frame: the look is planned again over it, flown, and the aim asked there; the run
+    goes on with the wrist's lid as its box, on the wrist's own table, the scene camera asked nothing after."""
+    lid = _wrist_lid()
+    asked = _lids(monkeypatch, (lid, None))
+    planned = []
+    real = rp.plan_reach
+    monkeypatch.setattr(
+        rp,
+        "plan_reach",
+        lambda c, cfg, button, q, **k: (planned.append((c.cpose, tuple(button), k)), real(c, cfg, button, q, **k))[1],
+    )
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [None, (BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0
+    assert rec.events == [
+        "reach:look",
+        "aim:reach-aim",
+        "reach:look",
+        "aim:reach-aim",
+        *WAY_IN,
+        "hold",
+        *BACK,
+        "aim:reach-after",
+        *GRIP,
+        *CLOSE,
+        *CARRY,
+        *HOME,
+    ]
+    assert asked == [(BUTTON[:2], "scene", True)] and LOOK_FRAMES == ["reach-look"]  # the first look's, kept
+    # the look again: planned for the wrist's lid, with the box where the wrist has it and the press proven there
+    first, again = planned[0], planned[1]
+    assert first[1] == pytest.approx(BUTTON) and first[2] == {"depth": True, "looks": None, "shortest_walk": True}
+    assert again[0] is lid.pose and again[1] == pytest.approx(lid.top_xyz) and again[2] == {"depth": True}
+    assert ctx.worlds.table_top_z == pytest.approx(lid.table_z_scene)  # the wrist's own table from here on
+    (row,) = (r for r in rows if r["leg"] == "look_again")
+    assert (row["n"], row["planned"], row["had"], row["from_aimed_mm"]) == (1, True, "the scene camera", 184)
+    assert row["lid_xyz"] == pytest.approx(list(lid.top_xyz), abs=1e-4)
+    out = capsys.readouterr().out
+    assert (
+        "LOOK AGAIN 1 of 2: no button where the scene camera had the box; the wrist sees the lid at [0.750, -0.730, "
+        "0.370], 184 mm from there — the look moves over it" in out
+    )
+    assert "the wrist at the look" in out  # the counter's edges read again, on the wrist's own points
+    assert out.rstrip().endswith("arm home")
+
+
+def test_two_looks_again_at_most_and_the_stop_says_so(ctx, monkeypatch, tmp_path, capsys):
+    """A lid the wrist's finder has and the aim finds no button on is no container this run opens: after two
+    looks again the STOP it was, the arm home, the looks counted in its words."""
+    a, b = _wrist_lid(), _wrist_lid(dx=0.16, dy=-0.10)
+    asked = _lids(monkeypatch, (a, None), (b, None), (_wrist_lid(dx=0.0, dy=-0.30), None))
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [None, None, None])
+    assert code == 2
+    assert rec.events == [
+        "reach:look",
+        "aim:reach-aim",
+        "reach:look",
+        "aim:reach-aim",
+        "reach:look",
+        "aim:reach-aim",
+        "home",
+    ]
+    # each look again is asked from where the look before it was aimed, with the wrist's lid as the run's box
+    assert asked == [(BUTTON[:2], "scene", True), (a.top_xyz[:2], "wrist", False)]
+    assert [r["n"] for r in rows if r["leg"] == "look_again"] == [1, 2] and LOOK_FRAMES == ["reach-look"] * 3
+    out = capsys.readouterr().out
+    assert "LOOK AGAIN 2 of 2: no button where the wrist's own look had the box" in out
+    assert (
+        "STOP: no button from the look pose, nor from 2 looks again (no circle; each look again over the lid the "
+        "wrist's frame showed; no look again: a reach looks again no more than 2 times) — nothing was pressed — "
+        "returning home" in out
+    )
+
+
+def test_with_no_lid_in_the_wrists_frame_the_stop_is_as_it_was_and_says_why_no_look_again(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    asked = _lids(monkeypatch, (None, "the wrist's frame from the look pose: wrist camera: no counter in 1 frame"))
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [None])
+    assert code == 2 and rec.events == ["reach:look", "aim:reach-aim", "home"] and len(asked) == 1
+    assert not [r for r in rows if r["leg"] == "look_again"] and LOOK_FRAMES == ["reach-look"]
+    assert (
+        "STOP: no button from the look pose (no circle; no look again: the wrist's frame from the look pose: wrist "
+        "camera: no counter in 1 frame) — nothing was pressed — returning home" in capsys.readouterr().out
+    )
+
+
+def test_a_lid_whose_look_does_not_plan_is_no_way_in_from_the_look_pose(ctx, monkeypatch, tmp_path, capsys):
+    """The wrist sees the lid and no press plans for it from where the chair stands: the arm goes home, and that
+    is what the run says (by hand: its STOP; guided: NO WAY IN, the chair is moved and the run looks again)."""
+    real = rp.plan_reach
+    for guided, want in ((False, 1), (True, rp.NO_WAY_IN)):
+        _lids(monkeypatch, (_wrist_lid(), None))
+        calls = []
+
+        def plan_reach(c, cfg, button, q, _calls=calls, **k):
+            _calls.append(tuple(button))
+            return real(c, cfg, button, q, **k) if len(_calls) == 1 else (None, "30 deg: the look pose (IK_FAIL)")
+
+        monkeypatch.setattr(rp, "plan_reach", plan_reach)
+        real_flow = rp.run_reach_press
+
+        def with_guide(node, ctx_, cfg, runner, watcher, args, fix, locator, _g=guided, _flow=real_flow):
+            args.guide = _g
+            return _flow(node, ctx_, cfg, runner, watcher, args, fix, locator)
+
+        monkeypatch.setattr(rp, "run_reach_press", with_guide)
+        code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path / str(guided), [None, (BUTTON, 0.4)])
+        monkeypatch.setattr(rp, "run_reach_press", real_flow)
+        assert code == want and rec.events == ["reach:look", "aim:reach-aim", "home"]
+        (row,) = (r for r in rows if r["leg"] == "look_again")
+        assert row["planned"] is False and row["why"] == "30 deg: the look pose (IK_FAIL)"
+        out = capsys.readouterr().out
+        word = "NO WAY IN" if guided else "STOP"
+        assert (
+            "%s: no reach-out press plans for the lid the wrist sees from the look pose, at [0.750, -0.730] (30 deg: "
+            "the look pose (IK_FAIL)) — nothing was pressed — returning home" % word in out
+        )
+        assert ctx.no_way_in.startswith("no reach-out press plans for the lid the wrist sees")
+
+
+def test_a_look_again_is_flown_only_where_the_runs_time_still_holds_it(ctx, monkeypatch, tmp_path, capsys):
+    """The engine stops a run at its budget wherever it is. A look again and all a run does after its look need
+    RELOOK_S + RELOOK_REST_S: with less left, none is flown, and the STOP says so."""
+    import time
+
+    asked = _lids(monkeypatch, (_wrist_lid(), None))
+    short = rp.RELOOK_S + rp.RELOOK_REST_S - 5.0
+    monkeypatch.setenv(rlo.RUN_BUDGET_ENV, json.dumps({"s": short, "from": round(time.monotonic(), 3), "go": False}))
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [None, (BUTTON, 0.4)])
+    assert code == 2 and rec.events == ["reach:look", "aim:reach-aim", "home"] and asked == []
+    assert "no look again: no time left for a look again (the run has " in capsys.readouterr().out
+    # with the time for it, it is flown
+    monkeypatch.setenv(rlo.RUN_BUDGET_ENV, json.dumps({"s": 90.0, "from": round(time.monotonic(), 3), "go": False}))
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path / "b", [None, (BUTTON, 0.4), (UP, 9.0)])
+    assert code == 0 and rec.events[:4] == ["reach:look", "aim:reach-aim", "reach:look", "aim:reach-aim"]
+
+
+def test_a_look_again_that_stops_part_way_ends_the_run_there(ctx, monkeypatch, tmp_path):
+    _lids(monkeypatch, (_wrist_lid(), None))
+    ends = {2: ("aborted", {"message": "stopped", "progress": 0.4})}  # the second goal sent: the look again
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [None, (BUTTON, 0.4)], ends=ends)
+    assert code == 1 and rec.events == ["reach:look", "aim:reach-aim", "reach:look"]
+    assert ctx.client.lets_go  # a compliant leg stopped part way is let go of there

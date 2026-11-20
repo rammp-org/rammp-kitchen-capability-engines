@@ -91,6 +91,12 @@ WRIST_VS_SCENE = re.compile(r"^WRIST LOOK: the box at \[.*?\]; the scene camera 
 NO_CONTAINER = re.compile(r"^WRIST LOOK: no container .*— the scene camera's box is taken")
 HOME_FIRST = re.compile(r"^HOME FIRST: ")
 LOOK_START = re.compile(r"^REACH-OUT: hand tilted (\d+) deg; looking")
+# a look that found no button where the find had the box, and the look flown over the lid the wrist's own
+# frame shows from there (tasks/reach_press.look_again): the first look's step ends, a step of its own begins
+LOOK_AGAIN = re.compile(
+    r"^LOOK AGAIN (\d+) of \d+: no button where (.*?) had the box; "
+    r"the wrist sees the lid at \[.*?\], (\d+) mm from there"
+)
 AIM = re.compile(r"^AIM: button circle at pixel .*?, (\d+) mm across")
 AIMED = re.compile(r"^AIMED from the look pose: button at \[%s, %s, %s\]" % (NUM, NUM, NUM))
 TABLE_WARN = re.compile(r"^WARNING: the wrist reads its table ([-+]?\d+) mm from the scene camera's")
@@ -328,6 +334,7 @@ class FlightView:
         self.views = 0
         self.rivals = self.far = False
         self.aim_mm = None
+        self.relooked = None  # the look went again over the lid the wrist saw: said with the button found
         self.tilt = None
         self.presses = 0
         self.contact_mm = None
@@ -504,6 +511,16 @@ class FlightView:
         if m:
             self._begin("LOOK", "moving to look at the button")
             return
+        m = LOOK_AGAIN.match(s)
+        if m:
+            who, cm = m.group(2), int(round(int(m.group(3)) / 10.0))
+            if self.cur is not None and self.cur[0] == "LOOK":
+                self._end("??", "no button where %s had the box" % who)
+            self.cur = None
+            self.relooked = "over the lid the wrist saw %d cm from where %s had it" % (cm, who)
+            self.aim_mm = None
+            self._begin("LOOK", "moving over the lid the wrist sees, %d cm from there" % cm)
+            return
         m = AIM.match(s)
         if m:
             self.aim_mm = int(m.group(1))
@@ -517,7 +534,8 @@ class FlightView:
             self.out_m = math.hypot(float(m.group(1)), float(m.group(2)))
             if self.cur is not None and self.cur[0] == "LOOK":
                 across = "" if self.aim_mm is None else ", %d mm across" % self.aim_mm
-                self._end("ok", "button found%s, %.2f m out" % (across, self.out_m))
+                over = "" if not self.relooked else ", %s" % self.relooked
+                self._end("ok", "button found%s, %.2f m out%s" % (across, self.out_m, over))
             return
         m = TURN.match(s) or PRESS_LEAN.match(s)
         if m:

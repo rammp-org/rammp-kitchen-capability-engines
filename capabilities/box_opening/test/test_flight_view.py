@@ -1113,3 +1113,50 @@ def test_a_run_cut_between_two_spots_says_the_cut_and_where_the_lid_was():
     ]
     out = _view(FOUND + PRESSED + CARRIED + SPOT_2 + met, 130, timed_out=True, held=False)
     assert not any("on its way to spot" in line or "being chosen" in line for line in out)
+
+
+def test_a_look_that_goes_again_over_the_lid_the_wrist_sees_is_a_step_of_its_own():
+    """RAMMP 1.5, 2026-11-20: the look stood where the scene camera had the box, 19 cm from the lid. The look
+    again (tasks/reach_press.look_again) ends that step as what it was, begins its own, and the button found from
+    it says where it was found."""
+    scene_fix = (
+        6,
+        P + "SCENE: box at [0.681, -0.035] yaw 0.0 deg from 191 lid points (SEG 0.76, 2 sightings "
+        "(segmenter+segmenter); 4.5 s to locate [streams 0.02 seg 0.06], 5.5 s since start) — reaching out",
+    )
+    look = (7, P + "REACH-OUT: hand tilted 30 deg; looking from 0.15 m back toward the arm; gravity alone moves x")
+    again = (
+        13,
+        P + "LOOK AGAIN 1 of 2: no button where the scene camera had the box; the wrist sees the lid at [0.776, "
+        "-0.200, 0.392], 190 mm from there — the look moves over it",
+    )
+    aim = (18, P + "AIM: button circle at pixel (322, 190) r 31 px, 43 mm across, +0.4 mm above its own lid")
+    aimed = (18, P + "AIMED from the look pose: button at [0.789, -0.203, 0.392], 14 mm from the scene camera's")
+    out = [" ".join(line.split()) for line in _view([scene_fix, look, again, aim, aimed], 0)]
+    assert out[:6] == [
+        "find ... looking for the box",
+        "1 FIND ok box 0.68 m out (scene camera) 6.0 s",
+        "look ... moving to look at the button",
+        "2 LOOK ?? no button where the scene camera had the box 6.0 s",
+        "look ... moving over the lid the wrist sees, 19 cm from there",
+        "3 LOOK ok button found, 43 mm across, 0.81 m out, over the lid the wrist saw 19 cm from where the scene "
+        "camera had it 5.0 s",
+    ]
+    # two looks again and no button: the press's failure as it was, the looks counted in the run's own line
+    stop = (
+        25,
+        P + "STOP: no button from the look pose, nor from 2 looks again (no circle; each look again over the lid "
+        "the wrist's frame showed; no look again: a reach looks again no more than 2 times) — nothing was pressed "
+        "— returning home",
+    )
+    twice = (19, again[1].replace("LOOK AGAIN 1", "LOOK AGAIN 2").replace("the scene camera", "the wrist's own look"))
+    out = _view([scene_fix, look, again, twice, stop], 2)
+    steps = [line for line in out if line[:2].strip().isdigit()]
+    assert [line.split()[1:3] for line in steps[:5]] == [
+        ["FIND", "ok"],
+        ["LOOK", "??"],
+        ["LOOK", "??"],
+        ["LOOK", "ok"],
+        ["PRESS", "FAIL"],
+    ]
+    assert "no button from the look pose, nor from 2 looks again" in steps[4]

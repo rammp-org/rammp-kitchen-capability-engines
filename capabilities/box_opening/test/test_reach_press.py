@@ -2981,3 +2981,131 @@ def test_the_way_ins_executions_are_one_or_the_free_air_and_the_stroke():
     assert reach_press.way_in_parts(two) == [two[:1], two[1:]]
     wrong = [line("reach:slide-in", Q0, mid, False), line("depth:press", mid, Q1, True)]  # the stroke in position
     assert reach_press.way_in_parts(wrong) is None
+
+
+# --- the look again's own find: the wrist's finder on a frame from the look pose (2026-11-20) ----------------
+GEN15_LOOK = "wrist_reach_look_gen15_20261120_1841.npz"  # the 13:41:02 look: the lid whole, upper right of the frame
+GEN15_LENS = (0.151329, -0.571954)  # the scene camera's lens that day (arm_mount)
+GEN15_SCENE = (0.681, -0.035)  # where it had the selected container; the look was aimed there
+
+
+def _gen15_tie(wide=True):
+    from box_opening.tasks import press_demo
+
+    d = np.subtract(GEN15_SCENE, GEN15_LENS)
+    d = tuple(d / np.linalg.norm(d))
+    return press_demo.SelectionTie(
+        "food_container_2", GEN15_LENS, d, d, at_xy=GEN15_SCENE, wide_deg=press_demo.SELECTED_WIDE_DEG if wide else 0.0
+    )
+
+
+def _from_the_look(monkeypatch, ctx, frame, selection=None, instance_id=None, aimed=GEN15_SCENE, locator=None):
+    """reach_press.lid_from_here on `frame` (a WristFrame, or None with why), the run's selection as its own look
+    left it: ((fix, why), the captions its frame was kept with)."""
+    from box_opening.tasks import survey as sv
+
+    kept = []
+    got = (frame, "snap", "pose", None) if not isinstance(frame, str) else (None, None, None, frame)
+    monkeypatch.setattr(sv, "grab_frame", lambda node, watcher, runner, tag: got)
+    monkeypatch.setattr(sv, "save_frame", lambda watcher, snap, pose, f, caption: kept.append(caption))
+    # (the arm's reach is the finder's own matter, tested with it: this harness's arm is not gen_1_5's)
+    monkeypatch.setattr(sv, "_within_reach", lambda model: lambda top_xyz: True)
+    ctx.model = ContainerModel.load(PINK)
+    ctx.selection = selection
+    args = SimpleNamespace(instance_id=instance_id, wrist_alone=False)
+    scene_fix = SimpleNamespace(top_xyz=(*GEN15_SCENE, 0.443), source="segmenter")
+    return reach_press.lid_from_here(None, ctx, None, SimpleNamespace(), args, locator, scene_fix, aimed), kept
+
+
+def test_the_wrists_finder_has_the_lid_in_the_frame_the_look_of_2026_11_20_ended_on(ctx, monkeypatch):
+    """The frame the 13:41 run ended on ("1 circle(s) on the rectified lid plane, none the button: 190 mm from the
+    prior"): the wrist's own finder has the container in it, 190 mm from where the scene camera had it and within
+    1 cm of where the wrist's look from rest had put it ([0.770, -0.193]). It is the selected container by the
+    one-container rule, and not by the 75 mm alone."""
+    from conftest import fixture_path
+
+    from box_opening.perception import wrist_finder as wf
+
+    frame = wf.frame_from_capture(fixture_path(GEN15_LOOK))
+    sel = ("food_container_2", _gen15_tie(), None)
+    (fix, why), kept = _from_the_look(monkeypatch, ctx, frame, selection=sel, instance_id="food_container_2")
+    assert why is None and fix.source == "wrist"
+    assert fix.top_xyz[:2] == pytest.approx((0.776, -0.200), abs=0.003) and fix.top_xyz[2] == pytest.approx(
+        0.392, abs=0.003
+    )
+    assert np.hypot(fix.top_xyz[0] - 0.770, fix.top_xyz[1] + 0.193) < 0.010
+    assert fix.table_z_scene == pytest.approx(0.301, abs=0.003)  # its own counter, 92 mm under the lid's top
+    assert len(kept) == 1 and kept[0].startswith("the container at [0.776, -0.200], its top 92 mm above the counter")
+    # with a second container of the kind in the scene camera's view the 75 mm stands, and no look again is flown
+    sel = ("food_container_2", _gen15_tie(wide=False), None)
+    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame, selection=sel, instance_id="food_container_2")
+    assert fix is None and why.startswith("the wrist's frame from the look pose: a container at [0.776, -0.200], ")
+    assert why.endswith(": not taken for the selected container food_container_2")
+    # no selection (a run by hand): the one container in view
+    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame)
+    assert why is None and fix.top_xyz[:2] == pytest.approx((0.776, -0.200), abs=0.003)
+    # a selection nothing ties a find to takes none
+    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame, instance_id="food_container_2")
+    assert fix is None and "nothing the scene camera saw ties it to the selected container food_container_2" in why
+    # a lid where the look was aimed already: the look stood over it, and looking again changes nothing
+    (fix, why), _kept = _from_the_look(monkeypatch, ctx, frame, aimed=(0.790, -0.180))
+    assert fix is None and "from where the look was aimed: the look stood over it" in why
+    # no frame from the look pose
+    (fix, why), kept = _from_the_look(monkeypatch, ctx, "no new wrist frame")
+    assert fix is None and why == "no wrist frame from the look pose (no new wrist frame)" and not kept
+
+
+def test_of_several_lid_sized_tops_the_selections_tie_names_the_one_it_takes(ctx, monkeypatch):
+    """A table with more than the container on it: where two places pass and the finder will not guess, the one
+    the selection's tie takes alone is named to it (as another camera's detector names one: `seen_at`). Two that
+    the tie takes, or none, and there is no lid to look at again."""
+    from box_opening.perception import wrist_finder as wf
+
+    lid = SimpleNamespace(xy=(0.776, -0.200), top_z=0.392, button="unchecked")  # 14 deg about the scene lens
+    roll = SimpleNamespace(xy=(0.520, -0.330), top_z=0.392, button="unchecked")  # a roll of tape, well off the cone
+    fix = SimpleNamespace(top_xyz=(0.776, -0.200, 0.392), source="wrist")
+    asked = []
+
+    def find_container(frames, model, check_buttons=True, reachable=None, seen_at=None, far_nearest=False):
+        asked.append(tuple(round(float(v), 3) for v in seen_at))
+        named = asked[-1] == lid.xy
+        return SimpleNamespace(
+            fix=fix if named else None,
+            why="the container at [0.776, -0.200]" if named else "wrist camera: two places pass: refusing to guess",
+            places=(lid, roll),
+            patches=(),
+        )
+
+    monkeypatch.setattr(wf, "find_container", find_container)
+    sel = ("food_container_2", _gen15_tie(), None)
+    (got, why), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert got is fix and why is None and asked == [GEN15_SCENE, lid.xy]
+    # a second top in the cone: nothing names one, and the finder's own refusal stands
+    asked.clear()
+    roll.xy = (0.830, -0.060)
+    (got, why), _kept = _from_the_look(monkeypatch, ctx, object(), selection=sel, instance_id="food_container_2")
+    assert got is None and asked == [GEN15_SCENE] and why.endswith("two places pass: refusing to guess")
+
+
+def test_the_selection_a_look_again_is_judged_by_is_the_runs_own_looks_or_asked_of_the_scene_camera(ctx, monkeypatch):
+    from box_opening.tasks import press_demo
+
+    ctx.model = ContainerModel.load(PINK)
+    args = SimpleNamespace(instance_id="food_container_2", wrist_alone=False)
+    tie = _gen15_tie()
+    ctx.selection = ("food_container_2", tie, None)
+    assert reach_press._selection(ctx, args, None, None) == ("food_container_2", tie, None)
+    assert reach_press._selection(ctx, SimpleNamespace(instance_id=None), None, None) == (None, None, None)
+    # a run whose own look left none (no --wrist-first): asked of the scene camera's locator, by its fix
+    ctx.selection = None
+    asked = []
+    monkeypatch.setattr(
+        press_demo,
+        "selection_look",
+        lambda loc, fix, model, sel, alone: (asked.append((loc, fix, sel)), (tie, None))[1],
+    )
+    scene_fix = SimpleNamespace(source="segmenter")
+    assert reach_press._selection(ctx, args, "locator", scene_fix) == ("food_container_2", tie, None)
+    assert asked == [("locator", scene_fix, "food_container_2")]
+    # ... and with no scene camera to ask (the wrist's own box), nothing ties
+    assert reach_press._selection(ctx, args, None, scene_fix) == ("food_container_2", None, None)
