@@ -100,6 +100,81 @@ def test_vz_contact_ignores_the_sag_before_it_is_armed():
     assert any(armed.update(v) for v in sag)  # what it would have read
 
 
+# (t s, vz cm/s, fz N) every ~0.12 s of the gen_1_5 lowering of 2026-11-20 02:33 (descent_20261120_023330.csv): the
+# sag (to ~1.1 s), the wait, the creep; the container meets the table ~3.8 s and fz climbs to +20 N, the speed test
+# never firing
+TRACE_0233 = [
+    tuple(float(v) for v in p.split(","))
+    for p in """
+    0,0.02,-5.7 0.28,-2.48,-4 0.41,-3.29,-4.9 0.53,-3.14,-4.3 0.65,-3.04,-5.3 0.77,-2.59,-5.7 0.9,-1.86,-6.1
+    1.02,-0.75,-5.7 1.15,-0.01,-5.1 1.27,-0.05,-4.6 1.39,-0.05,-4.5 1.52,0,-4.8 1.64,0.14,-4.6 1.76,0.42,-4.7
+    1.88,0.2,-5 2,0.26,-4.8 2.12,-0.01,-4.6 2.24,-0.1,-4.8 2.37,-0.05,-4.4 2.49,-0.23,-4.2 2.61,-0.31,-4
+    2.75,-0.5,-3.7 2.87,-0.55,-3.7 2.99,-0.52,-3.3 3.11,-0.96,-4 3.23,-1.04,-4.2 3.36,-0.95,-4 3.48,-0.61,-2.9
+    3.6,-0.92,-3.4 3.73,-0.95,-3.7 3.87,-0.69,-2.8 3.99,-0.62,-1.9 4.13,-0.66,-1.3 4.26,-0.61,-1.5 4.38,-1,-1.8
+    4.5,-0.62,-0.6 4.62,-0.53,0.3 4.76,-0.73,0.6 4.87,-0.54,1.2 4.99,-0.26,1.7 5.12,-0.64,2.2 5.24,-0.62,2.7
+    5.37,-0.63,2.5 5.48,-0.75,2.7 5.61,-0.79,3.6 5.73,-0.56,5.4 5.85,-0.44,5.7 5.98,-0.8,5.6 6.1,-0.59,6.2
+    """.split()
+]
+# the first 0.7 s of the 03:05 lowering at (0.80, 0.35) (descent_20261120_030522.csv), every message: the sag at up to
+# 7 cm/s, and fz stepping from -4.7 to +2.5 N as it ends, nothing touched; the old force test (free air taken during
+# the sag) called it contact here
+TRACE_0305_SAG = [
+    tuple(float(v) for v in p.split(","))
+    for p in """
+    0,0.02,-3.2 0.17,-3.22,-5.2 0.2,-3.95,-4.8 0.21,-4.2,-3.9 0.23,-4.44,-3.3 0.25,-4.58,-2.8 0.28,-4.65,-2.5
+    0.29,-4.54,-2.4 0.31,-4.82,-2.4 0.34,-4.92,-2.6 0.35,-6,-3.6 0.37,-5.63,-3.5 0.4,-6.59,-4.4 0.41,-6.85,-4.5
+    0.44,-6.48,-4.2 0.46,-6.65,-4.4 0.47,-6.82,-4.7 0.5,-6.88,-4.5 0.52,-7.03,-4.7 0.54,-6.28,-3.8 0.56,-5.63,-3
+    0.58,-4.74,-1.7 0.6,-4.05,-0.9 0.62,-3.02,0.2 0.64,-2.29,0.9 0.66,-1.13,1.8 0.68,-0.56,2.3 0.7,-0.16,2.5
+    """.split()
+]
+
+
+def feed(c, trace):
+    """FzContact over (t, vz cm/s, fz) messages: the index of the first contact, or None."""
+    for k, (t, vz, fz) in enumerate(trace):
+        if c.update(fz, vz / 100, t):
+            return k
+    return None
+
+
+def test_fz_contact_catches_the_0233_touch_the_speed_test_missed():
+    c = plan.FzContact(rise=5.0, skip_n=2, baseline_n=4)  # this trace is every 6th message: fewer of them to wait
+    k = feed(c, TRACE_0233)
+    assert k is not None
+    assert c.baseline == pytest.approx(-4.7, abs=0.4)  # taken after the sag, from ~1.2 s
+    assert 4.4 <= TRACE_0233[k][0] <= 5.0  # within ~1 s of the touch (~3.8 s), at ~+5 N, not at +20
+
+
+def test_fz_contact_takes_free_air_after_the_sag_not_during_it():
+    c = plan.FzContact(rise=5.0)
+    held = [(0.7 + 0.025 * i, -0.3, 2.5 + 0.4 * (i % 3)) for i in range(1, 60)]  # holding after the sag, untouched
+    assert feed(c, TRACE_0305_SAG + held) is None
+    assert c.baseline == pytest.approx(2.9, abs=0.5)  # the post-sag level, not the -4 .. -2 N of the fall
+
+
+def test_fz_contact_ignores_free_air_before_the_touch():
+    c = plan.FzContact(rise=5.0, skip_n=2, baseline_n=4)
+    assert feed(c, TRACE_0233[:30]) is None  # 0-3.6 s, before the touch
+
+
+def test_fz_contact_needs_the_rise_on_consecutive_messages():
+    c = plan.FzContact(rise=5.0, hits=3, baseline_n=4, skip_n=0, max_wait_s=0.0)
+    assert feed(c, [(1.0, 0.0, -5.0)] * 5) is None  # settled at once (max_wait 0), free air -5 N
+    assert feed(c, [(1.0, 0.0, f) for f in (1.0, 1.0, -5.0, 1.0, 1.0, -5.0)]) is None  # never 3 in a row
+    assert feed(c, [(1.0, 0.0, 1.0)] * 3) == 2
+
+
+def test_fz_contact_waits_at_most_max_wait_for_the_sag():
+    c = plan.FzContact(rise=5.0, baseline_n=4, skip_n=0, max_wait_s=1.5)
+    still = [(0.04 * i, 0.0, -5.0) for i in range(60)]  # no sag at all (settled first)
+    assert feed(c, still) is None and c.baseline == pytest.approx(-5.0)
+
+
+def test_fz_contact_off():
+    c = plan.FzContact(rise=0.0)
+    assert feed(c, [(0.1 * i, -2.0 if i < 10 else 0.0, -5.0 if i < 30 else 30.0) for i in range(60)]) is None
+
+
 def test_contact_arms_after_the_ignored_drop():
     length = 0.30
     assert not plan.contact_armed(0.0, length, 0.03)

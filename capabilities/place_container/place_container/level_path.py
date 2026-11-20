@@ -192,16 +192,22 @@ def solve_near(model, q, pos, R_goal, J_pinv, iters=8):
     """Joints at the tool pose (pos, R_goal) near q: Newton steps on the pose error with J_pinv (the
     pseudo-inverse of a Jacobian near q, refreshed halfway), the elbow left where q has it. None if it does
     not converge to POS_TOL_M / ROT_TOL_RAD or leaves a joint limit. Continuous joints stay unwrapped."""
+    return solve_near_why(model, q, pos, R_goal, J_pinv, iters)[0]
+
+
+def solve_near_why(model, q, pos, R_goal, J_pinv, iters=8):
+    """solve_near, and why it gave None: (q, "") or (None, the reason)."""
     q = np.asarray(q, dtype=float).copy()
     for i in range(iters):
         T = model.fk(q)
         e = np.concatenate([pos - T[:3, 3], Rotation.from_matrix(R_goal @ T[:3, :3].T).as_rotvec()])
         if np.linalg.norm(e[:3]) < POS_TOL_M and np.linalg.norm(e[3:]) < ROT_TOL_RAD:
-            return None if model.limit_violations(wrap_continuous(q)) else q
+            bad = model.limit_violations(wrap_continuous(q))
+            return (None, f"past a joint limit: {bad[0]}") if bad else (q, "")
         if i == iters // 2:
             J_pinv = np.linalg.pinv(jacobian(model, q))
         q = q + J_pinv @ e
-    return None
+    return None, "no exact IK solution there"
 
 
 def knot_poses(p_from, R_from, p_to, R_to, step):
@@ -222,6 +228,7 @@ def search_line(model, chair, q_from, p_to, R_to, step, label, null_steps=NULL_S
     poses = knot_poses(T[:3, 3], T[:3, :3], p_to, R_to, step)
     for k, (pos, quat) in enumerate(poses):
         nxt = []
+        why = {}  # each dropped shape's reason -> how many: said in the refusal, so it names what stopped the line
         R_goal = Rotation.from_quat(quat).as_matrix()
         for cost, path, worst in beam:
             q_prev = path[-1]
@@ -229,26 +236,51 @@ def search_line(model, chair, q_from, p_to, R_to, step, label, null_steps=NULL_S
             n, J_pinv = null_direction(J), np.linalg.pinv(J)
             seen = []
             for a in null_steps:
-                q = solve_near(model, q_prev + a * n, pos, R_goal, J_pinv)
+                q, reason = solve_near_why(model, q_prev + a * n, pos, R_goal, J_pinv)
                 if q is None:
+                    why[reason] = why.get(reason, 0) + 1
                     continue
-                if np.max(np.abs(np.degrees(q - q_prev))) > MAX_KNOT_STEP_DEG:
+                step_deg = np.abs(np.degrees(q - q_prev))
+                if np.max(step_deg) > MAX_KNOT_STEP_DEG:
+                    j = int(np.argmax(step_deg))
+                    reason = (
+                        f"J{j + 1} would turn {step_deg[j]:.0f} deg in one {step * 100:.0f} cm step "
+                        f"(max {MAX_KNOT_STEP_DEG:.0f})"
+                    )
+                    why[reason] = why.get(reason, 0) + 1
                     continue
                 if any(np.max(np.abs(q - s)) < np.radians(0.5) for s in seen):
                     continue
                 seen.append(q)
-                c, _, _ = chair.clearance(q)
+                c, link, box = chair.clearance(q)
                 if c < CLEAR_MIN_M:
+                    reason = f"{link} {c * 100:.1f} cm from {box} (min {CLEAR_MIN_M * 100:.1f})"
+                    why[reason] = why.get(reason, 0) + 1
                     continue
                 step_cost = float(np.sum((q - q_prev) ** 2))
                 clear_cost = CLEARANCE_WEIGHT * max(0.0, CLEAR_WANT_M - c) * step
                 nxt.append((cost + step_cost + clear_cost, path + [q], min(worst, c)))
         if not nxt:
             c, link, box = chair.clearance(beam[0][1][-1])
+            q_last = wrap_continuous(beam[0][1][-1])
+            joints = " ".join(f"J{i + 1} {np.degrees(v):.0f}" for i, v in enumerate(q_last))
+            ranked = sorted(why.items(), key=lambda e: -e[1])
+            reasons = "; ".join(f"{r} (x{n})" for r, n in ranked[:3])
+            # the main reason in the words ui.py turns into the user's (its "chair and user boxes", "a joint jumps",
+            # "past a joint limit" rules)
+            top = ranked[0][0] if ranked else ""
+            if " cm from " in top:
+                kind = f"too close to the chair and user boxes (within {CLEAR_MIN_M * 100:.1f} cm)"
+            elif "would turn" in top:
+                kind = "a joint jumps"
+            elif top.startswith("past a joint limit"):
+                kind = "past a joint limit"
+            else:
+                kind = "no exact IK solution"
             raise Refused(
                 f"{label}: no arm shape continues the line at {k}/{len(poses)} (tool at {np.round(pos, 3).tolist()}): "
-                f"every elbow position is within {CLEAR_MIN_M * 100:.1f} cm of the chair and user boxes or needs a "
-                f"joint jump (last kept: {link} {c * 100:.1f} cm from {box}) -- nothing moved"
+                f"{kind} -- every elbow position tried: {reasons or 'none tried'}. Last kept shape: joints (deg) "
+                f"{joints}; {link} {c * 100:.1f} cm from {box} -- nothing moved"
             )
         nxt.sort(key=lambda e: e[0])
         beam = nxt[:BEAM]

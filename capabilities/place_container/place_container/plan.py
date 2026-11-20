@@ -159,10 +159,17 @@ class Model:
         return bowl_tilt_deg(self.fk(q)[:3, :3], self.pitch)
 
     def limit_violations(self, q):
+        """The joints of q the driver would refuse: past a limit or within its joint_limit_margin_rad of one
+        (sim.JOINT_LIMIT_MARGIN_RAD; cuRobo's band, as sim.limit_room). With the raw limits, a back-out ending
+        0.07-0.09 rad from J4's limit planned, then cuRobo's check refused it (gen_1_5, 2026-11-19)."""
+        m = sim.JOINT_LIMIT_MARGIN_RAD
         bad = []
         for i, (v, (lo, hi)) in enumerate(zip(q, self.limits, strict=True)):
-            if lo < hi and not (lo <= v <= hi):
-                bad.append(f"J{i + 1} {np.degrees(v):.0f} deg (limit {np.degrees(lo):.0f}..{np.degrees(hi):.0f})")
+            if lo < hi and not (lo + m <= v <= hi - m):
+                bad.append(
+                    f"J{i + 1} {np.degrees(v):.0f} deg (limit {np.degrees(lo):.0f}..{np.degrees(hi):.0f}, "
+                    f"the driver keeps {np.degrees(m):.1f} deg off it)"
+                )
         return bad
 
     def ik(self, pos, quat, seed, restarts=10, rot_weight=0.2, stay=0.0):
@@ -713,6 +720,49 @@ class VzContact:
             return False
         self.moved = self.moved or vz < -self.moving
         self.count = self.count + 1 if self.moved and vz >= self.stop else 0
+        return self.count >= self.need
+
+
+class FzContact:
+    """Contact on the way down from the wrist force (/ee_state force z, in arm_mount: + = the table pushing up):
+    fz `rise` N or more above the hand's free-air fz for `hits` new messages in a row = the container is on
+    something. It catches what VzContact can't: a touch inside contact_ignore_m, or a hand lagging its command too
+    much to "move then stop" (gen_1_5, 2026-11-20 02:33: a table 2.5 cm higher than marked, fz -4.5 -> +20 N, the
+    speed test never fired).
+    The free-air fz is the median of `baseline_n` messages taken once the SAG IS OVER: the hand has fallen faster
+    than `still_vz` and then moved slower than it for `still_n` messages in a row, or `max_wait_s` has passed;
+    `skip_n` messages after that are left out (the step's own spike: 03:02 read -0.7 there, -2.2 a moment on). The
+    wrench is estimated from the joint torques, and it reads differently while the compliant arm falls through its
+    sag than once it holds: at the sag's end fz stepped up 2.5-7 N with nothing touched (gen_1_5 11-20 03:02 and
+    03:05, the latter taken as contact 6% into the lowering when the free air was taken during the sag).
+    rise <= 0: off."""
+
+    def __init__(self, rise=5.0, hits=3, baseline_n=10, still_vz=0.01, still_n=3, max_wait_s=1.5, skip_n=10):
+        self.rise, self.need, self.baseline_n = float(rise), int(hits), int(baseline_n)
+        self.still_vz, self.still_n, self.max_wait_s = float(still_vz), int(still_n), float(max_wait_s)
+        self.skip_n = int(skip_n)
+        self.fell, self.still, self.settled, self.skipped = False, 0, False, 0
+        self.seen, self.count, self.baseline = [], 0, None
+
+    def update(self, fz, vz, t):
+        """One new /ee_state message: fz (N), the hand's vz (m/s, + up), t (s since the lowering started).
+        True once it is contact."""
+        if self.rise <= 0:
+            return False
+        if self.baseline is None:
+            if not self.settled:
+                self.fell = self.fell or vz < -self.still_vz
+                self.still = self.still + 1 if self.fell and abs(vz) < self.still_vz else 0
+                self.settled = self.still >= self.still_n or t >= self.max_wait_s
+                return False
+            if self.skipped < self.skip_n:
+                self.skipped += 1
+                return False
+            self.seen.append(float(fz))
+            if len(self.seen) >= self.baseline_n:
+                self.baseline = float(np.median(self.seen))
+            return False
+        self.count = self.count + 1 if float(fz) - self.baseline >= self.rise else 0
         return self.count >= self.need
 
 

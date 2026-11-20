@@ -44,8 +44,12 @@ params:
   # Contact is ignored until the descent's command has gone this far down (m): the sag when the arm
   # goes compliant must not read as contact.
   contact_ignore_m: 0.08
-  # Contact more than this (m) above where the bottom meets the table = not the table.
-  early_stop: 0.03
+  # Contact also when the wrist force (fz, + up) rises this many N over its free-air value, taken once the
+  # sag at the start of the line down is over (it needs no speed). 0 = off: the speed test only.
+  contact_fz_rise: 5.0
+  # Contact more than this (m) above where the bottom meets the table = not the table (held, not let go).
+  # 6 cm: gen_1_5's arm frame is tilted a few deg, so one table_z is up to ~4 cm off across the table.
+  early_stop: 0.06
   # Joint impedance for the settle, lowering, hold, retreat and reset (one set: the stiffness never changes
   # mid-place). The driver's documented starting point, not the "medium" profile RAMMP-table used.
   impedance_kq: [80.0, 80.0, 80.0, 80.0, 30.0, 30.0, 30.0]
@@ -60,6 +64,14 @@ params:
   reset_speed_scale: 1.0
   # and the retreat's peak speed (m/s).
   retreat_speed: 0.10
+  # The level place's back-out as soon as the gripper opens: this far straight back along the hand (m),
+  # off the lip, then this far straight up. Longer back folds the elbow: closer than ~0.87 m, 8 cm back
+  # ran J4 into its limit (gen_1_5, 2026-11-19).
+  back_out_back_m: 0.03
+  # The level place's hand directions over the spot, tried in order (deg about vertical: 0 = straight forward,
+  # - = toward the arm's right), then straight out from the arm's base; the first whose whole place plans.
+  hand_angles_deg: [-30.0, -15.0, -45.0, 0.0, -60.0, -75.0, -90.0, 15.0]
+  back_out_up_m: 0.05
   # reset: curobo = one go_to_joint_configs motion (up, then the start) around the chair's collision
   # volumes, at go_to_speed_scale; legacy = the impedance move_joints moves (no chair check).
   reset_mode: curobo

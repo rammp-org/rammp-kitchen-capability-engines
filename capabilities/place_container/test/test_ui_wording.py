@@ -38,6 +38,24 @@ def check_plain(text):
             "too close to the wheelchair",
             "further from the wheelchair",
         ),
+        (
+            # level_path.search_line's refusal names its main reason in the words the panel's rules match
+            "back-out: no arm shape continues the line at 6/9 (tool at [0.625, -0.071, 0.374]): past a joint limit -- "
+            "every elbow position tried: past a joint limit: J4 -143 deg (limit -147..147, the driver keeps 5.7 deg "
+            "off it) (x15). Last kept shape: "
+            "joints (deg) J1 0 J2 30 J3 180 J4 140 J5 0 J6 60 J7 90; arm_half_arm_1_link 9.9 cm from seat/scan_01_1 -- "
+            "nothing moved",
+            "joint limits",
+            ui.TAP_OTHER,
+        ),
+        (
+            "back-out: no arm shape continues the line at 6/9 (tool at [0.625, -0.071, 0.374]): too close to the "
+            "chair and user boxes (within 1.5 cm) -- every elbow position tried: arm_forearm_link 0.9 cm from "
+            "person/lap (min 1.5) (x5). Last kept shape: joints (deg) J1 0; arm_forearm_link 1.6 cm from person/lap "
+            "-- nothing moved",
+            "too close to the wheelchair",
+            "further from the wheelchair",
+        ),
         ("carry 4: the container would tilt 7.5 deg (max 5) -- nothing moved", "tilt 7.5 degrees", ui.TAP_OTHER),
         (
             "the gripper is at 0.01 (0 = open; under 0.05 holds nothing): it isn't holding the container. Close it on "
