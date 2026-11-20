@@ -1633,8 +1633,8 @@ class SceneLocator:
                     self._adopted_said = adopted
                     log.info(
                         "[scene] the selected container (%s) is in none of the segmenter's frames, and they hold one "
-                        "container of its kind, %s: that one is read as the selected one (its tracker gave it a new "
-                        "number)" % (self.instance_id, adopted)
+                        "container of its kind and no other, %s: that one is read for it, for as long as it is the "
+                        "only one in view" % (self.instance_id, adopted)
                     )
             held = getattr(m_seg, "containers", None)
             if held is not None:

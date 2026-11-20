@@ -28,9 +28,18 @@ An id the scene camera no longer has (RAMMP 1.5, 2026-11-20 13:42: the UI's goal
 food_container_2, the id was in none of the detections for the whole look, and the run ended in 10 s
 "The arm cannot tell which container you chose" with one container on the table): before any fix, where
 the selected id is in none of the frames and the frames hold ONE container of the classes, every one
-under the same other id, for LONE_FRAMES frames over LONE_S or more, that one is read as the selected
-container from then on (SegmenterRung.alias, SegFrame.adopted: the tracker gave it a new number). Two
-containers of the classes, or none, and nothing is taken: nothing says which was selected.
+under the same other id, for LONE_FRAMES frames over LONE_S or more with no gap longer than LONE_GAP_S,
+that one is read for the selected container (SegmenterRung.alias, SegFrame.adopted). What that
+establishes is only that it is the one container of its kind in view, not that it is the selected one
+under a new number: so it is read only in a frame that holds exactly that one container, a frame that
+holds two of the kind or the selected id itself ends it (the row starts again from nothing), and from a
+fix on the container is followed by where it was boxed first (`near`), this only where no box is there;
+no other id is taken up once there is a fix. It is forgotten wherever `near` is (SegmenterRung.forget:
+a line-up's end, the chair moved since). Two containers of the classes,
+or none, and nothing is taken: nothing says which was selected. (Review of 2026-11-20: as first written
+the other id was read in frames with two containers and never dropped. The selected container hidden for
+a second, a neighbour left alone in view, and the neighbour was read as the selected one from then on,
+with the selected one back in every frame under a new id.)
 
 How many containers of the classes the scene camera has is kept too (SegFrame.containers, a lid boxed
 on its holder counted with it; SegmenterRung.containers_seen over the last ONE_WINDOW_S): where it has
@@ -102,6 +111,10 @@ FOLLOW_IOU = 3 / 7
 # ten seconds of "cannot tell which" before it ended: one second is in time and past a flicker.
 LONE_FRAMES = 5
 LONE_S = 1.0
+# ... and with no more than this between one such frame and the next: frames that hold none of the kind
+# neither count nor end the row, but they do not let it reach across a time nothing was seen in (five
+# frames gathered over minutes are no row). The segmenter's own silence, SEG_SILENT_S.
+LONE_GAP_S = 1.0
 # How many containers of the classes the scene camera has NOW: the most that any one frame of the last
 # ONE_WINDOW_S held, of at least ONE_MIN_FRAMES frames (containers_seen). The most, not the newest: a
 # neighbour missed in one frame is still a neighbour. Two seconds is what perception itself keeps a
@@ -245,10 +258,12 @@ def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None, a
     without either id takes the box that overlaps `near` most, FOLLOW_IOU or
     more, as the selected one. `alias` (SegmenterRung.alias: the one container
     of the classes the frames held while the selected id was in none of them):
-    read where neither the selected id nor a holder's is in the frame, before
-    `near` is asked. Whatever is selected, the frame says how many containers
-    of the classes it held (`containers`: the boxes that stand on no other of
-    them) and, of exactly one, its id (`lone`)."""
+    read where neither the selected id nor a holder's is in the frame and no
+    box is where the selected one was (`near` is asked first), and only in a
+    frame that holds that one container of the classes and no other. Whatever
+    is selected, the frame says how many
+    containers of the classes it held (`containers`: the boxes that stand on no
+    other of them) and, of exactly one, its id (`lone`)."""
     li = getattr(msg, "label_image", None)
     wh = (int(li.width), int(li.height)) if li is not None else (0, 0)
     kept = []
@@ -282,13 +297,14 @@ def frame_of(msg, classes, now_s, instance_id=None, near=None, holder_id=None, a
                 resolved = mine[0][3]
             elif holder_id:
                 mine = []  # known to be the lid, here with no holder under it: never taken for one
-        if not mine and alias and not holder_id:
-            mine = [k for k in kept if k[3] == alias][:1]  # the one container the frames held, its own id gone
-            adopted = alias if mine else None
         if not mine and near is not None and kept:
             best = max(kept, key=lambda k: box_iou(k[2], near))
             if box_iou(best[2], near) >= FOLLOW_IOU:
                 mine, followed = [best], best[3]
+        if not mine and alias and not holder_id and lone == alias:
+            # the one container of the classes in view, read for the selected one whose id no frame holds
+            # (after where it was boxed, which says more: the alias only where that finds nothing)
+            mine, adopted = [holders[0]], alias
         selected = bool(mine)
         mine_box = mine[0][2] if mine else None
         lids = [k for k in kept if k not in mine and stacked_on(k[2], [m[2] for m in mine])]
@@ -338,8 +354,8 @@ class SegmenterRung:
         self.instance_id = instance_id or None
         self.near = None  # where the selected container was boxed at the last fix (follow); None before one
         self.holder_id = None  # the holder's id, where the selected id turned out to be its lid's (frame_of)
-        self.alias = None  # the one container of the classes read as the selected one, its own id gone (_adopt)
-        self._lone = None  # (id, when first, frames): the row of frames that held that one container alone
+        self.alias = None  # the one container of the classes read for the selected one, its own id gone (_adopt)
+        self._lone = None  # (id, when first, frames, when last): the row of frames that held that one alone
         self._seen = ()  # ((recv_s, containers), ...) of the newest frames, replaced whole (containers_seen)
         self.latest = None  # SegFrame, replaced whole by the callback (one attribute store)
         self.count = 0
@@ -396,21 +412,34 @@ class SegmenterRung:
 
     def _adopt(self, frame):
         """The row of frames that hold ONE container of the classes while the selected id is in none
-        (LONE_FRAMES over LONE_S): that container's id becomes `alias`, read as the selected one from the
-        next frame on. Only before a fix: from one on the selected container is followed by where it was
-        boxed (follow), and a neighbour left alone in view while the arm hides the selected one is not it."""
-        if not self.instance_id or self.near is not None or frame.selected or (frame.containers or 0) > 1:
-            self._lone = None  # the selected one is in it (by an id it is read by), or two are: nothing to take
+        (LONE_FRAMES over LONE_S, none more than LONE_GAP_S after the one before): that container's id
+        becomes `alias`, read for the selected one from the next frame on, in frames that hold it alone
+        (frame_of). A frame with two or more of the classes, or with the selected container in it by its
+        own id (or its holder's), ends the alias and the row. A new one is taken up only before a fix:
+        from one on the selected container is followed by where it was boxed (follow), and a neighbour
+        left alone in view while the arm hides the selected one is not it."""
+        own = bool(frame.selected) and not frame.adopted and not frame.followed
+        if (frame.containers or 0) > 1 or own:
+            self.alias = self._lone = None  # two of the kind, or the selected one itself: nothing is read for it
+            return
+        if not self.instance_id or self.near is not None or frame.selected:
+            self._lone = None  # nothing to take up (no selection, a fix to follow by), or it is read already
             return
         if not frame.lone:
-            return  # none of the classes in this frame: the row neither grows nor ends
-        row = self._lone
-        if row is None or row[0] != frame.lone:
-            row = (frame.lone, float(frame.recv_s), 0)
-        row = (row[0], row[1], row[2] + 1)
+            return  # none of the classes in this frame: the row neither grows nor ends (LONE_GAP_S bounds it)
+        t, row = float(frame.recv_s), self._lone
+        if row is None or row[0] != frame.lone or t - row[3] > LONE_GAP_S:
+            row = (frame.lone, t, 0, t)
+        row = (row[0], row[1], row[2] + 1, t)
         self._lone = row
-        if row[2] >= LONE_FRAMES and float(frame.recv_s) - row[1] >= LONE_S:
+        if row[2] >= LONE_FRAMES and t - row[1] >= LONE_S:
             self.alias, self._lone = row[0], None  # (one attribute store: the callback's next frame reads it)
+
+    def forget(self):
+        """The chair has moved since (a line-up's end): where the selected container was boxed is another
+        place in the image now, and what was read for it while its id was gone is to be established
+        again (`near`, `alias` and its row)."""
+        self.near = self.alias = self._lone = None
 
     def containers_seen(self, now_s, window_s=ONE_WINDOW_S):
         """(frames, the most containers of the classes any one of them held) over the last `window_s`: how

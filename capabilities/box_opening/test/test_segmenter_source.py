@@ -553,3 +553,96 @@ def test_only_one_container_is_the_most_any_frame_of_the_last_two_seconds_held()
     for i in range(3):
         _feed(free, two, 10.0 + 0.2 * i)
     assert free.containers_seen(10.5) == (3, 2)
+
+
+def _adopted(selected="food_container_2", other="food_container_5", box=HOLDER_162417):
+    """A rung that has read `other`, alone in view for LONE_S, for the selected id no frame held."""
+    rung = _lone_rung(selected)
+    one = [_obj(box=box, instance_id=other)]
+    for i in range(sg.LONE_FRAMES):
+        _feed(rung, one, 10.0 + 0.3 * i)
+    assert rung.alias == other
+    return rung, one
+
+
+def test_the_one_read_for_a_selected_id_is_read_only_alone_in_the_frame_and_two_of_the_kind_end_it():
+    """Review of 2026-11-20: A (selected, _2) and B (_3) in view, A hidden for a second, so B alone is read for
+    it; A back under a new id (_4), and as first written every frame {A: 4, B: 3} read B as the selected one and
+    two of them committed a fix on B. What a row of lone frames establishes is that B is the only container of
+    its kind in view, no more: a frame with two of the kind is not that, and ends it."""
+    rung, b_alone = _adopted(other="food_container_3", box=_OTHER)
+    f = _feed(rung, b_alone, 12.0)
+    assert f.selected is True and f.adopted == "food_container_3"
+    both = [_obj(box=HOLDER_162417, instance_id="food_container_4"), _obj(box=_OTHER, instance_id="food_container_3")]
+    f = _feed(rung, both, 12.1)
+    assert f.selected is False and f.adopted is None and f.objects == ()  # never read with a second one in view
+    assert rung.alias is None  # ... and ended by it
+    # B alone again: nothing is read for the selected id until a whole row has stood again
+    f = _feed(rung, b_alone, 12.2)
+    assert f.selected is False and rung.alias is None
+    for i in range(1, sg.LONE_FRAMES):
+        _feed(rung, b_alone, 12.2 + 0.3 * i)
+    assert rung.alias == "food_container_3"
+    # the selected id itself back in a frame ends it too
+    rung, one = _adopted()
+    f = _feed(rung, [_obj(box=_OTHER, instance_id="food_container_2")], 12.0)
+    assert f.selected is True and f.adopted is None and rung.alias is None
+    f = _feed(rung, one, 12.1)
+    assert f.selected is False
+
+
+def test_from_a_fix_on_where_it_was_boxed_comes_before_the_one_read_for_it_and_no_other_is_taken_up():
+    """`near` (where the selected container was boxed at the last fix) says more than "the only one in view": it is
+    asked first, and the one read for the selected id only where no box is there. Once there is a fix no other
+    id is taken up: a neighbour left alone in view while the arm hides the selected one is not it."""
+    rung, one = _adopted()
+    rung.follow(HOLDER_162417)  # a fix was made on it
+    f = _feed(rung, one, 12.0)
+    assert f.selected is True and f.followed == "food_container_5" and f.adopted is None  # by where it was
+    assert rung.alias == "food_container_5"  # (kept: the follow is not the selected id come back)
+    # the same one container, boxed elsewhere in the image (the chair moved a little): still it, by the alias
+    moved = [_obj(box=_OTHER, instance_id="food_container_5")]
+    f = _feed(rung, moved, 12.1)
+    assert f.selected is True and f.adopted == "food_container_5" and f.followed is None
+    # another id alone in view, after a fix: not taken up, however long it stands
+    other = [_obj(box=_OTHER, instance_id="food_container_9")]
+    for i in range(3 * sg.LONE_FRAMES):
+        f = _feed(rung, other, 13.0 + 0.3 * i)
+    assert f.selected is False and rung.alias == "food_container_5"
+    # with both in view, the one where the selected container was boxed is followed, the alias ended
+    both = one + other
+    f = _feed(rung, both, 20.0)
+    assert f.selected is True and f.followed == "food_container_5" and rung.alias is None
+
+
+def test_what_was_read_for_a_selected_id_is_forgotten_where_the_box_is():
+    """A line-up's end (the chair moved since): where the container was boxed, the id read for it and the row
+    that would make one are all forgotten, and established again from where the chair stands now."""
+    rung, one = _adopted()
+    rung.follow(HOLDER_162417)
+    rung.forget()
+    assert rung.near is None and rung.alias is None
+    f = _feed(rung, one, 12.0)
+    assert f.selected is False and rung.alias is None  # one frame is no row
+    for i in range(1, sg.LONE_FRAMES):
+        _feed(rung, one, 12.0 + 0.3 * i)
+    assert rung.alias == "food_container_5"
+
+
+def test_a_row_does_not_reach_across_a_time_nothing_of_the_kind_was_seen_in():
+    """Frames that hold none of the kind neither count nor end the row, but five lone frames gathered over
+    minutes are no row: more than LONE_GAP_S between one and the next, and it starts again."""
+    rung = _lone_rung()
+    one = [_obj(box=HOLDER_162417, instance_id="food_container_5")]
+    t = 10.0
+    for _ in range(sg.LONE_FRAMES + 2):  # one lone frame a minute, nothing of the kind between
+        _feed(rung, one, t)
+        _feed(rung, [], t + 1.0)
+        t += 60.0
+    assert rung.alias is None
+    # within the gap, frames with none of the kind do not break it
+    rung = _lone_rung()
+    for i in range(sg.LONE_FRAMES):
+        _feed(rung, one, 10.0 + 0.6 * i)
+        _feed(rung, [], 10.3 + 0.6 * i)
+    assert rung.alias == "food_container_5"
