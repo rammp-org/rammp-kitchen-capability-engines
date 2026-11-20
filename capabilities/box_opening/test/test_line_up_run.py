@@ -1058,3 +1058,74 @@ def test_the_ear_hears_go_or_stop_and_a_closed_pipe_is_a_stop():
         while not ear.heard() and time.monotonic() - t0 < 2.0:
             time.sleep(0.01)
         assert (ear.go, ear.stop) == (go, stop), text
+
+
+def _gen15_scene(tops=(), one=True):
+    """gen_1_5's scene locator as it stood on 2026-11-20 (test_survey's camera and the selected container's own
+    box in its image), a look of which tells one sighting of `tops` where it has one. `one`: its segmenter holds
+    no other container of the kind."""
+    from test_survey import GEN15_BOX, GEN15_CAM, GEN15_K, _locator
+
+    scene = Scene(tops=tops)
+    for name, value in vars(_locator(mine=GEN15_BOX, k=GEN15_K, tf=GEN15_CAM, held=9)).items():
+        if name != "last_why":
+            setattr(scene, name, value)
+    scene.only_one = lambda: one
+    return scene
+
+
+def test_the_one_container_rule_ties_a_line_ups_find_only_by_the_scene_cameras_own_place(lined, monkeypatch):
+    """RAMMP 1.5: the scene camera has the one container ~14 deg from where the wrist sees it. With the scene
+    camera's own place for the selected container (a sighting of its look, no older than LINE_UP_PLACE_S) the
+    watch's judge ties the wrist's find by it as the run after the go does, range and all, and the find is
+    said. With only the selected instance's box in the scene image there is a direction and no range: the
+    one-container rule does not apply, the 75 mm refuses the find, and the watch says it does not see the
+    container. As first written the box alone gave the wide cone, with no range: any lone lid-sized top
+    across the table was said, and "Ready" asked for a top the run then refused (review of 2026-11-20)."""
+    from test_survey import MODEL, SELECTED
+
+    lined.ctx.model = MODEL
+    lined.at = (0.770, -0.193, 0.385)  # where the wrist has it; the scene camera's own place is [0.681, -0.035]
+    placed = [(0.681, -0.035, 0.443)] * 20
+    scene = _gen15_scene(placed)
+    _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=scene, instance_id=SELECTED)
+    assert len([ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]) == 3
+    # the look the judge made for that place is its own: what the scene camera sighted in it is kept, not said
+    # (this stand-in's watch asks the scene camera's own look after every frame: those three are said as ever)
+    assert scene.looks == 4 and len([ln for ln in lines if "fix" in ln and ln["fix"].get("by") != "wrist"]) == 3
+    # no place from the scene camera, its box of the selection alone: the 75 mm, and the find is not said
+    scene = _gen15_scene()
+    _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=scene, instance_id=SELECTED)
+    assert not [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
+    refused = [ln for ln in lines if "not taken for the selected container %s" % SELECTED in ln.get("none", "")]
+    assert refused and {ln["kind"] for ln in refused} == {"unseen"}
+    assert "99 mm to the side of the scene camera's line of sight to it" in refused[0]["none"]
+    # ... nor is a lone top far across the table, in the box's direction or 14 deg off it
+    for far in ((1.60, 0.35, 0.385), (1.75, 0.70, 0.385)):
+        lined.at = far
+        _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=_gen15_scene(), instance_id=SELECTED)
+        tied = press_demo.selection_tie(_gen15_scene(), None, MODEL, SELECTED).judge(far[:2])[0]
+        assert bool([ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]) is tied
+    # with the scene camera's place, a top in its direction and far past its range is refused too
+    lined.at = (1.354, 0.121, 0.385)
+    _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=_gen15_scene(placed), instance_id=SELECTED)
+    assert not [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
+    # with a second container of the kind in the scene camera's view: the 75 mm, place or no place
+    lined.at = (0.770, -0.193, 0.385)
+    two = _gen15_scene(placed, one=False)
+    _got, lines, _runner = _line_up(lined, Ear(3, go=False), locator=two, instance_id=SELECTED)
+    assert not [ln for ln in lines if ln.get("fix", {}).get("by") == "wrist"]
+    # a place that has aged past LINE_UP_PLACE_S is asked for again, at most once in as long
+    clock = [100.0]
+    monkeypatch.setattr(press_demo.time, "monotonic", lambda: clock[0])
+    scene = _gen15_scene([(0.681, -0.035, 0.443)])  # one sighting, then none
+    lined.at = (0.770, -0.193, 0.385)
+
+    class Slow(Ear):
+        def heard(self):
+            clock[0] += 0.6  # each frame of the wrist's 0.6 s after the one before
+            return super().heard()
+
+    _got, lines, _runner = _line_up(lined, Slow(8, go=False), locator=scene, instance_id=SELECTED)
+    said = ["fix" in ln and ln["fix"].get("by") == "wrist" for ln in lines[1:]]
+    assert said[0] and not all(said)  # tied while the place was fresh, by the 75 mm (refused) once it had aged

@@ -93,7 +93,7 @@ NO_CONTAINER = re.compile(r"^WRIST LOOK: no container .*— the scene camera's b
 # locator's line: perception/scene_source.locate, once a run)
 ID_ADOPTED = re.compile(
     r"^\[scene\] the selected container \((.*?)\) is in none of the segmenter's frames, and they hold one container "
-    r"of its kind, (.*?): that one is read as the selected one"
+    r"of its kind and no other, (.*?): that one is read for it"
 )
 HOME_FIRST = re.compile(r"^HOME FIRST: ")
 LOOK_START = re.compile(r"^REACH-OUT: hand tilted (\d+) deg; looking")
@@ -454,6 +454,7 @@ class FlightView:
                 if ok:
                     self.lined_up += 1
                     self.views = 0  # the find that follows counts its own
+                    self.relooked = None  # (... and looks again from its own first look)
                     self.going_home = False  # (a home before the line-up is not the way home of what follows)
                     # ... nor is the press that had no way in the failure of a run that goes on from here
                     self.last_fail = None
@@ -504,8 +505,7 @@ class FlightView:
         m = ID_ADOPTED.match(s)
         if m:
             self._note(
-                "%s is no longer in the scene camera's list; the one container in view (%s) is taken for it"
-                % m.groups()
+                "%s is not in the scene camera's list; the only container in view (%s) is read for it" % m.groups()
             )
             return
         m = FIX.match(s)
@@ -522,6 +522,7 @@ class FlightView:
             return
         m = LOOK_START.match(s)
         if m:
+            self.relooked = None  # a reach's first look: what a round before looked at again is not this one's
             self._begin("LOOK", "moving to look at the button")
             return
         m = LOOK_AGAIN.match(s)
@@ -851,7 +852,10 @@ class FlightView:
                 name = "CARRY"
             else:
                 name = "RUN"
-        if self.cur is not None and self.cur[0] in ("FIND", "LOOK") and ("press" in stop):
+        if self.cur is not None and self.cur[0] == "LOOK" and self.relooked and "no button from the look pose" in stop:
+            # the look again found no button over the lid the wrist saw either: not a look that ended well
+            self._end("??", "no button %s either" % self.relooked)
+        elif self.cur is not None and self.cur[0] in ("FIND", "LOOK") and ("press" in stop):
             # no press reaches the box the look found: the look itself ended well
             self._end("ok")
         if self.cur is not None and self.cur[0] != name and name in ("LIFT", "CARRY", "SET DOWN", "HOME"):

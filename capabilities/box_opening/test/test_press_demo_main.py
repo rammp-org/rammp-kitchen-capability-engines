@@ -1333,8 +1333,9 @@ def test_where_the_wrist_finds_none_the_scene_cameras_fix_flies_and_nothing_is_m
 
 
 def test_which_cameras_heights_a_run_goes_by_is_said_where_both_read_them(capsys):
-    """say_tables: one camera's heights throughout a run, the wrist's where its find was taken. The scene
-    camera's are said beside them and not used; more than 30 mm apart is a warning."""
+    """say_tables: one camera's table and lid throughout a run, the wrist's where its find was taken. The scene
+    camera's are said beside them, and only the press's start height takes the higher of the two lid tops
+    (reach_press); more than 30 mm apart is a warning."""
     from types import SimpleNamespace
 
     from box_opening.tasks import press_demo
@@ -1347,7 +1348,10 @@ def test_which_cameras_heights_a_run_goes_by_is_said_where_both_read_them(capsys
     out = capsys.readouterr().out
     assert "reads the table at 0.313 and the lid's top at 0.405, 92 mm over it" in out
     assert "the scene camera read them at 0.343 (+30 mm) and 0.443 (+38 mm)" in out
-    assert "The run goes by the wrist's: one camera's heights throughout, the lid found by touch" in out
+    assert (
+        "The run goes by the wrist's table and lid; only the press starts from the higher of the two tops, and "
+        "finds the lid by touch" in out
+    )
     assert "WARNING" not in out  # (30 mm: at the bound, not past it)
     assert rows == [
         (
@@ -1374,3 +1378,77 @@ def test_which_cameras_heights_a_run_goes_by_is_said_where_both_read_them(capsys
     assert press_demo.say_tables(runner, nan, wrist, 0.313) is None
     assert press_demo.say_tables(runner, SimpleNamespace(), wrist, 0.313) is None
     assert capsys.readouterr().out == "" and len(rows) == 1
+
+
+def test_the_scene_cameras_lid_top_goes_with_a_wrist_find_taken_for_its_container(monkeypatch, tmp_path):
+    """Review of 2026-11-20: with the wrist's find taken, the press's "higher top" guard compared the wrist with
+    itself and the scene camera's top of the SAME lid was dropped; the wrist reads low (its lid 39-58 mm under
+    the scene camera's that day). Where the two were paired, main hands the reach-out the scene camera's top
+    with the wrist's fix (ctx.scene_top_z); a rough scene fix's top is no measure, and a run that goes on with
+    the scene camera's own fix has it in the fix already."""
+    from types import SimpleNamespace
+
+    from box_opening.perception import camera_check
+    from box_opening.tasks import press_demo
+
+    monkeypatch.setattr(camera_check, "adopt", lambda *a, **k: None)
+    tops = []
+
+    def reach(ctx):
+        tops.append(ctx.scene_top_z)
+        return _at_staging()(ctx)
+
+    taken = []
+    monkeypatch.setattr(press_demo, "wrist_look", _wrist_taken(taken))
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "a", ["--execute", "--wrist-first"], reach)
+    assert code == 0 and tops == [float(taken[0][0].top_xyz[2])]
+    # a rough scene fix (a box its frame cut): its top is its fit's, and is not handed on
+    look = _wrist_taken(taken)
+
+    def of_a_rough_fix(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
+        scene_fix.rough = True
+        return look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said)
+
+    monkeypatch.setattr(press_demo, "wrist_look", of_a_rough_fix)
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "b", ["--execute", "--wrist-first"], reach)
+    assert code == 0 and tops[-1] is None
+    # the wrist finds none: the run goes on with the scene camera's fix, whose top is the fix's own
+    monkeypatch.setattr(press_demo, "wrist_look", lambda n, c, cfg, r, w, a, locator, fix, said: (fix, locator, None))
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "c", ["--execute", "--wrist-first"], reach)
+    assert code == 0 and tops[-1] is None
+    # ... and what one round left is not the next round's (a guided run: the chair moved between)
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    seen, codes = [], [NO_WAY_IN, 0]
+
+    def round_(ctx):
+        seen.append(ctx.scene_top_z)
+        ctx.scene_top_z = 9.9  # (as a look again leaves one)
+        return SimpleNamespace(code=codes.pop(0))
+
+    _guided_by(monkeypatch)
+    code, _c, _rows = run_main(monkeypatch, tmp_path / "d", ["--execute", "--wrist-first", "--guide"], round_)
+    assert code == 0 and seen == [None, None]
+
+
+def test_the_guidance_is_handed_the_place_no_press_planned_for_which_may_be_a_look_agains_lid(monkeypatch, tmp_path):
+    """Review of 2026-11-20: a look again's lid did not plan, the reach-out answered NO_WAY_IN, and main handed
+    the guidance its own scene fix, 16-19 cm from the lid. The engine bars the cell of the place it is handed:
+    it barred one the lid did not stand in, and asked "Ready?" with the chair unmoved. The reach-out leaves the
+    place that did not plan (ctx.no_way_in_at); with none left, the find's own."""
+    from types import SimpleNamespace
+
+    from box_opening.tasks.reach_press import NO_WAY_IN
+
+    REACH_OUTS.clear()
+    lid, codes = (0.770, -0.192, 0.385), [NO_WAY_IN, NO_WAY_IN, 0]
+
+    def reach(ctx):
+        ctx.no_way_in_at = lid if len(codes) == 3 else None  # the first round: a look again's lid did not plan
+        return SimpleNamespace(code=codes.pop(0))
+
+    calls = _guided_by(monkeypatch)
+    code, _c, _rows = run_main(monkeypatch, tmp_path, ["--execute", "--guide"], reach)
+    assert code == 0 and len(calls) == 2
+    assert calls[0]["place"] == lid and calls[0]["place"] != tuple(REACH_OUTS[0].top_xyz)
+    assert calls[1]["place"] == tuple(REACH_OUTS[1].top_xyz)  # the find's own, as ever

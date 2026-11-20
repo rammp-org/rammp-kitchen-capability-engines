@@ -63,6 +63,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import rclpy
 
@@ -1410,6 +1411,12 @@ LINE_UP_NOT_AT_REST = guide.ARM_NOT_AT_REST
 # "seen" (guide.LOST_S). One frame without a find between the user's Open and the go's arrival is not the
 # wrist having lost the box
 LINE_UP_HELD_S = guide.LOST_S
+# The scene camera's own place for the selected container, as the watch's judge ties a wrist find by it
+# (line_up_watch.scene_place): no older than this, the guide's own "seen". Both cameras ride the chair, so
+# what one saw a second ago stands where the other sees it now but for what the chair moved in that
+# second, well inside the 0.20 m the tie allows along the line. Older, and the scene camera is asked again,
+# at most once in as long.
+LINE_UP_PLACE_S = guide.LOST_S
 
 
 class LineUpEar:
@@ -1537,14 +1544,38 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             return kind
         return guide.K_UNSEEN if state in SEG_DELIVERS else kind
 
+    placed = [None, 0.0, 0.0]  # the scene camera's newest sighting (xyz, rough), when, and when last asked for
+    quiet = [False]  # a look of the judge's own: its sightings are kept, not said
+
     if locator is not None:
 
         def told(sighting, age_s):
             line = box_watch.fix_line(sighting, age_s)
             if line is not None:
-                say(line)
+                placed[0], placed[1] = (tuple(line["fix"]["xyz"]), bool(line["fix"]["rough"])), time.monotonic()
+                if not quiet[0]:
+                    say(line)
 
         locator.on_sighting = told
+
+    def scene_place():
+        """Where the scene camera itself has the selected container now, as a fix selection_tie reads
+        (top_xyz, rough), or None: its newest sighting no older than LINE_UP_PLACE_S, looked for once more
+        (a look of LINE_UP_LOOK_S whose sightings are kept and not said: the wrist's find is what is being
+        said) where that has aged, at most once in LINE_UP_PLACE_S."""
+        if locator is None:
+            return None
+        now = time.monotonic()
+        if (placed[0] is None or now - placed[1] > LINE_UP_PLACE_S) and now - placed[2] >= LINE_UP_PLACE_S:
+            placed[2], quiet[0] = now, True
+            try:
+                locator.locate(LINE_UP_LOOK_S)
+            finally:
+                quiet[0] = False
+        if placed[0] is None or time.monotonic() - placed[1] > LINE_UP_PLACE_S:
+            return None
+        return SimpleNamespace(top_xyz=placed[0][0], rough=placed[0][1])
+
     selected = getattr(args, "instance_id", None) or None
     judge = None
     if selected:
@@ -1559,8 +1590,15 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             tied (guide.K_NOT_CHOSEN); a second top beside it is two that could be it (K_SEVERAL). As
             first written a find off the line was K_UNSEEN: with the scene camera's mount off, as on
             2026-11-17, "The arm cannot see the container" for the whole wait with a lid in every frame
-            (review of 2026-11-19, the second)."""
-            tie, alone = selection_look(locator, None, ctx.model, selected, getattr(args, "wrist_alone", False))
+            (review of 2026-11-19, the second).
+            The tie is by where the scene camera itself has the selected container now (scene_place: the
+            run after the go ties by its own fix too), else by the instance's box in its image. Only the
+            first has a range, and only with a range does the one-container rule apply
+            (SELECTED_WIDE_DEG): a cone with no depth would have this watch say, and ask Ready for, any
+            lone top across the table, which the run would then refuse (review of 2026-11-20)."""
+            tie, alone = selection_look(
+                locator, scene_place(), ctx.model, selected, getattr(args, "wrist_alone", False)
+            )
             if tie is not None:
                 why = tie_refusal(tie, find, fix.top_xyz)[0]
                 kind = guide.K_UNSEEN if why is None else guide.kind_of(why)  # (its words: tie_refusal)
@@ -1655,9 +1693,15 @@ def line_up_watch(node, ctx, cfg, runner, watcher, args, locator, rest_tol, ear=
             # box was in the image then (SegmenterRung.follow). The scene camera rides the chair, which has
             # moved since: in the run that box may be another container's. Forgotten, so the run's first
             # look starts as a fresh run's does, the chair parked.
+            # ... and so may the one container read for a selected id the frames no longer held (its alias):
+            # forgotten with it, to be established again from where the chair stands now
             seg = getattr(locator, "seg", None)
             if seg is not None:
-                seg.near = None
+                forget = getattr(seg, "forget", None)
+                if callable(forget):
+                    forget()
+                else:
+                    seg.near = None
     if ear.go:
         held = turned and held_at[0] is not None and time.monotonic() - held_at[0] <= LINE_UP_HELD_S
         log.info("[press_demo] LINE-UP: go — the run starts")
@@ -1770,6 +1814,7 @@ def forget_scene(ctx, worlds, watcher):
     ctx.survey_clouds = None
     ctx.wrist_far = None
     ctx.wrist_seen = ctx.side_seen = None
+    ctx.scene_top_z = ctx.no_way_in_at = None
     ctx.home_ahead = None
     worlds.table_top_z = None  # the world file's own again, where it names a table; else none until measured
     worlds.table_extent = None
@@ -1995,17 +2040,27 @@ SELECTED_ALONG_M = 0.20
 # TF has it is turned that much from where it points. Every find was refused for the selected container,
 # every run reached for the scene camera's place, 16-19 cm from the lid, and ended "no button from the
 # look pose" with the lid in the frame's corner. Where the scene camera holds ONE container of the
-# selected one's kind (SegmenterRung.only_one: no neighbour to tell it from), what the wrist finds is the
-# selected container within SELECTED_WIDE_DEG about the scene lens of its line, and within
-# SELECTED_ALONG_M of its range from the lens where the scene camera placed it. 20 deg: a third more
-# than the worst seen; past it the two cameras are taken to see two things. A second
-# lid-sized top in that cone, and neither is taken, with two things said of which tops count there
-# (SelectionTie.rival): one the arm cannot reach is no rival of a find it can (the finder's own rule: a
-# place out of reach is no container this run could open), and of two out of reach the one a lid's
-# width or more farther from the arm is not the one being brought to it (wrist_finder.
-# _nearest_arm_alone's margin). A top within the 75 mm of the line is a rival of every find, as it
-# always was. Where the scene camera holds two or more of the kind, the 75 mm stands alone.
+# selected one's kind (SegmenterRung.only_one: no neighbour to tell it from) AND placed it (a fix: the
+# rule needs its range), what the wrist finds is the selected container within SELECTED_WIDE_DEG about
+# the scene lens of its line and within SELECTED_ALONG_M of that range from the lens. 20 deg: a third
+# more than the worst seen; past it the two cameras are taken to see two things. Without a range (the
+# selected instance's box in the scene image alone) the rule does not apply: a cone with no depth takes
+# any lone top across the table. ANY second lid-sized top in that cone, within the arm's reach or not,
+# and neither is taken (the review of 2026-11-20: as first written a top out of reach was no rival of a
+# find within it, and with the scene camera at [0.912, 0.000], the container at [0.988, -0.201] out of
+# reach and a tin at [0.820, -0.200] within it, the tin was the selected container). A top within the
+# 75 mm of the line is a rival of every find, as it always was. Where the scene camera holds two or more
+# of the kind, the 75 mm stands alone.
+# WHAT THIS RULE CANNOT TELL, and takes (the owner's rule as given: one container in each camera's view
+# is the same container): two different containers 16-25 cm apart, the selected one in the scene
+# camera's view and hidden from the wrist, the other in the wrist's view and hidden from the scene
+# camera. The other is taken for the selected one.
 SELECTED_WIDE_DEG = 20.0
+# How a wrist find was taken for the run's container (wrist_first leaves it on ctx.wrist_taken_by;
+# reach_press.lid_from_here answers with it): tied to the selection by the 75 mm, tied by the
+# one-container rule alone, --wrist-alone's one container, or with no selection at all (the finder's one
+# find). What a pair of the two cameras' places made of such a find rests on (perception/camera_check).
+BY_TIE, BY_TIE_ONE, BY_ALONE, BY_ONLY = "tie", "tie-one-container", "wrist-alone", "no-selection"
 
 
 @dataclass(frozen=True)
@@ -2016,9 +2071,9 @@ class SelectionTie:
     else the two sides of the instance's own box in its image, `wider_m` more past a side its frame
     cuts the box at (the lid's width: the part out of view lies there).
     `wide_deg` (0: the 75 mm rule alone): the scene camera holds no other container of the selected
-    one's kind, and a find this many degrees about its lens off those lines is still the selected
-    one (SELECTED_WIDE_DEG's note). `reachable` ((x, y, z) of a lid's top -> whether the arm reaches
-    it; None: not asked): which tops of the wide cone are rivals (rival)."""
+    one's kind, and where it placed the lid (`at_xy`: the rule needs that range) a find this many
+    degrees about its lens off the line, near that range, is still the selected one
+    (SELECTED_WIDE_DEG's note)."""
 
     instance_id: str
     cam_xy: tuple
@@ -2029,7 +2084,6 @@ class SelectionTie:
     lid_m: float = 0.105
     by: str = "where the scene camera placed it"
     wide_deg: float = 0.0
-    reachable: object = None
 
     def off(self, xy):
         """How far (x, y) lies from where the scene camera has the selection: None behind its view of it,
@@ -2063,12 +2117,14 @@ class SelectionTie:
         )
 
     def _wide(self, off):
-        """The one-container rule (wide_deg): in the cone about the lens, and near the lid's range."""
+        """The one-container rule (wide_deg): in the cone about the lens AND near the range the scene
+        camera placed the lid at. Where it placed none (the instance's box alone), the rule does not apply."""
         return (
             self.wide_deg > 0.0
             and off is not None
+            and off["range_m"] is not None
             and off["deg"] <= self.wide_deg
-            and (off["range_m"] is None or abs(off["range_m"]) <= SELECTED_ALONG_M)
+            and abs(off["range_m"]) <= SELECTED_ALONG_M
         )
 
     def cameras_apart(self, xy):
@@ -2087,7 +2143,9 @@ class SelectionTie:
 
     def judge(self, xy):
         """(tied, words): is (x, y) in the direction the scene camera has the selection, and how
-        far off it lies, said."""
+        far off it lies, said (with the angle about the lens where only the one-container rule ties
+        it). What the words say is where it lies, never that it is taken: a rival may still refuse it
+        (tie_refusal)."""
         off = self.off(xy)
         if off is None:
             return False, "behind the scene camera's view of it"
@@ -2101,49 +2159,26 @@ class SelectionTie:
         if self._narrow(off):
             return True, words
         if self._wide(off):
-            return True, words + (
-                " (%.1f deg about its lens); the scene camera holds no other container of its kind, so the "
-                "cameras disagree and the wrist's is the selected one" % off["deg"]
-            )
+            return True, words + " (%.1f deg about its lens)" % off["deg"]
         return False, words
 
     def rival(self, find, xy):
         """(x, y) of another lid-sized top the wrist's frames hold in the selection's direction — a
-        place that passes, or a top a view cut — at least half a lid from `xy` (the find: (x, y), or
-        (x, y, its top's height)); or None. In the direction: within the 75 mm rule, whatever the find.
-        Of a find the one-container rule alone ties, also a top of the wide cone, unless the arm reaches
-        the find and not that top, or reaches neither and the top stands a lid's width or more farther
-        from the arm (`reachable`; where it was not asked, or a top's height is not known, the top is a
-        rival)."""
-        top_z = xy[2] if len(xy) > 2 else None
-        tops = [q for q in getattr(find, "places", ()) if getattr(q, "button", "") != "none"]
-        tops += [p for p in getattr(find, "patches", ()) if getattr(p, "why", "").endswith("cut off by the view")]
+        place that passes, or a top a view cut — at least half a lid from `xy` (the find); or None. In
+        the direction: within the 75 mm rule, whatever the find. Of a find the one-container rule alone
+        ties, also ANY top of the wide cone, within the arm's reach or not: two lid-sized tops there,
+        and nothing says which is the selected container."""
+        tops = [q.xy for q in getattr(find, "places", ()) if getattr(q, "button", "") != "none"]
+        tops += [p.xy for p in getattr(find, "patches", ()) if getattr(p, "why", "").endswith("cut off by the view")]
         mine = self.off(xy)
         wide_find = not self._narrow(mine) and self._wide(mine)
-        for top in tops:
-            t = top.xy
+        for t in tops:
             if math.hypot(t[0] - xy[0], t[1] - xy[1]) < 0.5 * self.lid_m:
                 continue
             off = self.off(t)
-            if self._narrow(off):
-                return float(t[0]), float(t[1])
-            if wide_find and self._wide(off) and not self._beside(xy, top_z, top):
+            if self._narrow(off) or (wide_find and self._wide(off)):
                 return float(t[0]), float(t[1])
         return None
-
-    def _beside(self, xy, top_z, top):
-        """Whether the top `top` of the wide cone is NO rival of the find at `xy` (rival's two cases)."""
-        z = getattr(top, "top_z", None)
-        if self.reachable is None or top_z is None or z is None:
-            return False
-        try:
-            find_in = bool(self.reachable((float(xy[0]), float(xy[1]), float(top_z))))
-            top_in = bool(self.reachable((float(top.xy[0]), float(top.xy[1]), float(z))))
-        except Exception:  # noqa: BLE001 - a reach that cannot be asked rules no rival out
-            return False
-        if find_in:
-            return not top_in
-        return not top_in and math.hypot(*top.xy[:2]) >= math.hypot(xy[0], xy[1]) + self.lid_m
 
 
 def selection_tie(locator, scene_fix, model, instance_id):
@@ -2153,7 +2188,8 @@ def selection_tie(locator, scene_fix, model, instance_id):
     SegFrame.mine), its two sides as lines of sight from the lens; None where neither says where the
     selected container is (it was in none of the frames, or TF or the intrinsics are missing):
     nothing would tie what the wrist finds to it. Where the scene camera holds no other container of the
-    selected one's kind (locator.only_one), the tie has the wide cone too (SELECTED_WIDE_DEG)."""
+    selected one's kind (locator.only_one), the tie has the wide cone too (SELECTED_WIDE_DEG), which
+    ties only where the tie is by a fix (its range): a tie by the instance's box is the 75 mm alone."""
     import numpy as np
 
     T = locator.base_to_color() if locator is not None else None
@@ -2162,13 +2198,9 @@ def selection_tie(locator, scene_fix, model, instance_id):
     T = np.asarray(T, float)
     cam = (float(T[0, 3]), float(T[1, 3]))
     lid_m = float(max(model.lid_dims[0], model.lid_dims[1]))
-    # the scene camera holds no other container of this kind: the wide cone, and which of its tops are rivals
+    # the scene camera holds no other container of this kind: the wide cone (which ties only by a fix's range)
     one = getattr(locator, "only_one", None)
-    wide = {}
-    if callable(one) and one():
-        from box_opening.tasks import survey as sv
-
-        wide = {"wide_deg": SELECTED_WIDE_DEG, "reachable": sv._within_reach(model)}
+    wide = {"wide_deg": SELECTED_WIDE_DEG} if callable(one) and one() else {}
 
     def unit(dx, dy):
         n = math.hypot(dx, dy)
@@ -2255,8 +2287,15 @@ def tie_refusal(tie, find, at):
     container, or a second lid-sized top of `find` stands in that direction too. wrist_first's rule, asked
     by the line-up's watch as well, so the panel asks the user to open only what the run would take."""
     tied, how = tie.judge(at[:2])
-    rival = tie.rival(find, at) if tied else None  # (with its top's height, where `at` has it)
+    rival = tie.rival(find, at[:2]) if tied else None
     if tied and rival is None:
+        asked = getattr(tie, "cameras_apart", None)
+        if callable(asked) and asked(at[:2]) is not None:
+            # taken by the one-container rule alone: said as that, here where it IS taken
+            how += (
+                "; the scene camera holds no other container of its kind, so the cameras disagree and the wrist's "
+                "is the selected one"
+            )
         return None, how
     why = "a container at [%.3f, %.3f], %s" % (at[0], at[1], how)
     if rival is not None:
@@ -2307,7 +2346,8 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
     it would not take: guide.K_NOT_CHOSEN or K_SEVERAL), for main's word on what the find was
     (no_container_kind). A find taken by the one-container rule alone (SELECTED_WIDE_DEG: the cameras
     disagree on where the one container stands) is noted with how far, and that is left on
-    ctx.cameras_apart (SelectionTie.cameras_apart, with both cameras' places and the scene lens)."""
+    ctx.cameras_apart (SelectionTie.cameras_apart, with both cameras' places and the scene lens). How a
+    find that is taken was taken is left on ctx.wrist_taken_by (BY_*)."""
     from box_opening.tasks import survey as sv
 
     survey = sv.run_survey(
@@ -2328,6 +2368,7 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         log.info("[press_demo] preview ends at the wrist look's pose: its frames, the aim and the press need --execute")
         sys.exit(0)
     # lid-sized tops it saw that all stand out of the arm's reach: with --guide the chair is moved for them
+    ctx.wrist_taken_by = None  # how the find is taken, where it is (BY_*)
     ctx.wrist_far = far_tops(survey.find, getattr(ctx, "model", None))
     # ... and what it saw where it finds no container, or none it takes: a camera that delivered nothing,
     # two that could be the container, or nothing that could (looked_kind)
@@ -2376,6 +2417,7 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
         )
         asked = getattr(tie, "cameras_apart", None)  # (a tie that does not measure it says nothing of it)
         apart = asked(at[:2]) if callable(asked) else None
+        ctx.wrist_taken_by = BY_TIE if apart is None else BY_TIE_ONE
         if apart is not None:
             # taken by the one-container rule alone (SELECTED_WIDE_DEG): how far the two cameras put one
             # container apart, kept for the record and for what goes by the scene camera's numbers after this
@@ -2403,7 +2445,10 @@ def wrist_first(node, ctx, cfg, runner, watcher, args, scene_fix, said=None, tie
             "which is in none of the scene camera's detections (--wrist-alone)" % (at[0], at[1], alone)
         )
         runner.note("wrist_first", found=True, alone=True, taken=True, at=[round(float(v), 4) for v in at[:2]])
+        ctx.wrist_taken_by = BY_ALONE
     if survey.fix is not None:
+        if tie is None and not alone:
+            ctx.wrist_taken_by = BY_ONLY  # no selection: the finder's one find, tied to nothing
         ctx.survey_clouds = survey.clouds
         if scene_fix is not None:
             a, b = survey.fix.top_xyz, scene_fix.top_xyz
@@ -2458,11 +2503,14 @@ def wrist_look(node, ctx, cfg, runner, watcher, args, locator, scene_fix, said):
     selection the scene camera did hold is tied as above, with or without it."""
     selected = getattr(args, "instance_id", None) or None
     tie, alone, untied = None, None, None
-    ctx.selection = None  # (the selected id, its tie, alone): what a look later in this run is judged by too
-    ctx.cameras_apart = None
+    # (the selected id, its tie, alone, the scene locator asked): what a look later in this run is judged by
+    # too (reach_press._selection, which asks the locator again whether it still holds one container)
+    ctx.selection = None
+    ctx.cameras_apart = ctx.wrist_taken_by = None
+    ctx.scene_top_z = None  # the scene camera's top of a lid the wrist's find was taken for (main, look_again)
     if selected:
         tie, alone = selection_look(locator, scene_fix, ctx.model, selected, getattr(args, "wrist_alone", False))
-        ctx.selection = (selected, tie, alone)
+        ctx.selection = (selected, tie, alone, locator)
         if alone:
             log.info(
                 "[press_demo] WRIST LOOK: the selected container %s is in none of the scene camera's detections: the "
@@ -2610,10 +2658,13 @@ def say_tables(runner, scene_seen, fix, run_table_z=None):
     the heights from the wrist camera where it has them). The run's heights are its fix's own, one
     camera's throughout: the wrist's where its find was taken (`fix`, source "wrist": the lid's top
     and the counter under it, read in one frame), the scene camera's where the wrist found none
-    (`scene_seen`, its own fix: also `fix` then, and nothing is said). They are never mixed, and the
-    scene camera's table is never put under the wrist's lid: each camera reads every height its own
-    way, and what a run needs of them is the lid's top over the table it stands on, which one camera's
-    frame gives (reach_lid_off.setdown_table_z). The wrist's stand lower than the scene camera's
+    (`scene_seen`, its own fix: also `fix` then, and nothing is said). The table and the lid over it
+    are never mixed, and the scene camera's table is never put under the wrist's lid: each camera reads
+    every height its own way, and what a run needs of them is the lid's top over the table it stands on,
+    which one camera's frame gives (reach_lid_off.setdown_table_z). One thing alone takes the scene
+    camera's lid top on a wrist find: the height the press STARTS from, the higher of the two cameras'
+    tops (reach_press: the wrist reads low, and a press that starts too low starts inside the lid).
+    The wrist's stand lower than the scene camera's
     (flatbot since 2026-10-27: its table 18-22 mm under the scene's, button_aim's note; the press met
     the lid 40-45 mm over the wrist's top on 2026-11-13 and 11-17; RAMMP 1.5 2026-11-20, the finder
     on four runs' saved frames: its table 31-50 mm and its lid 39-58 mm under the scene camera's),
@@ -2643,7 +2694,8 @@ def say_tables(runner, scene_seen, fix, run_table_z=None):
             -1000 * off,
             float(scene_seen.top_xyz[2]),
             -1000 * lid,
-            "The run goes by the wrist's: one camera's heights throughout, the lid found by touch"
+            "The run goes by the wrist's table and lid; only the press starts from the higher of the two tops, "
+            "and finds the lid by touch"
             if own
             else "The run's table is the world file's, %.3f" % float(run_table_z),
         )
@@ -3039,6 +3091,7 @@ def main():
             wrist_said, scene_said = [], None
             ctx.wrist_far = None  # (wrist_first says what it saw out of the arm's reach)
             ctx.wrist_seen = ctx.side_seen = None  # (... and each wrist look, what it saw where it found none)
+            ctx.scene_top_z = ctx.no_way_in_at = None  # (... and what the round before left of its lid and its refusal)
             if getattr(args, "wrist_first", False):
                 # THE WRIST CAMERA FINDS THE BOX (--wrist-first; owner, 2026-11-11: "having the wrist
                 # cam just find the box ... the arm would just need to angle itself so it can see the
@@ -3054,8 +3107,14 @@ def main():
                     # THE TWO CAMERAS HAVE THE SAME CONTAINER (the wrist's find was taken for the one the
                     # scene camera fixed): how far apart they have it is measured, and the scene camera's
                     # numbers are turned by it for the rest of this run (perception/camera_check; RAMMP 1.5,
-                    # 2026-11-20: 155-215 mm apart, a steady 14 deg about the scene lens)
+                    # 2026-11-20: 155-215 mm apart, a steady 14 deg about the scene lens).
+                    # HOW THIS PAIR WAS ESTABLISHED is ctx.wrist_taken_by (BY_*: wrist_first's take), known
+                    # here and nowhere else in main: what camera_check.adopt is to be told of it
                     camera_check.adopt(ctx, locator, scene_seen, scene_fix, runner, by=runner_stamp(runner))
+                    if not getattr(scene_seen, "rough", False):
+                        # ... and the scene camera's own top of that lid: the press starts from the higher
+                        # of the two cameras' (reach_press: the wrist's place and table, the higher top)
+                        ctx.scene_top_z = float(scene_seen.top_xyz[2])
             far = (getattr(ctx, "wrist_far", None) or []) if args.guide else []
             not_seen = [] if args.guide else None  # why no camera has it, where the run does not end on that
             if scene_fix is None and (not far or side_survey_has_a_turn(args)):
@@ -3203,7 +3262,9 @@ def main():
                 args,
                 locator,
                 start_tol,
-                scene_fix.top_xyz,
+                # the place no press planned for: the find's, or the lid a look again found elsewhere
+                # (reach_press.no_way_in's `at`): the engine bars THAT place, and the chair is moved for it
+                getattr(ctx, "no_way_in_at", None) or scene_fix.top_xyz,
                 getattr(ctx, "no_way_in", "") or "no press plans from where the chair stands",
                 guided,
                 ear,

@@ -1156,10 +1156,19 @@ def test_a_look_that_goes_again_over_the_lid_the_wrist_sees_is_a_step_of_its_own
         ["FIND", "ok"],
         ["LOOK", "??"],
         ["LOOK", "??"],
-        ["LOOK", "ok"],
+        ["LOOK", "??"],  # the last look again found no button either: not a look that ended well
         ["PRESS", "FAIL"],
     ]
+    assert "no button over the lid the wrist saw 19 cm from where the wrist's own look had it either" in steps[3]
     assert "no button from the look pose, nor from 2 looks again" in steps[4]
+    # a run with no look again is as it always read: the look ended well, the press has no button
+    out = _view([scene_fix, look, (13, P + "STOP: no button from the look pose (no circle) — nothing was pressed")], 2)
+    steps = [line for line in out if line[:2].strip().isdigit()]
+    assert [line.split()[1:3] for line in steps[:3]] == [["FIND", "ok"], ["LOOK", "ok"], ["PRESS", "FAIL"]]
+    # what one round looked at again is not said of the next round's look (a guided run: the chair moved between)
+    out = [" ".join(line.split()) for line in _view([scene_fix, look, again, scene_fix, look, aim, aimed], 0)]
+    found = [line for line in out if "button found" in line]
+    assert len(found) == 1 and "over the lid the wrist saw" not in found[0]
 
 
 def test_a_selected_id_the_scene_camera_no_longer_has_is_said_with_the_one_taken_for_it():
@@ -1168,11 +1177,11 @@ def test_a_selected_id_the_scene_camera_no_longer_has_is_said_with_the_one_taken
     said = (
         2,
         "[scene] the selected container (food_container_2) is in none of the segmenter's frames, and they hold one "
-        "container of its kind, food_container_5: that one is read as the selected one (its tracker gave it a new "
-        "number)",
+        "container of its kind and no other, food_container_5: that one is read for it, for as long as it is the "
+        "only one in view",
     )
     out = [" ".join(line.split()) for line in _view([said], 2)]
     assert out[1] == (
-        "note food_container_2 is no longer in the scene camera's list; the one container in view "
-        "(food_container_5) is taken for it"
+        "note food_container_2 is not in the scene camera's list; the only container in view (food_container_5) "
+        "is read for it"
     )

@@ -1328,17 +1328,19 @@ def test_one_container_in_each_cameras_view_is_the_same_container():
         assert alone.wide_deg == press_demo.SELECTED_WIDE_DEG and among.wide_deg == 0.0
         tied, how = alone.judge(wrist)
         apart = alone.cameras_apart(wrist)
-        assert tied and how.endswith(
-            "(%.1f deg about its lens); the scene camera holds no other container of its kind, so the cameras "
-            "disagree and the wrist's is the selected one" % apart["about_lens_deg"]
-        )
+        assert tied and how.endswith("(%.1f deg about its lens)" % apart["about_lens_deg"])
+        assert "the selected one" not in how  # where it lies, never that it is taken: a rival may still refuse it
         seen.append((apart["across_mm"], apart["about_lens_deg"], apart["nearer_mm"]))
         # with a second container of the kind in the scene camera's view the 75 mm stands, as it did that day
         refused, was = among.judge(wrist)
         assert not refused and how.startswith(was) and among.cameras_apart(wrist) is None
         why, _how = press_demo.tie_refusal(among, SimpleNamespace(places=(), patches=()), (*wrist, 0.385))
         assert why.endswith(": not taken for the selected container %s" % SELECTED)
-        assert press_demo.tie_refusal(alone, SimpleNamespace(places=(), patches=()), (*wrist, 0.385))[0] is None
+        taken, said = press_demo.tie_refusal(alone, SimpleNamespace(places=(), patches=()), (*wrist, 0.385))
+        assert taken is None and said == how + (
+            "; the scene camera holds no other container of its kind, so the cameras disagree and the wrist's is "
+            "the selected one"
+        )
     assert seen == [(206, 13.0, 60), (175, 13.9, 50), (174, 13.9, 50), (159, 14.9, 55), (148, 14.0, 47)]
     # the run's own line of 13:40:54, word for word, as the refusal it still is among several
     tie = press_demo.selection_tie(_gen15(one=False), _scene_fix(xy=(0.681, -0.035)), MODEL, SELECTED)
@@ -1373,56 +1375,60 @@ def test_the_one_container_rule_has_a_ceiling_and_leaves_the_75_mm_as_it_was():
     boxed = press_demo.selection_tie(_gen15(one=False, mine=GEN15_BOX), None, MODEL, SELECTED)
     tied, how = boxed.judge((0.770, -0.193))
     assert not tied and how == "99 mm to the side of the scene camera's line of sight to it"
+    # ... and by the 75 mm alone with one container too: the instance's box gives a direction and no range,
+    # and a cone with no depth would take any lone top across the table (review of 2026-11-20)
     boxed = press_demo.selection_tie(_gen15(mine=GEN15_BOX), None, MODEL, SELECTED)
-    assert boxed.judge((0.770, -0.193))[0] and boxed.cameras_apart((0.770, -0.193))["nearer_mm"] is None
+    assert boxed.wide_deg == press_demo.SELECTED_WIDE_DEG and boxed.at_xy is None
+    assert boxed.judge((0.770, -0.193)) == (False, how) and boxed.cameras_apart((0.770, -0.193)) is None
+    across_the_table = (boxed.cam_xy[0] + 2.0 * boxed.a[0], boxed.cam_xy[1] + 2.0 * boxed.a[1])  # 2 m down its side
+    assert boxed.judge(across_the_table)[0]  # (on its line: the 75 mm's own, as ever)
+    d = np.subtract((0.770, -0.193), boxed.cam_xy)
+    off_it = tuple(np.array(boxed.cam_xy) + 2.0 * d / np.linalg.norm(d))  # the wrist's direction, 2 m out
+    assert not boxed.judge(off_it)[0]
     # a stand-in or a locator that cannot count (no segmenter read) never has the wide cone
     assert press_demo.selection_tie(_locator(), _scene_fix(), MODEL, SELECTED).wide_deg == 0.0
 
 
-def test_a_second_top_in_the_wide_cone_is_a_rival_unless_the_arm_reaches_only_the_find():
-    """Two lid-sized tops in the cone, and nothing says which is the selected one: neither is taken. But a top
-    the arm cannot reach is no rival of a find it can (the finder's own rule), and of two out of reach the one a
-    lid's width or more farther from the arm is not the one being brought to it. A top within the 75 mm of the
-    scene camera's line is a rival of every find, as ever."""
-    from dataclasses import replace
-
-    scene, wrist = (0.681, -0.035), (0.770, -0.193, 0.385)
-    tie = press_demo.selection_tie(_gen15(), _scene_fix(xy=scene), MODEL, SELECTED)
-    tie = replace(tie, reachable=lambda p: float(np.hypot(p[0], p[1])) <= 0.85)
+def test_any_second_lid_sized_top_in_the_wide_cone_is_a_rival_within_reach_or_not():
+    """Two lid-sized tops in the cone, and nothing says which is the selected one: neither is taken, whether the
+    arm reaches them or not. As first written a top out of reach was no rival of a find within it: the scene
+    camera at [0.912, 0.000], the container at [0.988, -0.201] out of reach, a tin at [0.820, -0.200] within it,
+    and the tin was the selected container (review of 2026-11-20). A top within the 75 mm of the scene camera's
+    line is a rival of every find, as ever; a find the 75 mm ties has only the 75 mm's rivals."""
+    tie = press_demo.selection_tie(_gen15(), _scene_fix(xy=(0.912, 0.000)), MODEL, SELECTED)
 
     def find(*tops):
         return SimpleNamespace(
             places=tuple(SimpleNamespace(xy=t[:2], top_z=t[2], button="unchecked") for t in tops), patches=()
         )
 
-    beside = (0.830, -0.060, 0.385)  # in the cone (8 deg), within the arm's reach
-    why, _how = press_demo.tie_refusal(tie, find(wrist, beside), wrist)
-    assert "another lid-sized top at [0.830, -0.060] in the same direction" in why
-    assert press_demo.guide.kind_of(why) == press_demo.guide.K_SEVERAL
-    far = (0.965, -0.102, 0.385)  # in the cone (15 deg), 0.97 m out: the arm does not reach it
-    assert tie.judge(far[:2])[0] and press_demo.tie_refusal(tie, find(wrist, far), wrist)[0] is None
-    # the find itself out of reach (the line-up's watch, the chair still driving up): a top a lid farther is none,
-    # one as near the arm is
-    out = (0.988, -0.201, 0.385)
-    tie_far = press_demo.selection_tie(_gen15(), _scene_fix(xy=(0.912, 0.000)), MODEL, SELECTED)
-    tie_far = replace(tie_far, reachable=lambda p: float(np.hypot(p[0], p[1])) <= 0.85)
-    farther, as_near = (1.150, -0.050, 0.385), (1.000, -0.050, 0.385)
-    assert tie_far.judge(farther[:2])[0] and tie_far.judge(as_near[:2])[0]
-    assert press_demo.tie_refusal(tie_far, find(out, farther), out)[0] is None
-    assert "another lid-sized top at [1.000, -0.050]" in press_demo.tie_refusal(tie_far, find(out, as_near), out)[0]
-    # a top on the scene camera's line itself (the 75 mm) is a rival whatever the arm reaches
+    container, tin = (0.988, -0.201, 0.385), (0.820, -0.200, 0.385)
+    assert tie.judge(container[:2])[0] and tie.judge(tin[:2])[0]  # both in the cone, near its range
+    assert press_demo.tie_refusal(tie, find(tin), tin)[0] is None  # the tin alone would be it: the rule as given
+    for found, other in ((tin, container), (container, tin)):
+        why, _how = press_demo.tie_refusal(tie, find(tin, container), found)
+        assert "another lid-sized top at [%.3f, %.3f] in the same direction" % other[:2] in why
+        assert why.endswith(": not taken for the selected container %s" % SELECTED)
+        assert press_demo.guide.kind_of(why) == press_demo.guide.K_SEVERAL
+        assert "the selected one" not in why and "the cameras disagree" not in why  # a refusal never says "taken"
+    # a top the view cut counts as one
+    cut = SimpleNamespace(xy=container[:2], why="its top 45x100 mm, cut off by the view")
+    why, _how = press_demo.tie_refusal(tie, SimpleNamespace(places=(), patches=(cut,)), tin)
+    assert "another lid-sized top at [0.988, -0.201]" in why
+    # the range gates the cone: a top in its direction and 0.45 m farther from the lens is no rival
+    far = (1.354, 0.121, 0.385)
+    assert not tie.judge(far[:2])[0] and press_demo.tie_refusal(tie, find(tin, far), tin)[0] is None
+    # a top on the scene camera's line itself (the 75 mm) is a rival of every find
+    scene, wrist = (0.681, -0.035), (0.770, -0.193, 0.385)
+    tie = press_demo.selection_tie(_gen15(), _scene_fix(xy=scene), MODEL, SELECTED)
     on_line = (0.814, 0.100, 0.385)
-    short = replace(tie, reachable=lambda p: float(np.hypot(p[0], p[1])) <= 0.80)  # the find within, this top not
-    assert short.off(on_line[:2])["across_m"] < 0.001 and not short.reachable(on_line) and short.reachable(wrist)
-    assert "another lid-sized top at [0.814, 0.100]" in press_demo.tie_refusal(short, find(wrist, on_line), wrist)[0]
-    # where the reach was not asked, or a top's height is not known, a top of the cone is a rival
-    unasked = replace(tie, reachable=None)
-    assert "another lid-sized top" in press_demo.tie_refusal(unasked, find(wrist, far), wrist)[0]
-    cut = SimpleNamespace(xy=far[:2], why="its top 45x100 mm, cut off by the view")
-    assert "another lid-sized top" in press_demo.tie_refusal(tie, SimpleNamespace(places=(), patches=(cut,)), wrist)[0]
+    assert tie.off(on_line[:2])["across_m"] < 0.001
+    assert "another lid-sized top at [0.814, 0.100]" in press_demo.tie_refusal(tie, find(wrist, on_line), wrist)[0]
     # a find the 75 mm ties has only the 75 mm's rivals: a top elsewhere in the cone is none of its
-    near_line = tuple(np.array(scene) + 0.02) + (0.385,)
-    assert press_demo.tie_refusal(tie, find(near_line, beside), near_line)[0] is None
+    near_line, beside = (*(np.array(scene) + 0.02), 0.385), (0.830, -0.060, 0.385)
+    assert tie.judge(beside[:2])[0] and press_demo.tie_refusal(tie, find(near_line, beside), near_line)[0] is None
+    # ... and the same top IS one of a find only the cone ties
+    assert "another lid-sized top at [0.830, -0.060]" in press_demo.tie_refusal(tie, find(wrist, beside), wrist)[0]
 
 
 def test_the_wrists_find_is_taken_where_the_cameras_disagree_and_how_far_is_kept(monkeypatch):
@@ -1446,6 +1452,7 @@ def test_the_wrists_find_is_taken_where_the_cameras_disagree_and_how_far_is_kept
     }
     assert notes == [("wrist_first", dict({"found": True, "tied": True, "wide": True, "scene": True}, **apart))]
     assert ctx.cameras_apart == apart and ctx.selection[0] == SELECTED and ctx.selection[1].wide_deg == 20.0
+    assert ctx.selection[3] is _loc and ctx.wrist_taken_by == press_demo.BY_TIE_ONE and ctx.scene_top_z is None
     # with a second container of the kind in the scene camera's view: as on 2026-11-20, the scene camera's box
     (fix, kept, _s), said, _a, notes, ctx, loc = _look(monkeypatch, survey, scene_fix=scene, locator=_gen15(one=False))
     assert fix is scene and kept is loc and ctx.cameras_apart is None
@@ -1455,6 +1462,15 @@ def test_the_wrists_find_is_taken_where_the_cameras_disagree_and_how_far_is_kept
     survey = sv.Survey(fix=_wrist_fix((0.69, -0.05)), clouds=_clouds(), find=SimpleNamespace(places=(), patches=()))
     (fix, *_), said, _a, notes, ctx, _l = _look(monkeypatch, survey, scene_fix=scene, locator=_gen15())
     assert fix is survey.fix and not notes and ctx.cameras_apart is None
-    # no selection: nothing is kept of one
+    assert ctx.wrist_taken_by == press_demo.BY_TIE
+    # no selection: nothing is kept of one, and the find is the finder's own
     (fix, *_), _said, _a, _n, ctx, _l = _look(monkeypatch, survey, instance_id=None)
-    assert ctx.selection is None
+    assert ctx.selection is None and ctx.wrist_taken_by == press_demo.BY_ONLY
+    # --wrist-alone's one container
+    alone = _locator(held=0, why=UNSEEN_WHY)
+    (fix, *_), _said, _a, _n, ctx, _l = _look(monkeypatch, survey, locator=alone, alone=True)
+    assert fix is survey.fix and ctx.wrist_taken_by == press_demo.BY_ALONE
+    # a find that is not taken was taken by nothing
+    other = sv.Survey(fix=_wrist_fix((0.60, 0.30)), clouds=_clouds(), find=SimpleNamespace(places=(), patches=()))
+    (fix, *_), _said, _a, _n, ctx, _l = _look(monkeypatch, other, scene_fix=scene, locator=_gen15())
+    assert fix is scene and ctx.wrist_taken_by is None
