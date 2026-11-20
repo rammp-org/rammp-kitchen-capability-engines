@@ -120,6 +120,8 @@ PARAMS = {
     "state_dir": "/config/microwave_place",
     # microwave/open_door's shared door.json; must use the same persistent directory.
     "door_data_dir": "/microwave_data",
+    # false: plan the side shift and transit against the scene's microwave box only, without door.json's door model
+    "use_door_model": True,
     # locate: the scene camera's depth and intrinsics (the 3D detections are not used)
     "depth_topic": "/scene_camera/depth/image_rect_raw",
     "camera_info_topic": "/scene_camera/color/camera_info",
@@ -546,20 +548,26 @@ class Capability(CapabilityEngine):
         c = self.cfg
         q0 = np.asarray(self.arm.raw_joints(), dtype=float)
         oven, loc, boxes, world, world_info, stamp = self._oven_world(ctx, log)
-        door, open_grasp_pos, door_boxes, door_info = _shared_door_model(door_common.DOOR_FILE, door_common)
-        world_info["door_open_deg"] = door_info["open_deg"]
-        world_info["door_boxes"] = [box[0] for box in door_boxes]
         checker = place_motion.Checker(model, boxes)
         try:
-            bodies, _ = door_common.add_door_model(model.scene, model.rb, door, open_grasp_pos)
-            checker.bodies.extend(bodies)
-            # 4-5. the first heading that passes every stage
-            ctx.progress("plan", 0.0)
-            with door_common.door_in_curobo(
-                self.arm, _shared_curobo_boxes(boxes, door_boxes), "microwave place transit"
-            ) as door_world_loaded:
-                if not door_world_loaded:
-                    raise place_motion.Refused("the shared microwave door model could not be loaded into cuRobo")
+            if c["use_door_model"]:
+                door, open_grasp_pos, door_boxes, door_info = _shared_door_model(door_common.DOOR_FILE, door_common)
+                world_info["door_open_deg"] = door_info["open_deg"]
+                world_info["door_boxes"] = [box[0] for box in door_boxes]
+                bodies, _ = door_common.add_door_model(model.scene, model.rb, door, open_grasp_pos)
+                checker.bodies.extend(bodies)
+                # 4-5. the first heading that passes every stage
+                ctx.progress("plan", 0.0)
+                with door_common.door_in_curobo(
+                    self.arm, _shared_curobo_boxes(boxes, door_boxes), "microwave place transit"
+                ) as door_world_loaded:
+                    if not door_world_loaded:
+                        raise place_motion.Refused("the shared microwave door model could not be loaded into cuRobo")
+                    cand, plan, res, attempts = place_motion.search_place(self.arm, model, checker, q0, oven, c, log)
+            else:
+                world_info["door_model"] = "off"
+                log("door model OFF (use_door_model false): side shift and transit checked against the scene box only")
+                ctx.progress("plan", 0.0)
                 cand, plan, res, attempts = place_motion.search_place(self.arm, model, checker, q0, oven, c, log)
             summary, record = place_motion.summarize(
                 model, q0, loc, oven, world, world_info, boxes, cand, plan, res, attempts, c
