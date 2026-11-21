@@ -185,6 +185,13 @@ PULL_PATH_TOL_RAD = (0.15, 0.15, 0.15, 0.15, 0.30, 0.30, 0.30)
 # carries the hand further round the real one -- the 14:55 open's 60 deg plan opened it ~68 about the fitted hinge.
 SWING_END_TOL_M = 0.04  # the hand's end off the planned one: beyond this something else held it (the seal, a slip)
 SWING_ANGLE_TOL_DEG = 5.0  # the door's angle at the end, from the hand: at most this short of swing_deg
+# A swing the driver ran to its end but that left the door further short (or the hand further off) than that, with the
+# hinge fitted from its arc: the plan for what follows was made for a door at swing_deg, which isn't where the door is,
+# so it is not run; the hand lets go and what follows is planned again against the door as measured (the fitted hinge,
+# the angle from the hand). 11-20 (runs/20261121_000438_open): the door 54.2 deg of 60, the hand 6.7 cm off -- the
+# door's direction detected ~12 deg off -- and the open stopped holding the handle. Under this angle the door is too
+# little open for what follows (planned and run from ~60): it stops holding the handle, as before
+SWING_REPLAN_MIN_DEG = 45.0
 # The hinge from the swing itself: the hand clamped on the handle traces the door's real arc, so a circle fitted to the
 # tool's path (sampled at HINGE_FIT_HZ while the gripper is closed) is the hinge -- written to the door file for what
 # follows (the push-open, the close). The detected hinge is handle + a measured offset, and the handle's estimate moves

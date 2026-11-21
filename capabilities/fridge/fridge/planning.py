@@ -168,6 +168,7 @@ class Planner:
         self.t0 = time.monotonic()
         self.search_t0 = self.t0  # when the current search started (search()): the budget's clock
         self.plans = 0
+        self.finished = False  # the last run(): the driver ran the whole trajectory (no stop), wherever the tool ended
         self.cached = 0
         self.local = 0  # legs solved here (on or along the door)
         self.plan_s = 0.0
@@ -500,6 +501,7 @@ class Planner:
         time.sleep(SETTLE_S)
         st = self.arm.get_state()
         err = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - motion.goals[-1].pos))
+        self.finished = res.error_code == 0
         if res.error_code != 0:
             say(f"{label}: STOPPED ({rammp_arm.ERRORS.get(res.error_code, res.error_code)} {res.error_string})")
             return False

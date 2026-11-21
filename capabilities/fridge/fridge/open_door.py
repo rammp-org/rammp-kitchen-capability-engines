@@ -402,10 +402,11 @@ def fit_circle(xy):
 
 def record_swing_hinge(xy):
     """The hinge from the swing's path `xy` (ArcTrace), into the door file (hinge and hinge_pivot) when the fit is
-    good (HINGE_FIT_*); else the estimate stays. Also says it as the node's measured offset, from the handle."""
+    good (HINGE_FIT_*); else the estimate stays. Also says it as the node's measured offset, from the handle. Returns
+    True when the door file has the fitted hinge."""
     if len(xy) < 10:
         say(f"  hinge from the swing: {len(xy)} samples with the gripper closed -- not fitted, the estimate stays")
-        return
+        return False
     door = load_door()
     old = np.asarray(door["hinge"], float)
     centre, r, rms, span = fit_circle(xy)
@@ -424,10 +425,11 @@ def record_swing_hinge(xy):
             f"  {msg} -- not used (needs {F.HINGE_FIT_MIN_DEG:.0f} deg, {F.HINGE_FIT_MAX_RMS_M * 1000:.0f} mm RMS, "
             f"{F.HINGE_FIT_MAX_SHIFT_M * 100:.0f} cm): the estimate stays"
         )
-        return
+        return False
     hinge = [float(centre[0]), float(centre[1]), float(old[2])]
     save_door_geometry(hinge=hinge, hinge_pivot=hinge, hinge_estimate=old.tolist())
     say(f"  {msg} -- the door file's hinge now")
+    return True
 
 
 def record_hand_angle(ee):
@@ -919,8 +921,10 @@ def _close_gripper(ai):
 def execute_open(ai, planner, plan):
     """Approach; the swing under joint impedance, the gripper closing on the bar as it starts (GRIP_DURING_SWING), to a
     stop at exactly the angle asked for; then the gripper opens there, the hand still (push_open._release). What
-    follows is planned again from where that leaves the arm. Returns True when the swing finished and the hand let go;
-    raises Refused."""
+    follows is planned again from where that leaves the arm. A swing the driver ran to its end that left the door short
+    of its angle (at least SWING_REPLAN_MIN_DEG, the hinge fitted from its arc) lets go too, and what follows is then
+    planned only against the door as measured (plan["after"].replan). Returns True when the hand let go; False when
+    it stopped holding the handle; raises Refused."""
     cand, model = plan["cand"], plan["model"]
     st = ai.get_state()
     if float(st["gripper_pos"]) > 0.2:
@@ -992,18 +996,28 @@ def execute_open(ai, planner, plan):
             events=events,
             tol=F.SWING_END_TOL_M,
         )
+    finished = planner.finished  # the driver ran the whole swing (no stop), wherever the hand ended
     final = ai.get_state()
-    record_swing_hinge(arc.xy)  # the real hinge, for the angle below and everything after (the push-open, the close)
+    fitted = record_swing_hinge(arc.xy)  # the real hinge, for the angle below and all after (the push-open, the close)
     record_hand_angle(final["ee_pos"])  # the hand still holds the handle: it says where the door is
     deg = float(load_door()["door_open_deg"])
     if ok and deg < plan["swing_deg"] - F.SWING_ANGLE_TOL_DEG:
         say(f"  the door is ~{deg:.0f} deg open, over {F.SWING_ANGLE_TOL_DEG:.0f} short of {plan['swing_deg']}")
         ok = False
+    # ran to its end but short: what follows was planned for a door at swing_deg -- let go and plan it again against
+    # the door as measured (F.SWING_REPLAN_MIN_DEG), never run the old plan
+    replan = not ok and finished and fitted and deg >= F.SWING_REPLAN_MIN_DEG and plan.get("after") is not None
     say(
-        f"SWING {'DONE' if ok else 'STOPPED SHORT'}: door ~{deg:.1f} deg, EE {np.round(final['ee_pos'][:3], 4)}, "
-        f"gripper {float(final['gripper_pos']):.2f}"
+        f"SWING {'DONE' if ok else 'SHORT' if replan else 'STOPPED SHORT'}: door ~{deg:.1f} deg, "
+        f"EE {np.round(final['ee_pos'][:3], 4)}, gripper {float(final['gripper_pos']):.2f}"
     )
-    if not ok:
+    if replan:
+        say(
+            f"  the swing ran to its end with the door at ~{deg:.0f} deg of {plan['swing_deg']}: letting go and "
+            "planning what follows again, against the door where it is (the hinge from the swing's arc)"
+        )
+        plan["after"].replan = True
+    elif not ok:
         return False
     P._release(ai)  # stopped at the angle: let go, the hand still (Refused if the gripper doesn't open)
     say(f"released: gripper {float(ai.get_state()['gripper_pos']):.2f}")

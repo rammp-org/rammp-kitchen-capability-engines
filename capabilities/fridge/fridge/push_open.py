@@ -471,7 +471,8 @@ def after_release(after, planner, ai, door):
     first = checked.get("motion")
     # the plan checked before the swing, if the arm is where it starts (as close as any planned motion must be): no new
     # search, so no stop of its length between the pull and the push (a search from here held the arm ~23 s, 11-12)
-    if first is not None:
+    # `after.replan` (execute_open: the swing ended short of its angle): that plan was for a door that isn't there
+    if first is not None and not getattr(after, "replan", False):
         off = float(np.degrees(np.max(np.abs(pl._short_delta(first.q0, st["position"])))))
         if off <= pl.START_TOL_DEG:
             return f"the plan checked before the swing (the arm {off:.1f} deg from its start)"
