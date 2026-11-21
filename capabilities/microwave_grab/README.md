@@ -551,3 +551,32 @@ velocities, slowed for the configured speed, with the final segment in impedance
 Lift and withdrawal retain their existing locally generated, checked paths.
 
 The retrieval microwave model includes only the top, left side, right/control-panel side and open door. Bottom and back are excluded. The selected robot planner config exempts these four named microwave boxes from world padding; robot collision-sphere buffers and other collision layers are unchanged.
+
+## Validated staged grasp and 30% full run (2026-11-20)
+
+The attended full run completed detection, approach, first insertion, straight final insertion,
+close, 2 cm lift, and straight retreat. Targets used a -0.020 m height offset relative to the
+node's configured grasp_up (0.035 m on the running Jetson), giving 0.015 m above the detected
+container point. The speed scale was capped at 0.3 for approach, both insertion segments,
+lift, and retreat; gripper speed/force retain their configured settings.
+
+```bash
+ros2 action send_goal --feedback /microwave_grab/execute_action \
+  rammp_orchestrator_interfaces/action/ExecuteAction \
+  '{"engine_id":"microwave_grab","action_id":"take_out","params_json":"{\"execute\":true,\"straight_insertion\":true,\"use_saved_scene\":true,\"motion_speed_scale\":0.3,\"height_offset_m\":-0.020}"}'
+```
+
+These options must be supplied explicitly for the validated sequence. Omit
+`stop_after_first_insertion` for the complete task; set it true for the earlier staged stop.
+The node's take_lift default is now 0.02 m. Normal take_out still defaults to fresh microwave
+modeling and cuRobo insertion unless the explicit options select otherwise.
+
+`use_saved_scene` reads `state_dir/grasp_reached_scene.json` and loads its world_file plus the
+matching metadata JSON. This is runtime state on the Jetson, not a portable repository asset.
+Use it only while the microwave, open door, wheelchair and arm mounting are unchanged.
+Fresh container detection still runs. Fresh microwave fitting differed by approximately
+34 degrees in this session despite the operator confirming no scene movement; that fitting
+issue remains unresolved. The held container is not represented in collision checks.
+
+Successful recording:
+`/config/microwave_grab/runs/take_out_20261121T024516_571143Z_da02cf13`.

@@ -350,6 +350,7 @@ class Capability(CapabilityEngine):
     required_resources = ["arm", "gripper"]
     actions = [
         Action("place", "Place the held container in the open microwave", params_schema=PLACE),
+        Action("compare_alignment", "Compare wrist and scene microwave alignment without motion", params_schema=EXECUTE),
         Action("diagnose_grasp", "Diagnose saved grasp without moving", params_schema=EXECUTE),
         Action("finish_grasp", "Close, lift 2 cm, and retract from saved grasp", params_schema=EXECUTE),
         Action("move_to_grasp", "Continue to saved grasp point, leaving gripper open", params_schema=EXECUTE),
@@ -486,6 +487,8 @@ class Capability(CapabilityEngine):
             raise EngineError("bad_params", f"'site' must be one of {', '.join(SITES)}, not {site!r}", recoverable=True)
         try:
             model = place_motion.Model(self.cfg["flange_to_tip"])
+            if action_id == "compare_alignment":
+                return self._compare_alignment(ctx, log)
             if action_id == "diagnose_grasp":
                 return self._diagnose_grasp(model, ctx, log)
             if action_id == "finish_grasp":
@@ -539,6 +542,74 @@ class Capability(CapabilityEngine):
             raise EngineError("refused", _site_words(str(e), site), recoverable=True) from e
 
 
+
+
+    def _compare_alignment(self, ctx, log):
+        import cv2
+        c = self.cfg
+        results, shots = {}, {}
+        for name, color, depth, info in [
+            ("scene", microwave_detection.SAM3_IMAGE_TOPIC, c["depth_topic"], c["camera_info_topic"]),
+            ("wrist", c["wrist_topics"][0], c["wrist_topics"][1], c["wrist_topics"][2]),
+        ]:
+            ctx.checkpoint()
+            ctx.progress("compare_"+name, 0.0)
+            camera = microwave_detection.SceneCamera(self, rammp_arm.FRAME, (depth, info),
+                                                     sam3_image_topic=color)
+            try:
+                located = microwave_detection.locate(
+                    self, rammp_arm.FRAME, (depth, info), 3, 30.0, c["agree_m"], c["agree_deg"],
+                    log, camera=camera)
+            except microwave_detection.NotLocated as error:
+                results[name] = {"success": False, "error": str(error)}
+                continue
+            shot = located["scene"]
+            shots[name] = shot
+            estimate = {key: value for key, value in located.items() if key not in ("scene", "body")}
+            results[name] = {"success": True, "estimate": estimate,
+                             "yaw_deg": float(np.degrees(np.arctan2(located["insertion_axis"][1], located["insertion_axis"][0]))),
+                             "world_T_cam": shot["world_T_cam"].tolist(),
+                             "stamp": shot["stamp"], "image_topic": color}
+            directory = self.state_dir / "camera_alignment"
+            directory.mkdir(exist_ok=True)
+            np.savez_compressed(directory / f"{name}.npz", depth_m=shot["depth_m"], K=shot["K"],
+                world_T_cam=shot["world_T_cam"], mask=shot["mask"])
+        result = {"executed": False, "frame": rammp_arm.FRAME, "cameras": results}
+        if all(results.get(name, {}).get("success") for name in ("scene", "wrist")):
+            a, b = results["scene"], results["wrist"]
+            diff = (a["yaw_deg"] - b["yaw_deg"] + 180) % 360 - 180
+            corners_a = np.asarray(a["estimate"]["fit"]["opening_corners"])
+            corners_b = np.asarray(b["estimate"]["fit"]["opening_corners"])
+            result["comparison"] = {
+                "yaw_difference_deg": float(diff),
+                "point_difference_m": (np.asarray(a["estimate"]["point"])-np.asarray(b["estimate"]["point"])).tolist(),
+                "point_distance_m": float(np.linalg.norm(np.asarray(a["estimate"]["point"])-np.asarray(b["estimate"]["point"]))),
+                "opening_corner_distances_m": np.linalg.norm(corners_a-corners_b,axis=1).tolist(),
+                "floor_difference_m": a["estimate"]["floor_z"]-b["estimate"]["floor_z"]}
+        for name, shot in shots.items():
+            depth = np.nan_to_num(shot["depth_m"])
+            image = cv2.applyColorMap(np.uint8(np.clip(depth / 2.0,0,1)*255),cv2.COLORMAP_TURBO)
+            image[depth<=0] = 0
+            contours,_ = cv2.findContours(shot["mask"].astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(image,contours,-1,(255,255,255),1)
+            for other in shots:
+                corners = np.asarray(results[other]["estimate"]["fit"]["opening_corners"])
+                camera_points = (np.linalg.inv(shot["world_T_cam"]) @ np.c_[corners,np.ones(len(corners))].T).T[:,:3]
+                pixel = (shot["K"] @ camera_points.T).T
+                pixel = np.round(pixel[:,:2]/pixel[:,2:3]).astype(np.int32)
+                color = (0,255,0) if other==name else (255,0,255)
+                cv2.polylines(image,[pixel],True,color,2)
+            cv2.putText(image,name+" | own fit: green | other camera: magenta",(8,20),cv2.FONT_HERSHEY_SIMPLEX,.42,(255,255,255),1)
+            cv2.imwrite(str(self.state_dir/"camera_alignment"/f"{name}.png"),image)
+        record = json.loads((self.state_dir/"grasp_reached_scene.json").read_text())
+        saved = json.loads(Path(record["world_file"]).with_suffix(".json").read_text())
+        corners = np.asarray(saved["opening_corners"])
+        edge = corners[1]-corners[0]
+        normal = np.cross(edge,[0,0,1])
+        saved_yaw = float(np.degrees(np.arctan2(normal[1],normal[0])))
+        result["saved_scene_yaw_deg_mod_180"] = saved_yaw % 180
+        self._save("camera_alignment/comparison.json", result)
+        return result
 
     def _diagnose_grasp(self, model, ctx, log):
         saved = json.loads((self.state_dir / "plans/first_insertion_latest.json").read_text())
