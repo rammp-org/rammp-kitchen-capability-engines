@@ -224,7 +224,7 @@ PARAMS = {
     # the hand's peak speed (m/s) on that impedance part of the line in: half the approach's insert_speed
     "impedance_speed": 0.08,
     # after closing: straight up this far (m), then the place's level retract
-    "take_lift": 0.03,
+    "take_lift": 0.02,
 }
 EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
 PLACE = EXECUTE
@@ -232,6 +232,11 @@ TAKE_OUT = {
     "type": "object",
     "properties": {
         "execute": {"type": "boolean", "default": False},
+        "stop_after_first_insertion": {"type": "boolean", "default": False},
+        "height_offset_m": {"type": "number", "default": -0.020},
+        "straight_insertion": {"type": "boolean", "default": False},
+        "use_saved_scene": {"type": "boolean", "default": False},
+        "motion_speed_scale": {"type": "number", "minimum": 0.01, "maximum": 1.0},
         # where from: the microwave's settings, or the fridge's (FRIDGE_TAKE)
         "site": {"type": "string", "enum": list(SITES), "default": "microwave"},
     },
@@ -345,6 +350,9 @@ class Capability(CapabilityEngine):
     required_resources = ["arm", "gripper"]
     actions = [
         Action("place", "Place the held container in the open microwave", params_schema=PLACE),
+        Action("diagnose_grasp", "Diagnose saved grasp without moving", params_schema=EXECUTE),
+        Action("finish_grasp", "Close, lift 2 cm, and retract from saved grasp", params_schema=EXECUTE),
+        Action("move_to_grasp", "Continue to saved grasp point, leaving gripper open", params_schema=EXECUTE),
         Action("take_out", "Take the container out of the open microwave (or the fridge)", params_schema=TAKE_OUT),
         *(
             Action(ui_id, label, perception_classes=list(classes))
@@ -478,9 +486,15 @@ class Capability(CapabilityEngine):
             raise EngineError("bad_params", f"'site' must be one of {', '.join(SITES)}, not {site!r}", recoverable=True)
         try:
             model = place_motion.Model(self.cfg["flange_to_tip"])
+            if action_id == "diagnose_grasp":
+                return self._diagnose_grasp(model, ctx, log)
+            if action_id == "finish_grasp":
+                return self._finish_grasp(model, execute, ctx, log)
+            if action_id == "move_to_grasp":
+                return self._move_to_grasp(model, execute, ctx, log)
             if action_id == "take_out":
                 if site == "microwave":
-                    with self._grab_collision_world(ctx, log) as scene:
+                    with self._grab_collision_world(ctx, log, bool(params.get("use_saved_scene", False))) as scene:
                         checker = place_motion.Checker(model, scene["metadata"]["obstacles"])
                         try:
 
@@ -511,10 +525,10 @@ class Capability(CapabilityEngine):
                                 phase,
                                 report_clearance,
                             )
-                            return {**self._take_out(model, execute, ctx, log, site, scene), "note": note}
+                            return {**self._take_out(model, execute, ctx, log, site, scene, params.get("stop_after_first_insertion", False), params.get("height_offset_m", -0.020), motion_params=params), "note": note}
                         finally:
                             checker.close()
-                return {**self._take_out(model, execute, ctx, log, site), "note": note}
+                return {**self._take_out(model, execute, ctx, log, site, stop_after_first_insertion=params.get("stop_after_first_insertion", False), height_offset_m=params.get("height_offset_m", -0.020), motion_params=params), "note": note}
             return {**self._place(model, execute, ctx, log), "note": note}
         except (
             place_motion.Refused,
@@ -523,6 +537,209 @@ class Capability(CapabilityEngine):
             collision_world.InvalidGeometry,
         ) as e:
             raise EngineError("refused", _site_words(str(e), site), recoverable=True) from e
+
+
+
+    def _diagnose_grasp(self, model, ctx, log):
+        saved = json.loads((self.state_dir / "plans/first_insertion_latest.json").read_text())
+        summary, c = saved["summary"], self.cfg
+        q = np.asarray(self.arm.raw_joints(), dtype=float)
+        T = model.fk(q)
+        target = np.asarray(summary["grasp"])
+        cand = take_out.grasp_pose(model, np.asarray(saved["q0"]), summary["container_point"],
+                                  c["reach_in"], c["grasp_depth"], summary["grasp_up_m"])
+        result = dict(executed=False, current=T[:3, 3].tolist(), target=target.tolist(),
+                      delta=(target-T[:3, 3]).tolist(), current_joints=q.tolist())
+        try:
+            line = place_motion.plan_line(model, q, target-T[:3, 3], "diagnostic straight insertion",
+                                          step=place_motion.LINE_STEP)
+        except place_motion.Refused as error:
+            result["straight_ik_error"] = str(error)
+            return result
+        result["straight_ik_samples"] = len(line)
+        result["endpoint_joints"] = np.asarray(line[-1]).tolist()
+        result["endpoint"] = model.fk(line[-1])[:3, 3].tolist()
+        result["joint_change_deg"] = place_motion.wrap_deg(np.asarray(line[-1])-q).tolist()
+        with self._grab_collision_world(ctx, log) as scene:
+            result["scene"] = scene["metadata"]
+            checker = place_motion.Checker(model, scene["metadata"]["obstacles"])
+            try:
+                records = []
+                try:
+                    collision_world.check_local_path(checker, line, place_motion.dense,
+                        place_motion.LINE_STEP_DEG, c["take_clear_min"], ctx.checkpoint,
+                        "diagnostic straight insertion", records.append)
+                except collision_world.InvalidGeometry as error:
+                    result["straight_collision_error"] = str(error)
+                result["clearance"] = records
+                result["endpoint_closest"] = checker.closest_points(line[-1], False)
+            finally:
+                checker.close()
+            joint_plan = self.arm.plan_to_joints(line[-1], q)
+            result["curobo_joint_goal"] = dict(success=joint_plan.success, message=joint_plan.message)
+            pose_plan = self.arm.plan_to_pose(target, cand["quat"], q)
+            result["curobo_free_pose_goal"] = dict(success=pose_plan.success, message=pose_plan.message)
+        self._save("grasp_diagnostics.json", result)
+        log(f"grasp diagnostics: {json.dumps(result, default=_json_default)}")
+        return result
+
+
+    def _finish_grasp(self, model, execute, ctx, log):
+        """Continue the staged grasp without homing or repeating insertion."""
+        import yaml
+        saved = json.loads((self.state_dir / "plans/first_insertion_latest.json").read_text())
+        summary, c = saved["summary"], dict(self.cfg)
+        q = np.asarray(self.arm.raw_joints(), dtype=float)
+        start = model.fk(q)[:3, 3]
+        if np.linalg.norm(start - summary["grasp"]) > place_motion.END_TOL:
+            raise place_motion.Refused("arm is not at the saved grasp point; not closing")
+        if abs(c["take_lift"] - 0.02) > 1e-9:
+            raise place_motion.Refused("finish_grasp requires configured 2 cm lift")
+        def move(qs, name):
+            qs = np.asarray(qs)
+            distances = np.asarray(place_motion.pose_lengths(model, qs))
+            length = float(np.sum(distances))
+            if length < 0.001:
+                return
+            duration = 1.875 * length / 0.16
+            fractions = np.r_[0.0, np.cumsum(distances)] / length
+            times = np.array([place_motion.minjerk_time(float(f)) for f in fractions]) * duration
+            times[0], times[-1] = 0.0, duration
+            velocities = np.gradient(qs, times, axis=0)
+            velocities[0] = velocities[-1] = 0.0
+            ctx.checkpoint()
+            result = self.arm.execute_joint_trajectory(take_out.rammp_arm.JOINTS,
+                zip(times, qs, velocities, strict=True), speed_scale=0.1)
+            if result.error_code != place_motion.SUCCESSFUL:
+                raise place_motion.Refused(f"{name} stopped: {result.error_string}")
+            endpoint = model.fk(np.asarray(self.arm.raw_joints(), dtype=float))[:3, 3]
+            if np.linalg.norm(endpoint-model.fk(qs[-1])[:3, 3]) > place_motion.END_TOL:
+                raise place_motion.Refused(f"{name} endpoint error; holding position")
+        record = json.loads((self.state_dir / "grasp_reached_scene.json").read_text())
+        scene_path = Path(record["world_file"])
+        scene = {"metadata": {"obstacles": yaml.safe_load(scene_path.read_text())["obstacles"]}}
+        expected_layers = collision_world.planner_layers(c["planner_config"])
+        with collision_world.loaded_world(self.arm, scene_path, c["take_approach_world"],
+                lambda arm, world, logger: take_out.set_approach_world(arm, world, logger, expected_layers),
+                log):
+            config_path = Path(c["planner_config"])
+            config = yaml.safe_load(config_path.read_text())
+            obstacles = list(scene["metadata"]["obstacles"])
+            for layer in list(config["layers"]) + ["layer_mebot_floor.yaml"]:
+                layer_path = Path(layer)
+                if not layer_path.is_absolute():
+                    layer_path = config_path.parent / layer_path
+                obstacles.extend(yaml.safe_load(layer_path.read_text())["obstacles"])
+            padded = [{**box, "rpy_deg": box.get("rpy_deg", [0, 0, 0]),
+                       "dims": (np.asarray(box["dims"]) + 0.04).tolist()} for box in obstacles]
+            checker = place_motion.Checker(model, padded)
+            try:
+                c["collision_check"] = lambda phase, qs: collision_world.check_local_path(
+                    checker, qs, place_motion.dense, place_motion.LINE_STEP_DEG,
+                    c["take_clear_min"], ctx.checkpoint, phase,
+                    lambda record: log(f"{phase} clearance: {record}"))
+                lift = place_motion.plan_line(model, q, [0, 0, c["take_lift"]], "2 cm lift",
+                                             step=place_motion.LINE_STEP)
+                take_out.check_local(c, "2 cm lift", lift)
+                take_out.plan_withdrawal(self.arm, model, lift[-1], summary["pre_grasp"], c)
+                if not execute:
+                    return {"executed": False, "lift_m": c["take_lift"], "speed_scale": 0.1}
+                ctx.checkpoint()
+                ctx.progress("close", 0.0)
+                pos = take_out.close_on_brim(self.arm, log)
+                ctx.checkpoint()
+                q = np.asarray(self.arm.raw_joints(), dtype=float)
+                lift = place_motion.plan_line(model, q, [0, 0, c["take_lift"]], "2 cm lift",
+                                             step=place_motion.LINE_STEP)
+                take_out.check_local(c, "measured-start 2 cm lift", lift)
+                take_out.plan_withdrawal(self.arm, model, lift[-1], summary["pre_grasp"], c)
+                ctx.progress("lift", 0.0)
+                move(lift, "2 cm lift")
+                ctx.checkpoint()
+                q = np.asarray(self.arm.raw_joints(), dtype=float)
+                route = take_out.plan_withdrawal(self.arm, model, q, summary["pre_grasp"], c)
+                ctx.progress("retract", 0.0)
+                move(route["out"], "straight withdrawal")
+                actual = model.fk(np.asarray(self.arm.raw_joints(), dtype=float))[:3, 3]
+                return {"executed": True, "lift_m": c["take_lift"], "gripper": pos,
+                        "stopped_at": "retracted_holding_container", "actual": actual.tolist()}
+            finally:
+                checker.close()
+
+    def _move_to_grasp(self, model, execute, ctx, log):
+        """Continue only the last saved first insertion to its grasp; never close."""
+        saved = json.loads((self.state_dir / "plans/first_insertion_latest.json").read_text())
+        summary, c = saved["summary"], self.cfg
+        cand = take_out.grasp_pose(model, np.asarray(saved["q0"]), summary["container_point"],
+                                  c["reach_in"], c["grasp_depth"], summary["grasp_up_m"])
+        target = np.asarray(summary["grasp"], dtype=float)
+        q = np.asarray(self.arm.raw_joints(), dtype=float)
+        current = model.fk(q)
+        if np.linalg.norm(current[:3, 3] - summary["first_insertion_target"]) > place_motion.END_TOL:
+            raise place_motion.Refused("arm is not at the saved first insertion endpoint")
+        with self._grab_collision_world(ctx, log) as scene:
+            from types import SimpleNamespace
+            import yaml
+
+            # Explicit Cartesian insertion requested by the operator, solved from measured joints.
+            qs = np.asarray(place_motion.plan_line(model, q, target-current[:3, 3],
+                            "straight grasp insertion", step=place_motion.LINE_STEP))
+            place_motion.check_line(model, qs, current[:3, 3], target, None, "straight grasp insertion")
+            lengths = np.asarray(place_motion.pose_lengths(model, qs), dtype=float)
+            distance = float(np.sum(lengths))
+            if distance < 0.001:
+                raise place_motion.Refused("already at grasp; no insertion required")
+            fractions = np.r_[0.0, np.cumsum(lengths)] / distance
+            duration = 1.875 * distance / 0.16
+            times = np.array([place_motion.minjerk_time(float(f)) for f in fractions]) * duration
+            times[0], times[-1] = 0.0, duration
+            velocities = np.gradient(qs, times, axis=0)
+            velocities[0] = velocities[-1] = 0.0
+            plan = SimpleNamespace(q=qs, t=times, qd=velocities)
+            reference = take_out.Rotation.from_quat(cand["quat"])
+            for sample in place_motion.dense(plan.q, place_motion.LINE_STEP_DEG):
+                actual = take_out.Rotation.from_matrix(model.fk(sample)[:3, :3])
+                deviation = float(np.degrees((reference.inv() * actual).magnitude()))
+                if deviation > take_out.INSERT_ORIENTATION_TOL_DEG:
+                    raise place_motion.Refused(f"grasp continuation orientation deviation {deviation:.3f} deg")
+            # Include persistent chair/person/floor layers and the planner's 20 mm padding.
+            config_path = Path(c["planner_config"])
+            config = yaml.safe_load(config_path.read_text())
+            obstacles = list(scene["metadata"]["obstacles"])
+            for layer in list(config["layers"]) + ["layer_mebot_floor.yaml"]:
+                layer_path = Path(layer)
+                if not layer_path.is_absolute():
+                    layer_path = config_path.parent / layer_path
+                obstacles.extend(yaml.safe_load(layer_path.read_text())["obstacles"])
+            padded = [{**box, "rpy_deg": box.get("rpy_deg", [0.0, 0.0, 0.0]), "dims": (np.asarray(box["dims"]) + 0.040).tolist()} for box in obstacles]
+            checker = place_motion.Checker(model, padded)
+            try:
+                collision_world.check_local_path(checker, plan.q, place_motion.dense,
+                    place_motion.LINE_STEP_DEG, c["take_clear_min"], ctx.checkpoint,
+                    "grasp continuation", lambda record: log(f"grasp continuation clearance: {record}"))
+            finally:
+                checker.close()
+            endpoint = model.fk(np.asarray(plan.q[-1]))[:3, 3]
+            if np.linalg.norm(endpoint - target) > place_motion.END_TOL:
+                raise place_motion.Refused("grasp continuation plan misses the target")
+            if not execute:
+                return {"executed": False, "target": target.tolist(), "speed_scale": 0.1}
+            ctx.checkpoint()
+            ctx.progress("reach", 0.0)
+            log("-> grasp point only: impedance, 10% maximum speed scale; gripper unchanged")
+            try:
+                take_out.run_insertion_plan(self.arm, model, plan, c["impedance_speed"],
+                                           0.1, "grasp continuation", gains=c["take_gains"])
+            finally:
+                place_motion.exit_impedance(self.arm, log)
+            actual = model.fk(np.asarray(self.arm.raw_joints(), dtype=float))[:3, 3]
+            error = float(np.linalg.norm(actual - target))
+            if error > place_motion.END_TOL:
+                raise place_motion.Refused(f"stopped with gripper open: grasp endpoint error {error * 100:.2f} cm")
+            ctx.progress("grasp_point_open", 100.0)
+            return {"executed": True, "stopped_at": "grasp_point", "gripper_unchanged": True,
+                    "speed_scale_max": 0.1, "target": target.tolist(),
+                    "actual": actual.tolist(), "position_error_m": error}
 
     def _place(self, model, execute, ctx, log):
         c = self.cfg
@@ -566,7 +783,7 @@ class Capability(CapabilityEngine):
         finally:
             checker.close()
 
-    def _take_out(self, model, execute, ctx, log, site="microwave", scene=None):
+    def _take_out(self, model, execute, ctx, log, site="microwave", scene=None, stop_after_first_insertion=False, height_offset_m=-0.020, motion_params=None):
         """Find the nearest container-mask point, approach, insert, close, lift and retract. `site` "fridge": with the
         fridge's settings (FRIDGE_TAKE), and executing only if fridge_accept_unmodeled_door (FRIDGE_DOOR_GAP)."""
         c = self.cfg
@@ -575,6 +792,14 @@ class Capability(CapabilityEngine):
             if execute and not self.cfg["fridge_accept_unmodeled_door"]:
                 raise place_motion.Refused(f"refused before anything moved: {FRIDGE_DOOR_GAP}")
             log(f"take-out from the fridge settings. WARNING: {FRIDGE_DOOR_GAP.split('. Set')[0]}")
+        motion_params = motion_params or {}
+        c = {**c, "straight_insertion": bool(motion_params.get("straight_insertion", False))}
+        if "motion_speed_scale" in motion_params:
+            scale = float(motion_params["motion_speed_scale"])
+            if not np.isfinite(scale) or not 0.01 <= scale <= 1.0:
+                raise place_motion.Refused("motion_speed_scale must be in [0.01, 1]")
+            c.update(motion_speed_scale=scale, take_approach_speed_scale=scale,
+                     take_exit_speed_scale=scale, insert_speed=0.16*scale, impedance_speed=0.16*scale)
         ctx.checkpoint()
         try:
             world_message = (
@@ -599,10 +824,25 @@ class Capability(CapabilityEngine):
             log,
             ctx.checkpoint,
         )
-        cand = take_out.grasp_pose(model, q0, rim["point"], c["reach_in"], c["grasp_depth"], c["grasp_up"])
+        height_offset_m = float(height_offset_m)
+        if not np.isfinite(height_offset_m):
+            raise place_motion.Refused("height_offset_m must be finite")
+        log(f"grasp height: {c['grasp_up']:.3f} m + {height_offset_m:.3f} m offset")
+        cand = take_out.grasp_pose(model, q0, rim["point"], c["reach_in"], c["grasp_depth"], c["grasp_up"] + height_offset_m)
         ctx.progress("plan", 0.0)
         ctx.checkpoint()
+        c = {**c, "stop_after_first_insertion": bool(stop_after_first_insertion)}
         legs = take_out.plan_take_out(self.arm, model, q0, cand, c)
+        if stop_after_first_insertion:
+            summary = dict(stopped_at="first_insertion", height_offset_m=height_offset_m, grasp_up_m=c["grasp_up"] + height_offset_m, grasp=np.asarray(cand["target"]).tolist(), container_point=np.round(rim["point"], 3).tolist(),
+                           pre_grasp=np.round(cand["pre"], 3).tolist(),
+                           first_insertion_target=(np.asarray(cand["target"]) - c["impedance_in"] * np.asarray(cand["heading"])).tolist())
+            self._save("plans/first_insertion_latest.json", dict(summary=summary, q0=q0, **{key: value for key, value in legs.items() if key != "insertion_plans"}))
+            if not execute:
+                return {"executed": False, "plan": summary}
+            with _started("first-insertion"):
+                result = take_out.run_take_out(self.arm, model, q0, cand, legs, c, ctx, log)
+            return {**result, "plan": summary}
         T_pre = model.fk(legs["approach"][-1])
         summary = dict(
             site=site,
@@ -652,14 +892,26 @@ class Capability(CapabilityEngine):
         if not execute:
             log("DRY RUN -- planned, nothing commanded")
             return {"executed": False, "plan": summary}
+        c = {**c, "stop_after_first_insertion": bool(stop_after_first_insertion)}
         with _started("take-out"):
             result = take_out.run_take_out(self.arm, model, q0, cand, legs, c, ctx, log)
         return {**result, "plan": summary}
 
     @contextmanager
-    def _grab_collision_world(self, ctx, log):
+    def _grab_collision_world(self, ctx, log, use_saved_scene=False):
         """Observe the shell before HOME; keep it in cuRobo until retrieval ends."""
         c = self.cfg
+        if use_saved_scene:
+            record = json.loads((self.state_dir / "grasp_reached_scene.json").read_text())
+            path = Path(record["world_file"])
+            metadata = json.loads(path.with_suffix(".json").read_text())
+            expected = collision_world.planner_layers(c["planner_config"])
+            log(f"using verified static microwave scene: {path}")
+            with collision_world.loaded_world(self.arm, path, c["take_approach_world"],
+                    lambda arm, world, logger: take_out.set_approach_world(arm, world, logger, expected),
+                    log) as message:
+                yield dict(message=message, metadata=metadata)
+            return
         ctx.checkpoint()
         ctx.progress("microwave_model", 0.0)
         try:

@@ -22,7 +22,7 @@ import time
 
 import numpy as np
 import rammp_arm
-from capability_engine.arm import HOLD_FIXED, HOLD_NONE
+from capability_engine.arm import HOLD_FIXED
 from scipy.spatial.transform import Rotation
 
 from . import place_motion as pm
@@ -114,13 +114,33 @@ def set_approach_world(arm, world, log, expected_layers=None):
     return message
 
 
-INSERT_ORIENTATION_TOL_DEG = 10.0  # microwave_grab insertion transit only
+INSERT_ORIENTATION_TOL_DEG = 2.0  # microwave_grab insertion transit only
 
+
+
+def straight_plan(model, qs):
+    """Driver trajectory for a Cartesian path; nominal peak 0.16 m/s before speed scaling."""
+    from types import SimpleNamespace
+
+    qs = np.asarray(qs, dtype=float)
+    distances = np.asarray(pm.pose_lengths(model, qs))
+    length = float(np.sum(distances))
+    if length < 1e-6:
+        raise pm.Refused("straight path has zero length")
+    fractions = np.r_[0.0, np.cumsum(distances)] / length
+    duration = 1.875 * length / 0.16
+    times = np.array([pm.minjerk_time(float(f)) for f in fractions]) * duration
+    times[0], times[-1] = 0.0, duration
+    if np.any(np.diff(times) <= 0):
+        raise pm.Refused("straight path has repeated time samples")
+    velocities = np.gradient(qs, times, axis=0)
+    velocities[0] = velocities[-1] = 0.0
+    return SimpleNamespace(success=True, q=qs, t=times, qd=velocities)
 
 def plan_from_pregrasp(model, q_pre, cand, cfg, arm=None):
     """cuRobo insertion in two checked segments, followed by the existing local lift.
 
-    Every insertion sample must still follow the straight, fixed-heading reach.
+    Insertion may follow a curved cuRobo path within the orientation and collision bounds.
     No local IK fallback is allowed if cuRobo cannot plan it.
     """
     T = model.fk(np.asarray(q_pre, dtype=float))
@@ -134,8 +154,17 @@ def plan_from_pregrasp(model, q_pre, cand, cfg, arm=None):
     target = np.asarray(cand["target"], dtype=float)
     split = target - float(cfg["impedance_in"]) * np.asarray(cand["heading"])
     plans = []
-    for label, goal in (("position insertion", split), ("impedance insertion", target)):
-        pl = arm.plan_to_pose(goal, cand["quat"], start, HOLD_NONE)
+    goals = (("position insertion", split), ("impedance insertion", target))
+    if cfg.get("stop_after_first_insertion", False):
+        goals = goals[:1]
+    for label, goal in goals:
+        if cfg.get("straight_insertion", False) and label == "impedance insertion":
+            begin = model.fk(start)[:3, 3]
+            qs_line = pm.plan_line(model, start, goal-begin, label, step=pm.LINE_STEP)
+            pm.check_line(model, qs_line, begin, goal, None, label)
+            pl = straight_plan(model, qs_line)
+        else:
+            pl = arm.plan_to_pose(goal, cand["quat"], start, HOLD_FIXED)
         if not pl.success or len(pl.q) < 2:
             raise pm.Refused(f"{label}: cuRobo refused: {pl.message}")
         qs = np.asarray(pl.q, dtype=float)
@@ -148,12 +177,15 @@ def plan_from_pregrasp(model, q_pre, cand, cfg, arm=None):
             if deviation > INSERT_ORIENTATION_TOL_DEG:
                 raise pm.Refused(f"{label}: orientation deviates {deviation:.2f} deg at sample {i} "
                                  f"(limit {INSERT_ORIENTATION_TOL_DEG:.2f})")
-        pm.check_line(model, qs, model.fk(start)[:3, 3], goal, None, label)
         check_local(cfg, label, qs)
         plans.append(pl)
         start = qs[-1]
+    if cfg.get("stop_after_first_insertion", False):
+        endpoint = model.fk(np.asarray(plans[0].q[-1]))[:3, 3]
+        if np.linalg.norm(endpoint - split) > pm.END_TOL:
+            raise pm.Refused("first insertion endpoint misses its target")
+        return dict(line=np.asarray(plans[0].q), insertion_plans=plans)
     line = np.vstack([np.asarray(plans[0].q), np.asarray(plans[1].q)[1:]])
-    pm.check_line(model, line, cand["pre"], cand["target"], None, "line in")
     end = pm.end_pose_error(model, line[-1], cand["target"], cand["heading"])
     if end[0] > pm.END_TOL or end[1] > pm.END_TOL_DEG:
         raise pm.Refused(f"the line in ends {end[0] * 100:.1f} cm / {end[1]:.1f} deg off the grasp")
@@ -259,7 +291,7 @@ def execute_withdrawal(arm, model, pre, cfg, ctx, log):
     route = plan_withdrawal(arm, model, q, pre, cfg)
     ctx.progress("retract", 0.0)
     log("-> local straight retreat to pre-grasp x/y at lifted height (no cuRobo collision check)")
-    move_timed(arm, model, route["out"], "local withdrawal", cfg["insert_speed"], "holding the container")
+    move_timed(arm, model, route["out"], "local withdrawal", cfg["insert_speed"], "holding the container", max_scale=cfg.get("motion_speed_scale"))
     actual = model.fk(np.asarray(arm.raw_joints(), dtype=float))[:3, 3]
     if np.linalg.norm(actual - route["out_target"]) > pm.END_TOL:
         raise pm.Refused("STOPPED holding container: local retreat endpoint tracking error")
@@ -281,6 +313,8 @@ def plan_take_out(arm, model, q0, cand, cfg):
         raise pm.Refused("take-out approach: cuRobo returned no executable trajectory")
     check_local(cfg, "approach", approach.q)
     legs = plan_from_pregrasp(model, approach.q[-1], cand, cfg, arm=arm)
+    if cfg.get("stop_after_first_insertion", False):
+        return dict(approach=approach.q, approach_t=approach.t, approach_qd=approach.qd, **legs)
     exit_plan = plan_withdrawal(arm, model, legs["lift"][-1], cand["pre"], cfg)
     return dict(approach=approach.q, approach_t=approach.t, approach_qd=approach.qd, **{k: v for k, v in legs.items() if k != "insertion_plans"}, **exit_plan)
 
@@ -324,11 +358,15 @@ def run_insertion_plan(arm, model, plan, speed, max_scale, label, gains=None):
     time.sleep(pm.SETTLE_AFTER_S)
 
 
-def move_timed(arm, model, qs, what, speed, state, impedance=None):
+def move_timed(arm, model, qs, what, speed, state, impedance=None, max_scale=None):
     """move_joints through qs[1:], timed like the approach (pose_lengths: no joint, and no turn of the hand, faster
     than `speed` / ROT_LENGTH), not by the tool's travel alone: near the wrist singularity a straight line swings J5
     and J7 a long way for little tool travel. `impedance`: move_joints' impedance dict (None: position control).
     Refused if it fails."""
+    if max_scale is not None:
+        plan = straight_plan(model, qs)
+        run_insertion_plan(arm, model, plan, speed, max_scale, what, gains=impedance)
+        return
     ok = arm.move_joints(
         qs[1:],
         cart_lengths=pm.pose_lengths(model, qs),
@@ -386,6 +424,15 @@ def run_take_out(arm, model, q0, cand, legs, cfg, ctx, log):
     ctx.checkpoint()
     q_pre = np.asarray(arm.raw_joints(), dtype=float)
     insertion = plan_from_pregrasp(model, q_pre, cand, c, arm=arm)
+    if c.get("stop_after_first_insertion", False):
+        ctx.checkpoint()
+        ctx.progress("reach", 0.0)
+        run_insertion_plan(arm, model, insertion["insertion_plans"][0], c["insert_speed"], c["take_approach_speed_scale"], "position insertion")
+        log("STOPPED as requested: first position insertion complete; gripper open, no impedance insertion")
+        ctx.progress("first_insertion_complete", 100.0)
+        return {"executed": True, "stopped_at": "first_insertion", "gripper_open": True,
+                "joints": np.asarray(arm.raw_joints(), dtype=float).tolist()}
+
     # Refuse before insertion if the new local lift endpoint has no valid exit.
     ctx.checkpoint()
     plan_withdrawal(arm, model, insertion["lift"][-1], cand["pre"], c)
@@ -395,6 +442,12 @@ def run_take_out(arm, model, q0, cand, legs, cfg, ctx, log):
     ctx.progress("reach", 0.0)
     log(f"-> straight line in to {c['impedance_in'] * 100:.0f} cm short of the grasp (position control)")
     run_insertion_plan(arm, model, position_plan, c["insert_speed"], c["take_approach_speed_scale"], "position insertion")
+
+    if c.get("stop_after_first_insertion", False):
+        log("STOPPED as requested: first position insertion complete; gripper open, no impedance insertion")
+        ctx.progress("first_insertion_complete", 100.0)
+        return {"executed": True, "stopped_at": "first_insertion", "gripper_open": True,
+                "joints": np.asarray(arm.raw_joints(), dtype=float).tolist()}
 
     # 2b. joint impedance for the last `impedance_in` of the line in only (cfg take_gains); it ends before the close
     ctx.checkpoint()
@@ -436,7 +489,7 @@ def run_take_out(arm, model, q0, cand, legs, cfg, ctx, log):
     # Account for impedance tracking error before committing to the lift.
     ctx.checkpoint()
     plan_withdrawal(arm, model, lift[-1], cand["pre"], c)
-    move_timed(arm, model, lift, "the raise", LIFT_SPEED, "holding the container in the oven")
+    move_timed(arm, model, lift, "the raise", LIFT_SPEED, "holding the container in the oven", max_scale=c.get("motion_speed_scale"))
     ctx.checkpoint()
     ctx.progress("retract", 0.0)
     exit_plan = execute_withdrawal(arm, model, cand["pre"], c, ctx, log)

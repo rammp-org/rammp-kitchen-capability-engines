@@ -144,7 +144,7 @@ params:
   # the hand's peak speed (m/s) on that impedance part of the line in
   impedance_speed: 0.08
   # after closing: straight up this far (m), then the level line back out
-  take_lift: 0.03
+  take_lift: 0.02
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

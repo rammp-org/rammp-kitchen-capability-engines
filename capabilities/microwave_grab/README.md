@@ -429,7 +429,7 @@ Before HOME or approach, real `take_out` goals segment the cavity with SAM3's
 `inside of microwave` prompt and the body with a separate `microwave` request.
 The known-size cavity fit supplies the gravity-aligned frame. Exterior-front
 mask depths supply the surrounding rectangle, excluding the open door and
-interior points. Four wall boxes plus a back leave the cavity empty; the right
+interior points. The top and two side boxes leave the cavity, bottom and back open; the right
 wall includes the control panel. This uses the measured cavity depth and a
 configurable back-wall thickness, rather than inferring hidden walls from depth.
 
@@ -549,3 +549,5 @@ the straight-line, endpoint and local microwave-clearance gates; no local IK
 fallback is used for insertion. Execution preserves cuRobo samples, timing and
 velocities, slowed for the configured speed, with the final segment in impedance.
 Lift and withdrawal retain their existing locally generated, checked paths.
+
+The retrieval microwave model includes only the top, left side, right/control-panel side and open door. Bottom and back are excluded. The selected robot planner config exempts these four named microwave boxes from world padding; robot collision-sphere buffers and other collision layers are unchanged.

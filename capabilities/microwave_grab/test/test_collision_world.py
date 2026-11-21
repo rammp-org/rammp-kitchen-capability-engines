@@ -57,9 +57,11 @@ def test_shell_leaves_cavity_open_and_blocks_control_panel(oven):
     boxes = world.shell_boxes(oven, [-0.28, 0.21, -0.04, 0.25], [0.3048, 0.1905], 0.3048, 0.0286, 0.02)
     for x in [-0.02, 0, 0.10, 0.30]:
         assert not any(inside(b, [x, 0, 0.10]) for b in boxes)
-    for point in [[-0.01, -0.22, 0.1], [0.10, 0.19, 0.1], [0.10, 0, 0.23], [0.10, 0, -0.02], [0.315, 0, 0.1]]:
+    for point in [[-0.01, -0.22, 0.1], [0.10, 0.19, 0.1], [0.10, 0, 0.23]]:
         assert any(inside(b, point) for b in boxes), point
-    assert len(boxes) == 5
+    assert {b["name"] for b in boxes} == {"microwave_control_panel", "microwave_left_wall", "microwave_top"}
+    for point in [[0.10, 0, -0.02], [0.315, 0, 0.1]]:
+        assert not any(inside(b, point) for b in boxes)
 
 
 @pytest.mark.parametrize("outer", [[-0.1, 0.21, -0.04, 0.25], [-0.28, 0.21, 0.01, 0.25], [np.nan, 0.21, -0.04, 0.25]])
@@ -199,7 +201,7 @@ def test_fixed_control_panel_and_borders_preserve_open_cavity(oven):
     panel = next(b for b in boxes if b["name"] == "microwave_control_panel")
     assert panel["dims"][1] == pytest.approx(0.127)
     assert panel["position"][1] + panel["dims"][1] / 2 == pytest.approx(-0.1524)
-    for name in ("microwave_top", "microwave_bottom"):
+    for name in ("microwave_top",):
         assert next(b for b in boxes if b["name"] == name)["dims"][2] == pytest.approx(0.0254)
     for x in [-0.02, 0.1, 0.30]:
         assert not any(inside(b, [x, 0, 0.1]) for b in boxes)

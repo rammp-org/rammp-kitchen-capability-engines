@@ -1,0 +1,14 @@
+robot: /config/robot/curobo/robot.yaml
+world: /config/robot/curobo/world.yaml
+layers:
+- /config/robot/curobo/layer_mebot_seat.yaml
+- /config/robot/curobo/layer_mebot_person.yaml
+planner:
+  num_ik_seeds: 512
+  reseed_each_plan: true
+  graph_fallback: true
+  no_pad_names:
+  - microwave_top
+  - microwave_left_wall
+  - microwave_control_panel
+  - microwave_open_door

@@ -435,3 +435,105 @@ def test_insertion_collision_refuses_without_retrying_approach(motion, monkeypat
     arm.plan_to_pose.assert_called_once()
     arm.plan_to_joints.assert_not_called()
     arm.execute_joint_trajectory.assert_not_called()
+
+
+def test_insertion_requests_fixed_orientation_and_checks_drift(motion, monkeypatch):
+    take, pm = motion
+    arm, model = Mock(), Mock()
+    q = np.zeros(7)
+    model.fk.return_value = np.eye(4)
+    plan = SimpleNamespace(success=True, q=np.array([q, q]), message="")
+    arm.plan_to_pose.return_value = plan
+    monkeypatch.setattr(pm, "end_pose_error", Mock(return_value=(0.0, 0.0)), raising=False)
+    monkeypatch.setattr(pm, "plan_line", Mock(return_value=[q, q]), raising=False)
+    cand = dict(pre=np.zeros(3), target=np.zeros(3), quat=[0, 0, 0, 1], heading=[1, 0, 0])
+    cfg = dict(impedance_in=0.1, take_lift=0.06)
+    take.plan_from_pregrasp(model, q, cand, cfg, arm)
+    assert arm.plan_to_pose.call_count == 2
+    assert all(call.args[3] == take.HOLD_FIXED for call in arm.plan_to_pose.call_args_list)
+    # A planner claiming success must still fail the independent 2-degree check.
+    tilted = np.eye(4)
+    tilted[:3, :3] = take.Rotation.from_euler("x", 3, degrees=True).as_matrix()
+    model.fk.side_effect = [np.eye(4), tilted]
+    with pytest.raises(pm.Refused, match="orientation deviates"):
+        take.plan_from_pregrasp(model, q, cand, cfg, arm)
+
+
+def test_partial_run_plans_only_first_segment(motion, monkeypatch):
+    take, pm = motion
+    arm, model = Mock(), Mock()
+    q = np.zeros(7)
+    model.fk.return_value = np.eye(4)
+    arm.plan_to_pose.return_value = SimpleNamespace(success=True, q=[q, q], message="")
+    later = Mock(side_effect=AssertionError("partial run must not plan lift"))
+    monkeypatch.setattr(pm, "plan_line", later, raising=False)
+    result = take.plan_from_pregrasp(
+        model, q, dict(pre=np.zeros(3), target=[0.1, 0, 0], quat=[0, 0, 0, 1], heading=[1, 0, 0]),
+        dict(impedance_in=0.1, stop_after_first_insertion=True), arm,
+    )
+    assert len(result["insertion_plans"]) == 1
+    assert arm.plan_to_pose.call_count == 1
+    assert arm.plan_to_pose.call_args.args[3] == take.HOLD_FIXED
+    later.assert_not_called()
+
+
+def test_partial_run_stops_before_impedance_close_and_retreat(motion, monkeypatch):
+    take, pm = motion
+    q = np.zeros(7)
+    arm = Mock()
+    arm.raw_joints.return_value = q
+    arm.execute_joint_trajectory.return_value = SimpleNamespace(error_code=pm.SUCCESSFUL)
+    plan = SimpleNamespace(q=[q, q])
+    monkeypatch.setattr(take, "set_gripper", Mock())
+    monkeypatch.setattr(take, "plan_from_pregrasp", Mock(return_value=dict(insertion_plans=[plan])))
+    insertion = Mock()
+    monkeypatch.setattr(take, "run_insertion_plan", insertion)
+    forbidden = Mock(side_effect=AssertionError("must not execute beyond first insertion"))
+    monkeypatch.setattr(take, "plan_withdrawal", forbidden)
+    monkeypatch.setattr(take, "close_on_brim", forbidden)
+    result = take.run_take_out(
+        arm, Mock(), q, {}, dict(approach_t=[0, 1], approach=[q, q], approach_qd=[q, q]),
+        dict(grip_open=0, take_approach_speed_scale=0.3, insert_speed=0.048, stop_after_first_insertion=True),
+        Mock(), Mock(),
+    )
+    assert result["stopped_at"] == "first_insertion"
+    assert insertion.call_count == 1
+    forbidden.assert_not_called()
+
+
+def test_explicit_straight_final_insertion_keeps_pose_planned_first_segment(motion, monkeypatch):
+    take, pm = motion
+    q = np.zeros(7)
+    model, arm = Mock(), Mock()
+    model.fk.return_value = np.eye(4)
+    line = [q, q]
+    plan = SimpleNamespace(success=True, q=line)
+    arm.plan_to_pose.return_value = plan
+    planner = Mock(return_value=line)
+    monkeypatch.setattr(pm, "plan_line", planner, raising=False)
+    monkeypatch.setattr(pm, "end_pose_error", Mock(return_value=(0.0, 0.0)), raising=False)
+    monkeypatch.setattr(pm, "check_line", Mock())
+    monkeypatch.setattr(take, "straight_plan", Mock(return_value=plan))
+    result = take.plan_from_pregrasp(
+        model, q, dict(pre=np.zeros(3), target=[0.1, 0, 0], quat=[0, 0, 0, 1], heading=[1, 0, 0]),
+        dict(impedance_in=0.1, take_lift=0.02, straight_insertion=True), arm,
+    )
+    assert len(result["insertion_plans"]) == 2
+    assert planner.call_count == 2  # final insertion, then lift
+    pm.check_line.assert_called_once()
+    arm.plan_to_pose.assert_called_once()
+    assert arm.plan_to_pose.call_args.args[3] == take.HOLD_FIXED
+
+
+def test_explicit_motion_scale_uses_driver_trajectory_without_legacy_move(motion, monkeypatch):
+    take, _ = motion
+    arm, model = Mock(), Mock()
+    qs = [np.zeros(7), np.ones(7)]
+    plan = SimpleNamespace()
+    monkeypatch.setattr(take, "straight_plan", Mock(return_value=plan))
+    execute = Mock()
+    monkeypatch.setattr(take, "run_insertion_plan", execute)
+    take.move_timed(arm, model, qs, "lift", 0.05, "holding", max_scale=0.3)
+    assert execute.call_args.args[2] is plan
+    assert execute.call_args.args[4] == 0.3
+    arm.move_joints.assert_not_called()

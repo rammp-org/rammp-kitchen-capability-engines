@@ -25,7 +25,7 @@ def _vector(value, name):
 
 
 def shell_boxes(oven, outer, opening, depth, recess, wall):
-    """Four surrounding walls and a back; right wall includes the control panel.
+    """Top and two sides only; right side includes the control panel.
 
     outer is (left/right horizontal bounds, bottom/top height bounds) in the
     cavity's A/S/Z frame. A increases toward the viewer's left; S into the oven.
@@ -42,9 +42,7 @@ def shell_boxes(oven, outer, opening, depth, recess, wall):
     return [
         oven.box("microwave_control_panel", (a0, -width / 2), (-recess, depth + wall), (z0, z1)),
         oven.box("microwave_left_wall", (width / 2, a1), (-recess, depth + wall), (z0, z1)),
-        oven.box("microwave_bottom", (-width / 2, width / 2), (-recess, depth + wall), (z0, 0)),
         oven.box("microwave_top", (-width / 2, width / 2), (-recess, depth + wall), (height, z1)),
-        oven.box("microwave_back", (-width / 2, width / 2), (depth, depth + wall), (0, height)),
     ]
 
 
