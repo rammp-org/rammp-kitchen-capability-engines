@@ -92,7 +92,11 @@ GRASP = "side"
 # camera's handle point; the wrist camera's (detect_camera wrist, the default) is unchecked for it: watch where the
 # fingers close ---
 SIDE_INSERT_DEG = 70.0  # the hand slides in this far off the door normal: 20 deg off the face, from in front of it
-SIDE_PADS_INTO_M = 0.011  # the pads' line: this far behind the detected handle point, into the door ...
+# the pads' line: this far behind the detected handle point, into the door ... 0.011 until 11-20: on the new fridge the
+# back finger touched the handle's mounting plate a little (the handle point came out 2-3 cm behind the bar's front
+# when SAM 3's mask took in the plate: runs/20261121_000438_open, _001341_open); 5 mm less, the grasp otherwise as
+# tuned on 11-06
+SIDE_PADS_INTO_M = 0.006
 SIDE_PADS_PAST_BAR_M = 0.05  # ... and the pads this far further along the approach (11-06: 17 cm in from a waypoint
 # 12 cm short of the bar: the fingers wrap the bar deep in the hand)
 SIDE_TILTS_DEG = (0, -10, 10, -20, 20, -30, 30, -40, 40)  # nose-down (+) / nose-up (-) tilts about the finger axis,
