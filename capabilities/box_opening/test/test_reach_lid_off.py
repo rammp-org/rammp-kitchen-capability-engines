@@ -253,9 +253,10 @@ def _full_flow(
     runner = R(ctx.client, log_dir=tmp_path)
     queue = list(aims)
 
-    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag, min_hits=None):
+    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag, min_hits=None, **kw):
         rec.events.append("aim:" + tag)
         rec.aim_hits.append((tag, min_hits))
+        rec.aims.append((tag, lid_z, tuple(prior_xy), kw))
         got = queue.pop(0) if queue else None
         if got is None:
             return None, "no circle", None, None
@@ -7684,3 +7685,75 @@ def test_a_wrist_fix_presses_from_the_scene_cameras_top_only_where_main_handed_i
     out = capsys.readouterr().out
     assert code == 0 and "the scene camera puts the lid 50 mm higher than the wrist's aim" in out
     assert "0 mm from the scene camera's" in out and "from the wrist's own find" not in out
+
+
+# the lid under the look by the look's own frame (reach_press.lid_under_look), 30 mm under the scene camera's
+# top (BUTTON's z) and on its own counter, and what the look's aims are then asked with besides its top
+LOOK_TOP, LOOK_COUNTER = BUTTON[2] - 0.03, BUTTON[2] - 0.03 - 0.093
+BY_LOOK = {"lid_by_view": True}
+
+
+def _lid_under_look(monkeypatch):
+    trp._look_frame(monkeypatch, tops=[(BUTTON[0] + 0.004, BUTTON[1] - 0.002, LOOK_TOP, LOOK_COUNTER)])
+
+
+def test_a_lid_the_looks_frame_measures_lower_than_the_scene_cameras_is_pressed_from_the_scene_cameras_top(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    """The look's aim goes by the lid its own frame measured, 30 mm under the scene camera's top; the press
+    still starts from the highest of the tops it always went by, the scene camera's here, as it did before."""
+    _lid_under_look(monkeypatch)
+    low = (BUTTON[0], BUTTON[1], LOOK_TOP)  # the aim's own height for the button, the look frame's lid
+    up = (low[0], low[1], low[2] + 0.009)  # ... and for the popped knob after the press, by the same camera
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(low, 0.4), (up, 9.0)])
+    assert code == 0 and rec.aims[0] == ("reach-aim", LOOK_TOP, BUTTON[:2], BY_LOOK)
+    out = capsys.readouterr().out
+    assert "the scene camera puts the lid 30 mm higher than the wrist's aim: pressing from that height" in out
+    assert "LOOK: the look pose's own frame has the lid 4 mm from the aimed point" in out
+
+
+def test_an_open_box_under_a_lid_the_looks_frame_measures_has_its_lid_taken_off_unpressed(
+    ctx, monkeypatch, tmp_path, capsys
+):
+    _lid_under_look(monkeypatch)
+    code, rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, [(UP, 9.0)])
+    assert code == 0
+    assert rec.events == ["reach:look", "aim:reach-aim", *GRIP, *CLOSE, *CARRY, *HOME]
+    assert rec.aims[0] == ("reach-aim", LOOK_TOP, BUTTON[:2], BY_LOOK)
+    assert [(r["button_above_lid_mm"], r["opened"]) for r in rows if r["leg"] == "open_box"] == [(9.0, True)]
+    assert "ALREADY OPEN" in capsys.readouterr().out
+
+
+def test_a_knob_in_between_under_a_lid_the_looks_frame_measures_is_rechecked_by_that_lid(ctx, monkeypatch, tmp_path):
+    _lid_under_look(monkeypatch)
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, [(BUTTON, 4.4), (BUTTON, 1.0), (UP, 9.0)])
+    assert code == 0
+    assert [a for a in rec.aims if a[0] != "reach-after"] == [
+        ("reach-aim", LOOK_TOP, BUTTON[:2], BY_LOOK),
+        ("reach-recheck", LOOK_TOP, BUTTON[:2], BY_LOOK),
+    ]
+
+
+def _prior_button(fix):
+    """The look's prior button over the lid `fix`, as look_again makes it."""
+    from box_opening.models.container import from_container
+
+    b = from_container(fix.pose, ContainerModel.load(PINK).button_offset)
+    return float(b[0]), float(b[1]), float(fix.top_xyz[2])
+
+
+def test_after_a_look_again_the_aims_go_by_the_look_agains_lid_not_the_first_looks_frame(ctx, monkeypatch, tmp_path):
+    """The lid the first look's frame measured is the one under THAT look: a look again stands over another
+    lid, and its aims, the recheck too, go by that lid's top as they did before."""
+    _lid_under_look(monkeypatch)
+    lid = _wrist_lid()
+    _lids(monkeypatch, (lid, None))
+    aims = [None, (BUTTON, 4.4), (BUTTON, 1.0), (UP, 9.0)]
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, aims)
+    assert code == 0
+    again = _prior_button(lid)
+    assert [a for a in rec.aims if a[0] != "reach-after"] == [
+        ("reach-aim", LOOK_TOP, BUTTON[:2], BY_LOOK),
+        ("reach-aim", again[2], again[:2], {}),
+        ("reach-recheck", again[2], again[:2], {}),
+    ]

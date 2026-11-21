@@ -1841,11 +1841,13 @@ REACH_AIM_S = 4.0
 REACH_AIM_HITS = 2
 
 
-def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag, min_hits=None):
+def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag, min_hits=None, lid_by_view=False):
     """(got, status, the knob's height above its lid in mm, the press point
     as the wrist measured it) from aim_button_at_staging, within REACH_AIM_S
-    and on REACH_AIM_HITS agreeing hits (`min_hits` where given), got's point moved AIM_FORWARD_M
-    out from the arm (aim_forward). got's z is raised by the wrist's
+    and on REACH_AIM_HITS agreeing hits (`min_hits` where given), with
+    `lid_by_view` the lid judged against `lid_z` as a frame of this view
+    measured it (lid_under_look, _aim_heights), got's point moved
+    AIM_FORWARD_M out from the arm (aim_forward). got's z is raised by the wrist's
     table offset (button_aim.ButtonAimer.fix): the height the arm and the
     scene camera are compared with. The measured point is the one the
     wrist's own readings are judged against — the lid after the press, the
@@ -1877,6 +1879,7 @@ def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag, min_hits=None):
         lid_z=lid_z,
         prior_xy=prior_xy,
         min_hits=REACH_AIM_HITS if min_hits is None else int(min_hits),
+        lid_by_view=lid_by_view,
     )
     measured = seen.get("measured_xyz", None if got is None else got[0])
     if got is not None:
@@ -1884,12 +1887,21 @@ def _aim(node, watcher, yaw, lid_z, prior_xy, runner, tag, min_hits=None):
     return got, status, seen.get("button_up_mm"), measured
 
 
-def judge_knob(node, watcher, yaw, prior_button, runner, first):
+def _aim_heights(prior_button, look):
+    """(lid_z, the rest of _aim's arguments) for an aim at `prior_button`: its own top, or `look`
+    (lid_under_look's top) with the lid judged against it as it is. The table is the run's either way."""
+    if look is None:
+        return prior_button[2], {}
+    return look, {"lid_by_view": True}
+
+
+def judge_knob(node, watcher, yaw, prior_button, runner, first, look=None):
     """The open/shut call before the press (press_demo.knob_call) on
     `first`, the look's aim (_aim's got, status, knob mm, measured). A
     knob read neither flush nor up, or not read, is aimed at once more from
-    the same pose ('reach-recheck'), and that aim decides where it read the
-    knob: still in between, the box is taken for open (the wrist study's
+    the same pose ('reach-recheck'), judged against the lid top the first
+    was (`look`: lid_under_look's, _aim_heights), and that aim decides
+    where it read the knob: still in between, the box is taken for open (the wrist study's
     band, press_demo.KNOB_SHUT_BELOW_MM). Returns (the deciding aim, its
     call, every reading in order), the call noted ('knob_call')."""
     from box_opening.tasks.press_demo import knob_call
@@ -1898,7 +1910,8 @@ def judge_knob(node, watcher, yaw, prior_button, runner, first):
     call = knob_call(first[2])
     looks = 1
     if call in ("band", "unread"):
-        again = _aim(node, watcher, yaw, prior_button[2], prior_button[:2], runner, "reach-recheck")
+        lid_z, by_look = _aim_heights(prior_button, look)
+        again = _aim(node, watcher, yaw, lid_z, prior_button[:2], runner, "reach-recheck", **by_look)
         looks += 1
         if again[0] is not None:
             reads.append(again[2])
@@ -2999,6 +3012,125 @@ def _selection(ctx, args, locator, scene_fix):
     return selected, tie, alone
 
 
+def _under_look(xy, aimed_xy, m):
+    """Whether a top at `xy` stands within half a lid of `aimed_xy`, where the look was aimed: the lid the
+    look stood over."""
+    lid_m = float(max(m.lid_dims[0], m.lid_dims[1]))
+    return math.hypot(float(xy[0]) - float(aimed_xy[0]), float(xy[1]) - float(aimed_xy[1])) < 0.5 * lid_m
+
+
+def _frame_from_here(node, watcher, runner, m, tag, timeout_s=None):
+    """One wrist frame shot from where the arm stands (survey.grab_frame, `tag` its wait for a still arm,
+    `timeout_s` how long it waits for frames, unset survey.SURVEY_FRAME_S) and the wrist's finder on it,
+    geometry alone (no button asked of it), the frame kept for inspection (survey.save_frame): (the frame,
+    its WristFind, None, (the frame's s, the finder's s)), or (None, None, why, (the s waited, None)) with
+    no frame."""
+    from box_opening.perception import wrist_finder as wf
+    from box_opening.tasks import survey as sv
+
+    t0 = time.monotonic()
+    wait = {} if timeout_s is None else {"timeout_s": float(timeout_s)}
+    frame, snap, pose, why = sv.grab_frame(node, watcher, runner, tag, **wait)
+    t1 = time.monotonic()
+    if frame is None:
+        return None, None, why, (t1 - t0, None)
+    find = wf.find_container([frame], m, check_buttons=False)
+    t2 = time.monotonic()
+    try:
+        sv.save_frame(watcher, snap, pose, frame, find.why)
+    except Exception as e:  # noqa: BLE001 - a frame kept for inspection only
+        log.info("[press_demo] (the look pose's frame was not kept: %s)" % e)
+    return frame, find, None, (t1 - t0, t2 - t1)
+
+
+# THE LID UNDER THE LOOK, BY THE LOOK'S OWN FRAME. The oblique aim expects the lid ring at the find's box
+# height (its top less its own counter) carried onto the table the look's frame sees
+# (button_aim.find_button_oblique), within LID_PRIOR_TOL_M (30 mm). Where the find is the wrist's survey
+# from the rest pose, far and tilted, its counter is no measure of the box: RAMMP 1.5, 2026-11-20, two runs
+# in a row ended "no button from the look pose" with the lid in plain view; the survey read the counter at
+# 0.252 where the run before read 0.271, the box 116 mm tall against 94.5, and at 22:09 the aim threw the
+# button's circle away, "lid ring -34 mm from its prior height" (the run before had passed by 18 mm). The
+# look's own frame, the finder on it (22:09's: the lid 4 mm from the aimed point, top 0.377 over a counter
+# at 0.282), has the lid where the aim sees it: the aim is judged against that top, nothing carried
+# (lid_by_view), and with it found the button within 2 mm of the lid's centre. That top is all that changes,
+# and only for the look's aims: the aim's table is the run's (its offset, and the fix's z raised by it, the
+# wrist against that table, as ever); the run's box, its table, its worlds and what the press starts from
+# are untouched. The frame waits no longer than the aim itself may (LOOK_LID_FRAME_S): with no wrist
+# frames the aim cannot aim either.
+LOOK_LID_TAG = "reach-look-lid"
+LOOK_LID_FRAME_S = REACH_AIM_S
+
+
+def lid_under_look(node, ctx, runner, watcher, aimed):
+    """The lid under the look by the look pose's own frame (the note above): its top z where the wrist's
+    finder has exactly one lid-sized top within half a lid of `aimed` (the look's prior button, its z the
+    find's top) in one frame shot from where the arm stands, else None: no frame, none there, two there,
+    one with no height over a counter, or a finder that raised. Says which in one LOOK line and a
+    'look_lid' row, the frame's top and counter beside the find's top and the run's table. Changes
+    nothing: the run's box, its table and its worlds stay what they are."""
+    m = ctx.model
+    given_top = float(aimed[2])
+    given_table = getattr(watcher, "table_z", None)
+    got, why, near_m, took = None, None, None, (None, None)
+    try:
+        frame, find, why, took = _frame_from_here(node, watcher, runner, m, LOOK_LID_TAG, LOOK_LID_FRAME_S)
+        if frame is None:
+            why = "no wrist frame from the look pose (%s)" % why
+        else:
+            tops = [q for q in find.places if q.button != "none"]
+            if tops:
+                near_m = min(math.hypot(q.xy[0] - aimed[0], q.xy[1] - aimed[1]) for q in tops)
+            under = [q for q in tops if _under_look(q.xy, aimed, m)]
+            if len(under) > 1:
+                why = "%d lid-sized tops within half a lid of the aimed point" % len(under)
+            elif not under:
+                why = "no lid-sized top within half a lid of the aimed point (%s)" % (
+                    "the nearest %.0f mm from it" % (1000 * near_m) if tops else find.why
+                )
+            elif not (math.isfinite(under[0].top_z) and math.isfinite(under[0].table_z)):
+                why = "the lid-sized top under the look has no height over a counter"
+            else:
+                got = (float(under[0].top_z), float(under[0].table_z))
+    except Exception as e:  # noqa: BLE001 - never the run's end: the look's aims go by the find's heights
+        why = "the look pose's frame or finder failed: %s" % e
+    table = float("nan") if given_table is None else float(given_table)
+    if got is None:
+        log.info(
+            "[press_demo] LOOK: no lid by the look pose's own frame (%s) — the aim goes by the find's top at %.3f "
+            "over the table at %.3f" % (why, given_top, table)
+        )
+    else:
+        log.info(
+            "[press_demo] LOOK: the look pose's own frame has the lid %.0f mm from the aimed point, its top at %.3f "
+            "over a counter at %.3f; the find had its top at %.3f over the table at %.3f (the frame's top %+.0f mm "
+            "from it, its counter %+.0f mm, the box %+.0f mm) — the aim judges the lid by this frame's top"
+            % (
+                1000 * near_m,
+                got[0],
+                got[1],
+                given_top,
+                table,
+                1000 * (got[0] - given_top),
+                1000 * (got[1] - table),
+                1000 * ((got[0] - got[1]) - (given_top - table)),
+            )
+        )
+    if runner is not None:
+        runner.note(
+            "look_lid",
+            found=got is not None,
+            why=why,
+            top_z=None if got is None else round(got[0], 4),
+            table_z=None if got is None else round(got[1], 4),
+            find_top_z=round(given_top, 4),
+            table_given=None if given_table is None else round(float(given_table), 4),
+            from_aimed_mm=None if near_m is None else round(1000 * near_m, 1),
+            frame_s=None if took[0] is None else round(took[0], 3),
+            finder_s=None if took[1] is None else round(took[1], 3),
+        )
+    return None if got is None else got[0]
+
+
 def lid_from_here(node, ctx, runner, watcher, args, locator, scene_fix, aimed_xy):
     """The container the wrist's finder has in a frame shot from where the arm stands (the look pose, the
     aim having found no button near `aimed_xy`): (its fix, None, how it was taken: press_demo.BY_*), or (None, why
@@ -3020,20 +3152,15 @@ def lid_from_here(node, ctx, runner, watcher, args, locator, scene_fix, aimed_xy
     from box_opening.tasks import survey as sv
 
     m = ctx.model
-    frame, snap, pose, why = sv.grab_frame(node, watcher, runner, RELOOK_TAG)
+    frame, find, why, _took = _frame_from_here(node, watcher, runner, m, RELOOK_TAG)
     if frame is None:
         return None, "no wrist frame from the look pose (%s)" % why, None
     lid_m = float(max(m.lid_dims[0], m.lid_dims[1]))
     selected, tie, alone = _selection(ctx, args, locator, scene_fix)
 
     def aimed_at(xy):
-        return math.hypot(float(xy[0]) - float(aimed_xy[0]), float(xy[1]) - float(aimed_xy[1])) < 0.5 * lid_m
+        return _under_look(xy, aimed_xy, m)
 
-    find = wf.find_container([frame], m, check_buttons=False)
-    try:
-        sv.save_frame(watcher, snap, pose, frame, find.why)
-    except Exception as e:  # noqa: BLE001 - a frame kept for inspection only
-        log.info("[press_demo] (the look pose's frame was not kept: %s)" % e)
     here = "the wrist's frame from the look pose"
     tops = [q for q in find.places if q.button != "none" and not aimed_at(q.xy)]
     # what the tie's rival test and --wrist-alone's count read: the frame's tops but for what stands where
@@ -3564,7 +3691,10 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
             )
             return 1
 
-    got, status, up_mm, measured = _aim(node, watcher, yaw, prior_button[2], prior_button[:2], runner, "reach-aim")
+    # the lid top by the look's own frame, where it shows one under the look: what the look's aims judge it by
+    look = lid_under_look(node, ctx, runner, watcher, prior_button)
+    lid_z, by_look = _aim_heights(prior_button, look)
+    got, status, up_mm, measured = _aim(node, watcher, yaw, lid_z, prior_button[:2], runner, "reach-aim", **by_look)
     relooks, no_more = 0, None
     # a compliant run only: a guarded one references its guards at the look pose it flew to (at_look)
     clock = rlo.RunClock(runner) if got is None and soft else None
@@ -3584,6 +3714,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         scene_fix, plan, prior_button, locator = again.fix, again.plan, again.button, None
         yaw, counter_z, seen = scene_fix.pose.yaw, again.counter_z, again.seen
         eyes = (node, watcher, scene_fix, list(again.q_from))
+        look = None  # the frame's lid was under the look before: from here the aims go by the look again's lid
         got, status, up_mm, measured = _aim(node, watcher, yaw, prior_button[2], prior_button[:2], runner, "reach-aim")
     if got is None:
         if not soft:
@@ -3603,7 +3734,7 @@ def _reach_press(node, ctx, cfg, runner, watcher, args, scene_fix, locator):
         return 2
     # pressed only with the knob read flush; in between, looked at once more (judge_knob)
     (got, status, up_mm, measured), call, reads = judge_knob(
-        node, watcher, yaw, prior_button, runner, (got, status, up_mm, measured)
+        node, watcher, yaw, prior_button, runner, (got, status, up_mm, measured), look
     )
     if call == "unread":
         _go_home(

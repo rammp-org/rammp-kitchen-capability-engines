@@ -425,6 +425,7 @@ def aim_button_at_staging(
     lid_z=None,
     prior_xy=None,
     min_hits=None,
+    lid_by_view=False,
 ):
     """The wrist's press aim: the button's circle alone (owner's design
     2026-09-17 — no OWL and no box-footprint gate here; the scene camera
@@ -438,12 +439,26 @@ def aim_button_at_staging(
     lid_z / prior_xy: the lid height to expect and where the button should
     be — what the reach-out press's oblique look aims with (button_aim);
     min_hits: the agreeing hits a tilted view's fix takes (unset, MIN_HITS).
+    lid_by_view: lid_z is the lid top a frame of this same view measured
+    (reach_press.lid_under_look), and the lid is judged against that top as
+    it is (button_aim.find_button); the table is the watcher's all the same,
+    so the table offset, and the fix's z raised by it, are the wrist against
+    the run's table. The AIM line and the aim's row then say which top it
+    was judged against.
     `out` gets button_up_mm and measured_xyz, the press point as the wrist
     measured it: what the wrist's own later readings are judged against."""
     from box_opening.perception.button_aim import ButtonAimer
 
     # only what is set: unset, the call is the straight-down aim's own
     kw = {k: v for k, v in (("lid_z", lid_z), ("prior_xy", prior_xy), ("min_hits", min_hits)) if v is not None}
+    # the lid top the aim went by, said where it is the look frame's own
+    by_view, by_view_row = "", {}
+    if lid_by_view:
+        if lid_z is None:
+            raise ValueError("lid_by_view without the lid_z that view measured")
+        kw["lid_by_view"] = True
+        by_view = "; the lid judged against its top as the look's own frame measured it, %.3f" % lid_z
+        by_view_row = dict(lid_by_view=True, lid_z=round(float(lid_z), 4))
     aimer = ButtonAimer(watcher.grab, watcher.model, watcher.table_z, **kw)
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout_s:
@@ -466,7 +481,7 @@ def aim_button_at_staging(
             # "4/19 frames agree" where 3 of its 4 hits did
             log.info(
                 "[press_demo] AIM: button circle at pixel (%.0f, %.0f) r %.0f px, %.0f mm across, %s above its own "
-                "lid%s%s; pressing its centre; %d of %d hits agree (%d frames, %.1f s)"
+                "lid%s%s; pressing its centre; %d of %d hits agree (%d frames, %.1f s)%s"
                 % (
                     s.uv[0],
                     s.uv[1],
@@ -479,6 +494,7 @@ def aim_button_at_staging(
                     aimer.hits,
                     aimer.frames,
                     time.monotonic() - t0,
+                    by_view,
                 )
             )
             warn = table_offset_warning(off_raw)
@@ -524,6 +540,7 @@ def aim_button_at_staging(
                     # cause (moving, no pose, a gate) recorded nowhere
                     rejects=dict(aimer.rejects.most_common(AIM_REJECTS_KEPT)),
                     capture=None if folder is None else str(folder),
+                    **by_view_row,
                 )
             return (xyz, yaw), aimer.status()
         # A tick that took a frame goes straight on to the next: judging a
@@ -545,6 +562,7 @@ def aim_button_at_staging(
             hit_s=[round(float(v), 2) for v in aimer.hit_s],
             rejects=dict(aimer.rejects.most_common(AIM_REJECTS_KEPT)),
             last_reject=aimer.last_why,
+            **by_view_row,
         )
     return None, aimer.status()
 

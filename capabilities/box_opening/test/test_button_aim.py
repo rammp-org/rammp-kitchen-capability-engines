@@ -517,6 +517,43 @@ def test_a_lid_low_over_its_own_table_is_still_refused(pink, inc):
     assert s is None and "lid ring -40 mm from its prior height" in why, why
 
 
+@pytest.mark.parametrize("inc", [29, 39])
+def test_a_lid_top_this_view_measured_is_not_moved_by_the_table_it_sees(pink, inc):
+    """RAMMP 1.5 2026-11-20 22:09: the table the look's frame saw stood 43 mm above the one the aim was given,
+    the find's box height carried onto it put the gate 34 mm over the lid, and the button was refused with the
+    lid in plain view. Given the lid top this view measured (lid_by_view), the lid is judged against that top:
+    the button. The table offset is still read and reported. The same frame and top without the flag: the
+    box height carried onto that table, refused as it was."""
+    color, depth, cam, rot, b = reach_out_frame(pink, inc, table_drop=-0.043)
+    prior = tuple(b[:2])
+    s, why = find_button(
+        color, depth, OAK_K, rot, cam, FLAT_TABLE_Z, pink, lid_z=b[2], prior_xy=prior, lid_by_view=True
+    )
+    assert why is None, why
+    assert np.hypot(s.xyz[0] - b[0], s.xyz[1] - b[1]) < 0.002
+    assert s.xyz[2] == pytest.approx(b[2], abs=0.003) and s.lid_z_m == pytest.approx(b[2], abs=0.003)
+    assert s.table_offset_raw_m == pytest.approx(0.043, abs=0.003)
+    s0, why0 = find_button(color, depth, OAK_K, rot, cam, FLAT_TABLE_Z, pink, lid_z=b[2], prior_xy=prior)
+    assert s0 is None and "-43 mm from" in why0 and "prior height" in why0, why0
+    assert "the table in view +43 mm from the one given, the lid judged against it" in why0
+
+
+@pytest.mark.parametrize("inc", [29, 39])
+def test_a_lid_top_this_view_measured_still_gates_the_ring(pink, inc):
+    """lid_by_view carries no table offset into the gate and widens nothing: a lid top 40 mm over the ring
+    this frame sees is refused, here where the lid and its table both stand 40 mm under the top given and
+    the table offset alone would have taken it; and the refusal says what the lid was judged against."""
+    color, depth, cam, rot, b = reach_out_frame(pink, inc, lid_drop=0.040)
+    prior = tuple(b[:2])
+    s, why = find_button(color, depth, OAK_K, rot, cam, FLAT_TABLE_Z, pink, lid_z=_h0(pink), prior_xy=prior)
+    assert why is None, why  # carried: the box height above the table this frame sees
+    s1, why1 = find_button(
+        color, depth, OAK_K, rot, cam, FLAT_TABLE_Z, pink, lid_z=_h0(pink), prior_xy=prior, lid_by_view=True
+    )
+    assert s1 is None and "lid ring -40 mm from its prior height" in why1, why1
+    assert "the lid judged against its top as this view measured it" in why1
+
+
 def test_the_prior_cut_slides_a_circle_over_the_heights_the_gates_allow():
     """With a table offset the gates allow a lid around h0 moved by it, and
     the cut on the prior slides each circle over that band, not h0's."""
@@ -1087,6 +1124,63 @@ def test_the_1059_regrip_rectified_on_the_wrists_own_lid_finds_the_knob_not_the_
     assert why0 is None and s0.diameter_m > 0.058, why0
 
 
+# RAMMP 1.5 2026-11-20 22:09: the frame the look's aim judged and refused ("lid ring -34 mm from its prior
+# height"; a reach-look capture, no fused depth), and the frame the look again shot from the same pose a
+# second later, which the wrist's finder ran on (a survey capture, fused). The run's heights: the find's.
+GEN15_2209_AIM = "wrist_reach_look_gen15_20261120_2209.npz"
+GEN15_2209_LID = "wrist_look_lid_gen15_20261120_2209.npz"
+GEN15_2209_TABLE, GEN15_2209_TOP, GEN15_2209_AIMED = 0.2520, 0.3680, (0.575, -0.269)
+
+
+def test_the_2209_look_judged_against_its_own_frames_lid_finds_the_button(pink):
+    """RAMMP 1.5 2026-11-20 22:09: the survey from the rest pose read its counter 19 mm low, so its box
+    height carried onto the table the look saw put the gate 34 mm over the lid, and the aim threw the button
+    away with the lid in plain view. The wrist's finder on the look pose's own frame has the lid at the aimed
+    point, its top 0.377 over a counter at 0.282; judged against that top, nothing carried, on the run's own
+    table as given, the aim finds the button at the lid's centre and reads the knob flush (the box was shut).
+    The table this frame sees still reads 43 mm above the one given, too far to be taken out of the fix."""
+    from box_opening.perception import wrist_finder as wf
+
+    f = wf.frame_from_capture(fixture_path(GEN15_2209_AIM), fused=False)
+    looked = wf.frame_from_capture(fixture_path(GEN15_2209_LID))
+    aimed = GEN15_2209_AIMED
+    s0, why0 = find_button(
+        f.color,
+        f.depth,
+        f.k,
+        f.rot_cam,
+        f.trans_cam,
+        GEN15_2209_TABLE,
+        pink,
+        dist=f.dist,
+        lid_z=GEN15_2209_TOP,
+        prior_xy=aimed,
+    )
+    assert s0 is None and "lid ring -34 mm from its prior height" in why0, why0
+    find = wf.find_container([looked], pink, check_buttons=False)
+    half = 0.5 * max(pink.lid_dims[0], pink.lid_dims[1])
+    (lid,) = (q for q in find.places if np.hypot(q.xy[0] - aimed[0], q.xy[1] - aimed[1]) < half)
+    assert np.hypot(lid.xy[0] - aimed[0], lid.xy[1] - aimed[1]) < 0.008
+    assert lid.top_z == pytest.approx(0.377, abs=0.003) and lid.table_z == pytest.approx(0.282, abs=0.003)
+    s, why = find_button(
+        f.color,
+        f.depth,
+        f.k,
+        f.rot_cam,
+        f.trans_cam,
+        GEN15_2209_TABLE,
+        pink,
+        dist=f.dist,
+        lid_z=lid.top_z,
+        prior_xy=aimed,
+        lid_by_view=True,
+    )
+    assert why is None, why
+    assert s.oblique and np.hypot(s.xyz[0] - lid.xy[0], s.xyz[1] - lid.xy[1]) < 0.005
+    assert abs(s.above_lid_m) < 0.003 and s.lid_z_m == pytest.approx(lid.top_z, abs=0.010)
+    assert s.table_offset_raw_m == pytest.approx(0.0435, abs=0.003) and not np.isfinite(s.table_offset_m)
+
+
 def test_still_frames_fuse_their_depth_and_a_moved_camera_starts_again():
     """A tilted view's aim judges each frame on the depth of the still frames
     before it too: holes in one frame are filled from the others, per pixel,
@@ -1270,6 +1364,9 @@ def test_a_synthetic_top_down_frame_takes_the_old_path(pink):
     np.testing.assert_equal(astuple(s2), astuple(s))
     s3, why3 = find_button(color, depth, OAK_K, ROT_DOWN, cam, FLAT_TABLE_Z, pink, prior_xy=(b[0] + 0.1, b[1]))
     assert s3 is None and "100 mm from where the box is" in why3
+    # a lid top this view measured is the oblique aim's: straight down, as lid_z, it changes nothing
+    s4, _ = find_button(color, depth, OAK_K, ROT_DOWN, cam, FLAT_TABLE_Z, pink, lid_z=h0 + 0.05, lid_by_view=True)
+    np.testing.assert_equal(astuple(s4), astuple(s))
 
     cam8, rot8 = reach_out_pose(b, 8, 0.13, off_deg=0.0)
     color, depth = render(cam8, rot8, [(BUTTON_XY, h0, 0.0)], h0 - BOX_H)
@@ -1325,6 +1422,79 @@ def test_the_aimer_hands_its_priors_to_every_aim(pink, monkeypatch):
     fx = aimer.fix()
     assert np.hypot(fx[0] - b[0], fx[1] - b[1]) < 0.002 and fx[2] == pytest.approx(b[2], abs=0.003)
     assert aimer.last_sighting.oblique
+
+
+def _aim_fix(pink, monkeypatch, frame, table_z, **kw):
+    """ButtonAimer on two still frames of `frame` (reach_out_frame's) given `table_z` and `kw`: its fix (as
+    the press goes by it, as measured) and its table offset, or None without a fix."""
+    from types import SimpleNamespace
+
+    from box_opening.perception import button_aim, depth_source
+
+    color, depth, cam, rot, _b = frame
+    monkeypatch.setattr(depth_source, "camera_pose_at", lambda g, offset_s=None, stamp=None: (rot, cam))
+    g = SimpleNamespace(color=color, depth=depth, k=OAK_K, dist=None, color_stamp=None)
+    aimer = button_aim.ButtonAimer(g, pink, table_z, min_hits=2, **kw)
+    for i in (1, 2):
+        g.color_stamp = SimpleNamespace(sec=i, nanosec=0)
+        aimer.tick()
+    if aimer.fix() is None:
+        return None
+    return aimer.fix(), aimer.fix(measured=True), aimer.table_offset_m()
+
+
+@pytest.mark.parametrize("inc", [29, 39])
+def test_a_lid_top_this_view_measured_still_raises_the_fix_by_the_runs_table(pink, monkeypatch, inc):
+    """Red team, round 1: the wrist reading its lid and its table both 20 mm under the run's. Aimed with the
+    find's top, the fix's z is raised by that table offset, back to the run's height (what bounds a guarded
+    press from below). Aimed with the top this view measured (lid_by_view), on the run's table as every aim
+    is, the fix is the same: the table offset is still the wrist against the run's table."""
+    frame = reach_out_frame(pink, inc, lid_drop=0.020)
+    b = frame[4]
+    old = _aim_fix(pink, monkeypatch, frame, FLAT_TABLE_Z, lid_z=_h0(pink), prior_xy=tuple(b[:2]))
+    new = _aim_fix(pink, monkeypatch, frame, FLAT_TABLE_Z, lid_z=b[2], prior_xy=tuple(b[:2]), lid_by_view=True)
+    assert old is not None and new is not None
+    assert old[2] == pytest.approx(-0.020, abs=0.003) and new[2] == pytest.approx(old[2], abs=0.001)
+    assert old[1][2] == pytest.approx(b[2], abs=0.003) and new[1] == pytest.approx(old[1], abs=0.001)
+    assert old[0][2] == pytest.approx(_h0(pink), abs=0.004) and new[0] == pytest.approx(old[0], abs=0.001)
+
+
+def test_lid_by_view_without_a_lid_z_changes_nothing(pink):
+    """The flag says lid_z is this view's: with no lid_z the lid is judged as ever, a box's height above the
+    table this frame sees (here 40 mm under the one given, lid and table alike)."""
+    from dataclasses import astuple
+
+    color, depth, cam, rot, b = reach_out_frame(pink, 39, lid_drop=0.040)
+    s, why = find_button(color, depth, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=tuple(b[:2]))
+    s1, why1 = find_button(color, depth, OAK_K, rot, cam, FLAT_TABLE_Z, pink, prior_xy=tuple(b[:2]), lid_by_view=True)
+    assert why is None and why1 is None, (why, why1)
+    np.testing.assert_equal(astuple(s1), astuple(s))
+
+
+def test_the_aimer_judges_every_frame_against_a_lid_top_its_view_measured(pink, monkeypatch):
+    """ButtonAimer(lid_by_view=True) hands the flag to every find_button: on the frame whose table stands 43
+    mm above the one given, it fixes on the button; without the flag, every frame is refused as it was."""
+    from types import SimpleNamespace
+
+    from box_opening.perception import button_aim, depth_source
+
+    color, depth, cam, rot, b = reach_out_frame(pink, 39, table_drop=-0.043)
+    monkeypatch.setattr(depth_source, "camera_pose_at", lambda g, offset_s=None, stamp=None: (rot, cam))
+    for lid_by_view in (True, False):
+        g = SimpleNamespace(color=color, depth=depth, k=OAK_K, dist=None, color_stamp=None)
+        aimer = button_aim.ButtonAimer(
+            g, pink, FLAT_TABLE_Z, lid_z=b[2], prior_xy=tuple(b[:2]), min_hits=2, lid_by_view=lid_by_view
+        )
+        for i in range(1, 3):  # parked: the first frame votes too (FIRST_LOOKBACK_S)
+            g.color_stamp = SimpleNamespace(sec=i, nanosec=0)
+            fixed = aimer.tick()
+        assert aimer.frames == 2
+        if lid_by_view:
+            assert fixed and aimer.hits == 2, aimer.status()
+            fx = aimer.fix(measured=True)
+            assert np.hypot(fx[0] - b[0], fx[1] - b[1]) < 0.002 and fx[2] == pytest.approx(b[2], abs=0.003)
+        else:
+            assert not fixed and aimer.hits == 0 and "prior height" in aimer.last_why, aimer.status()
 
 
 def test_a_tilted_aim_on_two_hits_fixes_on_its_second_frame(pink, monkeypatch):

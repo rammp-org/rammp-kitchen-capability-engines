@@ -1325,6 +1325,78 @@ def test_the_staging_aim_builds_its_aimer_the_straight_down_way_when_no_reach_ou
     assert made[-1] == {"lid_z": 0.2, "prior_xy": (0.8, 0.0), "min_hits": 2}
 
 
+@pytest.mark.parametrize("fixed", [True, False])
+def test_an_aim_given_the_lid_top_its_own_view_measured_says_so_on_the_runs_table(monkeypatch, capsys, fixed):
+    """reach_press.lid_under_look's top: the aimer is told it is this view's own (lid_by_view) and is built
+    on the watcher's table as every aim is (nothing hands the aim another table: its offset, and the fix's z
+    raised by it, are the wrist against the run's table); the AIM line and the aim's row, fixed or missed,
+    say which top it was judged against. Unasked, nothing is said (the tests above)."""
+    from collections import Counter
+    from types import SimpleNamespace
+
+    from box_opening.perception import button_aim
+    from box_opening.tasks import press_demo
+
+    made = []
+
+    class Aimer:
+        last_why = "no circle"
+        frames, hits, hit_s, above_lid, pair_dt_ms, rejects = 2, 2, [0.1, 0.2], [0.001, 0.001], [], Counter()
+        last_sighting = SimpleNamespace(uv=(320.0, 200.0), r_px=20.0, diameter_m=0.044, oblique=True, disc_fill=0.8)
+
+        def __init__(self, grab, model, table_z, **kw):
+            made.append((table_z, kw))
+
+        def tick(self):
+            return fixed
+
+        def fix(self, measured=False):
+            return (0.575, -0.269, 0.378)
+
+        def fix_hits(self):
+            return [0, 1]
+
+        def button_above_lid_m(self):
+            return 0.001
+
+        def table_offset_m(self, raw=False):
+            return float("nan")
+
+        def status(self):
+            return "2 of 2 hits agree in 2 frames"
+
+        def judged_frame(self):
+            return None
+
+    monkeypatch.setattr(button_aim, "ButtonAimer", Aimer)
+    monkeypatch.setattr(press_demo, "_spin_detect", lambda node: None)
+    notes = []
+    runner = SimpleNamespace(note=lambda leg, **kw: notes.append((leg, kw)))
+    w = SimpleNamespace(
+        grab=SimpleNamespace(color=None, depth=None, k=None, color_stamp=None), model=None, table_z=0.252
+    )
+    press_demo.aim_button_at_staging(
+        None,
+        w,
+        0.0,
+        timeout_s=0.05,
+        runner=runner,
+        tag="reach-aim",
+        lid_z=0.3771,
+        prior_xy=(0.575, -0.269),
+        min_hits=2,
+        lid_by_view=True,
+    )
+    assert made == [(0.252, {"lid_z": 0.3771, "prior_xy": (0.575, -0.269), "min_hits": 2, "lid_by_view": True})]
+    ((leg, kw),) = notes
+    assert leg == ("reach-aim" if fixed else "aim_missed")
+    assert (kw["lid_by_view"], kw["lid_z"]) == (True, 0.3771) and "table_z" not in kw
+    said = "the lid judged against its top as the look's own frame measured it, 0.377"
+    assert (said in capsys.readouterr().out) == fixed
+    with pytest.raises(ValueError, match="lid_by_view without the lid_z"):
+        press_demo.aim_button_at_staging(None, w, 0.0, timeout_s=0, lid_by_view=True)
+
+
 def test_the_aim_judges_frames_back_to_back_and_waits_only_when_none_is_new(monkeypatch, capsys):
     """Flatbot 2026-10-27: a 20 ms sleep after every tick, the 45-75 ms ones
     that judged a tilted frame too, held the reach-out aims to 10.1-14.0 of

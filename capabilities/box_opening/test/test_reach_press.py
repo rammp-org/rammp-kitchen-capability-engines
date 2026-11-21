@@ -634,6 +634,7 @@ class _Rec:
         self.primes = []  # each locator.prime(): how many events came before it
         self.reads = 0  # at-rest reads (client.settled_efforts)
         self.runs = []  # per runner.run: (its legs' names, the gains each execution it took was sent)
+        self.aims = []  # each aim: (its tag, lid_z, prior_xy, the rest of what it was asked with)
 
 
 def _flow(
@@ -727,10 +728,11 @@ def _flow(
         assert runner.start_gripper("press:close", GRIPPER_CMD_CLOSED, True)
     aims = [first, after]
 
-    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag):
+    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag, **kw):
         # each aim: (press point, knob mm[, the press point as the wrist
         # measured it, before the raise — by default the same])
         rec.events.append("aim:" + tag)
+        rec.aims.append((tag, lid_z, tuple(prior_xy), kw))
         got = aims.pop(0)
         if got is None:
             return None, "no circle", None, None
@@ -993,6 +995,30 @@ def test_the_open_shut_call_before_the_press_looks_once_more_between_flush_and_u
     rows = [json.loads(line) for line in next(tmp_path.glob("run-*.jsonl")).read_text().splitlines()]
     (note,) = (r for r in rows if r["leg"] == "knob_call")
     assert (note["looks"], note["reads_mm"], note["call"], note["pressed"]) == (looks, want, call, call == "shut")
+
+
+def test_the_recheck_between_flush_and_up_goes_by_the_heights_the_first_aim_went_by(monkeypatch, tmp_path):
+    """The look's aim judged against the lid top the look's own frame measured (lid_under_look): a knob read
+    in between is aimed at once more against the same top, never the find's that the first aim was spared."""
+    from conftest import FakeClient
+
+    from box_opening.runtime.runner import Runner
+
+    first = (((0.66, -0.57, 0.40), 0.0), "2 of 2 hits", 4.4, (0.66, -0.57, 0.39))
+    asked = []
+
+    def aim(node, watcher, yaw, lid_z, prior_xy, runner_, tag, **kw):
+        asked.append((tag, lid_z, prior_xy, kw))
+        return (((0.66, -0.57, 0.40), 0.0), "2 of 2 hits", 1.0, (0.66, -0.57, 0.39))
+
+    monkeypatch.setattr(reach_press, "_aim", aim)
+    runner = Runner(FakeClient(), log_dir=tmp_path)
+    _got, said, _reads = reach_press.judge_knob(None, None, 0.0, (0.66, -0.57, 0.401), runner, first, 0.377)
+    assert said == "shut"
+    assert asked == [("reach-recheck", 0.377, (0.66, -0.57), {"lid_by_view": True})]
+    asked.clear()
+    reach_press.judge_knob(None, None, 0.0, (0.66, -0.57, 0.401), runner, first)  # no lid by that frame
+    assert asked == [("reach-recheck", 0.401, (0.66, -0.57), {})]
 
 
 def _reach_world_button(ctx):
@@ -3369,3 +3395,165 @@ def test_a_look_again_from_a_rough_fix_a_wrist_fix_or_a_world_files_table_takes_
     assert reach_press._seen_words(again.seen, aim=True) == (
         "the scene camera, the wrist from a look pose and the wrist at the look"
     )
+
+
+# RAMMP 1.5 2026-11-20 22:09 (test_button_aim's GEN15_2209_*): the frame the look again shot from the look
+# pose, the wrist's finder on it; the run's heights, the find's (the survey from rest), and where the look
+# was aimed
+GEN15_2209_LID = "wrist_look_lid_gen15_20261120_2209.npz"
+GEN15_2209_TABLE, GEN15_2209_TOP, GEN15_2209_AIMED = 0.2520, 0.3680, (0.575, -0.269)
+
+
+def _look_frame(monkeypatch, frame=None, tops=None, raises=None):
+    """reach_press.lid_under_look's frame and finder scripted: `frame` what survey.grab_frame shoots from the
+    look pose (None: a stand-in; a str: no frame, and why); the wrist's finder on it the real one, or with
+    `tops` one that has the lid-sized tops [(x, y, top z, counter z)] in it, or raises `raises`. Returns the
+    captions the frame was kept with and the waits it was shot with (grab_frame's keywords)."""
+    from box_opening.perception import wrist_finder as wf
+    from box_opening.tasks import survey as sv
+
+    kept, waits = [], []
+    if isinstance(frame, str):
+        got = (None, None, None, frame)
+    else:
+        got = (SimpleNamespace(tag="look") if frame is None else frame, "snap", "pose", None)
+    monkeypatch.setattr(sv, "grab_frame", lambda node, watcher, runner, tag, **kw: (waits.append(kw), got)[1])
+    monkeypatch.setattr(sv, "save_frame", lambda watcher, snap, pose, f, caption: kept.append(caption))
+    if tops is not None or raises is not None:
+
+        def find_container(frames, model, check_buttons=True, reachable=None, seen_at=None, far_nearest=False):
+            assert check_buttons is False and seen_at is None  # geometry alone, nothing named to it
+            if raises is not None:
+                raise raises
+            places = tuple(
+                SimpleNamespace(xy=(x, y), top_z=top, table_z=table, button="unchecked") for x, y, top, table in tops
+            )
+            return SimpleNamespace(fix=None, why="wrist camera: %d places" % len(places), places=places, patches=())
+
+        monkeypatch.setattr(wf, "find_container", find_container)
+    return kept, waits
+
+
+def _lid_under_look(ctx, tmp_path, aimed, table_z):
+    """reach_press.lid_under_look from the look pose aimed at `aimed` (the look's prior button), the watcher's
+    table `table_z`: (what it returned, its look_lid row)."""
+    import json
+
+    from conftest import FakeClient
+
+    from box_opening.runtime.runner import Runner
+
+    ctx.model = ContainerModel.load(PINK)
+    runner = Runner(FakeClient(), log_dir=tmp_path)
+    got = reach_press.lid_under_look(None, ctx, runner, SimpleNamespace(table_z=table_z), aimed)
+    rows = [json.loads(line) for line in next(tmp_path.glob("run-*.jsonl")).read_text().splitlines()]
+    (row,) = (r for r in rows if r["leg"] == "look_lid")
+    return got, row
+
+
+def test_the_lid_under_the_2209_look_is_the_one_its_own_frame_measures(ctx, monkeypatch, tmp_path, capsys):
+    """RAMMP 1.5 2026-11-20 22:09: the find (the survey from rest) had the lid's top at 0.368 over a table at
+    0.252, a box 116 mm tall, and the aim from the look pose refused the button against it. The look pose's
+    own frame has the lid 4 mm from the aimed point, its top 0.377 over a counter at 0.282: that top is what
+    the look's aims judge the lid against, the counter a record. The frame is waited for no longer than the aim
+    itself may, and kept; nothing of the run's box or worlds changes."""
+    from conftest import fixture_path
+
+    from box_opening.perception import wrist_finder as wf
+
+    kept, waits = _look_frame(monkeypatch, wf.frame_from_capture(fixture_path(GEN15_2209_LID)))
+    cpose, clouds = ctx.cpose, getattr(ctx, "survey_clouds", None)
+    got, row = _lid_under_look(ctx, tmp_path, (*GEN15_2209_AIMED, GEN15_2209_TOP), GEN15_2209_TABLE)
+    assert got == pytest.approx(0.377, abs=0.003)
+    assert row["found"] is True and row["why"] is None
+    assert row["top_z"] == pytest.approx(got, abs=1e-4) and row["table_z"] == pytest.approx(0.282, abs=0.003)
+    assert waits == [{"timeout_s": reach_press.REACH_AIM_S}]
+    assert (row["find_top_z"], row["table_given"]) == (GEN15_2209_TOP, GEN15_2209_TABLE)
+    assert row["from_aimed_mm"] < 8.0 and row["frame_s"] >= 0.0 and row["finder_s"] > 0.0
+    assert len(kept) == 1
+    assert ctx.cpose is cpose and getattr(ctx, "survey_clouds", None) is clouds
+    out = capsys.readouterr().out
+    assert "LOOK: the look pose's own frame has the lid" in out
+    assert "the frame's top +9 mm from it, its counter +30 mm, the box -21 mm)" in out
+
+
+@pytest.mark.parametrize(
+    "frame, tops, raises, why",
+    [
+        ("no new wrist frame", None, None, "no wrist frame from the look pose (no new wrist frame)"),
+        (None, [], None, "no lid-sized top within half a lid of the aimed point (wrist camera: 0 places)"),
+        # a top 0.6 of a lid (63 mm) from the aimed point is another container's, not the lid under the look
+        (None, [(0.063, 0.0)], None, "no lid-sized top within half a lid of the aimed point (the nearest 63 mm"),
+        (None, [(0.01, 0.0), (-0.02, 0.01)], None, "2 lid-sized tops within half a lid of the aimed point"),
+        (None, None, RuntimeError("boom"), "the look pose's frame or finder failed: boom"),
+        (None, [(0.01, 0.0, float("nan"), 0.300)], None, "the lid-sized top under the look has no height over a"),
+        (None, [(0.01, 0.0, 0.392, float("nan"))], None, "the lid-sized top under the look has no height over a"),
+    ],
+)
+def test_without_one_lid_under_the_look_in_its_own_frame_there_are_no_heights_by_it(
+    ctx, monkeypatch, tmp_path, capsys, frame, tops, raises, why
+):
+    aimed = (0.66, -0.57, 0.40)
+    tops = None if tops is None else [(aimed[0] + t[0], aimed[1] + t[1], *(t[2:] or (0.392, 0.300))) for t in tops]
+    _look_frame(monkeypatch, frame, tops, raises)
+    got, row = _lid_under_look(ctx, tmp_path, aimed, 0.279)
+    assert got is None and row["found"] is False and row["why"].startswith(why), row["why"]
+    assert row["top_z"] is None and (row["find_top_z"], row["table_given"]) == (0.40, 0.279)
+    out = capsys.readouterr().out
+    assert "LOOK: no lid by the look pose's own frame (%s" % why in out
+    assert "the aim goes by the find's top at 0.400 over the table at 0.279" in out
+
+
+@pytest.mark.parametrize("off, found", [(0.0520, True), (0.0530, False)])  # half the pink lid: 52.5 mm
+def test_the_lid_under_the_look_is_one_within_half_a_lid_of_the_aimed_point(ctx, monkeypatch, tmp_path, off, found):
+    aimed = (0.66, -0.57, 0.40)
+    _look_frame(monkeypatch, tops=[(aimed[0] + off * 0.6, aimed[1] - off * 0.8, 0.392, 0.300)])
+    got, row = _lid_under_look(ctx, tmp_path, aimed, 0.279)
+    assert (got == 0.392 if found else got is None) and row["from_aimed_mm"] == pytest.approx(1000 * off)
+
+
+def test_the_looks_aim_goes_by_the_lid_its_own_frame_measures_and_nothing_else_changes(ctx, monkeypatch, tmp_path):
+    """One lid-sized top under the look in its own frame, in a guarded run (where the press starts from the
+    aim's own z): the look's aim judges the lid against its top (lid_by_view) and is handed nothing else, its
+    table the run's and its prior the find's place as ever; the aim after the press goes by the aimed button,
+    and the run flies, presses and goes home exactly as it does without that lid."""
+    from conftest import CFG, LID_SPOT, FakeClient, FakeStore
+
+    from box_opening.models.container import ContainerPose
+    from box_opening.primitives.core import Ctx
+
+    code0, rec0, chain0, _home0 = _flow(ctx, monkeypatch, tmp_path / "without")
+    without = (_reach_world_button(ctx), list(ctx.client.executed), list(ctx.client.exec_starts))
+    ctx = Ctx(
+        model=ContainerModel.load(CFG),
+        cpose=ContainerPose(xyz=(0.45, 0.0, -0.07), yaw=0.0),
+        client=FakeClient(),
+        worlds=FakeStore(),
+        config_path=CFG,
+        lid_drop=LID_SPOT,
+    )  # conftest's ctx, afresh
+    _look_frame(monkeypatch, tops=[(BUTTON[0] + 0.004, BUTTON[1], 0.392, 0.300)])
+    code, rec, chain, _home = _flow(ctx, monkeypatch, tmp_path / "with")
+    assert code == code0 == 0
+    assert rec0.aims[0] == ("reach-aim", BUTTON[2], BUTTON[:2], {})
+    assert rec.aims[0] == ("reach-aim", 0.392, BUTTON[:2], {"lid_by_view": True})
+    assert rec.aims[1:] == rec0.aims[1:] and [a[0] for a in rec.aims[1:]] == ["reach-after"]
+    assert rec.events == rec0.events and chain.lines == chain0.lines  # every line flown, the press's start too
+    assert (_reach_world_button(ctx), list(ctx.client.executed), list(ctx.client.exec_starts)) == without
+
+
+@pytest.mark.parametrize(
+    "frame, tops, raises",
+    [
+        ("no new wrist frame", None, None),
+        (None, [(BUTTON[0] + 0.063, BUTTON[1], 0.392, 0.300)], None),  # a top beyond half a lid
+        (None, None, RuntimeError("boom")),
+    ],
+)
+def test_without_a_lid_under_the_look_in_its_own_frame_the_aim_is_asked_as_before(
+    ctx, monkeypatch, tmp_path, frame, tops, raises
+):
+    _look_frame(monkeypatch, frame, tops, raises)
+    code, rec, _chain, _home = _flow(ctx, monkeypatch, tmp_path)
+    assert code == 0
+    assert rec.aims[0] == ("reach-aim", BUTTON[2], BUTTON[:2], {})

@@ -48,7 +48,13 @@ beside the container, and goes home. It has one action, `open_box`:
    camera sees"); in a run by hand it is `not_found`, nothing pressed, the arm
    home.
 1. **Look:** the arm moves to a pose looking down at the lid at 45 degrees, and
-   the wrist camera aims at the button. Where it finds no button there, the
+   the wrist camera aims at the button. It judges the lid against the lid top
+   the wrist's own container finder measures in a frame from that pose, where
+   that frame has one lid within half a lid of where the look was aimed; else
+   against the find's top, moved by how far the table the aim sees stands from
+   the run's. The top it is judged against changes nothing else: the run's
+   box, its table and what the press starts from stay as they are. Where it
+   finds no button there, the
    wrist's own container finder is asked of a frame from that pose: a lid it
    finds elsewhere than the look was aimed (half a lid or more away), which
    alone is the selected container by the run's own rule, becomes the run's box; the

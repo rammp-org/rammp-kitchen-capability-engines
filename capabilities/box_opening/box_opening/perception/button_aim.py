@@ -403,7 +403,18 @@ def view_tilt_deg(rot_cam):
 
 
 def find_button(
-    color_bgr, depth, k, rot_cam, trans_cam, table_z, model, dist=None, lid_z=None, prior_xy=None, prior_max_m=None
+    color_bgr,
+    depth,
+    k,
+    rot_cam,
+    trans_cam,
+    table_z,
+    model,
+    dist=None,
+    lid_z=None,
+    prior_xy=None,
+    prior_max_m=None,
+    lid_by_view=False,
 ):
     """The button in one still frame: (ButtonSighting, None) or (None, why).
     The sighting's xyz is the PRESS POINT: the seam circle's centre.
@@ -419,12 +430,27 @@ def find_button(
     path uses lid_z: the top-down staging aim's lid is at table_z + dims.z
     whatever lid_z says. Both use prior_xy: from straight down a circle
     farther than DOWN_PRIOR_MAX_M (or `prior_max_m`, a caller that knows
-    the place better) from it is not the button. A camera axis more than
-    OBLIQUE_MIN_DEG off straight down goes to find_button_oblique with the
-    same arguments."""
+    the place better) from it is not the button. `lid_by_view`: lid_z is
+    the lid top as THIS view measured it (a frame of its own, from the same
+    pose): the lid is judged against lid_z itself, not moved by the table
+    this frame reads (find_button_oblique); table_z is still the table the
+    offset is read against. Without a lid_z it changes nothing; the
+    straight-down path ignores it, as it ignores lid_z. A camera axis more
+    than OBLIQUE_MIN_DEG off straight down goes to find_button_oblique with
+    the same arguments."""
     if rot_cam is not None and view_tilt_deg(rot_cam) > OBLIQUE_MIN_DEG:
         return find_button_oblique(
-            color_bgr, depth, k, rot_cam, trans_cam, table_z, model, dist=dist, lid_z=lid_z, prior_xy=prior_xy
+            color_bgr,
+            depth,
+            k,
+            rot_cam,
+            trans_cam,
+            table_z,
+            model,
+            dist=dist,
+            lid_z=lid_z,
+            prior_xy=prior_xy,
+            lid_by_view=lid_by_view,
         )
     import cv2
 
@@ -712,21 +738,24 @@ def _table_offset(lifted, h0, table_z, inc_deg):
     return raw, raw
 
 
-def _table_words(off, off_raw):
+def _table_words(off, off_raw, lid_by_view=False):
     """What a refusal says of the table its frame saw (_table_offset): the
-    lid judged against it, or not (TABLE_GATE_MAX_M); the fix's z raised by
-    it (taken out), or not."""
+    lid judged against it, or not (TABLE_GATE_MAX_M, or a lid top this view
+    measured: lid_by_view); the fix's z raised by it (taken out), or not."""
     if not np.isfinite(off_raw):
         return ""
+    taken = "taken out" if np.isfinite(off) else "not taken out"
+    if lid_by_view:
+        return (
+            "; the table in view %+.0f mm from the one given, the lid judged against its top as this view measured "
+            "it, %s" % (1000 * off_raw, taken)
+        )
     if abs(off_raw) > TABLE_GATE_MAX_M:
         return (
             "; the table in view %+.0f mm from the one given, too far to be the table: the lid judged against "
             "the one given" % (1000 * off_raw)
         )
-    return "; the table in view %+.0f mm from the one given, the lid judged against it, %s" % (
-        1000 * off_raw,
-        "taken out" if np.isfinite(off) else "not taken out",
-    )
+    return "; the table in view %+.0f mm from the one given, the lid judged against it, %s" % (1000 * off_raw, taken)
 
 
 def _prior_miss_m(cu, cv, s, c0, g, h0, cam, prior_xy, h_gate=None):
@@ -806,7 +835,9 @@ def _rectified(color_bgr, depth, kk, rot, cam, dd, g, rb):
     return (s, c0, gray, lifted), None
 
 
-def find_button_oblique(color_bgr, depth, k, rot_cam, trans_cam, table_z, model, dist=None, lid_z=None, prior_xy=None):
+def find_button_oblique(
+    color_bgr, depth, k, rot_cam, trans_cam, table_z, model, dist=None, lid_z=None, prior_xy=None, lid_by_view=False
+):
     """The button seen from a tilted pose: (ButtonSighting, None) or (None, why).
 
     The frame is resampled onto the horizontal plane z = h0 (lid_z, default
@@ -816,9 +847,12 @@ def find_button_oblique(color_bgr, depth, k, rot_cam, trans_cam, table_z, model,
     reads base z and the lid ring's height is measured, not assumed: it
     must lie within LID_PRIOR_TOL_M of h0 moved by the table offset — a
     box's height above the table this frame reads (_table_offset,
-    TABLE_GATE_MAX_M). The circle found on h0 is then moved along the
-    camera's rays to the disc's measured height h:
-    P = C + (P' - C) (Cz - h) / (Cz - h0)."""
+    TABLE_GATE_MAX_M). With `lid_by_view` and a lid_z, h0 is the lid top
+    this view measured itself (find_button): nothing is carried, so
+    the ring must lie within LID_PRIOR_TOL_M of h0 as it is; the table offset
+    is still read, reported and raises the fix's z as ever. The circle found
+    on h0 is then moved along the camera's rays to the disc's measured
+    height h: P = C + (P' - C) (Cz - h) / (Cz - h0)."""
     import cv2
 
     if color_bgr is None or depth is None or k is None:
@@ -847,11 +881,15 @@ def find_button_oblique(color_bgr, depth, k, rot_cam, trans_cam, table_z, model,
     # (TABLE_GATE_MAX_M); the fix's z is raised only by an offset taken out
     # (TABLE_OFFSET_*, ButtonAimer.fix). Past TABLE_RECTIFY_M the frame is
     # rectified again on that plane, so the circles are measured at the
-    # scale they lie at (TABLE_RECTIFY_M's 10-30 regrips)
+    # scale they lie at (TABLE_RECTIFY_M's 10-30 regrips). A lid top this
+    # view measured (lid_by_view) is where this frame sees the lid already:
+    # no table offset moves it (Gen1.5 2026-11-20 22:09: the survey's box
+    # height carried onto the look's table put the gate 34 mm over the lid)
     table_off, table_raw = _table_offset(lifted, h0, table_z, inc)
-    seen = bool(np.isfinite(table_raw) and abs(table_raw) <= TABLE_GATE_MAX_M)
-    h_gate = h0 + (table_raw if seen else 0.0)
-    if seen and abs(table_raw) > TABLE_RECTIFY_M:
+    by_view = bool(lid_by_view) and lid_z is not None  # with no lid_z there is no top of this view's
+    carried = bool(np.isfinite(table_raw) and abs(table_raw) <= TABLE_GATE_MAX_M) and not by_view
+    h_gate = h0 + (table_raw if carried else 0.0)
+    if carried and abs(table_raw) > TABLE_RECTIFY_M:
         g1, _why = _lid_plane(prior_xy, h_gate, kk, rot, cam, dd, (hh, ww))
         got1, _why = (None, None) if g1 is None else _rectified(color_bgr, depth, kk, rot, cam, dd, g1, rb)
         if got1 is not None:
@@ -941,7 +979,7 @@ def find_button_oblique(color_bgr, depth, k, rot_cam, trans_cam, table_z, model,
     return None, "%d circle(s) on the rectified lid plane, none the button: %s%s" % (
         len(cands),
         "; ".join(whys[:3]),
-        _table_words(table_off, table_raw),
+        _table_words(table_off, table_raw, by_view),
     )
 
 
@@ -1091,16 +1129,20 @@ class ButtonAimer:
     (agreeing_fix). A tilted view's aim takes `min_hits` (2: two agreeing
     among the last `window` — the reach-out's look); a straight-down one,
     where most frames hit, at least MIN_HITS in a row whatever min_hits
-    says. lid_z and prior_xy go to find_button (see there). A tilted view's
-    frame is judged on the depth of the still frames before it too
-    (StillDepth), and its fix's z raised by the wrist's table offset (fix)."""
+    says. lid_z, prior_xy and lid_by_view go to find_button (see there). A
+    tilted view's frame is judged on the depth of the still frames before
+    it too (StillDepth), and its fix's z raised by the wrist's table offset
+    (fix)."""
 
-    def __init__(self, grab, model, table_z, lid_z=None, prior_xy=None, min_hits=MIN_HITS, window=AIM_WINDOW):
+    def __init__(
+        self, grab, model, table_z, lid_z=None, prior_xy=None, min_hits=MIN_HITS, window=AIM_WINDOW, lid_by_view=False
+    ):
         self.grab = grab
         self.model = model
         self.table_z = float(table_z)
         self.lid_z = None if lid_z is None else float(lid_z)
         self.prior_xy = None if prior_xy is None else (float(prior_xy[0]), float(prior_xy[1]))
+        self.lid_by_view = bool(lid_by_view)
         self.min_hits = int(min_hits)
         self.window = int(window)
         self.t0 = time.monotonic()
@@ -1191,6 +1233,7 @@ class ButtonAimer:
             dist=f.dist,
             lid_z=self.lid_z,
             prior_xy=self.prior_xy,
+            lid_by_view=self.lid_by_view,
         )
         if s is None:
             return self._reject(why, stamp)
