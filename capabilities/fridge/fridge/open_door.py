@@ -1,7 +1,7 @@
 """Open the fridge: detect the handle, grasp it, swing the door open and let go while still moving, then push it on (or
 go round it).
 
-The grasp (the node's `grasp`, constants.GRASP): "side" (side_grasp.py, the default) or "front" (fingers across the bar,
+The grasp (the node's `grasp`, constants.GRASP): "auto" (the default), "side" (side_grasp.py) or "front" (fingers across the bar,
 GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs only up to the hand being off the handle:
 - its grasps: SIDE_TILTS_DEG (level first, then out to 40 deg nose-up / nose-down), in along the door from the hinge
   side, 20 deg off its face, one finger between the bar and the door, from a line-up SIDE_SLIDE_M back along the
@@ -234,7 +234,7 @@ _HANDLE_LENGTH = F.MEASURED["handle_length_m"]  # configure sets these two
 _DOOR_Z_FROM_HANDLE = (-F.MEASURED["door_below_handle_m"], F.MEASURED["door_above_handle_m"])
 
 
-def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="side", **measured):
+def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="auto", **measured):
     """Everything the detection and the door model need from the fridge: call once at startup. `mount_tilt_deg`: a key
     of constants.MOUNTS. `door_normal`: how each look measures the door's direction (_make_detector, DOOR_NORMALS;
     handle_model and handle need SAM 3's mask). `grasp`: constants.GRASPS. `measured`: constants.MEASURED's names."""
@@ -336,7 +336,7 @@ def closed_door(geom, h, grasp_pos, cand=None):
         handle_length_m=_HANDLE_LENGTH,
         closed_hold_pos=list(map(float, hold)),
         hold_in_tool=list(map(float, in_tool)),
-        grasp=F.GRASP,
+        grasp=("side" if cand.get("side") else "front") if cand is not None else F.GRASP,
         **({"front_hold": list(map(float, cand["front"]))} if cand is not None and cand.get("front") else {}),
         **shared.door_model(n, grasp_pos, h),
     )
@@ -443,11 +443,11 @@ def record_hand_angle(ee):
     save_door_geometry(door_open_deg=abs(a), open_sign=float(np.sign(a) or 1.0))
 
 
-def grasp_candidates(geom):
+def grasp_candidates(geom, grasp=None):
     """The grasps tried, in order: each tilt (+ nose-down, - nose-up), the hand up then upside down (fingers across the
     bar both ways). Dicts {pitch, flip, h, pos, quat}. A tilt whose grasp door_common refuses (beyond MAX_REACH) is
     skipped. The side grasp (F.GRASP "side"): side_grasp.candidates."""
-    if F.GRASP == "side":
+    if (grasp or F.GRASP) in ("auto", "side"):
         return S.candidates(geom)
     out = []
     for pitch in F.GRASP_PITCHES_DEG:
@@ -550,7 +550,7 @@ def record_proven(plan, geom, source):
 def hand_world(model, deg):
     """The door open `deg` with a window round the hand on the handle (and the handle) left out: onto or off it. The
     side grasp's: side_grasp.hold_world."""
-    if F.GRASP == "side":
+    if model.door.get("grasp") == "side":
         return S.hold_world(model, (deg,))
     return model.holding(
         (deg,), model.df.u_handle, float(model.door["handle_mid_z"]), F.HAND_WINDOW_U_M, F.HAND_WINDOW_Z_M
@@ -614,6 +614,9 @@ class StagingRequired(Refused):
 
 
 OPEN_PREFLIGHT_S = 8.0
+OPEN_POLICY_S = 20.0
+FRONT_SEARCH_S = 12.0
+SIDE_FIXED_SEARCH_S = 7.0
 
 
 def base_rotation_hint(normal):
@@ -625,22 +628,50 @@ def base_rotation_hint(normal):
     return {}
 
 
-def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=False):
-    """Plan the live open with a deadline shared by all of its candidates and planner calls."""
+def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=False, progress=None):
+    """Plan the live open with one deadline shared by all strategies."""
+    policy = F.GRASP == "auto" and adaptive_pull and isinstance(after, PushOpen)
     previous_deadline = planner.deadline
-    deadline = time.monotonic() + OPEN_PREFLIGHT_S
-    planner.deadline = deadline if previous_deadline is None else min(deadline, previous_deadline)
+    start = time.monotonic()
+    deadline = start + (OPEN_POLICY_S if policy else OPEN_PREFLIGHT_S)
+    if previous_deadline is not None:
+        deadline = min(deadline, previous_deadline)
+    strategies = (
+        (("front", True, FRONT_SEARCH_S), ("side", False, SIDE_FIXED_SEARCH_S), ("side", True, OPEN_POLICY_S))
+        if policy else (("side" if F.GRASP == "auto" else F.GRASP, adaptive_pull, OPEN_PREFLIGHT_S),)
+    )
     diagnostics = []
+    failure = None
+    sweep_failure = None
     try:
-        result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging, adaptive_pull)
-        try:
-            planner.join(result["approach"], result["model"].cabinet())
-        except (pl.OverBudget, pl.PlannerBusy):
-            raise
-        except Refused as e:
-            diagnostics.append({"stage": "approach join", "reason": str(e), "candidate": result["name"]})
-            raise Infeasible(str(e)) from e
-        return result
+        for grasp, adaptive, limit in strategies:
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            planner.deadline = min(now + limit, deadline)
+            if progress is not None:
+                detail = "adaptive pull" if adaptive else f"{swing:g}° pull"
+                progress(min(99.0, 100 * (now - start) / (deadline - start)), f"Planning {grasp} grasp, {detail}")
+            try:
+                result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging, adaptive, grasp)
+                try:
+                    planner.join(result["approach"], result["model"].cabinet())
+                except (pl.OverBudget, pl.PlannerBusy):
+                    raise
+                except Refused as e:
+                    diagnostics.append({"stage": "approach join", "reason": str(e), "candidate": result["name"]})
+                    raise Infeasible(str(e)) from e
+                planner.check_deadline()
+                return result
+            except SweepBlocked as e:
+                sweep_failure = e
+            except (Infeasible, pl.OverBudget) as e:
+                failure = e
+        if failure is not None:
+            raise failure
+        if sweep_failure is not None:
+            raise sweep_failure
+        raise pl.OverBudget("open preflight deadline reached")
     except SweepBlocked as e:
         raise Infeasible(str(e), payload=e.payload) from e
     except (Infeasible, pl.OverBudget) as e:
@@ -659,18 +690,23 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
         planner.deadline = previous_deadline
 
 
-def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_pull):
+def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_pull, grasp):
     """Plan the whole open from joints `q0` (see the module): every grasp with cuRobo's own arm configuration first,
     then every grasp from the other configurations (seeds). Returns the plan dict; raises Refused (with why)."""
     planner.search()
-    cands = grasp_candidates(geom)
+    cands = grasp_candidates(geom, grasp)
     if not cands:
         raise Infeasible("no grasp: every tilt's grasp is out of reach")
     # the door model is the same for every grasp (the face is placed from the handle); the file keeps the chosen one's
     model = FridgeModel(closed_door(geom, cands[0]["h"], cands[0].get("ref", cands[0]["pos"]), cands[0]))
     push = after if isinstance(after, PushOpen) else None
     adaptive_pull = adaptive_pull and push is not None
-    angles = P.pull_angles(swing) if adaptive_pull else (swing,)
+    angles = (swing,)
+    if adaptive_pull:
+        # The gate uses the first angle to identify the full pull that permits a base move.
+        angles = P.pull_angles(swing) if grasp == "side" else (swing,) + tuple(
+            angle for angle in (45, 50, 55) if angle < swing
+        )
     pull_angles = check_open(model, planner.world, angles, push)
     collision = planner.preflight_start(
         model.full(0.0), q0, np.radians(F.START_JOINTS_DEG) if staging is None else staging
@@ -736,7 +772,7 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
                 continue
             line_goal = goals[0]
             line_pose = (line_goal.pos, line_goal.quat)
-            options = iter(((swing, 0.0),))
+            options = iter((angle, 0.0) for angle in sorted(pull_angles))
             if cand.get("side"):
                 insert_joints, why, margin = local_path(planner, goals[1:], lineup_motion.q_end, line_pose)
                 if insert_joints is None:
@@ -1289,10 +1325,10 @@ def run(
     base_moves=True,
     search_alternate_placements=False,
     staging=None,
+    progress=None,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
-    Pull to `swing_deg` when specified, or SWING_DEG without `push`. The default side-grasp push-open tries
-    the largest safe pull first, up to PUSH_OPEN_PULL_DEG. `grasp_offset`:
+    Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side grasps. `grasp_offset`:
     grasp this far (m) above the middle of the bar (set_grasp_offset). `release_only`: let go and back off the handle,
     nothing else (when a run stopped holding it). `save_door`: a dry run that plans OK also writes DOOR_FILE as the
     planned open would leave it (save_planned_door). `around` (the full-pull path only, `push` false): False tests the
@@ -1340,7 +1376,7 @@ def run(
         geom, q0 = detect(ai)
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
-        adaptive_pull = push and swing_deg is None and F.GRASP == "side"
+        adaptive_pull = push and swing_deg is None and F.GRASP in ("auto", "side")
         try:
             plan = plan_open(
                 planner,
@@ -1350,6 +1386,7 @@ def run(
                 after,
                 staging=staging,
                 adaptive_pull=adaptive_pull,
+                progress=progress,
             )
         except Infeasible as e:  # not plannable from here: where to put the wheelchair is the answer
             if e.payload.get("reason") == "door_sweep_blocked":

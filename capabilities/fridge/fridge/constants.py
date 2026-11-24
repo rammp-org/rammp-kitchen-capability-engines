@@ -81,11 +81,9 @@ GRASP_FORCE = 0.5  # a normal close (the microwave's 0.25 is loosened on purpose
 # from either end of handle_length_m: half the 2F-85 pad's ~2.2 cm width, plus ~2 cm for the detected middle being off
 GRASP_END_MARGIN_M = 0.03
 
-# --- which grasp the open uses (the node's `grasp` parameter; configure sets GRASP): "side" (side_grasp.py, this
-# branch's default: in along the door from the hinge side, one finger behind the bar) or "front" (fingers across the
-# bar, straight in from in front of it: feature/15-fridge's). Everything after the grasp is the same code ---
-GRASPS = ("side", "front")
-GRASP = "side"
+# The automatic policy tries front and side grasps for the default push-open.
+GRASPS = ("auto", "side", "front")
+GRASP = "auto"
 # --- the side grasp (side_grasp.py). Its pads' place is the one that ran on the arm on 11-06 (89504f3's
 # side_grasp_poses, with the then GRIP_EXT 0.126 - GRASP_X_ADJUST 0.040 - GRASP_PADS_PAST_TOOL 0.042 - SIDE_DEEPER_M
 # 0.055), written out because GRIP_EXT has changed since (the front grasp's, 11-09). It was found with the SCENE
@@ -523,7 +521,7 @@ UI_NOTICE_TIMEOUT_S = 30.0
 UI_PROMPT_TIMEOUT_S = 600.0
 
 
-def configure(data_dir, mount_tilt_deg=0, grasp="side"):
+def configure(data_dir, mount_tilt_deg=0, grasp="auto"):
     """Point door_common's paths at `data_dir`, name the appliance and pick the mount's and the grasp's placement. No
     door-size defaults: every fridge door file carries its own (open_door.configure's DOOR_MODEL)."""
     global PLACEMENT_X, PLACEMENT_Y, PLACEMENT_CELLS, CELLS_NEEDING_BASE_MOVE, PUSH_OPEN_DZ_M, GRASP_PITCHES_DEG, GRASP

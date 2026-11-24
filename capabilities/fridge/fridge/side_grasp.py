@@ -1,4 +1,4 @@
-"""The side grasp (the node's `grasp: side`, this branch's default): the hand comes in along the door from the hinge
+"""The side grasp (the node's `grasp: side` or automatic fallback): the hand comes in along the door from the hinge
 side of the handle, one finger between the bar and the door, and closes across the bar from its front and back.
 
 Seen from above it is the front grasp's hand turned 90 deg about the vertical (away from the hinge), then turned back

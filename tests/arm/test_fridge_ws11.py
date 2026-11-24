@@ -177,6 +177,7 @@ def test_executing_goal_does_not_search_hypothetical_placements(tmp_path, monkey
 def test_nov16_side_open_uses_a_shorter_checked_push_handoff(tmp_path):
     _, geom, planner = recorded(1, tmp_path)
     arm = planner.arm
+    open_door.configure(tmp_path, 30, grasp="side")
     after = open_door.PushOpen(base_moves=False)
 
     plan = open_door.plan_open(
@@ -240,3 +241,41 @@ def test_c2_search_016_door_leg_contact_is_blocked(tmp_path):
     assert "cm" in exc.value.payload["operator_hint"]
     assert planner.plans == 0
     assert not arm.sent and not arm.grips
+
+
+@pytest.mark.parametrize("side_succeeds", [False, True])
+def test_auto_open_shares_deadline_and_announces_each_strategy(tmp_path, monkeypatch, side_succeeds):
+    from types import SimpleNamespace
+
+    _, geom, planner = recorded(1, tmp_path)
+    after = open_door.PushOpen(base_moves=False)
+    now = [100.0]
+    planner.deadline = 119.5
+    tried, messages = [], []
+
+    def attempt(active, geom, q, swing, push, diagnostics, staging, adaptive, grasp):
+        assert push is after
+        tried.append((grasp, adaptive, active.deadline))
+        if len(tried) == 1:
+            now[0] = active.deadline
+            raise planning.OverBudget("front limit")
+        if len(tried) == 2 and not side_succeeds:
+            now[0] = active.deadline
+            raise planning.OverBudget("side limit")
+        return dict(approach=None, model=SimpleNamespace(cabinet=lambda: []), name=grasp)
+
+    monkeypatch.setattr(open_door.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(open_door, "_plan_open", attempt)
+    monkeypatch.setattr(planner, "join", lambda *_: None)
+    result = open_door.plan_open(
+        planner, geom, planner.arm.q, 60, after, adaptive_pull=True,
+        progress=lambda percent, message: messages.append((percent, message)),
+    )
+    assert result["name"] == "side"
+    assert planner.deadline == 119.5
+    assert tried == [("front", True, 112), ("side", False, 119)] + (
+        [] if side_succeeds else [("side", True, 119.5)]
+    )
+    assert [message for _, message in messages] == [
+        "Planning front grasp, adaptive pull", "Planning side grasp, 60° pull",
+    ] + ([] if side_succeeds else ["Planning side grasp, adaptive pull"])

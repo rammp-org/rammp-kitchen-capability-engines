@@ -86,7 +86,7 @@ PARAMS = {
     "mount_tilt_deg": 0,
     # the open's grasp (constants.GRASPS): "side" (side_grasp.py: in along the door from the hinge side, one finger
     # behind the bar, tilted -40..40 deg) or "front" (fingers across the bar, straight in). Picks the placement advice
-    "grasp": "side",
+    "grasp": "auto",
     "color_topic": "/wrist_camera/color/image_raw",
     "camera_info_topic": "/wrist_camera/color/camera_info",
     # every wrist camera's depth, aligned to colour on the D405 and the OAK; the D435i needs aligned_depth_to_color
@@ -684,6 +684,7 @@ class Capability(CapabilityEngine):
                     base_moves=bool(params.get("base_moves", True)),
                     search_alternate_placements=bool(params.get("search_alternate_placements", False)),
                     staging=np.radians(self.cfg["start_joints_deg"]),
+                    progress=lambda percent, message: ctx.progress(action_id, percent, message),
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
                     relocalize.capture_reference(self.arm)
