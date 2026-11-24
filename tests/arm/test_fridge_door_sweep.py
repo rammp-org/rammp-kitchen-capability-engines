@@ -152,3 +152,28 @@ def test_resumed_push_uses_and_records_the_checked_endpoint(model, tmp_path, mon
     assert saved["door_open_deg"] == 90
     assert saved["push_after_chair_move"] is None
     assert saved["door_open_deg"] == push_open.FINAL_ANGLE_DEG
+
+
+def test_support_cabinet_blocks_the_dock_and_its_translation(model, tmp_path):
+    model.door.update(support_floor_z=-0.5, support_height=0.5)
+    (support,) = model.support()
+    assert support in model.full(30)
+    assert support in model.cabinet()
+    np.testing.assert_allclose(support["position"], [0.5, -0.25, -0.25])
+
+    # The feet are below the door and can still hit the stationary support.
+    feet = box((0.5, -0.25, -0.42))
+    clear_model = FridgeModel({**model.door, "support_height": 0.0})
+    assert DoorSweep(clear_model, [feet], 0, 90).obstacle() is None
+    sweep = DoorSweep(model, [feet], 0, 90)
+    assert sweep.obstacle() == "person/legs"
+    assert sweep.clear_push_end(90) is None
+    with pytest.raises(SweepBlocked):
+        check_open(model, PlannerWorld(None, tmp_path, extra=[feet]), (60,), push_open.PushOpen())
+
+    near = box((1.20, -0.25, -0.42))
+    assert DoorSweep(model, [near], 0, 0).obstacle() is None
+    assert (
+        DoorSweep(model, [near], 0, 0, translation=np.array([0.3, 0, 0])).obstacle()
+        == "person/legs"
+    )

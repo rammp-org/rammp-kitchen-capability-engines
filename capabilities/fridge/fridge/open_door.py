@@ -273,6 +273,10 @@ def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="aut
             door_t=m["door_depth_m"],
             door_past_handle=m["door_width_m"] - m["hinge_along_door_m"],
             body_depth=m["body_depth_m"],
+            body_width=m["body_width_m"],
+            body_height=m["body_height_m"],
+            support_height=m["support_height_m"],
+            support_floor_z=m["support_floor_z_m"],
         ),
         DOOR_FACE_BEHIND_HANDLE=m["handle_centre_to_face_m"],
         DOOR_Z_FROM_HANDLE=_DOOR_Z_FROM_HANDLE,  # the camera sees only part of it

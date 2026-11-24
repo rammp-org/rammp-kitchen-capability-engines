@@ -69,16 +69,29 @@ class FridgeModel:
             "dims": [round(float(dv), 5), round(float(du), 5), round(float(dz), 5)],
         }
 
-    def body(self):
-        """The cabinet behind the closed door (it never moves)."""
+    def support(self):
+        """The stationary cabinet below the appliance, with its front flush to the closed door."""
+        height = self.door.get("support_height", 0.0)
+        if height <= 0:
+            return []
         df = self.df
-        _, _, _, body_depth = door_dims(self.door)
+        _, _, _, depth = door_dims(self.door)
+        width = self.door.get("body_width", df.length)
+        z = self.door["support_floor_z"] + height / 2
+        return [self._box("support_cabinet", df.length / 2, df.t / 2 - depth / 2, 0.0, z, width, depth, height)]
+
+    def body(self):
+        """The appliance behind the door and the support it sits on."""
+        df = self.df
+        _, _, _, depth = door_dims(self.door)
         lo, hi = _door_z(self.door)
-        return [
-            self._box(
-                "body", df.length / 2, -df.t / 2 - body_depth / 2, 0.0, (lo + hi) / 2, df.length, body_depth, hi - lo
-            )
-        ]
+        support = self.support()
+        height = self.door.get("body_height", hi - lo)
+        width = self.door.get("body_width", df.length)
+        if support:
+            lo = self.door["support_floor_z"] + self.door["support_height"]
+        fridge = self._box("body", df.length / 2, -df.t / 2 - depth / 2, 0.0, lo + height / 2, width, depth, height)
+        return [fridge, *support]
 
     def slab(self, deg, tag="door", window=None, v=None):
         """The door slab open `deg`. `window` (u0, u1, z0, z1): leave this part of it out, through its thickness --

@@ -73,15 +73,17 @@ class DoorSweep:
             half_step = 0.5
         self.angles = angles
         slab = [model.slab(deg)[0] for deg in angles]
-        dims, centres, axes = self._boxes(slab)
-        radius = np.max(np.linalg.norm(centres[:, :2] - model.df.hinge[:2], axis=1))
+        dims, centres, axes = self._boxes(slab + model.support())
+        count = len(slab)
+        radius = np.max(np.linalg.norm(centres[:count, :2] - model.df.hinge[:2], axis=1))
         radius += np.linalg.norm(dims[0, :2])
         # If the closed slab is fixed and the pivot is off by e, the
         # rotated slab is off by (I - R)e. Bound that displacement over
         # each sample's interval, with a floor for closed-pose translation.
         angle_bound = np.radians(np.minimum(180, np.abs(angles) + half_step))
         hinge_pad = F.DOOR_SWEEP_HINGE_MARGIN_M * np.maximum(1, 2 * np.sin(angle_bound / 2))
-        dims[:, :2] += hinge_pad[:, None] + radius * np.radians(half_step) + 0.00002
+        dims[:count, :2] += hinge_pad[:, None] + radius * np.radians(half_step) + 0.00002
+        dims[count:] += padding  # the stationary support is padded in the arm's collision world too
         if translation is not None:
             shift = np.asarray(translation) / 2
             centres += shift
@@ -112,7 +114,9 @@ class DoorSweep:
 
     def _hits(self, shift):
         gaps = self.gaps if shift is None else self.gaps + self.axes @ shift
-        return (np.abs(gaps) <= self.radii + 1e-10).all(axis=-1)
+        hits = (np.abs(gaps) <= self.radii + 1e-10).all(axis=-1)
+        count = len(self.angles)
+        return hits[:count] | hits[count:].any(axis=0)
 
     def obstacle(self, shift=None):
         if not self.names:

@@ -73,7 +73,11 @@ params:
   door_below_handle_m: 0.3937
   # NOT MEASURED: the STL's straight bar between its mounts. Measure it.
   handle_length_m: 0.2032
-  body_depth_m: 0.5
+  body_depth_m: 0.4572
+  body_width_m: 0.4826
+  body_height_m: 0.8382
+  support_height_m: 0.50
+  support_floor_z_m: -0.502
   # The wheelchair: on the 30-deg mount it is the cuRobo planner's own collision layers, in every
   # world; the level mount (no layers) gets this stand-in box behind the arm base (m) in the fridge's
   # world. And which way moving the chair back moves the fridge in the arm's frame (x, y).

@@ -37,7 +37,11 @@ MEASURED = {
     # the handle bar's grippable straight length, between its mounts: 8 in, measured on the fridge (11-06). It limits
     # how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
     "handle_length_m": 8 * INCH,
-    "body_depth_m": 0.50,  # cabinet behind the door
+    "body_depth_m": 18 * INCH,  # cabinet behind the door
+    "body_width_m": 19 * INCH,
+    "body_height_m": 33 * INCH,
+    "support_height_m": 0.50,  # appliance sits on the support cabinet
+    "support_floor_z_m": -0.502,  # floor in the Gen1.5 arm_mount frame
     # LEVEL MOUNT ONLY (dojo, which has no wheelchair model): no part of the arm or gripper may be more than this far
     # behind the arm base (arm-base x) while on its right (y < 0) -- the stand-in for the chair (10-24: a close ran the
     # arm into the back of the chair; user: ~8 in estimated, then 12, then 15). On the 30-deg mount the wheelchair and
