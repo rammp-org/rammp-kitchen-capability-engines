@@ -108,10 +108,11 @@ class Cancelled(Exception):
 class EngineError(Exception):
     """Raise from `execute()` to fail the action with an error code."""
 
-    def __init__(self, error_code: str, message: str = "", recoverable: bool = False):
+    def __init__(self, error_code: str, message: str = "", recoverable: bool = False, *, payload=None):
         super().__init__(message or error_code)
         self.error_code = error_code
         self.recoverable = recoverable
+        self.payload = payload
 
 
 class _Run:
@@ -929,6 +930,8 @@ class CapabilityEngine(Node):
                 result.status = Result.STATUS_FAILED
                 result.error_code = error.error_code
                 result.recoverable = error.recoverable
+                if error.payload is not None:
+                    result.payload_json = json.dumps(error.payload)
                 self.get_logger().error(f"{goal.action_id} failed: {error}")
             except Exception as error:  # a bug in execute() must not kill the node
                 result.status = Result.STATUS_FAILED

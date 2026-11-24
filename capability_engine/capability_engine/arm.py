@@ -229,6 +229,10 @@ def wait_until(ready, timeout_s, ctx=None):
         time.sleep(POLL_S)
 
 
+def _remaining(timeout_s, deadline):
+    return timeout_s if deadline is None else max(0.0, min(timeout_s, deadline - time.monotonic()))
+
+
 def _result_within(fut, timeout_s):
     """`fut`'s result, or None if it is not done within `timeout_s` (no cancel: settling)."""
     return fut.result() if wait_until(fut.done, timeout_s) else None
@@ -1116,7 +1120,7 @@ class ArmInterface:
             self._goals.append(send)
         return send
 
-    def _goal_result(self, send, timeout_s, label, monitor=None, path=False, moves=True):
+    def _goal_result(self, send, timeout_s, label, monitor=None, path=False, moves=True, *, deadline=None):
         """Wait for goal `send`'s acceptance, then up to `timeout_s` for its result: the action's
         Result. A cancel of the action cancels the goal and raises Cancelled. Refused (`label`
         first) when the goal is refused or unanswered, or has no result in time (it is then
@@ -1124,7 +1128,7 @@ class ArmInterface:
         the goal runs; True cancels the goal and sets monitor_stopped. `path`: record last_path.
         `moves`: a goal that moves the arm (not a plan), so a refusal says nothing moved."""
         ctx = self._ctx
-        wait_until(lambda: send.done() or not self._in_action, GOAL_ACCEPT_S, ctx)
+        wait_until(lambda: send.done() or not self._in_action, _remaining(GOAL_ACCEPT_S, deadline), ctx)
         gh = send.result() if send.done() else None
         with self._alive(ACTION_ENDED_MESSAGE):  # end_action() settles it then
             rf = gh.get_result_async() if gh is not None and gh.accepted else None
@@ -1148,7 +1152,7 @@ class ArmInterface:
             self.monitor_stopped = False
         res = None
         try:
-            t_end = time.monotonic() + timeout_s
+            t_end = time.monotonic() + _remaining(timeout_s, deadline)
             while not rf.done() and time.monotonic() < t_end and self._in_action:
                 if ctx.cancelled():
                     ctx.checkpoint()  # raises the engine's Cancelled: cancelled below
@@ -1322,7 +1326,7 @@ class ArmInterface:
 
     # -- the planner (cuRobo: plans only, nothing moves) -----------------------------------------
 
-    def plan_to_pose(self, pos, quat, start_joints, hold=HOLD_NONE) -> Plan:
+    def plan_to_pose(self, pos, quat, start_joints, hold=HOLD_NONE, *, deadline=None) -> Plan:
         """cuRobo's plan for the tool frame to (pos, quat xyzw) in arm_mount, from `start_joints`
         (rad, arm_joint_1..7, as the driver reports them: raw_joints()). `hold` (HOLD_*): how much
         of the tool's orientation the path keeps. A failed plan is Plan(success=False, message)."""
@@ -1332,17 +1336,17 @@ class ArmInterface:
         o.x, o.y, o.z, o.w = map(float, quat)
         g.start_joints = [float(x) for x in start_joints]
         g.hold = hold
-        return self._plan_goal("plan_to_pose", g)
+        return self._plan_goal("plan_to_pose", g, deadline=deadline)
 
-    def plan_to_joints(self, q_goal, start_joints) -> Plan:
+    def plan_to_joints(self, q_goal, start_joints, *, deadline=None) -> Plan:
         """cuRobo's plan to joints `q_goal` from `start_joints` (rad, arm_joint_1..7), as
         plan_to_pose."""
         g = PlanToJoints.Goal()
         g.target_joints = [float(x) for x in q_goal]
         g.start_joints = [float(x) for x in start_joints]
-        return self._plan_goal("plan_to_joints", g)
+        return self._plan_goal("plan_to_joints", g, deadline=deadline)
 
-    def blend(self, legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None) -> Plan:
+    def blend(self, legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None, *, deadline=None) -> Plan:
         """cuRobo's ONE trajectory through `legs` (Plans it returned, each planned from the last
         joints of the leg before), passing junction k (the end of leg k) still moving where
         `blend_radius[k]` (m, one per junction) > 0 and stopping on it where it is 0. The planner
@@ -1362,9 +1366,9 @@ class ArmInterface:
             for quat in hold_orientation:
                 x, y, z, w = (0.0, 0.0, 0.0, 1.0) if quat is None else map(float, quat)
                 g.hold_orientation.append(Quaternion(x=x, y=y, z=z, w=w))
-        return self._plan_goal("blend", g)
+        return self._plan_goal("blend", g, deadline=deadline)
 
-    def set_world(self, world: str, *, even_if_cancelled=False) -> tuple[bool, str]:
+    def set_world(self, world: str, *, even_if_cancelled=False, deadline=None) -> tuple[bool, str]:
         """Swap cuRobo's collision world for `world`: a world YAML path as the planner sees it, or
         a name it resolves next to its config. (success, message). `even_if_cancelled`: wait for
         the answer even once the action is cancelled (at most SERVICE_CALL_S), e.g. to put back
@@ -1372,21 +1376,21 @@ class ArmInterface:
         if self._mock:
             return self._mock_sent("set_world"), MOCK_NOT_SENT
         res = self._call(
-            "set_world", SetWorld.Request(world=world), cancellable=not even_if_cancelled
+            "set_world", SetWorld.Request(world=world), cancellable=not even_if_cancelled, deadline=deadline
         )
         return res.success, res.message
 
-    def _plan_goal(self, name, g):
+    def _plan_goal(self, name, g, *, deadline=None):
         if self._mock:  # a successful plan with no samples
             self._mock_sent(name)
             return Plan(True, MOCK_NOT_SENT)
         client = self._action(name)  # the planner needs no arm state
         path = ACTIONS[name][1]
         try:
-            if not self._wait_for_server(client, self._ctx, PLANNER_WAIT_S):
+            if not self._wait_for_server(client, self._ctx, _remaining(PLANNER_WAIT_S, deadline)):
                 self._fail(Refused, f"{name}: no {path} action server (the cuRobo planner)")
             send = self._send_goal(client, g)
-            res = self._goal_result(send, PLAN_TIMEOUT_S, name, moves=False)
+            res = self._goal_result(send, PLAN_TIMEOUT_S, name, moves=False, deadline=deadline)
         except Refused as e:  # a failed plan
             return Plan(False, str(e))
         if not res.success:
@@ -1427,7 +1431,7 @@ class ArmInterface:
         res = self._call("set_gains", req)
         return res.accepted, res.message
 
-    def _call(self, name, request, on_sent=None, cancellable=True):
+    def _call(self, name, request, on_sent=None, cancellable=True, *, deadline=None):
         """Call service `name` and return its response: Refused when the server is not up within
         SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
         ends, Cancelled once it is cancelled (both waits poll every POLL_S). Waits for no arm
@@ -1437,13 +1441,13 @@ class ArmInterface:
         client = self._client(name)
         ctx = self._ctx if cancellable else None
         path = SERVICES[name][1]
-        if not wait_until(lambda: self._live(client.service_is_ready), SERVICE_WAIT_S, ctx):
+        if not wait_until(lambda: self._live(client.service_is_ready), _remaining(SERVICE_WAIT_S, deadline), ctx):
             self._fail(Refused, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")
         with self._alive():  # end_action() settles a request sent here (`on_sent`)
             future = client.call_async(request)
             if on_sent is not None:
                 on_sent(future)
-        if not wait_until(lambda: self._live(future.done), SERVICE_CALL_S, ctx):
+        if not wait_until(lambda: self._live(future.done), _remaining(SERVICE_CALL_S, deadline), ctx):
             self._fail(Refused, f"{path}: no answer in {SERVICE_CALL_S:g} s")
         return future.result()
 
