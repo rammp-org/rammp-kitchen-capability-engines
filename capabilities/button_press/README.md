@@ -26,9 +26,10 @@ run that needs staging stops after gating the staging goal, because the press is
 re-detect there. Someone stands at the e-stop whenever `allow_execute` is on. The first motion:
 `{"presses": 0, "no_return": true}`, attended, before any press.
 
-How a run ends: a check that refuses a leg before it is sent backs off to the last safe pose (the
-start, or the pre-press spot after a press its own checks stopped). A motion the driver fails (an
-e-stop, control taken, a tracking abort) or a cancel leaves the arm holding where it stopped. The
+How a run ends: back at the start joints, also when it fails its own checks (straight out from the panel
+first when close to it; a press its own checks stopped goes back to the pre-press spot before that). A
+motion the driver fails (an e-stop, control taken, a tracking abort), a cancel, or bad arm state leaves
+the arm holding where it stopped. The
 approach, press and return report `pausable: false`.
 
 ## The pre-press spot (computed)
@@ -90,7 +91,7 @@ as before.
 | Old (`ArmInterfaceClient`)                       | Now (`PressArm` on `self.arm`, `press_arm.py`)                                                                                                      |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `get_state()["position"]`                        | `/joint_states` (best effort; `joint_1..7`, wrapped to ±π)                                                                                          |
-| `get_state()["ee_pos"]` (Kortex tool pose)       | `/ee_state` + 0.120 m along the flange z (`/ee_state` is the flange, `end_effector_link`)                                                           |
+| `get_state()["ee_pos"]` (Kortex tool pose)       | `/ee_state` + 0.134 m along the flange z (`/ee_state` is the flange, `end_effector_link`; 0.120 before the sensor puck)                             |
 | `get_state()["gripper_pos"]`                     | `/gripper_state.position` (0 open … 1 closed)                                                                                                       |
 | `get_arm_state()` (`SERVOING_READY`)             | `/control_status` (e-stop, arbitration, owner) + `/diagnostics` (`Arm` task)                                                                        |
 | `get_speed()` low/medium                         | none. Each leg is timed here: min-jerk, peak 6 cm/s tool, 0.35 rad/s per joint                                                                      |

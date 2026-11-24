@@ -20,14 +20,16 @@ Steps:
   5. go          straight line to the pre-press spot, wrist turning to face the panel
   6. press       `presses` times: in along the normal until the wrist torques feel the button,
                  push_mm further (or until stop_nm), then straight back to the spot
-  7. return      back to the start pose (cuRobo), unless no_return
+  7. return      back to the start JOINTS (Run.go_home), unless no_return
 
 A dry run that needs staging stops after checking the staging goal: the rest can only be planned
-from the re-detect. Any failed check raises Abort and the arm holds. A check that refuses a move
-before it is sent first backs off to the last safe pose (the start, or the pre-press spot during a
-press); a motion that was sent and failed (MotionFailed: the driver's error, an e-stop, control
-lost) or a cancel leaves the arm holding where it is. The pre-press offset is stored relative to the
-button, so one measurement serves every button.
+from the re-detect. Any failed check raises Abort, and the arm goes back to where it started first
+(Run.go_home: straight out from the panel when close to it, then cuRobo to the start joints); a press
+its checks stopped goes back to the pre-press spot before that. A motion that was sent and failed
+(MotionFailed: the driver's error, an e-stop, control lost), a Stop or cancel, or bad arm state
+(ArmError) leaves the arm holding where it is -- except a cuRobo plan refused before anything moved.
+A cuRobo move refused because a joint sits at its limit turns that joint off it first and tries once
+more. The pre-press offset is stored relative to the button, so one measurement serves every button.
 """
 
 from __future__ import annotations
@@ -83,6 +85,7 @@ from button_press.press_arm import (
     GRIPPER_CLOSED_ABOVE,
     TRACK_ABORT_M,
     PressArm,
+    clear_of_limit,
 )
 
 # ---- the pre-press spot, in the panel frame (x right, y up, z out of the panel; origin = button)
@@ -140,7 +143,10 @@ CAMERA_FRAME = "wrist_d405_color_optical"
 # than the staging pose (along the panel normal), then a straight sim-checked line goes the rest of the
 # way in. With the microwave on the raised counter (top ~0.29 m), cuRobo's own path to the staging
 # pose swung the arm into the microwave's top (2026-10-15). lead_in 0 = the old single cuRobo move.
-STAGE_LEAD_IN_M = 0.10  # was 0.20 (2026-10-15); with staging at 0.35 that put the lead-in ~60 cm out
+# Off since 2026-11-18: cuRobo now has the microwave and its counter in its world before this move
+# (set_obstacles), and the stop 10 cm out cost a second leg (~1.6 s) on every run. Was 0.10, and 0.20
+# before 2026-10-15.
+STAGE_LEAD_IN_M = 0.0
 LEAD_IN_SPEED_MPS = 0.15  # the straight lead-in leg (free air, away from the microwave): 2.5 x CART_SPEED
 # (no settle sleep: the re-detect only takes frames captured after the arm stopped -- see `after`)
 # ---- scene camera (far/first look; see scene_finder.py): the fixed Orbbec Gemini finds the
@@ -292,6 +298,7 @@ class Run:
         # reanchor_seed() after a big move.
         self.seed_posture = None
         self.q0 = None  # the start joints (preflight): where go_home returns the arm
+        self.panel = None  # (button xyz, panel normal out) of the latest estimate: go_home backs out from it
 
     def log(self, rec):
         """Append one record (plus a timestamp) to the run log, if there is one."""
@@ -413,6 +420,7 @@ class Run:
         """The microwave and its counter from this panel estimate: the clearance check's boxes, and (execute runs)
         cuRobo's world. Abort if the driver's model and the gating sim disagree, or the planner refuses the world."""
         boxes = microwave_boxes(origin, R, self.args.target)
+        self.panel = (np.asarray(origin, dtype=float), np.asarray(R[:, 2], dtype=float))
         if self.clear is not None:
             self.clear.close()
             self.clear = None
@@ -456,17 +464,45 @@ class Run:
         """True if the arm is at its start joints (within HOME_TOL_DEG on every joint)."""
         return self.q0 is not None and max_joint_delta_deg(self.arm.joints(), self.q0) <= HOME_TOL_DEG
 
-    def go_back(self, p0, R0, why, n_out=None):
-        """After a move its checks refused (nothing sent: never after a MotionFailed): go back to
-        (p0, R0) with a long (cuRobo) move, unless already there or in a dry run. Near the panel
-        (n_out given), back straight out from it first (retreat). If that fails too, the arm holds."""
-        p_now, R_now = self.arm.ee_pose()
-        if not self.args.execute or (np.linalg.norm(p_now - p0) < 0.005 and rot_angle_deg(R_now, R0) < 2.0):
+    def go_home(self, why=None):
+        """Back to the start JOINTS (preflight's q0), not merely the start pose: the arm's own start
+        configuration, so runs do not drift through the redundant arm's postures. Straight out from the
+        panel first when the tool is within RETREAT_OUT_M of it (retreat), then cuRobo in joint space
+        (a joint at its limit is turned off it first: limit_retry). Nothing if already there or in a dry
+        run. Raises Abort / MotionFailed (the arm holds) if it cannot."""
+        if not self.args.execute or self.q0 is None or self.at_home():
             return
-        say(f"  {why} -- going back to the start first")
-        if n_out is not None:
-            self.retreat(n_out)
-        self.long_move(p0, R0, "bail")
+        if why:
+            say(f"  {why} -- going back to the start")
+        if self.panel is not None:
+            origin, n_out = self.panel
+            p, _ = self.arm.ee_pose()
+            if float((p - origin) @ n_out) < RETREAT_OUT_M:
+                self.retreat(n_out)
+        if self.world.loaded is None:
+            raise Abort("back to start: cuRobo's world has no microwave in it -- arm not commanded")
+        try:
+            self.limit_retry(lambda: self.arm.go_to_joints(self.q0, "back to start", self.log), "back to start")
+        except MotionFailed as e:
+            # The start joints themselves have a joint at its limit (the run started there): go home with
+            # that joint just off it instead.
+            q, joint = clear_of_limit(self.q0, str(e), "GOAL")
+            if q is None:
+                raise
+            off = float(np.degrees(q - self.q0).sum())
+            say(f"  the start has {joint} at its limit -- going back with it {off:+.1f} deg off")
+            self.q0 = q
+            self.limit_retry(lambda: self.arm.go_to_joints(self.q0, "back to start", self.log), "back to start")
+
+    def limit_retry(self, go, name):
+        """go(); if cuRobo refused it because a joint is at its limit (nothing moved), turn that joint
+        off the limit and go() once more."""
+        try:
+            return go()
+        except MotionFailed as e:
+            if not self.arm.turn_off_limit(str(e), name, self.log):
+                raise
+        return go()
 
     def retreat(self, n_out, name="back out from the panel"):
         """Straight out along the panel normal n_out, RETREAT_OUT_M, keeping the wrist as it is:
@@ -505,7 +541,9 @@ class Run:
         Refused unless cuRobo's world has the microwave in it (set_obstacles)."""
         if self.args.execute and self.world.loaded is None:
             raise Abort(f"{name}: cuRobo's world has no microwave in it yet -- arm not commanded")
-        return self.arm.go_to_ee_pose(p, Rm, name, self.log, track_abort_m=LOOSE_TRACK_ABORT_M)
+        return self.limit_retry(
+            lambda: self.arm.go_to_ee_pose(p, Rm, name, self.log, track_abort_m=LOOSE_TRACK_ABORT_M), name
+        )
 
     def press(self, p_spot, R_spot, n_out):
         """Press args.presses times from the pre-press spot: in until the touch, push_mm past it
@@ -1035,6 +1073,29 @@ def plan_press(run: Run, a, pub, p0, origin, R, presses: int, back: bool):
 
 
 def press_button(run: Run, a, pub) -> dict:
+    """The run (_press_button), going back to the start when it fails on its own checks (Abort) or
+    on a cuRobo plan refused before anything moved. A sent motion that failed, a Stop or cancel
+    (Cancelled) or bad arm state (ArmError) is not an Abort and holds. The failure is raised either way."""
+    try:
+        return _press_button(run, a, pub)
+    except MotionFailed as e:
+        if "PLANNING_FAILED" in str(e):  # cuRobo refused: nothing was sent
+            _go_home_after(run, e)
+        raise
+    except Abort as e:
+        _go_home_after(run, e)
+        raise
+
+
+def _go_home_after(run: Run, e):
+    try:
+        run.go_home(f"run failed ({e})")
+    except Abort as e2:  # MotionFailed too: say why, and keep the run's own failure
+        say(f"  could not go back to the start: {e2}")
+        run.log({"stage": "go_home_failed", "error": str(e2)})
+
+
+def _press_button(run: Run, a, pub) -> dict:
     """The whole run, steps 1-7 of the module docstring. Returns what it did ({"dry_run": ...,
     "pressed": n, "returned": ...}); raises Abort on any failed check.
 
@@ -1080,13 +1141,7 @@ def press_button(run: Run, a, pub) -> dict:
             return done
         run.step("stage", 0.25)
         say("\n== go to the staging pose ==")
-        try:
-            go_to_staging(run, p_st, R_st, R[:, 2], lead)
-        except MotionFailed:
-            raise
-        except Abort as e:
-            run.go_back(p0, R0, f"move refused ({e})")
-            raise
+        go_to_staging(run, p_st, R_st, R[:, 2], lead)
         stopped = run.per.get_clock().now().nanoseconds  # the leg returned: the arm is still
         run.reanchor_seed("at the staging pose")
         run.step("redetect", 0.4)
@@ -1102,13 +1157,7 @@ def press_button(run: Run, a, pub) -> dict:
 
     run.step("approach", 0.6, pausable=False)
     say("\n== go to the pre-press spot ==")
-    try:
-        run.move(go, "to pre-press")
-    except MotionFailed:
-        raise
-    except Abort as e:
-        run.go_back(p0, R0, f"move refused ({e})", n_out=n_out)
-        raise
+    run.move(go, "to pre-press")
 
     if a.presses:
         run.step("press", 0.7, pausable=False)
@@ -1120,14 +1169,7 @@ def press_button(run: Run, a, pub) -> dict:
         return done
     run.step("return", 0.9, pausable=False)
     say("\n== back to start ==")
-    back_to_start(run, p0, R0, n_out)
+    run.go_home()
     done["returned"] = True
     say("\ndone.")
     return done
-
-
-def back_to_start(run: Run, p0, R0, n_out):
-    """From the panel back to the start pose: straight out RETREAT_OUT_M along the panel normal
-    first, then cuRobo (its world has no microwave: never let it start right at the panel)."""
-    run.retreat(n_out)
-    run.long_move(p0, R0, "back to start")

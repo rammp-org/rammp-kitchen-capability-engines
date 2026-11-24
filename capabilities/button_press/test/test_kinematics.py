@@ -19,9 +19,12 @@ def kin():
     k.close()
 
 
-def test_tool_frame_is_flange_plus_120mm(kin):
-    """tool_frame = end_effector_link + 0.120 m along its z: what RammpArm adds to /ee_state."""
+def test_tool_frame_is_flange_plus_tool_z(kin):
+    """tool_frame = end_effector_link + TOOL_Z (0.134 m, with the sensor puck) along its z: what RammpArm adds
+    to /ee_state."""
     import pybullet as p
+
+    from button_press.press_arm import TOOL_Z
 
     q = np.array([0.3, -0.4, 2.0, -1.5, 0.7, -1.0, 0.2])
     kin._set_sim(q)
@@ -29,7 +32,7 @@ def test_tool_frame_is_flange_plus_120mm(kin):
         kin.robot_id, kin.end_effector_id - 1, computeForwardKinematics=True, physicsClientId=kin.cid
     )
     tool, _ = kin.fk(q)
-    want = np.asarray(flange[4]) + Rotation.from_quat(flange[5]).apply([0, 0, 0.120])
+    want = np.asarray(flange[4]) + Rotation.from_quat(flange[5]).apply([0, 0, TOOL_Z])
     assert np.allclose(tool, want, atol=1e-6)
 
 

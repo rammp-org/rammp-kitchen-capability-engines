@@ -139,7 +139,8 @@
     </inertial>
   </link>
   <joint name="tool_frame_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0 0 0.120" />
+    <!-- 0.134, not the generator's 0.120: the sensor puck adds 0.014 m (press_arm.TOOL_Z) -->
+    <origin rpy="0 0 0" xyz="0 0 0.134" />
     <parent link="end_effector_link" />
     <child link="tool_frame" />
     <axis xyz="0 0 0" />

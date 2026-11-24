@@ -1,4 +1,6 @@
 """Leaving the panel: back straight out before any cuRobo move, and never cuRobo right at the panel.
+Going home (Run.go_home): to the start JOINTS, after the run's own failures too; a driver failure or a
+cancel holds. A cuRobo move refused at a joint limit turns that joint off it and tries once more.
 
 2026-10-14: the return to start handed the whole move to cuRobo with the fingertips 2 cm from the
 button; cuRobo's world has no microwave, and its path swept the gripper into it. Runs Run's moves
@@ -6,6 +8,7 @@ against a stand-in arm that records what would be sent (no ROS, nothing moves).
 """
 
 import argparse
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,14 +21,25 @@ from button_press import Abort, MotionFailed  # noqa: E402
 N_OUT = np.array([-0.993, 0.104, 0.053]) / np.linalg.norm([-0.993, 0.104, 0.053])  # out of the panel, toward the arm
 SPOT = np.array([0.675, -0.317, 0.077])  # the pre-press spot
 HOME = np.array([0.577, 0.001, 0.433])
+BUTTON = SPOT - 0.06 * N_OUT  # the pre-press spot is 6 cm out of the panel
+Q_HOME = np.array([0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57])  # the start joints
+LIMIT_REFUSAL = (
+    "back to start: go_to_joint_config failed: RammpArm: back to start ended PLANNING_FAILED START_IN_LIMIT_MARGIN: "
+    "start: arm_joint_6 is 0.000 rad from its position limit [-2.090, 2.090], inside joint_limit_margin_rad 0.100"
+)
 
 
 class FakeArm:
     def __init__(self, p):
         self.p, self.R = np.asarray(p, float), np.eye(3)
+        self.q = Q_HOME + 0.5  # away from the start
+        self.refuse = []  # go_to_joints raises these first, one per call
 
     def ee_pose(self):
         return self.p, self.R
+
+    def joints(self):
+        return self.q
 
 
 def run_at(p, execute=True, fail=()):
@@ -50,6 +64,20 @@ def run_at(p, execute=True, fail=()):
         run.sent.append(("curobo", name, p))
         run.arm.p = np.asarray(p, float)
 
+    def go_to_joints(q, name, log):
+        if run.arm.refuse:
+            raise MotionFailed(run.arm.refuse.pop(0))
+        run.sent.append(("curobo joints", name, q))
+        run.arm.p, run.arm.q = HOME, np.asarray(q, float)
+
+    def turn_off_limit(error, name, log):
+        if "START_IN_LIMIT_MARGIN" not in error:
+            return False
+        run.sent.append(("turn off limit", name, None))
+        return True
+
+    run.arm.go_to_joints, run.arm.turn_off_limit = go_to_joints, turn_off_limit
+    run.q0, run.panel, run.world = Q_HOME, (BUTTON, N_OUT), SimpleNamespace(loaded=[{"name": "microwave"}])
     run.move, run.long_move, run.log = move, long_move, lambda rec: None
     run.collide = {}  # leg name -> whether run.move was asked to clearance-check it
     run.check_leg = lambda name, q, knots: (1.0, "")  # collision.py has its own tests
@@ -57,33 +85,120 @@ def run_at(p, execute=True, fail=()):
     return run
 
 
-def test_back_to_start_backs_straight_out_first():
+def test_go_home_backs_straight_out_first_then_goes_to_the_start_joints():
     run = run_at(SPOT)
-    pb.back_to_start(run, HOME, np.eye(3), N_OUT)
+    run.go_home()
     kinds = [(k, n) for k, n, _ in run.sent]
-    assert kinds == [("straight", "back out from the panel"), ("curobo", "back to start")]
+    assert kinds == [("straight", "back out from the panel"), ("curobo joints", "back to start")]
     path = run.sent[0][2]
     end = path[-1][0]
     assert np.allclose(end, SPOT + pb.RETREAT_OUT_M * N_OUT)  # straight out along the normal
     assert all(np.allclose(Rm, np.eye(3)) for _, Rm in path)  # without turning the wrist
     assert all(abs(float((p - SPOT) @ N_OUT) - np.linalg.norm(p - SPOT)) < 1e-9 for p, _ in path)
-    assert np.allclose(run.sent[1][2], HOME)
+    assert np.allclose(run.sent[1][2], Q_HOME)  # the start JOINTS, not just the start pose
 
 
 def test_the_retreat_clears_the_panel_like_staging():
     assert pb.RETREAT_OUT_M >= 0.10  # cuRobo starts well clear of it
 
 
-def test_a_bail_from_the_approach_backs_out_before_curobo():
-    run = run_at(SPOT + 0.05 * N_OUT)
-    run.go_back(HOME, np.eye(3), "move aborted", n_out=N_OUT)
-    assert [(k, n) for k, n, _ in run.sent] == [("straight", "back out from the panel"), ("curobo", "bail")]
+def test_go_home_far_from_the_panel_goes_straight_to_curobo():
+    run = run_at(BUTTON + 0.30 * N_OUT)
+    run.go_home("move refused")
+    assert [(k, n) for k, n, _ in run.sent] == [("curobo joints", "back to start")]
 
 
-def test_a_bail_far_from_the_panel_goes_straight_to_curobo():
-    run = run_at(SPOT + 0.30 * N_OUT)
-    run.go_back(HOME, np.eye(3), "move aborted")
-    assert [(k, n) for k, n, _ in run.sent] == [("curobo", "bail")]
+def test_go_home_at_the_start_does_nothing():
+    run = run_at(HOME)
+    run.arm.q = Q_HOME + np.radians(0.5)
+    run.go_home()
+    assert run.sent == []
+
+
+def test_go_home_turns_a_joint_off_its_limit_and_tries_again():
+    run = run_at(BUTTON + 0.30 * N_OUT)
+    run.arm.refuse = [LIMIT_REFUSAL]
+    run.go_home()
+    assert [(k, n) for k, n, _ in run.sent] == [("turn off limit", "back to start"), ("curobo joints", "back to start")]
+
+
+def test_go_home_holds_on_any_other_refusal():
+    run = run_at(BUTTON + 0.30 * N_OUT)
+    run.arm.refuse = ["back to start: go_to_joint_config failed: INVALID_GOAL supervisor rejected planned trajectory"]
+    with pytest.raises(MotionFailed, match="supervisor"):
+        run.go_home()
+    assert run.sent == []
+
+
+def _failing_run(error, monkeypatch):
+    run = run_at(SPOT)
+
+    def press(run_, a, pub):
+        raise error
+
+    monkeypatch.setattr(pb, "_press_button", press)
+    return run
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        Abort("dome detector: only 4/7 frames agree on the start_30s pixel"),
+        Abort("press 1 (contact): no touch within 30 mm"),
+        MotionFailed("to staging: go_to_ee_pose failed: RammpArm: to staging ended PLANNING_FAILED START_IN_COLLISION"),
+    ],
+)
+def test_a_run_that_fails_its_own_checks_goes_home(error, monkeypatch):
+    run = _failing_run(error, monkeypatch)
+    with pytest.raises(type(error)):
+        pb.press_button(run, run.args, None)
+    assert [k for k, _, _ in run.sent] == ["straight", "curobo joints"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MotionFailed("to pre-press: trajectory ended PATH_TOLERANCE_VIOLATED -- HOLDING HERE"),
+        MotionFailed("back to start: go_to_joint_config failed: E-stop engaged"),
+        RuntimeError("Cancelled"),  # a Stop or cancel, ArmError: not an Abort
+    ],
+)
+def test_a_driver_failure_or_a_cancel_holds(error, monkeypatch):
+    run = _failing_run(error, monkeypatch)
+    with pytest.raises(type(error)):
+        pb.press_button(run, run.args, None)
+    assert run.sent == []
+
+
+def test_a_failed_way_home_keeps_the_runs_own_failure(monkeypatch):
+    run = _failing_run(Abort("press 1 (contact): no touch within 30 mm"), monkeypatch)
+    run.arm.refuse = ["back to start: go_to_joint_config failed: E-stop engaged"]
+    with pytest.raises(Abort, match="no touch"):
+        pb.press_button(run, run.args, None)
+
+
+def test_turn_off_limit_turns_only_that_joint_clear_of_the_margin():
+    from button_press import press_arm as pa
+
+    sent = []
+    q0 = np.array([1.28, 0.42, -3.01, -2.09, -1.94, -2.0997, -2.21])
+    pa_arm = pa.PressArm.__new__(pa.PressArm)
+    pa_arm.execute, pa_arm.sent_goals = True, 0
+    pa_arm.raw_joints = lambda: q0
+    pa_arm._wait_still = lambda: HOME
+    pa_arm.arm = SimpleNamespace(
+        execute_joint_trajectory=lambda names, points, **k: sent.append((names, points))
+        or SimpleNamespace(error_code=0, error_string="")
+    )
+    assert pa_arm.turn_off_limit(LIMIT_REFUSAL, "back to start", lambda rec: None)
+    (names, points) = sent[0]
+    assert list(names) == list(pa.rammp_arm.JOINTS)
+    q_end = np.asarray(points[-1][1])
+    assert np.allclose(points[0][1], q0) and np.allclose(points[0][2], 0) and np.allclose(points[-1][2], 0)
+    assert np.allclose(np.delete(q_end, 5), np.delete(q0, 5))  # only joint 6
+    assert abs(q_end[5] - (-2.090 + 0.100 + pa.LIMIT_CLEAR_RAD)) < 1e-9
+    assert not pa_arm.turn_off_limit("INVALID_GOAL supervisor rejected planned trajectory", "x", lambda rec: None)
+    assert len(sent) == 1
 
 
 def test_an_aborted_press_returns_to_the_spot_in_a_straight_line():
@@ -149,8 +264,8 @@ def test_lead_in_zero_is_one_curobo_move():
     assert [(k, n) for k, n, _ in run.sent] == [("curobo", "to staging")]
 
 
-def test_lead_in_defaults_to_10_cm():
-    assert pb.Args().lead_in == pb.STAGE_LEAD_IN_M == 0.10
+def test_lead_in_is_off_by_default():
+    assert pb.Args().lead_in == pb.STAGE_LEAD_IN_M == 0.0
 
 
 class LeadArm:
@@ -222,7 +337,7 @@ def test_only_the_legs_toward_the_panel_are_clearance_checked():
     """Straight out along the normal and back from the button: not checked (they touch the panel or only move
     away from it); the straight lead-in to staging: checked."""
     run = run_at(SPOT)
-    pb.back_to_start(run, HOME, np.eye(3), N_OUT)
+    run.go_home()
     assert run.collide == {"back out from the panel": False}
     run = run_at(HOME)
     pb.go_to_staging(run, SPOT + 0.15 * N_OUT, np.eye(3), N_OUT, 0.20)
@@ -230,8 +345,6 @@ def test_only_the_legs_toward_the_panel_are_clearance_checked():
 
 
 def test_a_long_move_is_refused_until_curobo_has_the_microwave():
-    from types import SimpleNamespace
-
     run = pb.Run.__new__(pb.Run)
     run.args = argparse.Namespace(execute=True)
     run.world = SimpleNamespace(loaded=None)
