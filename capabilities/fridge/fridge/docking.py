@@ -234,7 +234,7 @@ def dock(
 
 GUIDED_STEP_M = 0.10
 GUIDED_TURN = math.radians(15)
-GUIDED_LOOK_HEADING = math.radians(35)
+GUIDED_LOOK_HEADING = math.radians(28)
 GUIDED_POSITION_MARGIN = 0.025
 GUIDED_YAW_MARGIN = math.radians(4)
 GUIDED_SETTLE_S = 1.0
@@ -250,6 +250,26 @@ def guidance_text(distance, turn):
     return f"{movement}, then stop. Keep the route clear. Wait here while I check again."
 
 
+def guided_routes(delta, yaw):
+    yield from route_options(delta, yaw)
+    # A shallow diagonal followed by a straight correction can make a
+    # lateral move without turning the handle out of the cameras.
+    along, across = rotation(-yaw) @ delta
+    if abs(across) <= TRANSLATION_TOL:
+        return
+    first_direction = 1 if along > 0 else -1
+    for direction in (first_direction, -first_direction):
+        diagonal = math.copysign(GUIDED_LOOK_HEADING, across * direction)
+        travel = across / math.sin(diagonal)
+        return_straight = along - travel * math.cos(diagonal)
+        yield (
+            (0.0, wrap(yaw + diagonal)),
+            (travel, 0.0),
+            (0.0, -diagonal),
+            (return_straight, 0.0),
+        )
+
+
 def guided_step(delta, yaw, geom, guard):
     """Ask for only one short segment, with an allowance for human overshoot."""
 
@@ -260,7 +280,7 @@ def guided_step(delta, yaw, geom, guard):
         return max(0.0, max(abs(wrap(angle)) for angle in headings) - GUIDED_LOOK_HEADING)
 
     blocked = None
-    for route in sorted(route_options(delta, yaw), key=view_excursion):
+    for route in sorted(guided_routes(delta, yaw), key=view_excursion):
         for distance, turn in route:
             if abs(distance) > TRANSLATION_TOL or abs(turn) > TURN_TOL:
                 break
