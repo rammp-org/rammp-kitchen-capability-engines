@@ -398,6 +398,11 @@ class DriveFlow(Flow):
                 SPEED_DEFAULT=0.05, PARAMS=(), check=lambda base, arm: None, move_chair=move_chair
             ),
             BaseError=type("BaseError", (Exception,), {}),
+            SweepBlocked=type("SweepBlocked", (Exception,), {}),
+            open_door=types.SimpleNamespace(
+                Infeasible=type("Infeasible", (Exception,), {}),
+                StagingRequired=type("StagingRequired", (Exception,), {}),
+            ),
             Planner=lambda *a, **k: None,
             WristCamera=lambda *a, **k: None,
             dc=types.SimpleNamespace(

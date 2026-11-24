@@ -527,14 +527,6 @@ def standoffs(cand):
     )
 
 
-def hand_lags(cand):
-    """The side grasp's hand lags tried for grasp `cand`, in order: the one that worked before first; (0,) for the
-    front grasp."""
-    if not cand.get("side"):
-        return [0.0]
-    return proven.first((cand.get("proven") or {}).get("lag"), F.SIDE_HAND_LAGS_DEG)
-
-
 def proven_file():
     """The record of the grasps that planned and ran (proven.py), next to the door file."""
     return dc.DOOR_FILE.parent / proven.FILE_NAME
@@ -542,7 +534,9 @@ def proven_file():
 
 def record_proven(plan, geom, source):
     """Record `plan`'s grasp as one that worked (`source`: "plan" or "arm"), for the next search to try first."""
-    err = proven.record(proven_file(), proven.make_record(F.GRASP, plan, geom["h_raw"], geom["n"], source))
+    err = proven.record(
+        proven_file(), proven.make_record(plan["door"]["grasp"], plan, geom["h_raw"], geom["n"], source)
+    )
     if err:
         say(f"  (could not record the grasp that worked: {err})")
 
@@ -717,7 +711,7 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
     if collision:
         raise StagingRequired(collision)
     # the grasps that worked before first (proven.py), each with its line-up and lag first; the rest in their order
-    prefs = proven.preferred(proven.load(proven_file()) + list(F.PROVEN_SEEDS), F.GRASP, geom["h_raw"], geom["n"])
+    prefs = proven.preferred(proven.load(proven_file()) + list(F.PROVEN_SEEDS), grasp, geom["h_raw"], geom["n"])
     cands = proven.order(cands, prefs)
     first_tried = [c["proven"] for c in cands if c.get("proven")]
     if first_tried:
@@ -733,6 +727,7 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         say("    candidate rejected " + json.dumps(item))
 
     def side_pull_options(cand, insert_joints, name):
+        preferred_lag = (cand.get("proven") or {}).get("lag")
         for angle in pull_angles:
             ranked = []
             for lag in F.SIDE_HAND_LAGS_DEG:
@@ -740,8 +735,8 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
                 if why:
                     fail(f"{name}, {angle:g}°, lag {lag:g}°", why, {"previous_limit_margin_deg": margin})
                 else:
-                    ranked.append((margin, lag))
-            for _, lag in sorted(ranked, reverse=True):
+                    ranked.append((lag == preferred_lag, margin, lag))
+            for _, _, lag in sorted(ranked, reverse=True):
                 yield angle, lag
 
     def grasp_and_swing(cand, hint_name=None, seed=None, lineup=None):
@@ -992,7 +987,7 @@ def search_placement(planner, geom, q0, swing, make_after, hint=(0.0, 0.0), *, a
         try:
             with quiet():
                 previous_deadline = planner.deadline
-                planner.deadline = deadline
+                planner.deadline = min(deadline, t1 + OPEN_PREFLIGHT_S)
                 try:
                     plan_open(planner, _shifted_geom(geom, d), q0, swing, make_after(), adaptive_pull=adaptive_pull)
                 finally:

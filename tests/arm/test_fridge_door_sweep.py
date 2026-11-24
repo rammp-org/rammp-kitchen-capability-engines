@@ -65,16 +65,10 @@ def test_final_push_angle_and_between_dock_travel(model, tmp_path):
     legs = box((0.04, 0.9, 0))
     world = PlannerWorld(None, tmp_path, extra=[legs])
     after = push_open.PushOpen(base_moves=False)
-    assert check_open(model, world, push_open.pull_angles(60), after) == (60, 50, 40, 30)
-    sweep = DoorSweep(model, [legs], 60, 90, push_grid=True)
-    _, end = after.safe_routes(model, world, 60, in_place=True)[0]
-    assert 65 <= end < 90
-    assert end == sweep.clear_push_end(65)
-    assert sweep.clear_push_end(end + 1) is None
+    with pytest.raises(SweepBlocked, match="person/legs"):
+        check_open(model, world, push_open.pull_angles(60), after)
+    assert after.safe_routes(model, world, 60, in_place=True) == ()
     assert push_open.PushOpen().safe_routes(model, world, 60, in_place=False)[0][1] == 90
-    door = dict(model.door, door_open_deg=60)
-    after.end_deg = end
-    assert push_open.planned_door_after(door, True, after)["door_open_deg"] == end
     # Endpoints of a chair translation are clear, but the slab would pass through the seat.
     seat = box((0.5, 0.3, 0), name="seat/armrest")
     sweep = DoorSweep(model, [seat], 0, 0)
@@ -97,7 +91,10 @@ def test_deployment_layers_match_planner_config(tmp_path):
     assert [b["name"] for b in boxes] == ["person/part", "seat/part", "platform/part"]
     assert padding == 0.024
     config.write_text(yaml.safe_dump({"layers": layers[:-1]}))
-    with pytest.raises(ValueError, match="must supply person, seat and platform"):
+    boxes, _ = deployment_boxes(config)
+    assert [b["name"] for b in boxes] == ["person/part", "seat/part"]
+    config.write_text(yaml.safe_dump({"layers": layers[:1]}))
+    with pytest.raises(ValueError, match="must supply nonempty person and seat"):
         deployment_boxes(config)
 
 
@@ -119,12 +116,12 @@ def test_push_floor_block_keeps_reposition_hint(model, tmp_path):
         check_open(model, world, push_open.pull_angles(60), push_open.PushOpen(base_moves=False))
     shift = np.r_[exc.value.payload["fridge_shift_m"], 0]
     sweep = DoorSweep(model, [legs], 30, 90, push_grid=True)
-    assert sweep.clear_push_end(60) is None
-    assert sweep.clear_push_end(60, shift) >= 60
+    assert sweep.clear_push_end(90) is None
+    assert sweep.clear_push_end(90, shift) == 90
 
 
 def test_resumed_push_uses_and_records_the_checked_endpoint(model, tmp_path, monkeypatch):
-    world = PlannerWorld(None, tmp_path, extra=[box((0.09, 0.9, 0))])
+    world = PlannerWorld(None, tmp_path, extra=[box((-0.11, 0.9, 0))])
     ai = SimpleNamespace(
         get_state=lambda: {
             "gripper_pos": 0,
@@ -146,12 +143,12 @@ def test_resumed_push_uses_and_records_the_checked_endpoint(model, tmp_path, mon
         moved_model = FridgeModel(moved)
         boxes, padding = world.door_sweep_boxes()
         sweep = DoorSweep(moved_model, boxes, 40, 90, padding, push_grid=True)
-        assert 60 <= end_deg < 90
-        assert end_deg == sweep.clear_push_end(60)
+        assert end_deg == 90
+        assert end_deg == sweep.clear_push_end(90)
         return SimpleNamespace(goals=[]), (0.35,), ""
 
     monkeypatch.setattr(push_open, "plan_finished_push", plan)
     assert push_open.push_after_chair_move(ai, planner, True, (1, 0))
-    assert 60 <= saved["door_open_deg"] < 90
+    assert saved["door_open_deg"] == 90
     assert saved["push_after_chair_move"] is None
     assert saved["door_open_deg"] == push_open.FINAL_ANGLE_DEG

@@ -36,7 +36,7 @@ class SweepBlocked(Refused):
 
 
 def deployment_boxes(config_path):
-    """Read the same unpadded layer files as the planner, requiring all three."""
+    """Read the planner’s unpadded occupant and chair layers, including a separate platform if configured."""
     path = Path(config_path)
     config = yaml.safe_load(path.read_text())
     boxes = {}
@@ -45,8 +45,8 @@ def deployment_boxes(config_path):
         name = layer["layer"]
         if name in CHAIR_LAYERS:
             boxes.setdefault(name, []).extend(dict(box, name=f"{name}/{box['name']}") for box in layer["obstacles"])
-    if any(not boxes.get(name) for name in CHAIR_LAYERS):
-        raise ValueError("planner config must supply person, seat and platform layers")
+    if any(not boxes.get(name) for name in ("person", "seat")) or not all(boxes.values()):
+        raise ValueError("planner config must supply nonempty person and seat layers and any configured platform")
     padding = float(config.get("planner", {}).get("world_padding", LAYER_PADDING_M))
     if not np.isfinite(padding) or padding < 0:
         raise ValueError("invalid planner world_padding")
