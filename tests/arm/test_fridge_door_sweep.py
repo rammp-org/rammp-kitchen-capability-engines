@@ -163,7 +163,9 @@ def test_support_cabinet_blocks_the_dock_and_its_translation(model, tmp_path):
     (support,) = model.support()
     assert support in model.full(30)
     assert support in model.cabinet()
-    np.testing.assert_allclose(support["position"], [0.5, -0.25, -0.25])
+    np.testing.assert_allclose(
+        support["position"], [0.5, -0.27, -0.25]
+    )  # footprint: door slab + body behind it
 
     # The feet are below the door and can still hit the stationary support.
     feet = box((0.5, -0.25, -0.42))

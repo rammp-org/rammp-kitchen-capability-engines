@@ -73,7 +73,7 @@ params:
   door_below_handle_m: 0.3937
   # NOT MEASURED: the STL's straight bar between its mounts. Measure it.
   handle_length_m: 0.2032
-  body_depth_m: 0.4572
+  body_depth_m: 0.35052  # 18 in overall (listing) less the 4.2 in door slab in front of it
   body_width_m: 0.4826
   body_height_m: 0.8382
   support_height_m: 0.50

@@ -70,12 +70,14 @@ class FridgeModel:
         }
 
     def support(self):
-        """The stationary cabinet below the appliance, with its front flush to the closed door."""
+        """The stationary cabinet below the appliance: the appliance's own footprint (door slab plus body behind it),
+        its front flush to the closed door."""
         height = self.door.get("support_height", 0.0)
         if height <= 0:
             return []
         df = self.df
         _, _, _, depth = door_dims(self.door)
+        depth += df.t  # the footprint runs from the door's front face to the body's back
         width = self.door.get("body_width", df.length)
         z = self.door["support_floor_z"] + height / 2
         return [self._box("support_cabinet", df.length / 2, df.t / 2 - depth / 2, 0.0, z, width, depth, height)]

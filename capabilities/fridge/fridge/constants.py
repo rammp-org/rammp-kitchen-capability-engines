@@ -37,7 +37,8 @@ MEASURED = {
     # the handle bar's grippable straight length, between its mounts: 8 in, measured on the fridge (11-06). It limits
     # how far above or below the middle of the bar the open may grasp (GRASP_END_MARGIN_M)
     "handle_length_m": 8 * INCH,
-    "body_depth_m": 18 * INCH,  # cabinet behind the door
+    # cabinet behind the door slab: 18 in overall front to back (listing; user 11-25) less the slab in front
+    "body_depth_m": 18 * INCH - 4.2 * INCH,
     "body_width_m": 19 * INCH,
     "body_height_m": 33 * INCH,
     "support_height_m": 0.50,  # appliance sits on the support cabinet
