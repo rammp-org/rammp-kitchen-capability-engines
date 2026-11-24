@@ -657,7 +657,7 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
             planner.deadline = min(now + limit, deadline)
             if progress is not None:
                 detail = "adaptive pull" if adaptive else f"{swing:g}° pull"
-                progress(min(99.0, 100 * (now - start) / (deadline - start)), f"Planning {grasp} grasp, {detail}")
+                progress(min(0.99, (now - start) / (deadline - start)), f"Planning {grasp} grasp, {detail}")
             try:
                 result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging, adaptive, grasp)
                 planner.check_deadline()

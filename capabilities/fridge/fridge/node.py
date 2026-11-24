@@ -657,7 +657,7 @@ class Capability(CapabilityEngine):
             def moving():
                 self._drove = True
                 ui_motion.enter_context(self._ui_driving("open", None))
-                ctx.progress("open", 0.0, "Docking the wheelchair. Keep the route clear.")
+                ctx.progress("open", 0.0, "Docking the wheelchair. Keep the route clear.", pausable=False)
 
             detected, iterations = docking.dock(
                 self.base,
@@ -671,7 +671,7 @@ class Capability(CapabilityEngine):
                 odom_to_axle=odom,
                 on_motion=moving,
             )
-        ctx.progress("open", 0.0, f"Dock confirmed after {iterations} correction(s)")
+        ctx.progress("open", 0.0, f"Dock confirmed after {iterations} correction(s)", pausable=False)
         if camera is scene:
             return detected
 
@@ -709,7 +709,7 @@ class Capability(CapabilityEngine):
         if action_id == "go_to_start":  # mock too: self.arm's mock plans and moves the mock joints
             return self._go_to_start(ctx, execute, speed, note)
         if self.mock:
-            ctx.progress(action_id, 100.0, "mock: nothing detected or moved")
+            ctx.progress(action_id, 1.0, "mock: nothing detected or moved")
             return {"executed": False, "mock": True}
 
         ctx.checkpoint()
@@ -801,14 +801,14 @@ class Capability(CapabilityEngine):
                     base_moves=bool(params.get("base_moves", True)),
                     search_alternate_placements=bool(params.get("search_alternate_placements", False)),
                     staging=np.radians(self.cfg["start_joints_deg"]),
-                    progress=lambda percent, message: ctx.progress(action_id, percent, message),
+                    progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),
                     detect_at_dock=dock_then_contact if may_dock else None,
                     allow_short_handoff=docking_requested,
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
                     relocalize.capture_reference(self.arm)
                 if ok and push_open.NEXT_STEP:  # the wheelchair move it asks for, where the goal was sent
-                    ctx.progress(action_id, 100.0, push_open.NEXT_STEP)
+                    ctx.progress(action_id, 1.0, push_open.NEXT_STEP)
                     note = f"{note}. {push_open.NEXT_STEP}" if note else push_open.NEXT_STEP
             else:
                 settings = {k: v for k, v in params.items() if k in close_door.GOAL_SETTINGS}
@@ -828,7 +828,7 @@ class Capability(CapabilityEngine):
                         f"Plan OK. With execute true and drive_base true the base drives the wheelchair "
                         f"{close_door.how_moved(chair_back)} at {base_speed:.2f} m/s, then closes."
                     )
-                    ctx.progress(action_id, 100.0, next_step)
+                    ctx.progress(action_id, 1.0, next_step)
                     note = f"{note}. {next_step}" if note else next_step
                 elif ok and not execute and chair_back != 0 and not settings.get("chair_moved"):
                     # the plan passed: say, where the goal was sent (feedback and the result), what comes next
@@ -836,7 +836,7 @@ class Capability(CapabilityEngine):
                         f"Plan OK. {close_door.move_chair(chair_back)}, then send the close with execute true and "
                         "chair_moved true."
                     )
-                    ctx.progress(action_id, 100.0, next_step)
+                    ctx.progress(action_id, 1.0, next_step)
                     note = f"{note}. {next_step}" if note else next_step
         except (open_door.Infeasible, open_door.StagingRequired) as e:
             code = "start_staging_required" if isinstance(e, open_door.StagingRequired) else "open_no_motion"
@@ -846,6 +846,8 @@ class Capability(CapabilityEngine):
             raise EngineError(code, str(e), recoverable=True, payload=payload) from e
         except SweepBlocked as e:
             payload = {**e.payload, **({"base_motion_attempted": True} if self._drove else {})}
+            if params.get("chair_moved"):  # the resumed push: the door is part open, so a retry blocks the same way
+                raise EngineError("refused", str(e), recoverable=False, payload=payload) from e
             raise EngineError("open_no_motion", str(e), recoverable=True, payload=payload) from e
         except dc.Refused as e:
             if self._drove:
@@ -909,7 +911,7 @@ class Capability(CapabilityEngine):
         gap = _joint_gap_deg(target, q_now)
         if gap <= constants.START_REACHED_DEG:
             done = f"already at the fridge start pose (every joint within {gap:.1f} deg): nothing moved"
-            ctx.progress(action_id, 100.0, done)
+            ctx.progress(action_id, 1.0, done)
             return {"executed": False, "note": f"{note}. {done}" if note else done}
         world = self._planner_world()
         try:
@@ -934,9 +936,9 @@ class Capability(CapabilityEngine):
             planned_s = float(plan.t[-1]) if len(plan.t) else 0.0
             if not execute:
                 done = f"dry run: the fridge start pose plans ({planned_s:.1f} s at full speed); nothing moved"
-                ctx.progress(action_id, 100.0, f"{note}. {done}" if note else done)
+                ctx.progress(action_id, 1.0, f"{note}. {done}" if note else done)
                 return {"executed": False, "note": f"{note}. {done}" if note else done}
-            ctx.progress(action_id, 10.0, "moving to the fridge start pose")
+            ctx.progress(action_id, 0.1, "moving to the fridge start pose")
             scale = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)  # `speed` scales it, as in every fridge run
             if not self.arm.go_to_joint_config(target, label="go_to_start", speed_scale=scale):
                 raise EngineError(
@@ -949,7 +951,7 @@ class Capability(CapabilityEngine):
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         finally:
             world.restore()  # the robot's own planner world back (only if this action pushed one)
-        ctx.progress(action_id, 100.0, "at the fridge start pose")
+        ctx.progress(action_id, 1.0, "at the fridge start pose")
         return {"executed": True, "note": note}
 
 

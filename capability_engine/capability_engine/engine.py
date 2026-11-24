@@ -933,7 +933,10 @@ class CapabilityEngine(Node):
                 result.error_code = error.error_code
                 result.recoverable = error.recoverable
                 if error.payload is not None:
-                    result.payload_json = json.dumps(error.payload)
+                    try:
+                        result.payload_json = json.dumps(error.payload)
+                    except (TypeError, ValueError):  # unserializable: keep the handler alive
+                        result.payload_json = "{}"
                 self.get_logger().error(f"{goal.action_id} failed: {error}")
             except Exception as error:  # a bug in execute() must not kill the node
                 result.status = Result.STATUS_FAILED
