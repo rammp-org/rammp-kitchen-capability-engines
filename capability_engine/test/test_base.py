@@ -7,6 +7,9 @@ import threading
 import time
 
 import pytest
+from base_sim import DifferentialDrive
+from capability_engine.base import BaseError, BaseInterface
+from capability_engine.engine import Cancelled
 from fake_driver import FakeBase, FakeCtx, counts
 from rammp_base_interfaces.msg import DriveCommand, MibStatus
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -14,8 +17,6 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from capability_engine import base as base_module
-from capability_engine.base import BaseError, BaseInterface
-from capability_engine.engine import Cancelled
 
 WAIT_S = 5.0
 POLL_S = 0.01
@@ -481,3 +482,24 @@ def test_unknown_profile_raises(base_env):
     base.begin_action(FakeCtx())
     with pytest.raises(BaseError, match="profile 'turbo'"):
         base.request_mode("autonomous", profile="turbo")
+
+
+def test_instrumented_fake_base_publishes_yaw_and_watchdog_brakes(base_env):
+    make, fake = base_env
+    base, _ = make()
+    fake.drive = DifferentialDrive(time=time.monotonic())
+    fake.start_mib()
+    fake.start()
+    base.begin_action(FakeCtx())
+    base.request_mode("autonomous", profile="low")
+    before = base.odometry()
+    for _ in range(10):
+        base.send_twist(0.0, 0.12)
+        time.sleep(0.05)
+    moving = base.odometry()
+    assert moving.twist.twist.angular.z > 0.05
+    assert moving.pose.pose.orientation.z > before.pose.pose.orientation.z
+    wait_until(lambda: abs(base.odometry().twist.twist.angular.z) < 0.005)
+    assert abs(base.odometry().pose.pose.position.x) < 0.002
+    assert fake.drive.twists and fake.odometry_samples
+    assert all(cmd[1] == cmd[2] == 0.0 and cmd[3] > 0.0 for cmd in fake.drive.twists)

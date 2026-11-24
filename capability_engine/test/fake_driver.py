@@ -37,7 +37,9 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+from base_sim import HIGH, LOW, NORMAL
 from builtin_interfaces.msg import Duration
+from capability_engine.engine import Cancelled
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from nav_msgs.msg import Odometry
 from rammp_arm import ERRORS, JOINTS
@@ -79,8 +81,6 @@ from rclpy.qos import (
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
-from capability_engine.engine import Cancelled
 
 GRIPPER_JOINT = "arm_robotiq_85_left_knuckle_joint"
 STATE_HZ = 50.0  # /joint_states, /ee_state and /gripper_state
@@ -634,16 +634,19 @@ class FakeDriver(Node):
 class FakeBase(Node):
     """The drive base (the MIB), faked: records every rammp_base_interfaces/TwistSetpoint on
     /base/setpoint/twist in .twists, and publishes nav_msgs/Odometry on /base/odom at ODOM_HZ while
-    publishing (set_odom(x, y, yaw) sets what it publishes; start() and stop_publishing()).
+    publishing. Give it a DifferentialDrive via drive= to integrate twists in AUTONOMOUS.
+    Otherwise set_odom(x, y, yaw) sets what it publishes. Both paths record odometry_samples.
 
     It also publishes MibStatus on /rammp/mib/status at MIB_STATUS_HZ (once start_mib() is called)
     and records every DriveCommand on /rammp/drive_command in .commands, answering each as
     DriveCommand.msg says the MIB does (unless ignore_commands()). set_state(s) moves it, as a
     joystick touch or an e-stop would; stop_mib() stops the MibStatus."""
 
-    def __init__(self):
+    def __init__(self, *, drive=None):
         super().__init__("fake_base")
         self.twists = []
+        self.drive = drive
+        self.odometry_samples = []
         self.commands = []
         self._lock = threading.Lock()
         self._publishing = False
@@ -720,6 +723,15 @@ class FakeBase(Node):
     def _on_twist(self, m):
         with self._lock:
             self.twists.append(m)
+            if self.drive is not None:
+                now = time.monotonic()
+                self.drive.set_mode(now, self._state == MibStatus.SYSTEM_STATE_AUTONOMOUS)
+                self.drive.profile = {
+                    MibStatus.PROFILE_LOW: LOW,
+                    MibStatus.PROFILE_NORMAL: NORMAL,
+                    MibStatus.PROFILE_HIGH: HIGH,
+                }[self._profile]
+                self.drive.command(now, m.twist.linear.x, m.twist.angular.z, m.twist.linear.y)
 
     def received(self):
         """[(vx, vy, wz, token)] of every setpoint so far."""
@@ -741,10 +753,20 @@ class FakeBase(Node):
     def _publish_odom(self):
         if not self._publishing:
             return
-        x, y, yaw = self._pose
+        with self._lock:
+            if self.drive is None:
+                x, y, yaw = self._pose
+                vx = vy = wz = 0.0
+            else:
+                now = time.monotonic()
+                self.drive.set_mode(now, self._state == MibStatus.SYSTEM_STATE_AUTONOMOUS)
+                x, y, yaw, vx, vy, wz = self.drive.odometry(now)
         m = Odometry()
         m.header.stamp = self.get_clock().now().to_msg()
         m.header.frame_id, m.child_frame_id = "odom", "base_link"
         m.pose.pose.position.x, m.pose.pose.position.y = x, y
         m.pose.pose.orientation.z, m.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
+        m.twist.twist.linear.x, m.twist.twist.linear.y, m.twist.twist.angular.z = vx, vy, wz
+        with self._lock:
+            self.odometry_samples.append(m)
         self._odom_pub.publish(m)
