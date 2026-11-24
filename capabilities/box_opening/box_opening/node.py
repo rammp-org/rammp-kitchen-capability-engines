@@ -120,6 +120,13 @@ PARAMS = {
     # the mock only: how long each of its phases lasts (s). 0, the default, and its run is over at once, as it
     # always was; a second or two and the UI can be rehearsed on it (the panel, its bar, Cancel) with no arm
     "mock_phase_s": 0.0,
+    # the mock only: every failure this node can really report (MOCK_FAILURE_CYCLE), each raised for this
+    # many consecutive mock attempts before the next one takes its turn -- so the UI's every wait/fail/retry
+    # state can be rehearsed with no arm, with no params to set. 1 (the default): each shows once, in order,
+    # then (every one having had its turn) the mock always succeeds from there. 0 turns the cycle off: the
+    # mock always succeeds, as it did before this parameter existed. Counted per action_id, kept across
+    # separate goals (a Retry tap is a new goal): only a node restart starts the count over
+    "mock_fail_repeat": 1,
 }
 NOT_ALLOWED = "allow_execute is off: open_box moves the arm only on a node set for an attended run"
 
@@ -195,9 +202,110 @@ MOCK_PHASES = {
     ),
 }
 MOCK_APPROACH_PHASES = 6  # the mock's line-up: its box comes into reach over this many mock_phase_s
+# every failure mock_fail_repeat cycles through, in the order the real run would meet them: error_code and
+# recoverable exactly as error_for()/the real "not_allowed" gate report them (so the UI's notice -- Done-only
+# or with a Retry -- is the one the real failure gets too), the open_box phase whose progress/world-state is
+# written before it fires (None: before the run starts, nothing moved -- the mock's own line-up included), and
+# a mock message (error_for()'s own wording is what a run's last line said; the mock has no run to quote, so it
+# says plainly which of this node's failures it is rehearsing). "_bug": not an EngineError at all -- a bare
+# exception, for the generic "something went wrong" notice (execute()'s `except Exception`).
+MOCK_FAILURE_CYCLE = (
+    ("not_allowed", False, None, NOT_ALLOWED + ": nothing ran (mock)"),
+    ("not_lined_up", True, None, "mock: the container wasn't lined up before the run would have started"),
+    ("not_ready", True, None, "mock: not starting -- the robot wasn't ready"),
+    ("not_found", True, "locate", "mock: NO BOX -- the container wasn't found"),
+    ("no_button", True, "look", "mock: no button found on the container"),
+    ("not_home", True, "look", "mock: the arm did not get home before the press"),
+    ("contact_early", True, "look", "mock: something else is in the way of the press"),
+    ("contact_late", True, "press", "mock: the box is not where it was seen"),
+    ("watch_failed", False, "press", "mock: the contact watch failed"),
+    ("box_moved", True, "press", "mock: the press MOVED the box"),
+    ("no_press", True, "press", "mock: nothing was pressed"),
+    ("not_popped", True, "press", "mock: pressed, but the knob is not up"),
+    ("arm_holds", False, "grip", "mock: the arm holds where it stopped -- clear it, attended, before the next run"),
+    ("lid_dropped", False, "carry", "mock: the lid slipped out of the fingers"),
+    ("lid_put_back", True, "carry", "mock: the lid wouldn't come off, so the arm put it back on the box"),
+    ("arm_halted", False, "release", "mock: the arm was halted (e-stop, or control taken)"),
+    ("stopped", False, "release", "mock: the run was ended by signal 15"),
+    ("_bug", False, "home", "mock: a bug during open_box (ValueError)"),
+)
 # where the mock says it set the lid down (arm_mount, m): a stand-in, the mock sees nothing.
 # flatbot's 2026-10-30 13:28 run set it down here, beside the box
 MOCK_LID_XYZ = [0.597, -0.071, 0.209]
+# MOCK_FAILURE_CYCLE/MOCK_PHASES above are no longer called (_mock() is kept, unused, for reference/diff):
+# a hand-coded reimplementation of the real run's phases/errors silently drifts from LEG_PHASES/error_for()
+# whenever those change. From here down, the mock runs through the SAME code the real run does (_follow(),
+# Panel, _sync_world(), error_for()) behind a MockRun/MockRunLog standing in for Run/RunLog (Run's own
+# interface, the only seam) -- the same "one shared method, a swapped source" pattern _line_up() already
+# uses for BoxSource vs. line_up.MockApproach.
+
+# the mock's canned run log, in the real run's own row shapes (leg/kind/ok, exactly RunLog.rows() would
+# read from a real run's run-*.jsonl): every row LEG_PHASES/Tracker.add() would see on a full, successful
+# run, so the mock's progress/phases/percentages and its held/released/opened world-state come from the
+# identical Tracker this capability runs on a real run, not a separate mock-only phase table.
+MOCK_RUN_SCRIPT = (
+    {"leg": "scene_fix", "kind": "note", "origin_xyz": MOCK_LID_XYZ},
+    {"leg": "reach:look", "kind": "motion", "ok": True, "outcome": "arrived"},
+    {"leg": "press:close", "kind": "gripper", "ok": True, "outcome": "arrived"},
+    {"leg": "reach:slide-in", "kind": "motion", "ok": True, "outcome": "arrived"},
+    {"leg": "depth:press", "kind": "motion", "ok": True, "outcome": "arrived"},
+    {"leg": "grip:open", "kind": "gripper", "ok": True, "outcome": "arrived"},
+    {"leg": "lid_spot", "kind": "note", "xyz": MOCK_LID_XYZ},
+    {"leg": "grip:close", "kind": "gripper", "ok": True, "outcome": "arrived"},
+    {"leg": "lid:carry", "kind": "motion", "ok": True, "outcome": "arrived"},
+    {"leg": "place:touch", "kind": "motion", "ok": True, "outcome": "arrived"},
+    {"leg": "reach_grip_result", "kind": "note", "ok": True, "detail": "mock"},
+    {"leg": "reach_setdown", "kind": "note"},
+    {"leg": "place:retreat", "kind": "motion", "ok": True, "outcome": "arrived"},
+    {"leg": "place:open", "kind": "gripper", "ok": True, "outcome": "arrived"},
+    {"leg": "home", "kind": "motion", "ok": True, "outcome": "arrived"},
+)
+
+
+class MockOutcome:
+    """One MOCK_OUTCOME_CYCLE entry: `kind` "raise" (not_allowed, _bug -- neither is a run's own failure, so
+    neither goes through Run/error_for(): not_allowed is refused before a run would start, same as the real
+    gate; _bug is a bare exception, which error_for() never produces) or "run" (every other failure: ends
+    MOCK_RUN_SCRIPT after `prefix` of its rows with `exit_code` and `lines`, read by the same error_for() a
+    real run's exit code and console lines are)."""
+
+    def __init__(self, code, kind, recoverable=None, message=None, prefix=None, exit_code=None, lines=()):
+        self.code = code
+        self.kind = kind
+        self.recoverable = recoverable
+        self.message = message
+        self.prefix = prefix
+        self.exit_code = exit_code
+        self.lines = lines
+
+
+# every failure mock_fail_repeat cycles through, in the order the real run would meet them. For "run" entries
+# the error_code/recoverable the UI's notice gets come from error_for() itself (code+lines below), exactly as
+# a real run's do; only the "raise" entries (not_allowed, _bug) name them directly, since neither is a run's
+# own outcome. prefix: how many of MOCK_RUN_SCRIPT's rows run first (so the failure's progress/world-state,
+# held/released/opened, are whatever a real run that far along would have shown).
+MOCK_OUTCOME_CYCLE = (
+    MockOutcome("not_allowed", "raise", recoverable=False, message=NOT_ALLOWED + ": nothing ran (mock)"),
+    MockOutcome("not_lined_up", "run", prefix=0, exit_code=EXIT_NOT_LINED_UP,
+                lines=("STOP: not lined up before the run would have started",)),
+    MockOutcome("not_ready", "run", prefix=0, exit_code=1, lines=("not starting: the robot wasn't ready",)),
+    MockOutcome("not_found", "run", prefix=0, exit_code=2, lines=("NO BOX: the container wasn't found",)),
+    MockOutcome("no_button", "run", prefix=2, exit_code=1, lines=("STOP: no button found on the container",)),
+    MockOutcome("not_home", "run", prefix=0, exit_code=3, lines=("STOP: the arm did not get home before the press",)),
+    MockOutcome("contact_early", "run", prefix=2, exit_code=1,
+                lines=("STOP: something else is in the way of the press",)),
+    MockOutcome("contact_late", "run", prefix=3, exit_code=1, lines=("STOP: the box is not where it was seen",)),
+    MockOutcome("watch_failed", "run", prefix=4, exit_code=1, lines=("STOP: contact watch failed",)),
+    MockOutcome("box_moved", "run", prefix=4, exit_code=1, lines=("STOP: the press MOVED the box",)),
+    MockOutcome("no_press", "run", prefix=4, exit_code=1, lines=("STOP: nothing was pressed",)),
+    MockOutcome("not_popped", "run", prefix=4, exit_code=1, lines=("STOP: pressed, but the knob is not up",)),
+    MockOutcome("arm_holds", "run", prefix=5, exit_code=1, lines=("STOP: the arm holds where it stopped",)),
+    MockOutcome("lid_dropped", "run", prefix=11, exit_code=1, lines=("STOP: the lid slipped out of the fingers",)),
+    MockOutcome("lid_put_back", "run", prefix=11, exit_code=1, lines=("STOP: the lid is back on the box",)),
+    MockOutcome("arm_halted", "run", prefix=5, exit_code=EXIT_HALTED, lines=()),
+    MockOutcome("stopped", "run", prefix=8, exit_code=-signal.SIGTERM, lines=("mid-grip: contact lost",)),
+    MockOutcome("_bug", "raise", message="a bug during open_box (ValueError)"),
+)
 VIDEO_LINE = re.compile(r"\] VIDEO: .*: (\S+)$")
 # a line the run's own rclpy logger wrote: "[ERROR] [1793385477.635189323] [box_opening_run]: ..."
 ROS_LINE = re.compile(r"^\[(DEBUG|INFO|WARN|ERROR|FATAL)\] \[[0-9.]+\] \[([^\]]*)\]: (.*)$")
@@ -352,6 +460,91 @@ class RunLog:
         return out
 
 
+class MockProc:
+    """`Run.proc`'s interface for a MockRun: no child process, so `.poll()` delivers one of its rows'
+    worth of "elapsed time" per call -- the same one-row-per-loop-iteration pace `_follow()` drains a
+    real run's log file at -- returning None until every row has had its iteration, then the outcome's
+    exit code. `.send_signal()`/`.kill()` end it at once (killed by that signal): `_follow()`'s cancel
+    and escalation paths call them unconditionally and must never block or raise. `phase_s` (mock_phase_s):
+    each row (and the exit itself) is held back until that long has passed since the last one, so the
+    panel shows each phase that long; 0 (the default) and a row is delivered on every call, over at once,
+    as the mock always was."""
+
+    def __init__(self, nrows, exit_code, phase_s=0.0):
+        self._nrows = nrows
+        self._exit_code = exit_code
+        self._phase_s = phase_s
+        self._last = time.monotonic()
+        self.ticks = 0
+        self.returncode = None
+
+    def poll(self):
+        if self.returncode is not None:
+            return self.returncode
+        now = time.monotonic()
+        if self._phase_s > 0.0 and now - self._last < self._phase_s:
+            return None
+        self._last = now
+        if self.ticks < self._nrows:
+            self.ticks += 1
+            return None
+        self.returncode = self._exit_code
+        return self.returncode
+
+    def send_signal(self, _sig):
+        if self.returncode is None:
+            self.returncode = -signal.SIGINT
+
+    def kill(self):
+        if self.returncode is None or self.returncode >= 0:
+            self.returncode = -signal.SIGKILL
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class MockRun:
+    """Run's interface for the mock: MOCK_RUN_SCRIPT's rows (or a failing prefix of them), a MockProc
+    standing in for the child process, and `lines` seeded with the console line(s) a real run like
+    this would have said last -- so error_for() reads the mock's outcome exactly as a real run's."""
+
+    def __init__(self, rows, exit_code, lines, phase_s=0.0):
+        self.lines = deque(lines, maxlen=TAIL_LINES)
+        self.video = None
+        self.started = time.monotonic()
+        self.timed_out = False
+        self.proc = MockProc(len(rows), exit_code, phase_s=phase_s)
+
+    def interrupt(self):
+        self.proc.send_signal(signal.SIGINT)
+
+    def stop(self, wait_s):
+        self.interrupt()
+        self.proc.wait(wait_s)
+
+    def finish(self):
+        return self.proc.returncode
+
+
+class MockRunLog:
+    """RunLog's interface for a MockRun: its rows, delivered one per `proc` tick (MockProc) instead of
+    read from a run-*.jsonl file. `.path` stays None, as the real log before a run's file exists: the
+    mock's `run_log` result is None, as it always was, and Tracker.up()'s "looking for the container"
+    is never said (the mock's own first row, scene_fix, carries that progress instead)."""
+
+    def __init__(self, proc, rows):
+        self.path = None
+        self._proc = proc
+        self._rows = rows
+        self._sent = 0
+
+    def rows(self):
+        n = min(self._proc.ticks, len(self._rows))
+        out = self._rows[self._sent : n]
+        self._sent = n
+        return out
+
+
 class WorldWriter:
     """A run's world-state writes, made in order on a thread of their own (REVIEW_RULES R4): an
     orchestrator call waits up to 10 s for its service and 10 s for the answer, and the poll loop
@@ -463,7 +656,9 @@ class Panel:
         due = self._tried_at is None or now - self._tried_at >= PANEL_REFRESH_S
         if due or (self._sent is not None and panel != self._sent):
             self._tried_at = now
-            self._sent = panel if self._live() and self._ctx.update_user_panel(panel_json=panel) else None
+            live = self._live()
+            ok = live and self._ctx.update_user_panel(panel_json=panel)
+            self._sent = panel if ok else None
         return pressed
 
 
@@ -623,6 +818,7 @@ class Capability(CapabilityEngine):
         self._ui_stopped = False  # this execution was stopped by the panel's own Stop (_cancel_from_ui)
         self._ui_held = False  # this execution's run ended with the lid in the fingers (for its Stopped notice)
         self._ui_killed = False  # ... and was killed, not ended by its Ctrl+C: its notice says no arm state
+        self._mock_attempts = {}  # mock_fail_repeat's count, per action_id, across separate goals (_mock_outcome)
         self._mock_pubs = self._mock_interface() if self.mock else []
         use_node_logger(self)
         self.context.on_shutdown(self._on_shutdown)
@@ -839,7 +1035,7 @@ class Capability(CapabilityEngine):
         shows nothing more: the orchestrator has taken the UI back. Standalone (no UI) nothing is sent."""
         t0 = time.monotonic()
         self._ui_stopped = self._ui_held = self._ui_killed = False
-        ui = RunUI(ctx, PANEL_TITLE, cancel=lambda: cancel_own_run(self), logger=self.get_logger())
+        ui = RunUI(ctx, PANEL_TITLE, cancel=lambda: cancel_own_run(self))
         try:
             result = self._open_box(action_id, params, ctx)
         except Cancelled:
@@ -879,31 +1075,47 @@ class Capability(CapabilityEngine):
         if self._cancelled_early():
             raise Cancelled()  # nothing ran
         check_params(params)
+        outcome = None
         if self.mock:
-            return self._mock(action_id, ctx)
-        if not self._allowed():
+            # the mock moves nothing: always allowed (availability). mock_fail_repeat's own "not_allowed"
+            # and "_bug" entries are not a run's outcome (error_for() never produces either), so they are
+            # raised here, the same way the real gate below raises "not_allowed" before a run ever starts
+            outcome = self._mock_outcome(action_id)
+            if outcome is not None and outcome.kind == "raise":
+                if outcome.code == "_bug":
+                    raise ValueError(outcome.message)
+                raise EngineError(outcome.code, outcome.message, recoverable=outcome.recoverable)
+        elif not self._allowed():
             raise EngineError("not_allowed", NOT_ALLOWED + ": nothing ran", recoverable=False)
-        ctx.checkpoint()  # cancelled before it started: nothing runs
-        env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
+        ctx.checkpoint()  # cancelled before it started: nothing runs (mock or real)
         # the selection as the goal came: read once, used for the line-up, every write and the run's argv
         instance_id = self.instance_id
-        runs = state_dir(env) / "runs"
-        log = RunLog(runs, RunLog.existing(runs))
         track = Tracker(action_id, instance_id)
         t0 = time.monotonic()
         # the flight view (flight_view): the run's lines read as they are logged, one short line a step
-        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader
+        # on this node's stdout. It only reads, and nothing it meets stops the run or its reader. The mock
+        # has no console to read, and never had one (_mock() did not use it either)
         view = FlightView()
-        lined_up_s, run_ = 0.0, None
-        if self._lines_up() and self._param("wrist_first"):
-            # the wrist looks while the user lines up (owner 2026-11-16: "keep the wrist look"): the run's own
-            # process is the line-up's eyes, started now and held at its line-up until the Open, so that one
-            # process alone ever commands the arm. Its budget runs from here, the line-up inside it
-            view.start(action_id, instance_id)
-            run_ = self._lined_up_run(ctx, env, action_id, instance_id, view)
+        lined_up_s, run_, log, env = 0.0, None, None, None
+        if self.mock:
+            phase_s = max(0.0, float(self._param("mock_phase_s")))
+            # the real run's line-up, of a box that comes into reach over a few of the mock's phases
+            lined_up_s = self._line_up(
+                ctx, lambda: line_up.MockApproach(MOCK_APPROACH_PHASES * phase_s, far_m=self._far_m())
+            )
         else:
-            # nothing moves, and nothing runs but on the line-up's Open
-            lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
+            env = self._env()  # this goal's params, read once (REVIEW_RULES: none is a start-up copy)
+            runs = state_dir(env) / "runs"
+            log = RunLog(runs, RunLog.existing(runs))
+            if self._lines_up() and self._param("wrist_first"):
+                # the wrist looks while the user lines up (owner 2026-11-16: "keep the wrist look"): the run's
+                # own process is the line-up's eyes, started now and held at its line-up until the Open, so
+                # that one process alone ever commands the arm. Its budget runs from here, the line-up inside
+                view.start(action_id, instance_id)
+                run_ = self._lined_up_run(ctx, env, action_id, instance_id, view)
+            else:
+                # nothing moves, and nothing runs but on the line-up's Open
+                lined_up_s = self._line_up(ctx, lambda: self._box_source(env, instance_id))
         first = MOCK_PHASES[action_id][0][0]  # the first phase's name
         ctx.progress(first, 0.0, "starting", pausable=False)
         panel = Panel(ctx, self._ui_live)  # on the UI from now until the action ends
@@ -911,8 +1123,11 @@ class Capability(CapabilityEngine):
         panel.tick()
         world = WorldWriter(self.get_logger())
         if run_ is None:
-            view.start(action_id, track.instance_id)
-            run_ = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
+            if self.mock:
+                run_, log = self._mock_run(outcome, phase_s=phase_s)
+            else:
+                view.start(action_id, track.instance_id)
+                run_ = Run(self._argv(action_id, track.instance_id), env, view.relay(LOGGER.log))
         self._run = run_
         code = None
         try:
@@ -930,9 +1145,10 @@ class Capability(CapabilityEngine):
             self._progress(log, track, ctx, panel)  # the last rows, written as it ended
             if not (ctx.cancelled() or panel.pressed):
                 self._sync_world(track, ctx, world)  # the last rows' word: a release, a put-back
-            view.finish(
-                code, cancelled=ctx.cancelled() or panel.pressed, timed_out=run_.timed_out, held=bool(track.held)
-            )
+            if not self.mock:  # the mock has no flight view to close either (it never opened one)
+                view.finish(
+                    code, cancelled=ctx.cancelled() or panel.pressed, timed_out=run_.timed_out, held=bool(track.held)
+                )
             self._ui_held = bool(track.held)  # for its notice (execute)
             self._ui_killed = run_.proc.returncode == -signal.SIGKILL
         if ctx.cancelled() or panel.pressed:
@@ -948,6 +1164,8 @@ class Capability(CapabilityEngine):
             "video": run_.video,
             "run_log": str(log.path) if log.path else None,
         }
+        if self.mock:
+            result["mock"] = True
         error = None
         if run_.timed_out:
             error = EngineError(
@@ -1100,11 +1318,60 @@ class Capability(CapabilityEngine):
                 env[var] = str(self._param(name))
         return env
 
+    def _mock_outcome(self, action_id):
+        """The outcome (if any) this mock attempt at `action_id` simulates: None (it succeeds), or one of
+        MOCK_OUTCOME_CYCLE's entries. mock_fail_repeat attempts show each entry before the next one takes
+        its turn, in order; every entry having had its turn, every further attempt succeeds. The count is
+        kept per action_id (not globally): a Retry tap starts a new goal/action_id, so this is what makes
+        the SAME retried action show its next failure (or, finally, succeed) rather than repeating the
+        first one forever. 0 (or less) turns the whole cycle off."""
+        repeat = int(self._param("mock_fail_repeat"))
+        if repeat <= 0:
+            return None
+        attempt = self._mock_attempts.get(action_id, 0)
+        self._mock_attempts[action_id] = attempt + 1
+        index = attempt // repeat
+        outcome = MOCK_OUTCOME_CYCLE[index] if index < len(MOCK_OUTCOME_CYCLE) else None
+        return outcome
+
+    @staticmethod
+    def _mock_run(outcome, phase_s=0.0):
+        """The mock's Run/RunLog (MockRun/MockRunLog): MOCK_RUN_SCRIPT in full where `outcome` is None (it
+        succeeds, exit code 0, as a real run's happy path ends), or cut to `outcome.prefix` of its rows and
+        ended with `outcome.exit_code`/`outcome.lines` -- read by _follow()/error_for() exactly as a real
+        run's rows/exit code/console lines are, so the UI's notice for a rehearsed failure is the one the
+        real failure gets too. `phase_s` (mock_fail_repeat's own mock_phase_s) paces each row/the final exit
+        the same length apart the mock's line-up already rehearses its own phases at."""
+        if outcome is None:
+            rows, exit_code, lines = MOCK_RUN_SCRIPT, 0, ()
+        else:
+            rows, exit_code, lines = MOCK_RUN_SCRIPT[: outcome.prefix], outcome.exit_code, outcome.lines
+        run_ = MockRun(rows, exit_code, lines, phase_s=phase_s)
+        return run_, MockRunLog(run_.proc, rows)
+
+    def _old_mock_outcome(self, action_id):
+        """Superseded by _mock_outcome()/MOCK_OUTCOME_CYCLE above: kept only so _mock() below, no longer
+        called from _open_box(), still runs if read directly (review diff)."""
+        repeat = int(self._param("mock_fail_repeat"))
+        if repeat <= 0:
+            return None
+        attempt = self._mock_attempts.get(action_id, 0)
+        self._mock_attempts[action_id] = attempt + 1
+        index = attempt // repeat
+        return MOCK_FAILURE_CYCLE[index] if index < len(MOCK_FAILURE_CYCLE) else None
+
     def _mock(self, action_id, ctx):
         """A successful real run at the interface, nothing moved (review round 2): its phases in
         its words (each `mock_phase_s` long), the gripper's `holding` from the grip to the release and
         the container `opened` at the release, written as the real run writes them, its panel on the UI
-        and its result. Like the real run it cannot pause; a cancel ends it."""
+        and its result. Like the real run it cannot pause; a cancel ends it. mock_fail_repeat: some
+        attempts raise one of MOCK_FAILURE_CYCLE's failures instead -- the SAME notice (Done-only, or
+        with a Retry where the real failure is recoverable) the real run's own failure gets, from
+        execute()'s unchanged except blocks; this method only ever raises, it never shows anything."""
+        outcome = self._old_mock_outcome(action_id)
+        if outcome and outcome[2] is None:  # before the run starts: nothing moved, not even the line-up
+            code, recoverable, _, message = outcome
+            raise EngineError(code, message, recoverable=recoverable)
         track = Tracker(action_id, self.instance_id)
         phase_s = max(0.0, float(self._param("mock_phase_s")))
         t0 = time.monotonic()
@@ -1131,6 +1398,12 @@ class Capability(CapabilityEngine):
                 track.held, track.set_down, track.released = False, True, True
                 track.lid_spot = list(MOCK_LID_XYZ)
             self._sync_world(track, ctx, world)
+            if outcome and outcome[2] == phase:  # this phase's progress/world-state is written; then it fails
+                code, recoverable, _, message = outcome
+                world.wait(WORLD_WAIT_S)
+                if code == "_bug":
+                    raise ValueError(message)
+                raise EngineError(code, message, recoverable=recoverable)
             until = time.monotonic() + phase_s  # the phase's length, a cancel read all through it
             while time.monotonic() < until:
                 cancel_point()

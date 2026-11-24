@@ -158,6 +158,24 @@ def test_motion_gives_up_waiting_for_the_goal_after_a_bound_and_runs_fn_anyway()
     assert clock.t == pytest.approx(panels.GOAL_OPEN_WAIT_S, abs=0.2)
 
 
+def test_notice_waits_for_a_fresh_goal_to_finish_opening_even_if_done_is_tapped_early():
+    """A notice sent right behind an earlier panel whose goal is still opening (e.g. a run that fails before its
+    first real progress step) must not let an already-buffered Done tap end the wait before the goal-open bound:
+    otherwise the notice's own content, merged while opening, never gets a chance to actually reach the bridge --
+    see GOAL_OPEN_WAIT_S's own comment and the matching motion() tests above."""
+    ui, ctx, clock = make()
+
+    class Run:
+        ui_goal_handle = None
+        ui_opening = True  # never flips: as if the bridge never accepts or rejects
+        ui_lock = threading.Lock()
+
+    ctx._run = Run()
+    clock.script = [(0.1, lambda: ctx.tap("done"))]
+    ui.notice("Done.")
+    assert clock.t == pytest.approx(panels.GOAL_OPEN_WAIT_S, abs=0.2)
+
+
 def test_stopped_notice_stays_up_until_done_although_the_run_is_cancelled():
     ui, ctx, clock = make()
     ctx.cancel()

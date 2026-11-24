@@ -111,11 +111,10 @@ def cancel_own_run(engine):
 class RunUI:
     """One action's panels. `cancel` cancels the running action (normally `lambda: cancel_own_run(self)`)."""
 
-    def __init__(self, ctx, title, cancel, logger=None, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, ctx, title, cancel, clock=time.monotonic, sleep=time.sleep):
         self.ctx = ctx
         self.title = title
         self._cancel = cancel
-        self._log = logger
         self._clock = clock
         self._sleep = sleep
         self.user_stopped = False  # the user pressed Stop (vs. an orchestrator cancel)
@@ -268,8 +267,6 @@ class RunUI:
     def _stop(self):
         if not self.user_stopped:
             self.user_stopped = True
-            if self._log is not None:
-                self._log.warning("UI: Stop pressed; cancelling the action")
             self._cancel()
 
     def motion(self, message, fn, stopped_note=None):
@@ -355,15 +352,23 @@ class RunUI:
 
     def notice(self, message, title=None, timeout_s=NOTICE_TIMEOUT_S, style=None):
         """A final message with Done, waited on for at most `timeout_s`. Never raises: by now the action's outcome
-        is decided (an orchestrator cancel just ends the wait)."""
+        is decided (an orchestrator cancel just ends the wait).
+
+        Waits (bounded, GOAL_OPEN_WAIT_S) for this panel's own UI goal-open to finish, the same reason `motion()`
+        does right after its own first panel (see GOAL_OPEN_WAIT_S's own comment): a notice sent right behind an
+        earlier panel whose goal hasn't opened yet (e.g. a run that fails before its first real progress step, so
+        there is next to no time between that first panel and this one) only merges its content locally, and
+        without this wait nothing here notices or waits for the merge to actually reach the bridge -- the user
+        would keep seeing the earlier (stale) panel until some unrelated event (a Stop tap) happens to end that
+        goal."""
         self.quiet()
         if not self.send(message, [DONE], title=title, style=style):
             return
+        self._wait_while_opening(GOAL_OPEN_WAIT_S)
         try:
             self._wait({DONE["button_id"]}, timeout_s, raise_on_cancel=False)
-        except Exception as error:  # a notice must never change the action's result
-            if self._log is not None:
-                self._log.warning(f"UI: notice wait ended: {error!r}")
+        except Exception:  # a notice must never change the action's result
+            pass
 
     def done(self, message, mock=False):
         if mock:

@@ -105,6 +105,11 @@ params:
   # how far from the arm's base (m) the line-up trusts that boundary: a container further out is told to
   # come closer. 0 (the default): as far as the run's own proof plans a press. A robot's profile sets it
   line_up_far_m: 0.0
+  # the mock only (mock: true): every failure box_opening can really report, cycled through once each (in
+  # the order the real run would meet them), this many attempts apiece, before the mock always succeeds --
+  # so the UI's every wait/fail/retry state can be rehearsed with no arm, no params to set. 1 (the default).
+  # 0 turns the cycle off: the mock always succeeds, as it did before this parameter existed
+  mock_fail_repeat: 1
 publishes:
   - /box_opening/status
   # the run's gripper commands (runtime/client.py), to the arm driver

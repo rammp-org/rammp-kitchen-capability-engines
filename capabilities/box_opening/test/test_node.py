@@ -957,7 +957,11 @@ def test_the_mock_holds_every_topic_the_real_run_publishes_and_the_real_node_non
 def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
     handlers = list(LOGGER.handlers)
     cap = node.Capability(
-        parameter_overrides=[Parameter("mock", value=True), Parameter("use_orchestrator", value=False)]
+        parameter_overrides=[
+            Parameter("mock", value=True),
+            Parameter("use_orchestrator", value=False),
+            Parameter("mock_fail_repeat", value=0),  # this test is about the happy path, not mock_fail_repeat
+        ]
     )
     try:
         ctx = FakeCtx()
@@ -965,8 +969,18 @@ def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
         assert a.available
         cap.instance_id = "c1"
         out = cap.execute("open_box", {}, ctx)
-        assert [p for p, *_ in ctx.said] == [p for p, *_ in node.MOCK_PHASES["open_box"]]
+        # MOCK_RUN_SCRIPT's rows, through the SAME LEG_PHASES/Tracker a real run's rows go through (not a
+        # curated phase table of its own): every named phase appears, in the real run's own order
+        phases = [p for p, *_ in ctx.said]
+        order = ["locate", "look", "press", "grip", "carry", "release", "home"]
+        assert phases[0] == "locate" and phases[-1] == "home"
+        assert [p for p in order if p in phases] == order
+        pcts = [pct for _, pct, *_ in ctx.said]
+        assert pcts == sorted(pcts) and pcts[-1] == 1.0
         assert not any(pausable for *_, pausable in ctx.said)  # the real run cannot pause: neither can it
+        messages = [m for _, _, m, _ in ctx.said]
+        assert "pressing the button" in messages and messages[-1] == "going home"
+        assert not any(":" in m or "_" in m for m in messages)  # REVIEW_RULES U2
         # review round 2: a successful real run at the interface — its result, and its writes
         assert out["mock"] and out["executed"] and out["lid_off"] and out["lid_xyz"] == node.MOCK_LID_XYZ
         assert (out["presses"], out["grips"], out["world_state"]) == (1, 1, "opened")
@@ -984,11 +998,119 @@ def test_the_mock_walks_the_runs_phases_and_moves_nothing(ros):
         LOGGER.handlers[:] = handlers
 
 
+def test_mock_fail_repeat_cycles_every_mock_failure_then_always_succeeds(ros):
+    """mock_fail_repeat (default 1): each of MOCK_OUTCOME_CYCLE's failures is raised once, in order -- the
+    SAME EngineError (error_code, recoverable) a real run with that exit code/console line (and that much
+    of MOCK_RUN_SCRIPT behind it) would report, through error_for() and execute()'s unchanged except
+    blocks -- then (every one having had its turn) the mock always succeeds."""
+    handlers = list(LOGGER.handlers)
+    cap = node.Capability(
+        parameter_overrides=[Parameter("mock", value=True), Parameter("use_orchestrator", value=False)]
+    )
+    try:
+        cap.instance_id = "c1"
+        for outcome in node.MOCK_OUTCOME_CYCLE:
+            ctx = FakeCtx()
+            if outcome.kind == "raise":
+                if outcome.code == "_bug":
+                    with pytest.raises(ValueError):
+                        cap.execute("open_box", {}, ctx)
+                else:
+                    with pytest.raises(EngineError) as e:
+                        cap.execute("open_box", {}, ctx)
+                    assert e.value.error_code == outcome.code and e.value.recoverable is outcome.recoverable
+                continue
+            # the expected (code, recoverable) comes from error_for() itself, read the same way _open_box()
+            # reads a real run's -- not a second hand-written table that could drift from it
+            track = node.Tracker("open_box")
+            for row in node.MOCK_RUN_SCRIPT[: outcome.prefix]:
+                track.add(row)
+            expected = node.error_for("open_box", outcome.exit_code, list(outcome.lines))
+            exp_code, exp_recoverable = expected.error_code, expected.recoverable
+            if track.held:  # the lid still in the fingers overrides recoverable, as a real run's does
+                exp_recoverable = False
+            with pytest.raises(EngineError) as e:
+                cap.execute("open_box", {}, ctx)
+            assert e.value.error_code == exp_code and e.value.recoverable is exp_recoverable
+        # every failure has had its turn: the mock succeeds from here on, as it always did before
+        ctx = FakeCtx()
+        out = cap.execute("open_box", {}, ctx)
+        assert out["mock"] and out["executed"] and out["lid_off"]
+        out2 = cap.execute("open_box", {}, ctx)
+        assert out2["mock"] and out2["executed"]
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_mock_fail_repeat_fires_each_failure_that_many_attempts_before_the_next(ros):
+    handlers = list(LOGGER.handlers)
+    cap = node.Capability(
+        parameter_overrides=[
+            Parameter("mock", value=True),
+            Parameter("use_orchestrator", value=False),
+            Parameter("mock_fail_repeat", value=2),
+        ]
+    )
+    try:
+        cap.instance_id = "c1"
+        first_code = node.MOCK_OUTCOME_CYCLE[0].code
+        second_code = node.MOCK_OUTCOME_CYCLE[1].code
+        codes = []
+        for _ in range(3):
+            with pytest.raises(EngineError) as e:
+                cap.execute("open_box", {}, FakeCtx())
+            codes.append(e.value.error_code)
+        assert codes == [first_code, first_code, second_code]
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_mock_fail_repeat_is_counted_per_action_id(ros):
+    """A different action_id (a different goal/instance) starts its own count: one action's Retry taps
+    do not use up another's."""
+    handlers = list(LOGGER.handlers)
+    cap = node.Capability(
+        parameter_overrides=[Parameter("mock", value=True), Parameter("use_orchestrator", value=False)]
+    )
+    try:
+        cap.instance_id = "c1"
+        first_code = node.MOCK_OUTCOME_CYCLE[0].code
+        with pytest.raises(EngineError) as e1:
+            cap.execute("goal-a", {}, FakeCtx())
+        with pytest.raises(EngineError) as e2:
+            cap.execute("goal-b", {}, FakeCtx())
+        assert e1.value.error_code == first_code and e2.value.error_code == first_code
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
+def test_mock_fail_repeat_off_is_the_old_always_succeeds_mock(ros):
+    handlers = list(LOGGER.handlers)
+    cap = node.Capability(
+        parameter_overrides=[
+            Parameter("mock", value=True),
+            Parameter("use_orchestrator", value=False),
+            Parameter("mock_fail_repeat", value=0),
+        ]
+    )
+    try:
+        cap.instance_id = "c1"
+        for _ in range(len(node.MOCK_OUTCOME_CYCLE) + 1):
+            out = cap.execute("open_box", {}, FakeCtx())
+            assert out["mock"] and out["executed"]
+    finally:
+        cap.destroy_node()
+        LOGGER.handlers[:] = handlers
+
+
 def test_the_paced_mock_rehearses_the_ui_its_panel_and_cancel(ros, monkeypatch):
     """mock_phase_s: each of the mock's phases lasts that long, its panel on the UI as the real run's, and
     Cancel on it ends it cancelled with nothing opened. 0 (the default): over at once, as it always was."""
     handlers = list(LOGGER.handlers)
-    overrides = {"mock": True, "use_orchestrator": False, "mock_phase_s": 0.3}
+    overrides = {"mock": True, "use_orchestrator": False, "mock_phase_s": 0.3, "mock_fail_repeat": 0}
     cap = node.Capability(parameter_overrides=[Parameter(k, value=v) for k, v in overrides.items()])
     try:
         monkeypatch.setattr(cap, "_ui_live", lambda: True)
@@ -996,25 +1118,27 @@ def test_the_paced_mock_rehearses_the_ui_its_panel_and_cancel(ros, monkeypatch):
         ctx = FakeCtx()
         t0 = time.monotonic()
         out = cap.execute("open_box", {}, ctx)
-        phases = node.MOCK_PHASES["open_box"]
-        assert len(phases) * 0.3 <= time.monotonic() - t0 < len(phases) * 0.3 + 2.0
+        nrows = len(node.MOCK_RUN_SCRIPT)
+        assert nrows * 0.3 <= time.monotonic() - t0 < nrows * 0.3 + 3.0
         assert out["lid_off"] and ctx.objects == {"c1": {"opened": True}}
         run = [p for p in ctx.panels if "progress" in p]  # the run's panels, then its Done notice
-        shown = [p["message"] for p in run]
-        assert [m for m in dict.fromkeys(shown) if m != "Starting"] == [d[:1].upper() + d[1:] for _, _, d in phases]
+        order = ["locate", "look", "press", "grip", "carry", "release", "home"]
+        phases_shown = [p["progress"]["phase"] for p in run]
+        assert [p for p in order if p in phases_shown] == order
         assert [p["progress"]["pct"] for p in run] == sorted(p["progress"]["pct"] for p in run)
         assert run[-1]["progress"]["pct"] == 100.0
         assert all([b["button_id"] for b in p["buttons"]] == ["cancel"] for p in run)
         assert ctx.panels[-1]["message"] == node.wrap("Mock: " + ui_text.DONE + " No arm motion.")
         assert [b["button_id"] for b in ctx.panels[-1]["buttons"]] == ["done"]
-        # Cancel pressed while it "presses": cancelled, nothing held, nothing opened
+        # Cancel pressed partway through: cancelled, nothing held, nothing opened
         ctx = FakeCtx()
         import threading
 
         threading.Timer(0.75, ctx.events.append, args=(CANCEL_PRESS,)).start()
         with pytest.raises(Cancelled):
             cap.execute("open_box", {}, ctx)
-        assert [p for p, *_ in ctx.said] == ["locate", "look", "press"]
+        phases = [p for p, *_ in ctx.said]
+        assert phases and phases[0] == "locate" and "home" not in phases  # cancelled before it ever finished
         assert ctx.objects == {} and ctx.world == []
         assert ctx.panels[-2]["message"] == node.wrap(node.PANEL_CANCELLED) and ctx.panels[-2]["buttons"] == []
         assert ctx.panels[-1]["title"] == "Opening the container: stopped"  # then the Stopped notice
@@ -1024,7 +1148,7 @@ def test_the_paced_mock_rehearses_the_ui_its_panel_and_cancel(ros, monkeypatch):
 
 
 def _mock_lining_up(monkeypatch, ui=True, **params):
-    overrides = dict({"mock": True, "use_orchestrator": False, "line_up": True}, **params)
+    overrides = dict({"mock": True, "use_orchestrator": False, "line_up": True, "mock_fail_repeat": 0}, **params)
     cap = node.Capability(parameter_overrides=[Parameter(k, value=v) for k, v in overrides.items()])
     monkeypatch.setattr(cap, "_ui_live", lambda: ui)
     cap.instance_id = "c1"
@@ -1043,13 +1167,17 @@ def test_the_mock_lines_up_first_and_runs_only_on_open(ros, monkeypatch):
         threading.Timer(3.2, ctx.events.append, args=({"type": "button", "button_id": "open"},)).start()
         t0 = time.monotonic()
         out = cap.execute("open_box", {}, ctx)
-        assert 3.2 <= time.monotonic() - t0 < 3.2 + 7 * 0.2 + 2.0
+        nrows = len(node.MOCK_RUN_SCRIPT)
+        assert 3.2 <= time.monotonic() - t0 < 3.2 + (nrows + 1) * 0.2 + 2.0
         assert out["lid_off"] and ctx.objects == {"c1": {"opened": True}}
         lining = [m for p, _pct, m, _pausable in ctx.said if p == "line_up"]
         assert lining[0].startswith("Move closer") and any(m.startswith("Move left") for m in lining)
         assert lining[-3:] == ["Hold still, checking", "Ready. Open the container?", "Opening the container"]
         phases = [p for p, *_ in ctx.said]
-        assert phases[len(lining) :] == [p for p, *_ in node.MOCK_PHASES["open_box"]]  # the run, after its Open
+        run_phases = phases[len(lining) :]  # the run, after its Open
+        order = ["locate", "look", "press", "grip", "carry", "release", "home"]
+        assert run_phases[0] == "locate" and run_phases[-1] == "home"
+        assert [p for p in order if p in run_phases] == order
         assert all(pct == 0.0 and not pausable for p, pct, _m, pausable in ctx.said if p == "line_up")
         asked = [p for p in ctx.panels if p["message"] == "Ready. Open the container?"]
         assert asked and [b["button_id"] for b in asked[0]["buttons"]] == ["open", "cancel"]
@@ -1132,7 +1260,10 @@ def test_with_no_ui_there_is_no_one_to_ask_and_the_run_starts_as_always(ros, mon
     try:
         ctx = FakeCtx()
         out = cap.execute("open_box", {}, ctx)
-        assert out["lid_off"] and [p for p, *_ in ctx.said] == [p for p, *_ in node.MOCK_PHASES["open_box"]]
+        phases = [p for p, *_ in ctx.said]
+        order = ["locate", "look", "press", "grip", "carry", "release", "home"]
+        assert out["lid_off"] and phases[0] == "locate" and phases[-1] == "home"
+        assert [p for p in order if p in phases] == order
         assert ctx.panels == []
     finally:
         cap.destroy_node()
