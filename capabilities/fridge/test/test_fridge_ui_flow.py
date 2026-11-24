@@ -372,7 +372,7 @@ class DriveFlow(Flow):
         super().__init__(**kw)
         self.drives, self.panels_while_driving = [], []
 
-        def move_chair(base, arm, ctx, move, *, speed, cfg, execute):
+        def move_chair(base, arm, ctx, move, *, speed, cfg, execute, mode_entered=False, keep_heading=False):
             self.drives.append({"move": move, "speed": speed, "execute": execute})
             self.panels_while_driving.append(ctx.sent[-1] if ctx.sent else None)
             if during is not None:
