@@ -588,12 +588,17 @@ class PushOpen:
 AFTER_RELEASE = {**F.PULL_GAINS, "path_tol": F.AFTER_RELEASE_PATH_TOL_RAD}  # everything after the release: compliant
 
 
-def _release(ai):
+def _release(ai, *, early=False):
     """Open the gripper, slowly, the hand still (the swing has stopped at its angle). Refused if the gripper's own
     reported position (its joint state, not a camera) still says closed after the command: backing off then would drag
     the door."""
-    ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED)
-    if float(ai.get_state()["gripper_pos"]) > 0.2:
+    if early:
+        cleared = ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED, open_threshold=0.2)
+        position = ai.gripper_state().position if cleared else float("inf")
+    else:
+        ai.gripper(0.0, speed=F.GRIP_OPEN_SPEED)
+        position = ai.get_state()["gripper_pos"]
+    if not float(position) <= 0.2:
         raise Refused("the gripper did not open -- the hand is still on the handle.")
 
 

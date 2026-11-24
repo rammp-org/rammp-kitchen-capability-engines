@@ -171,6 +171,7 @@ class Planner:
         self.deadline = None  # shared deadline for bounded open preflight
         self.last_failure = {}
         self.plans = 0
+        self.feedback_settle = False
         self.finished = False  # the last run(): the driver ran the whole trajectory (no stop), wherever the tool ended
         self.cached = 0
         self.local = 0  # legs solved here (on or along the door)
@@ -606,13 +607,24 @@ class Planner:
                     # gripper opening at the pull's end -- must not happen with the arm stopped part way
                     thread.cancel()
                 thread.join(timeout=10.0)
-        time.sleep(SETTLE_S)
-        st = self.arm.get_state()
-        err = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - motion.goals[-1].pos))
         self.finished = res.error_code == 0
-        if res.error_code != 0:
+        if not self.finished:
             say(f"{label}: STOPPED ({rammp_arm.ERRORS.get(res.error_code, res.error_code)} {res.error_string})")
             return False
+        if not self.feedback_settle:
+            time.sleep(SETTLE_S)
+        until = time.monotonic() + SETTLE_S
+        while True:
+            st = self.arm.get_state()
+            err = float(np.linalg.norm(np.asarray(st["ee_pos"][:3]) - motion.goals[-1].pos))
+            if not self.feedback_settle or time.monotonic() >= until:
+                break
+            speed = np.max(np.abs(st["velocity"]))
+            joint_error = np.max(np.abs(_short_delta(plan.q[-1], st["position"])))
+            if err <= tol and speed <= 0.02 and joint_error <= np.radians(1):
+                break
+            self.checkpoint()
+            time.sleep(0.02)
         say(f"{label}: done, tool {err * 100:.1f} cm from the last goal")
         return err <= tol
 
