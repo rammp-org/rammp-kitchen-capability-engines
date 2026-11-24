@@ -3,13 +3,14 @@
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pybullet as bullet
 import pytest
 from door_common import common
 from door_common import open_door as shared
-from fridge import constants, open_door, planning, world
+from fridge import constants, open_door, planning, push_open, world
 from fridge.door_sweep import DoorSweep
 from fridge.world import FridgeModel, PlannerWorld
 from fridge_fake import HANDLE_QUAT, URDF, FakeCurobo, Plan
@@ -285,3 +286,20 @@ def test_auto_open_shares_deadline_and_reports_progress(tmp_path, monkeypatch, s
         "Planning front grasp, adaptive pull",
         "Planning side grasp, 60° pull",
     ] + ([] if side_succeeds else ["Planning side grasp, adaptive pull"])
+
+
+
+def test_push_entry_checks_between_planner_samples():
+    start, end = np.zeros((2, 7))
+    start[0], end[0] = -.4, .4
+    quat = [0, 0, 0, 1]
+    slab = dict(position=[0, 0, 0], dims=[.1, .5, .8], rpy_deg=[0, 0, 0])
+    fk = SimpleNamespace(poses=lambda q: (q[:, :3], np.tile(quat, (len(q), 1))))
+    entry = planning.free(end[:3], quat, "in behind the door", [slab])
+    leg = SimpleNamespace(q=np.array([start, end]))
+    motion = planning.Motion([entry], [leg], start)
+    assert push_open.entry_hits_slab(fk, motion, slab)
+
+    # Identical sweep with sufficient vertical clearance.
+    leg.q[:, 2] = 1
+    assert not push_open.entry_hits_slab(fk, motion, slab)

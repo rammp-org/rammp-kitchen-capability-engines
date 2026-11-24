@@ -243,6 +243,11 @@ PUSH_OPEN_PULL_DEG = 60  # the pull. 11-05 sim sweep (PyBullet planner): 60 gave
 PUSH_OPEN_TO_DEG = 90  # maximum push target
 PUSH_OPEN_MIN_FINAL_DEG = 90  # minimum opening required for the demo
 PUSH_OPEN_MIN_PUSH_DEG = 5  # ... at least this far past the pull: the pull is at most PUSH_OPEN_TO_DEG - this
+# The hand envelope is wider than the physical fingers. Reject a deep
+# overlap during free travel, before the intentional preload into the door.
+PUSH_ENTRY_MAX_BOX_OVERLAP_M = 0.015
+# A parallel hand contacts the slab on the free-edge side of the tool.
+PUSH_PARALLEL_EDGE_INSET_M = 0.09
 PUSH_OPEN_EDGE_CLEAR_M = 0.16  # the point past the free edge (tool point), when cuRobo needs one
 PUSH_OPEN_GAP_M = 0.10  # the push start: this far off the door's inner face (tool point) ...
 PUSH_OPEN_DZ_M = -0.10  # ... this far above the handle's height (negative: below; configure sets it from MOUNTS) ...
