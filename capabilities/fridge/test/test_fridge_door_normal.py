@@ -48,3 +48,26 @@ def test_real_wrist_handle_with_obscured_door_requires_another_look():
     depth[~mask] = 0
     with pytest.raises(dn.DoorNormalError, match="insufficient door surface depth"):
         dn.measure_door_normal(depth, K, T, mask, door_standoff_m=0.070)
+
+
+def _v4_wrist(dock):
+    path = Path(__file__).parent / "fixtures" / f"v4_dock_{dock}_1531_wrist.npz"
+    with np.load(path) as frame:
+        return frame["depth_mm"], frame["K"], frame["base_T_cam"], frame["mask"]
+
+
+def test_v4_dock_02_narrow_mask_retries_clean_short_strip():
+    depth, K, T, mask = _v4_wrist("02")
+    points, rows, cols = dn._points(depth, K, T, mask)
+    front = dn._bar_front_point(points, depth[rows, cols] / 1000, rows)
+    # Removing the added columns recreates the original 96.8 mm trimmed span.
+    original = depth.copy()
+    original[:, :262] = 0
+    assert dn.measure_door_surface(original, K, T, mask, front, 0.070) is None
+
+    plane = dn.measure_door_surface(depth, K, T, mask, front, 0.070)
+    assert plane is not None
+    assert 0.10 <= plane.span_m < 0.18
+    assert plane.inliers > 2400
+    assert plane.rms_m < 0.002
+    assert plane.yaw_deg == pytest.approx(11.0, abs=0.5)

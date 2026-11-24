@@ -331,12 +331,47 @@ def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m
     toward[2] = 0.0
     along = np.cross(toward, [0.0, 0.0, 1.0])
     a, b = np.stack([front - cam, front - cam + 0.2 * along]) @ base_T_cam[:3, :3]
-    if b[0] * a[2] > a[0] * b[2]:
-        u0, u1 = us.max() + 4, us.max() + 4 + 3 * width
-    else:
-        u0, u1 = us.min() - 4 - 3 * width, us.min() - 4
-    region[v0:v1:2, max(0, u0) : max(0, u1) : 2] = True
-    points, _, _ = _points(depth_mm, K, base_T_cam, region)
+    right = b[0] * a[2] > a[0] * b[2]
+    edge = us.max() + 4 if right else us.min() - 4
+
+    def fit_strip(strip_width):
+        u0, u1 = (edge, edge + strip_width) if right else (edge - strip_width, edge)
+        region[v0:v1:2, max(0, u0) : max(0, u1) : 2] = True
+        points, _, _ = _points(depth_mm, K, base_T_cam, region)
+        region.fill(False)
+        return _fit_door_strip(points, front, toward, standoff_m)
+
+    fit = fit_strip(3 * width)
+    if fit is None or fit.span_m >= 0.10:
+        return fit
+    if fit.inliers < 0.60 * fit.points or fit.rms_m > 0.004:
+        return None
+
+    # Cap the expanded hinge-side strip at a projected 16 cm from the mask edge.
+    # At this short range the probe stays inside the measured 37.4 cm handle-to-hinge offset.
+    # Intersect the strip's starting pixel with the provisional plane before projecting the far end.
+    rotation = base_T_cam[:3, :3]
+    ray = np.array([(edge - K[0, 2]) / K[0, 0], ((v0 + v1) / 2 - K[1, 2]) / K[1, 1], 1.0])
+    incidence = (rotation @ ray) @ fit.normal
+    if incidence >= -1e-6:
+        return None
+    start = ray * (((fit.centre - cam) @ fit.normal) / incidence)
+    tangent = np.cross(fit.normal, [0.0, 0.0, 1.0])
+    end = start + 0.16 * (tangent @ rotation)
+    if min(start[2], end[2]) <= 0:
+        return None
+    limit = int(K[0, 0] * abs(end[0] / end[2] - start[0] / start[2]))
+    if limit <= 3 * width:
+        return None
+    wider = fit_strip(limit)
+    if wider is None or wider.span_m < 0.10:
+        return None
+    if abs(wider.yaw_deg - fit.yaw_deg) > 3 or abs((wider.centre - fit.centre) @ fit.normal) > 0.008:
+        return None
+    return wider
+
+
+def _fit_door_strip(points, front, toward, standoff_m):
     if len(points) < 100:
         return None
     rng = np.random.default_rng(SEED)
@@ -363,7 +398,7 @@ def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m
     n = np.r_[normal, 0.0]
     span = np.ptp(np.percentile(xy[best] @ np.array([-normal[1], normal[0]]), [5, 95]))
     height = np.ptp(np.percentile(points[best, 2], [5, 95]))
-    if span < 0.10 or height < 0.08 or abs((front[:2] - centre) @ normal - standoff_m) >= 0.025:
+    if height < 0.08 or abs((front[:2] - centre) @ normal - standoff_m) >= 0.025:
         return None
     return DoorNormal(
         n,
