@@ -155,8 +155,9 @@ def _drive_leg(base, arm, ctx, distance, angle, speed, yaw_speed, odom_to_axle, 
         base.stop()
     until = clock() + base_drive.SETTLE_S
     while True:
+        if step is None:
+            ctx.checkpoint()
         progress, v, w = sample()
-        ctx.checkpoint()
         if clock() >= until and v <= LINEAR_SETTLED and w <= ANGULAR_SETTLED:
             break
         base.stop()
@@ -173,16 +174,28 @@ def stationary_look(base, arm, look, odom_to_axle, *, mode_entered):
         raise BaseError("The wheelchair must be stopped for a docking look")
     if arm.control_status().estopped:
         raise BaseError("Arm e-stop before docking look")
-    observation = look()
-    after, v, w = _sample(base)
-    delta, turn = relative_axle(before, after, odom_to_axle)
-    if v > LINEAR_SETTLED or w > ANGULAR_SETTLED or np.linalg.norm(delta) > 0.01 or abs(turn) > TURN_TOL:
-        raise BaseError("The wheelchair moved during a docking look")
-    if arm.control_status().estopped:
-        raise BaseError("Arm e-stop during docking look")
-    if mode_entered:
-        base.send_twist(0.0, 0.0)  # verify the MIB still accepts AUTONOMOUS even at the final dock
-    return observation
+    try:
+        return look()
+    finally:
+        after, v, w = _sample(base)
+        delta, turn = relative_axle(before, after, odom_to_axle)
+        if v > LINEAR_SETTLED or w > ANGULAR_SETTLED or np.linalg.norm(delta) > 0.01 or abs(turn) > TURN_TOL:
+            raise BaseError("The wheelchair moved during a docking look")
+        if arm.control_status().estopped:
+            raise BaseError("Arm e-stop during docking look")
+        if mode_entered:
+            base.send_twist(0.0, 0.0)
+
+
+def confirm_wrist(base, arm, scene, look, odom_to_axle, *, mode_entered):
+    """Read a stationary wrist pose and check its agreement with the scene dock."""
+    wrist = stationary_look(base, arm, look, odom_to_axle, mode_entered=mode_entered)
+    scene_geom, wrist_geom = scene[0], wrist[0]
+    if np.linalg.norm(scene_geom["h_raw"] - wrist_geom["h_raw"]) > 0.03 or np.dot(
+        scene_geom["n"], wrist_geom["n"]
+    ) < np.cos(np.radians(3)):
+        raise Refused("Scene and wrist disagree at the dock. Check the fridge pose before opening.")
+    return wrist
 
 
 def dock(
@@ -198,6 +211,7 @@ def dock(
     odom_to_axle,
     on_motion,
     on_route=None,
+    confirm=None,
     target_handle=TARGET_HANDLE,
     target_yaw=TARGET_YAW,
     clock=time.monotonic,
@@ -216,9 +230,37 @@ def dock(
     remaining_yaw = MAX_YAW_TRAVEL
     entered = False
     ready = None
+
+    def park_ready():
+        nonlocal ready
+        parked_at, _, _ = _sample(base)
+
+        def stationary():
+            pose, v, w = _sample(base)
+            shift, turn = relative_axle(parked_at, pose, odom_to_axle)
+            if (
+                v > LINEAR_SETTLED
+                or w > ANGULAR_SETTLED
+                or np.linalg.norm(shift) > TRANSLATION_TOL
+                or abs(turn) > TURN_TOL
+            ):
+                raise BaseError("Wheelchair moved while parking the arm")
+
+        ready.park(ctx, clock, sleep, stationary)
+        ready = None
+
+    def observe():
+        return stationary_look(base, arm, look, odom_to_axle, mode_entered=entered)
+
     for index in range(MAX_LOOKS):
         ctx.checkpoint()
-        geom, q = stationary_look(base, arm, look, odom_to_axle, mode_entered=entered)
+        try:
+            geom, q = observe()
+        except Refused:
+            if ready is None:
+                raise
+            park_ready()
+            geom, q = observe()
         if clock() >= deadline:
             raise Refused("Docking timed out waiting for a stationary camera observation")
         handle, normal = geom["h_raw"], geom["n"]
@@ -226,26 +268,20 @@ def dock(
             raise Refused("Docking requires a measured fixture heading and finite handle position")
         delta, yaw = correction(handle, normal, axle_to_mount, target_handle, target_yaw)
         if np.linalg.norm(handle[:2] - target_handle) <= POSITION_TOLERANCE and abs(yaw) <= YAW_TOLERANCE:
-            return (geom, q), index
+            if confirm is None:
+                return (geom, q), index
+            try:
+                return confirm((geom, q)), index
+            except Refused:
+                if ready is None:
+                    raise
+                park_ready()
+                return confirm((geom, q)), index
         if index == MAX_LOOKS - 1:
             break
         if ready is not None:
-            parked_at, _, _ = _sample(base)
-
-            def stationary(parked_at=parked_at):
-                pose, v, w = _sample(base)
-                shift, turn = relative_axle(parked_at, pose, odom_to_axle)
-                if (
-                    v > LINEAR_SETTLED
-                    or w > ANGULAR_SETTLED
-                    or np.linalg.norm(shift) > TRANSLATION_TOL
-                    or abs(turn) > TURN_TOL
-                ):
-                    raise BaseError("Wheelchair moved while parking the arm")
-
-            ready.park(ctx, clock, sleep, stationary)
+            park_ready()
             q = np.asarray(arm.joint_states().position, float)
-            ready = None
         route, distance, rotation_travel = checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard)
         if not entered:
             on_motion()

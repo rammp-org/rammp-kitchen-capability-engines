@@ -689,6 +689,16 @@ class Capability(CapabilityEngine):
             ]
             docking.check_route(geom["closed_model"], [*boxes, *arm_boxes], padding, route, mount)
 
+        def confirm(detected):
+            if camera is scene:
+                return detected
+
+            def wrist_look():
+                camera.require_frames_after_now()
+                return open_door.detect(self.arm)
+
+            return docking.confirm_wrist(self.base, self.arm, detected, wrist_look, odom, mode_entered=self._drove)
+
         drive_cfg = {
             **cfg,
             "docking_max_linear_speed": self.cfg["docking_max_linear_speed"],
@@ -738,23 +748,11 @@ class Capability(CapabilityEngine):
                     odom_to_axle=odom,
                     on_motion=moving,
                     on_route=preview,
+                    confirm=confirm,
                     **target,
                 )
         ctx.progress("open", 0.0, f"Dock confirmed after {iterations} correction(s)", pausable=False)
-        if camera is scene:
-            return detected
-
-        def wrist_look():
-            camera.require_frames_after_now()
-            return open_door.detect(self.arm)
-
-        wrist = docking.stationary_look(self.base, self.arm, wrist_look, odom, mode_entered=self._drove)
-        scene_geom, wrist_geom = detected[0], wrist[0]
-        if np.linalg.norm(scene_geom["h_raw"] - wrist_geom["h_raw"]) > 0.03 or np.dot(
-            scene_geom["n"], wrist_geom["n"]
-        ) < np.cos(np.radians(3)):
-            raise dc.Refused("Scene and wrist disagree at the dock. Check the fridge pose before opening.")
-        return wrist
+        return detected if autonomous else confirm(detected)
 
     def _execute(self, action_id, params, ctx):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)

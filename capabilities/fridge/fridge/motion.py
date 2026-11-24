@@ -104,12 +104,12 @@ def logged_run(what, ai, log_args, speed, task, *, fast=False):
             to_console("ERROR", f"stopped: {e}")
         raise
     finally:
+        rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
+        rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED = saved_contact
         if log is not None:
             log.close(ok)
         _stop_bag(bag)
         _set_console(None)
-        rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
-        rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED = saved_contact
 
 
 def opened(door, deg):

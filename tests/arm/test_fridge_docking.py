@@ -77,7 +77,13 @@ class Ctx:
 
 
 def run_dock(
-    base, ctx, guard=lambda *_: None, *, assume_odom_to_axle=docking.ODOM_TO_AXLE, on_route=None
+    base,
+    ctx,
+    guard=lambda *_: None,
+    *,
+    assume_odom_to_axle=docking.ODOM_TO_AXLE,
+    on_route=None,
+    confirm=None,
 ):
     mount = np.asarray(docking.AXLE_TO_MOUNT[:2])
 
@@ -99,6 +105,7 @@ def run_dock(
         odom_to_axle=np.asarray(assume_odom_to_axle),
         on_motion=lambda: None,
         on_route=on_route,
+        confirm=confirm,
         clock=base.monotonic,
         sleep=base.sleep,
     )
@@ -147,6 +154,36 @@ def test_ready_follows_only_the_terminal_leg_and_closes_on_failure():
         run_dock(base, ctx, on_route=on_route)
     assert events == ["stream opened", "turn and arm in progress", "stream closed"]
     assert base.commands[-1] == (0, 0)
+
+
+def test_dock_retries_wrist_from_park_after_ready_pose_occlusion():
+    ctx = Ctx()
+    base = VirtualBase((-0.15, -0.10, -0.25), ctx)
+    events = []
+
+    @contextmanager
+    def follow(clock):
+        events.append("ready")
+        yield lambda: None
+
+    def park(ctx, clock, sleep, stationary):
+        stationary()
+        events.append("parked")
+
+    def on_route(geom, q, delta, yaw, mount, route):
+        expected = tuple(docking.route_samples(route[:-1]))[-1]
+        return lambda: Obj(follow=follow, park=park, route_at=expected)
+
+    def confirm(observation):
+        if events[-1] == "ready":
+            events.append("occluded")
+            raise Refused("Handle obscured by ready pose")
+        events.append("wrist confirmed")
+        return observation
+
+    _, corrections = run_dock(base, ctx, on_route=on_route, confirm=confirm)
+    assert corrections == 1
+    assert events == ["ready", "occluded", "parked", "wrist confirmed"]
 
 
 def test_dock_at_target_does_not_request_mode_or_twists():
