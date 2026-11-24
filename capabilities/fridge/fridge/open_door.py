@@ -1,7 +1,7 @@
 """Open the fridge: detect the handle, grasp it, swing the door open and let go while still moving, then push it on (or
 go round it).
 
-The grasp (the node's `grasp`, constants.GRASP): "auto" (the default), "side" (side_grasp.py) or "front" (fingers across the bar,
+The node's `grasp` selects "auto" (the default), "side" (side_grasp.py) or "front" (fingers across the bar,
 GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs only up to the hand being off the handle:
 - its grasps: SIDE_TILTS_DEG (level first, then out to 40 deg nose-up / nose-down), in along the door from the hinge
   side, 20 deg off its face, one finger between the bar and the door, from a line-up SIDE_SLIDE_M back along the
@@ -638,7 +638,8 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
         deadline = min(deadline, previous_deadline)
     strategies = (
         (("front", True, FRONT_SEARCH_S), ("side", False, SIDE_FIXED_SEARCH_S), ("side", True, OPEN_POLICY_S))
-        if policy else (("side" if F.GRASP == "auto" else F.GRASP, adaptive_pull, OPEN_PREFLIGHT_S),)
+        if policy
+        else (("side" if F.GRASP == "auto" else F.GRASP, adaptive_pull, OPEN_PREFLIGHT_S),)
     )
     diagnostics = []
     failure = None
@@ -704,8 +705,10 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
     angles = (swing,)
     if adaptive_pull:
         # The gate uses the first angle to identify the full pull that permits a base move.
-        angles = P.pull_angles(swing) if grasp == "side" else (swing,) + tuple(
-            angle for angle in (45, 50, 55) if angle < swing
+        angles = (
+            P.pull_angles(swing)
+            if grasp == "side"
+            else (swing,) + tuple(angle for angle in (45, 50, 55) if angle < swing)
         )
     pull_angles = check_open(model, planner.world, angles, push)
     collision = planner.preflight_start(
@@ -1328,7 +1331,8 @@ def run(
     progress=None,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
-    Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side grasps. `grasp_offset`:
+    Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side
+    grasps. `grasp_offset`:
     grasp this far (m) above the middle of the bar (set_grasp_offset). `release_only`: let go and back off the handle,
     nothing else (when a run stopped holding it). `save_door`: a dry run that plans OK also writes DOOR_FILE as the
     planned open would leave it (save_planned_door). `around` (the full-pull path only, `push` false): False tests the

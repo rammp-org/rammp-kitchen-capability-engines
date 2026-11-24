@@ -244,7 +244,7 @@ def test_c2_search_016_door_leg_contact_is_blocked(tmp_path):
 
 
 @pytest.mark.parametrize("side_succeeds", [False, True])
-def test_auto_open_shares_deadline_and_announces_each_strategy(tmp_path, monkeypatch, side_succeeds):
+def test_auto_open_shares_deadline_and_reports_progress(tmp_path, monkeypatch, side_succeeds):
     from types import SimpleNamespace
 
     _, geom, planner = recorded(1, tmp_path)
@@ -268,7 +268,12 @@ def test_auto_open_shares_deadline_and_announces_each_strategy(tmp_path, monkeyp
     monkeypatch.setattr(open_door, "_plan_open", attempt)
     monkeypatch.setattr(planner, "join", lambda *_: None)
     result = open_door.plan_open(
-        planner, geom, planner.arm.q, 60, after, adaptive_pull=True,
+        planner,
+        geom,
+        planner.arm.q,
+        60,
+        after,
+        adaptive_pull=True,
         progress=lambda percent, message: messages.append((percent, message)),
     )
     assert result["name"] == "side"
@@ -277,5 +282,6 @@ def test_auto_open_shares_deadline_and_announces_each_strategy(tmp_path, monkeyp
         [] if side_succeeds else [("side", True, 119.5)]
     )
     assert [message for _, message in messages] == [
-        "Planning front grasp, adaptive pull", "Planning side grasp, 60° pull",
+        "Planning front grasp, adaptive pull",
+        "Planning side grasp, 60° pull",
     ] + ([] if side_succeeds else ["Planning side grasp, adaptive pull"])
