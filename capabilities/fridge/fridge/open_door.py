@@ -1374,6 +1374,7 @@ def run(
     detect_at_dock=None,
     allow_short_handoff=False,
     short_reentry=False,
+    fast=False,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side
@@ -1489,6 +1490,6 @@ def run(
         record_proven(plan, geom, "arm")  # the swing finished on the arm: tried before ones that only planned
         return after.execute(ai, planner, drive_chair)
 
-    ok = logged_run("open", ai, log_args or {}, speed, task)
+    ok = logged_run("open", ai, log_args or {}, speed, task, fast=fast)
     say(f"\nOPEN {'OK' if ok else 'STOPPED'}{'' if execute else ' (dry run)'}")
     return ok

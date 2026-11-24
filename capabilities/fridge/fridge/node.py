@@ -243,9 +243,10 @@ class Capability(CapabilityEngine):
                 "type": "object",
                 "properties": {
                     **COMMON,
+                    "profile": {"type": "string", "enum": ["standard", "fast"], "default": "standard"},
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
                     "push_open": {"type": "boolean", "default": True},
-                    "short_reentry": {"type": "boolean", "default": False},
+                    "short_reentry": {"type": "boolean"},
                     # full-pull path only (push_open false): False tests the pull alone -- after the swing just let go
                     # and back off the handle, no round-the-door (the plan is gated by the back-off only)
                     "around": {"type": "boolean", "default": True},
@@ -756,7 +757,12 @@ class Capability(CapabilityEngine):
     def _execute(self, action_id, params, ctx):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)
         self._guided = False
-        speed = float(params.get("speed", constants.CLOSE_SPEED if action_id == "close" else 1.0))
+        profile = params.get("profile", "standard") if action_id == "open" else "standard"
+        if profile not in ("standard", "fast"):
+            raise EngineError("bad_params", "'profile' must be standard or fast", recoverable=True)
+        fast = profile == "fast"
+        default_speed = constants.CLOSE_SPEED if action_id == "close" else 0.7 if fast else 1.0
+        speed = float(params.get("speed", default_speed))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
@@ -887,7 +893,8 @@ class Capability(CapabilityEngine):
                     progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),
                     detect_at_dock=detect_open,
                     allow_short_handoff=docking_requested,
-                    short_reentry=bool(params.get("short_reentry", False)),
+                    short_reentry=bool(params.get("short_reentry", fast)),
+                    fast=fast,
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
                     relocalize.capture_reference(self.arm)

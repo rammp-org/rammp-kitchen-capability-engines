@@ -75,7 +75,7 @@ def _stop_bag(rec):
         say(f"  (the rosbag did not close cleanly: {e!r})")
 
 
-def logged_run(what, ai, log_args, speed, task):
+def logged_run(what, ai, log_args, speed, task, *, fast=False):
     """`task()` -> ok, logged to RUNS_DIR/<time>_<what> (RunLog) with a camera frame before and after, everything the
     node logs meanwhile in its console.log, and a rosbag (BAG) in its bag/. `speed` (0..1] scales every arm
     motion for this run only. Returns ok; a refusal passes through."""
@@ -83,6 +83,9 @@ def logged_run(what, ai, log_args, speed, task):
     rammp_arm.CART_SPEED *= speed
     rammp_arm.JOINT_SPEED *= speed
     rammp_arm.GO_TO_SPEED_SCALE = max(0.01, rammp_arm.GO_TO_SPEED_SCALE * speed)
+    saved_contact = (rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED)
+    if fast:
+        rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED = 0.135, 0.75
     log = bag = None
     ok = False
     try:
@@ -106,6 +109,7 @@ def logged_run(what, ai, log_args, speed, task):
         _stop_bag(bag)
         _set_console(None)
         rammp_arm.CART_SPEED, rammp_arm.JOINT_SPEED, rammp_arm.GO_TO_SPEED_SCALE = saved
+        rammp_arm.CONTACT_CART_SPEED, rammp_arm.CONTACT_JOINT_SPEED = saved_contact
 
 
 def opened(door, deg):
