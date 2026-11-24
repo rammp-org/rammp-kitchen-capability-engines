@@ -1093,7 +1093,8 @@ def test_a_through_leg_is_checked_segment_by_segment_against_its_own_worlds(frid
 def test_the_push_is_checked_against_the_door_where_it_is_at_each_step(fridge):
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False)
-    goals = open_door.LAST_PLAN["after"].motion.goals
+    plan = open_door.LAST_PLAN
+    goals = plan["after"].motion.goals
     push = next(g for g in goals if g.label.startswith("onto the inner face"))
     assert push.path == "through" and len(push.segment_worlds) == len(push.through)
     off = goals[
@@ -1101,6 +1102,6 @@ def test_the_push_is_checked_against_the_door_where_it_is_at_each_step(fridge):
     ]  # the step-off after the stop: against the door at 90
     assert all(label.startswith("the door at 90 deg") for label, _ in off.segment_worlds)
     labels = [label for label, _ in push.segment_worlds]
-    assert labels[0].startswith(f"the door at {F.PUSH_OPEN_PULL_DEG} deg")  # where the pull stopped
+    assert labels[0].startswith(f"the door at {plan['swing_deg']:.0f} deg")
     assert labels[-1].startswith("the door at 90 deg")
     assert all(any(b["name"] == "door_panel" for b in w) for _, w in push.segment_worlds)
