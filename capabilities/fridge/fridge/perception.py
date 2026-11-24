@@ -107,7 +107,14 @@ def _handle_like(height, width):
 class HandleDetector(door_common.perception.HandleDetector):
     check_door_vertical = False  # _door_plane checks the normal itself, so it can try the next plane instead
 
-    def __init__(self, handle_centre_to_face_m=0.070, door_square_to_arm=False, door_normal_from_handle=False):
+    def __init__(
+        self,
+        handle_centre_to_face_m=0.070,
+        door_square_to_arm=False,
+        door_normal_from_handle=False,
+        *,
+        hinge_direction=1,
+    ):
         if door_square_to_arm and door_normal_from_handle:
             raise ValueError("door_square_to_arm and door_normal_from_handle both set the door's normal: pick one")
         self.min_standoff = handle_centre_to_face_m * DOOR_STANDOFF_MIN_FRACTION
@@ -115,6 +122,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         self.last_miss = ""  # why the last look found nothing, for the refusal
         self.door_square_to_arm = door_square_to_arm
         self.door_normal_from_handle = door_normal_from_handle
+        self.hinge_direction = hinge_direction
         self._merged = (None, None)  # (picked mask, it merged with the instances in its box): _normal_from_handle's
 
     def pick_handle_mask(self, instances, frame=None):
@@ -253,7 +261,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         fwd[2] = 0.0
         n_out = -fwd / np.linalg.norm(fwd)  # the door's outward normal, roughly back toward the camera
         along = np.cross(n_out, [0.0, 0.0, 1.0])  # from the handle toward the hinge, in the arm's frame
-        a, b = self._bar, self._bar + Rb.T @ (along * 0.2)
+        a, b = self._bar, self._bar + Rb.T @ (along * (0.2 * self.hinge_direction))
         return 1.0 if (b[0] / b[2] - a[0] / a[2]) > 0 else -1.0
 
     def door_region(self, rgb, box, debug):

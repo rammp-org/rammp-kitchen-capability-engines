@@ -325,7 +325,7 @@ def _footprint(P, R, t, model):
     )
 
 
-def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m):
+def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m, *, hinge_direction=1):
     """Find the door beside the handle, using the known bar-to-door distance to reject reflections."""
     vs, us = np.nonzero(handle_mask)
     width = us.max() - us.min() + 1
@@ -335,7 +335,7 @@ def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m
     cam = base_T_cam[:3, 3]
     toward = cam - front
     toward[2] = 0.0
-    along = np.cross(toward, [0.0, 0.0, 1.0])
+    along = hinge_direction * np.cross(toward, [0.0, 0.0, 1.0])
     a, b = np.stack([front - cam, front - cam + 0.2 * along]) @ base_T_cam[:3, :3]
     right = b[0] * a[2] > a[0] * b[2]
     edge = us.max() + 4 if right else us.min() - 4
@@ -362,7 +362,7 @@ def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m
     if incidence >= -1e-6:
         return None
     start = ray * (((fit.centre - cam) @ fit.normal) / incidence)
-    tangent = np.cross(fit.normal, [0.0, 0.0, 1.0])
+    tangent = hinge_direction * np.cross(fit.normal, [0.0, 0.0, 1.0])
     end = start + 0.16 * (tangent @ rotation)
     if min(start[2], end[2]) <= 0:
         return None
@@ -471,7 +471,9 @@ def _icp(P, cam, R, t, model, iters, footprint_from, fixed_yaw=False):
     return R, t, cost, on
 
 
-def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_STL, prev=None, *, door_standoff_m=None):
+def measure_door_normal(
+    depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_STL, prev=None, *, door_standoff_m=None, hinge_direction=1
+):
     """The door's outward normal from one look: the printed handle's model (stl_path) registered to the SAM 3 mask's
     points with depth, 4-DoF (position and yaw about the vertical: the door is vertical), point-to-plane ICP with a
     Huber loss, matched only to model faces turned toward the camera, and -- once roughly in place -- only to the mask's
@@ -493,7 +495,11 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
     start = np.median(front, axis=0)
     cam = T[:3, 3]
     model = load_handle_model(stl_path)
-    plane = None if door_standoff_m is None else measure_door_surface(depth_mm, K, T, mask, start, door_standoff_m)
+    plane = (
+        None
+        if door_standoff_m is None
+        else measure_door_surface(depth_mm, K, T, mask, start, door_standoff_m, hinge_direction=hinge_direction)
+    )
     if plane is not None:
         R0 = _model_rotation(plane.yaw_deg)
         R, t, _, on = _icp(P, cam, R0, start - R0 @ model[2], model, ICP_ITERS, FOOTPRINT_FROM_ITER, fixed_yaw=True)
@@ -634,7 +640,14 @@ def make_detector(handle_centre_to_face_m=0.070, **kwargs):
 
         def _normal_from_handle(self, mask, depth, K, base_T_cam):
             try:
-                res = measure_door_normal(depth, K, base_T_cam, mask, door_standoff_m=handle_centre_to_face_m)
+                res = measure_door_normal(
+                    depth,
+                    K,
+                    base_T_cam,
+                    mask,
+                    door_standoff_m=handle_centre_to_face_m,
+                    hinge_direction=self.hinge_direction,
+                )
             except DoorNormalError as e:
                 self.last_miss = str(e)
                 self.last_door_normal = None

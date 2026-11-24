@@ -73,7 +73,7 @@ DOOR_NORMALS = ("handle_model", "handle", "plane", "square")
 NORMAL_AGREE_DEG = {"handle_model": 3.0, "handle": 5.0, "plane": 10.0, "square": 10.0}
 
 
-def _make_detector(handle_centre_to_face_m, door_normal="handle_model"):
+def _make_detector(handle_centre_to_face_m, door_normal="handle_model", hinge_direction=1):
     """The handle detector for one detect_handle. `door_normal` (DOOR_NORMALS): where each look's door normal comes
     from -- handle_model: surface depth beside the SAM 3 mask sets yaw, checked against the printed handle model;
     handle: the bar's front and its plate as
@@ -81,10 +81,12 @@ def _make_detector(handle_centre_to_face_m, door_normal="handle_model"):
     if door_normal == "handle_model":
         from .door_normal import make_detector  # numpy / scipy; the ROS side (open3d) only when called
 
-        return make_detector(handle_centre_to_face_m=handle_centre_to_face_m)
+        return make_detector(handle_centre_to_face_m=handle_centre_to_face_m, hinge_direction=hinge_direction)
     from .perception import HandleDetector  # here, not at import: open3d, which the planning tests don't have
 
-    return HandleDetector(handle_centre_to_face_m, door_normal == "square", door_normal == "handle")
+    return HandleDetector(
+        handle_centre_to_face_m, door_normal == "square", door_normal == "handle", hinge_direction=hinge_direction
+    )
 
 
 PLACEMENT_CELL_M = 0.05  # constants.PLACEMENT_CELLS' grid step: a handle within half of it of a cell is in that cell
@@ -234,12 +236,15 @@ _HANDLE_LENGTH = F.MEASURED["handle_length_m"]  # configure sets these two
 _DOOR_Z_FROM_HANDLE = (-F.MEASURED["door_below_handle_m"], F.MEASURED["door_above_handle_m"])
 
 
-def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="auto", **measured):
+def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="auto", *, hinge_side="left", **measured):
     """Everything the detection and the door model need from the fridge: call once at startup. `mount_tilt_deg`: a key
     of constants.MOUNTS. `door_normal`: how each look measures the door's direction (_make_detector, DOOR_NORMALS;
     handle_model and handle need SAM 3's mask). `grasp`: constants.GRASPS. `measured`: constants.MEASURED's names."""
     if door_normal not in DOOR_NORMALS:
         raise ValueError(f"door_normal must be one of {', '.join(DOOR_NORMALS)}, not {door_normal!r}")
+    if hinge_side not in ("left", "right"):
+        raise ValueError("hinge_side must be left or right when facing the fridge")
+    hinge_direction = 1 if hinge_side == "left" else -1
     global _HANDLE_LENGTH, _DOOR_Z_FROM_HANDLE
     m = {**F.MEASURED, **measured}
     _HANDLE_LENGTH = float(m["handle_length_m"])
@@ -249,9 +254,15 @@ def configure(data_dir, mount_tilt_deg=0, door_normal="handle_model", grasp="aut
     mount = F.MOUNTS[mount_tilt_deg]
     # the hinge and the door's face from the handle (where the fingers close), as they are measured. The offset in the
     # door's frame: into it, along it, up. A wrong one drags the door or the fridge during the swing
-    hinge_offset = np.array([m["handle_centre_to_face_m"] + m["pin_behind_face_m"], m["hinge_along_door_m"], 0.0])
+    hinge_offset = np.array(
+        [
+            m["handle_centre_to_face_m"] + m["pin_behind_face_m"],
+            hinge_direction * m["hinge_along_door_m"],
+            0.0,
+        ]
+    )
     shared.configure(
-        MAKE_DETECTOR=partial(_make_detector, m["handle_centre_to_face_m"], door_normal),
+        MAKE_DETECTOR=partial(_make_detector, m["handle_centre_to_face_m"], door_normal, hinge_direction),
         FIND_HINGE=shared.hinge_measured(hinge_offset, from_handle=True),
         GRIP_EXT=F.GRIP_EXT,
         VERTICAL_CORR=F.VERTICAL_CORR,
