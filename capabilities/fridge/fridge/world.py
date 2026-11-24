@@ -180,11 +180,12 @@ class PlannerWorld:
         self.base_layers = list(base_layers)
         self.restore_world = restore_world
         self.extra = list(extra)
+        self.restore_needed = False
         self.loaded = None  # the obstacles the planner holds now (pushed by this action), None: not ours
         self.pushes = 0
         self.push_s = 0.0  # time spent pushing worlds (writing the scene, the planner loading it)
 
-    def push(self, obstacles, label):
+    def push(self, obstacles, label, *, deadline=None):
         """Make `obstacles` (+ `extra`) the planner's world. Nothing is sent if it holds exactly these already.
         Raises Refused if the planner refuses it."""
         obstacles = self.extra + list(obstacles)
@@ -196,9 +197,11 @@ class PlannerWorld:
         tmp = self.write_dir / f".{SCENE_NAME}.tmp"
         tmp.write_text(f"# written by the fridge capability: {label}\n" + yaml.safe_dump(scene, sort_keys=False))
         os.replace(tmp, self.write_dir / SCENE_NAME)
-        ok, msg = self.arm.set_world(str(self.planner_dir / SCENE_NAME))
+        kwargs = {} if deadline is None else {"deadline": deadline}
+        self.restore_needed = True
+        self.loaded = None
+        ok, msg = self.arm.set_world(str(self.planner_dir / SCENE_NAME), **kwargs)
         if not ok:
-            self.loaded = None
             raise Refused(f"the cuRobo planner refused the fridge's collision world ({label}): {msg}")
         self.loaded = obstacles
         self.pushes += 1
@@ -206,13 +209,14 @@ class PlannerWorld:
 
     def restore(self):
         """Put the robot's own world back (also after a cancel). Says so if the planner refuses it."""
-        if self.loaded is None and not self.pushes:
+        if not self.restore_needed:
             return
         try:
             ok, msg = self.arm.set_world(self.restore_world, even_if_cancelled=True)
         except Exception as e:  # noqa: BLE001 -- the action is ending either way
             ok, msg = False, repr(e)
         self.loaded, self.pushes, self.push_s = None, 0, 0.0
+        self.restore_needed = False
         if not ok:
             say(f"WARNING: could not put the planner's world back to {self.restore_world}: {msg}")
 

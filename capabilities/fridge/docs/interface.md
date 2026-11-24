@@ -136,7 +136,15 @@ without a reference (no executed open since, or a dry run's door file) it says s
 `RELOC_SAM3_PROMPTS` keeps only the fridge's pixels when the service answers. Tuned offline on depth only (11-13): the
 move back and the turn to ~1 cm and ~1-2 deg; sideways less sure (1-7 cm between views of an unmoved chair).
 
-Failures: `refused` (a check failed; the message says which and the arm holds), `stopped`
+Open accepts `search_alternate_placements` (bool, default false) on dry runs. A failed live
+preflight returns `open_no_motion` with `executed: false`, a reason, failure counts, and
+candidate diagnostics in the result payload. The payload includes a signed base-angle hint
+when the measured yaw is outside the placement window. Positive is left viewed from above.
+A start collision returns `start_staging_required` with any named blocker and penetration
+reported by the planner, plus the outcome of a bounded joint-space staging request. The open
+commands no motion in either case.
+
+Other failures include `refused` (a check failed; the message says which and the arm holds), `stopped`
 (a motion stopped short), `bad_params`. On an executed success it marks the object `opened`
 (true after `open`, false after `close`). Nothing measures whether the door shut: watch it.
 
@@ -202,10 +210,10 @@ the orchestrator is up.
   square-on, 50–60 cm from it, with the handle in view and the door filling most of the image.
 - **Placement.** The open prints where the wheelchair should go, from a sim sweep (`MOUNTS`'
   `placement_cells`: a guide, the plan decides): the nearest point of the region that planned, no move
-  under 2 cm along an axis (two detections of one placement differ by 1–3 cm). When the plan refuses,
-  it plans the open again with the fridge shifted as wheelchair moves of 5 and 10 cm would shift it
-  (at most `PLACEMENT_SEARCH_S`, 90 s) and names the smallest move after which it plans, or says no
-  such move helps (then the refusal isn't about placement). On the level mount (dojo), at the placement
+  under 2 cm along an axis (two detections of one placement differ by 1–3 cm). The live placement has an
+  8 s planning budget after detection. To verify alternate translations, send a dry run with
+  `search_alternate_placements: true`. It has a separate 30 s budget shared by the alternate
+  placements. On the level mount (dojo), at the placement
   that passed (handle x 0.50–0.56, y −0.45 to −0.39), a 90° door's free edge is ~10 cm in front of the arm's base, so the hand passes right beside the base (~0.67 m
   up) and sweeps across in front of it. The sim has no wheelchair or person in it: keep that space
   clear.

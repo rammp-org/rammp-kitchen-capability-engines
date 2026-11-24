@@ -244,6 +244,7 @@ class Capability(CapabilityEngine):
                     "chair_moved": {"type": "boolean", "default": False},
                     # false: plan the open with no wheelchair move (the push from where the chair is, or refuse)
                     "base_moves": {"type": "boolean", "default": True},
+                    "search_alternate_placements": {"type": "boolean", "default": False},
                     # a dry run that plans OK also writes the door file as the planned open would leave it, so the
                     # close can be tested without an executed open (open the door to that angle by hand)
                     "save_door": {"type": "boolean", "default": False},
@@ -456,7 +457,11 @@ class Capability(CapabilityEngine):
         """A check refused (recoverable) with nothing holding: the same button may try again. Never after an open
         that may have left the hand on the handle, and never once the goal drove the wheelchair (drive_base): a
         retry would drive the picked move again from where it now is."""
-        if error.error_code != "refused" or not error.recoverable or getattr(self, "_drove", False):
+        if (
+            error.error_code not in {"refused", "open_no_motion", "start_staging_required"}
+            or not error.recoverable
+            or getattr(self, "_drove", False)
+        ):
             return False
         return not Capability._ui_maybe_holding(action_id, error)
 
@@ -675,6 +680,8 @@ class Capability(CapabilityEngine):
                     chair_back_dir=self.cfg["chair_back_dir"],
                     drive_chair=drive_chair,
                     base_moves=bool(params.get("base_moves", True)),
+                    search_alternate_placements=bool(params.get("search_alternate_placements", False)),
+                    staging=np.radians(self.cfg["start_joints_deg"]),
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
                     relocalize.capture_reference(self.arm)
@@ -709,6 +716,9 @@ class Capability(CapabilityEngine):
                     )
                     ctx.progress(action_id, 100.0, next_step)
                     note = f"{note}. {next_step}" if note else next_step
+        except (open_door.Infeasible, open_door.StagingRequired) as e:
+            code = "start_staging_required" if isinstance(e, open_door.StagingRequired) else "open_no_motion"
+            raise EngineError(code, str(e), recoverable=True, payload=e.payload) from e
         except dc.Refused as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         except BaseError as e:  # a wheelchair move stopped part way (or the MIB refused it): the base commanded still

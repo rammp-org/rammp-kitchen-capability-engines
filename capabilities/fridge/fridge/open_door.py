@@ -39,8 +39,10 @@ GRASP_PITCHES_DEG, each with the hand either way up). The side grasp differs onl
 Refusals raise door_common.common.Refused: the arm holds where it is.
 """
 
+import json
 import threading
 import time
+from collections import Counter
 from functools import partial
 
 import numpy as np
@@ -597,11 +599,64 @@ def seeds(q0):
 
 
 class Infeasible(Refused):
-    """The open can't be planned from this placement: no grasp gives a whole open that cuRobo plans (or the search ran
-    out of time). Other refusals (the arm's start, the planner, the gripper, ...) are something else."""
+    """The live placement did not yield a complete motion within preflight."""
+
+    def __init__(self, message, *, payload=None):
+        super().__init__(message)
+        self.payload = payload
 
 
-def plan_open(planner, geom, q0, swing, after):
+class StagingRequired(Refused):
+    def __init__(self, payload):
+        self.payload = {"executed": False, **payload}
+        super().__init__(payload["reason"] + " -- " + payload["staging_reason"])
+
+
+OPEN_PREFLIGHT_S = 8.0
+
+
+def base_rotation_hint(normal):
+    yaw = float(np.degrees(np.arctan2(-normal[1], -normal[0])))
+    correction = yaw - float(np.clip(yaw, *F.PLACEMENT_YAW_DEG))
+    if correction:
+        direction = "left" if correction > 0 else "right"
+        return {"base_rotation_deg": correction, "suggestion": f"Rotate base by {abs(correction):.1f}° {direction}."}
+    return {}
+
+
+def plan_open(planner, geom, q0, swing, after, *, staging=None):
+    """Plan the live open with a deadline shared by all of its candidates and planner calls."""
+    previous_deadline = planner.deadline
+    deadline = time.monotonic() + OPEN_PREFLIGHT_S
+    planner.deadline = deadline if previous_deadline is None else min(deadline, previous_deadline)
+    diagnostics = []
+    try:
+        result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging)
+        try:
+            planner.join(result["approach"], result["model"].cabinet())
+        except (pl.OverBudget, pl.PlannerBusy):
+            raise
+        except Refused as e:
+            diagnostics.append({"stage": "approach join", "reason": str(e), "candidate": result["name"]})
+            raise Infeasible(str(e)) from e
+        return result
+    except (Infeasible, pl.OverBudget) as e:
+        counts = Counter("line-up" if item["stage"].startswith("line up") else item["stage"] for item in diagnostics)
+        raise Infeasible(
+            str(e),
+            payload={
+                "executed": False,
+                "reason": str(e),
+                "failure_counts": dict(counts.most_common(4)),
+                "candidates": diagnostics,
+                **base_rotation_hint(geom["n"]),
+            },
+        ) from e
+    finally:
+        planner.deadline = previous_deadline
+
+
+def _plan_open(planner, geom, q0, swing, after, diagnostics, staging):
     """Plan the whole open from joints `q0` (see the module): every grasp with cuRobo's own arm configuration first,
     then every grasp from the other configurations (seeds). Returns the plan dict; raises Refused (with why)."""
     planner.search()
@@ -610,6 +665,11 @@ def plan_open(planner, geom, q0, swing, after):
         raise Infeasible("no grasp: every tilt's grasp is out of reach")
     # the door model is the same for every grasp (the face is placed from the handle); the file keeps the chosen one's
     model = FridgeModel(closed_door(geom, cands[0]["h"], cands[0].get("ref", cands[0]["pos"]), cands[0]))
+    collision = planner.preflight_start(
+        model.full(0.0), q0, np.radians(F.START_JOINTS_DEG) if staging is None else staging
+    )
+    if collision:
+        raise StagingRequired(collision)
     # the grasps that worked before first (proven.py), each with its line-up and lag first; the rest in their order
     prefs = proven.preferred(proven.load(proven_file()) + list(F.PROVEN_SEEDS), F.GRASP, geom["h_raw"], geom["n"])
     cands = proven.order(cands, prefs)
@@ -618,9 +678,13 @@ def plan_open(planner, geom, q0, swing, after):
         say(f"  tried first (worked before): {'; '.join(proven.describe(r) for r in first_tried)}")
     tried = []
 
-    def fail(what):
-        tried.append(what)
-        say(f"    {what}")
+    def fail(name, why, detail=None):
+        item = dict(detail or {}, candidate=name)
+        item.setdefault("stage", why.partition(":")[0])
+        item.setdefault("reason", why)
+        diagnostics.append(item)
+        tried.append(f"{name}: {why}")
+        say("    candidate rejected " + json.dumps(item))
 
     def grasp_and_swing(cand, hint_name=None, seed=None, lineup=None):
         """The approach and the swing for grasp `cand` (from another arm configuration: `seed`; or `lineup`, (standoff,
@@ -644,29 +708,43 @@ def plan_open(planner, geom, q0, swing, after):
                 )
                 leg, why = planner.leg(goal, seed)
                 if leg is None or not len(leg.q):
+                    fail(name, why or "line-up: planner returned no samples", planner.last_failure)
                     continue
                 q_lineup = leg.q[-1]
-            approach, why = planner.motion(approach_goals(model, cand, standoff, q_lineup), q0, from_arm=True)
-            if approach is not None or pl.goal_unreachable(why) and "in to the handle" in why:
-                break  # the grasp itself can't be reached: another line-up won't help
-        if approach is None:
-            fail(f"{name}: {why}")
-            return None
-        sw, lag = None, 0.0
-        lags = hand_lags(cand)
-        for k, lag in enumerate(lags):
-            if cand.get("side"):  # the joints alone first (local IK, no cuRobo): a swing or a slide off the bar
-                # that runs a joint into its limit is dropped before it costs a world load and a check per stretch
-                why = side_joints_why(planner, model, cand, swing, lag, approach.q_end)
-                if (
-                    why
-                    and "of its limit" in why
-                    and lag < F.SIDE_HAND_LAGS_DEG[0]
-                    and all(later < lag for later in lags[k + 1 :])
-                ):
-                    break  # the turns left are smaller: the hand turns further with the door, the wrist bends more
-                if why:
+            goals = approach_goals(model, cand, standoff, q_lineup)
+            lineup_motion, why = planner.motion(goals[:1], q0, from_arm=True)
+            if lineup_motion is None:
+                fail(f"{name}, {standoff:.3f} m", why, planner.last_failure)
+                continue
+            line_goal = goals[0]
+            line_pose = (line_goal.pos, line_goal.quat)
+            lags = [(0.0, 0.0)]
+            if cand.get("side"):
+                insert_joints, why, margin = local_path(planner, goals[1:], lineup_motion.q_end, line_pose)
+                if insert_joints is None:
+                    fail(name, why, {"previous_limit_margin_deg": margin})
                     continue
+                lags = []
+                for lag in F.SIDE_HAND_LAGS_DEG:
+                    why, margin = side_sweep_score(planner, model, cand, swing, lag, insert_joints)
+                    if why:
+                        fail(f"{name}, lag {lag:g}°", why, {"previous_limit_margin_deg": margin})
+                    else:
+                        lags.append((margin, lag))
+                if not lags:
+                    continue
+            insert, why = planner.motion(goals[1:], lineup_motion.q_end, start_pose=line_pose)
+            if insert is None:
+                fail(f"{name}, {standoff:.3f} m", why, planner.last_failure)
+                if not cand.get("side") and pl.goal_unreachable(why):
+                    break
+                continue
+            approach = pl.Motion(lineup_motion.goals + insert.goals, lineup_motion.legs + insert.legs, q0)
+            break
+        if approach is None:
+            return None
+        sw = None
+        for _, lag in sorted(lags, reverse=True):
             sw, why = planner.motion(
                 swing_goals(model, cand, swing, lag), approach.q_end, start_pose=(cand["pos"], cand["quat"])
             )
@@ -679,7 +757,7 @@ def plan_open(planner, geom, q0, swing, after):
             if sw is not None:
                 break
         if sw is None:
-            fail(f"{name}: {why}")
+            fail(name, why)
             return None
         if lag:
             name = S.name(cand, lag) + (f", {hint_name}" if hint_name else "")
@@ -691,13 +769,13 @@ def plan_open(planner, geom, q0, swing, after):
         sw = found["swing"]
         ok, msg = after.plan(planner, opened(door, swing), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
         if not ok:
-            fail(f"{found['name']}: swing OK but {msg}")
+            fail(found["name"], f"after swing: {msg}")
             return None
         say(f"  plan: {found['name']}, line-up {found['standoff'] * 100:.0f} cm out, swing {swing} deg; {msg}")
         return dict(found, swing_deg=swing, door=door, model=model, after_msg=msg)
 
     def configs(cand):
-        return side_configs(planner.fk, cand, q0)
+        return side_configs(planner, model, cand, q0, swing)
 
     try:
         return _search(cands, grasp_and_swing, after_swing, q0, tried, configs)
@@ -705,46 +783,57 @@ def plan_open(planner, geom, q0, swing, after):
         raise Infeasible(f"{e}; {len(tried)} grasps failed before it: {why_not(tried)}") from e
 
 
-def side_joints_why(planner, model, cand, swing, lag, q_grasp):
-    """The side grasp's swing (hand `lag` deg behind the door) and its slide off the bar, by local IK alone from the
-    grasp joints `q_grasp`, as planning.Planner._along solves them (one branch, every joint off its limits, no jumps):
-    why they can't be done, or "" (cuRobo then checks them as usual)."""
-    (swing_goal,) = swing_goals(model, cand, swing, lag)
-    end = (swing_goal.pos, swing_goal.quat)
-    back = back_off_goals(model, swing, end)[0]
-    q, pose = np.asarray(q_grasp, float), (cand["pos"], cand["quat"])
-    for goal in (swing_goal, back):
+def local_path(planner, goals, joints, pose):
+    """Follow the same IK branch and step guard as the collision-checked planner legs."""
+    q = np.asarray(joints, float)
+    margin = planner.limit_margin(q)
+    for goal in goals:
         poses, _ = pl.path_poses(goal, np.asarray(pose[0], float), np.asarray(pose[1], float))
         for k, (p, quat) in enumerate(poses):
+            planner.check_budget()
             nq, why = planner.fk.ik(p, quat, q)
             if nq is None:
-                return f"{goal.label}: point {k + 1}/{len(poses)}: {why}"
+                return None, f"{goal.label}: point {k + 1}/{len(poses)}: {why}", margin
             if np.degrees(np.max(np.abs(nq - q))) > pl.MAX_STEP_DEG:
-                return f"{goal.label}: point {k + 1}/{len(poses)}: a joint jumps"
+                return None, f"{goal.label}: point {k + 1}/{len(poses)}: a joint jumps", margin
             q = nq
+            margin = min(margin, planner.limit_margin(q))
         pose = (goal.pos, goal.quat)
-    return ""
+    return q, "", margin
 
 
-def side_configs(fk, cand, q0):
-    """The side grasp's other arm configurations for grasp `cand`: [(name, (standoff, line-up joints))], local IK at
-    the first line-up (SIDE_SLIDE_M) from each of side_grasp.config_seeds(q0), every joint off its limits; one per
-    configuration (within SAME_CONFIG_DEG), the most room at J6 (the wrist: the swing bends it) first, then the least
-    reconfiguration from `q0`; at most SIDE_CONFIGS of them. The side branch's slide_configs, 11-06."""
+def side_sweep_score(planner, model, cand, swing, lag, q_grasp):
+    (goal,) = swing_goals(model, cand, swing, lag)
+    back = back_off_goals(model, swing, (goal.pos, goal.quat))[0]
+    _, why, margin = local_path(planner, (goal, back), q_grasp, (cand["pos"], cand["quat"]))
+    return why, margin
+
+
+def side_configs(planner, model, cand, q0, swing):
+    """Rank line-up configurations by minimum joint clearance through insert, pull and back-off."""
     standoff = F.SIDE_SLIDE_M[0]
     pos = lineup_point(cand, standoff)
     found = []
     for name, seed in S.config_seeds(q0):
-        q, _ = fk.ik(pos, cand["quat"], seed)
-        if q is None or any(
-            np.degrees(np.max(np.abs(pl._short_delta(q, f)))) < S.SAME_CONFIG_DEG for _, (_, f) in found
-        ):
+        planner.check_budget()
+        q, _ = planner.fk.ik(pos, cand["quat"], seed)
+        if q is None:
             continue
-        found.append((name, (standoff, q)))
-    found.sort(
-        key=lambda c: (round(abs(np.degrees(c[1][1][5])) / 10.0), float(np.max(np.abs(pl._short_delta(q0, c[1][1])))))
-    )
-    return found[: F.SIDE_CONFIGS]
+        for wrapped in planner.fk.wrist_equivalents(q):
+            if any(np.max(np.abs(wrapped - item[2])) < np.radians(S.SAME_CONFIG_DEG) for item in found):
+                continue
+            goals = approach_goals(model, cand, standoff, wrapped)
+            grasp, _, insert_margin = local_path(planner, goals[1:], wrapped, (pos, cand["quat"]))
+            if grasp is None:
+                continue
+            for lag in F.SIDE_HAND_LAGS_DEG:
+                why, margin = side_sweep_score(planner, model, cand, swing, lag, grasp)
+                if not why:
+                    label = name if np.array_equal(wrapped, q) else f"{name}, alternate wrist wrap"
+                    found.append((min(insert_margin, margin), label, wrapped))
+                    break
+    found.sort(key=lambda item: (-item[0], np.max(np.abs(q0 - item[2]))))
+    return [(name, (standoff, q)) for _, name, q in found[: F.SIDE_CONFIGS]]
 
 
 def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
@@ -791,8 +880,7 @@ def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
 PLACEMENT_SEARCH_MOVES_M = (0.05, 0.10, 0.15)  # on a refused open: the handle shifted this far (along each axis and
 # both at once), as wheelchair moves would shift it -- after the sim table's own suggestion -- and the open planned
 # again there: the advice the planner itself checked
-PLACEMENT_SEARCH_S = 900.0  # ... all of them may take this long (0: no search). Enough for every try: a try is the
-# whole open's search (~20 s when nothing plans, 11-09 detections on the Jetson's GPU) and stops at the first that plans
+PLACEMENT_SEARCH_S = 30.0  # shared budget for an explicitly requested dry-run placement search
 
 
 def _shifted_geom(geom, d):
@@ -825,6 +913,7 @@ def search_placement(planner, geom, q0, swing, make_after, hint=(0.0, 0.0)):
         h = (float(hint[0]), float(hint[1]))
         order = [h] + [d for d in order if d != h]
     t0 = time.monotonic()
+    deadline = t0 + PLACEMENT_SEARCH_S
     tried = 0
     say(
         f"  searching for a wheelchair placement where the open plans: {len(order)} moves (up to "
@@ -838,9 +927,15 @@ def search_placement(planner, geom, q0, swing, make_after, hint=(0.0, 0.0)):
         t1 = time.monotonic()
         try:
             with quiet():
-                plan_open(planner, _shifted_geom(geom, d), q0, swing, make_after())
+                previous_deadline = planner.deadline
+                planner.deadline = deadline
+                try:
+                    plan_open(planner, _shifted_geom(geom, d), q0, swing, make_after())
+                finally:
+                    planner.deadline = previous_deadline
         except (
             Infeasible,
+            StagingRequired,
             pl.StartNotClear,
         ) as e:  # doesn't plan there (the fridge moved onto the arm's start: neither)
             say(f"    handle moved {np.round(d, 2).tolist()} m: no ({_short_why(e)}, {time.monotonic() - t1:.0f} s)")
@@ -932,7 +1027,6 @@ def execute_open(ai, planner, plan):
         ai.gripper(0.0)
         if float(ai.get_state()["gripper_pos"]) > 0.2:
             raise Refused("Gripper still closed after opening -- refusing to grasp.")
-    planner.join(plan["approach"], model.cabinet())
     if not planner.run(plan["approach"], "approach"):
         raise Refused("Did not reach the grasp -- ABORT before closing the gripper.")
     e = float(np.linalg.norm(np.asarray(ai.get_state()["ee_pos"][:3]) - cand["pos"]))
@@ -1168,6 +1262,8 @@ def run(
     chair_back_dir=F.CHAIR_BACK_DIR,
     drive_chair=None,
     base_moves=True,
+    search_alternate_placements=False,
+    staging=None,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Exactly `swing_deg` (default PUSH_OPEN_PULL_DEG, or SWING_DEG without `push`), then what follows. `grasp_offset`:
@@ -1219,16 +1315,22 @@ def run(
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
         try:
-            plan = plan_open(planner, geom, q0, swing, after)
+            plan = plan_open(planner, geom, q0, swing, after, staging=staging)
         except Infeasible as e:  # not plannable from here: where to put the wheelchair is the answer
             _, hint = placement_moves(h, n)
-            found = search_placement(planner, geom, q0, swing, make_after, hint)
+            found = ""
+            if search_alternate_placements and not execute:
+                found = search_placement(planner, geom, q0, swing, make_after, hint)
             nomove = (
                 " (base_moves false: no wheelchair move was planned; from this placement the push needs one)"
                 if push and not BASE_MOVES
                 else ""
             )
-            raise Refused(f"{e}{nomove} -- refusing before any motion. {start}{placement_primary(h, n)}{found}") from e
+            message = f"{e}{nomove} -- refusing before any motion. {start}{placement_primary(h, n)}{found}"
+            raise Infeasible(message, payload=e.payload) from e
+        except StagingRequired as e:
+            e.args = (f"{e} -- refusing before any motion. {start}{placement_secondary(h, n)}",)
+            raise
         except Refused as e:  # something else (the arm's start, the planner, ...): placement only as an aside
             raise Refused(f"{e} -- refusing before any motion. {start}{placement_secondary(h, n)}") from e
         plan.update(after=after, hinge_fields=geom["hinge_fields"], door_mid=geom["door_mid"])
