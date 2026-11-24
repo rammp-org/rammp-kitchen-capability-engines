@@ -1,0 +1,215 @@
+"""Drive the production docking loop against a simulated differential base."""
+
+import math
+import sys
+import threading
+from collections import deque
+from types import SimpleNamespace as Obj
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+from door_common.common import Refused
+from fridge import base_drive, docking
+
+from capability_engine import BaseError, Cancelled
+
+
+class VirtualBase:
+    """Integrate body twists at the axle, and report the offset odometry datum."""
+
+    def __init__(self, pose, ctx):
+        self.pose = np.array(pose, float)
+        self.time = 0.0
+        self.command = np.zeros(2)
+        self.commands = []
+        self.mode_calls = 0
+        self.estopped = False
+        self.ctx = ctx
+        self.on_sleep = lambda: None
+
+    def monotonic(self):
+        return self.time
+
+    def sleep(self, dt):
+        self.time += dt
+        self.pose[:2] += docking.rotation(self.pose[2])[:, 0] * self.command[0] * dt
+        self.pose[2] += self.command[1] * dt
+        self.on_sleep()
+
+    def request_mode(self, mode, *, profile):
+        assert mode == "autonomous"
+        assert profile == "low"
+        self.mode_calls += 1
+
+    def send_twist(self, vx, wz):
+        self.ctx.checkpoint()
+        self.command[:] = vx, wz
+        self.commands.append((vx, wz))
+
+    def stop(self):
+        self.command[:] = 0, 0
+        self.commands.append((0, 0))
+
+    def odometry(self):
+        yaw = self.pose[2]
+        x, y = self.pose[:2] - docking.rotation(yaw) @ docking.ODOM_TO_AXLE
+        q = Obj(x=0, y=0, z=math.sin(yaw / 2), w=math.cos(yaw / 2))
+        return Obj(
+            pose=Obj(pose=Obj(position=Obj(x=x, y=y), orientation=q)),
+            twist=Obj(twist=Obj(linear=Obj(x=self.command[0]), angular=Obj(z=self.command[1]))),
+        )
+
+    def control_status(self):
+        return Obj(estopped=self.estopped)
+
+
+class Ctx:
+    cancel = pause = False
+
+    def checkpoint(self):
+        if self.cancel:
+            raise Cancelled()
+
+    def paused(self):
+        return self.pause
+
+
+def run_dock(base, ctx, guard=lambda *_: None, *, assume_odom_to_axle=docking.ODOM_TO_AXLE):
+    mount = np.asarray(docking.AXLE_TO_MOUNT[:2])
+
+    def look():
+        turn = docking.rotation(-base.pose[2])
+        handle = turn @ (docking.TARGET_HANDLE + mount - base.pose[:2]) - mount
+        normal = -(docking.rotation(docking.TARGET_YAW - base.pose[2])[:, 0])
+        return dict(h_raw=np.r_[handle, 0.326], n=np.r_[normal, 0.0]), []
+
+    return docking.dock(
+        base,
+        base,
+        ctx,
+        look,
+        guard,
+        speed=0.12,
+        cfg=base_drive.PARAMS,
+        axle_to_mount=mount,
+        odom_to_axle=np.asarray(assume_odom_to_axle),
+        on_motion=lambda: None,
+        clock=base.monotonic,
+        sleep=base.sleep,
+    )
+
+
+def test_dock_checks_and_executes_rotate_translate_rotate():
+    ctx = Ctx()
+    base = VirtualBase((-0.15, -0.10, -0.25), ctx)
+    routes = []
+    (geom, _), corrections = run_dock(base, ctx, lambda _, route: routes.append(route))
+    assert corrections == len(routes) == 1
+    assert base.mode_calls == 1
+    assert len(routes[0]) == 3
+    assert np.linalg.norm(geom["h_raw"][:2] - docking.TARGET_HANDLE) <= docking.POSITION_TOLERANCE
+    assert abs(base.pose[2]) <= docking.YAW_TOLERANCE
+    assert 0 < max(abs(v) for v, _ in base.commands) <= 0.05
+    assert 0 < max(abs(w) for _, w in base.commands) <= docking.MAX_YAW_SPEED
+    assert base.commands[-1] == (0, 0)
+
+
+def test_dock_at_target_does_not_request_mode_or_twists():
+    ctx = Ctx()
+    base = VirtualBase((0.0, 0.0, 0.0), ctx)
+    assert run_dock(base, ctx)[1] == 0
+    assert base.mode_calls == 0
+    assert base.commands == []
+
+
+def test_over_budget_and_blocked_routes_refuse_before_mode_request():
+    ctx = Ctx()
+    far = VirtualBase((-0.50, 0.0, 0.0), ctx)
+    with pytest.raises(Refused, match="distance or heading budget"):
+        run_dock(far, ctx)
+    near = VirtualBase((-0.10, 0.0, 0.0), ctx)
+
+    def deny(*_):
+        raise Refused("test leg obstruction")
+
+    with pytest.raises(Refused, match="leg obstruction"):
+        run_dock(near, ctx, deny)
+    assert far.mode_calls == near.mode_calls == 0
+    assert far.commands == near.commands == []
+
+
+@pytest.mark.parametrize(
+    "fault,error",
+    [
+        ("cancel", Cancelled),
+        ("pause", BaseError),
+        ("estopped", BaseError),
+    ],
+)
+def test_dock_stops_on_interruption(fault, error):
+    ctx = Ctx()
+    base = VirtualBase((-0.10, -0.05, 0.0), ctx)
+    target = base if fault == "estopped" else ctx
+    base.on_sleep = lambda: setattr(target, fault, True)
+    with pytest.raises(error):
+        run_dock(base, ctx)
+    assert base.commands[0] != (0, 0)
+    assert base.commands[-1] == (0, 0)
+
+
+def test_rejected_direct_path_can_use_a_guarded_retreat():
+    seen = []
+
+    def guard(_, route):
+        seen.append(route)
+        if len(route) < 4:
+            raise Refused("obstructed")
+
+    route, distance, turn = docking.checked_route(
+        np.array([-0.15, -0.035]),
+        0.1,
+        0.35,
+        math.pi,
+        None,
+        guard,
+    )
+    assert route[0] == (-0.08, 0.0)
+    assert len(seen) >= 2
+    assert distance <= 0.35 and turn <= math.pi
+    position, yaw = list(docking.route_samples(route))[-1]
+    assert position == pytest.approx((-0.15, -0.035))
+    assert yaw == pytest.approx(0.1)
+
+
+def test_dock_rejects_the_legacy_urdf_root_as_an_odom_datum():
+    ctx = Ctx()
+    base = VirtualBase((-0.10, -0.05, 0.0), ctx)
+    with pytest.raises(BaseError, match="departed the checked docking segment"):
+        run_dock(base, ctx, assume_odom_to_axle=(0.48575, -0.002625))
+    assert base.commands[-1] == (0, 0)
+
+
+def test_camera_flushes_both_cached_and_in_flight_pre_motion_frames(monkeypatch):
+    for name in ("open3d", "message_filters"):
+        monkeypatch.setitem(sys.modules, name, MagicMock())
+    from door_common.perception import WristCamera
+
+    camera = WristCamera.__new__(WristCamera)
+    camera._lock = threading.Lock()
+    camera._sam3 = None
+    camera._latest = "cached"
+    camera._recent = deque(["cached"])
+    camera.node = Obj(get_clock=lambda: Obj(now=lambda: Obj(nanoseconds=2_000_000_000)))
+
+    def frame(ns):
+        sec, nanosec = divmod(ns, 1_000_000_000)
+        return Obj(header=Obj(stamp=Obj(sec=sec, nanosec=nanosec)))
+
+    camera.require_frames_after_now()
+    rgb, info = frame(2_010_000_000), frame(2_010_000_000)
+    camera._on_frame(rgb, info, frame(1_997_000_000))
+    assert camera._latest is None and not camera._recent
+    depth = frame(2_014_000_000)
+    camera._on_frame(rgb, info, depth)
+    assert camera._latest == (rgb, info, depth)

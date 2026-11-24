@@ -100,6 +100,7 @@ class WristCamera:
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest = None
+        self._after_s = None
         self._recent = collections.deque()  # with SAM 3: (colour, info, depth) of the last FRAME_KEEP_S, oldest first
         self._sam3 = sam3  # before the subscriptions: _on_frame reads it
         self._box = None  # (header, DetectedObject): the latest box_class object with a pose
@@ -130,6 +131,11 @@ class WristCamera:
 
     def _on_frame(self, color, info, depth):
         with self._lock:
+            if (
+                self._after_s is not None
+                and min(_stamp_s(color.header.stamp), _stamp_s(depth.header.stamp)) <= self._after_s
+            ):
+                return
             self._latest = (color, info, depth)
             if self._sam3 is None:  # only SAM 3's masks need an older frame
                 return
@@ -248,6 +254,13 @@ class WristCamera:
             "size": np.array([obj.size.x, obj.size.y, obj.size.z]),
             "score": float(obj.score),
         }
+
+    def require_frames_after_now(self):
+        """Invalidate cached RGB-D and accept only images captured after this call."""
+        with self._lock:
+            self._after_s = self.node.get_clock().now().nanoseconds / 1e9
+            self._latest = None
+            self._recent.clear()
 
     def wait_for_frames(self, timeout_s=10.0):
         t0 = time.time()

@@ -405,6 +405,7 @@ def _bare_camera(base, sam3):
         collections.deque(),
         sam3,
     )
+    cam._after_s = None
     cam._frame = lambda color, info, depth: {
         "color": color,
         "depth": depth,

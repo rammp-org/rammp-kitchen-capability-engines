@@ -46,7 +46,7 @@ def check(base, arm):
         raise Refused("drive_base: the arm is e-stopped -- nothing moved.")
 
 
-def move_chair(base, arm, ctx, move, *, speed, cfg, execute):
+def move_chair(base, arm, ctx, move, *, speed, cfg, execute, mode_entered=False, keep_heading=False):
     """Drive the wheelchair straight `move` m (+ back, away from the fridge; - forward). Returns how far it really moved
     (m, + back), within cfg's base_tolerance of `move`. Refuses (nothing moved) unless `execute`, over
     base_max_distance or base_max_speed, or with the arm e-stopped."""
@@ -63,13 +63,21 @@ def move_chair(base, arm, ctx, move, *, speed, cfg, execute):
     if dist < tol:
         return 0.0
     ctx.checkpoint()
-    base.request_mode("autonomous", profile=cfg["base_profile"])
+    if not mode_entered:
+        base.request_mode("autonomous", profile=cfg["base_profile"])
     x0, y0, yaw0 = _pose(base.odometry())
 
     def moved():
         """(along the starting heading, + forward; straight-line distance from the start)."""
-        x, y, _ = _pose(base.odometry())
-        return (x - x0) * math.cos(yaw0) + (y - y0) * math.sin(yaw0), math.hypot(x - x0, y - y0)
+        x, y, yaw = _pose(base.odometry())
+        dx, dy = x - x0, y - y0
+        c, s = math.cos(yaw0), math.sin(yaw0)
+        turn = math.atan2(math.sin(yaw - yaw0), math.cos(yaw - yaw0))
+        if keep_heading and (
+            not all(map(math.isfinite, (dx, dy, turn))) or abs(-dx * s + dy * c) > tol or abs(turn) > math.radians(1)
+        ):
+            raise BaseError("The wheelchair departed the checked straight handoff: stopped")
+        return dx * c + dy * s, math.hypot(dx, dy)
 
     timeout_s = dist / speed + cfg["base_timeout_margin"]
     say(f"drive_base: driving the wheelchair {dist * 100:.0f} cm {'back' if move > 0 else 'forward'} at {speed} m/s")

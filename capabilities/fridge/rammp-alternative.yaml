@@ -166,6 +166,11 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
+  # Experimental fixture-A docking, with both RGB-D cameras online. Enable for the Gen1.5 after
+  # checking the odometry datum, arm staging pose, full chair footprint and emergency stop.
+  docking_enabled: false
+  docking_axle_to_mount_xy: [0.11595, 0.284325]
+  docking_odom_to_axle_xy: [0.0, 0.0]
   # The UI bridge node whose request_user_input action and service show the UI buttons' panels (capability_engine).
   ui_bridge_node_name: ui_bridge_node
 publishes: [/fridge/status]

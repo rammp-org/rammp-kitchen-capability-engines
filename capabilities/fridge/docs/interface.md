@@ -16,7 +16,7 @@ door instead, fingers across the bar. Either grasps at the middle of the bar, or
 or below it. The gripper closes as the pull starts and opens with the hand still after the
 door stops at the planned angle. With `grasp: auto` (the default) and no explicit pull angle, the push-open shares
 20 s across front (45°, 50°, 55°, 60°), side (60°), and adaptive side (60°, 50°, 40°, 30°).
-A shorter handoff requires a checked push from the current dock. The `grasp: front` override defaults
+With the standard policy, a shorter handoff requires a checked push from the current dock. The `grasp: front` override defaults
 to 60°, and `grasp: side` keeps the descending adaptive pull. Then, in one motion, it backs
 straight off the handle, goes round the door's free edge and pushes the door on to
 90° with the side of the hand, coming to rest exactly there (its last 10° slow, at any `speed`), steps 10 cm off it and, in the same motion, turns to face into the fridge in front
@@ -71,6 +71,22 @@ The demo-fridge model includes the support cabinet in the arm planning world and
 `body_width_m` and `body_height_m` defaults are 0.4826 m and 0.8382 m. The support shares the body footprint
 and begins at `support_floor_z_m` (−0.502 m in Gen1.5 `arm_mount`). Set `support_height_m` from the support
 cabinet (0.50 m for the demo) or to 0 for a fridge on the floor.
+
+### Gen1.5 fixture A docking
+
+Set `docking_enabled` on a verified Gen1.5 configuration. An executed `open` with `drive_base: true`
+and `base_moves: true` locates the closed fridge with fresh scene RGB-D and checks the route from
+the parked Fridge arm pose. A selected wrist feed can supply a stationary fallback and confirms the
+final pose before arm planning. The target handle is 0.825 m forward and 0.235 m right of the mount,
+with the inward normal at −14° relative to chair forward. The position and heading tolerances are
+2.5 cm and 2°. With `execute: false`, the arm plans from the current parking pose and the base stays still.
+
+Docking commands at most 0.05 m/s and 0.12 rad/s, reserves up to 0.35 m and 180° cumulative motion,
+and permits three corrections. It uses `docking_axle_to_mount_xy` for the turning center and
+`docking_odom_to_axle_xy` for the published odometry origin. A dock-enabled open can plan a
+checked straight handoff after a shorter pull. The handoff releases and backs off the gripper before
+the base moves. The push is replanned after checking the displacement and heading. Confirm the
+route, including the space beside and behind the chair, before sending an executing goal.
 
 ## Publishes
 

@@ -60,7 +60,9 @@ class DoorSweep:
     so the radius of the outermost slab corner bounds all between-sample travel.
     """
 
-    def __init__(self, model, boxes, start, end, padding=LAYER_PADDING_M, *, translation=None, push_grid=False):
+    def __init__(
+        self, model, boxes, start, end, padding=LAYER_PADDING_M, *, translation=None, push_grid=False, appliance=False
+    ):
         self.names = [box["name"] for box in boxes]
         if not boxes:
             return
@@ -73,7 +75,7 @@ class DoorSweep:
             half_step = 0.5
         self.angles = angles
         slab = [model.slab(deg)[0] for deg in angles]
-        dims, centres, axes = self._boxes(slab + model.support())
+        dims, centres, axes = self._boxes(slab + (model.body() + model.handle(start) if appliance else model.support()))
         count = len(slab)
         radius = np.max(np.linalg.norm(centres[:count, :2] - model.df.hinge[:2], axis=1))
         radius += np.linalg.norm(dims[0, :2])

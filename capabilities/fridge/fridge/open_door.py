@@ -830,7 +830,8 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         angle = found["swing_deg"]
         swung_door = opened(door, angle)
         args = (planner, swung_door, sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
-        # Keep the established pull for a base move. The shorter handoff is planned at the measured dock.
+        # The normal policy keeps the established pull for a base move. Experimental docking can
+        # opt into checked translations after short pulls too.
         ok, msg = after.plan(*args, in_place=angle < swing) if adaptive_pull else after.plan(*args)
         if not ok:
             fail(found["name"], f"after swing: {msg}")
@@ -1072,7 +1073,7 @@ def why_not(tried):
 LAST_PLAN = None  # the last plan_open's plan (+ geom), e.g. to save a dry run's door
 
 
-def detect(ai):
+def detect(ai, *, for_docking=False):
     """door_common's detection and the measured hinge: the geometry dict plan_open takes, and the placement advice."""
     st = ai.get_state()
     q0 = np.asarray(st["position"], dtype=float)
@@ -1081,7 +1082,8 @@ def detect(ai):
     if shared.PLACEMENT_NOTE is not None:
         say(shared.PLACEMENT_NOTE(h_raw, n, q0))
     try:
-        hinge, h, grasp, hinge_fields = shared.FIND_HINGE(h_raw, orient, n, hinge_seen)
+        settings = {"check_reach": False} if for_docking else {}
+        hinge, h, grasp, hinge_fields = shared.FIND_HINGE(h_raw, orient, n, hinge_seen, **settings)
     except Refused as e:
         raise Refused(f"{e}{placement_secondary(h_raw, n)}") from e
     geom = dict(
@@ -1094,6 +1096,8 @@ def detect(ai):
         door_mid=door_mid,
         hinge_fields=hinge_fields,
     )
+    if for_docking:
+        geom["closed_model"] = FridgeModel(closed_door(geom, h, grasp.position))
     return geom, q0
 
 
@@ -1353,6 +1357,8 @@ def run(
     search_alternate_placements=False,
     staging=None,
     progress=None,
+    detect_at_dock=None,
+    allow_short_handoff=False,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side
@@ -1396,12 +1402,12 @@ def run(
 
         def make_after():
             if push:
-                return PushOpen(chair_back_dir, base_moves=BASE_MOVES)
+                return PushOpen(chair_back_dir, base_moves=BASE_MOVES, allow_short_handoff=allow_short_handoff)
             return ReleaseAround() if around else ReleaseBackOff()
 
         after = make_after()
         LAST_PLAN = None
-        geom, q0 = detect(ai)
+        geom, q0 = detect(ai) if detect_at_dock is None else detect_at_dock()
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
         adaptive_pull = push and swing_deg is None and F.GRASP in ("auto", "side")

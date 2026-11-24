@@ -68,7 +68,11 @@ def test_final_push_angle_and_between_dock_travel(model, tmp_path):
     with pytest.raises(SweepBlocked, match="person/legs"):
         check_open(model, world, push_open.pull_angles(60), after)
     assert after.safe_routes(model, world, 60, in_place=True) == ()
+    assert push_open.PushOpen().safe_routes(model, world, 60, in_place=True) == ()
     assert push_open.PushOpen().safe_routes(model, world, 60, in_place=False)[0][1] == 90
+    short_handoff = push_open.PushOpen(allow_short_handoff=True)
+    assert short_handoff.safe_routes(model, world, 60, in_place=True)[0][0] != 0.0
+    assert short_handoff.safe_routes(model, world, 60, in_place=True)[0][1] == 90
     # Endpoints of a chair translation are clear, but the slab would pass through the seat.
     seat = box((0.5, 0.3, 0), name="seat/armrest")
     sweep = DoorSweep(model, [seat], 0, 0)

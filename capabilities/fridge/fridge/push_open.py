@@ -351,8 +351,9 @@ class PushOpen:
     """What follows the pull: plans the back-off, wheelchair move and push from the hand on the handle, the gripper
     open (`plan`), and runs them (`execute`), re-planned from where the pull really ended."""
 
-    def __init__(self, chair_dir=F.CHAIR_BACK_DIR, base_moves=True):
+    def __init__(self, chair_dir=F.CHAIR_BACK_DIR, base_moves=True, *, allow_short_handoff=False):
         self.chair_dir = chair_dir
+        self.allow_short_handoff = allow_short_handoff
         self.moves = F.CHAIR_MOVES_M if base_moves else (0.0,)  # base_moves false: the push from where the chair is
         self.chair_move = None
         self.motion = None  # back-off + push (no move), or the back-off alone (a move)
@@ -368,14 +369,14 @@ class PushOpen:
         if minimum > F.PUSH_OPEN_TO_DEG:
             return ()
         push = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding, push_grid=True)
-        moves = (0.0,) if in_place else self.moves
+        moves = (0.0,) if in_place and not self.allow_short_handoff else self.moves
         safe = []
         for move in moves:
             shift = np.r_[np.asarray(self.chair_dir) * move, 0.0]
             end_deg = push.clear_push_end(minimum, shift if move else None)
             if end_deg is None:
                 continue
-            if move and DoorSweep(model, boxes, deg0, deg0, padding, translation=shift).obstacle():
+            if move and DoorSweep(model, boxes, deg0, deg0, padding, translation=shift, appliance=True).obstacle():
                 continue
             safe.append((move, end_deg))
         return tuple(sorted(safe, key=lambda route: -route[1]))

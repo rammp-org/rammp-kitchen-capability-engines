@@ -357,6 +357,7 @@ def detect_handle():
 
     def look(tag):
         for attempt in range(1, MAX_EMPTY_RETRIES + 1):
+            _checkpoint()
             instances = None
             if HANDLE_SOURCE == "sam3" and hasattr(cam, "sam3_detect"):
                 # SAM 3 segments the newest image when asked: detect on that very frame (its depth, its camera pose)
@@ -473,7 +474,7 @@ def _fingers_in_front(rb, q, face_pt, n):
     return best
 
 
-def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0):
+def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0, *, check_reach=True):
     """Grasp pose for handle position `h` (vertical-corrected here), squared to the door face, tilted
     `pitch_deg` nose-down about the finger axis. The tool point doesn't depend on the tilt."""
     h = h + np.array([0.0, 0.0, VERTICAL_CORR])
@@ -500,7 +501,7 @@ def grasp_pose(h, orient, n, pitch_deg=0.0, side_deg=0.0):
         quat = (rz * R.from_quat(quat)).as_quat()
         pos = h + rz.apply(pos - h)
     say(f"grasp {np.round(pos, 4)}  range {np.linalg.norm(pos):.3f}")
-    if np.linalg.norm(pos) > MAX_REACH or not _height_ok(pos[2]):
+    if check_reach and (np.linalg.norm(pos) > MAX_REACH or not _height_ok(pos[2])):
         raise Refused(
             f"GATE FAILED at grasp: range {np.linalg.norm(pos):.3f} (max {MAX_REACH}), "
             f"z {pos[2]:.3f} ({_height_limits()})"
@@ -574,8 +575,8 @@ def hinge_measured(offset, from_handle=False):
     fingers close -- the tool point stands ~5 cm in front of it), in the door's frame: into it, along it toward the
     hinge, up. For FIND_HINGE, as hinge_detected."""
 
-    def find(h_raw, orient, n, hinge_seen):
-        h, grasp = grasp_pose(h_raw, orient, n)
+    def find(h_raw, orient, n, hinge_seen, *, check_reach=True):
+        h, grasp = grasp_pose(h_raw, orient, n, check_reach=check_reach)
         into, along = -np.r_[n[:2], 0.0] / np.linalg.norm(n[:2]), np.cross(np.r_[n[:2], 0.0], [0.0, 0.0, 1.0])
         along /= np.linalg.norm(along)
         if hinge_seen is not None:
