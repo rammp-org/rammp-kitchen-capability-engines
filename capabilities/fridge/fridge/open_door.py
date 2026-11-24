@@ -1177,7 +1177,10 @@ def execute_open(ai, planner, plan):
         # same swing end: checking it again would only repeat that (it held the arm still ~6 s at the handle, 11-12)
         say(f"  the grasp is on the plan ({off:.1f} deg off): the swing and what follows it as planned up front")
     save_door_geometry(**plan["hinge_fields"])
-    planner.join(sw, model.cabinet())
+    # Push-open preflight already joined and collision-checked the unchanged pull.
+    # A pull rebuilt from the measured grasp still needs its own join.
+    if sw.joined is None:
+        planner.join(sw, model.cabinet())
     events = [(0.0, partial(_close_gripper, ai))] if F.GRIP_DURING_SWING else []
     say(
         f"swing {plan['swing_deg']} deg"
