@@ -87,7 +87,15 @@ def test_the_door_model_is_the_slab_the_cabinet_and_the_handle_where_the_door_fi
     door = _closed_door(tmp_path)
     model = FridgeModel(door)
     df = DoorFrame(door, door["open_sign"])
-    (slab,), (body,), (handle,) = model.slab(0.0), model.body(), model.handle(0.0)
+    (slab,), (body, support), (handle,) = model.slab(0.0), model.body(), model.handle(0.0)
+    assert support["name"] == "support_cabinet"
+    assert support["dims"] == pytest.approx(
+        [F.MEASURED["body_depth_m"], F.MEASURED["body_width_m"], F.MEASURED["support_height_m"]]
+    )
+    assert support["position"][2] - support["dims"][2] / 2 == pytest.approx(
+        F.MEASURED["support_floor_z_m"]
+    )
+    assert body["dims"][2] == pytest.approx(F.MEASURED["body_height_m"])
     face_x = (
         HANDLE[0] + F.MEASURED["handle_centre_to_face_m"]
     )  # the door square to the arm: its face in x
