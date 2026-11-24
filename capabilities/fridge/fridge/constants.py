@@ -243,9 +243,6 @@ PUSH_OPEN_PULL_DEG = 60  # the pull. 11-05 sim sweep (PyBullet planner): 60 gave
 PUSH_OPEN_TO_DEG = 90  # maximum push target
 PUSH_OPEN_MIN_FINAL_DEG = 90  # minimum opening required for the demo
 PUSH_OPEN_MIN_PUSH_DEG = 5  # ... at least this far past the pull: the pull is at most PUSH_OPEN_TO_DEG - this
-# The hand envelope is wider than the physical fingers. Reject a deep
-# overlap during free travel, before the intentional preload into the door.
-PUSH_ENTRY_MAX_BOX_OVERLAP_M = 0.015
 # A larger displacement of the hinge or the release edge requires a fresh
 # push plan. The intentional contact preload is itself only one centimetre.
 PUSH_RELEASE_REUSE_M = 0.010

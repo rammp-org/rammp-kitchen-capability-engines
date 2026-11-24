@@ -32,7 +32,7 @@ from scipy.spatial.transform import Rotation as R
 from . import constants as F
 from . import planning as pl
 from . import side_grasp as S
-from .close_door import _box_gap, _box_gaps, _hand_points, move_chair
+from .close_door import _box_gap, _hand_points, move_chair
 from .door_sweep import DoorSweep, SweepBlocked, push_minimum
 from .motion import load_door, opened, shifted
 from .world import FridgeModel, hand_reach
@@ -183,12 +183,15 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
     v_in = -(df.t / 2 + F.PUSH_OPEN_GAP_M)
     goals = []
     if via_from is not None:
+        d = df._rot(deg0).T @ (np.asarray(via_from[:2]) - df.hinge[:2])
+        v_out = max(float(d @ df.n) - df.mid, F.AROUND_OUT_M)
         goals.append(
             pl.free(
-                df.pos(df.length + F.PUSH_OPEN_EDGE_CLEAR_M, F.AROUND_OUT_M, deg0, float(via_from[2])),
+                df.pos(df.length + F.PUSH_OPEN_EDGE_CLEAR_M, v_out, deg0, float(via_from[2])),
                 q_in,
                 "past the free edge",
                 route_world,
+                blend=0.06,
                 world_label="the open door",
             )
         )
@@ -198,6 +201,7 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
             q_in,
             "in behind the door",
             route_world,
+            blend=0.02,
             world_label="the open door",
         )
     )
@@ -290,26 +294,6 @@ def plan_finished_push(
     return push, placed, f"ends {F.PUSH_OPEN_AWAY_M * 100:.0f} cm off the door (not on to in front of it: {no_finish})"
 
 
-def entry_hits_slab(fk, motion, slab):
-    """Check the open gripper along the free route, before intended contact."""
-    for goal, leg in zip(motion.goals, motion.legs, strict=True):
-        if goal.path != "free":
-            break
-        joints = np.asarray(leg.q)
-        deltas = np.asarray([pl._short_delta(a, b) for a, b in zip(joints[:-1], joints[1:], strict=True)])
-        spans = np.maximum(1, np.ceil(np.max(np.abs(deltas), axis=1) / np.radians(2)).astype(int))
-        samples = [joints[0]]
-        for start, delta, span in zip(joints[:-1], deltas, spans, strict=True):
-            samples.extend(start + np.linspace(0, 1, span + 1)[1:, None] * delta)
-        pos, quat = fk.poses(np.asarray(samples))
-        points = np.asarray([_hand_points(p, q) for p, q in zip(pos, quat, strict=True)])
-        # The hand envelope includes empty space between the fingers. cuRobo
-        # checks the arm links, handle and cabinet in the full route world.
-        if np.any(_box_gaps(points, slab) < -F.PUSH_ENTRY_MAX_BOX_OVERLAP_M):
-            return True
-    return False
-
-
 def plan_push(
     planner, door, q_off, off_pose, route_world, model=None, from_arm=False, finish=None, *, end_deg=F.PUSH_OPEN_TO_DEG
 ):
@@ -320,7 +304,6 @@ def plan_push(
     model = model or FridgeModel(door)
     deg0 = float(door["door_open_deg"])
     why = "no placement tried"
-    slab = model.slab(deg0)[0]
     for placement in placements():
         u_push, approach_deg, _ = placement
         if approach_deg == 0 and model.df.length - u_push < F.PUSH_PARALLEL_EDGE_INSET_M:
@@ -336,9 +319,6 @@ def plan_push(
                     break
             motion, why = planner.motion(goals, q_off, start_pose=off_pose, from_arm=from_arm)
             if motion is not None:
-                if entry_hits_slab(planner.fk, motion, slab):
-                    why = "the open hand envelope crosses the door on the way to the push"
-                    continue
                 return motion, (*placement, via is not None)
             if "START_STATE" in why:  # the hand's start is blocked in this world: no placement changes that
                 return None, why
@@ -423,7 +403,6 @@ class PushOpen:
             sweep = DoorSweep(model, boxes, deg0, min(push_minimum(deg0), F.PUSH_OPEN_TO_DEG), padding)
             return False, str(SweepBlocked(sweep.obstacle() or "the chair keep-out", sweep))
         backs = back_off_goals(model, deg0, hold_pose)
-        backs[-1].blend = 0.0  # preserve the end of the back-off before taking the checked entry route
         off, why = planner.motion(backs, q_hold, start_pose=hold_pose, from_arm=from_arm)
         if off is None:
             return False, f"push-open: {why}"
