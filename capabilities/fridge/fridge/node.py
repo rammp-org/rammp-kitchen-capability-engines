@@ -243,6 +243,7 @@ class Capability(CapabilityEngine):
                 "type": "object",
                 "properties": {
                     **COMMON,
+                    "speed": {key: value for key, value in COMMON["speed"].items() if key != "default"},
                     "profile": {"type": "string", "enum": ["standard", "fast"], "default": "standard"},
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
                     "push_open": {"type": "boolean", "default": True},
@@ -638,7 +639,7 @@ class Capability(CapabilityEngine):
             finally:
                 dc.set_camera(camera)
 
-    def _dock_open(self, ctx, world, camera, speed, cfg, *, guided=False, autonomous=True):
+    def _dock_open(self, ctx, world, camera, speed, cfg, *, guided=False, autonomous=True, preview=None):
         if self.cfg["door_normal"] == "square":
             raise dc.Refused("Docking needs a measured door normal")
         if not np.allclose(self.cfg["chair_back_dir"], [1.0, 0.0]):
@@ -736,6 +737,7 @@ class Capability(CapabilityEngine):
                     axle_to_mount=mount,
                     odom_to_axle=odom,
                     on_motion=moving,
+                    on_route=preview,
                     **target,
                 )
         ctx.progress("open", 0.0, f"Dock confirmed after {iterations} correction(s)", pausable=False)
@@ -853,13 +855,13 @@ class Capability(CapabilityEngine):
             if not may_dock:
                 contact.enter_context(self._contact_expected(execute))
 
-            def dock_then_contact():
+            def dock_then_contact(preview=None):
                 if guidance_requested:
                     detected = self._dock_open(
                         ctx, world, camera, base_speed, self.cfg, guided=True, autonomous=docking_requested
                     )
                 else:
-                    detected = self._dock_open(ctx, world, camera, base_speed, base_cfg)
+                    detected = self._dock_open(ctx, world, camera, base_speed, base_cfg, preview=preview)
                 contact.enter_context(self._contact_expected(execute))
                 return detected
 
@@ -895,6 +897,7 @@ class Capability(CapabilityEngine):
                     allow_short_handoff=docking_requested,
                     short_reentry=bool(params.get("short_reentry", fast)),
                     fast=fast,
+                    predictive=fast and may_dock and docking_requested and not guidance_requested,
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
                     relocalize.capture_reference(self.arm)

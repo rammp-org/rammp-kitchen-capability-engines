@@ -43,8 +43,10 @@ import json
 import threading
 import time
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from itertools import chain
+from threading import Event
 
 import numpy as np
 from door_common import common as dc
@@ -644,7 +646,7 @@ def base_rotation_hint(normal):
     return {}
 
 
-def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=False, progress=None):
+def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=False, progress=None, prediction=None):
     """Plan the live open with one deadline shared by all strategies."""
     policy = F.GRASP == "auto" and adaptive_pull and isinstance(after, PushOpen)
     previous_deadline = planner.deadline
@@ -657,6 +659,8 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
         if policy
         else (("side" if F.GRASP == "auto" else F.GRASP, adaptive_pull, OPEN_PREFLIGHT_S),)
     )
+    if prediction is not None:
+        strategies = tuple(sorted(strategies, key=lambda strategy: strategy[0] != prediction["grasp"]))
     diagnostics = []
     failure = None
     sweep_failure = None
@@ -670,7 +674,18 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
                 detail = "adaptive pull" if adaptive else f"{swing:g}° pull"
                 progress(min(0.99, (now - start) / (deadline - start)), f"Planning {grasp} grasp, {detail}")
             try:
-                result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging, adaptive, grasp)
+                result = _plan_open(
+                    planner,
+                    geom,
+                    np.asarray(q0),
+                    swing,
+                    after,
+                    diagnostics,
+                    staging,
+                    adaptive,
+                    grasp,
+                    prediction=prediction,
+                )
                 planner.check_deadline()
                 return result
             except SweepBlocked as e:
@@ -700,7 +715,7 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
         planner.deadline = previous_deadline
 
 
-def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_pull, grasp):
+def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_pull, grasp, *, prediction=None):
     """Plan the whole open from joints `q0` (see the module): every grasp with cuRobo's own arm configuration first,
     then every grasp from the other configurations (seeds). Returns the plan dict; raises Refused (with why)."""
     planner.search()
@@ -727,6 +742,9 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         raise StagingRequired(collision)
     # the grasps that worked before first (proven.py), each with its line-up and lag first; the rest in their order
     prefs = proven.preferred(proven.load(proven_file()) + list(F.PROVEN_SEEDS), grasp, geom["h_raw"], geom["n"])
+    if prediction is not None and prediction["grasp"] == grasp:
+        key = (round(prediction["pitch"]), prediction["flip"])
+        prefs = [(key, prediction), *(item for item in prefs if item[0] != key)]
     cands = proven.order(cands, prefs)
     first_tried = [c["proven"] for c in cands if c.get("proven")]
     if first_tried:
@@ -1116,7 +1134,7 @@ def _close_gripper(ai):
     ai.gripper(1.0, force=F.GRASP_FORCE)
 
 
-def execute_open(ai, planner, plan):
+def execute_open(ai, planner, plan, *, fast=False):
     """Approach; the swing under joint impedance, the gripper closing on the bar as it starts (GRIP_DURING_SWING), to a
     stop at exactly the angle asked for; then the gripper opens there, the hand still (push_open._release). What
     follows is planned again from where that leaves the arm. A swing the driver ran to its end that left the door short
@@ -1219,7 +1237,7 @@ def execute_open(ai, planner, plan):
         plan["after"].replan = True
     elif not ok:
         return False
-    P._release(ai)  # stopped at the angle: let go, the hand still (Refused if the gripper doesn't open)
+    P._release(ai, early=fast)  # held at the pull angle until the gripper clears the handle
     say(f"released: gripper {float(ai.get_state()['gripper_pos']):.2f}")
     return True
 
@@ -1352,6 +1370,76 @@ def save_planned_door(plan, push, after):
     )
 
 
+def _predictive_dock(detect_at_dock, planner, make_after, swing, staging, adaptive_pull):
+    """Use the scene to identify a candidate for wrist-confirmed replanning."""
+    from capability_engine import ArmError
+
+    from . import dock_ready
+
+    stop = Event()
+    future = None
+    ready = Future()
+
+    def checkpoint():
+        if stop.is_set():
+            raise Refused("The dock look is ready")
+        planner.checkpoint()
+
+    def preview(geom, joints, delta, yaw, mount, route):
+        inverse = R.from_rotvec([0, 0, -yaw])
+
+        def point(value):
+            return inverse.apply(np.asarray(value, float) + np.r_[mount - delta, 0]) - np.r_[mount, 0]
+
+        h = point(geom["h_raw"])
+        n = inverse.apply(geom["n"])
+        orient = (inverse * R.from_quat(geom["orient"])).as_quat()
+        mid = None if geom["door_mid"] is None else point(geom["door_mid"])
+        seen = None if geom["hinge_seen"] is None else point(geom["hinge_seen"])
+        try:
+            hinge, _, _, fields = shared.FIND_HINGE(h, orient, n, seen)
+            predicted = dict(
+                geom, h_raw=h, n=n, orient=orient, door_mid=mid, hinge=hinge, hinge_seen=seen, hinge_fields=fields
+            )
+            speculative = pl.Planner(planner.arm, planner.world, planner.fk, checkpoint, planner.budget_s)
+            if route and hasattr(planner.arm, "stream"):
+                speculative.deadline = time.monotonic() + 1.5
+                try:
+                    motion = dock_ready.plan_ready(speculative, geom, predicted, joints, route, mount)
+                    if motion is not None:
+                        ready.set_result(motion)
+                except (Refused, ArmError, ValueError) as error:
+                    say(f"  arm ready pose unavailable: {error}")
+                finally:
+                    speculative.deadline = None
+            plan = plan_open(
+                speculative, predicted, joints, swing, make_after(), staging=staging, adaptive_pull=adaptive_pull
+            )
+        except (Refused, ArmError, ValueError) as error:
+            say(f"  scene preflight unavailable: {error}")
+            return None
+        return proven.make_record(plan["door"]["grasp"], plan, h, n, "plan")
+
+    def on_route(*args):
+        nonlocal future
+        if future is None:
+            future = pool.submit(preview, *args)
+            return lambda: ready.result() if ready.done() else None
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            geom, joints = detect_at_dock(on_route)
+        finally:
+            stop.set()
+    prediction = None if future is None else future.result()
+    if prediction is not None and (
+        np.linalg.norm(geom["h_raw"] - prediction["handle"]) > 0.03
+        or np.dot(geom["n"], prediction["normal"]) < np.cos(np.radians(3))
+    ):
+        prediction = None
+    return geom, joints, prediction
+
+
 def run(
     ai,
     planner,
@@ -1375,6 +1463,7 @@ def run(
     allow_short_handoff=False,
     short_reentry=False,
     fast=False,
+    predictive=False,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side
@@ -1392,6 +1481,9 @@ def run(
     global BASE_MOVES
     P.NEXT_STEP, P.NEXT_MOVE, P.FINAL_ANGLE_DEG = "", 0.0, None
     BASE_MOVES = bool(base_moves)
+
+    if fast:
+        planner.feedback_settle = True
 
     def task():
         global LAST_PLAN
@@ -1428,10 +1520,14 @@ def run(
 
         after = make_after()
         LAST_PLAN = None
-        geom, q0 = detect(ai) if detect_at_dock is None else detect_at_dock()
+        adaptive_pull = push and swing_deg is None and F.GRASP in ("auto", "side")
+        prediction = None
+        if predictive:
+            geom, q0, prediction = _predictive_dock(detect_at_dock, planner, make_after, swing, staging, adaptive_pull)
+        else:
+            geom, q0 = detect(ai) if detect_at_dock is None else detect_at_dock()
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
-        adaptive_pull = push and swing_deg is None and F.GRASP in ("auto", "side")
         try:
             plan = plan_open(
                 planner,
@@ -1442,6 +1538,7 @@ def run(
                 staging=staging,
                 adaptive_pull=adaptive_pull,
                 progress=progress,
+                **({"prediction": prediction} if prediction is not None else {}),
             )
         except Infeasible as e:  # not plannable from here: where to put the wheelchair is the answer
             if e.payload.get("reason") == "door_sweep_blocked":
@@ -1475,7 +1572,7 @@ def run(
             if save_door:
                 save_planned_door(plan, push, after)
             return True
-        if not execute_open(ai, planner, plan):
+        if not execute_open(ai, planner, plan, fast=fast):
             holding = float(ai.get_state()["gripper_pos"]) > 0.2
             say(
                 "swing did not finish -- stopping "

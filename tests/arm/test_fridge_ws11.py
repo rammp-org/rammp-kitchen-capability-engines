@@ -253,7 +253,9 @@ def test_auto_open_shares_deadline_and_reports_progress(tmp_path, monkeypatch, s
     planner.deadline = 119.5
     tried, messages = [], []
 
-    def attempt(active, geom, q, swing, push, diagnostics, staging, adaptive, grasp):
+    def attempt(
+        active, geom, q, swing, push, diagnostics, staging, adaptive, grasp, *, prediction=None
+    ):
         assert push is after
         tried.append((grasp, adaptive, active.deadline))
         if len(tried) == 1:

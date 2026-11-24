@@ -4,6 +4,7 @@ import math
 import sys
 import threading
 from collections import deque
+from contextlib import contextmanager
 from types import SimpleNamespace as Obj
 from unittest.mock import MagicMock
 
@@ -75,7 +76,9 @@ class Ctx:
         return self.pause
 
 
-def run_dock(base, ctx, guard=lambda *_: None, *, assume_odom_to_axle=docking.ODOM_TO_AXLE):
+def run_dock(
+    base, ctx, guard=lambda *_: None, *, assume_odom_to_axle=docking.ODOM_TO_AXLE, on_route=None
+):
     mount = np.asarray(docking.AXLE_TO_MOUNT[:2])
 
     def look():
@@ -95,6 +98,7 @@ def run_dock(base, ctx, guard=lambda *_: None, *, assume_odom_to_axle=docking.OD
         axle_to_mount=mount,
         odom_to_axle=np.asarray(assume_odom_to_axle),
         on_motion=lambda: None,
+        on_route=on_route,
         clock=base.monotonic,
         sleep=base.sleep,
     )
@@ -112,6 +116,36 @@ def test_dock_checks_and_executes_rotate_translate_rotate():
     assert abs(base.pose[2]) <= docking.YAW_TOLERANCE
     assert 0 < max(abs(v) for v, _ in base.commands) <= 0.05
     assert 0 < max(abs(w) for _, w in base.commands) <= docking.MAX_YAW_SPEED
+    assert base.commands[-1] == (0, 0)
+
+
+def test_ready_follows_only_the_terminal_leg_and_closes_on_failure():
+    ctx = Ctx()
+    base = VirtualBase((-0.15, -0.10, -0.25), ctx)
+    events = []
+
+    @contextmanager
+    def follow(clock):
+        events.append("stream opened")
+
+        def step():
+            if base.command[1]:
+                events.append("turn and arm in progress")
+                raise BaseError("Arm tracking")
+
+        try:
+            yield step
+        finally:
+            events.append("stream closed")
+
+    def on_route(geom, q, delta, yaw, mount, route):
+        assert len(route) == 3
+        expected = tuple(docking.route_samples(route[:-1]))[-1]
+        return lambda: Obj(follow=follow, route_at=expected)
+
+    with pytest.raises(BaseError, match="Arm tracking"):
+        run_dock(base, ctx, on_route=on_route)
+    assert events == ["stream opened", "turn and arm in progress", "stream closed"]
     assert base.commands[-1] == (0, 0)
 
 

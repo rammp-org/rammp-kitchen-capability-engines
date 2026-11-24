@@ -94,6 +94,11 @@ route, including the space beside and behind the chair, before sending an execut
 Set `profile: fast` on an `open` goal for a default arm goal speed of 0.7,
 contact caps of 0.135 m/s and 0.75 rad/s, and the short re-entry route.
 Explicit `speed` and `short_reentry` goal values override their profile defaults.
+On an autonomous docking open, the fast profile previews a complete plan from the scene
+look and favors its grasp when replanning from wrist geometry. If the planner verifies
+clearance against the swept appliance and chair layers in time, the arm can move toward
+a ready pose during the terminal docking leg. A further docking correction first parks
+the arm on the checked reverse path.
 
 Set `short_reentry: true` on an `open` goal to let the in-place push try a waypoint 8 cm beyond
 the free edge before the usual 16 cm waypoint. The planner checks both against the open door.

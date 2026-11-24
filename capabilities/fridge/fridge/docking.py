@@ -2,6 +2,7 @@
 
 import math
 import time
+from contextlib import nullcontext
 from itertools import accumulate
 
 import numpy as np
@@ -101,7 +102,7 @@ def _sample(base):
     return pose, abs(twist.linear.x), abs(twist.angular.z)
 
 
-def _drive_leg(base, arm, ctx, distance, angle, speed, yaw_speed, odom_to_axle, deadline, clock, sleep):
+def _drive_leg(base, arm, ctx, distance, angle, speed, yaw_speed, odom_to_axle, deadline, clock, sleep, step=None):
     turning = angle != 0.0
     goal = angle if turning else distance
     tolerance = TURN_TOL if turning else TRANSLATION_TOL
@@ -146,17 +147,21 @@ def _drive_leg(base, arm, ctx, distance, angle, speed, yaw_speed, odom_to_axle, 
                 break
             command = sign * min(top_speed, max(top_speed / 4, 2 * remaining))
             vx, wz = (0.0, command) if turning else (command, 0.0)
+            if step is not None:
+                step()
             base.send_twist(vx, wz)
             sleep(base_drive.PERIOD_S)
     finally:
         base.stop()
     until = clock() + base_drive.SETTLE_S
     while True:
-        ctx.checkpoint()
         progress, v, w = sample()
+        ctx.checkpoint()
         if clock() >= until and v <= LINEAR_SETTLED and w <= ANGULAR_SETTLED:
             break
         base.stop()
+        if step is not None:
+            step()
         sleep(base_drive.PERIOD_S)
     if abs(progress - abs(goal)) > tolerance:
         raise BaseError("Wheelchair settled outside the checked segment endpoint")
@@ -192,6 +197,7 @@ def dock(
     axle_to_mount,
     odom_to_axle,
     on_motion,
+    on_route=None,
     target_handle=TARGET_HANDLE,
     target_yaw=TARGET_YAW,
     clock=time.monotonic,
@@ -209,6 +215,7 @@ def dock(
     speed = min(linear_limit, speed, cfg["base_max_speed"])
     remaining_yaw = MAX_YAW_TRAVEL
     entered = False
+    ready = None
     for index in range(MAX_LOOKS):
         ctx.checkpoint()
         geom, q = stationary_look(base, arm, look, odom_to_axle, mode_entered=entered)
@@ -222,17 +229,49 @@ def dock(
             return (geom, q), index
         if index == MAX_LOOKS - 1:
             break
+        if ready is not None:
+            parked_at, _, _ = _sample(base)
+
+            def stationary(parked_at=parked_at):
+                pose, v, w = _sample(base)
+                shift, turn = relative_axle(parked_at, pose, odom_to_axle)
+                if (
+                    v > LINEAR_SETTLED
+                    or w > ANGULAR_SETTLED
+                    or np.linalg.norm(shift) > TRANSLATION_TOL
+                    or abs(turn) > TURN_TOL
+                ):
+                    raise BaseError("Wheelchair moved while parking the arm")
+
+            ready.park(ctx, clock, sleep, stationary)
+            q = np.asarray(arm.joint_states().position, float)
+            ready = None
         route, distance, rotation_travel = checked_route(delta, yaw, remaining_d, remaining_yaw, geom, guard)
         if not entered:
             on_motion()
             base.request_mode("autonomous", profile=cfg["base_profile"])
             entered = True
-        for d, a in route:
+        # Ignore the same negligible legs the driver would skip when identifying the terminal leg.
+        route = tuple((d, a) for d, a in route if abs(d) > TRANSLATION_TOL or abs(a) > TURN_TOL)
+        route_start = _sample(base)[0]
+        prepare = None if on_route is None else on_route(geom, q, delta, yaw, axle_to_mount, route)
+        for leg_index, (d, a) in enumerate(route):
             # Only check pause while stopped. Motor commands contain their own cancel check.
             ctx.checkpoint()
             if clock() >= deadline:
                 raise BaseError("Docking exceeded its motion deadline")
-            _drive_leg(base, arm, ctx, d, a, speed, yaw_speed, odom_to_axle, deadline, clock, sleep)
+            if prepare is not None and leg_index == len(route) - 1:
+                candidate = prepare()
+                if candidate is not None:
+                    expected_xy, expected_yaw = candidate.route_at
+                    actual_xy, actual_yaw = relative_axle(route_start, _sample(base)[0], odom_to_axle)
+                    if (
+                        np.linalg.norm(actual_xy - expected_xy) <= 0.02
+                        and abs(wrap(actual_yaw - expected_yaw)) <= TURN_TOL
+                    ):
+                        ready = candidate
+            with ready.follow(clock) if ready is not None else nullcontext() as step:
+                _drive_leg(base, arm, ctx, d, a, speed, yaw_speed, odom_to_axle, deadline, clock, sleep, step)
         remaining_d -= distance
         remaining_yaw -= rotation_travel
     raise Refused("Docking did not converge within three corrections. Repark the chair.")
