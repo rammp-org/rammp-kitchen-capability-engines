@@ -34,11 +34,11 @@ def rotation(angle):
     return np.array([[c, -s], [s, c]])
 
 
-def correction(handle, normal, axle_to_mount):
+def correction(handle, normal, axle_to_mount, target_handle=TARGET_HANDLE, target_yaw=TARGET_YAW):
     """Return desired axle displacement and yaw in the current chair frame."""
-    yaw = wrap(math.atan2(-normal[1], -normal[0]) - TARGET_YAW)
+    yaw = wrap(math.atan2(-normal[1], -normal[0]) - target_yaw)
     axle = np.asarray(axle_to_mount)
-    return handle[:2] + axle - rotation(yaw) @ (TARGET_HANDLE + axle), yaw
+    return handle[:2] + axle - rotation(yaw) @ (target_handle + axle), yaw
 
 
 def legs(displacement, yaw, *, other_direction=False):
@@ -191,6 +191,8 @@ def dock(
     axle_to_mount,
     odom_to_axle,
     on_motion,
+    target_handle=TARGET_HANDLE,
+    target_yaw=TARGET_YAW,
     clock=time.monotonic,
     sleep=time.sleep,
 ):
@@ -208,8 +210,8 @@ def dock(
         handle, normal = geom["h_raw"], geom["n"]
         if not np.isfinite([*handle, *normal]).all() or np.linalg.norm(normal[:2]) < 0.9:
             raise Refused("Docking requires a measured fixture heading and finite handle position")
-        delta, yaw = correction(handle, normal, axle_to_mount)
-        if np.linalg.norm(handle[:2] - TARGET_HANDLE) <= POSITION_TOLERANCE and abs(yaw) <= YAW_TOLERANCE:
+        delta, yaw = correction(handle, normal, axle_to_mount, target_handle, target_yaw)
+        if np.linalg.norm(handle[:2] - target_handle) <= POSITION_TOLERANCE and abs(yaw) <= YAW_TOLERANCE:
             return (geom, q), index
         if index == MAX_LOOKS - 1:
             break
@@ -227,6 +229,117 @@ def dock(
         remaining_d -= distance
         remaining_yaw -= rotation_travel
     raise Refused("Docking did not converge within three corrections. Repark the chair.")
+
+
+GUIDED_STEP_M = 0.10
+GUIDED_TURN = math.radians(15)
+GUIDED_POSITION_MARGIN = 0.025
+GUIDED_YAW_MARGIN = math.radians(4)
+GUIDED_SETTLE_S = 1.0
+GUIDED_MAX_TIME = 150.0
+GUIDED_MAX_STEPS = 24
+
+
+def guidance_text(distance, turn):
+    if distance:
+        movement = f"Drive {'forward' if distance > 0 else 'back'} about {round(abs(distance) * 100)} cm"
+    else:
+        movement = f"Turn {'left' if turn > 0 else 'right'} about {round(math.degrees(abs(turn)))}°"
+    return f"{movement}, then stop. Keep the route clear. Wait here while I check again."
+
+
+def guided_step(delta, yaw, geom, guard):
+    """Ask for only one short segment, with an allowance for human overshoot."""
+    blocked = None
+    for route in route_options(delta, yaw):
+        for distance, turn in route:
+            if abs(distance) > TRANSLATION_TOL or abs(turn) > TURN_TOL:
+                break
+        else:
+            continue
+        distance = math.copysign(min(abs(distance), GUIDED_STEP_M), distance) if distance else 0.0
+        turn = math.copysign(min(abs(turn), GUIDED_TURN), turn) if turn else 0.0
+        far_distance = distance + math.copysign(GUIDED_POSITION_MARGIN, distance) if distance else 0.0
+        far_turn = turn + math.copysign(GUIDED_YAW_MARGIN, turn) if turn else 0.0
+        try:
+            guard(geom, ((far_distance, far_turn),))
+        except Refused as error:
+            blocked = blocked or error
+        else:
+            return distance, turn
+    raise Refused("No checked small wheelchair move is available. Stop and repark the chair.") from blocked
+
+
+def _await_guided_step(base, arm, ctx, start, step, odom_to_axle, deadline, clock, sleep):
+    distance, turn = step
+    stopped_since = None
+    while clock() < deadline:
+        ctx.checkpoint()
+        if arm.control_status().estopped:
+            raise BaseError("Arm e-stop during guided docking")
+        pose, v, w = _sample(base)
+        (x, y), yaw = relative_axle(start, pose, odom_to_axle)
+        if distance:
+            progress = math.copysign(1, distance) * x
+            target, margin = abs(distance), GUIDED_POSITION_MARGIN
+            departed = abs(y) > margin or abs(yaw) > GUIDED_YAW_MARGIN
+        else:
+            progress = math.copysign(1, turn) * yaw
+            target, margin = abs(turn), GUIDED_YAW_MARGIN
+            departed = math.hypot(x, y) > GUIDED_POSITION_MARGIN
+        if departed or not -margin <= progress <= target + margin:
+            raise Refused("Stop the wheelchair. It moved outside the checked step.")
+        moved = progress >= target * 0.5
+        if moved and v <= LINEAR_SETTLED and w <= ANGULAR_SETTLED:
+            stopped_since = clock() if stopped_since is None else stopped_since
+            if clock() - stopped_since >= GUIDED_SETTLE_S:
+                return
+        else:
+            stopped_since = None
+        sleep(base_drive.PERIOD_S)
+    raise Refused("Stop the wheelchair. Guided docking timed out.")
+
+
+def guide(
+    base,
+    arm,
+    ctx,
+    look,
+    guard,
+    *,
+    axle_to_mount,
+    odom_to_axle,
+    show,
+    coarse=False,
+    target_handle=TARGET_HANDLE,
+    target_yaw=TARGET_YAW,
+    clock=time.monotonic,
+    sleep=time.sleep,
+):
+    """Guide a manual driver using fresh looks between bounded steps."""
+    deadline = clock() + GUIDED_MAX_TIME
+    for count in range(GUIDED_MAX_STEPS + 1):
+        ctx.checkpoint()
+        geom, q = stationary_look(base, arm, look, odom_to_axle, mode_entered=False)
+        handle, normal = geom["h_raw"], geom["n"]
+        if not np.isfinite([*handle, *normal]).all() or np.linalg.norm(normal[:2]) < 0.9:
+            raise Refused("Guidance requires a measured fixture heading and finite handle position")
+        delta, yaw = correction(handle, normal, axle_to_mount, target_handle, target_yaw)
+        if coarse:
+            ready = np.linalg.norm(delta) <= 0.08 and abs(yaw) <= math.radians(6)
+        else:
+            ready = np.linalg.norm(handle[:2] - target_handle) <= POSITION_TOLERANCE and abs(yaw) <= YAW_TOLERANCE
+        if clock() >= deadline or (count == GUIDED_MAX_STEPS and not ready):
+            break
+        if ready:
+            return (geom, q), count
+        step = guided_step(delta, yaw, geom, guard)
+        start, v, w = _sample(base)
+        if v > LINEAR_SETTLED or w > ANGULAR_SETTLED:
+            raise Refused("Stop the wheelchair before continuing guided docking.")
+        show(*step)
+        _await_guided_step(base, arm, ctx, start, step, odom_to_axle, min(deadline, clock() + 18), clock, sleep)
+    raise Refused("Stop the wheelchair. Guided docking did not converge.")
 
 
 # Drive-wheel midpoint and floor from the Gen1.5 generated platform/floor layers.

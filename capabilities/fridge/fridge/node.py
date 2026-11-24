@@ -109,6 +109,7 @@ PARAMS = {
     "sam3_prompts": ["handle"],
     "sam3_threshold": 0.3,
     **constants.MEASURED,
+    "hinge_side": "left",
     # the fridge's collision world for the cuRobo planner (world.py): this node writes it into planner_world_dir, a host
     # directory the planner container mounts too, at planner_world_dir_in_planner ("": the same path), and pushes it
     # with set_world. planner_base_layers: the robot world's layers every pushed scene lists again (as the planner sees
@@ -141,6 +142,9 @@ PARAMS = {
     # drive_base: its limits and the MIB drive profile (base_drive.PARAMS)
     **base_drive.PARAMS,
     "docking_enabled": False,  # fixture A / Gen1.5, after verifying the route and odometry datum on hardware
+    "guided_docking_enabled": False,  # show checked drive steps on the Open UI buttons
+    "docking_target_handle_xy": docking.TARGET_HANDLE.tolist(),
+    "docking_target_yaw_deg": float(np.degrees(docking.TARGET_YAW)),
     "docking_axle_to_mount_xy": list(docking.AXLE_TO_MOUNT[:2]),
     "docking_odom_to_axle_xy": list(docking.ODOM_TO_AXLE),
 }
@@ -289,6 +293,7 @@ class Capability(CapabilityEngine):
             self.cfg["mount_tilt_deg"],
             self.cfg["door_normal"],
             self.cfg["grasp"],
+            hinge_side=self.cfg["hinge_side"],
             **{k: self.cfg[k] for k in constants.MEASURED},
         )
         if self.cfg["handle_source"] not in ("depth", "sam3"):
@@ -403,7 +408,8 @@ class Capability(CapabilityEngine):
             raise error
         while True:
             ctx.checkpoint()
-            self._drove = False  # as _execute sets it: a Stop before _execute runs mustn't read the last goal's
+            self._drove = False  # a Stop before _execute runs mustn't read the last goal's
+            self._guided = False
             try:
                 result = ui.motion(
                     UI_MOVING[action_id],
@@ -467,6 +473,7 @@ class Capability(CapabilityEngine):
             error.error_code not in {"refused", "open_no_motion", "start_staging_required"}
             or not error.recoverable
             or getattr(self, "_drove", False)
+            or getattr(self, "_guided", False)
         ):
             return False
         return not Capability._ui_maybe_holding(action_id, error)
@@ -596,7 +603,7 @@ class Capability(CapabilityEngine):
                 log = self.get_logger().info if back else self.get_logger().error
                 log(f"contact stop: default profile {'back' if back else 'NOT restored'} ({said})")
 
-    def _dock_open(self, ctx, world, camera, speed, cfg):
+    def _dock_open(self, ctx, world, camera, speed, cfg, *, guided=False, autonomous=True):
         if self.cfg["door_normal"] == "square":
             raise dc.Refused("Docking needs a measured door normal")
         if not np.allclose(self.cfg["chair_back_dir"], [1.0, 0.0]):
@@ -620,6 +627,14 @@ class Capability(CapabilityEngine):
         odom = np.asarray(self.cfg["docking_odom_to_axle_xy"], float)
         if any(offset.shape != (2,) or not np.isfinite(offset).all() for offset in (mount, odom)):
             raise dc.Refused("Invalid docking axle calibration")
+
+        target_handle = np.asarray(self.cfg.get("docking_target_handle_xy", docking.TARGET_HANDLE), float)
+        target_yaw = np.radians(self.cfg.get("docking_target_yaw_deg", np.degrees(docking.TARGET_YAW)))
+        if target_handle.shape != (2,) or not np.isfinite([*target_handle, target_yaw]).all():
+            raise dc.Refused("Invalid docking target")
+        target = {}
+        if not np.array_equal(target_handle, docking.TARGET_HANDLE) or target_yaw != docking.TARGET_YAW:
+            target = dict(target_handle=target_handle, target_yaw=target_yaw)
 
         def look():
             scene.require_frames_after_now()
@@ -659,18 +674,44 @@ class Capability(CapabilityEngine):
                 ui_motion.enter_context(self._ui_driving("open", None))
                 ctx.progress("open", 0.0, "Docking the wheelchair. Keep the route clear.", pausable=False)
 
-            detected, iterations = docking.dock(
-                self.base,
-                self.arm,
-                ctx,
-                look,
-                guard,
-                speed=speed,
-                cfg=cfg,
-                axle_to_mount=mount,
-                odom_to_axle=odom,
-                on_motion=moving,
-            )
+            if guided:
+                ui = self._ui
+
+                def show(distance, turn):
+                    message = docking.guidance_text(distance, turn)
+                    ui.moving(message)
+                    if not ui.connected:
+                        raise dc.Refused("Guided docking needs the wheelchair instructions panel")
+                    self._guided = True
+                    ctx.progress("open", 0.0, message, pausable=False)
+
+                detected, iterations = docking.guide(
+                    self.base,
+                    self.arm,
+                    ctx,
+                    look,
+                    guard,
+                    axle_to_mount=mount,
+                    odom_to_axle=odom,
+                    show=show,
+                    coarse=autonomous,
+                    **target,
+                )
+                ui.moving("Checking the parking position. Keep the wheelchair stopped.")
+            if autonomous:
+                detected, iterations = docking.dock(
+                    self.base,
+                    self.arm,
+                    ctx,
+                    look,
+                    guard,
+                    speed=speed,
+                    cfg=cfg,
+                    axle_to_mount=mount,
+                    odom_to_axle=odom,
+                    on_motion=moving,
+                    **target,
+                )
         ctx.progress("open", 0.0, f"Dock confirmed after {iterations} correction(s)", pausable=False)
         if camera is scene:
             return detected
@@ -689,6 +730,7 @@ class Capability(CapabilityEngine):
 
     def _execute(self, action_id, params, ctx):
         self._drove = False  # whether this goal has driven the wheelchair (drive_base)
+        self._guided = False
         speed = float(params.get("speed", constants.CLOSE_SPEED if action_id == "close" else 1.0))
         if not 0.0 < speed <= 1.0:
             raise EngineError("bad_params", "'speed' must be in (0, 1]", recoverable=True)
@@ -734,12 +776,15 @@ class Capability(CapabilityEngine):
         log_args = {**params, "execute": execute}
         # a dry run gets it too, for its messages; it refuses to drive unless the goal executes
         drive_chair = None
-        docking_requested = (
+        may_park = (
             action_id == "open"
-            and drive_base
             and bool(params.get("base_moves", True))
             and not params.get("release_only")
-            and bool(self.cfg.get("docking_enabled"))
+            and not params.get("chair_moved")
+        )
+        docking_requested = may_park and drive_base and bool(self.cfg.get("docking_enabled"))
+        guidance_requested = (
+            may_park and bool(self.cfg.get("guided_docking_enabled")) and getattr(self, "_ui", None) is not None
         )
         if drive_base:
             base_cfg = {k: self.cfg[k] for k in base_drive.PARAMS}
@@ -763,7 +808,7 @@ class Capability(CapabilityEngine):
         contact = contextlib.ExitStack()  # the loose contact profile while an executed open / close runs
         try:
             # before the arm moves, if this goal may drive the base: its odometry and the arm's e-stop status are there
-            may_dock = docking_requested and execute
+            may_dock = (docking_requested or guidance_requested) and execute
             if action_id == "open":
                 may_drive = (
                     bool(params.get("push_open", True))
@@ -772,13 +817,18 @@ class Capability(CapabilityEngine):
                 )
             else:
                 may_drive = params.get("chair_back") is None or float(params["chair_back"]) != 0
-            if drive_base and (may_drive or may_dock):
+            if (drive_base and may_drive) or may_dock:
                 base_drive.check(self.base, self.arm)
             if not may_dock:
                 contact.enter_context(self._contact_expected(execute))
 
             def dock_then_contact():
-                detected = self._dock_open(ctx, world, camera, base_speed, base_cfg)
+                if guidance_requested:
+                    detected = self._dock_open(
+                        ctx, world, camera, base_speed, self.cfg, guided=True, autonomous=docking_requested
+                    )
+                else:
+                    detected = self._dock_open(ctx, world, camera, base_speed, base_cfg)
                 contact.enter_context(self._contact_expected(execute))
                 return detected
 
@@ -798,7 +848,7 @@ class Capability(CapabilityEngine):
                     chair_moved=bool(params.get("chair_moved", False)),
                     chair_back_dir=self.cfg["chair_back_dir"],
                     drive_chair=drive_chair,
-                    base_moves=bool(params.get("base_moves", True)),
+                    base_moves=bool(params.get("base_moves", True)) and not (guidance_requested and not drive_base),
                     search_alternate_placements=bool(params.get("search_alternate_placements", False)),
                     staging=np.radians(self.cfg["start_joints_deg"]),
                     progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),

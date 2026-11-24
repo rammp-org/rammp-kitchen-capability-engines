@@ -213,3 +213,41 @@ def test_camera_flushes_both_cached_and_in_flight_pre_motion_frames(monkeypatch)
     depth = frame(2_014_000_000)
     camera._on_frame(rgb, info, depth)
     assert camera._latest == (rgb, info, depth)
+
+
+def test_manual_guidance_relooks_after_steps_without_requesting_drive_control():
+    ctx = Ctx()
+    base = VirtualBase((-0.16, 0.0, 0.0), ctx)
+    mount = np.asarray(docking.AXLE_TO_MOUNT[:2])
+    target = docking.TARGET_HANDLE + np.array([0.025, -0.02])
+    observations, prompts, checked = [], [], []
+
+    def look():
+        observations.append(base.pose.copy())
+        handle = target - base.pose[:2]
+        normal = -docking.rotation(docking.TARGET_YAW)[:, 0]
+        return dict(h_raw=np.r_[handle, 0.393], n=np.r_[normal, 0.0]), []
+
+    def guide_driver(distance, turn):
+        prompts.append((distance, turn))
+        assert turn == 0.0
+        base.pose[0] += 0.9 * distance
+
+    (geom, _), steps = docking.guide(
+        base,
+        base,
+        ctx,
+        look,
+        lambda _, route: checked.append(route),
+        axle_to_mount=mount,
+        odom_to_axle=np.asarray(docking.ODOM_TO_AXLE),
+        show=guide_driver,
+        target_handle=target,
+        clock=base.monotonic,
+        sleep=base.sleep,
+    )
+    assert steps == len(prompts) == len(checked) == 2
+    assert len(observations) == 3
+    assert geom["h_raw"][:2] == pytest.approx(target, abs=docking.POSITION_TOLERANCE)
+    assert base.commands == []
+    assert base.mode_calls == 0
