@@ -43,6 +43,7 @@ from door_common import common as dc
 from door_common import open_door as shared_open
 
 from . import base_drive, close_door, constants, motion, open_door, push_open, relocalize, ui_text
+from .door_sweep import SweepBlocked
 from .kinematics import Chain
 from .perception import WristCamera
 from .planning import Planner
@@ -116,6 +117,7 @@ PARAMS = {
     "planner_world_dir_in_planner": "",
     "planner_base_layers": ["/config/robot/curobo/layer_mebot_floor.yaml"],
     "planner_restore_world": "world.yaml",
+    "planner_sweep_config": "/config/robot/curobo/planner.yaml",
     "chair_back_dir": list(constants.CHAIR_BACK_DIR),
     # go_to_start's pose: the arm's joints J1..J7 (deg)
     "start_joints_deg": list(constants.START_JOINTS_DEG),
@@ -719,6 +721,8 @@ class Capability(CapabilityEngine):
         except (open_door.Infeasible, open_door.StagingRequired) as e:
             code = "start_staging_required" if isinstance(e, open_door.StagingRequired) else "open_no_motion"
             raise EngineError(code, str(e), recoverable=True, payload=e.payload) from e
+        except SweepBlocked as e:
+            raise EngineError("open_no_motion", str(e), recoverable=True, payload=e.payload) from e
         except dc.Refused as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         except BaseError as e:  # a wheelchair move stopped part way (or the MIB refused it): the base commanded still
@@ -756,6 +760,7 @@ class Capability(CapabilityEngine):
             [x for x in self.cfg["planner_base_layers"] if x],
             self.cfg["planner_restore_world"],
             extra=[chair_stand_in(self.cfg["chair_keep_out_behind_m"])] if self.cfg["mount_tilt_deg"] == 0 else [],
+            sweep_config=self.cfg["planner_sweep_config"] if self.cfg["mount_tilt_deg"] == 30 else None,
         )
 
     def _go_to_start(self, ctx, execute, speed, note):

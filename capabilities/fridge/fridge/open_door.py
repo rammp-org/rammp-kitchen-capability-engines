@@ -57,6 +57,7 @@ from . import planning as pl
 from . import push_open as P
 from . import proven, relocalize
 from . import side_grasp as S
+from .door_sweep import SweepBlocked, check_open
 from .motion import load_door, logged_run, opened
 from .push_open import PushOpen, back_off_goals, push_after_chair_move
 from .world import FridgeModel, configure_handle
@@ -640,6 +641,8 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
             diagnostics.append({"stage": "approach join", "reason": str(e), "candidate": result["name"]})
             raise Infeasible(str(e)) from e
         return result
+    except SweepBlocked as e:
+        raise Infeasible(str(e), payload=e.payload) from e
     except (Infeasible, pl.OverBudget) as e:
         counts = Counter("line-up" if item["stage"].startswith("line up") else item["stage"] for item in diagnostics)
         raise Infeasible(
@@ -665,6 +668,10 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         raise Infeasible("no grasp: every tilt's grasp is out of reach")
     # the door model is the same for every grasp (the face is placed from the handle); the file keeps the chosen one's
     model = FridgeModel(closed_door(geom, cands[0]["h"], cands[0].get("ref", cands[0]["pos"]), cands[0]))
+    push = after if isinstance(after, PushOpen) else None
+    adaptive_pull = adaptive_pull and push is not None
+    angles = P.pull_angles(swing) if adaptive_pull else (swing,)
+    pull_angles = check_open(model, planner.world, angles, push)
     collision = planner.preflight_start(
         model.full(0.0), q0, np.radians(F.START_JOINTS_DEG) if staging is None else staging
     )
@@ -677,8 +684,6 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
     if first_tried:
         say(f"  tried first (worked before): {'; '.join(proven.describe(r) for r in first_tried)}")
     tried = []
-    adaptive_pull = adaptive_pull and isinstance(after, PushOpen)
-    pull_angles = P.pull_angles(swing) if adaptive_pull else (swing,)
 
     def fail(name, why, detail=None):
         item = dict(detail or {}, candidate=name)
@@ -1287,7 +1292,7 @@ def run(
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Pull to `swing_deg` when specified, or SWING_DEG without `push`. The default side-grasp push-open tries
-    shorter pulls before PUSH_OPEN_PULL_DEG. `grasp_offset`:
+    the largest safe pull first, up to PUSH_OPEN_PULL_DEG. `grasp_offset`:
     grasp this far (m) above the middle of the bar (set_grasp_offset). `release_only`: let go and back off the handle,
     nothing else (when a run stopped holding it). `save_door`: a dry run that plans OK also writes DOOR_FILE as the
     planned open would leave it (save_planned_door). `around` (the full-pull path only, `push` false): False tests the
@@ -1347,6 +1352,8 @@ def run(
                 adaptive_pull=adaptive_pull,
             )
         except Infeasible as e:  # not plannable from here: where to put the wheelchair is the answer
+            if e.payload.get("reason") == "door_sweep_blocked":
+                raise
             _, hint = placement_moves(h, n)
             found = ""
             if search_alternate_placements and not execute:

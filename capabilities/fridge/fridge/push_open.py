@@ -33,6 +33,7 @@ from . import constants as F
 from . import planning as pl
 from . import side_grasp as S
 from .close_door import _box_gap, _hand_points, move_chair
+from .door_sweep import DoorSweep, SweepBlocked
 from .motion import load_door, opened, shifted
 from .world import FridgeModel, hand_reach
 
@@ -41,8 +42,8 @@ NEXT_MOVE = 0.0  # ... and that move (m, + back), for the UI's prompt; 0: none a
 
 
 def pull_angles(requested):
-    """Try shorter default side pulls first, within the open action's angle range."""
-    return tuple(angle for angle in (30, 40, 50) if angle < requested) + (requested,)
+    """Prefer the largest default side pull that admits a push handoff."""
+    return (requested,) + tuple(angle for angle in (50, 40, 30) if angle < requested)
 
 
 def hand_quat(df, deg, approach_deg, y_up):
@@ -354,18 +355,36 @@ class PushOpen:
         self.finish = ""  # how the push ends (plan_finished_push), in words
         self.in_place = False
 
+    def safe_moves(self, model, world, deg0, *, in_place):
+        boxes, padding = world.door_sweep_boxes()
+        push = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding)
+        moves = (0.0,) if in_place else self.moves
+        safe = []
+        for move in moves:
+            shift = np.r_[np.asarray(self.chair_dir) * move, 0.0]
+            if push.obstacle(shift if move else None) is not None:
+                continue
+            if move and DoorSweep(model, boxes, deg0, deg0, padding, translation=shift).obstacle():
+                continue
+            safe.append(move)
+        return tuple(safe)
+
     def plan(self, planner, door, q_hold, hold_pose, from_arm=False, *, in_place=None):
         """From the hand on the handle (joints `q_hold`, tool `hold_pose`) with the door as `door` (open as far as the
         pull leaves it). `from_arm`: that is where the arm is now. Returns (ok, message)."""
         model = FridgeModel(door)
         deg0 = float(door["door_open_deg"])
+        in_place = self.in_place if in_place is None else in_place
+        moves = self.safe_moves(model, planner.world, deg0, in_place=in_place)
+        if not moves:
+            boxes, padding = planner.world.door_sweep_boxes()
+            sweep = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding)
+            return False, str(SweepBlocked(sweep.obstacle() or "the chair keep-out", sweep))
         backs = back_off_goals(model, deg0, hold_pose)
         off, why = planner.motion(backs, q_hold, start_pose=hold_pose, from_arm=from_arm)
         if off is None:
             return False, f"push-open: {why}"
         off_pose = (backs[-1].pos, backs[-1].quat)
-        in_place = self.in_place if in_place is None else in_place
-        moves = (0.0,) if in_place else self.moves
         for move in moves:
             if move == 0:
                 moved, route = door, model.full(deg0)
@@ -383,7 +402,7 @@ class PushOpen:
             else:
                 self.motion, self.push = off, push
             return True, f"push-open OK, {_after(move)} ({self.describe()}); the push {self.finish}"
-        if len(moves) == 1:
+        if moves == (0.0,):
             return False, (
                 f"push-open: no hand placement behind the door plans without a wheelchair move "
                 f"(last: {why})"
@@ -431,7 +450,8 @@ class PushOpen:
         deg0 = float(door["door_open_deg"])
         if deg0 > F.PUSH_OPEN_TO_DEG - F.PUSH_OPEN_MIN_PUSH_DEG + 2:  # a pull may overshoot a little
             raise Refused(f"the door is already ~{deg0:.0f} deg open (push to {F.PUSH_OPEN_TO_DEG}).")
-        say(f"  {after_release(self, planner, ai, door)}")
+        safe = self.safe_moves(FridgeModel(door), planner.world, deg0, in_place=self.in_place)
+        say(f"  {after_release(self, planner, ai, door, reuse=self.chair_move in safe)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
         if not self.chair_move:
             ok = planner.run(self.motion, "off the handle + round the door + push-open", impedance=AFTER_RELEASE)
@@ -471,7 +491,7 @@ def _release(ai):
         raise Refused("the gripper did not open -- the hand is still on the handle.")
 
 
-def after_release(after, planner, ai, door):
+def after_release(after, planner, ai, door, *, reuse=True):
     """What follows the release (`after`: PushOpen, ReleaseAround, ...; execute_open let go), planned again from where
     the arm is now; if that fails, the plan `after` checked before the swing, when the arm is where it starts. Returns
     what it did, in words; raises Refused (the gripper open, the arm holding)."""
@@ -480,8 +500,7 @@ def after_release(after, planner, ai, door):
     first = checked.get("motion")
     # the plan checked before the swing, if the arm is where it starts (as close as any planned motion must be): no new
     # search, so no stop of its length between the pull and the push (a search from here held the arm ~23 s, 11-12)
-    # `after.replan` (execute_open: the swing ended short of its angle): that plan was for a door that isn't there
-    if first is not None and not getattr(after, "replan", False):
+    if reuse and first is not None and not getattr(after, "replan", False):
         off = float(np.degrees(np.max(np.abs(pl._short_delta(first.q0, st["position"])))))
         if off <= pl.START_TOL_DEG:
             return f"the plan checked before the swing (the arm {off:.1f} deg from its start)"
@@ -507,6 +526,10 @@ def push_after_chair_move(ai, planner, execute, chair_dir):
     moved = shifted(door, move, chair_dir)
     model = FridgeModel(moved)
     deg0 = float(moved["door_open_deg"])
+    boxes, padding = planner.world.door_sweep_boxes()
+    sweep = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding)
+    if obstacle := sweep.obstacle():
+        raise SweepBlocked(obstacle, sweep)
     pose = (np.asarray(st["ee_pos"][:3]), np.asarray(st["ee_pos"][3:7]))
     planner.search()  # a new search: the base's drive (or the goal before) doesn't count against it
     motion, placed, finish = plan_finished_push(

@@ -29,6 +29,8 @@ container:
     # (set_world with its path): the planner container must mount the same host directory at the same
     # path (planner_world_dir), read-only is enough.
     - /tmp/rammp_planner_worlds:/rammp_planner_worlds
+    # Same robot config and chair layer files as the planner, for door-sweep preflight.
+    - ./config/robots/current:/config/robot:ro
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
@@ -90,6 +92,7 @@ params:
   planner_world_dir_in_planner: ""
   planner_base_layers: [/config/robot/curobo/layer_mebot_floor.yaml]
   planner_restore_world: world.yaml
+  planner_sweep_config: /config/robot/curobo/planner.yaml
   # How each look measures the door's direction: handle_model (the printed handle's model fit to SAM 3's
   # mask on the depth, as the side grasp's estimator), handle (the bar and its plate), plane (a door-plane
   # fit over the whole image) or square (TESTING ONLY: the door taken as square to the arm).

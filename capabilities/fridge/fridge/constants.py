@@ -232,6 +232,8 @@ AROUND_END_M = (0.25, 0.30)  # the end: this far from the hinge along the door, 
 # rest of the way with the side of the hand: in behind the door, fingers along it toward the hinge, rolled vertical
 # (facing the hand into the cabinet puts the gripper through the door). cuRobo routes from the back-off to the push
 # start round the open door (a point past its free edge only if it finds no route), then onto the inner face and round
+# Horizontal slab allowance for the fitted hinge (WS11-C2 fixture B reached ~88 mm error).
+DOOR_SWEEP_HINGE_MARGIN_M = 0.10
 PUSH_OPEN_PULL_DEG = 60  # the pull. 11-05 sim sweep (PyBullet planner): 60 gave the most chair placements where the
 # open and the close plan; kept for cuRobo until it is swept again
 PUSH_OPEN_TO_DEG = 90  # push the door on to this

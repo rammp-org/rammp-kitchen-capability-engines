@@ -22,6 +22,8 @@ import yaml
 from door_common.common import DoorFrame, Refused, door_dims, say
 from scipy.spatial.transform import Rotation as R
 
+from . import door_sweep
+
 # the handle: a bar this far out of the door's face (measured 11-06), this wide along the door, and this much taller
 # than its grippable straight length (its mounts)
 HANDLE_PROTRUSION_M = 3.5 * 0.0254
@@ -173,17 +175,37 @@ class PlannerWorld:
     put back, resolved by the planner next to its config. `extra`: obstacle dicts every scene also has (the level
     mount's stand-in for the chair)."""
 
-    def __init__(self, arm, write_dir, planner_dir=None, base_layers=(), restore_world="world.yaml", extra=()):
+    def __init__(
+        self, arm, write_dir, planner_dir=None, base_layers=(), restore_world="world.yaml", extra=(),
+        *, sweep_config=None,
+    ):
         self.arm = arm
         self.write_dir = Path(write_dir)
         self.planner_dir = Path(planner_dir or write_dir)
         self.base_layers = list(base_layers)
         self.restore_world = restore_world
         self.extra = list(extra)
+        self.sweep_config = sweep_config
+        self._sweep_boxes = None
         self.restore_needed = False
         self.loaded = None  # the obstacles the planner holds now (pushed by this action), None: not ours
         self.pushes = 0
         self.push_s = 0.0  # time spent pushing worlds (writing the scene, the planner loading it)
+
+    def door_sweep_boxes(self):
+        if self._sweep_boxes is None:
+            if self.sweep_config is None:
+                boxes = [
+                    box for box in self.extra
+                    if box["name"].partition("/")[0] in door_sweep.CHAIR_LAYERS | {"chair_stand_in"}
+                ]
+                self._sweep_boxes = boxes, door_sweep.LAYER_PADDING_M
+            else:
+                try:
+                    self._sweep_boxes = door_sweep.deployment_boxes(self.sweep_config)
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError) as e:
+                    raise Refused(f"Door sweep layers unavailable ({self.sweep_config}): {e}") from e
+        return self._sweep_boxes
 
     def push(self, obstacles, label, *, deadline=None):
         """Make `obstacles` (+ `extra`) the planner's world. Nothing is sent if it holds exactly these already.
