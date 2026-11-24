@@ -54,8 +54,8 @@ from scipy.spatial.transform import Rotation as R
 
 from . import constants as F
 from . import planning as pl
-from . import push_open as P
 from . import proven, relocalize
+from . import push_open as P
 from . import side_grasp as S
 from .door_sweep import SweepBlocked, check_open
 from .motion import load_door, logged_run, opened
@@ -649,13 +649,6 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=Fa
                 progress(min(99.0, 100 * (now - start) / (deadline - start)), f"Planning {grasp} grasp, {detail}")
             try:
                 result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging, adaptive, grasp)
-                try:
-                    planner.join(result["approach"], result["model"].cabinet())
-                except (pl.OverBudget, pl.PlannerBusy):
-                    raise
-                except Refused as e:
-                    diagnostics.append({"stage": "approach join", "reason": str(e), "candidate": result["name"]})
-                    raise Infeasible(str(e)) from e
                 planner.check_deadline()
                 return result
             except SweepBlocked as e:
@@ -824,12 +817,37 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         door = closed_door(geom, c["h"], c.get("ref", c["pos"]), c)
         sw = found["swing"]
         angle = found["swing_deg"]
-        args = (planner, opened(door, angle), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
+        swung_door = opened(door, angle)
+        args = (planner, swung_door, sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
         # Keep the established pull for a base move. The shorter handoff is planned at the measured dock.
         ok, msg = after.plan(*args, in_place=angle < swing) if adaptive_pull else after.plan(*args)
         if not ok:
             fail(found["name"], f"after swing: {msg}")
             return None
+        phases = [("approach", found["approach"], model.cabinet())]
+        if push is not None:
+            phases.extend(
+                (
+                    ("pull", sw, model.cabinet()),
+                    ("push" if not push.chair_move else "release", push.motion, FridgeModel(swung_door).cabinet()),
+                )
+            )
+            if push.chair_move:
+                moved = FridgeModel(P.shifted(swung_door, push.chair_move, push.chair_dir))
+                phases.append(("push after chair move", push.push, moved.cabinet()))
+        previous = q0
+        for label, motion, obstacles in phases:
+            try:
+                samples = planner.join(motion, obstacles).joined.q
+                if len(samples):
+                    if np.max(np.abs(samples[0] - previous)) >= np.radians(pl.START_TOL_DEG):
+                        raise Refused("joint discontinuity at the start of the joined trajectory")
+                    previous = samples[-1]
+            except (pl.OverBudget, pl.PlannerBusy):
+                raise
+            except Refused as e:
+                fail(found["name"], f"{label} join: {e}")
+                return None
         say(f"  plan: {found['name']}, line-up {found['standoff'] * 100:.0f} cm out, swing {angle} deg; {msg}")
         return dict(found, door=door, model=model, after_msg=msg)
 
