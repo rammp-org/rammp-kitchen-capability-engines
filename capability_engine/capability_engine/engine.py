@@ -108,7 +108,9 @@ class Cancelled(Exception):
 class EngineError(Exception):
     """Raise from `execute()` to fail the action with an error code."""
 
-    def __init__(self, error_code: str, message: str = "", recoverable: bool = False, *, payload=None):
+    def __init__(
+        self, error_code: str, message: str = "", recoverable: bool = False, *, payload=None
+    ):
         super().__init__(message or error_code)
         self.error_code = error_code
         self.recoverable = recoverable

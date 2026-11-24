@@ -1120,7 +1120,9 @@ class ArmInterface:
             self._goals.append(send)
         return send
 
-    def _goal_result(self, send, timeout_s, label, monitor=None, path=False, moves=True, *, deadline=None):
+    def _goal_result(
+        self, send, timeout_s, label, monitor=None, path=False, moves=True, *, deadline=None
+    ):
         """Wait for goal `send`'s acceptance, then up to `timeout_s` for its result: the action's
         Result. A cancel of the action cancels the goal and raises Cancelled. Refused (`label`
         first) when the goal is refused or unanswered, or has no result in time (it is then
@@ -1128,7 +1130,9 @@ class ArmInterface:
         the goal runs; True cancels the goal and sets monitor_stopped. `path`: record last_path.
         `moves`: a goal that moves the arm (not a plan), so a refusal says nothing moved."""
         ctx = self._ctx
-        wait_until(lambda: send.done() or not self._in_action, _remaining(GOAL_ACCEPT_S, deadline), ctx)
+        wait_until(
+            lambda: send.done() or not self._in_action, _remaining(GOAL_ACCEPT_S, deadline), ctx
+        )
         gh = send.result() if send.done() else None
         with self._alive(ACTION_ENDED_MESSAGE):  # end_action() settles it then
             rf = gh.get_result_async() if gh is not None and gh.accepted else None
@@ -1346,7 +1350,16 @@ class ArmInterface:
         g.start_joints = [float(x) for x in start_joints]
         return self._plan_goal("plan_to_joints", g, deadline=deadline)
 
-    def blend(self, legs, blend_radius, speed_scale=None, hold=None, hold_orientation=None, *, deadline=None) -> Plan:
+    def blend(
+        self,
+        legs,
+        blend_radius,
+        speed_scale=None,
+        hold=None,
+        hold_orientation=None,
+        *,
+        deadline=None,
+    ) -> Plan:
         """cuRobo's ONE trajectory through `legs` (Plans it returned, each planned from the last
         joints of the leg before), passing junction k (the end of leg k) still moving where
         `blend_radius[k]` (m, one per junction) > 0 and stopping on it where it is 0. The planner
@@ -1376,7 +1389,10 @@ class ArmInterface:
         if self._mock:
             return self._mock_sent("set_world"), MOCK_NOT_SENT
         res = self._call(
-            "set_world", SetWorld.Request(world=world), cancellable=not even_if_cancelled, deadline=deadline
+            "set_world",
+            SetWorld.Request(world=world),
+            cancellable=not even_if_cancelled,
+            deadline=deadline,
         )
         return res.success, res.message
 
@@ -1441,13 +1457,17 @@ class ArmInterface:
         client = self._client(name)
         ctx = self._ctx if cancellable else None
         path = SERVICES[name][1]
-        if not wait_until(lambda: self._live(client.service_is_ready), _remaining(SERVICE_WAIT_S, deadline), ctx):
+        if not wait_until(
+            lambda: self._live(client.service_is_ready), _remaining(SERVICE_WAIT_S, deadline), ctx
+        ):
             self._fail(Refused, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?")
         with self._alive():  # end_action() settles a request sent here (`on_sent`)
             future = client.call_async(request)
             if on_sent is not None:
                 on_sent(future)
-        if not wait_until(lambda: self._live(future.done), _remaining(SERVICE_CALL_S, deadline), ctx):
+        if not wait_until(
+            lambda: self._live(future.done), _remaining(SERVICE_CALL_S, deadline), ctx
+        ):
             self._fail(Refused, f"{path}: no answer in {SERVICE_CALL_S:g} s")
         return future.result()
 
