@@ -787,7 +787,7 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         angle = found["swing_deg"]
         args = (planner, opened(door, angle), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
         # Keep the established pull for a base move. The shorter handoff is planned at the measured dock.
-        ok, msg = after.plan(*args, in_place=True) if adaptive_pull and angle < swing else after.plan(*args)
+        ok, msg = after.plan(*args, in_place=angle < swing) if adaptive_pull else after.plan(*args)
         if not ok:
             fail(found["name"], f"after swing: {msg}")
             return None
@@ -1286,7 +1286,8 @@ def run(
     staging=None,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
-    Exactly `swing_deg` (default PUSH_OPEN_PULL_DEG, or SWING_DEG without `push`), then what follows. `grasp_offset`:
+    Pull to `swing_deg` when specified, or SWING_DEG without `push`. The default side-grasp push-open tries
+    shorter pulls before PUSH_OPEN_PULL_DEG. `grasp_offset`:
     grasp this far (m) above the middle of the bar (set_grasp_offset). `release_only`: let go and back off the handle,
     nothing else (when a run stopped holding it). `save_door`: a dry run that plans OK also writes DOOR_FILE as the
     planned open would leave it (save_planned_door). `around` (the full-pull path only, `push` false): False tests the
