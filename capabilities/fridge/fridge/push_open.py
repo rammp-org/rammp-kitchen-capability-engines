@@ -370,6 +370,12 @@ def _after(move):
     return "no wheelchair move needed" if not move else f"after the wheelchair moves {_how(move)}"
 
 
+def release_geometry(model, angle):
+    """The hinge and free edge that determine the route around the released door."""
+    df = model.df
+    return np.array([df.hinge[:2], df.pos(df.length, 0.0, angle, 0.0)[:2]])
+
+
 class PushOpen:
     """What follows the pull: plans the back-off, wheelchair move and push from the hand on the handle, the gripper
     open (`plan`), and runs them (`execute`), re-planned from where the pull really ended."""
@@ -385,6 +391,7 @@ class PushOpen:
         self.finish = ""  # how the push ends (plan_finished_push), in words
         self.in_place = False
         self.end_deg = None
+        self.release_geometry = None
 
     def safe_routes(self, model, world, deg0, *, in_place):
         boxes, padding = world.door_sweep_boxes()
@@ -436,6 +443,7 @@ class PushOpen:
             self.chair_move, self.placement = move, placed
             self.finish = finish
             self.end_deg = end_deg
+            self.release_geometry = release_geometry(model, deg0)
             if move == 0:
                 self.motion, self.push = pl.Motion(off.goals + push.goals, off.legs + push.legs, off.q0), None
             else:
@@ -489,8 +497,14 @@ class PushOpen:
         deg0 = float(door["door_open_deg"])
         if deg0 > F.PUSH_OPEN_TO_DEG - F.PUSH_OPEN_MIN_PUSH_DEG + 2:  # a pull may overshoot a little
             raise Refused(f"the door is already ~{deg0:.0f} deg open (push to {F.PUSH_OPEN_TO_DEG}).")
-        safe = self.safe_routes(FridgeModel(door), planner.world, deg0, in_place=self.in_place)
-        reuse = (self.chair_move, self.end_deg) in safe
+        model = FridgeModel(door)
+        safe = self.safe_routes(model, planner.world, deg0, in_place=self.in_place)
+        reuse = (
+            (self.chair_move, self.end_deg) in safe
+            and self.release_geometry is not None
+            and np.max(np.linalg.norm(release_geometry(model, deg0) - self.release_geometry, axis=1))
+            <= F.PUSH_RELEASE_REUSE_M
+        )
         say(f"  {after_release(self, planner, ai, door, reuse=reuse)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
         if not self.chair_move:

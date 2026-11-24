@@ -246,6 +246,9 @@ PUSH_OPEN_MIN_PUSH_DEG = 5  # ... at least this far past the pull: the pull is a
 # The hand envelope is wider than the physical fingers. Reject a deep
 # overlap during free travel, before the intentional preload into the door.
 PUSH_ENTRY_MAX_BOX_OVERLAP_M = 0.015
+# A larger displacement of the hinge or the release edge requires a fresh
+# push plan. The intentional contact preload is itself only one centimetre.
+PUSH_RELEASE_REUSE_M = 0.010
 # A parallel hand contacts the slab on the free-edge side of the tool.
 PUSH_PARALLEL_EDGE_INSET_M = 0.09
 PUSH_OPEN_EDGE_CLEAR_M = 0.16  # the point past the free edge (tool point), when cuRobo needs one
