@@ -41,6 +41,16 @@ the fingertips met the button (TF's lid was 76 mm high on 20:04, so every
 home was planned from "inside" a box that was not there). After a contact,
 a wrist camera that no longer finds the box holds the arm unless the scene
 camera finds it (after_scene_check), the reach-out's own AFTER rule.
+
+A COMPLIANT press (press_compliant, and the reach-out's one execution) has
+none of the above but the turn: one stroke down in the driver's joint
+impedance, watched. With PRESS_BY_FORCE (not flown) it stops where the pads
+meet the button and pushes from there (push_down): the springs' reference
+set, from the arm as it stands, to where they push COMPLIANT_PRESS_N straight
+down on the pads, again where the button gives; then held and read
+(compliant_hold), and back up. Off, as flown to 2026-11-20: the stroke ends
+as far past the contact as it was planned past the top, bent to push
+straight down at the button's modelled bottom.
 """
 
 import dataclasses
@@ -266,6 +276,56 @@ BEND_STEP_RAD = 0.005  # the bend's waypoints: no joint moves more than this bet
 # a bend dropping the pads less than this has nothing to bend (a chain whose
 # pads barely move with its joints, as the test fakes' that stand still)
 BEND_MIN_DROP_M = 0.001
+# A compliant press commands a force, not a depth (2026-11-23, from the code and its arithmetic, not
+# flown). Every press since 2026-11-12 met its button 40-45 mm above where the cameras put its top, so
+# the stroke was cut on its straight part, the bend never reached, and the springs held a reference
+# straight below the contact: pushing sideways too (fingertip_compliance), and, held `travel + over`
+# below the contact where the pink box's button bottoms after 7.5 mm of its 12, about 18 N, not 10.
+# With this on, the stroke is cut where the pads meet the button (watch_press: past_m 0) and push_down
+# sets the reference, from the arm as it stands, to where the springs push COMPLIANT_PRESS_N straight
+# down on the pads where they are. Off, the press is as it flew to 2026-11-20 (bc3c880): the only one
+# that has flown, kept to go back to at the bench with this one edit
+PRESS_BY_FORCE = True
+
+
+def push_on():
+    """Whether the press pushes by force: PRESS_BY_FORCE and press_contact's PRESS_FROM_CONTACT both on
+    (a push needs the stroke cut where the pads met the button). watch_press, press_text and
+    compliant_hold ask this one question; either off, the motion, the words and the run record are
+    bc3c880's."""
+    from box_opening.tasks import press_contact
+
+    return bool(PRESS_BY_FORCE and press_contact.PRESS_FROM_CONTACT)
+
+
+# push_down's bounds, all from the code and the arithmetic on 2026-11-23, none from a flight. The pads held
+# on a button are stiffer straight down than free ones (1 / C_zz, ~1600-1850 N/m): pinned there, they
+# cannot slide aside. Measured on the Gen3's chain (RIGID, the pads pinned): ~2800 N/m at the tests' press
+# pose 0.47 m out (test_depth_press's gen3), ~1950 at 0.62 m. The arithmetic takes K ~2800, the worse for
+# both bounds below (smaller steps, a larger shortfall). A step sets the reference to push F
+# (COMPLIANT_PRESS_N, 10 N) on pads that stand still; a
+# button that resists r N gives under it until the springs push r, (F - r) / K: 1.4 mm a step at 6 N,
+# 0.7 at 8 N. At most this many steps: 8 push a 7.5 mm travel through where it resists ~7.3 N or less
+# along it ((10 - 7.3) x 8 / 2800 = 7.7 mm), and stop on one that resists more (end "steps", or "held"
+# below)
+PUSH_STEPS = 8
+# the pads going down more than this during a step: the button gave and the force fell with it, so the
+# next step sets the reference again. 0.5 mm is ~1.4 N at K: the most the final force may fall short. So a
+# button that needs within ~1.5 N of F along its travel gives less than this a step and is not pushed
+# through: the push ends "held" where it stands, the record says how far it went down — reported, never
+# forced
+PUSH_GIVE_M = 0.0005
+# A step starts at the reference the driver holds (a reference that jumps up to the pads could let a
+# push-push latch go, and the push shut it again), unless that is farther than this from the measured
+# joints (largest joint difference): then this far from them, toward it. Under the runner's
+# DRIFT_REPLAN_RAD 0.04, which refuses a plan-free line that starts farther; it only binds after a
+# stroke that overshot far, and then it also lowers a force that stood above COMPLIANT_PRESS_N
+PUSH_START_MAX_RAD = 0.03
+# the pads this much more than cfg.button_travel_m below where the push began: nothing holds them up
+PUSH_THROUGH_M = 0.005
+# the pads this far sideways from where the push began: the box moves or the pads slip, no further step.
+# Twice what a bent reference moves pads that give
+PUSH_SLIDE_M = 0.004
 # A compliant reach-out's way back up from the hold (rise_back_up): the
 # stroke's own samples reversed, joined at the first one whose pads stand
 # this far above where the spring held them, the held arm's step to it no
@@ -1151,27 +1211,43 @@ def stroke_bend(chain, q_b, kq=COMPLIANT_KQ):
     flies straight instead: pads that do not move with the joints, or less
     than BEND_MIN_DROP_M, a bend past BEND_MAX_M, or an end outside a
     joint's limits."""
-    q_b = np.asarray(q_b, float)
+    return spring_end(chain, q_b, COMPLIANT_PRESS_N, kq, drop_within=COMPLIANT_OVERSHOOT_M)
+
+
+def spring_end(chain, q, force, kq=COMPLIANT_KQ, drop_within=None):
+    """The rule stroke_bend and push_down share: the springs' reference
+    q_end = q - F Kq^-1 J_z(q)^T, J_z the vertical row of fingertip_jacobian
+    at joints `q`, about which joint springs `kq` push F (`force`, N)
+    straight down at the pads held where they stand at `q`, nothing
+    sideways. `drop_within` (lo, hi): F scaled where the pads' reference
+    would then drop below the pads at `q` less or more than that, to drop
+    that bound, never past COMPLIANT_PRESS_MAX_N. Returns (q_end, how far
+    it moves the pads' reference sideways (m), None), or (None, that, why)
+    where it is refused: pads that do not move with the joints, or less
+    than BEND_MIN_DROP_M, a reference moved past BEND_MAX_M sideways, or an
+    end outside a joint's limits."""
+    q_b = np.asarray(q, float)
     J = fingertip_jacobian(chain, q_b)
     inv = 1.0 / np.asarray(kq, float)[: len(q_b)]
     if float(J[2] @ (inv * J[2])) <= 0.0:
         return None, 0.0, "the pads do not move with the joints here"
     pad_b = _pads(chain, q_b)
 
-    def end(force):
-        q = q_b - force * inv * J[2]
-        return q, float(pad_b[2] - _pads(chain, q)[2])
+    def end(f):
+        q_f = q_b - f * inv * J[2]
+        return q_f, float(pad_b[2] - _pads(chain, q_f)[2])
 
-    force = COMPLIANT_PRESS_N
     q_end, drop = end(force)
     if drop < BEND_MIN_DROP_M:
         return None, 0.0, "a bend would drop the pads only %.1f mm" % (1000 * drop)
-    bound = min(max(drop, COMPLIANT_OVERSHOOT_M[0]), COMPLIANT_OVERSHOOT_M[1])
-    if bound != drop:
-        force *= bound / drop
-    force = min(force, COMPLIANT_PRESS_MAX_N)  # (the floor never pushes harder than the ceiling)
-    if force != COMPLIANT_PRESS_N or bound != drop:
-        q_end, drop = end(force)
+    if drop_within is not None:
+        asked = force
+        bound = min(max(drop, drop_within[0]), drop_within[1])
+        if bound != drop:
+            force *= bound / drop
+        force = min(force, COMPLIANT_PRESS_MAX_N)  # (the floor never pushes harder than the ceiling)
+        if force != asked or bound != drop:
+            q_end, drop = end(force)
     aside = float(np.hypot(*(_pads(chain, q_end) - pad_b)[:2]))
     if aside > BEND_MAX_M:
         return (
@@ -1199,7 +1275,11 @@ def compliant_stroke(chain, cfg, q0, quat, top_z, kq=COMPLIANT_KQ):
     straight on down to as far below the bottom as the spring there
     (fingertip_stiffness_z at q_b) needs to push COMPLIANT_PRESS_N, within
     COMPLIANT_OVERSHOOT_M, refused where the pads already stand below that.
-    Returns (StrokePlan, None) or (None, why)."""
+    Returns (StrokePlan, None) or (None, why). With PRESS_BY_FORCE the
+    contact watch stops it where the pads meet the button (watch_press),
+    on its straight part wherever the button stands above its modelled
+    bottom, and the push (push_down) sets the force from there: its end and
+    its bend are what it flies only where nothing is met before them."""
     q0 = [float(v) for v in q0]
     R0, t0 = chain.fk(q0)
     R0, t0 = np.asarray(R0, float), np.asarray(t0, float)
@@ -1311,8 +1391,23 @@ def press_text(stroke, cfg):
     """What the console says of a compliant stroke (compliant_stroke's)
     before it flies: how far down, past the button's bottom, bent how far
     aside (or why not), with what spring, held how long — and the lean,
-    from LEAN_SAID_DEG on."""
+    from LEAN_SAID_DEG on. The push on (push_on): straight down until the
+    pads meet the button, then the push (push_down), and no depth below it."""
     lean = _lean_deg(stroke.quat)
+    leaning = ", the hand leaning %.0f deg back toward the arm" % lean if lean >= LEAN_SAID_DEG else ""
+    if push_on():
+        return (
+            "PRESS (compliant)%s: straight down, watched, until the pads meet the button (%.0f mm at most); "
+            "from where they meet it the arm pushes ~%.0f N straight down (%.0f N/m at the pads), held %.1f s, "
+            "then back up. A contact well off the cameras' top refuses it"
+            % (
+                leaning,
+                1000 * (stroke.pad0[2] - stroke.end_z),
+                min(COMPLIANT_PRESS_N, COMPLIANT_PRESS_MAX_N),
+                stroke.k,
+                cfg.push_hold_s,
+            )
+        )
     if stroke.bent:
         how = (
             "straight down %.0f mm to the button's bottom, its reference on %.0f mm below it and %.0f mm aside, "
@@ -1339,12 +1434,7 @@ def press_text(stroke, cfg):
         )
     return (
         "PRESS (compliant)%s: %s; held %.1f s, then back up. Watched all the way down: it ends past where the "
-        "pads meet the button, and a contact well off the cameras' top refuses it"
-        % (
-            ", the hand leaning %.0f deg back toward the arm" % lean if lean >= LEAN_SAID_DEG else "",
-            how,
-            cfg.push_hold_s,
-        )
+        "pads meet the button, and a contact well off the cameras' top refuses it" % (leaning, how, cfg.push_hold_s)
     )
 
 
@@ -1355,8 +1445,12 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
     stop_when. It watches the whole descent, the execution's last stretch
     below where the stroke begins (DESCENT_ARM_M under its pads at q0; the
     slow rise once the slow leg's start, TOUCH_SLOW_M above the top, has
-    settled) and, with `cut`, ends the stroke as far past where the pads met
-    the box as it was planned past the top — never deeper than planned. A
+    settled) and, with `cut`, ends the stroke where the pads met the box
+    (past_m 0: the cut fires where the contact is detected, the reference
+    already some millimetres past it), from where compliant_hold's push
+    (push_down) sets the force. The push off (push_on), as before: it ends
+    the stroke as far past where the pads met the box as it was planned
+    past the top — never deeper than planned. A
     contact outside CONTACT_EARLY_M above to CONTACT_LATE_M below the top,
     none at all, or a watch that fails, refuses the press, the stroke
     stopped where that is judged (PressContact.refusal: the caller goes back
@@ -1386,7 +1480,7 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
         ctx.client,
         top_z,
         max(slow_z, start_z - DESCENT_ARM_M),
-        float(top_z) - float(stroke.end_z),
+        0.0 if push_on() else float(top_z) - float(stroke.end_z),
         stroke.end_z,
         cut=cut,
         final=True,
@@ -1404,23 +1498,204 @@ def watch_press(ctx, legs, stroke, top_z, cut=True):
     return contact
 
 
+@dataclass
+class PressPush:
+    """What push_down did: the reference `ref` (joints) it left the driver
+    holding, the one the hold reads the springs' pull toward; `steps`
+    flown; how far the pads went `down_m` and `aside_m` from where they
+    stood when it began; and why it ended, `end` (held: the button held
+    under the last step; steps: PUSH_STEPS flown; refused: the rule's
+    refusals, spring_end's; not started: the runner or the driver refused
+    a step; stopped: a step stopped part-way; through: the pads went past
+    the button's travel; slid: the pads went sideways) and `why`, its
+    words. `let_go`: the springs were let go (every end but held), `ref`
+    the arm as it stood. `stopped`: which step stopped part-way and the
+    runner's words, else "" — only that ends the run (compliant_hold)."""
+
+    ref: list
+    steps: int
+    down_m: float
+    aside_m: float
+    end: str
+    why: str
+    let_go: bool = False
+    stopped: str = ""  # a step that stopped part-way: which, and the runner's words ("": none did)
+
+    def record(self):
+        """The run record's 'push' (depth_compliant_press)."""
+        return dict(
+            steps=self.steps,
+            force_n=min(COMPLIANT_PRESS_N, COMPLIANT_PRESS_MAX_N),
+            down_mm=round(1000 * self.down_m, 1),
+            aside_mm=round(1000 * self.aside_m, 1),
+            end=self.end,
+            why=self.why,
+            let_go=self.let_go,
+            stopped_part_way=bool(self.stopped),
+        )
+
+
+def push_down(ctx, cfg, runner, stroke, held_ref):
+    """The compliant press's push (PRESS_BY_FORCE), after its `stroke`
+    (compliant_stroke's) was cut where the pads met the button, the driver
+    holding the reference `held_ref` there: up to PUSH_STEPS steps, each a
+    plan-free compliant line 'depth:push' (compliant_line, at the stroke's
+    slow speed, no lookahead) in joint space, no joint moving more than
+    BEND_STEP_RAD between two waypoints, from the reference the driver
+    holds — never jumping up to the pads, which could let a push-push latch
+    go; PUSH_START_MAX_RAD from the measured joints toward it where it
+    stands farther, under the runner's drift gate — to
+    q - F Kq^-1 J_z(q)^T (spring_end), q the arm's measured joints on the
+    reference's side of the wrap and F COMPLIANT_PRESS_N, never past
+    COMPLIANT_PRESS_MAX_N: held at q, the springs push F straight down at
+    the pads, whatever the compliance couples. The first step is worked
+    out from the joints as the stroke's execution returned, and goes out
+    at once: no wait at the cut, whose reference stands over the cap.
+    After each step the arm is waited still (runner.wait_still: it spins
+    and hears fresh joints) and the pads are read from joints heard after
+    that wait: down more than PUSH_GIVE_M during the step, the button gave
+    and the force fell, and the next step sets the reference again from
+    there. One rule for how it ends: either with the springs set to push
+    F straight down on pads that stand where it was set for (held: a
+    step the button held), or with the springs let go (refused: a step
+    the rule refuses; not started: one the runner or the driver refuses
+    before it starts; slid: the pads more than PUSH_SLIDE_M sideways from
+    where it began, a WARNING; steps: PUSH_STEPS flown and the button gave
+    under the last too; through: the pads more than cfg.button_travel_m +
+    PUSH_THROUGH_M below where it began; all five
+    rp.let_go, the reference the arm as it stands — the stroke's cut
+    reference, straight below the pads, unbent and over the cap, is never
+    kept — and stopped: a step that stopped part-way,
+    rp.let_go_part_way). After a let-go the hold reads not felt; only
+    "stopped" ends the run (compliant_hold). "Held" is bounded by the
+    wait: an arm wait_still calls still while the button creeps on under
+    it, a wait that timed out, or a client with no stream to wait on
+    reads as held, and the hold's own reading (press_n, from joints heard
+    through the hold) then says the force that was there. Nothing in it
+    reads a camera, a stiffness or a planned depth. Said in one line
+    ('PUSH:'). Not flown. Returns a PressPush."""
+    from box_opening.runtime import approach
+    from box_opening.runtime.branches import on_branch
+
+    chain = approach._chain()
+    force = min(COMPLIANT_PRESS_N, COMPLIANT_PRESS_MAX_N)
+    world = _full_world(ctx)
+    speed = COMPLIANT_STROKE_SLOWDOWN * TOUCH_SPEED
+    ref = np.asarray(held_ref, float)
+    # as the stroke's execution returned (no wait: the cut's reference stands over the cap, and the wait
+    # after the first step corrects an arm not quite still here)
+    q = np.asarray(on_branch(ctx.client.joints(), ref), float)  # the reading is wrapped, the reference is not
+    first = _pads(chain, q)
+    steps, end, why, let_go, stopped = 0, None, None, False, ""
+    while end is None:
+        target, _aside, refused = spring_end(chain, q, force, COMPLIANT_KQ)
+        if refused is not None:
+            end, why = "refused", "%s; the springs let go" % refused
+            break
+        gap = float(np.abs(ref - q).max())
+        start = ref if gap <= PUSH_START_MAX_RAD else q + (ref - q) * (PUSH_START_MAX_RAD / gap)
+        n = max(2, int(math.ceil(float(np.abs(target - start).max()) / BEND_STEP_RAD)))
+        pts = [list(start + (target - start) * (i / n)) for i in range(n + 1)]
+        res = runner.run([compliant_line(ctx, "depth:push", pts, stroke.quat, speed, world)], execute=True)
+        if any(not r.ok for r in res):
+            last = res[-1]
+            if last.flown_traj is None or not last.progress:
+                end = "not started"
+                why = "step %d did not start (%s); the springs let go" % (steps + 1, last.detail or last.outcome)
+            else:
+                rp.let_go_part_way(ctx, res)  # stopped part-way: the springs would pull on toward its next point
+                stopped = "step %d: %s" % (steps + 1, last.detail or last.outcome)
+                end, let_go = "stopped", True
+                why = "step %d stopped part-way (%s); the springs let go" % (steps + 1, last.detail or last.outcome)
+            break
+        ref, steps = target, steps + 1
+        # read from joints heard after the arm stands: client.joints() is what this node last heard, the
+        # step's execution as it returned, a button still sinking under it then; wait_still spins and hears
+        runner.wait_still("the push's read after step %d" % steps)
+        before = _pads(chain, q)
+        q = np.asarray(on_branch(ctx.client.joints(), ref), float)
+        pad = _pads(chain, q)
+        aside = float(np.hypot(*(pad - first)[:2]))
+        if aside > PUSH_SLIDE_M:
+            end, why = "slid", "the pads went %.1f mm sideways; the springs let go" % (1000 * aside)
+            log.info(
+                "[press_demo] WARNING: the pads went %.1f mm sideways under the push (more than %.0f): the box is "
+                "moving or the pads slip — no further push, the springs let go" % (1000 * aside, 1000 * PUSH_SLIDE_M)
+            )
+        elif first[2] - pad[2] > float(cfg.button_travel_m) + PUSH_THROUGH_M:
+            end = "through"
+            why = "the pads went %.1f mm down, past the button's %.0f mm travel; the springs let go" % (
+                1000 * (first[2] - pad[2]),
+                1000 * float(cfg.button_travel_m),
+            )
+        elif before[2] - pad[2] <= PUSH_GIVE_M:
+            end, why = "held", "the button held"
+        elif steps >= PUSH_STEPS:
+            end, why = "steps", "the button still gave after %d steps; the springs let go" % steps
+    if end not in ("held", "stopped"):
+        # the springs let go: the reference held (the cut's, straight below the pads, unbent and over the
+        # cap; or one set for where the pads stood before they slid or went on down, which pushes partly
+        # sideways) is not kept. Only a button that held under the last step keeps its push
+        rp.let_go(ctx)
+        let_go = True
+    if let_go:
+        q = np.asarray(on_branch(ctx.client.joints(), ref), float)
+        ref = q  # the driver holds where the arm stands
+    pad = _pads(chain, q)
+    push = PressPush(
+        [float(v) for v in ref],
+        steps,
+        round(float(first[2] - pad[2]), 6) + 0.0,  # (rounded, + 0.0: pads that did not move say 0 mm, not -0)
+        float(np.hypot(*(pad - first)[:2])),
+        end,
+        why,
+        let_go,
+        stopped,
+    )
+    if not steps and end == "stopped":
+        log.info(
+            "[press_demo] PUSH: step 1 stopped part-way from where the pads met the button, the pads %.1f mm "
+            "lower and %.1f mm aside: %s" % (1000 * push.down_m, 1000 * push.aside_m, why)
+        )
+    elif steps:
+        log.info(
+            "[press_demo] PUSH: %d step%s straight down to ~%.0f N from where the pads met the button, the pads "
+            "%.1f mm lower and %.1f mm aside: %s"
+            % (steps, "" if steps == 1 else "s", force, 1000 * push.down_m, 1000 * push.aside_m, why)
+        )
+    else:
+        log.info("[press_demo] PUSH: none from where the pads met the button: %s" % why)
+    return push
+
+
 def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
     """The compliant press's hold at the end of its stroke (`stroke`,
     compliant_stroke's) on the button whose top is at `top_z`: held
     push_hold_s where the springs left the pads, pressing — the hold IS the
-    reading. What the pads pushed with is the joint springs' pull from the
-    held arm toward the stroke's end (stroke.q_end, under COMPLIANT_KQ; a
-    stroke cut past where the pads met the box, `contact`'s held_ref, the
-    reference the driver holds there: watch_press) as the pads feel it:
-    the force f, world axes, with J^T f = Kq (q_end - q_held), least
-    squares, J fingertip_jacobian's at the held arm. Its
-    downward part is the press, COMPLIANT_FELT_N or more a press, and the
+    reading. With PRESS_BY_FORCE, a stroke `contact` cut where the pads met
+    the box (watch_press) is pushed first (push_down): the reference set,
+    from the arm as it stands, to where the springs push COMPLIANT_PRESS_N
+    straight down on the pads, again where the button gave; the hold reads
+    against the reference the push left. Off (as before), or a stroke not
+    cut: against the stroke's end (stroke.q_end), or the reference a cut
+    left the driver holding (`contact`'s held_ref). What the pads pushed
+    with is the joint springs' pull (under COMPLIANT_KQ) from the held arm
+    toward that reference as the pads feel it: the force f, world axes,
+    with J^T f = Kq (q_ref - q_held), least squares, J
+    fingertip_jacobian's at the held arm. Its downward part is the press,
+    COMPLIANT_FELT_N or more a press (never one whose push let the springs
+    go), and the
     rest the sideways shove. seen["touch_xyz"] is where the pads were held,
-    pressing, and seen["held_joints"] the arm held there, the way back up's
-    start (rise_back_up). The run record (depth_compliant_press) and the
-    console say it, the bend, and how far from the aim (the pads at q0)
-    the pads were held. Returns the verdict: a DepthPress, free, judged
-    False (a compliant press does not look)."""
+    pressing, and seen["held_joints"] the arm held there, after the push,
+    the way back up's start (rise_back_up). The run record
+    (depth_compliant_press, the push's facts under 'push') and the console
+    say it, the bend, and how far from the aim (the pads at q0) the pads
+    were held. Returns the verdict: a DepthPress, free, judged False (a
+    compliant press does not look) — not free where a push step stopped
+    part-way: "the push stopped (...) — the arm holds", and each caller
+    ends the run there as for a stroke that stopped part-way. Any other
+    push that did not end with the button held let the springs go too, and
+    the hold reads it not felt, free."""
     from box_opening.runtime import approach
     from box_opening.runtime.branches import on_branch
 
@@ -1428,8 +1703,31 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
     k, end_z = stroke.k, stroke.end_z
     q_end = stroke.q_end if stroke.q_end is not None else (stroke.legs[-1][1][-1] if stroke.legs else stroke.q0)
     cut = contact is not None and contact.held_ref is not None
-    if cut:  # the stroke ended past where the pads met the box: the reference held there
+    if cut:  # the stroke ended where the pads met the box (or past it): the reference held there
         q_end, end_z = contact.held_ref, float(contact.stop_z)
+    pushing = push_on()
+    met = None
+    if contact is not None:
+        met = contact.record()  # where the pads met the box, and the stroke cut there or not
+        if met.get("met"):
+            if not met["cut"]:
+                how = "the stroke flew as planned (%s)" % met.get("why", "")
+            elif pushing:
+                how = "the stroke stopped where they met it, %.0f mm above its planned end" % met["cut_mm"]
+            else:
+                how = "the stroke cut %.0f mm short of its planned end, %.0f mm past it" % (
+                    met["cut_mm"],
+                    met["past_mm"],
+                )
+            log.info(
+                "[press_demo] CONTACT: the pads met the box at %.3f, %+.0f mm from the top the cameras measured; %s"
+                % (met["z"], met["above_top_mm"], how)
+            )
+        else:
+            log.info("[press_demo] CONTACT: none seen on the way down; the stroke flew as planned")
+    push = push_down(ctx, cfg, runner, stroke, q_end) if cut and pushing else None
+    if push is not None:
+        q_end = push.ref
     q_end = np.asarray(q_end, float)
     held = ctx.client.settled_efforts(duration_s=0.15, settle_s=max(0.0, float(cfg.push_hold_s) - 0.15))
     # the driver's own estimate of the force on the tool over the same last 0.15 s of the hold
@@ -1442,7 +1740,7 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
     pull = np.asarray(COMPLIANT_KQ, float)[: len(qh)] * (q_end - qh)
     f = np.linalg.lstsq(fingertip_jacobian(chain, qh).T, pull, rcond=None)[0]
     force, aside = float(-f[2]) + 0.0, float(np.hypot(f[0], f[1]))  # + 0.0: a spring at rest says 0 N, not -0
-    felt = force >= COMPLIANT_FELT_N
+    felt = force >= COMPLIANT_FELT_N and not (push is not None and push.let_go)
     if felt:
         seen["touch_xyz"] = tuple(round(float(v), 5) for v in pad)  # where the pads were held, pressing
     off = pad[:2] - np.asarray(stroke.pad0, float)[:2]  # the held pads from the aim
@@ -1466,21 +1764,10 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
     lean = _lean_deg(stroke.quat)
     if lean >= LEAN_SAID_DEG:
         facts["lean_deg"] = lean
-    if contact is not None:
-        facts["contact"] = met = contact.record()  # where the pads met the box, and the stroke cut past it or not
-        if met.get("met"):
-            log.info(
-                "[press_demo] CONTACT: the pads met the box at %.3f, %+.0f mm from the top the cameras measured; %s"
-                % (
-                    met["z"],
-                    met["above_top_mm"],
-                    "the stroke cut %.0f mm short of its planned end, %.0f mm past it" % (met["cut_mm"], met["past_mm"])
-                    if met["cut"]
-                    else "the stroke flew as planned (%s)" % met.get("why", ""),
-                )
-            )
-        else:
-            log.info("[press_demo] CONTACT: none seen on the way down; the stroke flew as planned")
+    if met is not None:
+        facts["contact"] = met
+    if push is not None:
+        facts["push"] = push.record()
     runner.note("depth_compliant_press", **facts)
     pushed = max(float(force), float((driver_force or {}).get("peak_n") or 0.0))
     if pushed > COMPLIANT_PRESS_MAX_N + PRESS_OVER_SAID_N:
@@ -1490,19 +1777,31 @@ def compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=None):
             "stiffer than the model has it, or the button stood higher): bring this run back"
             % (pushed, COMPLIANT_PRESS_MAX_N)
         )
+    if push is not None:
+        below = 1000 * (end_z - pad[2])
+        where = "%.0f mm %s where they met the button" % (abs(below), "below" if below >= 0 else "above")
+    else:
+        where = "%.0f mm above the stroke's %send" % (1000 * (pad[2] - end_z), "cut " if cut else "")
     log.info(
-        "[press_demo] %s, %.0f N sideways: the pads held %.0f mm above the stroke's %send, %.0f mm %s the button's "
-        "top, %.0f mm from the aim"
+        "[press_demo] %s, %.0f N sideways: the pads held %s, %.0f mm %s the button's top, %.0f mm from the aim"
         % (
             "PRESSED with ~%.0f N" % force if felt else "NOTHING PRESSED (%.0f N)" % force,
             aside,
-            1000 * (pad[2] - end_z),
-            "cut " if cut else "",
+            where,
             1000 * abs(float(top_z) - pad[2]),
             "below" if pad[2] < float(top_z) else "above",
             1000 * float(np.hypot(*off)),
         )
     )
+    if push is not None and push.stopped:
+        return DepthPress(
+            free=False,
+            contact=felt,
+            felt=felt,
+            judged=False,
+            press_n=force,
+            why="the push stopped (%s) — the arm holds" % push.stopped,
+        )
     return DepthPress(free=True, contact=felt, felt=felt, judged=False, press_n=force)
 
 
@@ -1594,7 +1893,12 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
     fly. From the stroke's start until the rise ends a stop lets go
     (rp.let_go): the stroke stopped part-way, the way up refused or
     stopped (compliant_rise), anything raised — and before it, a turn
-    stopped part-way (turn_down's). A turn or a stroke that did not start
+    stopped part-way (turn_down's). With PRESS_BY_FORCE (not flown) the
+    stroke stops where the pads meet the button and the hold pushes from
+    there (compliant_hold, push_down): the springs push COMPLIANT_PRESS_N
+    straight down on the pads where they stand, not toward the stroke's
+    end, and a push step that stopped part-way holds the arm there, let
+    go, as a stroke that did; off, as before. A turn or a stroke that did not start
     moved nothing, and nothing is let go: after the stroke's, the arm
     stands over the button in free air, free to go home."""
     from box_opening.runtime import approach
@@ -1613,7 +1917,7 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
         return DepthPress(free=True, why=why)
     world = _full_world(ctx)
     legs = [compliant_line(ctx, name, pts, quat, speed, world) for name, pts, speed in stroke.legs]
-    contact = watch_press(ctx, legs, stroke, top_z)  # where the pads meet the box ends the stroke past it
+    contact = watch_press(ctx, legs, stroke, top_z)  # where the pads meet the box ends the stroke (watch_press)
     log.info("[press_demo] %s" % press_text(stroke, cfg))
     viz_hook("press", stroke, top_z, cfg)  # the stroke, drawn off this thread (perception/viz)
     try:
@@ -1638,9 +1942,10 @@ def press_compliant(ctx, cfg, runner, contact_tool, seen, turned=None, top_z=Non
         if any(not r.ok for r in res):
             rp.let_go(ctx)  # stopped part-way down, or on the button
             return DepthPress(free=False, why="the press stroke stopped (%s) — the arm holds" % res[-1].detail)
-        return compliant_rise(
-            ctx, runner, stroke, compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=contact)
-        )
+        held = compliant_hold(ctx, cfg, runner, stroke, top_z, seen, contact=contact)
+        if not held.free:
+            return held  # its push stopped part-way, let go: the arm holds, as a stroke stopped part-way
+        return compliant_rise(ctx, runner, stroke, held)
     except BaseException:
         # a Ctrl+C in the hold's read lands with no goal in flight (abort.py
         # raises at once): the springs would push on into the box

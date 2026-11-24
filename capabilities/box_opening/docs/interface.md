@@ -63,7 +63,19 @@ beside the container, and goes home. It has one action, `open_box`:
    that frame, or no button from them either, `no_button`.
 1. **Press:** the fingers, closed, press the button in joint impedance. The arm
    feels where the pads meet the lid, watching its whole way down, and the
-   stroke ends the button's travel past that. A press that meets something
+   stroke stops there. From where the arm then stands it pushes 10 N straight
+   down on the pads (the joint springs' reference set for that force, not a
+   depth), and pushes again where the button gives, up to eight short pushes:
+   no height from a camera, no button travel and no stiffness model sets the
+   force. A push that stops part-way ends the run there, the arm let go and
+   holding, as a stroke that stops part-way does. Any other push that does
+   not end with the button held (the arm cannot fly or start it, the pads
+   slide more than 4 mm sideways, the button still gives after eight pushes
+   or goes past its travel) lets the springs go, and the press counts as not
+   felt. Not flown: the press as
+   flown to 2026-11-20, the stroke ending the button's travel past the
+   contact, is one switch away (`depth_press.PRESS_BY_FORCE`). A press that
+   meets something
    more than 45 mm above the button's top as the cameras saw it, or nothing
    down to 25 mm below it, is refused: stopped there, back up and home
    (`contact_early`, `contact_late`).
@@ -1226,7 +1238,7 @@ flies in position control instead:
 - the arm then stands at the stroke's start while the driver is put in its
   joint impedance there and its spring fades in (0.8 s, run-log row
   `air_switch`);
-- the stroke (`depth:approach`, `depth:press`), the hold, the grip and
+- the stroke (`depth:approach`, `depth:press`), its push (`depth:push`), the hold, the grip and
   everything after fly as they did. The grip's own way down to the knob stays
   one motion in the impedance.
 

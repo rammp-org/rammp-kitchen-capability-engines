@@ -740,6 +740,7 @@ def test_the_view_never_stops_the_reader_that_feeds_it():
         ("the way home stopped during home (path tolerance) — the arm holds", "HOME"),
         ("the way down to the knob stopped during grip:down (the driver aborted) — the arm holds", "GRIP"),
         ("the way in stopped during depth:approach (cancelled) — the arm holds", "PRESS"),
+        ("the push stopped (step 2: PATH_TOLERANCE_VIOLATED) — the arm holds", "PRESS"),
         (
             "the lid's way from the box to the table stopped during place:touch (path tolerance) — the "
             "arm holds the lid",

@@ -122,6 +122,13 @@ PRESS_START = re.compile(r"^(?:PRESS (\d+) of \d+: )?ONE MOTION from the look po
 PRESS_LEAN = re.compile(r"^PRESS \(compliant\), the hand leaning (\d+) deg")
 CONTACT = re.compile(r"^CONTACT: the pads met the box at [\d.]+, ([-+]?\d+) mm from the top")
 PRESSED = re.compile(r"^PRESSED with ~(\d+) N")
+# the push after the stroke stopped where the pads met the button (tasks/depth_press.push_down): its steps,
+# the force, how far the pads went down, and why it ended
+PUSH = re.compile(r"^PUSH: (\d+) steps? straight down to ~(\d+) N .*?, the pads (-?[\d.]+) mm lower .*?: (.*)$")
+PUSH_NONE = re.compile(r"^PUSH: none from where the pads met the button: (.*)$")
+PUSH_STOPPED = re.compile(
+    r"^PUSH: step 1 stopped part-way from where the pads met the button, the pads (-?[\d.]+) mm lower .*?: (.*)$"
+)
 PRESS_REFUSED = re.compile(r"^PRESS REFUSED \((.*?)\)")
 GRIP_FROM_PRESS = re.compile(r"^GRIP STRAIGHT FROM THE PRESS: up (\d+) mm")
 GRIP_FROM_LOOK = re.compile(r"^GRIP[^:]*: the fingers open to the knob")
@@ -605,6 +612,32 @@ class FlightView:
         if m:
             self.contact_mm = int(m.group(1))
             return
+        m = PUSH.match(s)
+        if m:
+            steps = int(m.group(1))
+            # said at once, under the press's line: whatever the hold reads after it (PRESSED, NOTHING
+            # PRESSED) or a STOP, the push is shown
+            self._note(
+                "pushed straight down to %s N (%d step%s), the button went %.0f mm: %s"
+                % (
+                    m.group(2),
+                    steps,
+                    "" if steps == 1 else "s",
+                    float(m.group(3)),
+                    m.group(4),
+                )
+            )
+            return
+        m = PUSH_NONE.match(s)
+        if m:
+            self._note("no push after the touch: %s" % m.group(1))
+            return
+        m = PUSH_STOPPED.match(s)
+        if m:
+            self._note(
+                "the push's first step stopped part-way, the button %.0f mm down: %s" % (float(m.group(1)), m.group(2))
+            )
+            return
         m = PRESSED.match(s)
         if m:
             tilt = "" if not self.tilt or self.tilt < 5 else ", hand tilted %d°" % self.tilt
@@ -879,7 +912,7 @@ class FlightView:
         if name is None and back:
             name = "CARRY"  # the lid had nowhere to go: not the way home, which it flew
         if name is None:
-            if stop.startswith("pressed") or "the press " in stop:
+            if stop.startswith(("pressed", "the push ")) or "the press " in stop:
                 name = "PRESS"
             elif "knob" in stop or "grip" in stop or "fingers" in stop:
                 name = "GRIP"

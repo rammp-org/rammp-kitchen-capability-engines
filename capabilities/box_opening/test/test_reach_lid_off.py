@@ -130,6 +130,7 @@ def _full_flow(
     from_press=False,
     setdown="met",
     touch_table=False,
+    before_hold=None,
 ):
     """run_reach_press as a full run (compliant --depth-press, no
     --press-only), everything faked: `aims` the wrist's aims in order, each
@@ -150,7 +151,8 @@ def _full_flow(
     table the set-down goes by is the cameras' (the fake chain's fk stands
     still, and its fingers' hold says nothing of the lid's top) unless
     `touch_table`: then setdown_table_z's own, the cameras' table moved by
-    where that fk has the fingers hold the knob (_touch_table_z);
+    where that fk has the fingers hold the knob (_touch_table_z); `before_hold`
+    called with each hold's arguments before its stand-in holds, the hold's verdict where it returns one;
     `rise` depth_press.rise_back_up's stand-in (None:
     back up the stroke); `at_spot_look()` what else happens at the spot
     look; `one_motion` False: the grip's lookahead plans the lift alone,
@@ -230,7 +232,10 @@ def _full_flow(
 
     def hold(ctx_, cfg_, runner_, stroke, top_z, seen, contact=None):
         rec.events.append("hold")
+        got = None if before_hold is None else before_hold(ctx_, cfg_, runner_, stroke, top_z, contact)
         seen.update(held_joints=[float(v) + 0.002 for v in stroke.legs[-1][1][-1]], touch_xyz=held_pad)
+        if isinstance(got, dp.DepthPress):
+            return got
         return dp.DepthPress(free=True, contact=True, felt=True, judged=False, press_n=15.0)
 
     monkeypatch.setattr(dp, "compliant_hold", hold)
@@ -1905,8 +1910,9 @@ def test_the_set_down_watch_starts_above_where_the_plan_has_the_lid_meet_the_tab
 
 def test_every_press_is_cut_at_its_contact_and_watched_all_the_way_down(ctx, monkeypatch, tmp_path):
     """Contact detection rides each press's way in (its lead's stop_when). Review round 2: every
-    press's stroke ends as far past where the pads met the box as it was planned past the top, a
-    press once more (the knob not up after the first) too; each watches its whole descent
+    press's stroke is cut where the pads meet the box (dp.PRESS_BY_FORCE: past it by nothing, the push
+    sets the force from there), a press once more (the knob not up after the first) too; each watches
+    its whole descent
     (final, from where its stroke begins), refuses a contact off the band, and stops on a watch
     that fails."""
     from box_opening.tasks import press_contact as pc
@@ -1922,12 +1928,69 @@ def test_every_press_is_cut_at_its_contact_and_watched_all_the_way_down(ctx, mon
     code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, NOT_UP_TWICE)
     assert code == 1
     assert [(lead, on, got.cut) for lead, on, got in watched] == [("reach:re-aim", True, True)] * 2
+    assert [got.past_m for _lead, _on, got in watched] == [0.0, 0.0]
     for _lead, _on, got in watched:
         assert isinstance(got, pc.PressContact) and got.final and got.abort_on_failure
         # the band, both ends up by what flatbot's fingers reach past the pads it measures (constants, 2026-11-17)
         assert got.early_m == pytest.approx(pc.CONTACT_EARLY_M + FINGERS_PAST_MODEL_M)
         assert got.late_m == pytest.approx(pc.CONTACT_LATE_M - FINGERS_PAST_MODEL_M)
         assert got.slow_z == pytest.approx(got.top_z + dp.TOUCH_SLOW_M) and got.arm_z >= got.slow_z
+
+
+@pytest.mark.parametrize("press_only", [False, True], ids=["the full run's two presses", "the press alone"])
+def test_every_way_into_the_hold_pushes_from_where_its_stroke_was_cut(ctx, monkeypatch, tmp_path, press_only):
+    """The push lives in the hold (dp.compliant_hold), so every way into it pushes: the full run's first
+    press and its second (_press_and_back), and the press-only run (reach_press._fly_way_in), each from
+    the reference its stroke's cut left the driver holding. The fake client flies every execution to
+    its end and feeds the watch nothing: here each watch is cut at its first poll, the reference held
+    at its stroke's last point."""
+    real_watch, real_push, real_hold, pushed = dp.watch_press, dp.push_down, dp.compliant_hold, []
+
+    def watch(ctx_, legs, stroke, top_z, cut=True):
+        got = real_watch(ctx_, legs, stroke, top_z, cut=cut)
+
+        def stop(progress):
+            got.held_ref, got.stop_z = [float(v) for v in stroke.legs[-1][1][-1]], float(stroke.end_z)
+            return True
+
+        legs[0].stop_when = stop
+        return got
+
+    def push(ctx_, cfg, runner, stroke, held_ref):
+        pushed.append(([float(v) for v in stroke.legs[-1][1][-1]], list(held_ref)))
+        return real_push(ctx_, cfg, runner, stroke, held_ref)
+
+    monkeypatch.setattr(dp, "watch_press", watch)
+    monkeypatch.setattr(dp, "push_down", push)
+    aims = [(BUTTON, 0.4)] if press_only else NOT_UP_TWICE
+
+    def real(ctx_, cfg_, runner_, stroke, top_z, contact):
+        # the real hold beside the flow's stand-in (_full_flow), which goes on as the flow's tests have it
+        real_hold(ctx_, cfg_, runner_, stroke, top_z, {}, contact=contact)
+
+    _code, _rec, _chain, rows = _full_flow(ctx, monkeypatch, tmp_path, aims, press_only=press_only, before_hold=real)
+    held = [r for r in rows if r["leg"] == "depth_compliant_press"]
+    assert len(pushed) == len(held) == (1 if press_only else 2)
+    assert all(end == ref for end, ref in pushed) and all("push" in r for r in held)
+
+
+@pytest.mark.parametrize("press_only", [False, True], ids=["the full run", "the press alone"])
+def test_a_push_that_stopped_part_way_ends_the_run_where_the_arm_holds(ctx, monkeypatch, tmp_path, capsys, press_only):
+    """Gate ruling G1: a push step that stopped part-way lets go (dp.push_down), and the hold comes back
+    not free, "the push stopped (...) — the arm holds". The full run's press (_press_and_back) and the
+    press-only run (reach_press._fly_way_in) end there as for a way in that stopped part-way: a STOP that
+    says it, exit code 1, and nothing flown after the hold — no rise, no grip, no second press."""
+    monkeypatch.setattr(rp.time, "sleep", lambda s: None)
+    why = "the push stopped (step 2: PATH_TOLERANCE_VIOLATED) — the arm holds"
+
+    def stopped(*_a):
+        return dp.DepthPress(free=False, why=why, judged=False)
+
+    aims = [(BUTTON, 0.4)] if press_only else NOT_UP_TWICE
+    code, rec, _chain, _rows = _full_flow(ctx, monkeypatch, tmp_path, aims, press_only=press_only, before_hold=stopped)
+    assert code == 1
+    assert rec.events.count("hold") == 1 and rec.events[-1] == "hold"
+    assert "[press_demo] STOP: %s" % why in capsys.readouterr().out
 
 
 def test_the_drivers_force_is_logged_at_the_press_and_the_set_down(ctx, monkeypatch, tmp_path):

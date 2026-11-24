@@ -2638,7 +2638,8 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
     goes home from the look pose — from over the box, the clear first,
     where its free air flew in position and only the stroke did not start
     (fly_way_in); one that stopped part-way holds the arm
-    there, its STOP naming the leg in flight. From the way in's start to
+    there, its STOP naming the leg in flight, as does a hold whose push
+    stopped part-way (its DepthPress not free). From the way in's start to
     where the way home ends, a stop lets go (let_go): the way in stopped
     part-way, the way home stopped or did not get home (its fallback's
     clear or home, _home_from_over_box), anything raised. Returns the
@@ -2697,17 +2698,18 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
             runner.note("reach_slid_in", turned_down=way.down.walked, residual_nm=None)
             seen = {}
             held = dp.compliant_hold(ctx, cfg, runner, way.stroke, top_z, seen, contact=contact)
-            result, homed = _way_home(
-                ctx,
-                cfg,
-                runner,
-                way.stroke,
-                held,
-                seen.get("held_joints") or ctx.client.joints(),
-                ahead,
-                scene_fix,
-                locator,
-            )
+            if held.free:
+                result, homed = _way_home(
+                    ctx,
+                    cfg,
+                    runner,
+                    way.stroke,
+                    held,
+                    seen.get("held_joints") or ctx.client.joints(),
+                    ahead,
+                    scene_fix,
+                    locator,
+                )
     except BaseException:
         # A Ctrl+C in the hold's read lands with no goal in flight (abort.py
         # raises at once) and press_demo exits 130: the springs would push on
@@ -2755,6 +2757,11 @@ def _fly_way_in(ctx, cfg, runner, way, legs, top_z, scene_fix, locator):
             % (_phase_at(names, retimed.get("seg_start_fracs") or [0.0], last.progress), last.detail or last.outcome)
         )
         let_go(ctx)
+        return 1
+    if not held.free:
+        # the hold's push stopped part-way (depth_press.compliant_hold), its springs let go there: the
+        # run ends where the arm holds, as where the way in stopped part-way
+        log.info("[press_demo] STOP: %s" % held.why)
         return 1
     if not result.free or not homed:
         # the way home stopped (_way_home): the arm holds on the button — no

@@ -1701,15 +1701,17 @@ def _flies_onto(ctx, contact_z, hz=90.0):
     ctx.client.execute = execute
 
 
-def test_a_compliant_press_that_meets_the_box_above_its_top_is_cut_as_far_past_it_as_planned(
+def test_with_the_push_off_a_press_that_meets_the_box_above_its_top_is_cut_as_far_past_it_as_planned(
     ctx, monkeypatch, tmp_path
 ):
-    """Contact detection (tasks/press_contact): the box 20 mm higher than
+    """The old rule, PRESS_BY_FORCE off (as flown to 2026-11-20). Contact
+    detection (tasks/press_contact): the box 20 mm higher than
     the cameras put it. The stroke ends as far below where the pads met it
     as it was planned below the top — 20 mm short of its planned end — the
     driver holding the reference there; the hold reads the spring's pull
     toward THAT reference, and the run record keeps where it met and the
     cut."""
+    monkeypatch.setattr(dp, "PRESS_BY_FORCE", False)
     cfg = load_press_demo(PINK)
     meet = COMPLIANT_TOP + 0.020
     _flies_onto(ctx, meet)
@@ -1789,13 +1791,18 @@ def test_a_leaning_presss_contact_band_is_wider_by_what_its_pads_corner_hangs_un
     assert 0.056 < band(0.0) and 0.045 < band(0.0) and band(0.0) < 0.056 + 0.012
 
 
-def test_a_compliant_press_that_meets_the_box_below_its_top_flies_its_stroke_as_planned(ctx, monkeypatch, tmp_path):
-    """The box 8 mm lower than the cameras put it: as far past the contact
+def test_with_the_push_off_a_press_that_meets_the_box_below_its_top_flies_its_stroke_as_planned(
+    ctx, monkeypatch, tmp_path
+):
+    """The old rule, PRESS_BY_FORCE off (as flown to 2026-11-20; on, the
+    stroke stops where the pads meet the box wherever that is, and pushes).
+    The box 8 mm lower than the cameras put it: as far past the contact
     as planned would be deeper than the stroke goes — never deeper than
     planned: it flies to its end. (Judged by the band of a hand whose fingers
     are the model's: with flatbot's longer ones, constants.FINGERS_PAST_MODEL_M,
     a top met 8 mm under where it was read is 28 mm under where they would
     meet it, and refused as late.)"""
+    monkeypatch.setattr(dp, "PRESS_BY_FORCE", False)
     monkeypatch.setattr(dp, "FINGERS_PAST_MODEL_M", 0.0)
     meet = COMPLIANT_TOP - 0.008
     _flies_onto(ctx, meet)
@@ -2021,6 +2028,9 @@ def test_a_bend_past_bend_max_m_flies_straight_and_the_run_says_why(ctx, monkeyp
     end = _pads_at(chain, stroke.q_end)
     assert list(end) == pytest.approx(list(_pads_at(chain, Q_COUPLED)[:2]) + [bottom - 0.06], abs=1e-9)  # straight
     assert list(stroke.legs[-1][1][-1]) == pytest.approx(stroke.q_end)
+    # the words of the stroke as it flew to 2026-11-20 (PRESS_BY_FORCE off): with the push it is stopped where
+    # the pads meet the button, and its end is said by none
+    monkeypatch.setattr(dp, "PRESS_BY_FORCE", False)
     assert "; not bent: a bend would move the pads' reference 60 mm sideways" in dp.press_text(stroke, cfg)
     q_b = np.linalg.solve(chain.A, [end[0], end[1], bottom])  # the pads held at the bottom, over the aim
     # the driver's own estimate of the force on the tool, beside the springs' (owner 2026-11-04)
@@ -2405,6 +2415,657 @@ def test_a_compliant_run_whose_aimed_button_no_way_down_reaches_goes_home_from_t
     ) in out
     rows = [json.loads(line) for line in open(next(tmp_path.glob("run-*.jsonl")))]
     assert not [r for r in rows if r["leg"] in ("reach_way_in", "home_refused")]
+
+
+# ---- the push: a compliant press commands a force, from where the pads meet the button ----------------
+#
+# On Kinova's own Gen3 (the package's default chain, kinematics.urdf_path(): the real arm's kinematics), whose
+# pads' compliance couples. The harness's arm stands in static balance under its springs: in free air at its
+# reference; on the button, where the springs' energy is least with the pads held where they came down on it,
+# all three coordinates (_held_at). The force in a case is that solve's: nothing of depth_press's model in it.
+
+PUSH_TOOL = [0.45, -0.15, 0.10]  # the tool where the stroke starts, turned down over the button
+PUSH_SEED = [0.073, 0.682, -2.754, -1.735, -0.341, -0.792, 2.195]  # the Gen3's joints near there
+PUSH_DROP_M = 0.10  # the cameras' top this far below the pads where the stroke starts
+PUSH_F = min(dp.COMPLIANT_PRESS_N, dp.COMPLIANT_PRESS_MAX_N)
+
+
+@pytest.fixture(scope="module")
+def gen3():
+    """(the Gen3's chain, its joints turned down at PUSH_TOOL with joint_7 a turn round from how the arm
+    reads it, the hand's attitude). The pads' compliance there couples, off its diagonal at least 15 % of
+    its vertical term: these cases cannot run on a diagonal one."""
+    from box_opening.runtime.kinematics import ArmChain
+
+    chain = ArmChain()
+    quat = ContainerModel.load(PINK).press_quat(PUSH_TOOL)
+    q0 = chain.nearest_solution(PUSH_SEED, PUSH_TOOL, quat)
+    assert q0 is not None
+    q0 = [float(v) for v in q0]
+    q0[6] += 2 * np.pi  # the stroke's joints are not wrapped; the arm's readings are (_flies_on)
+    C = dp.fingertip_compliance(chain, q0)
+    assert max(abs(C[0, 2]), abs(C[1, 2])) >= 0.15 * C[2, 2]
+    return chain, q0, list(quat)
+
+
+def _wrapped(q):
+    """Joints as the arm reports them: the continuous ones wrapped into (-pi, pi]."""
+    from box_opening.runtime.branches import CONTINUOUS_JOINTS
+
+    out = [float(v) for v in q]
+    for i in CONTINUOUS_JOINTS:
+        out[i] = float(np.pi - (np.pi - out[i]) % (2 * np.pi))
+    return out
+
+
+class _Button:
+    """A button whose top stands at `z`: the pads held where they first come down on it, all three
+    coordinates (they do not slide on it), and never past it. Under the push (`pushing`: an execution no
+    watch stops) it gives up to `give` straight down while it is pushed harder than `give_n` (N), as far
+    as brings the push back to `give_n`, then holds; and where it is told to `drift` (m, x and y), it
+    moves that far sideways under each push, the pads with it. `ref` is the springs' reference the
+    driver holds, `f` the button's push on the pads (world); `reads` each hold's (ref, the pads' point
+    on the button), `settles` f at each execution's end. `moving`: the arm as it stood before the
+    button gave under the last stand (what a step's execution returns with: the button still sinking)."""
+
+    def __init__(self, chain, z, give=0.0, give_n=4.0, drift=(0.0, 0.0)):
+        self.chain, self.z, self.floor, self.give_n = chain, float(z), float(z) - float(give), float(give_n)
+        self.drift = np.asarray(drift, float)
+        self.xy, self.ref, self.f, self.pushing, self.moving = None, None, np.zeros(3), False, None
+        self.reads, self.settles = [], []
+
+    def point(self):
+        return None if self.xy is None else np.r_[self.xy, self.z]
+
+    def stand(self, q_ref):
+        """Where the arm stands with the springs' reference at `q_ref`: in balance."""
+        q_ref = np.asarray(q_ref, float)
+        self.ref = q_ref
+        if _pads_at(self.chain, q_ref)[2] >= self.z:
+            self.xy, self.f, self.moving = None, np.zeros(3), q_ref
+            return q_ref
+        if self.xy is None:
+            self.xy = _pads_at(self.chain, q_ref)[:2]
+        q, f = _held_at(self.chain, q_ref, self.point())
+        self.moving = q
+        for _ in range(20):
+            if not self.pushing or f[2] <= self.give_n + 1e-6 or self.z <= self.floor:
+                break
+            # the push past give_n moves it down: as far as brings it back (a secant step), or to its floor
+            _q, f_lower = _held_at(self.chain, q_ref, self.point() - [0.0, 0.0, 1e-4])
+            self.z = max(self.floor, self.z - 1e-4 * (f[2] - self.give_n) / (f[2] - f_lower[2]))
+            q, f = _held_at(self.chain, q_ref, self.point())
+        self.f = f
+        return q
+
+
+def _flies_on(ctx, button, hz=90.0):
+    """ctx.client flies every execution, watched or not, onto `button` (_Button): a watched one as the
+    driver reports it (_flies_onto's kept samples, stop_when polled after each), an unwatched one to its
+    end, or to where a scripted outcome (exec_script) left it, the button pushed (_Button.pushing). Its
+    readings are wrapped (_wrapped); a release (rp.let_go) puts the springs' reference where the arm
+    stands. It hears as the real client does (the brief's "Hearing"): joints() gives what it last
+    heard (.heard), and it hears only during an execution, a wait_still and a settled_efforts. An
+    unwatched execution returns hearing the arm before the button gave (_Button.moving); the arm
+    stands (.live) where the button let it sink, and only a wait_still or a settled_efforts hears it.
+    Each execution's first point, the arm's joints as it went out and the reference the driver held then
+    are in ctx.client.push_starts, its waypoints in .sent, the reference it left in .ends."""
+    from collections import deque
+
+    from box_opening.runtime.branches import on_branch
+
+    c = ctx.client
+    c.push_starts, c.sent, c.ends, c.releases = [], [], [], []
+
+    def stand(q_ref):
+        c.live = _wrapped(button.stand(q_ref))
+
+    def hear():
+        c.heard = list(c.live)
+
+    hear()
+
+    def execute(traj_, speed, guard=None, while_running=None, stop_when=None, gains=None):
+        c.executed.append((len(traj_.points), speed))
+        c.gains_sent = getattr(c, "gains_sent", []) + [gains]
+        c.exec_starts.append(list(traj_.points[0].positions))
+        c.guards.append(guard)
+        held = None if button.ref is None else list(button.ref)
+        c.push_starts.append((list(traj_.points[0].positions), list(c.live), held))
+        pts = list(traj_.points)
+        ts = np.array([p.time_from_start.sec + 1e-9 * p.time_from_start.nanosec for p in pts])
+        qs = np.array([list(p.positions) for p in pts])
+        c.sent.append(qs)
+        T = max(float(ts[-1]), 1e-9)
+
+        def at(frac):
+            return np.array([np.interp(frac * T, ts, qs[:, j]) for j in range(qs.shape[1])])
+
+        info = {"message": "ok", "progress": 0.0, "sent_at": 50.0, "sent_traj": traj_, "feedback_q": deque()}
+        c.last_execution = info
+        button.pushing = stop_when is None
+        if stop_when is None:
+            if button.xy is not None:
+                button.xy = button.xy + button.drift
+            outcome, got = c.exec_script.pop(0) if c.exec_script else ("arrived", {"message": "ok", "progress": 1.0})
+            info.update(got)
+            if info["progress"] > 0:
+                stand(at(float(info["progress"])))
+                c.heard = _wrapped(button.moving)  # as it returned: the button still sinking
+            button.settles.append(button.f.copy())
+            c.ends.append(None if button.ref is None else button.ref.copy())
+            return outcome, info
+        t = 50.0
+        while True:
+            frac = min(1.0, (t - 50.0) / T)
+            stand(at(frac))
+            hear()
+            info["feedback_q"].append((t, frac, list(c.live), None))
+            info["progress"] = frac
+            if stop_when(frac) or frac >= 1.0:
+                button.settles.append(button.f.copy())
+                c.ends.append(button.ref.copy())
+                return ("stopped" if frac < 1.0 else "arrived"), info
+            t += 1.0 / hz
+
+    def settled(*a, **k):
+        hear()
+        button.reads.append((None if button.ref is None else button.ref.copy(), button.point()))
+        return [0.0] * 4, list(c.live)
+
+    def wait_still():
+        c.stills.append(len(c.executed))
+        hear()
+        return 0.0, False
+
+    def release():
+        c.releases.append(list(c.live))
+        stand(on_branch(c.live, button.ref))
+
+    c.execute, c.settled_efforts, c.release, c.wait_still = execute, settled, release, wait_still
+    c.joints = lambda: list(c.heard)
+
+
+def _on_gen3(ctx, monkeypatch, tmp_path, gen3, above, by_force=True, travel=None, from_contact=True, **button):
+    """ctx on the Gen3 (`gen3`) at its stroke's start, every execution flown onto a _Button whose top
+    stands `above` the cameras' top (PUSH_DROP_M under the pads there), the rest of its kind `button`;
+    `travel`, the button's travel the press is told (cfg.button_travel_m); `by_force` and `from_contact`
+    dp.PRESS_BY_FORCE and press_contact.PRESS_FROM_CONTACT. Returns (the press config,
+    the cameras' top, the button, a Runner logging to `tmp_path`, each of its run()s' leg names)."""
+    import dataclasses
+
+    from box_opening.runtime import approach
+    from box_opening.runtime.runner import Runner
+
+    chain, q0, _quat = gen3
+    monkeypatch.setattr(approach, "_chain", lambda: chain)
+    from box_opening.tasks import press_contact as pc
+
+    monkeypatch.setattr(dp, "PRESS_BY_FORCE", by_force)
+    monkeypatch.setattr(pc, "PRESS_FROM_CONTACT", from_contact)
+    cfg = load_press_demo(PINK)
+    if travel is not None:
+        cfg = dataclasses.replace(cfg, button_travel_m=travel)
+    ctx.model, ctx.press_cfg = ContainerModel.load(PINK), cfg
+    ctx.client.compliant = True
+    ctx.client.live = ctx.client.heard = list(q0)
+    top = float(_pads_at(chain, q0)[2]) - PUSH_DROP_M
+    pressed = _Button(chain, top + above, **button)
+    _flies_on(ctx, pressed)
+    flown = []
+
+    class R(Runner):
+        def run(self, legs_, execute, lookahead=None):
+            flown.append([lg.name for lg in legs_])
+            return super().run(legs_, execute, lookahead)
+
+    return cfg, top, pressed, R(ctx.client, log_dir=tmp_path), flown
+
+
+def _push_press(ctx, monkeypatch, tmp_path, gen3, above, script=(), **kw):
+    """dp.press_compliant on the Gen3 from its stroke's start (_on_gen3, `kw` its button and the rest),
+    `script` the outcomes of the push's executions in turn (exec_script's, scripted as each goes out).
+    Returns (its verdict, the button, the run record's depth_compliant_press row or None, each
+    runner.run's leg names, seen)."""
+    import json
+
+    cfg, top, pressed, runner_, flown = _on_gen3(ctx, monkeypatch, tmp_path, gen3, above, **kw)
+    script = list(script)
+    real = runner_.run
+
+    def run(legs_, execute, lookahead=None):
+        if legs_ and legs_[0].name == "depth:push" and script:
+            ctx.client.exec_script.append(script.pop(0))
+        return real(legs_, execute, lookahead)
+
+    runner_.run = run
+    seen = {}
+    result = dp.press_compliant(ctx, cfg, runner_, dp.DOWN_CONTACT_TOOL, seen, gen3[2], top)
+    rows = [json.loads(line) for line in open(next(tmp_path.glob("run-*.jsonl")))]
+    note = next((r for r in rows if r.get("leg") == "depth_compliant_press"), None)
+    return result, pressed, note, flown, seen
+
+
+def _the_force(chain, pressed):
+    """The button's push on the pads at the hold (world, N): the springs about the reference the driver
+    held then, the pads where the button held them (_held_at)."""
+    ref, b = pressed.reads[-1]
+    return _held_at(chain, ref, b)[1]
+
+
+def _the_force_now(chain, pressed):
+    """The button's push on the pads now: the springs about the reference the driver holds (_held_at)."""
+    return _held_at(chain, pressed.ref, pressed.point())[1]
+
+
+def _pushes(flown):
+    return sum(names == ["depth:push"] for names in flown)
+
+
+@pytest.mark.parametrize("above", [0.0, 0.02, 0.04, 0.06])
+def test_a_press_pushes_its_force_straight_down_on_a_button_met_anywhere_up_to_60_mm_over_its_top(
+    ctx, monkeypatch, tmp_path, gen3, above
+):
+    """The stroke stops where the pads meet the button, wherever between the cameras' top and 60 mm over
+    it, and the push sets the springs' reference from the arm as it stands: held there, the pads push
+    COMPLIANT_PRESS_N straight down, within 0.01 N, under 0.01 N sideways, on an arm whose compliance
+    couples. One step: the button does not give. The record keeps the push; the hold's reading is the
+    force the button feels."""
+    result, pressed, note, flown, seen = _push_press(ctx, monkeypatch, tmp_path, gen3, above)
+    assert flown == [["depth:approach", "depth:press"], ["depth:push"], ["depth:rise"]]
+    f = _the_force(gen3[0], pressed)
+    assert f[2] == pytest.approx(PUSH_F, abs=0.01) and np.hypot(f[0], f[1]) < 0.01
+    assert result.felt and result.press_n == pytest.approx(f[2], abs=0.05) and note["sideways_n"] < 0.5
+    assert note["push"] == {
+        "steps": 1,
+        "force_n": PUSH_F,
+        "down_mm": 0.0,
+        "aside_mm": 0.0,
+        "end": "held",
+        "why": "the button held",
+        "let_go": False,
+        "stopped_part_way": False,
+    }
+    assert note["contact"]["met"] and note["contact"]["cut"] and note["contact"]["past_mm"] == 0.0
+    assert seen["touch_xyz"] == pytest.approx(list(pressed.reads[-1][1]), abs=1e-4)
+
+
+def test_with_the_push_off_the_press_pushes_what_bc3c880_did_past_10_n_and_sideways(ctx, monkeypatch, tmp_path, gen3):
+    """The record of why the push exists. PRESS_BY_FORCE off, the press is as it flew to 2026-11-20: the
+    stroke cut as far past where the pads met the button as it was planned past the top, the springs held
+    toward that reference. The button 20 mm over the cameras' top holds the pads 32 mm above the stroke's
+    modelled bottom, 18 mm above the reference the cut left on its straight part, unbent: on this arm's
+    springs, held where they met it, the pads push ~52 N down there and ~25 N sideways."""
+    result, pressed, note, flown, _seen = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02, by_force=False)
+    assert flown == [["depth:approach", "depth:press"], ["depth:rise"]] and "push" not in note
+    f = _the_force(gen3[0], pressed)
+    assert f[2] == pytest.approx(52.0, abs=0.5) and f[2] > dp.COMPLIANT_PRESS_MAX_N
+    assert np.hypot(f[0], f[1]) == pytest.approx(25.0, abs=0.5)
+    assert result.press_n == pytest.approx(f[2], abs=0.05)
+    assert note["contact"]["past_mm"] > 0.0 and note["contact"]["cut"]
+
+
+def _pinned_k(chain, pressed):
+    """How stiff the held pads are straight down (N/m): the button's push on them about the hold's
+    reference, the pads held 0.1 mm lower (_held_at)."""
+    ref, b = pressed.reads[-1]
+    return (_held_at(chain, ref, b - [0.0, 0.0, 1e-4])[1][2] - _held_at(chain, ref, b)[1][2]) / -1e-4
+
+
+@pytest.mark.parametrize("give", [0.002, 0.005, 0.0075])
+def test_a_button_that_gives_is_pushed_again_until_it_holds_and_never_past_the_force(
+    ctx, monkeypatch, tmp_path, gen3, give
+):
+    """A button that gives under the push, 2, 5 and 7.5 mm, then holds: the force fell with it, so the
+    push sets the reference again from where the arm then stands, step after step, until a step the
+    button holds. The final force is COMPLIANT_PRESS_N less at most what PUSH_GIVE_M of give takes off
+    it, and at no step's settle more than 0.5 N past it. The way back up still joins the stroke 15 mm
+    over the held pads (rise_back_up) and flies."""
+    chain, q0, quat = gen3
+    result, pressed, note, flown, seen = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02, give=give, give_n=1.0)
+    steps = _pushes(flown)
+    assert steps >= 2 and note["push"]["steps"] == steps and note["push"]["end"] == "held"
+    assert note["push"]["down_mm"] == pytest.approx(1000 * give, abs=0.2)
+    f = _the_force(chain, pressed)
+    assert PUSH_F - dp.PUSH_GIVE_M * _pinned_k(chain, pressed) <= f[2] <= PUSH_F + 1e-6
+    pushed = pressed.settles[1 : 1 + steps]  # (the stroke's cut is the first)
+    assert len(pushed) == steps and max(s[2] for s in pushed) <= PUSH_F + 0.5
+    assert result.felt and flown[-1] == ["depth:rise"]
+    stroke, _why = dp.compliant_stroke(chain, ctx.press_cfg, q0, quat, float(_pads_at(chain, q0)[2]) - PUSH_DROP_M)
+    up = dp.rise_back_up(chain, stroke, seen["held_joints"])
+    assert up is not None and ctx.client.exec_starts[-1] == pytest.approx(up[0], abs=1e-9)
+
+
+def test_the_flight_view_reads_a_pushed_press_and_says_the_push_under_it(ctx, monkeypatch, tmp_path, gen3, capsys):
+    """The press's own lines, as a pushed press says them, read by the flight view (flight_view.py): its
+    CONTACT and PRESSED lines still match, and the push is said under the press's line in a person's
+    words, as soon as it is read: a push that flew nothing says why, and a push that stopped part-way,
+    the hold then reading NOTHING PRESSED, is shown too."""
+    from box_opening.flight_view import FlightView
+
+    def view(lines):
+        out = []
+        fv = FlightView(write=out.append, clock=lambda: 0.0)
+        fv.start()
+        fv.feed("[press_demo] ONE MOTION from the look pose to below the button: depth:approach, depth:press")
+        for line in lines:
+            fv.feed(line)
+        return [line.rstrip() for line in out]
+
+    _push_press(ctx, monkeypatch, tmp_path, gen3, 0.04)
+    said = [line for line in capsys.readouterr().out.splitlines() if line.startswith("[press_demo] ")]
+    assert any(line.startswith("[press_demo] PUSH: 1 step straight down to ~10 N") for line in said)
+    out = view(said)
+    assert out[-3] == "             note  pushed straight down to 10 N (1 step), the button went 0 mm: the button held"
+    assert out[-2].startswith(" 2 PRESS     ok    10 N ")
+    assert out[-1] == "             note  lid touched 40 mm higher than the camera read it"
+    monkeypatch.setattr(dp, "BEND_MAX_M", 1e-6)
+    (tmp_path / "again").mkdir()
+    _push_press(ctx, monkeypatch, tmp_path / "again", gen3, 0.04)
+    out = view([line for line in capsys.readouterr().out.splitlines() if line.startswith("[press_demo] ")])
+    assert any(
+        line.startswith("             note  no push after the touch: a bend would move the pads' reference")
+        for line in out
+    )
+    # a push that stopped part-way: the hold reads NOTHING PRESSED, and the push is still shown
+    monkeypatch.setattr(dp, "BEND_MAX_M", 0.03)
+    (tmp_path / "stopped").mkdir()
+    out_ = ("failed", {"message": "PATH_TOLERANCE_VIOLATED", "progress": 0.5})
+    _push_press(ctx, monkeypatch, tmp_path / "stopped", gen3, 0.04, script=[out_])
+    said = [line for line in capsys.readouterr().out.splitlines() if line.startswith("[press_demo] ")]
+    assert any(line.startswith("[press_demo] NOTHING PRESSED") for line in said)
+    assert any(line.startswith("[press_demo] PUSH: step 1 stopped part-way from where the pads met") for line in said)
+    assert any(
+        line.startswith("             note  the push's first step stopped part-way, the button ")
+        and line.endswith(": step 1 stopped part-way (PATH_TOLERANCE_VIOLATED); the springs let go")
+        for line in view(said)
+    )
+
+
+def test_each_push_starts_at_the_reference_the_driver_holds_never_up_at_the_pads(ctx, monkeypatch, tmp_path, gen3):
+    """A push-push latch toggles on a press and a release: a reference that jumped up to the pads between
+    the stroke and the push could let it go, and the push shut it again. Each step's first waypoint is
+    the reference the driver held before it (the stroke's cut, then the step before's end) where that
+    stands within PUSH_START_MAX_RAD of the measured joints, and no joint moves more than BEND_STEP_RAD
+    between two of its waypoints."""
+    from box_opening.runtime.branches import on_branch
+
+    _r, _p, _n, flown, _s = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02, give=0.005, give_n=1.0)
+    starts = [st for st, names in zip(ctx.client.push_starts, flown, strict=True) if names == ["depth:push"]]
+    assert len(starts) >= 2
+    for first, live, held in starts:
+        gap = np.abs(np.asarray(on_branch(live, held)) - np.asarray(held)).max()
+        assert gap <= dp.PUSH_START_MAX_RAD and first == pytest.approx(held, abs=1e-9)
+    for traj_, names in zip(ctx.client.sent, flown, strict=True):
+        if names == ["depth:push"]:
+            assert np.abs(np.diff(traj_, axis=0)).max() <= dp.BEND_STEP_RAD + 1e-9
+
+
+def test_after_a_stroke_that_overshot_far_the_push_starts_its_bound_from_the_arm_toward_the_reference(
+    ctx, monkeypatch, tmp_path, gen3
+):
+    """The driver holding a reference far past the arm (the stroke's planned end, the pads held on the
+    button 38 mm above it): a step started there would be refused by the runner's drift gate (0.04 rad).
+    It starts PUSH_START_MAX_RAD from the measured joints, on the straight joint-space line toward the
+    held reference, and the runner flies it."""
+    from box_opening.runtime.branches import on_branch
+
+    chain, q0, quat = gen3
+    cfg, top, pressed, runner_, flown = _on_gen3(ctx, monkeypatch, tmp_path, gen3, 0.02)
+    stroke, _why = dp.compliant_stroke(chain, cfg, q0, quat, top)
+    deep = np.asarray(stroke.q_end, float)
+    ctx.client.live = ctx.client.heard = _wrapped(pressed.stand(deep))  # (heard: the stroke ended there)
+    live = np.asarray(on_branch(ctx.client.live, deep))
+    assert np.abs(deep - live).max() > 0.04  # past the drift gate
+    push = dp.push_down(ctx, cfg, runner_, stroke, list(deep))
+    assert push.steps >= 1 and push.end == "held" and flown[0] == ["depth:push"]
+    first = np.asarray(ctx.client.push_starts[0][0])
+    assert np.abs(first - live).max() == pytest.approx(dp.PUSH_START_MAX_RAD, abs=1e-9)
+    along = (first - live) / np.linalg.norm(first - live)
+    assert along == pytest.approx((deep - live) / np.linalg.norm(deep - live), abs=1e-9)
+    f = _the_force_now(chain, pressed)  # (the rule's Jacobian is the arm's, not the far reference's)
+    assert f[2] == pytest.approx(PUSH_F, abs=0.01) and np.hypot(f[0], f[1]) < 0.01
+
+
+@pytest.mark.parametrize(
+    "refuse, why",
+    [
+        (lambda mp, chain, c: mp.setattr(dp, "BEND_MAX_M", 1e-6), "sideways, past BEND_MAX_M"),
+        # (once the stroke has flown: its own lines keep to the limits)
+        (lambda mp, chain, c: mp.setattr(chain, "within_limits", lambda q, *a, **k: not c.ends), "outside a joint's"),
+        (lambda mp, chain, c: mp.setattr(dp, "BEND_MIN_DROP_M", 1.0), "would drop the pads only"),
+    ],
+)
+def test_a_push_the_rule_refuses_flies_nothing_and_lets_the_springs_go(ctx, monkeypatch, tmp_path, gen3, refuse, why):
+    """The push shares stroke_bend's rule (spring_end) and its refusals: a reference that would move the
+    pads past BEND_MAX_M sideways, an end outside a joint's limits, pads that do not move with the joints.
+    Refused, no step flies, and the springs are let go (gate round 4): the reference the stroke's cut left,
+    straight below the pads, unbent and over the cap, is not kept. The hold reads a let-go arm, not felt,
+    free, and the press goes back up as after any press not felt; the record says why."""
+    ctx.client.ends = []
+    refuse(monkeypatch, gen3[0], ctx.client)
+    result, pressed, note, flown, _seen = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02)
+    assert _pushes(flown) == 0 and flown[-1] == ["depth:rise"]
+    assert note["push"]["end"] == "refused" and note["push"]["steps"] == 0 and why in note["push"]["why"]
+    assert note["push"]["let_go"] and not note["push"]["stopped_part_way"] and len(ctx.client.releases) == 1
+    ref, _b = pressed.reads[-1]
+    assert np.abs(ref - ctx.client.ends[0]).max() > 0.005  # not the reference the stroke's cut left
+    assert note["contact"]["cut"] and result.free and not result.felt and not note["felt"]
+    # let go where it stands, the springs push nothing: the button feels no force (the harness: its pads stand
+    # free on it), and the hold reads none
+    ref, b = pressed.reads[-1]
+    assert b is None or abs(_held_at(gen3[0], ref, b)[1][2]) < 0.05
+    assert abs(result.press_n) < 0.05
+
+
+@pytest.mark.parametrize("ends", ["not started", "stopped"])
+def test_a_push_step_refused_before_it_starts_or_stopped_part_way_ends_the_push(ctx, monkeypatch, tmp_path, gen3, ends):
+    """A step the driver refused before it started moved nothing: no further step, and the springs are let
+    go (gate round 4): the stroke's cut reference, over the cap, is not kept. One that stopped part-way lets
+    go too (rp.let_go_part_way). Either way the springs hold where the arm stands, and the hold reads a
+    let-go arm, nothing pressed — even where the arm stands 5 mm higher by the hold's reading (here the
+    button's own spring lifting it), which the springs would read as a press. The one refused before it
+    started goes back up as after any press not felt; the one that stopped part-way ends the press there
+    (gate ruling G1): not free, "the push stopped (...) — the arm holds", no rise."""
+    real_let_go = rp.let_go
+
+    def let_go(ctx_):
+        real_let_go(ctx_)
+        chain, q = gen3[0], np.asarray(ctx_.client.joints(), float)
+        lifted = q + np.linalg.pinv(dp.fingertip_jacobian(chain, q)) @ [0.0, 0.0, 0.005]
+        ctx_.client.settled_efforts = lambda *a, **k: ([0.0] * 4, [float(v) for v in lifted])
+
+    monkeypatch.setattr(rp, "let_go", let_go)
+    out = ("failed", {"message": "PATH_TOLERANCE_VIOLATED", "progress": 0.5 if ends == "stopped" else 0.0})
+    result, pressed, note, flown, _seen = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02, script=[out])
+    assert _pushes(flown) == 1 and flown[-1] == (["depth:push"] if ends == "stopped" else ["depth:rise"])
+    assert note["push"]["end"] == ends and note["push"]["steps"] == 0
+    assert note["push"]["let_go"] and note["push"]["stopped_part_way"] == (ends == "stopped")
+    assert len(ctx.client.releases) == 1
+    assert not result.felt and not note["felt"] and note["press_n"] >= dp.COMPLIANT_FELT_N  # (read, not felt)
+    if ends == "stopped":
+        assert not result.free
+        assert result.why == "the push stopped (step 1: PATH_TOLERANCE_VIOLATED) — the arm holds"
+    else:
+        assert result.free
+
+
+def test_pads_that_go_through_the_buttons_travel_stop_the_push(ctx, monkeypatch, tmp_path, gen3):
+    """The pads more than cfg.button_travel_m + PUSH_THROUGH_M below where the push began: nothing holds
+    them up, and no further step. The springs are let go: the reference was set for where the pads stood
+    before they went down, and pushes partly sideways from where they stand now."""
+    result, _p, note, flown, _s = _push_press(
+        ctx, monkeypatch, tmp_path, gen3, 0.02, travel=0.001, give=0.05, give_n=0.0
+    )
+    assert note["push"]["end"] == "through" and _pushes(flown) == note["push"]["steps"] < dp.PUSH_STEPS
+    assert note["push"]["down_mm"] > 1000 * (0.001 + dp.PUSH_THROUGH_M)
+    assert note["push"]["let_go"] and not note["push"]["stopped_part_way"] and len(ctx.client.releases) == 1
+    assert result.free and not result.felt and abs(result.press_n) < 0.05 and flown[-1] == ["depth:rise"]
+
+
+def test_pads_that_go_sideways_under_the_push_stop_it_with_a_warning(ctx, monkeypatch, tmp_path, gen3, capsys):
+    """The pads more than PUSH_SLIDE_M sideways from where the push began: the box moves or the pads slip.
+    No further step, a WARNING that says how far, the springs let go (a reference set for where the pads
+    stood would pull them back sideways through the hold), and the record."""
+    result, _p, note, flown, _s = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02, give=0.05, drift=(0.005, 0.0))
+    assert note["push"]["end"] == "slid" and _pushes(flown) == note["push"]["steps"] == 1
+    assert note["push"]["aside_mm"] == pytest.approx(5.0, abs=0.1)
+    assert "WARNING: the pads went 5.0 mm sideways under the push" in capsys.readouterr().out
+    # gate round 3, finding 2: the springs let go there, the hold reads it not felt, and the press goes on
+    # (free, back up) as after any press not felt
+    assert note["push"]["let_go"] and not note["push"]["stopped_part_way"] and len(ctx.client.releases) == 1
+    assert result.free and not result.felt and not note["felt"] and flown[-1] == ["depth:rise"]
+
+
+def test_a_button_that_keeps_giving_is_pushed_push_steps_times_and_no_more(ctx, monkeypatch, tmp_path, gen3):
+    """A button that resists 4 N along a travel longer than the steps' reach: (10 - 4) N / ~2800 N/m a
+    step, PUSH_STEPS (8) steps go ~17 mm, short of it. The push stops there and says so: reported,
+    never forced. The button gave under the last step too, so its reference no longer pushes straight down
+    on the pads where they stand: the springs are let go, and the hold reads not felt."""
+    result, _p, note, flown, _s = _push_press(
+        ctx, monkeypatch, tmp_path, gen3, 0.02, travel=0.05, give=0.05, give_n=4.0
+    )
+    assert _pushes(flown) == note["push"]["steps"] == dp.PUSH_STEPS and note["push"]["end"] == "steps"
+    assert note["push"]["let_go"] and not note["push"]["stopped_part_way"] and len(ctx.client.releases) == 1
+    assert result.free and not result.felt and abs(result.press_n) < 0.05 and flown[-1] == ["depth:rise"]
+
+
+def test_a_button_that_gives_under_a_millimetre_is_pushed_again_to_within_1_5_n_of_the_force(
+    ctx, monkeypatch, tmp_path, gen3
+):
+    """Gate ruling G2: PUSH_GIVE_M 0.5 mm is ~1.4 N at the held pads' ~2800 N/m, the most the final force
+    may fall short. A button that gives 0.8 mm under the first step, then holds, took ~2.2 N off it: the
+    push goes on, and the force the button feels at the end is within 1.5 N of COMPLIANT_PRESS_N, never
+    past it."""
+    _r, pressed, note, flown, _s = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02, give=0.0008, give_n=0.5)
+    assert _pushes(flown) >= 2 and note["push"]["end"] == "held"
+    assert note["push"]["down_mm"] == pytest.approx(0.8, abs=0.05)
+    assert PUSH_F - 1.5 <= _the_force(gen3[0], pressed)[2] <= PUSH_F + 1e-6
+
+
+def test_the_push_reads_the_pads_from_joints_heard_after_the_arm_was_waited_still(ctx, monkeypatch, tmp_path, gen3):
+    """Gate round 3, finding 1: client.joints() is what the node last heard. A step's execution returns
+    hearing the arm before a button that gives has sunk under it (the harness's hearing); read then, the
+    give is missed and the push ends "held" with the button part-way, short of the force. After each step
+    the arm is waited still (runner.wait_still, which hears), and the pads are read after it: a button that
+    gives 5 mm is pushed until it holds, the final force COMPLIANT_PRESS_N less at most what PUSH_GIVE_M of
+    give takes off it. No wait at the cut: the first step goes out as the stroke's execution returned."""
+    cfg, top, pressed, runner_, flown = _on_gen3(ctx, monkeypatch, tmp_path, gen3, 0.02, give=0.005, give_n=1.0)
+    heard_at_return = []
+    execute = ctx.client.execute
+
+    def recorded(traj_, speed, guard=None, while_running=None, stop_when=None, gains=None):
+        got = execute(traj_, speed, guard, while_running, stop_when, gains)
+        if stop_when is None:
+            heard_at_return.append(
+                float(_pads_at(gen3[0], ctx.client.heard)[2] - _pads_at(gen3[0], ctx.client.live)[2])
+            )
+        return got
+
+    ctx.client.execute = recorded
+    result = dp.press_compliant(ctx, cfg, runner_, dp.DOWN_CONTACT_TOOL, {}, gen3[2], top)
+    steps = _pushes(flown)
+    assert heard_at_return[0] > dp.PUSH_GIVE_M  # (the harness: the first step returns with the button sinking)
+    assert steps >= 2 and ctx.client.stills[:steps] == list(range(2, steps + 2))  # after each step, none at the cut
+    f = _the_force(gen3[0], pressed)
+    assert PUSH_F - dp.PUSH_GIVE_M * _pinned_k(gen3[0], pressed) <= f[2] <= PUSH_F + 1e-6 and result.felt
+
+
+def test_pads_that_creep_sideways_step_by_step_stop_the_push_once_they_are_past_push_slide_m(
+    ctx, monkeypatch, tmp_path, gen3, capsys
+):
+    """PUSH_SLIDE_M is how far the pads stand from where the push began, not how far one step moved
+    them: a box that creeps 1.5 mm under each push of a button that keeps giving is 4.5 mm off after
+    the third, and the push stops there with its WARNING."""
+    _r, _p, note, flown, _s = _push_press(
+        ctx, monkeypatch, tmp_path, gen3, 0.02, travel=0.05, give=0.05, give_n=4.0, drift=(0.0015, 0.0)
+    )
+    assert note["push"]["end"] == "slid" and _pushes(flown) == note["push"]["steps"] == 3
+    assert note["push"]["aside_mm"] == pytest.approx(4.5, abs=0.1)
+    assert "WARNING: the pads went 4.5 mm sideways under the push" in capsys.readouterr().out
+
+
+def test_a_press_force_set_above_the_ceiling_pushes_the_ceiling(ctx, monkeypatch, tmp_path, gen3):
+    """COMPLIANT_PRESS_N set above COMPLIANT_PRESS_MAX_N (15 N here): the push asks the ceiling, 10 N,
+    and no more, the button's own reading of it within 0.01 N; the record says 10."""
+    monkeypatch.setattr(dp, "COMPLIANT_PRESS_N", 15.0)
+    result, pressed, note, _flown, _seen = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02)
+    f = _the_force(gen3[0], pressed)
+    assert f[2] == pytest.approx(dp.COMPLIANT_PRESS_MAX_N, abs=0.01) and np.hypot(f[0], f[1]) < 0.01
+    assert note["push"]["force_n"] == dp.COMPLIANT_PRESS_MAX_N and result.press_n <= dp.COMPLIANT_PRESS_MAX_N + 0.01
+
+
+def test_a_push_on_springs_that_differ_joint_by_joint_still_pushes_straight_down(ctx, monkeypatch, tmp_path, gen3):
+    """Gate ruling G4: joint springs that differ by joint (COMPLIANT_KQ, here not RIGID's 400 on all
+    seven) couple the pads' compliance differently. The push's rule divides by each joint's own spring:
+    judged by the harness's own solve (_held_at), the pads push COMPLIANT_PRESS_N straight down within
+    0.01 N and under 0.01 N sideways."""
+    monkeypatch.setattr(dp, "COMPLIANT_KQ", (400.0, 250.0, 520.0, 180.0, 450.0, 120.0, 300.0))
+    result, pressed, note, _flown, _seen = _push_press(ctx, monkeypatch, tmp_path, gen3, 0.02)
+    assert note["push"]["steps"] >= 1
+    f = _the_force(gen3[0], pressed)
+    assert f[2] == pytest.approx(PUSH_F, abs=0.01) and np.hypot(f[0], f[1]) < 0.01
+    assert result.press_n == pytest.approx(f[2], abs=0.05)
+
+
+@pytest.mark.parametrize("off", ["PRESS_BY_FORCE", "PRESS_FROM_CONTACT"])
+def test_with_either_switch_off_the_press_flies_says_and_records_what_bc3c880_did(
+    ctx, monkeypatch, tmp_path, gen3, capsys, off
+):
+    """Gate ruling G3: the push is on only with PRESS_BY_FORCE and press_contact's PRESS_FROM_CONTACT both
+    on (dp.push_on). With either off there is no push, the console says the press as bc3c880 said it (its
+    depth below the button, "watched all the way down"), and the contact watch is told the stroke's
+    planned depth past the top (past_m). PRESS_FROM_CONTACT off with PRESS_BY_FORCE on flies, says and
+    records exactly what both off do."""
+    from box_opening.tasks import press_contact as pc
+
+    watched = []
+    real_watch = dp.watch_press
+
+    def watch(ctx_, legs, stroke, top_z, cut=True):
+        got = real_watch(ctx_, legs, stroke, top_z, cut=cut)
+        watched.append((got.past_m, float(top_z) - float(stroke.end_z)))
+        return got
+
+    monkeypatch.setattr(dp, "watch_press", watch)
+
+    def run(where, by_force, from_contact):
+        where.mkdir()
+        _r, _p, note, flown, _s = _push_press(
+            ctx, monkeypatch, where, gen3, 0.02, by_force=by_force, from_contact=from_contact
+        )
+        said = [line for line in capsys.readouterr().out.splitlines() if line.startswith("[press_demo] ")]
+        return note, flown, said
+
+    note, flown, said = run(tmp_path / "off", off != "PRESS_BY_FORCE", off != "PRESS_FROM_CONTACT")
+    assert not dp.push_on() and _pushes(flown) == 0 and "push" not in note
+    assert not any(line.startswith("[press_demo] PUSH:") for line in said)
+    (text,) = (line for line in said if line.startswith("[press_demo] PRESS (compliant)"))
+    assert "Watched all the way down" in text and "until the pads meet the button" not in text
+    assert watched[-1][0] == pytest.approx(watched[-1][1]) and watched[-1][0] > 0.0
+    if off == "PRESS_FROM_CONTACT":
+        both, flown_both, said_both = run(tmp_path / "both", False, False)
+        assert flown == flown_both and said == said_both
+        assert {k: v for k, v in note.items() if k != "t"} == {k: v for k, v in both.items() if k != "t"}
+        assert not note["contact"]["cut"]
+    else:
+        assert note["contact"]["cut"] and note["contact"]["past_mm"] > 0.0
+    assert pc.PRESS_FROM_CONTACT == (off != "PRESS_FROM_CONTACT")
+
+
+@pytest.mark.parametrize("refused", ["early", "late", "never", "failed"])
+def test_a_refused_press_pushes_nothing(ctx, monkeypatch, tmp_path, gen3, refused):
+    """A press its contact watch refuses (met well over the cameras' top, nothing met down to well under
+    it, watched to its end with nothing met, a watch that failed) goes back up: no push, no hold."""
+    from box_opening.tasks import press_contact as pc
+
+    above = {"early": 0.08, "late": -0.03, "never": -0.2, "failed": 0.02}[refused]
+    if refused == "never":
+        monkeypatch.setattr(pc, "CONTACT_LATE_M", 1.0)  # no late limit inside the stroke
+    if refused == "failed":
+        monkeypatch.setattr(pc.PressContact, "_feed_new", lambda self: 1 / 0)
+    _r, _p, note, flown, _s = _push_press(ctx, monkeypatch, tmp_path, gen3, above)
+    assert note is None and _pushes(flown) == 0 and flown[0] == ["depth:approach", "depth:press"]
 
 
 # ---- a compliant reach-out's way in: one execution from the aimed look pose ----------------
@@ -3449,6 +4110,7 @@ def test_on_flatbot_a_bent_press_pushes_straight_down_where_a_straight_one_shove
     assert stroke.over == pytest.approx(dp.COMPLIANT_OVERSHOOT_M[0], abs=0.0005)
     assert stroke.bend_m == pytest.approx(0.005, abs=0.001) and notes[True]["bend_mm"] == pytest.approx(5.0, abs=1.0)
     assert float(np.abs(np.asarray(stroke.q_end) - q_b).max()) == pytest.approx(0.022, abs=0.003)
+    monkeypatch.setattr(dp, "PRESS_BY_FORCE", False)  # (the bent stroke's words: the press without the push)
     assert (
         "PRESS (compliant): straight down 72 mm to the button's bottom, its reference on 15 mm below it and 5 mm "
         "aside, where the springs push ~17 N straight down on the pads held there (1166 N/m at the pads); held "

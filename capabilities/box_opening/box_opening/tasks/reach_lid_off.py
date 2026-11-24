@@ -3380,7 +3380,7 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     look pose where the way in did not start (from over the box, the clear
     first, where its free air flew in position and only the stroke did not
     start: rp.fly_way_in), the arm let go and held where
-    a move stopped part-way, up off the button and home from over the box
+    a move stopped part-way (the hold's push too), up off the button and home from over the box
     where the way back did not start. Home is planned from the look pose
     while the way back flies: ctx.home_ahead, for a stop there (_stop_home).
     `direct(seen)` (the first press's, GRIP_FROM_PRESS): after a hold that
@@ -3451,6 +3451,11 @@ def _press_and_back(ctx, cfg, runner, way, legs, top_z, press, direct=None):
     runner.note("reach_slid_in", turned_down=way.down.walked, residual_nm=None)
     seen = {}
     held = dp.compliant_hold(ctx, cfg, runner, way.stroke, top_z, seen, contact=contact)
+    if not held.free:
+        # the hold's push stopped part-way (dp.compliant_hold), its springs let go there: the run ends where
+        # the arm holds, as where the way in stopped part-way — no rise, no grip, no second press
+        log.info("[press_demo] STOP: %s" % held.why)
+        return 1, None
     if held.felt:
         _note_frames(ctx, stage="pressed", touch_xyz=list(seen["touch_xyz"]) if seen.get("touch_xyz") else None)
     held_z = float(seen["touch_xyz"][2]) if held.felt and seen.get("touch_xyz") else None
