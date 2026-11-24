@@ -677,6 +677,7 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
     if first_tried:
         say(f"  tried first (worked before): {'; '.join(proven.describe(r) for r in first_tried)}")
     tried = []
+    adaptive_pull = adaptive_pull and isinstance(after, PushOpen)
     pull_angles = P.pull_angles(swing) if adaptive_pull else (swing,)
 
     def fail(name, why, detail=None):
@@ -784,7 +785,9 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         door = closed_door(geom, c["h"], c.get("ref", c["pos"]), c)
         sw = found["swing"]
         angle = found["swing_deg"]
-        ok, msg = after.plan(planner, opened(door, angle), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
+        args = (planner, opened(door, angle), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
+        # Keep the established pull for a base move. The shorter handoff is planned at the measured dock.
+        ok, msg = after.plan(*args, in_place=True) if adaptive_pull and angle < swing else after.plan(*args)
         if not ok:
             fail(found["name"], f"after swing: {msg}")
             return None

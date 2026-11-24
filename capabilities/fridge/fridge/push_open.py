@@ -353,7 +353,7 @@ class PushOpen:
         self.placement = None
         self.finish = ""  # how the push ends (plan_finished_push), in words
 
-    def plan(self, planner, door, q_hold, hold_pose, from_arm=False):
+    def plan(self, planner, door, q_hold, hold_pose, from_arm=False, *, in_place=False):
         """From the hand on the handle (joints `q_hold`, tool `hold_pose`) with the door as `door` (open as far as the
         pull leaves it). `from_arm`: that is where the arm is now. Returns (ok, message)."""
         model = FridgeModel(door)
@@ -363,7 +363,8 @@ class PushOpen:
         if off is None:
             return False, f"push-open: {why}"
         off_pose = (backs[-1].pos, backs[-1].quat)
-        for move in self.moves:
+        moves = (0.0,) if in_place else self.moves
+        for move in moves:
             if move == 0:
                 moved, route = door, model.full(deg0)
             else:
@@ -379,10 +380,10 @@ class PushOpen:
             else:
                 self.motion, self.push = off, push
             return True, f"push-open OK, {_after(move)} ({self.describe()}); the push {self.finish}"
-        if len(self.moves) == 1:
+        if len(moves) == 1:
             return False, (
                 f"push-open: no hand placement behind the door plans without a wheelchair move "
-                f"(base_moves false; last: {why})"
+                f"(last: {why})"
             )
         moves = ", ".join(f"{m * 100:+.0f}" for m in self.moves)
         return False, f"push-open: no hand placement behind the door plans (wheelchair moves {moves} cm; last: {why})"

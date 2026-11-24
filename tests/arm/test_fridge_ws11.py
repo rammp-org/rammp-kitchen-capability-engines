@@ -164,3 +164,19 @@ def test_executing_goal_does_not_search_hypothetical_placements(tmp_path, monkey
         open_door.run(arm, planner, True, search_alternate_placements=True)
     assert failure.value.payload["failure_counts"]["line-up"] > 0
     assert not arm.sent and not arm.grips
+
+
+def test_nov16_side_open_uses_a_shorter_checked_push_handoff(tmp_path):
+    _, geom, planner = recorded(1, tmp_path)
+    arm = planner.arm
+    after = open_door.PushOpen(base_moves=False)
+
+    plan = open_door.plan_open(
+        planner, geom, arm.q, constants.PUSH_OPEN_PULL_DEG, after, adaptive_pull=True
+    )
+
+    assert 30 <= plan["swing_deg"] < constants.PUSH_OPEN_PULL_DEG
+    assert plan["approach"].joined.success
+    assert after.chair_move == 0.0
+    assert any(goal.label == "in behind the door" for goal in after.motion.goals)
+    assert not arm.sent and not arm.grips
