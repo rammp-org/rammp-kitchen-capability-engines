@@ -67,7 +67,7 @@ The open's planning tries the grasps that worked before first and uses the first
 the test logs (`PROVEN_SEEDS` in `constants.py`) follow those. Every other grasp is still tried after them. Delete the
 file to start the order afresh (a new fridge or mount).
 
-The fixture A model includes the support cabinet in the arm planning world and the chair clearance check. The
+The demo-fridge model includes the support cabinet in the arm planning world and the chair clearance check. The
 `body_width_m` and `body_height_m` defaults are 0.4826 m and 0.8382 m. The support shares the body footprint
 and begins at `support_floor_z_m` (−0.502 m in Gen1.5 `arm_mount`). Set `support_height_m` from the support
 cabinet (0.50 m for the demo) or to 0 for a fridge on the floor.
