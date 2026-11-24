@@ -233,6 +233,8 @@ FOOTPRINT_FIT = False  # ... when this is set; else the footprint only judges th
 WARM_ITERS = 8  # a warm start (prev): at most this many iterations
 ICP_MAX_POINTS = 1200  # ICP's steps use at most this many of the mask's points (a fixed random subset): speed
 FIT_MAX_STEP_M = 0.10  # the fit may move the model at most this far from where it started
+BAR_MIN_FULL_COVERAGE = 0.80  # measured 5th–95th-percentile height divided by the full STL extent
+BAR_END_ZONE_M = 0.04  # where the bar bends into its mounting legs
 
 
 @dataclass
@@ -295,11 +297,15 @@ def _model_rotation(yaw):
     return np.stack([up, yc, zc], axis=1)
 
 
-def _bar_front_point(P, d, pv):
-    """Rough handle point to start from: the median of the mask's nearest layer (per row, within FRONT_LAYER_M)."""
+def _bar_front_points(P, d, pv):
+    """The mask's nearest layer in each image row."""
     nearest = np.full(int(pv.max()) + 1, np.inf)
     np.minimum.at(nearest, pv, d)
-    return np.median(P[d <= nearest[pv] + FRONT_LAYER_M], axis=0)
+    return P[d <= nearest[pv] + FRONT_LAYER_M]
+
+
+def _bar_front_point(P, d, pv):
+    return np.median(_bar_front_points(P, d, pv), axis=0)
 
 
 def _footprint(P, R, t, model):
@@ -483,7 +489,8 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
     if len(P) < FIT_MIN_POINTS:
         raise DoorNormalError(f"{len(P)} handle points with depth (needs {FIT_MIN_POINTS})")
     d = np.asarray(depth_mm, float)[pv, pu] / 1000.0
-    start = _bar_front_point(P, d, pv)
+    front = _bar_front_points(P, d, pv)
+    start = np.median(front, axis=0)
     cam = T[:3, 3]
     model = load_handle_model(stl_path)
     plane = None if door_standoff_m is None else measure_door_surface(depth_mm, K, T, mask, start, door_standoff_m)
@@ -512,7 +519,7 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
     X = model[0] @ R.T + t
     vis = np.einsum("ij,ij->i", model[1] @ R.T, cam - X) > 0
     F = P[on]
-    dist = cKDTree(X).query(F)[0] if len(F) else np.zeros(0)
+    dist, nearest = cKDTree(X).query(F)
     n = -R[:, 2]
     position = R @ model[2] + t
     noise = max(1.0, (float(np.linalg.norm(position - cam)) / FIT_REF_RANGE_M) ** 2)  # depth noise ~ range^2
@@ -529,8 +536,6 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
         footprint_fraction=float(on.mean()),
         debug={"data_in": F[inl], "data_out": np.vstack([F[~inl], P[~on]]), "model": X[vis], "start": start},
     )
-    if plane is not None:
-        res.debug["door_surface"] = plane
     problems = []
     if on.sum() < FIT_MIN_POINTS:
         problems.append(f"{int(on.sum())} mask points on the model's footprint (needs {FIT_MIN_POINTS})")
@@ -556,7 +561,35 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
         problems.append(f"the normal faces {off:.0f} deg away from the camera (max {MAX_OFF_CAMERA_DEG:.0f})")
     if problems:
         raise DoorNormalError(f"handle model fit (yaw {res.yaw_deg:+.1f} deg): " + "; ".join(problems))
+    if plane is not None:
+        res.debug["door_surface"] = plane
+        # Require the observed front to stand off the door at the expected range. A mask that follows
+        # the door or cabinet edge can have a short extent and still overlap the STL's mounting plate.
+        front_gap = (front - plane.centre) @ n
+        front_support = float(np.mean(abs(front_gap - door_standoff_m) < 0.025))
+        matches = nearest[inl]
+        model_x = model[0][matches, 0]
+        lo, hi = model[4][0], model[5][0]
+        near_end = (model_x < lo + BAR_END_ZONE_M) | (model_x > hi - BAR_END_ZONE_M)
+        vertical_normal = abs(model[1][matches, 0]) > 0.4
+        off_door = (F[inl] - plane.centre) @ n > door_standoff_m / 2
+        # The vertical front alone cannot anchor ICP in z. Look for a bend with a vertical normal.
+        end_support = int(np.count_nonzero(near_end & vertical_normal & off_door))
+        res.debug["height_support"] = (hi - lo, front_support, end_support)
     return res
+
+
+def _handle_height(fit, bounds):
+    """Use the registered center for partial views with foreground and end support."""
+    lo, hi = bounds
+    extent, front_support, end_support = fit.debug["height_support"]
+    coverage = (hi - lo) / extent
+    if coverage >= BAR_MIN_FULL_COVERAGE:
+        return (lo + hi) / 2, coverage, "visible midpoint"
+    z = fit.position[2]
+    if front_support >= 0.85 and end_support >= 12 and lo <= z <= hi:
+        return z, coverage, "registered center"
+    return (lo + hi) / 2, coverage, "visible midpoint (ambiguous registration)"
 
 
 @dataclass
@@ -607,14 +640,29 @@ def make_detector(handle_centre_to_face_m=0.070, **kwargs):
                 self.last_door_normal = None
                 return None
             self.last_door_normal = res
-            plane = res.debug["door_surface"]
-            say(
-                f"  door surface: {plane.inliers}/{plane.points} points, {plane.span_m * 100:.0f} cm span, "
-                f"{plane.rms_m * 1000:.1f} mm RMS; handle model: yaw {res.yaw_deg:+.1f} deg (0 = square to the arm), "
-                f"{res.inlier_fraction * 100:.0f}% of {res.points} pts on it, {res.rms_m * 1000:.1f} mm RMS, bar front "
-                f"at {np.round(res.position, 3)}"
-            )
             return res.normal.copy()
+
+        def _square_door(self, base_T_cam, normal=None):
+            detection = super()._square_door(base_T_cam, normal)
+            res = self.last_door_normal
+            # HandleDetector can also be explicitly configured to assume a square door.
+            if normal is None:
+                return detection
+            bounds = np.asarray(self._bar_extent) + base_T_cam[2, 3]
+            z, coverage, source = _handle_height(res, bounds)
+            detection["handle"][2] = z
+            plane = res.debug["door_surface"]
+            _, front_support, end_support = res.debug["height_support"]
+            say(
+                f"  accepted handle {np.round(detection['handle'], 3)} ({source}), "
+                f"visible Z {bounds[0]:.3f}–{bounds[1]:.3f} m ({coverage:.0%} of STL), "
+                f"fitted Z {res.position[2]:.3f} m, {front_support:.0%} front standoff support, "
+                f"{end_support} end inliers; handle model: yaw {res.yaw_deg:+.1f} deg, "
+                f"{res.footprint_fraction:.0%} footprint of {res.points} pts, "
+                f"{res.inlier_fraction:.0%} inliers, {res.rms_m * 1000:.1f} mm RMS; door surface: "
+                f"{plane.inliers}/{plane.points} pts, {plane.span_m * 100:.0f} cm span, {plane.rms_m * 1000:.1f} mm RMS"
+            )
+            return detection
 
     return ModelNormalHandleDetector(
         handle_centre_to_face_m=handle_centre_to_face_m, door_normal_from_handle=True, **kwargs

@@ -71,3 +71,48 @@ def test_v4_dock_02_narrow_mask_retries_clean_short_strip():
     assert plane.inliers > 2400
     assert plane.rms_m < 0.002
     assert plane.yaw_deg == pytest.approx(11.0, abs=0.5)
+
+
+def test_v4_cabinet_height_clipped_wrist_uses_registered_center():
+    depth, K, T, mask = _v4_wrist("00")
+    fit = dn.measure_door_normal(depth, K, T, mask, door_standoff_m=0.070)
+    points, rows, cols = dn._points(depth, K, T, mask)
+    front = points[depth[rows, cols] / 1000 <= _row_nearest(depth, rows, cols) + 0.020]
+    bounds = np.percentile(front[:, 2], [5, 95])
+    z, coverage, source = dn._handle_height(fit, bounds)
+    assert coverage < dn.BAR_MIN_FULL_COVERAGE
+    assert source == "registered center"
+    assert z == pytest.approx(0.393, abs=0.003)
+    assert z - np.mean(bounds) > 0.004
+
+
+def _row_nearest(depth, rows, cols):
+    nearest = np.full(depth.shape[0], np.inf)
+    np.minimum.at(nearest, rows, depth[rows, cols] / 1000)
+    return nearest[rows]
+
+
+@pytest.mark.parametrize(
+    ("support", "bounds", "source"),
+    [
+        ((0.248, 0.95, 40), (0.275, 0.495), "visible midpoint"),
+        ((0.248, 0.70, 40), (0.300, 0.450), "visible midpoint (ambiguous registration)"),
+        ((0.248, 0.95, 0), (0.300, 0.450), "visible midpoint (ambiguous registration)"),
+    ],
+)
+def test_handle_height_only_uses_model_for_anchored_partial_bar(support, bounds, source):
+    fit = dn.HandleFit(
+        normal=np.array([-1, 0, 0]),
+        yaw_deg=0,
+        position=np.array([0.85, -0.2, 0.393]),
+        R=np.eye(3),
+        t=np.zeros(3),
+        rms_m=0.002,
+        inlier_fraction=0.95,
+        points=600,
+        footprint_fraction=1.0,
+        debug={"height_support": support},
+    )
+    z, _, reason = dn._handle_height(fit, bounds)
+    assert z == pytest.approx(np.mean(bounds))
+    assert reason == source
