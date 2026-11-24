@@ -8,8 +8,6 @@ import time
 
 import pytest
 from base_sim import DifferentialDrive
-from capability_engine.base import BaseError, BaseInterface
-from capability_engine.engine import Cancelled
 from fake_driver import FakeBase, FakeCtx, counts
 from rammp_base_interfaces.msg import DriveCommand, MibStatus
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -17,6 +15,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from capability_engine import base as base_module
+from capability_engine.base import BaseError, BaseInterface
+from capability_engine.engine import Cancelled
 
 WAIT_S = 5.0
 POLL_S = 0.01

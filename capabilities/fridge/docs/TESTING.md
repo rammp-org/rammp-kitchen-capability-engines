@@ -339,21 +339,21 @@ In order. Stop at the first step that fails, and save the run before changing an
 1. **Deployment.** Pin the fridge image. Add `./config/robots/current:/config/robot:ro` to the fridge entries in
    `december_2026/sheppy-manifest.yaml`. Without it, the 30° mount refuses every open. Turn the orchestrator's
    `execute_timeout_s` off (or raise it) before enabling docking.
-2. **Measure the site.** Handle height, door bottom and cabinet top above the floor; fridge depth; the hinge (left,
+1. **Measure the site.** Handle height, door bottom and cabinet top above the floor; fridge depth; the hinge (left,
    facing the fridge). Tape the hinge position relative to the handle bar (code: 0.049 m into the door, 0.374 m
    along it). Measure the pull force, with a luggage scale on the handle, to break the seal, and again at ~30° and ~80°.
-3. **Cameras.** Run the two-camera agreement dry run above (30 mm / 5°). Scene-camera docking waits until it passes.
-4. **Demo mark.** Put the closed handle ≈ 0.825 m forward and 0.235 m right of `arm_mount`, with the chair turned 14°
+1. **Cameras.** Run the two-camera agreement dry run above (30 mm / 5°). Scene-camera docking waits until it passes.
+1. **Demo mark.** Put the closed handle ≈ 0.825 m forward and 0.235 m right of `arm_mount`, with the chair turned 14°
    toward the hinge side. Mark the floor. Dry-run Open (`execute: false`, `drive_base: false`) from the mark, then
    ±3 cm / ±3° off it. Expect a front grasp, a 90° push and a plan in a few seconds.
-5. **Open without the base,** empty chair first, at the lowest speed. Read the door angle independently at the end of the
+1. **Open without the base,** empty chair first, at the lowest speed. Read the door angle independently at the end of the
    pull, after release, at first push contact, at the end and after retreat. The first push contact must be on the
    inner face, moving the door open. Door closing after the hand leaves points to the entry route. Drift before
    contact points to release dynamics.
-6. **Base (docking stays off until this passes).** Empty chair, open floor. Check the odom datum and the axle position
+1. **Base (docking stays off until this passes).** Empty chair, open floor. Check the odom datum and the axle position
    (code: axle at (−0.116, −0.284) m in `arm_mount`) with a slow straight move and an in-place turn each way. Measure
    the stop distance, the 300 ms watchdog, joystick takeover, e-stop and cancel at 0.02 m/s, then at 0.03 m/s.
-7. **Docking.** `docking_enabled`, empty chair, from ~10 cm / 5° off the mark, then wider. A spotter stays on the
+1. **Docking.** `docking_enabled`, empty chair, from ~10 cm / 5° off the mark, then wider. A spotter stays on the
    e-stop. Then with a person in the chair, starting at the mark with no correction, then one small correction.
 
 Log wrist, scene, odometry, twists, MIB status, external torque and the action result throughout.

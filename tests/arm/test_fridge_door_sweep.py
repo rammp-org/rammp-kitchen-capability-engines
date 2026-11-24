@@ -187,15 +187,21 @@ def test_support_cabinet_blocks_the_dock_and_its_translation(model, tmp_path):
     ("hinge", "angle", "reuse"),
     [([0, 0, 0], 40, True), ([0.02, 0, 0], 40, False), ([0, 0, 0], 42, False)],
 )
-def test_push_reuse_requires_agreement_with_the_release_geometry(model, hinge, angle, reuse, monkeypatch):
+def test_push_reuse_requires_agreement_with_the_release_geometry(
+    model, hinge, angle, reuse, monkeypatch
+):
     after = push_open.PushOpen(base_moves=False)
     after.chair_move, after.end_deg = 0.0, 90.0
     after.release_geometry = push_open.release_geometry(model, 40)
     after.safe_routes = lambda *args, **kwargs: ((0.0, 90.0),)
-    monkeypatch.setattr(push_open, "load_door", lambda: dict(model.door, hinge=hinge, door_open_deg=angle))
+    monkeypatch.setattr(
+        push_open, "load_door", lambda: dict(model.door, hinge=hinge, door_open_deg=angle)
+    )
     observed = []
     monkeypatch.setattr(push_open, "after_release", lambda *args, reuse: observed.append(reuse))
-    planner = SimpleNamespace(world=None, join=lambda *args: None, run=lambda *args, **kwargs: False)
+    planner = SimpleNamespace(
+        world=None, join=lambda *args: None, run=lambda *args, **kwargs: False
+    )
 
     assert not after.execute(None, planner)
     assert observed == [reuse]

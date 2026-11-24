@@ -39,7 +39,6 @@ from pathlib import Path
 
 from base_sim import HIGH, LOW, NORMAL
 from builtin_interfaces.msg import Duration
-from capability_engine.engine import Cancelled
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from nav_msgs.msg import Odometry
 from rammp_arm import ERRORS, JOINTS
@@ -81,6 +80,8 @@ from rclpy.qos import (
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from capability_engine.engine import Cancelled
 
 GRIPPER_JOINT = "arm_robotiq_85_left_knuckle_joint"
 STATE_HZ = 50.0  # /joint_states, /ee_state and /gripper_state

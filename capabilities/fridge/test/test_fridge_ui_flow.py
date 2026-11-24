@@ -655,7 +655,7 @@ def test_each_button_needs_the_door_its_action_starts_from(opened, offered):
     node = DOOR["Capability"]()
     why = {a: node._ui_unavailable(a, "fridge_1", _world(opened)) for a in DOOR["UI_ACTIONS"]}
     assert {a for a, w in why.items() if not w} == offered
-    for a, w in why.items():
+    for _a, w in why.items():
         if w:
             assert w == ("The fridge door is already open." if opened else "The fridge door is already closed.")
 
