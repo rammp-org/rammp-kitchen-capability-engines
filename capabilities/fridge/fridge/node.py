@@ -747,7 +747,10 @@ class Capability(CapabilityEngine):
         # that pushes it reports that)
         if execute and not (action_id == "open" and push_open.NEXT_STEP):
             ctx.update_object(self.instance_id, opened=action_id == "open")
-        return {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
+        result = {"executed": execute, "note": note, "runs_dir": str(dc.RUNS_DIR)}
+        if action_id == "open" and push_open.FINAL_ANGLE_DEG is not None:
+            result["push_final_angle_deg"] = push_open.FINAL_ANGLE_DEG
+        return result
 
     def _planner_world(self):
         """This action's PlannerWorld: the scenes it pushes list planner_base_layers, and on the level mount the chair

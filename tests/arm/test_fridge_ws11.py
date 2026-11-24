@@ -186,6 +186,7 @@ def test_nov16_side_open_uses_a_shorter_checked_push_handoff(tmp_path):
     assert 30 <= plan["swing_deg"] < constants.PUSH_OPEN_PULL_DEG
     assert plan["approach"].joined.success
     assert after.chair_move == 0.0
+    assert after.end_deg == constants.PUSH_OPEN_TO_DEG
     assert any(goal.label == "in behind the door" for goal in after.motion.goals)
     assert not arm.sent and not arm.grips
 
@@ -201,6 +202,8 @@ def test_nov16_door_sweep_is_clear_of_seat_and_legs(tmp_path, index):
     )
     boxes, padding = planner.world.door_sweep_boxes()
     assert DoorSweep(model, boxes, 0, constants.PUSH_OPEN_TO_DEG, padding).obstacle() is None
+    after = open_door.PushOpen(base_moves=False)
+    assert after.safe_routes(model, planner.world, 60, in_place=True) == ((0.0, 90.0),)
 
 
 def test_c2_search_016_door_leg_contact_is_blocked(tmp_path):

@@ -60,13 +60,18 @@ class DoorSweep:
     so the radius of the outermost slab corner bounds all between-sample travel.
     """
 
-    def __init__(self, model, boxes, start, end, padding=LAYER_PADDING_M, *, translation=None):
+    def __init__(self, model, boxes, start, end, padding=LAYER_PADDING_M, *, translation=None, push_grid=False):
         self.names = [box["name"] for box in boxes]
         if not boxes:
             return
         count = max(1, int(np.ceil(abs(end - start) / SAMPLE_DEG)))
         angles = np.linspace(start, end, count + 1)
         half_step = abs(end - start) / (2 * count)
+        if push_grid:
+            # Fixed samples let every candidate use the same conservative prefix.
+            angles = np.r_[start, np.arange(np.floor(start) + 1, end + 1)]
+            half_step = 0.5
+        self.angles = angles
         slab = [model.slab(deg)[0] for deg in angles]
         dims, centres, axes = self._boxes(slab)
         radius = np.max(np.linalg.norm(centres[:, :2] - model.df.hinge[:2], axis=1))
@@ -105,12 +110,25 @@ class DoorSweep:
             raise ValueError("invalid door or chair box geometry")
         return dims, centres, axes.as_matrix().swapaxes(-1, -2)
 
+    def _hits(self, shift):
+        gaps = self.gaps if shift is None else self.gaps + self.axes @ shift
+        return (np.abs(gaps) <= self.radii + 1e-10).all(axis=-1)
+
     def obstacle(self, shift=None):
         if not self.names:
             return None
-        gaps = self.gaps if shift is None else self.gaps + self.axes @ shift
-        hit = (np.abs(gaps) <= self.radii + 1e-10).all(axis=-1).any(axis=0)
+        hit = self._hits(shift).any(axis=0)
         return next((name for name, intersects in zip(self.names, hit, strict=True) if intersects), None)
+
+    def clear_push_end(self, minimum, shift=None):
+        """Largest whole-degree endpoint with an entirely clear sampled prefix."""
+        if not self.names:
+            return float(F.PUSH_OPEN_TO_DEG) if minimum <= F.PUSH_OPEN_TO_DEG else None
+        blocked = np.flatnonzero(self._hits(shift).any(axis=1))
+        index = int(blocked[0]) - 1 if blocked.size else len(self.angles) - 1
+        if index >= 0 and self.angles[index] >= minimum:
+            return float(self.angles[index])
+        return None
 
     def clear_shift(self):
         """Smallest tested chair move along a single axis that clears this sweep at the new dock."""
@@ -129,10 +147,15 @@ def check_open(model, world, angles, after):
     for angle in angles:
         if DoorSweep(model, boxes, 0.0, angle, padding).obstacle() is not None:
             continue
-        if after is None or after.safe_moves(model, world, angle, in_place=angle < angles[0]):
+        if after is None or after.safe_routes(model, world, angle, in_place=angle < angles[0]):
             safe.append(angle)
     if not safe:
-        end = F.PUSH_OPEN_TO_DEG if after is not None else min(angles)
-        sweep = DoorSweep(model, boxes, 0.0, end, padding)
+        end = min(angles) if after is None else push_minimum(min(angles))
+        sweep = DoorSweep(model, boxes, 0.0, min(end, F.PUSH_OPEN_TO_DEG), padding)
         raise SweepBlocked(sweep.obstacle() or "the chair keep-out", sweep)
     return tuple(safe)
+
+
+def push_minimum(start):
+    """The demo opening floor and the minimum travel beyond the pull handoff."""
+    return max(F.PUSH_OPEN_MIN_FINAL_DEG, float(np.ceil(start + F.PUSH_OPEN_MIN_PUSH_DEG)))

@@ -1257,8 +1257,8 @@ def release_back_off(ai, planner, execute):
 
 def save_planned_door(plan, push, after):
     """Write DOOR_FILE as the open just planned would leave it (a dry run's save_door): the closed door, the hinge, the
-    door model, and the door open to PUSH_OPEN_TO_DEG (`push`; where it stands after the wheelchair move the push-open
-    planned) or the pull's swing. Replaces the file."""
+    door model, and the door at the planned push angle and dock (or the pull angle for a pull-only action).
+    Replaces the file."""
     door = opened(plan["door"], plan["swing_deg"])
     door = P.planned_door_after(door, push, after if push else None)
     door.update(plan["hinge_fields"])
@@ -1304,7 +1304,7 @@ def run(
     (the push from where the chair stands, or it refuses), and the placement advice leaves out the cells that need
     one (constants CELLS_NEEDING_BASE_MOVE). Returns True when it finished (or the dry run passed); raises Refused."""
     global BASE_MOVES
-    P.NEXT_STEP, P.NEXT_MOVE = "", 0.0
+    P.NEXT_STEP, P.NEXT_MOVE, P.FINAL_ANGLE_DEG = "", 0.0, None
     BASE_MOVES = bool(base_moves)
 
     def task():

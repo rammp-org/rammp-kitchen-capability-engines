@@ -1,6 +1,6 @@
 """The push-open, the open's default: after the PUSH_OPEN_PULL_DEG pull, stopped there, and the release (the gripper
-opened with the hand still), off the handle, round the door's free edge, and the door pushed on to PUSH_OPEN_TO_DEG with
-the side of the hand -- one trajectory under joint impedance, the wheelchair moved first if the push needs it.
+opened with the hand still), off the handle, round the door's free edge, and the door pushed to the checked final
+angle with the side of the hand. The wheelchair moves first if needed.
 
 The motion (planning.py), planned with the open before anything moves and again from where the release leaves the arm:
 1. Straight back off the handle BACK_OFF_M (local IK; the door with a window round the hand in cuRobo's check).
@@ -10,7 +10,7 @@ The motion (planning.py), planned with the open before anything moves and again 
    only if it finds none is it given one point, PUSH_OPEN_EDGE_CLEAR_M past the edge.
 3. ONE leg (local IK, checked against the cabinet: it pushes the door): onto the inner face until the side of the
    hand is PUSH_OPEN_PRELOAD_M past touching it (the real hand's size, HAND_BOX_TOOL_M), round with the door to
-   PUSH_OPEN_TO_DEG, the hand held in the door's frame, then PUSH_OPEN_AWAY_M straight off it.
+   the checked final angle, the hand held in the door's frame, then PUSH_OPEN_AWAY_M straight off it.
    Then, in the same leg (no stop, the hand turning the short way), to in front of the middle of the fridge, facing
    into it, upright (finish_pose), the hand's real box PUSH_OPEN_FINISH_CLEAR_M clear of the open door and its handle
    all the way. The hand placements are tried for that first (plan_finished_push); if none plans, the push-open ends
@@ -33,11 +33,12 @@ from . import constants as F
 from . import planning as pl
 from . import side_grasp as S
 from .close_door import _box_gap, _hand_points, move_chair
-from .door_sweep import DoorSweep, SweepBlocked
+from .door_sweep import DoorSweep, SweepBlocked, push_minimum
 from .motion import load_door, opened, shifted
 from .world import FridgeModel, hand_reach
 
 NEXT_STEP = ""  # what the person does next, said where the goal was sent (the node reads it): the wheelchair move
+FINAL_ANGLE_DEG = None  # target of a successful planned or completed push
 NEXT_MOVE = 0.0  # ... and that move (m, + back), for the UI's prompt; 0: none asked for
 
 
@@ -167,7 +168,7 @@ def placements():
     return [(u, a, y) for u in F.PUSH_OPEN_AT_M for a in F.PUSH_OPEN_APPROACH_DEG for y in (1.0, -1.0)]
 
 
-def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finish=None):
+def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finish=None, *, end_deg=F.PUSH_OPEN_TO_DEG):
     """The goals from the hand off the handle to the end of the push, for one hand placement: (optionally) a point past
     the free edge, the push start, onto the inner face, round with the door. `route_world`: what the route to the push
     start avoids. `via_from`: the back-off's tool position -- add the point past the free edge (its height and
@@ -205,11 +206,10 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
         )
     )
     # the push: ONE leg onto the inner face and round with the door (the hand held in the door's frame, a pose every
-    # PUSH_OPEN_POINT_DEG) to exactly PUSH_OPEN_TO_DEG, where it comes to REST, still against the door: the door isn't
-    # held, so a hand still moving at 90 would let it coast on past. Its last PUSH_EASE_DEG at most PUSH_END_JOINT_SPEED
-    # whatever the goal's speed (push_caps), so the door is as slow at the end however fast the push ran
-    n = max(1, int(np.ceil((F.PUSH_OPEN_TO_DEG - deg0) / F.PUSH_OPEN_POINT_DEG)))
-    degs = [deg0] + [deg0 + (F.PUSH_OPEN_TO_DEG - deg0) * k / n for k in range(1, n + 1)]
+    # PUSH_OPEN_POINT_DEG) to exactly end_deg, where it comes to REST, still against the door: the door isn't
+    # held. Slow down over the last PUSH_EASE_DEG to limit coast, independent of the requested speed.
+    n = max(1, int(np.ceil((end_deg - deg0) / F.PUSH_OPEN_POINT_DEG)))
+    degs = [deg0] + [deg0 + (end_deg - deg0) * k / n for k in range(1, n + 1)]
     poses = [
         (df.pos(u_push, v_push, d, z_in), q_in if k == 0 else hand_quat(df, d, approach_deg, y_up))
         for k, d in enumerate(degs)
@@ -225,16 +225,15 @@ def push_goals(model, deg0, z_hold, placement, route_world, via_from=None, finis
     goals.append(
         pl.through(
             poses,
-            f"onto the inner face, push to {F.PUSH_OPEN_TO_DEG} deg and stop there",
+            f"onto the inner face, push to {end_deg:g} deg and stop there",
             model.cabinet(),
             caps=push_caps(degs),
             world_label="the cabinet (pushing)",
             segment_worlds=[worlds[d] for d in degs],
         )
     )
-    # then, from rest, straight off the inner face -- the close starts from there, the door left at 90 stays -- and on
-    # to in front of the fridge (`finish`), one more leg
-    deg = float(F.PUSH_OPEN_TO_DEG)
+    # Move straight off the inner face from rest and optionally finish in front of the fridge.
+    deg = float(end_deg)
     off = [(df.pos(u_push, v_push - F.PUSH_OPEN_AWAY_M, deg, z_in), hand_quat(df, deg, approach_deg, y_up))]
     label = f"{F.PUSH_OPEN_AWAY_M * 100:.0f} cm off the door"
     if finish is not None:
@@ -262,37 +261,42 @@ def push_caps(degs):
 
     scale = rammp_arm.JOINT_SPEED * rammp_arm.contact_speed_scale() / pl.LOCAL_JOINT_SPEED
     end = min(1.0, F.PUSH_END_JOINT_SPEED / max(1e-6, pl.LOCAL_JOINT_SPEED * scale))
-    return [end if d >= F.PUSH_OPEN_TO_DEG - F.PUSH_EASE_DEG - 1e-6 else 1.0 for d in degs]
+    return [end if d >= degs[-1] - F.PUSH_EASE_DEG - 1e-6 else 1.0 for d in degs]
 
 
-def finish_gap(model, step_off, finish):
-    """How close (m) the hand's real box (HAND_BOX_TOOL_M) comes to the door open PUSH_OPEN_TO_DEG or its handle on the
+def finish_gap(model, step_off, finish, end_deg=F.PUSH_OPEN_TO_DEG):
+    """How close (m) the hand's real box (HAND_BOX_TOOL_M) comes to the door at end_deg or its handle on the
     way from the step-off to `finish` (both (pos, quat)), the hand turning evenly as the leg does."""
     goal = pl.Goal(np.asarray(finish[0], float), np.asarray(finish[1], float), "", [], path="line")
     poses, _ = pl.path_poses(goal, np.asarray(step_off[0], float), np.asarray(step_off[1], float))
-    deg = float(F.PUSH_OPEN_TO_DEG)
-    boxes = model.slab(deg) + model.handle(deg)
+    boxes = model.slab(end_deg) + model.handle(end_deg)
     return min(min(_box_gap(_hand_points(p, q), b) for b in boxes) for p, q in poses)
 
 
-def plan_finished_push(planner, door, q_off, off_pose, route_world, model=None, from_arm=False):
+def plan_finished_push(
+    planner, door, q_off, off_pose, route_world, model=None, from_arm=False, *, end_deg=F.PUSH_OPEN_TO_DEG
+):
     """plan_push, ending in front of the fridge (finish_pose, the first of PUSH_OPEN_FINISH_OUT_M out from it that any
     hand placement plans); else the push ending at its step-off. Returns (Motion, placement, how the push ends in
     words) or (None, why, "")."""
     no_finish = "no stand-off tried"
     for out in F.PUSH_OPEN_FINISH_OUT_M:
         fin = finish_pose(door, out)
-        push, placed = plan_push(planner, door, q_off, off_pose, route_world, model, from_arm, finish=fin)
+        push, placed = plan_push(
+            planner, door, q_off, off_pose, route_world, model, from_arm, finish=fin, end_deg=end_deg
+        )
         if push is not None:
             return push, placed, f"then {out * 100:.0f} cm in front of the fridge, facing it"
         no_finish = placed
-    push, placed = plan_push(planner, door, q_off, off_pose, route_world, model, from_arm)
+    push, placed = plan_push(planner, door, q_off, off_pose, route_world, model, from_arm, end_deg=end_deg)
     if push is None:
         return None, placed, ""
     return push, placed, f"ends {F.PUSH_OPEN_AWAY_M * 100:.0f} cm off the door (not on to in front of it: {no_finish})"
 
 
-def plan_push(planner, door, q_off, off_pose, route_world, model=None, from_arm=False, finish=None):
+def plan_push(
+    planner, door, q_off, off_pose, route_world, model=None, from_arm=False, finish=None, *, end_deg=F.PUSH_OPEN_TO_DEG
+):
     """The push from the hand off the handle (joints `q_off`, tool `off_pose`), the door as `door`: the first hand
     placement whose whole motion plans, cuRobo routing straight to the push start first, then via a point past the
     free edge. `finish` (pos, quat): the push's leg goes on to there (push_goals), the hand's real box at least
@@ -302,9 +306,11 @@ def plan_push(planner, door, q_off, off_pose, route_world, model=None, from_arm=
     why = "no placement tried"
     for placement in placements():
         for via in (None, off_pose[0]):
-            goals = push_goals(model, deg0, float(off_pose[0][2]), placement, route_world, via_from=via, finish=finish)
+            goals = push_goals(
+                model, deg0, float(off_pose[0][2]), placement, route_world, via_from=via, finish=finish, end_deg=end_deg
+            )
             if finish is not None:
-                gap = finish_gap(model, goals[-1].through[-2], finish)
+                gap = finish_gap(model, goals[-1].through[-2], finish, end_deg)
                 if gap < F.PUSH_OPEN_FINISH_CLEAR_M:
                     why = f"on to in front of the fridge, the hand would come {gap * 100:.1f} cm from the door"
                     break
@@ -354,20 +360,25 @@ class PushOpen:
         self.placement = None
         self.finish = ""  # how the push ends (plan_finished_push), in words
         self.in_place = False
+        self.end_deg = None
 
-    def safe_moves(self, model, world, deg0, *, in_place):
+    def safe_routes(self, model, world, deg0, *, in_place):
         boxes, padding = world.door_sweep_boxes()
-        push = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding)
+        minimum = push_minimum(deg0)
+        if minimum > F.PUSH_OPEN_TO_DEG:
+            return ()
+        push = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding, push_grid=True)
         moves = (0.0,) if in_place else self.moves
         safe = []
         for move in moves:
             shift = np.r_[np.asarray(self.chair_dir) * move, 0.0]
-            if push.obstacle(shift if move else None) is not None:
+            end_deg = push.clear_push_end(minimum, shift if move else None)
+            if end_deg is None:
                 continue
             if move and DoorSweep(model, boxes, deg0, deg0, padding, translation=shift).obstacle():
                 continue
-            safe.append(move)
-        return tuple(safe)
+            safe.append((move, end_deg))
+        return tuple(sorted(safe, key=lambda route: -route[1]))
 
     def plan(self, planner, door, q_hold, hold_pose, from_arm=False, *, in_place=None):
         """From the hand on the handle (joints `q_hold`, tool `hold_pose`) with the door as `door` (open as far as the
@@ -375,37 +386,39 @@ class PushOpen:
         model = FridgeModel(door)
         deg0 = float(door["door_open_deg"])
         in_place = self.in_place if in_place is None else in_place
-        moves = self.safe_moves(model, planner.world, deg0, in_place=in_place)
-        if not moves:
+        routes = self.safe_routes(model, planner.world, deg0, in_place=in_place)
+        if not routes:
             boxes, padding = planner.world.door_sweep_boxes()
-            sweep = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding)
+            sweep = DoorSweep(model, boxes, deg0, min(push_minimum(deg0), F.PUSH_OPEN_TO_DEG), padding)
             return False, str(SweepBlocked(sweep.obstacle() or "the chair keep-out", sweep))
         backs = back_off_goals(model, deg0, hold_pose)
         off, why = planner.motion(backs, q_hold, start_pose=hold_pose, from_arm=from_arm)
         if off is None:
             return False, f"push-open: {why}"
         off_pose = (backs[-1].pos, backs[-1].quat)
-        for move in moves:
+        for move, end_deg in routes:
             if move == 0:
                 moved, route = door, model.full(deg0)
             else:
                 moved, route = shifted(door, move, self.chair_dir), swept_world(door, move, self.chair_dir)
-            push, placed, finish = plan_finished_push(planner, moved, off.q_end, off_pose, route, FridgeModel(moved))
+            push, placed, finish = plan_finished_push(
+                planner, moved, off.q_end, off_pose, route, FridgeModel(moved), end_deg=end_deg
+            )
             if push is None:
                 why = placed
                 continue
             self.in_place = in_place
             self.chair_move, self.placement = move, placed
             self.finish = finish
+            self.end_deg = end_deg
             if move == 0:
                 self.motion, self.push = pl.Motion(off.goals + push.goals, off.legs + push.legs, off.q0), None
             else:
                 self.motion, self.push = off, push
-            return True, f"push-open OK, {_after(move)} ({self.describe()}); the push {self.finish}"
-        if moves == (0.0,):
+            return True, f"push-open OK, {_after(move)} ({self.describe()}); the push to {end_deg:g} deg {self.finish}"
+        if len(routes) == 1 and routes[0][0] == 0.0:
             return False, (
-                f"push-open: no hand placement behind the door plans without a wheelchair move "
-                f"(last: {why})"
+                f"push-open: no hand placement behind the door plans without a wheelchair move (last: {why})"
             )
         moves = ", ".join(f"{m * 100:+.0f}" for m in self.moves)
         return False, f"push-open: no hand placement behind the door plans (wheelchair moves {moves} cm; last: {why})"
@@ -419,7 +432,8 @@ class PushOpen:
 
     def dry_run(self, drive_chair):
         """The dry run's NEXT_STEP: what an executed open would do after the pull."""
-        global NEXT_STEP
+        global NEXT_STEP, FINAL_ANGLE_DEG
+        FINAL_ANGLE_DEG = self.end_deg
         move = self.chair_move or 0.0
         if not move:
             NEXT_STEP = (
@@ -444,20 +458,22 @@ class PushOpen:
         again from where the arm is (else the plan checked before the swing, if the arm is where it starts), then off
         the bar, round the door and the push as ONE motion under joint impedance. With a wheelchair move: the back-off,
         then the move (driven, or asked for)."""
-        global NEXT_STEP, NEXT_MOVE
+        global NEXT_STEP, NEXT_MOVE, FINAL_ANGLE_DEG
         say("\n===== off the handle, round the door, push further open =====")
         door = load_door()
         deg0 = float(door["door_open_deg"])
         if deg0 > F.PUSH_OPEN_TO_DEG - F.PUSH_OPEN_MIN_PUSH_DEG + 2:  # a pull may overshoot a little
             raise Refused(f"the door is already ~{deg0:.0f} deg open (push to {F.PUSH_OPEN_TO_DEG}).")
-        safe = self.safe_moves(FridgeModel(door), planner.world, deg0, in_place=self.in_place)
-        say(f"  {after_release(self, planner, ai, door, reuse=self.chair_move in safe)}")
+        safe = self.safe_routes(FridgeModel(door), planner.world, deg0, in_place=self.in_place)
+        reuse = (self.chair_move, self.end_deg) in safe
+        say(f"  {after_release(self, planner, ai, door, reuse=reuse)}")
         planner.join(self.motion, FridgeModel(door).cabinet())
         if not self.chair_move:
             ok = planner.run(self.motion, "off the handle + round the door + push-open", impedance=AFTER_RELEASE)
             say(f"PUSH-OPEN {'DONE' if ok else 'STOPPED SHORT'}")
             if ok:
-                save_door_geometry(door_open_deg=float(F.PUSH_OPEN_TO_DEG))
+                save_door_geometry(door_open_deg=self.end_deg)
+                FINAL_ANGLE_DEG = self.end_deg
             return ok
         if not planner.run(self.motion, "off the handle", impedance=AFTER_RELEASE):
             return False
@@ -517,6 +533,7 @@ def push_after_chair_move(ai, planner, execute, chair_dir):
     """The push-open's last part, after the open asked for the wheelchair move and it was made: the push from where the
     hand is (off the handle), against the door file's door shifted by that move; the door file then holds the door
     where it now is. A dry run plans it only."""
+    global FINAL_ANGLE_DEG
     door = load_door()
     move = door.get("push_after_chair_move")
     if not move:
@@ -529,21 +546,30 @@ def push_after_chair_move(ai, planner, execute, chair_dir):
     model = FridgeModel(moved)
     deg0 = float(moved["door_open_deg"])
     boxes, padding = planner.world.door_sweep_boxes()
-    sweep = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding)
-    if obstacle := sweep.obstacle():
-        raise SweepBlocked(obstacle, sweep)
+    minimum = push_minimum(deg0)
+    if minimum > F.PUSH_OPEN_TO_DEG:
+        raise Refused(f"the door is already ~{deg0:.0f} deg open, leaving too little travel for a push.")
+    sweep = DoorSweep(model, boxes, deg0, F.PUSH_OPEN_TO_DEG, padding, push_grid=True)
+    end_deg = sweep.clear_push_end(minimum)
+    if end_deg is None:
+        required = DoorSweep(model, boxes, deg0, minimum, padding)
+        raise SweepBlocked(required.obstacle() or "the chair keep-out", required)
     pose = (np.asarray(st["ee_pos"][:3]), np.asarray(st["ee_pos"][3:7]))
     planner.search()  # a new search: the base's drive (or the goal before) doesn't count against it
     motion, placed, finish = plan_finished_push(
-        planner, moved, st["position"], pose, model.full(deg0), model, from_arm=True
+        planner, moved, st["position"], pose, model.full(deg0), model, from_arm=True, end_deg=end_deg
     )
     if motion is None:
         raise Refused(
             f"no hand placement behind the door plans from here, with the door {_how(move)} from where it was "
             f"recorded ({placed}) -- check the wheelchair moved as asked."
         )
-    say(f"  push planned: {len(motion.goals)} legs, hand {placed[0] * 100:.0f} cm from the hinge; it {finish}")
+    say(
+        f"  push planned: {len(motion.goals)} legs, hand {placed[0] * 100:.0f} cm from the hinge; "
+        f"push to {end_deg:g} deg, it {finish}"
+    )
     if not execute:
+        FINAL_ANGLE_DEG = end_deg
         say("  (dry run: the push plans from here; nothing moves)")
         return True
     planner.join(motion, model.cabinet())
@@ -556,16 +582,16 @@ def push_after_chair_move(ai, planner, execute, chair_dir):
                 for k in ("hinge", "hinge_pivot", "closed_grasp_pos", "closed_handle", "door_mid")
                 if moved.get(k) is not None
             },
-            door_open_deg=float(F.PUSH_OPEN_TO_DEG),
+            door_open_deg=end_deg,
             push_after_chair_move=None,
         )
+        FINAL_ANGLE_DEG = end_deg
     return ok
 
 
 def planned_door_after(door, push, after):
-    """The door file a dry run's save_door writes: the door open PUSH_OPEN_TO_DEG (`push`), shifted by the wheelchair
-    move the push-open planned (`after`)."""
-    out = opened(door, F.PUSH_OPEN_TO_DEG) if push else dict(door)
+    """The door at the planned push angle and dock, as saved by a dry run."""
+    out = opened(door, after.end_deg) if push else dict(door)
     if push and after is not None and after.chair_move:
         out = shifted(out, after.chair_move, after.chair_dir)
     return out

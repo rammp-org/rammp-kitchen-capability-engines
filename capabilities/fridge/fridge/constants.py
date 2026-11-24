@@ -238,7 +238,8 @@ DOOR_SWEEP_HINGE_MARGIN_M = 0.030
 # start round the open door (a point past its free edge only if it finds no route), then onto the inner face and round
 PUSH_OPEN_PULL_DEG = 60  # the pull. 11-05 sim sweep (PyBullet planner): 60 gave the most chair placements where the
 # open and the close plan; kept for cuRobo until it is swept again
-PUSH_OPEN_TO_DEG = 90  # push the door on to this
+PUSH_OPEN_TO_DEG = 90  # maximum push target
+PUSH_OPEN_MIN_FINAL_DEG = 60  # minimum useful opening for reaching into the fridge
 PUSH_OPEN_MIN_PUSH_DEG = 5  # ... at least this far past the pull: the pull is at most PUSH_OPEN_TO_DEG - this
 PUSH_OPEN_EDGE_CLEAR_M = 0.16  # the point past the free edge (tool point), when cuRobo needs one
 PUSH_OPEN_GAP_M = 0.10  # the push start: this far off the door's inner face (tool point) ...
