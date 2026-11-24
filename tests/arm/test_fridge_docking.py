@@ -251,3 +251,18 @@ def test_manual_guidance_relooks_after_steps_without_requesting_drive_control():
     assert geom["h_raw"][:2] == pytest.approx(target, abs=docking.POSITION_TOLERANCE)
     assert base.commands == []
     assert base.mode_calls == 0
+
+
+def test_guided_lateral_route_keeps_a_shallow_view_and_reaches_target():
+    displacement, yaw = np.array([-0.11, -0.10]), 0.09
+    *_, shallow, reversed_shallow = docking.guided_routes(displacement, yaw)
+    for route in (shallow, reversed_shallow):
+        poses = list(docking.route_samples(route))
+        assert poses[-1][0] == pytest.approx(displacement)
+        assert poses[-1][1] == pytest.approx(yaw)
+        assert (
+            max(abs(heading - yaw) for _, heading in poses) <= docking.GUIDED_LOOK_HEADING + 1e-10
+        )
+    distance, turn = docking.guided_step(displacement, yaw, None, lambda *_: None)
+    assert distance == 0.0
+    assert turn == docking.GUIDED_TURN
