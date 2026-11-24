@@ -587,7 +587,7 @@ def _handle_height(fit, bounds):
     if coverage >= BAR_MIN_FULL_COVERAGE:
         return (lo + hi) / 2, coverage, "visible midpoint"
     z = fit.position[2]
-    if front_support >= 0.85 and end_support >= 12 and lo <= z <= hi:
+    if front_support >= 0.95 and end_support >= 12 and lo <= z <= hi:
         return z, coverage, "registered center"
     return (lo + hi) / 2, coverage, "visible midpoint (ambiguous registration)"
 

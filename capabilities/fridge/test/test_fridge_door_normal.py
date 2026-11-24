@@ -96,7 +96,7 @@ def _row_nearest(depth, rows, cols):
     ("support", "bounds", "source"),
     [
         ((0.248, 0.95, 40), (0.275, 0.495), "visible midpoint"),
-        ((0.248, 0.70, 40), (0.300, 0.450), "visible midpoint (ambiguous registration)"),
+        ((0.248, 0.90, 40), (0.300, 0.450), "visible midpoint (ambiguous registration)"),
         ((0.248, 0.95, 0), (0.300, 0.450), "visible midpoint (ambiguous registration)"),
     ],
 )
