@@ -41,10 +41,11 @@ def test_intermediate_collision_with_clear_endpoints(model, sign):
 
 
 def test_vertical_separation_and_hinge_margin(model):
-    assert DoorSweep(model, [box((0.7, 0.08, 0))], 0, 0).obstacle() == "person/legs"
-    assert DoorSweep(model, [box((0.7, 0.08, 0.5))], 0, 0).obstacle() is None
-    # At 90 degrees a pivot error can displace a door point by sqrt(2) times that error.
-    assert DoorSweep(model, [box((-0.156, 0.7, 0))], 90, 90).obstacle() == "person/legs"
+    assert DoorSweep(model, [box((0.7, 0.055, 0))], 0, 0).obstacle() == "person/legs"
+    assert DoorSweep(model, [box((0.7, 0.055, 0.5))], 0, 0).obstacle() is None
+    # After chair padding, 36 mm remains to the slab, within the 42 mm allowance at 90 degrees.
+    assert DoorSweep(model, [box((-0.066, 0.7, 0))], 90, 90).obstacle() == "person/legs"
+    assert DoorSweep(model, [box((-0.080, 0.7, 0))], 90, 90).obstacle() is None
 
 
 def test_refusal_reports_a_shift_that_clears_the_sweep(model, tmp_path):
