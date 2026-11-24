@@ -142,6 +142,7 @@ PARAMS = {
     # drive_base: its limits and the MIB drive profile (base_drive.PARAMS)
     **base_drive.PARAMS,
     "docking_enabled": False,  # fixture A / Gen1.5, after verifying the route and odometry datum on hardware
+    "open_scene_fallback_enabled": False,  # retry a refused fixed-base wrist look on the scene camera
     "guided_docking_enabled": False,  # show checked drive steps on the Open UI buttons
     "docking_target_handle_xy": docking.TARGET_HANDLE.tolist(),
     "docking_target_yaw_deg": float(np.degrees(docking.TARGET_YAW)),
@@ -603,15 +604,11 @@ class Capability(CapabilityEngine):
                 log = self.get_logger().info if back else self.get_logger().error
                 log(f"contact stop: default profile {'back' if back else 'NOT restored'} ({said})")
 
-    def _dock_open(self, ctx, world, camera, speed, cfg, *, guided=False, autonomous=True):
-        if self.cfg["door_normal"] == "square":
-            raise dc.Refused("Docking needs a measured door normal")
-        if not np.allclose(self.cfg["chair_back_dir"], [1.0, 0.0]):
-            raise dc.Refused("Docking needs the Gen1.5 arm mount square to the wheelchair")
+    def _open_scene_camera(self, camera):
         topics = tuple(self.cfg[k] for k in ("scene_color_topic", "scene_camera_info_topic", "scene_depth_topic"))
         if not all(topics):
-            raise dc.Refused("Docking needs the scene RGB-D camera topics")
-        scene = (
+            raise dc.Refused("The fridge look needs the scene RGB-D camera topics")
+        return (
             camera
             if self.cfg["detect_camera"] == "scene"
             else WristCamera(
@@ -623,6 +620,26 @@ class Capability(CapabilityEngine):
                 sam3_threshold=self.cfg["sam3_threshold"],
             )
         )
+
+    def _detect_open_with_scene_fallback(self, camera):
+        try:
+            return open_door.detect(self.arm)
+        except dc.Refused:
+            scene = self._open_scene_camera(camera)
+            self.get_logger().info("Fridge wrist look refused. Trying the scene view.")
+            try:
+                dc.set_camera(scene)
+                scene.require_frames_after_now()
+                return open_door.detect(self.arm)
+            finally:
+                dc.set_camera(camera)
+
+    def _dock_open(self, ctx, world, camera, speed, cfg, *, guided=False, autonomous=True):
+        if self.cfg["door_normal"] == "square":
+            raise dc.Refused("Docking needs a measured door normal")
+        if not np.allclose(self.cfg["chair_back_dir"], [1.0, 0.0]):
+            raise dc.Refused("Docking needs the Gen1.5 arm mount square to the wheelchair")
+        scene = self._open_scene_camera(camera)
         mount = np.asarray(self.cfg["docking_axle_to_mount_xy"], float)
         odom = np.asarray(self.cfg["docking_odom_to_axle_xy"], float)
         if any(offset.shape != (2,) or not np.isfinite(offset).all() for offset in (mount, odom)):
@@ -833,6 +850,14 @@ class Capability(CapabilityEngine):
                 return detected
 
             if action_id == "open":
+                detect_open = dock_then_contact if may_dock else None
+                if (
+                    detect_open is None
+                    and self.cfg.get("open_scene_fallback_enabled")
+                    and self.cfg["detect_camera"] == "wrist"
+                ):
+                    detect_open = partial(self._detect_open_with_scene_fallback, camera)
+
                 ok = open_door.run(
                     self.arm,
                     planner,
@@ -852,7 +877,7 @@ class Capability(CapabilityEngine):
                     search_alternate_placements=bool(params.get("search_alternate_placements", False)),
                     staging=np.radians(self.cfg["start_joints_deg"]),
                     progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),
-                    detect_at_dock=dock_then_contact if may_dock else None,
+                    detect_at_dock=detect_open,
                     allow_short_handoff=docking_requested,
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
