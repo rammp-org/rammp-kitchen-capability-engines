@@ -2,6 +2,7 @@
 
 import math
 import time
+from itertools import accumulate
 
 import numpy as np
 from capability_engine import BaseError
@@ -233,6 +234,7 @@ def dock(
 
 GUIDED_STEP_M = 0.10
 GUIDED_TURN = math.radians(15)
+GUIDED_LOOK_HEADING = math.radians(35)
 GUIDED_POSITION_MARGIN = 0.025
 GUIDED_YAW_MARGIN = math.radians(4)
 GUIDED_SETTLE_S = 1.0
@@ -250,8 +252,15 @@ def guidance_text(distance, turn):
 
 def guided_step(delta, yaw, geom, guard):
     """Ask for only one short segment, with an allowance for human overshoot."""
+
+    def view_excursion(route):
+        # Prefer a retreat for a near-sideways correction. Facing far away
+        # from the dock can put the handle outside both cameras at a re-look.
+        headings = accumulate((turn for _, turn in route), initial=-yaw)
+        return max(0.0, max(abs(wrap(angle)) for angle in headings) - GUIDED_LOOK_HEADING)
+
     blocked = None
-    for route in route_options(delta, yaw):
+    for route in sorted(route_options(delta, yaw), key=view_excursion):
         for distance, turn in route:
             if abs(distance) > TRANSLATION_TOL or abs(turn) > TURN_TOL:
                 break
