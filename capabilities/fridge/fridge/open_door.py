@@ -527,6 +527,13 @@ def standoffs(cand):
     )
 
 
+def hand_lags(cand):
+    """List side hand lags with the previously successful lag first."""
+    if not cand.get("side"):
+        return [0.0]
+    return proven.first((cand.get("proven") or {}).get("lag"), F.SIDE_HAND_LAGS_DEG)
+
+
 def proven_file():
     """The record of the grasps that planned and ran (proven.py), next to the door file."""
     return dc.DOOR_FILE.parent / proven.FILE_NAME
@@ -720,7 +727,7 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_p
         say("    candidate rejected " + json.dumps(item))
 
     def side_pull_options(cand, insert_joints, name):
-        preferred_lag = (cand.get("proven") or {}).get("lag")
+        preferred_lag = hand_lags(cand)[0] if (cand.get("proven") or {}).get("lag") is not None else None
         for angle in pull_angles:
             ranked = []
             for lag in F.SIDE_HAND_LAGS_DEG:

@@ -47,13 +47,13 @@ def test_the_hand_slides_in_from_the_hinge_side_20_deg_off_the_door(side):
     # the fingers close across the door's normal (turned with the hand), level
     assert abs(fingers @ NORMAL) > np.cos(np.radians(90 - F.SIDE_INSERT_DEG)) - 1e-9
     assert abs(fingers[2]) < 1e-9
-    # the pads where they were on the arm on 11-06: 1.1 cm behind the detected point, into the
+    # the pads where they were on the arm on 11-06: 6 mm behind the detected point, into the
     # door, then 5 cm on along the approach
     pads = level["pos"] + approach * shared.GRASP_PADS_PAST_TOOL
     expect = HANDLE - NORMAL * F.SIDE_PADS_INTO_M + approach * F.SIDE_PADS_PAST_BAR_M
     np.testing.assert_allclose(pads, expect, atol=1e-9)
-    # 11-06's bar point: the detected point - into x (GRIP_EXT - X_ADJUST - pads - SIDE_DEEPER_M)
-    assert F.SIDE_PADS_INTO_M == pytest.approx(-(0.126 - 0.040 - 0.042 - 0.055))
+    # The mounting-plate clearance shifts the 11-06 bar point 5 mm outward.
+    assert F.SIDE_PADS_INTO_M == pytest.approx(-(0.126 - 0.040 - 0.042 - 0.055) - 0.005)
 
 
 def test_every_tilt_from_40_up_to_40_down_keeps_the_pads_on_the_bar(side):

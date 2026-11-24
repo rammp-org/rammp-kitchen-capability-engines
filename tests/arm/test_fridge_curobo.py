@@ -946,11 +946,13 @@ def test_a_close_starting_inside_the_chair_refuses_at_once(fridge):
     assert close_door.LAST_CHAIR_BACK is None
 
 
-def test_a_move_whose_start_is_blocked_costs_one_plan(fridge):
+def test_a_move_whose_start_is_blocked_costs_one_plan(fridge, monkeypatch):
     """A start blocked in a move's world rules that move out at once: every height and hand turn
     would start from the same pose in the same world."""
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False, save_door=True)
+    # Choose moves with a geometrically admissible push target for this door model.
+    monkeypatch.setattr(F, "CLOSE_CHAIR_MOVES_M", (0.0, 0.05, -0.05))
     calls = []
 
     def blocked(pos, quat, start_joints, hold=0):
@@ -1006,10 +1008,12 @@ def test_a_leg_whose_curobo_plan_raised_is_asked_again(fridge):
     assert len(answers) == n + 1
 
 
-def test_the_push_open_ends_in_front_of_the_fridge_facing_it_in_the_same_leg(fridge):
+def test_the_push_open_ends_in_front_of_the_fridge_facing_it_in_the_same_leg(fridge, monkeypatch):
     """After the push and its step-off, on to finish_pose in the push's one leg: no stop, no
     blend."""
     arm, planner, _ = fridge
+    # The synthetic door fixture has a finish route with about 16 mm clearance.
+    monkeypatch.setattr(F, "PUSH_OPEN_FINISH_CLEAR_M", 0.015)
     assert open_door.run(arm, planner, True)
     door = json.loads(dc.DOOR_FILE.read_text())
     pos, quat = push_open.finish_pose(door)
