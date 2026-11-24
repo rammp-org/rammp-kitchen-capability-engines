@@ -18,10 +18,6 @@ POSITION_TOLERANCE = 0.025
 YAW_TOLERANCE = math.radians(2)
 MAX_YAW_TRAVEL = math.radians(180)
 MAX_YAW_SPEED = 0.12
-SPEED_PARAMS = {
-    "docking_max_linear_speed": 0.05,
-    "docking_max_yaw_speed": MAX_YAW_SPEED,
-}
 MAX_TIME = 75.0
 MAX_LOOKS = 4
 LINEAR_SETTLED = 0.005
@@ -204,8 +200,8 @@ def dock(
     """Return the last camera observation and number of corrections executed."""
     deadline = clock() + MAX_TIME
     remaining_d = min(0.35, cfg["base_max_distance"])
-    linear_limit = cfg.get("docking_max_linear_speed", SPEED_PARAMS["docking_max_linear_speed"])
-    yaw_speed = cfg.get("docking_max_yaw_speed", SPEED_PARAMS["docking_max_yaw_speed"])
+    linear_limit = cfg.get("docking_max_linear_speed", 0.05)
+    yaw_speed = cfg.get("docking_max_yaw_speed", MAX_YAW_SPEED)
     if not 0 < linear_limit <= 0.15 or not 0 < yaw_speed <= 0.30:
         raise Refused("Docking speed limits must be in (0, 0.15] m/s and (0, 0.30] rad/s")
     if not math.isfinite(speed) or not speed > 0:

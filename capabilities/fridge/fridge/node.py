@@ -141,7 +141,8 @@ PARAMS = {
     "boxes_topic": "/perception/object_detections_3d",
     # drive_base: its limits and the MIB drive profile (base_drive.PARAMS)
     **base_drive.PARAMS,
-    **docking.SPEED_PARAMS,
+    "docking_max_linear_speed": 0.05,
+    "docking_max_yaw_speed": 0.12,
     "docking_enabled": False,  # fixture A / Gen1.5, after verifying the route and odometry datum on hardware
     "open_scene_fallback_enabled": False,  # retry a refused fixed-base wrist look on the scene camera
     "guided_docking_enabled": False,  # show checked drive steps on the Open UI buttons
@@ -686,7 +687,11 @@ class Capability(CapabilityEngine):
             ]
             docking.check_route(geom["closed_model"], [*boxes, *arm_boxes], padding, route, mount)
 
-        drive_cfg = {**cfg, **{name: self.cfg.get(name, default) for name, default in docking.SPEED_PARAMS.items()}}
+        drive_cfg = {
+            **cfg,
+            "docking_max_linear_speed": self.cfg["docking_max_linear_speed"],
+            "docking_max_yaw_speed": self.cfg["docking_max_yaw_speed"],
+        }
         with contextlib.ExitStack() as ui_motion:
 
             def moving():
