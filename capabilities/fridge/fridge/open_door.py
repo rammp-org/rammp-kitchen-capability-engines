@@ -75,8 +75,8 @@ NORMAL_AGREE_DEG = {"handle_model": 3.0, "handle": 5.0, "plane": 10.0, "square":
 
 def _make_detector(handle_centre_to_face_m, door_normal="handle_model"):
     """The handle detector for one detect_handle. `door_normal` (DOOR_NORMALS): where each look's door normal comes
-    from -- handle_model: the printed handle's model (RAMMP.Fridge.Handle5.STL) registered to SAM 3's handle mask on the
-    depth (door_normal.measure_door_normal, the side grasp's estimator); handle: the bar's front and its plate as
+    from -- handle_model: surface depth beside the SAM 3 mask sets yaw, checked against the printed handle model;
+    handle: the bar's front and its plate as
     parallel planes; plane: a door-plane fit over the whole image; square: the door taken as square to the arm."""
     if door_normal == "handle_model":
         from .door_normal import make_detector  # numpy / scipy; the ROS side (open3d) only when called

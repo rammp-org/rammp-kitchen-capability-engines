@@ -347,8 +347,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         return det
 
     def _square_door(self, base_T_cam, normal=None):
-        """The detection without any door plane, the handle from its own depth: door_square_to_arm (`normal` None), or
-        door_normal_from_handle's `normal`."""
+        """Build the detection using the bar depth and the supplied or assumed door normal."""
         Rb, tb = base_T_cam[:3, :3], base_T_cam[:3, 3]
         lo, hi = self._bar_extent
         z0 = float(tb[2])
@@ -359,7 +358,7 @@ class HandleDetector(door_common.perception.HandleDetector):
         )
         say(
             f"  handle from its own depth: {self._bar_points} pts on the bar's front, z {lo + z0:.3f} to {hi + z0:.3f}"
-            f" -> middle {(lo + hi) / 2 + z0:.3f}; {how}, no door plane fit"
+            f" -> middle {(lo + hi) / 2 + z0:.3f}; {how}"
         )
         return {
             "handle": Rb @ self._bar + tb,
