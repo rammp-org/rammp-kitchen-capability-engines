@@ -10,12 +10,17 @@ import pytest
 from door_common import common
 from door_common import open_door as shared
 from fridge import constants, open_door, planning, world
-from fridge.world import PlannerWorld
+from fridge.door_sweep import DoorSweep
+from fridge.world import FridgeModel, PlannerWorld
 from fridge_fake import HANDLE_QUAT, URDF, FakeCurobo, Plan
 
 from capability_engine import sim
 
 FIXTURES = Path(__file__).parent / "fixtures" / "ws11"
+# Padded by the sweep, as in the v2 pinned planner world.
+V2_LEGS = dict(
+    name="person/legs", position=[-0.00150, -0.35075, -0.18200], dims=[0.8668, 0.4827, 0.6776]
+)
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +50,10 @@ def recorded(index, tmp_path):
         hinge_fields=fields,
     )
     arm = FakeCurobo(q)
-    planner = planning.Planner(arm, PlannerWorld(arm, tmp_path / "worlds"), arm.fk)
+    seat = [dict(box, name=f"seat/{box['name']}") for box in data["seat_boxes"]]
+    planner = planning.Planner(
+        arm, PlannerWorld(arm, tmp_path / "worlds", extra=[*seat, V2_LEGS]), arm.fk
+    )
     return data, geom, planner
 
 
@@ -179,4 +187,53 @@ def test_nov16_side_open_uses_a_shorter_checked_push_handoff(tmp_path):
     assert plan["approach"].joined.success
     assert after.chair_move == 0.0
     assert any(goal.label == "in behind the door" for goal in after.motion.goals)
+    assert not arm.sent and not arm.grips
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_nov16_door_sweep_is_clear_of_seat_and_legs(tmp_path, index):
+    _, geom, planner = recorded(index, tmp_path)
+    candidate = open_door.grasp_candidates(geom)[0]
+    model = FridgeModel(
+        open_door.closed_door(
+            geom, candidate["h"], candidate.get("ref", candidate["pos"]), candidate
+        )
+    )
+    boxes, padding = planner.world.door_sweep_boxes()
+    assert DoorSweep(model, boxes, 0, constants.PUSH_OPEN_TO_DEG, padding).obstacle() is None
+
+
+def test_c2_search_016_door_leg_contact_is_blocked(tmp_path):
+    # v2/fake/reliability/search, search-016 hit person/legs with the slab
+    # at 50.33 degrees. Recreate the fit using the frozen search observation.
+    handle = np.array([0.733491862039143, -0.4067476244761701, 0.33882659325054254])
+    yaw = np.radians(13.23552302431958)
+    normal = -np.array([np.cos(yaw), np.sin(yaw), 0])
+    open_door.configure(tmp_path, 30, grasp="side")
+    hinge, _, _, fields = shared.FIND_HINGE(handle, HANDLE_QUAT, normal, None)
+    geom = dict(
+        h_raw=handle,
+        n=normal,
+        orient=HANDLE_QUAT,
+        hinge=hinge,
+        hinge_seen=None,
+        door_mid=None,
+        door_z=None,
+        hinge_fields=fields,
+    )
+    q = np.radians([103.7074, -32.1909, -170.7741, -123.1256, 102.6052, 110.6805, 2.1714])
+    arm = FakeCurobo(q)
+    planner = planning.Planner(arm, PlannerWorld(arm, tmp_path / "worlds", extra=[V2_LEGS]), arm.fk)
+    with pytest.raises(open_door.Infeasible, match="Door sweep blocked by person/legs") as exc:
+        open_door.plan_open(
+            planner,
+            geom,
+            q,
+            constants.PUSH_OPEN_PULL_DEG,
+            open_door.PushOpen(base_moves=False),
+            adaptive_pull=True,
+        )
+    assert exc.value.payload["executed"] is False
+    assert "cm" in exc.value.payload["operator_hint"]
+    assert planner.plans == 0
     assert not arm.sent and not arm.grips

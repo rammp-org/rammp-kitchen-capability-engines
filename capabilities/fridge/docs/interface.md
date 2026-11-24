@@ -14,9 +14,9 @@ from the side (`grasp: side`, the default): the hand slides in along the door fr
 nose-down (the first tilt whose whole open plans, level first); `grasp: front` grasps it squared to the
 door instead, fingers across the bar. Either grasps at the middle of the bar, or `grasp_offset_m` above
 or below it. The gripper closes as the pull starts and opens with the hand still after the
-door stops at the planned angle. With the default side grasp and push, planning tries 30°,
-40°, 50° and 60° in that order for each viable approach. The shorter pulls require a checked
-push from the current dock. The front grasp defaults to a 60° pull for the push. Then, in one motion, it backs
+door stops at the planned angle. With the default side grasp and push, planning tries the
+safe angles among 60°, 50°, 40° and 30° in that order for each viable approach. The shorter
+pulls require a checked push from the current dock. The front grasp defaults to a 60° pull for the push. Then, in one motion, it backs
 straight off the handle, goes round the door's free edge and pushes the door on to
 90° with the side of the hand, coming to rest exactly there (its last 10° slow, at any `speed`), steps 10 cm off it and, in the same motion, turns to face into the fridge in front
 of its middle (if the arm can reach that). If the push needs the wheelchair moved first, the goal stops after the
@@ -141,6 +141,17 @@ Open accepts `search_alternate_placements` (bool, default false) on dry runs. A 
 preflight returns `open_no_motion` with `executed: false`, a reason, failure counts, and
 candidate diagnostics in the result payload. The payload includes a signed base-angle hint
 when the measured yaw is outside the placement window. Positive is left viewed from above.
+The slab must clear the padded person, seat and platform for the whole planned pull and push,
+including the final position. A blocked sweep returns `open_no_motion` with `executed: false`,
+`reason: door_sweep_blocked`, the obstacle name and an `operator_hint`. When a single-axis
+chair shift clears the sweep, `fridge_shift_m` gives its effect on the fridge in arm_mount
+coordinates. Retry preflight after repositioning.
+
+On the 30° mount, mount the planner's robot configuration read-only in the fridge container
+and set `planner_sweep_config` to its planner YAML (default `/config/robot/curobo/planner.yaml`).
+Open refuses if the required layers cannot be loaded. On the level mount the sweep uses the
+same stand-in box as the arm planner.
+
 A start collision returns `start_staging_required` with any named blocker and penetration
 reported by the planner, plus the outcome of a bounded joint-space staging request. The open
 commands no motion in either case.

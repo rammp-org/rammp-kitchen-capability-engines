@@ -44,9 +44,7 @@ def deployment_boxes(config_path):
         layer = yaml.safe_load((path.parent / filename).read_text())
         name = layer["layer"]
         if name in CHAIR_LAYERS:
-            boxes.setdefault(name, []).extend(
-                dict(box, name=f"{name}/{box['name']}") for box in layer["obstacles"]
-            )
+            boxes.setdefault(name, []).extend(dict(box, name=f"{name}/{box['name']}") for box in layer["obstacles"])
     if any(not boxes.get(name) for name in CHAIR_LAYERS):
         raise ValueError("planner config must supply person, seat and platform layers")
     padding = float(config.get("planner", {}).get("world_padding", LAYER_PADDING_M))
@@ -86,10 +84,9 @@ class DoorSweep:
         a, b = np.broadcast_arrays(axes[:, None], chair_axes[None, :])
         cross = np.cross(a[..., :, None, :], b[..., None, :, :])
         self.axes = np.concatenate((a, b, cross.reshape(*a.shape[:2], 9, 3)), axis=2)
-        self.radii = (
-            (np.abs(self.axes @ a.swapaxes(-1, -2)) * dims[:, None, None]).sum(axis=-1)
-            + (np.abs(self.axes @ b.swapaxes(-1, -2)) * chair_dims[None, :, None]).sum(axis=-1)
-        )
+        self.radii = (np.abs(self.axes @ a.swapaxes(-1, -2)) * dims[:, None, None]).sum(axis=-1) + (
+            np.abs(self.axes @ b.swapaxes(-1, -2)) * chair_dims[None, :, None]
+        ).sum(axis=-1)
         delta = centres[:, None] - chair_centres
         self.gaps = (self.axes @ delta[..., None]).squeeze(-1)
 

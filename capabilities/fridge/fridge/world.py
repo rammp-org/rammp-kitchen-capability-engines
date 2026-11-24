@@ -176,8 +176,15 @@ class PlannerWorld:
     mount's stand-in for the chair)."""
 
     def __init__(
-        self, arm, write_dir, planner_dir=None, base_layers=(), restore_world="world.yaml", extra=(),
-        *, sweep_config=None,
+        self,
+        arm,
+        write_dir,
+        planner_dir=None,
+        base_layers=(),
+        restore_world="world.yaml",
+        extra=(),
+        *,
+        sweep_config=None,
     ):
         self.arm = arm
         self.write_dir = Path(write_dir)
@@ -196,7 +203,8 @@ class PlannerWorld:
         if self._sweep_boxes is None:
             if self.sweep_config is None:
                 boxes = [
-                    box for box in self.extra
+                    box
+                    for box in self.extra
                     if box["name"].partition("/")[0] in door_sweep.CHAIR_LAYERS | {"chair_stand_in"}
                 ]
                 self._sweep_boxes = boxes, door_sweep.LAYER_PADDING_M
