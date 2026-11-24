@@ -121,3 +121,37 @@ def test_push_floor_block_keeps_reposition_hint(model, tmp_path):
     sweep = DoorSweep(model, [legs], 30, 90, push_grid=True)
     assert sweep.clear_push_end(60) is None
     assert sweep.clear_push_end(60, shift) >= 60
+
+
+def test_resumed_push_uses_and_records_the_checked_endpoint(model, tmp_path, monkeypatch):
+    world = PlannerWorld(None, tmp_path, extra=[box((0.09, 0.9, 0))])
+    ai = SimpleNamespace(
+        get_state=lambda: {
+            "gripper_pos": 0,
+            "position": np.zeros(7),
+            "ee_pos": [0, 0, 0, 0, 0, 0, 1],
+        }
+    )
+    door = dict(model.door, door_open_deg=40, push_after_chair_move=0.05)
+    planner = SimpleNamespace(
+        world=world, search=lambda: None, join=lambda *_: None, run=lambda *_, **__: True
+    )
+    saved = {}
+    monkeypatch.setattr(push_open, "load_door", lambda: door)
+    monkeypatch.setattr(push_open, "save_door_geometry", lambda **fields: saved.update(fields))
+    monkeypatch.setattr(push_open, "FINAL_ANGLE_DEG", None)
+
+    def plan(*args, end_deg, **kwargs):
+        moved = args[1]
+        moved_model = FridgeModel(moved)
+        boxes, padding = world.door_sweep_boxes()
+        sweep = DoorSweep(moved_model, boxes, 40, 90, padding, push_grid=True)
+        assert 60 <= end_deg < 90
+        assert end_deg == sweep.clear_push_end(60)
+        return SimpleNamespace(goals=[]), (0.35,), ""
+
+    monkeypatch.setattr(push_open, "plan_finished_push", plan)
+    assert push_open.push_after_chair_move(ai, planner, True, (1, 0))
+    assert 60 <= saved["door_open_deg"] < 90
+    assert saved["push_after_chair_move"] is None
+    assert saved["door_open_deg"] == push_open.FINAL_ANGLE_DEG
