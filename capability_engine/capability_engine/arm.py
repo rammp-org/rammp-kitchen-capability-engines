@@ -1210,12 +1210,18 @@ class ArmInterface:
         rf.add_done_callback(lambda _: self._forget(send))
 
     @_rammp
-    def gripper(self, position, timeout_s=4.0, force=None, *, speed=None):
+    def gripper(self, position, timeout_s=4.0, force=None, *, speed=None, open_threshold=None):
         """Stream /setpoint/gripper at 50 Hz until the fingers stop moving (or `timeout_s`). The
         2F-85 latches the last command, so it holds after the stream stops. `speed`: a fraction
         of the closing speed (default GRIPPER_SPEED). A cancel of the action stops the stream and
         raises Cancelled. False, as for every motion, when not_ready() refuses (e.g. an e-stop),
-        before or while it streams."""
+        before or while it streams. For an opening command, `open_threshold` returns as
+        soon as a fresh position sample reaches that clearance. The driver continues to
+        hold the latched opening command."""
+        if open_threshold is not None and not 0 <= position < open_threshold <= 1:
+            raise ValueError(
+                "open_threshold must be above the target opening position and at most 1"
+            )
         self._checkpoint()
         if self._mock:
             self._mock_gripper = float(position)
@@ -1248,7 +1254,13 @@ class ArmInterface:
             with self._alive():
                 pub.publish(m)
             time.sleep(GRIPPER_PERIOD_S)
-            g = self._read("/gripper_state").position
+            if open_threshold is not None:
+                state = self.gripper_state()
+                if state.age_s <= time.monotonic() - t0 and state.position <= open_threshold:
+                    return True
+                g = state.position
+            else:
+                g = self._read("/gripper_state").position
             now = time.monotonic()
             if abs(g - last) > GRIPPER_MOVED:
                 last, still_since = g, None
@@ -1256,7 +1268,7 @@ class ArmInterface:
                 still_since = still_since or now
                 if now - still_since > GRIPPER_STILL_S:
                     break
-        return True
+        return open_threshold is None
 
     # -- the driver's goals ----------------------------------------------------------------------
 
