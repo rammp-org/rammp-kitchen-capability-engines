@@ -44,6 +44,7 @@ import threading
 import time
 from collections import Counter
 from functools import partial
+from itertools import chain
 
 import numpy as np
 from door_common import common as dc
@@ -213,8 +214,7 @@ def placement_advice(handle, normal, start_joints=None, level=True):
     ]
     if dx or dy:
         lines[0] += (
-            f"; into where the {PLACEMENT_SIM_PULL_DEG} deg open planned in sim: handle x {x + dx:.2f} y "
-            f"{y + dy:.2f}"
+            f"; into where the {PLACEMENT_SIM_PULL_DEG} deg open planned in sim: handle x {x + dx:.2f} y {y + dy:.2f}"
         )
     if F.PLACEMENT_CELLS and abs(float(handle[2]) - PLACEMENT_SIM_Z_M) > PLACEMENT_Z_TOL_M:
         lines.append(
@@ -491,7 +491,7 @@ def approach_goals(model, cand, standoff, q_lineup=None):
             q_lineup,
             pre,
             cand["quat"],
-            f"line up {standoff * 100:.0f} cm out (other arm " "configuration)",
+            f"line up {standoff * 100:.0f} cm out (other arm configuration)",
             model.full(0.0),
             blend=0.03,
             world_label="the closed door",
@@ -624,14 +624,14 @@ def base_rotation_hint(normal):
     return {}
 
 
-def plan_open(planner, geom, q0, swing, after, *, staging=None):
+def plan_open(planner, geom, q0, swing, after, *, staging=None, adaptive_pull=False):
     """Plan the live open with a deadline shared by all of its candidates and planner calls."""
     previous_deadline = planner.deadline
     deadline = time.monotonic() + OPEN_PREFLIGHT_S
     planner.deadline = deadline if previous_deadline is None else min(deadline, previous_deadline)
     diagnostics = []
     try:
-        result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging)
+        result = _plan_open(planner, geom, np.asarray(q0), swing, after, diagnostics, staging, adaptive_pull)
         try:
             planner.join(result["approach"], result["model"].cabinet())
         except (pl.OverBudget, pl.PlannerBusy):
@@ -656,7 +656,7 @@ def plan_open(planner, geom, q0, swing, after, *, staging=None):
         planner.deadline = previous_deadline
 
 
-def _plan_open(planner, geom, q0, swing, after, diagnostics, staging):
+def _plan_open(planner, geom, q0, swing, after, diagnostics, staging, adaptive_pull):
     """Plan the whole open from joints `q0` (see the module): every grasp with cuRobo's own arm configuration first,
     then every grasp from the other configurations (seeds). Returns the plan dict; raises Refused (with why)."""
     planner.search()
@@ -677,6 +677,7 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging):
     if first_tried:
         say(f"  tried first (worked before): {'; '.join(proven.describe(r) for r in first_tried)}")
     tried = []
+    pull_angles = P.pull_angles(swing) if adaptive_pull else (swing,)
 
     def fail(name, why, detail=None):
         item = dict(detail or {}, candidate=name)
@@ -685,6 +686,18 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging):
         diagnostics.append(item)
         tried.append(f"{name}: {why}")
         say("    candidate rejected " + json.dumps(item))
+
+    def side_pull_options(cand, insert_joints, name):
+        for angle in pull_angles:
+            ranked = []
+            for lag in F.SIDE_HAND_LAGS_DEG:
+                why, margin = side_sweep_score(planner, model, cand, angle, lag, insert_joints)
+                if why:
+                    fail(f"{name}, {angle:g}°, lag {lag:g}°", why, {"previous_limit_margin_deg": margin})
+                else:
+                    ranked.append((margin, lag))
+            for _, lag in sorted(ranked, reverse=True):
+                yield angle, lag
 
     def grasp_and_swing(cand, hint_name=None, seed=None, lineup=None):
         """The approach and the swing for grasp `cand` (from another arm configuration: `seed`; or `lineup`, (standoff,
@@ -695,7 +708,6 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging):
             name = f"tilt {cand['pitch']} deg, hand {'upside down' if cand['flip'] else 'up'}"
         if hint_name:
             name += f", {hint_name}"
-        approach, why = None, ""
         for standoff in standoffs(cand) if lineup is None else (lineup[0],):
             q_lineup = None if lineup is None else lineup[1]
             if seed is not None:  # cuRobo's line-up joints, planned from another configuration
@@ -718,21 +730,16 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging):
                 continue
             line_goal = goals[0]
             line_pose = (line_goal.pos, line_goal.quat)
-            lags = [(0.0, 0.0)]
+            options = iter(((swing, 0.0),))
             if cand.get("side"):
                 insert_joints, why, margin = local_path(planner, goals[1:], lineup_motion.q_end, line_pose)
                 if insert_joints is None:
                     fail(name, why, {"previous_limit_margin_deg": margin})
                     continue
-                lags = []
-                for lag in F.SIDE_HAND_LAGS_DEG:
-                    why, margin = side_sweep_score(planner, model, cand, swing, lag, insert_joints)
-                    if why:
-                        fail(f"{name}, lag {lag:g}°", why, {"previous_limit_margin_deg": margin})
-                    else:
-                        lags.append((margin, lag))
-                if not lags:
-                    continue
+                options = side_pull_options(cand, insert_joints, name)
+            first = next(options, None)
+            if first is None:
+                continue
             insert, why = planner.motion(goals[1:], lineup_motion.q_end, start_pose=line_pose)
             if insert is None:
                 fail(f"{name}, {standoff:.3f} m", why, planner.last_failure)
@@ -740,45 +747,55 @@ def _plan_open(planner, geom, q0, swing, after, diagnostics, staging):
                     break
                 continue
             approach = pl.Motion(lineup_motion.goals + insert.goals, lineup_motion.legs + insert.legs, q0)
-            break
-        if approach is None:
-            return None
-        sw = None
-        for _, lag in sorted(lags, reverse=True):
-            sw, why = planner.motion(
-                swing_goals(model, cand, swing, lag), approach.q_end, start_pose=(cand["pos"], cand["quat"])
-            )
-            if sw is not None and cand.get("side"):  # and the hand can get off the bar from where it ends (the start
-                # of what follows; planned once, the planner keeps it): else the next lag
-                end = (sw.goals[-1].pos, sw.goals[-1].quat)
-                off, why = planner.motion(back_off_goals(model, swing, end), sw.q_end, start_pose=end)
-                if off is None:
-                    why, sw = f"swing OK but {why}", None
-            if sw is not None:
+            for angle, lag in chain((first,), options):
+                sw, why = planner.motion(
+                    swing_goals(model, cand, angle, lag), approach.q_end, start_pose=(cand["pos"], cand["quat"])
+                )
+                if sw is not None and cand.get("side"):
+                    end = (sw.goals[-1].pos, sw.goals[-1].quat)
+                    off, why = planner.motion(back_off_goals(model, angle, end), sw.q_end, start_pose=end)
+                    if off is None:
+                        why, sw = f"swing OK but {why}", None
+                if sw is None:
+                    fail(name, why)
+                    continue
+                label = S.name(cand, lag) + (f", {hint_name}" if hint_name else "") if lag else name
+                found = dict(
+                    name=label,
+                    cand=cand,
+                    standoff=standoff,
+                    approach=approach,
+                    swing=sw,
+                    hint=hint_name,
+                    lag=lag,
+                    swing_deg=angle,
+                )
+                if not adaptive_pull:
+                    return found
+                complete = after_swing(found)
+                if complete is not None:
+                    return complete
+            if not adaptive_pull:
                 break
-        if sw is None:
-            fail(name, why)
-            return None
-        if lag:
-            name = S.name(cand, lag) + (f", {hint_name}" if hint_name else "")
-        return dict(name=name, cand=cand, standoff=standoff, approach=approach, swing=sw, hint=hint_name, lag=lag)
+        return None
 
     def after_swing(found):
         c = found["cand"]
         door = closed_door(geom, c["h"], c.get("ref", c["pos"]), c)
         sw = found["swing"]
-        ok, msg = after.plan(planner, opened(door, swing), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
+        angle = found["swing_deg"]
+        ok, msg = after.plan(planner, opened(door, angle), sw.q_end, (sw.goals[-1].pos, sw.goals[-1].quat))
         if not ok:
             fail(found["name"], f"after swing: {msg}")
             return None
-        say(f"  plan: {found['name']}, line-up {found['standoff'] * 100:.0f} cm out, swing {swing} deg; {msg}")
-        return dict(found, swing_deg=swing, door=door, model=model, after_msg=msg)
+        say(f"  plan: {found['name']}, line-up {found['standoff'] * 100:.0f} cm out, swing {angle} deg; {msg}")
+        return dict(found, door=door, model=model, after_msg=msg)
 
     def configs(cand):
-        return side_configs(planner, model, cand, q0, swing)
+        return side_configs(planner, model, cand, q0, pull_angles[0])
 
     try:
-        return _search(cands, grasp_and_swing, after_swing, q0, tried, configs)
+        return _search(cands, grasp_and_swing, None if adaptive_pull else after_swing, q0, tried, configs)
     except pl.OverBudget as e:
         raise Infeasible(f"{e}; {len(tried)} grasps failed before it: {why_not(tried)}") from e
 
@@ -847,7 +864,7 @@ def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
         found = grasp_and_swing(cand)
         if found:
             any_swung = True
-            done = after_swing(found)
+            done = found if after_swing is None else after_swing(found)
             if done:
                 return done
     if not any_swung:
@@ -859,7 +876,7 @@ def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
             for hint_name, seed in seeds(q0):
                 found = grasp_and_swing(cand, hint_name, seed)
                 if found:
-                    done = after_swing(found)
+                    done = found if after_swing is None else after_swing(found)
                     if done:
                         return done
                     break
@@ -871,7 +888,7 @@ def _search(cands, grasp_and_swing, after_swing, q0, tried, configs=None):
         for cand in cands:
             for hint_name, lineup in configs(cand):
                 found = grasp_and_swing(cand, hint_name, lineup=lineup)
-                done = found and after_swing(found)
+                done = found if after_swing is None else found and after_swing(found)
                 if done:
                     return done
     raise Infeasible(f"no grasp gives a whole open that cuRobo plans ({len(tried)} tried): {why_not(tried)}")
@@ -893,7 +910,7 @@ def _shifted_geom(geom, d):
     return out
 
 
-def search_placement(planner, geom, q0, swing, make_after, hint=(0.0, 0.0)):
+def search_placement(planner, geom, q0, swing, make_after, hint=(0.0, 0.0), *, adaptive_pull=False):
     """After the open refused where the wheelchair stands: plan it again with the fridge shifted as wheelchair moves
     would shift it -- first the sim table's suggestion `hint` (dx, dy, the handle's move), then PLACEMENT_SEARCH_MOVES_M
     along each axis and diagonally, smallest first (among equal sizes, those along `hint` first) -- each try the whole
@@ -930,7 +947,7 @@ def search_placement(planner, geom, q0, swing, make_after, hint=(0.0, 0.0)):
                 previous_deadline = planner.deadline
                 planner.deadline = deadline
                 try:
-                    plan_open(planner, _shifted_geom(geom, d), q0, swing, make_after())
+                    plan_open(planner, _shifted_geom(geom, d), q0, swing, make_after(), adaptive_pull=adaptive_pull)
                 finally:
                     planner.deadline = previous_deadline
         except (
@@ -1314,13 +1331,22 @@ def run(
         geom, q0 = detect(ai)
         h, n = geom["h_raw"], geom["n"]
         start = f"Start joints {np.round(np.degrees(q0), 1)}."
+        adaptive_pull = push and swing_deg is None and F.GRASP == "side"
         try:
-            plan = plan_open(planner, geom, q0, swing, after, staging=staging)
+            plan = plan_open(
+                planner,
+                geom,
+                q0,
+                swing,
+                after,
+                staging=staging,
+                adaptive_pull=adaptive_pull,
+            )
         except Infeasible as e:  # not plannable from here: where to put the wheelchair is the answer
             _, hint = placement_moves(h, n)
             found = ""
             if search_alternate_placements and not execute:
-                found = search_placement(planner, geom, q0, swing, make_after, hint)
+                found = search_placement(planner, geom, q0, swing, make_after, hint, adaptive_pull=adaptive_pull)
             nomove = (
                 " (base_moves false: no wheelchair move was planned; from this placement the push needs one)"
                 if push and not BASE_MOVES
@@ -1341,7 +1367,7 @@ def run(
         say(f"  planning: {planner.summary()}")
         record_proven(plan, geom, "plan")  # the next search tries this grasp first (proven.py)
         if not execute:
-            say(f"\nDRY RUN -- would grasp, then swing {swing} deg. Nothing commanded.")
+            say(f"\nDRY RUN -- would grasp, then swing {plan['swing_deg']} deg. Nothing commanded.")
             after.dry_run(drive_chair)
             if save_door:
                 save_planned_door(plan, push, after)

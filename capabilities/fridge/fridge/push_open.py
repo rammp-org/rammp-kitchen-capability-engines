@@ -40,6 +40,11 @@ NEXT_STEP = ""  # what the person does next, said where the goal was sent (the n
 NEXT_MOVE = 0.0  # ... and that move (m, + back), for the UI's prompt; 0: none asked for
 
 
+def pull_angles(requested):
+    """Try shorter default side pulls first, within the open action's angle range."""
+    return tuple(angle for angle in (30, 40, 50) if angle < requested) + (requested,)
+
+
 def hand_quat(df, deg, approach_deg, y_up):
     """The hand behind the door open `deg`: approach level, `approach_deg` off "along the door toward the hinge"
     toward "into the cabinet"; tool y up/down (`y_up` +-1); then rolled PUSH_OPEN_ROLL_DEG about the approach."""
