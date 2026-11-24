@@ -235,10 +235,10 @@ Do this before relying on it.
    It pulls to 60° (with the side grasp the hand turns up to 30° less than the door, the bar turning in the gripper)
    and stops, lets go, slides back off the bar, moves out and round to in front of the handle (where the front grasp's
    back-off ends) and pushes on, or stops with
-   `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`. A refused plan
-   (dry run or not) then spends up to 90 s planning it again for wheelchair moves of 5 and 10 cm and ends
-   `checked by planning it: the open plans with ... -- move the wheelchair ...` (or that no such move helps:
-   the refusal isn't about placement). Prefer that over the `placement:` lines, which come from a sim.
+   `Pull done and the hand is off the handle. Move the WHEELCHAIR straight back ~5 cm ...`. A refused preflight returns
+   its failure stage and candidate diagnostics. A dry run with `"search_alternate_placements": true`
+   can spend up to 30 s checking alternate base translations and reports the first one that plans.
+   The ordinary placement advice comes from a sim.
 
    **Without any wheelchair move** add `\"base_moves\": false` to the params (e.g.
    `"{\"execute\": false, \"base_moves\": false}"` for the dry run): the push must plan from where the chair

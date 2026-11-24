@@ -23,6 +23,7 @@ from fridge_fake import (  # noqa: F401 -- fridge: the fixture
     door_is_open,
     door_where_it_stands,
     fridge,
+    unshifted_push_blocked,
 )
 from scipy.spatial.transform import Rotation as R
 
@@ -213,9 +214,10 @@ def test_a_start_inside_an_obstacle_refuses_at_once(fridge):
     p, quat = arm.fk.pose(arm.q)
     with pytest.raises(planning.StartNotClear, match="no plan can start from it"):
         planner.motion([planning.free(p + [0.1, 0, 0], quat, "x", [])], arm.q, from_arm=True)
-    with pytest.raises(dc.Refused, match="start pose is not clear"):
+    with pytest.raises(open_door.StagingRequired, match="start pose is not clear") as refused:
         open_door.run(arm, planner, False)
-    assert len(arm.pose_goals) == 2  # one plan each: no search
+    assert not refused.value.payload["staging_planned"]
+    assert len(arm.pose_goals) == 1  # only the direct motion call asked for a pose plan
 
 
 def test_a_search_stops_at_its_budget_and_repeats_are_planned_once(fridge):
@@ -369,9 +371,7 @@ def test_the_open_refuses_a_pull_that_leaves_nothing_to_push(fridge):
 def test_the_push_asks_for_the_smallest_wheelchair_move_that_lets_it_push(fridge):
     arm, planner, _ = fridge
     # cuRobo finds no arm configuration in behind the open door where it stands: only after a move
-    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(
-        obstacles
-    )
+    arm.unreachable = unshifted_push_blocked
     assert open_door.run(arm, planner, False)
     assert "stops, asking you to" in push_open.NEXT_STEP and "BACK" in push_open.NEXT_STEP.upper()
     after = open_door.LAST_PLAN["after"]
@@ -481,9 +481,7 @@ def test_without_base_moves_the_push_plans_no_wheelchair_move_and_the_open_refus
     arm, planner, _ = fridge
     monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", 0.0)
     # as above: the push plans only after a wheelchair move -- which base_moves false never plans
-    arm.unreachable = lambda pos, quat, obstacles: isinstance(obstacles, list) and door_is_open(
-        obstacles
-    )
+    arm.unreachable = unshifted_push_blocked
     with pytest.raises(dc.Refused, match="base_moves false: no wheelchair move was planned"):
         open_door.run(arm, planner, False, base_moves=False)
     assert arm.sent == [] and push_open.NEXT_MOVE == 0.0
@@ -786,12 +784,18 @@ def test_a_refusal_about_feasibility_leads_with_where_to_move_the_wheelchair(fri
     monkeypatch.setattr(open_door, "PLACEMENT_SEARCH_S", 0.0)
     arm.unreachable = lambda pos, quat, obstacles: True  # nothing plans anywhere
     msg = _refusal(arm, planner, [0.85, -0.04, 0.30])  # right of the region (y -0.04 > -0.15)
-    assert "no grasp" in msg and "Wheelchair placement (" in msg and "to its left" in msg
+    assert (
+        "refusing before any motion" in msg
+        and "Wheelchair placement (" in msg
+        and "to its left" in msg
+    )
     assert "NOT the cause" not in msg
     print("\n=== feasibility example ===\n" + msg)
     msg = _refusal(arm, planner, [0.85, -0.22, 0.30])  # inside it: nothing about placement
     assert (
-        "no grasp" in msg and "Wheelchair placement" not in msg and "wheelchair" not in msg.lower()
+        "refusing before any motion" in msg
+        and "Wheelchair placement" not in msg
+        and "wheelchair" not in msg.lower()
     )
 
 
@@ -861,7 +865,8 @@ def test_a_refused_open_searches_the_wheelchair_moves_that_make_it_plan(fridge, 
     real_ik = planning.Planner.leg
 
     def leg(self, goal, q_start, start_pose=None, from_arm=False):
-        if "line up" in goal.label and goal.pos[1] < ok_y - 0.01:
+        handle_y = next((box["position"][1] for box in goal.world if box["name"] == "handle"), None)
+        if "line up" in goal.label and handle_y is not None and handle_y < ok_y - 0.01:
             return (
                 None,
                 f"{goal.label}: cuRobo found no plan "
@@ -872,7 +877,7 @@ def test_a_refused_open_searches_the_wheelchair_moves_that_make_it_plan(fridge, 
     monkeypatch.setattr(planning.Planner, "leg", leg)
     budget = planner.budget_s
     with pytest.raises(dc.Refused) as e:
-        open_door.run(arm, planner, False)
+        open_door.run(arm, planner, False, search_alternate_placements=True)
     msg = str(e.value)
     assert (
         "checked by planning it: the open plans" in msg and "to its right" in msg and "~5 cm" in msg

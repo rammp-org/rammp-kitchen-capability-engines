@@ -1327,7 +1327,10 @@ def run(
                 else ""
             )
             message = f"{e}{nomove} -- refusing before any motion. {start}{placement_primary(h, n)}{found}"
-            raise Infeasible(message, payload=e.payload) from e
+            payload = e.payload
+            if found:
+                payload = {**payload, "checked_placement_advice": found.strip()}
+            raise Infeasible(message, payload=payload) from e
         except StagingRequired as e:
             e.args = (f"{e} -- refusing before any motion. {start}{placement_secondary(h, n)}",)
             raise

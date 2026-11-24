@@ -59,6 +59,20 @@ def door_is_open(obstacles):
     return abs(by["door"]["rpy_deg"][2] - by["body"]["rpy_deg"][2]) > 1.0
 
 
+def unshifted_push_blocked(pos, quat, obstacles):
+    """Reject the push entry behind the live door while allowing the pull and release."""
+    if not isinstance(obstacles, list) or not door_is_open(obstacles):
+        return False
+    boxes = {box["name"]: np.asarray(box["position"]) for box in obstacles}
+    front = boxes["handle"][:2] - boxes["door"][:2]
+    # The bar is offset toward the free edge as well as in front of the slab.
+    yaw = next(box for box in obstacles if box["name"] == "door")["rpy_deg"][2]
+    radians = np.radians(yaw)
+    normal = np.array([np.cos(radians), np.sin(radians)])
+    normal *= np.sign(front @ normal)
+    return bool((np.asarray(pos)[:2] - boxes["door"][:2]) @ normal < 0)
+
+
 def door_where_it_stands(obstacles):
     """True when `obstacles` holds the open door where the door file puts it: not shifted by a
     wheelchair move. The close plans against the door shifted by a move under the same box names
