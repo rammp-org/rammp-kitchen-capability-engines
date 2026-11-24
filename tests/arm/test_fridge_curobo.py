@@ -728,7 +728,9 @@ def test_the_push_open_comes_to_rest_at_exactly_its_angle_however_fast_it_runs(f
 
     arm, planner, _ = fridge
     assert open_door.run(arm, planner, False)
-    goals = open_door.LAST_PLAN["after"].motion.goals
+    plan = open_door.LAST_PLAN
+    pull = plan["swing_deg"]
+    goals = plan["after"].motion.goals
     labels = [g.label for g in goals]
     k = next(i for i, g in enumerate(goals) if g.label.startswith("onto the inner face"))
     push, off = goals[k], goals[k + 1]
@@ -737,17 +739,17 @@ def test_the_push_open_comes_to_rest_at_exactly_its_angle_however_fast_it_runs(f
         goals[k - 1].blend > 0.0
     )  # ... and nowhere before it: in behind the door, it blends onto the inner face
     arm2, planner2, _ = arm, planner, None
-    motion = open_door.LAST_PLAN["after"].motion
+    motion = plan["after"].motion
     planner2.join(motion, [])
     radii = arm2.blends[-1][1]
     assert radii[k] == 0.0 and not motion.notes  # joined with the true stop at 90
     df = FridgeModel(
         json.loads(dc.DOOR_FILE.read_text())
         if dc.DOOR_FILE.exists()
-        else open_door.opened(open_door.LAST_PLAN["door"], F.PUSH_OPEN_PULL_DEG)
+        else open_door.opened(plan["door"], pull)
     ).df
     assert abs(df.angle_of(push.through[-1][0]) - df.angle_of(push.through[0][0])) == pytest.approx(
-        F.PUSH_OPEN_TO_DEG - F.PUSH_OPEN_PULL_DEG, abs=0.5
+        F.PUSH_OPEN_TO_DEG - pull, abs=0.5
     )
     assert "off the door" in off.label
     # the end of the push: the same joint speed limit at full speed and at 0.2
@@ -755,7 +757,7 @@ def test_the_push_open_comes_to_rest_at_exactly_its_angle_however_fast_it_runs(f
     for speed in (1.0, 0.2):
         monkeypatch.setattr(rammp_arm, "JOINT_SPEED", 0.85 * speed)
         monkeypatch.setattr(rammp_arm, "CART_SPEED", 0.16 * speed)
-        caps = push_open.push_caps([F.PUSH_OPEN_PULL_DEG, F.PUSH_OPEN_TO_DEG])
+        caps = push_open.push_caps([pull, F.PUSH_OPEN_TO_DEG])
         scale = rammp_arm.JOINT_SPEED * rammp_arm.contact_speed_scale() / planning.LOCAL_JOINT_SPEED
         ends.append(caps[-1] * planning.LOCAL_JOINT_SPEED * scale)
         assert caps[0] == 1.0
