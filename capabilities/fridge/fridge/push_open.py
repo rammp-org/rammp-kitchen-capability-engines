@@ -468,7 +468,10 @@ class PushOpen:
             say(f"\n>>> drive_base: driving the wheelchair {_how(move)} for the push")
             moved = drive_chair(move)  # within the base_tolerance of `move`, or it raises
             save_door_geometry(push_after_chair_move=float(moved))
-            return push_after_chair_move(ai, planner, True, self.chair_dir)
+            try:
+                return push_after_chair_move(ai, planner, True, self.chair_dir)
+            except SweepBlocked as e:
+                raise Refused(f"{e} The pull and wheelchair move finished. The push was stopped before motion.") from e
         save_door_geometry(push_after_chair_move=float(move))
         NEXT_MOVE = float(move)
         NEXT_STEP = (
@@ -492,9 +495,8 @@ def _release(ai):
 
 
 def after_release(after, planner, ai, door, *, reuse=True):
-    """What follows the release (`after`: PushOpen, ReleaseAround, ...; execute_open let go), planned again from where
-    the arm is now; if that fails, the plan `after` checked before the swing, when the arm is where it starts. Returns
-    what it did, in words; raises Refused (the gripper open, the arm holding)."""
+    """Reuse the checked plan if allowed and the arm is at its start. Otherwise replan after release.
+    Returns what it did in words or raises Refused with the gripper open and the arm holding."""
     st = ai.get_state()
     checked = dict(after.__dict__)
     first = checked.get("motion")

@@ -1,5 +1,7 @@
 """The slab can hit the chair even when the arm's world checks would pass."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import yaml
@@ -86,3 +88,13 @@ def test_deployment_layers_match_planner_config(tmp_path):
     config.write_text(yaml.safe_dump({"layers": layers[:-1]}))
     with pytest.raises(ValueError, match="must supply person, seat and platform"):
         deployment_boxes(config)
+
+
+def test_resumed_push_refuses_before_planning_at_blocked_dock(model, tmp_path, monkeypatch):
+    world = PlannerWorld(None, tmp_path, extra=[box((0.09, 0.9, 0))])
+    ai = SimpleNamespace(get_state=lambda: {"gripper_pos": 0})
+    door = dict(model.door, door_open_deg=60, push_after_chair_move=0.05)
+    monkeypatch.setattr(push_open, "load_door", lambda: door)
+    with pytest.raises(SweepBlocked, match="person/legs") as exc:
+        push_open.push_after_chair_move(ai, SimpleNamespace(world=world), True, (1, 0))
+    assert exc.value.payload["executed"] is False
