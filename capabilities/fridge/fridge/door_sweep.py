@@ -65,12 +65,18 @@ class DoorSweep:
         if not boxes:
             return
         count = max(1, int(np.ceil(abs(end - start) / SAMPLE_DEG)))
-        slab = [model.slab(deg)[0] for deg in np.linspace(start, end, count + 1)]
+        angles = np.linspace(start, end, count + 1)
+        half_step = abs(end - start) / (2 * count)
+        slab = [model.slab(deg)[0] for deg in angles]
         dims, centres, axes = self._boxes(slab)
-        dims[:, :2] += F.DOOR_SWEEP_HINGE_MARGIN_M
         radius = np.max(np.linalg.norm(centres[:, :2] - model.df.hinge[:2], axis=1))
         radius += np.linalg.norm(dims[0, :2])
-        dims[:, :2] += radius * np.radians(abs(end - start) / (2 * count)) + 0.00002
+        # If the closed slab is fixed and the pivot is off by e, the
+        # rotated slab is off by (I - R)e. Bound that displacement over
+        # each sample's interval, with a floor for closed-pose translation.
+        angle_bound = np.radians(np.minimum(180, np.abs(angles) + half_step))
+        hinge_pad = F.DOOR_SWEEP_HINGE_MARGIN_M * np.maximum(1, 2 * np.sin(angle_bound / 2))
+        dims[:, :2] += hinge_pad[:, None] + radius * np.radians(half_step) + 0.00002
         if translation is not None:
             shift = np.asarray(translation) / 2
             centres += shift

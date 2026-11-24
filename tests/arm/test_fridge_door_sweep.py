@@ -43,6 +43,8 @@ def test_intermediate_collision_with_clear_endpoints(model, sign):
 def test_vertical_separation_and_hinge_margin(model):
     assert DoorSweep(model, [box((0.7, 0.08, 0))], 0, 0).obstacle() == "person/legs"
     assert DoorSweep(model, [box((0.7, 0.08, 0.5))], 0, 0).obstacle() is None
+    # At 90 degrees a pivot error can displace a door point by sqrt(2) times that error.
+    assert DoorSweep(model, [box((-0.156, 0.7, 0))], 90, 90).obstacle() == "person/legs"
 
 
 def test_refusal_reports_a_shift_that_clears_the_sweep(model, tmp_path):
