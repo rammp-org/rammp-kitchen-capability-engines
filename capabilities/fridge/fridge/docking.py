@@ -18,6 +18,10 @@ POSITION_TOLERANCE = 0.025
 YAW_TOLERANCE = math.radians(2)
 MAX_YAW_TRAVEL = math.radians(180)
 MAX_YAW_SPEED = 0.12
+SPEED_PARAMS = {
+    "docking_max_linear_speed": 0.05,
+    "docking_max_yaw_speed": MAX_YAW_SPEED,
+}
 MAX_TIME = 75.0
 MAX_LOOKS = 4
 LINEAR_SETTLED = 0.005
@@ -101,7 +105,7 @@ def _sample(base):
     return pose, abs(twist.linear.x), abs(twist.angular.z)
 
 
-def _drive_leg(base, arm, ctx, distance, angle, speed, odom_to_axle, deadline, clock, sleep):
+def _drive_leg(base, arm, ctx, distance, angle, speed, yaw_speed, odom_to_axle, deadline, clock, sleep):
     turning = angle != 0.0
     goal = angle if turning else distance
     tolerance = TURN_TOL if turning else TRANSLATION_TOL
@@ -111,7 +115,7 @@ def _drive_leg(base, arm, ctx, distance, angle, speed, odom_to_axle, deadline, c
     if v > LINEAR_SETTLED or w > ANGULAR_SETTLED:
         raise BaseError("The wheelchair was moving at the start of a docking segment")
     sign = math.copysign(1, goal)
-    top_speed = MAX_YAW_SPEED if turning else speed
+    top_speed = yaw_speed if turning else speed
     deadline = min(deadline, clock() + abs(goal) / top_speed + 5.0)
 
     def sample():
@@ -200,7 +204,13 @@ def dock(
     """Return the last camera observation and number of corrections executed."""
     deadline = clock() + MAX_TIME
     remaining_d = min(0.35, cfg["base_max_distance"])
-    speed = min(0.05, speed)
+    linear_limit = cfg.get("docking_max_linear_speed", SPEED_PARAMS["docking_max_linear_speed"])
+    yaw_speed = cfg.get("docking_max_yaw_speed", SPEED_PARAMS["docking_max_yaw_speed"])
+    if not 0 < linear_limit <= 0.15 or not 0 < yaw_speed <= 0.30:
+        raise Refused("Docking speed limits must be in (0, 0.15] m/s and (0, 0.30] rad/s")
+    if not math.isfinite(speed) or not speed > 0:
+        raise Refused("Docking requires a positive drive speed")
+    speed = min(linear_limit, speed, cfg["base_max_speed"])
     remaining_yaw = MAX_YAW_TRAVEL
     entered = False
     for index in range(MAX_LOOKS):
@@ -226,7 +236,7 @@ def dock(
             ctx.checkpoint()
             if clock() >= deadline:
                 raise BaseError("Docking exceeded its motion deadline")
-            _drive_leg(base, arm, ctx, d, a, speed, odom_to_axle, deadline, clock, sleep)
+            _drive_leg(base, arm, ctx, d, a, speed, yaw_speed, odom_to_axle, deadline, clock, sleep)
         remaining_d -= distance
         remaining_yaw -= rotation_travel
     raise Refused("Docking did not converge within three corrections. Repark the chair.")

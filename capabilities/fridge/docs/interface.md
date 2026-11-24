@@ -82,8 +82,10 @@ final pose before arm planning. The target handle is 0.825 m forward and 0.235 m
 with the inward normal at −14° relative to chair forward. The position and heading tolerances are
 2.5 cm and 2°. With `execute: false`, the arm plans from the current parking pose and the base stays still.
 
-Docking commands at most 0.05 m/s and 0.12 rad/s, reserves up to 0.35 m and 180° cumulative motion,
-and permits three corrections. It uses `docking_axle_to_mount_xy` for the turning center and
+Docking defaults to `docking_max_linear_speed: 0.05` m/s and `docking_max_yaw_speed: 0.12` rad/s.
+The settings accept up to 0.15 m/s and 0.30 rad/s respectively. Translation also observes the
+goal's `base_speed` and the configured `base_max_speed`. Docking reserves up to 0.35 m and 180°
+of cumulative motion and permits three corrections. It uses `docking_axle_to_mount_xy` for the turning center and
 `docking_odom_to_axle_xy` for the published odometry origin. A dock-enabled open can plan a
 checked straight handoff after a shorter pull. The handoff releases and backs off the gripper before
 the base moves. The push is replanned after checking the displacement and heading. Confirm the
