@@ -43,8 +43,15 @@ docker run --rm --network host --ipc host -e ROS_DOMAIN_ID=0 \
 
 - **SAM 3** finds the handle; its weights are mounted from `/home/abra/sam3-test/models/sam3` (check it exists).
   `sheppy status` should show `sam3` running (`sheppy logs sam3` if not).
-- **The door's angle:** the handle model fit on the wrist camera (`door_normal: handle_model`); `-p door_normal:=square`
-  assumes it square to the arm (place the wheelchair square). `-p detect_camera:=scene` uses the scene camera.
+- **The door's angle:** `door_normal: handle_model` measures the door surface beside the SAM 3 handle mask and fits
+  the handle model at that yaw. The wrist is the default. `-p detect_camera:=scene` uses the scene camera.
+- **Hardware-day camera check:** With the door closed and the arm and base stationary at the intended start, confirm
+  both camera transforms are from the current robot calibration. Run the Open dry run (`execute: false`,
+  `drive_base: false`) with `detect_camera:=wrist`, then with `detect_camera:=scene` using the same start pose. Compare
+  the logged mean handle XYZ and outward door normals in `arm_mount`. Require both looks to settle to agreeing pairs,
+  with at most 30 mm Euclidean handle separation and 5° between normals across cameras. Refuse the executable open
+  if either dry run fails to establish a pose or the poses exceed either limit. Check TF, aligned depth and the
+  selected masks, then repeat the check before enabling execution. Restore `detect_camera:=wrist` for the open.
 - **The planner** reads the fridge world through the `curobo_kernel_cache` volume it already mounts at `/root/.cache`
   (T2 mounts it too), so the manifest needs no extra volume. `config ... fridge_world.yaml not found` = T2 lacks it. If
   every plan fails with `EXCEPTION`: `sheppy restart planner`.

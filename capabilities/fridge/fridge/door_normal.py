@@ -2,14 +2,15 @@
 grasp does not have to take the door as square to the arm.
 
 measure_door_normal (the method): the printed handle's own model (RAMMP.Fridge.Handle5.STL, the file that was printed,
-next to this module) registered to the scene camera's points on SAM 3's 'handle' mask. The handle's mounting plate sits
+next to this module) registered to the camera's points on SAM 3's 'handle' mask. The handle's mounting plate sits
 flat on the door, so the model's door normal (its -z) is the door's.
 1. All of the mask's points with depth, into the arm's frame.
 2. The model, sampled on its surface, starts with its bar's front at the mask's nearest layer (per row, within
    FRONT_LAYER_M of the row's nearest point), at each yaw of ICP_YAW_STARTS_DEG.
 3. 4-DoF point-to-plane ICP (x, y, z and yaw about the vertical: the door is vertical): each data point matched to the
    nearest model point on a face turned toward the camera, Huber-weighted, those farther than ICP_MATCH_M left out of
-   the step. The start with the lowest final cost wins.
+   the step. The start with the lowest final cost wins when fitting the handle alone. In production, RANSAC fits the
+   door surface beside the handle and ICP fits translation at that yaw. An unsupported surface requires another look.
 4. The look fails with the reason (DoorNormalError), never a default normal, on: too few points, too few of them on the
    model (FIT_MIN_INLIER_FRACTION), too large a residual (FIT_MAX_RMS_M), the model moving off the handle, or a normal
    more than MAX_OFF_CAMERA_DEG from facing the camera.
@@ -334,7 +335,7 @@ def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m
         u0, u1 = us.max() + 4, us.max() + 4 + 3 * width
     else:
         u0, u1 = us.min() - 4 - 3 * width, us.min() - 4
-    region[v0:v1:2, max(0, u0):max(0, u1):2] = True
+    region[v0:v1:2, max(0, u0) : max(0, u1) : 2] = True
     points, _, _ = _points(depth_mm, K, base_T_cam, region)
     if len(points) < 100:
         return None
@@ -350,7 +351,7 @@ def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m
     xy = points[:, :2]
     inlier_m = 0.008 * max(1.0, (np.linalg.norm(toward) / FIT_REF_RANGE_M) ** 2)
     best = np.zeros(len(points), dtype=bool)
-    for pair, normal in zip(pairs[valid], normals[valid]):
+    for pair, normal in zip(pairs[valid], normals[valid], strict=True):
         inliers = abs((xy - pair[0]) @ normal) < inlier_m
         if inliers.sum() > best.sum():
             best = inliers
@@ -364,8 +365,17 @@ def measure_door_surface(depth_mm, K, base_T_cam, handle_mask, front, standoff_m
     height = np.ptp(np.percentile(points[best, 2], [5, 95]))
     if span < 0.10 or height < 0.08 or abs((front[:2] - centre) @ normal - standoff_m) >= 0.025:
         return None
-    return DoorNormal(n, yaw_deg(n), np.r_[centre, points[best, 2].mean()], int(best.sum()), len(points),
-                      rms, span, height, {"front_in": points[best], "front_out": points[~best]})
+    return DoorNormal(
+        n,
+        yaw_deg(n),
+        np.r_[centre, points[best, 2].mean()],
+        int(best.sum()),
+        len(points),
+        rms,
+        span,
+        height,
+        {"front_in": points[best], "front_out": points[~best]},
+    )
 
 
 def _icp(P, cam, R, t, model, iters, footprint_from, fixed_yaw=False):
@@ -441,9 +451,7 @@ def measure_door_normal(depth_mm, K, base_T_cam, handle_mask, stl_path=HANDLE_ST
     start = _bar_front_point(P, d, pv)
     cam = T[:3, 3]
     model = load_handle_model(stl_path)
-    plane = None if door_standoff_m is None else measure_door_surface(
-        depth_mm, K, T, mask, start, door_standoff_m
-    )
+    plane = None if door_standoff_m is None else measure_door_surface(depth_mm, K, T, mask, start, door_standoff_m)
     if plane is not None:
         R0 = _model_rotation(plane.yaw_deg)
         R, t, _, on = _icp(P, cam, R0, start - R0 @ model[2], model, ICP_ITERS, FOOTPRINT_FROM_ITER, fixed_yaw=True)
@@ -546,7 +554,7 @@ def combine_looks(normals, min_looks=COMBINE_MIN_LOOKS, max_spread_deg=COMBINE_M
 
 def make_detector(handle_centre_to_face_m=0.070, **kwargs):
     """The fridge's HandleDetector(door_normal_from_handle=True, **kwargs), its _normal_from_handle replaced by
-    measure_door_normal (the handle model's fit) on the picked mask. A look that can't
+    a door-surface-constrained handle model fit on the picked mask. A look that can't
     be measured is a miss (last_miss says why), never a default normal. The detection's 'normal' is this look's;
     combine several looks with combine_looks before relying on it."""
     from door_common.common import say
