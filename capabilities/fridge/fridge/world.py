@@ -22,7 +22,7 @@ import yaml
 from door_common.common import DoorFrame, Refused, door_dims, say
 from scipy.spatial.transform import Rotation as R
 
-from . import door_sweep
+from . import door_sweep, world_budget
 
 # the handle: a bar this far out of the door's face (measured 11-06), this wide along the door, and this much taller
 # than its grippable straight length (its mounts)
@@ -209,6 +209,8 @@ class PlannerWorld:
         self.extra = list(extra)
         self.sweep_config = sweep_config
         self._sweep_boxes = None
+        self._budget_settings = None
+        self._fit_cache = {}
         self.restore_needed = False
         self.loaded = None  # the obstacles the planner holds now (pushed by this action), None: not ours
         self.pushes = 0
@@ -230,10 +232,42 @@ class PlannerWorld:
                     raise Refused(f"Door sweep layers unavailable ({self.sweep_config}): {e}") from e
         return self._sweep_boxes
 
+    def _box_budget(self):
+        if self._budget_settings is None:
+            budget, reserved, padding = world_budget.DEFAULT_BOX_BUDGET, 0, door_sweep.LAYER_PADDING_M
+            if self.sweep_config is not None:
+                path = Path(self.sweep_config)
+                try:
+                    config = yaml.safe_load(path.read_text())
+                    settings = config.get("planner", {})
+                    budget = int(settings.get("collision_cache_obb", budget))
+                    padding = float(settings.get("world_padding", padding))
+                    layers = {(path.parent / name).resolve() for name in [*config.get("layers", []), *self.base_layers]}
+                    for layer in layers:
+                        reserved += len(yaml.safe_load(layer.read_text())["obstacles"])
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError) as e:
+                    raise Refused(f"Cannot count cuRobo collision boxes from {path}: {e}") from e
+            self._budget_settings = dict(budget=budget, reserved=reserved, padding=padding)
+        return self._budget_settings
+
     def push(self, obstacles, label, *, deadline=None):
         """Make `obstacles` (+ `extra`) the planner's world. Nothing is sent if it holds exactly these already.
         Raises Refused if the planner refuses it."""
-        obstacles = self.extra + list(obstacles)
+        obstacles = list(obstacles)
+        required = obstacles
+        # Chair and occupant geometry are fixed safety layers. Only room geometry is eligible for reduction.
+        surrounding = [box for box in self.extra if box["name"].startswith("room_")]
+        required = [box for box in self.extra if not box["name"].startswith("room_")] + required
+        settings = self._box_budget()
+        count = len(required)
+        if count + len(surrounding) + settings["reserved"] > settings["budget"]:
+            if count not in self._fit_cache:
+                fitted = world_budget.fit_boxes(required, surrounding, label=label, **settings)
+                self._fit_cache[count] = fitted[: len(fitted) - count]
+            surrounding = self._fit_cache[count]
+            obstacles = surrounding + required
+        else:
+            obstacles = self.extra + obstacles
         if obstacles == self.loaded:
             return
         t0 = time.monotonic()
