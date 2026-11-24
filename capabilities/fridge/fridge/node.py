@@ -244,6 +244,7 @@ class Capability(CapabilityEngine):
                     **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 30, "maximum": 110},
                     "push_open": {"type": "boolean", "default": True},
+                    "short_reentry": {"type": "boolean", "default": False},
                     # full-pull path only (push_open false): False tests the pull alone -- after the swing just let go
                     # and back off the handle, no round-the-door (the plan is gated by the back-off only)
                     "around": {"type": "boolean", "default": True},
@@ -881,6 +882,7 @@ class Capability(CapabilityEngine):
                     progress=lambda fraction, message: ctx.progress(action_id, fraction, message, pausable=False),
                     detect_at_dock=detect_open,
                     allow_short_handoff=docking_requested,
+                    short_reentry=bool(params.get("short_reentry", False)),
                 )
                 if ok and execute:  # the door file is true now: the view the close re-detects the fridge against
                     relocalize.capture_reference(self.arm)

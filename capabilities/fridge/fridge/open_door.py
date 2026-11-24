@@ -1373,6 +1373,7 @@ def run(
     progress=None,
     detect_at_dock=None,
     allow_short_handoff=False,
+    short_reentry=False,
 ):
     """The open as the node runs it, logged to RUNS_DIR/<time>_open. `planner`: this action's planning.Planner.
     Pull to `swing_deg` when specified, or SWING_DEG without `push`. The automatic push-open searches front then side
@@ -1416,7 +1417,12 @@ def run(
 
         def make_after():
             if push:
-                return PushOpen(chair_back_dir, base_moves=BASE_MOVES, allow_short_handoff=allow_short_handoff)
+                return PushOpen(
+                    chair_back_dir,
+                    base_moves=BASE_MOVES,
+                    allow_short_handoff=allow_short_handoff,
+                    short_reentry=short_reentry,
+                )
             return ReleaseAround() if around else ReleaseBackOff()
 
         after = make_after()

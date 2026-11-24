@@ -91,6 +91,9 @@ checked straight handoff after a shorter pull. The handoff releases and backs of
 the base moves. The push is replanned after checking the displacement and heading. Confirm the
 route, including the space beside and behind the chair, before sending an executing goal.
 
+Set `short_reentry: true` on an `open` goal to let the in-place push try a waypoint 8 cm beyond
+the free edge before the usual 16 cm waypoint. The planner checks both against the open door.
+
 ## Publishes
 
 | Topic            | Type              | Rate | Meaning                                                                                                   |
